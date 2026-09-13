@@ -5,6 +5,8 @@ import { recoverOrphanLoopRuns, recoverDurableLoopRuns } from './lib/agent/run-s
 import { runDueAgentSchedules } from './lib/agent/productivity.js'
 import { dispatchQueuedRequests } from './lib/agent/request-queue.js'
 import { reconcileCreditRefunds, reconcileTokenSettlements } from './lib/credits.js'
+import { recoverNovelImportJobs } from './lib/novel-import-service.js'
+import { isNovelImportMaintenanceEnabled, maintainNovelImports } from './lib/novel-import-maintenance.js'
 
 // Do not accept new runs or dispatch schedules while startup recovery is scanning
 // old queued/running rows: otherwise a fresh request can be mistaken for an orphan.
@@ -13,7 +15,16 @@ await recoverOrphanLoopRuns()
 // Recover only existing protocol-one tasks. Discovery rechecks the original
 // lease; live owners and stopped roots are never treated as startup orphans.
 let refundSweepRunning = false
+let importRecoveryRunning = false
 function recoverSavedTasks() {
+  if ((process.env.NOVEL_IMPORT_ENABLED === 'true' || isNovelImportMaintenanceEnabled()) && !importRecoveryRunning) {
+    importRecoveryRunning = true
+    void recoverNovelImportJobs().then(() => maintainNovelImports()).then(result => {
+      if (result.failedBlobs > 0) console.warn('[novel-import] 私有临时文件清理待重试', { failedBlobs: result.failedBlobs })
+    }).catch(() => {
+      console.error('[novel-import] 导入恢复暂时不可用，持久记录保留')
+    }).finally(() => { importRecoveryRunning = false })
+  }
   void recoverDurableLoopRuns().catch(() => {
     console.error('[agent-loop] 持久任务恢复扫描失败，原状态保留，等待下一次扫描')
   })

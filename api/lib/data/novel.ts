@@ -13,6 +13,7 @@ import { buildPagination, buildSlug, chapterListItemSelect, commentInclude, ensu
 import { publicChapterWhere } from './chapter.js'
 import { searchableNovelWhere } from './search.js'
 import { DEFAULT_VOLUME_TITLE } from './volume.js'
+import { activeChapterScope, activeVolumeWhere, updateActiveChapter } from './internal.js'
 
 
 
@@ -205,7 +206,7 @@ export async function publishNovelData(
   const updated = await prisma.$transaction(async (tx) => {
     if (chapterIds.length > 0) {
       const selectedChapters = await tx.chapter.findMany({
-        where: { novelId, id: { in: chapterIds } },
+        where: { ...activeChapterScope(novelId), id: { in: chapterIds } },
         select: {
           id: true,
           title: true,
@@ -216,21 +217,21 @@ export async function publishNovelData(
           publishedAt: true,
         },
       })
+      if (selectedChapters.length !== new Set(chapterIds).size) {
+        throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '所选章节已归档、已删除或不属于当前作品，请刷新后重新选择。')
+      }
       await Promise.all(
         selectedChapters.map((chapter) =>
-          tx.chapter.update({
-            where: { id: chapter.id },
-            data: {
-              status: 'published',
-              visibility,
-              publishedTitle: chapter.title,
-              publishedSummary: chapter.summary,
-              publishedContent: chapter.content,
-              publishedWordCount: chapter.wordCount,
-              publishedRevision: chapter.revision + 1,
-              revision: { increment: 1 },
-              publishedAt: chapter.publishedAt ?? now,
-            },
+          updateActiveChapter(tx, { id: chapter.id, novelId, revision: chapter.revision }, {
+            status: 'published',
+            visibility,
+            publishedTitle: chapter.title,
+            publishedSummary: chapter.summary,
+            publishedContent: chapter.content,
+            publishedWordCount: chapter.wordCount,
+            publishedRevision: chapter.revision + 1,
+            revision: { increment: 1 },
+            publishedAt: chapter.publishedAt ?? now,
           }),
         ),
       )
@@ -264,11 +265,11 @@ export async function publishNovelData(
 
   const { recordWritingSignal } = await import('../agent/writing-experiments.js')
   await recordWritingSignal(userId, novelId, 'chapter_published', chapterIds.length)
-  const firstThreePublished = await prisma.chapter.count({ where: { novelId, orderIndex: { lte: 3 }, status: 'published', publishedContent: { not: null } } })
+  const firstThreePublished = await prisma.chapter.count({ where: { ...activeChapterScope(novelId), orderIndex: { lte: 3 }, status: 'published', publishedContent: { not: null } } })
   if (firstThreePublished >= 3) {
     const passed = await prisma.chapterQualityReport.groupBy({
       by: ['chapterId'],
-      where: { userId, novelId, status: { in: ['passed', 'repaired'] }, chapter: { orderIndex: { lte: 3 } } },
+      where: { userId, novelId, status: { in: ['passed', 'repaired'] }, chapter: { ...activeChapterScope(novelId), orderIndex: { lte: 3 } } },
     })
     const prototype = await prisma.firstThreePrototype.findFirst({ where: { userId, novelId, status: { notIn: ['completed', 'abandoned'] } }, orderBy: { version: 'desc' } })
     if (prototype) await prisma.firstThreePrototype.update({ where: { id: prototype.id }, data: { status: 'completed', completedChapters: 3, passedChapters: Math.min(3, passed.length) } })
@@ -390,7 +391,7 @@ export async function getNovelDetailData(
   }
 
   const chapterWhere: Prisma.ChapterWhereInput = isOwner
-    ? { novelId }
+    ? activeChapterScope(novelId)
     : {
         novelId,
         status: 'published',
@@ -405,7 +406,7 @@ export async function getNovelDetailData(
       orderBy: { orderIndex: 'asc' },
     }),
     prisma.volume.findMany({
-      where: { novelId },
+      where: { novelId, ...(isOwner ? activeVolumeWhere : {}) },
       include: {
         chapters: {
           where: chapterWhere,

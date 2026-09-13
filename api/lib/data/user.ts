@@ -14,6 +14,7 @@ import { buildAutoNickname, commentInclude, conversationInclude, ensureNonEmptyT
 import { getViewerLikedCommentIds } from './comment.js'
 import { attachPostViewerFlags, getViewerPostFlags } from './post.js'
 import { searchableNovelWhere } from './search.js'
+import { activeChapterScope } from './internal.js'
 
 
 
@@ -23,6 +24,7 @@ export async function getMePayloadData(userId: string): Promise<UserMePayload> {
   const [draftChapters, recentPosts, recentComments, recentConversations, recentCoverAssets, authoredNovels] = await prisma.$transaction([
       prisma.chapter.findMany({
         where: {
+          ...activeChapterScope(),
           authorId: userId,
           status: 'draft',
         },

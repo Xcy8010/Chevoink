@@ -4,6 +4,7 @@ import type { PublishAdvice } from '../../shared/contracts/index.js'
 import { listNovelPlanArtifacts } from './agent/plan-artifacts.js'
 import { readNovelCoverBuffer } from './novel-cover-storage.js'
 import { buildZipBuffer, type ZipEntry } from './zip-writer.js'
+import { activeChapterScope } from './data-access.js'
 
 /** 一键导出选项：四类内容可勾选，章节支持全量或按 ID 子集 */
 export type NovelExportOptions = {
@@ -185,7 +186,7 @@ export async function buildNovelExportZip(
   }
 
   const allChapters = await prisma.chapter.findMany({
-    where: { novelId },
+    where: activeChapterScope(novelId),
     orderBy: { orderIndex: 'asc' },
     select: {
       id: true,
@@ -203,8 +204,8 @@ export async function buildNovelExportZip(
   const wantedIds = options.chapterIds?.length ? new Set(options.chapterIds) : null
   const chapters = wantedIds ? allChapters.filter((chapter) => wantedIds.has(chapter.id)) : allChapters
 
-  if (includeChapters && wantedIds && chapters.length === 0) {
-    throw new DataAccessError(400, 'VALIDATION_ERROR', '勾选的章节不存在，请重新选择。')
+  if (includeChapters && wantedIds && chapters.length !== wantedIds.size) {
+    throw new DataAccessError(400, 'VALIDATION_ERROR', '勾选的章节已归档、已删除或不属于当前作品，请重新选择。')
   }
 
   // 发布建议是导出唯一慢步骤（AI 调用）：缓存未命中时尽早发请求，与后续装配并行隐藏延迟

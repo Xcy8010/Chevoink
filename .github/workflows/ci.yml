@@ -82,6 +82,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: 文档隔离工作器协议测试（不代表原生 OCR 验收）
+        run: python3 -m unittest discover -s workers/document-import/tests -p 'test_*.py' -v
+
       - name: 测试（含覆盖率门禁）
         run: npx vitest run --coverage
 

@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client'
 
 import { DataAccessError, prisma } from '../../prisma.js'
 import { getChapterBaseline, getCreatedChapter, getLastTouchedChapter, recordChapterBaseline, recordCreatedChapter } from '../baseline.js'
-import { recalcNovelStats } from './novel-tools.js'
+import { activeChapterScope, activeVolumeWhere, recalculateNovelStats } from '../../data/internal.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { placeCreatedChapter, resolveChapterPlacement } from '../../data/volume.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
@@ -23,8 +23,8 @@ import { chapterWriteArguments, chapterAppendArguments, chapterEditArguments } f
 const WRITE_PERMISSION = { plan: 'deny', build: 'allow', review: 'deny' } as const
 
 async function findOwnedChapter(ctx: ToolContext, chapterId: string) {
-  return prisma.chapter.findFirst({
-    where: { id: chapterId, novelId: ctx.novelId, authorId: ctx.userId },
+  return (ctx.transaction ?? prisma).chapter.findFirst({
+    where: { id: chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId },
   })
 }
 
@@ -45,14 +45,16 @@ const MISSING_CHAPTER_HINT =
 function buildChapterNotFound(ctx: ToolContext, chapterId: string): ToolResult {
   const hint = ctx.chapterId && ctx.chapterId !== chapterId ? `作者当前打开的章节是 chapterId=${ctx.chapterId}。` : ''
   return {
-    output: `章节 ${chapterId} 不存在或不属于当前作品。${hint}请用 novel_get_context 查看章节列表确认后重试。`,
+    outcome: 'failed',
+    output: `章节 ${chapterId} 已归档、不存在或不属于当前作品。${hint}请用 novel_get_context 查看当前章节列表；不要按同序号替换旧章节 ID。`,
   }
 }
 
 /** 基线冲突检测：用户在 Agent 运行期间改过章节时不盲写 */
 function buildConflictResult(chapterTitle: string): ToolResult {
   return {
-    output: `冲突：章节《${chapterTitle}》在你上次读取后已被用户修改。请先用 chapter_read 重新读取最新内容，再决定如何写入，避免覆盖用户的修改。`,
+    outcome: 'failed',
+    output: `冲突：章节《${chapterTitle}》在你上次读取后已被修改或归档。请先用 chapter_read 重新读取当前内容，再决定如何写入，避免覆盖用户的修改。`,
     summary: `《${chapterTitle}》存在编辑冲突，已阻止写入`,
   }
 }
@@ -73,21 +75,26 @@ async function updateOwnedChapterAtRevision(
   chapter: { id: string; revision: number },
   data: Prisma.ChapterUpdateManyMutationInput,
 ) {
-  const result = await prisma.chapter.updateMany({
-    where: {
-      id: chapter.id,
-      novelId: ctx.novelId,
-      authorId: ctx.userId,
-      revision: chapter.revision,
-    },
-    data: { ...data, revision: { increment: 1 } },
-  })
-
-  if (result.count === 0) {
-    return null
+  const apply = async (tx: Prisma.TransactionClient) => {
+    const result = await tx.chapter.updateMany({
+      where: {
+        id: chapter.id,
+        ...activeChapterScope(ctx.novelId),
+        authorId: ctx.userId,
+        revision: chapter.revision,
+      },
+      data: { ...data, revision: { increment: 1 } },
+    })
+    if (result.count !== 1) return null
+    // Keep the returned revision/body bound to our CAS while its row lock is
+    // held, rather than observing a subsequent writer through the global client.
+    const updated = await tx.chapter.findFirst({ where: {
+      id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision + 1,
+    } })
+    if (!updated) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '写入后的章节作用域已变化，本次事务需要回滚。')
+    return updated
   }
-
-  return findOwnedChapter(ctx, chapter.id)
+  return ctx.transaction ? apply(ctx.transaction) : prisma.$transaction(apply)
 }
 
 async function writeChapterContent(
@@ -125,12 +132,12 @@ async function writeChapterContent(
   if (!updated) {
     return buildConflictResult(chapter.title)
   }
-  await recalcNovelStats(ctx.novelId)
-  recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
+  await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
+  if (!ctx.transaction) recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
   if (isAgent2FeatureEnabled('memory2', ctx.userId)) {
     await enqueueChapterMemoryExtraction({
       novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: updated.revision, before, after,
-    })
+    }, ctx.transaction)
   }
   if (isAgent2FeatureEnabled('storyCompiler', ctx.userId)) {
     await recordStoryCompilerWrite({
@@ -140,7 +147,7 @@ async function writeChapterContent(
       chapterId: updated.id,
       chapterOrderIndex: updated.orderIndex,
       chapterRevision: updated.revision,
-    })
+    }, ctx.transaction)
   }
 
   return {
@@ -214,20 +221,23 @@ export const chapterCreateTool = defineTool({
           display: { kind: 'chapterRef', chapterId: existing.id, title: existing.title, wordCount: existing.wordCount },
         }
       }
+      // A lost/archived cached identity is not permission to recreate the old
+      // run's chapter in a replacement manuscript under a new ID.
+      return buildChapterNotFound(ctx, alreadyCreatedId)
     }
 
     const create = async (tx: Prisma.TransactionClient) => {
       const volumeByOrder = args.volumeOrder !== undefined
-        ? await tx.volume.findFirst({ where: { novelId: ctx.novelId, orderIndex: args.volumeOrder } })
+        ? await tx.volume.findFirst({ where: { novelId: ctx.novelId, ...activeVolumeWhere, orderIndex: args.volumeOrder } })
         : null
       if (args.volumeOrder !== undefined && !volumeByOrder) {
         throw new DataAccessError(400, 'VOLUME_NOT_FOUND', `第 ${args.volumeOrder} 卷不存在，请先用 volume_list 或 novel_get_context 核对卷结构。`)
       }
       const globalTarget = args.position
-        ? await tx.chapter.findFirst({ where: { novelId: ctx.novelId, orderIndex: args.position } })
+        ? await tx.chapter.findFirst({ where: { ...activeChapterScope(ctx.novelId), orderIndex: args.position } })
         : null
       const lastExisting = await tx.chapter.findFirst({
-        where: { novelId: ctx.novelId },
+        where: activeChapterScope(ctx.novelId),
         orderBy: { orderIndex: 'desc' },
         select: { volumeId: true },
       })
@@ -241,7 +251,7 @@ export const chapterCreateTool = defineTool({
         }),
         args.positionInVolume ?? globalTarget?.orderInVolume,
       )
-      const chapterCount = await tx.chapter.count({ where: { novelId: ctx.novelId } })
+      const chapterCount = await tx.chapter.count({ where: activeChapterScope(ctx.novelId) })
       const created = await tx.chapter.create({
         data: {
           novelId: ctx.novelId,
@@ -257,13 +267,13 @@ export const chapterCreateTool = defineTool({
         },
       })
       await placeCreatedChapter(tx, ctx.novelId, created, placement.volume.id, placement.position)
-      return tx.chapter.findUniqueOrThrow({
-        where: { id: created.id },
+      return tx.chapter.findFirstOrThrow({
+        where: { id: created.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId },
         include: { volume: { select: { title: true, orderIndex: true } } },
       })
     }
     const chapter = ctx.transaction ? await create(ctx.transaction) : await prisma.$transaction(create)
-    await recalcNovelStats(ctx.novelId, ctx.transaction)
+    await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
     if (!ctx.transaction) {
       recordChapterBaseline(ctx.runId, chapter.id, chapter.revision)
       recordCreatedChapter(ctx.runId, chapter.title, chapter.id)
@@ -415,12 +425,12 @@ export const chapterEditRangeTool = defineTool({
     if (!updated) {
       return buildConflictResult(chapter.title)
     }
-    await recalcNovelStats(ctx.novelId)
-    recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
+    await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
+    if (!ctx.transaction) recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
     if (isAgent2FeatureEnabled('memory2', ctx.userId)) {
       await enqueueChapterMemoryExtraction({
         novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: updated.revision, before, after,
-      })
+      }, ctx.transaction)
     }
     if (isAgent2FeatureEnabled('storyCompiler', ctx.userId)) {
       await recordStoryCompilerWrite({
@@ -430,7 +440,7 @@ export const chapterEditRangeTool = defineTool({
         chapterId: updated.id,
         chapterOrderIndex: updated.orderIndex,
         chapterRevision: updated.revision,
-      })
+      }, ctx.transaction)
     }
 
     return {
@@ -484,8 +494,8 @@ export const chapterRenameTool = defineTool({
     if (!updated) {
       return buildConflictResult(chapter.title)
     }
-    await recalcNovelStats(ctx.novelId)
-    recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
+    await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
+    if (!ctx.transaction) recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
 
     return {
       output: `已把章节《${previousTitle}》重命名为《${args.title.trim()}》。`,

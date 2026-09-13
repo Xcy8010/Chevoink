@@ -29,6 +29,10 @@ import ConfirmDialog from './components/ConfirmDialog'
 import CoverPanel from './components/CoverPanel'
 import EditorCanvas from './components/EditorCanvas'
 import ExportDialog from './components/ExportDialog'
+import ImportDialog from './components/ImportDialog'
+import { useImportCapabilities } from './components/use-import-capabilities'
+import { readImportHandoff, readImportJobId, clearImportHandoff, type ImportAgentAttachment } from './lib/import-handoff'
+import type { NovelImportModelSelection } from '../../../shared/contracts/novel-import.js'
 import { buildReviewDiff, resolveReviewHunk } from './components/diff'
 import MetaPanel from './components/MetaPanel'
 import NovelCoverCropDialog from './components/NovelCoverCropDialog'
@@ -126,6 +130,30 @@ export default function StudioWorkspace() {
   const [chapters, setChapters] = useState<StudioPayload['chapters']>([])
   const [volumes, setVolumes] = useState<StudioPayload['volumes']>([])
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  const importCapabilities = useImportCapabilities(activeNovelId, taskUiUserId)
+  const [importRequest, setImportRequest] = useState<{ novelId: string; userId: string; attachment?: ImportAgentAttachment; jobId?: string } | null>(null)
+  const [importModel, setImportModel] = useState<{ novelId: string; selection: NovelImportModelSelection | null } | null>(null)
+  const handleImportModelSelection = useCallback((ownerNovelId: string, selection: NovelImportModelSelection | null) => {
+    setImportModel({ novelId: ownerNovelId, selection })
+  }, [])
+  const importAvailable = importCapabilities.data?.enabled === true && !studioQuery.isPlaceholderData && currentNovel?.id === activeNovelId
+  const openNovelImport = () => {
+    if (importAvailable && taskUiUserId) setImportRequest({ novelId: activeNovelId, userId: taskUiUserId })
+  }
+  useEffect(() => {
+    if (!importAvailable || !taskUiUserId) return
+    const attachment = readImportHandoff(searchParams)
+    const jobId = readImportJobId(searchParams)
+    if (attachment || jobId) {
+      setImportRequest({ novelId: activeNovelId, userId: taskUiUserId, attachment: attachment ?? undefined, jobId: jobId ?? undefined })
+      const next = clearImportHandoff(searchParams)
+      next.delete('importJobId')
+      setSearchParams(next, { replace: true })
+    }
+  }, [activeNovelId, importAvailable, taskUiUserId, searchParams, setSearchParams])
+  useEffect(() => {
+    setImportRequest((request) => request?.novelId === activeNovelId && request.userId === taskUiUserId ? request : null)
+  }, [activeNovelId, taskUiUserId])
   const [activeChangeSetId, setActiveChangeSetId] = useState<string | null>(null)
   const [selectedChapterId, setSelectedChapterId] = useState<string | null>(null)
   const [selectedTreeItemId, setSelectedTreeItemId] = useState<string | null>(null)
@@ -3479,6 +3507,7 @@ export default function StudioWorkspace() {
     if (sessionResolutionError) return <div role="alert" className="flex h-full flex-col items-center justify-center gap-4 p-6 text-sm text-[var(--text-secondary)]"><p>{sessionResolutionError}</p><button type="button" className="rounded-lg border border-[var(--border-subtle)] px-4 py-2" onClick={() => setSessionResolutionAttempt(value => value + 1)}>重新读取任务</button></div>
     return (
       <AgentPanel
+          onImportModelSelection={handleImportModelSelection}
           voiceScopeKey={taskUiScope}
           voiceDisabled={studioSettingsOpen || studioQuery.isPlaceholderData}
           sessionId={agentSessionId}
@@ -3886,6 +3915,7 @@ export default function StudioWorkspace() {
                   { key: 'publish', label: novelForm?.status === 'published' ? '更新发布' : '发布作品', icon: Upload, action: () => handlePublishNovel() },
                   ...(novelForm?.status && novelForm.status !== 'archived' ? [{ key: 'completion', label: novelForm.status === 'completed' ? '继续连载' : '完结作品', icon: Flag, action: () => handleToggleNovelCompletion() }] : []),
                   { key: 'detail', label: '作品页', icon: BookOpenText, action: () => navigate(detailPreviewHref) },
+                  ...(importAvailable ? [{ key: 'import', label: '一键导入', icon: Upload, action: openNovelImport }] : []),
                   { key: 'export', label: '一键导出', icon: FolderDown, action: () => setExportDialogOpen(true) },
                   ...(previewHref
                     ? [{ key: 'preview', label: '预览阅读', icon: BookOpen, action: () => navigate(previewHref) }]
@@ -3979,6 +4009,7 @@ export default function StudioWorkspace() {
             currentNovelStatus={novelForm?.status}
             onOpenNovelMeta={() => setActiveToolPanel('meta')}
             onExportNovel={() => setExportDialogOpen(true)}
+            onImportNovel={importAvailable ? openNovelImport : undefined}
             onPublishNovel={handlePublishNovel}
             onToggleNovelCompletion={handleToggleNovelCompletion}
             autoFollow={autoFollow}
@@ -4005,6 +4036,7 @@ export default function StudioWorkspace() {
             onOpenCover={() => setActiveToolPanel('cover')}
             onOpenMeta={() => setActiveToolPanel('meta')}
             onExport={() => setExportDialogOpen(true)}
+            onImport={importAvailable ? openNovelImport : undefined}
             onDeleteNovel={handleRequestDeleteNovel}
             onCreateVolume={handleRequestCreateVolume}
             onCreateChapter={handleRequestCreateChapter}
@@ -4316,6 +4348,43 @@ export default function StudioWorkspace() {
         chapters={chapters}
         onClose={() => setExportDialogOpen(false)}
       />
+      {importRequest?.novelId === activeNovelId && importRequest.userId === taskUiUserId ? <ImportDialog
+        open
+        novelId={activeNovelId}
+        novelTitle={novelForm?.title ?? currentNovel.title}
+        currentMetadata={{ title: currentNovel.title, summary: currentNovel.summary, tags: currentNovel.tags }}
+        modelSelection={importModel?.novelId === activeNovelId && importModel.selection ? importModel.selection : { kind: 'basic' }}
+        agentAttachment={importRequest.attachment}
+        initialJobId={importRequest.jobId}
+        beforeImport={async () => {
+          if (importCapabilities.data?.aiEnabled && (importModel?.novelId !== activeNovelId || !importModel.selection)) throw new Error('请先在当前作品打开 Agent 输入框并确认模型选择。')
+          if (chapterSaveState === 'saving' || novelSaveState === 'saving') throw new Error('当前修改正在保存，请稍后重试。')
+          if (chapterDirty) {
+            await persistChapter('manual')
+            // Persistence may return without saving for pending review/validation/in-flight writes.
+            // Ask for a second explicit attempt after React receives the authoritative saved state.
+            throw new Error('已尝试保存当前章节，请确认保存成功后重新打开导入。未保存的内容不会被覆盖。')
+          }
+          if (novelDirty) {
+            await saveNovelMutation.mutateAsync({ reason: 'manual' })
+            throw new Error('作品设置已保存，请重新打开导入以核对最新内容。')
+          }
+          return true
+        }}
+        onClose={() => setImportRequest(null)}
+        onImported={async (receipt) => {
+          await refreshWorkspaceAfterAgentWrite()
+          if (currentNovelStateRef.current?.id !== receipt.novelId) return
+          if (receipt.firstChapterId) {
+            setSelectedChapterId(receipt.firstChapterId)
+            setSelectedTreeItemId(`chapter:${receipt.firstChapterId}`)
+            setChapterDraft(null)
+            setWorkViewer('chapter')
+          }
+        }}
+        onRestored={refreshWorkspaceAfterAgentWrite}
+        onViewChapter={handleSelectChapter}
+      /> : null}
       <NovelCoverCropDialog
         open={Boolean(pendingCoverUploadFile)}
         file={pendingCoverUploadFile}

@@ -1,0 +1,47 @@
+# 隔离文档导入 Worker 原型
+
+[English 与完整接口/命令/官方来源](./README.md)
+
+范围仅为 plan32 的 DOC 转换、离线 PDF/图片 OCR 与受限客户端；不处理鉴权、小说卷章、数据库、模型计费或提交。原型具备容器构建文件和协议测试，**不代表 DOC/OCR 原生能力或生产沙箱已验收**。本工作未改 parser、根 package、数据库 schema、路由、UI，也未提交或部署。
+
+## 接入约定
+
+从 `api/lib/novel-import/worker-client.ts` 导入 `createDocumentImportWorker`。配置专用、API 所有、0700 的 `stagingRoot` 和审核过的 worker 镜像 digest；每个监督进程复用一个实例，最多同时运行一个任务。只支持 Linux API 与同机 Linux Docker，不继承远程 Docker 环境，不回退到宿主 LibreOffice/Python。
+
+`run({sourceId,sourceHash,format,bytes,signal?,timeoutMs?,ocrLanguages?})`：
+
+- `sourceId` 为 1–80 位字母/数字/下划线/连字符的内部 ID；`sourceHash` 为原始字节 SHA256。
+- `format` 为 `doc/pdf/image`；图片仅 PNG/JPEG。`bytes` 为 `Uint8Array`，不接收文件路径、命令、URL、密钥或任意环境。
+- `timeoutMs` 为 1 秒至 30 分钟，默认 30 分钟；语言为 `chi_sim+eng/chi_tra+eng/eng`。
+- 返回 `outcome=converted/parsed/needs_review/failed`。返回值也可能是失败，必须检查 `error`；基础设施、协议、取消错误抛出含稳定 `code` 的 `DocumentWorkerError`。
+- `artifacts` 为 `{id,mediaType,sha256,byteLength,bytes,width?,height?}`；线上协议使用有界 base64，客户端校验后返回字节。无容器指定的宿主输出路径。
+- DOC 的 `convertedArtifactId` 指向 DOCX，交现有受限 DOCX parser 继续处理，并保留转换警告；转换成功不等于正文完整，DOC 不伪造页码。
+- PDF 的 `pages` 保留每页状态、尺寸、警告、`blocks`、`regions`。块包含原生/OCR 方法、文本、位置、置信度、区域 ID 与 `duplicateOf`。坐标是未旋转 PDF 左上角点数；图片模式使用内部单页 PDF 坐标。
+- `duplicateOf` 仅记录精确文本与空间重叠证据。保留原块，默认正文拼装跳过已标注 OCR 重复块，不直接把原生文字与 OCR 拼接。
+- `coverage` 的互斥分类计数与总页数守恒；所有 OCR 页均待复核，不凭高置信度自动通过。`complete` 只代表处理覆盖，不代表字准率、用户批准或允许写入。
+
+原文件必须由 API 独立持久保存；本地 staging 是临时目录，不是原文仓库。API 继续负责归属、配额、租约 fencing、私有附件存储、完整性确认、显式排除与提交。图片必须鉴权访问；DOCX 再做容器安全检查。PNG 客户端仅检查长度/摘要/头部尺寸，不冒充完整图像净化。缓存须包含用户、原 hash、实际镜像 digest、语言与选项。
+
+## 隔离与能力边界
+
+调用固定为非 root UID/GID 10001、只读根、断网、移除 capabilities、禁止提权、保留 Docker 默认 seccomp；1 CPU/1 GiB、无 swap、96 PID、关闭 core。唯一 `/input` 只读挂载只有源文件与请求；`/work` 256 MiB、`/tmp` 64 MiB 为 noexec/nosuid/nodev tmpfs。不挂应用目录、宿主输出目录、Docker socket、密钥或业务数据库。
+
+DOC 检查 OLE/WordDocument/FIB/table stream 与加密位，用独立 LibreOffice profile 和本地 UNO pipe；加载时禁止宏、链接更新及交互批准，断网阻止远程模板。输出 DOCX 有大小/ZIP 基础安全检查，复杂对象/修订等仍由后续 parser 与用户复核。
+
+PDF 逐页子进程提取原生文本；即使存在原生页眉，也对图片区域 OCR。旋转、异常字符、阅读顺序、表单/注释和混合矢量内容均产生复核警告。OCR 使用固定 Debian Tesseract 5.5 CPU LSTM 与简/繁中、英语数据，不安装 Paddle/GPU、不运行时下载、不调用模型。选择理由是更轻的离线部署依赖，不是经实测证明中文精度优于 Paddle。
+
+硬上限：源 50 MiB、1000 页、解码/渲染图像 20 MP、单 PNG 4 MiB、128 个附件/合计 32 MiB、每页 64 区域/10 万字符、任务 500 万字符/10 万块、响应 64 MiB；原生子进程 120 秒、单页 OCR 合计 60 秒、任务 30 分钟。超过 20 MP 的源图片直接失败。图片附件是渲染区域 PNG，非嵌入图片逐字节副本；原始文档仍是来源依据。
+
+后页失败/超限时保留已完成页并列出其余失败页，不把部分结果称为整本成功。容器 OOM/死亡、外层超时或非法协议时没有持久增量检查点；API 保留源后另行重试，不承诺恢复内存中已完成页。
+
+取消/超时终止 CLI，并按精确随机名称强制删除容器，只删除自建 staging 子目录。清理额外最多两次各 5 秒 Docker 调用；无法确认时返回 `IMPORT_CLEANUP_FAILED`。API/宿主死亡、Docker 失联或延迟创建竞态仍需运维基于 `org.chevoink.document-import=protocol-v1` 标签、年龄与持久任务租约做清理器，本原型未安装清理器。staging 必须在专用本地磁盘，文件系统调用未独立支持取消。
+
+## 依赖与验证
+
+Dockerfile 固定 2026-09-13 从 Docker 官方 registry 核验的 Debian trixie-slim OCI digest；`dependencies.lock` 固定 Debian 原生库/语言包版本，已核对官方包页面。构建时联网通过 apt 签名/摘要校验，运行时断网。镜像内生成完整已安装包清单和语言数据 SHA256；没有声称已锁定历史 apt 全部传递依赖。构建后必须扫描/SBOM、验收并固定实际 worker 镜像 digest；固定版本失效应停止构建，不擅自放宽。
+
+完整构建、host-safe 测试与容器 smoke 命令见英文文档。不得把根目录作为 Docker build context，不带生产配置。Paddle 未引入；PyMuPDF 是 AGPL/商业双许可，LibreOffice、Tesseract、字体及其传递依赖的许可证需随镜像保留并在分发前审查，官方链接见英文文档。
+
+2026-09-13 验证记录：最初本地在 Windows、Python 3.12.10、Node 24.12.0 下通过 25 项 TypeScript、11 项 Python 离线测试及定向严格类型检查/ESLint；随后父任务报告同一组 25 项 worker 协议/客户端 TypeScript 测试已在仓库固定 Node 22.23.2 下通过，这是当前 Node 验证证据，不是原生集成验收。本地仍无 Docker/soffice，1 项容器原生 smoke 继续明确跳过。**未构建容器、未实跑 LibreOffice/Tesseract worker、未验证 OS 沙箱、中文 CER、内存/CPU、攻击样本或生产部署。** 可选 mapper 与独立的整文件 parser 边界由各自负责人接入；本 worker 测试记录不代表完整应用集成或六格式交付已完成。原生开关仍关闭，后续原生验收与全仓闸门由父任务协调。
+
+容器 smoke 在同一受限容器内生成自有原生 PDF、带页眉扫描区域 PDF、PNG，以及真正 OLE DOC 转 DOCX；代码已提供，未记录为通过。仍须补外部授权 DOC、密码/损坏/宏样本、旋转/双栏/低清中文金标准集、取消清理/崩溃恢复及 plan32 字符错误率闸门。文件清单见英文文档末尾，所有文件均在指定所有权范围内。

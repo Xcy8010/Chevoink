@@ -6,7 +6,7 @@ import { commitOperationEffect, prepareOperation, recordToolFailure } from '../r
 import { recordChapterBaseline } from '../baseline.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
 import { recordStoryCompilerWrite } from '../story-compiler.js'
-import { recalcNovelStats } from './novel-tools.js'
+import { activeChapterScope, recalculateNovelStats } from '../../data/internal.js'
 import type { ToolContext, ToolResult, AgentTool } from './types.js'
 import { chapterWriteArguments, chapterAppendArguments, chapterEditArguments } from './chapter-arguments.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
@@ -16,7 +16,8 @@ import { DataAccessError } from '../../prisma.js'
 type Action = 'chapter_write' | 'chapter_append' | 'chapter_edit_range'
 
 export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentTool, input: Record<string, unknown>): Promise<ToolResult> {
-  const capability = ctx.durableContent
+  const capability = ctx.durableContent && { ...ctx.durableContent, lease: { ...ctx.durableContent.lease },
+    ...(ctx.durableContent.cursor ? { cursor: { ...ctx.durableContent.cursor } } : {}) }
   if (!capability?.cursor || capability.lease.userId !== ctx.userId || capability.lease.runId !== ctx.runId || tool.name !== 'chapter_rename') return runtimeError('RUNTIME_SCOPE_MISMATCH', '章节改名缺少原始写入位置。')
   const lease = { ...capability.lease }, cursor = { ...capability.cursor }
   const normalize = (raw: unknown) => {
@@ -31,14 +32,18 @@ export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentT
     ctx.signal.throwIfAborted()
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId || args.chapterId !== capability.chapterId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '章节改名范围与原任务不符。')
-    const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, novelId: ctx.novelId, authorId: ctx.userId } })
-    if (!chapter || chapter.revision !== capability.expectedRevision) return runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化，请重新读取后改名。')
+    const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
+    if (!chapter || chapter.revision !== capability.expectedRevision) return runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，请重新读取当前章节后改名。')
     const title = args.title.trim()
     if (!title) return runtimeError('CHAPTER_RENAME_INVALID', '章节标题不能为空。')
     const revision = chapter.revision + (chapter.title === title ? 0 : 1)
     if (revision !== chapter.revision) {
-      await tx.chapter.update({ where: { id: chapter.id }, data: { title, revision } })
-      await recalcNovelStats(ctx.novelId, tx)
+      const updated = await tx.chapter.updateMany({
+        where: { id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: capability.expectedRevision },
+        data: { title, revision: { increment: 1 } },
+      })
+      if (updated.count !== 1) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，改名未执行。')
+      await recalculateNovelStats(tx, ctx.novelId)
     }
     return runtimeJson({ renamedChapter: { id: chapter.id, title, content: chapter.content, revision },
       toolResult: { output: `已把章节《${chapter.title}》重命名为《${title}》。`, summary: `章节改名《${title}》`,
@@ -107,8 +112,8 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     ctx.signal.throwIfAborted()
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) runtimeError('RUNTIME_SCOPE_MISMATCH', '正文操作不属于原任务范围。')
-    const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, novelId: ctx.novelId, authorId: ctx.userId } })
-    if (!chapter) return runtimeError('RUNTIME_SCOPE_MISMATCH', '章节不存在或不属于当前作品。')
+    const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
+    if (!chapter) return runtimeError('CHAPTER_REVISION_CONFLICT', '章节已归档、不存在或不属于当前作品，请重新读取当前章节。')
     if (chapter.revision !== expectedRevision) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已被修改，请重新读取后建立新操作，不能覆盖用户修改。')
     const before = chapter.content
     let after = candidate
@@ -125,10 +130,10 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     }
     const changed = before !== after
     if (changed) {
-      const updated = await tx.chapter.updateMany({ where: { id: chapter.id, authorId: ctx.userId, novelId: ctx.novelId, revision: expectedRevision },
+      const updated = await tx.chapter.updateMany({ where: { id: chapter.id, authorId: ctx.userId, ...activeChapterScope(ctx.novelId), revision: expectedRevision },
         data: { content: after, wordCount: after.length, revision: { increment: 1 } } })
-      if (updated.count !== 1) runtimeError('CHAPTER_REVISION_CONFLICT', '章节版本并发冲突。')
-      await recalcNovelStats(ctx.novelId, tx)
+      if (updated.count !== 1) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，正文写入未执行。')
+      await recalculateNovelStats(tx, ctx.novelId)
     }
     const revision = expectedRevision + (changed ? 1 : 0)
     const memoryJobId = changed && isAgent2FeatureEnabled('memory2', ctx.userId)

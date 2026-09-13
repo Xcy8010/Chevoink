@@ -15,6 +15,7 @@ import feedbackRoutes from './routes/feedback.js'
 import homeRoutes from './routes/home.js'
 import metaRoutes from './routes/meta.js'
 import novelsRoutes from './routes/novels.js'
+import novelImportRoutes from './routes/novel-imports.js'
 import postsRoutes from './routes/posts.js'
 import recommendationsRoutes from './routes/recommendations.js'
 import searchRoutes from './routes/search.js'
@@ -39,8 +40,13 @@ app.use(
 // 限流/审计按真实客户端 IP 分桶（否则反代下全站共享 127.0.0.1 同一桶）
 app.set('trust proxy', 1)
 // 发帖最多 9 张 base64 配图，预留到 40mb
-app.use(express.json({ limit: '40mb' }))
-app.use(express.urlencoded({ extended: true, limit: '40mb' }))
+const standardJson = express.json({ limit: '40mb' })
+const standardForm = express.urlencoded({ extended: true, limit: '40mb' })
+// Import payloads are parsed only AFTER authentication, using that router's
+// narrower JSON limit or its bounded raw-file stream (never Base64).
+const isImportRequest = (req: Request) => /^\/api\/novels\/[^/]+\/imports(?:\/|$)/i.test(req.path)
+app.use((req, res, next) => isImportRequest(req) ? next() : standardJson(req, res, next))
+app.use((req, res, next) => isImportRequest(req) ? next() : standardForm(req, res, next))
 // Inspect aliases before public static decoding; every private read uses the same ACL.
 app.use('/api/uploads', agentAttachmentGateway)
 // 上传图片文件名含随机 ID、内容不可变，30 天强缓存安全（nginx 直服未命中时的兜底）
@@ -94,6 +100,7 @@ app.use('/api/conversations', conversationsRoutes)
 app.use('/api/feedback', feedbackRoutes)
 app.use('/api/home', homeRoutes)
 app.use('/api/meta', metaRoutes)
+app.use('/api/novels/:novelId/imports', novelImportRoutes)
 app.use('/api/novels', novelsRoutes)
 app.use('/api/posts', postsRoutes)
 app.use('/api/recommendations', recommendationsRoutes)

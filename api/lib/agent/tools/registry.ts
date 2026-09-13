@@ -12,6 +12,7 @@ import {
   chapterWriteTool,
 } from './chapter-tools.js'
 import { novelExportTool } from './export-tools.js'
+import { novelImportTool } from './import-tools.js'
 import { askUserTool } from './interact-tools.js'
 import {
   coverPromptSetTool,
@@ -127,6 +128,7 @@ export const allTools: AgentTool<any>[] = [
   viewImageTool,
   readFileTool,
   novelExportTool,
+  novelImportTool,
   volumeListTool,
   structureOutlineTool,
   projectSearchTool,
@@ -234,7 +236,8 @@ export function getToolByName(name: string): AgentTool | undefined {
 
 /** 按模式过滤：deny 的工具不出现在 LLM 工具列表里（对模型不可见） */
 export function getToolsForMode(mode: AgentExecutionMode): AgentTool[] {
-  return allTools.filter((tool) => tool.permission[mode] !== 'deny')
+  return allTools.filter((tool) => tool.permission[mode] !== 'deny'
+    && (tool.name !== 'novel_import' || process.env.NOVEL_IMPORT_ENABLED === 'true'))
 }
 
 /** zod schema → OpenAI function calling 定义（zod v4 原生转换） */

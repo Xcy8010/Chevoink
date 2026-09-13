@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!dependencies.lock
+!*.py
+!tests/
+!tests/container_smoke.py

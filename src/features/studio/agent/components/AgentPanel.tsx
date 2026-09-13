@@ -139,6 +139,7 @@ type AgentPanelProps = {
   onOpenStudioSettings?: (section: 'general' | 'models' | 'operations' | 'archives') => void
   /** 打开技能区：输入框「+」菜单里发现需要新建/导入/启用技能时直达。 */
   onOpenSkills?: () => void
+  onImportModelSelection?: (novelId: string, selection: { kind: 'basic' } | { kind: 'custom'; customModelId: string } | null) => void
 }
 
 /** 无缓存首次拉取时图标流光的保底展示时长（一个完整扫光周期），避免快请求下只闪一下 */
@@ -180,6 +181,7 @@ export function AgentPanel({
   sessionResolving = false,
   onOpenStudioSettings,
   onOpenSkills,
+  onImportModelSelection,
   referenceOptions = [],
 }: AgentPanelProps) {
   const workConversation = useWorkConversation()
@@ -282,6 +284,11 @@ export function AgentPanel({
     return saved === 'lite' || saved === 'standard' || saved === 'performance' || saved === 'ultimate' || saved === 'custom' ? saved : 'speed'
   })
   const [customModelId, setCustomModelId] = useState<string | null>(() => typeof window === 'undefined' ? null : window.localStorage.getItem('chevoink:agent-custom-model-id'))
+  useEffect(() => {
+    onImportModelSelection?.(novelId, modelTier === 'custom'
+      ? customModelId ? { kind: 'custom', customModelId } : null
+      : { kind: 'basic' })
+  }, [novelId, modelTier, customModelId, onImportModelSelection])
   const [reasoningSelections, setReasoningSelections] = useState<Record<string, ModelReasoningEffort>>(() => {
     if (typeof window === 'undefined') return {}
     try {

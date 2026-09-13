@@ -28,6 +28,7 @@ type StudioToolbarProps = {
   onPublishNovel: () => void
   onDeleteNovel: () => void
   onExport: () => void
+  onImport?: () => void
   onSelectNovel: (novelId: string) => void
   onCreateNovel: () => void
   onEditNovelTitle?: () => void
@@ -62,6 +63,7 @@ export default function StudioToolbar({
   onPublishNovel,
   onDeleteNovel,
   onExport,
+  onImport,
   onSelectNovel,
   onCreateNovel,
   onEditNovelTitle,
@@ -223,6 +225,7 @@ export default function StudioToolbar({
                       查看作品页
                     </Link>
                   ) : null}
+                  {onImport ? <button type="button" className={`${moreItemClass} min-h-11`} onClick={() => { moreRef.current?.querySelector<HTMLElement>('button')?.focus(); setMoreOpen(false); onImport() }}><Upload className="h-4 w-4 text-[var(--text-secondary)]" />一键导入</button> : null}
                   <button
                     type="button"
                     className={moreItemClass}

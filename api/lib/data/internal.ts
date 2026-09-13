@@ -8,6 +8,45 @@ import type { Chapter, ChapterListItem, Comment, CommentTargetType, Conversation
 import { hasConfiguredPassword } from '../password.js'
 import { DataAccessError, prisma } from '../prisma.js'
 
+// Creative scope only. Public readers and historical/moderation paths must not
+// inherit this predicate: import archival does not unpublish retained snapshots.
+export const activeVolumeWhere = { archivedAt: null } satisfies Prisma.VolumeWhereInput
+
+export function activeChapterScope(novelId?: string): Prisma.ChapterWhereInput {
+  return {
+    ...(novelId === undefined ? {} : { novelId }),
+    archivedAt: null,
+    volume: { ...activeVolumeWhere, ...(novelId === undefined ? {} : { novelId }) },
+  }
+}
+
+export function assertActiveWriteCount(count: number, entity: 'chapter' | 'volume') {
+  if (count === 1) return
+  throw new DataAccessError(409, entity === 'chapter' ? 'CHAPTER_REVISION_CONFLICT' : 'VOLUME_REVISION_CONFLICT',
+    '目标已归档或发生变化，请刷新后重试。')
+}
+
+/** Guard the mutation itself, including callers that observed the row before import. */
+export async function updateActiveChapter(
+  tx: Prisma.TransactionClient,
+  where: Prisma.ChapterWhereInput & { id: string },
+  data: Prisma.ChapterUpdateManyArgs['data'],
+) {
+  const result = await tx.chapter.updateMany({
+    where: { AND: [where, activeChapterScope(typeof where.novelId === 'string' ? where.novelId : undefined)] }, data,
+  })
+  assertActiveWriteCount(result.count, 'chapter')
+}
+
+export async function updateActiveVolume(
+  tx: Prisma.TransactionClient,
+  where: Prisma.VolumeWhereInput & { id: string },
+  data: Prisma.VolumeUpdateManyMutationInput,
+) {
+  const result = await tx.volume.updateMany({ where: { AND: [where, activeVolumeWhere] }, data })
+  assertActiveWriteCount(result.count, 'volume')
+}
+
 // 行映射器的最小输入结构：字段以映射器实际访问为准，Prisma 查询结果（含对应 include）天然满足
 export type UserRecord = {
   id: string
@@ -563,8 +602,8 @@ export function toPublishedVolumeListItem(record: VolumeRecord): VolumeListItem 
 }
 
 export const volumeListItemInclude = {
-  _count: { select: { chapters: true } },
-  chapters: { select: { wordCount: true } },
+  _count: { select: { chapters: { where: activeChapterScope() } } },
+  chapters: { where: activeChapterScope(), select: { wordCount: true } },
 } satisfies Prisma.VolumeInclude
 
 
@@ -980,14 +1019,18 @@ export async function ensureConversationMember(userId: string, conversationId: s
 
 export async function recalculateNovelStats(tx: Prisma.TransactionClient, novelId: string) {
   const chapters = await tx.chapter.findMany({
-    where: { novelId },
+    where: activeChapterScope(novelId),
     orderBy: { orderIndex: 'asc' },
   })
 
   const latestChapter = chapters[chapters.length - 1] ?? null
-  const latestPublished = [...chapters]
-    .filter((chapter) => chapter.status === 'published' && chapter.publishedAt)
-    .sort((left, right) => right.orderIndex - left.orderIndex)[0]
+  // Preserve the existing publication-date/order semantics across both active
+  // and archived records; replacing the creative draft must not clear this date.
+  const latestPublished = await tx.chapter.findFirst({
+    where: { novelId, status: 'published', publishedAt: { not: null } },
+    orderBy: { orderIndex: 'desc' },
+    select: { publishedAt: true },
+  })
 
   const wordCount = chapters.reduce((total, chapter) => total + (chapter.wordCount ?? 0), 0)
 

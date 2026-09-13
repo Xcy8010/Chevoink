@@ -339,6 +339,8 @@ enum PrivacyLevel {
 }
 
 model User {
+  novelImportJobs NovelImportJob[]
+  novelImportIntents NovelImportIntent[]
   id                         String                  @id @default(cuid()) @db.VarChar(64)
   email                      String?                 @unique @db.VarChar(255)
   phone                      String?                 @unique @db.VarChar(32)
@@ -464,6 +466,8 @@ model SmsVerificationCode {
 }
 
 model Novel {
+  importJobs NovelImportJob[]
+  importIntents NovelImportIntent[]
   id                     String                  @id @default(cuid()) @db.VarChar(64)
   authorId               String                  @map("author_id") @db.VarChar(64)
   title                  String                  @db.VarChar(128)
@@ -548,6 +552,8 @@ model Novel {
 }
 
 model Chapter {
+  archivedAt           DateTime?              @map("archived_at")
+  archivedByImportId   String?                @map("archived_by_import_id") @db.VarChar(64)
   id                   String                 @id @default(cuid()) @db.VarChar(64)
   novelId              String                 @map("novel_id") @db.VarChar(64)
   authorId             String                 @map("author_id") @db.VarChar(64)
@@ -585,14 +591,16 @@ model Chapter {
   qualityReports       ChapterQualityReport[]
   storyBranches        StoryBranch[]
 
-  @@unique([novelId, orderIndex])
-  @@unique([volumeId, orderInVolume])
+  // Active-only uniqueness is maintained by SQL partial indexes (Prisma 6).
+  @@index([novelId, archivedAt])
   @@index([novelId, status])
   @@index([volumeId, orderInVolume])
   @@map("chapters")
 }
 
 model Volume {
+  archivedAt DateTime? @map("archived_at")
+  archivedByImportId String? @map("archived_by_import_id") @db.VarChar(64)
   id         String    @id @default(cuid()) @db.VarChar(64)
   novelId    String    @map("novel_id") @db.VarChar(64)
   title      String    @db.VarChar(128)
@@ -604,9 +612,133 @@ model Volume {
   novel      Novel     @relation(fields: [novelId], references: [id], onDelete: Cascade)
   chapters   Chapter[]
 
-  @@unique([novelId, orderIndex])
+  // Active-only uniqueness is maintained by SQL partial indexes (Prisma 6).
+  @@index([novelId, archivedAt])
   @@index([novelId])
   @@map("volumes")
+}
+
+model NovelImportIntent {
+  id String @id @db.VarChar(64)
+  userId String @db.VarChar(64)
+  novelId String @db.VarChar(64)
+  targetHash String @db.VarChar(64)
+  overwriteRequired Boolean
+  confirmationStep Int @default(0)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel Novel @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  jobs NovelImportJob[]
+  @@index([userId, novelId, expiresAt])
+  @@map("novel_import_intents")
+}
+
+model NovelImportJob {
+  id String @id @db.VarChar(64)
+  userId String @db.VarChar(64)
+  novelId String @db.VarChar(64)
+  intentId String @unique @db.VarChar(64)
+  status String @default("uploading") @db.VarChar(32)
+  jobVersion Int @default(1)
+  manifestRevision Int @default(0)
+  manifestHash String? @db.VarChar(64)
+  targetHash String @db.VarChar(64)
+  modelSelection Json
+  parseEncoding String? @db.VarChar(32)
+  leaseOwner String? @db.VarChar(64)
+  leaseEpoch Int @default(0)
+  leaseUntil DateTime?
+  errorCode String? @db.VarChar(64)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel Novel @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  intent NovelImportIntent @relation(fields: [intentId], references: [id], onDelete: Cascade)
+  source NovelImportSource?
+  manifests NovelImportManifest[]
+  approvals NovelImportApproval[]
+  commit NovelImportCommit?
+  backup NovelImportBackup?
+  @@index([userId, novelId, createdAt])
+  @@index([status, leaseUntil])
+  @@map("novel_import_jobs")
+}
+
+model NovelImportSource {
+  id String @id @db.VarChar(64)
+  jobId String @unique @db.VarChar(64)
+  filename String @db.VarChar(255)
+  storageKey String @db.VarChar(128)
+  sha256 String @db.VarChar(64)
+  bytes Int
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@map("novel_import_sources")
+}
+
+model NovelImportManifest {
+  id String @id @db.VarChar(64)
+  jobId String @db.VarChar(64)
+  revision Int
+  hash String @db.VarChar(64)
+  storageKey String @db.VarChar(128)
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@unique([jobId, revision])
+  @@map("novel_import_manifests")
+}
+
+model NovelImportApproval {
+  id String @id @db.VarChar(64)
+  jobId String @db.VarChar(64)
+  userId String @db.VarChar(64)
+  kind String @db.VarChar(16)
+  sourceHash String @db.VarChar(64)
+  manifestHash String @db.VarChar(64)
+  manifestRevision Int
+  targetHash String @db.VarChar(64)
+  expiresAt DateTime
+  consumedAt DateTime?
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@index([jobId, kind])
+  @@map("novel_import_approvals")
+}
+
+model NovelImportBackup {
+  id String @id @db.VarChar(64)
+  jobId String @unique @db.VarChar(64)
+  // Retained row IDs + metadata; full bodies remain in their original rows.
+  snapshot Json
+  beforeHash String @db.VarChar(64)
+  afterHash String @db.VarChar(64)
+  expiresAt DateTime
+  restoredAt DateTime?
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@map("novel_import_backups")
+}
+
+model NovelImportCommit {
+  jobId String @id @db.VarChar(64)
+  approvalId String @unique @db.VarChar(64)
+  idempotencyKey String @db.VarChar(128)
+  receipt Json
+  // Durable outbox marker: parent integration drains it without paid AI effects.
+  effectsPublishedAt DateTime?
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@index([effectsPublishedAt, createdAt])
+  @@map("novel_import_commits")
+}
+
+// DB delete triggers retain exact private keys for later bounded orphan cleanup.
+model NovelImportGarbage {
+  storageKey String @id @db.VarChar(128)
+  createdAt DateTime @default(now())
+  @@map("novel_import_garbage")
 }
 
 model ChangeSet {

@@ -11,6 +11,7 @@ import { PLACEHOLDER_NOVEL_TITLES, chapterListItemSelect, ensureNonEmptyText, en
 import { normalizeCoverImageUrl } from './novel.js'
 import { normalizeNovelStructure, placeCreatedChapter, resolveChapterPlacement } from './volume.js'
 import { resolveAgent2FeatureFlags } from '../agent2-feature-flags.js'
+import { activeChapterScope, activeVolumeWhere, assertActiveWriteCount, updateActiveChapter } from './internal.js'
 
 
 
@@ -26,12 +27,12 @@ export async function getStudioPayloadData(userId: string, novelId: string): Pro
 
   const [chapters, volumes, coverAssetRecords] = await prisma.$transaction([
     prisma.chapter.findMany({
-      where: { novelId },
+      where: activeChapterScope(novelId),
       select: chapterListItemSelect,
       orderBy: { orderIndex: 'asc' },
     }),
     prisma.volume.findMany({
-      where: { novelId },
+      where: { novelId, ...activeVolumeWhere },
       include: volumeListItemInclude,
       orderBy: { orderIndex: 'asc' },
     }),
@@ -60,7 +61,7 @@ export async function getStudioPayloadData(userId: string, novelId: string): Pro
   // 草稿章需要完整正文，单独按 id 补查一次，避免列表查询携带全部章节正文
   const draftChapterMeta = chapters.find((chapter) => chapter.status === 'draft') ?? null
   const draftChapter = draftChapterMeta
-    ? await prisma.chapter.findUnique({ where: { id: draftChapterMeta.id } })
+    ? await prisma.chapter.findFirst({ where: { id: draftChapterMeta.id, ...activeChapterScope(novelId) } })
     : null
 
   return {
@@ -173,7 +174,7 @@ export async function createChapterData(
 
   const chapter = await prisma.$transaction(async (tx) => {
     const placement = await resolveChapterPlacement(tx, novelId, input.volumeId, input.orderInVolume)
-    const chapterCount = await tx.chapter.count({ where: { novelId } })
+    const chapterCount = await tx.chapter.count({ where: activeChapterScope(novelId) })
     const created = await tx.chapter.create({
       data: {
         novelId,
@@ -198,7 +199,7 @@ export async function createChapterData(
 
     await placeCreatedChapter(tx, novelId, created, placement.volume.id, placement.position)
     await recalculateNovelStats(tx, novelId)
-    return tx.chapter.findUniqueOrThrow({ where: { id: created.id } })
+    return tx.chapter.findFirstOrThrow({ where: { id: created.id, ...activeChapterScope(novelId) } })
   })
 
   return toChapter(chapter)
@@ -209,8 +210,8 @@ export async function createChapterData(
 export async function getChapterData(userId: string, novelId: string, chapterId: string): Promise<Chapter | null> {
   await ensureNovelOwner(userId, novelId)
 
-  const chapter = await prisma.chapter.findUnique({
-    where: { id: chapterId },
+  const chapter = await prisma.chapter.findFirst({
+    where: { id: chapterId, ...activeChapterScope(novelId) },
   })
 
   if (!chapter || chapter.novelId !== novelId) {
@@ -230,8 +231,8 @@ export async function updateChapterData(
 ): Promise<Chapter | null> {
   await ensureNovelOwner(userId, novelId)
 
-  const existing = await prisma.chapter.findUnique({
-    where: { id: chapterId },
+  const existing = await prisma.chapter.findFirst({
+    where: { id: chapterId, ...activeChapterScope(novelId) },
   })
 
   if (!existing || existing.novelId !== novelId) {
@@ -274,19 +275,11 @@ export async function updateChapterData(
               : existing.publishedAt,
     }
 
-    if (input.expectedRevision === undefined) {
-      await tx.chapter.update({ where: { id: chapterId }, data })
-    } else {
-      const result = await tx.chapter.updateMany({
-        where: { id: chapterId, revision: input.expectedRevision },
-        data,
-      })
-      if (result.count === 0) {
-        throw new DataAccessError(409, CHAPTER_REVISION_CONFLICT_CODE, CHAPTER_REVISION_CONFLICT_MESSAGE)
-      }
-    }
+    // Even a legacy request without expectedRevision must not commit a snapshot
+    // calculated from a row that changed (or was archived) after the read.
+    await updateActiveChapter(tx, { id: chapterId, novelId, revision: existing.revision }, data)
 
-    const record = await tx.chapter.findUnique({ where: { id: chapterId } })
+    const record = await tx.chapter.findFirst({ where: { id: chapterId, ...activeChapterScope(novelId) } })
     if (!record) {
       throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '章节不存在或已被删除。')
     }
@@ -315,8 +308,8 @@ export async function deleteChapterData(
 ): Promise<boolean> {
   await ensureNovelOwner(userId, novelId)
 
-  const existing = await prisma.chapter.findUnique({
-    where: { id: chapterId },
+  const existing = await prisma.chapter.findFirst({
+    where: { id: chapterId, ...activeChapterScope(novelId) },
   })
 
   if (!existing || existing.novelId !== novelId) {
@@ -328,14 +321,10 @@ export async function deleteChapterData(
   }
 
   await prisma.$transaction(async (tx) => {
-    if (expectedRevision === undefined) {
-      await tx.chapter.delete({ where: { id: chapterId } })
-    } else {
-      const deleted = await tx.chapter.deleteMany({ where: { id: chapterId, revision: expectedRevision } })
-      if (deleted.count === 0) {
-        throw new DataAccessError(409, CHAPTER_REVISION_CONFLICT_CODE, CHAPTER_REVISION_CONFLICT_MESSAGE)
-      }
-    }
+    const deleted = await tx.chapter.deleteMany({
+      where: { id: chapterId, revision: existing.revision, ...activeChapterScope(novelId) },
+    })
+    assertActiveWriteCount(deleted.count, 'chapter')
     await compactChapterOrder(tx, novelId)
     await recalculateNovelStats(tx, novelId)
   })

@@ -1,0 +1,10 @@
+python3=3.13.5-1
+libreoffice-writer-nogui=4:25.2.3-2+deb13u6
+python3-uno=4:25.2.3-2+deb13u6
+python3-pymupdf=1.25.4+ds1-3+deb13u1
+python3-olefile=0.47-1
+tesseract-ocr=5.5.0-1+b1
+tesseract-ocr-eng=1:4.1.0-2
+tesseract-ocr-chi-sim=1:4.1.0-2
+tesseract-ocr-chi-tra=1:4.1.0-2
+fonts-noto-cjk=1:20240730+repack1-1

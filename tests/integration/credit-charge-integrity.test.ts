@@ -269,6 +269,13 @@ describe.skipIf(!dbAvailable)('credit request identity and wallet integrity (iso
         expect(await getTaskCreditUsage(userId, runId)).toMatchObject({ charged: 5, refunded: 2, netCharged: 3 })
         expect(await getTaskCreditUsage(userId, otherId)).toMatchObject({ charged: 3, refunded: 0 })
         await refundCreditCharge(userId, `usage:${usageIds[0]}`, 'test provider failure')
+        // The pagination assertions above have already checked the frozen cutoff.
+        // This final assertion tests task attribution, not DB/JS clock alignment;
+        // make only this fixture's new refund visible to the fresh snapshot.
+        await prisma.creditLedgerEntry.update({
+          where: { idempotencyKey: `refund:usage:${usageIds[0]}`, userId, kind: 'refund' },
+          data: { createdAt: sameTime },
+        })
         expect(await getTaskCreditUsage(userId, resumedId)).toMatchObject({ charged: 5, refunded: 3, netCharged: 2 })
       } finally { await prisma.aiUsageLog.deleteMany({ where: { id: { in: usageIds }, userId } }) }
       await expect(getTaskCreditUsage(randomUUID(), runId)).rejects.toMatchObject({ code: 'AGENT_RUN_NOT_FOUND' })
@@ -299,7 +306,12 @@ describe.skipIf(!dbAvailable)('credit request identity and wallet integrity (iso
     await fixture(async (userId, input) => {
       await consumeCredits(input)
       const intent = await recordSearchRefundIntent(userId, input.idempotencyKey, { attempts: [{ provider: 'bing', outcome: 'failed', durationMs: 20 }] })
-      await prisma.creditRefundIntent.update({ where: { originalEntryId: intent.originalEntryId }, data: { evidence: {} } })
+      // Invalid-evidence handling is the subject, not DB/JS clock alignment.
+      // Explicitly make this exact fixture intent due before invoking the scan.
+      await prisma.creditRefundIntent.update({
+        where: { originalEntryId: intent.originalEntryId, originalEntry: { userId } },
+        data: { evidence: {}, nextAttemptAt: new Date(Date.now() - 60_000) },
+      })
       expect(await reconcileCreditRefunds({ userId })).toEqual({ examined: 1, settled: 0 })
       const retained = await prisma.creditRefundIntent.findUniqueOrThrow({ where: { originalEntryId: intent.originalEntryId } })
       expect(retained.settledAt).toBeNull()
