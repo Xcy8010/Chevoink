@@ -15,7 +15,7 @@ describe('admin analytics interaction', () => {
     expect(card.getAttribute('aria-expanded')).toBe('true')
     expect(screen.getByRole('table')).toBeTruthy()
     expect(document.querySelector('svg text')).toBeNull() // Axis labels must not be stretched with the SVG.
-    fireEvent.click(screen.getByRole('button', { name: '月', exact: true }))
+    fireEvent.click(screen.getByRole('button', { name: '本月', exact: true }))
     await waitFor(() => expect(request).toHaveBeenCalledWith('/api/admin/analytics?period=month&scope=dashboard'))
   })
   it('does not show 100% for empty success-rate samples', async () => {

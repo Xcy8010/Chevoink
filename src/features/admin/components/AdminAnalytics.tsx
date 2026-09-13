@@ -17,11 +17,11 @@ export default function AdminAnalytics({ scope }: { scope: 'dashboard' | 'creati
     <section className="mb-6 space-y-4" aria-label={scope === 'dashboard' ? '平台统计' : '创作统计'}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex rounded-xl border border-[var(--border-default)] p-1" aria-label="统计粒度">
-          {(['day', 'week', 'month'] as const).map((item, i) => <button key={item} type="button" aria-pressed={period === item} onClick={() => setPeriod(item)} className={`min-h-11 rounded-lg px-4 text-sm ${period === item ? 'bg-[var(--surface-contrast)] text-[var(--text-contrast)]' : 'text-[var(--text-secondary)]'}`}>{['日', '周', '月'][i]}</button>)}
+          {(['day', 'week', 'month'] as const).map((item, i) => <button key={item} type="button" aria-pressed={period === item} onClick={() => setPeriod(item)} className={`min-h-11 rounded-lg px-4 text-sm ${period === item ? 'bg-[var(--surface-contrast)] text-[var(--text-contrast)]' : 'text-[var(--text-secondary)]'}`}>{['本日', '本周', '本月'][i]}</button>)}
         </div>
         <button type="button" disabled={query.isFetching} onClick={() => void query.refetch()} className="min-h-11 rounded-lg px-3 text-sm disabled:opacity-50">刷新统计</button>
       </div>
-      <p className="text-xs leading-6 text-[var(--text-secondary)]">{period === 'day' ? '近 14 日' : period === 'week' ? '近 12 周（周一起）' : '近 12 月'} · UTC+8 · 数值为范围合计，当前周期尚未结束。点击卡片展开，切换日/周/月调整统计。</p>
+      <p className="text-xs leading-6 text-[var(--text-secondary)]">{period === 'day' ? '本日 · 按小时' : period === 'week' ? '本周 · 按天（周一起）' : '本月 · 按天'} · UTC+8 · 数值为范围合计，当前周期尚未结束。点击卡片展开，仅统计本期起点至当前时间，不填充未来时段。</p>
       {query.isPending ? <p role="status">正在加载统计…</p> : query.isError ? <p role="alert">统计加载失败，请点击刷新重试。</p> : data ? <>
         {scope === 'creation' ? <div className="grid gap-3 sm:grid-cols-2">
           <div className="rounded-xl border border-[var(--border-default)] p-4">执行成功率 <strong>{rate(total('completed'), total('failed'))}</strong><p className="mt-2 text-xs text-[var(--text-secondary)]">范围内发起执行的当前状态：完成 ÷（完成 + 失败）。暂停、待审批及进行中不计入分母；不是会话完成率。</p></div>
@@ -32,9 +32,9 @@ export default function AdminAnalytics({ scope }: { scope: 'dashboard' | 'creati
             <button type="button" className="w-full rounded-xl p-4 text-left focus-visible:outline focus-visible:outline-2" aria-expanded={expanded === metric.key} onClick={() => setExpanded(expanded === metric.key ? null : metric.key)}>
               <span className="flex justify-between gap-2 text-sm">{metric.label}<span>{expanded === metric.key ? '收起' : '展开'}</span></span>
               <strong className="mt-2 block break-all text-2xl tabular-nums">{metric.unavailable ? '未核定' : format(metric.total)}</strong>
-              {!metric.unavailable && <TrendLineChart labels={data.labels.map(label => period === 'month' ? label.slice(0, 7) : label.slice(5))} values={metric.values} />}
+              {!metric.unavailable && <TrendLineChart labels={data.labels.map(label => period === 'day' ? label.slice(11) : label.slice(5))} values={metric.values} />}
             </button>
-            {expanded === metric.key ? <div className="max-h-72 overflow-auto border-t border-[var(--border-default)] p-4"><table className="w-full text-sm"><caption className="sr-only">{metric.label}分期数据</caption><thead><tr><th className="text-left">周期起始日（UTC+8）</th><th className="text-right">数量</th></tr></thead><tbody>{data.labels.map((label, i) => <tr key={label} className="border-t border-[var(--border-default)]"><td className="py-3">{label}</td><td className="text-right tabular-nums">{metric.unavailable ? '未核定' : format(metric.values[i])}</td></tr>)}</tbody></table></div> : null}
+            {expanded === metric.key ? <div className="max-h-72 overflow-auto border-t border-[var(--border-default)] p-4"><table className="w-full text-sm"><caption className="sr-only">{metric.label}分期数据</caption><thead><tr><th className="text-left">时间（UTC+8）</th><th className="text-right">数量</th></tr></thead><tbody>{data.labels.map((label, i) => <tr key={label} className="border-t border-[var(--border-default)]"><td className="py-3">{label}</td><td className="text-right tabular-nums">{metric.unavailable ? '未核定' : format(metric.values[i])}</td></tr>)}</tbody></table></div> : null}
           </div>)}
         </div>
         {data.cost ? <div className="rounded-xl border border-[var(--border-default)] p-4 text-sm">

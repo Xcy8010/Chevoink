@@ -21,7 +21,7 @@ export function publicRates(provider: string, model: string, peak: boolean): [nu
 
 export async function supplierCosts(period: 'day' | 'week' | 'month', from: Date, to: Date) {
   const rows = await prisma.$queryRaw<Array<{ date: string; provider: string; model: string; peak: boolean; known: boolean; calls: number; input: number; output: number; hit: number }>>(Prisma.sql`
-    SELECT to_char(date_trunc(${period}, created_at + interval '8 hours'), 'YYYY-MM-DD') AS date,
+    SELECT to_char(date_trunc(${period === 'day' ? 'hour' : 'day'}, created_at + interval '8 hours'), ${period === 'day' ? 'YYYY-MM-DD HH24:00' : 'YYYY-MM-DD'}) AS date,
       COALESCE(provider_name, '未知供应商') AS provider, model_name AS model,
       (extract(isodow FROM created_at + interval '8 hours') <= 5 AND
        (extract(hour FROM created_at + interval '8 hours') BETWEEN 9 AND 11 OR extract(hour FROM created_at + interval '8 hours') BETWEEN 14 AND 17)) AS peak,

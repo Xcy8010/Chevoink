@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
-import { getAdminAnalyticsData } from '../../api/lib/data/admin-analytics.js'
+import { getAdminAnalyticsData, analyticsWindow } from '../../api/lib/data/admin-analytics.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 
 const ready = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
@@ -10,7 +10,7 @@ describe.skipIf(!ready)('admin analytics real SQL', () => {
     for (const scope of ['dashboard', 'creation', 'cost', 'credits'] as const) {
       it(`${scope}/${period} aggregates in SQL with finite serializable values`, async () => {
         const data = await getAdminAnalyticsData(period, scope)
-        expect(data.labels).toHaveLength(period === 'day' ? 14 : 12)
+        expect(data.labels).toEqual(analyticsWindow(period, new Date(data.to)).labels)
         expect(data.metrics).toHaveLength(scope === 'dashboard' ? 8 : scope === 'creation' ? 7 : 1)
         for (const metric of data.metrics) {
           expect(metric.values).toHaveLength(data.labels.length)

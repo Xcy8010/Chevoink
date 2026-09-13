@@ -6,18 +6,18 @@ import type { AdminAnalyticsPayload, AdminAnalyticsPeriod } from '../../../share
 /** UTC+8 calendar buckets; weeks start Monday. End is the request snapshot. */
 export function analyticsWindow(period: AdminAnalyticsPeriod, now = new Date()) {
   const local = new Date(now.getTime() + 8 * 3600000)
+  const currentLocal = new Date(local)
   local.setUTCHours(0, 0, 0, 0)
   if (period === 'week') local.setUTCDate(local.getUTCDate() - (local.getUTCDay() + 6) % 7)
   if (period === 'month') local.setUTCDate(1)
-  const count = period === 'day' ? 14 : 12
   const labels: string[] = []
-  for (let i = count - 1; i >= 0; i--) {
-    const date = new Date(local)
-    if (period === 'month') date.setUTCMonth(date.getUTCMonth() - i)
-    else date.setUTCDate(date.getUTCDate() - i * (period === 'week' ? 7 : 1))
-    labels.push(date.toISOString().slice(0, 10))
+  const from = new Date(local.getTime() - 8 * 3600000)
+  const step = period === 'day' ? 3600000 : 86400000
+  for (let time = local.getTime(); time <= currentLocal.getTime(); time += step) {
+    const iso = new Date(time).toISOString()
+    labels.push(period === 'day' ? `${iso.slice(0,10)} ${iso.slice(11,13)}:00` : iso.slice(0,10))
   }
-  return { labels, from: new Date(`${labels[0]}T00:00:00+08:00`), to: now }
+  return { labels, from, to: now }
 }
 
 const snapshots = new Map<string, { expires: number; value: Promise<AdminAnalyticsPayload> }>()
@@ -31,7 +31,7 @@ export function getAdminAnalyticsData(period: AdminAnalyticsPeriod, scope: 'dash
     if (snapshots.get(key)?.value === value) snapshots.delete(key)
     throw error
   })
-  snapshots.set(key, { expires: Date.now() + 60000, value })
+  snapshots.set(key, { expires: Math.min(Date.now() + 60000, (Math.floor(Date.now() / 3600000) + 1) * 3600000), value })
   return value
 }
 
@@ -59,7 +59,7 @@ async function queryAdminAnalytics(period: AdminAnalyticsPeriod, scope: 'dashboa
   ] as const
   const metrics: AdminAnalyticsPayload['metrics'] = await Promise.all(sources.map(async ([key, label, source]) => {
     const rows = await prisma.$queryRaw<Array<{ date: string; value: number }>>(Prisma.sql`
-      SELECT to_char(date_trunc(${period}, date + interval '8 hours'), 'YYYY-MM-DD') AS date,
+      SELECT to_char(date_trunc(${period === 'day' ? 'hour' : 'day'}, date + interval '8 hours'), ${period === 'day' ? 'YYYY-MM-DD HH24:00' : 'YYYY-MM-DD'}) AS date,
              SUM(value)::float8 AS value
       FROM (${source}) source WHERE date >= ${from} AND date < ${to} GROUP BY 1 ORDER BY 1
     `)
