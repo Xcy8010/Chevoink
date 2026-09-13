@@ -13,12 +13,14 @@ function configuration(): Runtime | undefined {
   if (process.env.NOVEL_IMPORT_NATIVE_ENABLED !== 'true') return undefined
   const image = process.env.DOCUMENT_IMPORT_WORKER_IMAGE
   const stagingRoot = process.env.DOCUMENT_IMPORT_WORKER_STAGING_ROOT
+  const dockerExecutable = process.env.DOCUMENT_IMPORT_WORKER_EXECUTABLE
   if (!image || !stagingRoot) throw new DocumentWorkerError('IMPORT_WORKER_UNAVAILABLE')
-  const key = JSON.stringify([image, stagingRoot])
+  if (dockerExecutable && !dockerExecutable.startsWith('/')) throw new DocumentWorkerError('IMPORT_PROTOCOL_INVALID')
+  const key = JSON.stringify([image, stagingRoot, dockerExecutable])
   if (runtime?.key === key) return runtime
   // Config changes must not start a second client while the old one owns native work.
   if (runtime?.busy || runtime?.probe) throw new DocumentWorkerError('IMPORT_WORKER_UNAVAILABLE')
-  const worker = createDocumentImportWorker({ image, stagingRoot })
+  const worker = createDocumentImportWorker({ image, stagingRoot, ...(dockerExecutable ? { dockerExecutable } : {}) })
   runtime = { key, worker, parse: createNovelImportPipeline({ native: { enabled: true, worker } }), checkedAt: 0, busy: 0 }
   return runtime
 }

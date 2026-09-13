@@ -6,6 +6,9 @@ Scope: plan32 DOC conversion, offline PDF/image OCR and the API-side isolated pa
 
 ## Current application entry and release handoff (2026-09-14)
 
+For a service account without Docker socket access, use the [restricted sudo launcher](./privileged/README.md),
+not Docker group membership. It requires a separate root-owned approved-image config and its CI acceptance.
+
 `api/lib/novel-import/runtime.ts` exports `parseConfiguredNovelImportDocument(buffer, filename, {sourceId, sourceHash?, encoding?, signal?, deadlineAt?})`. The optional absolute Unix-millisecond `deadlineAt` is the persisted job deadline, reused after recovery. Results are `{parsed, report, artifacts}`; artifacts contain bounded sanitized PNG bytes and MUST be stored privately before the machine-only `IMPORT_IMAGE_STORAGE_REQUIRED` check can be cleared. Human review cannot waive storage. IDs and page/member/block evidence stay bound to the source hash; image/cover candidates are never applied automatically.
 
 DOC/PDF, including ZIP members, use the explicitly configured native worker. DOCX/ZIP images receive offline OCR when native is enabled; original paragraphs remain unchanged and OCR text is placed in a visible “unassigned image text” volume for human placement. Native jobs have a 30-minute absolute deadline; TXT/MD remain capped at 120 seconds, converter subprocesses at 120 seconds and regional OCR at a shared 60 seconds per page. The caller must enforce durable leases, fencing and a bounded global claim pool. Runtime also prevents concurrent native jobs in one supervisor.

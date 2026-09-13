@@ -1,0 +1,5 @@
+# Install with root:root 0440 at /etc/sudoers.d/chevoink-document-import.
+# The Python launcher, its ancestors and root config MUST NOT be writable by ubuntu.
+# No sudo permission for docker, sh, python, env, cp/install, or arbitrary commands is granted here.
+Defaults!/usr/local/libexec/chevoink-document-import-launcher env_reset,!setenv
+ubuntu ALL=(root) NOPASSWD: /usr/local/libexec/chevoink-document-import-launcher

@@ -47,6 +47,23 @@ jobs:
         run: python3 -m unittest discover -s workers/document-import/tests -p 'test_*.py' -v
       - name: Real native DOC / scanned Chinese OCR / mixed PDF / health acceptance
         run: node node_modules/vitest/vitest.mjs run --config workers/document-import/tests/parser-vitest.config.ts
+      - name: Install restricted launcher for a CI user with NO Docker group or generic sudo
+        run: |
+          sudo useradd --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin import-launcher-ci
+          sudo install -d -o root -g root -m 0755 /usr/local/libexec /etc/chevoink-document-import
+          sudo install -d -o root -g root -m 0700 /var/lib/chevoink-document-import-launcher
+          sudo install -d -o import-launcher-ci -g import-launcher-ci -m 0700 /opt/chevoink/shared/document-import-staging
+          sudo install -o root -g root -m 0755 workers/document-import/privileged/root-launcher.py /usr/local/libexec/chevoink-document-import-launcher
+          sudo install -o root -g root -m 0755 workers/document-import/privileged/docker-wrapper.sh /usr/local/bin/chevoink-document-import-docker
+          python3 -c 'import json,os,pwd; print(json.dumps(dict(image=os.environ["DOCUMENT_IMPORT_TEST_IMAGE"],uid=pwd.getpwnam("import-launcher-ci").pw_uid)))' > "$RUNNER_TEMP/launcher.json"
+          sudo install -o root -g root -m 0600 "$RUNNER_TEMP/launcher.json" /etc/chevoink-document-import/launcher.json
+          sed 's/^ubuntu /import-launcher-ci /' workers/document-import/privileged/sudoers.example > "$RUNNER_TEMP/launcher.sudoers"
+          sudo visudo -cf "$RUNNER_TEMP/launcher.sudoers"
+          sudo install -o root -g root -m 0440 "$RUNNER_TEMP/launcher.sudoers" /etc/sudoers.d/chevoink-document-import
+          node --input-type=module -e 'import {build} from "esbuild"; await build({entryPoints:["workers/document-import/tests/launcher-client-acceptance.ts"],bundle:true,platform:"node",format:"cjs",target:"node22",outfile:process.env.RUNNER_TEMP+"/launcher-client.cjs"})'
+          sudo install -o root -g root -m 0644 "$RUNNER_TEMP/launcher-client.cjs" /usr/local/libexec/chevoink-import-launcher-ci.cjs
+      - name: Verify actual client through sudo allowlist as unprivileged CI user
+        run: sudo -n -u import-launcher-ci -- "$(command -v node)" /usr/local/libexec/chevoink-import-launcher-ci.cjs "$DOCUMENT_IMPORT_TEST_IMAGE"
       - name: Retain exact tested native image for release handoff (no registry push)
         run: docker save "$DOCUMENT_IMPORT_TEST_IMAGE" | gzip > "$RUNNER_TEMP/document-import-worker.tar.gz"
       - name: Save native acceptance evidence

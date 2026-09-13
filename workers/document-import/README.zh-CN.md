@@ -6,6 +6,8 @@
 
 ## 本轮接线与精确镜像交接（2026-09-14）
 
+部署账号无 Docker socket 权限时，使用 [root-owned 受限 sudo launcher](./privileged/README.md)，不授予 Docker 组或泛用 Docker sudo 权限。须先通过新增 CI，再按文档安装固定 helper、root 配置及精确 sudoers。
+
 - 服务入口：`api/lib/novel-import/runtime.ts` 的 `parseConfiguredNovelImportDocument(buffer, filename, {sourceId, sourceHash?, encoding?, signal?, deadlineAt?})`；`deadlineAt` 是持久任务截止时间的 Unix 毫秒，恢复后不可重新给 30 分钟。返回 `{parsed, report, artifacts}`，图片字节仅交私有存储；只有服务证明全部资源归属/摘要正确且已保存，才能清除 `IMPORT_IMAGE_STORAGE_REQUIRED`，人工不得豁免。
 - DOC/PDF 及 ZIP 内同类成员走受控 native worker；DOCX/ZIP 图片安全转为 PNG 后做离线 OCR，文字放“图片正文（待归章）”，不替换已有段落。图片/封面只产生候选，须人工确认用途及顺序。
 - 原生总期限 30 分钟，TXT/MD 120 秒，单转换进程 120 秒，每页各 OCR 区域合计 60 秒。服务负责持久租约、fencing 与全局有界 claim；runtime 同进程最多一个 native 任务。
