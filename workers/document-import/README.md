@@ -23,13 +23,13 @@ Successful CI artifacts for the **same commit**:
 Authorized operator handoff (instructions only, not commands executed by this task):
 
 1. Require the full application CI and dedicated native workflow for the same SHA to pass. Download both artifacts from that run and keep the evidence with the release.
-2. Load the saved tar with `docker load --input <downloaded-document-import-worker.tar.gz>`; **do not rebuild on the server**. Check `docker image inspect --format '{{.Id}}' <ID-from-document-import-image.id>` exactly equals that complete `sha256:...` ID. Never substitute a mutable tag or the base-image digest.
+2. Load the saved tar with `docker load --input <downloaded-document-import-worker.tar.gz>`; **do not rebuild on the server**. Verify the authenticated artifact and loaded image using the [static image identity procedure](./IMAGE-IDENTITY.md). A CI manifest/index digest can differ from classic Docker's config ID: prove the raw config digest, ordered layers, platform and CI artifact association before approving the complete local ID. Never substitute a mutable tag or the base-image digest.
 3. Provision `/opt/chevoink/shared/document-import-staging` owned by the API service account with mode `0700`. It is outside uploads/public directories. The approved service account needs controlled access to the local Docker daemon; the container itself never receives that socket.
 4. Set operator environment (separate from the main import/overwrite flags):
 
    ```dotenv
    NOVEL_IMPORT_NATIVE_ENABLED=true
-   DOCUMENT_IMPORT_WORKER_IMAGE=sha256:<exact-ID-from-successful-CI>
+   DOCUMENT_IMPORT_WORKER_IMAGE=sha256:<verified-local-ID-mapped-to-successful-CI-artifact>
    DOCUMENT_IMPORT_WORKER_STAGING_ROOT=/opt/chevoink/shared/document-import-staging
    ```
 

@@ -282,7 +282,10 @@ async function persistPreview(scope: NovelImportScope, jobId: string, expected: 
       if (job.jobVersion !== claim.jobVersion || job.manifestRevision !== claim.manifestRevision || job.leaseEpoch !== claim.leaseEpoch || job.leaseOwner !== claim.leaseOwner || !job.leaseUntil || job.leaseUntil <= new Date()) fail('IMPORT_PREVIEW_CHANGED', '预览或任务已变化，请刷新。')
       await tx.novelImportManifest.create({ data: { id: randomUUID(), jobId, revision: preview.manifestRevision, hash: saved.sha256, storageKey: saved.storageKey } })
       await tx.novelImportApproval.updateMany({ where: { jobId, consumedAt: null }, data: { expiresAt: new Date() } })
-      await tx.novelImportJob.update({ where: { id: jobId }, data: { status: preview.warnings.some(w => w.blocking) || !preview.volumes.some(v => v.chapters.some(c => c.content.trim())) ? 'needs_review' : 'ready', manifestRevision: preview.manifestRevision, manifestHash: preview.manifestHash, jobVersion: { increment: 1 }, errorCode: null } })
+      // Publish the usable preview and release its write lease atomically. A
+      // reader may confirm as soon as this transaction commits, before pruning
+      // or the failure-cleanup finally below has finished.
+      await tx.novelImportJob.update({ where: { id: jobId }, data: { status: preview.warnings.some(w => w.blocking) || !preview.volumes.some(v => v.chapters.some(c => c.content.trim())) ? 'needs_review' : 'ready', manifestRevision: preview.manifestRevision, manifestHash: preview.manifestHash, leaseOwner: null, leaseUntil: null, jobVersion: { increment: 1 }, errorCode: null } })
       const obsolete = await tx.novelImportManifest.findMany({ where: { jobId, revision: { lte: preview.manifestRevision - NOVEL_IMPORT_PREVIEW_LIMITS.retainedRevisions } }, select: { id: true, storageKey: true }, take: NOVEL_IMPORT_PREVIEW_LIMITS.revisions })
       await tx.novelImportManifest.deleteMany({ where: { jobId, id: { in: obsolete.map(row => row.id) } } })
       return obsolete.map(row => row.storageKey)

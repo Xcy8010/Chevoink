@@ -60,12 +60,16 @@ or settings from a caller's working directory/environment.
 Root configuration has exactly two fields (no environment-selected paths or Docker arguments):
 
 ```json
-{"image":"sha256:<exact successful-CI image ID>","uid":1000}
+{"image":"sha256:<verified local ID mapped to successful-CI artifact>","uid":1000}
 ```
 
 Replace `1000` with the **verified numeric UID from `id -u ubuntu`**, not an assumed value.
-Replace the placeholder image with the complete ID recorded by CI and verified after `docker
-load`. The helper compares `SUDO_UID` with this root-owned numeric value. During a release
+Replace the placeholder image with the complete local ID verified after `docker load` using
+the [static artifact/config identity procedure](../IMAGE-IDENTITY.md). CI manifest/index and
+classic Docker config IDs need not be identical, but their payload association must be proven;
+use the same verified local ID in this root config and the runtime environment. Do not overwrite
+the original CI evidence or relax the exact-image allowlist. The helper compares `SUDO_UID`
+with this root-owned numeric value. During a release
 upgrade, update this root-owned config to the newly approved image as an operator; the runtime
 environment cannot approve a different image. Cleanup of older root-recorded jobs for the same
 caller remains possible using their previously approved image/nonce receipts.

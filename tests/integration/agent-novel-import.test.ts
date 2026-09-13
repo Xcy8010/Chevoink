@@ -106,6 +106,10 @@ async function createFixture() {
     }, { timeout: 20000, interval: 100 })
     if (parseError) throw parseError
     await vi.waitFor(async () => expect((await getNovelImportStatus(scope, job.jobId)).status).toBe('ready'), { timeout: 15000 })
+    // Public ready must already be confirmable, not await a later finally cleanup.
+    // Keep this outside waitFor so a live lease fails instead of being retried.
+    expect(await prisma.novelImportJob.findFirstOrThrow({ where: { id: job.jobId, ...scope },
+      select: { status: true, leaseOwner: true, leaseUntil: true } })).toEqual({ status: 'ready', leaseOwner: null, leaseUntil: null })
     const preview = await getNovelImportPreview(scope, job.jobId)
     return { job, preview }
   }

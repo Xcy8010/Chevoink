@@ -131,6 +131,12 @@ beforeEach(() => {
 })
 
 describe('staged import authorization and durability (DB mocked; not concurrency release evidence)', () => {
+  it('publishes ready and releases the preview lease in the same database update', async () => {
+    const result = await prepared()
+    // Checking only the final row would miss the old ready-before-finally race.
+    expect(fixture.db.novelImportJob.update).toHaveBeenCalledWith({ where: { id: result.job.jobId }, data: expect.objectContaining({ status: 'ready', manifestRevision: 1, leaseOwner: null, leaseUntil: null }) })
+    await expect(confirmNovelImport(human(), result.job.jobId, { manifestRevision: result.preview.manifestRevision, manifestHash: result.preview.manifestHash, targetHash: result.job.targetHash })).resolves.toHaveProperty('approvalId')
+  })
   it('keeps new imports opt-in while history restoration survives the kill switch', () => {
     vi.stubEnv('NOVEL_IMPORT_ENABLED', ''); vi.stubEnv('NOVEL_IMPORT_OVERWRITE_ENABLED', 'true')
     expect(novelImportCapabilities()).toMatchObject({ enabled: false, overwriteEnabled: false, overwriteVerified: true, restoreEnabled: true, aiEnabled: true })

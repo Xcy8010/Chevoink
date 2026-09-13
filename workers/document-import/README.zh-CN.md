@@ -16,13 +16,13 @@
 最终交接必须取同一成功 CI 运行的两份 artifact：`document-import-native-evidence-<SHA>`（镜像 ID 与验收 JSON）和 `document-import-worker-<SHA>`（`document-import-worker.tar.gz`）。以下是获准发布时由主 agent/operator 执行的说明，本任务没有执行：
 
 1. 应用全量 CI 与专用 native CI 同 SHA 全部成功。
-2. `docker load --input <下载的document-import-worker.tar.gz>`，不在服务器重新构建。`docker image inspect --format '{{.Id}}' <CI记录ID>` 必须等于 `document-import-image.id` 中完整 `sha256:...`，不能改用 tag 或基础镜像 digest。
+2. `docker load --input <下载的document-import-worker.tar.gz>`，不在服务器重新构建。按[镜像身份静态映射说明](./IMAGE-IDENTITY.md)核验可信 artifact、原始 Config 摘要、有序层和平台。CI manifest/index digest 与 classic Docker config ID 可以不同，但必须先证明来源和 payload 关联，再批准完整本地 ID；不能改用 tag 或基础镜像 digest。
 3. 创建 `/opt/chevoink/shared/document-import-staging`，归 API 服务账号，权限 `0700`；必须在 uploads/public 以外。容器不挂 Docker socket；只有监督端以获批权限使用同机 daemon。
 4. 配置独立 operator 环境：
 
    ```dotenv
    NOVEL_IMPORT_NATIVE_ENABLED=true
-   DOCUMENT_IMPORT_WORKER_IMAGE=sha256:<成功CI的精确镜像ID>
+   DOCUMENT_IMPORT_WORKER_IMAGE=sha256:<已核验映射到成功CI-artifact的完整本地ID>
    DOCUMENT_IMPORT_WORKER_STAGING_ROOT=/opt/chevoink/shared/document-import-staging
    ```
 
