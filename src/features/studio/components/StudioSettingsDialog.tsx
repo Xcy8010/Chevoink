@@ -75,6 +75,8 @@ type Props = {
   runIds?: string[]
   onSelectSession?: (sessionId: string) => void
   onTaskForked?: (session: AgentSession) => void
+  /** 当前作品的导入记录与恢复入口；宿主负责关闭设置并打开导入弹窗历史视图 */
+  onOpenImportHistory?: () => void
 }
 
 type NavItem = {
@@ -244,6 +246,16 @@ function GeneralPanel(props: Props) {
             description={`${currentNovel?.chapterCount ?? 0} 章 · ${props.chapterId ? '已打开章节' : '尚未打开章节'}`}
             value={props.perspective === 'work' ? 'Work 工作区' : 'IDE 写作台'}
           />
+          {props.onOpenImportHistory ? (
+            <button type="button" onClick={props.onOpenImportHistory} className="flex w-full items-center gap-3 border-t border-[var(--border-subtle)] py-4 text-left hover:text-[var(--text-primary)]">
+              <RotateCcw className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium">导入记录与恢复</span>
+                <span className="mt-1 block text-xs text-[var(--text-tertiary)]">查看当前作品的导入任务、完整性报告与可恢复回执</span>
+              </span>
+              <ChevronRight className="h-4 w-4 text-[var(--text-tertiary)]" />
+            </button>
+          ) : null}
         </div>
       </SettingsGroup>
 

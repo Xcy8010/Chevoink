@@ -5,25 +5,27 @@ import { MemoryRouter } from 'react-router-dom'
 import type { ComponentProps, ReactNode } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import StudioCommandBar from '../../src/features/studio/components/StudioCommandBar'
+import StudioSettingsDialog from '../../src/features/studio/components/StudioSettingsDialog'
 import StudioToolbar from '../../src/features/studio/components/StudioToolbar'
 import { useImportCapabilities } from '../../src/features/studio/components/use-import-capabilities'
 import { novelImportApi } from '../../src/features/studio/import-api'
 
 vi.mock('../../src/features/feedback/components/FeedbackDialog', () => ({ default: () => null }))
 vi.mock('../../src/features/studio/components/StudioMoreMenu', () => ({ default: () => null }))
+vi.mock('../../src/features/studio/agent/components/AgentOperationsCenter', () => ({ default: () => null }))
+vi.mock('../../src/features/account/CustomModelSettingsDialog', () => ({ CustomModelSettingsContent: () => null }))
+vi.mock('../../src/features/account/InviteCreditsDialog', () => ({ default: () => null }))
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 const commandProps: ComponentProps<typeof StudioCommandBar> = {
   perspective: 'work', perspectiveSwitchEnabled: false, onPerspectiveChange: vi.fn(), currentNovelId: 'a', novelTitle: '作品', novelOptions: [],
-  onSelectNovel: vi.fn(), onCreateNovel: vi.fn(), onPublish: vi.fn(), onOpenCover: vi.fn(), onOpenMeta: vi.fn(), onExport: vi.fn(), onDeleteNovel: vi.fn(),
+  onSelectNovel: vi.fn(), onCreateNovel: vi.fn(), onPublish: vi.fn(), onOpenCover: vi.fn(), onOpenMeta: vi.fn(), onExport: vi.fn(), onImport: vi.fn(), onDeleteNovel: vi.fn(),
 }
 
-it.each(['work', 'ide'] as const)('places import immediately above export in the %s work menu only when enabled', perspective => {
+it.each(['work', 'ide'] as const)('places import immediately above export in the %s work menu regardless of capability', perspective => {
   const onImport = vi.fn()
-  const view = render(<MemoryRouter><StudioCommandBar {...commandProps} perspective={perspective} /></MemoryRouter>)
+  render(<MemoryRouter><StudioCommandBar {...commandProps} perspective={perspective} onImport={onImport} /></MemoryRouter>)
   fireEvent.click(screen.getByRole('button', { name: '作品' }))
-  expect(screen.queryByRole('button', { name: '一键导入' })).toBeNull()
-  view.rerender(<MemoryRouter><StudioCommandBar {...commandProps} perspective={perspective} onImport={onImport} /></MemoryRouter>)
   const upload = screen.getByRole('button', { name: '一键导入' })
   expect(upload.nextElementSibling).toBe(screen.getByRole('button', { name: '一键导出' }))
   fireEvent.click(upload)
@@ -60,12 +62,16 @@ it('capability hook fails closed after refetch error and isolates novel/user que
   hook.unmount(); query.clear()
 })
 
-it('keeps the read-only history entry independently available when a new import callback is absent', () => {
-  const onImportHistory = vi.fn()
-  render(<MemoryRouter><StudioCommandBar {...commandProps} onImportHistory={onImportHistory} /></MemoryRouter>)
+it('drops the history entry from the work menu; it lives in studio settings now', () => {
+  render(<MemoryRouter><StudioCommandBar {...commandProps} /></MemoryRouter>)
   fireEvent.click(screen.getByRole('button', { name: '作品' }))
-  expect(screen.queryByRole('button', { name: '一键导入' })).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: '导入记录与恢复' }))
-  expect(onImportHistory).toHaveBeenCalledTimes(1)
-  expect(document.activeElement).toBe(screen.getByRole('button', { name: '作品' }))
+  expect(screen.queryByRole('button', { name: '导入记录与恢复' })).toBeNull()
+})
+
+it('exposes the read-only history entry in the settings general panel for the current novel', () => {
+  const onOpenImportHistory = vi.fn()
+  const novels = [{ id: 'a', title: '作品', status: 'draft', chapterCount: 2, updatedAt: '2026-09-10' }] as ComponentProps<typeof StudioSettingsDialog>['novels']
+  render(<StudioSettingsDialog open section="general" onSectionChange={vi.fn()} onClose={vi.fn()} perspective="work" onPerspectiveChange={vi.fn()} autoFollow={false} onAutoFollowChange={vi.fn()} novelId="a" novels={novels} sessionId={null} onOpenImportHistory={onOpenImportHistory} />)
+  fireEvent.click(screen.getByRole('button', { name: /导入记录与恢复/ }))
+  expect(onOpenImportHistory).toHaveBeenCalledOnce()
 })

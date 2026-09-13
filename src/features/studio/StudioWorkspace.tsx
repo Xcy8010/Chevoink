@@ -141,8 +141,9 @@ export default function StudioWorkspace() {
   const openImportHistory = () => {
     if (importHistoryAvailable && taskUiUserId) setImportRequest({ novelId: activeNovelId, userId: taskUiUserId, view: 'history' })
   }
+  // 入口始终开放：服务端开关关闭时由导入弹窗给出未开放提示；覆盖警告由作品真实章数决定
   const openNovelImport = () => {
-    if (importAvailable && taskUiUserId) setImportRequest({ novelId: activeNovelId, userId: taskUiUserId })
+    if (taskUiUserId) setImportRequest({ novelId: activeNovelId, userId: taskUiUserId })
   }
   useEffect(() => {
     if (!importHistoryAvailable || !taskUiUserId) return
@@ -3919,7 +3920,7 @@ export default function StudioWorkspace() {
                   { key: 'publish', label: novelForm?.status === 'published' ? '更新发布' : '发布作品', icon: Upload, action: () => handlePublishNovel() },
                   ...(novelForm?.status && novelForm.status !== 'archived' ? [{ key: 'completion', label: novelForm.status === 'completed' ? '继续连载' : '完结作品', icon: Flag, action: () => handleToggleNovelCompletion() }] : []),
                   { key: 'detail', label: '作品页', icon: BookOpenText, action: () => navigate(detailPreviewHref) },
-                  ...(importAvailable ? [{ key: 'import', label: '一键导入', icon: Upload, action: openNovelImport }] : []),
+                  { key: 'import', label: '一键导入', icon: Upload, action: openNovelImport },
                   { key: 'export', label: '一键导出', icon: FolderDown, action: () => setExportDialogOpen(true) },
                   ...(previewHref
                     ? [{ key: 'preview', label: '预览阅读', icon: BookOpen, action: () => navigate(previewHref) }]
@@ -4013,8 +4014,7 @@ export default function StudioWorkspace() {
             currentNovelStatus={novelForm?.status}
             onOpenNovelMeta={() => setActiveToolPanel('meta')}
             onExportNovel={() => setExportDialogOpen(true)}
-            onImportNovel={importAvailable ? openNovelImport : undefined}
-            onImportHistory={importHistoryAvailable ? openImportHistory : undefined}
+            onImportNovel={openNovelImport}
             onPublishNovel={handlePublishNovel}
             onToggleNovelCompletion={handleToggleNovelCompletion}
             autoFollow={autoFollow}
@@ -4041,8 +4041,7 @@ export default function StudioWorkspace() {
             onOpenCover={() => setActiveToolPanel('cover')}
             onOpenMeta={() => setActiveToolPanel('meta')}
             onExport={() => setExportDialogOpen(true)}
-            onImport={importAvailable ? openNovelImport : undefined}
-            onImportHistory={importHistoryAvailable ? openImportHistory : undefined}
+            onImport={openNovelImport}
             onDeleteNovel={handleRequestDeleteNovel}
             onCreateVolume={handleRequestCreateVolume}
             onCreateChapter={handleRequestCreateChapter}
@@ -4259,6 +4258,7 @@ export default function StudioWorkspace() {
             section={studioSettingsSection}
             onSectionChange={setStudioSettingsSection}
             onClose={() => setStudioSettingsOpen(false)}
+            onOpenImportHistory={importHistoryAvailable ? () => { setStudioSettingsOpen(false); openImportHistory() } : undefined}
             perspective={workspacePerspective}
             onPerspectiveChange={setWorkspacePerspective}
             autoFollow={autoFollow}

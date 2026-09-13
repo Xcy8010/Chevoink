@@ -27,9 +27,8 @@ type Props = {
   onOpenCover: () => void
   onOpenMeta: () => void
   onExport: () => void
-  /** Only pass when the authenticated server import capability is enabled. */
-  onImport?: () => void
-  onImportHistory?: () => void
+  /** 入口始终展示；服务端开关关闭时由导入弹窗给出未开放提示，不在菜单层隐藏 */
+  onImport: () => void
   onDeleteNovel: () => void
   /** 顶部「作品」菜单的结构操作 */
   onCreateVolume?: () => void
@@ -100,9 +99,8 @@ export default function StudioCommandBar(props: Props) {
           <button type="button" className={item} onClick={() => { closeMenu(); props.onOpenMeta() }}><Settings2 className="h-3.5 w-3.5" />作品设置</button>
           <button type="button" className={item} onClick={() => { closeMenu(); props.onPublish() }}><Upload className="h-3.5 w-3.5" />{publishLabel}</button>
           {completionButton}
-          {props.onImport ? <button type="button" className={cn(item, 'min-h-11')} onClick={() => { menuRef.current?.querySelector<HTMLElement>('button[aria-expanded="true"]')?.focus(); closeMenu(); props.onImport?.() }}><Upload className="h-3.5 w-3.5" />一键导入</button> : null}
+          <button type="button" className={cn(item, 'min-h-11')} onClick={() => { menuRef.current?.querySelector<HTMLElement>('button[aria-expanded="true"]')?.focus(); closeMenu(); props.onImport() }}><Upload className="h-3.5 w-3.5" />一键导入</button>
           <button type="button" className={item} onClick={() => { closeMenu(); props.onExport() }}><FolderDown className="h-3.5 w-3.5" />一键导出</button>
-          {props.onImportHistory ? <button type="button" className={cn(item, 'min-h-11')} onClick={() => { menuRef.current?.querySelector<HTMLElement>('button[aria-expanded="true"]')?.focus(); closeMenu(); props.onImportHistory?.() }}><RotateCcw className="h-3.5 w-3.5" />导入记录与恢复</button> : null}
           <div className="mx-2 my-1 border-t border-[var(--border-subtle)]" />
           <button type="button" className={cn(item, 'text-rose-600')} onClick={() => { closeMenu(); props.onDeleteNovel() }}><Trash2 className="h-3.5 w-3.5" />删除作品</button>
         </>

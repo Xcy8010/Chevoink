@@ -12,17 +12,16 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear() })
 const noop = () => undefined
 const novels = [{ id: 'a', title: '作品A', status: 'draft', chapterCount: 1, updatedAt: '2026-09-10' }, { id: 'b', title: '作品B', status: 'draft', chapterCount: 1, updatedAt: '2026-09-09' }] as ComponentProps<typeof StudioWorkspaceSidebar>['novels']
 function Fixture(overrides: Partial<ComponentProps<typeof StudioWorkspaceSidebar>>) {
-  return <StudioWorkspaceSidebar open onOpenChange={noop} perspective="work" perspectiveSwitchEnabled onPerspectiveChange={noop} currentNovelId="a" currentTasksNovelId="a" currentNovelTitle="作品A" novels={novels} currentTasks={[]} activeTaskId={null} taskSwitchLocked={false} onSelectNovel={noop} onCreateNovel={noop} onCreateTask={noop} onSelectTask={noop} onRenameTask={noop} onCreateTaskInNovel={noop} onTaskDeleted={noop} onTaskForked={noop} onNovelDeleted={noop} autoFollow={false} onAutoFollowChange={noop} onOpenStudioSettings={noop} onExportNovel={noop} {...overrides} />
+  return <StudioWorkspaceSidebar open onOpenChange={noop} perspective="work" perspectiveSwitchEnabled onPerspectiveChange={noop} currentNovelId="a" currentTasksNovelId="a" currentNovelTitle="作品A" novels={novels} currentTasks={[]} activeTaskId={null} taskSwitchLocked={false} onSelectNovel={noop} onCreateNovel={noop} onCreateTask={noop} onSelectTask={noop} onRenameTask={noop} onCreateTaskInNovel={noop} onTaskDeleted={noop} onTaskForked={noop} onNovelDeleted={noop} autoFollow={false} onAutoFollowChange={noop} onOpenStudioSettings={noop} onExportNovel={noop} onImportNovel={noop} {...overrides} />
 }
 
-it('only exposes import for the current novel and with the optional capability callback', () => {
+it('exposes import for the current novel only, without capability gating', () => {
   const onImportNovel = vi.fn()
-  const view = render(<Fixture />)
+  render(<Fixture onImportNovel={onImportNovel} />)
   fireEvent.contextMenu(screen.getByRole('button', { name: /^作品A/ }))
-  expect(screen.queryByRole('button', { name: '一键导入' })).toBeNull()
-  view.rerender(<Fixture onImportNovel={onImportNovel} />)
   const upload = screen.getByRole('button', { name: '一键导入' })
   expect(upload.nextElementSibling).toBe(screen.getByRole('button', { name: '一键导出' }))
+  expect(screen.queryByRole('button', { name: '导入记录与恢复' })).toBeNull()
   fireEvent.contextMenu(screen.getByRole('button', { name: /^作品B/ }))
   expect(screen.queryByRole('button', { name: '一键导入' })).toBeNull()
   expect(onImportNovel).not.toHaveBeenCalled()
