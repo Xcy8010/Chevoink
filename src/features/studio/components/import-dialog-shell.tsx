@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react'
+import { useId, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 
@@ -16,7 +16,7 @@ export function ImportDialogShell({ title, description, stage, onClose, children
   const close = useRef(onClose)
   close.current = onClose
   const composing = useRef(false)
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const overflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
@@ -58,7 +58,9 @@ export function ImportDialogShell({ title, description, stage, onClose, children
       if (previous?.isConnected) previous.focus()
     }
   }, [])
-  useEffect(() => { panel.current?.querySelector<HTMLElement>('[data-import-safe-focus]')?.focus() }, [stage])
+  // Put focus on the safe action in the same commit as the new confirmation,
+  // before paint or keyboard input can observe a stale dialog-container focus.
+  useLayoutEffect(() => { panel.current?.querySelector<HTMLElement>('[data-import-safe-focus]')?.focus() }, [stage])
 
   return createPortal(<div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/45 sm:p-6">
     <div ref={panel} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} aria-describedby={`${id}-description`} tabIndex={-1}
