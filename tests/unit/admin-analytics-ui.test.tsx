@@ -14,6 +14,7 @@ describe('admin analytics interaction', () => {
     fireEvent.click(card)
     expect(card.getAttribute('aria-expanded')).toBe('true')
     expect(screen.getByRole('table')).toBeTruthy()
+    expect(document.querySelector('svg text')).toBeNull() // Axis labels must not be stretched with the SVG.
     fireEvent.click(screen.getByRole('button', { name: '月', exact: true }))
     await waitFor(() => expect(request).toHaveBeenCalledWith('/api/admin/analytics?period=month&scope=dashboard'))
   })

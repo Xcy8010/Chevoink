@@ -7,11 +7,11 @@ const ready = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTest
 afterAll(async () => { await prisma.$disconnect() })
 describe.skipIf(!ready)('admin analytics real SQL', () => {
   for (const period of ['day', 'week', 'month'] as const) {
-    for (const scope of ['dashboard', 'creation'] as const) {
+    for (const scope of ['dashboard', 'creation', 'cost', 'credits'] as const) {
       it(`${scope}/${period} aggregates in SQL with finite serializable values`, async () => {
         const data = await getAdminAnalyticsData(period, scope)
         expect(data.labels).toHaveLength(period === 'day' ? 14 : 12)
-        expect(data.metrics).toHaveLength(scope === 'dashboard' ? 8 : 7)
+        expect(data.metrics).toHaveLength(scope === 'dashboard' ? 8 : scope === 'creation' ? 7 : 1)
         for (const metric of data.metrics) {
           expect(metric.values).toHaveLength(data.labels.length)
           expect(Number.isFinite(metric.total)).toBe(true)

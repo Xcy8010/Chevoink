@@ -6,6 +6,8 @@ import { formatCreditAmount } from '@/features/account/credit-format'
 import { AdminCard, AdminPageHeader, AdminPanelState } from '../AdminLayout'
 import { formatTokens } from '../admin-shared'
 import { getAdminTokenManagement } from '../api'
+import SupplierBalances from '../components/SupplierBalances'
+import AdminAnalytics from '../components/AdminAnalytics'
 
 function formatCacheRate(hit: number | null, miss: number | null) {
   if (hit === null || miss === null) return '—'
@@ -28,6 +30,8 @@ export default function AdminTokenManagementPage() {
   const maxTrend = useMemo(() => Math.max(1, ...(data?.trend?.map((item) => item.requestTokens + item.responseTokens) ?? [1])), [data?.trend])
   return (
     <div>
+      <SupplierBalances />
+      <AdminAnalytics scope="cost" />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><AdminPageHeader title="Token 管理" description="按 UTC+8 统计模型输入/输出 Token、联网搜索和生图调用，并下钻到用户创作记录。" /><div className="flex shrink-0 rounded-lg border border-[var(--border-strong)] p-1">{([['today','本日'],['week','本周'],['month','本月']] as const).map(([value,label]) => <button key={value} type="button" onClick={() => setPeriod(value)} className={`rounded-md px-3 py-1.5 text-xs ${period === value ? 'bg-[var(--surface-contrast)] text-[var(--text-contrast)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]'}`}>{label}</button>)}</div></div>
       <AdminPanelState state={query.isLoading ? 'loading' : query.isError ? 'error' : 'ready'}>
         {data ? (

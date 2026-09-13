@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '../prisma.js'
+import { supplierCosts } from './supplier-cost.js'
 import type { AdminAnalyticsPayload, AdminAnalyticsPeriod } from '../../../shared/contracts/admin-analytics.js'
 
 /** UTC+8 calendar buckets; weeks start Monday. End is the request snapshot. */
@@ -21,8 +22,8 @@ export function analyticsWindow(period: AdminAnalyticsPeriod, now = new Date()) 
 
 const snapshots = new Map<string, { expires: number; value: Promise<AdminAnalyticsPayload> }>()
 
-/** At most six aggregate snapshots; coalesce concurrent admin requests. No user data. */
-export function getAdminAnalyticsData(period: AdminAnalyticsPeriod, scope: 'dashboard' | 'creation'): Promise<AdminAnalyticsPayload> {
+/** At most twelve aggregate snapshots; coalesce concurrent admin requests. No user data. */
+export function getAdminAnalyticsData(period: AdminAnalyticsPeriod, scope: 'dashboard' | 'creation' | 'credits' | 'cost'): Promise<AdminAnalyticsPayload> {
   const key = `${scope}:${period}`
   const cached = snapshots.get(key)
   if (cached && cached.expires > Date.now()) return cached.value
@@ -34,10 +35,12 @@ export function getAdminAnalyticsData(period: AdminAnalyticsPeriod, scope: 'dash
   return value
 }
 
-async function queryAdminAnalytics(period: AdminAnalyticsPeriod, scope: 'dashboard' | 'creation'): Promise<AdminAnalyticsPayload> {
+async function queryAdminAnalytics(period: AdminAnalyticsPeriod, scope: 'dashboard' | 'creation' | 'credits' | 'cost'): Promise<AdminAnalyticsPayload> {
   const { labels, from, to } = analyticsWindow(period)
   // Fixed identifiers only; every external value is a bound SQL parameter.
-  const sources = scope === 'dashboard' ? [
+  const sources = scope === 'cost' ? [] : scope === 'credits' ? [
+    ['invites', '成功邀请人数', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM referral_redemptions`],
+  ] as const : scope === 'dashboard' ? [
     ['users', '注册用户', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM users`],
     ['published', '已发布作品', Prisma.sql`SELECT published_at AS date, 1::numeric AS value FROM novels WHERE published_at IS NOT NULL`],
     ['posts', '社区帖子', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM posts`],
@@ -45,7 +48,6 @@ async function queryAdminAnalytics(period: AdminAnalyticsPeriod, scope: 'dashboa
     ['novels', '已创建作品', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM novels`],
     ['tokens', '已记录 Token', Prisma.sql`SELECT created_at AS date, (COALESCE(request_tokens,0)::numeric + COALESCE(response_tokens,0)) AS value FROM ai_usage_logs`],
     ['credits', '已消耗 Credits（毛额）', Prisma.sql`SELECT created_at AS date, -delta_milli::numeric / 1000 AS value FROM credit_ledger_entries WHERE kind = 'usage' AND delta_milli < 0`],
-    ['invites', '成功邀请人数', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM referral_redemptions`],
   ] as const : [
     ['sessions', '新建会话', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_sessions`],
     ['runs', '发起执行', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_runs`],
@@ -55,7 +57,7 @@ async function queryAdminAnalytics(period: AdminAnalyticsPeriod, scope: 'dashboa
     ['toolSuccess', '工具成功', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_run_events WHERE type = 'tool.result' AND payload->>'ok' = 'true'`],
     ['toolFailed', '工具未成功', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_run_events WHERE type = 'tool.result' AND payload->>'ok' = 'false'`],
   ] as const
-  const metrics = await Promise.all(sources.map(async ([key, label, source]) => {
+  const metrics: AdminAnalyticsPayload['metrics'] = await Promise.all(sources.map(async ([key, label, source]) => {
     const rows = await prisma.$queryRaw<Array<{ date: string; value: number }>>(Prisma.sql`
       SELECT to_char(date_trunc(${period}, date + interval '8 hours'), 'YYYY-MM-DD') AS date,
              SUM(value)::float8 AS value
@@ -74,5 +76,7 @@ async function queryAdminAnalytics(period: AdminAnalyticsPeriod, scope: 'dashboa
     FROM agent_run_events WHERE type = 'tool.result' AND created_at >= ${from} AND created_at < ${to}
     GROUP BY 1 ORDER BY failed DESC, calls DESC, name ASC LIMIT 30
   `) : []
-  return { period, from: from.toISOString(), to: to.toISOString(), labels, metrics, tools }
+  const costs = scope === 'dashboard' || scope === 'cost' ? await supplierCosts(period, from, to) : null
+  if (costs) metrics.push({ key: 'cost', label: '已消耗成本（￥·估算小计）', total: costs.total, values: labels.map(date => costs.days.get(date) ?? 0), unavailable: costs.knownCalls === 0 && costs.unknownCalls > 0 })
+  return { period, from: from.toISOString(), to: to.toISOString(), labels, metrics, tools, ...(costs ? { cost: { knownCalls: costs.knownCalls, unknownCalls: costs.unknownCalls, models: costs.models } } : {}) }
 }

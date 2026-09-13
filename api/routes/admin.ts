@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express'
 import { createRateCard, transitionRateCard, listRateCards, rateCardEvidenceSchema } from '../lib/billing/rate-cards.js'
 import { itemizedTokenPriceSchema } from '../lib/billing/token-price.js'
 import { z } from 'zod'
+import { getSupplierBalances } from '../lib/supplier-balances.js'
 
 import { createAuthCaptchaChallenge, verifyAuthCaptchaChallenge } from '../lib/auth-captcha.js'
 import {
@@ -449,13 +450,21 @@ router.post('/me/bind-phone', async (req: Request, res: Response): Promise<void>
 
 /* ---------------- 仪表盘 ---------------- */
 
+router.get('/supplier-balances', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try {
+    await requireAdmin(req)
+    res.status(200).json(buildSuccess(requestId, await getSupplierBalances()))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
 router.get('/analytics', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
   try {
     await requireAdmin(req)
     const input = z.object({
       period: z.enum(['day', 'week', 'month']).default('day'),
-      scope: z.enum(['dashboard', 'creation']).default('dashboard'),
+      scope: z.enum(['dashboard', 'creation', 'credits', 'cost']).default('dashboard'),
     }).parse(req.query)
     res.status(200).json(buildSuccess(requestId, await getAdminAnalyticsData(input.period, input.scope)))
   } catch (error) {

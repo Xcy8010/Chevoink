@@ -4,6 +4,7 @@ import { Pause, Play, RefreshCcw } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import Button from '@/components/ui/Button'
+import AdminAnalytics from '../components/AdminAnalytics'
 import { useToast } from '@/components/ui/toast-context'
 import { formatCreditAmount } from '@/features/account/credit-format'
 import { AdminCard, AdminPageHeader, AdminPanelState } from '../AdminLayout'
@@ -79,6 +80,7 @@ export default function AdminCreditsManagementPage() {
 
   return <div>
     <AdminPageHeader title="Credits 管理" description="查看公测额度、奖励余额和耗尽情况；个人、批量及全局高危操作均需要人机验证与二次确认。" />
+    <AdminAnalytics scope="credits" />
     <AdminPanelState state={query.isLoading ? 'loading' : query.isError ? 'error' : 'ready'}>
       {data ? <div className="space-y-4">
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">

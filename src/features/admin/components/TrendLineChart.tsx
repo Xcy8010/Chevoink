@@ -106,9 +106,6 @@ export default function TrendLineChart({ labels, values }: { labels: string[]; v
                 strokeWidth={1}
                 shapeRendering="crispEdges"
               />
-              <text x={0} y={tick.y + 4} fill="var(--text-tertiary)" fontSize={9} fontWeight={500}>
-                {tick.label}
-              </text>
             </g>
           ))}
           {chart.xTicks.map((tick) => (
@@ -131,6 +128,7 @@ export default function TrendLineChart({ labels, values }: { labels: string[]; v
             strokeWidth={1.4}
             strokeLinecap="round"
             strokeLinejoin="round"
+            vectorEffect="non-scaling-stroke"
           />
           {hovered ? (
             <>
@@ -147,6 +145,11 @@ export default function TrendLineChart({ labels, values }: { labels: string[]; v
             </>
           ) : null}
         </svg>
+
+        {/* Keep type outside the non-uniformly stretched SVG, including expanded cards. */}
+        <div className="pointer-events-none absolute inset-0 text-[11px] font-medium leading-none text-[var(--text-tertiary)]" aria-hidden="true">
+          {chart.yTicks.map((tick, index) => <span key={index} className="absolute left-0 -translate-y-1/2" style={{ top: `${tick.y / HEIGHT * 100}%` }}>{tick.label}</span>)}
+        </div>
 
         {hovered && hover ? (
           <div
