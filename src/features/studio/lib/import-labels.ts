@@ -34,7 +34,7 @@ const ERRORS: Record<string, string> = {
   IMPORT_RESTORE_CONFLICT: '导入后已有新编辑，恢复已阻止。请先导出当前稿件并核对差异。',
   IMPORT_RESTORE_UNAVAILABLE: '当前备份无法恢复。请保留任务编号并联系支持，不要重复覆盖。',
   IMPORT_DISABLED: '服务器尚未开放一键导入，请稍后再试。',
-  IMPORT_UNSUPPORTED_FORMAT: '当前格式尚未开放。请查看服务器格式说明并选择可用格式。',
+  IMPORT_UNSUPPORTED_FORMAT: '当前格式尚未开放，请选择支持的文件格式。',
   IMPORT_CONVERT_FAILED: '文档转换失败。请检查文件是否损坏，或另存为当前支持的格式。',
   IMPORT_PASSWORD_REQUIRED: '文件受密码保护。请先解除密码，再重新上传。',
   IMPORT_ARCHIVE_UNSAFE: 'ZIP 未通过安全检查。请重新打包正常文件，移除嵌套压缩包及异常路径。',

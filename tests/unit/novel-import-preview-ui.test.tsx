@@ -71,7 +71,7 @@ describe('revision-bound on-demand preview', () => {
   it('loads only selected bodies and saves untouched unread chapters as references, never empty content', async () => {
     const { props, client, modern } = dialogFixture()
     render(<ImportDialog {...props} />)
-    await clickArmed(/继续 \/ 查看任务 job-a/)
+    await clickArmed(/任务 job-a/)
     await screen.findByLabelText('原文正文')
     expect(client.preview).not.toHaveBeenCalled()
     expect(modern.chapter).toHaveBeenCalledTimes(1)
@@ -135,7 +135,7 @@ describe('revision-bound on-demand preview', () => {
     const { props, modern, client } = dialogFixture()
     modern.summary.mockResolvedValue({ ...summary, volumes: [{ title: '卷', chapters: summary.volumes[0].chapters.map(chapter => ({ ...chapter, nonEmpty: false })) }] })
     render(<ImportDialog {...props} />)
-    await clickArmed(/继续 \/ 查看任务 job-a/)
+    await clickArmed(/任务 job-a/)
     await screen.findByLabelText('原文正文')
     expect((screen.getByRole('button', { name: '导入 1 卷 3 章' }) as HTMLButtonElement).disabled).toBe(true)
     expect(client.commit).not.toHaveBeenCalled()
