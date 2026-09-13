@@ -1,4 +1,4 @@
-import { useMemo, useState, type MouseEvent } from 'react'
+import { useMemo, useState, type PointerEvent } from 'react'
 
 type SparklinePoint = { x: number; y: number; value: number }
 
@@ -24,7 +24,7 @@ function getAxisUpperBound(value: number): number {
 }
 
 function formatAxisLabel(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1)
+  return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
 }
 
 function buildSparkline(values: number[], labels: string[]) {
@@ -32,16 +32,13 @@ function buildSparkline(values: number[], labels: string[]) {
   const availableWidth = WIDTH - PADDING_LEFT - PADDING_RIGHT
   const availableHeight = HEIGHT - PADDING_TOP - PADDING_BOTTOM
   const max = Math.max(...series, 0)
-  const min = Math.min(...series, 0)
-  const range = Math.max(max - min, 1)
   const upperBound = getAxisUpperBound(max)
   const yStep = upperBound / 4
 
   const points = series.map<SparklinePoint>((value, index) => {
     const ratio = series.length === 1 ? 0.5 : index / (series.length - 1)
     const x = PADDING_LEFT + availableWidth * ratio
-    const normalizedY =
-      max === min ? (value === 0 ? availableHeight : availableHeight * 0.4) : ((max - value) / range) * availableHeight
+    const normalizedY = (1 - value / upperBound) * availableHeight
     return { x: Number(x.toFixed(2)), y: Number((PADDING_TOP + normalizedY).toFixed(2)), value }
   })
 
@@ -55,7 +52,7 @@ function buildSparkline(values: number[], labels: string[]) {
 
   const xTicks = points
     .map((point, index) => ({
-      label: series.length > 5 && index % 2 === 1 && index !== series.length - 1 ? '' : labels[index] ?? '',
+      label: index % Math.max(1, Math.ceil((series.length - 1) / 3)) !== 0 && index !== series.length - 1 ? '' : labels[index] ?? '',
       x: point.x,
     }))
     .filter((item) => item.label)
@@ -68,7 +65,7 @@ export default function TrendLineChart({ labels, values }: { labels: string[]; v
   const [hover, setHover] = useState<HoverState | null>(null)
   const chart = useMemo(() => buildSparkline(values, labels), [values, labels])
 
-  const handleMouseMove = (event: MouseEvent<HTMLDivElement>) => {
+  const handleMouseMove = (event: PointerEvent<HTMLDivElement>) => {
     const bounds = event.currentTarget.getBoundingClientRect()
     if (!chart.points.length || bounds.width <= 0) {
       setHover(null)
@@ -96,7 +93,7 @@ export default function TrendLineChart({ labels, values }: { labels: string[]; v
 
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="relative" onMouseMove={handleMouseMove} onMouseLeave={() => setHover(null)}>
+      <div className="relative" onPointerMove={handleMouseMove} onPointerLeave={() => setHover(null)}>
         <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} preserveAspectRatio="none" className="h-[132px] w-full overflow-visible">
           {chart.yTicks.map((tick) => (
             <g key={`y-${tick.label}`}>

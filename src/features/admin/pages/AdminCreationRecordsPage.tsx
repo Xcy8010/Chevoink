@@ -5,6 +5,7 @@ import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, FileText, History, L
 
 import { getAdminAgentSessionMessages, getAdminCreationRecords, getAdminCreationRecordsIndex } from '../api'
 import Button from '@/components/ui/Button'
+import AdminAnalytics from '../components/AdminAnalytics'
 import TextInput from '@/components/ui/TextInput'
 import { AdminCard, AdminPageHeader, AdminPanelState, StatusPill } from '../AdminLayout'
 import { formatTokens } from '../admin-shared'
@@ -343,6 +344,7 @@ export default function AdminCreationRecordsPage() {
           title="创作记录"
           description={indexTotal > 0 ? `共 ${indexTotal} 位创作者有 Agent 创作记录，点击进入查看完整对话` : '无需搜索即可查看已有创作记录的创作者，点击进入其创作记录'}
         />
+        <AdminAnalytics scope="creation" />
         <form
           className="mb-4 flex max-w-md gap-2"
           onSubmit={(event) => {

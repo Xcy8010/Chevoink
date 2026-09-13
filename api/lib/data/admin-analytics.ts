@@ -1,0 +1,78 @@
+import { Prisma } from '@prisma/client'
+import { prisma } from '../prisma.js'
+import type { AdminAnalyticsPayload, AdminAnalyticsPeriod } from '../../../shared/contracts/admin-analytics.js'
+
+/** UTC+8 calendar buckets; weeks start Monday. End is the request snapshot. */
+export function analyticsWindow(period: AdminAnalyticsPeriod, now = new Date()) {
+  const local = new Date(now.getTime() + 8 * 3600000)
+  local.setUTCHours(0, 0, 0, 0)
+  if (period === 'week') local.setUTCDate(local.getUTCDate() - (local.getUTCDay() + 6) % 7)
+  if (period === 'month') local.setUTCDate(1)
+  const count = period === 'day' ? 14 : 12
+  const labels: string[] = []
+  for (let i = count - 1; i >= 0; i--) {
+    const date = new Date(local)
+    if (period === 'month') date.setUTCMonth(date.getUTCMonth() - i)
+    else date.setUTCDate(date.getUTCDate() - i * (period === 'week' ? 7 : 1))
+    labels.push(date.toISOString().slice(0, 10))
+  }
+  return { labels, from: new Date(`${labels[0]}T00:00:00+08:00`), to: now }
+}
+
+const snapshots = new Map<string, { expires: number; value: Promise<AdminAnalyticsPayload> }>()
+
+/** At most six aggregate snapshots; coalesce concurrent admin requests. No user data. */
+export function getAdminAnalyticsData(period: AdminAnalyticsPeriod, scope: 'dashboard' | 'creation'): Promise<AdminAnalyticsPayload> {
+  const key = `${scope}:${period}`
+  const cached = snapshots.get(key)
+  if (cached && cached.expires > Date.now()) return cached.value
+  const value = queryAdminAnalytics(period, scope).catch(error => {
+    if (snapshots.get(key)?.value === value) snapshots.delete(key)
+    throw error
+  })
+  snapshots.set(key, { expires: Date.now() + 60000, value })
+  return value
+}
+
+async function queryAdminAnalytics(period: AdminAnalyticsPeriod, scope: 'dashboard' | 'creation'): Promise<AdminAnalyticsPayload> {
+  const { labels, from, to } = analyticsWindow(period)
+  // Fixed identifiers only; every external value is a bound SQL parameter.
+  const sources = scope === 'dashboard' ? [
+    ['users', '注册用户', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM users`],
+    ['published', '已发布作品', Prisma.sql`SELECT published_at AS date, 1::numeric AS value FROM novels WHERE published_at IS NOT NULL`],
+    ['posts', '社区帖子', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM posts`],
+    ['comments', '评论', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM comments`],
+    ['novels', '已创建作品', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM novels`],
+    ['tokens', '已记录 Token', Prisma.sql`SELECT created_at AS date, (COALESCE(request_tokens,0)::numeric + COALESCE(response_tokens,0)) AS value FROM ai_usage_logs`],
+    ['credits', '已消耗 Credits（毛额）', Prisma.sql`SELECT created_at AS date, -delta_milli::numeric / 1000 AS value FROM credit_ledger_entries WHERE kind = 'usage' AND delta_milli < 0`],
+    ['invites', '成功邀请人数', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM referral_redemptions`],
+  ] as const : [
+    ['sessions', '新建会话', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_sessions`],
+    ['runs', '发起执行', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_runs`],
+    ['completed', '已完成执行', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_runs WHERE status = 'completed'`],
+    ['failed', '失败执行', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_runs WHERE status = 'failed'`],
+    ['tools', '工具返回', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_run_events WHERE type = 'tool.result'`],
+    ['toolSuccess', '工具成功', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_run_events WHERE type = 'tool.result' AND payload->>'ok' = 'true'`],
+    ['toolFailed', '工具未成功', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_run_events WHERE type = 'tool.result' AND payload->>'ok' = 'false'`],
+  ] as const
+  const metrics = await Promise.all(sources.map(async ([key, label, source]) => {
+    const rows = await prisma.$queryRaw<Array<{ date: string; value: number }>>(Prisma.sql`
+      SELECT to_char(date_trunc(${period}, date + interval '8 hours'), 'YYYY-MM-DD') AS date,
+             SUM(value)::float8 AS value
+      FROM (${source}) source WHERE date >= ${from} AND date < ${to} GROUP BY 1 ORDER BY 1
+    `)
+    const byDate = new Map(rows.map(row => [row.date, row.value]))
+    const values = labels.map(label => byDate.get(label) ?? 0)
+    return { key, label, values, total: values.reduce((a, b) => a + b, 0) }
+  }))
+  const tools = scope === 'creation' ? await prisma.$queryRaw<AdminAnalyticsPayload['tools']>(Prisma.sql`
+    SELECT COALESCE(NULLIF(payload->>'toolName',''), '未知工具') AS name,
+      COUNT(*)::int AS calls,
+      COUNT(*) FILTER (WHERE payload->>'ok' = 'false')::int AS failed,
+      COUNT(*) FILTER (WHERE payload->>'ok' = 'true')::int AS succeeded,
+      COUNT(*) FILTER (WHERE payload->>'ok' IS NULL OR payload->>'ok' NOT IN ('true','false'))::int AS unknown
+    FROM agent_run_events WHERE type = 'tool.result' AND created_at >= ${from} AND created_at < ${to}
+    GROUP BY 1 ORDER BY failed DESC, calls DESC, name ASC LIMIT 30
+  `) : []
+  return { period, from: from.toISOString(), to: to.toISOString(), labels, metrics, tools }
+}

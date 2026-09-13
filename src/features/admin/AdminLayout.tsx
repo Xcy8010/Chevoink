@@ -117,7 +117,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
             <p className="text-xs text-[var(--text-secondary)]">管理后台</p>
           </div>
         </Link>
-        <nav className="flex-1 space-y-1 px-3">
+        <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto px-3">
           {navItems.map((item) => (
             <NavLink
               key={item.to}
@@ -147,7 +147,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
               onClick={() => void handleLogout()}
               aria-label="退出登录"
               title="退出登录"
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
             >
               <LogOut size={14} />
             </button>
@@ -155,7 +155,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
               to="/"
               aria-label="返回主站"
               title="返回主站"
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
             >
               <Home size={14} />
             </Link>
@@ -164,7 +164,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
               onClick={toggleTheme}
               aria-label="切换主题"
               title="切换深色/浅色模式"
-              className="ml-auto flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              className="ml-auto flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
             >
               {theme === 'light' ? <MoonStar size={14} /> : <SunMedium size={14} />}
             </button>
@@ -183,7 +183,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
                 onClick={toggleTheme}
                 aria-label="切换主题"
                 title="切换深色/浅色模式"
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)]"
+                className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)]"
               >
                 {theme === 'light' ? <MoonStar size={14} /> : <SunMedium size={14} />}
               </button>
@@ -191,7 +191,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
                 to="/"
                 aria-label="返回主站"
                 title="返回主站"
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)]"
+                className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)]"
               >
                 <Home size={14} />
               </Link>
@@ -200,7 +200,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
                 onClick={() => void handleLogout()}
                 aria-label="退出登录"
                 title="退出登录"
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)]"
+                className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)]"
               >
                 <LogOut size={14} />
               </button>
@@ -334,7 +334,7 @@ function PagerIconButton({
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-40 disabled:hover:text-[var(--text-secondary)]"
+      className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-40 disabled:hover:text-[var(--text-secondary)]"
     >
       {children}
     </button>
@@ -383,7 +383,7 @@ export function AdminPager({
           <select
             value={pageSize}
             onChange={(event) => onPageSizeChange(Number(event.target.value))}
-            className="h-8 rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-1.5 text-xs text-[var(--text-primary)] outline-none"
+            className="h-11 rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-1.5 text-xs text-[var(--text-primary)] outline-none"
           >
             {[10, 20, 50].map((size) => (
               <option key={size} value={size}>
@@ -411,7 +411,7 @@ export function AdminPager({
                 commitDraft()
               }
             }}
-            className="h-8 w-12 rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] text-center text-xs text-[var(--text-primary)] outline-none"
+            className="h-11 w-12 rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] text-center text-xs text-[var(--text-primary)] outline-none"
           />
           <span className="px-0.5 text-xs text-[var(--text-secondary)]">/ {totalPages} 页</span>
           <PagerIconButton label="下一页" disabled={page >= totalPages} onClick={() => onPageChange(page + 1)}>

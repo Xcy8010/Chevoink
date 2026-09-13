@@ -31,6 +31,7 @@ import {
   getAdminCreationRecordsData,
   getAdminCreationRecordsIndexData,
   getAdminDashboardData,
+  getAdminAnalyticsData,
   getAdminFeedbackDetailData,
   getAdminTokenManagementData,
   getAdminNovelDetailData,
@@ -447,6 +448,20 @@ router.post('/me/bind-phone', async (req: Request, res: Response): Promise<void>
 })
 
 /* ---------------- 仪表盘 ---------------- */
+
+router.get('/analytics', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try {
+    await requireAdmin(req)
+    const input = z.object({
+      period: z.enum(['day', 'week', 'month']).default('day'),
+      scope: z.enum(['dashboard', 'creation']).default('dashboard'),
+    }).parse(req.query)
+    res.status(200).json(buildSuccess(requestId, await getAdminAnalyticsData(input.period, input.scope)))
+  } catch (error) {
+    sendRouteError(res, requestId, error)
+  }
+})
 
 router.get('/dashboard', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()

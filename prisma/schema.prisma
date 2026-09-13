@@ -1877,6 +1877,7 @@ model AgentRunEvent {
   projection AgentEventProjection?
 
   @@unique([runId, seq])
+  @@index([type, createdAt])
   @@map("agent_run_events")
 }
 
