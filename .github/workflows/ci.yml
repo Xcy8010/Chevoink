@@ -86,7 +86,9 @@ jobs:
         run: python3 -m unittest discover -s workers/document-import/tests -p 'test_*.py' -v
 
       - name: 测试（含覆盖率门禁）
-        run: npx vitest run --coverage
+        # Files share one isolated database and global worker quotas. Run files
+        # sequentially; explicit concurrent-request tests inside each file stay concurrent.
+        run: npx vitest run --coverage --no-file-parallelism
 
       - name: 生成 Agent 3.0 确定性评测快照
         run: |

@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(), execute: vi.fn(), active: vi.fn(() => false), prepare: vi.fn() }))
+const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(), execute: vi.fn(), active: vi.fn(() => false), prepare: vi.fn(),
+  transaction: vi.fn(), tx: { $queryRaw: vi.fn(), agentRun: { findFirst: vi.fn() } },
+}))
 vi.mock('../../api/lib/agent/events.js', () => ({ prepareRunEventResume: mocks.prepare }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } },
-  prisma: { agentRun: { findFirst: mocks.find, count: mocks.count }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) } },
+  prisma: { $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) } },
 }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(), getModelTierRuntime: vi.fn() }))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: mocks.execute }))
@@ -12,6 +14,11 @@ import { continueLoopRun } from '../../api/lib/agent/run-service.js'
 const run = { id: 'run19', sessionId: 's', userId: 'u', novelId: 'n', chapterId: 'c19', status: 'paused', engine: 'loop', mode: 'build', inputSummary: 'truncated', modelTier: 'speed', reasoningEffort: 'high', customModelId: null }
 beforeEach(() => {
   vi.resetAllMocks()
+  // Keep the transactional ownership/epoch query separate from the exact-target
+  // and latest-run reads, so their ordered fixtures retain their original meaning.
+  mocks.transaction.mockImplementation(callback => callback(mocks.tx))
+  mocks.tx.$queryRaw.mockResolvedValue([{ id: 'n' }])
+  mocks.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 0 } })
   mocks.active.mockReturnValue(false)
   mocks.count.mockResolvedValue(0)
   mocks.prepare.mockResolvedValue(72)
@@ -33,6 +40,13 @@ describe('continue API exact target', () => {
   })
   it('resumes the requested run with full original input, not the 300-char summary', async () => {
     expect(await continueLoopRun('u', 'run19')).toMatchObject({ runId: 'run19' })
+    expect(mocks.transaction).toHaveBeenCalledOnce()
+    expect(mocks.tx.$queryRaw.mock.calls[0][0].join('?')).toBe('SELECT id FROM novels WHERE id = ? FOR UPDATE')
+    expect(mocks.tx.$queryRaw.mock.calls[0][1]).toBe('n')
+    expect(mocks.tx.agentRun.findFirst).toHaveBeenCalledWith({
+      where: { id: 'run19', userId: 'u', novelId: 'n' },
+      select: { manuscriptRevision: true, novel: { select: { authorId: true, manuscriptRevision: true } } },
+    })
     expect(mocks.execute.mock.calls[0][0]).toMatchObject({ runId: 'run19', chapterId: 'c19', resume: true, eventStartSeq: 72 })
     expect(mocks.execute.mock.calls[0][0].prompt.length).toBeGreaterThan(300)
   })

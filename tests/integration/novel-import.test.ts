@@ -37,7 +37,7 @@ async function prepare() {
   const upload = await request(app).put(`${base()}/${jobId}/source?filename=book.txt`).set('Cookie', cookie()).type('application/octet-stream').send(Buffer.from('第一章 起点\n这是作者拥有的测试正文。\n\n第二章 远行\n这是第二章的独立原文。'))
   expect(upload.status).toBe(200)
   const analyze = await request(app).post(`${base()}/${jobId}/analyze`).set('Cookie', cookie()).send({})
-  expect(analyze.status).toBe(200)
+  expect(analyze.status, JSON.stringify(analyze.body)).toBe(200)
   await vi.waitFor(async () => expect((await prisma.novelImportJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe('ready'), { timeout: 10_000 })
   const preview = await request(app).get(`${base()}/${jobId}/preview`).set('Cookie', cookie())
   expect(preview.status).toBe(200)
@@ -65,6 +65,9 @@ afterAll(async () => {
       const manifests = await prisma.novelImportManifest.findMany({ where: { job: { userId } }, select: { storageKey: true } })
       const artifacts = await prisma.novelImportArtifact.findMany({ where: { job: { userId } }, select: { storageKey: true } })
       storageKeys.push(...sources.map(row => row.storageKey), ...manifests.map(row => row.storageKey), ...artifacts.map(row => row.storageKey))
+      // The published-overwrite assertion may fail before its inline cleanup.
+      // Restrict cleanup to novels actually owned by this suite, even on failure.
+      await prisma.projectMemoryEntry.deleteMany({ where: { novelId: { in: novelIds }, novel: { authorId: userId } } })
       await prisma.chapter.deleteMany({ where: { novelId: { in: novelIds }, authorId: userId } })
       await prisma.volume.deleteMany({ where: { novelId: { in: novelIds } } })
       await prisma.novel.deleteMany({ where: { id: { in: novelIds }, authorId: userId } })
@@ -100,7 +103,16 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
     // Release only this test owner's unfinished jobs; exercise the real quota
     // rather than weakening admission limits to accommodate shared fixtures.
     const jobs = await prisma.novelImportJob.findMany({ where: { userId, status: { notIn: ['succeeded', 'cancelled'] } }, select: { id: true, novelId: true } })
-    for (const job of jobs) await request(app).post(`/api/novels/${job.novelId}/imports/${job.id}/cancel`).set('Cookie', cookie()).send({})
+    try {
+      for (const job of jobs) {
+        const cancelled = await request(app).post(`/api/novels/${job.novelId}/imports/${job.id}/cancel`).set('Cookie', cookie()).send({})
+        expect(cancelled.status, JSON.stringify(cancelled.body)).toBe(200)
+      }
+    } finally {
+      // Fencing is fixture cleanup, not a bypass in admission. Even a failed
+      // cancel assertion must not strand this suite's synthetic global lease.
+      await prisma.novelImportJob.updateMany({ where: { userId, status: { notIn: ['succeeded', 'cancelled'] } }, data: { status: 'cancelled', leaseOwner: null, leaseUntil: null, leaseEpoch: { increment: 1 } } })
+    }
     // This suite exercises >10 logical imports. Age only its own finished
     // fixtures outside the rolling admission window instead of weakening limits.
     await prisma.novelImportJob.updateMany({ where: { userId, status: { in: ['succeeded', 'cancelled'] } }, data: { createdAt: new Date(Date.now() - 2 * 86400_000) } })
@@ -212,7 +224,7 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
     const implicit = await request(app).post(`${base()}/${ready.jobId}/analyze`).set('Cookie', cookie()).send({})
     expect(implicit.status).toBe(409)
     const reparse = await request(app).post(`${base()}/${ready.jobId}/analyze`).set('Cookie', cookie()).send({ encoding: 'utf-8' })
-    expect(reparse.status).toBe(200)
+    expect(reparse.status, JSON.stringify(reparse.body)).toBe(200)
     await vi.waitFor(async () => expect((await prisma.novelImportJob.findUniqueOrThrow({ where: { id: ready.jobId } })).manifestRevision).toBe(ready.preview.manifestRevision + 1), { timeout: 10_000 })
     expect(await prisma.novelImportSource.findUniqueOrThrow({ where: { jobId: ready.jobId } })).toEqual(sourceBefore)
     expect((await prisma.novelImportJob.findUniqueOrThrow({ where: { id: ready.jobId } })).parseEncoding).toBe('utf-8')

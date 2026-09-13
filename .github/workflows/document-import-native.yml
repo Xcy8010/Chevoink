@@ -60,7 +60,7 @@ jobs:
           sed 's/^ubuntu /import-launcher-ci /' workers/document-import/privileged/sudoers.example > "$RUNNER_TEMP/launcher.sudoers"
           sudo visudo -cf "$RUNNER_TEMP/launcher.sudoers"
           sudo install -o root -g root -m 0440 "$RUNNER_TEMP/launcher.sudoers" /etc/sudoers.d/chevoink-document-import
-          node --input-type=module -e 'import {build} from "esbuild"; await build({entryPoints:["workers/document-import/tests/launcher-client-acceptance.ts"],bundle:true,platform:"node",format:"cjs",target:"node22",outfile:process.env.RUNNER_TEMP+"/launcher-client.cjs"})'
+          node --input-type=module -e 'import {createRequire} from "node:module"; const require=createRequire(import.meta.url); const viteRequire=createRequire(require.resolve("vite")); const {build}=viteRequire("esbuild"); await build({entryPoints:["workers/document-import/tests/launcher-client-acceptance.ts"],bundle:true,platform:"node",format:"cjs",target:"node22",outfile:process.env.RUNNER_TEMP+"/launcher-client.cjs"})'
           sudo install -o root -g root -m 0644 "$RUNNER_TEMP/launcher-client.cjs" /usr/local/libexec/chevoink-import-launcher-ci.cjs
       - name: Verify actual client through sudo allowlist as unprivileged CI user
         run: sudo -n -u import-launcher-ci -- "$(command -v node)" /usr/local/libexec/chevoink-import-launcher-ci.cjs "$DOCUMENT_IMPORT_TEST_IMAGE"
