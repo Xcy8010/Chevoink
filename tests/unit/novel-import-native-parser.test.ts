@@ -65,13 +65,19 @@ describe('optional native result adapter: fake protocol, never Docker/native QA'
   })
 
   it('excludes only duplicateOf OCR from assembly while returning all original duplicate evidence', async () => {
-    const native = result([page(1, { state: 'needs_review', blocks: [block('original', '原文'), block('ocr', 'OCR可能有异文', { method: 'ocr', duplicateOf: 'original', confidence: 98 })] })])
+    const native = result([page(1, { state: 'needs_review', blocks: [block('original', '原文'), block('ocr', '原 文', { method: 'ocr', duplicateOf: 'original', confidence: 98 })] })])
     const preview = await adapt(native, source)
     expect(body(preview.parsed)).toBe('原文')
-    expect(preview.native.pages[0].blocks[1].text).toBe('OCR可能有异文')
+    expect(preview.native.pages[0].blocks[1].text).toBe('原 文')
     expect(warning(preview.parsed, 'IMPORT_NATIVE_DUPLICATE_BLOCK_EXCLUDED')?.blocking).toBe(true)
     const unmarked = result([page(1, { state: 'needs_review', blocks: [block('one', '同文'), block('two', '同文', { method: 'ocr' })] })])
     expect(body((await adapt(unmarked, source)).parsed)).toBe('同文\n\n同文')
+  })
+  it('rejects duplicate claims that would discard different or nonoverlapping OCR text', async () => {
+    for (const duplicate of [block('ocr', '不同正文', { method: 'ocr', duplicateOf: 'original' }),
+      block('ocr', '原文', { method: 'ocr', duplicateOf: 'original', bbox: [1, 50, 90, 70] })]) {
+      await expect(adapt(result([page(1, { state: 'needs_review', blocks: [block('original', '原文'), duplicate] })]), source)).rejects.toMatchObject({ code: 'IMPORT_PROTOCOL_INVALID' })
+    }
   })
 
   it('blocks overlapping/multicolumn native blocks even if worker coverage is complete', async () => {

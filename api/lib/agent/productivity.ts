@@ -12,6 +12,8 @@ import type {
   StoryBranchView,
 } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
+import { activeChapterScope } from '../data/internal.js'
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { startLoopRun, stopLoopRun } from './run-service.js'
 
 async function requireNovel(userId: string, novelId: string) {
@@ -90,7 +92,7 @@ export async function listStoryBranches(userId: string, novelId: string) {
 
 export async function createStoryBranch(userId: string, input: { novelId: string; chapterId: string; sourceRunId?: string | null; name: string }) {
   await requireNovel(userId, input.novelId)
-  const chapter = await prisma.chapter.findFirst({ where: { id: input.chapterId, novelId: input.novelId, authorId: userId }, select: { id: true, content: true, revision: true } })
+  const chapter = await prisma.chapter.findFirst({ where: { id: input.chapterId, ...activeChapterScope(input.novelId), authorId: userId }, select: { id: true, content: true, revision: true } })
   if (!chapter) throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '章节不存在或无权访问。')
   let baseContent = chapter.content
   if (input.sourceRunId) {
@@ -123,7 +125,7 @@ function lineDelta(before: string, after: string) {
 export async function getStoryBranchDiff(userId: string, branchId: string): Promise<{ diff: StoryBranchDiffView }> {
   const branch = await prisma.storyBranch.findFirst({ where: { id: branchId, userId } })
   if (!branch) throw new DataAccessError(404, 'BRANCH_NOT_FOUND', '版本分支不存在。')
-  const chapter = await prisma.chapter.findFirst({ where: { id: branch.chapterId, authorId: userId }, select: { title: true, revision: true } })
+  const chapter = await prisma.chapter.findFirst({ where: { id: branch.chapterId, ...activeChapterScope(branch.novelId), authorId: userId }, select: { title: true, revision: true } })
   if (!chapter) throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '源章节已不存在。')
   return { diff: { branchId: branch.id, chapterId: branch.chapterId, chapterTitle: chapter.title, baseRevision: branch.baseRevision, currentRevision: chapter.revision, conflicted: chapter.revision !== branch.baseRevision, before: branch.baseContent, after: branch.headContent, ...lineDelta(branch.baseContent, branch.headContent) } }
 }
@@ -132,10 +134,11 @@ export async function mergeStoryBranch(userId: string, branchId: string) {
   const result = await prisma.$transaction(async (tx) => {
     const branch = await tx.storyBranch.findFirst({ where: { id: branchId, userId } })
     if (!branch) throw new DataAccessError(404, 'BRANCH_NOT_FOUND', '版本分支不存在。')
+    await lockNovelActiveScope(tx, branch.novelId)
     if (branch.status !== 'active') throw new DataAccessError(409, 'BRANCH_NOT_ACTIVE', '该版本分支已合并或关闭。')
-    const chapter = await tx.chapter.findFirst({ where: { id: branch.chapterId, authorId: userId }, select: { revision: true, wordCount: true } })
+    const chapter = await tx.chapter.findFirst({ where: { id: branch.chapterId, ...activeChapterScope(branch.novelId), authorId: userId }, select: { revision: true, wordCount: true } })
     if (!chapter) throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '源章节已不存在。')
-    const updated = await tx.chapter.updateMany({ where: { id: branch.chapterId, authorId: userId, revision: branch.baseRevision }, data: { content: branch.headContent, wordCount: branch.headContent.length, revision: { increment: 1 } } })
+    const updated = await tx.chapter.updateMany({ where: { id: branch.chapterId, ...activeChapterScope(branch.novelId), authorId: userId, revision: branch.baseRevision }, data: { content: branch.headContent, wordCount: branch.headContent.length, revision: { increment: 1 } } })
     if (updated.count !== 1) throw new DataAccessError(409, 'BRANCH_CONFLICT', '源章节在分支创建后已变化，请比较差异后重新建立分支。')
     await tx.novel.update({ where: { id: branch.novelId }, data: { wordCount: { increment: branch.headContent.length - chapter.wordCount } } })
     return tx.storyBranch.update({ where: { id: branch.id }, data: { status: 'merged', mergedAt: new Date() } })

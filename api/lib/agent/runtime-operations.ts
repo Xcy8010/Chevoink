@@ -18,7 +18,7 @@ async function ownedOperation(tx: RuntimeTx, token: RunLeaseToken, operationId: 
 
 /** Frozen admission cannot override permissions narrowed since preparation.
  * Receipt replay is intentionally checked before this new-effect boundary. */
-async function assertCurrentToolPolicy(tx: RuntimeTx, token: RunLeaseToken, operation: Awaited<ReturnType<typeof ownedOperation>>) {
+export async function assertCurrentToolPolicy(tx: RuntimeTx, token: RunLeaseToken, operation: Awaited<ReturnType<typeof ownedOperation>>) {
   if (operation.kind !== 'tool') return
   const envelope = operation.inputSnapshot as Prisma.JsonObject
   const input = envelope.input as Prisma.JsonObject | undefined

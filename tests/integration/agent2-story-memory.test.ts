@@ -197,6 +197,10 @@ describe.skipIf(!dbAvailable)('Agent 2.0 P4 故事记忆与混合召回（需 DB
     const sameRevision = await saveStoryMemory({ ...input, content: '同版冲突' })
     expect(sameRevision.action).toBe('conflict')
     await updateStoryMemoryEntry(userId, original.id, { content: '作者权威修订', expectedVersion: 1 })
+    // A projection cannot merely claim r2: first commit the actual source r2.
+    await expect(saveStoryMemory({ ...input, content: '伪造新版投影', systemDerived: true, evidence: { ...input.evidence, revision: 2 } }))
+      .rejects.toMatchObject({ code: 'MEMORY_SOURCE_REQUIRED' })
+    await prisma.chapter.update({ where: { id: chapterIds[5] }, data: { revision: { increment: 1 } } })
     await saveStoryMemory({ ...input, content: '新投影', systemDerived: true, evidence: { ...input.evidence, revision: 2 } })
     expect(await prisma.projectMemoryEntry.findUniqueOrThrow({ where: { id: original.id } })).toMatchObject({ content: '作者权威修订' })
   })

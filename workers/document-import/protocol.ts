@@ -109,6 +109,7 @@ export function decodeWorkerResponse(raw: Uint8Array, request: WorkerRequest): D
     counts[page.state]++
     const regionIds = new Set(page.regions.map(r => r.id))
     const nativeIds = new Set(page.blocks.filter(b => b.method === 'native').map(b => b.id))
+    const nativeBlocks = new Map(page.blocks.filter(b => b.method === 'native').map(b => [b.id, b]))
     for (const item of [...page.blocks, ...page.regions]) {
       if (globalIds.has(item.id) || item.bbox[2] > page.width + 1 || item.bbox[3] > page.height + 1) return invalid()
       globalIds.add(item.id)
@@ -117,6 +118,14 @@ export function decodeWorkerResponse(raw: Uint8Array, request: WorkerRequest): D
     for (const b of page.blocks) {
       chars += b.text.length; blocks++
       if ((b.regionId && !regionIds.has(b.regionId)) || (b.duplicateOf && (b.method !== 'ocr' || !nativeIds.has(b.duplicateOf)))) return invalid()
+      if (b.duplicateOf) {
+        const original = nativeBlocks.get(b.duplicateOf)!
+        const a = original.bbox; const c = b.bbox
+        const intersection = Math.max(0, Math.min(a[2], c[2]) - Math.max(a[0], c[0])) * Math.max(0, Math.min(a[3], c[3]) - Math.max(a[1], c[1]))
+        const smaller = Math.min((a[2] - a[0]) * (a[3] - a[1]), (c[2] - c[0]) * (c[3] - c[1]))
+        // Merely naming a native block must never make different/nonoverlapping text disappear.
+        if (!b.text.trim() || b.text.replace(/\s/g, '') !== original.text.replace(/\s/g, '') || intersection / smaller < .8) return invalid()
+      }
     }
     if (page.blocks.reduce((sum, b) => sum + b.text.length, 0) > WORKER_LIMITS.pageTextChars) return invalid()
     if (page.state === 'verified_blank' && (page.blocks.length || page.regions.length || page.warnings.length)) return invalid()

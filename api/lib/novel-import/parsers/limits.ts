@@ -13,14 +13,18 @@ export const NOVEL_IMPORT_LIMITS = Object.freeze({
   pdfPages: 1000,
   warnings: 5000,
   durationMs: 120_000,
+  nativeDurationMs: 1_800_000,
 })
 
 export class ParseContext {
-  readonly deadline = Date.now() + NOVEL_IMPORT_LIMITS.durationMs
+  readonly deadline: number
   decompressedBytes = 0
   entries = 0
   sourceChars = 0
-  constructor(readonly signal?: AbortSignal) {}
+  constructor(readonly signal?: AbortSignal, durationMs: number = NOVEL_IMPORT_LIMITS.durationMs) {
+    limit(Number.isInteger(durationMs) && durationMs > 0 && durationMs <= NOVEL_IMPORT_LIMITS.nativeDurationMs, '解析截止时间无效。')
+    this.deadline = Date.now() + durationMs
+  }
   check() {
     if (this.signal?.aborted) throw new NovelImportParseError('IMPORT_CANCELLED', '文档解析已取消。')
     if (Date.now() > this.deadline) throw new NovelImportParseError('IMPORT_LIMIT_EXCEEDED', '文档解析超时，请拆分文件。')

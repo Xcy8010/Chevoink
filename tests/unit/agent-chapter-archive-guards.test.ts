@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const m = vi.hoisted(() => ({
   db: { chapter: { findFirst: vi.fn(), updateMany: vi.fn() }, $transaction: vi.fn() },
   tx: {
+    $queryRaw: vi.fn(),
+    agentRun: { findFirst: vi.fn() },
     chapter: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), updateMany: vi.fn(), create: vi.fn(), count: vi.fn() },
     volume: { findFirst: vi.fn() }, agentTaskRoot: { findUniqueOrThrow: vi.fn() },
   },
@@ -56,6 +58,8 @@ const contentArgs = (action: typeof actions[number], unchanged = false) => actio
 
 beforeEach(() => {
   vi.resetAllMocks()
+  m.tx.$queryRaw.mockResolvedValue([{ id: 'n' }])
+  m.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 0 } })
   clearRunBaselines('r')
   m.db.$transaction.mockImplementation(work => work(tx))
   m.db.chapter.findFirst.mockResolvedValue(row)
@@ -85,6 +89,21 @@ function expectCas() {
 }
 
 describe('legacy Agent chapter archive guards', () => {
+  it.each(legacy)('%s rejects the previous manuscript epoch even if chapter revision still matches', async (_name, execute) => {
+    recordChapterBaseline('r', 'c', 4)
+    m.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 1 } })
+    await expect(execute(ctx())).rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
+
+  it('does not create a target-less chapter from a run authorized before import/restore', async () => {
+    m.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 1 } })
+    await expect(chapterCreateTool.execute(ctx(), { title: 'Next chapter' })).rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })
+    expect(m.tx.volume.findFirst).not.toHaveBeenCalled()
+    expect(m.tx.chapter.create).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
   it.each(legacy)('%s rejects an archived chapter or archived parent volume with a still-matching baseline', async (_name, execute) => {
     recordChapterBaseline('r', 'c', 4)
     m.db.chapter.findFirst.mockResolvedValue(null)
@@ -168,6 +187,13 @@ describe('legacy Agent chapter archive guards', () => {
 })
 
 describe('durable Agent chapter archive guards', () => {
+  it.each(actions)('%s fences an old manuscript before reading/writing chapter effects', async action => {
+    m.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 2 } })
+    await expect(executeDurableChapter(durable(action), action, contentArgs(action))).rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })
+    expect(m.tx.chapter.findFirst).not.toHaveBeenCalled()
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
   it.each(actions)('%s records failure, not a successful write receipt, for an archived source at the same revision', async action => {
     m.tx.chapter.findFirst.mockResolvedValue(null)
     expect(await executeDurableChapter(durable(action), action, contentArgs(action))).toMatchObject({ outcome: 'failed' })

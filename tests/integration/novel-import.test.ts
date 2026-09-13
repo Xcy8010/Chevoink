@@ -11,6 +11,8 @@ import { verifyTestDatabase } from '../support/database-preflight.js'
 import { isTestDatabaseRequired } from '../support/database-availability.js'
 import { maintainNovelImports } from '../../api/lib/novel-import-maintenance.js'
 import { readImportBlob } from '../../api/lib/novel-import-storage.js'
+import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
+import { drainNovelImportEffects } from '../../api/lib/novel-import-effects.js'
 
 // Identity, host allowlist AND least-privilege role are verified, not just a name.
 // Missing migrations on a reachable verified DB fail the suite; never catch/skip.
@@ -25,6 +27,10 @@ const base = () => `/api/novels/${novelId}/imports`
 async function prepare() {
   const preflight = await request(app).post(`${base()}/preflight`).set('Cookie', cookie()).send({})
   expect(preflight.status).toBe(200)
+  if (preflight.body.data.overwriteRequired) for (const step of [1, 2]) {
+    const confirmation = await request(app).post(`${base()}/intents/${preflight.body.data.intentId}/confirm`).set('Cookie', cookie()).send({ step, targetHash: preflight.body.data.targetHash })
+    expect(confirmation.status).toBe(200)
+  }
   const create = await request(app).post(base()).set('Cookie', cookie()).send({ intentId: preflight.body.data.intentId })
   expect(create.status).toBe(200)
   const jobId: string = create.body.data.jobId
@@ -43,6 +49,13 @@ async function approve() {
   expect(grant.status).toBe(200)
   return { ...prepared, input: { approvalId: grant.body.data.approvalId as string, idempotencyKey: randomUUID() } }
 }
+async function restoreApproval(jobId: string) {
+  const impact = await request(app).get(`${base()}/${jobId}/restore-preview`).set('Cookie', cookie())
+  expect(impact.status).toBe(200); expect(impact.body.data.canRestore).toBe(true)
+  const grant = await request(app).post(`${base()}/${jobId}/restore-confirm`).set('Cookie', cookie()).send({ targetHash: impact.body.data.currentTargetHash })
+  expect(grant.status).toBe(200)
+  return { restoreApprovalId: grant.body.data.restoreApprovalId as string, targetHash: grant.body.data.targetHash as string, idempotencyKey: randomUUID() }
+}
 
 afterAll(async () => {
   try {
@@ -50,7 +63,8 @@ afterAll(async () => {
       // Record referenced blobs before normal deletion cascades queue them.
       const sources = await prisma.novelImportSource.findMany({ where: { job: { userId } }, select: { storageKey: true } })
       const manifests = await prisma.novelImportManifest.findMany({ where: { job: { userId } }, select: { storageKey: true } })
-      storageKeys.push(...sources.map(row => row.storageKey), ...manifests.map(row => row.storageKey))
+      const artifacts = await prisma.novelImportArtifact.findMany({ where: { job: { userId } }, select: { storageKey: true } })
+      storageKeys.push(...sources.map(row => row.storageKey), ...manifests.map(row => row.storageKey), ...artifacts.map(row => row.storageKey))
       await prisma.chapter.deleteMany({ where: { novelId: { in: novelIds }, authorId: userId } })
       await prisma.volume.deleteMany({ where: { novelId: { in: novelIds } } })
       await prisma.novel.deleteMany({ where: { id: { in: novelIds }, authorId: userId } })
@@ -73,7 +87,7 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
     directory = await mkdtemp(path.join(os.tmpdir(), 'novel-import-db-test-'))
     vi.stubEnv('NOVEL_IMPORT_STORAGE_DIR', directory)
     vi.stubEnv('NOVEL_IMPORT_ENABLED', 'true')
-    vi.stubEnv('NOVEL_IMPORT_OVERWRITE_ENABLED', 'true') // still hardlocked in code
+    vi.stubEnv('NOVEL_IMPORT_OVERWRITE_ENABLED', 'true')
     await prisma.user.createMany({ data: [userId, otherUserId].map(id => ({ id, nickname: 'import-fixture', passwordHash: 'fixture-only' })) })
   })
   beforeEach(async () => {
@@ -87,6 +101,9 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
     // rather than weakening admission limits to accommodate shared fixtures.
     const jobs = await prisma.novelImportJob.findMany({ where: { userId, status: { notIn: ['succeeded', 'cancelled'] } }, select: { id: true, novelId: true } })
     for (const job of jobs) await request(app).post(`/api/novels/${job.novelId}/imports/${job.id}/cancel`).set('Cookie', cookie()).send({})
+    // This suite exercises >10 logical imports. Age only its own finished
+    // fixtures outside the rolling admission window instead of weakening limits.
+    await prisma.novelImportJob.updateMany({ where: { userId, status: { in: ['succeeded', 'cancelled'] } }, data: { createdAt: new Date(Date.now() - 2 * 86400_000) } })
   })
 
   it('concurrent duplicate commit has one atomic receipt, backup and contiguous private draft tree', async () => {
@@ -105,6 +122,11 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
     expect((await request(app).post(`${base()}/${ready.jobId}/cancel`).set('Cookie', cookie()).send({})).body.data.status).toBe('succeeded')
     expect(await prisma.aiUsageLog.count({ where: { userId } })).toBe(usageBefore)
     expect(await prisma.creditLedgerEntry.count({ where: { userId } })).toBe(ledgerBefore)
+    const projections = await Promise.all([drainNovelImportEffects({ jobIds: [ready.jobId] }), drainNovelImportEffects({ jobIds: [ready.jobId] })])
+    expect(projections.reduce((sum, result) => sum + result.processed, 0)).toBe(1)
+    expect(projections.every(result => !result.failed)).toBe(true)
+    expect(await prisma.novelImportEvent.count({ where: { jobId: ready.jobId, kind: 'imported' } })).toBe(1)
+    expect((await request(app).get(`${base()}/${ready.jobId}`).set('Cookie', cookie())).body.data.effects).toMatchObject({ status: 'published', kind: 'imported' })
   })
   it('preview edits invalidate old grants and preserve an unchanged empty work', async () => {
     const ready = await approve()
@@ -113,7 +135,7 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
     expect(edit.status).toBe(200)
     expect(edit.body.data.manifestRevision).toBe(ready.preview.manifestRevision + 1)
     const result = await request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send(ready.input)
-    expect(result.status).toBe(409); expect(result.body.error.code).toBe('IMPORT_PREVIEW_CHANGED')
+    expect(result.status).toBe(409); expect(result.body.error.code).toBe('IMPORT_APPROVAL_EXPIRED')
     expect(await prisma.chapter.count({ where: { novelId } })).toBe(0)
     expect(await prisma.novelImportBackup.count({ where: { jobId: ready.jobId } })).toBe(0)
     expect((await prisma.novelImportApproval.findUniqueOrThrow({ where: { id: ready.input.approvalId } })).consumedAt).toBeNull()
@@ -145,22 +167,25 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
     expect(Boolean(commit)).toBe(job.status === 'succeeded')
     expect(await prisma.chapter.count({ where: { novelId } })).toBe(job.status === 'succeeded' ? ready.preview.volumes.reduce((n: number, v: { chapters: unknown[] }) => n + v.chapters.length, 0) : 0)
   })
-  it('unauthorized reads and restore-off remain failclosed after a successful import', async () => {
+  it('unauthorized reads and restore without separate human approval remain failclosed', async () => {
     const ready = await approve()
     expect((await request(app).get(`${base()}/${ready.jobId}/preview`).set('Cookie', cookie(otherUserId))).status).toBe(404)
     expect((await request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send(ready.input)).status).toBe(200)
-    expect((await request(app).post(`${base()}/${ready.jobId}/restore-preview`).set('Cookie', cookie()).send({})).body.error.code).toBe('IMPORT_RESTORE_DISABLED')
-    expect((await request(app).post(`${base()}/${ready.jobId}/restore`).set('Cookie', cookie()).send({ restoreApprovalId: randomUUID(), targetHash: ready.targetHash })).body.error.code).toBe('IMPORT_RESTORE_DISABLED')
+    expect((await request(app).get(`${base()}/${ready.jobId}/restore-preview`).set('Cookie', cookie(otherUserId))).status).toBe(404)
+    expect((await request(app).post(`${base()}/${ready.jobId}/restore-preview`).set('Cookie', cookie()).send({})).body.error.code).toBe('IMPORT_INPUT_INVALID')
+    expect((await request(app).post(`${base()}/${ready.jobId}/restore`).set('Cookie', cookie()).send({ restoreApprovalId: randomUUID(), targetHash: ready.targetHash, idempotencyKey: randomUUID() })).body.error.code).toBe('IMPORT_APPROVAL_REQUIRED')
     expect(await prisma.chapter.count({ where: { novelId, archivedAt: { not: null } } })).toBe(0)
   })
   it('normal whole-work deletion cascades preview jobs and queues exact private blob keys', async () => {
     const ready = await prepare()
     const source = await prisma.novelImportSource.findUniqueOrThrow({ where: { jobId: ready.jobId } })
     const manifest = await prisma.novelImportManifest.findMany({ where: { jobId: ready.jobId } })
-    storageKeys.push(source.storageKey, ...manifest.map(row => row.storageKey))
+    const artifacts = await prisma.novelImportArtifact.findMany({ where: { jobId: ready.jobId } })
+    storageKeys.push(source.storageKey, ...manifest.map(row => row.storageKey), ...artifacts.map(row => row.storageKey))
     await prisma.novel.delete({ where: { id: novelId } })
     expect(await prisma.novelImportJob.findUnique({ where: { id: ready.jobId } })).toBeNull()
     expect(await prisma.novelImportGarbage.findUnique({ where: { storageKey: source.storageKey } })).not.toBeNull()
+    for (const artifact of artifacts) expect(await prisma.novelImportGarbage.findUnique({ where: { storageKey: artifact.storageKey } })).not.toBeNull()
   })
   it('active partial indexes permit retained rows but still reject duplicate active positions', async () => {
     const archivedId = randomUUID()
@@ -245,5 +270,77 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
     await maintainNovelImports({ jobIds: [ready.jobId] })
     expect((await prisma.novelImportJob.findUniqueOrThrow({ where: { id: ready.jobId } })).status).toBe('parsing')
     expect(await prisma.novelImportSource.findUnique({ where: { jobId: ready.jobId } })).toEqual(source)
+  })
+  it('published overwrite and concurrent restore preserve old identity, counters, order and snapshot', async () => {
+    const volume = await prisma.volume.create({ data: { novelId, title: '公开原卷', orderIndex: 1 } })
+    const chapter = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId: volume.id, title: '未发布的新标题', content: '作者保存的旧草稿', orderIndex: 1, orderInVolume: 1, status: 'published', visibility: 'public', publishedTitle: '读者原来看到的标题', publishedContent: '读者原文', publishedRevision: 1, publishedAt: new Date('2025-01-01') } })
+    await prisma.novel.update({ where: { id: novelId }, data: { chapterCount: 1, wordCount: 8, lastChapterTitle: chapter.title } })
+    const memory = await prisma.projectMemoryEntry.create({ data: { novelId, sourceChapterId: chapter.id, memoryType: 'characterCard', title: '人工关联记忆', content: '这段人工内容必须保留', status: 'confirmed' } })
+    const ready = await approve()
+    const committed = await request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send(ready.input)
+    expect(committed.status).toBe(200)
+    const archived = await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })
+    expect(archived).toMatchObject({ archivedAt: expect.any(Date), revision: chapter.revision + 1, title: chapter.title, volumeId: volume.id, orderIndex: 1, publishedTitle: chapter.publishedTitle, publishedContent: chapter.publishedContent, publishedAt: chapter.publishedAt })
+    expect(await prisma.projectMemoryEntry.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({ content: memory.content, status: 'invalid', reviewStatus: 'pending' })
+    await prisma.chapter.update({ where: { id: chapter.id }, data: { commentCount: { increment: 1 } } })
+    const input = await restoreApproval(ready.jobId)
+    const restore = () => request(app).post(`${base()}/${ready.jobId}/restore`).set('Cookie', cookie()).send(input)
+    const [a, b] = await Promise.all([restore(), restore()])
+    expect(a.status).toBe(200); expect(b.status).toBe(200); expect(a.body.data).toEqual(b.body.data)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ archivedAt: null, revision: chapter.revision + 2, publishedContent: chapter.publishedContent, commentCount: 1 })
+    expect(await prisma.chapter.count({ where: { novelId, archivedAt: null } })).toBe(1)
+    expect(await prisma.chapter.count({ where: { novelId, archivedAt: { not: null } } })).toBe(2)
+    expect((await prisma.novel.findUniqueOrThrow({ where: { id: novelId } })).manuscriptRevision).toBe(2)
+    expect((await prisma.novelImportCommit.findUniqueOrThrow({ where: { jobId: ready.jobId } })).receipt).toEqual(committed.body.data)
+    const backup = await prisma.novelImportBackup.findUniqueOrThrow({ where: { jobId: ready.jobId } })
+    expect(backup).toMatchObject({ restoredApprovalId: input.restoreApprovalId, restoreIdempotencyKey: input.idempotencyKey, restoredAt: expect.any(Date) })
+    await prisma.novelImportBackup.update({ where: { id: backup.id }, data: { expiresAt: new Date(0) } })
+    expect((await restore()).body.data).toEqual(a.body.data)
+    expect(await drainNovelImportEffects({ jobIds: [ready.jobId] })).toEqual({ processed: 1, failed: 0 })
+    expect(await prisma.novelImportEvent.count({ where: { jobId: ready.jobId } })).toBe(2)
+    await prisma.projectMemoryEntry.delete({ where: { id: memory.id } })
+  })
+  it('ordinary writer winning the shared gate makes an already-approved import fail without archival', async () => {
+    const ready = await approve()
+    let unlock!: () => void; let acquired!: () => void
+    const locked = new Promise<void>(resolve => { acquired = resolve })
+    const hold = new Promise<void>(resolve => { unlock = resolve })
+    const writer = prisma.$transaction(async tx => {
+      await lockNovelActiveScope(tx, novelId); acquired(); await hold
+      await tx.volume.create({ data: { novelId, title: '并发新卷必须保留', orderIndex: 1 } })
+    })
+    await locked
+    const importing = request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send(ready.input).then(response => response)
+    unlock(); await writer
+    expect((await importing).body.error.code).toBe('IMPORT_TARGET_CHANGED')
+    expect(await prisma.novelImportCommit.count({ where: { jobId: ready.jobId } })).toBe(0)
+    expect(await prisma.volume.findFirstOrThrow({ where: { novelId } })).toMatchObject({ title: '并发新卷必须保留', archivedAt: null })
+  })
+  it('restore rejects later current edits and preserves both versions with a durable conflict status', async () => {
+    const volume = await prisma.volume.create({ data: { novelId, title: '原卷', orderIndex: 1 } })
+    const old = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId: volume.id, title: '原空章', content: '', orderIndex: 1, orderInVolume: 1 } })
+    const ready = await approve()
+    expect((await request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send(ready.input)).status).toBe(200)
+    const input = await restoreApproval(ready.jobId)
+    const current = await prisma.chapter.findFirstOrThrow({ where: { novelId, archivedAt: null } })
+    await prisma.$transaction(async tx => { await lockNovelActiveScope(tx, novelId); await tx.chapter.update({ where: { id: current.id }, data: { content: '导入后新增正文不能被恢复抹掉', revision: { increment: 1 } } }) })
+    const result = await request(app).post(`${base()}/${ready.jobId}/restore`).set('Cookie', cookie()).send(input)
+    expect(result.body.error.code).toBe('IMPORT_RESTORE_CONFLICT')
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: current.id } })).toMatchObject({ content: '导入后新增正文不能被恢复抹掉', archivedAt: null })
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: old.id } })).archivedAt).not.toBeNull()
+    expect((await request(app).get(`${base()}/${ready.jobId}`).set('Cookie', cookie())).body.data.restore.status).toBe('restore_conflict')
+  })
+  it('an expired restore approval cannot consume the backup and disabled uploads do not disable restoration', async () => {
+    const ready = await approve()
+    expect((await request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send(ready.input)).status).toBe(200)
+    const first = await restoreApproval(ready.jobId)
+    await prisma.novelImportApproval.update({ where: { id: first.restoreApprovalId }, data: { expiresAt: new Date(0) } })
+    expect((await request(app).post(`${base()}/${ready.jobId}/restore`).set('Cookie', cookie()).send(first)).body.error.code).toBe('IMPORT_APPROVAL_EXPIRED')
+    vi.stubEnv('NOVEL_IMPORT_ENABLED', 'false')
+    try {
+      const second = await restoreApproval(ready.jobId)
+      const restored = await request(app).post(`${base()}/${ready.jobId}/restore`).set('Cookie', cookie()).send(second)
+      expect(restored.status).toBe(200); expect(restored.body.data.restoredChapterCount).toBe(0)
+    } finally { vi.stubEnv('NOVEL_IMPORT_ENABLED', 'true') }
   })
 })

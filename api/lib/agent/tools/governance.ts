@@ -23,7 +23,7 @@ export const AGENT_TOOL_GOVERNANCE = {
   view_image: { category: 'read', risk: 'low', postconditions: ['attachment_scope_verified'] },
   read_file: { category: 'read', risk: 'medium', postconditions: ['attachment_scope_verified', 'content_marked_untrusted'] },
   novel_export: { category: 'read', risk: 'medium', postconditions: ['novel_scope_verified', 'export_artifact_created'] },
-  novel_import: { category: 'read', risk: 'medium', postconditions: ['novel_scope_verified', 'original_attachment_verified', 'human_import_handoff_only', 'no_chapter_content_written'] },
+  novel_import: { category: 'high_risk', risk: 'high', postconditions: ['novel_scope_verified', 'original_attachment_verified', 'persistent_human_double_confirmation', 'manifest_source_target_bound_approval', 'idempotent_import_receipt', 'run_waits_without_model_calls'] },
   volume_list: { category: 'read', risk: 'low', postconditions: ['novel_scope_verified'] },
   structure_outline: { category: 'read', risk: 'low', postconditions: ['structure_invariants_reported'] },
   project_search: { category: 'read', risk: 'low', postconditions: ['source_revisions_returned', 'index_freshness_reported'] },

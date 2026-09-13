@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.json",
+  "include": [
+    "import-active-data-scope.test.ts",
+    "agent-chapter-archive-guards.test.ts",
+    "import-stale-writers.test.ts",
+    "import-style-learning-fence.test.ts",
+    "style-learning-worker.test.ts",
+    "../integration/style-learning.test.ts",
+    "agent-request-queue.test.ts",
+    "agent3-humanity-quality.test.ts",
+    "../integration/import-write-fences.test.ts",
+    "../integration/import-active-structure.test.ts",
+    "../integration/agent2-story-memory.test.ts"
+  ]
+}

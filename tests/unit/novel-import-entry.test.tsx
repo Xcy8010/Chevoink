@@ -59,3 +59,13 @@ it('capability hook fails closed after refetch error and isolates novel/user que
   expect(capability.mock.calls.every(([novel]) => novel === 'a')).toBe(true)
   hook.unmount(); query.clear()
 })
+
+it('keeps the read-only history entry independently available when a new import callback is absent', () => {
+  const onImportHistory = vi.fn()
+  render(<MemoryRouter><StudioCommandBar {...commandProps} onImportHistory={onImportHistory} /></MemoryRouter>)
+  fireEvent.click(screen.getByRole('button', { name: '作品' }))
+  expect(screen.queryByRole('button', { name: '一键导入' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '导入记录与恢复' }))
+  expect(onImportHistory).toHaveBeenCalledTimes(1)
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: '作品' }))
+})

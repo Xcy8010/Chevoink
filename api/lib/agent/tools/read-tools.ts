@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { prisma } from '../../prisma.js'
+import { activeChapterScope, activeVolumeWhere } from '../../data/internal.js'
 import { searchStoryMemory } from '../story-memory.js'
 import { recordChapterBaseline } from '../baseline.js'
 import { defineTool, type ToolResult } from './types.js'
@@ -88,10 +89,11 @@ export const novelGetContextTool = defineTool({
     }
 
     const volumes = await db.volume.findMany({
-      where: { novelId: ctx.novelId },
+      where: { novelId: ctx.novelId, ...activeVolumeWhere },
       orderBy: { orderIndex: 'asc' },
       include: {
         chapters: {
+          where: activeChapterScope(ctx.novelId),
           orderBy: { orderInVolume: 'asc' },
           select: { id: true, title: true, orderIndex: true, orderInVolume: true, wordCount: true, status: true, summary: true },
         },
@@ -162,7 +164,7 @@ export const chapterReadTool = defineTool({
       return { outcome: 'failed', summary: '未指定要读取的章节', output: '未传 chapterId/chapterOrder 且当前没有正在编辑的章节。知道全书第N章可直接传 chapterOrder=N；否则先用 novel_get_context 查看章节列表。' }
     }
     const matches = await db.chapter.findMany({
-      where: { ...(chapterId ? { id: chapterId } : {}), ...(args.chapterOrder ? { orderIndex: args.chapterOrder } : {}), novelId: ctx.novelId, authorId: ctx.userId },
+      where: { ...(chapterId ? { id: chapterId } : {}), ...(args.chapterOrder ? { orderIndex: args.chapterOrder } : {}), ...activeChapterScope(ctx.novelId), authorId: ctx.userId },
       select: { id: true, title: true, content: true, wordCount: true, summary: true, revision: true },
       take: 2,
     })
@@ -218,7 +220,7 @@ export const chapterListSummariesTool = defineTool({
     }
     const db = ctx.transaction ?? prisma
     const chapters = await db.chapter.findMany({
-      where: { novelId: ctx.novelId, authorId: ctx.userId },
+      where: { ...activeChapterScope(ctx.novelId), authorId: ctx.userId },
       orderBy: { orderIndex: 'asc' },
       select: { id: true, title: true, orderIndex: true, summary: true, content: true },
     })

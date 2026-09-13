@@ -43,6 +43,12 @@ beforeEach(async () => {
       if (behavior === 'unavailable') { child.emit('error', new Error('sensitive host path')); return }
       if (behavior === 'invalid') { child.stdout.write('{broken'); child.emit('close', 0); return }
       if (behavior === 'overflow') { child.stdout.write(Buffer.alloc(WORKER_LIMITS.responseBytes + 1)); return }
+      if (args.at(-1) === '/app/health.py') {
+        child.stdout.write(JSON.stringify({ version: 'document-import-health/1', ready: true, parserVersion: 'synthetic',
+          capabilities: ['doc', 'pdf', 'ocr:chi_sim+eng', 'ocr:chi_tra+eng', 'ocr:eng'],
+          languages: { eng: 'a'.repeat(64), chi_sim: 'b'.repeat(64), chi_tra: 'c'.repeat(64) } }))
+        child.emit('close', 0); return
+      }
       const mount = args.find(a => a.startsWith('type=bind,src='))!
       const dir = mount.slice('type=bind,src='.length).split(',dst=')[0]
       const request = JSON.parse(readFileSync(path.join(dir, 'request.json'), 'utf8'))
@@ -74,7 +80,8 @@ describe('supervisor lifecycle with fake Docker process and real private staging
     expect(await readdir(sourceDir)).toEqual([])
     expect(spawnMock.mock.calls[0][2]).toMatchObject({ shell: false, windowsHide: true })
     expect(spawnMock.mock.calls[0][2].env).not.toHaveProperty('DATABASE_URL')
-    expect(spawnMock.mock.calls[0][2].env).not.toHaveProperty('DOCKER_HOST')
+    expect(spawnMock.mock.calls[0][2].env.DOCKER_HOST).toBe('unix:///var/run/docker.sock')
+    expect(spawnMock.mock.calls[0][2].env.DOCKER_CONFIG).toBe('/nonexistent/chevoink-document-import-config')
     expect(spawnMock.mock.calls[0][2].env).not.toHaveProperty('API_KEY')
     expect(spawnMock.mock.calls[1][1].slice(0, 2)).toEqual(['rm', '--force'])
   })
@@ -119,6 +126,12 @@ describe('supervisor lifecycle with fake Docker process and real private staging
       return implementation(...args)
     })
     await expect(worker().run({ ...input, signal: controller.signal })).rejects.toMatchObject({ code: 'IMPORT_CANCELLED' })
+    expect(await readdir(sourceDir)).toEqual([])
+  })
+  it('probes native dependencies in the same sandbox using no user source bytes', async () => {
+    expect((await worker().health()).ready).toBe(true)
+    expect(spawnMock.mock.calls[0][1].at(-1)).toBe('/app/health.py')
+    expect(spawnMock.mock.calls[0][1]).toContain('--network=none')
     expect(await readdir(sourceDir)).toEqual([])
   })
 })

@@ -5,7 +5,8 @@ import {
   workerRequestSchema, workerResponseSchema, type DocumentWorkerResult, type WorkerPage,
 } from '../../../workers/document-import/protocol.js'
 import { NovelImportParseError, type ParsedNovelImport } from './parser.js'
-import { parseNovelImportFileIsolated } from './isolated-parser.js'
+import { createIsolatedNovelImportParser, parseNovelImportFileIsolated } from './isolated-parser.js'
+import { stableImportId } from './parsers/images.js'
 import { checkStructure, hasUnsafeControls, limit, NOVEL_IMPORT_LIMITS, ParseContext } from './parsers/limits.js'
 import { parseText } from './parsers/text.js'
 import { emptyImport } from './parsers/types.js'
@@ -129,7 +130,7 @@ function pageText(page: WorkerPage, result: ParsedNovelImport, source: string): 
 export async function adaptNativeNovelImportResult(
   input: DocumentWorkerResult,
   source: NativeNovelImportSource,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; resources?: boolean } = {},
 ): Promise<NativeNovelImportPreview> {
   const context = new ParseContext(options.signal)
   await context.checkpoint()
@@ -139,10 +140,19 @@ export async function adaptNativeNovelImportResult(
   if (native.outcome === 'converted') {
     const artifact = native.artifacts.find((artifact) => artifact.id === native.convertedArtifactId)!
     // Protocol validation requires a DOC -> DOCX artifact here. Never dispatch .doc again.
-    parsed = await parseNovelImportFileIsolated(Buffer.from(artifact.bytes), 'converted.docx', { signal: options.signal })
+    const parseConverted = options.resources ? createIsolatedNovelImportParser({ resources: true }) : parseNovelImportFileIsolated
+    parsed = await parseConverted(Buffer.from(artifact.bytes), 'converted.docx', { signal: options.signal })
     const remap = (value: string) => `${origin}&converted=${artifact.id}${value.replace(/^converted\.docx/, '')}`
     for (const volume of parsed.volumes) for (const chapter of volume.chapters) chapter.source = remap(chapter.source)
     for (const warning of parsed.warnings) warning.source = warning.source ? remap(warning.source) : origin
+    for (const image of parsed.images ?? []) {
+      const priorId = image.id
+      image.source = remap(image.source); image.id = stableImportId('image', image.source)
+      for (const volume of parsed.volumes) for (const chapter of volume.chapters) {
+        // Remap only generated image markers, never bare matching IDs in ordinary prose.
+        chapter.content = chapter.content.split(`[图片来源：${priorId}]`).join(`[图片来源：${image.id}]`)
+      }
+    }
     addWarning(parsed, 'IMPORT_DOC_CONVERSION_REVIEW', 'DOC 已转换为 DOCX 并提取；转换不等于完整保真，请保留原 DOC、转换产物并核验正文与附件。', origin)
   } else {
     for (const page of native.pages) {
@@ -202,7 +212,7 @@ export async function adaptNativeNovelImportResult(
 function nativeFormat(filename: string): DocumentWorkerInput['format'] {
   if (/\.doc$/i.test(filename)) return 'doc'
   if (/\.pdf$/i.test(filename)) return 'pdf'
-  if (/\.(?:png|jpe?g|webp|tiff?|bmp)$/i.test(filename)) return 'image'
+  if (/\.(?:png|jpe?g)$/i.test(filename)) return 'image'
   throw new NovelImportParseError('IMPORT_UNSUPPORTED_FORMAT', '原生适配器仅处理 DOC、PDF 或本地图像；DOCX/TXT/MD 请使用确定性解析入口。')
 }
 

@@ -1,3 +1,4 @@
+import type { ImportEvidence, ImportImage } from '../document-types.js'
 export type NovelImportChapter = { title: string; content: string; source: string }
 export type NovelImportVolume = { title: string; chapters: NovelImportChapter[] }
 export type NovelImportWarning = { code: string; message: string; source?: string; blocking: boolean }
@@ -8,8 +9,16 @@ export type ParsedNovelImport = {
   /** UTF-16 code units in decoded, newline-normalized source text, including headings. */
   sourceChars: number
   parserVersion: string
+  /** Optional enriched pipeline result; never send image bytes directly over HTTP. */
+  images?: ImportImage[]
+  evidence?: ImportEvidence
 }
-export type NovelImportParseOptions = { encoding?: string; signal?: AbortSignal }
+export type NovelImportParseOptions = { encoding?: string; signal?: AbortSignal;
+  /** Trusted orchestration only, not uploaded options/manifest fields. */
+  resources?: boolean;
+  durationMs?: number;
+  nativeParser?: (buffer: Buffer, filename: string, signal?: AbortSignal) => Promise<ParsedNovelImport>
+}
 
 export const NOVEL_IMPORT_PARSER_VERSION = 'deterministic-1'
 

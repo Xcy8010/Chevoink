@@ -7,6 +7,9 @@ import type { MemoryEvidence, MemoryGraph, MemorySearchHit } from '../../../shar
 import { generateTextCompletion } from '../ai-service.js'
 import { getAuxiliaryModelRuntime } from '../credits.js'
 import { DataAccessError, prisma } from '../prisma.js'
+import { activeChapterScope, activeVolumeWhere } from '../data/internal.js'
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
+import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { memoryGraphProposalSchema, projectReviewedMemoryGraph, type MemoryGraphProposal } from './memory-graph-proposal.js'
 
 type EvidenceInput = {
@@ -118,8 +121,25 @@ async function addEvidence(memoryId: string, evidence: EvidenceInput, db: Prisma
 export async function saveStoryMemory(input: SaveMemoryInput, transaction?: Prisma.TransactionClient): Promise<{ id: string; action: 'created' | 'updated' | 'conflict'; status: StoryMemoryStatus }> {
   if (!transaction) return prisma.$transaction(tx => saveStoryMemory(input, tx))
   const db = transaction
+  await lockNovelActiveScope(db, input.novelId)
+  if (input.runId) await assertAgentManuscriptCurrent(db, { userId: input.userId, novelId: input.novelId, runId: input.runId })
   const novel = await db.novel.findFirst({ where: { id: input.novelId, authorId: input.userId }, select: { id: true } })
   if (!novel) throw new DataAccessError(404, 'NOVEL_NOT_FOUND', '作品不存在或无权写入记忆。')
+  const chapterIds = [...new Set([...(input.sourceChapterId ? [input.sourceChapterId] : []),
+    ...(input.evidence.sourceType === 'chapter' ? [input.evidence.sourceId] : [])])]
+  for (const id of chapterIds) {
+    const source = await db.chapter.findFirst({ where: { id, ...activeChapterScope(input.novelId) }, select: { revision: true } })
+    if (!source || (input.evidence.sourceType === 'chapter' && input.evidence.sourceId === id
+      && input.evidence.revision !== undefined && source.revision !== input.evidence.revision)) {
+      throw new DataAccessError(409, 'MEMORY_SOURCE_REQUIRED', '记忆来源章节已归档或变化，未保存旧结果。')
+    }
+  }
+  if (input.evidence.sourceType === 'volume') {
+    const source = await db.volume.findFirst({ where: { id: input.evidence.sourceId, novelId: input.novelId, ...activeVolumeWhere }, select: { revision: true } })
+    if (!source || (input.evidence.revision !== undefined && source.revision !== input.evidence.revision)) {
+      throw new DataAccessError(409, 'MEMORY_SOURCE_REQUIRED', '记忆来源卷已归档或变化，未保存旧结果。')
+    }
+  }
   await db.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`memory:${input.novelId}`}, 0))::text`
   const title = input.title.trim()
   const content = input.content.trim()
@@ -256,6 +276,7 @@ export async function searchStoryMemory(input: {
     db.projectMemoryEntry.findMany({
       where: {
         novelId: input.novelId, status: { in: ['confirmed', 'inferred'] }, reviewStatus: { in: ['none', 'accepted'] },
+        OR: [{ sourceChapterId: null }, { sourceChapter: activeChapterScope(input.novelId) }],
         ...(input.memoryType ? { memoryType: input.memoryType } : {}),
       },
       include: { evidence: { orderBy: { createdAt: 'desc' }, take: 8 } },
@@ -267,7 +288,9 @@ export async function searchStoryMemory(input: {
         status: { in: ['confirmed', 'inferred'] },
         OR: [{ canonicalName: { contains: input.query, mode: 'insensitive' } }, { aliases: { some: { alias: { contains: input.query, mode: 'insensitive' } } } }],
       },
-      include: { aliases: true, relationsFrom: { include: { toEntity: true } }, relationsTo: { include: { fromEntity: true } } },
+      include: { aliases: true,
+        relationsFrom: { where: { OR: [{ revision: null }, { revision: { gte: 0 } }] }, include: { toEntity: true } },
+        relationsTo: { where: { OR: [{ revision: null }, { revision: { gte: 0 } }] }, include: { fromEntity: true } } },
       take: 20,
     }),
   ])
@@ -332,6 +355,9 @@ export async function processMemoryExtractionJob(jobId: string): Promise<void> {
   let claimed = false
   try {
     await prisma.$transaction(async tx => {
+      const owner = await tx.memoryExtractionJob.findUnique({ where: { id: jobId }, select: { novelId: true } })
+      if (!owner) return
+      await lockNovelActiveScope(tx, owner.novelId)
       await tx.$queryRaw`SELECT id FROM memory_extraction_jobs WHERE id = ${jobId} FOR UPDATE`
       const job = await tx.memoryExtractionJob.findUnique({ where: { id: jobId } })
       if (!job || job.diff && typeof job.diff === 'object' && !Array.isArray(job.diff) && job.diff.durableTaskRootId) return
@@ -361,8 +387,9 @@ export async function applyMemoryExtractionJob(tx: Prisma.TransactionClient, job
     const job = await tx.memoryExtractionJob.findUniqueOrThrow({ where: { id: jobId } })
     if (scope && job.novelId !== scope.novelId || job.diff && typeof job.diff === 'object' && !Array.isArray(job.diff)
       && job.diff.durableTaskRootId && job.diff.durableTaskRootId !== scope?.taskRootId) throw new DataAccessError(409, 'MEMORY_JOB_SOURCE_MISMATCH', '记忆任务需要原持久任务控制权。')
-    const chapter = await tx.chapter.findUnique({
-      where: { id: job.chapterId }, include: { novel: { select: { authorId: true } }, volume: { select: { id: true, title: true, revision: true } } },
+    await lockNovelActiveScope(tx, job.novelId)
+    const chapter = await tx.chapter.findFirst({
+      where: { id: job.chapterId, ...activeChapterScope(job.novelId) }, include: { novel: { select: { authorId: true } }, volume: { select: { id: true, title: true, revision: true } } },
     })
     if (!chapter || chapter.revision !== job.chapterRevision) {
       await tx.memoryExtractionJob.update({ where: { id: jobId }, data: { status: 'completed', errorMessage: 'stale_revision_skipped', leaseUntil: null } })
@@ -381,7 +408,7 @@ export async function applyMemoryExtractionJob(tx: Prisma.TransactionClient, job
       evidence: { sourceType: 'chapter', sourceId: chapter.id, revision: chapter.revision, span: { start: 0, end: chapter.content.length, quoteHash: createHash('sha256').update(chapter.content).digest('hex') }, confidence: 1 },
     }, tx)
     const volumeMemories = await tx.projectMemoryEntry.findMany({
-      where: { novelId: chapter.novelId, memoryType: 'chapterSummary', status: { in: ['confirmed', 'inferred'] }, reviewStatus: { in: ['none', 'accepted'] }, sourceChapter: { volumeId: chapter.volumeId } },
+      where: { novelId: chapter.novelId, memoryType: 'chapterSummary', status: { in: ['confirmed', 'inferred'] }, reviewStatus: { in: ['none', 'accepted'] }, sourceChapter: { volumeId: chapter.volumeId, ...activeChapterScope(chapter.novelId) } },
       orderBy: { sourceChapter: { orderInVolume: 'asc' } }, take: 100, select: { content: true },
     })
     const volumeMemory = await saveStoryMemory({
@@ -500,15 +527,19 @@ function mergeGraphEnvelopes(envelopes: Array<z.infer<typeof aiGraphEnvelopeSche
 }
 
 /** 合并后的图按“替换旧 AI 图”语义写库：清旧 AI 实体/关系，再 upsert 实体、别名与关系。 */
-async function persistMemoryGraph(novelId: string, merged: MergedGraph, sourceId: string) {
-  const stale = await prisma.storyEntity.findMany({ where: { novelId, status: 'inferred', description: { startsWith: AI_GRAPH_DESCRIPTION_PREFIX } }, select: { id: true } })
-  if (stale.length > 0) await prisma.storyEntity.deleteMany({ where: { id: { in: stale.map((item) => item.id) } } })
-  await prisma.entityRelation.deleteMany({ where: { fromEntity: { novelId }, sourceId: { startsWith: 'ai-graph:' } } })
+async function persistMemoryGraph(tx: Prisma.TransactionClient, novelId: string, merged: MergedGraph, sourceId: string) {
+  const stale = await tx.storyEntity.findMany({ where: { novelId, status: 'inferred', description: { startsWith: AI_GRAPH_DESCRIPTION_PREFIX } }, select: { id: true } })
+  if (stale.length > 0) await tx.storyEntity.deleteMany({ where: { id: { in: stale.map((item) => item.id) } } })
+  await tx.entityRelation.deleteMany({ where: { fromEntity: { novelId }, sourceId: { startsWith: 'ai-graph:' } } })
 
   const entityByKey = new Map<string, { id: string; canonicalName: string }>()
   for (const item of merged.entities) {
     const canonicalName = item.name.trim()
-    const entity = await prisma.storyEntity.upsert({
+    // A verified rebuild may revive only this invalidated AI projection, never
+    // downgrade an independently confirmed/manual entity's status.
+    await tx.storyEntity.updateMany({ where: { novelId, entityType: item.type, canonicalName, status: 'invalid',
+      description: { startsWith: AI_GRAPH_DESCRIPTION_PREFIX } }, data: { status: 'inferred' } })
+    const entity = await tx.storyEntity.upsert({
       where: { novelId_entityType_canonicalName: { novelId, entityType: item.type, canonicalName } },
       create: { novelId, entityType: item.type, canonicalName, description: `${AI_GRAPH_DESCRIPTION_PREFIX}${item.description}`.trim(), status: 'inferred' },
       update: { description: `${AI_GRAPH_DESCRIPTION_PREFIX}${item.description}`.trim() },
@@ -517,7 +548,7 @@ async function persistMemoryGraph(novelId: string, merged: MergedGraph, sourceId
     entityByKey.set(normalizedEntityKey(canonicalName), entity)
     for (const alias of [...item.aliases].filter(Boolean)) {
       entityByKey.set(normalizedEntityKey(alias), entity)
-      await prisma.entityAlias.upsert({ where: { entityId_alias: { entityId: entity.id, alias } }, create: { entityId: entity.id, alias, sourceId }, update: { sourceId } })
+      await tx.entityAlias.upsert({ where: { entityId_alias: { entityId: entity.id, alias } }, create: { entityId: entity.id, alias, sourceId }, update: { sourceId } })
     }
   }
 
@@ -527,11 +558,11 @@ async function persistMemoryGraph(novelId: string, merged: MergedGraph, sourceId
     const to = entityByKey.get(normalizedEntityKey(relation.to))
     if (!from || !to || from.id === to.id) continue
     const relationType = relation.type.trim()
-    const existing = await prisma.entityRelation.findFirst({ where: { fromEntityId: from.id, toEntityId: to.id, relationType, validFrom: null }, select: { id: true } })
+    const existing = await tx.entityRelation.findFirst({ where: { fromEntityId: from.id, toEntityId: to.id, relationType, validFrom: null }, select: { id: true } })
     if (existing) {
-      await prisma.entityRelation.update({ where: { id: existing.id }, data: { state: relation.state.trim(), confidence: relation.confidence, sourceId } })
+      await tx.entityRelation.update({ where: { id: existing.id }, data: { state: relation.state.trim(), confidence: relation.confidence, sourceId, revision: null } })
     } else {
-      await prisma.entityRelation.create({ data: { fromEntityId: from.id, toEntityId: to.id, relationType, state: relation.state.trim(), confidence: relation.confidence, sourceId } })
+      await tx.entityRelation.create({ data: { fromEntityId: from.id, toEntityId: to.id, relationType, state: relation.state.trim(), confidence: relation.confidence, sourceId } })
     }
     relationCount += 1
   }
@@ -591,7 +622,7 @@ async function buildMemoryGraphOnce(
 ) {
   const novel = await prisma.novel.findFirst({
     where: { id: novelId, authorId: userId },
-    select: { id: true, title: true, summary: true, categoryName: true, tagNames: true },
+    select: { id: true, title: true, summary: true, categoryName: true, tagNames: true, manuscriptRevision: true },
   })
   if (!novel) throw new DataAccessError(404, 'NOVEL_NOT_FOUND', '作品不存在或无权更新关系网。')
 
@@ -611,7 +642,7 @@ async function buildMemoryGraphOnce(
   }
 
   const chapters = await prisma.chapter.findMany({
-    where: { novelId, content: { not: '' } }, orderBy: { orderIndex: 'asc' },
+    where: { ...activeChapterScope(novelId), content: { not: '' } }, orderBy: { orderIndex: 'asc' },
     select: { id: true, title: true, content: true, revision: true, orderIndex: true }, take: AI_GRAPH_MAX_CHAPTERS,
   })
   if (chapters.length === 0) return { chapterCount: 0, jobCount: 0, entityCount: existingEntityCount, relationCount: 0, reused: true }
@@ -647,7 +678,15 @@ async function buildMemoryGraphOnce(
   if (valid.length === 0) throw new DataAccessError(502, 'AI_PROVIDER_EMPTY_RESPONSE', '关系网抽取未识别到有效内容，请稍后重试。')
 
   const merged = mergeGraphEnvelopes(valid)
-  const relationCount = await persistMemoryGraph(novelId, merged, sourceId)
+  const relationCount = await prisma.$transaction(async tx => {
+    await lockNovelActiveScope(tx, novelId)
+    const current = await tx.novel.findFirst({ where: { id: novelId, authorId: userId }, select: { manuscriptRevision: true } })
+    const unchanged = await tx.chapter.count({ where: { ...activeChapterScope(novelId), OR: chapters.map(chapter => ({ id: chapter.id, revision: chapter.revision })) } })
+    if (!current || current.manuscriptRevision !== novel.manuscriptRevision || unchanged !== chapters.length) {
+      throw new DataAccessError(409, 'MEMORY_SOURCE_REQUIRED', '关系网生成期间稿件已导入、恢复或修改，未应用旧模型结果。')
+    }
+    return persistMemoryGraph(tx, novelId, merged, sourceId)
+  })
   return { chapterCount: chapters.length, jobCount: 0, entityCount: merged.entities.length, relationCount, reused: false }
 }
 
@@ -718,14 +757,14 @@ export async function getMemoryGraph(userId: string, novelId: string): Promise<M
 
   const entities = await prisma.storyEntity.findMany({
     where: { novelId, status: { in: ['confirmed', 'inferred', 'conflicted'] } },
-    include: { aliases: { orderBy: { alias: 'asc' } }, relationsFrom: true },
+    include: { aliases: { orderBy: { alias: 'asc' } }, relationsFrom: { where: { OR: [{ revision: null }, { revision: { gte: 0 } }] } } },
     orderBy: [{ updatedAt: 'desc' }, { canonicalName: 'asc' }],
     take: 240,
   })
   const nodeIds = new Set(entities.map((entity) => entity.id))
   const edges = entities
     .flatMap((entity) => entity.relationsFrom)
-    .filter((relation) => nodeIds.has(relation.toEntityId))
+    .filter((relation) => (relation.revision === null || relation.revision >= 0) && nodeIds.has(relation.toEntityId))
     .slice(0, 600)
   const latestEntityAt = entities[0]?.updatedAt ?? new Date(0)
   const version = createHash('sha256')
@@ -765,6 +804,7 @@ export async function resolveMemoryReview(userId: string, memoryId: string, acce
   return prisma.$transaction(async tx => {
     const owner = await tx.projectMemoryEntry.findFirst({ where: { id: memoryId, novel: { authorId: userId } }, select: { novelId: true } })
     if (!owner) throw new DataAccessError(404, 'MEMORY_NOT_FOUND', '记忆候选不存在。')
+    await lockNovelActiveScope(tx, owner.novelId)
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`memory:${owner.novelId}`}, 0))::text`
     const memory = await tx.projectMemoryEntry.findUniqueOrThrow({ where: { id: memoryId } })
     if (memory.reviewStatus !== 'pending' || ['invalid', 'superseded'].includes(memory.status)) throw new DataAccessError(409, 'MEMORY_REVIEW_STALE', '此卡片已处理或删除，请刷新审核列表。')
@@ -885,6 +925,7 @@ export async function updateStoryMemoryEntry(userId: string, memoryId: string, p
   const updated = await prisma.$transaction(async tx => {
     const owner = await tx.projectMemoryEntry.findFirst({ where: { id: memoryId, novel: { authorId: userId } }, select: { novelId: true } })
     if (!owner) throw new DataAccessError(404, 'MEMORY_NOT_FOUND', '记忆卡片不存在。')
+    await lockNovelActiveScope(tx, owner.novelId)
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`memory:${owner.novelId}`}, 0))::text`
     const memory = await tx.projectMemoryEntry.findFirst({ where: { id: memoryId, status: { notIn: ['invalid', 'superseded'] } } })
     if (!memory) throw new DataAccessError(404, 'MEMORY_NOT_FOUND', '记忆卡片不存在。')
@@ -948,10 +989,12 @@ async function assertMemoryProposalCurrent(tx: Prisma.TransactionClient, memoryI
       throw new DataAccessError(409, 'MEMORY_PROPOSAL_STALE', '原设定已变更或删除，此候选不能覆盖新版。请拒绝旧候选，再基于最新卡片修订。')
     }
   }
-  const evidence = await tx.memoryEvidence.findMany({ where: { memoryId, sourceType: 'chapter', revision: { not: null } } })
+  const evidence = await tx.memoryEvidence.findMany({ where: { memoryId, sourceType: { in: ['chapter', 'volume'] } } })
   for (const source of evidence) {
-    const chapter = await tx.chapter.findFirst({ where: { id: source.sourceId, novelId }, select: { revision: true } })
-    if (!chapter || chapter.revision !== source.revision) throw new DataAccessError(409, 'MEMORY_SOURCE_REQUIRED', '候选来源章节已变更，请核对当前原文后重新提交候选。')
+    const record = source.sourceType === 'volume'
+      ? await tx.volume.findFirst({ where: { id: source.sourceId, novelId, ...activeVolumeWhere }, select: { revision: true } })
+      : await tx.chapter.findFirst({ where: { id: source.sourceId, ...activeChapterScope(novelId) }, select: { revision: true } })
+    if (!record || (source.revision !== null && record.revision !== source.revision)) throw new DataAccessError(409, 'MEMORY_SOURCE_REQUIRED', '候选来源卷章已变更，请核对当前原文后重新提交候选。')
   }
 }
 

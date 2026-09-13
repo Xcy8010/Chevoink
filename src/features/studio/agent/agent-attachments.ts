@@ -95,13 +95,11 @@ export async function prepareAgentImage(file: File): Promise<string> {
 export function validateAgentFile(file: File): string | null {
   const extension = (file.name.split('.').pop() ?? '').toLowerCase()
 
-  if (extension === 'doc') {
-    return '暂不支持旧版 .doc 格式，请转存为 .docx 后重新上传。'
+  if (!(AGENT_FILE_EXTENSIONS as readonly string[]).includes(extension)) {
+    return '文件仅支持 pdf、docx、txt、md、zip、doc 格式；ZIP/DOC 需通过作品导入核验。'
   }
 
-  if (!(AGENT_FILE_EXTENSIONS as readonly string[]).includes(extension)) {
-    return '文件仅支持 pdf、docx、txt、md 格式。'
-  }
+  if (!file.size) return '文件不能为空。'
 
   const maxBytes = extension === 'pdf' ? MAX_AGENT_FILE_BYTES_PDF : MAX_AGENT_FILE_BYTES_DOC
 

@@ -8,6 +8,8 @@ import { durablePauseSchema } from './runtime-common.js'
 import { readExecutionFrame } from './runtime-state.js'
 import { durableQuestionSchema } from './runtime-question.js'
 import { durableMessageId } from './runtime-frame-events.js'
+import { novelImportWaitingSchema } from '../novel-import-origin.js'
+import { importCommitWaitingSchema, importWaitingUrl } from './runtime-import.js'
 
 /** Only this DB-locked allocator writes UI events for the durable protocol.
  * New source families retain their outbox rows until their projector is added;
@@ -17,7 +19,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
   return runtimeTransaction(async tx => {
     const { root } = await lockRunRoot(tx, userId, runId)
     const sources = await tx.agentExecutionOutbox.findMany({ where: { taskRootId: root.id,
-      OR: [{ type: { in: ['approval.requested', 'approval.resolved', 'execution.state.saved', 'question.requested'] } },
+      OR: [{ type: { in: ['approval.requested', 'approval.resolved', 'execution.state.saved', 'question.requested', 'import.requested', 'import.commit_requested'] } },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'completed' } },
         { type: 'run.paused', payload: { path: ['runIds'], array_contains: [runId] } }],
       projections: { none: { runId } } }, orderBy: { sequence: 'asc' }, take: limit })
@@ -26,7 +28,19 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
     const events: AgentStreamEvent[] = []
     for (const source of sources) {
       let bodies: import('../../../shared/contracts/index.js').AgentStreamEventBody[]
-      if (source.type === 'question.requested') {
+      if (source.type === 'import.requested' || source.type === 'import.commit_requested') {
+        const waiting = source.type === 'import.requested' ? novelImportWaitingSchema.parse(source.payload) : importCommitWaitingSchema.parse(source.payload)
+        const operation = await tx.agentOperation.findFirst({ where: { id: waiting.operationId, taskRootId: root.id, kind: 'tool', action: 'novel_import' } })
+        const input = z.object({ input: z.object({ callId: z.string(), novelId: z.string(), args: z.unknown(), normalization: z.object({ sourceRevision: z.number().int().nonnegative() }) }) }).safeParse(operation?.inputSnapshot)
+        const expectedArgs = 'attachmentUrl' in waiting ? { action: 'prepare', attachmentUrl: waiting.attachmentUrl } : { action: 'commit', jobId: waiting.jobId }
+        if (!operation || !input.success || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash || source.operationId !== operation.id
+          || source.eventKey !== `import:${operation.id}` || source.runId !== operation.originRunId || input.data.input.novelId !== root.novelId
+          || input.data.input.callId !== waiting.callId || runtimeJson(input.data.input.args).hash !== runtimeJson(expectedArgs).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '导入等待事件缺少原始调用。')
+        const frame = await readExecutionFrame(tx, root.id, input.data.input.normalization.sourceRevision)
+        bodies = [{ type: 'tool.call', messageId: durableMessageId(root.id, frame.state.turn), callId: waiting.callId,
+          toolName: 'novel_import', title: '等待作者确认导入', args: expectedArgs, autoApproved: false,
+          importWaiting: { url: importWaitingUrl(root.novelId, source.runId, waiting), expiresAt: waiting.expiresAt } }]
+      } else if (source.type === 'question.requested') {
         const question = durableQuestionSchema.parse(source.payload)
         const operation = await tx.agentOperation.findFirst({ where: { id: question.operationId, taskRootId: root.id, action: 'ask_user' } })
         const input = z.object({ input: z.object({ callId: z.string(), args: z.unknown(), normalization: z.object({ sourceRevision: z.number().int().nonnegative() }) }) }).safeParse(operation?.inputSnapshot)

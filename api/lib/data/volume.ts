@@ -15,6 +15,7 @@ import type {
 } from '../../../shared/contracts/index.js'
 import { buildStructureOrderRows } from '../../../shared/structure/ordering.js'
 import { DataAccessError, prisma } from '../prisma.js'
+import { lockNovelActiveScope } from './novel-write-lock.js'
 import { CHAPTER_REVISION_CONFLICT_CODE, CHAPTER_REVISION_CONFLICT_MESSAGE } from './chapter-revision.js'
 import {
   activeChapterScope,
@@ -50,6 +51,7 @@ function assertExpectedRevision(expected: number | undefined, actual: number, en
 
 /** 新作品和历史兼容写入均保证至少有一卷。 */
 export async function ensureDefaultVolume(tx: StructureTx, novelId: string): Promise<PrismaVolume> {
+  await lockNovelActiveScope(tx, novelId)
   const existing = await tx.volume.findFirst({ where: { novelId, ...activeVolumeWhere }, orderBy: { orderIndex: 'asc' } })
   if (existing) return existing
   return tx.volume.create({ data: { novelId, title: DEFAULT_VOLUME_TITLE, orderIndex: 1 } })
@@ -162,6 +164,7 @@ export async function placeCreatedChapter(
   volumeId: string,
   zeroBasedPosition: number,
 ) {
+  await lockNovelActiveScope(tx, novelId)
   const layout = await loadLayout(tx, novelId)
   const target = layout.byVolume.get(volumeId)
   if (!target) throw new DataAccessError(400, 'VOLUME_NOT_FOUND', '目标卷不存在或不属于当前作品。')
@@ -186,6 +189,7 @@ export async function listVolumesData(userId: string, novelId: string, transacti
 export async function createVolumeData(userId: string, novelId: string, input: CreateVolumeRequest, transaction?: Prisma.TransactionClient): Promise<Volume> {
   await ensureNovelOwner(userId, novelId, transaction)
   const create = async (tx: Prisma.TransactionClient) => {
+    await lockNovelActiveScope(tx, novelId)
     const volumes = await tx.volume.findMany({ where: { novelId, ...activeVolumeWhere }, orderBy: { orderIndex: 'asc' } })
     const created = await tx.volume.create({
       data: {
@@ -212,6 +216,7 @@ export async function updateVolumeData(
 ): Promise<Volume | null> {
   await ensureNovelOwner(userId, novelId, transaction)
   const update = async (tx: Prisma.TransactionClient) => {
+    await lockNovelActiveScope(tx, novelId)
     const existing = await tx.volume.findFirst({ where: { id: volumeId, novelId, ...activeVolumeWhere } })
     if (!existing) return null
     assertExpectedRevision(input.expectedRevision, existing.revision, '卷')
@@ -235,6 +240,7 @@ export async function moveVolumeData(
 ): Promise<Volume | null> {
   await ensureNovelOwner(userId, novelId, transaction)
   const move = async (tx: Prisma.TransactionClient) => {
+    await lockNovelActiveScope(tx, novelId)
     const volumes = await tx.volume.findMany({ where: { novelId, ...activeVolumeWhere }, orderBy: { orderIndex: 'asc' } })
     const currentIndex = volumes.findIndex((item) => item.id === volumeId)
     if (currentIndex < 0) return null
@@ -252,6 +258,7 @@ export async function moveVolumeData(
 export async function deleteVolumeData(userId: string, novelId: string, volumeId: string, transaction?: Prisma.TransactionClient): Promise<boolean> {
   await ensureNovelOwner(userId, novelId, transaction)
   const remove = async (tx: Prisma.TransactionClient) => {
+    await lockNovelActiveScope(tx, novelId)
     const volumes = await tx.volume.findMany({ where: { novelId, ...activeVolumeWhere }, orderBy: { orderIndex: 'asc' } })
     const target = volumes.find((item) => item.id === volumeId)
     if (!target) return false
@@ -279,6 +286,7 @@ export async function moveChapterData(
 ) {
   await ensureNovelOwner(userId, novelId, transaction)
   const move = async (tx: Prisma.TransactionClient) => {
+    await lockNovelActiveScope(tx, novelId)
     const chapter = await tx.chapter.findFirst({ where: { id: chapterId, ...activeChapterScope(novelId) } })
     if (!chapter) return null
     assertExpectedRevision(input.expectedRevision, chapter.revision, '章节')
@@ -305,6 +313,7 @@ export async function splitChapterData(
 ) {
   await ensureNovelOwner(userId, novelId, transaction)
   const split = async (tx: Prisma.TransactionClient) => {
+    await lockNovelActiveScope(tx, novelId)
     const chapter = await tx.chapter.findFirst({ where: { id: chapterId, ...activeChapterScope(novelId) } })
     if (!chapter) return null
     assertExpectedRevision(input.expectedRevision, chapter.revision, '章节')
@@ -352,6 +361,7 @@ export async function mergeChaptersData(
     throw new DataAccessError(400, 'INVALID_MERGE_TARGET', '不能把章节与自身合并。')
   }
   const merge = async (tx: Prisma.TransactionClient) => {
+    await lockNovelActiveScope(tx, novelId)
     const [target, source] = await Promise.all([
       tx.chapter.findFirst({ where: { id: targetChapterId, ...activeChapterScope(novelId) } }),
       tx.chapter.findFirst({ where: { id: input.sourceChapterId, ...activeChapterScope(novelId) } }),

@@ -11,7 +11,14 @@ describe.skipIf(!ready)('admin analytics real SQL', () => {
       it(`${scope}/${period} aggregates in SQL with finite serializable values`, async () => {
         const data = await getAdminAnalyticsData(period, scope)
         expect(data.labels).toEqual(analyticsWindow(period, new Date(data.to)).labels)
-        expect(data.metrics).toHaveLength(scope === 'dashboard' ? 8 : scope === 'creation' ? 7 : 1)
+        expect(data.metrics).toHaveLength(scope === 'dashboard' ? 8 : scope === 'creation' ? 9 : 1)
+        if (scope === 'creation') {
+          expect(data.metrics.map(metric => metric.key)).toEqual(expect.arrayContaining(['importJobs', 'importCommits']))
+          expect(data.imports).toBeDefined()
+          expect(data.imports!.previewed).toBeLessThanOrEqual(data.imports!.jobs)
+          expect(data.imports!.committed).toBeLessThanOrEqual(data.imports!.jobs)
+          expect(data.imports!.failures).toHaveLength(Math.min(data.imports!.failures.length, 20))
+        }
         for (const metric of data.metrics) {
           expect(metric.values).toHaveLength(data.labels.length)
           expect(Number.isFinite(metric.total)).toBe(true)

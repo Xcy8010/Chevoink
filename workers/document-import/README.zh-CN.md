@@ -1,8 +1,32 @@
-# 隔离文档导入 Worker 原型
+# 隔离文档导入 Worker 与业务解析管线
 
 [English 与完整接口/命令/官方来源](./README.md)
 
-范围仅为 plan32 的 DOC 转换、离线 PDF/图片 OCR 与受限客户端；不处理鉴权、小说卷章、数据库、模型计费或提交。原型具备容器构建文件和协议测试，**不代表 DOC/OCR 原生能力或生产沙箱已验收**。本工作未改 parser、根 package、数据库 schema、路由、UI，也未提交或部署。
+范围为 plan32 的 DOC 转换、离线 PDF/图片 OCR、隔离解析与业务适配；鉴权、私有持久化、人工决定、计费及提交由应用服务负责。**原生验收以实际同 SHA 的专用 CI 结果为准；新增工作流不等于已通过。** 本工作未提交、部署或执行生产文档测试。
+
+## 本轮接线与精确镜像交接（2026-09-14）
+
+- 服务入口：`api/lib/novel-import/runtime.ts` 的 `parseConfiguredNovelImportDocument(buffer, filename, {sourceId, sourceHash?, encoding?, signal?, deadlineAt?})`；`deadlineAt` 是持久任务截止时间的 Unix 毫秒，恢复后不可重新给 30 分钟。返回 `{parsed, report, artifacts}`，图片字节仅交私有存储；只有服务证明全部资源归属/摘要正确且已保存，才能清除 `IMPORT_IMAGE_STORAGE_REQUIRED`，人工不得豁免。
+- DOC/PDF 及 ZIP 内同类成员走受控 native worker；DOCX/ZIP 图片安全转为 PNG 后做离线 OCR，文字放“图片正文（待归章）”，不替换已有段落。图片/封面只产生候选，须人工确认用途及顺序。
+- 原生总期限 30 分钟，TXT/MD 120 秒，单转换进程 120 秒，每页各 OCR 区域合计 60 秒。服务负责持久租约、fencing 与全局有界 claim；runtime 同进程最多一个 native 任务。
+- 专用 CI：`.github/workflows/document-import-native.yml`，缺 Linux/镜像时 required 模式失败而非 skip。包含真 OLE DOC 且检查转换正文、混合 PDF、PNG、无文字层中文扫描 PDF、真实客户端 hash/取消/清理及健康自检。中文金标准是自有固定干净印刷文本，去 Unicode 空白的 CER 必须 ≤2%；同时输出 raw CER、规范化口径和原文/识别/source hashes，不宣称手写/所有恶意样本已验收。
+
+最终交接必须取同一成功 CI 运行的两份 artifact：`document-import-native-evidence-<SHA>`（镜像 ID 与验收 JSON）和 `document-import-worker-<SHA>`（`document-import-worker.tar.gz`）。以下是获准发布时由主 agent/operator 执行的说明，本任务没有执行：
+
+1. 应用全量 CI 与专用 native CI 同 SHA 全部成功。
+2. `docker load --input <下载的document-import-worker.tar.gz>`，不在服务器重新构建。`docker image inspect --format '{{.Id}}' <CI记录ID>` 必须等于 `document-import-image.id` 中完整 `sha256:...`，不能改用 tag 或基础镜像 digest。
+3. 创建 `/opt/chevoink/shared/document-import-staging`，归 API 服务账号，权限 `0700`；必须在 uploads/public 以外。容器不挂 Docker socket；只有监督端以获批权限使用同机 daemon。
+4. 配置独立 operator 环境：
+
+   ```dotenv
+   NOVEL_IMPORT_NATIVE_ENABLED=true
+   DOCUMENT_IMPORT_WORKER_IMAGE=sha256:<成功CI的精确镜像ID>
+   DOCUMENT_IMPORT_WORKER_STAGING_ROOT=/opt/chevoink/shared/document-import-staging
+   ```
+
+5. 在发布 checkout 使用已配置的服务环境运行内部命令 `node --import tsx workers/document-import/health-cli.ts`。退出 0 且 `ready:true` 代表真实沙箱内版本、工具、Python bridge 和语言包自检通过；**零文档转换、零 OCR、零合成文档处理**，不公开 HTTP health 接口。用户禁止的服务器 DOC/OCR 文档测试依旧禁止。
+
+Docker 客户端只连接 `unix:///var/run/docker.sock`，不继承远程 context/config/密钥。native 关闭时走确定性解析；显式开启但健康失败不会静默换解析器。健康仅代表依赖就绪，不代替 CI 字准率验收；此开关也不授权归档/恢复/发布/Agent 写入。
 
 ## 接入约定
 

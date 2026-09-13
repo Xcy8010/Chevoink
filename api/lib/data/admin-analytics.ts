@@ -56,6 +56,8 @@ async function queryAdminAnalytics(period: AdminAnalyticsPeriod, scope: 'dashboa
     ['tools', '工具返回', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_run_events WHERE type = 'tool.result'`],
     ['toolSuccess', '工具成功', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_run_events WHERE type = 'tool.result' AND payload->>'ok' = 'true'`],
     ['toolFailed', '工具未成功', Prisma.sql`SELECT created_at AS date, 1::numeric AS value FROM agent_run_events WHERE type = 'tool.result' AND payload->>'ok' = 'false'`],
+    ['importJobs', '发起作品导入', Prisma.sql`SELECT "createdAt" AS date, 1::numeric AS value FROM novel_import_jobs`],
+    ['importCommits', '已提交导入', Prisma.sql`SELECT "createdAt" AS date, 1::numeric AS value FROM novel_import_commits`],
   ] as const
   const metrics: AdminAnalyticsPayload['metrics'] = await Promise.all(sources.map(async ([key, label, source]) => {
     const rows = await prisma.$queryRaw<Array<{ date: string; value: number }>>(Prisma.sql`
@@ -77,6 +79,29 @@ async function queryAdminAnalytics(period: AdminAnalyticsPeriod, scope: 'dashboa
     GROUP BY 1 ORDER BY failed DESC, calls DESC, name ASC LIMIT 30
   `) : []
   const costs = scope === 'dashboard' || scope === 'cost' ? await supplierCosts(period, from, to) : null
+  const imports = scope === 'creation' ? await queryImportAnalytics(from, to) : undefined
   if (costs) metrics.push({ key: 'cost', label: '已消耗成本（￥·估算小计）', total: costs.total, values: labels.map(date => costs.days.get(date) ?? 0), unavailable: costs.knownCalls === 0 && costs.unknownCalls > 0 })
-  return { period, from: from.toISOString(), to: to.toISOString(), labels, metrics, tools, ...(costs ? { cost: { knownCalls: costs.knownCalls, unknownCalls: costs.unknownCalls, models: costs.models } } : {}) }
+  return { period, from: from.toISOString(), to: to.toISOString(), labels, metrics, tools, ...(imports ? { imports } : {}), ...(costs ? { cost: { knownCalls: costs.knownCalls, unknownCalls: costs.unknownCalls, models: costs.models } } : {}) }
+}
+
+async function queryImportAnalytics(from: Date, to: Date): Promise<NonNullable<AdminAnalyticsPayload['imports']>> {
+  const [rows, failures] = await Promise.all([
+    prisma.$queryRaw<Array<{ jobs: number; previewed: number; failedBeforePreview: number; committed: number; cancelled: number; restored: number }>>(Prisma.sql`
+      SELECT COUNT(*)::int AS jobs,
+        COUNT(*) FILTER (WHERE j."manifestRevision" > 0)::int AS previewed,
+        COUNT(*) FILTER (WHERE j.status = 'failed' AND j."manifestRevision" = 0)::int AS "failedBeforePreview",
+        COUNT(*) FILTER (WHERE c."jobId" IS NOT NULL)::int AS committed,
+        COUNT(*) FILTER (WHERE j.status = 'cancelled')::int AS cancelled,
+        COUNT(*) FILTER (WHERE b."restoredAt" IS NOT NULL)::int AS restored
+      FROM novel_import_jobs j LEFT JOIN novel_import_commits c ON c."jobId" = j.id
+      LEFT JOIN novel_import_backups b ON b."jobId" = j.id
+      WHERE j."createdAt" >= ${from} AND j."createdAt" < ${to}
+    `),
+    prisma.$queryRaw<Array<{ code: string; count: number }>>(Prisma.sql`
+      SELECT "errorCode" AS code, COUNT(*)::int AS count FROM novel_import_jobs
+      WHERE "createdAt" >= ${from} AND "createdAt" < ${to} AND status = 'failed' AND "errorCode" IS NOT NULL
+      GROUP BY "errorCode" ORDER BY count DESC, code LIMIT 20
+    `),
+  ])
+  return { ...(rows[0] ?? { jobs: 0, previewed: 0, failedBeforePreview: 0, committed: 0, cancelled: 0, restored: 0 }), failures }
 }

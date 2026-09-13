@@ -69,6 +69,19 @@ describe.skipIf(!dbAvailable)('Style learning ownership, durable progress and ap
     expect(generateTextCompletion).toHaveBeenCalledTimes(count)
     await expect(changeStyleLearning(userId, novelId, failed.id, { revision: failed.revision, action: 'retry' })).rejects.toThrow()
   })
+  it('import invalidation cannot be resumed, retried, enabled or bypassed with a new request ID', async () => {
+    const job = await prisma.styleLearningJob.findFirstOrThrow({ where: { profileId } })
+    const stale = await prisma.styleLearningJob.update({ where: { id: job.id }, data: { error: 'IMPORT_SOURCE_ARCHIVED', status: 'paused', enabled: false, revision: { increment: 1 } } })
+    for (const action of ['resume', 'retry', 'enable'] as const) {
+      await expect(changeStyleLearning(userId, novelId, job.id, { revision: stale.revision, action, consent: true })).rejects.toMatchObject({ status: 409, code: 'IMPORT_SCOPE_CHANGED' })
+    }
+    await expect(startStyleLearning(userId, novelId, { requestId: randomUUID(), profileId, model, consent: true })).rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })
+    expect((await prisma.styleLearningJob.findUniqueOrThrow({ where: { id: job.id } })).revision).toBe(stale.revision)
+    expect(await getLearnedStyleDigest(userId, novelId)).toBe('')
+    // Subsequent revocation exercises a newly selected sample, not the retained old profile.
+    const profile = await extractAuthorStyleProfile({ userId, novelId, title: '重新选择样章', chapterIds: [], uploadedFile: { name: 'fresh.md', size: Buffer.byteLength(content), content } })
+    profileId = profile.profileId; sourceId = profile.sourceId
+  })
   it('revocation deletes source, learning records and fences a late paid response', async () => {
     let release!: (result: string) => void
     let started!: () => void

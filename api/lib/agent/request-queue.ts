@@ -2,6 +2,7 @@ import type { AgentQueuedRequest, Prisma } from '@prisma/client'
 import { startAgentLoopRunSchema, type StartAgentLoopRunRequest } from '../../../shared/contracts/index.js'
 import type { AgentQueueAction, AgentQueueSnapshot } from '../../../shared/contracts/agent-queue.js'
 import { DataAccessError, prisma } from '../prisma.js'
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { assertManagedAttachmentsAccess } from '../agent-attachment-storage.js'
 import { getActiveRunIdBySession, hasActiveRunInSession, stopAgentRun } from './active-runs.js'
 import { forkAgentSessionData, startLoopRunLocked, toAgentSession } from './run-service.js'
@@ -42,15 +43,21 @@ export async function enqueueRequest(userId: string, id: string, raw: StartAgent
     const session = await ownedSession(userId, input.sessionId)
     if (session.novelId !== input.novelId) throw new DataAccessError(400, 'VALIDATION_ERROR', '会话与作品不匹配。')
     await assertManagedAttachmentsAccess(input.attachments, userId)
-    const prior = await prisma.agentQueuedRequest.findUnique({ where: { id } })
-    if (prior) {
-      if (prior.userId !== userId) throw conflict()
-      return { id: prior.id }
-    }
-    const count = await prisma.agentQueuedRequest.count({ where: { userId, status: { in: editable } } })
-    if (count >= 50) throw new DataAccessError(400, 'QUEUE_FULL', '待发需求最多保留 50 条，请先处理已有需求。')
-    await prisma.agentQueuedRequest.create({ data: { id, userId, sessionId: session.id, payload: { ...input, mode: 'build' } as Prisma.InputJsonValue } })
-    return { id }
+    return prisma.$transaction(async tx => {
+      // Same order as run admission; the pending row and import's busy check
+      // cannot pass each other, including when the manuscript is empty.
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${userId}`}, 0))::text`
+      await lockNovelActiveScope(tx, session.novelId)
+      const prior = await tx.agentQueuedRequest.findUnique({ where: { id } })
+      if (prior) {
+        if (prior.userId !== userId) throw conflict()
+        return { id: prior.id }
+      }
+      const count = await tx.agentQueuedRequest.count({ where: { userId, status: { in: editable } } })
+      if (count >= 50) throw new DataAccessError(400, 'QUEUE_FULL', '待发需求最多保留 50 条，请先处理已有需求。')
+      await tx.agentQueuedRequest.create({ data: { id, userId, sessionId: session.id, payload: { ...input, mode: 'build' } as Prisma.InputJsonValue } })
+      return { id }
+    })
   })
 }
 

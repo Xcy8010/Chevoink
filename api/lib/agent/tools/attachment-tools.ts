@@ -195,7 +195,7 @@ export const readFileTool = defineTool({
   name: 'read_file',
   title: '读取文件',
   description:
-    '读取作者随消息上传的文件内容（pdf/docx/txt/md）。作者附带文件时必须先调用本工具理解内容再行动，禁止凭文件名猜测。返回提取的纯文本（单次最多 20000 字符，超出时用 offset 参数续读）。',
+    '读取作者随消息上传的文件内容（pdf/docx/txt/md）。禁止凭文件名猜测。ZIP/DOC 及完整作品导入请使用 novel_import prepare，经用户核对与确认，不通过本工具解压或转换。返回提取的纯文本（单次最多 20000 字符，超出时用 offset 参数续读）。',
   parameters: z.object({
     url: z.string().describe('文件地址（作者附件元数据中的 url）'),
     offset: z
@@ -217,6 +217,10 @@ export const readFileTool = defineTool({
     }
 
     const buffer = await readAuthorizedAgentAttachment(args.url, ctx.userId)
+
+    if (['.zip', '.doc'].includes(path.extname(diskPath).toLowerCase())) {
+      return { outcome: 'failed', summary: '需使用作品导入', output: 'ZIP/DOC 仅作为导入原件保存，请使用 novel_import prepare，或打开作品导入面板核验。此工具未解压、未转换、未导入；DOC 转换器未开放时请另存为 DOCX。' }
+    }
 
     try {
       const result = await extractFileText(buffer, path.basename(diskPath), args.offset ?? 0)

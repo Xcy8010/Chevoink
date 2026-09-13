@@ -131,18 +131,22 @@ export default function StudioWorkspace() {
   const [volumes, setVolumes] = useState<StudioPayload['volumes']>([])
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
   const importCapabilities = useImportCapabilities(activeNovelId, taskUiUserId)
-  const [importRequest, setImportRequest] = useState<{ novelId: string; userId: string; attachment?: ImportAgentAttachment; jobId?: string } | null>(null)
+  const [importRequest, setImportRequest] = useState<{ novelId: string; userId: string; attachment?: ImportAgentAttachment; jobId?: string; view?: 'history' } | null>(null)
   const [importModel, setImportModel] = useState<{ novelId: string; selection: NovelImportModelSelection | null } | null>(null)
   const handleImportModelSelection = useCallback((ownerNovelId: string, selection: NovelImportModelSelection | null) => {
     setImportModel({ novelId: ownerNovelId, selection })
   }, [])
   const importAvailable = importCapabilities.data?.enabled === true && !studioQuery.isPlaceholderData && currentNovel?.id === activeNovelId
+  const importHistoryAvailable = !!importCapabilities.data && !studioQuery.isPlaceholderData && currentNovel?.id === activeNovelId
+  const openImportHistory = () => {
+    if (importHistoryAvailable && taskUiUserId) setImportRequest({ novelId: activeNovelId, userId: taskUiUserId, view: 'history' })
+  }
   const openNovelImport = () => {
     if (importAvailable && taskUiUserId) setImportRequest({ novelId: activeNovelId, userId: taskUiUserId })
   }
   useEffect(() => {
-    if (!importAvailable || !taskUiUserId) return
-    const attachment = readImportHandoff(searchParams)
+    if (!importHistoryAvailable || !taskUiUserId) return
+    const attachment = importAvailable ? readImportHandoff(searchParams) : null
     const jobId = readImportJobId(searchParams)
     if (attachment || jobId) {
       setImportRequest({ novelId: activeNovelId, userId: taskUiUserId, attachment: attachment ?? undefined, jobId: jobId ?? undefined })
@@ -150,7 +154,7 @@ export default function StudioWorkspace() {
       next.delete('importJobId')
       setSearchParams(next, { replace: true })
     }
-  }, [activeNovelId, importAvailable, taskUiUserId, searchParams, setSearchParams])
+  }, [activeNovelId, importAvailable, importHistoryAvailable, taskUiUserId, searchParams, setSearchParams])
   useEffect(() => {
     setImportRequest((request) => request?.novelId === activeNovelId && request.userId === taskUiUserId ? request : null)
   }, [activeNovelId, taskUiUserId])
@@ -4010,6 +4014,7 @@ export default function StudioWorkspace() {
             onOpenNovelMeta={() => setActiveToolPanel('meta')}
             onExportNovel={() => setExportDialogOpen(true)}
             onImportNovel={importAvailable ? openNovelImport : undefined}
+            onImportHistory={importHistoryAvailable ? openImportHistory : undefined}
             onPublishNovel={handlePublishNovel}
             onToggleNovelCompletion={handleToggleNovelCompletion}
             autoFollow={autoFollow}
@@ -4037,6 +4042,7 @@ export default function StudioWorkspace() {
             onOpenMeta={() => setActiveToolPanel('meta')}
             onExport={() => setExportDialogOpen(true)}
             onImport={importAvailable ? openNovelImport : undefined}
+            onImportHistory={importHistoryAvailable ? openImportHistory : undefined}
             onDeleteNovel={handleRequestDeleteNovel}
             onCreateVolume={handleRequestCreateVolume}
             onCreateChapter={handleRequestCreateChapter}
@@ -4356,6 +4362,7 @@ export default function StudioWorkspace() {
         modelSelection={importModel?.novelId === activeNovelId && importModel.selection ? importModel.selection : { kind: 'basic' }}
         agentAttachment={importRequest.attachment}
         initialJobId={importRequest.jobId}
+        initialView={importRequest.view}
         beforeImport={async () => {
           if (importCapabilities.data?.aiEnabled && (importModel?.novelId !== activeNovelId || !importModel.selection)) throw new Error('请先在当前作品打开 Agent 输入框并确认模型选择。')
           if (chapterSaveState === 'saving' || novelSaveState === 'saving') throw new Error('当前修改正在保存，请稍后重试。')

@@ -11,13 +11,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from protocol import LIMITS, VERSION, WorkerError, bounded_dimensions, encode, failed_page, finalize, image_dimensions, make_artifact, overlap, response, same_text, validate_request
 import main
 from pdf_ocr import tsv_blocks
-from runtime import assert_sandbox
+from runtime import assert_sandbox, read_bounded
 
 REQUEST = dict(version=VERSION, requestId='req1', sourceId='source1', sourceHash='a'*64,
                format='pdf', timeoutMs=1000, ocrLanguages='chi_sim+eng')
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_actual_read_is_bounded(self):
+        with tempfile.TemporaryDirectory(prefix='document-worker-read-') as root:
+            source = Path(root) / 'source'
+            source.write_bytes(b'x' * 10)
+            self.assertEqual(read_bounded(source, 10), b'x' * 10)
+            with self.assertRaises(WorkerError) as caught:
+                read_bounded(source, 9)
+            self.assertEqual(caught.exception.code, 'IMPORT_LIMIT_EXCEEDED')
+
     def test_request_whitelist(self):
         self.assertEqual(validate_request(REQUEST), REQUEST)
         for change in ({'path': '/etc/passwd'}, {'sourceId': '../escape'}, {'format': 'sh'}, {'timeoutMs': True},

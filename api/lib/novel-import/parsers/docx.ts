@@ -4,15 +4,20 @@ import { limit, NOVEL_IMPORT_LIMITS, ParseContext } from './limits.js'
 import { runConverter } from './isolated.js'
 import { headingKind, splitText, type Heading } from './text.js'
 import { NovelImportParseError, type NovelImportWarning } from './types.js'
+import { createHash } from 'node:crypto'
+import { checkImportImages, imageExtension, sanitizeImportImage } from './images.js'
+import type { ImportImage } from '../document-types.js'
 
 type DocxExtraction = { html: string; messageCount: number; images: number }
 
-export async function parseDocx(buffer: Buffer, source: string, context: ParseContext) {
+export async function parseDocx(buffer: Buffer, source: string, context: ParseContext, resources = false) {
   const entries = scanArchive(buffer, context)
   if (!entries.some((entry) => entry.path === '[Content_Types].xml') || !entries.some((entry) => entry.path === 'word/document.xml')) {
     throw new NovelImportParseError('FILE_TYPE_MISMATCH', '文件不是 Word DOCX 文档。', source)
   }
   const warnings: NovelImportWarning[] = []
+  const images: ImportImage[] = []
+  const imageByHash = new Map<string, ImportImage>()
   let xmlBytes = 0
   for (const entry of entries) {
     const bytes = await readArchiveEntry(buffer, entry, context)
@@ -40,23 +45,29 @@ export async function parseDocx(buffer: Buffer, source: string, context: ParseCo
         names.add(element.localName.split(':').pop()!)
         if (element.getAttribute('TargetMode') === 'External') warn('文档包含外部关系；未访问外部目标，相关内容需核验。')
       })
-      if (['altChunk', 'object', 'OLEObject', 'pict', 'drawing', 'txbxContent', 'subDoc', 'control', 'oMath', 'oMathPara'].some((name) => names.has(name))) warn('内嵌图片、文本框、公式或对象可能无法完整转换；尚未保存附件或执行 OCR。')
+      if (['altChunk', 'object', 'OLEObject', 'pict', 'txbxContent', 'subDoc', 'control', 'oMath', 'oMathPara', ...(resources ? [] : ['drawing'])].some((name) => names.has(name))) warn(resources ? '文本框、公式、旧式绘图或对象可能无法完整转换，请对照源文件核验。' : '内嵌图片、文本框、公式或对象可能无法完整转换；尚未保存附件或执行 OCR。')
       if (['ins', 'del', 'moveFrom', 'moveTo', 'commentRangeStart'].some((name) => names.has(name))) warn('文档含修订或批注，需要确认显示版本；转换文本不能代替修订核验。')
       if (/^word\/(?:header|footer|comments)\d*\.xml$/i.test(entry.path)) warn('页眉、页脚或批注未作为正文导入，请确认是否含正文。')
+    } else if (resources && /^word\/media\//i.test(entry.path) && imageExtension.test(entry.path)) {
+      // Preserve original member identity even for identical bytes in different placements.
+      const image = await sanitizeImportImage(bytes, memberSource, context)
+      images.push(image); checkImportImages(images)
+      imageByHash.set(createHash('sha256').update(bytes).digest('hex'), image)
+      warnings.push({ code: 'IMPORT_IMAGE_REVIEW_REQUIRED', message: '图片已安全转码并保留来源；请查看并确认是否包含需转录的正文，封面须另行选择。', source: memberSource, blocking: true })
     } else if (/^word\/(?:media|embeddings)\//i.test(entry.path) || /vbaProject/i.test(entry.path)) warn('内嵌资源未导入为可查看附件；宏及对象不会执行。')
   }
   const converted = await runConverter<DocxExtraction>('mammoth', `
     let images = 0;
     const result = await library.convertToHtml({buffer}, {
       externalFileAccess: false, includeEmbeddedStyleMap: false, ignoreEmptyParagraphs: false,
-      convertImage: library.images.imgElement(async () => { images++; return {src: 'novel-import:unsupported-image'}; })
+      convertImage: library.images.imgElement(async image => { images++; return {src: ${resources ? "'novel-import-image:' + require('node:crypto').createHash('sha256').update(await image.read()).digest('hex')" : "'novel-import:unsupported-image'"}}; })
     });
     if (result.value.length > 20000000) throw Object.assign(new Error('HTML limit'), {code: 'IMPORT_LIMIT_EXCEEDED'});
     return {html: result.value, messageCount: result.messages.length, images};
   `, buffer, context)
   context.check()
   if (converted.messageCount) warnings.push({ code: 'IMPORT_DOCX_CONVERSION_WARNING', message: `Word 转换器报告 ${converted.messageCount} 项未完全支持的内容，请对照源文件。`, source, blocking: true })
-  if (converted.images) warnings.push({ code: 'IMPORT_DOCX_IMAGE_UNSUPPORTED', message: `${converted.images} 张内嵌图片仅保留位置标记；未保存附件且尚未 OCR。`, source, blocking: true })
+  if (converted.images && !resources) warnings.push({ code: 'IMPORT_DOCX_IMAGE_UNSUPPORTED', message: `${converted.images} 张内嵌图片仅保留位置标记；未保存附件且尚未 OCR。`, source, blocking: true })
   const { document } = parseHTML(`<html><body>${converted.html}</body></html>`)
   const chunks: string[] = []
   const headings: Heading[] = []
@@ -69,7 +80,12 @@ export async function parseDocx(buffer: Buffer, source: string, context: ParseCo
     const element = node as Element
     const tag = element.tagName.toLowerCase()
     if (tag === 'br') { append('\n'); return }
-    if (tag === 'img') { append('[内嵌图片：待核验]'); return }
+    if (tag === 'img') {
+      const image = imageByHash.get((element.getAttribute('src') ?? '').replace(/^novel-import-image:/, ''))
+      append(image ? `[图片来源：${image.id}]` : '[内嵌图片：待核验]')
+      if (resources && !image) warnings.push({ code: 'IMPORT_DOCX_IMAGE_UNSUPPORTED', message: '该图片位置未能关联安全图片资源，请对照原文件。', source, blocking: true })
+      return
+    }
     const start = length
     if (tag === 'li') append('- ')
     for (const child of Array.from(node.childNodes)) visit(child, depth + 1)
@@ -90,5 +106,6 @@ export async function parseDocx(buffer: Buffer, source: string, context: ParseCo
   context.addChars(text.length)
   const result = splitText(text, source, false, headings.length ? headings : undefined)
   result.warnings.push(...warnings)
+  if (resources) result.images = images
   return result
 }

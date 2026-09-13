@@ -13,7 +13,8 @@ import {
   type ProjectSearchResult,
 } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
-import { ensureNovelOwner, recalculateNovelStats } from './internal.js'
+import { activeChapterScope, ensureNovelOwner, recalculateNovelStats } from './internal.js'
+import { lockNovelActiveScope } from './novel-write-lock.js'
 
 type ChangeSetRecord = PrismaChangeSet & { patches: PrismaChangeSetPatch[] }
 
@@ -165,7 +166,7 @@ export async function searchProjectData(
     : []
   const chapters = await transaction.chapter.findMany({
     where: {
-      novelId,
+      ...activeChapterScope(novelId),
       volumeId: input.volumeIds?.length ? { in: input.volumeIds } : undefined,
       id: input.chapterIds?.length ? { in: input.chapterIds } : undefined,
       OR: lexicalOr.length ? lexicalOr : undefined,
@@ -268,7 +269,7 @@ export async function previewBulkReplaceData(
   }
   const chapters = await prisma.chapter.findMany({
     where: {
-      novelId,
+      ...activeChapterScope(novelId),
       id: input.excludeChapterIds.length ? { notIn: input.excludeChapterIds } : undefined,
       OR: input.fields.map((field) => ({
         [field]: {
@@ -371,6 +372,12 @@ function fieldValue(chapter: { title: string; summary: string | null; content: s
   throw new DataAccessError(400, 'UNSUPPORTED_CHANGESET_FIELD', `暂不支持修改字段 ${field}。`)
 }
 
+function assertChangeSetManuscriptCurrent(validations: Prisma.JsonValue) {
+  if (Array.isArray(validations) && validations.some(item => item && typeof item === 'object' && !Array.isArray(item) && item.code === 'IMPORT_SCOPE_CHANGED')) {
+    throw new DataAccessError(409, 'IMPORT_SCOPE_CHANGED', '来源稿件已导入或恢复，旧变更集不能重试；请基于当前正文重新预览。')
+  }
+}
+
 export async function applyChangeSetData(
   userId: string,
   changeSetId: string,
@@ -379,6 +386,7 @@ export async function applyChangeSetData(
   const existing = await loadOwnedChangeSet(userId, changeSetId)
   if (!existing) return null
   if (existing.status === 'applied') return toChangeSet(existing)
+  assertChangeSetManuscriptCurrent(existing.validations)
   if (!['draft', 'approved', 'conflicted', 'failed'].includes(existing.status)) {
     throw new DataAccessError(409, 'CHANGESET_STATE_CONFLICT', `当前变更集状态 ${existing.status} 不允许应用。`)
   }
@@ -390,6 +398,12 @@ export async function applyChangeSetData(
 
   try {
     await prisma.$transaction(async (tx) => {
+      await lockNovelActiveScope(tx, existing.novelId)
+      // Re-read under the import lock: an outside-lock preview may have raced
+      // an archive+restore cycle and must not erase its permanent invalidation.
+      const current = await tx.changeSet.findFirst({ where: { id: changeSetId, userId }, select: { validations: true } })
+      if (!current) throw new DataAccessError(409, 'CHANGESET_TARGET_MISSING', '变更集已不存在。')
+      assertChangeSetManuscriptCurrent(current.validations)
       await tx.changeSet.update({ where: { id: changeSetId }, data: { status: 'applying' } })
       if (selectedIds) {
         await tx.changeSetPatch.updateMany({ where: { changeSetId }, data: { selected: false } })
@@ -405,7 +419,7 @@ export async function applyChangeSetData(
       }
 
       for (const [chapterId, patches] of byChapter) {
-        const chapter = await tx.chapter.findFirst({ where: { id: chapterId, novelId: existing.novelId } })
+        const chapter = await tx.chapter.findFirst({ where: { id: chapterId, authorId: userId, ...activeChapterScope(existing.novelId) } })
         if (!chapter) throw new DataAccessError(409, 'CHANGESET_TARGET_MISSING', `章节 ${chapterId} 已不存在。`)
         const expectedRevision = patches[0].expectedRevision
         if (patches.some((patch) => patch.expectedRevision !== expectedRevision)) {
@@ -458,7 +472,7 @@ export async function applyChangeSetData(
         }
         if (hasMutation) {
           const updated = await tx.chapter.updateMany({
-            where: { id: chapterId, revision: writeRevision },
+            where: { id: chapterId, authorId: userId, ...activeChapterScope(existing.novelId), revision: writeRevision },
             data: update,
           })
           if (updated.count !== 1) throw new DataAccessError(409, 'CHANGESET_REVISION_CONFLICT', `章节《${chapter.title}》写入时发生冲突。`)
@@ -507,6 +521,7 @@ export async function rollbackChangeSetData(userId: string, changeSetId: string)
 
   try {
     await prisma.$transaction(async (tx) => {
+      await lockNovelActiveScope(tx, existing.novelId)
       const byChapter = new Map<string, PrismaChangeSetPatch[]>()
       for (const patch of selected) {
         const bucket = byChapter.get(patch.targetId) ?? []
@@ -514,7 +529,7 @@ export async function rollbackChangeSetData(userId: string, changeSetId: string)
         byChapter.set(patch.targetId, bucket)
       }
       for (const [chapterId, patches] of byChapter) {
-        const chapter = await tx.chapter.findFirst({ where: { id: chapterId, novelId: existing.novelId } })
+        const chapter = await tx.chapter.findFirst({ where: { id: chapterId, authorId: userId, ...activeChapterScope(existing.novelId) } })
         if (!chapter) throw new DataAccessError(409, 'CHANGESET_TARGET_MISSING', `章节 ${chapterId} 已不存在。`)
         const appliedRevision = patches[0].appliedRevision
         if (!appliedRevision || chapter.revision !== appliedRevision) {
@@ -533,7 +548,7 @@ export async function rollbackChangeSetData(userId: string, changeSetId: string)
             update.wordCount = (patch.before ?? '').length
           }
         }
-        const restored = await tx.chapter.updateMany({ where: { id: chapterId, revision: appliedRevision }, data: update })
+        const restored = await tx.chapter.updateMany({ where: { id: chapterId, authorId: userId, ...activeChapterScope(existing.novelId), revision: appliedRevision }, data: update })
         if (restored.count !== 1) throw new DataAccessError(409, 'CHANGESET_ROLLBACK_CONFLICT', `章节《${chapter.title}》回滚时发生冲突。`)
       }
       await recalculateNovelStats(tx, existing.novelId)

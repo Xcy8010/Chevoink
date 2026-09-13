@@ -17,6 +17,7 @@ RUN apt-get update \
     && sha256sum /usr/share/tesseract-ocr/5/tessdata/eng.traineddata /usr/share/tesseract-ocr/5/tessdata/chi_sim.traineddata /usr/share/tesseract-ocr/5/tessdata/chi_tra.traineddata > /app/language-data.sha256
 COPY --chown=0:0 *.py /app/
 COPY --chown=0:0 tests/container_smoke.py /app/tests/container_smoke.py
+COPY --chown=0:0 tests/native_gold.py /app/tests/native_gold.py
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 HOME=/work TMPDIR=/tmp LANG=C.UTF-8 OMP_THREAD_LIMIT=1
 USER 10001:10001

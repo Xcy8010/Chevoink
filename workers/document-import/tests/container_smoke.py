@@ -14,6 +14,9 @@ def main():
     import pymupdf
     import pdf_ocr
     import libreoffice_convert
+    from health import probe
+    from native_gold import run_gold
+    health = probe()
     root = Path('/work')
     request = dict(version=VERSION, requestId='smoke', sourceId='synthetic', sourceHash='a'*64,
                    format='pdf', timeoutMs=120000, ocrLanguages='eng')
@@ -57,9 +60,17 @@ def main():
     libreoffice_convert.INPUT = doc_path
     converted = libreoffice_convert.convert()
     assert converted['artifact']['mediaType'].endswith('document')
+    # Verify real conversion text, not merely an OOXML-looking signature.
+    import base64
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(converted['artifact']['base64']))) as archive:
+        assert 'Synthetic real DOC conversion fixture.' in archive.read('word/document.xml').decode()
+    chinese = run_gold(root, request)
     print(json.dumps({'passed': ['native-pdf', 'mixed-regional-ocr', 'image-ocr', 'real-ole-doc-to-docx'],
                       'nativeFixtureHash': hashlib.sha256(native_path.read_bytes()).hexdigest(),
-                      'note': 'Smoke only: no Chinese CER, adversarial corpus or resource-cap benchmark claim.'}))
+                      'chineseGold': chinese, 'health': health,
+                      'note': 'Self-authored clean print only; no handwriting/adversarial corpus quality claim.'}))
 
 
 if __name__ == '__main__':

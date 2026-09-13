@@ -1,14 +1,14 @@
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { isMainThread, parentPort, workerData } from 'node:worker_threads'
-import { ParseContext } from './limits.js'
+import { NOVEL_IMPORT_LIMITS, ParseContext } from './limits.js'
 import { NovelImportParseError } from './types.js'
 
 const require = createRequire(import.meta.url)
 const MAX_PROTOCOL_BYTES = 128 * 1024 * 1024
 let converterSequence = 0
 
-function converterThroughSupervisor<T>(module: 'mammoth' | 'pdf-parse', source: string, buffer: Buffer, context: ParseContext): Promise<T> {
+function converterThroughSupervisor<T>(module: 'mammoth' | 'pdf-parse' | 'sharp', source: string, buffer: Buffer, context: ParseContext): Promise<T> {
   const port = parentPort!
   const id = ++converterSequence
   return new Promise<T>((resolve, reject) => {
@@ -31,7 +31,7 @@ function converterThroughSupervisor<T>(module: 'mammoth' | 'pdf-parse', source: 
  * in worker_threads on some hosts, so isolate its lifetime in a child process.
  * V8 heap limits do not constitute a hard RSS/OS sandbox; production orchestration supplies that.
  */
-export function runConverter<T>(module: 'mammoth' | 'pdf-parse', source: string, buffer: Buffer, context: ParseContext): Promise<T> {
+export function runConverter<T>(module: 'mammoth' | 'pdf-parse' | 'sharp', source: string, buffer: Buffer, context: ParseContext): Promise<T> {
   context.check()
   // Whole-parser isolation delegates subprocess ownership to its supervisor. A terminated
   // or OOM Worker must never leave a native helper running without an owner able to kill it.
@@ -71,7 +71,7 @@ export function runConverter<T>(module: 'mammoth' | 'pdf-parse', source: string,
     const chunks: Buffer[] = []
     const stop = (error: Error) => { failure ??= error; child.kill('SIGKILL') }
     const cancel = () => stop(new NovelImportParseError('IMPORT_CANCELLED', '文档解析已取消。'))
-    const timer = setTimeout(() => stop(new NovelImportParseError('IMPORT_LIMIT_EXCEEDED', '文档解析超时，请拆分文件。')), Math.max(1, context.deadline - Date.now()))
+    const timer = setTimeout(() => stop(new NovelImportParseError('IMPORT_LIMIT_EXCEEDED', '文档解析超时，请拆分文件。')), Math.max(1, Math.min(NOVEL_IMPORT_LIMITS.durationMs, context.deadline - Date.now())))
     context.signal?.addEventListener('abort', cancel, { once: true })
     if (context.signal?.aborted) cancel()
     child.stdout.on('data', (chunk: Buffer) => {

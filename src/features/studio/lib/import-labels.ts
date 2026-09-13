@@ -10,6 +10,14 @@ export function importStatusLabel(status: string): string {
 }
 
 const ERRORS: Record<string, string> = {
+  IMPORT_AI_SCOPE_LIMIT: '当前章节超出局部分析范围。请先手动拆分为较短章节，再保存预览后请求建议。',
+  IMPORT_AI_BOUNDARY_INVALID: '建议边界不符合原文，未应用任何调整。请手动核对和拆分。',
+  IMPORT_AI_OUTPUT_INCOMPLETE: '模型建议输出不完整，原文未修改。请手动调整，不要自动重发付费请求。',
+  IMPORT_AI_CANCELLED: '结构建议已停止或超时，已发生用量仍以账务记录为准；原文未修改。',
+  IMPORT_AI_FAILED: '结构建议未完成，原文未修改。请查看模型配置或手动调整。',
+  IMPORT_AI_RESULT_UNKNOWN: '供应商结果或费用待核对。请查询持久记录，不要重复发送请求。',
+  IMPORT_MODEL_CHANGED: '本任务绑定的模型或计费配置已变化，请重新查看模型与费用后确认。',
+  IMPORT_BUDGET_REQUIRED: '结构建议预算不足或已达任务请求上限。请手动调整，不会截断原文或自动提高预算。',
   IMPORT_ENCODING_AMBIGUOUS: '文本编码需要确认。请手动选择 UTF-8、UTF-16LE/BE 或 GB18030，再重试解析。',
   IMPORT_NO_BODY: '未识别到非空正文。请选择含原文正文的文件，不能只导入目录、封面或规划。',
   IMPORT_CHAPTER_TOO_LONG: '存在超过 10 万字符的章节。请在原文光标处拆分，全部章节符合上限后再导入。',

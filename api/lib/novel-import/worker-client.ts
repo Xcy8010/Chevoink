@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { z } from 'zod'
 import {
   decodeWorkerResponse, DocumentWorkerError, WORKER_LIMITS, WORKER_VERSION, workerRequestSchema,
   type DocumentWorkerResult, type WorkerRequest,
@@ -27,6 +28,11 @@ export interface DocumentWorkerInput {
   timeoutMs?: number
   ocrLanguages?: WorkerRequest['ocrLanguages']
 }
+const healthSchema = z.object({ version: z.literal('document-import-health/1'), ready: z.literal(true),
+  parserVersion: z.string().min(1).max(120), capabilities: z.array(z.enum(['doc', 'pdf', 'ocr:chi_sim+eng', 'ocr:chi_tra+eng', 'ocr:eng'])).length(5),
+  languages: z.object({ eng: z.string().regex(/^[a-f0-9]{64}$/), chi_sim: z.string().regex(/^[a-f0-9]{64}$/),
+    chi_tra: z.string().regex(/^[a-f0-9]{64}$/) }).strict() }).strict()
+export type DocumentWorkerHealth = z.infer<typeof healthSchema>
 
 function imageIsPinned(image: string) {
   return /^(?:sha256:[a-f0-9]{64}|[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64})$/.test(image)
@@ -52,7 +58,8 @@ export function documentWorkerDockerArgs(image: string, inputDirectory: string, 
 
 function dockerEnvironment(): NodeJS.ProcessEnv {
   // Do not forward DATABASE_URL, cloud credentials, proxy variables, DOCKER_HOST or DOCKER_CONTEXT.
-  return { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR }
+  return { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR,
+    DOCKER_HOST: 'unix:///var/run/docker.sock', DOCKER_CONFIG: '/nonexistent/chevoink-document-import-config' }
 }
 
 function invokeDocker(executable: string, args: string[], timeoutMs: number, signal?: AbortSignal,
@@ -103,8 +110,7 @@ export function createDocumentImportWorker(config: DocumentWorkerConfig) {
   const executable = config.dockerExecutable ?? 'docker'
   if (executable !== 'docker' && !path.isAbsolute(executable)) throw new DocumentWorkerError('IMPORT_PROTOCOL_INVALID')
   let busy = false
-  return {
-    async run(input: DocumentWorkerInput): Promise<DocumentWorkerResult> {
+  const execute = async (input: DocumentWorkerInput, health = false): Promise<DocumentWorkerResult | DocumentWorkerHealth> => {
       if (busy) throw new DocumentWorkerError('IMPORT_LIMIT_EXCEEDED')
       if (input.signal?.aborted) throw new DocumentWorkerError('IMPORT_CANCELLED')
       // Operational sandbox is Linux Docker only. No installed desktop LibreOffice fallback.
@@ -125,7 +131,7 @@ export function createDocumentImportWorker(config: DocumentWorkerConfig) {
       let started = false
       let cleanupFailed = false
       let failure: DocumentWorkerError | undefined
-      let result: DocumentWorkerResult | undefined
+      let result: DocumentWorkerResult | DocumentWorkerHealth | undefined
       const containerName = `document-import-${request.requestId}`
       const deadline = Date.now() + request.timeoutMs
       try {
@@ -139,9 +145,14 @@ export function createDocumentImportWorker(config: DocumentWorkerConfig) {
         const remaining = deadline - Date.now()
         if (remaining <= 0) throw new DocumentWorkerError('IMPORT_DEADLINE_EXCEEDED')
         started = true
-        const raw = await invokeDocker(executable, documentWorkerDockerArgs(config.image, directory, containerName), remaining, input.signal)
+        const args = documentWorkerDockerArgs(config.image, directory, containerName)
+        if (health) args[args.length - 1] = '/app/health.py'
+        const raw = await invokeDocker(executable, args, remaining, input.signal, health ? 16384 : WORKER_LIMITS.responseBytes)
         if (input.signal?.aborted) throw new DocumentWorkerError('IMPORT_CANCELLED')
-        result = decodeWorkerResponse(raw, request)
+        if (health) {
+          try { result = healthSchema.parse(JSON.parse(raw.toString('utf8'))) }
+          catch { throw new DocumentWorkerError('IMPORT_PROTOCOL_INVALID') }
+        } else result = decodeWorkerResponse(raw, request)
       } catch (error) {
         failure = error instanceof DocumentWorkerError ? error : new DocumentWorkerError('IMPORT_WORKER_UNAVAILABLE')
       } finally {
@@ -172,6 +183,20 @@ export function createDocumentImportWorker(config: DocumentWorkerConfig) {
       if (failure) throw failure
       if (input.signal?.aborted) throw new DocumentWorkerError('IMPORT_CANCELLED')
       if (!result) throw new DocumentWorkerError('IMPORT_PROTOCOL_INVALID')
+      return result
+  }
+  return {
+    async run(input: DocumentWorkerInput): Promise<DocumentWorkerResult> {
+      const result = await execute(input)
+      if ('ready' in result) throw new DocumentWorkerError('IMPORT_PROTOCOL_INVALID')
+      return result
+    },
+    /** Real native dependency probe through identical sandbox/cleanup limits; no user bytes. */
+    async health(options: { signal?: AbortSignal } = {}): Promise<DocumentWorkerHealth> {
+      const bytes = Buffer.from('document-import-health/1')
+      const result = await execute({ sourceId: 'health', sourceHash: createHash('sha256').update(bytes).digest('hex'),
+        format: 'pdf', bytes, timeoutMs: 15_000, signal: options.signal }, true)
+      if (!('ready' in result)) throw new DocumentWorkerError('IMPORT_PROTOCOL_INVALID')
       return result
     },
   }

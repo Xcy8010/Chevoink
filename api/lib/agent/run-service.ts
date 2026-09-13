@@ -34,6 +34,9 @@ import { assertTaskAuthorizationRuntimeReady } from './task-authorization.js'
 import { assertLegacyRuntimeCompatible } from './runtime-identity.js'
 import { fenceLocallyStoppedLegacyRun, pauseDurableTask, pauseDurableTaskForAttention, pauseLegacyOrphanRun, recoverLegacyOrphanRun } from './runtime-lifecycle.js'
 import { resumeDurableTask } from './runtime-resume.js'
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
+import { activeChapterScope } from '../data/internal.js'
+import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { recoverRunElapsedMs, savedRunUsageSchema } from './checkpoint.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { assertCreditAccess, getModelTierRuntime } from '../credits.js'
@@ -145,7 +148,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
     let task = buildTaskSpec({ runId, novelId: run.novelId, chapterId: run.chapterId, prompt: input.prompt, selection: input.selection,
       creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
     if (task.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')) {
-      const chapters = await tx.chapter.findMany({ where: { novelId: run.novelId, authorId: userId }, select: { id: true } })
+      const chapters = await tx.chapter.findMany({ where: { ...activeChapterScope(run.novelId), authorId: userId }, select: { id: true } })
       task = { ...task, scope: { ...task.scope, chapterIds: chapters.map(chapter => chapter.id) } }
     }
     await tx.agentRun.update({ where: { id: runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(task))).value } })
@@ -202,6 +205,7 @@ async function executeOwnedPersistedLoopRun(run: AgentRunRecord) {
     lease = await acquireRunLease({ userId, runId: run.id, ownerId: durableProcessOwner, claimId: randomUUID() })
     controller.signal.throwIfAborted()
     await withRunLease(lease, async tx => {
+      await assertAgentManuscriptCurrent(tx, { userId, novelId: run.novelId, runId: run.id })
       const state = await readExecutionStateInTransaction(tx, lease!.taskRootId)
       const initial = await readExecutionFrame(tx, lease!.taskRootId, 0)
       const originalPrompt = Array.isArray(state.originalRequest) ? state.originalRequest.flatMap(part =>
@@ -310,7 +314,7 @@ export async function startLoopRunLocked(
 
   if (chapterId) {
     const chapter = await prisma.chapter.findFirst({
-      where: { id: chapterId, novelId: session.novelId, authorId: userId },
+      where: { id: chapterId, ...activeChapterScope(session.novelId), authorId: userId },
       select: { id: true },
     })
     if (!chapter) {
@@ -359,6 +363,12 @@ export async function startLoopRunLocked(
     // Queued/recovering runs may not yet have a local controller. Share the
     // durable resume admission lock and count saved work before creating more.
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${userId}`}, 0))::text`
+    await lockNovelActiveScope(tx, session.novelId)
+    const manuscript = await tx.novel.findFirst({ where: { id: session.novelId, authorId: userId }, select: { manuscriptRevision: true } })
+    if (!manuscript) throw new DataAccessError(404, 'NOVEL_NOT_FOUND', '作品不存在或无权访问。')
+    if (chapterId && !await tx.chapter.findFirst({ where: { id: chapterId, authorId: userId, ...activeChapterScope(session.novelId) }, select: { id: true } })) {
+      throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '章节已归档或不属于当前稿件。')
+    }
     const live = ['queued', 'running', 'awaiting_approval'] as const
     if (await tx.agentRun.count({ where: { sessionId: session.id, status: { in: [...live] } } })) {
       throw new DataAccessError(409, 'RUN_IN_PROGRESS', '当前会话已有任务在执行，请先停止或等待完成。')
@@ -373,7 +383,7 @@ export async function startLoopRunLocked(
       })
       if (claimed.count !== 1) throw new DataAccessError(409, 'QUEUE_CHANGED', '待发需求已变更，请刷新。')
     }
-    const created = await tx.agentRun.create(runData)
+    const created = await tx.agentRun.create({ ...runData, data: { ...runData.data, manuscriptRevision: manuscript.manuscriptRevision } })
     await tx.agentMessage.create({ data: { id: admittedMessageId, runId: created.id, sessionId: session.id, role: 'user', parts: admittedParts } })
     if (queuedRequest) await tx.agentQueuedRequest.update({ where: { id: queuedRequest.id }, data: { runId: created.id } })
     return created
@@ -677,6 +687,7 @@ async function continueLoopRunLocked(
   runId: string,
 ): Promise<StartAgentLoopRunResponse> {
   const run = await findOwnedLoopRun(userId, runId)
+  await prisma.$transaction(tx => assertAgentManuscriptCurrent(tx, { userId, novelId: run.novelId, runId }))
 
   assertTaskAuthorizationRuntimeReady(run.taskSpec, { userId, sessionId: run.sessionId, novelId: run.novelId })
   if (run.runtimeProtocolVersion === 1 && run.taskRootId) {
@@ -1564,6 +1575,7 @@ export async function forkAgentSessionData(
           sessionId: created.id,
           userId,
           novelId: run.novelId,
+          manuscriptRevision: run.manuscriptRevision,
           chapterId: run.chapterId,
           mode: run.mode,
           action: run.action,

@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import { env } from '../../../config/env.js'
 import { DataAccessError } from '../../prisma.js'
+import { activeChapterScope } from '../../data/internal.js'
+import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import { getModelTierRuntime } from '../../credits.js'
 import { resolveDurableTokenPrice } from '../../billing/resolve-token-price.js'
 import { itemizedTokenPriceSchema } from '../../billing/token-price.js'
@@ -73,7 +75,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     if (!compilation?.chapter || !compilation.bridge) return { kind: 'rejected' as const, code: 'COMPILATION_NOT_WRITTEN', message: '本任务的编译尚无目标正文和章节桥，不能检查。' }
     if (await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, baseline.id) !== baseline.hash) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_STALE', message: '编译状态已变化，请先 chapter_bridge_get 读取当前章节桥，未执行检查。' }
     const sourceId = compilation.bridge.fromChapterId
-    const source = sourceId ? await tx.chapter.findFirst({ where: { id: sourceId, novelId: ctx.novelId }, select: { id: true, revision: true, content: true } }) : null
+    const source = sourceId ? await tx.chapter.findFirst({ where: { id: sourceId, ...activeChapterScope(ctx.novelId) }, select: { id: true, revision: true, content: true } }) : null
     const coverage = { version: 1 as const, contentHash: runtimeJson({ content: compilation.chapter.content }).hash,
       charCount: compilation.chapter.content.length, sourceHash: source ? runtimeJson(source).hash : null }
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
@@ -111,8 +113,8 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
   const failure = (code: string, output: string) => recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code, output, summary: '连续性检查未执行' })
   const assertCurrent = async (tx: RuntimeTx, frozen: Work) => {
     if (await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, frozen.compiler.id) !== frozen.compiler.hash) throw new DataAccessError(409, 'TOOL_COMPILER_STALE', '检查期间章节桥或场景已变化，原结果未应用；请重新读取章节桥。')
-    const chapter = await tx.chapter.findFirst({ where: { id: frozen.chapter.id, authorId: ctx.userId, novelId: ctx.novelId }, select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
-    const source = frozen.sourceId ? await tx.chapter.findFirst({ where: { id: frozen.sourceId, novelId: ctx.novelId }, select: { id: true, revision: true, content: true } }) : null
+    const chapter = await tx.chapter.findFirst({ where: { id: frozen.chapter.id, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) }, select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
+    const source = frozen.sourceId ? await tx.chapter.findFirst({ where: { id: frozen.sourceId, ...activeChapterScope(ctx.novelId) }, select: { id: true, revision: true, content: true } }) : null
     if (!chapter || runtimeJson(chapter).hash !== runtimeJson(frozen.chapter).hash || (source ? runtimeJson(source).hash : null) !== frozen.coverage.sourceHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间正文或来源章节已变化，未应用旧结果。请读取当前正文和章节桥后重查。')
   }
   const execute = async (frozen: Work) => {
@@ -146,6 +148,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     }
     return commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
       ctx.signal.throwIfAborted()
+      await assertAgentManuscriptCurrent(tx, ctx)
       await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${frozen.compiler.id} FOR UPDATE`
       await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${frozen.chapter.id} FOR UPDATE`
       if (frozen.sourceId) await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${frozen.sourceId} FOR SHARE`
@@ -160,7 +163,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       let memoryJobId: string | null = null
       const revision = frozen.chapter.revision + (changed ? 1 : 0)
       if (changed) {
-        const updated = await tx.chapter.updateMany({ where: { id: frozen.chapter.id, authorId: ctx.userId, novelId: ctx.novelId, revision: frozen.chapter.revision, content: frozen.chapter.content }, data: { content: after, wordCount: after.length, revision: { increment: 1 } } })
+        const updated = await tx.chapter.updateMany({ where: { id: frozen.chapter.id, authorId: ctx.userId, ...activeChapterScope(ctx.novelId), revision: frozen.chapter.revision, content: frozen.chapter.content }, data: { content: after, wordCount: after.length, revision: { increment: 1 } } })
         if (updated.count !== 1) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '修订版本已变化，整次效果回滚。')
         await tx.sceneTask.updateMany({ where: { compilationId: frozen.compiler.id }, data: { chapterId: frozen.chapter.id, status: 'writing' } })
         await tx.chapterBridge.update({ where: { compilationId: frozen.compiler.id }, data: { toChapterId: frozen.chapter.id, targetRevision: revision } })

@@ -5,12 +5,18 @@ import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const fixture = vi.hoisted(() => {
-  const names = ['novel', 'volume', 'chapter', 'agentRun', 'agentSession', 'agentMessage', 'changeSet', 'aiModelConfig', 'novelImportIntent', 'novelImportJob', 'novelImportSource', 'novelImportManifest', 'novelImportApproval', 'novelImportCommit', 'novelImportBackup', 'novelImportGarbage']
+  const names = ['novel', 'volume', 'chapter', 'coverAsset', 'readingProgress', 'agentRun', 'agentQueuedRequest', 'agentSession', 'agentMessage', 'changeSet', 'aiModelConfig', 'novelImportIntent', 'novelImportJob', 'novelImportSource', 'novelImportManifest', 'novelImportApproval', 'novelImportCommit', 'novelImportBackup', 'novelImportGarbage', 'novelImportArtifact', 'novelImportEvent', 'projectMemoryEntry', 'memoryExtractionJob', 'storyEvent', 'storyEntity', 'foreshadowThread', 'entityRelation', 'storyCompilation', 'sceneTask', 'chapterBridge', 'chapterQualityReport', 'styleProfile', 'styleLearningJob']
   type Row = Record<string, unknown>
   const state: Record<string, Row[]> = Object.fromEntries(names.map(name => [name, []]))
   const matches = (row: Row, where: Row = {}): boolean => Object.entries(where).every(([key, value]) => {
     if (key === 'job') return matches(state.novelImportJob.find(job => job.id === row.jobId) ?? {}, value as Row)
     if (key === 'OR') return (value as Row[]).some(clause => matches(row, clause))
+    if (key === 'AND') return (value as Row[]).every(clause => matches(row, clause))
+    if (key === 'evidence') return ((row.evidence ?? []) as Row[]).some(e => matches(e, (value as Row).some as Row))
+    if (key === 'profile') return matches(state.styleProfile.find(p => p.id === row.profileId) ?? {}, value as Row)
+    if (key === 'session') return matches(state.agentSession.find(s => s.id === row.sessionId) ?? {}, value as Row)
+    if (key === 'patches') return ((row.patches ?? []) as Row[]).some(p => matches(p, (value as Row).some as Row))
+    if (key === 'jobId_kind') return matches(row, value as Row)
     if (key === 'jobId_revision') return matches(row, value as Row)
     if (value && typeof value === 'object' && !(value instanceof Date)) {
       const filter = value as Row
@@ -19,23 +25,24 @@ const fixture = vi.hoisted(() => {
       if ('gt' in filter) return Number(row[key]) > Number(filter.gt)
       if ('gte' in filter) return Number(row[key]) >= Number(filter.gte)
       if ('lte' in filter) return Number(row[key]) <= Number(filter.lte)
+      if ('startsWith' in filter) return typeof row[key] === 'string' && row[key].startsWith(String(filter.startsWith))
     }
     return row[key] === value
   })
   const modify = (row: Row, data: Row) => { for (const [key, value] of Object.entries(data)) row[key] = value && typeof value === 'object' && 'increment' in value ? Number(row[key] ?? 0) + Number(value.increment) : value }
   const delegates = Object.fromEntries(names.map(name => [name, {
-    findFirst: vi.fn(async ({ where = {} }: { where?: Row } = {}) => state[name].find(row => matches(row, where)) ?? null),
+    findFirst: vi.fn(async ({ where = {} }: { where?: Row } = {}) => { const row = state[name].find(row => matches(row, where)); return row ? { ...row } : null }),
     findUnique: vi.fn(async ({ where }: { where: Row }) => state[name].find(row => matches(row, where)) ?? null),
     findUniqueOrThrow: vi.fn(async ({ where }: { where: Row }) => { const row = state[name].find(row => matches(row, where)); if (!row) throw new Error('fixture missing'); return row }),
     findMany: vi.fn(async ({ where = {} }: { where?: Row } = {}) => state[name].filter(row => matches(row, where)).map(row => ({ ...row }))),
     count: vi.fn(async ({ where = {} }: { where?: Row } = {}) => state[name].filter(row => matches(row, where)).length),
-    create: vi.fn(async ({ data }: { data: Row }) => { const row = { createdAt: new Date(), status: 'uploading', jobVersion: 1, manifestRevision: 0, manifestHash: null, leaseEpoch: 0, leaseOwner: null, leaseUntil: null, parseEncoding: null, consumedAt: null, confirmationStep: 0, errorCode: null, ...data }; state[name].push(row); return { ...row } }),
+    create: vi.fn(async ({ data }: { data: Row }) => { const row = { createdAt: new Date(), status: 'uploading', jobVersion: 1, manifestRevision: 0, manifestHash: null, leaseEpoch: 0, leaseOwner: null, leaseUntil: null, parseEncoding: null, consumedAt: null, confirmationStep: 0, errorCode: null, restoredAt: null, restoreReceipt: null, restoreErrorCode: null, agentRunId: null, agentToolCallId: null, effectsPublishedAt: null, ...data }; state[name].push(row); return { ...row } }),
     createMany: vi.fn(async ({ data }: { data: Row[] }) => { state[name].push(...data.map(row => ({ archivedAt: null, archivedByImportId: null, revision: 1, publishedContent: null, publishedRevision: null, publishedAt: null, ...row }))); return { count: data.length } }),
     update: vi.fn(async ({ where, data }: { where: Row; data: Row }) => { const row = state[name].find(row => matches(row, where)); if (!row) throw new Error('fixture update missing'); modify(row, data); return { ...row } }),
     updateMany: vi.fn(async ({ where, data }: { where: Row; data: Row }) => { const rows = state[name].filter(row => matches(row, where)); rows.forEach(row => modify(row, data)); return { count: rows.length } }),
     deleteMany: vi.fn(async ({ where }: { where: Row }) => { const prior = state[name].length; state[name] = state[name].filter(row => !matches(row, where)); return { count: prior - state[name].length } }),
   }]))
-  const db = { ...delegates, $transaction: vi.fn() }
+  const db = { ...delegates, $transaction: vi.fn(), $queryRaw: vi.fn(async (_strings: unknown, novelId: string) => state.novel.filter(n => n.id === novelId).map(n => ({ id: n.id }))) }
   db.$transaction.mockImplementation(async (fn: (tx: typeof db) => Promise<unknown>) => {
     const backup = structuredClone(state)
     try { return await fn(db) } catch (error) { Object.assign(state, backup); throw error }
@@ -49,6 +56,16 @@ vi.mock('../api/lib/auth-session.js', async () => {
 })
 vi.mock('../api/lib/agent-attachment-storage.js', () => ({ assertManagedAttachmentAccess: fixture.attachmentAccess, readAuthorizedAgentAttachment: fixture.attachmentRead }))
 vi.mock('../api/lib/novel-import/isolated-parser.js', () => ({ parseNovelImportFileIsolated: fixture.parse }))
+vi.mock('../api/lib/novel-import/pipeline.js', () => ({ parseNovelImportDocument: async (bytes: Buffer, filename: string, options: { sourceId: string; sourceHash: string }) => {
+  const parsed = await fixture.parse(bytes, filename, options)
+  return { parsed, artifacts: [], report: { version: 1, sourceId: options.sourceId, sourceHash: options.sourceHash, parserVersion: parsed.parserVersion, complete: true,
+    items: [{ id: 'source-item', kind: 'file', source: filename, status: 'native', excludable: true }],
+    issues: parsed.warnings.filter((w: { code: string }) => !['IMPORT_CHAPTER_TOO_LARGE', 'IMPORT_CHAPTER_TOO_LONG'].includes(w.code)).map((w: { code: string; message: string; blocking: boolean }, i: number) => ({ ...w, id: `issue-${i}`, itemIds: ['source-item'], resolution: 'none' })) } }
+} }))
+vi.mock('../api/lib/novel-import/preview-storage.js', async original => ({ ...await original<typeof import('../api/lib/novel-import/preview-storage.js')>(), storePreviewParts: async (_claim: unknown, preview: unknown) => preview, storePreviewImages: async () => [] }))
+// This suite isolates transaction/HTTP permissions; report integrity has its own
+// real-helper suite, and real pipeline coverage remains in DB integration tests.
+vi.mock('../api/lib/novel-import/preview.js', async original => ({ ...await original<typeof import('../api/lib/novel-import/preview.js')>(), assertNovelImportPreviewComplete: vi.fn() }))
 vi.mock('../api/lib/novel-import-storage.js', async () => {
   const { createHash, randomUUID } = await import('node:crypto')
   const hash = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex')
@@ -64,14 +81,19 @@ vi.mock('../api/lib/novel-import-storage.js', async () => {
 
 import { DataAccessError } from '../api/lib/prisma.js'
 import { Prisma } from '@prisma/client'
-import { analyzeNovelImport, assertNovelImportRestoreBaseline, attachNovelImportSource, authenticateNovelImportHuman, cancelNovelImport, commitNovelImport, confirmNovelImport, confirmNovelImportIntent, editNovelImportPreview, getNovelImportPreview, getNovelImportStatus, hashNovelImportPreview, listNovelImports, novelImportCapabilities, novelImportTransaction, preflightNovelImport, prepareNovelImport, previewNovelImportRestore, restoreNovelImport, uploadNovelImportSource, type NovelImportHuman } from '../api/lib/novel-import-service.js'
+import { analyzeNovelImport, assertNovelImportHuman, assertNovelImportRestoreBaseline, attachNovelImportSource, authenticateNovelImportHuman, cancelNovelImport, commitNovelImport, confirmNovelImport, confirmNovelImportIntent, editNovelImportPreview, getNovelImportPreview, getNovelImportRestorePreview, getNovelImportStatus, hashNovelImportPreview, listNovelImports, novelImportCapabilities, novelImportTransaction, preflightNovelImport, prepareNovelImport, previewNovelImportRestore, restoreNovelImport, uploadNovelImportSource, type NovelImportHuman } from '../api/lib/novel-import-service.js'
 import { novelImportCommitSchema, novelImportSourceSchema } from '../shared/contracts/novel-import.js'
 import importRouter from '../api/routes/novel-imports.js'
+import { drainNovelImportEffects } from '../api/lib/novel-import-effects.js'
 
 const scope = { userId: 'user-a', novelId: 'novel-a' }
 const human = () => authenticateNovelImportHuman({ params: { novelId: scope.novelId }, headers: { 'x-test-user': scope.userId } } as unknown as Request)
 async function prepared() {
   const intent = await preflightNovelImport(scope)
+  if (intent.overwriteRequired) {
+    await confirmNovelImportIntent(human(), intent.intentId, 1, intent.targetHash)
+    await confirmNovelImportIntent(human(), intent.intentId, 2, intent.targetHash)
+  }
   const job = await prepareNovelImport(scope, intent.intentId)
   await uploadNovelImportSource(scope, job.jobId, 'original.txt', (async function* () { yield Buffer.from('第一章\n原文不改写') })())
   await analyzeNovelImport(scope, job.jobId)
@@ -84,19 +106,34 @@ async function approved() {
   const approval = await confirmNovelImport(human(), result.job.jobId, { manifestRevision: result.preview.manifestRevision, manifestHash: result.preview.manifestHash, targetHash: result.job.targetHash })
   return { ...result, approval, input: { approvalId: approval.approvalId, idempotencyKey: 'logical-import-operation' } }
 }
+function existingBook(content = '旧稿正文', published = false) {
+  vi.stubEnv('NOVEL_IMPORT_OVERWRITE_ENABLED', 'true')
+  const volume = { id: 'old-volume', novelId: scope.novelId, title: '旧卷', summary: null, orderIndex: 1, revision: 4, archivedAt: null, archivedByImportId: null }
+  const chapter = { id: 'old-chapter', novelId: scope.novelId, authorId: scope.userId, volumeId: volume.id, title: '旧章', summary: null, content, orderIndex: 1, orderInVolume: 1, wordCount: content.length, revision: 7, status: published ? 'published' : 'draft', visibility: 'public', archivedAt: null, archivedByImportId: null, publishedTitle: published ? '公开旧标题' : null, publishedContent: published ? '公开原文快照' : null, publishedRevision: published ? 5 : null, publishedAt: published ? new Date('2025-01-01') : null }
+  fixture.state.volume.push(volume); fixture.state.chapter.push(chapter)
+  Object.assign(fixture.state.novel[0], { chapterCount: 1, wordCount: content.length, lastChapterTitle: chapter.title })
+  return { volume: { ...volume }, chapter: { ...chapter } }
+}
+async function committedForRestore() {
+  const result = await approved()
+  const receipt = await commitNovelImport(scope, result.job.jobId, result.input)
+  const impact = await getNovelImportRestorePreview(scope, result.job.jobId)
+  const grant = await previewNovelImportRestore(human(), result.job.jobId, impact.currentTargetHash)
+  return { ...result, receipt, restoreInput: { restoreApprovalId: grant.restoreApprovalId, targetHash: grant.targetHash, idempotencyKey: 'restore-once-only' } }
+}
 
 beforeEach(() => {
   vi.clearAllMocks(); vi.stubEnv('NOVEL_IMPORT_ENABLED', 'true'); vi.stubEnv('NOVEL_IMPORT_OVERWRITE_ENABLED', 'false')
   for (const name of Object.keys(fixture.state)) fixture.state[name] = []
   fixture.blobs.clear()
-  fixture.state.novel.push({ id: scope.novelId, authorId: scope.userId, title: '原书', summary: '简介', tagNames: ['原标签'], status: 'draft', publishedAt: null, wordCount: 0, chapterCount: 0, lastChapterTitle: null })
+  fixture.state.novel.push({ id: scope.novelId, authorId: scope.userId, title: '原书', summary: '简介', tagNames: ['原标签'], status: 'draft', publishedAt: null, wordCount: 0, chapterCount: 0, lastChapterTitle: null, manuscriptRevision: 0 })
   fixture.parse.mockResolvedValue({ volumes: [{ title: '正文卷', chapters: [{ title: '第一章', content: '原文不改写', source: 'original.txt#char=0-8' }] }], metadata: { title: '候选书名' }, warnings: [], sourceChars: 8, parserVersion: 'fixture-1' })
 })
 
 describe('staged import authorization and durability (DB mocked; not concurrency release evidence)', () => {
-  it('is default OFF and environment variables cannot enable unaudited overwrite/restore', () => {
+  it('keeps new imports opt-in while history restoration survives the kill switch', () => {
     vi.stubEnv('NOVEL_IMPORT_ENABLED', ''); vi.stubEnv('NOVEL_IMPORT_OVERWRITE_ENABLED', 'true')
-    expect(novelImportCapabilities()).toMatchObject({ enabled: false, overwriteEnabled: false, overwriteVerified: false, restoreEnabled: false, aiEnabled: false })
+    expect(novelImportCapabilities()).toMatchObject({ enabled: false, overwriteEnabled: false, overwriteVerified: true, restoreEnabled: true, aiEnabled: true })
   })
   it('fails closed for another owner before reading any private source', async () => {
     await expect(getNovelImportStatus({ ...scope, userId: 'user-b' }, randomUUID())).rejects.toMatchObject({ code: 'NOVEL_NOT_FOUND' })
@@ -118,15 +155,19 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     expect(fixture.db.volume.updateMany).not.toHaveBeenCalled()
     expect(fixture.db.chapter.updateMany).not.toHaveBeenCalled()
   })
-  it('blocks retained publication snapshots regardless of chapter/novel status', async () => {
+  it('keeps retained publication snapshots visible and never edits their identity', async () => {
     fixture.state.chapter.push({ id: 'archived', novelId: scope.novelId, status: 'draft', archivedAt: new Date(), publishedContent: '公开历史', publishedAt: null, publishedRevision: 2 })
-    await expect(preflightNovelImport(scope)).rejects.toMatchObject({ code: 'IMPORT_PUBLISHED_OVERWRITE_BLOCKED' })
+    const old = { ...fixture.state.chapter[0] }
+    const result = await approved(); await commitNovelImport(scope, result.job.jobId, result.input)
+    expect(fixture.state.chapter[0]).toEqual(old)
   })
   it('does not accept booleans or forged human capabilities', async () => {
     expect(novelImportCommitSchema.safeParse({ confirmed: true }).success).toBe(false)
     expect(novelImportSourceSchema.safeParse({ filename: 'x', arbitrary: 'unbounded input' }).success).toBe(false)
     await expect(confirmNovelImportIntent(scope as NovelImportHuman, randomUUID(), 1, 'hash')).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
     await expect(editNovelImportPreview(scope as NovelImportHuman, randomUUID(), {})).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
+    expect(() => assertNovelImportHuman(scope as NovelImportHuman)).toThrow(expect.objectContaining({ code: 'IMPORT_APPROVAL_REQUIRED' }))
+    expect(() => assertNovelImportHuman(human())).not.toThrow()
   })
   it('requires two independent ordered requests and rejects duplicate/skip steps', async () => {
     const intent = await preflightNovelImport(scope)
@@ -297,17 +338,202 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     expect(complete.volumes[0].chapters.map(c => c.content).join('')).toBe(original)
     expect(complete.warnings.some(w => w.blocking)).toBe(false)
   })
-  it('restore is failclosed during rollout, even for a verified human and a succeeded job', async () => {
-    const result = await approved(); await commitNovelImport(scope, result.job.jobId, result.input)
-    await expect(previewNovelImportRestore(human(), result.job.jobId)).rejects.toMatchObject({ code: 'IMPORT_RESTORE_DISABLED' })
-    await expect(restoreNovelImport(human(), result.job.jobId, { restoreApprovalId: randomUUID(), targetHash: result.job.targetHash })).rejects.toMatchObject({ code: 'IMPORT_RESTORE_DISABLED' })
-    expect(fixture.state.chapter[0].archivedAt).toBeNull()
+  it('restores even an initially empty book with independent approval and durable exact replay', async () => {
+    const result = await approved(); const committed = await commitNovelImport(scope, result.job.jobId, result.input)
+    const impact = await getNovelImportRestorePreview(scope, result.job.jobId)
+    expect(impact).toMatchObject({ canRestore: true, before: { volumes: 0, chapters: 0 }, current: { volumes: 1, chapters: 1 } })
+    expect(fixture.state.novelImportApproval).toHaveLength(1) // read only
+    vi.stubEnv('NOVEL_IMPORT_ENABLED', 'false')
+    const approval = await previewNovelImportRestore(human(), result.job.jobId, impact.currentTargetHash)
+    const input = { restoreApprovalId: approval.restoreApprovalId, targetHash: approval.targetHash, idempotencyKey: 'restore-operation' }
+    const receipt = await restoreNovelImport(human(), result.job.jobId, input)
+    expect(receipt).toMatchObject({ restored: true, restoredChapterCount: 0, restoredVolumeCount: 0 })
+    expect(fixture.state.chapter[0].archivedAt).toBeInstanceOf(Date)
+    expect(fixture.state.novel[0].manuscriptRevision).toBe(2)
+    expect(fixture.state.novel[0].chapterCount).toBe(0)
+    fixture.blobs.clear(); fixture.state.novelImportBackup[0].expiresAt = new Date(0)
+    fixture.state.novel[0].summary = '恢复之后的新修改'
+    expect(await restoreNovelImport(human(), result.job.jobId, input)).toEqual(receipt)
+    await expect(restoreNovelImport(human(), result.job.jobId, { ...input, idempotencyKey: 'another-restore' })).rejects.toMatchObject({ code: 'IMPORT_IDEMPOTENCY_CONFLICT' })
+    expect(fixture.state.novelImportCommit[0].receipt).toEqual(committed)
+    expect(await getNovelImportStatus(scope, result.job.jobId)).toMatchObject({ source: { filename: 'original.txt' }, restore: { status: 'restored', receipt } })
   })
   it('restore baseline rejects changed current content, request or grant instead of overwriting edits', () => {
     expect(() => assertNovelImportRestoreBaseline('same', 'same')).not.toThrow()
     for (const hashes of [['edited', 'old', 'old', 'old'], ['old', 'old', 'stale', 'old'], ['old', 'old', 'old', 'stale']]) {
       expect(() => assertNovelImportRestoreBaseline(...hashes as [string, string, string, string])).toThrow(expect.objectContaining({ code: 'IMPORT_RESTORE_CONFLICT' }))
     }
+  })
+  it('counts an empty existing chapter as overwrite, requiring both HTTP confirmations', async () => {
+    existingBook('')
+    const intent = await preflightNovelImport(scope)
+    expect(intent).toMatchObject({ chapterCount: 1, nonEmptyChapterCount: 0, overwriteRequired: true })
+    await expect(prepareNovelImport(scope, intent.intentId)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
+    await confirmNovelImportIntent(human(), intent.intentId, 1, intent.targetHash)
+    await expect(prepareNovelImport(scope, intent.intentId)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
+    await confirmNovelImportIntent(human(), intent.intentId, 2, intent.targetHash)
+    expect((await prepareNovelImport(scope, intent.intentId)).status).toBe('uploading')
+  })
+  it('archives and restores the same old IDs without changing published snapshot/order/title', async () => {
+    const old = existingBook('旧草稿正文', true)
+    const result = await committedForRestore()
+    expect(fixture.state.chapter[0]).toMatchObject({ ...old.chapter, archivedAt: expect.any(Date), archivedByImportId: result.job.jobId, revision: 8 })
+    expect(fixture.state.volume[0]).toMatchObject({ ...old.volume, archivedAt: expect.any(Date), archivedByImportId: result.job.jobId, revision: 5 })
+    expect(fixture.state.chapter[1]).toMatchObject({ status: 'draft', visibility: 'private', publishedContent: null })
+    // Public comments/views are not creative edits and don't invalidate restoration.
+    Object.assign(fixture.state.chapter[0], { commentCount: 19, updatedAt: new Date() })
+    await restoreNovelImport(human(), result.job.jobId, result.restoreInput)
+    expect(fixture.state.chapter[0]).toMatchObject({ ...old.chapter, revision: 9 })
+    expect(fixture.state.volume[0]).toMatchObject({ ...old.volume, revision: 6 })
+    expect(fixture.state.chapter).toHaveLength(2)
+    expect(fixture.state.chapter[1].archivedAt).toBeInstanceOf(Date)
+    expect(fixture.state.novelImportCommit).toHaveLength(1)
+    expect(fixture.db.chapter.deleteMany).not.toHaveBeenCalled()
+    expect(fixture.db.volume.deleteMany).not.toHaveBeenCalled()
+  })
+  it('invalidates derived source facts atomically, keeps manual prose and does not revive old derivations', async () => {
+    existingBook()
+    fixture.state.projectMemoryEntry.push(
+      { id: 'auto', novelId: scope.novelId, sourceChapterId: 'old-chapter', status: 'confirmed', version: 2, content: '自动事实' },
+      { id: 'human-linked', novelId: scope.novelId, sourceChapterId: null, evidence: [{ sourceType: 'volume', sourceId: 'old-volume' }], status: 'confirmed', version: 1, content: '人工写的关联记忆' },
+      { id: 'human-independent', novelId: scope.novelId, sourceChapterId: null, status: 'confirmed', version: 1, content: '独立作者设定' },
+    )
+    fixture.state.memoryExtractionJob.push({ id: 'extract', novelId: scope.novelId, chapterId: 'old-chapter', status: 'processing' })
+    fixture.state.chapterBridge.push({ id: 'bridge', novelId: scope.novelId, committedAt: new Date(), sourceRevision: 7 })
+    fixture.state.styleProfile.push({ id: 'style', novelId: scope.novelId, confirmed: true })
+    fixture.state.styleLearningJob.push({ id: 'learning', profileId: 'style', status: 'running', claimToken: 'stale-token', revision: 3 })
+    const result = await committedForRestore()
+    expect(fixture.state.projectMemoryEntry[0]).toMatchObject({ status: 'invalid', reviewStatus: 'pending', content: '自动事实', version: 3 })
+    expect(fixture.state.projectMemoryEntry[1]).toMatchObject({ status: 'invalid', reviewStatus: 'pending', content: '人工写的关联记忆' })
+    expect(fixture.state.projectMemoryEntry[2]).toMatchObject({ status: 'confirmed', version: 1 })
+    expect(fixture.state.memoryExtractionJob[0]).toMatchObject({ status: 'failed', errorMessage: 'IMPORT_SOURCE_ARCHIVED' })
+    expect(fixture.state.chapterBridge[0]).toMatchObject({ committedAt: null, sourceRevision: -1 })
+    expect(fixture.state.styleLearningJob[0]).toMatchObject({ status: 'paused', claimToken: null, revision: 4, enabled: false })
+    await restoreNovelImport(human(), result.job.jobId, result.restoreInput)
+    expect(fixture.state.projectMemoryEntry[0].status).toBe('invalid')
+  })
+  it.each(['content', 'title', 'revision', 'orderIndex', 'volumeId', 'publishedContent'])('target hash binds chapter %s changes, even without a count change', async field => {
+    existingBook()
+    const result = await approved()
+    fixture.state.chapter[0][field] = ['revision', 'orderIndex'].includes(field) ? 12 : 'changed'
+    await expect(commitNovelImport(scope, result.job.jobId, result.input)).rejects.toMatchObject({ code: 'IMPORT_TARGET_CHANGED' })
+    expect(fixture.state.novelImportCommit).toHaveLength(0)
+    expect(fixture.state.chapter[0].archivedAt).toBeNull()
+  })
+  it('a manuscript epoch change prevents ABA reuse of unchanged text and counts', async () => {
+    const result = await approved()
+    fixture.state.novel[0].manuscriptRevision = 2
+    await expect(commitNovelImport(scope, result.job.jobId, result.input)).rejects.toMatchObject({ code: 'IMPORT_TARGET_CHANGED' })
+  })
+  it.each(['intent', 'approval'])('expired %s cannot be consumed to overwrite', async kind => {
+    existingBook()
+    const result = await approved()
+    fixture.state[kind === 'intent' ? 'novelImportIntent' : 'novelImportApproval'][0].expiresAt = new Date(0)
+    await expect(commitNovelImport(scope, result.job.jobId, result.input)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_EXPIRED' })
+    expect(fixture.state.chapter[0].archivedAt).toBeNull()
+    expect(fixture.state.novelImportApproval[0].consumedAt).toBeNull()
+  })
+  it('rolls back old archival and dependent invalidation if insertion fails', async () => {
+    existingBook()
+    const result = await approved()
+    const before = structuredClone(fixture.state)
+    fixture.db.chapter.createMany.mockRejectedValueOnce(new Error('disk unavailable'))
+    await expect(commitNovelImport(scope, result.job.jobId, result.input)).rejects.toThrow('disk unavailable')
+    expect(fixture.state).toEqual(before)
+  })
+  it('mutation row-count mismatch aborts the whole import rather than accepting partial writes', async () => {
+    existingBook(); const result = await approved()
+    fixture.db.chapter.updateMany.mockResolvedValueOnce({ count: 0 })
+    await expect(commitNovelImport(scope, result.job.jobId, result.input)).rejects.toMatchObject({ code: 'IMPORT_TARGET_CHANGED' })
+    expect(fixture.state.chapter[0].archivedAt).toBeNull()
+    expect(fixture.state.novelImportBackup).toHaveLength(0)
+  })
+  it.each(['current-content', 'current-metadata', 'retained-content', 'retained-missing'])('restore refuses %s changes and persists a conflict without partial writes', async change => {
+    existingBook(); const result = await committedForRestore()
+    if (change === 'current-content') fixture.state.chapter[1].content = '新写的内容不能丢'
+    if (change === 'current-metadata') fixture.state.novel[0].summary = '新简介不能丢'
+    if (change === 'retained-content') fixture.state.chapter[0].content = '原备份被改'
+    if (change === 'retained-missing') fixture.state.chapter.shift()
+    const chapters = structuredClone(fixture.state.chapter)
+    await expect(restoreNovelImport(human(), result.job.jobId, result.restoreInput)).rejects.toMatchObject({ code: 'IMPORT_RESTORE_CONFLICT' })
+    expect(fixture.state.chapter).toEqual(chapters)
+    expect(await getNovelImportStatus(scope, result.job.jobId)).toMatchObject({ restore: { status: 'restore_conflict' } })
+  })
+  it('expired and superseded restore grants cannot consume a backup', async () => {
+    const result = await committedForRestore()
+    const first = fixture.state.novelImportApproval.find(a => a.id === result.restoreInput.restoreApprovalId)!
+    first.expiresAt = new Date(0)
+    await expect(restoreNovelImport(human(), result.job.jobId, result.restoreInput)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_EXPIRED' })
+    const second = await previewNovelImportRestore(human(), result.job.jobId, result.restoreInput.targetHash)
+    await previewNovelImportRestore(human(), result.job.jobId, result.restoreInput.targetHash)
+    await expect(restoreNovelImport(human(), result.job.jobId, { ...result.restoreInput, restoreApprovalId: second.restoreApprovalId })).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_EXPIRED' })
+    expect(fixture.state.novelImportBackup[0].restoredAt).toBeNull()
+  })
+  it('restore requires a human grant, matching input baseline and an available backup', async () => {
+    const result = await committedForRestore()
+    await expect(restoreNovelImport(scope as NovelImportHuman, result.job.jobId, result.restoreInput)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
+    await expect(restoreNovelImport(human(), result.job.jobId, { ...result.restoreInput, restoreApprovalId: result.approval.approvalId })).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
+    await expect(restoreNovelImport(human(), result.job.jobId, { ...result.restoreInput, targetHash: 'a'.repeat(64) })).rejects.toMatchObject({ code: 'IMPORT_RESTORE_CONFLICT' })
+    fixture.state.novelImportBackup[0].expiresAt = new Date(0)
+    await expect(restoreNovelImport(human(), result.job.jobId, result.restoreInput)).rejects.toMatchObject({ code: 'IMPORT_RESTORE_UNAVAILABLE' })
+  })
+  it('restore rollback keeps both versions and its grant when the final receipt cannot persist', async () => {
+    existingBook(); const result = await committedForRestore()
+    const before = structuredClone(fixture.state)
+    fixture.db.novelImportBackup.update.mockRejectedValueOnce(new Error('receipt write failed'))
+    await expect(restoreNovelImport(human(), result.job.jobId, result.restoreInput)).rejects.toThrow('receipt write failed')
+    expect(fixture.state).toEqual(before)
+  })
+  it('shared lock precedes archival and raw SQL deadlocks retry only within the bound', async () => {
+    existingBook(); const result = await approved()
+    await commitNovelImport(scope, result.job.jobId, result.input)
+    expect(fixture.db.$queryRaw.mock.invocationCallOrder.at(-2)).toBeLessThan(fixture.db.chapter.updateMany.mock.invocationCallOrder[0])
+    const conflict = new Prisma.PrismaClientKnownRequestError('deadlock', { code: 'P2010', meta: { code: '40P01' }, clientVersion: '6.12.0' })
+    fixture.db.$transaction.mockRejectedValueOnce(conflict)
+    expect(await novelImportTransaction(async () => 'retried')).toBe('retried')
+  })
+  it('queued Agent prompts cannot be silently dispatched into an imported manuscript', async () => {
+    const result = await approved()
+    fixture.state.agentSession.push({ id: 'session', novelId: scope.novelId })
+    fixture.state.agentQueuedRequest.push({ id: 'request', sessionId: 'session', status: 'pending' })
+    await expect(commitNovelImport(scope, result.job.jobId, result.input)).rejects.toMatchObject({ code: 'IMPORT_WRITE_BUSY' })
+    expect(fixture.state.novelImportCommit).toHaveLength(0)
+  })
+  it('a stopped Agent origin does not permanently lock a valid human-owned preview', async () => {
+    const result = await approved()
+    fixture.state.novelImportJob[0].agentRunId = 'stopped-origin'
+    fixture.state.novelImportJob[0].agentToolCallId = 'old-call'
+    fixture.state.agentRun.push({ id: 'stopped-origin', novelId: scope.novelId, status: 'paused' })
+    expect((await commitNovelImport(scope, result.job.jobId, result.input)).chapterCount).toBe(1)
+  })
+  it('marks retryable old patches permanently stale across import/restore, retaining all history', async () => {
+    existingBook()
+    fixture.state.changeSet.push({ id: 'stale-set', novelId: scope.novelId, status: 'failed', validations: [{ code: 'prior', status: 'failed', message: '旧提示' }], patches: [{ targetType: 'chapter', targetId: 'old-chapter', after: '不得自动应用' }] })
+    const result = await committedForRestore()
+    expect(fixture.state.changeSet[0].validations).toContainEqual(expect.objectContaining({ code: 'IMPORT_SCOPE_CHANGED', status: 'failed' }))
+    expect(fixture.state.changeSet[0].patches).toEqual([{ targetType: 'chapter', targetId: 'old-chapter', after: '不得自动应用' }])
+    await restoreNovelImport(human(), result.job.jobId, result.restoreInput)
+    expect(fixture.state.changeSet[0].validations).toContainEqual(expect.objectContaining({ code: 'IMPORT_SCOPE_CHANGED' }))
+  })
+  it('outbox failure rolls back its event and marker, then retries exactly once even with imports disabled', async () => {
+    const result = await approved(); await commitNovelImport(scope, result.job.jobId, result.input)
+    vi.stubEnv('NOVEL_IMPORT_ENABLED', 'false')
+    fixture.db.novelImportCommit.update.mockRejectedValueOnce(new Error('marker persistence failed'))
+    expect(await drainNovelImportEffects({ jobIds: [result.job.jobId] })).toEqual({ processed: 0, failed: 1 })
+    expect(fixture.state.novelImportEvent).toHaveLength(0)
+    expect(fixture.state.novelImportCommit[0].effectsPublishedAt).toBeNull()
+    expect(await drainNovelImportEffects({ jobIds: [result.job.jobId] })).toEqual({ processed: 1, failed: 0 })
+    expect(await drainNovelImportEffects({ jobIds: [result.job.jobId] })).toEqual({ processed: 0, failed: 0 })
+    expect(fixture.state.novelImportEvent).toHaveLength(1)
+    expect(await getNovelImportStatus(scope, result.job.jobId)).toMatchObject({ effects: { status: 'published', kind: 'imported' } })
+  })
+  it('outbox projects both import and restore if the server was offline between the two', async () => {
+    const result = await committedForRestore()
+    await restoreNovelImport(human(), result.job.jobId, result.restoreInput)
+    expect(await drainNovelImportEffects({ jobIds: [result.job.jobId] })).toEqual({ processed: 1, failed: 0 })
+    expect(fixture.state.novelImportEvent.map(e => e.kind)).toEqual(['imported', 'restored'])
+    expect(await getNovelImportStatus(scope, result.job.jobId)).toMatchObject({ effects: { status: 'published', kind: 'restored' } })
+    await expect(drainNovelImportEffects({ jobIds: ['not-a-owned-uuid'] })).rejects.toThrow('Invalid bounded')
   })
   it('attachment handoff rejects URLs not in the original user message before reading bytes', async () => {
     const intent = await preflightNovelImport(scope); const job = await prepareNovelImport(scope, intent.intentId)
@@ -347,7 +573,7 @@ describe('import HTTP boundary', () => {
   it('authenticates before parsing bodies or exposing capabilities', async () => {
     expect((await request(app).get(`${base}/capabilities`)).status).toBe(401)
     expect((await request(app).post(`${base}/preflight`).type('json').send('{invalid')).status).toBe(401)
-    expect((await request(app).get(`${base}/capabilities`).set('x-test-user', scope.userId)).body.data.restoreEnabled).toBe(false)
+    expect((await request(app).get(`${base}/capabilities`).set('x-test-user', scope.userId)).body.data.restoreEnabled).toBe(true)
   })
   it('rejects cross-site Origin even without fetch metadata and blocks HTML form intents', async () => {
     expect((await request(app).post(`${base}/preflight`).set('x-test-user', scope.userId).set('Origin', 'https://evil.example').send({})).status).toBe(403)
@@ -375,6 +601,7 @@ describe('import HTTP boundary', () => {
   it('limits small mutation bodies to 16KiB but allows a larger valid manifest', async () => {
     const tooBig = await request(app).post(`${base}/preflight`).set('x-test-user', scope.userId).send({ ignored: 'x'.repeat(17_000) })
     expect(tooBig.status).toBe(413)
+    fixture.parse.mockResolvedValueOnce({ volumes: [{ title: '卷', chapters: [{ title: '长原文', content: '原'.repeat(20_000), source: 'original.txt' }] }], metadata: {}, warnings: [], sourceChars: 20_000, parserVersion: 'fixture-1' })
     const { job, preview } = await prepared()
     const edited = await request(app).patch(`${base}/${job.jobId}/manifest`).set('x-test-user', scope.userId).send({ expectedManifestRevision: 1, volumes: [{ ...preview.volumes[0], chapters: [{ ...preview.volumes[0].chapters[0], content: '原'.repeat(20_000) }] }] })
     expect(edited.status).toBe(200)

@@ -1,12 +1,42 @@
-# Isolated document import worker prototype
+# Isolated document import worker and business parser
 
 [简体中文](./README.zh-CN.md)
 
-Scope: plan32 DOC conversion and offline PDF/image OCR, not authentication, chapter parsing, storage, billing or import commit. This is a container-ready prototype, **not a native-tested or deploy-approved capability**. No parser, root package, database schema, route or UI files are changed by this work.
+Scope: plan32 DOC conversion, offline PDF/image OCR and the API-side isolated parsing pipeline. Authentication, private persistence, human decisions, billing and import commit remain the application service's responsibility. **Native acceptance requires the actual same-SHA CI result; adding this workflow is not evidence of passing native tests.** No production document testing is authorized.
+
+## Current application entry and release handoff (2026-09-14)
+
+`api/lib/novel-import/runtime.ts` exports `parseConfiguredNovelImportDocument(buffer, filename, {sourceId, sourceHash?, encoding?, signal?, deadlineAt?})`. The optional absolute Unix-millisecond `deadlineAt` is the persisted job deadline, reused after recovery. Results are `{parsed, report, artifacts}`; artifacts contain bounded sanitized PNG bytes and MUST be stored privately before the machine-only `IMPORT_IMAGE_STORAGE_REQUIRED` check can be cleared. Human review cannot waive storage. IDs and page/member/block evidence stay bound to the source hash; image/cover candidates are never applied automatically.
+
+DOC/PDF, including ZIP members, use the explicitly configured native worker. DOCX/ZIP images receive offline OCR when native is enabled; original paragraphs remain unchanged and OCR text is placed in a visible “unassigned image text” volume for human placement. Native jobs have a 30-minute absolute deadline; TXT/MD remain capped at 120 seconds, converter subprocesses at 120 seconds and regional OCR at a shared 60 seconds per page. The caller must enforce durable leases, fencing and a bounded global claim pool. Runtime also prevents concurrent native jobs in one supervisor.
+
+The separate workflow `.github/workflows/document-import-native.yml` builds **only** `workers/document-import` as its Docker context and runs required Linux native acceptance. Missing Linux/image prerequisites fail required CI instead of silently skipping. Tests include a genuine OLE DOC with converted XML text checks, mixed PDF, PNG OCR, an image-only Chinese PDF with fixed self-authored gold text, the real client protocol/hash/cancel/cleanup path, and dependency health. The Chinese gate is CER ≤2% after removing Unicode whitespace only; raw CER, exact normalization, reference/source/recognized hashes are also emitted. This clean-print corpus does not validate handwriting or all adversarial documents.
+
+Successful CI artifacts for the **same commit**:
+
+- `document-import-native-evidence-<SHA>`: exact `document-import-image.id` and `document-import-native-report.json`.
+- `document-import-worker-<SHA>`: `document-import-worker.tar.gz`, saved from the image that passed those tests. This workflow never pushes a registry image or deploys anything.
+
+Authorized operator handoff (instructions only, not commands executed by this task):
+
+1. Require the full application CI and dedicated native workflow for the same SHA to pass. Download both artifacts from that run and keep the evidence with the release.
+2. Load the saved tar with `docker load --input <downloaded-document-import-worker.tar.gz>`; **do not rebuild on the server**. Check `docker image inspect --format '{{.Id}}' <ID-from-document-import-image.id>` exactly equals that complete `sha256:...` ID. Never substitute a mutable tag or the base-image digest.
+3. Provision `/opt/chevoink/shared/document-import-staging` owned by the API service account with mode `0700`. It is outside uploads/public directories. The approved service account needs controlled access to the local Docker daemon; the container itself never receives that socket.
+4. Set operator environment (separate from the main import/overwrite flags):
+
+   ```dotenv
+   NOVEL_IMPORT_NATIVE_ENABLED=true
+   DOCUMENT_IMPORT_WORKER_IMAGE=sha256:<exact-ID-from-successful-CI>
+   DOCUMENT_IMPORT_WORKER_STAGING_ROOT=/opt/chevoink/shared/document-import-staging
+   ```
+
+5. From the release checkout, run the internal command with the provisioned service environment: `node --import tsx workers/document-import/health-cli.ts`. Exit 0 plus `ready:true` requires actual sandboxed tool/version/library/language-data self-checks. It performs **zero document conversion, zero OCR and zero synthetic document processing**. Do not expose it as a public HTTP endpoint. Production DOC/OCR document tests remain prohibited.
+
+The Docker client is fixed to `unix:///var/run/docker.sock`, with no inherited remote context/config or credentials. Native disabled returns the deterministic pipeline; configured-but-unhealthy native fails closed rather than silently switching parsers. A health result is dependency readiness, not a substitute for CI quality acceptance. Release-wide archive/restore/Agent/native-client acceptance is separately owned and is not granted by this worker flag.
 
 ## Integration
 
-The only API-side module is `api/lib/novel-import/worker-client.ts`. Reuse one client instance per supervisor process (one active execution, no hidden queue). API orchestration must enforce global and per-user quotas, ownership, leases/fencing, cancellation and original-source retention.
+The low-level API-side module is `api/lib/novel-import/worker-client.ts`; application code uses the runtime entry above. Reuse one client instance per supervisor process (one active execution, no hidden queue). API orchestration must enforce global and per-user quotas, ownership, leases/fencing, cancellation and original-source retention.
 
 ```ts
 const worker = createDocumentImportWorker({

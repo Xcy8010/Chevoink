@@ -29,6 +29,7 @@ type Props = {
   onExport: () => void
   /** Only pass when the authenticated server import capability is enabled. */
   onImport?: () => void
+  onImportHistory?: () => void
   onDeleteNovel: () => void
   /** 顶部「作品」菜单的结构操作 */
   onCreateVolume?: () => void
@@ -101,6 +102,7 @@ export default function StudioCommandBar(props: Props) {
           {completionButton}
           {props.onImport ? <button type="button" className={cn(item, 'min-h-11')} onClick={() => { menuRef.current?.querySelector<HTMLElement>('button[aria-expanded="true"]')?.focus(); closeMenu(); props.onImport?.() }}><Upload className="h-3.5 w-3.5" />一键导入</button> : null}
           <button type="button" className={item} onClick={() => { closeMenu(); props.onExport() }}><FolderDown className="h-3.5 w-3.5" />一键导出</button>
+          {props.onImportHistory ? <button type="button" className={cn(item, 'min-h-11')} onClick={() => { menuRef.current?.querySelector<HTMLElement>('button[aria-expanded="true"]')?.focus(); closeMenu(); props.onImportHistory?.() }}><RotateCcw className="h-3.5 w-3.5" />导入记录与恢复</button> : null}
           <div className="mx-2 my-1 border-t border-[var(--border-subtle)]" />
           <button type="button" className={cn(item, 'text-rose-600')} onClick={() => { closeMenu(); props.onDeleteNovel() }}><Trash2 className="h-3.5 w-3.5" />删除作品</button>
         </>

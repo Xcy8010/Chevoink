@@ -883,6 +883,8 @@ const ToolCallCard = memo(function ToolCallCard({
   const argumentRows = useMemo(() => describeToolArguments(part.args), [part.args])
   const durationLabel = formatToolDuration(part.durationMs)
   const running = part.status === 'running'
+  const importWaiting = running && part.toolName === 'novel_import' && part.importWaiting
+    && /^\/studio\/novel\/[^/?#]+\?/.test(part.importWaiting.url) ? part.importWaiting : null
   const writeTool = WRITE_TOOL_NAMES.has(part.toolName)
   const workflowDisplay = part.display?.kind === 'storyCompiler' || part.display?.kind === 'qualityReport'
   const workflowDisplayHasBody = part.display?.kind !== 'storyCompiler'
@@ -911,7 +913,7 @@ const ToolCallCard = memo(function ToolCallCard({
       ? argsRecord.query
       : ''
   const runningLabel =
-    running && webSearchQuery
+    importWaiting ? '等待作者确认' : running && webSearchQuery
       ? `正在搜索「${webSearchQuery}」…`
       : running && platformSearchQuery
         ? `正在搜索作品「${platformSearchQuery}」…`
@@ -973,6 +975,10 @@ const ToolCallCard = memo(function ToolCallCard({
             ) : rowExpandable ? <button type="button" onClick={() => setExpanded((value) => !value)} aria-label={expanded ? '收起工具详情' : '展开工具详情'} className="absolute inset-0 z-0" /> : null}
             {headerContent}
           </div>}
+      {importWaiting ? <p className="pb-2 pl-[22px] text-xs leading-5">
+        <a className="underline" href={importWaiting.url}>核对原文并确认导入</a>
+        <span className="ml-2 text-[var(--text-secondary)]">尚未导入；已有章节需要两次覆盖确认。</span>
+      </p> : null}
       {part.summary ? (
         <p
           className={cn(

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { DataAccessError } from '../../prisma.js'
+import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import { getStructureRevisionHash } from '../../data/volume.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
 import { readExecutionStateInTransaction } from '../runtime-state.js'
@@ -34,6 +35,7 @@ export async function executeDurableStructure(ctx: ToolContext, tool: AgentTool,
   if ('rejected' in prepared) return prepared.rejected
   const receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()
+    await assertAgentManuscriptCurrent(tx, ctx)
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '结构操作不属于原任务。')
     const observed = await readObservedBaseline(tx, root.id, cursor.expectedRevision, { kind: 'structure', id: ctx.novelId })

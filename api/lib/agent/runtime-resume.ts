@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
+import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { env } from '../../config/env.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeJson, runtimeTransaction } from './runtime-common.js'
@@ -25,6 +26,7 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
     // Shared by durable resume admissions across processes; never hold over HTTP.
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${captured.userId}`}, 0))::text`
     const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
+    await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: run.id, novelId: run.novelId })
     if (root.authorizationMode !== 'legacy') runtimeError('TASK_AUTHORIZATION_NOT_ACTIVATED', '阶段授权执行器尚未接入，不能降级恢复。')
     const pause = await tx.agentExecutionOutbox.findUnique({ where: { id: captured.pauseEventId } })
     const parsedPause = pausePayload.safeParse(pause?.payload)
@@ -65,7 +67,7 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
     if (await tx.agentRunLease.count({ where: { run: { taskRootId: root.id }, enabled: true } })) runtimeError('RUNTIME_STATE_CONFLICT', '暂停的所有权撤销尚未完整，不能恢复。')
     const now = await databaseNow(tx)
     const resumed = await tx.agentRun.create({ data: { id: resumedRunId, userId: run.userId, sessionId: run.sessionId,
-      novelId: run.novelId, chapterId: run.chapterId, engine: 'loop', mode: state.configuration.mode === 'build' ? 'act' : state.configuration.mode,
+      novelId: run.novelId, manuscriptRevision: run.manuscriptRevision, chapterId: run.chapterId, engine: 'loop', mode: state.configuration.mode === 'build' ? 'act' : state.configuration.mode,
       action: run.action, agentType: run.agentType, status: 'queued', taskRootId: root.id, runtimeProtocolVersion: root.protocolVersion,
       taskSpec: runtimeJson({ ...spec.data, runId: resumedRunId }).value, currentTurn: state.frame.state.turn,
       ...(run.startRequest !== null ? { startRequest: runtimeJson(run.startRequest).value } : {}),

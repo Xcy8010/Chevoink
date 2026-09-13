@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
+  transaction: vi.fn(), query: vi.fn(),
   owned: vi.fn(), find: vi.fn(), unique: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn(), many: vi.fn(), latest: vi.fn(), start: vi.fn(), active: vi.fn(), activeId: vi.fn(), stop: vi.fn(), fork: vi.fn(),
 }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } },
-  prisma: { user: { findUnique: async () => ({ bannedAt: null }) }, agentSession: { findFirst: mocks.owned }, agentRun: { findFirst: mocks.latest }, agentQueuedRequest: { findFirst: mocks.find, findUnique: mocks.unique, count: mocks.count, create: mocks.create, updateMany: mocks.update, findMany: mocks.many } },
+  prisma: { $transaction: mocks.transaction, user: { findUnique: async () => ({ bannedAt: null }) }, agentSession: { findFirst: mocks.owned }, agentRun: { findFirst: mocks.latest }, agentQueuedRequest: { findFirst: mocks.find, findUnique: mocks.unique, count: mocks.count, create: mocks.create, updateMany: mocks.update, findMany: mocks.many } },
 }))
 vi.mock('../../api/lib/agent/run-service.js', () => ({ startLoopRunLocked: mocks.start, forkAgentSessionData: mocks.fork, toAgentSession: (s: unknown) => s }))
 vi.mock('../../api/lib/agent/active-runs.js', () => ({ hasActiveRunInSession: mocks.active, getActiveRunIdBySession: mocks.activeId, stopAgentRun: mocks.stop }))
@@ -16,6 +17,9 @@ const input = { sessionId: 's', novelId: 'n', prompt: '写第20章', mode: 'buil
 const item = { id: 'q', sessionId: 's', userId: 'u', payload: input, status: 'pending', revision: 0, priority: 0, error: null }
 beforeEach(() => {
   vi.resetAllMocks()
+  mocks.query.mockResolvedValue([{ id: 'n' }])
+  mocks.transaction.mockImplementation(work => work({ $queryRaw: mocks.query,
+    agentQueuedRequest: { findUnique: mocks.unique, count: mocks.count, create: mocks.create } }))
   mocks.owned.mockResolvedValue({ id: 's', novelId: 'n', userId: 'u' })
   mocks.find.mockResolvedValue(item)
   mocks.many.mockResolvedValue([item])
@@ -25,6 +29,13 @@ beforeEach(() => {
   mocks.start.mockResolvedValue({ runId: 'next' })
 })
 describe('durable request queue', () => {
+  it('holds the shared novel lock before admitting a pending request', async () => {
+    await enqueueRequest('u', 'q', input)
+    expect(mocks.query.mock.calls[1][0].join('?')).toBe('SELECT id FROM novels WHERE id = ? FOR UPDATE')
+    expect(mocks.query.mock.calls[1][1]).toBe('n')
+    expect(mocks.query.mock.invocationCallOrder[1]).toBeLessThan(mocks.create.mock.invocationCallOrder[0])
+    expect(mocks.transaction).toHaveBeenCalledTimes(1)
+  })
   it.each(['running', 'queued', 'awaiting_approval', 'paused', 'failed', 'cancelled'])('ordinary queue waits on %s', status => {
     expect(queueCanDispatch(status, 0)).toBe(false)
   })

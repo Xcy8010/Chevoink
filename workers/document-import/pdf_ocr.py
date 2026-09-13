@@ -4,7 +4,7 @@ import math
 import time
 
 from protocol import LIMITS, WorkerError, bounded_dimensions, image_dimensions, make_artifact, overlap, same_text
-from runtime import INPUT, WORK, remaining, run_process
+from runtime import INPUT, WORK, read_bounded, remaining, run_process
 
 
 def open_pdf():
@@ -191,7 +191,7 @@ def process_image(request):
     # Decode/re-encode inside the same sandbox; PDF adapter then supplies identical coverage semantics.
     global INPUT
     import pymupdf
-    image_dimensions(INPUT.read_bytes())
+    image_dimensions(read_bounded(INPUT, LIMITS['inputBytes']))
     with INPUT.open('rb') as stream:
         magic = stream.read(16)
     if not (magic.startswith(b'\x89PNG\r\n\x1a\n') or magic.startswith(b'\xff\xd8\xff')):

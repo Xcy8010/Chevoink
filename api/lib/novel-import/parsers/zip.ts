@@ -2,6 +2,7 @@ import { scanArchive, readArchiveEntry, naturalCompare } from './archive.js'
 import { checkStructure, isFatal, limit, NOVEL_IMPORT_LIMITS, ParseContext } from './limits.js'
 import { decodeText, fileStem, headingKind } from './text.js'
 import { emptyImport, NovelImportParseError, type ParsedNovelImport } from './types.js'
+import { checkImportImages, imageExtension, stableImportId } from './images.js'
 
 type MemberParser = (buffer: Buffer, source: string) => Promise<ParsedNovelImport>
 const SECTIONS = new Set(['正文', '规划', '目录', '作品信息以及发布建议'])
@@ -34,7 +35,7 @@ function nativeMetadata(text: string): ParsedNovelImport['metadata'] {
   }
 }
 
-export async function parseZip(buffer: Buffer, source: string, context: ParseContext, parseMember: MemberParser, encoding?: string) {
+export async function parseZip(buffer: Buffer, source: string, context: ParseContext, parseMember: MemberParser, encoding?: string, resources = false) {
   const entries = scanArchive(buffer, context).sort((a, b) => naturalCompare(a.path, b.path))
   const files = entries.filter((entry) => !entry.directory)
   // A directory named 规划/目录 alone is not an export marker. Recognize the actual exporter
@@ -42,6 +43,7 @@ export async function parseZip(buffer: Buffer, source: string, context: ParseCon
   const nativeRoots = new Set(files.map((entry) => exportMarker(entry.path)).filter((root): root is string => root !== undefined))
   const native = nativeRoots.size > 0
   const result = emptyImport()
+  if (resources) { result.images = []; result.evidence = { items: [] } }
   const singleRoot = nativeRoots.size === 1 ? [...nativeRoots][0] : undefined
   if (singleRoot) result.metadata.title = singleRoot
   const paths = files.filter((entry) => !entry.path.startsWith('__MACOSX/')).map((entry) => entry.path.split('/'))
@@ -58,6 +60,9 @@ export async function parseZip(buffer: Buffer, source: string, context: ParseCon
   }
   for (const entry of entries) {
     const memberSource = `${source}!/${entry.path}`
+    const item = { id: stableImportId('file', memberSource), kind: 'file' as const, source: memberSource,
+      status: 'native' as 'native' | 'failed' | 'needs_review' | 'excluded', excludable: true }
+    if (resources && !entry.directory) result.evidence!.items.push(item)
     try {
       // Even excluded/unsupported members are integrity-checked and charged to decompression limits.
       const data = await readArchiveEntry(buffer, entry, context)
@@ -66,11 +71,23 @@ export async function parseZip(buffer: Buffer, source: string, context: ParseCon
         throw new NovelImportParseError('IMPORT_ARCHIVE_UNSAFE', '不支持嵌套压缩包。', memberSource)
       }
       if (entry.path.split('/').some((part) => part === '__MACOSX' || part === '.DS_Store' || part.startsWith('._'))) {
+        item.status = 'excluded'
         result.warnings.push({ code: 'IMPORT_ARCHIVE_MEMBER_EXCLUDED', message: '系统辅助文件不作为正文导入。', source: memberSource, blocking: false })
         continue
       }
       if (multipleBooks) {
+        item.status = 'needs_review'
         result.warnings.push({ code: 'IMPORT_ARCHIVE_MEMBER_UNSELECTED', message: '尚未选择作品，此成员未导入。', source: memberSource, blocking: true })
+        continue
+      }
+      if (resources && imageExtension.test(entry.path)) {
+        const parsed = await parseMember(data, memberSource)
+        result.images!.push(...(parsed.images ?? [])); checkImportImages(result.images!)
+        result.evidence!.items.push(...(parsed.evidence?.items ?? []))
+        result.sourceChars += parsed.sourceChars
+        result.warnings.push(...parsed.warnings)
+        for (const [index, volume] of parsed.volumes.entries()) append(`image:${entry.path}:${index}`, volume.title, volume.chapters)
+        item.status = 'needs_review'
         continue
       }
       const section = exportSection(entry.path)
@@ -78,10 +95,12 @@ export async function parseZip(buffer: Buffer, source: string, context: ParseCon
         result.warnings.push({ code: 'IMPORT_ARCHIVE_STRUCTURE_AMBIGUOUS', message: '目录名类似辅助资料，但没有本站导出标记；原文保留预览，请确认是否属于正文。', source: memberSource, blocking: true })
       }
       if (native && section && section.root !== singleRoot) {
+        item.status = 'needs_review'
         result.warnings.push({ code: 'IMPORT_ARCHIVE_MEMBER_UNSELECTED', message: '此成员位于已识别作品根目录以外，未合并导入，请单独选择作品。', source: memberSource, blocking: true })
         continue
       }
       if (native && section?.section !== '正文') {
+        item.status = section ? 'excluded' : 'needs_review'
         if (section?.section === '作品信息以及发布建议' && section.rest.join('/') === '作品信息.txt') {
           const decoded = decodeText(data, memberSource, encoding)
           context.addChars(decoded.text.length)
@@ -114,6 +133,11 @@ export async function parseZip(buffer: Buffer, source: string, context: ParseCon
         continue
       }
       const parsed = await parseMember(data, memberSource)
+      if (resources) {
+        result.images!.push(...(parsed.images ?? [])); checkImportImages(result.images!)
+        result.evidence!.items.push(...(parsed.evidence?.items ?? []).filter(child => child.id !== item.id))
+        if (parsed.warnings.some(warning => warning.blocking)) item.status = 'needs_review'
+      }
       result.sourceChars += parsed.sourceChars
       result.warnings.push(...parsed.warnings)
       const parts = entry.path.split('/')
@@ -125,6 +149,7 @@ export async function parseZip(buffer: Buffer, source: string, context: ParseCon
         append(volume.title === '正文卷' ? `dir:${directory}` : `file:${entry.path}:${index}`, title, volume.chapters)
       }
     } catch (error) {
+      item.status = 'failed'
       if (isFatal(error)) throw error
       result.warnings.push({ code: error instanceof NovelImportParseError ? error.code : 'IMPORT_ARCHIVE_MEMBER_FAILED', message: error instanceof NovelImportParseError ? error.message : 'ZIP 成员解析失败，请单独检查此文件。', source: memberSource, blocking: true })
     } finally {

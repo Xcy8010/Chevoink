@@ -44,9 +44,10 @@ import { directiveListTool, directiveSaveTool, directiveSupersedeTool } from './
 import { styleProfileGetTool, retrievalTraceReadTool, craftSearchTool, styleLeakageCheckTool } from './tools/craft-library-tools.js'
 import { researchDossierGetTool, firstThreePrototypeGetTool } from './tools/research-dossier-tools.js'
 import { novelImportTool } from './tools/import-tools.js'
+import { executeDurableImport } from './runtime-import.js'
 
 const HISTORY_READ_ACTIONS = ['task_context_list', 'task_context_read', 'session_history_search', 'session_message_read'] as const
-const DOMAIN_READ_ACTIONS = ['novel_import', 'craft_search', 'style_leakage_check', 'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get'] as const
+const DOMAIN_READ_ACTIONS = ['craft_search', 'style_leakage_check', 'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get'] as const
 
 function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
   return { ...tool, execute: (ctx, args) => tool.execute(ctx, tool.parameters.parse(args)) }
@@ -129,6 +130,7 @@ export async function executeDurableToolStep(token: RunLeaseToken, signal: Abort
     const capability = { lease, cursor, operationKey: `exec:${frame.state.nextOperationSequence}` }
     if (['execution_context_read', 'chapter_read', 'plan_read', 'novel_get_context', 'chapter_list_summaries', 'memory_search', 'volume_list', 'structure_outline', ...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].includes(call.name)) ctx.durableRead = capability
     else if (call.name === 'ask_user') { /* Persistent question step below; no legacy waiter. */ }
+    else if (call.name === 'novel_import') ctx.durableImport = capability
     else if ((METADATA_ACTIONS as readonly string[]).includes(call.name)) ctx.durableMetadata = capability
     else if (['memory_save', 'memory_event_save', 'memory_relation_save'].includes(call.name)) ctx.durableMemory = capability
     else if (['todo_write', 'directive_save', 'directive_supersede'].includes(call.name)) ctx.durableTask = capability
@@ -196,6 +198,7 @@ export async function executeDurableToolStep(token: RunLeaseToken, signal: Abort
   }
   const historyAction = [...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].find(name => name === selected.tool.name)
   if (selected.tool.name === 'ask_user') return executeDurableQuestion(lease, selected.cursor, selected.ctx, selected.tool, selected.args)
+  if (selected.tool.name === 'novel_import') return executeDurableImport(selected.ctx, selected.tool, selected.args)
   if (historyAction) {
     const normalize = (raw: unknown) => Object.fromEntries(Object.entries(selected.tool.parameters.parse(normalizeToolInput(selected.tool, raw)) as Record<string, unknown>).filter(([, value]) => value !== undefined))
     return { kind: 'tool' as const, result: await executeDurableRead(selected.ctx, historyAction, selected.args, normalize,

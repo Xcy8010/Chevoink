@@ -466,6 +466,7 @@ model SmsVerificationCode {
 }
 
 model Novel {
+  manuscriptRevision Int @default(0) @map("manuscript_revision")
   importJobs NovelImportJob[]
   importIntents NovelImportIntent[]
   id                     String                  @id @default(cuid()) @db.VarChar(64)
@@ -622,6 +623,8 @@ model NovelImportIntent {
   id String @id @db.VarChar(64)
   userId String @db.VarChar(64)
   novelId String @db.VarChar(64)
+  agentRunId String? @db.VarChar(64)
+  agentToolCallId String? @db.VarChar(255)
   targetHash String @db.VarChar(64)
   overwriteRequired Boolean
   confirmationStep Int @default(0)
@@ -631,6 +634,7 @@ model NovelImportIntent {
   novel Novel @relation(fields: [novelId], references: [id], onDelete: Cascade)
   jobs NovelImportJob[]
   @@index([userId, novelId, expiresAt])
+  @@unique([agentRunId, agentToolCallId])
   @@map("novel_import_intents")
 }
 
@@ -638,6 +642,8 @@ model NovelImportJob {
   id String @id @db.VarChar(64)
   userId String @db.VarChar(64)
   novelId String @db.VarChar(64)
+  agentRunId String? @db.VarChar(64)
+  agentToolCallId String? @db.VarChar(255)
   intentId String @unique @db.VarChar(64)
   status String @default("uploading") @db.VarChar(32)
   jobVersion Int @default(1)
@@ -646,6 +652,7 @@ model NovelImportJob {
   targetHash String @db.VarChar(64)
   modelSelection Json
   parseEncoding String? @db.VarChar(32)
+  parseDeadlineAt DateTime?
   leaseOwner String? @db.VarChar(64)
   leaseEpoch Int @default(0)
   leaseUntil DateTime?
@@ -661,7 +668,10 @@ model NovelImportJob {
   approvals NovelImportApproval[]
   commit NovelImportCommit?
   backup NovelImportBackup?
+  artifacts NovelImportArtifact[]
+  events NovelImportEvent[]
   @@index([userId, novelId, createdAt])
+  @@unique([agentRunId, agentToolCallId])
   @@index([status, leaseUntil])
   @@map("novel_import_jobs")
 }
@@ -676,6 +686,22 @@ model NovelImportSource {
   createdAt DateTime @default(now())
   job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
   @@map("novel_import_sources")
+}
+
+model NovelImportArtifact {
+  id String @id @db.Uuid
+  jobId String @db.VarChar(64)
+  kind String @db.VarChar(24)
+  logicalId String @db.VarChar(255)
+  storageKey String @db.VarChar(128)
+  sha256 String @db.VarChar(64)
+  bytes Int
+  mediaType String @db.VarChar(128)
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@index([jobId])
+  @@unique([jobId, kind, sha256])
+  @@map("novel_import_artifacts")
 }
 
 model NovelImportManifest {
@@ -716,6 +742,10 @@ model NovelImportBackup {
   afterHash String @db.VarChar(64)
   expiresAt DateTime
   restoredAt DateTime?
+  restoredApprovalId String? @unique @db.VarChar(64)
+  restoreIdempotencyKey String? @db.VarChar(128)
+  restoreReceipt Json?
+  restoreErrorCode String? @db.VarChar(64)
   createdAt DateTime @default(now())
   job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
   @@map("novel_import_backups")
@@ -739,6 +769,17 @@ model NovelImportGarbage {
   storageKey String @id @db.VarChar(128)
   createdAt DateTime @default(now())
   @@map("novel_import_garbage")
+}
+
+model NovelImportEvent {
+  id String @id @db.Uuid
+  jobId String @db.VarChar(64)
+  kind String @db.VarChar(16)
+  payload Json
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@unique([jobId, kind])
+  @@map("novel_import_events")
 }
 
 model ChangeSet {
@@ -1480,6 +1521,7 @@ model AgentEvalComparison {
 }
 
 model AgentRun {
+  manuscriptRevision Int @default(0) @map("manuscript_revision")
   id                 String                 @id @default(cuid()) @db.VarChar(64)
   sessionId          String                 @map("session_id") @db.VarChar(64)
   userId             String                 @map("user_id") @db.VarChar(64)
@@ -3017,4 +3059,24 @@ model Feedback {
   @@index([kind, status, createdAt])
   @@index([userId, createdAt])
   @@map("feedbacks")
+}
+
+// Import-local paid suggestions are single-dispatch and never rewrite source text.
+model NovelImportSuggestion {
+  id String @id @db.VarChar(64)
+  jobId String @db.VarChar(64)
+  userId String @db.VarChar(64)
+  manifestRevision Int
+  manifestHash String @db.VarChar(64)
+  fingerprint String @db.VarChar(64)
+  volumeIndex Int
+  chapterIndex Int
+  status String @default("pending") @db.VarChar(24)
+  result Json?
+  errorCode String? @db.VarChar(128)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([jobId, manifestRevision, volumeIndex, chapterIndex])
+  @@index([jobId, createdAt])
+  @@map("novel_import_suggestions")
 }

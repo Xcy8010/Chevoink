@@ -18,6 +18,7 @@ import { useToast } from '@/components/ui/toast-context'
 import { AgentMobileModelSheet } from './AgentMobileModelSheet'
 
 import {
+  AGENT_FILE_ACCEPT,
   MAX_AGENT_FILE_COUNT,
   MAX_AGENT_IMAGE_COUNT,
   type AgentAttachmentMeta,
@@ -770,7 +771,7 @@ export function AgentComposer({
           <input
             ref={fileInputRef}
             type="file"
-            accept=".pdf,.docx,.txt,.md"
+            accept={AGENT_FILE_ACCEPT}
             multiple
             className="hidden"
             onChange={(event) => void handlePickFiles(event)}

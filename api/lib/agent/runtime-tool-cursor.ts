@@ -131,7 +131,7 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
 export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: ToolExecutionCursor, input: {
   key: string; action: string; callId: string; targetId: string; operationInput: Prisma.InputJsonValue; effectiveArgs: unknown;
   requireApproval?: boolean;
-  effectDomain?: 'chapter' | 'plan' | 'read' | 'structure' | 'task' | 'compiler' | 'memory' | 'metadata';
+  effectDomain?: 'chapter' | 'plan' | 'read' | 'structure' | 'task' | 'compiler' | 'memory' | 'metadata' | 'import';
   normalize: (parsed: unknown) => unknown
 }) {
   token = { ...token }; cursor = { ...cursor }
@@ -142,6 +142,8 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     const frame = await readExecutionFrame(tx, token.taskRootId, cursor.expectedRevision)
     if (frame.snapshotHash !== cursor.expectedHash || frame.state.phase !== 'idle' || input.key !== `exec:${frame.state.nextOperationSequence}`) runtimeError('RUNTIME_STATE_CONFLICT', '工具必须从原执行位置准入。')
     const grant = current.configuration.toolAuthority.find(item => item.name === input.action)
+    if (input.action === 'novel_import' && input.effectDomain !== 'import') runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '导入不能通过只读或旧写入适配器执行。')
+    if (input.effectDomain === 'import' && (input.action !== 'novel_import' || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '导入能力仅允许原任务的专用导入流程。')
     const plan = input.effectDomain === 'plan'
     const read = input.effectDomain === 'read'
     const metadata = input.effectDomain === 'metadata'

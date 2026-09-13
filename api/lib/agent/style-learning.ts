@@ -8,10 +8,13 @@ import { getModelTierRuntime } from '../credits.js'
 import { generateTextCompletion } from '../ai-service.js'
 import { isAgent2FeatureEnabled, requireAgent2Feature } from '../agent2-feature-flags.js'
 import { chunkStyleSamples, mergeStyleRules, parseStyleAnalysis, privateSamplesSchema, renderLearnedStyle, STYLE_ANALYSIS_PROMPT } from './style-learning-analysis.js'
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
+import { activeChapterScope } from '../data/internal.js'
 
 const reportsSchema = z.array(z.object({ chunk: z.number().int(), rules: z.array(styleRuleSchema) }))
 const json = (value: unknown) => JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue
 const conflict = () => new DataAccessError(409, 'STYLE_LEARNING_CONFLICT', '状态已变化，请刷新后再操作。')
+const sourceArchived = () => new DataAccessError(409, 'IMPORT_SCOPE_CHANGED', '来源稿件已导入或恢复，请重新选择当前样章并创建学习任务。')
 const owned = (userId: string, novelId: string) => ({ userId, novelId, kind: 'author' as const, source: { rightsStatus: 'approved' as const } })
 async function assertAccess(userId: string, novelId: string, requireEnabled = false) {
   requireAgent2Feature('craftLibrary', userId)
@@ -28,6 +31,7 @@ function view(job: StyleLearningJob): StyleLearningView {
   return { id: job.id, profileId: job.profileId, status: job.status, revision: job.revision, enabled: job.enabled, processed: job.processed, total: (job.chunks as unknown[]).length, pauseRequested: job.pauseRequested, modelLabel: `${model.provider} / ${model.model}`, rules: z.array(styleRuleSchema).parse(job.rules), reports: reportsSchema.parse(job.reports), error: job.error, updatedAt: job.updatedAt.toISOString() }
 }
 async function lockNovel(tx: Prisma.TransactionClient, userId: string, novelId: string) {
+  await lockNovelActiveScope(tx, novelId)
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`style:${userId}:${novelId}`}, 0))::text`
 }
 export async function getStyleLearningWorkspace(userId: string, novelId: string): Promise<StyleLearningWorkspace> {
@@ -61,6 +65,11 @@ export async function startStyleLearning(userId: string, novelId: string, raw: S
     }
     const profile = await tx.styleProfile.findFirst({ where: { id: input.profileId, ...owned(userId, novelId) }, include: { document: true } })
     if (!profile) throw new DataAccessError(404, 'STYLE_NOT_FOUND', '样章不存在或已撤回。')
+    // A new request ID must not revive the retained samples of an invalidated job.
+    if (await tx.styleLearningJob.count({ where: { profileId: profile.id, error: 'IMPORT_SOURCE_ARCHIVED' } })) throw sourceArchived()
+    const evidence = z.array(z.object({ id: z.string().min(1), revision: z.number().int().nonnegative() })).safeParse((profile.document?.metadata as { chapters?: unknown } | null)?.chapters ?? [])
+    if (!evidence.success) throw sourceArchived()
+    if (evidence.data.length && await tx.chapter.count({ where: { ...activeChapterScope(novelId), authorId: userId, OR: evidence.data.map(({ id, revision }) => ({ id, revision })) } }) !== new Set(evidence.data.map(chapter => chapter.id)).size) throw sourceArchived()
     if (await tx.styleLearningJob.count({ where: { profile: owned(userId, novelId), status: { in: ['queued', 'processing', 'analyzing'] } } })) throw new DataAccessError(409, 'STYLE_LEARNING_BUSY', '本作品已有学习任务，请等待或暂停后再开始。')
     const samples = privateSamplesSchema.safeParse((profile.document?.metadata as { privateSamples?: unknown })?.privateSamples)
     if (!samples.success) throw new DataAccessError(409, 'STYLE_LEGACY_SAMPLE', '历史画像未保存完整样章，请重新上传；旧文件不会自动发送给模型。')
@@ -77,6 +86,7 @@ export async function changeStyleLearning(userId: string, novelId: string, id: s
     await lockNovel(tx, userId, novelId)
     const job = await tx.styleLearningJob.findFirst({ where: { id, profile: owned(userId, novelId) } })
     if (!job || job.revision !== input.revision) throw conflict()
+    if (job.error === 'IMPORT_SOURCE_ARCHIVED' && ['resume', 'retry', 'enable'].includes(input.action)) throw sourceArchived()
     const data: Prisma.StyleLearningJobUpdateManyMutationInput = { revision: { increment: 1 } }
     if (input.action === 'enable' || input.action === 'disable') {
       if (job.status !== 'ready') throw conflict()

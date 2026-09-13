@@ -50,6 +50,7 @@ export async function maintainNovelImports(options: { jobIds?: readonly string[]
       const keys = options.jobIds ? [
         ...await tx.novelImportSource.findMany({ where: { jobId: job.id }, select: { storageKey: true } }),
         ...await tx.novelImportManifest.findMany({ where: { jobId: job.id }, select: { storageKey: true } }),
+        ...await tx.novelImportArtifact.findMany({ where: { jobId: job.id }, select: { storageKey: true } }),
       ].map(blob => blob.storageKey) : []
       // CAS/fencing and reference deletion commit together. Existing DB triggers
       // queue the exact removed source/manifest keys in this same transaction.
@@ -57,6 +58,7 @@ export async function maintainNovelImports(options: { jobIds?: readonly string[]
       await tx.novelImportApproval.updateMany({ where: { jobId: job.id, consumedAt: null }, data: { expiresAt: now } })
       await tx.novelImportManifest.deleteMany({ where: { jobId: job.id } })
       await tx.novelImportSource.deleteMany({ where: { jobId: job.id } })
+      await tx.novelImportArtifact.deleteMany({ where: { jobId: job.id } })
       return keys
     })
     if (expired) { result.expiredJobs++; scopedKeys.push(...expired) }
@@ -66,7 +68,7 @@ export async function maintainNovelImports(options: { jobIds?: readonly string[]
     try {
       // No caller-supplied paths, even if the queue has been corrupted.
       if (!/^[a-f0-9-]{36}\.blob$/.test(blob.storageKey)) { result.failedBlobs++; continue }
-      const references = await prisma.novelImportSource.count({ where: { storageKey: blob.storageKey } }) + await prisma.novelImportManifest.count({ where: { storageKey: blob.storageKey } })
+      const references = await prisma.novelImportSource.count({ where: { storageKey: blob.storageKey } }) + await prisma.novelImportManifest.count({ where: { storageKey: blob.storageKey } }) + await prisma.novelImportArtifact.count({ where: { storageKey: blob.storageKey } })
       if (references) { result.retainedBlobs++; continue }
       // File I/O is deliberately outside the retried DB transaction.
       await deleteUnreferencedImportBlob(blob.storageKey)

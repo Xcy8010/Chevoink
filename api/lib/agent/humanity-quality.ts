@@ -15,6 +15,9 @@ import type {
   HumanityQualitySignal,
 } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
+import { activeChapterScope } from '../data/internal.js'
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
+import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { taskSpecSchema } from '../../../shared/contracts/index.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from './craft-library.js'
@@ -211,7 +214,7 @@ export function analyzeDeterministicQuality(content: string, recentChapterTexts:
 
 export async function getOwnedQualityChapter(userId: string, novelId: string, chapterId: string, db: Prisma.TransactionClient = prisma) {
   const chapter = await db.chapter.findFirst({
-    where: { id: chapterId, novelId, authorId: userId },
+    where: { id: chapterId, ...activeChapterScope(novelId), authorId: userId },
     include: { novel: { select: { title: true, categoryName: true, tagNames: true } } },
   })
   if (!chapter) throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '章节不存在或不属于当前作品。')
@@ -239,11 +242,13 @@ export async function hasCommittedTaskChapter(db: Prisma.TransactionClient, user
   const rows = await db.storyCompilation.findMany({
     where: { userId, novelId, ...scope, status: { not: 'abandoned' } },
     select: { status: true, stage: true, chapterId: true,
-      chapter: { select: { id: true, novelId: true, revision: true, wordCount: true } },
+      chapter: { select: { id: true, novelId: true, revision: true, wordCount: true, archivedAt: true,
+        volume: { select: { novelId: true, archivedAt: true } } } },
       bridge: { select: { toChapterId: true, targetRevision: true, committedAt: true } } },
   })
   return rows.length > 0 && rows.every(row => row.status === 'completed' && row.stage === 'commit'
     && row.chapter && row.chapter.novelId === novelId && row.chapter.wordCount > 0
+    && row.chapter.archivedAt === null && row.chapter.volume.archivedAt === null && row.chapter.volume.novelId === novelId
     && row.chapterId === row.chapter.id && row.bridge?.toChapterId === row.chapter.id
     && row.bridge.committedAt !== null && row.bridge.targetRevision === row.chapter.revision)
 }
@@ -283,7 +288,7 @@ export async function buildHumanityQualityContext(userId: string, novelId: strin
     db.characterVoiceProfile.findMany({ where: { userId, novelId, status: 'confirmed' }, orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }], take: 12 }),
     db.experienceAnchor.findMany({ where: { userId, novelId, status: 'confirmed' }, orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }], take: 30 }),
     db.chapter.findMany({
-      where: { novelId, orderIndex: { lt: chapter.orderIndex } },
+      where: { ...activeChapterScope(novelId), orderIndex: { lt: chapter.orderIndex } },
       select: { title: true, content: true, orderIndex: true }, orderBy: { orderIndex: 'desc' }, take: 3,
     }),
     db.qualityFinding.groupBy({
@@ -354,6 +359,8 @@ export async function persistHumanityQualityReport(input: {
 }, transaction?: Prisma.TransactionClient): Promise<ChapterQualityReport & { findings: Array<{ id: string; signal: string; source: string; severity: string; startOffset: number; endOffset: number; evidenceExcerpt: string; explanation: string; suggestion: string; disposition: QualityFindingDisposition }> }> {
   if (!transaction) return prisma.$transaction(tx => persistHumanityQualityReport(input, tx))
   const tx = transaction
+  await lockNovelActiveScope(tx, input.novelId)
+  if (input.runId) await assertAgentManuscriptCurrent(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId })
   await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${input.chapterId} AND author_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
   const chapter = await getOwnedQualityChapter(input.userId, input.novelId, input.chapterId, tx)
   if (chapter.revision !== input.chapterRevision) throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '章节在质量检查期间已被修改，请基于最新版本重新检查。')
@@ -452,6 +459,8 @@ export async function applyQualityRepair(input: {
     }, transaction ?? prisma)
   }
   const apply = async (tx: Prisma.TransactionClient) => {
+    await lockNovelActiveScope(tx, input.novelId)
+    if (input.runId) await assertAgentManuscriptCurrent(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId })
     const scope = await qualityCompilationScope(tx, input.userId, input.novelId, input.runId)
     if (report.compilationId) await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${report.compilationId} FOR UPDATE`
     await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${report.chapter.id} FOR UPDATE`
@@ -462,7 +471,7 @@ export async function applyQualityRepair(input: {
       || current.status !== report.status || current.status === 'stale' || JSON.stringify(current.deterministicMetrics) !== JSON.stringify(report.deterministicMetrics)
       || fingerprint(current) !== fingerprint(report)) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '质量报告、作者选择或正文已变化，未应用旧修订。')
     const write = await tx.chapter.updateMany({
-      where: { id: report.chapter.id, novelId: input.novelId, authorId: input.userId, revision: report.chapterRevision, content: report.chapter.content },
+      where: { id: report.chapter.id, ...activeChapterScope(input.novelId), authorId: input.userId, revision: report.chapterRevision, content: report.chapter.content },
       data: { content: after, wordCount: after.length, revision: { increment: 1 } },
     })
     if (write.count !== 1) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '章节在修订期间已变化，请重新检查。')

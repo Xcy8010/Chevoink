@@ -7,6 +7,7 @@ import { recordChapterBaseline } from '../baseline.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
 import { recordStoryCompilerWrite } from '../story-compiler.js'
 import { activeChapterScope, recalculateNovelStats } from '../../data/internal.js'
+import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import type { ToolContext, ToolResult, AgentTool } from './types.js'
 import { chapterWriteArguments, chapterAppendArguments, chapterEditArguments } from './chapter-arguments.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
@@ -30,6 +31,7 @@ export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentT
     operationInput: runtimeJson({ callId: ctx.callId, args, expectedRevision: capability.expectedRevision }).value })
   const receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()
+    await assertAgentManuscriptCurrent(tx, ctx)
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId || args.chapterId !== capability.chapterId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '章节改名范围与原任务不符。')
     const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
@@ -110,6 +112,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   const operation = prepared?.operation ?? await prepareOperation(lease, { key: capability.operationKey, kind: 'tool', action, input: operationInput })
   const receipt = await commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()
+    await assertAgentManuscriptCurrent(tx, ctx)
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) runtimeError('RUNTIME_SCOPE_MISMATCH', '正文操作不属于原任务范围。')
     const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })

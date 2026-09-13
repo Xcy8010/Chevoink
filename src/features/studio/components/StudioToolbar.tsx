@@ -29,6 +29,7 @@ type StudioToolbarProps = {
   onDeleteNovel: () => void
   onExport: () => void
   onImport?: () => void
+  onImportHistory?: () => void
   onSelectNovel: (novelId: string) => void
   onCreateNovel: () => void
   onEditNovelTitle?: () => void
@@ -64,6 +65,7 @@ export default function StudioToolbar({
   onDeleteNovel,
   onExport,
   onImport,
+  onImportHistory,
   onSelectNovel,
   onCreateNovel,
   onEditNovelTitle,
@@ -237,6 +239,7 @@ export default function StudioToolbar({
                     <FolderDown className="h-4 w-4 text-[var(--text-secondary)]" />
                     一键导出
                   </button>
+                  {onImportHistory ? <button type="button" className={`${moreItemClass} min-h-11`} onClick={() => { moreRef.current?.querySelector<HTMLElement>('button')?.focus(); setMoreOpen(false); onImportHistory() }}><FolderDown className="h-4 w-4 text-[var(--text-secondary)]" />导入记录与恢复</button> : null}
                   <div className="my-1 border-t border-[var(--border-subtle)]" />
                   <button
                     type="button"

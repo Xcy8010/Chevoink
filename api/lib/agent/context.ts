@@ -5,6 +5,7 @@ import { MAX_NOVEL_TAGS, NOVEL_TAG_GROUPS } from '../../../shared/contracts/nove
 import { env } from '../../config/env.js'
 import type { ChatMessage } from '../ai-service.js'
 import { prisma } from '../prisma.js'
+import { activeChapterScope } from '../data/internal.js'
 import type { AgentDefinition } from './agents.js'
 import { OPERATION_KNOWLEDGE } from './knowledge/operation.js'
 import { buildGeneralWritingDigest, buildGenreWritingDigest } from './knowledge/writing.js'
@@ -435,7 +436,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
       : null),
     input.chapterId
       ? prisma.chapter.findFirst({
-          where: { id: input.chapterId, novelId: input.novelId },
+          where: { id: input.chapterId, ...activeChapterScope(input.novelId) },
           select: { id: true, title: true, orderIndex: true, wordCount: true },
         })
       : Promise.resolve(null),

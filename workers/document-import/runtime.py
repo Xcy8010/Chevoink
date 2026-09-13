@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import time
 
@@ -10,6 +11,24 @@ from protocol import LIMITS, WorkerError
 
 INPUT = Path('/input/source')
 WORK = Path('/work')
+
+
+def read_bounded(path, maximum):
+    """Bound the actual read, not only a prior stat (including if a file grows)."""
+    if path.is_symlink():
+        raise WorkerError('IMPORT_PROTOCOL_INVALID')
+    with path.open('rb') as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise WorkerError('IMPORT_PROTOCOL_INVALID')
+        chunks = []
+        length = 0
+        while length <= maximum:
+            chunk = stream.read(min(65536, maximum + 1 - length))
+            if not chunk:
+                return b''.join(chunks)
+            length += len(chunk)
+            chunks.append(chunk)
+        raise WorkerError('IMPORT_LIMIT_EXCEEDED')
 
 
 def assert_sandbox():
@@ -61,7 +80,7 @@ def run_stage(stage, request, deadline, page=None):
     run_process(args, remaining(deadline, LIMITS['nativeMs'] / 1000))
     if not output.is_file() or output.stat().st_size > LIMITS['responseBytes']:
         raise WorkerError('IMPORT_LIMIT_EXCEEDED')
-    data = json.loads(output.read_bytes())
+    data = json.loads(read_bounded(output, LIMITS['responseBytes']))
     output.unlink()
     if 'error' in data:
         raise WorkerError(data['error'])

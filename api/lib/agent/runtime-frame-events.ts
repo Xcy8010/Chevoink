@@ -29,9 +29,9 @@ export async function persistProjectedMessages(tx: RuntimeTx, source: AgentExecu
       if (body.text) parts = [...parts, { type: body.asReasoning ? 'reasoning' : 'text', text: body.text }]
     } else if (body.type === 'tool.call') {
       const index = parts.findIndex(part => part.type === 'tool-call' && part.callId === body.callId)
-      if (index < 0) parts = [...parts, { type: 'tool-call', callId: body.callId, toolName: body.toolName, title: body.title, args: body.args ?? null, status: 'running' }]
+      if (index < 0) parts = [...parts, { type: 'tool-call', callId: body.callId, toolName: body.toolName, title: body.title, args: body.args ?? null, status: 'running', ...(body.importWaiting ? { importWaiting: body.importWaiting } : {}) }]
       else parts = parts.map((part, at) => at === index && part.type === 'tool-call'
-        ? { ...part, title: body.title, toolName: body.toolName, args: body.args ?? part.args } : part)
+        ? { ...part, title: body.title, toolName: body.toolName, args: body.args ?? part.args, ...(body.importWaiting ? { importWaiting: body.importWaiting } : {}) } : part)
     } else if (body.type === 'tool.result') {
       const index = parts.findIndex(part => part.type === 'tool-call' && part.callId === body.callId)
       let snapshot: AgentRollbackSnapshot | undefined

@@ -12,7 +12,8 @@ import { AGENT_TOOL_GOVERNANCE } from '../../api/lib/agent/tools/governance.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 
 describe('next chapter delivery evidence', () => {
-  const row = { status: 'completed', stage: 'commit', chapterId: 'c', chapter: { id: 'c', novelId: 'n', wordCount: 3000, revision: 4 }, bridge: { toChapterId: 'c', targetRevision: 4, committedAt: new Date() } }
+  const row = { status: 'completed', stage: 'commit', chapterId: 'c', chapter: { id: 'c', novelId: 'n', wordCount: 3000, revision: 4,
+    archivedAt: null, volume: { novelId: 'n', archivedAt: null } }, bridge: { toChapterId: 'c', targetRevision: 4, committedAt: new Date() } }
   const makeDb = (rows: unknown[]) => {
     const findMany = vi.fn().mockResolvedValue(rows)
     return { findMany, db: { agentRun: { findFirst: vi.fn().mockResolvedValue({ taskRootId: 'root' }) }, storyCompilation: { findMany } } as unknown as Prisma.TransactionClient }
@@ -29,6 +30,9 @@ describe('next chapter delivery evidence', () => {
     { ...row, status: 'active' }, { ...row, stage: 'write' }, { ...row, chapter: null },
     { ...row, chapter: { ...row.chapter, wordCount: 0 } },
     { ...row, chapter: { ...row.chapter, novelId: 'foreign' } },
+    { ...row, chapter: { ...row.chapter, archivedAt: new Date() } },
+    { ...row, chapter: { ...row.chapter, volume: { novelId: 'n', archivedAt: new Date() } } },
+    { ...row, chapter: { ...row.chapter, volume: { novelId: 'foreign', archivedAt: null } } },
     { ...row, bridge: null }, { ...row, bridge: { ...row.bridge, committedAt: null } },
     { ...row, bridge: { ...row.bridge, targetRevision: 3 } },
     { ...row, bridge: { ...row.bridge, toChapterId: 'another' } },

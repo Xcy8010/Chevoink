@@ -7,6 +7,7 @@ import { dispatchQueuedRequests } from './lib/agent/request-queue.js'
 import { reconcileCreditRefunds, reconcileTokenSettlements } from './lib/credits.js'
 import { recoverNovelImportJobs } from './lib/novel-import-service.js'
 import { isNovelImportMaintenanceEnabled, maintainNovelImports } from './lib/novel-import-maintenance.js'
+import { drainNovelImportEffects } from './lib/novel-import-effects.js'
 
 // Do not accept new runs or dispatch schedules while startup recovery is scanning
 // old queued/running rows: otherwise a fresh request can be mistaken for an orphan.
@@ -17,9 +18,13 @@ await recoverOrphanLoopRuns()
 let refundSweepRunning = false
 let importRecoveryRunning = false
 function recoverSavedTasks() {
-  if ((process.env.NOVEL_IMPORT_ENABLED === 'true' || isNovelImportMaintenanceEnabled()) && !importRecoveryRunning) {
+  // Durable completion/restoration notifications survive the upload kill switch.
+  if (!importRecoveryRunning) {
     importRecoveryRunning = true
-    void recoverNovelImportJobs().then(() => maintainNovelImports()).then(result => {
+    void drainNovelImportEffects().then(result => {
+      if (result.failed > 0) console.warn('[novel-import] 完成事件投影待重试', { failedEvents: result.failed })
+      return recoverNovelImportJobs()
+    }).then(() => isNovelImportMaintenanceEnabled() ? maintainNovelImports() : { failedBlobs: 0 }).then(result => {
       if (result.failedBlobs > 0) console.warn('[novel-import] 私有临时文件清理待重试', { failedBlobs: result.failedBlobs })
     }).catch(() => {
       console.error('[novel-import] 导入恢复暂时不可用，持久记录保留')

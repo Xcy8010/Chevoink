@@ -37,6 +37,13 @@ export default function AdminAnalytics({ scope }: { scope: 'dashboard' | 'creati
             {expanded === metric.key ? <div className="max-h-72 overflow-auto border-t border-[var(--border-default)] p-4"><table className="w-full text-sm"><caption className="sr-only">{metric.label}分期数据</caption><thead><tr><th className="text-left">时间（UTC+8）</th><th className="text-right">数量</th></tr></thead><tbody>{data.labels.map((label, i) => <tr key={label} className="border-t border-[var(--border-default)]"><td className="py-3">{label}</td><td className="text-right tabular-nums">{metric.unavailable ? '未核定' : format(metric.values[i])}</td></tr>)}</tbody></table></div> : null}
           </div>)}
         </div>
+        {data.imports ? <div className="rounded-xl border border-[var(--border-default)] p-4 text-sm">
+          <h2 className="font-semibold">作品导入</h2>
+          <p className="my-3 text-xs leading-6 text-[var(--text-secondary)]">本期创建任务的当前状态。预览产出率 = 已生成预览 ÷（已生成预览 + 预览前失败）；不代表文字完整或识别准确率。取消不计为解析失败。提交数按任务去重，不把尚待确认算失败。</p>
+          <div className="flex flex-wrap gap-4"><span>任务 {data.imports.jobs}</span><span>生成预览 {data.imports.previewed}</span><span>预览产出率 {rate(data.imports.previewed, data.imports.failedBeforePreview)}</span><span>提交 {data.imports.committed}</span><span>取消 {data.imports.cancelled}</span><span>已恢复 {data.imports.restored}</span></div>
+          <h3 className="mt-4 font-medium">导入失败码排行</h3>
+          {data.imports.failures.length ? <ol className="mt-2 space-y-2">{data.imports.failures.map(row => <li key={row.code} className="flex flex-wrap justify-between gap-2"><span className="break-all">{row.code}</span><span>{row.count} 次</span></li>)}</ol> : <p className="mt-2 text-[var(--text-secondary)]">暂无失败记录</p>}
+        </div> : null}
         {data.cost ? <div className="rounded-xl border border-[var(--border-default)] p-4 text-sm">
           <h2 className="font-semibold">内置模型人民币估算</h2>
           <p className="my-3 text-xs leading-6 text-[var(--text-secondary)]">按 2026-09-13 核对的公开价重估所选范围用量，不是历史账单，不扣资源包或优惠。DeepSeek 按用量记录时间判断峰谷；输入包含缓存，输出不重复加思考 Token。已核定 {data.cost.knownCalls} 次，缺价格或完整用量 {data.cost.unknownCalls} 次（未计入，不代表免费）。历史缺内置档位的记录无法归属，不计入。</p>

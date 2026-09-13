@@ -41,7 +41,7 @@ export async function projectReviewedMemoryGraph(tx: Prisma.TransactionClient, m
   }))
   const where = { fromEntityId: entities[0].id, toEntityId: entities[1].id, relationType: proposal.relationType, validFrom: proposal.validFrom ?? null }
   const existing = await tx.entityRelation.findFirst({ where })
-  const data = { state: proposal.state ?? null, validTo: proposal.validTo ?? null, confidence: 1, sourceId: memory.id }
+  const data = { state: proposal.state ?? null, validTo: proposal.validTo ?? null, confidence: 1, sourceId: memory.id, revision: null }
   if (existing) await tx.entityRelation.update({ where: { id: existing.id }, data })
   else await tx.entityRelation.create({ data: { ...where, ...data } })
 }

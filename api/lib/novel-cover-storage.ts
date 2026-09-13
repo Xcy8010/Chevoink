@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { link, mkdir, open, readFile, realpath, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 import { env } from '../config/env.js'
@@ -59,6 +59,44 @@ function parseNovelCoverDataUrl(dataUrl: string): {
 export async function storeNovelCoverDataUrl(dataUrl: string): Promise<string> {
   const { mimeType, buffer } = parseNovelCoverDataUrl(dataUrl)
   return writeCoverBuffer(mimeType, buffer)
+}
+
+/** Import outbox only: promote an explicitly selected, ALREADY COMMITTED PNG.
+ * Content-addressed writes make retries/crashes bounded and idempotent. This
+ * never fetches a URL, invokes a model, or exposes an unselected private image. */
+export async function storeImportedNovelCoverDataUrl(dataUrl: string): Promise<string> {
+  const { mimeType, buffer } = parseNovelCoverDataUrl(dataUrl)
+  if (mimeType !== 'image/png' || buffer.length < 24 || !buffer.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) throw new DataAccessError(409, 'IMPORT_COVER_INVALID', '导入封面不是已验证的 PNG 图片。')
+  const directory = getNovelCoverDirectory()
+  await mkdir(directory, { recursive: true })
+  if (await realpath(directory) !== directory) throw new DataAccessError(503, 'IMPORT_COVER_STORAGE_UNSAFE', '封面存储目录不可用。')
+  const sha256 = createHash('sha256').update(buffer).digest('hex')
+  const filename = `${sha256}.png`
+  const target = path.join(directory, filename)
+  const temporary = path.join(directory, `.${sha256}.${randomUUID()}.tmp`)
+  try {
+    const handle = await open(temporary, 'wx', 0o644)
+    try { await handle.writeFile(buffer); await handle.sync() } finally { await handle.close() }
+    // Atomic publish after fsync: a crash cannot leave a partial public cover.
+    await link(temporary, target)
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error
+    if (await realpath(target) !== target) throw new DataAccessError(503, 'IMPORT_COVER_STORAGE_UNSAFE', '封面文件路径不可用。')
+    const handle = await open(target, 'r')
+    try {
+      const stat = await handle.stat()
+      if (!stat.isFile() || stat.size !== buffer.length) throw new DataAccessError(409, 'IMPORT_COVER_INVALID', '封面持久资源校验失败。')
+      const existing = Buffer.alloc(buffer.length + 1)
+      let length = 0
+      while (length < existing.length) {
+        const read = await handle.read(existing, length, existing.length - length, null)
+        if (!read.bytesRead) break
+        length += read.bytesRead
+      }
+      if (length !== buffer.length || !existing.subarray(0, length).equals(buffer)) throw new DataAccessError(409, 'IMPORT_COVER_INVALID', '封面持久资源校验失败。')
+    } finally { await handle.close() }
+  } finally { await unlink(temporary).catch(error => { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error }) }
+  return `${MANAGED_NOVEL_COVER_PREFIX}${filename}`
 }
 
 /** 魔数嗅探远程封面格式：CDN 常回 application/octet-stream，不能信 Content-Type */

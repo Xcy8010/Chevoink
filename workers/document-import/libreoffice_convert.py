@@ -4,7 +4,7 @@ import time
 import zipfile
 
 from protocol import LIMITS, WorkerError, make_artifact
-from runtime import INPUT, WORK
+from runtime import INPUT, WORK, read_bounded
 
 
 def validate_doc():
@@ -92,14 +92,17 @@ def convert():
                         'vbaproject' in e.filename.lower() for e in entries) or
                     'word/document.xml' not in archive.namelist()):
                 raise WorkerError('IMPORT_LIMIT_EXCEEDED')
-        return {'artifact': make_artifact('converted-docx', output.read_bytes(),
+        return {'artifact': make_artifact('converted-docx', read_bounded(output, LIMITS['artifactBytes']),
                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}
     finally:
-        if doc is not None:
-            doc.close(True)
-        proc.terminate()
         try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=3)
+            if doc is not None:
+                doc.close(True)
+        finally:
+            # A document close exception must never skip process cleanup.
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)

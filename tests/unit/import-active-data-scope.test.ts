@@ -7,6 +7,7 @@ const db = vi.hoisted(() => ({
   novel: { findUnique: vi.fn(), findFirst: vi.fn(), update: vi.fn() },
   coverAsset: { findMany: vi.fn() },
   $transaction: vi.fn(),
+  $queryRaw: vi.fn(),
 }))
 vi.mock('../../api/lib/prisma.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/prisma.js')>(), prisma: db,
@@ -27,6 +28,7 @@ const chapter = { id: 'c', novelId: 'n', authorId: 'u', volumeId: 'v', title: 'D
 
 beforeEach(() => {
   vi.resetAllMocks()
+  db.$queryRaw.mockResolvedValue([{ id: 'n' }])
   db.$transaction.mockImplementation(work => typeof work === 'function' ? work(tx) : Promise.all(work))
   db.novel.findUnique.mockResolvedValue(novel)
   db.novel.findFirst.mockResolvedValue(novel)
@@ -44,6 +46,45 @@ beforeEach(() => {
 })
 
 describe('import archival: bounded creative data scope', () => {
+  it('waits for the shared lock before even reading an empty-book default volume', async () => {
+    let release!: (rows: Array<{ id: string }>) => void
+    db.$queryRaw.mockReturnValue(new Promise(resolve => { release = resolve }))
+    const pending = ensureDefaultVolume(tx, 'n')
+    await Promise.resolve()
+    expect(db.volume.findFirst).not.toHaveBeenCalled()
+    expect(db.volume.create).not.toHaveBeenCalled()
+    release([{ id: 'n' }])
+    await pending
+    expect(db.volume.findFirst).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['archived draft', { archivedAt: new Date(), status: 'draft' }, {}],
+    ['archived private', { archivedAt: new Date(), visibility: 'private' }, {}],
+    ['scheduled publication', { publishedAt: new Date('2099-01-01') }, {}],
+    ['foreign novel', { novelId: 'other' }, {}],
+    ['private novel', {}, { visibility: 'private' }],
+    ['unpublished novel', {}, { status: 'draft' }],
+  ])('public reader rejects %s before returning any body/navigation', async (_name, chapterPatch, novelPatch) => {
+    db.novel.findUnique.mockResolvedValue({ ...novel, ...novelPatch })
+    db.chapter.findUnique.mockResolvedValue({ ...chapter, ...chapterPatch })
+    expect(await getReaderPayloadData('n', 'c', null)).toBeNull()
+    expect(db.chapter.findMany).not.toHaveBeenCalled()
+    expect(db.volume.findMany).not.toHaveBeenCalled()
+  })
+
+  it('uses identical published/visibility/schedule filters for navigation and volume counts', async () => {
+    db.chapter.findUnique.mockResolvedValue(chapter)
+    db.chapter.findMany.mockResolvedValue([chapter])
+    db.volume.findMany.mockResolvedValue([{ ...volume, chapters: [chapter] }, { ...volume, id: 'private-volume', chapters: [] }])
+    const result = await getReaderPayloadData('n', 'c', null)
+    const where = db.chapter.findMany.mock.calls[0][0].where
+    expect(where).toMatchObject({ novelId: 'n', status: 'published', visibility: 'public' })
+    expect(where.OR).toEqual([{ publishedAt: null }, { publishedAt: { lte: expect.any(Date) } }])
+    expect(db.volume.findMany.mock.calls[0][0].include.chapters.where).toEqual(where)
+    expect(result?.volumes.map(volume => volume.id)).toEqual(['v'])
+    expect(db.chapter.findMany.mock.calls[0][0].orderBy).toEqual([{ orderIndex: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }])
+  })
   it('separates creative predicates and nested counts from public publication scope', () => {
     expect(activeChapterScope('n')).toEqual({ novelId: 'n', archivedAt: null, volume: { novelId: 'n', archivedAt: null } })
     expect(activeVolumeWhere).toEqual({ archivedAt: null })

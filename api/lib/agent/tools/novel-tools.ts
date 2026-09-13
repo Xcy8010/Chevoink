@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 
 import { prisma } from '../../prisma.js'
+import { recalculateNovelStats } from '../../data/internal.js'
 import { ALL_NOVEL_TAGS, MAX_NOVEL_TAGS } from '../../../../shared/contracts/novel-tags.js'
 import { enforceCoverTitleInPrompt } from './cover-prompt.js'
 import { defineTool } from './types.js'
@@ -15,28 +16,7 @@ const WRITE_PERMISSION = { plan: 'deny', build: 'allow', review: 'deny' } as con
 const DANGEROUS_PERMISSION = { plan: 'deny', build: 'ask', review: 'deny' } as const
 
 export async function recalcNovelStats(novelId: string, db: Prisma.TransactionClient = prisma) {
-  const chapters = await db.chapter.findMany({
-    where: { novelId },
-    orderBy: { orderIndex: 'asc' },
-    select: { wordCount: true, title: true, status: true, publishedAt: true },
-  })
-
-  const wordCount = chapters.reduce((total, chapter) => total + (chapter.wordCount ?? 0), 0)
-  const lastChapter = chapters[chapters.length - 1] ?? null
-  // 与 data-access 的 recalculateNovelStats 口径一致：取序号最大的已发布章节的发布时间
-  const latestPublished = [...chapters]
-    .reverse()
-    .find((chapter) => chapter.status === 'published' && chapter.publishedAt)
-
-  await db.novel.update({
-    where: { id: novelId },
-    data: {
-      wordCount,
-      chapterCount: chapters.length,
-      lastChapterTitle: lastChapter?.title ?? null,
-      lastPublishedAt: latestPublished?.publishedAt ?? null,
-    },
-  })
+  return recalculateNovelStats(db, novelId)
 }
 
 export const novelCreateTool = defineTool({

@@ -4,6 +4,7 @@ import type { Prisma } from '@prisma/client'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { getChapterBaseline, getCreatedChapter, getLastTouchedChapter, recordChapterBaseline, recordCreatedChapter } from '../baseline.js'
 import { activeChapterScope, activeVolumeWhere, recalculateNovelStats } from '../../data/internal.js'
+import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { placeCreatedChapter, resolveChapterPlacement } from '../../data/volume.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
@@ -76,6 +77,7 @@ async function updateOwnedChapterAtRevision(
   data: Prisma.ChapterUpdateManyMutationInput,
 ) {
   const apply = async (tx: Prisma.TransactionClient) => {
+    await assertAgentManuscriptCurrent(tx, ctx)
     const result = await tx.chapter.updateMany({
       where: {
         id: chapter.id,
@@ -227,6 +229,7 @@ export const chapterCreateTool = defineTool({
     }
 
     const create = async (tx: Prisma.TransactionClient) => {
+      await assertAgentManuscriptCurrent(tx, ctx)
       const volumeByOrder = args.volumeOrder !== undefined
         ? await tx.volume.findFirst({ where: { novelId: ctx.novelId, ...activeVolumeWhere, orderIndex: args.volumeOrder } })
         : null

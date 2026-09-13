@@ -12,6 +12,7 @@ import { normalizeCoverImageUrl } from './novel.js'
 import { normalizeNovelStructure, placeCreatedChapter, resolveChapterPlacement } from './volume.js'
 import { resolveAgent2FeatureFlags } from '../agent2-feature-flags.js'
 import { activeChapterScope, activeVolumeWhere, assertActiveWriteCount, updateActiveChapter } from './internal.js'
+import { lockNovelActiveScope } from './novel-write-lock.js'
 
 
 
@@ -109,7 +110,8 @@ export async function getReaderPayloadData(
     prisma.chapter.findMany({
       where: chapterWhere,
       select: chapterListItemSelect,
-      orderBy: { orderIndex: 'asc' },
+      // Retained editions may share display positions; make navigation stable.
+      orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
     }),
     prisma.volume.findMany({
       where: { novelId },
@@ -119,7 +121,7 @@ export async function getReaderPayloadData(
           select: { wordCount: true, publishedWordCount: true, publishedRevision: true },
         },
       },
-      orderBy: { orderIndex: 'asc' },
+      orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
     }),
   ])
 
@@ -173,6 +175,7 @@ export async function createChapterData(
   await ensureNovelOwner(userId, novelId)
 
   const chapter = await prisma.$transaction(async (tx) => {
+    await lockNovelActiveScope(tx, novelId)
     const placement = await resolveChapterPlacement(tx, novelId, input.volumeId, input.orderInVolume)
     const chapterCount = await tx.chapter.count({ where: activeChapterScope(novelId) })
     const created = await tx.chapter.create({
@@ -251,6 +254,7 @@ export async function updateChapterData(
   const nextRevision = existing.revision + 1
 
   const updated = await prisma.$transaction(async (tx) => {
+    await lockNovelActiveScope(tx, novelId)
     const data: Prisma.ChapterUpdateManyMutationInput = {
       title: input.title === undefined ? undefined : nextTitle,
       summary: input.summary === undefined ? undefined : input.summary,
@@ -321,6 +325,7 @@ export async function deleteChapterData(
   }
 
   await prisma.$transaction(async (tx) => {
+    await lockNovelActiveScope(tx, novelId)
     const deleted = await tx.chapter.deleteMany({
       where: { id: chapterId, revision: existing.revision, ...activeChapterScope(novelId) },
     })
@@ -353,6 +358,7 @@ export async function adminDeleteChapterData(chapterId: string): Promise<{ title
   }
 
   await prisma.$transaction(async (tx) => {
+    await lockNovelActiveScope(tx, existing.novelId)
     await tx.chapter.delete({ where: { id: chapterId } })
     await compactChapterOrder(tx, existing.novelId)
     await recalculateNovelStats(tx, existing.novelId)

@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
     novelImportJob: { findMany: vi.fn(), findFirst: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
     novelImportSource: { count: vi.fn(), deleteMany: vi.fn() },
     novelImportManifest: { count: vi.fn(), deleteMany: vi.fn() },
+    novelImportArtifact: { count: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn() },
     novelImportApproval: { updateMany: vi.fn() },
     novelImportGarbage: { findMany: vi.fn(), deleteMany: vi.fn() },
   }, remove: vi.fn(),
@@ -20,6 +21,7 @@ beforeEach(() => {
   mocks.db.novelImportGarbage.findMany.mockResolvedValue([])
   mocks.db.novelImportSource.count.mockResolvedValue(0)
   mocks.db.novelImportManifest.count.mockResolvedValue(0)
+  mocks.db.novelImportArtifact.count.mockResolvedValue(0)
   mocks.remove.mockResolvedValue(undefined)
 })
 describe('bounded import maintenance', () => {
@@ -44,6 +46,7 @@ describe('bounded import maintenance', () => {
     expect(mocks.db.novelImportJob.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'expired', leaseEpoch: { increment: 1 } }) }))
     expect(mocks.db.novelImportSource.deleteMany).toHaveBeenCalledWith({ where: { jobId: 'old' } })
     expect(mocks.db.novelImportManifest.deleteMany).toHaveBeenCalledWith({ where: { jobId: 'old' } })
+    expect(mocks.db.novelImportArtifact.deleteMany).toHaveBeenCalledWith({ where: { jobId: 'old' } })
   })
   it('rechecks eligibility in the transaction and skips newly referenced jobs', async () => {
     mocks.db.novelImportJob.findMany.mockResolvedValue([{ id: 'changed' }])
@@ -66,6 +69,12 @@ describe('bounded import maintenance', () => {
     expect((await maintainNovelImports()).deletedBlobs).toBe(1)
     expect(mocks.db.novelImportGarbage.deleteMany).toHaveBeenCalledWith({ where: { storageKey: key } })
     expect(mocks.db.novelImportGarbage.findMany).toHaveBeenLastCalledWith({ orderBy: { createdAt: 'asc' }, take: 50 })
+  })
+  it('retains a report/image/chapter artifact even when source and manifest no longer refer to its key', async () => {
+    mocks.db.novelImportGarbage.findMany.mockResolvedValue([{ storageKey: key }])
+    mocks.db.novelImportArtifact.count.mockResolvedValue(1)
+    expect(await maintainNovelImports()).toMatchObject({ retainedBlobs: 1, deletedBlobs: 0 })
+    expect(mocks.remove).not.toHaveBeenCalled()
   })
   it('fences expired parsing claims with a version/epoch/live-lease CAS before TTL cleanup', async () => {
     mocks.db.novelImportJob.findMany.mockResolvedValueOnce([{ id: 'stale', jobVersion: 5, leaseEpoch: 2 }]).mockResolvedValueOnce([])

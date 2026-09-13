@@ -9,6 +9,8 @@ import {
 } from '../../../../shared/contracts/index.js'
 import { generateTextCompletion } from '../../ai-service.js'
 import { DataAccessError, prisma } from '../../prisma.js'
+import { activeChapterScope } from '../../data/internal.js'
+import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { getLatestQualityReport, qualityCompilationScope } from '../humanity-quality.js'
 import { recordChapterBaseline } from '../baseline.js'
@@ -130,8 +132,9 @@ async function applyRigorousContinuityRepairs(
   if (applied === 0 || after === chapter.content) return null
   ctx.signal.throwIfAborted()
   const { updated, memoryJobId } = await prisma.$transaction(async tx => {
+    await assertAgentManuscriptCurrent(tx, ctx)
     await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilationId} AND user_id = ${ctx.userId} AND novel_id = ${ctx.novelId} FOR UPDATE`
-    const changed = await tx.chapter.updateMany({ where: { id: chapter.id, novelId: ctx.novelId, authorId: ctx.userId, revision: chapter.revision, content: chapter.content },
+    const changed = await tx.chapter.updateMany({ where: { id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision, content: chapter.content },
       data: { content: after, wordCount: after.length, revision: { increment: 1 } } })
     if (changed.count !== 1) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '修订期间正文已变化，未覆盖新内容。请读取当前正文后重新检查。')
     const compilation = await tx.storyCompilation.updateMany({ where: { id: compilationId, userId: ctx.userId, novelId: ctx.novelId, status: 'active' }, data: { stage: 'repair' } })
@@ -556,7 +559,7 @@ export const continuityValidateTool = defineTool({
     const verificationOnly = quality?.compilationId === compilation.id && quality.chapterRevision === chapter.revision
       && !['analyzing', 'stale', 'failed'].includes(quality.status)
     const bridge = compilation.bridge
-    const sourceChapter = bridge.fromChapterId ? await prisma.chapter.findFirst({ where: { id: bridge.fromChapterId, novelId: ctx.novelId }, select: { revision: true } }) : null
+    const sourceChapter = bridge.fromChapterId ? await prisma.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { revision: true } }) : null
     const sourceUnchanged = !bridge.fromChapterId || sourceChapter?.revision === bridge.sourceRevision
     const cachedValidation = compilation.validation as { independentCheck?: string; checkedRevision?: number; findings?: Array<{ signal: string; severity: 'warning' | 'error'; evidence: string; suggestion: string }>; errorCount?: number; warningCount?: number } | null
     if ((!args.focus || continuityRepairRounds(compilation.validation) >= MAX_CONTINUITY_AUTO_REPAIRS) && sourceUnchanged && cachedValidation?.independentCheck === 'complete' && cachedValidation.checkedRevision === chapter.revision) {

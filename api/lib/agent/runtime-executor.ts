@@ -17,6 +17,7 @@ import { pauseDurableTaskForAttention, finalizeDurableTask } from './runtime-lif
 import { collectDurableCompletionEvidence } from './runtime-completion-evidence.js'
 import { advanceDurableMemory } from './runtime-memory.js'
 import { estimateChatMessagesTokens, estimateToolDefinitionTokens, resolveDurableInputLimit } from './context-budget.js'
+import { readDurableImportBoundary, waitForDurableImport } from './runtime-import.js'
 
 const reasoning = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
@@ -26,6 +27,8 @@ const reasoning = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', '
 export async function executeDurableStep(token: RunLeaseToken, signal: AbortSignal) {
   const lease = { ...token }
   signal.throwIfAborted()
+  const importBoundary = await readDurableImportBoundary(lease)
+  if (importBoundary) return importBoundary
   const prepared = await withRunLease(lease, async tx => {
     const state = await readExecutionStateInTransaction(tx, lease.taskRootId)
     if (state.frame.state.phase !== 'awaiting_operation') return null
@@ -105,12 +108,12 @@ export async function runDurableExecution(token: RunLeaseToken, signal: AbortSig
     for (;;) {
       ownedSignal.throwIfAborted()
       const step = await executeDurableStep(lease, ownedSignal)
-      if (step.kind === 'completion_review' || step.kind === 'waiting_approval' || step.kind === 'waiting_question' || step.kind === 'needs_attention') return step
+      if (step.kind === 'completion_review' || step.kind === 'waiting_approval' || step.kind === 'waiting_question' || step.kind === 'waiting_import' || step.kind === 'needs_attention') return step
     }
   })
   if (result.kind === 'needs_attention') {
     signal.throwIfAborted()
-    await pauseDurableTaskForAttention(lease, { expectedRevision: result.frame.revision, expectedHash: result.frame.snapshotHash })
+    await pauseDurableTaskForAttention(lease, { expectedRevision: result.frame.revision, expectedHash: result.frame.snapshotHash }, 'importBoundary' in result ? 'needs_input' : 'model_stalled')
   }
   return result
 }
@@ -151,6 +154,10 @@ export async function runReviewedDurableExecution(token: RunLeaseToken, signal: 
   const lease = { ...token }
   for (;;) {
     const step = await runDurableExecution(lease, signal)
+    if (step.kind === 'waiting_import') {
+      await waitForDurableImport(lease, signal, step.requestId)
+      continue
+    }
     if (step.kind === 'waiting_question' || step.kind === 'waiting_approval') {
       const requestId = step.kind === 'waiting_question' ? step.requestId : step.approvalId
       if (!requestId) return runtimeError('RUNTIME_RECEIPT_INVALID', '等待状态缺少原请求身份。')

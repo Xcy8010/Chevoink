@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp } from 'lucide-react'
 import type { NovelImportPreview } from '../../../../shared/contracts/novel-import.js'
 import { importChapterMergeIssue, importPreviewCounts, mergeImportChapters, moveImportChapter, reorderImportItem, splitImportChapter } from '../lib/import-preview'
 import { NOVEL_IMPORT_LIMITS } from '../../../../shared/contracts/novel-import.js'
+import { ImportBodyViewer } from './import-body-viewer'
 
 const inputClass = 'w-full min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 text-sm'
 const actionClass = 'rounded-lg border border-[var(--border-subtle)] px-3 text-sm disabled:opacity-40'
@@ -22,7 +23,6 @@ export function ImportPreviewEditor({ preview, onChange, disabled, currentMetada
   const volume = volumes[volumeIndex] ?? volumes[0]
   const chapter = volume?.chapters[chapterIndex]
   const mergeIssue = importChapterMergeIssue(volumes, volumeIndex, chapterIndex)
-  const rememberCursor = (element: HTMLTextAreaElement) => { if (chapter) setSplitCursor({ chapter, offset: element.selectionStart }) }
   const counts = importPreviewCounts(volumes)
   const updateVolumes = (next: typeof volumes) => onChange({ ...preview, volumes: next })
   const pageSize = 30
@@ -69,7 +69,7 @@ export function ImportPreviewEditor({ preview, onChange, disabled, currentMetada
           <div className="flex gap-2">{([-1, 1] as const).map(direction => <button type="button" key={direction} className={actionClass} aria-label={direction === -1 ? '章上移' : '章下移'} disabled={chapterIndex + direction < 0 || chapterIndex + direction >= volume.chapters.length} onClick={() => { updateVolumes(volumes.map((item, i) => i === volumeIndex ? { ...item, chapters: reorderImportItem(item.chapters, chapterIndex, direction) } : item)); setChapterIndex(chapterIndex + direction) }}>{direction === -1 ? <ArrowUp className="h-4 w-4" /> : <ArrowDown className="h-4 w-4" />}</button>)}</div>
           <label className="block text-sm">归属卷<select className={inputClass} value={volumeIndex} onChange={event => { const target = Number(event.target.value); const index = volumes[target].chapters.length; updateVolumes(moveImportChapter(volumes, volumeIndex, chapterIndex, target)); setVolumeIndex(target); setChapterIndex(index); setPage(Math.floor(index / pageSize)) }}>{volumes.map((item, i) => <option key={i} value={i}>{item.title}</option>)}</select></label>
           <p className="break-words text-xs text-[var(--text-secondary)]">来源：{chapter.source.memberPath ?? chapter.source.filename ?? '上传文件'}{chapter.source.page ? ` · 第 ${chapter.source.page} 页` : ''}</p>
-          <label className="block text-sm">原文正文（只读）<textarea aria-label="原文正文" readOnly value={chapter.content} onSelect={event => rememberCursor(event.currentTarget)} onClick={event => rememberCursor(event.currentTarget)} onKeyUp={event => rememberCursor(event.currentTarget)} onFocus={event => rememberCursor(event.currentTarget)} className={`${inputClass} mt-1 h-64 resize-y whitespace-pre-wrap p-3 leading-7`} /></label>
+          <ImportBodyViewer key={`${volumeIndex}:${chapterIndex}`} content={chapter.content} onCursor={offset => setSplitCursor({ chapter, offset })} />
           {chapter.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters && <p role="alert" className="text-sm">本章 {chapter.content.length} 字符，超过单章 {NOVEL_IMPORT_LIMITS.chapterCharacters} 字符限制。请定位原文光标并拆分，正文末尾不会截断。</p>}
           <button type="button" className={actionClass} disabled={splitCursor?.chapter !== chapter || splitCursor.offset <= 0 || splitCursor.offset >= chapter.content.length || counts.chapters >= NOVEL_IMPORT_LIMITS.chapters} onClick={event => {
             if (event.detail > 1 || splitCursor?.chapter !== chapter) return

@@ -263,6 +263,8 @@ export type AgentStreamEventBody =
       args: unknown
       /** 该调用是否未经用户挂起审批即自动批准（AGENT_AUTO_APPROVE 或白名单短路时为 true）；旧事件无此字段 */
       autoApproved?: boolean
+      /** Server-issued waiting location; never a tool approval or model argument. */
+      importWaiting?: { url: string; expiresAt: string }
       /** 非 undefined 表示这是子 Agent 内嵌执行内部的工具调用，值为所属 subagent_run 调用的 callId */
       subagentCallId?: string
     }
@@ -356,6 +358,7 @@ export type AgentMessagePart =
       args: unknown
       status: 'running' | 'success' | 'failed' | 'denied'
       summary?: string
+      importWaiting?: { url: string; expiresAt: string }
       display?: AgentToolDisplayPayload
       durationMs?: number
       /** 写入结果已经过作者审查并明确采纳；普通执行成功只表示“已完成”。 */

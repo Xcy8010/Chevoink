@@ -7,14 +7,14 @@ import sys
 import time
 
 from protocol import LIMITS, WorkerError, encode, failed_page, response, validate_request
-from runtime import INPUT, WORK, assert_sandbox, run_stage
+from runtime import INPUT, WORK, assert_sandbox, read_bounded, run_stage
 
 
 def read_request():
     path = Path('/input/request.json')
     if path.stat().st_size > 4096:
         raise WorkerError('IMPORT_PROTOCOL_INVALID')
-    return validate_request(json.loads(path.read_bytes()))
+    return validate_request(json.loads(read_bounded(path, 4096)))
 
 
 def main(request):
@@ -23,9 +23,8 @@ def main(request):
     try:
         if INPUT.is_symlink() or not INPUT.is_file() or not 0 < INPUT.stat().st_size <= LIMITS['inputBytes']:
             raise WorkerError('IMPORT_LIMIT_EXCEEDED')
-        with INPUT.open('rb') as stream:
-            if hashlib.file_digest(stream, 'sha256').hexdigest() != request['sourceHash']:
-                raise WorkerError('IMPORT_PROTOCOL_INVALID')
+        if hashlib.sha256(read_bounded(INPUT, LIMITS['inputBytes'])).hexdigest() != request['sourceHash']:
+            raise WorkerError('IMPORT_PROTOCOL_INVALID')
         if request['format'] == 'doc':
             part = run_stage('doc', request, deadline)
             result.update(outcome='converted', artifacts=[part['artifact']], convertedArtifactId=part['artifact']['id'])

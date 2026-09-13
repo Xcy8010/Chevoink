@@ -942,7 +942,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             // 进入工具执行即证明该消息正文流已结束：登记定稿，text.final 因断线重连等丢失时光标也不残留
             ...(state.finalizedTextIds.includes(event.messageId) ? {} : { finalizedTextIds: [...state.finalizedTextIds, event.messageId] }),
             ...(question ? { phase: 'awaiting_input' as const, pendingQuestion: question } : {}),
-            ...(question ? noteSessionSignal(state, 'attention') : {}),
+            ...(event.importWaiting ? { phase: 'awaiting_input' as const } : {}),
+            ...(question || event.importWaiting ? noteSessionSignal(state, 'attention') : {}),
             ...(isWrite && !isSubagentInternal && !existingActivity
               ? {
                   activitiesVersion: state.activitiesVersion + 1,
@@ -970,6 +971,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                         title: event.title,
                         args: event.args ?? part.args,
                         preparing: false,
+                        ...(event.importWaiting ? { importWaiting: event.importWaiting } : {}),
                         ...(event.subagentCallId && !part.subagentCallId ? { subagentCallId: event.subagentCallId } : {}),
                       }
                     : part,
@@ -984,6 +986,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                   title: event.title,
                   args: event.args,
                   status: 'running',
+                  ...(event.importWaiting ? { importWaiting: event.importWaiting } : {}),
                   ...(event.subagentCallId ? { subagentCallId: event.subagentCallId } : {}),
                 },
               ]
@@ -1030,6 +1033,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         case 'tool.result': {
           const extracted = activityFromDisplay(event.display)
           const clearQuestion = state.pendingQuestion?.callId === event.callId
+          const clearImport = event.toolName === 'novel_import' && state.messages.some(message => message.parts.some(part =>
+            part.type === 'tool-call' && part.callId === event.callId && part.importWaiting))
           // todo_write 成功后同步待办快照并递增触发版本（驱动待办区自动展开）
           const todoUpdate =
             event.ok && event.display?.kind === 'todoList'
@@ -1040,6 +1045,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             // 工具结果到达同样证明正文流早已结束：兜底登记定稿，确保光标不残留
             ...(state.finalizedTextIds.includes(event.messageId) ? {} : { finalizedTextIds: [...state.finalizedTextIds, event.messageId] }),
             ...(clearQuestion ? { phase: 'running' as const, pendingQuestion: null, ...withoutActiveSessionSignal(state) } : {}),
+            ...(clearImport ? { phase: 'running' as const, ...withoutActiveSessionSignal(state) } : {}),
             ...todoUpdate,
             liveToolDrafts: Object.fromEntries(Object.entries(state.liveToolDrafts).filter(([callId]) => callId !== event.callId)),
             workspaceActivities: [...state.workspaceActivities, ...(event.ok && (event.display?.kind === 'chapterDiff' || event.display?.kind === 'planDiff') && !state.workspaceActivities.some(activity => activity.callId === event.callId)

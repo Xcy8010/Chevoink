@@ -1,6 +1,10 @@
 import type { AgentRollbackSnapshot, AgentUIMessage } from '../../../shared/contracts/index.js'
 import type { AgentMessagePart } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
+import { activeChapterScope, assertActiveWriteCount, recalculateNovelStats, updateActiveChapter } from '../data/internal.js'
+import { normalizeNovelStructure } from '../data/volume.js'
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
+import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { getActiveRunIdBySession, hasActiveRunInSession } from './active-runs.js'
 import { publishDurableEvents } from './runtime-event-projection.js'
 
@@ -344,32 +348,37 @@ export async function rollbackLoopSessionFromMessage(
   const actions = collectRollbackActions(records).reverse()
 
   await prisma.$transaction(async (tx) => {
+    await lockNovelActiveScope(tx, session.novelId)
+    for (const runId of runIds) await assertAgentManuscriptCurrent(tx, { userId, novelId: session.novelId, runId })
+    // Validate the entire rollback before deleting history or touching content.
+    // Old run snapshots are not authority to modify import-retained chapters.
+    const targetIds = [...new Set(actions.flatMap(action => action.kind === 'created_chapter'
+      ? [action.chapterId] : action.snapshot.target === 'chapter' ? [action.snapshot.targetId] : []))]
+    const activeTargets = await tx.chapter.count({ where: { id: { in: targetIds }, authorId: userId, ...activeChapterScope(session.novelId) } })
+    if (activeTargets !== targetIds.length) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '回滚目标已归档或不存在，未修改正文或任务历史。')
     for (const action of actions) {
       if (action.kind === 'created_chapter') {
-        await tx.chapter.deleteMany({ where: { id: action.chapterId, novelId: session.novelId } })
+        const deleted = await tx.chapter.deleteMany({ where: { id: action.chapterId, authorId: userId, ...activeChapterScope(session.novelId) } })
+        assertActiveWriteCount(deleted.count, 'chapter')
         continue
       }
 
       const { snapshot } = action
       if (snapshot.target === 'chapter') {
         const exists = await tx.chapter.findFirst({
-          where: { id: snapshot.targetId, novelId: session.novelId },
-          select: { id: true },
+          where: { id: snapshot.targetId, authorId: userId, ...activeChapterScope(session.novelId) },
+          select: { id: true, revision: true },
         })
         if (!exists) {
           continue
         }
         if (snapshot.field === 'content') {
           const content = snapshot.previousValue ?? ''
-          await tx.chapter.update({
-            where: { id: snapshot.targetId },
-            data: { content, wordCount: content.length, revision: { increment: 1 } },
-          })
+          await updateActiveChapter(tx, { id: snapshot.targetId, novelId: session.novelId, authorId: userId, revision: exists.revision },
+            { content, wordCount: content.length, revision: { increment: 1 } })
         } else if (snapshot.field === 'title') {
-          await tx.chapter.update({
-            where: { id: snapshot.targetId },
-            data: { title: snapshot.previousValue ?? '', revision: { increment: 1 } },
-          })
+          await updateActiveChapter(tx, { id: snapshot.targetId, novelId: session.novelId, authorId: userId, revision: exists.revision },
+            { title: snapshot.previousValue ?? '', revision: { increment: 1 } })
         }
         continue
       }
@@ -397,34 +406,10 @@ export async function rollbackLoopSessionFromMessage(
       }
     }
 
-    // 回滚可能删除中间插入章：提交前恢复连续顺序，并让被前移章节的 revision 失效旧编辑基线
-    const orderedChapters = await tx.chapter.findMany({
-      where: { novelId: session.novelId },
-      orderBy: { orderIndex: 'asc' },
-      select: { id: true, orderIndex: true },
-    })
-    for (let index = 0; index < orderedChapters.length; index += 1) {
-      const expectedOrder = index + 1
-      if (orderedChapters[index].orderIndex !== expectedOrder) {
-        await tx.chapter.update({
-          where: { id: orderedChapters[index].id },
-          data: { orderIndex: expectedOrder, revision: { increment: 1 } },
-        })
-      }
-    }
-
-    // 重算作品统计（章节数/总字数）
-    const chapters = await tx.chapter.findMany({
-      where: { novelId: session.novelId },
-      select: { wordCount: true },
-    })
-    await tx.novel.update({
-      where: { id: session.novelId },
-      data: {
-        chapterCount: chapters.length,
-        wordCount: chapters.reduce((total, chapter) => total + chapter.wordCount, 0),
-      },
-    })
+    // Reuse the two-phase chapter AND volume ordering algorithm; retained rows
+    // neither consume active positions nor contribute to creative statistics.
+    await normalizeNovelStructure(tx, session.novelId)
+    await recalculateNovelStats(tx, session.novelId)
 
     await tx.projectMemoryEntry.deleteMany({ where: { runId: { in: runIds } } })
     await tx.agentArtifact.deleteMany({ where: { runId: { in: runIds } } })

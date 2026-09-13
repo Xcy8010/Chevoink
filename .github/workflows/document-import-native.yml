@@ -1,0 +1,66 @@
+name: Document import native acceptance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'workers/document-import/**'
+      - 'api/lib/novel-import/**'
+      - 'package-lock.json'
+      - '.github/workflows/document-import-native.yml'
+  push:
+    branches: [main, chevoink-windows]
+    paths:
+      - 'workers/document-import/**'
+      - 'api/lib/novel-import/**'
+      - 'package-lock.json'
+      - '.github/workflows/document-import-native.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: document-import-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      APP_ENV: test
+      DOCUMENT_IMPORT_NATIVE_REQUIRED: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Install locked Node dependencies (no application/DB boot)
+        run: npm ci
+      - name: Build reviewed worker only (never repository credentials in build context)
+        run: |
+          docker build --iidfile "$RUNNER_TEMP/document-import-image.id" workers/document-import
+          echo "DOCUMENT_IMPORT_TEST_IMAGE=$(cat "$RUNNER_TEMP/document-import-image.id")" >> "$GITHUB_ENV"
+          echo "DOCUMENT_IMPORT_NATIVE_REPORT=$RUNNER_TEMP/document-import-native-report.json" >> "$GITHUB_ENV"
+      - name: Host-safe protocol and failure tests
+        run: python3 -m unittest discover -s workers/document-import/tests -p 'test_*.py' -v
+      - name: Real native DOC / scanned Chinese OCR / mixed PDF / health acceptance
+        run: node node_modules/vitest/vitest.mjs run --config workers/document-import/tests/parser-vitest.config.ts
+      - name: Retain exact tested native image for release handoff (no registry push)
+        run: docker save "$DOCUMENT_IMPORT_TEST_IMAGE" | gzip > "$RUNNER_TEMP/document-import-worker.tar.gz"
+      - name: Save native acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: document-import-native-evidence-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/document-import-image.id
+            ${{ runner.temp }}/document-import-native-report.json
+          retention-days: 30
+      - name: Save successfully tested image
+        uses: actions/upload-artifact@v4
+        with:
+          name: document-import-worker-${{ github.sha }}
+          path: ${{ runner.temp }}/document-import-worker.tar.gz
+          retention-days: 7

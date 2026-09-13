@@ -179,12 +179,8 @@ function parseFileDataUrl(dataUrl: string, name: string): { extension: string; b
 
   const extension = (path.extname(name).slice(1) || '').toLowerCase()
 
-  if (extension === 'doc') {
-    throw new DataAccessError(400, 'VALIDATION_ERROR', '暂不支持旧版 .doc 格式，请转存为 .docx 后重新上传。')
-  }
-
   if (!(AGENT_FILE_EXTENSIONS as readonly string[]).includes(extension)) {
-    throw new DataAccessError(400, 'VALIDATION_ERROR', '文件仅支持 pdf、docx、txt、md 格式。')
+    throw new DataAccessError(400, 'VALIDATION_ERROR', '文件仅支持 pdf、docx、txt、md、zip、doc 格式。')
   }
 
   const maxBytes = extension === 'pdf' ? MAX_AGENT_FILE_BYTES_PDF : MAX_AGENT_FILE_BYTES_DOC
@@ -197,6 +193,13 @@ function parseFileDataUrl(dataUrl: string, name: string): { extension: string; b
     )
   }
 
+  // Import-only containers stay opaque here: never unzip or launch a converter
+  // in the chat upload process. The isolated import parser owns full validation.
+  const validZip = buffer.length >= 4 && [0x04034b50, 0x06054b50, 0x08074b50].includes(buffer.readUInt32LE(0))
+  const validDoc = buffer.subarray(0, 8).equals(Buffer.from('d0cf11e0a1b11ae1', 'hex'))
+  if ((extension === 'zip' && !validZip) || (extension === 'doc' && !validDoc)) {
+    throw new DataAccessError(400, 'VALIDATION_ERROR', '文件头与 ZIP/DOC 格式不符，请选择有效的原文件。')
+  }
   return { extension, buffer }
 }
 

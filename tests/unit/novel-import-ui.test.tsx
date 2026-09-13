@@ -29,8 +29,9 @@ function fixture(overrides: Partial<ImportDialogProps> = {}) {
     preview: vi.fn().mockResolvedValue(preview), edit: vi.fn().mockResolvedValue({ ...preview, manifestRevision: 2 }),
     rebase: vi.fn().mockResolvedValue(status), confirm: vi.fn().mockResolvedValue({ approvalId: 'approval', expiresAt: expiry }),
     commit: vi.fn().mockResolvedValue(receipt), cancel: vi.fn().mockResolvedValue({ ...status, status: 'cancelled' }),
-    restorePreview: vi.fn().mockResolvedValue({ restoreApprovalId: 'restore', targetHash: hash, expiresAt: expiry }),
-    restore: vi.fn().mockResolvedValue({ ...receipt, restored: true }),
+    restorePreview: vi.fn().mockResolvedValue({ canRestore: true, currentTargetHash: hash, backupExpiresAt: expiry, before: { volumes: 2, chapters: 3 }, current: { volumes: 1, chapters: 1 }, metadataKeys: ['title'], restoredAt: null, receipt: null }),
+    restoreConfirm: vi.fn().mockResolvedValue({ restoreApprovalId: 'restore', targetHash: hash, expiresAt: expiry }),
+    restore: vi.fn().mockResolvedValue({ ...receipt, restored: true, restoredAt: '2026-09-14T00:00:00Z', restoredTargetHash: hash, restoredVolumeCount: 2, restoredChapterCount: 3 }),
   }
   const props: ImportDialogProps = { open: true, novelId: 'a', novelTitle: '作品 A', modelSelection: { kind: 'custom', customModelId: 'selected-not-newest' }, beforeImport: vi.fn().mockResolvedValue(true), onClose: vi.fn(), onImported: vi.fn(), client, ...overrides }
   return { client, props }
@@ -48,6 +49,61 @@ async function uploadAndParse() {
 }
 
 describe('import confirmations and ownership', () => {
+  it('reads history while import is off without saving drafts or preparing a new intent', async () => {
+    const { props, client } = fixture({ initialView: 'history' })
+    const caps = await client.capabilities('a')
+    vi.mocked(client.capabilities).mockResolvedValue({ ...caps, enabled: false })
+    vi.mocked(client.list).mockResolvedValue([{ ...status, status: 'succeeded', receipt }, { ...status, novelId: 'b', jobId: 'other' }])
+    vi.mocked(client.status).mockResolvedValue({ ...status, status: 'succeeded', receipt, source: { filename: '完整原稿.zip', bytes: 2048 } })
+    render(<ImportDialog {...props} />)
+    await screen.findByRole('dialog', { name: '导入记录与恢复' })
+    expect(screen.queryByText(/other/)).toBeNull()
+    await armedClick(/继续 \/ 查看任务 job-a/)
+    await screen.findByText('导入完成')
+    expect(screen.getByText('原文件：完整原稿.zip')).toBeTruthy()
+    expect(props.beforeImport).not.toHaveBeenCalled()
+    expect(props.onImported).not.toHaveBeenCalled()
+    expect(client.preflight).not.toHaveBeenCalled()
+    expect(client.create).not.toHaveBeenCalled()
+  })
+
+  it('restores only after a separate impact confirmation and prevents duplicate dispatch', async () => {
+    const { props, client } = fixture({ initialJobId: status.jobId, onRestored: vi.fn() })
+    vi.mocked(client.capabilities).mockResolvedValue({ ...await client.capabilities('a'), enabled: false, restoreEnabled: true })
+    vi.mocked(client.status).mockResolvedValue({ ...status, status: 'succeeded', receipt })
+    render(<ImportDialog {...props} />)
+    await armedClick('恢复导入前版本')
+    await screen.findByRole('dialog', { name: '恢复导入前版本？' })
+    expect(screen.getByText(/当前 1 卷 1 章 → 恢复为 2 卷 3 章/)).toBeTruthy()
+    expect(client.restoreConfirm).not.toHaveBeenCalled()
+    await armedClick('确认恢复')
+    fireEvent.click(screen.getByRole('button', { name: '确认恢复' }), { detail: 2 })
+    await screen.findByText('恢复完成')
+    expect(client.restoreConfirm).toHaveBeenCalledTimes(1)
+    expect(client.restoreConfirm).toHaveBeenCalledWith('a', 'job-a', hash)
+    expect(client.restore).toHaveBeenCalledTimes(1)
+    expect(props.onRestored).toHaveBeenCalledTimes(1)
+    expect(client.preflight).not.toHaveBeenCalled()
+  })
+
+  it('keeps restoration unknown after a lost response until the durable restore receipt is read', async () => {
+    const { props, client } = fixture({ initialJobId: status.jobId, onRestored: vi.fn() })
+    vi.mocked(client.capabilities).mockResolvedValue({ ...await client.capabilities('a'), restoreEnabled: true })
+    vi.mocked(client.status).mockResolvedValue({ ...status, status: 'succeeded', receipt })
+    const restoredReceipt = await client.restore('a', 'job-a', { restoreApprovalId: 'restore', targetHash: hash })
+    vi.mocked(client.restore).mockClear().mockRejectedValue(new Error('network lost'))
+    render(<ImportDialog {...props} />)
+    await armedClick('恢复导入前版本'); await armedClick('确认恢复')
+    await screen.findByText('network lost')
+    expect((screen.getByRole('button', { name: '确认恢复' }) as HTMLButtonElement).disabled).toBe(true)
+    vi.mocked(client.status).mockResolvedValue({ ...status, status: 'succeeded', receipt, restore: { status: 'restored', receipt: restoredReceipt, expiresAt: expiry, restoredAt: restoredReceipt.restoredAt, errorCode: null } })
+    await armedClick('查询恢复结果')
+    await screen.findByText('恢复完成')
+    expect(client.restore).toHaveBeenCalledTimes(1)
+    expect(props.onRestored).toHaveBeenCalledTimes(1)
+    expect(props.onImported).not.toHaveBeenCalled()
+  })
+
   it('requires two independent confirmations even for a blank existing chapter, not double-click/Enter', async () => {
     const { props, client } = fixture()
     render(<ImportDialog {...props} />)
@@ -116,7 +172,7 @@ describe('import confirmations and ownership', () => {
     let resolveA!: (value: NovelImportPreflight) => void
     vi.mocked(client.preflight).mockImplementation(novel => novel === 'a' ? new Promise(resolve => { resolveA = resolve }) : Promise.resolve({ ...check, chapterCount: 0, overwriteRequired: false }))
     const view = render(<ImportDialog {...props} />)
-    await waitFor(() => expect(client.preflight).toHaveBeenCalledWith('a'))
+    await waitFor(() => expect(client.preflight).toHaveBeenCalledWith('a', undefined))
     view.rerender(<ImportDialog {...props} novelId="b" novelTitle="作品 B" />)
     await screen.findByLabelText('选择导入文件')
     await act(async () => { resolveA(check) })
@@ -241,6 +297,19 @@ describe('import confirmations and ownership', () => {
     expect(client.commit).not.toHaveBeenCalled()
   })
 
+  it('routes native hardware-back cancellation through the unsaved-preview confirmation', async () => {
+    const { props, client } = fixture()
+    vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
+    render(<ImportDialog {...props} />)
+    await screen.findByLabelText('选择导入文件'); await uploadAndParse()
+    fireEvent.change(screen.getByLabelText('章名'), { target: { value: '尚未保存' } })
+    const dialog = document.querySelector('dialog[open][data-native-back-dismiss]')!
+    fireEvent(dialog, new Event('cancel', { cancelable: true }))
+    await screen.findByRole('dialog', { name: '预览调整尚未保存' })
+    expect(props.onClose).not.toHaveBeenCalled()
+    expect(client.commit).not.toHaveBeenCalled()
+  })
+
   it('cancels only after an explicit task-cancel confirmation', async () => {
     const { props, client } = fixture()
     vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
@@ -315,8 +384,8 @@ describe('import confirmations and ownership', () => {
     render(<ImportDialog {...props} />)
     await screen.findByLabelText('选择导入文件'); await uploadAndParse()
     const split = async () => {
-      const body = screen.getByLabelText('原文正文') as HTMLTextAreaElement
-      body.focus(); body.setSelectionRange(100000, 100000); fireEvent.select(body); fireEvent.keyUp(body, { key: 'ArrowRight' })
+      fireEvent.change(screen.getByLabelText('跳转字符位置'), { target: { value: '100000' } })
+      fireEvent.click(screen.getByRole('button', { name: '定位拆分光标' }))
       await armedClick('在光标处拆分为两章')
       await armedClick('保存预览调整')
       await waitFor(() => expect(screen.queryByRole('button', { name: '保存预览调整' })).toBeNull())
