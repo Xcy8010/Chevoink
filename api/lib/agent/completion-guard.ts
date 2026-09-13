@@ -1,5 +1,17 @@
 import type { AgentMessagePart, AgentTodoItem } from '../../../shared/contracts/index.js'
 
+/** Empty/thinking-only responses are provider non-delivery, not unfinished todos.
+ * One correction is allowed, without changing the selected model or reasoning. */
+export function createEmptyResponseGuard() {
+  let consecutive = 0
+  return {
+    observe(content: string, toolCount: number): 'continue' | 'retry' | 'stop' {
+      if (content.trim() || toolCount > 0) { consecutive = 0; return 'continue' }
+      return ++consecutive < 2 ? 'retry' : 'stop'
+    },
+  }
+}
+
 /** Recovery is bounded both per consecutive failure and per run. A real call
  * breaks the streak, but never replenishes the total paid correction budget. */
 export function createProtocolRecoveryGuard() {

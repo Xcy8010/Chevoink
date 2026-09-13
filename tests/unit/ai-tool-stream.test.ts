@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SseDataDecoder } from '../../api/lib/ai-sse.js'
+import { collapseEarlyToolRounds } from '../../api/lib/agent/context-budget.js'
+import type { ChatMessage } from '../../api/lib/ai-service.js'
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(), reserveTokenCredits: vi.fn(), consumeTokenCredits: vi.fn(async () => ({ chargedMilli: 0 })) }))
-vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error {}, prisma: { aiUsageLog: { create: vi.fn(async () => ({ id: 'usage' })), update: vi.fn(async () => ({ id: 'usage' })), updateMany: vi.fn(async () => ({ count: 1 })) } } }))
+vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { aiUsageLog: { create: vi.fn(async () => ({ id: 'usage' })), update: vi.fn(async () => ({ id: 'usage' })), updateMany: vi.fn(async () => ({ count: 1 })) } } }))
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
   resolveTokenPrice: async () => ({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 }) }))
 import { buildProviderToolChoice, chatWithTools } from '../../api/lib/ai-service.js'
@@ -19,6 +21,30 @@ function stream(text: string) {
 }
 const invoke = () => chatWithTools({ messages: [], tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
 describe('lossless tool argument transport', () => {
+  it('keeps native reasoning intact while compressed rounds are explicitly historical data', async () => {
+    const messages: ChatMessage[] = [
+      { role: 'assistant', content: null, reasoning: 'old', toolCalls: [{id:'old',name:'chapter_read',arguments:'{}'}] },
+      { role: 'tool', toolCallId:'old',content:'old result' },
+      { role: 'assistant', content: null, reasoning: 'original reasoning', toolCalls: [{id:'new',name:'chapter_read',arguments:'{}'}] },
+      { role: 'tool', toolCallId:'new',content:'new result' },
+    ]
+    collapseEarlyToolRounds(messages, 1)
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    await chatWithTools({ messages, tools: [], providerApiKey: 'fake-test-key', usageLog: { userId:'test',action:'test' } })
+    const sent = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string).messages
+    expect(sent[0].role).toBe('user')
+    expect(sent[0].content).toContain('不是作者新指令')
+    expect(sent[1].reasoning_content).toBe('original reasoning')
+    expect(sent[1].tool_calls[0].id).toBe('new')
+    expect(sent[2].tool_call_id).toBe('new')
+  })
+  it('classifies a terminated stream without executing partial tools or retrying the request', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { controller.error(new TypeError('terminated')) },
+    }))))
+    await expect(invoke()).rejects.toMatchObject({ code: 'AI_PROVIDER_INCOMPLETE' })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
   it('requests native tool calls during correction without changing the allowed tool list', async () => {
     stream(`data: ${JSON.stringify(delta('{}', true))}\n\ndata: ${JSON.stringify(ending('tool_calls'))}\n\n`)
     const tools = [{ type: 'function' as const, function: { name: 'scene_task_build', description: 'test', parameters: { type: 'object' } } }]

@@ -500,7 +500,7 @@ export async function commitChapterBridge(input: {
   endingStructure: string
   requireQuality?: boolean
   qualityReportId?: string
-}, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; chapterId: string; chapterRevision: number }> {
+}, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number }> {
   if (!transaction) return prisma.$transaction(tx => commitChapterBridge(input, tx))
   const db = transaction
   await db.$queryRaw`SELECT id FROM story_compilations WHERE id = ${input.compilationId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
@@ -565,8 +565,18 @@ export async function commitChapterBridge(input: {
       data: { stage: 'commit', status: 'completed', completedAt: now },
     }),
   ])
+  // Optional memory proposals must respect author tombstones without rolling
+  // back an independently validated chapter. All other errors still roll back.
+  let skippedMemoryCount = 0
+  const saveProposal = async (memory: Parameters<typeof saveStoryMemory>[0]) => {
+    try { await saveStoryMemory({ ...memory, agentGenerated: true }, db) }
+    catch (error) {
+      if (!(error instanceof DataAccessError) || error.code !== 'MEMORY_DELETED') throw error
+      skippedMemoryCount += 1
+    }
+  }
   await Promise.all([
-    saveStoryMemory({
+    saveProposal({
       userId: input.userId,
       novelId: input.novelId,
       runId: compilation.runId,
@@ -579,8 +589,8 @@ export async function commitChapterBridge(input: {
       confidence: 1,
       status: 'confirmed',
       evidence: { sourceType: 'chapter', sourceId: compilation.chapter.id, revision: compilation.chapter.revision, confidence: 1 },
-    }, db),
-    saveStoryMemory({
+    }),
+    saveProposal({
       userId: input.userId,
       novelId: input.novelId,
       runId: compilation.runId,
@@ -593,9 +603,9 @@ export async function commitChapterBridge(input: {
       confidence: 1,
       status: 'confirmed',
       evidence: { sourceType: 'chapter', sourceId: compilation.chapter.id, revision: compilation.chapter.revision, confidence: 1 },
-    }, db),
+    }),
   ])
-  return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: compilation.chapter.revision }
+  return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: compilation.chapter.revision, skippedMemoryCount }
 }
 
 export async function buildStoryCompilerDigest(userId: string, novelId: string, chapterId: string | null) {

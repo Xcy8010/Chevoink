@@ -616,6 +616,9 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   } catch (error) {
     await durable?.interrupted(params.signal?.aborted ? 'aborted' : 'transport_error')
     await markUnobservedUsage(prepared?.id)
+    if (!params.signal?.aborted && error instanceof TypeError && error.message === 'terminated') {
+      throw new DataAccessError(502, 'AI_PROVIDER_INCOMPLETE', '模型连接中途断开，未取得完整结果；本轮工具未执行，已保存内容和已知用量保留。请稍后继续当前任务。')
+    }
     throw error
   }
 
@@ -836,6 +839,9 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
       }
     }
     await markUnobservedUsage(prepared?.id)
+    if (!params.signal?.aborted && error instanceof TypeError && error.message === 'terminated') {
+      throw new DataAccessError(502, 'AI_PROVIDER_INCOMPLETE', '模型连接中途断开，未取得完整结果；本轮工具未执行，已保存内容和已知用量保留。请稍后继续当前任务。')
+    }
     throw error
   } finally {
     await reader.cancel().catch(() => {})

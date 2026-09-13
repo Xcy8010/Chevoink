@@ -45,7 +45,8 @@ import type { AgentTool, ToolContext } from './tools/types.js'
 import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestrationResumeNote } from './tools/task-orchestration-tools.js'
 import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-text.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
-import { createProtocolRecoveryGuard, hasDurableProgress, hasReadProgress, isContinuationRequest, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
+import { createEmptyResponseGuard, createProtocolRecoveryGuard, hasDurableProgress, hasReadProgress, isContinuationRequest, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
+import { toolFailureRecovery } from './tool-failure-recovery.js'
 import { createRepeatDetector } from './repeat-detect.js'
 import {
   CHECKPOINT_BUDGET_SLICE,
@@ -211,6 +212,8 @@ const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
 
 type ToolCallOutcome = {
   providerFailure?: boolean
+  recoveryCode?: string
+  argumentFailure?: boolean
   observation: string
   part: Extract<AgentMessagePart, { type: 'tool-call' }>
   /** 附属分部：子 Agent 内嵌执行产生的内部工具调用卡片，随父消息一并落库与直播 */
@@ -319,11 +322,11 @@ export async function handleToolCall(
       callId: call.id,
       toolName: call.name,
       ok: false,
-      summary: '参数解析失败',
+      summary: call.incomplete ? '模型输出达上限，参数未完成' : '参数解析失败',
       durationMs: Date.now() - startedAt,
       ...subagentMark,
     })
-    return { observation, part: { ...basePart, args: null, status: 'failed', summary: '参数解析失败' } }
+    return { observation, argumentFailure: true, part: { ...basePart, args: null, status: 'failed', summary: call.incomplete ? '模型输出达上限，参数未完成' : '参数解析失败' } }
   }
 
   // 先统一修复兼容网关常见的二次包装、字符串化 JSON、参数列表与顶层 null，
@@ -490,7 +493,12 @@ export async function handleToolCall(
       return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。最多重试一次，仍失败则保留进度并报告阻塞。`, 'failed'), providerFailure: true }
     }
     console.warn('[agent-tool-failure]', { runId, tool: call.name, code: error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR', durationMs: Date.now() - startedAt })
-    const message = error instanceof Error ? error.message : String(error)
+    const recovery = error instanceof DataAccessError ? toolFailureRecovery(error.code) : undefined
+    if (recovery && error instanceof DataAccessError) return {
+      ...fail(recovery.label, `工具 ${call.name} 未完成（${error.code}）：${error.message} ${recovery.guidance}`, 'failed'),
+      recoveryCode: error.code,
+    }
+    const message = error instanceof DataAccessError ? error.message : '内部执行异常，本次操作未确认完成；请核对已保存状态，不要盲目重复写入'
     return fail('执行失败', `工具 ${call.name} 执行失败：${message}。可以调整参数重试，或换用其他工具。`, 'failed')
   }
 }
@@ -605,6 +613,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
   let blockedRepeat = 0
   const argumentFailures = new Map<string, number>()
   const toolProviderFailures = new Map<string, number>()
+  const recoveryFailures = new Map<string, number>()
   // 非空时本轮工具执行完立即走 wrap-up（P0 第 4 次同签名 / P1 干预模式二次命中）
   let forceWrapUpReason: string | null = null
   // P1 信道重复检测：正文+思考共用一个检测器，观察/干预由 env.agentRepeatGuardMode 决定
@@ -1095,6 +1104,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     let lastAssistantText = ''
     // 模型把工具调用写成正文文本而非真正 function calling 时的纠偏重试次数
     const protocolRecovery = createProtocolRecoveryGuard()
+    const emptyResponseRecovery = createEmptyResponseGuard()
     let requireNativeToolCall = false
     const toolNameList = tools.map((tool) => tool.name)
     // C3：规划类任务必须以 plan_save 落盘收尾，只聊天不落盘时回填提醒
@@ -1467,6 +1477,27 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
 
       if (cleanContent) lastAssistantText = cleanContent
 
+      const emptyDecision = emptyResponseRecovery.observe(cleanContent, effectiveToolCalls.length)
+      if (emptyDecision !== 'continue') {
+        // Preserve diagnosis, but do not replay unproductive reasoning into a
+        // growing request. Model and reasoning settings remain unchanged.
+        messages.pop()
+        await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
+        bus.emit({ type: 'step.finish', turn, usage: result.usage })
+        console.warn('[agent-empty-response]', { runId, turn, finishReason: result.finishReason,
+          reasoningChars: result.reasoning.length, completionTokens: result.usage.completionTokens, decision: emptyDecision })
+        if (emptyDecision === 'stop') {
+          const reason = result.finishReason === 'length'
+            ? '模型连续两轮未返回正文或工具调用，本轮又达到单次输出上限；已停止重复消耗，任务未完成。已保存内容保留，请检查模型输出上限或选择合适的推理档位后再继续。'
+            : '模型连续两轮未返回正文或工具调用，已停止重复消耗；任务未完成，已保存内容保留。请检查模型服务后再继续。'
+          await finalizeRun(runId, bus, 'failed', usage, turn, '', reason)
+          return
+        }
+        requireNativeToolCall = true
+        messages.push({ role: 'user', content: '[系统] 上轮只返回思考或空响应，没有正文和工具调用，不构成任何已完成工作。请直接执行原授权范围内一个必要的工具步骤，或给出有效答复；如受内容限制或缺少必要信息，请明确说明，不要继续长篇空转思考。' })
+        continue
+      }
+
       if (effectiveToolCalls.length === 0) {
         // C3：规划类任务未经 plan_save 落盘就想收尾，回填提醒（最多 2 次）防止全程只聊天不落盘
         if (expectsPlanSave && !planSavePerformed && planSaveReminders < 2) {
@@ -1568,10 +1599,16 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
           }
         }
         if (outcome.part.status === 'success') argumentFailures.delete(call.name)
-        else if (['参数解析失败', '参数校验失败', '参数归一化失败'].includes(outcome.part.summary ?? '')) {
+        else if (outcome.argumentFailure || ['参数解析失败', '参数校验失败', '参数归一化失败'].includes(outcome.part.summary ?? '')) {
           const failures = (argumentFailures.get(call.name) ?? 0) + 1
           argumentFailures.set(call.name, failures)
           if (failures >= 3) forceWrapUpReason = `工具 ${call.name} 连续三次参数无效，已停止重复消耗；已成功保存的内容保留，该工具未完成。`
+        }
+        if (outcome.recoveryCode) {
+          const key = `${call.name}:${outcome.recoveryCode}:${signature}`
+          const failures = (recoveryFailures.get(key) ?? 0) + 1
+          recoveryFailures.set(key, failures)
+          if (failures >= 3) forceWrapUpReason = `${outcome.part.title}反复遇到同一问题：${outcome.part.summary}。已停止相同参数重试，未绕过校验；请先核对目标和来源，已保存内容保留。`
         }
         lastActivityAt = Date.now()
         // 滑窗更新：只记成功执行；失败不碰窗口（同签名重试不会被误杀）
@@ -1587,6 +1624,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
           if (!progressSignatures.has(progressKey)) {
             progressSignatures.add(progressKey)
             if (durableProgress || readProgress) todoReminders = 0
+            if (durableProgress || readProgress) recoveryFailures.clear()
             // Checklist bookkeeping may reset a reminder, but is not new work
             // evidence and cannot renew the paid execution budget.
             if (durableProgress && display?.kind !== 'todoList') writeProgressCount += 1
@@ -1720,7 +1758,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       return
     }
 
-    const message = error instanceof Error ? error.message : String(error)
+    const message = error instanceof DataAccessError ? error.message : '任务执行遇到内部异常，已停止后续操作；已保存内容保留，请核对状态后再继续。'
     console.error('[agent-loop] run 执行异常', runId, error)
     bus.emit({ type: 'error', code: 'loop_crashed', message, recoverable: false })
     await flushLiveTurn()

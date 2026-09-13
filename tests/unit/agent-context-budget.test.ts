@@ -43,6 +43,8 @@ describe('Agent 运行中上下文预算与压缩', () => {
     expect(result.messages[0]).toEqual(messages[0])
     expect(result.messages.slice(-2)).toEqual(messages.slice(-2))
     expect(result.messages[1].content).toContain('execution_context_read')
+    expect(result.messages[1].role).toBe('user')
+    expect(result.messages[1].content).toContain('不是作者新指令')
     expect(result.messages[1].content).toContain('"messageIndex":1')
     expect(result.messages[1].content).toContain('"messageIndex":2')
     expect(result.messages[1].content).not.toContain('"messageIndex":3')
@@ -98,7 +100,7 @@ describe('Agent 运行中上下文预算与压缩', () => {
 
     expect(result.collapsedToolRounds).toBe(1)
     expect(messages.some((message) => message.role === 'tool' && message.toolCallId === 'old')).toBe(false)
-    expect(messages.some((message) => message.role === 'assistant' && String(message.content).includes('早前工具轮已压缩'))).toBe(true)
+    expect(messages.some((message) => message.role === 'user' && String(message.content).includes('早前工具轮已压缩'))).toBe(true)
     expect(messages.some((message) => message.role === 'tool' && message.toolCallId === 'recent')).toBe(true)
     expect(result.afterTokens).toBeLessThan(result.beforeTokens)
   })

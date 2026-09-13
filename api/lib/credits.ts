@@ -127,6 +127,10 @@ function makeReferralCode(seed?: string): string {
 }
 
 async function getGlobalSetting(db: CreditDb) {
+  // Hot-path admission/settlement reads must not initialize the singleton on
+  // every request. Do not cache: administrative pause/limits stay current.
+  const existing = await db.creditSystemSetting.findUnique({ where: { id: GLOBAL_SETTING_ID } })
+  if (existing) return existing
   return db.creditSystemSetting.upsert({
     where: { id: GLOBAL_SETTING_ID },
     create: {

@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ pending: vi.fn(), model: vi.fn(), account: vi.fn() }))
+const mocks = vi.hoisted(() => ({ pending: vi.fn(), model: vi.fn(), account: vi.fn(), setting: vi.fn(), initialize: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } },
   prisma: {
-    creditSystemSetting: { upsert: vi.fn(async () => ({ dailyAllowanceMilli: 450000, globallyPaused: false, resetHourUtc8: 15 })) },
+    creditSystemSetting: { findUnique: mocks.setting, upsert: mocks.initialize },
     creditAccount: { upsert: vi.fn(), updateMany: vi.fn(), findUniqueOrThrow: mocks.account },
     aiUsageLog: { aggregate: mocks.pending },
     aiModelConfig: { findFirst: mocks.model },
@@ -16,12 +16,24 @@ import { assertCreditAccess, getAuxiliaryModelRuntime } from '../../api/lib/cred
 const start = new Date('2026-09-09T07:00:00Z')
 beforeEach(() => {
   vi.clearAllMocks()
+  mocks.setting.mockResolvedValue({ dailyAllowanceMilli: 450000, globallyPaused: false, resetHourUtc8: 15 })
+  mocks.initialize.mockResolvedValue({ dailyAllowanceMilli: 450000, globallyPaused: false, resetHourUtc8: 15 })
   mocks.account.mockResolvedValue({ dailyAllowanceMilli: 450000, dailyUsedMilli: 0, bonusBalanceMilli: 0, periodStartedAt: start, suspendedAt: null })
   mocks.pending.mockResolvedValue({ _sum: { reservedCreditMilli: 0 } })
   mocks.model.mockResolvedValue({ tier: 'speed', modelName: 'fixture', baseUrl: 'https://fixture.example/v1', apiKeyCiphertext: 'fixture' })
 })
 
 describe('P0 credit admission and auxiliary model ownership', () => {
+  it('reads current settings without upserting the global singleton on each admission', async () => {
+    await assertCreditAccess('owner', 'speed')
+    expect(mocks.setting).toHaveBeenCalled()
+    expect(mocks.initialize).not.toHaveBeenCalled()
+  })
+  it('retains initialization for a missing singleton', async () => {
+    mocks.setting.mockResolvedValueOnce(null)
+    await assertCreditAccess('owner', 'speed')
+    expect(mocks.initialize).toHaveBeenCalledTimes(1)
+  })
   it('counts only unexpired reservations instead of locking on unknown usage', async () => {
     await assertCreditAccess('owner', 'speed')
     expect(mocks.pending).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ userId: 'owner', reservationExpiresAt: { gt: expect.any(Date) } }) }))

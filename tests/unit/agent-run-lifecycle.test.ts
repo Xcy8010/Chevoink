@@ -643,6 +643,32 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
   })
 
+  it.each(['stop', 'length'] as const)('bounds thinking-only %s responses without replaying their reasoning or claiming completion', async finishReason => {
+    const empty = { ...response(''), reasoning: '无效思考'.repeat(1000), finishReason }
+    queue(empty, empty)
+    await run()
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(JSON.stringify(mocks.chat.mock.calls[1][0].messages)).not.toContain('无效思考')
+    expect(mocks.update.mock.calls.some(([arg]) => String(arg.data.errorMessage).includes('连续两轮'))).toBe(true)
+  })
+
+  it('recovers an empty response through real tools and preserves explicit user-facing refusal', async () => {
+    queue(response(''), response('', [call('actual')]), response('无法完成该要求，请调整范围。'))
+    await run()
+    expect(mocks.tools[0].execute).toHaveBeenCalledTimes(1)
+    expect(mocks.chat).toHaveBeenCalledTimes(3)
+  })
+
+  it('bounds unchanged memory source failures instead of exhausting the task budget', async () => {
+    mocks.tools = [tool('memory_save', async () => { throw new DataAccessError(409, 'MEMORY_SOURCE_REQUIRED', '来源版本不匹配') }, false)]
+    queue(...['one', 'two', 'three'].map(id => response('', [call(id, 'memory_save')])), response('来源仍未核实。'))
+    await run()
+    expect(mocks.tools[0].execute).toHaveBeenCalledTimes(3)
+    expect(events().filter(e => e.type === 'tool.result').every(e => e.type === 'tool.result' && e.summary === '记忆来源需要重新核对')).toBe(true)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+  })
+
   it('resets consecutive no-progress reminders after actual advancement, supporting more than four milestones', async () => {
     mocks.todos.mockResolvedValue([{ content: '整改全书', status: 'pending' }])
     mocks.tools.push(tool('todo_write', async () => ({ output: '已完成', display: { kind: 'todoList', items: [{ content: '整改全书', status: 'completed' }] } }), false))

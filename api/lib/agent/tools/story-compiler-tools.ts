@@ -738,7 +738,7 @@ export const chapterBridgeCommitTool = defineTool({
     try {
       const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, ...terminal, requireQuality, qualityReportId }, ctx.transaction)
       return {
-        output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge、Scene Task 终态与故事记忆已原子对齐。下一章将直接召回本次终态。`,
+        output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge 与 Scene Task 终态已提交。故事记忆仅提交候选，作者确认前不参与事实召回。${result.skippedMemoryCount ? `其中 ${result.skippedMemoryCount} 项记忆因作者已删除而跳过，未重建；不影响章节终态提交。` : ''}下一章可承接本次章节桥终态。`,
         summary: '提交章节桥与故事终态',
         display: {
           kind: 'storyCompiler', compilationId: result.compilationId, phase: 'commit', title: '章节终态已提交',
