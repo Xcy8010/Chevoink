@@ -35,7 +35,7 @@ export async function drainNovelImportEffects(options: { jobIds?: readonly strin
         // A newer user-selected cover must win. Retry against it next tick.
         if (novel.coverAssetId !== observed.coverAssetId) return false
         let coverUrl = novel.coverAsset?.imageUrl ?? null
-        if (promotedUrl && novel.coverAsset?.imageUrl === originalUrl) {
+        if (promotedUrl && novel.coverAsset && novel.coverAsset.imageUrl === originalUrl) {
           await tx.coverAsset.update({ where: { id: novel.coverAsset.id }, data: { imageUrl: promotedUrl } })
           coverUrl = promotedUrl
         } else if (coverUrl?.startsWith('data:image/png;')) return false
