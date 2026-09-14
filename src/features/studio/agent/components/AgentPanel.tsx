@@ -114,6 +114,8 @@ type AgentPanelProps = {
   onWorkspaceRollback?: () => void
   onClose?: () => void
   className?: string
+  /** 右侧工具面板（作品设置/封面工坊等）打开时，宿主传入右内缩，避免输入框 z-[80] 压住面板底部。 */
+  composerInsetClassName?: string
   /** Work 宽屏存在独立任务停靠区时，内联待办/变更自动隐藏。 */
   activityPresentation?: 'inline' | 'responsive'
   /** 手机工作台把 Agent 标题与任务按钮并入作品选择同一行。 */
@@ -183,6 +185,7 @@ export function AgentPanel({
   onOpenSkills,
   onImportModelSelection,
   referenceOptions = [],
+  composerInsetClassName,
 }: AgentPanelProps) {
   const workConversation = useWorkConversation()
   const runId = useAgentStore((state) => state.runId)
@@ -1386,7 +1389,7 @@ export function AgentPanel({
         onClose={() => setQuotaDialogOpen(false)}
       />
       {workConversation.collapsed ? <WorkConversationRestore onExpand={workConversation.expand} recentMessage={recentConversationText} /> : null}
-      <div data-agent-composer className="px-4 pb-4">
+      <div data-agent-composer className={`px-4 pb-4 transition-[margin] duration-200${composerInsetClassName ? ` ${composerInsetClassName}` : ''}`}>
       {sessionId ? <AgentQueueTray key={sessionId} items={queueQuery.data?.items ?? []} onAction={async (item, action, prompt) => {
         const result = await actOnAgentQueue(sessionId, item.id, action, item.revision, prompt)
         await queueQuery.refetch()

@@ -12,6 +12,9 @@ export type ParsedNovelImport = {
   /** Optional enriched pipeline result; never send image bytes directly over HTTP. */
   images?: ImportImage[]
   evidence?: ImportEvidence
+  /** 标题关键词路由出的计划/设定段落（content-routing），不进 volumes。 */
+  plans?: Array<{ title: string; content: string }>
+  memories?: Array<{ memoryType: 'characterCard' | 'worldbuilding' | 'storyBible'; title: string; content: string }>
 }
 export type NovelImportParseOptions = { encoding?: string; signal?: AbortSignal;
   /** Trusted orchestration only, not uploaded options/manifest fields. */

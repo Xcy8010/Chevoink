@@ -781,18 +781,18 @@ export default function StudioSettingsDialog(props: Props) {
   }
 
   return createPortal(
-    <section aria-label="创作区设置" className="studio-settings-page studio-workspace fixed inset-0 z-[200] flex h-dvh w-screen overflow-hidden bg-white text-[var(--text-primary)] dark:bg-[#111318]">
-      <aside className="hidden h-full w-[264px] shrink-0 flex-col border-r border-[var(--border-subtle)] bg-[#f6f6f7] px-3 pb-4 pt-[max(16px,var(--safe-top))] dark:bg-[#1a1d23] lg:flex">
+    <section aria-label="创作区设置" className="studio-settings-page studio-workspace fixed inset-0 z-[200] flex h-dvh w-screen overflow-hidden bg-[var(--surface-default)] text-[var(--text-primary)]">
+      <aside className="hidden h-full w-[264px] shrink-0 flex-col border-r border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 pb-4 pt-[max(16px,var(--safe-top))] lg:flex">
         <button type="button" onClick={props.onClose} className="mb-4 flex h-10 items-center gap-2 rounded-[9px] px-2 text-sm font-medium hover:bg-[var(--surface-muted)]"><ArrowLeft className="h-4 w-4" />返回创作区</button>
         <label className="relative mb-5 block"><Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--text-tertiary)]" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索设置…" className="h-9 w-full rounded-[9px] border border-[var(--border-subtle)] bg-[var(--surface-default)] pl-9 pr-3 text-xs outline-none focus:border-[var(--border-strong)]" /></label>
-        <nav className="min-h-0 flex-1 space-y-5 overflow-y-auto" aria-label="设置导航">
+        <nav className="scrollbar-none min-h-0 flex-1 space-y-5 overflow-y-auto" aria-label="设置导航">
           {filteredGroups.map((group) => <div key={group.label}><p className="mb-1.5 px-3 text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--text-tertiary)]">{group.label}</p><div className="space-y-0.5">{group.items.map((item) => navButton(item))}</div></div>)}
           {filteredGroups.length === 0 ? <p className="px-3 py-8 text-center text-xs text-[var(--text-tertiary)]">没有匹配的设置</p> : null}
         </nav>
         <div className="mt-4 flex items-center gap-2 border-t border-[var(--border-subtle)] px-2 pt-4 text-xs text-[var(--text-tertiary)]"><img src="/chevoink-agent.png" alt="" className="h-4 w-4 object-contain" />Chevoink Agent 3.0</div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col bg-white dark:bg-[#111318]">
+      <div className="flex min-w-0 flex-1 flex-col bg-[var(--surface-default)]">
         <header className="flex shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] px-4 pb-3 pt-[max(12px,var(--safe-top))] lg:hidden">
           <button type="button" onClick={props.onClose} className="inline-flex h-9 w-9 items-center justify-center rounded-[9px] hover:bg-[var(--surface-muted)]" aria-label="返回创作区"><ArrowLeft className="h-4 w-4" /></button>
           <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">创作区设置</p><p className="truncate text-[10px] text-[var(--text-tertiary)]">{meta.title}</p></div>
@@ -803,7 +803,7 @@ export default function StudioSettingsDialog(props: Props) {
           <div className="min-w-0 flex-1"><h1 className="text-xl font-semibold tracking-tight">{meta.title}</h1><p className="mt-1 text-xs text-[var(--text-tertiary)]">{meta.description}</p></div>
         </header>
 
-        <main className={cn('min-h-0 flex-1 overflow-y-auto', props.section === 'operations' ? 'p-0' : 'px-5 py-7 sm:px-8 lg:px-10 lg:py-9')}>
+        <main className={cn('scrollbar-none min-h-0 flex-1 overflow-y-auto', props.section === 'operations' ? 'p-0' : 'px-5 py-7 sm:px-8 lg:px-10 lg:py-9')}>
           {props.section === 'operations' ? (
             <AgentOperationsCenter embedded open onClose={props.onClose} novelId={props.novelId} sessionId={props.sessionId} chapterId={props.chapterId} runIds={props.runIds ?? []} onSelectSession={props.onSelectSession} onTaskForked={props.onTaskForked} />
           ) : (

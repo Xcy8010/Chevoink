@@ -5,6 +5,8 @@ import { DataAccessError } from '../prisma.js'
 import { importBytesHash } from '../novel-import-storage.js'
 
 const reject = (code: string, message: string): never => { throw new DataAccessError(409, code, message) }
+/** 计划/创作记忆段落也算有效导入内容：仅导入设定或计划时不应被“至少一章正文”闸拒绝。 */
+export const routedContentCount = (preview: { plans?: unknown[]; memories?: unknown[] }) => (preview.plans?.length ?? 0) + (preview.memories?.length ?? 0)
 export const reportHash = (report: NovelImportDocumentReport) => importBytesHash(JSON.stringify(report))
 export const canonicalPreviewHash = (value: unknown) => importBytesHash(JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item))
 export const previewContentHash = (preview: NovelImportPreview) => canonicalPreviewHash(preview.volumes)
@@ -77,7 +79,7 @@ export function assertNovelImportPreviewComplete(input: NovelImportPreview): voi
     if (item.status === 'failed' || (item.status === 'needs_review' && !state.reviewed(item.id) && !state.issues.some(issue => issue.resolved && issue.itemIds.includes(item.id)))) reject('IMPORT_INCOMPLETE_CONTENT', '来源仍有未处理或待核验内容。')
   }
   if (!state.report.complete && !state.report.issues.some(issue => issue.blocking)) reject('IMPORT_INCOMPLETE_CONTENT', '来源覆盖报告不完整，请重新解析。')
-  if (!preview.volumes.some(v => v.chapters.some(c => c.content.trim()))) reject('IMPORT_NO_BODY', '至少保留一章非空正文。')
+  if (!preview.volumes.some(v => v.chapters.some(c => c.content.trim())) && !routedContentCount(preview)) reject('IMPORT_NO_BODY', '至少保留一章非空正文。')
   if (preview.volumes.some(v => v.chapters.some(c => c.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters))) reject('IMPORT_CHAPTER_TOO_LONG', '单章超过10万字符，请拆分。')
 }
 
@@ -120,7 +122,7 @@ export function applySourceReview(preview: NovelImportEvidencePreview, input: z.
     decisions.set(decision.itemId, { ...decision, sourceHash: preview.sourceHash, reportHash: preview.reportHash!, contentHash: '', reviewedAt: new Date().toISOString() })
   }
   const volumes = preview.volumes.map(v => ({ ...v, chapters: v.chapters.filter(c => !selected.some(item => withinSource(chapterSource(c.source), item.source))) }))
-  if (!volumes.some(v => v.chapters.some(c => c.content.trim()))) reject('IMPORT_NO_BODY', '不能排除全部正文；至少保留一章非空正文。')
+  if (!volumes.some(v => v.chapters.some(c => c.content.trim())) && !routedContentCount(preview)) reject('IMPORT_NO_BODY', '不能排除全部正文；至少保留一章非空正文。')
   const next: NovelImportEvidencePreview = { ...preview, volumes, decisions: [...decisions.values()] }
   const contentHash = previewContentHash(next)
   // Old review decisions are invalidated by body exclusion; new choices bind the actual result.

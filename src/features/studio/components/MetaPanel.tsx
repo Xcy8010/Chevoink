@@ -50,7 +50,7 @@ export default function MetaPanel({
         </Button>
       }
     >
-      <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto overscroll-contain pr-1">
+      <div className="scrollbar-none flex h-full min-h-0 flex-col gap-4 overflow-y-auto overscroll-contain">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-[18px] bg-[var(--surface-muted)] px-4 py-3 text-xs text-[var(--text-secondary)]">
           <span>{wordCountLabel}</span>
           <span>{chapterCountLabel}</span>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { LoaderCircle, Upload } from 'lucide-react'
 import { useToast } from '@/components/ui/toast-context'
-import type { NovelImportCapabilities, NovelImportJobStatus, NovelImportModelSelection, NovelImportPreflight, NovelImportPreview, NovelImportReceipt } from '../../../../shared/contracts/novel-import.js'
+import type { NovelImportCapabilities, NovelImportJobStatus, NovelImportModelSelection, NovelImportPreflight, NovelImportPreview, NovelImportReceipt, NovelImportStatus } from '../../../../shared/contracts/novel-import.js'
 import { novelImportApi, type NovelImportClient } from '../import-api'
 import { canSaveImportPreview, canSubmitImport, importPreviewCounts } from '../lib/import-preview'
 import { ImportDialogShell } from './import-dialog-shell'
@@ -47,11 +47,14 @@ type Stage = 'loading' | 'history' | 'first' | 'second' | 'workspace' | 'auto' |
 const previewStatuses = new Set(['ready', 'needs_review', 'awaiting_confirmation'])
 const terminalStatuses = new Set(['succeeded', 'cancelled', 'expired', 'failed'])
 const formats = ['zip', 'txt', 'md', 'pdf', 'doc', 'docx']
+/** 一键导入起跑前需要顶替的本作品未完结任务状态。 */
+const liveStatuses = new Set<NovelImportStatus>(['uploading', 'uploaded', 'parsing', 'needs_review', 'ready', 'awaiting_confirmation'])
 
 function canSubmitSummary(summary: NovelImportPreviewSummary, report: NovelImportReportDto | null) {
+  const routedExtra = Boolean(summary.plans?.length || summary.memories?.length)
   return !!report && report.manifestRevision === summary.manifestRevision && report.manifestHash === summary.manifestHash && report.sourceHash === summary.sourceHash
     && !report.issues.some(issue => issue.blocking && !issue.resolved) && !summary.warnings.some(warning => warning.blocking)
-    && summary.volumes.some(volume => volume.chapters.some(chapter => chapter.nonEmpty))
+    && (routedExtra || summary.volumes.some(volume => volume.chapters.some(chapter => chapter.nonEmpty)))
     && summary.volumes.every(volume => volume.title.trim() && volume.chapters.every(chapter => chapter.title.trim() && chapter.characters <= 100000))
 }
 
@@ -97,6 +100,8 @@ function ImportDialogSession(props: ImportDialogProps) {
   const restorePending = useRef(false)
   const [autoStep, setAutoStep] = useState('')
   const [autoNonce, setAutoNonce] = useState(0)
+  const [autoProgress, setAutoProgress] = useState(0)
+  const autoTarget = useRef(0)
   const toast = useToast()
   const [restoreApproval, setRestoreApproval] = useState<Awaited<ReturnType<NovelImportClient['restorePreview']>> | null>(null)
   const picker = useRef<HTMLInputElement>(null)
@@ -321,6 +326,14 @@ function ImportDialogSession(props: ImportDialogProps) {
     if (!intent || !capabilities?.enabled) throw new Error('导入条件未就绪，请重试。')
     if (Date.parse(intent.expiresAt) <= Date.now()) throw new Error('覆盖确认已过期，请点击重试重新核对。')
     setAutoStep('正在创建任务并上传文件…')
+    autoTarget.current = 15
+    // 顶替旧任务：本作品若有未完结导入任务先逐个取消，避免创建闸拒绝（服务端同作品自动取消为双保险）。
+    const history = await client.list(novelId)
+    if (!alive()) return
+    for (const item of history.filter(entry => entry.novelId === novelId && liveStatuses.has(entry.status))) {
+      try { await client.cancel(novelId, item.jobId) } catch { /* 服务端创建闸会自动取消同作品任务，这里失败可忽略。 */ }
+      if (!alive()) return
+    }
     const created = await client.create(novelId, intent.intentId, latest.current.modelSelection)
     if (!alive()) return
     if (created.novelId !== novelId) throw new Error('任务作品不匹配。')
@@ -329,6 +342,7 @@ function ImportDialogSession(props: ImportDialogProps) {
     if (!alive()) return
     setJob(uploaded)
     setAutoStep('正在解析原文…')
+    autoTarget.current = 35
     let next = uploaded.status === 'uploaded' ? await client.analyze(novelId, created.jobId, undefined) : uploaded
     if (!alive()) return
     setJob(next)
@@ -344,23 +358,35 @@ function ImportDialogSession(props: ImportDialogProps) {
     if (!previewStatuses.has(next.status)) throw new Error(`任务已${importStatusLabel(next.status)}，未导入任何内容。`)
     if (!previewClient) throw new AutoImportFallback('当前环境不支持自动核对，已切换到手动核对。')
     setAutoStep('正在核对解析结果…')
+    autoTarget.current = 60
     let [summaryNow, reportNow] = await Promise.all([previewClient.summary(novelId, next.jobId), previewClient.report(novelId, next.jobId)])
     if (!alive()) return
     adoptSummary(summaryNow); setReport(reportNow)
-    const pendingIssues = reportNow.issues.filter(issue => issue.blocking && !issue.resolved)
-    if (pendingIssues.some(issue => issue.resolution !== 'review' || issue.itemIds.length === 0)) throw new AutoImportFallback('解析结果存在需要人工处理的问题，已切换到手动核对。')
-    if (pendingIssues.length > 0) {
+    // 自动解决全部会导致提交闸失败的项：failed→exclude、未复核 needs_review→review、未解决 blocking issue 的 itemIds 同理；review 提交后重拉一次核对。
+    for (let round = 0; round < 2; round++) {
+      const statusById = new Map(reportNow.items.map(item => [item.id, item.status]))
+      const decisions = new Map<string, ImportReviewEdit['decisions'][number]>()
+      for (const item of reportNow.items) if (item.status === 'failed' || (item.status === 'needs_review' && !reportNow.decisions.some(decision => decision.itemId === item.id))) {
+        decisions.set(item.id, { itemId: item.id, action: item.excludable && item.status === 'failed' ? 'exclude' : 'review', reason: item.status === 'failed' ? '一键导入自动核对：该部分无法识别，已排除。' : '一键导入自动核对：确认保留该部分原文。' })
+      }
+      for (const issue of reportNow.issues.filter(issue => issue.blocking && !issue.resolved)) {
+        for (const itemId of issue.itemIds) if (!decisions.has(itemId)) {
+          decisions.set(itemId, { itemId, action: statusById.get(itemId) === 'failed' ? 'exclude' : 'review', reason: '一键导入自动核对：确认保留该部分原文。' })
+        }
+      }
+      if (decisions.size === 0) break
       setAutoStep('正在自动核对来源…')
-      const decisions: ImportReviewEdit['decisions'] = [...new Map(pendingIssues.flatMap(issue => issue.itemIds.map(itemId => [itemId, { itemId, action: 'review' as const, reason: '一键导入自动核对：确认保留该部分原文。' }]))).values()]
-      summaryNow = await previewClient.review(novelId, next.jobId, { expectedManifestRevision: summaryNow.manifestRevision, manifestHash: summaryNow.manifestHash, reportHash: reportNow.reportHash, decisions })
+      summaryNow = await previewClient.review(novelId, next.jobId, { expectedManifestRevision: summaryNow.manifestRevision, manifestHash: summaryNow.manifestHash, reportHash: reportNow.reportHash, decisions: [...decisions.values()] })
       if (!alive()) return
       adoptSummary(summaryNow)
       reportNow = await previewClient.report(novelId, next.jobId)
       if (!alive()) return
       setReport(reportNow)
     }
-    if (!canSubmitSummary(summaryNow, reportNow)) throw new AutoImportFallback('解析结果需要人工调整，已切换到手动核对。')
+    if (reportNow.issues.some(issue => issue.blocking && !issue.resolved)) throw new Error(reportNow.issues.find(issue => issue.blocking && !issue.resolved)!.message)
+    if (!canSubmitSummary(summaryNow, reportNow)) throw new Error('解析结果缺少可导入内容：没有非空章节，也没有识别到计划或设定。')
     setAutoStep('正在提交导入…')
+    autoTarget.current = 85
     if (!await latest.current.beforeImport()) throw new Error('当前编辑内容未保存，导入已阻止。')
     if (!alive()) return
     const grant = await client.confirm(novelId, next, summaryNow)
@@ -369,10 +395,12 @@ function ImportDialogSession(props: ImportDialogProps) {
     if (!alive()) return
     if (receipt.novelId !== novelId || receipt.jobId !== next.jobId) throw new Error('导入回执与当前任务不匹配，请查询服务器状态。')
     setJob({ ...next, status: 'succeeded', receipt })
+    autoTarget.current = 100
     await latest.current.onImported(receipt)
     if (!alive()) return
     delivered.current = next.jobId
-    toast.success(`导入完成：${receipt.volumeCount} 卷 ${receipt.chapterCount} 章 · ${receipt.wordCount} 字。`)
+    const extras = [receipt.planCount ? `${receipt.planCount} 份计划` : '', receipt.memoryCount ? `${receipt.memoryCount} 条创作记忆` : ''].filter(Boolean).join(' · ')
+    toast.success(`导入完成：${receipt.volumeCount} 卷 ${receipt.chapterCount} 章 · ${receipt.wordCount} 字${extras ? ` · ${extras}` : ''}。`)
     latest.current.onClose()
   }
   const pipelineRef = useRef(autoPipeline)
@@ -393,6 +421,15 @@ function ImportDialogSession(props: ImportDialogProps) {
     return () => window.clearTimeout(timer)
   }, [stage, autoNonce, run])
 
+  useEffect(() => {
+    // 伪进度条：每 160ms 向当前阶段目标平滑逼近，阶段目标由 autoPipeline 推进（15→35→60→85→100）。
+    if (stage !== 'auto') { autoTarget.current = 0; setAutoProgress(0); return }
+    const timer = window.setInterval(() => {
+      setAutoProgress(value => value >= autoTarget.current ? value : Math.min(autoTarget.current, value + Math.max(0.4, (autoTarget.current - value) * 0.08)))
+    }, 160)
+    return () => window.clearInterval(timer)
+  }, [stage, autoNonce])
+
   let title = '一键导入'
   let body: ReactNode
   let footer: ReactNode
@@ -412,10 +449,13 @@ function ImportDialogSession(props: ImportDialogProps) {
   } else if (stage === 'auto') {
     body = <div className="flex flex-col items-center gap-4 py-12">
       <LoaderCircle aria-label="正在导入" className="h-9 w-9 motion-safe:animate-spin" />
-      <p role="status" className="text-sm text-[var(--text-secondary)]">{autoStep || '正在准备导入…'}</p>
+      <div className="h-1.5 w-64 overflow-hidden rounded-full bg-[var(--surface-muted)]" aria-hidden="true">
+        <div className="h-full rounded-full bg-[var(--surface-contrast)] transition-[width] duration-200 ease-out" style={{ width: `${autoProgress}%` }} />
+      </div>
+      <p role="status" className="text-sm text-[var(--text-secondary)]">{autoStep || '正在准备导入…'}（{Math.floor(autoProgress)}%）</p>
       {file && <p className="max-w-full truncate text-xs text-[var(--text-tertiary)]">{file.name}</p>}
     </div>
-    footer = error ? <><button data-import-safe-focus type="button" className={button} onClick={close}>关闭</button><button type="button" className={button} disabled={!!busy} onClick={() => setStage('workspace')}>手动处理</button><button type="button" className={primary} disabled={!!busy} onClick={() => { setError(''); setAutoNonce(value => value + 1) }}>重试</button></> : back
+    footer = error ? <><button data-import-safe-focus type="button" className={button} onClick={close}>关闭</button><button type="button" className={primary} disabled={!!busy} onClick={() => { setError(''); setAutoNonce(value => value + 1) }}>重试</button></> : back
   } else if (stage === 'leave') {
     title = '预览调整尚未保存'
     body = <p>关闭前可保存调整以便稍后继续。放弃只丢弃本次未保存的预览编辑，不会取消服务端任务或改动原作品。</p>

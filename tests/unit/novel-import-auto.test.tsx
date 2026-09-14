@@ -102,17 +102,73 @@ describe('一键导入自动管线', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1)
   })
 
-  it('无法自动处理的阻断项（resolution=exclude）回落手动核对，绝不自动提交', async () => {
+  it('failed 项自动排除、needs_review 项自动确认，解决后提交导入', async () => {
+    const { client, previewClient, props } = dialogProps()
+    const items = [
+      { id: 'i1', kind: 'block' as const, source: 's', status: 'failed' as const, excludable: true },
+      { id: 'i2', kind: 'block' as const, source: 's', status: 'needs_review' as const, excludable: false },
+    ]
+    const unresolved = { ...cleanReport, items, issues: [issue({ itemIds: ['i1', 'i2'] })] }
+    const resolved = { ...cleanReport, items: [{ ...items[0], status: 'excluded' as const }, { ...items[1], status: 'native' as const }], issues: [issue({ itemIds: ['i1', 'i2'], resolved: true })] }
+    vi.mocked(previewClient.report).mockResolvedValueOnce(unresolved).mockResolvedValueOnce(resolved)
+    render(<ImportDialog {...props} />)
+    await screen.findByText(/导入完成：1 卷 1 章 · 4 字/)
+    expect(previewClient.review).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(previewClient.review).mock.calls[0][2].decisions).toEqual([
+      { itemId: 'i1', action: 'exclude', reason: '一键导入自动核对：该部分无法识别，已排除。' },
+      { itemId: 'i2', action: 'review', reason: '一键导入自动核对：确认保留该部分原文。' },
+    ])
+    expect(client.commit).toHaveBeenCalledTimes(1)
+    expect(props.onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('两轮自动核对后仍有未解决阻断项时报错，绝不提交且不回落手动', async () => {
     const { client, previewClient, props } = dialogProps()
     vi.mocked(previewClient.report).mockResolvedValue({ ...cleanReport, issues: [issue({ resolution: 'exclude' })] })
     render(<ImportDialog {...props} />)
-    await screen.findByText(/已切换到手动核对/)
-    expect(client.confirm).not.toHaveBeenCalled()
+    await screen.findByText(/低置信度片段/)
     expect(client.commit).not.toHaveBeenCalled()
     expect(props.onImported).not.toHaveBeenCalled()
     expect(props.onClose).not.toHaveBeenCalled()
-    // 回落到手动 workspace：展示手动提交入口（此时因未解决阻断项而禁用），用户可继续核对
-    await screen.findByRole('button', { name: /导入 1 卷 1 章/ })
+  })
+
+  it('自动阶段错误 footer 只有关闭与重试，没有“手动处理”按钮', async () => {
+    const { previewClient, props } = dialogProps()
+    vi.mocked(previewClient.report).mockResolvedValue({ ...cleanReport, issues: [issue({ resolution: 'exclude' })] })
+    render(<ImportDialog {...props} />)
+    await screen.findByText(/低置信度片段/)
+    expect(screen.queryByRole('button', { name: '手动处理' })).toBeNull()
+    expect(screen.getByRole('button', { name: '关闭' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy()
+  })
+
+  it('自动阶段渲染确定型伪进度条（进度条+百分比）', async () => {
+    const { client, props } = dialogProps()
+    let release!: () => void
+    vi.mocked(client.commit).mockImplementation(() => new Promise<NovelImportReceipt>(resolve => { release = () => resolve(receipt) }))
+    render(<ImportDialog {...props} />)
+    const status = await screen.findByRole('status')
+    await waitFor(() => expect(status.textContent).toMatch(/正在提交导入/))
+    expect(status.textContent).toMatch(/（\d+%）/)
+    const fill = document.querySelector('div[style*="width"]') as HTMLElement | null
+    expect(fill).not.toBeNull()
+    expect(fill!.style.width).toMatch(/%$/)
+    release()
+    await screen.findByText(/导入完成：1 卷 1 章 · 4 字/)
+  })
+
+  it('起跑前先取消本作品未完结的旧导入任务再创建', async () => {
+    const { client, props } = dialogProps()
+    vi.mocked(client.list).mockResolvedValue([
+      { ...status, jobId: 'old-live', novelId: 'a', status: 'ready' },
+      { ...status, jobId: 'other-novel', novelId: 'b', status: 'ready' },
+      { ...status, jobId: 'finished', novelId: 'a', status: 'succeeded' },
+    ])
+    render(<ImportDialog {...props} />)
+    await screen.findByText(/导入完成：1 卷 1 章 · 4 字/)
+    expect(client.cancel).toHaveBeenCalledTimes(1)
+    expect(client.cancel).toHaveBeenCalledWith('a', 'old-live')
+    expect(vi.mocked(client.cancel).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(client.create).mock.invocationCallOrder[0])
   })
 
   it('已有章节时保留服务端强制的两次覆盖确认，确认后再自动导入', async () => {

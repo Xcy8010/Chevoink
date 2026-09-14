@@ -83,7 +83,7 @@ export function ImportDialogShell({ title, description, stage, onClose, children
         <div className="min-w-0 flex-1"><h2 id={`${id}-title`} className="text-lg font-semibold">{title}</h2><p id={`${id}-description`} className="mt-1 break-words text-sm text-[var(--text-secondary)]">{description}</p></div>
         <button type="button" aria-label="收起导入面板" className="flex items-center justify-center rounded-lg hover:bg-[var(--surface-muted)]" onClick={onClose}><X className="h-5 w-5" /></button>
       </header>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">{children}</div>
+      <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">{children}</div>
       {footer && <footer className="flex max-h-[40dvh] shrink-0 flex-wrap items-center justify-end gap-2 overflow-y-auto border-t border-[var(--border-subtle)] p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">{footer}</footer>}
     </dialog>
   </div>, document.body)

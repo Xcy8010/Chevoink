@@ -70,7 +70,7 @@ export default function CoverPanel({
         </Button>
       }
     >
-      <div className="flex h-full min-h-0 max-w-full flex-col gap-4 overflow-y-auto overflow-x-hidden overscroll-contain pr-1">
+      <div className="scrollbar-none flex h-full min-h-0 max-w-full flex-col gap-4 overflow-y-auto overflow-x-hidden overscroll-contain">
         <input
           ref={uploadInputRef}
           type="file"

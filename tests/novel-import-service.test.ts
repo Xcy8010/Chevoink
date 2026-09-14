@@ -5,7 +5,7 @@ import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const fixture = vi.hoisted(() => {
-  const names = ['novel', 'volume', 'chapter', 'coverAsset', 'readingProgress', 'agentRun', 'agentQueuedRequest', 'agentSession', 'agentMessage', 'changeSet', 'aiModelConfig', 'novelImportIntent', 'novelImportJob', 'novelImportSource', 'novelImportManifest', 'novelImportApproval', 'novelImportCommit', 'novelImportBackup', 'novelImportGarbage', 'novelImportArtifact', 'novelImportEvent', 'projectMemoryEntry', 'memoryExtractionJob', 'storyEvent', 'storyEntity', 'foreshadowThread', 'entityRelation', 'storyCompilation', 'sceneTask', 'chapterBridge', 'chapterQualityReport', 'styleProfile', 'styleLearningJob']
+  const names = ['novel', 'volume', 'chapter', 'coverAsset', 'readingProgress', 'agentRun', 'agentQueuedRequest', 'agentSession', 'agentMessage', 'agentArtifact', 'changeSet', 'aiModelConfig', 'novelImportIntent', 'novelImportJob', 'novelImportSource', 'novelImportManifest', 'novelImportApproval', 'novelImportCommit', 'novelImportBackup', 'novelImportGarbage', 'novelImportArtifact', 'novelImportEvent', 'projectMemoryEntry', 'memoryExtractionJob', 'storyEvent', 'storyEntity', 'foreshadowThread', 'entityRelation', 'storyCompilation', 'sceneTask', 'chapterBridge', 'chapterQualityReport', 'styleProfile', 'styleLearningJob']
   type Row = Record<string, unknown>
   const state: Record<string, Row[]> = Object.fromEntries(names.map(name => [name, []]))
   const matches = (row: Row, where: Row = {}): boolean => Object.entries(where).every(([key, value]) => {
@@ -47,7 +47,7 @@ const fixture = vi.hoisted(() => {
     const backup = structuredClone(state)
     try { return await fn(db) } catch (error) { Object.assign(state, backup); throw error }
   })
-  return { state, db, blobs: new Map<string, Buffer>(), parse: vi.fn(), attachmentRead: vi.fn(), attachmentAccess: vi.fn(), storeJson: vi.fn(), removeBlob: vi.fn() }
+  return { state, db, blobs: new Map<string, Buffer>(), parse: vi.fn(), attachmentRead: vi.fn(), attachmentAccess: vi.fn(), storeJson: vi.fn(), removeBlob: vi.fn(), saveMemory: vi.fn(async (_input: unknown, _tx?: unknown) => ({ id: 'mem-created', action: 'created' as const, status: 'confirmed' as const })) }
 })
 vi.mock('../api/lib/prisma.js', async importOriginal => ({ ...await importOriginal<typeof import('../api/lib/prisma.js')>(), prisma: fixture.db }))
 vi.mock('../api/lib/auth-session.js', async () => {
@@ -66,6 +66,8 @@ vi.mock('../api/lib/novel-import/preview-storage.js', async original => ({ ...aw
 // This suite isolates transaction/HTTP permissions; report integrity has its own
 // real-helper suite, and real pipeline coverage remains in DB integration tests.
 vi.mock('../api/lib/novel-import/preview.js', async original => ({ ...await original<typeof import('../api/lib/novel-import/preview.js')>(), assertNovelImportPreviewComplete: vi.fn() }))
+// 创作记忆落库经 saveStoryMemory（自有测试覆盖）；此处仅隔离验证导入提交的委派参数。
+vi.mock('../api/lib/agent/story-memory.js', async original => ({ ...await original<typeof import('../api/lib/agent/story-memory.js')>(), saveStoryMemory: fixture.saveMemory }))
 vi.mock('../api/lib/novel-import-storage.js', async () => {
   const { createHash, randomUUID } = await import('node:crypto')
   const hash = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex')
@@ -109,7 +111,8 @@ async function approved() {
 function existingBook(content = '旧稿正文', published = false) {
   vi.stubEnv('NOVEL_IMPORT_OVERWRITE_ENABLED', 'true')
   const volume = { id: 'old-volume', novelId: scope.novelId, title: '旧卷', summary: null, orderIndex: 1, revision: 4, archivedAt: null, archivedByImportId: null }
-  const chapter = { id: 'old-chapter', novelId: scope.novelId, authorId: scope.userId, volumeId: volume.id, title: '旧章', summary: null, content, orderIndex: 1, orderInVolume: 1, wordCount: content.length, revision: 7, status: published ? 'published' : 'draft', visibility: 'public', archivedAt: null, archivedByImportId: null, publishedTitle: published ? '公开旧标题' : null, publishedContent: published ? '公开原文快照' : null, publishedRevision: published ? 5 : null, publishedAt: published ? new Date('2025-01-01') : null }
+  // 标题与默认解析产物「第一章」一致：智能合并下同名章节命中→归档旧行+导入新版本（等价旧的整卷替换路径）。
+  const chapter = { id: 'old-chapter', novelId: scope.novelId, authorId: scope.userId, volumeId: volume.id, title: '第一章', summary: null, content, orderIndex: 1, orderInVolume: 1, wordCount: content.length, revision: 7, status: published ? 'published' : 'draft', visibility: 'public', archivedAt: null, archivedByImportId: null, publishedTitle: published ? '公开旧标题' : null, publishedContent: published ? '公开原文快照' : null, publishedRevision: published ? 5 : null, publishedAt: published ? new Date('2025-01-01') : null }
   fixture.state.volume.push(volume); fixture.state.chapter.push(chapter)
   Object.assign(fixture.state.novel[0], { chapterCount: 1, wordCount: content.length, lastChapterTitle: chapter.title })
   return { volume: { ...volume }, chapter: { ...chapter } }
@@ -417,6 +420,72 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     expect(fixture.state.styleLearningJob[0]).toMatchObject({ status: 'paused', claimToken: null, revision: 4, enabled: false })
     await restoreNovelImport(human(), result.job.jobId, result.restoreInput)
     expect(fixture.state.projectMemoryEntry[0].status).toBe('invalid')
+  })
+  it('智能合并：同名章节归档重建，源中没有的现有章节保留，新章节追加', async () => {
+    vi.stubEnv('NOVEL_IMPORT_OVERWRITE_ENABLED', 'true')
+    fixture.state.volume.push({ id: 'v1', novelId: scope.novelId, title: '卷A', summary: null, orderIndex: 1, revision: 1, archivedAt: null, archivedByImportId: null })
+    fixture.state.chapter.push(
+      { id: 'c-match', novelId: scope.novelId, authorId: scope.userId, volumeId: 'v1', title: '第一章', summary: null, content: '旧第一章', orderIndex: 1, orderInVolume: 1, wordCount: 4, revision: 1, status: 'draft', visibility: 'public', archivedAt: null, archivedByImportId: null },
+      { id: 'c-keep', novelId: scope.novelId, authorId: scope.userId, volumeId: 'v1', title: '保留章', summary: null, content: '别动我', orderIndex: 2, orderInVolume: 2, wordCount: 3, revision: 1, status: 'draft', visibility: 'public', archivedAt: null, archivedByImportId: null },
+    )
+    Object.assign(fixture.state.novel[0], { chapterCount: 2, wordCount: 7, lastChapterTitle: '保留章' })
+    // 源：同名「第一章」更新 + 新增「第二章」；没有「保留章」。
+    fixture.parse.mockResolvedValue({ volumes: [{ title: '卷A', chapters: [
+      { title: '第一章', content: '新第一章正文', source: 'original.txt#char=0-6' },
+      { title: '第二章', content: '新第二章', source: 'original.txt#char=6-10' },
+    ] }], metadata: {}, warnings: [], sourceChars: 10, parserVersion: 'fixture-1' })
+    const result = await approved()
+    const receipt = await commitNovelImport(scope, result.job.jobId, result.input)
+    // 同名旧章被归档（保留可恢复），源中没有的现有章原样保留
+    expect(fixture.state.chapter.find(c => c.id === 'c-match')!.archivedAt).toBeInstanceOf(Date)
+    const keep = fixture.state.chapter.find(c => c.id === 'c-keep')!
+    expect(keep.archivedAt).toBeNull(); expect(keep.content).toBe('别动我')
+    // 旧卷因成员未全部命中而保留，导入另建新卷写两章
+    expect(fixture.state.volume.find(v => v.id === 'v1')!.archivedAt).toBeNull()
+    expect(receipt).toMatchObject({ volumeCount: 1, chapterCount: 2 })
+    const live = fixture.state.chapter.filter(c => c.archivedAt === null)
+    expect(live.map(c => c.title).sort()).toEqual(['保留章', '第一章', '第二章'].sort())
+    // 字数/章数对全部非归档章节重算：别动我3 + 新第一章6 + 新第二章4 = 13，共3章
+    expect(fixture.state.novel[0]).toMatchObject({ wordCount: 13, chapterCount: 3 })
+    // 备份快照只记被归档的旧行，可恢复
+    const snapshot = fixture.state.novelImportBackup[0].snapshot as { chapterIds: string[]; volumeIds: string[] }
+    expect(snapshot.chapterIds).toEqual(['c-match'])
+    expect(snapshot.volumeIds).toEqual([])
+  })
+  it('仅导入计划/记忆时完全不写卷章，计划入计划夹、记忆委派 saveStoryMemory', async () => {
+    existingBook()
+    fixture.parse.mockResolvedValue({ volumes: [], plans: [{ title: '主线大纲', content: '这是主线规划' }], memories: [{ memoryType: 'worldbuilding', title: '世界观设定', content: '大陆分为东西两域。' }], metadata: {}, warnings: [], sourceChars: 30, parserVersion: 'fixture-1' })
+    const result = await approved()
+    const receipt = await commitNovelImport(scope, result.job.jobId, result.input)
+    expect(receipt).toMatchObject({ volumeCount: 0, chapterCount: 0, planCount: 1, memoryCount: 1 })
+    // 现有卷章一律保留、未归档，作品总量不变
+    expect(fixture.state.chapter).toHaveLength(1)
+    expect(fixture.state.chapter[0].archivedAt).toBeNull()
+    expect(fixture.state.volume[0].archivedAt).toBeNull()
+    expect(fixture.state.novel[0]).toMatchObject({ chapterCount: 1 })
+    // 计划写入计划夹（chapterPlan + savedAsPlan），载体 run 自动创建
+    const plan = fixture.state.agentArtifact.find(a => a.artifactType === 'chapterPlan')
+    expect(plan).toMatchObject({ title: '主线大纲', content: '这是主线规划' })
+    expect((plan!.metadata as Record<string, unknown>).savedAsPlan).toBe(true)
+    expect(fixture.state.agentRun.some(r => r.inputSummary === '一键导入写入计划')).toBe(true)
+    // 记忆以 confirmed + overwrite 委派 saveStoryMemory，重复导入就地更新不进冲突箱
+    expect(fixture.saveMemory).toHaveBeenCalledTimes(1)
+    expect(fixture.saveMemory.mock.calls[0][0]).toMatchObject({ memoryType: 'worldbuilding', title: '世界观设定', status: 'confirmed', overwrite: true, layer: 'L1', importance: 75, evidence: expect.objectContaining({ sourceType: 'author_input' }) })
+  })
+  it('同作品重复导入自动顶替旧 LIVE 任务，不再拒绝创建', async () => {
+    const future = new Date(Date.now() + 86400_000)
+    fixture.state.novelImportJob.push(
+      { id: 'live-same-1', userId: scope.userId, novelId: scope.novelId, status: 'ready', expiresAt: future, leaseEpoch: 0, leaseOwner: null, leaseUntil: null, jobVersion: 1 },
+      { id: 'live-same-2', userId: scope.userId, novelId: scope.novelId, status: 'parsing', expiresAt: future, leaseEpoch: 0, leaseOwner: null, leaseUntil: null, jobVersion: 1 },
+      { id: 'live-other', userId: scope.userId, novelId: 'novel-b', status: 'ready', expiresAt: future, leaseEpoch: 0, leaseOwner: null, leaseUntil: null, jobVersion: 1 },
+    )
+    const intent = await preflightNovelImport(scope)
+    const job = await prepareNovelImport(scope, intent.intentId)
+    // 同作品两个旧任务自动取消，其他作品任务不受影响，新任务顺利创建
+    expect(fixture.state.novelImportJob.find(j => j.id === 'live-same-1')!.status).toBe('cancelled')
+    expect(fixture.state.novelImportJob.find(j => j.id === 'live-same-2')!.status).toBe('cancelled')
+    expect(fixture.state.novelImportJob.find(j => j.id === 'live-other')!.status).toBe('ready')
+    expect(job.status).toBe('uploading')
   })
   it.each(['content', 'title', 'revision', 'orderIndex', 'volumeId', 'publishedContent'])('target hash binds chapter %s changes, even without a count change', async field => {
     existingBook()

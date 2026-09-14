@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { createIsolatedNovelImportParser, type IsolatedNovelImportParserConfig } from './isolated-parser.js'
 import { IMPORT_RESOURCE_LIMITS, type ImportDocumentItem, type ImportDocumentIssue, type ImportDocumentReport, type ImportImage } from './document-types.js'
+import { routeImportContent } from './content-routing.js'
 import { checkImportImages, stableImportId } from './parsers/images.js'
 import { hasUnsafeControls, limit, NOVEL_IMPORT_LIMITS } from './parsers/limits.js'
 import { NovelImportParseError, type ParsedNovelImport } from './parsers/types.js'
@@ -123,8 +124,10 @@ export function createNovelImportPipeline(config: NovelImportPipelineConfig = {}
     if (!Number.isFinite(remaining) || remaining <= 0) throw new NovelImportParseError('IMPORT_DEADLINE_EXCEEDED', '解析任务已到达持久截止时间，请新建任务。')
     const parse = createIsolatedNovelImportParser({ resources: true, timeoutMs: Math.floor(remaining),
       ...(config.native?.enabled ? { nativeWorker: config.native.worker } : {}) })
-    const parsed = await parse(bytes, filename, { encoding: options.encoding, signal: options.signal })
-    parsed.parserVersion += '+document-pipeline-2'
+    const raw = await parse(bytes, filename, { encoding: options.encoding, signal: options.signal })
+    raw.parserVersion += '+document-pipeline-2'
+    // 计划/设定段落在此统一分流（全格式），报告只覆盖剩余章节桶。
+    const parsed = routeImportContent(raw)
     const artifacts = parsed.images ?? []
     checkImportImages(artifacts)
     // Persisting the resource bytes is mandatory, not a quality issue a human may waive.
