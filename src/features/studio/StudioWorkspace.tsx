@@ -131,7 +131,7 @@ export default function StudioWorkspace() {
   const [volumes, setVolumes] = useState<StudioPayload['volumes']>([])
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
   const importCapabilities = useImportCapabilities(activeNovelId, taskUiUserId)
-  const [importRequest, setImportRequest] = useState<{ novelId: string; userId: string; attachment?: ImportAgentAttachment; jobId?: string; view?: 'history' } | null>(null)
+  const [importRequest, setImportRequest] = useState<{ novelId: string; userId: string; attachment?: ImportAgentAttachment; jobId?: string; view?: 'history'; autoFile?: File } | null>(null)
   const [importModel, setImportModel] = useState<{ novelId: string; selection: NovelImportModelSelection | null } | null>(null)
   const handleImportModelSelection = useCallback((ownerNovelId: string, selection: NovelImportModelSelection | null) => {
     setImportModel({ novelId: ownerNovelId, selection })
@@ -141,9 +141,16 @@ export default function StudioWorkspace() {
   const openImportHistory = () => {
     if (importHistoryAvailable && taskUiUserId) setImportRequest({ novelId: activeNovelId, userId: taskUiUserId, view: 'history' })
   }
-  // 入口始终开放：服务端开关关闭时由导入弹窗给出未开放提示；覆盖警告由作品真实章数决定
+  // 入口始终开放：先选文件再进导入弹窗自动管线；服务端开关关闭时由导入弹窗给出未开放提示
+  const importPicker = useRef<HTMLInputElement>(null)
   const openNovelImport = () => {
-    if (taskUiUserId) setImportRequest({ novelId: activeNovelId, userId: taskUiUserId })
+    if (!taskUiUserId) return
+    if (importPicker.current) {
+      importPicker.current.value = ''
+      importPicker.current.click()
+      return
+    }
+    setImportRequest({ novelId: activeNovelId, userId: taskUiUserId })
   }
   useEffect(() => {
     if (!importHistoryAvailable || !taskUiUserId) return
@@ -4354,6 +4361,12 @@ export default function StudioWorkspace() {
         chapters={chapters}
         onClose={() => setExportDialogOpen(false)}
       />
+      {/* 一键导入：先选文件，选中后带着文件打开导入弹窗自动跑完整管线 */}
+      <input ref={importPicker} type="file" aria-label="选择一键导入文件" accept=".zip,.txt,.md,.pdf,.doc,.docx" className="sr-only" onChange={event => {
+        const picked = event.target.files?.[0]
+        event.target.value = ''
+        if (picked && taskUiUserId) setImportRequest({ novelId: activeNovelId, userId: taskUiUserId, autoFile: picked })
+      }} />
       {importRequest?.novelId === activeNovelId && importRequest.userId === taskUiUserId ? <ImportDialog
         open
         novelId={activeNovelId}
@@ -4361,6 +4374,7 @@ export default function StudioWorkspace() {
         currentMetadata={{ title: currentNovel.title, summary: currentNovel.summary, tags: currentNovel.tags }}
         modelSelection={importModel?.novelId === activeNovelId && importModel.selection ? importModel.selection : { kind: 'basic' }}
         agentAttachment={importRequest.attachment}
+        autoFile={importRequest.autoFile ?? null}
         initialJobId={importRequest.jobId}
         initialView={importRequest.view}
         beforeImport={async () => {

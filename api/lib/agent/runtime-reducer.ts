@@ -8,6 +8,7 @@ import { readToolApprovalOutcome } from './runtime-approval.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { formatDurableToolObservation, formatReferencedToolObservation, TOOL_OBSERVATION_INLINE_BYTES } from './runtime-common.js'
 import { executionContextReadTool } from './tools/task-context-tools.js'
+import { toOpenAIParameters } from './tool-schema.js'
 export { formatDurableToolObservation } from './runtime-common.js'
 
 type Message = z.infer<typeof executionSnapshotSchema>['messages'][number]
@@ -103,7 +104,7 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
       }
       const output = parsedResult.data.toolResult.output
       const canReadArchive = current.configuration.tools.some(tool => tool.function.name === 'execution_context_read'
-        && runtimeJson(tool.function.parameters).hash === runtimeJson(z.toJSONSchema(executionContextReadTool.parameters, { io: 'input' })).hash)
+        && runtimeJson(tool.function.parameters).hash === runtimeJson(toOpenAIParameters(executionContextReadTool.parameters)).hash)
         && current.configuration.toolAuthority.some(grant => grant.name === 'execution_context_read' && grant.permission === 'allow' && !grant.alwaysConfirm)
       appended = { role: 'tool', toolCallId: callId, content: operation.action !== 'execution_context_read' && canReadArchive
         && Buffer.byteLength(output, 'utf8') > TOOL_OBSERVATION_INLINE_BYTES

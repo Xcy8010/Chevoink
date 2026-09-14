@@ -19,7 +19,7 @@ export function MemoryModal({ title, onClose, children }: { title: string; onClo
   }, [])
   return createPortal(<dialog ref={ref} aria-label={title} onCancel={event => { event.preventDefault(); onClose() }}
     onKeyDown={event => event.stopPropagation()}
-    className="m-auto max-h-[90dvh] w-[calc(100%-2rem)] max-w-lg overflow-y-auto overscroll-contain rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-4 text-[var(--text-primary)] shadow-xl backdrop:bg-black/40 sm:p-6">
+    className="studio-workspace m-auto max-h-[90dvh] w-[calc(100%-2rem)] max-w-lg overflow-y-auto overscroll-contain rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-4 text-[var(--text-primary)] shadow-xl backdrop:bg-black/40 sm:p-6">
     <div className="mb-4 flex items-center justify-between gap-3"><h3 className="text-base font-semibold">{title}</h3>
       <button className={button} type="button" aria-label={`关闭${title}`} onClick={onClose}>关闭</button></div>
     {children}

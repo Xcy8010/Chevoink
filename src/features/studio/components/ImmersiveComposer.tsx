@@ -383,7 +383,7 @@ export default function ImmersiveComposer({
   }
 
   return createPortal(
-    <div className="fixed inset-0 z-[90] isolate overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]">
+    <div className="studio-workspace fixed inset-0 z-[90] isolate overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]">
       <div className="mx-auto flex h-full max-w-[140rem] flex-col px-3 pb-3 pt-[calc(var(--safe-top)+10px)] md:px-6 md:py-5">
         {isDesktop ? (
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">

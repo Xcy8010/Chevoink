@@ -142,7 +142,7 @@ export default function ContextDetailDialog({ sessionId, onClose }: Props) {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[150] flex items-center justify-center bg-[rgba(15,23,42,0.32)] px-4 backdrop-blur-[3px]"
+      className="studio-workspace fixed inset-0 z-[150] flex items-center justify-center bg-[rgba(15,23,42,0.32)] px-4 backdrop-blur-[3px]"
       style={{ animation: 'ctx-detail-fade-in 180ms ease-out' }}
       onClick={onClose}
     >

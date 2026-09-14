@@ -20,7 +20,7 @@ export default function CreateNovelDialog({ open, busy, onCancel, onCreate }: Pr
   const normalizedTitle = title.trim()
 
   return createPortal(
-    <div className="fixed inset-0 z-[175] flex items-center justify-center bg-black/25 p-4 backdrop-blur-[2px]" onMouseDown={() => { if (!busy) onCancel() }}>
+    <div className="studio-workspace fixed inset-0 z-[175] flex items-center justify-center bg-black/25 p-4 backdrop-blur-[2px]" onMouseDown={() => { if (!busy) onCancel() }}>
       <form className="w-full max-w-md rounded-[18px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-[0_26px_80px_rgba(15,23,42,.24)] motion-safe:animate-[agent-menu-in_160ms_cubic-bezier(.22,1,.36,1)]" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); onCreate(normalizedTitle) }}>
         <div className="flex items-start gap-3">
           <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[11px] bg-[var(--surface-muted)]"><BookOpenText className="h-5 w-5" /></span>

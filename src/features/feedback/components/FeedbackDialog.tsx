@@ -188,7 +188,7 @@ export default function FeedbackDialog({ open, kind, source, onClose }: Feedback
   return createPortal(
     <div
       {...{ [FEEDBACK_CAPTURE_IGNORE_ATTR]: '' }}
-      className="feedback-dialog fixed inset-0 z-[140] flex items-center justify-center bg-[rgba(15,23,42,0.32)] px-4 py-6 backdrop-blur-[2px]"
+      className={`${source?.startsWith('studio') ? 'studio-workspace ' : ''}feedback-dialog fixed inset-0 z-[140] flex items-center justify-center bg-[rgba(15,23,42,0.32)] px-4 py-6 backdrop-blur-[2px]`}
       onClick={(event) => {
         if (event.target === event.currentTarget && !submitting) {
           onClose()

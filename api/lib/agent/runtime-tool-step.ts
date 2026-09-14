@@ -1,4 +1,4 @@
-import { z } from 'zod'
+import { toOpenAIParameters } from './tool-schema.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { env } from '../../config/env.js'
 import { requestToolApproval, pollToolApproval } from './runtime-approval.js'
@@ -113,7 +113,7 @@ export async function executeDurableToolStep(token: RunLeaseToken, signal: Abort
     const tool = adapters.get(call.name)
     if (!grant || grant.permission === 'deny' || !definition || call.incomplete) return { reject: { cursor, callId: call.id } }
     if (!tool) return runtimeError('RUNTIME_TOOL_ADAPTER_REQUIRED', '此工具的持久适配尚未接入，不能执行旧效果路径。')
-    if (runtimeJson(z.toJSONSchema(tool.parameters, { io: 'input' })).hash !== runtimeJson(definition.function.parameters).hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '工具 schema 与原任务不一致。')
+    if (runtimeJson(toOpenAIParameters(tool.parameters)).hash !== runtimeJson(definition.function.parameters).hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '工具 schema 与原任务不一致。')
     let raw: unknown
     try { raw = call.arguments ? parseToolArgsTolerant(call.arguments, false) : {} }
     catch { return { reject: { cursor, callId: call.id } } }

@@ -350,7 +350,7 @@ export default function AgentMemoryCards({ novelId }: Props) {
       {menu ? createPortal(
         <div
           data-memory-menu
-          className="fixed z-[170] w-[168px] rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] py-1 shadow-[0_18px_48px_rgba(15,23,42,0.22)]"
+          className="studio-workspace fixed z-[170] w-[168px] rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] py-1 shadow-[0_18px_48px_rgba(15,23,42,0.22)]"
           style={{ left: menu.x, top: menu.y, animation: 'memory-pop-in 160ms cubic-bezier(0.16,1,0.3,1)' }}
           onPointerDown={(event) => event.stopPropagation()}
         >
@@ -498,7 +498,7 @@ function MemoryFanOverlay({ set, state, spotlight, suspended, onClose, onLoadMor
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[165] flex flex-col bg-[rgba(15,23,42,0.5)] backdrop-blur-md"
+      className="studio-workspace fixed inset-0 z-[165] flex flex-col bg-[rgba(15,23,42,0.5)] backdrop-blur-md"
       style={{ animation: 'memory-fade-in 200ms ease-out' }}
     >
       <header className="flex shrink-0 items-center gap-2.5 px-5 pb-1 pt-4" onClick={(event) => event.stopPropagation()}>
@@ -625,7 +625,7 @@ function MemoryCardDetailDialog({ card, onClose, onEdit, onQuote, onDelete }: De
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[175] flex items-center justify-center bg-[rgba(15,23,42,0.32)] px-4 backdrop-blur-[3px]"
+      className="studio-workspace fixed inset-0 z-[175] flex items-center justify-center bg-[rgba(15,23,42,0.32)] px-4 backdrop-blur-[3px]"
       style={{ animation: 'memory-fade-in 180ms ease-out' }}
       onClick={onClose}
     >

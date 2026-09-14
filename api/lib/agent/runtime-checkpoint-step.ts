@@ -5,7 +5,7 @@ import { readExecutionStateInTransaction, saveExecutionStateInTransaction } from
 import { commitRuntimeCheckpointInTransaction, durableProgressSchema, CHECKPOINT_ACTIONS } from './runtime-checkpoint.js'
 import { archiveEarlyToolRounds, estimateChatMessagesTokens, estimateToolDefinitionTokens } from './context-budget.js'
 import { executionContextReadTool } from './tools/task-context-tools.js'
-import { z } from 'zod'
+import { toOpenAIParameters } from './tool-schema.js'
 import { randomUUID } from 'node:crypto'
 
 /** Storage-pressure compaction is NOT a budget checkpoint and grants no tokens.
@@ -28,7 +28,7 @@ export async function advanceDurableContext(token: RunLeaseToken, inputLimit?: n
     const tool = configuration.tools.find(item => item.function.name === executionContextReadTool.name)
     const grant = configuration.toolAuthority.find(item => item.name === executionContextReadTool.name)
     if (!tool || !grant || grant.permission !== 'allow' || grant.alwaysConfirm
-      || runtimeJson(tool.function.parameters).hash !== runtimeJson(z.toJSONSchema(executionContextReadTool.parameters, { io: 'input' })).hash) return runtimeError('RUNTIME_CONTEXT_READER_REQUIRED', '压缩前必须提供本任务原文回读能力，不能留下无法读取的摘要。')
+      || runtimeJson(tool.function.parameters).hash !== runtimeJson(toOpenAIParameters(executionContextReadTool.parameters)).hash) return runtimeError('RUNTIME_CONTEXT_READER_REQUIRED', '压缩前必须提供本任务原文回读能力，不能留下无法读取的摘要。')
     const next = await saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
       snapshot: { ...frame.state, messages: archived.messages } })
     await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: lease.taskRootId, runId: lease.runId,

@@ -86,13 +86,13 @@ export default function NovelCoverCropDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-[2px] dark:bg-black/65">
+    <div className="studio-workspace fixed inset-0 z-[95] flex items-center justify-center bg-[rgba(15,23,42,0.45)] p-4 backdrop-blur-[2px]">
       <div className="absolute inset-0" onClick={() => !busy && onClose()} />
-      <div className="relative z-[1] w-full max-w-[920px] rounded-[32px] border border-slate-200 bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.16)] dark:border-slate-800 dark:bg-slate-950">
+      <div className="relative z-[1] w-full max-w-[920px] rounded-[24px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-6 shadow-[var(--shadow-soft)]">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-2">
-            <h3 className="text-2xl font-semibold text-slate-950 dark:text-slate-50">裁切作品封面</h3>
-            <p className="text-sm leading-7 text-slate-600 dark:text-slate-300">
+            <h3 className="text-2xl font-semibold text-[var(--text-primary)]">裁切作品封面</h3>
+            <p className="text-sm leading-7 text-[var(--text-secondary)]">
               在固定书封比例框内调整图片位置和缩放，最终会统一输出成标准书籍封面尺寸。
             </p>
           </div>
@@ -100,7 +100,7 @@ export default function NovelCoverCropDialog({
             type="button"
             onClick={onClose}
             disabled={busy}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 text-slate-600 transition hover:border-slate-300 hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-70 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-slate-50"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border-subtle)] text-[var(--text-secondary)] transition hover:border-[var(--border-strong)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-70"
           >
             <X className="h-4 w-4" />
           </button>
@@ -108,13 +108,13 @@ export default function NovelCoverCropDialog({
 
         <div className="mt-6 grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
           <div className="space-y-4">
-            <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+            <div className="rounded-[28px] border border-[var(--border-subtle)] bg-[var(--surface-muted)] p-4">
               <div
-                className="relative mx-auto overflow-hidden rounded-[24px] border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-950"
+                className="relative mx-auto overflow-hidden rounded-[24px] border border-[var(--border-subtle)] bg-[var(--surface-solid)]"
                 style={{ width: COVER_PREVIEW_WIDTH, height: COVER_PREVIEW_HEIGHT }}
               >
                 {loading ? (
-                  <div className="flex h-full items-center justify-center text-slate-500 dark:text-slate-400">
+                  <div className="flex h-full items-center justify-center text-[var(--text-tertiary)]">
                     <LoaderCircle className="h-5 w-5 animate-spin" />
                   </div>
                 ) : error ? (
@@ -140,15 +140,15 @@ export default function NovelCoverCropDialog({
                 ) : null}
               </div>
             </div>
-            <div className="rounded-[24px] bg-slate-50 px-4 py-4 text-sm leading-7 text-slate-600 dark:bg-slate-900 dark:text-slate-300">
+            <div className="rounded-[24px] bg-[var(--surface-muted)] px-4 py-4 text-sm leading-7 text-[var(--text-secondary)]">
               选取框固定为书籍封面比例，输出后会统一成标准竖版书封。
             </div>
           </div>
 
           <div className="grid gap-5">
             <label className="grid gap-2">
-              <span className="flex items-center gap-2 text-sm font-medium text-slate-950 dark:text-slate-50">
-                <Search className="h-4 w-4 text-slate-500 dark:text-slate-400" />
+              <span className="flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
+                <Search className="h-4 w-4 text-[var(--text-tertiary)]" />
                 缩放
               </span>
               <input
@@ -174,8 +174,8 @@ export default function NovelCoverCropDialog({
             </label>
 
             <label className="grid gap-2">
-              <span className="flex items-center gap-2 text-sm font-medium text-slate-950 dark:text-slate-50">
-                <Move className="h-4 w-4 text-slate-500 dark:text-slate-400" />
+              <span className="flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
+                <Move className="h-4 w-4 text-[var(--text-tertiary)]" />
                 左右位置
               </span>
               <input
@@ -201,8 +201,8 @@ export default function NovelCoverCropDialog({
             </label>
 
             <label className="grid gap-2">
-              <span className="flex items-center gap-2 text-sm font-medium text-slate-950 dark:text-slate-50">
-                <Move className="h-4 w-4 text-slate-500 dark:text-slate-400" />
+              <span className="flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
+                <Move className="h-4 w-4 text-[var(--text-tertiary)]" />
                 上下位置
               </span>
               <input
@@ -227,7 +227,7 @@ export default function NovelCoverCropDialog({
               />
             </label>
 
-            <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-4 text-sm leading-7 text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+            <div className="rounded-[24px] border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-4 py-4 text-sm leading-7 text-[var(--text-secondary)]">
               拖不动没关系，直接用这三个滑杆就可以把图片调整到统一封面视图里。
             </div>
 

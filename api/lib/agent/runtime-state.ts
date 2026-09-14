@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { lockRunRoot, runtimeError, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readTaskBudgetInTransaction, taskTurnLimit } from './runtime-budget.js'
+import { withObjectType } from './tool-schema.js'
 
 const id = z.string().min(1).max(64)
 const count = z.number().int().nonnegative().max(2147483647)
@@ -66,7 +67,9 @@ export async function readExecutionStateInTransaction(tx: RuntimeTx, taskRootId:
     || runtimeJson({ spec: root.specSnapshot, request: root.requestSnapshot }).hash !== root.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原始输入或配置快照损坏。')
   const latest = await tx.agentExecutionFrame.findFirst({ where: { taskRootId }, orderBy: { revision: 'desc' }, select: { revision: true } })
   if (!latest || latest.revision !== head.revision) runtimeError('RUNTIME_RECEIPT_INVALID', '执行头指针与最新快照不一致。')
-  return { head, configuration: configuration.data, originalRequest: root.requestSnapshot, originalSpec: root.specSnapshot,
+  // 旧快照的工具参数可能缺顶层 type（被供应商拒绝、任务无法继续）；读取时统一修复，与新转换哈希口径一致。
+  const storedConfiguration = { ...configuration.data, tools: configuration.data.tools.map(tool => ({ ...tool, function: { ...tool.function, parameters: withObjectType(tool.function.parameters) } })) }
+  return { head, configuration: storedConfiguration, originalRequest: root.requestSnapshot, originalSpec: root.specSnapshot,
     frame: await readFrame(tx, taskRootId, head.revision) }
 }
 

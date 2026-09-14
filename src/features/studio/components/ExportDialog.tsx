@@ -150,7 +150,7 @@ export default function ExportDialog({ open, novelId, novelTitle, chapters, onCl
   }
 
   return (
-    <div className="fixed inset-0 z-[130] flex items-end justify-center bg-[rgba(15,23,42,0.45)] p-0 sm:items-center sm:p-6" onClick={onClose}>
+    <div className="studio-workspace fixed inset-0 z-[130] flex items-end justify-center bg-[rgba(15,23,42,0.45)] p-0 sm:items-center sm:p-6" onClick={onClose}>
       <div
         className="flex max-h-[92vh] w-full max-w-md flex-col overflow-hidden rounded-t-[24px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[var(--shadow-soft)] sm:rounded-[24px]"
         onClick={(event) => event.stopPropagation()}

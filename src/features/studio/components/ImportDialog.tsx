@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { LoaderCircle, Upload } from 'lucide-react'
+import { useToast } from '@/components/ui/toast-context'
 import type { NovelImportCapabilities, NovelImportJobStatus, NovelImportModelSelection, NovelImportPreflight, NovelImportPreview, NovelImportReceipt } from '../../../../shared/contracts/novel-import.js'
 import { novelImportApi, type NovelImportClient } from '../import-api'
 import { canSaveImportPreview, canSubmitImport, importPreviewCounts } from '../lib/import-preview'
@@ -10,7 +11,7 @@ import { fetchImportOriginal, importSourceUrl } from '../lib/import-source-downl
 import { triggerBlobDownload } from '../lib/export-download'
 import type { ImportAgentAttachment } from '../lib/import-handoff'
 import type { NovelImportPreviewSummary, NovelImportReportDto } from '../../../../shared/contracts/novel-import-preview.js'
-import { importPreviewApi, type ImportStructureEdit } from '../import-preview-api'
+import { importPreviewApi, type ImportReviewEdit, type ImportStructureEdit } from '../import-preview-api'
 import { importStructureFromSummary } from '../lib/import-structure'
 import { ImportStructuredEditor } from './import-structured-editor'
 import { ImportIntegrityReport } from './import-integrity-report'
@@ -24,6 +25,8 @@ export type ImportDialogProps = {
   modelSelection: NovelImportModelSelection
   /** Untrusted handoff hint; server must revalidate owner, run and source before copying. */
   agentAttachment?: ImportAgentAttachment
+  /** 一键入口选择的文件：自动跑完上传/解析/提交，不再要求人工预览步骤。 */
+  autoFile?: File | null
   /** Status handoff: view only until a fresh human confirmation flow is requested. */
   initialJobId?: string
   initialView?: 'history'
@@ -40,7 +43,7 @@ export type ImportDialogProps = {
 
 const button = 'rounded-lg border border-[var(--border-subtle)] px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40'
 const primary = `${button} bg-[var(--surface-contrast)] text-[var(--text-contrast)]`
-type Stage = 'loading' | 'history' | 'first' | 'second' | 'workspace' | 'leave' | 'cancel' | 'restore' | 'reparse'
+type Stage = 'loading' | 'history' | 'first' | 'second' | 'workspace' | 'auto' | 'leave' | 'cancel' | 'restore' | 'reparse'
 const previewStatuses = new Set(['ready', 'needs_review', 'awaiting_confirmation'])
 const terminalStatuses = new Set(['succeeded', 'cancelled', 'expired', 'failed'])
 const formats = ['zip', 'txt', 'md', 'pdf', 'doc', 'docx']
@@ -50,6 +53,18 @@ function canSubmitSummary(summary: NovelImportPreviewSummary, report: NovelImpor
     && !report.issues.some(issue => issue.blocking && !issue.resolved) && !summary.warnings.some(warning => warning.blocking)
     && summary.volumes.some(volume => volume.chapters.some(chapter => chapter.nonEmpty))
     && summary.volumes.every(volume => volume.title.trim() && volume.chapters.every(chapter => chapter.title.trim() && chapter.characters <= 100000))
+}
+
+/** 自动管线遇到必须人工处理的解析结果时回落到手动核对，不算失败。 */
+class AutoImportFallback extends Error {}
+const wait = (ms: number) => new Promise(resolve => { window.setTimeout(resolve, ms) })
+function validateImportFile(next: File, caps: NovelImportCapabilities | null) {
+  const extension = next.name.split('.').pop()?.toLowerCase()
+  const capability = caps?.formats.find(item => item.extension.replace(/^\./, '').toLowerCase() === extension)
+  if (!extension || !formats.includes(extension) || !capability?.enabled) return `服务器尚未开放 .${extension ?? ''} 格式导入。`
+  if (!next.size) return '文件为空，请选择含有原文正文的文件。'
+  if (!caps || next.size > caps.sourceBytes) return '文件超过服务器上传上限，请拆分后再试。'
+  return ''
 }
 
 export default function ImportDialog(props: ImportDialogProps) {
@@ -80,6 +95,9 @@ function ImportDialogSession(props: ImportDialogProps) {
   const [restored, setRestored] = useState(false)
   const [restoreUncertain, setRestoreUncertain] = useState(false)
   const restorePending = useRef(false)
+  const [autoStep, setAutoStep] = useState('')
+  const [autoNonce, setAutoNonce] = useState(0)
+  const toast = useToast()
   const [restoreApproval, setRestoreApproval] = useState<Awaited<ReturnType<NovelImportClient['restorePreview']>> | null>(null)
   const picker = useRef<HTMLInputElement>(null)
   const latest = useRef(props)
@@ -169,7 +187,12 @@ function ImportDialogSession(props: ImportDialogProps) {
     if (!alive()) return
     setIntent(check)
     if (check.chapterCount > 0 && !capability.overwriteEnabled) throw new Error('服务器尚未开放已有章节的覆盖导入（包括空白章节）。')
-    setStage(check.chapterCount > 0 ? 'first' : 'workspace')
+    if (latest.current.autoFile) {
+      const problem = validateImportFile(latest.current.autoFile, capability)
+      if (problem) throw new Error(problem)
+    }
+    const automatic = Boolean(latest.current.autoFile)
+    setStage(check.chapterCount > 0 ? 'first' : automatic ? 'auto' : 'workspace')
   }), [acceptStatus, client, novelId, run])
 
   useEffect(() => {
@@ -198,7 +221,7 @@ function ImportDialogSession(props: ImportDialogProps) {
       const next = await client.confirmIntent(novelId, intent, step)
       if (!alive()) return
       setIntent(next)
-      setStage(step === 1 ? 'second' : 'workspace')
+      setStage(step === 1 ? 'second' : latest.current.autoFile ? 'auto' : 'workspace')
     })
   }
   const selectFile = (files: FileList | File[]) => {
@@ -206,11 +229,8 @@ function ImportDialogSession(props: ImportDialogProps) {
     if (files.length === 0) return // Native picker cancellation leaves previous choice intact.
     if (files.length !== 1) { setError('一次请选择一个主文件；多文件可打包为 ZIP。'); return }
     const next = files[0]
-    const extension = next.name.split('.').pop()?.toLowerCase()
-    const capability = capabilities?.formats.find(item => item.extension.replace(/^\./, '').toLowerCase() === extension)
-    if (!extension || !formats.includes(extension) || !capability?.enabled) { setError(`服务器尚未开放 .${extension ?? ''} 格式导入。`); return }
-    if (!next.size) { setError('文件为空，请选择含有原文正文的文件。'); return }
-    if (!capabilities || next.size > capabilities.sourceBytes) { setError('文件超过服务器上传上限，请拆分后再试。'); return }
+    const problem = validateImportFile(next, capabilities)
+    if (problem) { setError(problem); return }
     setFile(next); setError(''); setJob(null); setPreview(null); setRestored(false); setManualEncoding(false); setEncoding('utf-8')
     setSummary(null); setStructure(null); setReport(null)
   }
@@ -294,6 +314,85 @@ function ImportDialogSession(props: ImportDialogProps) {
     setSummary(null); setStructure(null); setReport(null)
   })
 
+  const autoPipeline = async (alive: () => boolean) => {
+    const source = latest.current.autoFile ?? null
+    const attachment = !source ? latest.current.agentAttachment ?? null : null
+    if (!source && !attachment) throw new Error('没有可导入的文件。')
+    if (!intent || !capabilities?.enabled) throw new Error('导入条件未就绪，请重试。')
+    if (Date.parse(intent.expiresAt) <= Date.now()) throw new Error('覆盖确认已过期，请点击重试重新核对。')
+    setAutoStep('正在创建任务并上传文件…')
+    const created = await client.create(novelId, intent.intentId, latest.current.modelSelection)
+    if (!alive()) return
+    if (created.novelId !== novelId) throw new Error('任务作品不匹配。')
+    setJob(created)
+    const uploaded = source ? await client.upload(novelId, created.jobId, source) : await client.attachment(novelId, created.jobId, attachment!)
+    if (!alive()) return
+    setJob(uploaded)
+    setAutoStep('正在解析原文…')
+    let next = uploaded.status === 'uploaded' ? await client.analyze(novelId, created.jobId, undefined) : uploaded
+    if (!alive()) return
+    setJob(next)
+    for (let guard = 0; !previewStatuses.has(next.status) && !terminalStatuses.has(next.status); guard++) {
+      if (guard > 240) throw new Error('解析时间过长，请稍后在导入记录中查看结果。')
+      await wait(2500)
+      if (!alive()) return
+      next = await client.status(novelId, created.jobId)
+      if (!alive()) return
+      setJob(next)
+    }
+    if (next.status === 'failed') throw new Error(importErrorMessage(next.errorCode ?? 'IMPORT_PARSE_FAILED'))
+    if (!previewStatuses.has(next.status)) throw new Error(`任务已${importStatusLabel(next.status)}，未导入任何内容。`)
+    if (!previewClient) throw new AutoImportFallback('当前环境不支持自动核对，已切换到手动核对。')
+    setAutoStep('正在核对解析结果…')
+    let [summaryNow, reportNow] = await Promise.all([previewClient.summary(novelId, next.jobId), previewClient.report(novelId, next.jobId)])
+    if (!alive()) return
+    adoptSummary(summaryNow); setReport(reportNow)
+    const pendingIssues = reportNow.issues.filter(issue => issue.blocking && !issue.resolved)
+    if (pendingIssues.some(issue => issue.resolution !== 'review' || issue.itemIds.length === 0)) throw new AutoImportFallback('解析结果存在需要人工处理的问题，已切换到手动核对。')
+    if (pendingIssues.length > 0) {
+      setAutoStep('正在自动核对来源…')
+      const decisions: ImportReviewEdit['decisions'] = [...new Map(pendingIssues.flatMap(issue => issue.itemIds.map(itemId => [itemId, { itemId, action: 'review' as const, reason: '一键导入自动核对：确认保留该部分原文。' }]))).values()]
+      summaryNow = await previewClient.review(novelId, next.jobId, { expectedManifestRevision: summaryNow.manifestRevision, manifestHash: summaryNow.manifestHash, reportHash: reportNow.reportHash, decisions })
+      if (!alive()) return
+      adoptSummary(summaryNow)
+      reportNow = await previewClient.report(novelId, next.jobId)
+      if (!alive()) return
+      setReport(reportNow)
+    }
+    if (!canSubmitSummary(summaryNow, reportNow)) throw new AutoImportFallback('解析结果需要人工调整，已切换到手动核对。')
+    setAutoStep('正在提交导入…')
+    if (!await latest.current.beforeImport()) throw new Error('当前编辑内容未保存，导入已阻止。')
+    if (!alive()) return
+    const grant = await client.confirm(novelId, next, summaryNow)
+    if (!alive()) return
+    const receipt = await client.commit(novelId, next.jobId, grant.approvalId, `novel-import:${next.jobId}`)
+    if (!alive()) return
+    if (receipt.novelId !== novelId || receipt.jobId !== next.jobId) throw new Error('导入回执与当前任务不匹配，请查询服务器状态。')
+    setJob({ ...next, status: 'succeeded', receipt })
+    await latest.current.onImported(receipt)
+    if (!alive()) return
+    delivered.current = next.jobId
+    toast.success(`导入完成：${receipt.volumeCount} 卷 ${receipt.chapterCount} 章 · ${receipt.wordCount} 字。`)
+    latest.current.onClose()
+  }
+  const pipelineRef = useRef(autoPipeline)
+  pipelineRef.current = autoPipeline
+  useEffect(() => {
+    if (stage !== 'auto') return
+    // 延迟一个宏任务启动：进入 auto 常由覆盖确认的 run 触发，需等它释放互斥锁；同时避免 StrictMode 双调用重复起跑。
+    const timer = window.setTimeout(() => {
+      void run('正在导入', async alive => {
+        try { await pipelineRef.current(alive) }
+        catch (failure) {
+          if (!alive()) return
+          if (failure instanceof AutoImportFallback) { setStage('workspace'); setError(failure.message); return }
+          throw failure
+        }
+      })
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [stage, autoNonce, run])
+
   let title = '一键导入'
   let body: ReactNode
   let footer: ReactNode
@@ -310,6 +409,13 @@ function ImportDialogSession(props: ImportDialogProps) {
       {!first && <p>此步骤仅确认进入覆盖导入流程，不会立即删除旧章节；解析完成后仍需核对文件与卷章预览，再确认导入。已发布或待审内容可能阻止导入，导入的新章节不会自动发布。</p>}
     </div>
     footer = <><button key={`${stage}-cancel`} data-import-safe-focus type="button" className={button} disabled={!first && !!busy} onClick={first ? close : recheck}>{first ? '取消' : '返回'}</button>{error && <button type="button" className={button} disabled={!!busy} onClick={recheck}>重新检查覆盖条件</button>}<button key={`${stage}-confirm`} type="button" className={primary} disabled={!!busy || !armed} onClick={event => { if (event.detail <= 1) confirmEntry(first ? 1 : 2) }}>{first ? '是，继续' : '确认并选择文件'}</button></>
+  } else if (stage === 'auto') {
+    body = <div className="flex flex-col items-center gap-4 py-12">
+      <LoaderCircle aria-label="正在导入" className="h-9 w-9 motion-safe:animate-spin" />
+      <p role="status" className="text-sm text-[var(--text-secondary)]">{autoStep || '正在准备导入…'}</p>
+      {file && <p className="max-w-full truncate text-xs text-[var(--text-tertiary)]">{file.name}</p>}
+    </div>
+    footer = error ? <><button data-import-safe-focus type="button" className={button} onClick={close}>关闭</button><button type="button" className={button} disabled={!!busy} onClick={() => setStage('workspace')}>手动处理</button><button type="button" className={primary} disabled={!!busy} onClick={() => { setError(''); setAutoNonce(value => value + 1) }}>重试</button></> : back
   } else if (stage === 'leave') {
     title = '预览调整尚未保存'
     body = <p>关闭前可保存调整以便稍后继续。放弃只丢弃本次未保存的预览编辑，不会取消服务端任务或改动原作品。</p>

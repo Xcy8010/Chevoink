@@ -73,7 +73,7 @@ export function ImportDialogShell({ title, description, stage, onClose, children
   // before paint or keyboard input can observe a stale dialog-container focus.
   useLayoutEffect(() => { panel.current?.querySelector<HTMLElement>('[data-import-safe-focus]')?.focus() }, [stage])
 
-  return createPortal(<div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/45 sm:p-6">
+  return createPortal(<div className="studio-workspace fixed inset-0 z-[200] flex items-center justify-center bg-black/45 sm:p-6">
     <dialog open data-native-back-dismiss ref={panel} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} aria-describedby={`${id}-description`} tabIndex={-1}
       onCancel={event => { event.preventDefault(); if (!composing.current && modalStack.at(-1) === panel.current) onClose() }}
       onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }}

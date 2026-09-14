@@ -1,4 +1,4 @@
-import { z } from 'zod'
+import { toOpenAIParameters } from '../tool-schema.js'
 
 import type { AgentExecutionMode } from '../../../../shared/contracts/index.js'
 import type { OpenAIToolDefinition } from '../../ai-service.js'
@@ -247,7 +247,7 @@ export function toOpenAITools(tools: AgentTool[]): OpenAIToolDefinition[] {
     function: {
       name: tool.name,
       description: tool.description,
-      parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) as Record<string, unknown>,
+      parameters: toOpenAIParameters(tool.parameters),
     },
   }))
 }

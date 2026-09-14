@@ -157,7 +157,7 @@ function ScheduleDialog({
 }) {
   if (!open) return null
   return createPortal(
-    <div className="fixed inset-0 z-[260] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <div className="studio-workspace fixed inset-0 z-[260] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <section role="dialog" aria-modal="true" aria-label="新建定时计划" className="w-full max-w-xl overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_24px_70px_rgba(15,23,42,.2)]">
         <header className="flex items-start gap-4 border-b border-[var(--border-subtle)] px-5 py-4">
           <div className="min-w-0 flex-1"><h3 className="text-base font-semibold">新建定时计划</h3><p className="mt-1 text-xs text-[var(--text-secondary)]">Agent 会在当前任务中按周期执行这项检查。</p></div>

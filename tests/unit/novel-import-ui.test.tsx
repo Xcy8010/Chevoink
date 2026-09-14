@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render as baseRender, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import ImportDialog, { type ImportDialogProps } from '../../src/features/studio/components/ImportDialog'
 import type { NovelImportClient } from '../../src/features/studio/import-api'
@@ -7,7 +7,11 @@ import type { NovelImportJobStatus, NovelImportPreflight, NovelImportPreview, No
 import { canSubmitImport, IMPORT_MERGE_DELIMITER, importChapterMergeIssue, importModelSelection, mergeImportChapters, moveImportChapter, reorderImportItem, splitImportChapter } from '../../src/features/studio/lib/import-preview'
 import { ImportPreviewEditor } from '../../src/features/studio/components/import-preview-editor'
 import { clearImportHandoff, readImportHandoff, readImportJobId } from '../../src/features/studio/lib/import-handoff'
+import { ToastProvider } from '../../src/components/ui/Toast'
 import { StrictMode } from 'react'
+
+// ImportDialog 使用 useToast（成功提示），测试统一包 ToastProvider；rerender 会沿用同一 wrapper。
+const render = (ui: Parameters<typeof baseRender>[0], options?: Parameters<typeof baseRender>[1]) => baseRender(ui, { wrapper: ToastProvider, ...options })
 
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 const expiry = '2099-01-01T00:00:00.000Z'
