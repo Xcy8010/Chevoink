@@ -285,7 +285,8 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
   })
   it('published overwrite and concurrent restore preserve old identity, counters, order and snapshot', async () => {
     const volume = await prisma.volume.create({ data: { novelId, title: '公开原卷', orderIndex: 1 } })
-    const chapter = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId: volume.id, title: '未发布的新标题', content: '作者保存的旧草稿', orderIndex: 1, orderInVolume: 1, status: 'published', visibility: 'public', publishedTitle: '读者原来看到的标题', publishedContent: '读者原文', publishedRevision: 1, publishedAt: new Date('2025-01-01') } })
+    // Title matches the import fixture (第一章 起点) so smart-merge archives this published row by title and rebuilds it, exercising published-identity preservation across archive/restore.
+    const chapter = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId: volume.id, title: '第一章 起点', content: '作者保存的旧草稿', orderIndex: 1, orderInVolume: 1, status: 'published', visibility: 'public', publishedTitle: '读者原来看到的标题', publishedContent: '读者原文', publishedRevision: 1, publishedAt: new Date('2025-01-01') } })
     await prisma.novel.update({ where: { id: novelId }, data: { chapterCount: 1, wordCount: 8, lastChapterTitle: chapter.title } })
     const memory = await prisma.projectMemoryEntry.create({ data: { novelId, sourceChapterId: chapter.id, memoryType: 'characterCard', title: '人工关联记忆', content: '这段人工内容必须保留', status: 'confirmed' } })
     const ready = await approve()
@@ -330,7 +331,8 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
   })
   it('restore rejects later current edits and preserves both versions with a durable conflict status', async () => {
     const volume = await prisma.volume.create({ data: { novelId, title: '原卷', orderIndex: 1 } })
-    const old = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId: volume.id, title: '原空章', content: '', orderIndex: 1, orderInVolume: 1 } })
+    // Title matches the import fixture so smart-merge archives this row; a later edit to an imported chapter must block restore and leave this row archived.
+    const old = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId: volume.id, title: '第一章 起点', content: '', orderIndex: 1, orderInVolume: 1 } })
     const ready = await approve()
     expect((await request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send(ready.input)).status).toBe(200)
     const input = await restoreApproval(ready.jobId)
