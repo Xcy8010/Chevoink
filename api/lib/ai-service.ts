@@ -49,6 +49,8 @@ type TextCompletionOptions = {
   /** Server-resolved runtime only; never accept provider credentials from tool arguments. */
   modelRuntime?: Awaited<ReturnType<typeof getModelTierRuntime>>
   multiplierBps?: number
+  /** 每次调用的输出 token 上限：仅在显式传入时随请求下发 max_tokens；不传则保持历史行为（交由供应商默认）。 */
+  maxOutputTokens?: number
 }
 
 function ensureTextProviderConfigured(apiKey?: string | null) {
@@ -913,6 +915,8 @@ export async function generateTextCompletion(
     body: JSON.stringify({
       model: modelRuntime.modelName ?? env.aiTextModel,
       temperature: options.temperature ?? 0.7,
+      // 与主循环 chatWithTools、durable 质量路径一致：显式传入时下发 max_tokens 上限，避免评审/修订输出失控膨胀。
+      ...(options.maxOutputTokens != null ? { max_tokens: options.maxOutputTokens } : {}),
       stream: true,
       stream_options: { include_usage: true },
       ...buildProviderReasoningPayload({

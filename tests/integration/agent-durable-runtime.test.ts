@@ -1289,7 +1289,7 @@ describe.runIf(available)('durable domain postconditions', () => {
 })
 
 describe.runIf(available)('quality report integrity and atomic repair', () => {
-  it.each(['complete', 'unavailable', 'unlocated', 'ambiguous', 'report-rollback', 'stale-source', 'repair', 'repair-rollback', 'no-op', 'empty', 'concurrent', 'wrong-compilation', 'tool-fallback', 'foreign-run', 'legacy-report', 'hash-mismatch', 'outer-transaction', 'outer-rollback', 'evidence-corrected', 'evidence-unresolved', 'evidence-ambiguous', 'evidence-credit-failure', 'quality-provider-failure', 'continuity-provider-failure'] as const)('%s cannot promote unverified reports or partially repair', async scenario => {
+  it.each(['complete', 'unavailable', 'unlocated', 'ambiguous', 'report-rollback', 'stale-source', 'repair', 'repair-rollback', 'no-op', 'empty', 'concurrent', 'wrong-compilation', 'tool-fallback', 'foreign-run', 'legacy-report', 'hash-mismatch', 'outer-transaction', 'outer-rollback', 'evidence-corrected', 'evidence-unresolved', 'evidence-ambiguous', 'evidence-credit-failure', 'quality-provider-failure', 'quality-timeout-fallback', 'continuity-provider-failure'] as const)('%s cannot promote unverified reports or partially repair', async scenario => {
     await fixture(async f => {
       const compilation = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '质量检查' })
       const compilationId = compilation.compilation.id
@@ -1308,6 +1308,16 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
         await expect(action).rejects.toBe(error)
         expect(model).toHaveBeenCalledTimes(1)
         expect(await prisma.chapterQualityReport.count({ where: { chapterId: f.chapterId } })).toBe(0)
+        return
+      }
+      if (scenario === 'quality-timeout-fallback') {
+        // 每次调用硬超时(env.aiTextTimeoutMs)触发时 AbortSignal.timeout 抛 TimeoutError(非 DataAccessError)：
+        // critic 不能让整次检查失败，而应降级为确定性兜底并交付报告(count=1)，根治“挂起→分析不出”。
+        const timeout = new DOMException('The operation timed out.', 'TimeoutError')
+        const model = vi.spyOn(aiService, 'generateTextCompletion').mockRejectedValue(timeout)
+        expect(await qualityAnalyzeTool.execute(ctx, { chapterId: f.chapterId, compilationId })).toMatchObject({ outcome: 'failed' })
+        expect(model).toHaveBeenCalledTimes(1)
+        expect((await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: f.chapterId } })).status).toBe('failed')
         return
       }
       if (scenario.startsWith('evidence-')) {
@@ -2196,7 +2206,11 @@ describe.runIf(available)('durable structural mutation batch', () => {
         const window = getCreditWindow()
         await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
         vi.stubGlobal('fetch', vi.fn(async () => new Response(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: calls.map((call, index) => ({ index, id: call.id,
-          type: 'function', function: { name: call.name, arguments: call.arguments } })) }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)))
+          type: 'function', function: { name: call.name, arguments: call.arguments } })) }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}
+
+data: [DONE]
+
+`)))
         await chatWithTools({ messages: current.frame.state.messages, tools: current.configuration.tools, provider: 'fixture', model: 'fixture', providerBaseUrl: 'https://provider.invalid/v1', providerApiKey: 'fixture-not-real', reasoningEffort: 'high',
           durableExecution: { lease, operationKey: 'exec:0', attemptKey: '1', cursor: { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash },
             price: { version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000, rateCardId: 'structure-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } } },

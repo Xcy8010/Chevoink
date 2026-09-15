@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { env } from '../../../config/env.js'
 import { generateTextCompletion } from '../../ai-service.js'
 import { DataAccessError, prisma } from '../../prisma.js'
 import {
@@ -142,7 +143,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
       response = await generateTextCompletion(
         `你是与 Writer/Critic 上下文隔离的局部修订编辑。只替换每条 evidence 本身，不扩写相邻内容，不改变事实、情节结果、人物知识或作者刻意的口语与断句。删除优先于同义词替换；补写只补建议中缺失的具体动作、选择或后果。punctuation_misuse 只移除误用符号，保留人物直接话语和逐字引文。replacement 可以为空。严格只输出 JSON：{"patches":[{"findingId":"原 id","replacement":"只替换证据范围的文本"}]}。必须为每个输入 id 返回且只返回一次。`,
         remaining.map((finding) => `findingId=${finding.id}\nsignal=${finding.signal}\nevidence=「${finding.evidenceExcerpt}」\n原因=${finding.explanation}\n最小修法=${finding.suggestion}`).join('\n\n'),
-        { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: ctx.signal, userId: ctx.userId, action: attempt === 0 ? 'agent3HumanityRevision' : 'agent3HumanityRevisionRetry', novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low' },
+        { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: attempt === 0 ? 'agent3HumanityRevision' : 'agent3HumanityRevisionRetry', novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: env.aiTextMaxOutputTokens },
       )
     } catch (error) {
       ctx.signal.throwIfAborted()
@@ -226,16 +227,28 @@ ${bundle.chapter.content}
     let attemptedEvidenceCorrection = false
     // Provider, credit and configuration failures retain their real error code.
     // Only malformed critic content belongs to the report's incomplete state.
-    const response = await generateTextCompletion(
-      buildCriticSystem('balanced'), userPrompt,
-      { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: ctx.signal, userId: ctx.userId, action: 'agent3HumanityCritic', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low' },
-    )
+    // 每次调用叠加硬超时(env.aiTextTimeoutMs)并下发 max_tokens(env.aiTextMaxOutputTokens)，与主循环 chatWithTools、durable 质量路径完全一致：
+    // 真实用户取消照常上抛；可修复的 provider/credit/config 失败(DataAccessError)保留错误码上抛；
+    // 仅“超时/意外异常”降级为确定性兜底，保证检查一定终止并交付报告，根治长时间挂起导致的“分析不出”。
+    let response = ''
     try {
-      rawCriticFindings = criticEnvelopeSchema.parse(parseJsonObject(response)).findings
-        .filter((finding, index, all) => all.findIndex((item) => item.signal === finding.signal && item.quote === finding.quote) === index)
-    } catch {
+      response = await generateTextCompletion(
+        buildCriticSystem('balanced'), userPrompt,
+        { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: 'agent3HumanityCritic', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low', maxOutputTokens: env.aiTextMaxOutputTokens },
+      )
+    } catch (error) {
       ctx.signal.throwIfAborted()
+      if (error instanceof DataAccessError) throw error
       criticFallback = true
+    }
+    if (!criticFallback) {
+      try {
+        rawCriticFindings = criticEnvelopeSchema.parse(parseJsonObject(response)).findings
+          .filter((finding, index, all) => all.findIndex((item) => item.signal === finding.signal && item.quote === finding.quote) === index)
+      } catch {
+        ctx.signal.throwIfAborted()
+        criticFallback = true
+      }
     }
     if (!criticFallback) {
       const invalid = rawCriticFindings.map((finding, index) => ({ finding, index }))
@@ -249,7 +262,7 @@ ${bundle.chapter.content}
           corrected = await generateTextCompletion(
           '你只负责校正质量报告的原文引用，不重新审稿、不增加或撤销意见。为每个 index 找到正文中连续、逐字且唯一的短引文，保留原问题含义；不得拼接、省略或改写引文。找不到证据就省略该 index，不得编造。严格输出 JSON：{"corrections":[{"index":0,"quote":"正文逐字引文"}]}。',
           `待定位意见：${JSON.stringify(invalid)}\n完整正文：\n${bundle.chapter.content}`,
-          { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: ctx.signal, userId: ctx.userId, action: 'agent3HumanityEvidenceCorrection', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low' },
+          { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: 'agent3HumanityEvidenceCorrection', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low', maxOutputTokens: env.aiTextMaxOutputTokens },
           )
         } catch (error) {
           ctx.signal.throwIfAborted()
