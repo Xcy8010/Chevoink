@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, X } from 'lucide-react'
 import type { CreditModelOption, CreditModelTier, CustomModelView, ModelReasoningEffort } from '../../../../../shared/contracts/index.js'
@@ -52,9 +52,9 @@ export function AgentMobileModelSheet(props: Props) {
     }
   }, [])
 
-  const row = (key: string, label: string, selected: boolean, detail: string, onClick: () => void) => (
+  const row = (key: string, label: string, selected: boolean, detail: string, onClick: () => void, badge?: ReactNode) => (
     <button key={key} type="button" aria-pressed={selected} onClick={onClick} className={cn('flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm', selected ? 'bg-[var(--surface-muted)]' : 'hover:bg-[var(--surface-muted)]')}>
-      <span className="min-w-0 flex-1 break-words">{label}</span>
+      <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 break-words">{label}{badge}</span>
       <span className="shrink-0 text-xs text-[var(--text-tertiary)]">{detail}</span>
       <span className="w-4 shrink-0">{selected && <Check className="h-4 w-4" />}</span>
     </button>
@@ -69,7 +69,7 @@ export function AgentMobileModelSheet(props: Props) {
         </header>
         <div className="min-h-0 overflow-y-auto overscroll-contain px-3 py-3">
           <p className="px-3 pb-2 text-xs text-[var(--text-tertiary)]">内置模型 · Credits 倍率</p>
-          {props.modelOptions.filter(option => option.available).map(option => row(option.tier, option.label, props.modelTier === option.tier, `${option.multiplier.toFixed(1)}x`, () => props.onTier(option.tier)))}
+          {props.modelOptions.filter(option => option.available).map(option => row(option.tier, option.label, props.modelTier === option.tier, `${option.multiplier.toFixed(1)}x`, () => props.onTier(option.tier), option.multiplier === 0 ? <span className="shrink-0 rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-[var(--color-error)]">免费</span> : undefined))}
           {props.customModels.some(model => model.enabled) && <p className="px-3 pb-2 pt-4 text-xs text-[var(--text-tertiary)]">自定义模型</p>}
           {props.customModels.filter(model => model.enabled).map(model => row(model.id, model.displayName, props.modelTier === 'custom' && props.customModelId === model.id, '自有密钥', () => props.onCustom(model.id)))}
           <section className="mt-3 border-t border-[var(--border-subtle)] px-3 pt-4">
