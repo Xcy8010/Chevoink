@@ -468,9 +468,11 @@ export async function handleToolCall(
   } catch (error) {
     if (ctx.signal.aborted) return fail('已中断', '用户已请求暂停，停止后续执行；已保存内容保留。', 'failed')
     if (error instanceof DataAccessError && error.code.startsWith('CREDITS_')) {
-      if (ctx.modelRuntime?.tier === 'custom' && ['web_search', 'research_dossier_build', 'cover_generate', 'view_image'].includes(call.name)
-        && ['CREDITS_EXHAUSTED', 'CREDITS_SETTLEMENT_PENDING', 'CREDITS_RESERVED', 'CREDITS_PROVIDER_UNSTABLE'].includes(error.code)) {
-        return fail('平台付费能力暂不可用', `${error.message} 本工具未完成，不要重复调用；继续使用作者已启用的自定义文本模型完成其余工作。图片生成、联网搜索仍需平台 Credits，不能声称已完成这些操作。`, 'failed')
+      // 自定义档与 0 倍率免费档的主模型调用不占用平台 Credits：额度类失败只让该工具失败，不终止整个 run。
+      const textModel = ctx.modelRuntime?.tier === 'custom' ? '作者已启用的自定义文本模型'
+        : ctx.modelRuntime?.multiplierBps === 0 ? '当前免费模型' : null
+      if (textModel && ['CREDITS_EXHAUSTED', 'CREDITS_SETTLEMENT_PENDING', 'CREDITS_RESERVED', 'CREDITS_PROVIDER_UNSTABLE'].includes(error.code)) {
+        return fail('平台付费能力暂不可用', `${error.message} 本工具未完成，不要重复调用；继续使用${textModel}完成其余工作。图片生成、联网搜索仍需平台 Credits，不能声称已完成这些操作。`, 'failed')
       }
       throw error
     }

@@ -42,6 +42,13 @@ describe('P0 credit admission and auxiliary model ownership', () => {
     mocks.pending.mockResolvedValue({ _sum: { reservedCreditMilli: 450000 } })
     await expect(assertCreditAccess('owner', 'speed')).rejects.toMatchObject({ code: 'CREDITS_RESERVED' })
   })
+  it('keeps the zero-rate free tier usable with no remaining balance or reservations', async () => {
+    mocks.account.mockResolvedValue({ dailyAllowanceMilli: 450000, dailyUsedMilli: 450000, bonusBalanceMilli: 0, periodStartedAt: start, suspendedAt: null })
+    mocks.pending.mockResolvedValue({ _sum: { reservedCreditMilli: 450000 } })
+    mocks.model.mockResolvedValueOnce({ tier: 'lite', modelName: 'fixture-free', baseUrl: 'https://fixture.example/v1', apiKeyCiphertext: 'fixture', multiplierBps: 0 })
+    await expect(assertCreditAccess('owner', 'lite')).resolves.toBeUndefined()
+    expect(mocks.pending).not.toHaveBeenCalled()
+  })
   it('permits BYOK with zero balance and pending platform usage', async () => {
     mocks.account.mockResolvedValue({ dailyAllowanceMilli: 450000, dailyUsedMilli: 450000, bonusBalanceMilli: 0, periodStartedAt: start, suspendedAt: null })
     mocks.pending.mockResolvedValue({ _sum: { reservedCreditMilli: 1000 } })

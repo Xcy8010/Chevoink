@@ -171,6 +171,17 @@ describe('BYOK paid-tool isolation', () => {
     const admitted = tool('web_search', async () => { throw new DataAccessError(402, 'CREDITS_EXHAUSTED', '平台额度不足') })
     await expect(handleToolCall(call('paid', admitted.name), [admitted], context(), { emit: mocks.emit }, 'message', 'run')).rejects.toMatchObject({ code: 'CREDITS_EXHAUSTED' })
   })
+  it('keeps platform quota failure local to the paid tool for the zero-rate free tier', async () => {
+    const ctx = context()
+    const runtime = await (await import('../../api/lib/credits.js')).getModelTierRuntime()
+    ctx.modelRuntime = { ...runtime, tier: 'lite', multiplierBps: 0, provider: 'deepseek', modelName: 'fixture-free', baseUrl: null, apiKey: null,
+      reasoningEffort: 'low', reasoningEfforts: ['low', 'high', 'max'], visionEnabled: false }
+    const admitted = tool('web_search', async () => { throw new DataAccessError(402, 'CREDITS_EXHAUSTED', '平台额度不足') })
+    const result = await handleToolCall(call('paid', 'web_search'), [admitted], ctx, { emit: mocks.emit }, 'message', 'run')
+    expect(result.part.status).toBe('failed')
+    expect(result.observation).toContain('免费模型')
+    expect(result.observation).toContain('不要重复调用')
+  })
 })
 
 describe('original task context on resume', () => {

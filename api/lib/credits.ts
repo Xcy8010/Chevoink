@@ -547,6 +547,8 @@ export async function reserveTokenCredits(userId: string, usageId: string, input
         const price = tokenPriceSchema.parse(usage.billingSnapshot)
         const { account, setting } = await ensureAccountWithDb(tx, userId)
         if (account.suspendedAt) throw new DataAccessError(423, setting.globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED', '当前模型服务已暂停。')
+        // 0 倍率免费档不产生费用：不预留、不受余额与预留占用闸门限制。
+        if (price.version === 'credits-v1-exact' && price.multiplierBps === 0) return
         const balance = Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli) + account.bonusBalanceMilli
         const available = Math.max(0, balance - await reservedTokenCredits(tx, userId))
         if (available <= 0) throw new DataAccessError(402, balance > 0 ? 'CREDITS_RESERVED' : 'CREDITS_EXHAUSTED', balance > 0 ? '可用额度暂被进行中或待核调用预留，请等待结算或预留释放。' : '今日额度已用尽。')
@@ -570,14 +572,9 @@ export async function assertCreditAccess(userId: string, tier: CreditModelTier =
     throw new DataAccessError(423, setting.globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED', setting.globallyPaused ? '公测模型服务已由管理员暂停，请稍后再试。' : '当前账户的模型使用权限已暂停。')
   }
   if (tier === 'custom') return
-  const remaining = Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli) + account.bonusBalanceMilli
-  if (remaining <= 0) {
-    throw new DataAccessError(402, 'CREDITS_EXHAUSTED', '今日额度已用尽，可邀请好友获得额外额度。')
-  }
-  if (remaining <= await reservedTokenCredits(prisma, userId)) throw new DataAccessError(409, 'CREDITS_RESERVED', '额度暂被进行中或待核调用预留，请等待结算或预留释放。')
   const model = await prisma.aiModelConfig.findFirst({
     where: { ownerUserId: null, tier, enabled: true, ...(requireSelectable ? { selectable: true } : {}) },
-    select: { tier: true, modelName: true, baseUrl: true, apiKeyCiphertext: true },
+    select: { tier: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, multiplierBps: true },
   })
   if (!model || !isConfiguredBuiltIn(model)) {
     const configuredModels = await prisma.aiModelConfig.count({ where: { ownerUserId: null } })
@@ -585,6 +582,13 @@ export async function assertCreditAccess(userId: string, tier: CreditModelTier =
     if (tier === 'speed' && configuredModels === 0) return
     throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '该模型档位尚未开放。')
   }
+  // 0 倍率档位的模型不消耗 Credits：额度耗尽或全被预留时仍须放行，否则免费档在 0 余额下不可用。
+  if (model.multiplierBps === 0) return
+  const remaining = Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli) + account.bonusBalanceMilli
+  if (remaining <= 0) {
+    throw new DataAccessError(402, 'CREDITS_EXHAUSTED', '今日额度已用尽，可邀请好友获得额外额度。')
+  }
+  if (remaining <= await reservedTokenCredits(prisma, userId)) throw new DataAccessError(409, 'CREDITS_RESERVED', '额度暂被进行中或待核调用预留，请等待结算或预留释放。')
 }
 
 /** Standalone text helpers have no run selector. Prefer the owner's most recently

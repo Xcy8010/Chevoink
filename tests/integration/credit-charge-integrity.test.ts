@@ -47,6 +47,21 @@ describe.skipIf(!dbAvailable)('credit request identity and wallet integrity (iso
       } finally { await prisma.aiUsageLog.deleteMany({ where: { id: { in: ids }, userId } }) }
     })
   })
+  it('never reserves or bills a zero-rate free-tier call on an empty balance', async () => {
+    await fixture(async userId => {
+      const usage = await prisma.aiUsageLog.create({ data: { userId, providerType: 'text', providerMode: 'fixture', modelName: 'fixture-free',
+        action: 'fixture', targetType: 'text', modelTier: 'lite', multiplierBps: 0, requestTokens: 1000, responseTokens: 500,
+        durationMs: 0, billingStatus: 'prepared', usageSource: 'prepared', billingSnapshot: { version: 'credits-v1-exact', modelTier: 'lite', multiplierBps: 0 } } })
+      try {
+        await prisma.creditAccount.update({ where: { userId }, data: { dailyAllowanceMilli: 0, dailyUsedMilli: 0, bonusBalanceMilli: 0 } })
+        await expect(reserveTokenCredits(userId, usage.id, 100000, 10000)).resolves.toBeUndefined()
+        expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usage.id } })).toMatchObject({ reservedCreditMilli: 0, billingStatus: 'prepared' })
+        const charge = await consumeTokenCredits({ userId, usageLogId: usage.id, requestTokens: 1000, responseTokens: 500, modelTier: 'lite', multiplierBps: 0 })
+        expect(charge.chargedMilli).toBe(0)
+        expect(await prisma.creditLedgerEntry.count({ where: { userId } })).toBe(1)
+      } finally { await prisma.aiUsageLog.delete({ where: { id: usage.id } }) }
+    })
+  })
   it.each(['reported', 'partial', 'unknown', 'expired'] as const)('isolates a %s call reservation and preserves settlement identity', async scenario => {
     await fixture(async userId => {
       const evidence = { policy: 'observed-output-estimate-2026-09-09', inputEstimate: 1000, outputEstimate: 40, responseObserved: scenario === 'partial' }
