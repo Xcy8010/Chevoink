@@ -23,6 +23,8 @@ import type {
   AgentStreamEvent,
   AgentWorkspaceToolPolicy,
   CreateAgentSessionRequest,
+  CreditModelTier,
+  ModelReasoningEffort,
   ProjectMemoryEntry,
   StartAgentLoopRunRequest,
   StartAgentLoopRunResponse,
@@ -643,11 +645,19 @@ export async function recoverOrphanLoopRuns(): Promise<void> {
   }
 }
 
+/** 续跑时的模型选择：跟随作者当前选择；缺省沿用原任务档位。 */
+export type ContinueLoopRunModelSelection = {
+  modelTier?: CreditModelTier
+  customModelId?: string | null
+  reasoningEffort?: ModelReasoningEffort
+}
+
 export async function continueLoopRun(
   userId: string,
   runId: string,
+  model?: ContinueLoopRunModelSelection,
 ): Promise<StartAgentLoopRunResponse> {
-  return withUserRunLock(userId, () => continueLoopRunLocked(userId, runId))
+  return withUserRunLock(userId, () => continueLoopRunLocked(userId, runId, model))
 }
 
 /** B0 recovery batch for existing durable tasks, separate from legacy cleanup.
@@ -685,6 +695,7 @@ export async function recoverDurableLoopRuns() {
 async function continueLoopRunLocked(
   userId: string,
   runId: string,
+  model?: ContinueLoopRunModelSelection,
 ): Promise<StartAgentLoopRunResponse> {
   const run = await findOwnedLoopRun(userId, runId)
   await prisma.$transaction(tx => assertAgentManuscriptCurrent(tx, { userId, novelId: run.novelId, runId }))
@@ -728,8 +739,18 @@ async function continueLoopRunLocked(
     throw new DataAccessError(409, 'RUN_LIMIT', `同时进行的任务数已达上限（${env.agentUserMaxConcurrent}），请稍后再试。`)
   }
 
-  await assertCreditAccess(userId, run.modelTier as import('../../../shared/contracts/index.js').CreditModelTier)
-  await getModelTierRuntime(run.modelTier as import('../../../shared/contracts/index.js').CreditModelTier, userId, run.customModelId, run.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort)
+  // 续跑跟随作者当前模型选择：0 余额用户换上 0 倍率免费档后必须能继续旧任务，
+  // 不能被原收费档的额度闸门拦截；未提供选择时沿用原任务档位。
+  const nextTier = (model?.modelTier ?? run.modelTier) as CreditModelTier
+  const nextCustomModelId = nextTier === 'custom' ? model?.customModelId ?? run.customModelId ?? null : null
+  if (nextTier === 'custom' && !nextCustomModelId) throw new DataAccessError(400, 'VALIDATION_ERROR', '请选择要使用的自定义模型。')
+  const nextReasoningEffort = (model?.reasoningEffort ?? run.reasoningEffort) as ModelReasoningEffort
+  await assertCreditAccess(userId, nextTier)
+  await getModelTierRuntime(nextTier, userId, nextCustomModelId, nextReasoningEffort)
+  // 档位变化持久化：刷新、再次续跑与状态展示保持同一选择。
+  if (nextTier !== run.modelTier || nextCustomModelId !== run.customModelId || nextReasoningEffort !== run.reasoningEffort) {
+    await prisma.agentRun.update({ where: { id: run.id }, data: { modelTier: nextTier, customModelId: nextCustomModelId, reasoningEffort: nextReasoningEffort } })
+  }
 
   // A stale tab must not revive an old task after the author has started a new one.
   const latest = await prisma.agentRun.findFirst({ where: { sessionId: run.sessionId }, orderBy: { createdAt: 'desc' }, select: { id: true } })
@@ -806,9 +827,9 @@ async function continueLoopRunLocked(
     tokenBudget: queuedInput?.tokenBudget,
     resume: true,
     eventStartSeq,
-    modelTier: run.modelTier as import('../../../shared/contracts/index.js').CreditModelTier,
-    customModelId: run.customModelId,
-    reasoningEffort: run.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort,
+    modelTier: nextTier,
+    customModelId: nextCustomModelId,
+    reasoningEffort: nextReasoningEffort,
   })
 
   return {

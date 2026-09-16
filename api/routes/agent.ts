@@ -3,6 +3,7 @@ import styleLearningRouter from './style-learning.js'
 import { z } from 'zod'
 
 import {
+  continueAgentLoopRunSchema,
   resolveAgentApprovalSchema,
   resolveAgentQuestionSchema,
   startAgentLoopRunSchema,
@@ -928,13 +929,14 @@ router.post('/runs/:runId/stop', async (req: Request, res: Response): Promise<vo
   }
 })
 
-// 新链路：从 paused/failed 恢复循环
+// 新链路：从 paused/failed 恢复循环（可选 body 携带作者当前模型选择，缺省沿用原任务档位）
 router.post('/runs/:runId/continue', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
 
   try {
     const userId = requireSessionUserId(req)
-    const payload = await continueLoopRun(userId, req.params.runId)
+    const model = parseBody(continueAgentLoopRunSchema, req.body, '续跑参数无效。')
+    const payload = await continueLoopRun(userId, req.params.runId, model)
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)

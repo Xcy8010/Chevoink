@@ -55,6 +55,7 @@ import {
   renameAgentSession,
   rollbackAgentSessionMessage,
   startAgentLoopRun,
+  type ContinueAgentLoopRunModel,
 } from '../agentApi'
 import { isRunActive, readSessionMessagesCache, useAgentStore, type ComposerReference } from '../agentStore'
 import { formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMessages, skillPhaseLabel } from '../lib/panel-helpers'
@@ -261,8 +262,12 @@ export function AgentPanel({
     (!conversationReady &&
       (sessionResolving || (sessionId !== null && hydratingSessionId === sessionId) || !conversationSettled))
   const [actionError, setActionError] = useState<string | null>(null)
+  // 续跑必须跟随作者当前的模型选择：ref 在下方每次渲染同步最新值，点击续跑时读取。
+  // 否则旧任务保存的收费档会重新把 0 余额用户拦在额度闸门外。
+  const continueModelRef = useRef<ContinueAgentLoopRunModel | null>(null)
   const { stoppingRunId, handleStop, handleContinue, handleResolveApproval, handleResolveQuestion } = useRunControls({
     runId, resumeableRunId, sessionId, phase, pendingApproval, pendingQuestion, connect, setActionError,
+    selectedModelRef: continueModelRef,
   })
   // 任务「更多」菜单与重命名弹窗（原 StudioCommandBar 任务三点按钮迁入）
   const [taskMenuOpen, setTaskMenuOpen] = useState(false)
@@ -419,6 +424,7 @@ export function AgentPanel({
   const selectedReasoningEffort = savedReasoningEffort && selectedModelCapability?.reasoningEfforts.includes(savedReasoningEffort)
     ? savedReasoningEffort
     : selectedModelCapability?.defaultReasoningEffort ?? 'high'
+  continueModelRef.current = { modelTier, customModelId, reasoningEffort: selectedReasoningEffort }
 
   useEffect(() => {
     const options = creditSummaryQuery.data?.models

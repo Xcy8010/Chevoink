@@ -8,6 +8,8 @@ import type {
   ApiResponse,
   ContextDetail,
   ContextState,
+  CreditModelTier,
+  ModelReasoningEffort,
   ResolveAgentApprovalRequest,
   ResolveAgentQuestionRequest,
   StartAgentLoopRunRequest,
@@ -100,8 +102,18 @@ export function stopAgentLoopRun(runId: string): Promise<{ stopped: boolean }> {
   return requestData<{ stopped: boolean }>(`/api/agent/runs/${runId}/stop`, { method: 'POST' })
 }
 
-export function continueAgentLoopRun(runId: string): Promise<StartAgentLoopRunResponse> {
-  return requestData<StartAgentLoopRunResponse>(`/api/agent/runs/${runId}/continue`, { method: 'POST' })
+/** 续跑时携带的模型选择：缺省沿用原任务档位 */
+export type ContinueAgentLoopRunModel = {
+  modelTier: CreditModelTier
+  customModelId?: string | null
+  reasoningEffort?: ModelReasoningEffort
+}
+
+export function continueAgentLoopRun(runId: string, model?: ContinueAgentLoopRunModel | null): Promise<StartAgentLoopRunResponse> {
+  return requestData<StartAgentLoopRunResponse>(`/api/agent/runs/${runId}/continue`, {
+    method: 'POST',
+    ...(model ? { body: JSON.stringify(model) } : {}),
+  })
 }
 
 export function resolveAgentApproval(

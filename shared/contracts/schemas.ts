@@ -150,6 +150,13 @@ export const startAgentLoopRunSchema = z.object({
   pinnedSubagentId: z.string().trim().min(1).max(64).optional(),
 })
 
+/** POST /api/agent/runs/:runId/continue（可选：续跑跟随作者当前的模型选择；缺省沿用原任务档位） */
+export const continueAgentLoopRunSchema = z.object({
+  modelTier: z.enum(['lite', 'speed', 'standard', 'performance', 'ultimate', 'custom']).optional(),
+  customModelId: z.string().trim().min(1).max(64).nullable().optional(),
+  reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
+})
+
 /** POST /api/agent/runs/:runId/approvals（原校验：callId 真值 + approved 为布尔） */
 export const resolveAgentApprovalSchema = z.object({
   callId: z.string().min(1),

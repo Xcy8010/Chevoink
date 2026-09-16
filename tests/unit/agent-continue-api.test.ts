@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(), execute: vi.fn(), active: vi.fn(() => false), prepare: vi.fn(),
+  runUpdate: vi.fn(), creditAccess: vi.fn(), tierRuntime: vi.fn(),
   transaction: vi.fn(), tx: { $queryRaw: vi.fn(), agentRun: { findFirst: vi.fn() } },
 }))
 vi.mock('../../api/lib/agent/events.js', () => ({ prepareRunEventResume: mocks.prepare }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } },
-  prisma: { $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) } },
+  prisma: { $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) } },
 }))
-vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(), getModelTierRuntime: vi.fn() }))
+vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.creditAccess, getModelTierRuntime: mocks.tierRuntime }))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: mocks.execute }))
 vi.mock('../../api/lib/agent/active-runs.js', () => ({ getActiveRun: () => undefined, hasActiveRunInSession: mocks.active, countActiveRunsByUser: () => 0 }))
 import { continueLoopRun } from '../../api/lib/agent/run-service.js'
@@ -78,5 +79,19 @@ describe('continue API exact target', () => {
     mocks.active.mockReturnValue(true)
     await expect(continueLoopRun('u', 'run19')).rejects.toMatchObject({ code: 'RUN_IN_PROGRESS' })
     expect(mocks.execute).not.toHaveBeenCalled()
+  })
+  it('follows the current model selection when resuming an old paid run', async () => {
+    expect(await continueLoopRun('u', 'run19', { modelTier: 'lite', customModelId: null, reasoningEffort: 'high' })).toMatchObject({ runId: 'run19' })
+    expect(mocks.creditAccess).toHaveBeenCalledWith('u', 'lite')
+    expect(mocks.tierRuntime).toHaveBeenCalledWith('lite', 'u', null, 'high')
+    expect(mocks.runUpdate).toHaveBeenCalledWith({ where: { id: 'run19' }, data: { modelTier: 'lite', customModelId: null, reasoningEffort: 'high' } })
+    expect(mocks.execute.mock.calls[0][0]).toMatchObject({ runId: 'run19', modelTier: 'lite', customModelId: null, reasoningEffort: 'high', resume: true })
+  })
+  it('keeps the saved tier and skips the write-back when no model selection travels with the resume', async () => {
+    expect(await continueLoopRun('u', 'run19')).toMatchObject({ runId: 'run19' })
+    expect(mocks.creditAccess).toHaveBeenCalledWith('u', 'speed')
+    expect(mocks.tierRuntime).toHaveBeenCalledWith('speed', 'u', null, 'high')
+    expect(mocks.runUpdate).not.toHaveBeenCalled()
+    expect(mocks.execute.mock.calls[0][0]).toMatchObject({ modelTier: 'speed', reasoningEffort: 'high' })
   })
 })

@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { continueAgentLoopRun, resolveAgentApproval, resolveAgentQuestion, stopAgentLoopRun } from '../agentApi'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import { continueAgentLoopRun, resolveAgentApproval, resolveAgentQuestion, stopAgentLoopRun, type ContinueAgentLoopRunModel } from '../agentApi'
 import { isRunActive, useAgentStore, type AgentRunPhase, type PendingApproval, type PendingQuestion } from '../agentStore'
 
 /** Commands are bound to a view epoch: late responses must never affect another task. */
-export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendingApproval, pendingQuestion, connect, setActionError }: {
+export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendingApproval, pendingQuestion, connect, setActionError, selectedModelRef }: {
   runId: string | null
   resumeableRunId: string | null
   sessionId: string | null
@@ -12,6 +12,8 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
   pendingQuestion: PendingQuestion | null
   connect: (runId: string) => void
   setActionError: (error: string | null) => void
+  /** 续跑随请求携带作者当前模型选择：点击时从 ref 读取最新值，避免闭包过期 */
+  selectedModelRef?: RefObject<ContinueAgentLoopRunModel | null>
 }) {
   const epoch = useRef(0)
   const pending = useRef(new Set<string>())
@@ -53,11 +55,11 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
     const target = runId ?? resumeableRunId
     if (!target) return
     setActionError(null)
-    await command(`continue:${target}`, () => continueAgentLoopRun(target), (result) => {
+    await command(`continue:${target}`, () => continueAgentLoopRun(target, selectedModelRef?.current ?? null), (result) => {
       useAgentStore.getState().beginRun(result.runId, '请继续完成之前的任务。', sessionId)
       connect(result.runId)
     }, '续跑失败，请稍后再试。')
-  }, [runId, resumeableRunId, sessionId, connect, command, setActionError])
+  }, [runId, resumeableRunId, sessionId, connect, command, setActionError, selectedModelRef])
 
   const handleResolveApproval = useCallback(async (approved: boolean, alwaysAllow: boolean) => {
     if (!runId || !pendingApproval) return
