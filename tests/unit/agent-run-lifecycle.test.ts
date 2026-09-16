@@ -362,13 +362,50 @@ describe('persisted legacy checkpoint budgets', () => {
     expect(events()).toContainEqual(expect.objectContaining({ type: 'error', code: 'run_checkpoint_unconfirmed' }))
   })
 
-  it('does not grant a fresh budget or a paid wrap-up to an exhausted historical run', async () => {
-    mocks.update.mockResolvedValueOnce({ taskSpec: null, ...{ currentTurn: 2, startedAt: new Date(),
-      usage: { promptTokens: env.agentRunTokenBudgetCeiling, completionTokens: 0, totalTokens: env.agentRunTokenBudgetCeiling } } })
+  it('grants a bounded manual slice to a ceiling-exhausted chain on explicit resume', async () => {
+    const started = Date.now() - 60_000
+    const ceiling = env.agentRunTokenBudgetCeiling
+    const checkpoint = { version: 1, runStartedAt: started, resumeCount: 2, compactionCount: 2,
+      maxTurns: env.agentMaxTurns + 100, tokenBudget: ceiling,
+      writeProgress: 5, writeBaseline: 5, readProgress: 5, readBaseline: 5, progressSignatures: [],
+      inheritedTokens: ceiling + 6_003 - 1_285_735, inheritedTurns: 56, inheritedExecutionMs: 60_000 }
+    mocks.update.mockResolvedValueOnce({ taskSpec: null, ...{ currentTurn: 19, startedAt: new Date(started),
+      usage: { promptTokens: 1_285_735, completionTokens: 0, totalTokens: 1_285_735, checkpoint } } })
+    queue(response('已完成。'))
+    await resume()
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded' }))
+    expect(events().some(event => event.type === 'text.final' && event.text.includes('手动续跑 1/2'))).toBe(true)
+    const terminal = mocks.update.mock.calls.find(([input]) => input.data.status === 'completed')?.[0]
+    expect(terminal?.data.usage).toMatchObject({ checkpoint: {
+      manualResumeCount: 1, tokenBudget: ceiling + 6_003 + 2_000_000, maxTurns: env.agentMaxTurns + 150 } })
+  })
+
+  it('stops an explicit resume before any provider request once manual grants are used up', async () => {
+    const ceiling = env.agentRunTokenBudgetCeiling
+    const checkpoint = { version: 1, runStartedAt: Date.now(), resumeCount: 4, compactionCount: 4,
+      maxTurns: env.agentMaxTurns + 300, tokenBudget: ceiling + 4_000_000,
+      writeProgress: 5, writeBaseline: 5, readProgress: 5, readBaseline: 5, progressSignatures: [],
+      inheritedTokens: ceiling + 4_000_000 - 1_000_000, inheritedTurns: 70, manualResumeCount: 2 }
+    mocks.update.mockResolvedValueOnce({ taskSpec: null, ...{ currentTurn: 3, startedAt: new Date(),
+      usage: { promptTokens: 1_000_000, completionTokens: 0, totalTokens: 1_000_000, checkpoint } } })
     await resume()
     expect(mocks.chat).not.toHaveBeenCalled()
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'failed',
-      usage: expect.objectContaining({ totalTokens: env.agentRunTokenBudgetCeiling }) }))
+    expect(events().some(event => event.type === 'text.final' && event.text.includes('手动续跑机会已用完'))).toBe(true)
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'failed' }))
+  })
+
+  it('grants a bounded manual slice to a checkpoint-less exhausted historical run instead of a paid wrap-up', async () => {
+    const ceiling = env.agentRunTokenBudgetCeiling
+    mocks.update.mockResolvedValueOnce({ taskSpec: null, ...{ currentTurn: 2, startedAt: new Date(),
+      usage: { promptTokens: ceiling, completionTokens: 0, totalTokens: ceiling } } })
+    queue(response('已完成。'))
+    await resume()
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded' }))
+    const terminal = mocks.update.mock.calls.find(([input]) => input.data.status === 'completed')?.[0]
+    expect(terminal?.data.usage).toMatchObject({ checkpoint: {
+      manualResumeCount: 1, tokenBudget: ceiling + 2_000_000, maxTurns: env.agentMaxTurns + 50 } })
   })
 
   it('keeps confirmed stream usage when stopped before a complete model response', async () => {
@@ -732,7 +769,7 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     const second = { ...base, id: 'second', usage: { promptTokens: 200, completionTokens: 0, totalTokens: 200,
       checkpoint: { version: 1, runStartedAt: Date.now(), resumeCount: 0, compactionCount: 0,
         maxTurns: env.agentMaxTurns, tokenBudget: 500, writeProgress: 0, writeBaseline: 0, readProgress: 0,
-        readBaseline: 0, progressSignatures: [], inheritedTokens: 300, inheritedTurns: 1 } } }
+        readBaseline: 0, progressSignatures: [], inheritedTokens: 300, inheritedTurns: 1, manualResumeCount: 2 } } }
     mocks.previous.mockResolvedValue(second as never)
     mocks.priorRuns.mockResolvedValue([first, second])
     await run('继续')

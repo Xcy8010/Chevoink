@@ -109,6 +109,9 @@ export const env = {
   agentRunTokenBudget: parsePositiveNumber(process.env.AGENT_RUN_TOKEN_BUDGET, 2000000),
   // plan/18：tokenBudget 硬顶（作者可显式上调预算，服务端 clamp 到此上限防失控）
   agentRunTokenBudgetCeiling: parsePositiveNumber(process.env.AGENT_RUN_TOKEN_BUDGET_CEILING, 5000000),
+  // 手动续跑（作者显式点击「继续」）：自动续跑在总硬顶上严格停止；手动入口可在硬顶之上
+  // 再授予有限预算片，防止接近完成的任务被硬顶永久死锁；次数由服务端再钳制内部硬上限。
+  agentRunManualResumeMax: parsePositiveNumber(process.env.AGENT_RUN_MANUAL_RESUME_MAX, 2),
   // plan/18 P2 墙钟：总帽防无限烧 credits；发生过自动续跑后切长任务帽；空转帽防低速空转
   agentRunWallClockMinutes: parsePositiveNumber(process.env.AGENT_RUN_WALL_CLOCK_MINUTES, 60),
   agentRunWallClockLongMinutes: parsePositiveNumber(process.env.AGENT_RUN_WALL_CLOCK_LONG_MINUTES, 180),

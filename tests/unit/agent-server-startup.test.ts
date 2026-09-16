@@ -11,7 +11,8 @@ it('finishes orphan recovery before listening or launching scheduled/queued runs
   let finish!: () => void
   mocks.recover.mockReturnValue(new Promise<void>(resolve => { finish = resolve }))
   const starting = import('../../api/server.js')
-  // 全量并发下动态 import 可能超过默认 1s 等待；放宽超时不改变「恢复先于监听/调度」的断言语义
+  // 全量并发下动态 import 可能超过默认 1s 等待；放宽超时不改变「恢复先于监听/调度」的断言语义。
+  // it 级超时与 waitFor 对齐：否则并发转换慢时会在等待阶段被测试默认 5s 超时截断（全量偶发超时）。
   await vi.waitFor(() => expect(mocks.recover).toHaveBeenCalledTimes(1), { timeout: 15_000, interval: 20 })
   expect(mocks.listen).not.toHaveBeenCalled()
   expect(mocks.schedules).not.toHaveBeenCalled()
@@ -23,4 +24,4 @@ it('finishes orphan recovery before listening or launching scheduled/queued runs
   expect(mocks.listen).toHaveBeenCalledTimes(1)
   expect(mocks.schedules).toHaveBeenCalledTimes(1)
   expect(mocks.durable).toHaveBeenCalledTimes(1)
-})
+}, 20_000)

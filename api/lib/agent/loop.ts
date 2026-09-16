@@ -50,9 +50,11 @@ import { toolFailureRecovery } from './tool-failure-recovery.js'
 import { createRepeatDetector } from './repeat-detect.js'
 import {
   CHECKPOINT_BUDGET_SLICE,
+  CHECKPOINT_MANUAL_RESUME_HARD_MAX,
   CHECKPOINT_MAX_RESUMES,
   CHECKPOINT_TURN_SLICE,
   evaluateCheckpoint,
+  resolveManualResumeGrant,
   resolveRunTokenBudget,
   savedRunUsageSchema,
   recoverLegacyRunUsage,
@@ -624,6 +626,8 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
   // P4 检查点自动续跑状态
   let resumeCount = 0
   let compactionCount = 0
+  // 手动续跑（作者显式点击「继续」）在自动硬顶之上再授予的预算片计数；持久化在 checkpoint 里
+  let manualResumeCount = 0
   let writeProgressCount = 0
   let checkpointWriteBaseline = 0
   let readProgressCount = 0
@@ -633,6 +637,8 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
   const taskTokens = () => usage.totalTokens + inheritedTokens
   let maxTurns = env.agentMaxTurns
   let runTokenBudget = resolveRunTokenBudget(params.tokenBudget, env.agentRunTokenBudget, env.agentRunTokenBudgetCeiling)
+  // 手动续跑名额：自动续跑在总硬顶上严格停止，作者显式「继续」可在硬顶之上再授予有限片。
+  const manualResumeMax = Math.min(env.agentRunManualResumeMax, CHECKPOINT_MANUAL_RESUME_HARD_MAX)
   let checkpointRestored = !params.resume
   const restoreSavedUsage = async (stored: { usage: unknown; currentTurn: number }, id: string) => {
     if (stored.usage !== null) return savedRunUsageSchema.safeParse(stored.usage)
@@ -647,7 +653,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     writeProgress: writeProgressCount, writeBaseline: checkpointWriteBaseline,
     readProgress: readProgressCount, readBaseline: checkpointReadBaseline,
     progressSignatures: [...progressSignatures],
-    inheritedTokens, inheritedTurns, inheritedExecutionMs,
+    inheritedTokens, inheritedTurns, inheritedExecutionMs, manualResumeCount,
   })
   const persistCheckpoint = () => prisma.agentRun.update({
     where: { id: runId, userId: params.userId, runtimeProtocolVersion: 0, taskRootId: null },
@@ -661,8 +667,10 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     runStartedAt = Math.min(runStartedAt, checkpoint.runStartedAt)
     resumeCount = checkpoint.resumeCount
     compactionCount = checkpoint.compactionCount
-    maxTurns = Math.min(checkpoint.maxTurns, env.agentMaxTurns + resumeCount * CHECKPOINT_TURN_SLICE)
-    runTokenBudget = Math.min(checkpoint.tokenBudget, env.agentRunTokenBudgetCeiling)
+    manualResumeCount = checkpoint.manualResumeCount
+    maxTurns = Math.min(checkpoint.maxTurns, env.agentMaxTurns + (resumeCount + manualResumeCount) * CHECKPOINT_TURN_SLICE)
+    // 手动续跑获得的片在自动硬顶之上，恢复时不会超过已经授予过的总额度。
+    runTokenBudget = Math.min(checkpoint.tokenBudget, env.agentRunTokenBudgetCeiling + manualResumeCount * CHECKPOINT_BUDGET_SLICE)
     writeProgressCount = checkpoint.writeProgress
     checkpointWriteBaseline = checkpoint.writeBaseline
     readProgressCount = checkpoint.readProgress
@@ -688,6 +696,16 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       .catch(() => null)
     if (exists) return
     await persistMessage(live.messageId, runId, params.sessionId, 'assistant', partsToSave).catch(() => {})
+  }
+
+  // 预算/续跑边界停止原因落库为可见消息：此前只写 errorMessage，会话里看不到原因，
+  // 作者只能反复盲点「继续」（线上反馈误判为限流）。停止时给一条可读、可执行的说明。
+  const announceStopReason = async (text: string) => {
+    const messageId = randomUUID()
+    bus.emit({ type: 'message.start', messageId, role: 'assistant' })
+    bus.emit({ type: 'text.delta', messageId, delta: text })
+    bus.emit({ type: 'text.final', messageId, text, asReasoning: false })
+    await persistMessage(messageId, runId, params.sessionId, 'assistant', [{ type: 'text', text }]).catch(() => {})
   }
 
   try {
@@ -818,6 +836,28 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       const reason = `任务累计执行时长已达上限（${Math.round(initialTimeLimitMs / 60_000)} 分钟，已排除有记录的暂停等待时间）。已保存内容保留；重复点击继续不会增加时间预算。`
       await finalizeRun(runId, bus, 'failed', usage, turn, reason, reason, false)
       return
+    }
+    // 手动续跑（作者显式点击「继续」或输入继续指令）：自动检查点续跑受总 token 硬顶约束，
+    // 但显式人工入口允许在硬顶之上再授予有限数量的预算片（plan/18「继续执行」手动入口），
+    // 避免任务被自动硬顶永久死锁；片数上限持久化在 checkpoint 里，连点不能无限放大成本。
+    if (params.resume || previousTask) {
+      const grant = resolveManualResumeGrant({
+        taskTokens: taskTokens(), runTokenBudget,
+        turnsUsed: turn + inheritedTurns, maxTurns,
+        manualResumeCount, maxManualResumes: manualResumeMax,
+      })
+      if (grant && !grant.granted) {
+        const reason = `${grant.reason}。本任务累计消耗 ${taskTokens()} tokens（自动续跑总上限 ${env.agentRunTokenBudgetCeiling}）。已保存内容保留，未完成工作不会标记完成；请新建任务继续剩余工作。`
+        await announceStopReason(reason)
+        await finalizeRun(runId, bus, 'failed', usage, turn, reason, reason, false)
+        return
+      }
+      if (grant?.granted) {
+        manualResumeCount = grant.manualResumeCount
+        runTokenBudget = grant.tokenBudget
+        maxTurns = grant.maxTurns
+        await announceStopReason(`手动续跑 ${manualResumeCount}/${manualResumeMax} · 累计消耗 ${(taskTokens() / 10_000).toFixed(0)} 万 tokens · 已授予新预算片（200 万） · 继续执行中`)
+      }
     }
     let taskSpec: TaskSpec = parsedTaskSpec.success
       ? { ...parsedTaskSpec.data, runId }
@@ -1220,7 +1260,14 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
 
     /** 29 R08：未结束且有新写入/读取证据时才刷新预算片；保留次数、时间和总量硬顶。 */
     let checkpointDeniedReason = ''
-    const checkpointStopMessage = () => `自动检查点未续跑：${checkpointDeniedReason || '运行预算边界未满足'}。任务累计消耗 ${taskTokens()} tokens，当前预算片上限 ${runTokenBudget}，总上限 ${env.agentRunTokenBudgetCeiling}；已续跑 ${resumeCount} 次。已保存内容保留，未完成工作不会标记完成；点击继续不会重置同一任务的预算或时间限制。`
+    const checkpointStopMessage = () => {
+      const base = `自动检查点未续跑：${checkpointDeniedReason || '运行预算边界未满足'}。任务累计消耗 ${taskTokens()} tokens（自动续跑总上限 ${env.agentRunTokenBudgetCeiling}）；已自动续跑 ${resumeCount} 次、手动续跑 ${manualResumeCount}/${manualResumeMax} 次。已保存内容保留，未完成工作不会标记完成。`
+      if (checkpointDeniedReason === '已达长任务墙钟总帽') return `${base}任务累计执行时长已达上限，重复点击继续不会增加时间预算。`
+      const remainingManual = Math.max(0, manualResumeMax - manualResumeCount)
+      return remainingManual > 0
+        ? `${base}点击「继续执行」可手动再授予一片 200 万 tokens 预算（本任务还剩 ${remainingManual} 次手动续跑机会）。`
+        : `${base}本任务的自动与手动续跑机会均已用尽，请新建任务继续剩余工作。`
+    }
     const tryCheckpointResume = async (trigger: 'budget' | 'turns'): Promise<boolean> => {
       const checkpoint = evaluateCheckpoint({
         todoLeft: todoItems.filter((item) => item.status !== 'completed').length,
@@ -1276,6 +1323,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       // Every request path, including no-tool/protocol retries, passes this budget gate.
       if (taskTokens() >= runTokenBudget && !(await tryCheckpointResume('budget'))) {
         const reason = checkpointStopMessage()
+        await announceStopReason(reason)
         await finalizeRun(runId, bus, 'failed', usage, turn, reason, reason, false)
         return
       }
@@ -1695,21 +1743,16 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
         // 预算片耗尽先检查任务进展，不能用是否建过待办来决定自动续跑。
         if (await tryCheckpointResume('budget')) continue
         const reason = checkpointStopMessage()
+        await announceStopReason(reason)
         await finalizeRun(runId, bus, 'failed', usage, turn, reason, reason, false)
         return
       }
     }
 
-    // 轮次上限（检查点续跑也不可用）：优雅收尾而非硬报错
-    await finalizeRun(
-      runId,
-      bus,
-      'failed',
-      usage,
-      turn,
-      lastAssistantText.slice(0, 300),
-      `已达最大轮次上限（${maxTurns} 轮），任务未完成。可点击"继续"让 Agent 接着执行。`,
-    )
+    // 轮次上限（检查点续跑也不可用）：优雅收尾而非硬报错；停止原因落库为可见消息
+    const turnLimitReason = checkpointStopMessage()
+    await announceStopReason(turnLimitReason)
+    await finalizeRun(runId, bus, 'failed', usage, turn, lastAssistantText.slice(0, 300), turnLimitReason)
   } catch (error) {
     if (error instanceof DataAccessError && error.code === 'TASK_AUTHORIZATION_RUNTIME_UPGRADE_REQUIRED') {
       // Admission did not succeed. In particular a rejected resume must not

@@ -6,6 +6,7 @@ import {
   CHECKPOINT_MAX_RESUMES,
   CHECKPOINT_TURN_SLICE,
   evaluateCheckpoint,
+  resolveManualResumeGrant,
   resolveRunTokenBudget,
 } from '../../api/lib/agent/checkpoint.js'
 import { createRepeatDetector } from '../../api/lib/agent/repeat-detect.js'
@@ -174,6 +175,23 @@ describe('plan/18 P4：检查点评估', () => {
 
   it('达到累计硬顶时即使有进展也不能重复获得检查点', () => {
     expect(evaluateCheckpoint({ ...baseInput, usedTokens: 5_000_000, tokenCeiling: 5_000_000 }).ok).toBe(false)
+  })
+
+  it('手动续跑：未命中预算/轮次边界不消耗名额', () => {
+    expect(resolveManualResumeGrant({ taskTokens: 100, runTokenBudget: 500, turnsUsed: 3, maxTurns: 100,
+      manualResumeCount: 0, maxManualResumes: 2 })).toBeNull()
+  })
+
+  it('手动续跑：命中累计硬顶时授予一片 200 万，越过硬顶', () => {
+    expect(resolveManualResumeGrant({ taskTokens: 5_006_003, runTokenBudget: 5_000_000, turnsUsed: 75, maxTurns: 300,
+      manualResumeCount: 0, maxManualResumes: 2 }))
+      .toEqual({ granted: true, tokenBudget: 7_006_003, maxTurns: 350, manualResumeCount: 1 })
+  })
+
+  it('手动续跑：轮次墙同样受名额约束，名额用尽明确拒绝', () => {
+    expect(resolveManualResumeGrant({ taskTokens: 100, runTokenBudget: 500, turnsUsed: 300, maxTurns: 300,
+      manualResumeCount: 2, maxManualResumes: 2 }))
+      .toEqual({ granted: false, reason: '手动续跑机会已用完（2/2）' })
   })
 })
 

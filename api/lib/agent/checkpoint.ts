@@ -40,6 +40,11 @@ export const CHECKPOINT_MAX_COMPACTIONS = 6
 export const CHECKPOINT_BUDGET_SLICE = 2_000_000
 /** 每次续跑刷新的轮次片 */
 export const CHECKPOINT_TURN_SLICE = 50
+/**
+ * 手动续跑（作者显式点击「继续」）在自动硬顶之上可再授予的预算片次数上限：
+ * 这是持久化计数的 schema 硬上限，实际额度由 env.AGENT_RUN_MANUAL_RESUME_MAX 决定（默认 2）。
+ */
+export const CHECKPOINT_MANUAL_RESUME_HARD_MAX = 10
 
 /** Internal metadata inside the existing run usage JSON, not a new UI/API field. */
 export const runCheckpointSchema = z.object({
@@ -55,6 +60,8 @@ export const runCheckpointSchema = z.object({
   inheritedTokens: z.number().int().nonnegative().default(0),
   inheritedTurns: z.number().int().nonnegative().default(0),
   inheritedExecutionMs: z.number().int().nonnegative().optional(),
+  // 作者显式续跑在自动硬顶之上再授予的预算片次数；老记录缺省 0（无手动续跑）。
+  manualResumeCount: z.number().int().min(0).max(CHECKPOINT_MANUAL_RESUME_HARD_MAX).default(0),
 }).strict().refine(value => value.writeBaseline <= value.writeProgress && value.readBaseline <= value.readProgress)
 export type RunCheckpointState = z.infer<typeof runCheckpointSchema>
 
@@ -130,4 +137,34 @@ export function evaluateCheckpoint(input: CheckpointEvaluation): { ok: boolean; 
 export function resolveRunTokenBudget(paramBudget: number | undefined | null, defaultBudget: number, ceiling: number): number {
   const requested = paramBudget ?? defaultBudget
   return Math.min(ceiling, Math.max(500, requested))
+}
+
+/**
+ * 手动续跑预算片：自动检查点续跑在总 token 硬顶上严格停下（evaluateCheckpoint），
+ * 但「继续执行」是设计中的显式人工入口（plan/18）——命中预算/轮次边界时，
+ * 作者显式续跑可在硬顶之上再授予有限数量的预算片，避免任务被硬顶永久死锁
+ * （额度耗尽换免费/自定义模型、供应商故障烧穿预算等场景都曾卡死任务）。
+ * 片数上限持久化在 checkpoint 里，脚本化连点不能无限放大成本；
+ * 未命中边界返回 null（正常续跑，不消耗手动名额）。
+ */
+export function resolveManualResumeGrant(input: {
+  taskTokens: number
+  runTokenBudget: number
+  turnsUsed: number
+  maxTurns: number
+  manualResumeCount: number
+  maxManualResumes: number
+}): { granted: false; reason: string } | { granted: true; tokenBudget: number; maxTurns: number; manualResumeCount: number } | null {
+  const atTokenWall = input.taskTokens >= input.runTokenBudget
+  const atTurnWall = input.turnsUsed >= input.maxTurns
+  if (!atTokenWall && !atTurnWall) return null
+  if (input.manualResumeCount >= input.maxManualResumes) {
+    return { granted: false, reason: `手动续跑机会已用完（${input.manualResumeCount}/${input.maxManualResumes}）` }
+  }
+  return {
+    granted: true,
+    tokenBudget: Math.max(input.runTokenBudget, input.taskTokens + CHECKPOINT_BUDGET_SLICE),
+    maxTurns: input.maxTurns + CHECKPOINT_TURN_SLICE,
+    manualResumeCount: input.manualResumeCount + 1,
+  }
 }
