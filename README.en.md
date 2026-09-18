@@ -143,12 +143,6 @@ The deterministic evaluation suite freezes 24 Chinese web-fiction scenarios acro
 
 Long tasks can resume within budget and progress checks, retaining the original request and target. Hard limits, unverifiable results and failed quality gates stop execution explicitly; automatic completion of an entire book is not guaranteed.
 
-## Current engineering status
-
-Revision `71f7adc` was deployed on 2026-09-08: [CI passed](https://github.com/Xcy8010/chevoink/actions/runs/34240086273), 1,885 tests passed; global line coverage is **33.62%**, with 40% still a target. Resume, repeated continuity repairs, research caching and cross-novel review persistence were addressed. Creating a novel no longer requires resolving the previous novel's reviews first.
-
-Still in beta: whole-book per-chapter analysis, V2 shadow pricing, independent security/recovery exercises and full end-to-end performance acceptance remain incomplete. No 95–100 score or measured Token-saving percentage is claimed. See [engineering evidence](./docs/ENGINEERING.en.md).
-
 ## Quick Navigation
 
 | What you want | Where to go |
