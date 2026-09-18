@@ -18,7 +18,7 @@ import type {
 import { hashPassword, isLegacyPasswordHash, verifyPassword } from '../password.js'
 import { evictUserBanCache } from '../auth-session.js'
 import { prisma } from '../prisma.js'
-import { buildPagination, excerptContent, isUserOnline, toIso } from './internal.js'
+import { buildPagination, excerptContent, isUserOnline, onlineWindowStart, toIso } from './internal.js'
 
 type AgentUsageSummary = { promptTokens: number; completionTokens: number; totalTokens: number }
 
@@ -448,6 +448,7 @@ export async function listAdminUsersData(input: {
   search?: string
   role?: string
   banned?: boolean
+  online?: boolean
   page: number
   pageSize: number
 }): Promise<{ items: AdminUserRow[]; pagination: Pagination }> {
@@ -468,6 +469,11 @@ export async function listAdminUsersData(input: {
     where.bannedAt = { not: null }
   } else if (input.banned === false) {
     where.bannedAt = null
+  }
+  if (input.online === true) {
+    // 「在线」取与 isUserOnline 相同的时间窗；封禁用户不计入在线，与状态列展示（已封禁优先）保持一致
+    where.bannedAt = null
+    where.lastActiveAt = { gte: onlineWindowStart() }
   }
 
   const [total, records] = await Promise.all([

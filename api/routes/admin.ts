@@ -496,6 +496,7 @@ router.get('/users', async (req: Request, res: Response): Promise<void> => {
       role: typeof req.query.role === 'string' ? req.query.role : undefined,
       banned:
         req.query.banned === 'true' ? true : req.query.banned === 'false' ? false : undefined,
+      online: req.query.online === 'true' ? true : undefined,
       page: parsePositiveInt(req.query.page, 1),
       pageSize: parsePositiveInt(req.query.pageSize, 20),
     })

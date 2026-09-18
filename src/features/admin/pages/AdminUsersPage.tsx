@@ -25,7 +25,7 @@ export default function AdminUsersPage() {
   const [keyword, setKeyword] = useState('')
   const [search, setSearch] = useState('')
   const [role, setRole] = useState('')
-  const [banned, setBanned] = useState('')
+  const [status, setStatus] = useState('')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const [pendingBan, setPendingBan] = useState<AdminUserRow | null>(null)
@@ -33,12 +33,13 @@ export default function AdminUsersPage() {
   const [tempPassword, setTempPassword] = useState<string | null>(null)
 
   const query = useQuery({
-    queryKey: ['admin', 'users', search, role, banned, page, pageSize],
+    queryKey: ['admin', 'users', search, role, status, page, pageSize],
     queryFn: () =>
       listAdminUsers({
         search: search || undefined,
         role: role || undefined,
-        banned: banned === 'true' ? 'true' : banned === 'false' ? 'false' : undefined,
+        banned: status === 'true' ? 'true' : status === 'false' ? 'false' : undefined,
+        online: status === 'online' ? 'true' : undefined,
         page,
         pageSize,
       }),
@@ -141,9 +142,9 @@ export default function AdminUsersPage() {
           </select>
 
           <select
-            value={banned}
+            value={status}
             onChange={(event) => {
-              setBanned(event.target.value)
+              setStatus(event.target.value)
               setPage(1)
             }}
             className="h-10 rounded-[var(--radius-pill)] border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm text-[var(--text-primary)] outline-none"
@@ -151,6 +152,7 @@ export default function AdminUsersPage() {
             <option value="">全部状态</option>
             <option value="false">正常</option>
             <option value="true">已封禁</option>
+            <option value="online">在线</option>
           </select>
 
           {!isSuperAdmin ? (

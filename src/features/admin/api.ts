@@ -246,6 +246,7 @@ export function listAdminUsers(input: {
   search?: string
   role?: string
   banned?: 'true' | 'false'
+  online?: 'true'
   page: number
   pageSize: number
 }): Promise<AdminListPayload<AdminUserRow>> {

@@ -284,6 +284,13 @@ export function isUserOnline(lastActiveAt: Date | string | null | undefined): bo
 
 
 
+/** 在线筛选的时间窗起点：与 isUserOnline 共用同一判定窗口，保证列表筛选与状态列展示一致 */
+export function onlineWindowStart(): Date {
+  return new Date(Date.now() - ONLINE_WINDOW_MS)
+}
+
+
+
 export function toIso(value: Date | string | null | undefined): string | null {
   if (!value) {
     return null
