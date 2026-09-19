@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
-import { Ban, ChevronDown, Circle, CircleCheck, FileText, ListTodo, LoaderCircle } from 'lucide-react'
+import { ChevronDown, Circle, CircleCheck, FileText, ListTodo, LoaderCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { AgentTodoItem } from '../../../../../shared/contracts/index.js'
 import { useAgentStore, type WorkspaceActivity } from '../agentStore'
@@ -24,40 +24,28 @@ function todoCounts(todos: DisplayTodo[]) {
   return {
     completed: active.filter(item => item.status === 'completed').length,
     active: active.length,
-    cancelled: todos.filter(item => item.status === 'cancelled').length,
   }
 }
 function todoSummary(todos: DisplayTodo[]) {
-  const { completed, active, cancelled } = todoCounts(todos)
-  return cancelled > 0 ? `${completed}/${active} 已完成 · ${cancelled} 项已取消` : `${completed}/${active} 已完成`
+  const { completed, active } = todoCounts(todos)
+  return `${completed}/${active} 已完成`
 }
 function TodoStatusIcon({ item, runActive }: { item: DisplayTodo; runActive: boolean }) {
   if (item.status === 'completed') return <CircleCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" aria-label="已完成" />
-  if (item.status === 'cancelled') return <Ban className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]" aria-label="已取消" />
   if (item.status === 'in_progress' && runActive) return <LoaderCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none" aria-label="执行中" />
   return <Circle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" aria-hidden="true" />
 }
 function TodoRow({ item, runActive, compact = false }: { item: DisplayTodo; runActive: boolean; compact?: boolean }) {
-  const cancelled = item.status === 'cancelled'
   return <li className={cn(
     'flex items-start gap-2 rounded-lg text-xs',
     compact ? 'px-2 py-1.5' : 'px-2 py-2',
     item.status === 'completed' ? 'text-[var(--text-tertiary)]' : item.status === 'in_progress' ? 'bg-[var(--surface-muted)] font-medium text-[var(--text-primary)]' : 'text-[var(--text-secondary)]',
   )}>
     <TodoStatusIcon item={item} runActive={runActive} />
-    <span className={cn('min-w-0 break-words leading-5', item.status === 'completed' && 'line-through', cancelled && 'line-through decoration-[var(--text-tertiary)]')}>
+    <span className={cn('min-w-0 break-words leading-5', item.status === 'completed' && 'line-through')}>
       {item.content}
     </span>
-    {cancelled ? <span className="shrink-0 text-[10px] text-[var(--text-tertiary)]">已取消</span> : null}
   </li>
-}
-function CancelledTodoDetails({ todos, runActive, compact = false }: { todos: DisplayTodo[]; runActive: boolean; compact?: boolean }) {
-  const cancelled = todos.filter(item => item.status === 'cancelled')
-  if (cancelled.length === 0) return null
-  return <details className={cn('text-xs text-[var(--text-tertiary)]', compact ? 'mx-2 mb-1' : 'mx-2 mb-2')}>
-    <summary className="cursor-pointer rounded-md px-2 py-1.5 hover:bg-[var(--surface-muted)]">已取消 {cancelled.length} 项</summary>
-    <ul className="mt-1 space-y-0.5">{cancelled.map((item, index) => <TodoRow key={todoKey(item, index)} item={item} runActive={runActive} compact={compact} />)}</ul>
-  </details>
 }
 const capsule = 'agent-activity-capsule flex min-h-9 min-w-0 items-center rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-muted)] text-sm font-medium leading-5 text-[var(--text-secondary)] transition-colors duration-150 hover:border-[var(--border-strong)] mobile:min-h-11 mobile:w-full mobile:rounded-none mobile:border-0 mobile:bg-transparent motion-reduce:transition-none'
 function Counts({ added, removed }: { added: number; removed: number }) {
@@ -147,7 +135,6 @@ function AgentActivityDock({ activities, todos, runActive, pendingReviewCount, r
   return <div data-agent-activity-dock className="flex min-w-0 flex-col gap-1">
     {todos.length > 0 ? <DockSection title="待办" summary={todoSummary(todos)} icon={<ListTodo className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />}>
       <ul className="max-h-60 overflow-y-auto overscroll-contain pb-1">{todos.filter(item => item.status !== 'cancelled').map((item, index) => <TodoRow key={todoKey(item, index)} item={item} runActive={runActive} compact />)}</ul>
-      <CancelledTodoDetails todos={todos} runActive={runActive} compact />
     </DockSection> : null}
     {changes.length > 0 || pendingReviewCount > 0 ? <DockSection title="工作区变更" summary={`${changes.length} 个变更`} icon={<FileText className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />}>
       <ul aria-label="工作区变更列表" className="max-h-[11.25rem] overflow-y-auto overscroll-contain">{[...changes].reverse().map(change => <li key={change.key}>
@@ -160,7 +147,8 @@ function AgentActivityDock({ activities, todos, runActive, pendingReviewCount, r
   </div>
 }
 export function AgentActivityBar(props: Props) {
-  return props.appearance === 'dock' ? <AgentActivityDock {...props} /> : <AgentActivityCapsules {...props} />
+  const visibleProps = { ...props, todos: props.todos.filter(item => item.status !== 'cancelled') }
+  return props.appearance === 'dock' ? <AgentActivityDock {...visibleProps} /> : <AgentActivityCapsules {...visibleProps} />
 }
 function AgentActivityCapsules({ activities, todos, runActive, pendingReviewCount, reviewBusy, onApproveAllReviews, onRejectAllReviews }: Props) {
   const [expanded, setExpanded] = useState<'todos' | 'changes' | null>(null)
@@ -172,10 +160,10 @@ function AgentActivityCapsules({ activities, todos, runActive, pendingReviewCoun
   useEffect(() => () => clearTimeout(closeTimer.current), [])
   const changes = useMemo(() => workspaceBodyChanges(activities), [activities])
   const total = useMemo(() => changes.reduce((sum, item) => ({ added: sum.added + item.added, removed: sum.removed + item.removed }), { added: 0, removed: 0 }), [changes])
-  const { completed, active, cancelled } = todoCounts(todos)
+  const { completed, active } = todoCounts(todos)
   const activeTodos = todos.filter(item => item.status !== 'cancelled')
   const current = activeTodos.find(item => item.status === 'in_progress') ?? activeTodos.find(item => item.status === 'pending')
-  const currentLabel = current?.content ?? (cancelled > 0 ? `${cancelled} 项已取消` : '全部完成')
+  const currentLabel = current?.content ?? '全部完成'
   const paired = todos.length > 0 && (changes.length > 0 || pendingReviewCount > 0)
   if (!changes.length && !todos.length && !pendingReviewCount && !expanded) return null
   return <div className="flex min-w-0 flex-col gap-2">
@@ -184,13 +172,11 @@ function AgentActivityCapsules({ activities, todos, runActive, pendingReviewCoun
         <button type="button" aria-label="待办进度" aria-haspopup="dialog" aria-expanded={expanded === 'todos'} onClick={() => { cancelClose(); setExpanded(value => value === 'todos' ? null : 'todos') }} className={cn(capsule, 'max-w-full gap-2 px-3 text-left mobile:gap-1.5 mobile:px-2.5')}>
           {current?.status === 'in_progress' && runActive ? <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--text-secondary)] motion-reduce:animate-none" aria-label="执行中" /> : <ListTodo className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)] mobile:hidden" />}
           <span className="shrink-0 tabular-nums text-[var(--text-secondary)]">{completed}/{active}</span>
-          {cancelled > 0 ? <span className="shrink-0 text-[10px] text-[var(--text-tertiary)]">{cancelled}项已取消</span> : null}
           <span className="min-w-0 max-w-48 truncate font-medium" title={currentLabel}>{currentLabel}</span>
           <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform duration-200', expanded === 'todos' && 'rotate-180')} />
         </button>
         <ActivityPopover anchor={todoAnchor} open={expanded === 'todos'} label="任务待办列表" onClose={() => setExpanded(value => value === 'todos' ? null : value)}>
           <ul className="p-2">{activeTodos.map((item, index) => <TodoRow key={todoKey(item, index)} item={item} runActive={runActive} />)}</ul>
-          <CancelledTodoDetails todos={todos} runActive={runActive} />
         </ActivityPopover>
       </div> : null}
       {changes.length > 0 || pendingReviewCount > 0 || expanded === 'changes' ? <div ref={changeAnchor} className={cn('min-w-0 max-w-full', paired && 'mobile:max-w-[50%] mobile:flex-1 mobile:border-l mobile:border-[var(--border-subtle)]')} onPointerEnter={event => { if (!event.pointerType || event.pointerType === 'mouse') { touchSummary.current = false; cancelClose(); setExpanded('changes') } }} onPointerLeave={event => { if (!event.pointerType || event.pointerType === 'mouse') closeSoon() }}>

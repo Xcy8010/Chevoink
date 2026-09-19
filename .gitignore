@@ -62,3 +62,14 @@ desktop/windows/test-results/
 /.playwright-cli/
 /output/playwright/
 /output/engineering-baseline/
+
+# Local investigations, production diagnostics and generated release artifacts
+/.repo-audit/
+/output/
+/prod-diag.sh
+/report-source.md
+/plan/evidence/32-import-ai-handoff-2026-09-19.md
+
+# Environment variants may contain production credentials; keep only templates
+.env.*
+!.env*.example
