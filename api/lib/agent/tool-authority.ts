@@ -10,6 +10,12 @@ export type ToolAuthority = ReadonlyMap<string, Readonly<{
 
 /** Narrow both the model's schemas and the executor's admission ceiling. */
 export function restrictToolsToTask(tools: AgentTool[], task: TaskSpec): AgentTool[] {
+  if (task.writingPacing === 'conversation_only') return tools.filter(tool => tool.readOnly || tool.name === 'ask_user')
+  if (task.writingPacing === 'proposal_only') {
+    // This ceiling is snapshotted and inherited by children and resume. A model
+    // cannot turn its own outline, question or checkpoint into write permission.
+    return tools.filter(tool => tool.readOnly || ['ask_user', 'todo_write', 'plan_save'].includes(tool.name))
+  }
   if (task.intent !== 'research_analysis') return tools.filter(tool => tool.name !== 'research_report_save' && tool.name !== 'research_report_read')
   return tools.filter(tool => tool.readOnly || tool.name === 'ask_user' || tool.name === 'todo_write' || tool.name === 'research_report_save')
 }

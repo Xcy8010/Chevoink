@@ -1444,7 +1444,7 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
 })
 
 describe.runIf(available)('durable quality actual tool chain', () => {
-  it.each(['success', 'repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain'] as const)('%s preserves paid results and atomic business effects', async scenario => {
+  it.each(['success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     await fixture(async f => {
       let lease = await claim(f)
@@ -1495,7 +1495,11 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         if (sourceId) await prisma.chapter.update({ where: { id: sourceId }, data: { content: '新的前文', revision: { increment: 1 } } })
         if (scenario === 'stale-compiler') await prisma.storyCompilation.update({ where: { id: compilationId }, data: { preparedContext: { changed: true } } })
         if (scenario === 'late-resume') await pauseDurableTask(f.userId, lease.runId)
-        const content = scenario === 'context-change' || scenario === 'full-chain' ? '{"findings":[]}' : scenario === 'format' || scenario === 'format-retry' && requests === 2 ? 'broken JSON'
+        const content = scenario === 'evidence-corrected' || scenario === 'evidence-unresolved'
+          ? requests === 1
+            ? JSON.stringify({ findings: [{ signal: 'emotion_grounding', severity: 'advisory', quote: '错误引用', explanation: '需要更具体动作', suggestion: '保留待审', confidence: 0.9 }] })
+            : JSON.stringify({ corrections: [{ index: 0, quote: scenario === 'evidence-corrected' ? '原文' : '仍不存在' }] })
+          : scenario === 'context-change' || scenario === 'full-chain' ? '{"findings":[]}' : scenario === 'format' || scenario === 'format-retry' && requests === 2 ? 'broken JSON'
           : requests === 1 ? JSON.stringify({ findings: repairing || scenario === 'protected' ? [{ signal: 'emotion_grounding', severity: 'warning', quote: '原文', explanation: '缺少动作', suggestion: '改成新文', confidence: 0.9 }] : [] })
           : '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}'
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: scenario === 'truncated' ? 'length' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
@@ -1537,7 +1541,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         return
       }
       const result = await step()
-      const failed = ['format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source'].includes(scenario)
+      const failed = ['evidence-unresolved', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('质量检查') } })
       if (scenario === 'context-change') { await prisma.novel.update({ where: { id: f.novelId }, data: { categoryName: '新的题材边界' } }); expect(await step()).toMatchObject({ result: { summary: '人类感质量检查' } }) }
       if (scenario === 'success' || scenario === 'repair') expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
@@ -1547,7 +1551,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('completed')
         expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(2)
       }
-      const expectedRequests = scenario === 'missing' ? 0 : scenario === 'format-retry' ? 3 : scenario === 'context-change' || scenario === 'full-chain' ? 2 : repairing ? 2 : 1
+      const expectedRequests = scenario === 'missing' ? 0 : scenario === 'format-retry' ? 3 : ['context-change', 'full-chain', 'evidence-corrected', 'evidence-unresolved'].includes(scenario) ? 2 : repairing ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
@@ -1689,11 +1693,11 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
   })
 })
 
-describe.runIf(available).each(['continuity', 'quality'] as const)('auxiliary model durable admission %s', family => {
-  const tool = family === 'quality' ? qualityAnalyzeTool : continuityValidateTool
-  const criticStep = family === 'quality' ? 'quality_critic' : 'continuity_critic'
-  const repairStep = family === 'quality' ? 'quality_repair' : 'continuity_repair'
-  const retryStep = family === 'quality' ? 'quality_repair_retry' : 'continuity_repair_retry'
+describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as const)('auxiliary model durable admission %s', family => {
+  const tool = family !== 'continuity' ? qualityAnalyzeTool : continuityValidateTool
+  const criticStep = family !== 'continuity' ? 'quality_critic' : 'continuity_critic'
+  const repairStep = family === 'quality-evidence' ? 'quality_evidence_correction' : family !== 'continuity' ? 'quality_repair' : 'continuity_repair'
+  const retryStep = family === 'quality-evidence' ? 'quality_evidence_correction' : family !== 'continuity' ? 'quality_repair_retry' : 'continuity_repair_retry'
   it.each(['replay', 'policy-denied', 'stop-resume', 'unknown', 'changed-input', 'wrong-attempt', 'wrong-step', 'skip-critic', 'damaged-prerequisite', 'ordered-repair', 'tools-leak', 'history-leak', 'late-result', 'concurrent', 'missing-result-event', 'cross-family'] as const)('%s binds paid work to the original pending tool', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
@@ -1731,7 +1735,7 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('auxiliary mo
         return
       }
       if (scenario === 'wrong-attempt' || scenario === 'wrong-step' || scenario === 'skip-critic' || scenario === 'tools-leak' || scenario === 'history-leak' || scenario === 'cross-family') {
-        const invalid = request(scenario === 'cross-family' ? (family === 'quality' ? 'continuity_critic' : 'quality_critic') : scenario === 'skip-critic' ? repairStep : criticStep)
+        const invalid = request(scenario === 'cross-family' ? (family !== 'continuity' ? 'continuity_critic' : 'quality_critic') : scenario === 'skip-critic' ? repairStep : criticStep)
         if (scenario === 'wrong-attempt') invalid.durableExecution.attemptKey = '2'
         if (scenario === 'wrong-step') invalid.durableExecution.operationKey += '-other'
         if (scenario === 'tools-leak') invalid.tools = [{ type: 'function', function: { name: 'chapter_write', description: '', parameters: {} } }]
@@ -1785,7 +1789,7 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('auxiliary mo
           await chatWithTools(request(retryStep))
         }
       }
-      const count = scenario === 'ordered-repair' ? 3 : 1
+      const count = scenario === 'ordered-repair' ? (family === 'quality-evidence' ? 2 : 3) : 1
       expect(fetchMock).toHaveBeenCalledTimes(count)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(count)
       expect(await readTaskBudget(lease)).toMatchObject({ usedTokens: BigInt(10 * count), attempts: BigInt(count), unresolvedAttempts: 0n })

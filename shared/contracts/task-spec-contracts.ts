@@ -64,6 +64,8 @@ export const taskSpecSchema = z.object({
   intent: taskIntentSchema,
   /** Frozen from the original request, never selected by a search tool. */
   researchBudget: z.enum(['standard', 'extended']).optional(),
+  /** Server-frozen creative scope; a broad book request is a proposal, not permission to serialize indefinitely. */
+  writingPacing: z.enum(['proposal_only', 'explicit_writing', 'conversation_only']).optional(),
   scope: taskScopeSchema,
   /** Additive migration: missing means legacy/unmigrated, never implicit consent. */
   authorization: taskAuthorizationSchema.optional(),

@@ -62,7 +62,7 @@ import {
   type RunCheckpointState,
 } from './checkpoint.js'
 import { autoNameSession } from './session-title.js'
-import { buildTaskSpec, narrowLegacyResearchTask } from './task-spec.js'
+import { buildTaskSpec, narrowLegacyResearchTask, narrowLegacyConversationTask } from './task-spec.js'
 import { buildSkillExecutionDigest, routeSkills, type SkillPhase } from './skills/index.js'
 import { resolveEnabledRuntimeSkills } from './skills/service.js'
 import { nextSkillPhase, phaseIntent, phaseSignals } from './skills/lifecycle.js'
@@ -491,10 +491,14 @@ export async function handleToolCall(
     // 错误即观察：不中断 run，把错误回填给模型自行重试或换路
     if (error instanceof DataAccessError && error.code.startsWith('AI_')) {
       const label = error.code === 'AI_PROVIDER_TIMEOUT' ? '模型网关超时'
+        : error.code === 'AI_PROVIDER_OUTPUT_LIMIT' ? '模型输出达到上限，检查未完成'
         : error.code === 'AI_PROVIDER_INCOMPLETE' ? '模型输出中断，检查未完成'
         : error.code === 'AI_PROVIDER_INVALID_RESPONSE' ? '模型响应格式异常' : '模型服务异常'
       console.warn('[agent-tool-provider]', { runId, tool: call.name, code: error.code, durationMs: Date.now() - startedAt })
-      return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。最多重试一次，仍失败则保留进度并报告阻塞。`, 'failed'), providerFailure: true }
+      const guidance = error.code === 'AI_PROVIDER_OUTPUT_LIMIT'
+        ? '输出预算已达上限，不要原样重复付费调用；保留进度并报告检查未完成，不能将截断报告当作通过。'
+        : '最多重试一次，仍失败则保留进度并报告阻塞。'
+      return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。${guidance}`, 'failed'), providerFailure: true }
     }
     console.warn('[agent-tool-failure]', { runId, tool: call.name, code: error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR', durationMs: Date.now() - startedAt })
     const recovery = error instanceof DataAccessError ? toolFailureRecovery(error.code) : undefined
@@ -670,7 +674,11 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     manualResumeCount = checkpoint.manualResumeCount
     maxTurns = Math.min(checkpoint.maxTurns, env.agentMaxTurns + (resumeCount + manualResumeCount) * CHECKPOINT_TURN_SLICE)
     // 手动续跑获得的片在自动硬顶之上，恢复时不会超过已经授予过的总额度。
-    runTokenBudget = Math.min(checkpoint.tokenBudget, env.agentRunTokenBudgetCeiling + manualResumeCount * CHECKPOINT_BUDGET_SLICE)
+    // The granted slice starts at actual consumption (which may overshoot the
+    // automatic ceiling by one response). Preserve that persisted grant exactly;
+    // clamping to ceiling + slices silently removes part of an approved slice.
+    runTokenBudget = manualResumeCount > 0 ? checkpoint.tokenBudget
+      : Math.min(checkpoint.tokenBudget, env.agentRunTokenBudgetCeiling)
     writeProgressCount = checkpoint.writeProgress
     checkpointWriteBaseline = checkpoint.writeBaseline
     readProgressCount = checkpoint.readProgress
@@ -747,7 +755,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       title: params.prompt.slice(0, 80),
     })
 
-    const prompt = params.resume ? '请继续完成之前的任务。' : params.prompt
+    const prompt = params.prompt
     // 附件以 additive attachment parts 随用户消息持久化：气泡缩略图回显 + 历史压缩可见
     const attachmentParts: AgentMessagePart[] = (params.attachments ?? []).map((attachment) => ({
       type: 'attachment',
@@ -767,11 +775,11 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       if (params.resume || !admitted || runtimeJson(admitted.parts).hash !== runtimeJson(JSON.parse(JSON.stringify(userParts))).hash) {
         throw new DataAccessError(409, 'RUN_INPUT_MISMATCH', '原始请求与已保存消息不一致，不能覆盖或猜测任务。')
       }
-    } else await persistMessage(userMessageId, runId, params.sessionId, 'user', userParts)
+    } else if (!params.resume) await persistMessage(userMessageId, runId, params.sessionId, 'user', userParts)
 
     const continuingTask = Boolean(params.resume) || isContinuationRequest(params.prompt)
     // Typed “continue” starts a new run but must retain the original task scope/constraints.
-    const previousTask = continuingTask && !storedRun.taskSpec
+    const previousTask = !params.resume && continuingTask && !storedRun.taskSpec
       ? await prisma.agentRun.findFirst({ where: { sessionId: params.sessionId, userId: params.userId, novelId: params.novelId, id: { not: runId }, engine: 'loop' }, orderBy: { createdAt: 'desc' }, select: { id: true, taskSpec: true, taskRootId: true, runtimeProtocolVersion: true, usage: true, currentTurn: true, startedAt: true } })
       : null
     if (previousTask) assertLegacyRuntimeCompatible(previousTask)
@@ -872,7 +880,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
         })
     let taskSpecChanged = !parsedTaskSpec.success || Boolean(previousTask)
     if (params.resume || previousTask) {
-      const narrowed = narrowLegacyResearchTask(taskSpec, contextPrompt)
+      const narrowed = narrowLegacyConversationTask(narrowLegacyResearchTask(taskSpec, contextPrompt), contextPrompt)
       taskSpecChanged ||= narrowed !== taskSpec
       taskSpec = narrowed
     }

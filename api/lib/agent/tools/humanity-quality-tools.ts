@@ -20,7 +20,6 @@ import {
   getQualityReport,
   listCharacterVoiceProfiles,
   listExperienceAnchors,
-  locateCriticFindings,
   persistHumanityQualityReport,
   recordQualityFindingFeedback,
   resolveQualityChapterTarget,
@@ -33,6 +32,7 @@ import {
 import { defineTool, type ToolContext } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
 import { qualityReportMatchesContent } from '../quality-report-contract.js'
+import { correctQualityEvidence, qualityEvidenceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
 
 const READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const WRITE = { plan: 'deny', build: 'allow', review: 'allow' } as const
@@ -49,9 +49,6 @@ const REPAIR_BLOCK_CODES = new Set([
 ])
 
 const criticEnvelopeSchema = z.object({ findings: z.array(criticQualityFindingSchema).max(24) })
-const quoteCorrectionSchema = z.object({ corrections: z.array(z.object({
-  index: z.number().int().nonnegative(), quote: z.string().min(1).max(360),
-})).max(24) })
 const repairEnvelopeSchema = z.object({
   patches: z.array(z.object({ findingId: z.string().min(1), replacement: z.string().max(2_000) })).min(1).max(12),
 })
@@ -115,7 +112,7 @@ export function buildCriticSystem(lens: 'balanced' | 'story' | 'style'): string 
 不得把词汇本身当问题：熵、量子、铁锈味、华丽句、口语、断句、留白、无悬念收束都可能合理。只有题材/人物/场景功能/局部频率/上下文铺垫共同提供证据时才提示。
 不得要求每章固定钩子、固定对白比例或固定节奏；不得把作者的不规则声音清洗成统一白开水。
 emotion_grounding 按“触发→解释→身体或注意→冲动→选择→后果”检查，但正文不必写全链，只要最有力的两三环成立即可。
-severity 只能是 advisory 或 warning；审美意见绝不报 error。找不到问题返回空数组。
+severity 只能是 advisory 或 warning；审美意见绝不报 error。找不到问题返回空数组。最多24项，同一问题仅报告一次；quote最多360字符，explanation与suggestion各用一两句短句（最多1000字符）。完整检查全部维度，但不要复述无问题正文或输出审查过程，直接交付结构化结论，避免输出被截断。
 严格只输出 JSON：{"findings":[{"signal":"style_drift|orphaned_sophistication|plot_progress|description_load|emotion_grounding|explanation_echo|sentence_homology|image_repetition|character_voice|causal_gap|chapter_bridge|reader_pull|punctuation_misuse","severity":"advisory|warning","quote":"正文逐字短引文","explanation":"为何在当前语境构成问题","suggestion":"不改变事实和作者声音的最小修法","confidence":0.0}]}`
 }
 
@@ -251,8 +248,7 @@ ${bundle.chapter.content}
       }
     }
     if (!criticFallback) {
-      const invalid = rawCriticFindings.map((finding, index) => ({ finding, index }))
-        .filter(({ finding }) => locateCriticFindings(bundle.chapter.content, [finding]).length === 0)
+      const invalid = unlocatedQualityEvidence(bundle.chapter.content, rawCriticFindings)
       if (invalid.length > 0) {
         attemptedEvidenceCorrection = true
         // Correct only failed evidence bindings once. Keep every original judgment;
@@ -260,7 +256,7 @@ ${bundle.chapter.content}
         let corrected = ''
         try {
           corrected = await generateTextCompletion(
-          '你只负责校正质量报告的原文引用，不重新审稿、不增加或撤销意见。为每个 index 找到正文中连续、逐字且唯一的短引文，保留原问题含义；不得拼接、省略或改写引文。找不到证据就省略该 index，不得编造。严格输出 JSON：{"corrections":[{"index":0,"quote":"正文逐字引文"}]}。',
+          qualityEvidenceCorrectionSystem,
           `待定位意见：${JSON.stringify(invalid)}\n完整正文：\n${bundle.chapter.content}`,
           { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: 'agent3HumanityEvidenceCorrection', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low', maxOutputTokens: env.aiTextMaxOutputTokens },
           )
@@ -271,13 +267,7 @@ ${bundle.chapter.content}
           correctionError = error
         }
         try {
-          const corrections = quoteCorrectionSchema.parse(parseJsonObject(corrected)).corrections
-          for (const item of invalid) {
-            const candidates = corrections.filter((candidate) => candidate.index === item.index)
-            if (candidates.length !== 1) continue
-            const finding = { ...item.finding, quote: candidates[0].quote }
-            if (locateCriticFindings(bundle.chapter.content, [finding]).length === 1) rawCriticFindings[item.index] = finding
-          }
+          rawCriticFindings = correctQualityEvidence(bundle.chapter.content, rawCriticFindings, parseJsonObject(corrected))
         } catch { /* Remain incomplete; never reinterpret malformed corrections as success. */ }
       }
     }

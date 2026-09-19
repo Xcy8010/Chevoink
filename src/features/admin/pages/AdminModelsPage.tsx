@@ -8,6 +8,8 @@ import type { ModelReasoningEffort } from '../../../../shared/contracts'
 import { AdminCard, AdminPageHeader, AdminPanelState } from '../AdminLayout'
 import { formatTokens } from '../admin-shared'
 import { getAdminModelManagement, updateAdminModel } from '../api'
+import { ModelRoutesEditor } from '../components/ModelRoutesEditor'
+import type { ModelRouteInput } from '../../../../shared/contracts/model-routes'
 
 type ModelRow = NonNullable<ReturnType<typeof getAdminModelManagement> extends Promise<infer T> ? T : never>['models'][number]
 const REASONING_OPTIONS: ModelReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
@@ -21,6 +23,7 @@ export default function AdminModelsPage() {
     enabled: true, selectable: true, isDefault: false,
     reasoningEfforts: ['high'] as ModelReasoningEffort[], defaultReasoningEffort: 'high' as ModelReasoningEffort,
     visionEnabled: false, contextWindowTokens: '128000',
+    routes: [] as ModelRouteInput[],
   })
 
   useEffect(() => {
@@ -31,6 +34,7 @@ export default function AdminModelsPage() {
       enabled: editing.enabled, selectable: editing.selectable, isDefault: editing.isDefault,
       reasoningEfforts: editing.reasoningEfforts, defaultReasoningEffort: editing.defaultReasoningEffort,
       visionEnabled: editing.visionEnabled, contextWindowTokens: String(editing.contextWindowTokens ?? 128000),
+      routes: (editing.routes ?? []).map(({ apiKeyConfigured: _configured, ...route }) => route),
     })
   }, [editing])
 
@@ -116,6 +120,7 @@ export default function AdminModelsPage() {
       <div className="mt-5 grid gap-4 sm:grid-cols-2"><label className="text-xs">显示名称<TextInput className="mt-1.5" name={`model-display-${editing.id}`} autoComplete="off" value={form.displayName} onChange={(e) => setForm((v) => ({ ...v, displayName: e.target.value }))} /></label><label className="text-xs">供应商<TextInput className="mt-1.5" name={`model-provider-${editing.id}`} autoComplete="off" value={form.provider} onChange={(e) => setForm((v) => ({ ...v, provider: e.target.value }))} /></label><label className="text-xs">模型 ID<TextInput className="mt-1.5" name={`model-id-${editing.id}`} autoComplete="off" value={form.modelName} onChange={(e) => setForm((v) => ({ ...v, modelName: e.target.value }))} /></label><label className="text-xs">Credits 倍率<TextInput className="mt-1.5" name={`model-multiplier-${editing.id}`} autoComplete="off" type="number" min="0.1" step="0.1" value={form.multiplier} onChange={(e) => setForm((v) => ({ ...v, multiplier: e.target.value }))} /></label>{editingTextModel ? <label className="text-xs sm:col-span-2">上下文窗口（Tokens）<TextInput className="mt-1.5" name={`model-context-window-${editing.id}`} autoComplete="off" type="number" min="16000" max="4000000" step="1000" value={form.contextWindowTokens} onChange={(e) => setForm((v) => ({ ...v, contextWindowTokens: e.target.value }))} /><span className="mt-1.5 block text-[11px] leading-5 text-[var(--text-secondary)]">按供应商文档填写；Agent 自动压缩与输出预留将采用此值。</span></label> : null}<label className="text-xs sm:col-span-2">Base URL<TextInput className="mt-1.5" name={`model-endpoint-${editing.id}`} autoComplete="off" inputMode="url" data-lpignore="true" data-1p-ignore="true" value={form.baseUrl} onChange={(e) => setForm((v) => ({ ...v, baseUrl: e.target.value }))} placeholder="https://api.example.com/v1" /></label><label className="text-xs sm:col-span-2">替换 API Key<TextInput className="mt-1.5" name={`model-secret-${editing.id}`} type="password" autoComplete="new-password" data-lpignore="true" data-1p-ignore="true" value={form.apiKey} onChange={(e) => setForm((v) => ({ ...v, apiKey: e.target.value }))} placeholder={editing.apiKeyConfigured ? '已配置；留空保持不变，输入新值即替换' : '必须填写后才能开放该档位'} /></label></div>
       {editingTextModel ? <div className="mt-5 border-y border-[var(--border-subtle)] py-4"><div className="flex items-center gap-2 text-sm font-medium"><BrainCircuit className="h-4 w-4" />推理强度</div><div className="mt-3 flex flex-wrap gap-2">{availableReasoningOptions.map((effort) => <label key={effort} className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] px-2.5 py-1.5 text-xs"><input type="checkbox" checked={form.reasoningEfforts.includes(effort)} onChange={(event) => toggleReasoningEffort(effort, event.target.checked)} />{effort}</label>)}</div><label className="mt-4 block text-xs">默认强度<select value={form.defaultReasoningEffort} onChange={(event) => setForm((value) => ({ ...value, defaultReasoningEffort: event.target.value as ModelReasoningEffort }))} className="mt-1.5 h-10 w-full rounded-full border border-[var(--border-strong)] bg-[var(--surface-default)] px-4 text-sm">{form.reasoningEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label><label className="mt-4 flex items-center gap-2 text-sm"><input type="checkbox" checked={form.visionEnabled} onChange={(event) => setForm((value) => ({ ...value, visionEnabled: event.target.checked }))} /><Eye className="h-4 w-4" />支持 OpenAI 兼容图片输入</label></div> : null}
       <div className="mt-5 flex flex-wrap gap-4 text-sm"><label className="flex items-center gap-2"><input type="checkbox" checked={form.enabled} onChange={(e) => setForm((v) => ({ ...v, enabled: e.target.checked }))} />启用服务</label>{editingTextModel ? <><label className="flex items-center gap-2"><input type="checkbox" checked={form.selectable} onChange={(e) => setForm((v) => ({ ...v, selectable: e.target.checked }))} />允许用户选择</label><label className="flex items-center gap-2"><input type="checkbox" checked={form.isDefault} onChange={(e) => setForm((v) => ({ ...v, isDefault: e.target.checked }))} />设为默认</label></> : null}</div>
+      {editingTextModel && <ModelRoutesEditor routes={form.routes} onChange={routes => setForm(value => ({ ...value, routes }))} defaults={form} />}
       {mutation.isError ? <p className="mt-3 text-xs text-rose-600">{mutation.error instanceof Error ? mutation.error.message : '保存失败'}</p> : null}
       <div className="mt-5 flex justify-end gap-2"><Button variant="ghost" onClick={() => setEditing(null)}>取消</Button><Button variant="primary" disabled={mutation.isPending} onClick={() => mutation.mutate()}>保存配置</Button></div>
     </section></div> : null}

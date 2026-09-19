@@ -8,6 +8,38 @@ type DirectiveCandidate = Pick<UserDirective, 'kind' | 'text'>
 
 const PREFERENCE_MARKERS = /(希望|尽量|偏好|最好|倾向)/
 
+/** Only the current original request may authorize prose. Historical chapters,
+ * research results and an assistant's own plan are never author confirmation. */
+export function classifyWritingPacing(prompt: string): TaskSpec['writingPacing'] {
+  const clauses = prompt.split(/[。！？!?；;\n，,]+/u)
+  const positive = clauses.map(clause => clause.replace(/(?:不要|无需|不用|不必)(?:再)?(?:询问我|问我|确认|征求同意)/gu, ''))
+    .filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|别|do not|don't)/iu.test(clause)).join('，')
+  const greeting = /^(?:你好|您好|嗨|哈喽|hello|hi|hey|在吗|谢谢|早上好|晚上好|你是谁|你能做什么)[\s，,。.!！?？～~]*$/iu.test(prompt.trim())
+  const question = /^(?:请问|告诉我|解释|介绍|什么是|为什么|如何|怎么|怎样|能否解释|你觉得|你认为|(?:我)?(?:想|想要|希望)(?:了解|知道|学习)|what\b|why\b|how\b|explain\b)/iu.test(prompt.trim())
+  const explicitEffect = /(?:帮我|替我|为我|请你|然后|再)(?:直接)?(?:写|修改|改写|续写|创建|删除|保存|更新|润色|重写|生成)/u.test(positive)
+  // Resolve informational questions before matching a book-sized object:
+  // "如何写一本小说" asks for advice, not even a saved planning artifact.
+  if (greeting || (question && !explicitEffect)) return 'conversation_only'
+  // A classifier/quantity is optional ("写玄幻小说", "写本修仙小说").
+  // Do not turn explicit continuation or revision into a new-book proposal.
+  const broad = /(?<!续|改|重|扩|缩)(?:写|创作|创建|开|构思|策划).{0,40}(?:小说|故事)|(?:写|创作).{0,8}全书|(?:write|create).{0,30}(?:a|an|entire|whole).{0,24}(?:novel|book)/iu.test(positive)
+  if (!broad) return undefined
+  // A bounded chapter request or explicit autonomous serialization is stronger
+  // evidence than a general book goal. Never infer this from "写一本" alone.
+  const bounded = /(?:写|创作|完成|起草).{0,12}(?:第[一二两三四五六七八九十百0-9]+章|前[一二两三四五六七八九十0-9]+章|首章|下一章)|(?:write|draft).{0,12}(?:chapter\s*\d+|first chapter)/iu.test(positive)
+  const autonomous = /(?:自动|自主|自行|直接).{0,16}(?:写完|完成全书|创作全书|连续写|逐章写)|(?:全权|授权).{0,16}(?:写作|创作)|(?:write|finish).{0,24}(?:autonomously|automatically)/iu.test(positive)
+  const confirmationFirst = /(?:先|等).{0,24}(?:确认|同意|批准).{0,16}(?:再|后).{0,12}(?:写|正文)|(?:不要|不得|不能|别).{0,12}(?:直接|擅自|未经.{0,6}(?:同意|确认)).{0,8}(?:写|正文)|(?:先|只).{0,8}(?:大纲|规划|计划|方案)/u.test(prompt)
+  return !confirmationFirst && (bounded || autonomous) ? 'explicit_writing' : 'proposal_only'
+}
+
+/** Repair greeting/question legacy contracts only from the recovered original
+ * user message. Never infer a broader grant or change task identity on resume. */
+export function narrowLegacyConversationTask(spec: TaskSpec, originalPrompt: string): TaskSpec {
+  if (spec.authorization || spec.writingPacing || classifyWritingPacing(originalPrompt) !== 'conversation_only') return spec
+  return { ...spec, writingPacing: 'conversation_only', expectedOutputs: [{ kind: 'text', required: true,
+    description: '回应本任务原始用户问题或问候，不执行作品创作，不恢复其他任务的待办' }] }
+}
+
 /** Only explicit lower bounds for an in-chat report. This extracts a length
  * obligation, never grants research access or chapter-writing permissions. */
 function explicitReportMinimum(prompt: string): number | undefined {
@@ -89,7 +121,8 @@ export function buildTaskSpec(input: {
   creativeFreedom?: CreativeFreedom
   qualityMode?: StoryCompilerMode
 }): TaskSpec {
-  const intent = classifyIntent(input.prompt)
+  const writingPacing = classifyWritingPacing(input.prompt)
+  const intent = writingPacing === 'proposal_only' ? 'plan' : classifyIntent(input.prompt)
   const minimumChineseCharacters = intent === 'review' || intent === 'research_analysis' ? explicitReportMinimum(input.prompt) : undefined
   const requiresStructureValidation = intent === 'structure' || /(?:续写|写完|补完|完成|写到).{0,12}第?[一二两三四五六七八九十百千0-9]+卷|第?[一二两三四五六七八九十百千0-9]+卷.{0,12}(?:续写|写完|补完|完成)/.test(input.prompt)
   const protectsEarlierContent = /(不|不要|不得|不能|禁止).{0,8}(改动|修改|重写|影响).{0,8}(前面|此前|已有|之前)|保持.{0,8}(前面|此前|已有|之前).{0,8}不变/.test(input.prompt)
@@ -110,6 +143,7 @@ export function buildTaskSpec(input: {
     id: randomUUID(),
     runId: input.runId,
     intent,
+    ...(writingPacing ? { writingPacing } : {}),
     researchBudget: /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt) ? 'extended' : 'standard',
     scope: { novelId: input.novelId, chapterIds, selection },
     goals: [input.prompt.trim().slice(0, 1000) || '继续完成上一轮任务'],
@@ -119,7 +153,11 @@ export function buildTaskSpec(input: {
     softPreferences: directives
       .filter((item) => item.kind === 'preference')
       .map((item) => ({ id: randomUUID(), text: item.text, weight: 0.8 })),
-    expectedOutputs: [{ kind: outputKind, description: `完成${intent}任务并给出可核验结果${minimumChineseCharacters ? `；报告至少${minimumChineseCharacters}个汉字（不计代码、URL、标点与重复段落）` : ''}`, required: true,
+    expectedOutputs: [{ kind: outputKind, description: writingPacing === 'conversation_only'
+      ? '回应本任务原始用户问题或问候，不执行作品创作，不恢复其他任务的待办'
+      : writingPacing === 'proposal_only'
+      ? '交付题材定位、核心冲突、人物与全书大纲、首批章节范围建议，等待作者确认后再另起正文写作；本轮不写章节正文'
+      : `完成${intent}任务并给出可核验结果${minimumChineseCharacters ? `；报告至少${minimumChineseCharacters}个汉字（不计代码、URL、标点与重复段落）` : ''}`, required: true,
       ...(minimumChineseCharacters ? { minimumChineseCharacters } : {}) }],
     postconditions: [
       ...(intent === 'global_transform'
@@ -144,7 +182,12 @@ export function renderTaskSpec(spec: TaskSpec): string {
     const budget = spec.researchBudget === 'extended' ? '最多5次搜索、8次页面获取' : '最多2次搜索、2次页面获取'
     return `[系统] 本轮只读研究契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n只读取资料并交付分析；不得创建或改写章节、卷、作品、记忆、封面或派生写作窗口，历史写作指令不构成本轮授权。正文不可读或覆盖不足必须说明缺失，不能虚称全书读完。按照用户要求完整输出报告，不套用写作任务的简短收尾规则。复杂任务可维护本轮真实待办，无待办不补建已完成清单。\n联网预算：${budget}，缓存续读不消耗获取额度；连续两次读取失败后停止新增联网，保留已有证据并说明限制。普通分析不自行扩展到影视化、销量或结局争议。用户指定外部平台作品时直接搜索官方来源，不先搜索本平台作品库。优先官方作品页，再沿真实章节链接读取；书评、新闻、简介只能作为对应类型的资料，不是原著正文。\n预期交付：${spec.expectedOutputs.map(item => item.description).join('；')}。`
   }
-  const hard = spec.hardConstraints.map((item) => `- ${item.text}`).join('\n') || '- 无'
+  const pacing = spec.writingPacing === 'conversation_only'
+    ? '\n本轮是普通对话：直接回应当前任务的原始问候或问题；作品上下文只作背景，不代表写作授权，不继续其他窗口的创作、待办或历史计划。任务中止后仍回应该原始问题，不能将“继续”解释为继续写作品。'
+    : spec.writingPacing === 'proposal_only'
+    ? '\n创作阶段：本轮仅规划。宽泛整书目标不等于授权连续写正文。先利用已给条件形成可审阅的大纲（人物目标、核心冲突、主要转折、结局方向、卷章节奏），可用 plan_save 保存；说明假设和建议的首批章节范围，交付后收尾等待作者下一条明确写作指令。不要把调研完成、旧作品大纲、历史写作授权、普通继续或你自己的待办当作本轮正文授权；不能通过子任务或其它工具绕过。关键方向缺失可集中提问，但不必为每个细节重复确认。'
+    : '\n创作节奏：写作严格限于本任务原始请求。面对宽泛整书目标先交可审阅的大纲并确认首批范围，再进入正文；用户明确授权自主整书创作时先保存大纲、按计划分批推进，每批回报真实进度与重大偏差。用户明确指定章节/续写范围时直接执行该范围，不反复确认，不擅自向后无限续章。调研结果和历史任务不是新的写作授权。'
+  const hard = [spec.hardConstraints.map((item) => `- ${item.text}`).join('\n') || '- 无', pacing].join('')
   const freedomLabel = spec.creativeFreedom === 'stable' ? '平衡延续' : spec.creativeFreedom === 'bold' ? '大胆探索' : '严谨创作'
   const freedomRule = spec.creativeFreedom === 'stable'
     ? '贴合既有走向，只修明确错误。'

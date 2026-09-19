@@ -19,6 +19,7 @@ import { analyzeDeterministicQuality, applyQualityRepair, buildHumanityQualityCo
   getLatestQualityReport, getQualityReport, HUMANITY_CRITIC_VERSION, persistHumanityQualityReport, prepareQualityFindings,
   renderQualityLearning, renderVoiceAndAnchorContext } from '../humanity-quality.js'
 import { qualityReportMatchesContent } from '../quality-report-contract.js'
+import { correctQualityEvidence, qualityEvidenceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
 import { buildCriticSystem, reportDisplay } from './humanity-quality-tools.js'
 import { normalizeToolInput } from './input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
@@ -124,6 +125,16 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     if (!frozen.cached) {
       const critic = await call('quality_critic', frozen.criticSystem, frozen.criticInput, 0.15)
       if (critic.finishReason === 'stop' && !critic.toolCalls.length) try { findings = criticSchema.parse(parseObject(critic.content)).findings; complete = true } catch { /* incomplete is not a passing review */ }
+      // Match the legacy path: one journaled, billable quote-only correction.
+      // Never rerun the full critic or drop an unbound judgment to pass the gate.
+      const missing = complete ? unlocatedQualityEvidence(frozen.chapter.content, findings) : []
+      if (missing.length) {
+        const correction = await call('quality_evidence_correction', qualityEvidenceCorrectionSystem,
+          `待定位意见：${JSON.stringify(missing)}\n完整正文：\n${frozen.chapter.content}`, 0.15)
+        if (correction.finishReason === 'stop' && !correction.toolCalls.length) {
+          try { findings = correctQualityEvidence(frozen.chapter.content, findings, parseObject(correction.content)) } catch { /* retain incomplete evidence */ }
+        }
+      }
       findings = calibrateCriticFindings(findings, frozen.feedback)
     }
     const deterministic = analyzeDeterministicQuality(frozen.chapter.content, frozen.recentContents)

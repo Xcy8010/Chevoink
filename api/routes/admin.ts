@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express'
+import { modelRoutesInputSchema } from '../../shared/contracts/model-routes.js'
 import { createRateCard, transitionRateCard, listRateCards, rateCardEvidenceSchema } from '../lib/billing/rate-cards.js'
 import { itemizedTokenPriceSchema } from '../lib/billing/token-price.js'
 import { z } from 'zod'
@@ -180,6 +181,7 @@ const adminBatchCreditsSchema = adminDangerActionSchema.extend({ userIds: z.arra
 const adminBatchPauseCreditsSchema = adminBatchCreditsSchema.extend({ paused: z.boolean() })
 const modelReasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const adminModelUpdateSchema = z.object({
+  routes: modelRoutesInputSchema.optional(),
   provider: z.string().trim().min(1).max(40).optional(),
   displayName: z.string().trim().min(1).max(80).optional(),
   modelName: z.string().trim().min(1).max(160).optional(),
@@ -1189,7 +1191,7 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
     requireSuperAdmin(admin)
     const body = parseBody(adminModelUpdateSchema, req.body, '模型配置格式不正确。')
     await updateAdminModel(req.params.modelId, body)
-    await recordAdminAuditLog({ adminId: admin.id, action: 'models.update', targetType: 'aiModelConfig', targetId: req.params.modelId, detail: { ...body, apiKey: body.apiKey ? '[REPLACED]' : undefined }, ip: getRequestIp(req) })
+    await recordAdminAuditLog({ adminId: admin.id, action: 'models.update', targetType: 'aiModelConfig', targetId: req.params.modelId, detail: { ...body, routes: body.routes?.map(({ apiKey, ...route }) => ({ ...route, ...(apiKey ? { apiKey: '[REPLACED]' } : {}) })), apiKey: body.apiKey ? '[REPLACED]' : undefined }, ip: getRequestIp(req) })
     res.status(200).json(buildSuccess(requestId, { ok: true }))
   } catch (error) {
     sendRouteError(res, requestId, error)

@@ -13,11 +13,12 @@ const steps = {
   continuity_repair: { parent: 'continuity_validate', previous: 'continuity_critic' },
   continuity_repair_retry: { parent: 'continuity_validate', previous: 'continuity_repair' },
   quality_critic: { parent: 'quality_analyze', previous: null },
+  quality_evidence_correction: { parent: 'quality_analyze', previous: 'quality_critic' },
   quality_repair: { parent: 'quality_analyze', previous: 'quality_critic' },
   quality_repair_retry: { parent: 'quality_analyze', previous: 'quality_repair' },
 } as const
 export type AuxiliaryModelStep = keyof typeof steps
-const stepSchema = z.enum(['continuity_critic', 'continuity_repair', 'continuity_repair_retry', 'quality_critic', 'quality_repair', 'quality_repair_retry'])
+const stepSchema = z.enum(['continuity_critic', 'continuity_repair', 'continuity_repair_retry', 'quality_critic', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
 const parentInput = z.object({ input: z.object({ callId: z.string(), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema }) })
 const isolatedRequest = z.object({ body: z.object({
   messages: z.array(z.object({ role: z.enum(['system', 'user']), content: z.string() })).min(1),

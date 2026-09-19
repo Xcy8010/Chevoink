@@ -72,6 +72,12 @@ describe('continue API exact target', () => {
     await expect(continueLoopRun('u', 'run19')).rejects.toMatchObject({ code: 'STALE_RESUME_TARGET', status: 409 })
     expect(mocks.execute).not.toHaveBeenCalled()
   })
+  it('does not mutate an old task model when a stale tab requests a model switch', async () => {
+    mocks.find.mockReset().mockResolvedValueOnce(run).mockResolvedValueOnce({ id: 'new-run' })
+    await expect(continueLoopRun('u', 'run19', { modelTier: 'lite', customModelId: null, reasoningEffort: 'high' }))
+      .rejects.toMatchObject({ code: 'STALE_RESUME_TARGET' })
+    expect(mocks.runUpdate).not.toHaveBeenCalled()
+  })
   it('cannot use the resume API to start a completed run or overlap live work', async () => {
     mocks.find.mockReset().mockResolvedValue({ ...run, status: 'completed' })
     await expect(continueLoopRun('u', 'run19')).rejects.toMatchObject({ code: 'RUN_NOT_PAUSED' })

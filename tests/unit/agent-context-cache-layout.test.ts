@@ -139,6 +139,21 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     vi.restoreAllMocks()
   })
 
+  it('restores only the interrupted run thinking and keeps a greeting as the final task intent', async () => {
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([
+      { id: 'partial', runId: 'run-1', role: 'assistant', parts: [{ type: 'reasoning', text: '正在准备回答这次问候' }] },
+      { id: 'greeting', runId: 'run-1', role: 'user', parts: [{ type: 'text', text: '你好' }] },
+      { id: 'old', runId: 'other-run', role: 'assistant', parts: [{ type: 'reasoning', text: '旧任务写第三章' }] },
+    ] as never)
+    const { messages } = await assembleContext({ ...buildInput(), prompt: '你好', includeCurrentRunHistory: true })
+    expect(prisma.agentMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ sessionId: 'session-1' }) }))
+    expect(messages.some(message => String(message.content).includes('正在准备回答这次问候'))).toBe(true)
+    expect(messages.some(message => String(message.content).includes('旧任务写第三章'))).toBe(false)
+    expect(messages.at(-1)?.content).toContain('你好')
+    expect(messages.at(-1)?.content).toContain('只继续这项要求')
+    expect(messages.at(-1)?.content).toContain('原始要求若只是问候或提问')
+  })
+
   it('automatically adds the approved scoped style before the first model request, without changing stable system', async () => {
     vi.mocked(getLearnedStyleDigest).mockResolvedValueOnce('本作品风格 v4：用短对白推动行动。')
     const { messages } = await assembleContext(buildInput())

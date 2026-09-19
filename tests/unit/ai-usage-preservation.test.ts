@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ create: vi.fn(), charge: vi.fn(), access: vi.fn(), update: vi.fn(), updateMany: vi.fn(), runtime: vi.fn(), imageCharge: vi.fn(), owner: vi.fn() }))
+const mocks = vi.hoisted(() => ({ findModel: vi.fn(), create: vi.fn(), charge: vi.fn(), access: vi.fn(), update: vi.fn(), updateMany: vi.fn(), runtime: vi.fn(), imageCharge: vi.fn(), owner: vi.fn() }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.access, consumeTokenCredits: mocks.charge, reserveTokenCredits: vi.fn(), consumeCredits: mocks.imageCharge, getModelTierRuntime: mocks.runtime }))
 vi.mock('../../api/lib/data-access.js', () => ({ ensureNovelOwner: mocks.owner, createCoverAssetsData: vi.fn() }))
-vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { aiUsageLog: { create: mocks.create, update: mocks.update, updateMany: mocks.updateMany } } }))
+vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { aiModelConfig: { findFirst: mocks.findModel }, aiUsageLog: { create: mocks.create, update: mocks.update, updateMany: mocks.updateMany } } }))
+vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: (value: string) => value, encryptSecret: (value: string) => value }))
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
   resolveTokenPrice: async () => ({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 }) }))
 import { chatWithTools, generateTextCompletion, generateCoverImageData } from '../../api/lib/ai-service.js'
 
 beforeEach(() => {
+  mocks.findModel.mockReset().mockResolvedValue(null)
   mocks.imageCharge.mockReset()
   mocks.owner.mockReset().mockResolvedValue(undefined)
   mocks.create.mockReset().mockResolvedValue({ id: 'test-usage' })
@@ -27,6 +29,24 @@ async function invoke(usages: Array<Record<string, unknown>>) {
 }
 
 describe('explicit zero provider usage is not missing usage', () => {
+  it.each([429, 500, 503])('routes a rejected HTTP %s request to another configured account', async status => {
+    const primary = { id: `primary-${status}`, tier: 'speed', provider: 'openai', modelName: 'fixture', baseUrl: 'https://primary.test/v1', apiKeyCiphertext: 'fixture-not-a-key', metadata: { routes: [{ id: `00000000-0000-4000-8000-000000000${status}`, label: 'backup', provider: 'openai', modelName: 'backup', baseUrl: 'https://backup.test/v1', apiKeyCiphertext: 'other-fixture-key', enabled: true }] } }
+    mocks.findModel.mockResolvedValue(primary)
+    mocks.runtime.mockResolvedValue({ tier: 'speed', apiKey: 'fixture-not-a-key', baseUrl: primary.baseUrl, provider: 'openai', reasoningEffort: 'high', multiplierBps: 10000, modelName: 'fixture' })
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'busy' }, usage: { prompt_tokens: 0, completion_tokens: 0 } }), { status }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: '完整结果' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } })))
+    vi.stubGlobal('fetch', fetcher)
+    await expect(generateTextCompletion('system', 'user', { userId: 'test', action: 'test' })).resolves.toBe('完整结果')
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(fetcher.mock.calls[0][1].headers.Authorization).not.toBe(fetcher.mock.calls[1][1].headers.Authorization)
+  })
+  it('does not treat a valid-looking truncated JSON gateway report as complete', async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: '{"findings":[]}' }, finish_reason: 'length' }], usage: { prompt_tokens: 20, completion_tokens: 8192 } })))
+    vi.stubGlobal('fetch', fetcher)
+    await expect(generateTextCompletion('system', 'chapter', { userId: 'test', action: 'quality', maxOutputTokens: 8192 })).rejects.toMatchObject({ code: 'AI_PROVIDER_OUTPUT_LIMIT' })
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ responseTokens: 8192 }))
+  })
   it('classifies gateway HTML timeouts without reporting a malformed quality report or redispatching', async () => {
     const fetcher = vi.fn(async () => new Response('<html>Gateway Timeout</html>', { status: 504 }))
     vi.stubGlobal('fetch', fetcher)
@@ -35,7 +55,7 @@ describe('explicit zero provider usage is not missing usage', () => {
     expect(mocks.charge).not.toHaveBeenCalled()
     const body = JSON.parse((fetcher.mock.calls as unknown as Array<[string, RequestInit]>)[0][1].body as string)
     expect(body).toMatchObject({ stream: true, stream_options: { include_usage: true } })
-    expect(body).not.toHaveProperty('max_tokens') // Do not introduce a new quality/output limit to estimate a deposit.
+    expect(body.max_tokens).toBeGreaterThan(0) // Explicit output budget matches admission instead of the provider's smaller default.
   })
   it('keeps estimated evidence separate from absent provider usage on successful output', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: '完整报告' } }] }))))

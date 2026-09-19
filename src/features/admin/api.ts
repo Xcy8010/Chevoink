@@ -146,6 +146,7 @@ export function getAdminModelManagement(): Promise<AdminModelManagementPayload> 
 }
 
 export function updateAdminModel(modelId: string, payload: {
+  routes?: import('../../../shared/contracts/model-routes').ModelRouteInput[]
   provider?: string; displayName?: string; modelName?: string; baseUrl?: string | null; apiKey?: string
   multiplier?: number; enabled?: boolean; selectable?: boolean; isDefault?: boolean
   reasoningEfforts?: import('../../../shared/contracts').ModelReasoningEffort[]

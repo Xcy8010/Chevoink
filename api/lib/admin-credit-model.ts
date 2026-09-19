@@ -13,6 +13,8 @@ import { DataAccessError, prisma } from './prisma.js'
 import { encryptSecret } from './secret-box.js'
 import { getActiveTokenPrices } from './billing/rate-cards.js'
 import { presentLedgerPrice } from './billing/ledger-presentation.js'
+import { presentModelRoutes, saveModelRoutes } from './model-route-pool.js'
+import type { ModelRouteInput } from '../../shared/contracts/model-routes.js'
 
 const MILLI = 1000
 
@@ -297,6 +299,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
       const configurationReady = databaseReady || Boolean(fallback) || (model.tier === 'speed' && model.modelName !== 'unconfigured')
       const price = modelKind === 'text' && model.tier ? prices.get(model.tier) : null
       return {
+        routes: presentModelRoutes(model.metadata),
         pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
         id: model.id, tier: model.tier, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
         modelName: fallback?.modelName ?? model.modelName, baseUrl: fallback?.baseUrl ?? model.baseUrl, multiplier: model.multiplierBps / 10_000,
@@ -315,6 +318,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
 }
 
 export type UpdateAdminModelInput = {
+  routes?: ModelRouteInput[]
   provider?: string
   displayName?: string
   modelName?: string
@@ -345,6 +349,9 @@ export async function updateAdminModel(modelId: string, input: UpdateAdminModelI
     const currentCapabilities = parseModelCapabilities(model.metadata, model.provider)
     const reasoningEfforts = input.reasoningEfforts ?? currentCapabilities.reasoningEfforts
     const defaultReasoningEffort = input.defaultReasoningEffort ?? currentCapabilities.defaultReasoningEffort
+    const routes = saveModelRoutes(input.routes ?? presentModelRoutes(model.metadata).map(({ apiKeyConfigured: _configured, ...route }) => route), model.metadata, reasoningEfforts,
+      { contextWindowTokens: input.contextWindowTokens ?? currentCapabilities.contextWindowTokens, visionEnabled: input.visionEnabled ?? currentCapabilities.visionEnabled })
+    if (routes.length && !['lite', 'speed', 'standard', 'performance', 'ultimate', 'basic'].includes(model.tier ?? '')) throw new DataAccessError(400, 'MODEL_ROUTES_INVALID', '仅文本内置模型支持供应商线路。')
     assertProviderReasoningEfforts(input.provider ?? model.provider, reasoningEfforts)
     if (!reasoningEfforts.includes(defaultReasoningEffort)) throw new DataAccessError(400, 'VALIDATION_ERROR', '默认推理强度必须包含在模型支持档位中。')
     const nextModelName = input.modelName?.trim() || model.modelName
@@ -370,6 +377,7 @@ export async function updateAdminModel(modelId: string, input: UpdateAdminModelI
         isDefault: input.isDefault,
         metadata: {
           ...(model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata : {}),
+          ...(routes ? { routes } : {}),
           reasoningEfforts,
           defaultReasoningEffort,
           visionEnabled: input.visionEnabled ?? currentCapabilities.visionEnabled,

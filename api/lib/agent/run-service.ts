@@ -747,10 +747,6 @@ async function continueLoopRunLocked(
   const nextReasoningEffort = (model?.reasoningEffort ?? run.reasoningEffort) as ModelReasoningEffort
   await assertCreditAccess(userId, nextTier)
   await getModelTierRuntime(nextTier, userId, nextCustomModelId, nextReasoningEffort)
-  // 档位变化持久化：刷新、再次续跑与状态展示保持同一选择。
-  if (nextTier !== run.modelTier || nextCustomModelId !== run.customModelId || nextReasoningEffort !== run.reasoningEffort) {
-    await prisma.agentRun.update({ where: { id: run.id }, data: { modelTier: nextTier, customModelId: nextCustomModelId, reasoningEffort: nextReasoningEffort } })
-  }
 
   // A stale tab must not revive an old task after the author has started a new one.
   const latest = await prisma.agentRun.findFirst({ where: { sessionId: run.sessionId }, orderBy: { createdAt: 'desc' }, select: { id: true } })
@@ -800,6 +796,10 @@ async function continueLoopRunLocked(
   // queued/recovering work in the limit, not just controllers in this process.
   if (await prisma.agentRun.count({ where: { userId, status: { in: ['queued', 'running', 'awaiting_approval'] } } }) >= env.agentUserMaxConcurrent) {
     throw new DataAccessError(409, 'RUN_LIMIT', '同时进行的任务数已达上限，请稍后再试。')
+  }
+  // Persist a model change only after the exact target/input/time checks pass.
+  if (nextTier !== run.modelTier || nextCustomModelId !== run.customModelId || nextReasoningEffort !== run.reasoningEffort) {
+    await prisma.agentRun.update({ where: { id: run.id }, data: { modelTier: nextTier, customModelId: nextCustomModelId, reasoningEffort: nextReasoningEffort } })
   }
   // No awaits between this second concurrency check and executeAgentRun's synchronous registration.
   if (getActiveRun(runId) || hasActiveRunInSession(run.sessionId)) {

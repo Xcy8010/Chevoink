@@ -23,7 +23,7 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
     pending.current = new Set()
     setStoppingRunId(null)
     return () => { epoch.current = owner + 1 }
-  }, [sessionId])
+  }, [sessionId, runId, resumeableRunId])
   useEffect(() => {
     if (!isRunActive(phase) || stoppingRunId !== runId) setStoppingRunId(null)
   }, [phase, runId, stoppingRunId])
@@ -56,7 +56,7 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
     if (!target) return
     setActionError(null)
     await command(`continue:${target}`, () => continueAgentLoopRun(target, selectedModelRef?.current ?? null), (result) => {
-      useAgentStore.getState().beginRun(result.runId, '请继续完成之前的任务。', sessionId)
+      useAgentStore.getState().resumeRun(result.runId, sessionId)
       connect(result.runId)
     }, '续跑失败，请稍后再试。')
   }, [runId, resumeableRunId, sessionId, connect, command, setActionError, selectedModelRef])

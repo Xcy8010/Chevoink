@@ -10,6 +10,7 @@ import { fetch as undiciFetch, Agent as UndiciAgent } from 'undici'
 
 import { prisma, DataAccessError } from './prisma.js'
 import { env } from '../config/env.js'
+import { ModelRouteRejected, routeRejectionMayRetry, withModelRoutePool } from './model-route-pool.js'
 import { getToolModelRuntime } from './tool-model-config.js'
 import type {
   ChapterAssistRequest,
@@ -240,7 +241,8 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
       if (Date.now() - lastSaved >= 1000) { await saveOutputEvidence(usageId, inputEstimate, reasoning + content); lastSaved = Date.now() }
     }
     frames.push(decoder.decode(), true)
-    if (!done || truncated) throw new DataAccessError(502, 'AI_PROVIDER_INCOMPLETE', '模型连接提前结束或输出被截断，未将部分检查结果当作完成。')
+    if (truncated) throw new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', '模型输出达到上限，未将部分检查结果当作完成。')
+    if (!done) throw new DataAccessError(502, 'AI_PROVIDER_INCOMPLETE', '模型连接提前结束，未将部分检查结果当作完成。')
     return { choices: [{ message: { content } }], usage, localOutputEstimate: estimateTokenCount(reasoning + content) }
   } finally {
     await reader.cancel().catch(() => {})
@@ -263,7 +265,7 @@ type JsonProviderPayload = {
   localOutputEstimate?: number
   error?: { message?: unknown }
   data?: unknown
-  choices?: Array<{ message?: { content?: unknown } }>
+  choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>
   usage?: {
     prompt_tokens?: number
     completion_tokens?: number
@@ -460,7 +462,7 @@ export function buildProviderToolChoice(input: ProviderReasoningInput, requested
   return { tool_choice: requested }
 }
 
-type ChatWithToolsParams = {
+export type ChatWithToolsParams = {
   /** Internal protocol correction only; never grants additional tool authority. */
   toolChoice?: 'required'
   /** Internal callers freeze this value with their durable request. */
@@ -532,7 +534,7 @@ export async function chatWithTools(params: ChatWithToolsParams): Promise<ChatCo
         ...(params.durableExecution.price ? { price: structuredClone(params.durableExecution.price) } : {}),
         ...(params.durableExecution.cursor ? { cursor: { ...params.durableExecution.cursor } } : {}) } } : {}),
   }
-  if (!params.durableExecution) return chatWithToolsImpl(params)
+  if (!params.durableExecution) return withModelRoutePool(params, chatWithToolsImpl)
   return withLeaseHeartbeat(params.durableExecution.lease, params.signal, signal => chatWithToolsImpl({ ...params, signal }))
 }
 
@@ -645,6 +647,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
       await prisma.aiUsageLog.updateMany({ where: { id: prepared.id, billingStatus: 'prepared' },
         data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } })
     } else await markUnobservedUsage(prepared?.id)
+    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)) throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
     throw new DataAccessError(
       502,
       'AI_PROVIDER_ERROR',
@@ -887,6 +890,16 @@ export async function generateTextCompletion(
   options = { ...options }
   options.signal?.throwIfAborted()
   const modelRuntime = options.modelRuntime ?? await getModelTierRuntime(options.modelTier ?? 'speed', options.userId)
+  return withModelRoutePool({ messages: [], tools: [], model: modelRuntime.modelName ?? undefined,
+    provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, providerApiKey: modelRuntime.apiKey,
+    signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route =>
+    generateTextCompletionImpl(systemPrompt, userPrompt, { ...options, signal: route.signal, modelRuntime: { ...modelRuntime,
+      provider: route.provider ?? modelRuntime.provider, modelName: route.model ?? modelRuntime.modelName,
+      baseUrl: route.providerBaseUrl ?? modelRuntime.baseUrl, apiKey: route.providerApiKey ?? modelRuntime.apiKey } }))
+}
+
+async function generateTextCompletionImpl(systemPrompt: string, userPrompt: string, options: TextCompletionOptions & { modelRuntime: Awaited<ReturnType<typeof getModelTierRuntime>> }) {
+  const modelRuntime = options.modelRuntime
   const requestedReasoning = options.reasoningEffort ?? modelRuntime.reasoningEffort
   const completionReasoning = modelRuntime.reasoningEfforts && !modelRuntime.reasoningEfforts.includes(requestedReasoning)
     ? modelRuntime.reasoningEffort : requestedReasoning
@@ -896,7 +909,7 @@ export async function generateTextCompletion(
   const startedAt = Date.now()
   const endpoint = `${(modelRuntime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`
   const prepared = await prepareTextUsage({ userId: options.userId, action: options.action,
-    inputEstimate: estimateTokenCount(`${systemPrompt}\n${userPrompt}`), maxOutput: env.aiTextMaxOutputTokens,
+    inputEstimate: estimateTokenCount(`${systemPrompt}\n${userPrompt}`), maxOutput: options.maxOutputTokens ?? env.aiTextMaxOutputTokens,
     modelName: modelRuntime.modelName ?? env.aiTextModel, modelTier: modelRuntime.tier,
     multiplierBps: options.multiplierBps ?? modelRuntime.multiplierBps,
     novelId: options.novelId, chapterId: options.chapterId, targetType: options.targetType, targetId: options.targetId,
@@ -916,7 +929,7 @@ export async function generateTextCompletion(
       model: modelRuntime.modelName ?? env.aiTextModel,
       temperature: options.temperature ?? 0.7,
       // 与主循环 chatWithTools、durable 质量路径一致：显式传入时下发 max_tokens 上限，避免评审/修订输出失控膨胀。
-      ...(options.maxOutputTokens != null ? { max_tokens: options.maxOutputTokens } : {}),
+      max_tokens: options.maxOutputTokens ?? env.aiTextMaxOutputTokens,
       stream: true,
       stream_options: { include_usage: true },
       ...buildProviderReasoningPayload({
@@ -973,11 +986,13 @@ export async function generateTextCompletion(
       await prisma.aiUsageLog.updateMany({ where: { id: prepared.id, billingStatus: 'prepared' },
         data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } })
     }
+    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)) throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
     throw new DataAccessError(502, [408, 504].includes(response.status) ? 'AI_PROVIDER_TIMEOUT' : 'AI_PROVIDER_ERROR', typeof payload.error?.message === 'string' ? payload.error.message : '模型服务暂时不可用。')
   }
   if (typeof content !== 'string' || !content.trim()) {
     throw new DataAccessError(502, 'AI_PROVIDER_EMPTY_RESPONSE', '模型未返回有效内容。')
   }
+  if (payload.choices?.[0]?.finish_reason === 'length') throw new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', '模型输出达到上限，检查未完成。')
   return content.trim()
   } catch (error) {
     await markUnobservedUsage(prepared.id, dispatched)

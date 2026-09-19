@@ -308,12 +308,29 @@ describe('original task context on resume', () => {
     expect(assembleContext).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run', prompt,
       includeCurrentRunHistory: resume, selection: { text: '本次选区', start: 0, end: 4 } }))
     expect(events().filter(event => event.type === 'error')).toEqual([])
+    if (resume) {
+      expect(mocks.persist).not.toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ role: 'user' }) }))
+      expect(mocks.previous).not.toHaveBeenCalled()
+    }
   })
 })
 
 describe('persisted legacy checkpoint budgets', () => {
   const resume = () => executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel',
     chapterId: null, mode: 'build', prompt: '继续原任务', resume: true })
+  it('preserves the full previously granted slice after a provider response overshot the automatic ceiling', async () => {
+    const started = Date.now() - 1000
+    const tokenBudget = env.agentRunTokenBudgetCeiling + 2_006_003
+    const checkpoint = { version: 1, runStartedAt: started, resumeCount: 2, compactionCount: 2,
+      maxTurns: env.agentMaxTurns + 150, tokenBudget, manualResumeCount: 1,
+      writeProgress: 2, writeBaseline: 2, readProgress: 2, readBaseline: 2, progressSignatures: [] }
+    mocks.update.mockResolvedValueOnce({ taskSpec: null, currentTurn: 2, startedAt: new Date(started),
+      usage: { promptTokens: tokenBudget - 3000, completionTokens: 0, totalTokens: tokenBudget - 3000, checkpoint } })
+    queue(response('已完成。'))
+    await resume()
+    const terminal = mocks.update.mock.calls.find(([input]) => input.data.status === 'completed')?.[0]
+    expect(terminal?.data.usage).toMatchObject({ checkpoint: { tokenBudget, manualResumeCount: 1 } })
+  })
   it('resumes actual work after a paused gap without resetting token consumption', async () => {
     const now = Date.now(), started = now - (env.agentRunWallClockMinutes + 10) * 60_000
     mocks.update.mockResolvedValueOnce({ taskSpec: null, currentTurn: 1, startedAt: new Date(started),
