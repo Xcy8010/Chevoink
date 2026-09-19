@@ -19,7 +19,7 @@ describe('routeImportContent 标题关键词路由', () => {
   it('计划类标题分流到 plans，不进章节桶', () => {
     for (const title of ['故事大纲', '写作计划', '剧情规划', '内容梗概', '主线梳理', 'Story Outline', 'Series Plan']) {
       const routed = routeImportContent(parsed([chapter(title)]))
-      expect(routed.plans, title).toEqual([{ title, content: '正文内容' }])
+      expect(routed.plans, title).toEqual([{ title, content: '正文内容', source: 'x.txt#char=0-4' }])
       expect(routed.volumes, title).toEqual([])
     }
   })
@@ -41,11 +41,33 @@ describe('routeImportContent 标题关键词路由', () => {
     expect(routed.memories).toBeUndefined()
   })
 
+  it('跨文件路由保留完整来源和逐字正文，不修改原解析结果', () => {
+    const input = parsed([
+      { title: ' 故事大纲 ', content: '  计划正文\n尾行\n', source: 'book.zip!/outline.txt#char=2-14' },
+      { title: '人物设定', content: '角色😀\n', source: 'book.zip!/notes.pdf#page=10&region=2' },
+      { title: '第一章', content: '正文', source: 'book.zip!/body.txt#char=0-2' },
+    ])
+    const before = structuredClone(input)
+    const result = routeImportContent(input)
+    expect(result.plans).toEqual([{ ...input.volumes[0].chapters[0], title: '故事大纲' }])
+    expect(result.memories).toEqual([{ ...input.volumes[0].chapters[1], memoryType: 'characterCard' }])
+    expect(result.volumes[0].chapters).toEqual([input.volumes[0].chapters[2]])
+    expect(input).toEqual(before)
+  })
+
   it('普通章节标题保留在章节桶', () => {
     const routed = routeImportContent(parsed([chapter('第一章 风起')]))
     expect(routed.plans).toBeUndefined()
     expect(routed.memories).toBeUndefined()
     expect(routed.volumes[0].chapters).toHaveLength(1)
+  })
+
+  it.each(['第一章 秘密计划', 'Chapter 2 Character', '  第十二回 人物大纲  ', 'CHAPTER IV Worldbuilding', '第 １２ 章 秘密计划', '第壹章 角色设定'])('章节标题 %s 含路由关键词仍逐字保留为章节', (title) => {
+    const input = parsed([chapter(title)])
+    const routed = routeImportContent(input)
+    expect(routed.volumes).toEqual(input.volumes)
+    expect(routed.plans).toBeUndefined()
+    expect(routed.memories).toBeUndefined()
   })
 
   it('空正文段落不路由，原样留在章节桶交给完整性报告', () => {

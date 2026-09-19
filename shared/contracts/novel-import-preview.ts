@@ -12,7 +12,7 @@ export const novelImportStructureSchema = z.object({
   metadataSelection: novelImportMetadataSchema.optional(),
   volumes: z.array(z.object({ title: z.string().trim().min(1).max(128), chapters: z.array(z.object({
     title: z.string().trim().min(1).max(128), segments: z.array(z.object({ volumeIndex: index, chapterIndex: index, start: z.number().int().nonnegative().max(NOVEL_IMPORT_LIMITS.characters), end: z.number().int().nonnegative().max(NOVEL_IMPORT_LIMITS.characters) }).strict()).min(1).max(4000),
-  }).strict()).max(NOVEL_IMPORT_LIMITS.chapters) }).strict()).min(1).max(NOVEL_IMPORT_LIMITS.volumes),
+  }).strict()).max(NOVEL_IMPORT_LIMITS.chapters) }).strict()).max(NOVEL_IMPORT_LIMITS.volumes),
 }).strict()
 export interface NovelImportArtifactDescriptor { id: string; source: string; sha256: string; bytes: number; mediaType: 'image/png'; width: number; height: number; coverCandidate: boolean; url: string }
 export interface NovelImportReportItem {

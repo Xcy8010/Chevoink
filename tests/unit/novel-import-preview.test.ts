@@ -89,7 +89,7 @@ describe('durable import evidence and source-conserving editing', () => {
     const p = preview()
     expect(() => applySourceReview(p, review(p, 'file', 'exclude'))).toThrow(/不能直接排除/)
     const next = applySourceReview(p, review(p, 'page1', 'exclude'))
-    expect(() => applySourceReview(next, review(next, 'page10', 'exclude'))).toThrow(/全部正文/)
+    expect(() => applySourceReview(next, review(next, 'page10', 'exclude'))).toThrow(expect.objectContaining({ code: 'IMPORT_NO_BODY' }))
   })
   it('rejects unknown and duplicate decisions and user warning fields', () => {
     const p = preview()

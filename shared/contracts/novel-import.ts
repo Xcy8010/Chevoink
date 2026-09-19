@@ -26,8 +26,8 @@ export type NovelImportModelSelection = z.infer<typeof novelImportModelSchema>
 export type NovelImportManifestEdit = z.infer<typeof novelImportManifestEditSchema>
 export interface NovelImportWarning { code: string; message: string; source?: unknown; blocking: boolean }
 /** 标题关键词路由出的计划/设定段落：不进章节桶，提交时分别写入计划文件夹与创作记忆。 */
-export interface NovelImportPlanDto { title: string; content: string }
-export interface NovelImportMemoryDto { memoryType: 'characterCard' | 'worldbuilding' | 'storyBible'; title: string; content: string }
+export interface NovelImportPlanDto { title: string; content: string; source?: z.infer<typeof novelImportSourceSchema> }
+export interface NovelImportMemoryDto { memoryType: 'characterCard' | 'worldbuilding' | 'storyBible'; title: string; content: string; source?: z.infer<typeof novelImportSourceSchema> }
 export interface NovelImportPreview {
   manifestRevision: number; manifestHash: string; sourceHash: string; parserVersion: string
   volumes: NovelImportVolume[]; metadata: z.infer<typeof novelImportMetadataSchema>

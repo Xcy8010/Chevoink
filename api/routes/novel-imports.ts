@@ -124,8 +124,11 @@ router.put('/:jobId/source', route(async (req, human) => {
   finally { clearTimeout(timer); req.off('aborted', abort) }
 }))
 router.post('/:jobId/attachment', route((req, human) => attachNovelImportSource(human, id(req), z.object({ url: z.string().min(1).max(1024), runId: z.string().min(1).max(64) }).strict().parse(req.body))))
-const analyzeSchema = z.object({ encoding: z.string().min(1).max(32).optional() }).strict()
-router.post('/:jobId/analyze', route((req, human) => analyzeNovelImport(human, id(req), analyzeSchema.parse(req.body ?? {}).encoding)))
+const analyzeSchema = z.object({ encoding: z.string().min(1).max(32).optional(), reparse: z.boolean().optional() }).strict()
+router.post('/:jobId/analyze', route((req, human) => {
+  const input = analyzeSchema.parse(req.body ?? {})
+  return analyzeNovelImport(human, id(req), input.encoding, input.reparse)
+}))
 router.post('/:jobId/retry', route((req, human) => analyzeNovelImport(human, id(req), analyzeSchema.parse(req.body ?? {}).encoding)))
 router.patch('/:jobId/manifest', route((req, human) => editNovelImportPreview(human, id(req), req.body)))
 router.post('/:jobId/rebase', route((req, human) => rebaseNovelImport(human, id(req), z.object({ intentId: idSchema }).strict().parse(req.body).intentId)))

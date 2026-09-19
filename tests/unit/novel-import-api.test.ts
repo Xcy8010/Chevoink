@@ -85,3 +85,10 @@ it('sends the explicitly selected cover artifact ID and omits it on cancellation
   expect(requestData).toHaveBeenNthCalledWith(1, '/api/novels/a/imports/job/structure', { method: 'PATCH', body: JSON.stringify({ ...draft, metadataSelection: { coverArtifactId: 'cover-a' } }) })
   expect(requestData).toHaveBeenNthCalledWith(2, '/api/novels/a/imports/job/structure', { method: 'PATCH', body: JSON.stringify({ ...draft, metadataSelection: {} }) })
 })
+
+it('explicit reparse preserves detected encoding and sends a separate rebuild flag', async () => {
+  await novelImportApi.analyze('a', 'job', undefined, true)
+  expect(requestData).toHaveBeenCalledWith('/api/novels/a/imports/job/analyze', {
+    method: 'POST', body: '{"reparse":true}', timeoutMs: 120_000,
+  })
+})

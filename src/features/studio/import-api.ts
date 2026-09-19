@@ -13,7 +13,7 @@ export const novelImportApi = {
   create: (novelId: string, intentId: string, modelSelection: NovelImportModelSelection) => requestData<NovelImportJobStatus>(root(novelId), json('POST', { intentId, modelSelection })),
   upload: (novelId: string, jobId: string, file: File) => requestData<NovelImportJobStatus>(`${jobPath(novelId, jobId)}/source?filename=${encodeURIComponent(file.name)}`, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: file, timeoutMs: 120_000 }),
   attachment: (novelId: string, jobId: string, attachment: { url: string; runId: string }) => requestData<NovelImportJobStatus>(`${jobPath(novelId, jobId)}/attachment`, json('POST', { url: attachment.url, runId: attachment.runId })),
-  analyze: (novelId: string, jobId: string, encoding?: string) => requestData<NovelImportJobStatus>(`${jobPath(novelId, jobId)}/analyze`, { ...json('POST', encoding ? { encoding } : {}), timeoutMs: 120_000 }),
+  analyze: (novelId: string, jobId: string, encoding?: string, reparse = false) => requestData<NovelImportJobStatus>(`${jobPath(novelId, jobId)}/analyze`, { ...json('POST', { ...(encoding ? { encoding } : {}), ...(reparse ? { reparse: true } : {}) }), timeoutMs: 120_000 }),
   retry: (novelId: string, jobId: string, encoding?: string) => requestData<NovelImportJobStatus>(`${jobPath(novelId, jobId)}/retry`, { ...json('POST', encoding ? { encoding } : {}), timeoutMs: 120_000 }),
   status: (novelId: string, jobId: string) => requestData<NovelImportJobStatus>(jobPath(novelId, jobId)),
   preview: (novelId: string, jobId: string) => requestData<NovelImportPreview>(`${jobPath(novelId, jobId)}/preview`),

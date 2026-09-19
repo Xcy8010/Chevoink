@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render as baseRender, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import ImportDialog, { type ImportDialogProps } from '../../src/features/studio/components/ImportDialog'
+import { ImportIntegrityReport } from '../../src/features/studio/components/import-integrity-report'
 import type { NovelImportClient } from '../../src/features/studio/import-api'
 import type { NovelImportJobStatus, NovelImportPreflight, NovelImportReceipt } from '../../shared/contracts/novel-import'
 import type { NovelImportPreviewSummary, NovelImportReportDto, NovelImportReportIssue } from '../../shared/contracts/novel-import-preview'
@@ -47,7 +48,7 @@ function clientFixture() {
 function previewFixture(report: NovelImportReportDto = cleanReport) {
   return {
     summary: vi.fn().mockResolvedValue(summary),
-    chapter: vi.fn().mockResolvedValue({}),
+    chapter: vi.fn().mockResolvedValue({ ...summary.volumes[0].chapters[0], content: '原文正文', manifestRevision: 1, manifestHash: hash }),
     report: vi.fn().mockResolvedValue(report),
     structure: vi.fn().mockResolvedValue(summary),
     review: vi.fn().mockResolvedValue(summary),
@@ -71,119 +72,210 @@ async function armedClick(name: string | RegExp) {
 }
 
 describe('一键导入自动管线', () => {
-  it('空作品选择文件后自动跑完上传/解析/提交，成功 toast 并关闭，不停在报告页', async () => {
+  it('人工控件不允许用 review 掩盖混合的缺失阻断项或 failed 状态', () => {
+    const report: NovelImportReportDto = { ...cleanReport,
+      items: [{ id: 'i1', kind: 'page', source: 's#1', status: 'native', excludable: true }, { id: 'i2', kind: 'page', source: 's#2', status: 'failed', excludable: true }],
+      issues: [issue(), issue({ id: 'missing', resolution: 'exclude', resolved: true }), issue({ id: 'failed', itemIds: ['i2'] })],
+    }
+    render(<ImportIntegrityReport novelId="a" jobId="job-a" report={report} disabled={false} onReview={vi.fn()} />)
+    expect(screen.queryByRole('option', { name: '我已对照原文核对' })).toBeNull()
+    expect(screen.getAllByRole('option', { name: '明确排除此来源' })).toHaveLength(2)
+  })
+
+  it('一键解析完成后停在预览，只有最终人工确认才写入', async () => {
     const { client, previewClient, props } = dialogProps()
     render(<ImportDialog {...props} />)
-    await screen.findByText(/导入完成：1 卷 1 章 · 4 字/)
+    await screen.findByRole('button', { name: '导入 1 卷 1 章' })
     expect(client.create).toHaveBeenCalledTimes(1)
-    expect(client.upload).toHaveBeenCalledTimes(1)
     expect(client.analyze).toHaveBeenCalledTimes(1)
-    expect(client.confirm).toHaveBeenCalledTimes(1)
-    expect(client.commit).toHaveBeenCalledTimes(1)
-    expect(client.confirmIntent).not.toHaveBeenCalled()
-    // 自动核对读取了目录与完整性报告，但不要求用户手动确认报告
-    expect(previewClient.summary).toHaveBeenCalled()
-    expect(previewClient.report).toHaveBeenCalled()
-    expect(props.onImported).toHaveBeenCalledWith(receipt)
-    expect(props.onClose).toHaveBeenCalledTimes(1)
-  })
-
-  it('可自动核对的阻断项（resolution=review）自动提交来源确认后继续导入', async () => {
-    const { client, previewClient, props } = dialogProps()
-    const unresolved = { ...cleanReport, issues: [issue()] }
-    const resolved = { ...cleanReport, issues: [issue({ resolved: true })] }
-    vi.mocked(previewClient.report).mockResolvedValueOnce(unresolved).mockResolvedValueOnce(resolved)
-    render(<ImportDialog {...props} />)
-    await screen.findByText(/导入完成：1 卷 1 章 · 4 字/)
-    expect(previewClient.review).toHaveBeenCalledTimes(1)
-    const reviewArg = vi.mocked(previewClient.review).mock.calls[0][2]
-    expect(reviewArg.decisions).toEqual([{ itemId: 'i1', action: 'review', reason: '一键导入自动核对：确认保留该部分原文。' }])
-    expect(client.commit).toHaveBeenCalledTimes(1)
-    expect(props.onClose).toHaveBeenCalledTimes(1)
-  })
-
-  it('failed 项自动排除、needs_review 项自动确认，解决后提交导入', async () => {
-    const { client, previewClient, props } = dialogProps()
-    const items = [
-      { id: 'i1', kind: 'block' as const, source: 's', status: 'failed' as const, excludable: true },
-      { id: 'i2', kind: 'block' as const, source: 's', status: 'needs_review' as const, excludable: false },
-    ]
-    const unresolved = { ...cleanReport, items, issues: [issue({ itemIds: ['i1', 'i2'] })] }
-    const resolved = { ...cleanReport, items: [{ ...items[0], status: 'excluded' as const }, { ...items[1], status: 'native' as const }], issues: [issue({ itemIds: ['i1', 'i2'], resolved: true })] }
-    vi.mocked(previewClient.report).mockResolvedValueOnce(unresolved).mockResolvedValueOnce(resolved)
-    render(<ImportDialog {...props} />)
-    await screen.findByText(/导入完成：1 卷 1 章 · 4 字/)
-    expect(previewClient.review).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(previewClient.review).mock.calls[0][2].decisions).toEqual([
-      { itemId: 'i1', action: 'exclude', reason: '一键导入自动核对：该部分无法识别，已排除。' },
-      { itemId: 'i2', action: 'review', reason: '一键导入自动核对：确认保留该部分原文。' },
-    ])
-    expect(client.commit).toHaveBeenCalledTimes(1)
-    expect(props.onClose).toHaveBeenCalledTimes(1)
-  })
-
-  it('两轮自动核对后仍有未解决阻断项时报错，绝不提交且不回落手动', async () => {
-    const { client, previewClient, props } = dialogProps()
-    vi.mocked(previewClient.report).mockResolvedValue({ ...cleanReport, issues: [issue({ resolution: 'exclude' })] })
-    render(<ImportDialog {...props} />)
-    await screen.findByText(/低置信度片段/)
+    expect(previewClient.review).not.toHaveBeenCalled()
+    expect(client.confirm).not.toHaveBeenCalled()
     expect(client.commit).not.toHaveBeenCalled()
-    expect(props.onImported).not.toHaveBeenCalled()
     expect(props.onClose).not.toHaveBeenCalled()
+    await waitFor(() => expect(document.querySelector('[class*="animate-spin"]')).toBeNull())
+    await armedClick('导入 1 卷 1 章')
+    await waitFor(() => expect(props.onImported).toHaveBeenCalledWith(receipt))
+    expect(client.commit).toHaveBeenCalledTimes(1)
   })
 
-  it('自动阶段错误 footer 只有关闭与重试，没有“手动处理”按钮', async () => {
-    const { previewClient, props } = dialogProps()
-    vi.mocked(previewClient.report).mockResolvedValue({ ...cleanReport, issues: [issue({ resolution: 'exclude' })] })
+  it('review 阻断项回预览，机器不代替人工核对', async () => {
+    const { client, previewClient, props } = dialogProps()
+    previewClient.report.mockResolvedValue({ ...cleanReport, items: [{ id: 'i1', kind: 'page', source: 's#1', status: 'needs_review', excludable: true }], issues: [issue()] })
     render(<ImportDialog {...props} />)
-    await screen.findByText(/低置信度片段/)
-    expect(screen.queryByRole('button', { name: '手动处理' })).toBeNull()
-    expect(screen.getByRole('button', { name: '关闭' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy()
+    await screen.findByText(/自动流程不会代替人工核对/)
+    expect(previewClient.review).not.toHaveBeenCalled()
+    expect(client.commit).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('正在导入')).toBeNull()
+    expect(screen.getByRole('option', { name: '我已对照原文核对' })).toBeTruthy()
   })
 
-  it('自动阶段渲染确定型伪进度条（进度条+百分比）', async () => {
+  it('缺失项只 exclude，展示排除列表并等待最终确认，不静默提交', async () => {
+    const { client, previewClient, props } = dialogProps()
+    const items: NovelImportReportDto['items'] = [{ id: 'i1', kind: 'page', source: '缺页.pdf#page=2', status: 'native', excludable: true }]
+    const unresolved = { ...cleanReport, items, issues: [issue({ resolution: 'exclude' })] }
+    const decisions: NovelImportReportDto['decisions'] = [{ itemId: 'i1', action: 'exclude', reason: '自动排除缺失来源', reviewedAt: expiry, sourceHash: hash, reportHash, contentHash: hash }]
+    const resolved = { ...unresolved, partialImport: true, decisions, issues: [issue({ resolution: 'exclude', resolved: true })] }
+    previewClient.report.mockResolvedValueOnce(unresolved).mockResolvedValue(resolved)
+    previewClient.review.mockResolvedValue({ ...summary, partialImport: true })
+    render(<ImportDialog {...props} />)
+    await screen.findByText(/已停止自动提交/)
+    expect(previewClient.review).toHaveBeenCalledWith('a', 'job-a', expect.objectContaining({
+      expectedManifestRevision: 1, manifestHash: hash, reportHash,
+      decisions: [expect.objectContaining({ itemId: 'i1', action: 'exclude' })],
+    }))
+    expect((screen.getByLabelText('筛选来源类型') as HTMLSelectElement).value).toBe('excluded')
+    expect(screen.getByText(/缺页.pdf#page=2/)).toBeTruthy()
+    expect(client.confirm).not.toHaveBeenCalled()
+    expect(client.commit).not.toHaveBeenCalled()
+    await armedClick('部分导入：导入 1 卷 1 章')
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
+  })
+
+  it('无来源定位时不发送 review，明确解释并停转圈', async () => {
+    const { client, previewClient, props } = dialogProps()
+    previewClient.report.mockResolvedValue({ ...cleanReport, issues: [issue({ resolution: 'exclude' })] })
+    render(<ImportDialog {...props} />)
+    await screen.findByText(/无法定位问题来源/)
+    expect(previewClient.review).not.toHaveBeenCalled()
+    expect(client.commit).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('正在导入')).toBeNull()
+    expect(screen.getByRole('button', { name: '查询任务状态' })).toBeTruthy()
+  })
+
+  it('服务异常后查询原任务恢复预览，不重新创建、解析或取消任务', async () => {
+    const { client, previewClient, props } = dialogProps()
+    previewClient.report.mockRejectedValueOnce(new Error('报告请求失败')).mockResolvedValue(cleanReport)
+    render(<ImportDialog {...props} />)
+    await screen.findByText('报告请求失败')
+    expect(screen.queryByLabelText('正在导入')).toBeNull()
+    await armedClick('查询任务状态')
+    await screen.findByText('来源完整性报告')
+    expect(client.status).toHaveBeenCalledWith('a', 'job-a')
+    expect(client.create).toHaveBeenCalledTimes(1)
+    expect(client.analyze).toHaveBeenCalledTimes(1)
+    expect(client.cancel).not.toHaveBeenCalled()
+    expect(client.commit).not.toHaveBeenCalled()
+  })
+
+  it('解析失败仅重试原 job', async () => {
     const { client, props } = dialogProps()
-    let release!: () => void
-    vi.mocked(client.commit).mockImplementation(() => new Promise<NovelImportReceipt>(resolve => { release = () => resolve(receipt) }))
+    vi.mocked(client.analyze).mockResolvedValue({ ...status, status: 'failed', errorCode: 'IMPORT_PARSE_FAILED' })
     render(<ImportDialog {...props} />)
-    const status = await screen.findByRole('status')
-    await waitFor(() => expect(status.textContent).toMatch(/正在提交导入/))
-    expect(status.textContent).toMatch(/（\d+%）/)
-    const fill = document.querySelector('div[style*="width"]') as HTMLElement | null
-    expect(fill).not.toBeNull()
-    expect(fill!.style.width).toMatch(/%$/)
-    release()
-    await screen.findByText(/导入完成：1 卷 1 章 · 4 字/)
+    await armedClick('重试确定性解析')
+    await screen.findByText('来源完整性报告')
+    expect(client.retry).toHaveBeenCalledWith('a', 'job-a', undefined)
+    expect(client.create).toHaveBeenCalledTimes(1)
+    expect(client.cancel).not.toHaveBeenCalled()
   })
 
-  it('起跑前先取消本作品未完结的旧导入任务再创建', async () => {
+  it('创建结果未知时阻止再次上传，不盲目新建任务', async () => {
+    const { client, props } = dialogProps()
+    vi.mocked(client.create).mockRejectedValue(new Error('网络中断'))
+    render(<ImportDialog {...props} />)
+    await screen.findByText(/创建任务结果未知/)
+    expect((screen.getByRole('button', { name: '上传并检查文件' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(client.create).toHaveBeenCalledTimes(1)
+    expect(client.cancel).not.toHaveBeenCalled()
+  })
+
+  it('已有未完成任务时不创建、不取消任何任务', async () => {
     const { client, props } = dialogProps()
     vi.mocked(client.list).mockResolvedValue([
-      { ...status, jobId: 'old-live', novelId: 'a', status: 'ready' },
-      { ...status, jobId: 'other-novel', novelId: 'b', status: 'ready' },
-      { ...status, jobId: 'finished', novelId: 'a', status: 'succeeded' },
+      { ...status, jobId: 'old-live' },
+      { ...status, jobId: 'other-novel', novelId: 'b' },
     ])
     render(<ImportDialog {...props} />)
-    await screen.findByText(/导入完成：1 卷 1 章 · 4 字/)
-    expect(client.cancel).toHaveBeenCalledTimes(1)
-    expect(client.cancel).toHaveBeenCalledWith('a', 'old-live')
-    expect(vi.mocked(client.cancel).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(client.create).mock.invocationCallOrder[0])
+    await screen.findByText(/当前作品已有未完成导入/)
+    expect(client.cancel).not.toHaveBeenCalled()
+    expect(client.create).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /old-live/ })).toBeTruthy()
   })
 
-  it('已有章节时保留服务端强制的两次覆盖确认，确认后再自动导入', async () => {
+  it('合并语义保留双确认，之后只解析预览', async () => {
     const { client, props } = dialogProps()
     vi.mocked(client.preflight).mockResolvedValue(overwriteCheck)
     render(<ImportDialog {...props} />)
-    await screen.findByRole('dialog', { name: '是否覆盖当前作品章节？' })
+    await screen.findByRole('dialog', { name: '是否合并导入当前作品？' })
+    expect(screen.getByText(/不匹配的现有内容保留/)).toBeTruthy()
     expect(client.create).not.toHaveBeenCalled()
     await armedClick('是，继续')
-    await screen.findByRole('dialog', { name: '再次确认覆盖' })
-    await armedClick('确认并选择文件')
-    await screen.findByText(/导入完成：1 卷 1 章 · 4 字/)
-    expect(client.confirmIntent).toHaveBeenNthCalledWith(1, 'a', overwriteCheck, 1)
-    expect(client.confirmIntent).toHaveBeenNthCalledWith(2, 'a', { ...overwriteCheck, confirmationStep: 1 }, 2)
+    await screen.findByRole('dialog', { name: '再次确认合并导入' })
+    await armedClick('确认进入解析预览')
+    await screen.findByRole('button', { name: '确认合并并导入 1 卷 1 章' })
+    expect(client.confirmIntent).toHaveBeenCalledTimes(2)
+    expect(client.commit).not.toHaveBeenCalled()
+  })
+
+  it('部分提交结果未知时只核对状态，不重复 commit', async () => {
+    const { client, props } = dialogProps()
+    vi.mocked(client.commit).mockRejectedValue(new Error('提交连接中断'))
+    vi.mocked(client.status).mockResolvedValue({ ...status, status: 'succeeded', receipt })
+    render(<ImportDialog {...props} />)
+    await armedClick('导入 1 卷 1 章')
+    await screen.findByText('提交连接中断')
+    await armedClick('查询任务状态')
+    await waitFor(() => expect(props.onImported).toHaveBeenCalledWith(receipt))
     expect(client.commit).toHaveBeenCalledTimes(1)
-    expect(props.onImported).toHaveBeenCalledWith(receipt)
+    expect(client.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('空首章回执不显示查看首章', async () => {
+    const { client, props } = dialogProps({ initialJobId: 'job-a', onViewChapter: vi.fn() })
+    vi.mocked(client.status).mockResolvedValue({ ...status, status: 'succeeded', receipt: { ...receipt, chapterCount: 0, firstChapterId: '' } })
+    render(<ImportDialog {...props} />)
+    await screen.findByText('导入完成')
+    expect(screen.queryByRole('button', { name: '查看首章' })).toBeNull()
+  })
+
+  it('计划/记忆-only 也停预览并展示实际原文，不自动写入', async () => {
+    const { client, previewClient, props } = dialogProps()
+    previewClient.summary.mockResolvedValue({ ...summary, volumes: [], plans: [{ title: '原文计划', content: '原文计划内容', source: { filename: '计划.txt' } }], memories: [{ title: '人物卡', content: '人物原文内容', memoryType: 'characterCard', source: { filename: '人物.txt' } }] })
+    render(<ImportDialog {...props} />)
+    await screen.findByLabelText('计划与记忆导入预览')
+    expect(screen.getByText('原文计划内容')).toBeTruthy()
+    expect(screen.getByText('人物原文内容')).toBeTruthy()
+    expect(client.commit).not.toHaveBeenCalled()
+    await armedClick('导入 0 卷 0 章')
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
+  })
+
+  it('重新检查条件绑定原任务，不清空后新建', async () => {
+    const { client, previewClient, props } = dialogProps()
+    previewClient.report.mockRejectedValueOnce(new Error('报告暂不可用')).mockResolvedValue(cleanReport)
+    render(<ImportDialog {...props} />)
+    await screen.findByText('报告暂不可用')
+    await armedClick('重新检查')
+    await screen.findByText('来源完整性报告')
+    expect(client.rebase).toHaveBeenCalledWith('a', 'job-a', 'intent')
+    expect(client.create).toHaveBeenCalledTimes(1)
+    expect(client.cancel).not.toHaveBeenCalled()
+  })
+
+  it('旧来源报告可直接在原任务重新解析，不需伪选编码', async () => {
+    const { client, previewClient, props } = dialogProps()
+    previewClient.report.mockRejectedValueOnce(new Error('旧来源报告需重新解析')).mockResolvedValue(cleanReport)
+    render(<ImportDialog {...props} />)
+    await screen.findByText('旧来源报告需重新解析')
+    await armedClick('重新解析原文件')
+    await screen.findByRole('dialog', { name: '重新解析原文件？' })
+    await armedClick('确认重建预览')
+    await screen.findByText('来源完整性报告')
+    expect(client.analyze).toHaveBeenLastCalledWith('a', 'job-a', undefined, true)
+    expect(client.create).toHaveBeenCalledTimes(1)
+    expect(client.cancel).not.toHaveBeenCalled()
+  })
+
+  it('关闭后迟到解析结果不发送来源决定或提交', async () => {
+    const { client, previewClient, props } = dialogProps()
+    let resolve!: (value: NovelImportJobStatus) => void
+    vi.mocked(client.analyze).mockImplementation(() => new Promise(done => { resolve = done }))
+    const view = render(<ImportDialog {...props} />)
+    await waitFor(() => expect(client.analyze).toHaveBeenCalledTimes(1))
+    view.unmount()
+    resolve(status)
+    await Promise.resolve()
+    expect(previewClient.review).not.toHaveBeenCalled()
+    expect(previewClient.summary).not.toHaveBeenCalled()
+    expect(client.commit).not.toHaveBeenCalled()
   })
 })

@@ -314,6 +314,21 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     expect(fixture.state.novelImportJob[0].status).toBe('cancelled')
     expect(fixture.state.novelImportManifest).toHaveLength(0)
   })
+  it.each([null, 'gb18030'])('明确重解析无需另选编码，保留已有编码 %s 并撤销旧提交授权', async parseEncoding => {
+    const result = await approved()
+    fixture.state.novelImportJob[0].parseEncoding = parseEncoding
+    const before = structuredClone(fixture.state.novelImportJob)
+    await expect(analyzeNovelImport(scope, result.job.jobId)).rejects.toMatchObject({ code: 'IMPORT_STATE_INVALID' })
+    expect(fixture.state.novelImportJob).toEqual(before)
+    expect(Number(fixture.state.novelImportApproval[0].expiresAt)).toBeGreaterThan(Date.now())
+    await analyzeNovelImport(scope, result.job.jobId, undefined, true)
+    expect(fixture.state.novelImportJob[0].parseEncoding).toBe(parseEncoding)
+    expect(Number(fixture.state.novelImportApproval[0].expiresAt)).toBeLessThanOrEqual(Date.now())
+    await vi.waitFor(() => expect(fixture.state.novelImportJob[0].status).toBe('ready'))
+    expect(fixture.state.novelImportJob[0].manifestRevision).toBe(result.preview.manifestRevision + 1)
+    await expect(commitNovelImport(scope, result.job.jobId, result.input)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_EXPIRED' })
+    expect(fixture.state.chapter).toHaveLength(0)
+  })
   it('keeps incomplete parser warnings blocking even after a human edit', async () => {
     fixture.parse.mockResolvedValueOnce({ volumes: [{ title: '卷', chapters: [{ title: '章', content: '部分正文', source: 'x.pdf' }] }], metadata: {}, warnings: [{ code: 'IMPORT_VISION_REQUIRED', message: '扫描页待处理', blocking: true }], sourceChars: 4, parserVersion: 'partial' })
     const intent = await preflightNovelImport(scope); const job = await prepareNovelImport(scope, intent.intentId)
@@ -472,7 +487,7 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     expect(fixture.saveMemory).toHaveBeenCalledTimes(1)
     expect(fixture.saveMemory.mock.calls[0][0]).toMatchObject({ memoryType: 'worldbuilding', title: '世界观设定', status: 'confirmed', overwrite: true, layer: 'L1', importance: 75, evidence: expect.objectContaining({ sourceType: 'author_input' }) })
   })
-  it('同作品重复导入自动顶替旧 LIVE 任务，不再拒绝创建', async () => {
+  it('不同 intent 不取消同作品 LIVE 任务，明确取消后才可新建', async () => {
     const future = new Date(Date.now() + 86400_000)
     fixture.state.novelImportJob.push(
       { id: 'live-same-1', userId: scope.userId, novelId: scope.novelId, status: 'ready', expiresAt: future, leaseEpoch: 0, leaseOwner: null, leaseUntil: null, jobVersion: 1 },
@@ -480,12 +495,28 @@ describe('staged import authorization and durability (DB mocked; not concurrency
       { id: 'live-other', userId: scope.userId, novelId: 'novel-b', status: 'ready', expiresAt: future, leaseEpoch: 0, leaseOwner: null, leaseUntil: null, jobVersion: 1 },
     )
     const intent = await preflightNovelImport(scope)
+    const before = structuredClone(fixture.state.novelImportJob)
+    await expect(prepareNovelImport(scope, intent.intentId)).rejects.toMatchObject({ code: 'IMPORT_ACTIVE_JOB_EXISTS', status: 409 })
+    expect(fixture.state.novelImportJob).toEqual(before)
+    await cancelNovelImport(scope, 'live-same-1')
+    await cancelNovelImport(scope, 'live-same-2')
     const job = await prepareNovelImport(scope, intent.intentId)
-    // 同作品两个旧任务自动取消，其他作品任务不受影响，新任务顺利创建
-    expect(fixture.state.novelImportJob.find(j => j.id === 'live-same-1')!.status).toBe('cancelled')
-    expect(fixture.state.novelImportJob.find(j => j.id === 'live-same-2')!.status).toBe('cancelled')
     expect(fixture.state.novelImportJob.find(j => j.id === 'live-other')!.status).toBe('ready')
     expect(job.status).toBe('uploading')
+  })
+  it('同 intent 重复创建优先返回原任务，不触发活动任务冲突', async () => {
+    const intent = await preflightNovelImport(scope)
+    const job = await prepareNovelImport(scope, intent.intentId)
+    const before = structuredClone(fixture.state.novelImportJob)
+    expect((await prepareNovelImport(scope, intent.intentId)).jobId).toBe(job.jobId)
+    expect(fixture.state.novelImportJob).toEqual(before)
+  })
+  it('其他作品三个活动任务仍阻止新建，且不改变任何已有任务', async () => {
+    fixture.state.novelImportJob.push(...['b', 'c', 'd'].map(id => ({ id, userId: scope.userId, novelId: `novel-${id}`, status: 'ready', expiresAt: new Date(Date.now() + 86400_000) })))
+    const intent = await preflightNovelImport(scope)
+    const before = structuredClone(fixture.state.novelImportJob)
+    await expect(prepareNovelImport(scope, intent.intentId)).rejects.toMatchObject({ code: 'IMPORT_LIMIT_EXCEEDED', status: 429 })
+    expect(fixture.state.novelImportJob).toEqual(before)
   })
   it.each(['content', 'title', 'revision', 'orderIndex', 'volumeId', 'publishedContent'])('target hash binds chapter %s changes, even without a count change', async field => {
     existingBook()

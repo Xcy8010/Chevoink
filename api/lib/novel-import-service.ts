@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Request } from 'express'
 import { Prisma, type NovelImportJob, type NovelImportIntent } from '@prisma/client'
 import { z } from 'zod'
-import { NOVEL_IMPORT_LIMITS, novelImportCommitSchema, novelImportRestoreSchema, novelImportManifestEditSchema, novelImportModelSchema, novelImportVolumeSchema, novelImportMetadataSchema, type NovelImportCapabilities, type NovelImportJobStatus, type NovelImportModelSelection, type NovelImportPreflight, type NovelImportPreview, type NovelImportReceipt, type NovelImportRestorePreview, type NovelImportRestoreReceipt } from '../../shared/contracts/novel-import.js'
+import { NOVEL_IMPORT_LIMITS, novelImportCommitSchema, novelImportRestoreSchema, novelImportManifestEditSchema, novelImportModelSchema, novelImportVolumeSchema, novelImportSourceSchema, novelImportMetadataSchema, type NovelImportCapabilities, type NovelImportJobStatus, type NovelImportModelSelection, type NovelImportPreflight, type NovelImportPreview, type NovelImportReceipt, type NovelImportRestorePreview, type NovelImportRestoreReceipt } from '../../shared/contracts/novel-import.js'
 import { prisma, DataAccessError } from './prisma.js'
 import { requireSessionUserId } from './auth-session.js'
 import { deleteUnreferencedImportBlob, discardImportBlob, importBytesHash, readImportBlob, storeImportJson, storeImportStream, validateImportFilename } from './novel-import-storage.js'
@@ -157,11 +157,10 @@ export async function prepareNovelImport(scope: NovelImportScope, intentId: stri
     const intent = intentValid(await tx.novelImportIntent.findUnique({ where: { id: intentId } }), scope, t.hash, true)
     const prior = await tx.novelImportJob.findUnique({ where: { intentId } }); if (prior) return prior.id
     if (await tx.novelImportJob.count({ where: { userId: scope.userId, createdAt: { gte: new Date(Date.now() - 86400_000) } } }) >= NOVEL_IMPORT_DAILY_LIMITS.jobs) fail('IMPORT_DAILY_JOB_LIMIT', '24小时内最多创建10个导入任务，取消不会重置配额；请使用已有任务或24小时后重试。', 429)
-    // 新导入直接顶替同作品未完成任务：先取消同作品 LIVE 任务，全局并发闸只约束其他作品的任务。
+    // Preserve existing work across clients/racing retries; replacing a job requires explicit cancellation.
     const liveJobs = await tx.novelImportJob.findMany({ where: { userId: scope.userId, status: { in: LIVE }, expiresAt: { gt: new Date() } }, select: { id: true, novelId: true } })
-    const sameNovelJobIds = liveJobs.filter(job => job.novelId === scope.novelId).map(job => job.id)
-    if (sameNovelJobIds.length) await tx.novelImportJob.updateMany({ where: { id: { in: sameNovelJobIds } }, data: { status: 'cancelled', leaseEpoch: { increment: 1 }, leaseOwner: null, leaseUntil: null, jobVersion: { increment: 1 } } })
-    if (liveJobs.length - sameNovelJobIds.length >= 3) fail('IMPORT_LIMIT_EXCEEDED', '其他作品仍有过多未完成导入任务，请完成或取消后重试。', 429)
+    if (liveJobs.some(job => job.novelId === scope.novelId)) fail('IMPORT_ACTIVE_JOB_EXISTS', '此作品已有未完成导入，请继续已有任务或明确取消后再创建。')
+    if (liveJobs.length >= 3) fail('IMPORT_LIMIT_EXCEEDED', '其他作品仍有过多未完成导入任务，请完成或取消后重试。', 429)
     if (modelSelection.kind === 'custom' && !await tx.aiModelConfig.findFirst({ where: { id: modelSelection.customModelId, ownerUserId: scope.userId, enabled: true }, select: { id: true } })) fail('IMPORT_MODEL_UNAVAILABLE', '本次自定义模型不可用。', 403)
     const job = await tx.novelImportJob.create({ data: { id: randomUUID(), ...scope, agentRunId: intent.agentRunId, agentToolCallId: intent.agentToolCallId, intentId: intent.id, targetHash: t.hash, modelSelection, expiresAt: expiry(7 * 86400_000) } })
     return job.id
@@ -238,7 +237,7 @@ export async function attachNovelImportSource(human: NovelImportHuman, jobId: st
 }
 
 const parsedVolumeSchema = novelImportVolumeSchema.extend({ chapters: z.array(novelImportVolumeSchema.shape.chapters.element.extend({ content: z.string().max(NOVEL_IMPORT_LIMITS.characters) })).max(NOVEL_IMPORT_LIMITS.chapters) })
-const parsedSchema = z.object({ volumes: z.array(parsedVolumeSchema).max(NOVEL_IMPORT_LIMITS.volumes), metadata: novelImportMetadataSchema, warnings: z.array(z.object({ code: z.string().max(128), message: z.string().max(4000), source: z.string().max(4096).optional(), blocking: z.boolean() })).max(5000), sourceChars: z.number().int().nonnegative().max(NOVEL_IMPORT_LIMITS.characters), parserVersion: z.string().min(1).max(128), plans: z.array(z.object({ title: z.string().trim().min(1).max(160), content: z.string().max(NOVEL_IMPORT_LIMITS.characters) }).strict()).max(200).optional(), memories: z.array(z.object({ memoryType: z.enum(['characterCard', 'worldbuilding', 'storyBible']), title: z.string().trim().min(1).max(160), content: z.string().max(NOVEL_IMPORT_LIMITS.characters) }).strict()).max(500).optional() })
+const parsedSchema = z.object({ volumes: z.array(parsedVolumeSchema).max(NOVEL_IMPORT_LIMITS.volumes), metadata: novelImportMetadataSchema, warnings: z.array(z.object({ code: z.string().max(128), message: z.string().max(4000), source: z.string().max(4096).optional(), blocking: z.boolean() })).max(5000), sourceChars: z.number().int().nonnegative().max(NOVEL_IMPORT_LIMITS.characters), parserVersion: z.string().min(1).max(128), plans: z.array(z.object({ title: z.string().trim().min(1).max(160), content: z.string().max(NOVEL_IMPORT_LIMITS.characters), source: novelImportSourceSchema.optional() }).strict()).max(200).optional(), memories: z.array(z.object({ memoryType: z.enum(['characterCard', 'worldbuilding', 'storyBible']), title: z.string().trim().min(1).max(160), content: z.string().max(NOVEL_IMPORT_LIMITS.characters), source: novelImportSourceSchema.optional() }).strict()).max(500).optional() })
 export function assertNovelImportContent(volumes: NovelImportPreview['volumes'], options: { allowOversizedChapters?: boolean; allowEmptyBody?: boolean } = {}) {
   const chapters = volumes.flatMap(v => v.chapters)
   if (chapters.length > NOVEL_IMPORT_LIMITS.chapters || chapters.reduce((n, c) => n + c.content.length, 0) > NOVEL_IMPORT_LIMITS.characters) fail('IMPORT_LIMIT_EXCEEDED', '卷章或正文超过导入上限。', 413)
@@ -342,7 +341,7 @@ export async function downloadNovelImportImage(scope: NovelImportScope, jobId: s
   return readPreviewArtifact(jobId, artifactId, 'image')
 }
 /** Durable state is authoritative. In-memory promises only accelerate a DB claim. */
-export async function analyzeNovelImport(scope: NovelImportScope, jobId: string, encoding?: string) {
+export async function analyzeNovelImport(scope: NovelImportScope, jobId: string, encoding?: string, reparse = false) {
   enabled()
   if (encoding !== undefined) encoding = z.string().min(1).max(32).parse(encoding)
   const claim = await novelImportTransaction(async tx => {
@@ -356,8 +355,8 @@ export async function analyzeNovelImport(scope: NovelImportScope, jobId: string,
     }
     if (job.manifestRevision >= NOVEL_IMPORT_PREVIEW_LIMITS.revisions) fail('IMPORT_PREVIEW_LIMIT', '本任务已保存64个预览版本；请下载原文件后创建新任务。', 429)
     if (job.leaseUntil && job.leaseUntil > new Date()) fail('IMPORT_WRITE_BUSY', '预览保存尚未完成，请稍后重试。', 429)
-    const explicitReparse = encoding !== undefined && ['ready', 'needs_review', 'awaiting_confirmation'].includes(job.status)
-    if (!['uploaded', 'failed', 'parsing'].includes(job.status) && !explicitReparse) fail('IMPORT_STATE_INVALID', '当前任务不能启动解析；重新解析预览时请明确选择编码。')
+    const explicitReparse = (reparse || encoding !== undefined) && ['ready', 'needs_review', 'awaiting_confirmation'].includes(job.status)
+    if (!['uploaded', 'failed', 'parsing'].includes(job.status) && !explicitReparse) fail('IMPORT_STATE_INVALID', '当前任务不能启动解析；请明确确认重新解析预览。')
     if (await tx.novelImportJob.count({ where: { status: 'parsing', leaseUntil: { gt: new Date() } } })) fail('IMPORT_WRITE_BUSY', '解析器繁忙，请稍后重试。', 429)
     const source = await tx.novelImportSource.findUnique({ where: { jobId } }); if (!source) fail('IMPORT_SOURCE_INVALID', '请先上传文件。')
     // Preserve the audit rows, but revoke every unconsumed old content grant.
@@ -375,7 +374,10 @@ async function runParse(scope: NovelImportScope, claim: { job: NovelImportJob; s
     controller.signal.throwIfAborted()
     const document = await parseConfiguredNovelImportDocument(bytes, claim.source.filename, { sourceId: claim.source.id, sourceHash: claim.source.sha256, encoding, signal: controller.signal, deadlineAt: claim.job.parseDeadlineAt!.getTime() })
     const result = document.parsed
-    const parsed = parsedSchema.parse({ ...result, volumes: result.volumes.map(volume => ({ ...volume, chapters: volume.chapters.map(chapter => ({ ...chapter, source: { memberPath: chapter.source } })) })) })
+    const parsed = parsedSchema.parse({ ...result,
+      plans: result.plans?.map(item => ({ ...item, ...(item.source ? { source: { memberPath: item.source } } : {}) })),
+      memories: result.memories?.map(item => ({ ...item, ...(item.source ? { source: { memberPath: item.source } } : {}) })),
+      volumes: result.volumes.map(volume => ({ ...volume, chapters: volume.chapters.map(chapter => ({ ...chapter, source: { memberPath: chapter.source } })) })) })
     if (parsed.volumes.some(v => v.chapters.some(c => c.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters))) parsed.warnings.push({ code: 'IMPORT_CHAPTER_TOO_LONG', message: '单章超过10万字符，请在预览中拆分。', blocking: true })
     const currentTarget = await target(prisma, scope, false)
     if (!currentTarget.chapters.length && currentTarget.volumes.length) parsed.warnings.push({ code: 'IMPORT_EMPTY_VOLUMES_RETAINED', message: `将保留现有 ${currentTarget.volumes.length} 个空卷，并在其后导入新卷；不会删除或改名原空卷。`, blocking: false })
@@ -421,7 +423,7 @@ export async function editNovelImportStructure(human: NovelImportHuman, jobId: s
   if (!['ready', 'needs_review', 'awaiting_confirmation'].includes(job.status)) fail('IMPORT_STATE_INVALID', '请等待解析完成后修改。')
   const old = await getNovelImportPreview(human, jobId)
   const body = { ...applyStructureEdit(old, edit), manifestRevision: old.manifestRevision + 1 }
-  assertNovelImportContent(body.volumes, { allowOversizedChapters: true })
+  assertNovelImportContent(body.volumes, { allowOversizedChapters: true, allowEmptyBody: routedContentCount(body) > 0 })
   const preview = { ...body, manifestHash: hashNovelImportPreview(body) }
   await persistPreview(human, jobId, job, preview)
   return summarizePreview(preview)

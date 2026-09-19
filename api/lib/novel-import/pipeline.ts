@@ -126,7 +126,7 @@ export function createNovelImportPipeline(config: NovelImportPipelineConfig = {}
       ...(config.native?.enabled ? { nativeWorker: config.native.worker } : {}) })
     const raw = await parse(bytes, filename, { encoding: options.encoding, signal: options.signal })
     raw.parserVersion += '+document-pipeline-2'
-    // 计划/设定段落在此统一分流（全格式），报告只覆盖剩余章节桶。
+    // 分类不能改变来源覆盖范围：报告必须包含分流前的计划、记忆和章节。
     const parsed = routeImportContent(raw)
     const artifacts = parsed.images ?? []
     checkImportImages(artifacts)
@@ -134,7 +134,7 @@ export function createNovelImportPipeline(config: NovelImportPipelineConfig = {}
     // The preview service may remove only this machine-check after proving every descriptor
     // is hash-verified in owned private storage. Never remove OCR/image review warnings.
     if (artifacts.length) parsed.warnings.push({ code: 'IMPORT_IMAGE_STORAGE_REQUIRED', message: '图片资源须保存到本任务的私有存储后才能导入。', source: filename, blocking: true })
-    const report = buildNovelImportReport(parsed, filename, options.sourceId, sourceHash)
+    const report = buildNovelImportReport({ ...raw, warnings: parsed.warnings }, filename, options.sourceId, sourceHash)
     if (options.signal?.aborted) throw new NovelImportParseError('IMPORT_CANCELLED', '文档解析已取消。')
     return { parsed, report, artifacts }
   }

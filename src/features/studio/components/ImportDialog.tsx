@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { LoaderCircle, Upload } from 'lucide-react'
-import { useToast } from '@/components/ui/toast-context'
 import type { NovelImportCapabilities, NovelImportJobStatus, NovelImportModelSelection, NovelImportPreflight, NovelImportPreview, NovelImportReceipt, NovelImportStatus } from '../../../../shared/contracts/novel-import.js'
 import { novelImportApi, type NovelImportClient } from '../import-api'
 import { canSaveImportPreview, canSubmitImport, importPreviewCounts } from '../lib/import-preview'
@@ -11,10 +10,12 @@ import { fetchImportOriginal, importSourceUrl } from '../lib/import-source-downl
 import { triggerBlobDownload } from '../lib/export-download'
 import type { ImportAgentAttachment } from '../lib/import-handoff'
 import type { NovelImportPreviewSummary, NovelImportReportDto } from '../../../../shared/contracts/novel-import-preview.js'
-import { importPreviewApi, type ImportReviewEdit, type ImportStructureEdit } from '../import-preview-api'
+import { importPreviewApi, type ImportStructureEdit } from '../import-preview-api'
+import { planImportAutoReview } from '../lib/import-auto-review'
 import { importStructureFromSummary } from '../lib/import-structure'
 import { ImportStructuredEditor } from './import-structured-editor'
 import { ImportIntegrityReport } from './import-integrity-report'
+import { ImportRoutedContent } from './import-routed-content'
 
 export type ImportDialogProps = {
   open: boolean
@@ -25,7 +26,7 @@ export type ImportDialogProps = {
   modelSelection: NovelImportModelSelection
   /** Untrusted handoff hint; server must revalidate owner, run and source before copying. */
   agentAttachment?: ImportAgentAttachment
-  /** 一键入口选择的文件：自动跑完上传/解析/提交，不再要求人工预览步骤。 */
+  /** 一键入口文件：自动解析后停在预览，最终写入始终由用户确认。 */
   autoFile?: File | null
   /** Status handoff: view only until a fresh human confirmation flow is requested. */
   initialJobId?: string
@@ -47,7 +48,7 @@ type Stage = 'loading' | 'history' | 'first' | 'second' | 'workspace' | 'auto' |
 const previewStatuses = new Set(['ready', 'needs_review', 'awaiting_confirmation'])
 const terminalStatuses = new Set(['succeeded', 'cancelled', 'expired', 'failed'])
 const formats = ['zip', 'txt', 'md', 'pdf', 'doc', 'docx']
-/** 一键导入起跑前需要顶替的本作品未完结任务状态。 */
+/** Existing jobs must be resumed or explicitly cancelled, never silently replaced. */
 const liveStatuses = new Set<NovelImportStatus>(['uploading', 'uploaded', 'parsing', 'needs_review', 'ready', 'awaiting_confirmation'])
 
 function canSubmitSummary(summary: NovelImportPreviewSummary, report: NovelImportReportDto | null) {
@@ -99,10 +100,8 @@ function ImportDialogSession(props: ImportDialogProps) {
   const [restoreUncertain, setRestoreUncertain] = useState(false)
   const restorePending = useRef(false)
   const [autoStep, setAutoStep] = useState('')
-  const [autoNonce, setAutoNonce] = useState(0)
   const [autoProgress, setAutoProgress] = useState(0)
   const autoTarget = useRef(0)
-  const toast = useToast()
   const [restoreApproval, setRestoreApproval] = useState<Awaited<ReturnType<NovelImportClient['restorePreview']>> | null>(null)
   const picker = useRef<HTMLInputElement>(null)
   const latest = useRef(props)
@@ -153,7 +152,7 @@ function ImportDialogSession(props: ImportDialogProps) {
       if (previewClient) {
         const [manifest, evidence] = await Promise.all([previewClient.summary(novelId, next.jobId), previewClient.report(novelId, next.jobId)])
         if (!alive()) return
-        if (manifest.manifestRevision !== evidence.manifestRevision || manifest.manifestHash !== evidence.manifestHash) throw new Error('目录与完整性报告版本不一致，请重新查询任务。')
+        if (manifest.manifestRevision !== evidence.manifestRevision || manifest.manifestHash !== evidence.manifestHash || manifest.sourceHash !== evidence.sourceHash) throw new Error('目录与完整性报告版本不一致，请重新查询任务。')
         adoptSummary(manifest); setReport(evidence); setPreview(null)
       } else {
         const manifest = await client.preview(novelId, next.jobId)
@@ -191,7 +190,7 @@ function ImportDialogSession(props: ImportDialogProps) {
     const check = await client.preflight(novelId, attachment?.callId ? { runId: attachment.runId, callId: attachment.callId } : undefined)
     if (!alive()) return
     setIntent(check)
-    if (check.chapterCount > 0 && !capability.overwriteEnabled) throw new Error('服务器尚未开放已有章节的覆盖导入（包括空白章节）。')
+    if (check.chapterCount > 0 && !capability.overwriteEnabled) throw new Error('服务器尚未开放已有章节的合并导入（包括标题匹配后的归档重建）。')
     if (latest.current.autoFile) {
       const problem = validateImportFile(latest.current.autoFile, capability)
       if (problem) throw new Error(problem)
@@ -222,11 +221,14 @@ function ImportDialogSession(props: ImportDialogProps) {
   }
   const confirmEntry = (step: 1 | 2) => {
     if (!armed || !intent || (step === 1 ? stage !== 'first' : stage !== 'second')) return
-    void run('正在记录覆盖确认', async alive => {
+    void run('正在记录合并导入确认', async alive => {
       const next = await client.confirmIntent(novelId, intent, step)
       if (!alive()) return
       setIntent(next)
-      setStage(step === 1 ? 'second' : latest.current.autoFile ? 'auto' : 'workspace')
+      if (step === 2 && job) {
+        setStage('workspace')
+        await acceptStatus(await client.rebase(novelId, job.jobId, next.intentId), alive)
+      } else setStage(step === 1 ? 'second' : latest.current.autoFile ? 'auto' : 'workspace')
     })
   }
   const selectFile = (files: FileList | File[]) => {
@@ -240,13 +242,18 @@ function ImportDialogSession(props: ImportDialogProps) {
     setSummary(null); setStructure(null); setReport(null)
   }
   const upload = () => {
-    if ((!file && !props.agentAttachment) || !intent || !capabilities?.enabled) return
+    if (job || uncertain || (!file && !props.agentAttachment) || !intent || !capabilities?.enabled) return
     void run('正在创建任务并上传文件', async alive => {
       if (Date.parse(intent.expiresAt) <= Date.now()) throw new Error('覆盖入场确认已过期，请点击“重新检查”。')
+      const history = await client.list(novelId)
+      if (!alive()) return
+      setJobs(history.filter(item => item.novelId === novelId))
+      if (history.some(item => item.novelId === novelId && liveStatuses.has(item.status))) throw new Error('当前作品已有未完成导入，请恢复该任务；不会自动取消其他任务。')
+      setUncertain(true)
       const next = await client.create(novelId, intent.intentId, latest.current.modelSelection)
       if (!alive()) return
       if (next.novelId !== novelId) throw new Error('任务作品不匹配。')
-      setJob(next); setPreview(null)
+      setJob(next); setPreview(null); setUncertain(false)
       const uploaded = file
         ? await client.upload(novelId, next.jobId, file)
         : await client.attachment(novelId, next.jobId, props.agentAttachment!)
@@ -313,10 +320,9 @@ function ImportDialogSession(props: ImportDialogProps) {
     const attachment = latest.current.agentAttachment
     const next = await client.preflight(novelId, attachment?.callId ? { runId: attachment.runId, callId: attachment.callId } : undefined)
     if (!alive()) return
-    if (next.chapterCount > 0 && !capabilities?.overwriteEnabled) throw new Error('服务器尚未开放已有章节的覆盖导入（包括空白章节）。')
+    if (next.chapterCount > 0 && !capabilities?.overwriteEnabled) throw new Error('服务器尚未开放已有章节的合并导入（包括标题匹配后的归档重建）。')
     setIntent(next); setStage(next.chapterCount > 0 ? 'first' : 'workspace')
-    if (job) { setJobs(items => [job, ...items.filter(item => item.jobId !== job.jobId)]); setJob(null); setPreview(null) }
-    setSummary(null); setStructure(null); setReport(null)
+    if (job && next.chapterCount === 0) await acceptStatus(await client.rebase(novelId, job.jobId, next.intentId), alive)
   })
 
   const autoPipeline = async (alive: () => boolean) => {
@@ -324,20 +330,21 @@ function ImportDialogSession(props: ImportDialogProps) {
     const attachment = !source ? latest.current.agentAttachment ?? null : null
     if (!source && !attachment) throw new Error('没有可导入的文件。')
     if (!intent || !capabilities?.enabled) throw new Error('导入条件未就绪，请重试。')
-    if (Date.parse(intent.expiresAt) <= Date.now()) throw new Error('覆盖确认已过期，请点击重试重新核对。')
+    if (job || uncertain) throw new AutoImportFallback('请在预览中继续当前任务，不会重新创建任务。')
+    if (Date.parse(intent.expiresAt) <= Date.now()) throw new Error('覆盖确认已过期，请点击“重新检查”重新核对。')
+    setFile(source)
     setAutoStep('正在创建任务并上传文件…')
     autoTarget.current = 15
-    // 顶替旧任务：本作品若有未完结导入任务先逐个取消，避免创建闸拒绝（服务端同作品自动取消为双保险）。
+    // Do not invoke create when it could replace another active task.
     const history = await client.list(novelId)
     if (!alive()) return
-    for (const item of history.filter(entry => entry.novelId === novelId && liveStatuses.has(entry.status))) {
-      try { await client.cancel(novelId, item.jobId) } catch { /* 服务端创建闸会自动取消同作品任务，这里失败可忽略。 */ }
-      if (!alive()) return
-    }
+    setJobs(history.filter(item => item.novelId === novelId))
+    if (history.some(item => item.novelId === novelId && liveStatuses.has(item.status))) throw new AutoImportFallback('当前作品已有未完成导入，请恢复该任务；不会自动取消其他任务。')
+    setUncertain(true)
     const created = await client.create(novelId, intent.intentId, latest.current.modelSelection)
     if (!alive()) return
     if (created.novelId !== novelId) throw new Error('任务作品不匹配。')
-    setJob(created)
+    setJob(created); setUncertain(false)
     const uploaded = source ? await client.upload(novelId, created.jobId, source) : await client.attachment(novelId, created.jobId, attachment!)
     if (!alive()) return
     setJob(uploaded)
@@ -362,46 +369,22 @@ function ImportDialogSession(props: ImportDialogProps) {
     let [summaryNow, reportNow] = await Promise.all([previewClient.summary(novelId, next.jobId), previewClient.report(novelId, next.jobId)])
     if (!alive()) return
     adoptSummary(summaryNow); setReport(reportNow)
-    // 自动解决全部会导致提交闸失败的项：failed→exclude、未复核 needs_review→review、未解决 blocking issue 的 itemIds 同理；review 提交后重拉一次核对。
-    for (let round = 0; round < 2; round++) {
-      const statusById = new Map(reportNow.items.map(item => [item.id, item.status]))
-      const decisions = new Map<string, ImportReviewEdit['decisions'][number]>()
-      for (const item of reportNow.items) if (item.status === 'failed' || (item.status === 'needs_review' && !reportNow.decisions.some(decision => decision.itemId === item.id))) {
-        decisions.set(item.id, { itemId: item.id, action: item.excludable && item.status === 'failed' ? 'exclude' : 'review', reason: item.status === 'failed' ? '一键导入自动核对：该部分无法识别，已排除。' : '一键导入自动核对：确认保留该部分原文。' })
-      }
-      for (const issue of reportNow.issues.filter(issue => issue.blocking && !issue.resolved)) {
-        for (const itemId of issue.itemIds) if (!decisions.has(itemId)) {
-          decisions.set(itemId, { itemId, action: statusById.get(itemId) === 'failed' ? 'exclude' : 'review', reason: '一键导入自动核对：确认保留该部分原文。' })
-        }
-      }
-      if (decisions.size === 0) break
-      setAutoStep('正在自动核对来源…')
-      summaryNow = await previewClient.review(novelId, next.jobId, { expectedManifestRevision: summaryNow.manifestRevision, manifestHash: summaryNow.manifestHash, reportHash: reportNow.reportHash, decisions: [...decisions.values()] })
+    if (summaryNow.manifestRevision !== reportNow.manifestRevision || summaryNow.manifestHash !== reportNow.manifestHash || summaryNow.sourceHash !== reportNow.sourceHash) throw new AutoImportFallback('目录与来源报告版本不一致，请查询任务状态后继续。')
+    const plan = planImportAutoReview(reportNow)
+    if (plan.reason) throw new AutoImportFallback(plan.reason)
+    if (plan.decisions.length) {
+      setAutoStep('正在记录缺失或失败来源的排除…')
+      summaryNow = await previewClient.review(novelId, next.jobId, { expectedManifestRevision: summaryNow.manifestRevision, manifestHash: summaryNow.manifestHash, reportHash: reportNow.reportHash, decisions: plan.decisions })
       if (!alive()) return
       adoptSummary(summaryNow)
       reportNow = await previewClient.report(novelId, next.jobId)
       if (!alive()) return
       setReport(reportNow)
     }
-    if (reportNow.issues.some(issue => issue.blocking && !issue.resolved)) throw new Error(reportNow.issues.find(issue => issue.blocking && !issue.resolved)!.message)
+    if (plan.decisions.length || summaryNow.partialImport || reportNow.partialImport || reportNow.decisions.some(decision => decision.action === 'exclude')) throw new AutoImportFallback('已停止自动提交：存在排除来源。请核对预览中的已排除来源及保留内容，再明确确认部分导入。')
+    if (reportNow.issues.some(issue => issue.blocking && !issue.resolved)) throw new AutoImportFallback(`仍有未解决问题：${reportNow.issues.find(issue => issue.blocking && !issue.resolved)!.message}。请在预览中处理。`)
     if (!canSubmitSummary(summaryNow, reportNow)) throw new Error('解析结果缺少可导入内容：没有非空章节，也没有识别到计划或设定。')
-    setAutoStep('正在提交导入…')
-    autoTarget.current = 85
-    if (!await latest.current.beforeImport()) throw new Error('当前编辑内容未保存，导入已阻止。')
-    if (!alive()) return
-    const grant = await client.confirm(novelId, next, summaryNow)
-    if (!alive()) return
-    const receipt = await client.commit(novelId, next.jobId, grant.approvalId, `novel-import:${next.jobId}`)
-    if (!alive()) return
-    if (receipt.novelId !== novelId || receipt.jobId !== next.jobId) throw new Error('导入回执与当前任务不匹配，请查询服务器状态。')
-    setJob({ ...next, status: 'succeeded', receipt })
-    autoTarget.current = 100
-    await latest.current.onImported(receipt)
-    if (!alive()) return
-    delivered.current = next.jobId
-    const extras = [receipt.planCount ? `${receipt.planCount} 份计划` : '', receipt.memoryCount ? `${receipt.memoryCount} 条创作记忆` : ''].filter(Boolean).join(' · ')
-    toast.success(`导入完成：${receipt.volumeCount} 卷 ${receipt.chapterCount} 章 · ${receipt.wordCount} 字${extras ? ` · ${extras}` : ''}。`)
-    latest.current.onClose()
+    setAutoStep(''); setStage('workspace')
   }
   const pipelineRef = useRef(autoPipeline)
   pipelineRef.current = autoPipeline
@@ -413,22 +396,23 @@ function ImportDialogSession(props: ImportDialogProps) {
         try { await pipelineRef.current(alive) }
         catch (failure) {
           if (!alive()) return
-          if (failure instanceof AutoImportFallback) { setStage('workspace'); setError(failure.message); return }
+          setStage('workspace'); setAutoStep('')
+          if (failure instanceof AutoImportFallback) { setError(failure.message); return }
           throw failure
         }
       })
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [stage, autoNonce, run])
+  }, [stage, run])
 
   useEffect(() => {
-    // 伪进度条：每 160ms 向当前阶段目标平滑逼近，阶段目标由 autoPipeline 推进（15→35→60→85→100）。
+    // 仅展示解析阶段的估计进度；结束后转入预览，不代表已经写入作品。
     if (stage !== 'auto') { autoTarget.current = 0; setAutoProgress(0); return }
     const timer = window.setInterval(() => {
       setAutoProgress(value => value >= autoTarget.current ? value : Math.min(autoTarget.current, value + Math.max(0.4, (autoTarget.current - value) * 0.08)))
     }, 160)
     return () => window.clearInterval(timer)
-  }, [stage, autoNonce])
+  }, [stage])
 
   let title = '一键导入'
   let body: ReactNode
@@ -440,12 +424,12 @@ function ImportDialogSession(props: ImportDialogProps) {
     footer = <>{back}<button type="button" className={button} disabled={!!busy} onClick={showHistory}>刷新导入记录</button>{capabilities?.enabled && <button type="button" className={primary} disabled={!!busy} onClick={recheck}>准备新的导入</button>}</>
   } else if (stage === 'first' || stage === 'second') {
     const first = stage === 'first'
-    title = first ? '是否覆盖当前作品章节？' : '再次确认覆盖'
+    title = first ? '是否合并导入当前作品？' : '再次确认合并导入'
     body = <div className="space-y-4 text-sm leading-7">
-      <p>《{novelTitle}》已有 {intent?.volumeCount} 卷 {intent?.chapterCount} 章，其中 {intent?.nonEmptyChapterCount} 章有正文。导入将替换当前创作区卷章；确认前不会删除内容。</p>
-      {!first && <p>此步骤仅确认进入覆盖导入流程，不会立即删除旧章节；解析完成后仍需核对文件与卷章预览，再确认导入。已发布或待审内容可能阻止导入，导入的新章节不会自动发布。</p>}
+      <p>《{novelTitle}》已有 {intent?.volumeCount} 卷 {intent?.chapterCount} 章，其中 {intent?.nonEmptyChapterCount} 章有正文。导入按标题匹配：命中的内容将归档后重建，不匹配的现有内容保留，不会替换整个作品的卷章。</p>
+      <p>此步骤仅确认进入合并导入流程，不会立即写入作品；解析完成后会停在预览，供核对内容与分类，最终再次确认才写入。已发布或待审内容可能阻止导入，新章节不会自动发布。</p>
     </div>
-    footer = <><button key={`${stage}-cancel`} data-import-safe-focus type="button" className={button} disabled={!first && !!busy} onClick={first ? close : recheck}>{first ? '取消' : '返回'}</button>{error && <button type="button" className={button} disabled={!!busy} onClick={recheck}>重新检查覆盖条件</button>}<button key={`${stage}-confirm`} type="button" className={primary} disabled={!!busy || !armed} onClick={event => { if (event.detail <= 1) confirmEntry(first ? 1 : 2) }}>{first ? '是，继续' : '确认并选择文件'}</button></>
+    footer = <><button key={`${stage}-cancel`} data-import-safe-focus type="button" className={button} disabled={!first && !!busy} onClick={first ? close : recheck}>{first ? '取消' : '返回'}</button>{error && <button type="button" className={button} disabled={!!busy} onClick={recheck}>重新检查合并条件</button>}<button key={`${stage}-confirm`} type="button" className={primary} disabled={!!busy || !armed} onClick={event => { if (event.detail <= 1) confirmEntry(first ? 1 : 2) }}>{first ? '是，继续' : '确认进入解析预览'}</button></>
   } else if (stage === 'auto') {
     body = <div className="flex flex-col items-center gap-4 py-12">
       <LoaderCircle aria-label="正在导入" className="h-9 w-9 motion-safe:animate-spin" />
@@ -455,7 +439,7 @@ function ImportDialogSession(props: ImportDialogProps) {
       <p role="status" className="text-sm text-[var(--text-secondary)]">{autoStep || '正在准备导入…'}（{Math.floor(autoProgress)}%）</p>
       {file && <p className="max-w-full truncate text-xs text-[var(--text-tertiary)]">{file.name}</p>}
     </div>
-    footer = error ? <><button data-import-safe-focus type="button" className={button} onClick={close}>关闭</button><button type="button" className={primary} disabled={!!busy} onClick={() => { setError(''); setAutoNonce(value => value + 1) }}>重试</button></> : back
+    footer = back
   } else if (stage === 'leave') {
     title = '预览调整尚未保存'
     body = <p>关闭前可保存调整以便稍后继续。放弃只丢弃本次未保存的预览编辑，不会取消服务端任务或改动原作品。</p>
@@ -481,10 +465,10 @@ function ImportDialogSession(props: ImportDialogProps) {
       await latest.current.onRestored?.(receipt)
     }) }}>确认恢复</button>{restoreUncertain && <button type="button" className={button} disabled={!!busy} onClick={refreshStatus}>查询恢复结果</button>}</>
   } else if (stage === 'reparse') {
-    title = '按所选编码重建预览？'
-    body = <p>将按 {encoding.toUpperCase()} 重新解析原文件。已保存的卷章调整将由新预览替换，旧提交授权失效；原作品不变，不调用 AI。若要保留本次调整，请返回。</p>
-    footer = <><button data-import-safe-focus type="button" className={button} onClick={() => setStage('workspace')}>返回</button><button type="button" className={primary} disabled={!!busy || !armed || dirty || !manualEncoding} onClick={() => job && void run('正在按所选编码重新解析', async alive => {
-      const next = await client.analyze(novelId, job.jobId, encoding)
+    title = manualEncoding ? '按所选编码重建预览？' : '重新解析原文件？'
+    body = <p>将按{manualEncoding ? ` ${encoding.toUpperCase()} ` : '服务器检测或任务已确认的编码'}重新解析原文件。已保存的卷章调整将由新预览替换，旧提交授权失效；原作品不变，不调用 AI。若要保留本次调整，请返回。</p>
+    footer = <><button data-import-safe-focus type="button" className={button} onClick={() => setStage('workspace')}>返回</button><button type="button" className={primary} disabled={!!busy || !armed || dirty} onClick={() => job && void run('正在重新解析原文件', async alive => {
+      const next = await client.analyze(novelId, job.jobId, manualEncoding ? encoding : undefined, true)
       if (!alive()) return
       setPreview(null); setDirty(false); setStage('workspace')
       await acceptStatus(next, alive)
@@ -496,6 +480,7 @@ function ImportDialogSession(props: ImportDialogProps) {
     const counts = summary ? { chapters: (structure?.volumes ?? summary.volumes).reduce((total, volume) => total + volume.chapters.length, 0) } : preview ? importPreviewCounts(preview.volumes) : null
     const receipt = job?.receipt
     body = <div className="space-y-4">
+      {!receipt && (summary || preview) && <ImportRoutedContent preview={(summary ?? preview)!} />}
       {(job?.source || file) && <section aria-label="导入来源文件" className="min-w-0 rounded-lg border border-[var(--border-subtle)] p-3 text-sm"><p className="break-all">原文件：{job?.source?.filename ?? file?.name} · {((job?.source?.bytes ?? file?.size ?? 0) / 1024).toFixed(1)} KiB</p><p className="text-xs text-[var(--text-tertiary)]">{job?.sourceHash ? '已上传' : '待上传'}</p></section>}
       {restored && job?.restore?.receipt && <p role="status">已恢复 {job.restore.receipt.restoredVolumeCount} 卷 {job.restore.receipt.restoredChapterCount} 章。</p>}
       {!job && jobs.length > 0 && <section aria-label="可恢复任务" className="space-y-2"><h3 className="text-sm font-medium">未完成的导入</h3>{jobs.map(item => <button type="button" key={item.jobId} className={`${button} block w-full break-all text-left`} disabled={!!busy} onClick={() => resume(item)}>{importStatusLabel(item.status)} · 任务 {item.jobId.slice(0, 8)}</button>)}</section>}
@@ -507,7 +492,7 @@ function ImportDialogSession(props: ImportDialogProps) {
         <button type="button" className={`${button} mt-3`} disabled={!!busy} onClick={() => picker.current?.click()}>{file ? '重新选择文件' : '选择文件'}</button>
       </div>}
       {job && <section aria-live="polite" className="space-y-2 text-sm"><p className="break-all">任务 {job.jobId.slice(0, 8)} · {restored ? '已恢复导入前版本' : importStatusLabel(job.status)}</p><p>任务保留至 {job.expiresAt}。</p>{job.errorCode && <><p role="alert">{importErrorMessage(job.errorCode)}</p><details><summary className="min-h-11 cursor-pointer py-3">技术详情（联系支持时提供）</summary><p className="break-all">错误码：{job.errorCode}</p></details></>}{job.sourceHash && <a className={`${button} inline-flex min-h-11 items-center`} href={importSourceUrl(novelId, job.jobId)} download aria-disabled={!!busy} onClick={event => { event.preventDefault(); if (!busy) void run('正在校验并下载原文件', async alive => { const original = await fetchImportOriginal(novelId, job.jobId); if (alive()) triggerBlobDownload(original.blob, original.filename) }) }}>下载原文件</a>}{uncertain && <p role="alert">提交结果尚需核对。请查询服务器状态，不要新建任务重复导入。</p>}</section>}
-      {job && ['uploaded', 'failed', 'ready', 'needs_review', 'awaiting_confirmation'].includes(job.status) && <fieldset disabled={!!busy || !intent || uncertain} className="space-y-2 rounded-lg border border-[var(--border-subtle)] p-3 text-sm"><label className="flex min-h-11 items-center gap-3"><input type="checkbox" checked={manualEncoding} onChange={event => setManualEncoding(event.target.checked)} />手动指定文本编码（已知编码或解析提示时使用）</label>{manualEncoding ? <label className="block">文本编码<select className="ml-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3" value={encoding} onChange={event => setEncoding(event.target.value)}>{['utf-8', 'utf-16le', 'utf-16be', 'gb18030'].map(value => <option key={value} value={value}>{value.toUpperCase()}</option>)}</select></label> : <p className="text-xs text-[var(--text-secondary)]">默认使用服务器检测或任务已确认的编码；选择编码不会自动启动解析。</p>}{previewStatuses.has(job.status) && manualEncoding && <button type="button" className={button} disabled={dirty || !capabilities?.enabled} onClick={() => setStage('reparse')}>按所选编码重新解析</button>}{dirty && manualEncoding && <p className="text-xs">请先保存预览调整，再选择是否重建预览。</p>}</fieldset>}
+      {job && ['uploaded', 'failed', 'ready', 'needs_review', 'awaiting_confirmation'].includes(job.status) && <fieldset disabled={!!busy || !intent || uncertain} className="space-y-2 rounded-lg border border-[var(--border-subtle)] p-3 text-sm"><label className="flex min-h-11 items-center gap-3"><input type="checkbox" checked={manualEncoding} onChange={event => setManualEncoding(event.target.checked)} />手动指定文本编码（已知编码或解析提示时使用）</label>{manualEncoding ? <label className="block">文本编码<select className="ml-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3" value={encoding} onChange={event => setEncoding(event.target.value)}>{['utf-8', 'utf-16le', 'utf-16be', 'gb18030'].map(value => <option key={value} value={value}>{value.toUpperCase()}</option>)}</select></label> : <p className="text-xs text-[var(--text-secondary)]">默认使用服务器检测或任务已确认的编码；选择编码不会自动启动解析。</p>}{previewStatuses.has(job.status) && <button type="button" className={button} disabled={dirty || !capabilities?.enabled} onClick={() => setStage('reparse')}>{manualEncoding ? '按所选编码重新解析' : '重新解析原文件'}</button>}{dirty && manualEncoding && <p className="text-xs">请先保存预览调整，再选择是否重建预览。</p>}</fieldset>}
       {preview && !receipt && <><p className="text-sm">{intent ? `当前作品：${intent.volumeCount} 卷 ${intent.chapterCount} 章` : '当前为只读查看'} → 待导入：{preview.volumes.length} 卷 {counts?.chapters} 章。</p><ImportPreviewEditor preview={preview} disabled={!!busy || uncertain || !intent || !capabilities?.enabled} currentMetadata={props.currentMetadata ?? { title: novelTitle }} onChange={next => { setPreview(next); setDirty(true) }} /><p role="status" className="text-xs">{dirty ? '预览调整未保存；保存后才能提交。' : `预览版本 ${preview.manifestRevision} 已保存。`}</p></>}
       {summary && structure && job && previewClient && !receipt && <><p className="text-sm">{intent ? `当前作品：${intent.volumeCount} 卷 ${intent.chapterCount} 章` : '只读查看'} → 待导入 {structure.volumes.length} 卷 {counts?.chapters} 章。</p><ImportStructuredEditor key={job.jobId} novelId={novelId} jobId={job.jobId} summary={summary} report={report ?? undefined} draft={structure} disabled={!!busy || uncertain || !intent || !capabilities?.enabled} dirty={dirty} aiEnabled={capabilities?.aiEnabled === true} currentMetadata={props.currentMetadata ?? { title: novelTitle }} client={previewClient} onChange={next => { setStructure(next); setDirty(true) }} /><p role="status">{dirty ? '预览调整未保存；保存后才能提交。' : `预览版本 ${summary.manifestRevision} 已保存。`}</p>{summary.warnings.map((warning, index) => <p key={index} className="text-sm">{warning.blocking ? '阻断' : '注意'}：{warning.message}</p>)}</>}
       {report && job && previewClient && <ImportIntegrityReport key={`${job.jobId}:${report.manifestRevision}:${report.reportHash}`} novelId={novelId} jobId={job.jobId} report={report} disabled={!!busy || dirty || uncertain || !!receipt || !intent || !capabilities?.enabled} onReview={edit => run('正在记录来源核对决定', async alive => {
@@ -518,19 +503,27 @@ function ImportDialogSession(props: ImportDialogProps) {
         const evidence = await previewClient.report(novelId, job.jobId)
         if (alive()) setReport(evidence)
       })} />}
-      {receipt && <section className="space-y-3 rounded-xl border border-[var(--border-subtle)] p-4"><h3 className="font-semibold">{restored ? '恢复完成' : receipt.partialImport ? '部分导入完成' : '导入完成'}</h3><p>{receipt.volumeCount} 卷 {receipt.chapterCount} 章 · {receipt.wordCount} 字。备份保留至：{receipt.restoreExpiresAt}</p>{!capabilities?.restoreEnabled && <p className="text-sm">恢复功能尚未开放，备份回执不代表现在可直接恢复。</p>}{!restored && props.onViewChapter && <button type="button" className={button} onClick={() => props.onViewChapter?.(receipt.firstChapterId)}>查看首章</button>}{error && <button type="button" className={button} disabled={!!busy} onClick={() => void run('正在刷新创作区', async alive => { if (restored && job?.restore?.receipt) await latest.current.onRestored?.(job.restore.receipt); else if (!restorePending.current) await latest.current.onImported(receipt); if (alive()) delivered.current = receipt.jobId })}>刷新创作区</button>}<details><summary className="min-h-11 cursor-pointer py-3">查看导入报告</summary><p className="break-all text-sm">任务：{receipt.jobId}；备份：{receipt.backupId}；目标校验：{receipt.targetHash}。</p></details>{capabilities?.restoreEnabled && props.onRestored && !restored && <button type="button" className={button} disabled={!!busy} onClick={() => void run('正在检查恢复条件', async alive => { const approval = await client.restorePreview(novelId, receipt.jobId); if (alive()) { setRestoreApproval(approval); setStage('restore') } })}>恢复导入前版本</button>}</section>}
+      {receipt && <section className="space-y-3 rounded-xl border border-[var(--border-subtle)] p-4"><h3 className="font-semibold">{restored ? '恢复完成' : receipt.partialImport ? '部分导入完成' : '导入完成'}</h3><p>{receipt.volumeCount} 卷 {receipt.chapterCount} 章 · {receipt.wordCount} 字。备份保留至：{receipt.restoreExpiresAt}</p>{!capabilities?.restoreEnabled && <p className="text-sm">恢复功能尚未开放，备份回执不代表现在可直接恢复。</p>}{!restored && receipt.firstChapterId && props.onViewChapter && <button type="button" className={button} onClick={() => props.onViewChapter?.(receipt.firstChapterId)}>查看首章</button>}{error && <button type="button" className={button} disabled={!!busy} onClick={() => void run('正在刷新创作区', async alive => { if (restored && job?.restore?.receipt) await latest.current.onRestored?.(job.restore.receipt); else if (!restorePending.current) await latest.current.onImported(receipt); if (alive()) delivered.current = receipt.jobId })}>刷新创作区</button>}<details><summary className="min-h-11 cursor-pointer py-3">查看导入报告</summary><p className="break-all text-sm">任务：{receipt.jobId}；备份：{receipt.backupId}；目标校验：{receipt.targetHash}。</p></details>{capabilities?.restoreEnabled && props.onRestored && !restored && <button type="button" className={button} disabled={!!busy} onClick={() => void run('正在检查恢复条件', async alive => { const approval = await client.restorePreview(novelId, receipt.jobId); if (alive()) { setRestoreApproval(approval); setStage('restore') } })}>恢复导入前版本</button>}</section>}
     </div>
     footer = <>{back}
       {restoreUncertain && <><p role="alert">恢复结果未知，请查询服务器状态；不会自动重复恢复。</p><button type="button" className={button} disabled={!!busy} onClick={refreshStatus}>查询恢复结果</button></>}
       {(!intent || error) && !receipt && !restoreUncertain && <button type="button" className={button} disabled={!!busy || dirty || uncertain} onClick={recheck}>重新检查</button>}
-      {job && !receipt && uncertain && <button type="button" className={button} disabled={!!busy || dirty} onClick={refreshStatus}>查询任务状态</button>}
+      {job && !receipt && <button type="button" className={button} disabled={!!busy || dirty} onClick={refreshStatus}>查询任务状态</button>}
+      {!job && uncertain && <p role="alert">创建任务结果未知，已阻止重复创建。请收起面板后从导入记录核对原任务，不要重新上传。</p>}
       {job && !terminalStatuses.has(job.status) && !uncertain && <button type="button" className={button} disabled={!!busy} onClick={() => setStage('cancel')}>取消任务</button>}
-      {!job && <button type="button" className={primary} disabled={!!busy || (!file && !props.agentAttachment)} onClick={upload}>上传并检查文件</button>}
+      {!job && <button type="button" className={primary} disabled={!!busy || uncertain || (!file && !props.agentAttachment)} onClick={upload}>上传并检查文件</button>}
+      {job?.status === 'uploading' && (file || props.agentAttachment) && <button type="button" className={button} disabled={!!busy || uncertain} onClick={() => void run('正在核对并继续原任务上传', async alive => {
+        const current = await client.status(novelId, job.jobId)
+        if (!alive()) return
+        if (current.status !== 'uploading') { await acceptStatus(current, alive); return }
+        const uploaded = file ? await client.upload(novelId, job.jobId, file) : await client.attachment(novelId, job.jobId, props.agentAttachment!)
+        await acceptStatus(uploaded, alive)
+      })}>继续原任务上传</button>}
       {job?.status === 'uploaded' && <button type="button" className={primary} disabled={!!busy || !intent || !capabilities?.enabled} onClick={() => void run('正在解析原文内容（不调用 AI）', async alive => { const next = await client.analyze(novelId, job.jobId, manualEncoding ? encoding : undefined); await acceptStatus(next, alive) })}>开始确定性解析</button>}
       {job?.status === 'failed' && <button type="button" className={primary} disabled={!!busy || !intent || !capabilities?.enabled} onClick={() => void run('正在重试确定性解析（不调用 AI）', async alive => { const next = await client.retry(novelId, job.jobId, manualEncoding ? encoding : undefined); await acceptStatus(next, alive) })}>重试确定性解析</button>}
       {preview && !receipt && dirty && <button type="button" className={primary} disabled={!!busy || !canSaveImportPreview(preview)} onClick={() => void run('正在保存预览调整', savePreview)}>保存预览调整</button>}
-      {preview && !receipt && <button type="button" className={primary} disabled={!!busy || dirty || uncertain || !armed || !intent || !capabilities?.enabled || !canSubmitImport(preview)} onClick={event => { if (event.detail <= 1) submit() }}>{intent && intent.chapterCount > 0 ? '确认覆盖并导入' : '导入'} {preview.volumes.length} 卷 {counts?.chapters} 章</button>}
-      {summary && structure && !receipt && <>{dirty && <button type="button" className={primary} disabled={!!busy || !structure.volumes.every(volume => volume.title.trim() && volume.chapters.every(chapter => chapter.title.trim()))} onClick={() => void run('正在保存预览调整', savePreview)}>保存预览调整</button>}<button type="button" className={primary} disabled={!!busy || dirty || uncertain || !armed || !intent || !capabilities?.enabled || !canSubmitSummary(summary, report)} onClick={event => { if (event.detail <= 1) submit() }}>{summary.partialImport ? '部分导入：' : ''}{intent && intent.chapterCount > 0 ? '确认覆盖并导入' : '导入'} {structure.volumes.length} 卷 {counts?.chapters} 章</button></>}
+      {preview && !receipt && <button type="button" className={primary} disabled={!!busy || dirty || uncertain || !armed || !intent || !capabilities?.enabled || !canSubmitImport(preview)} onClick={event => { if (event.detail <= 1) submit() }}>{intent && intent.chapterCount > 0 ? '确认合并并导入' : '导入'} {preview.volumes.length} 卷 {counts?.chapters} 章</button>}
+      {summary && structure && !receipt && <>{dirty && <button type="button" className={primary} disabled={!!busy || !structure.volumes.every(volume => volume.title.trim() && volume.chapters.every(chapter => chapter.title.trim()))} onClick={() => void run('正在保存预览调整', savePreview)}>保存预览调整</button>}<button type="button" className={primary} disabled={!!busy || dirty || uncertain || !armed || !intent || !capabilities?.enabled || !canSubmitSummary(summary, report)} onClick={event => { if (event.detail <= 1) submit() }}>{summary.partialImport ? '部分导入：' : ''}{intent && intent.chapterCount > 0 ? '确认合并并导入' : '导入'} {structure.volumes.length} 卷 {counts?.chapters} 章</button></>}
     </>
   }
   return <ImportDialogShell title={title} description={`目标作品：《${novelTitle}》 · 原文导入，不生成缺失正文`} stage={stage} onClose={stage === 'leave' ? () => setStage('workspace') : close} footer={footer}>
