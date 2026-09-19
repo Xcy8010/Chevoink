@@ -14,6 +14,18 @@ export const novelImportStructureSchema = z.object({
     title: z.string().trim().min(1).max(128), segments: z.array(z.object({ volumeIndex: index, chapterIndex: index, start: z.number().int().nonnegative().max(NOVEL_IMPORT_LIMITS.characters), end: z.number().int().nonnegative().max(NOVEL_IMPORT_LIMITS.characters) }).strict()).min(1).max(4000),
   }).strict()).max(NOVEL_IMPORT_LIMITS.chapters) }).strict()).max(NOVEL_IMPORT_LIMITS.volumes),
 }).strict()
+/** Explicit retained entries; positions refer only to the bound persisted preview. */
+export const novelImportSelectionSchema = z.object({
+  expectedManifestRevision: z.number().int().positive(), manifestHash: hash,
+  chapters: z.array(z.object({ volumeIndex: index, chapterIndex: index }).strict()).max(NOVEL_IMPORT_LIMITS.chapters),
+  plans: z.array(index).max(200), memories: z.array(index).max(500),
+  metadataSelection: novelImportMetadataSchema.optional(),
+}).strict()
+export interface NovelImportContentExclusion {
+  kind: 'chapter' | 'plan' | 'memory'; title: string; contentHash: string
+  source?: NovelImportPreview['volumes'][number]['chapters'][number]['source']
+  manifestRevision: number; manifestHash: string; excludedAt: string; reason: string
+}
 export interface NovelImportArtifactDescriptor { id: string; source: string; sha256: string; bytes: number; mediaType: 'image/png'; width: number; height: number; coverCandidate: boolean; url: string }
 export interface NovelImportReportItem {
   id: string; kind: 'file' | 'page' | 'block' | 'region' | 'image'; source: string; parentId?: string
@@ -27,11 +39,13 @@ export interface NovelImportSourceDecision { itemId: string; action: 'exclude' |
 export interface NovelImportEvidencePreview extends NovelImportPreview {
   report?: NovelImportDocumentReport; reportHash?: string; artifacts?: NovelImportArtifactDescriptor[]
   decisions?: NovelImportSourceDecision[]; partialImport?: boolean
+  contentExclusions?: NovelImportContentExclusion[]
 }
 export interface NovelImportReportDto {
   manifestRevision: number; manifestHash: string; reportHash: string; sourceHash: string; partialImport: boolean
   items: Array<Omit<NovelImportReportItem, 'text'> & { textHash?: string; characters?: number }>
   issues: Array<NovelImportReportIssue & { resolved: boolean }>; decisions: NovelImportSourceDecision[]; artifacts: NovelImportArtifactDescriptor[]
+  contentExclusions?: NovelImportContentExclusion[]
 }
 export interface NovelImportPreviewSummary extends Omit<NovelImportEvidencePreview, 'volumes' | 'report'> {
   volumes: Array<{ title: string; chapters: Array<{ title: string; source: NovelImportPreview['volumes'][number]['chapters'][number]['source']; volumeIndex: number; chapterIndex: number; contentHash: string; characters: number; nonEmpty: boolean }> }>

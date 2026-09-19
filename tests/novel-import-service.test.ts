@@ -83,7 +83,7 @@ vi.mock('../api/lib/novel-import-storage.js', async () => {
 
 import { DataAccessError } from '../api/lib/prisma.js'
 import { Prisma } from '@prisma/client'
-import { analyzeNovelImport, assertNovelImportHuman, assertNovelImportRestoreBaseline, attachNovelImportSource, authenticateNovelImportHuman, cancelNovelImport, commitNovelImport, confirmNovelImport, confirmNovelImportIntent, editNovelImportPreview, getNovelImportPreview, getNovelImportRestorePreview, getNovelImportStatus, hashNovelImportPreview, listNovelImports, novelImportCapabilities, novelImportTransaction, preflightNovelImport, prepareNovelImport, previewNovelImportRestore, restoreNovelImport, uploadNovelImportSource, type NovelImportHuman } from '../api/lib/novel-import-service.js'
+import { analyzeNovelImport, assertNovelImportHuman, assertNovelImportRestoreBaseline, attachNovelImportSource, authenticateNovelImportHuman, cancelNovelImport, commitNovelImport, confirmNovelImport, confirmNovelImportIntent, confirmNovelImportSelectionIntent, editNovelImportPreview, getNovelImportPreview, getNovelImportRestorePreview, getNovelImportStatus, hashNovelImportPreview, listNovelImports, novelImportCapabilities, novelImportTransaction, preflightNovelImport, prepareNovelImport, previewNovelImportRestore, restoreNovelImport, selectNovelImportContent, uploadNovelImportSource, type NovelImportHuman } from '../api/lib/novel-import-service.js'
 import { novelImportCommitSchema, novelImportSourceSchema } from '../shared/contracts/novel-import.js'
 import importRouter from '../api/routes/novel-imports.js'
 import { drainNovelImportEffects } from '../api/lib/novel-import-effects.js'
@@ -388,15 +388,25 @@ describe('staged import authorization and durability (DB mocked; not concurrency
       expect(() => assertNovelImportRestoreBaseline(...hashes as [string, string, string, string])).toThrow(expect.objectContaining({ code: 'IMPORT_RESTORE_CONFLICT' }))
     }
   })
-  it('counts an empty existing chapter as overwrite, requiring both HTTP confirmations', async () => {
+  it('已有空章节可先解析选择，作品写入批准仍要求完整intent确认', async () => {
     existingBook('')
     const intent = await preflightNovelImport(scope)
     expect(intent).toMatchObject({ chapterCount: 1, nonEmptyChapterCount: 0, overwriteRequired: true })
-    await expect(prepareNovelImport(scope, intent.intentId)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
+    const job = await prepareNovelImport(scope, intent.intentId)
+    await uploadNovelImportSource(scope, job.jobId, 'original.txt', (async function* () { yield Buffer.from('正文') })())
+    await analyzeNovelImport(scope, job.jobId)
+    await vi.waitFor(() => expect(fixture.state.novelImportJob[0].status).toBe('ready'))
+    const preview = await getNovelImportPreview(scope, job.jobId)
+    const confirmation = { manifestRevision: preview.manifestRevision, manifestHash: preview.manifestHash, targetHash: job.targetHash }
+    await expect(confirmNovelImport(human(), job.jobId, confirmation)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
+    await expect(commitNovelImport(scope, job.jobId, { approvalId: randomUUID(), idempotencyKey: 'no-human-approval' })).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
     await confirmNovelImportIntent(human(), intent.intentId, 1, intent.targetHash)
-    await expect(prepareNovelImport(scope, intent.intentId)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
+    await expect(confirmNovelImport(human(), job.jobId, confirmation)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
+    expect(fixture.state.chapter).toHaveLength(1)
+    expect(fixture.state.chapter[0].archivedAt).toBeNull()
+    expect(fixture.state.novelImportApproval).toHaveLength(0)
     await confirmNovelImportIntent(human(), intent.intentId, 2, intent.targetHash)
-    expect((await prepareNovelImport(scope, intent.intentId)).status).toBe('uploading')
+    expect(await confirmNovelImport(human(), job.jobId, confirmation)).toMatchObject({ approvalId: expect.any(String) })
   })
   it('archives and restores the same old IDs without changing published snapshot/order/title', async () => {
     const old = existingBook('旧草稿正文', true)
@@ -466,6 +476,35 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     const snapshot = fixture.state.novelImportBackup[0].snapshot as { chapterIds: string[]; volumeIds: string[] }
     expect(snapshot.chapterIds).toEqual(['c-match'])
     expect(snapshot.volumeIds).toEqual([])
+  })
+  it('选择作品信息而不选正文只更新元数据，旧授权失效且不写卷章', async () => {
+    const result = await approved()
+    const input = { expectedManifestRevision: result.preview.manifestRevision, manifestHash: result.preview.manifestHash, chapters: [], plans: [], memories: [], metadataSelection: { title: '只更新书名' } }
+    const selected = await selectNovelImportContent(human(), result.job.jobId, input)
+    expect(selected.manifestRevision).toBe(result.preview.manifestRevision + 1)
+    expect(selected.volumes).toEqual([])
+    expect(selected.contentExclusions).toEqual([expect.objectContaining({ kind: 'chapter', title: '第一章' })])
+    expect(selected.partialImport).toBe(true)
+    expect(fixture.state.novel[0].title).toBe('原书')
+    await expect(selectNovelImportContent(human(), result.job.jobId, input)).rejects.toMatchObject({ code: 'IMPORT_PREVIEW_CHANGED' })
+    await expect(commitNovelImport(scope, result.job.jobId, result.input)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_EXPIRED' })
+    const grant = await confirmNovelImport(human(), result.job.jobId, { manifestRevision: selected.manifestRevision, manifestHash: selected.manifestHash, targetHash: result.job.targetHash })
+    const receipt = await commitNovelImport(scope, result.job.jobId, { approvalId: grant.approvalId, idempotencyKey: 'metadata-only-selection' })
+    expect(receipt).toMatchObject({ volumeCount: 0, chapterCount: 0, firstChapterId: '', partialImport: true })
+    expect(fixture.state.chapter).toHaveLength(0)
+    expect(fixture.state.volume).toHaveLength(0)
+    expect(fixture.state.novel[0].title).toBe('只更新书名')
+  })
+  it('选择接口拒绝全空、其他用户与取消任务，未选内容不能直接写入', async () => {
+    const result = await prepared()
+    const input = { expectedManifestRevision: result.preview.manifestRevision, manifestHash: result.preview.manifestHash, chapters: [], plans: [], memories: [] }
+    await expect(selectNovelImportContent(human(), result.job.jobId, input)).rejects.toMatchObject({ code: 'IMPORT_NO_BODY' })
+    const outsider = authenticateNovelImportHuman({ params: { novelId: scope.novelId }, headers: { 'x-test-user': 'user-b' } } as unknown as Request)
+    await expect(selectNovelImportContent(outsider, result.job.jobId, input)).rejects.toMatchObject({ code: 'NOVEL_NOT_FOUND' })
+    await cancelNovelImport(scope, result.job.jobId)
+    await expect(selectNovelImportContent(human(), result.job.jobId, input)).rejects.toMatchObject({ code: 'IMPORT_CANCELLED' })
+    expect(fixture.state.novelImportManifest).toHaveLength(1)
+    expect(fixture.state.chapter).toHaveLength(0)
   })
   it('仅导入计划/记忆时完全不写卷章，计划入计划夹、记忆委派 saveStoryMemory', async () => {
     existingBook()
@@ -676,10 +715,43 @@ describe('staged import authorization and durability (DB mocked; not concurrency
 describe('import HTTP boundary', () => {
   const app = express().use('/api/novels/:novelId/imports', importRouter)
   const base = '/api/novels/novel-a/imports'
+  it('选择UI一次真实确认完成intent，缺少confirmed、目标过期或跨用户均不授权', async () => {
+    existingBook()
+    const intent = await preflightNovelImport(scope)
+    const endpoint = `${base}/intents/${intent.intentId}/confirm-selection`
+    expect((await request(app).post(endpoint).set('x-test-user', scope.userId).send({ targetHash: intent.targetHash })).status).toBe(400)
+    expect((await request(app).post(endpoint).set('x-test-user', scope.userId).send({ targetHash: intent.targetHash, confirmed: false })).status).toBe(400)
+    expect((await request(app).post(endpoint).set('x-test-user', 'user-b').send({ targetHash: intent.targetHash, confirmed: true })).status).toBe(404)
+    expect((await request(app).post(endpoint).set('x-test-user', scope.userId).send({ targetHash: 'a'.repeat(64), confirmed: true })).body.error.code).toBe('IMPORT_TARGET_CHANGED')
+    expect(fixture.state.novelImportIntent[0].confirmationStep).toBe(0)
+    await expect(confirmNovelImportSelectionIntent(scope as NovelImportHuman, intent.intentId, intent.targetHash)).rejects.toMatchObject({ code: 'IMPORT_APPROVAL_REQUIRED' })
+    const result = await request(app).post(endpoint).set('x-test-user', scope.userId).send({ targetHash: intent.targetHash, confirmed: true })
+    expect(result.status).toBe(200)
+    expect(result.body.data.confirmationStep).toBe(2)
+    const replay = await request(app).post(endpoint).set('x-test-user', scope.userId).send({ targetHash: intent.targetHash, confirmed: true })
+    expect(replay.status).toBe(200)
+    expect(replay.body.data.confirmationStep).toBe(2)
+    expect(fixture.state.novelImportApproval).toHaveLength(0)
+    expect(fixture.state.chapter[0].archivedAt).toBeNull()
+    fixture.state.novelImportIntent[0].expiresAt = new Date(0)
+    expect((await request(app).post(endpoint).set('x-test-user', scope.userId).send({ targetHash: intent.targetHash, confirmed: true })).body.error.code).toBe('IMPORT_APPROVAL_EXPIRED')
+  })
   it('authenticates before parsing bodies or exposing capabilities', async () => {
     expect((await request(app).get(`${base}/capabilities`)).status).toBe(401)
     expect((await request(app).post(`${base}/preflight`).type('json').send('{invalid')).status).toBe(401)
     expect((await request(app).get(`${base}/capabilities`).set('x-test-user', scope.userId)).body.data.restoreEnabled).toBe(true)
+  })
+  it('selection HTTP接口绑定版本，拒绝外来正文与跨用户访问', async () => {
+    const { job, preview } = await prepared()
+    const input = { expectedManifestRevision: preview.manifestRevision, manifestHash: preview.manifestHash, chapters: [{ volumeIndex: 0, chapterIndex: 0 }], plans: [], memories: [] }
+    expect((await request(app).post(`${base}/${job.jobId}/selection`).send(input)).status).toBe(401)
+    expect((await request(app).post(`${base}/${job.jobId}/selection`).set('x-test-user', 'user-b').send(input)).status).toBe(404)
+    expect((await request(app).post(`${base}/${job.jobId}/selection`).set('x-test-user', scope.userId).send({ ...input, content: '不能注入正文' })).status).toBe(400)
+    const selected = await request(app).post(`${base}/${job.jobId}/selection`).set('x-test-user', scope.userId).send(input)
+    expect(selected.status).toBe(200)
+    expect(selected.body.data.manifestRevision).toBe(preview.manifestRevision + 1)
+    expect((await request(app).post(`${base}/${job.jobId}/selection`).set('x-test-user', scope.userId).send(input)).body.error.code).toBe('IMPORT_PREVIEW_CHANGED')
+    expect(fixture.state.chapter).toHaveLength(0)
   })
   it('rejects cross-site Origin even without fetch metadata and blocks HTML form intents', async () => {
     expect((await request(app).post(`${base}/preflight`).set('x-test-user', scope.userId).set('Origin', 'https://evil.example').send({})).status).toBe(403)

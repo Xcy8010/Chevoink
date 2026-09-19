@@ -6,12 +6,13 @@ const modalStack: HTMLElement[] = []
 let originalOverflow = ''
 
 /** One modal at a time. Escape folds the job; only explicit cancellation cancels it. */
-export function ImportDialogShell({ title, description, stage, onClose, children, footer }: {
+export function ImportDialogShell({ title, description, stage, onClose, children, footer, compact = false }: {
   title: string
   description: string
   stage: string
   onClose: () => void
   children: ReactNode
+  compact?: boolean
   footer?: ReactNode
 }) {
   const id = useId()
@@ -32,6 +33,7 @@ export function ImportDialogShell({ title, description, stage, onClose, children
     ) ?? []).filter((element) => {
       if (element.closest('[hidden]') || element.matches(':disabled')) return false
       for (let ancestor: HTMLElement | null = element; ancestor && ancestor !== panel.current; ancestor = ancestor.parentElement) {
+        if (ancestor instanceof HTMLDetailsElement && !ancestor.open && !ancestor.querySelector(':scope > summary')?.contains(element)) return false
         if (getComputedStyle(ancestor).display === 'none' || getComputedStyle(ancestor).visibility === 'hidden') return false
       }
       return true
@@ -78,7 +80,7 @@ export function ImportDialogShell({ title, description, stage, onClose, children
       onCancel={event => { event.preventDefault(); if (!composing.current && modalStack.at(-1) === panel.current) onClose() }}
       onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }}
       onKeyDownCapture={(event) => { if (event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)) { event.preventDefault(); event.stopPropagation() } }}
-      className="relative m-0 flex h-[100dvh] w-full min-w-0 flex-col overflow-hidden border-0 bg-[var(--surface-default)] p-0 text-[var(--text-primary)] shadow-xl sm:h-auto sm:max-h-[90dvh] sm:max-w-4xl sm:rounded-2xl [&_button]:min-h-11 [&_button]:min-w-11 [&_input:not([type=checkbox])]:min-h-11 [&_select]:min-h-11">
+      className={`relative m-0 flex h-[100dvh] w-full min-w-0 flex-col overflow-hidden border-0 bg-[var(--surface-default)] p-0 text-[var(--text-primary)] shadow-xl sm:h-auto sm:max-h-[90dvh] ${compact ? 'sm:max-w-xl' : 'sm:max-w-4xl'} sm:rounded-2xl [&_button]:min-h-11 [&_button]:min-w-11 [&_input:not([type=checkbox])]:min-h-11 [&_select]:min-h-11`}>
       <header className="flex shrink-0 items-start gap-3 border-b border-[var(--border-subtle)] p-4 pt-[max(1rem,env(safe-area-inset-top))]">
         <div className="min-w-0 flex-1"><h2 id={`${id}-title`} className="text-lg font-semibold">{title}</h2><p id={`${id}-description`} className="mt-1 break-words text-sm text-[var(--text-secondary)]">{description}</p></div>
         <button type="button" aria-label="收起导入面板" className="flex items-center justify-center rounded-lg hover:bg-[var(--surface-muted)]" onClick={onClose}><X className="h-5 w-5" /></button>

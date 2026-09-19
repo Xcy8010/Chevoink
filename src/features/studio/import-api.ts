@@ -9,6 +9,7 @@ export const novelImportApi = {
   capabilities: (novelId: string) => requestData<NovelImportCapabilities>(`${root(novelId)}/capabilities`),
   list: (novelId: string) => requestData<NovelImportJobStatus[]>(root(novelId)),
   preflight: (novelId: string, origin?: { runId: string; callId: string }) => requestData<NovelImportPreflight>(`${root(novelId)}/preflight`, json('POST', origin ? { origin } : undefined)),
+  confirmSelectionIntent: (novelId: string, intent: NovelImportPreflight) => requestData<NovelImportPreflight>(`${root(novelId)}/intents/${encodeURIComponent(intent.intentId)}/confirm-selection`, json('POST', { targetHash: intent.targetHash, confirmed: true })),
   confirmIntent: (novelId: string, intent: NovelImportPreflight, step: 1 | 2) => requestData<NovelImportPreflight>(`${root(novelId)}/intents/${encodeURIComponent(intent.intentId)}/confirm`, json('POST', { step, targetHash: intent.targetHash })),
   create: (novelId: string, intentId: string, modelSelection: NovelImportModelSelection) => requestData<NovelImportJobStatus>(root(novelId), json('POST', { intentId, modelSelection })),
   upload: (novelId: string, jobId: string, file: File) => requestData<NovelImportJobStatus>(`${jobPath(novelId, jobId)}/source?filename=${encodeURIComponent(file.name)}`, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: file, timeoutMs: 120_000 }),

@@ -175,10 +175,13 @@ describe('ZIP structure and integrity', () => {
     expect(contents(repeated)).toBe('开篇\n\n尾巴')
   })
 
-  it('never treats plans/catalog/info-only exports as body', async () => {
+  it('导出规划可单独导入，目录与发布建议仍不能伪造成正文', async () => {
     const result = await parse(zipFiles({ '书/规划/大纲.txt': '大纲', '书/目录/目录.txt': '第一章 目录', '书/作品信息以及发布建议/发布建议.txt': '建议' }), 'export.zip')
     expect(chapters(result)).toHaveLength(0)
-    expect(warning(result, 'IMPORT_NO_BODY')?.blocking).toBe(true)
+    expect(result.plans).toEqual([{ title: '大纲', content: '大纲', source: 'export.zip!/书/规划/大纲.txt' }])
+    expect(warning(result, 'IMPORT_NO_BODY')).toBeUndefined()
+    const catalogOnly = await parse(zipFiles({ '书/目录/目录.txt': '第一章 目录', '书/作品信息以及发布建议/发布建议.txt': '建议' }), 'export.zip')
+    expect(warning(catalogOnly, 'IMPORT_NO_BODY')?.blocking).toBe(true)
   })
 
   it('sorts generic files naturally, preserving final tails and same titles', async () => {

@@ -1,12 +1,15 @@
 import type { z } from 'zod'
 import { NOVEL_IMPORT_LIMITS, type NovelImportPreview } from '../../../shared/contracts/novel-import.js'
-import type { NovelImportDocumentReport, NovelImportEvidencePreview, NovelImportReportDto, NovelImportReportItem, novelImportReviewSchema, novelImportStructureSchema } from '../../../shared/contracts/novel-import-preview.js'
+import type { NovelImportContentExclusion, NovelImportDocumentReport, NovelImportEvidencePreview, NovelImportReportDto, NovelImportReportItem, novelImportReviewSchema, novelImportStructureSchema, novelImportSelectionSchema } from '../../../shared/contracts/novel-import-preview.js'
 import { DataAccessError } from '../prisma.js'
 import { importBytesHash } from '../novel-import-storage.js'
 
 const reject = (code: string, message: string): never => { throw new DataAccessError(409, code, message) }
 /** 计划/创作记忆段落也算有效导入内容：仅导入设定或计划时不应被“至少一章正文”闸拒绝。 */
 export const routedContentCount = (preview: { plans?: unknown[]; memories?: unknown[] }) => (preview.plans?.length ?? 0) + (preview.memories?.length ?? 0)
+export const hasImportMetadataSelection = (preview: Pick<NovelImportPreview, 'metadataSelection'>) => Object.values(preview.metadataSelection).some(value => value !== undefined)
+export const hasImportContent = (preview: NovelImportPreview) => preview.volumes.some(v => v.chapters.some(c => c.content.trim()))
+  || [...(preview.plans ?? []), ...(preview.memories ?? [])].some(item => item.content.trim()) || hasImportMetadataSelection(preview)
 export const reportHash = (report: NovelImportDocumentReport) => importBytesHash(JSON.stringify(report))
 export const canonicalPreviewHash = (value: unknown) => importBytesHash(JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item))
 // Keep old persisted reviews readable; new source-bearing routes bind every destination.
@@ -83,7 +86,7 @@ export function assertNovelImportPreviewComplete(input: NovelImportPreview): voi
     if (item.status === 'failed' || (item.status === 'needs_review' && !state.reviewed(item.id) && !state.issues.some(issue => issue.resolved && issue.itemIds.includes(item.id)))) reject('IMPORT_INCOMPLETE_CONTENT', '来源仍有未处理或待核验内容。')
   }
   if (!state.report.complete && !state.report.issues.some(issue => issue.blocking)) reject('IMPORT_INCOMPLETE_CONTENT', '来源覆盖报告不完整，请重新解析。')
-  if (!preview.volumes.some(v => v.chapters.some(c => c.content.trim())) && !routedContentCount(preview)) reject('IMPORT_NO_BODY', '至少保留一章非空正文。')
+  if (!hasImportContent(preview)) reject('IMPORT_NO_BODY', '请至少选择一项非空章节、计划、记忆或作品信息。')
   if (preview.volumes.some(v => v.chapters.some(c => c.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters))) reject('IMPORT_CHAPTER_TOO_LONG', '单章超过10万字符，请拆分。')
 }
 
@@ -94,14 +97,63 @@ export function refreshPreviewWarnings(preview: NovelImportEvidencePreview): Nov
   // Keep informational service notices, but never trust caller-provided blocking flags.
   warnings.push(...preview.warnings.filter(w => w.code === 'IMPORT_EMPTY_VOLUMES_RETAINED').map(w => ({ code: w.code, message: w.message, blocking: false })))
   if (preview.volumes.some(v => v.chapters.some(c => c.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters))) warnings.push({ code: 'IMPORT_CHAPTER_TOO_LONG', message: '单章超过10万字符，请在预览中拆分。', blocking: true })
-  return { ...preview, warnings, partialImport: (preview.decisions ?? []).some(d => d.action === 'exclude') }
+  return { ...preview, warnings, partialImport: (preview.decisions ?? []).some(d => d.action === 'exclude') || !!preview.contentExclusions?.length }
 }
 
 export function previewReportDto(preview: NovelImportEvidencePreview, boundContentHash?: string): NovelImportReportDto {
   const state = resolutionState(preview, boundContentHash)
   return { manifestRevision: preview.manifestRevision, manifestHash: preview.manifestHash, sourceHash: preview.sourceHash, reportHash: preview.reportHash!, partialImport: !!preview.partialImport,
     items: state.report.items.map(({ text, ...item }) => ({ ...item, ...(text === undefined ? {} : { textHash: importBytesHash(text), characters: text.length }) })),
-    issues: state.issues, decisions: preview.decisions ?? [], artifacts: preview.artifacts ?? [] }
+    issues: state.issues, decisions: preview.decisions ?? [], artifacts: preview.artifacts ?? [], contentExclusions: preview.contentExclusions ?? [] }
+}
+
+function unselectedExportCovers(preview: NovelImportEvidencePreview): z.infer<typeof novelImportReviewSchema>['decisions'] {
+  const report = preview.report!
+  const kept = [...preview.volumes.flatMap(volume => volume.chapters), ...(preview.plans ?? []), ...(preview.memories ?? [])]
+  // A missing provenance on any retained entry prevents proving disjointness.
+  if (kept.some(entry => !entry.source || !chapterSource(entry.source))) return []
+  const decisions: z.infer<typeof novelImportReviewSchema>['decisions'] = []
+  for (const artifact of preview.artifacts ?? []) {
+    if (!artifact.coverCandidate || artifact.id === preview.metadataSelection.coverArtifactId) continue
+    // Generic coverCandidate also includes scanned body images. Only the precise
+    // native-export cover path, corroborated by another export marker, is optional.
+    const match = /^(.+\.zip!\/(?:[^/]+\/)?)作品信息以及发布建议\/封面\.(?:png|jpe?g|webp)$/i.exec(artifact.source)
+    if (!match || !report.items.some(item => item.source.startsWith(`${match[1]}正文/`) || [`${match[1]}目录/目录.txt`, `${match[1]}作品信息以及发布建议/作品信息.txt`, `${match[1]}作品信息以及发布建议/发布建议.txt`].includes(item.source))) continue
+    if (!report.items.some(item => item.artifactId === artifact.id && item.source === artifact.source)) continue
+    if (kept.some(entry => withinSource(chapterSource(entry.source!), artifact.source) || withinSource(artifact.source, chapterSource(entry.source!)))) continue
+    const file = report.items.find(item => item.kind === 'file' && item.excludable && item.source === artifact.source)
+    if (!file || (preview.decisions ?? []).some(decision => decision.itemId === file.id && decision.action === 'exclude') || decisions.some(decision => decision.itemId === file.id)) continue
+    decisions.push({ itemId: file.id, action: 'exclude', reason: '用户未选择本站导出封面；该图片与全部保留内容来源独立，不导入其图片或 OCR 内容。' })
+  }
+  return decisions
+}
+
+/** Selecting destinations never certifies missing/OCR source content or edits original text. */
+export function applyContentSelection(preview: NovelImportEvidencePreview, input: z.infer<typeof novelImportSelectionSchema>): NovelImportEvidencePreview {
+  if (input.expectedManifestRevision !== preview.manifestRevision || input.manifestHash !== preview.manifestHash) reject('IMPORT_PREVIEW_CHANGED', '预览已变化，请重新选择导入内容。')
+  evidence(preview)
+  const chapters = new Set(input.chapters.map(item => `${item.volumeIndex}:${item.chapterIndex}`))
+  const plans = new Set(input.plans), memories = new Set(input.memories)
+  if (chapters.size !== input.chapters.length || plans.size !== input.plans.length || memories.size !== input.memories.length) reject('IMPORT_INPUT_INVALID', '导入内容不能重复选择。')
+  if (input.chapters.some(item => !preview.volumes[item.volumeIndex]?.chapters[item.chapterIndex]) || input.plans.some(index => !preview.plans?.[index]) || input.memories.some(index => !preview.memories?.[index])) reject('IMPORT_INPUT_INVALID', '所选内容不属于当前预览。')
+  const contentExclusions = [...(preview.contentExclusions ?? [])]
+  const exclude = (kind: NovelImportContentExclusion['kind'], item: { title: string; content: string; source?: NovelImportContentExclusion['source'] }) => {
+    contentExclusions.push({ kind, title: item.title, contentHash: importBytesHash(item.content), ...(item.source ? { source: item.source } : {}),
+      manifestRevision: preview.manifestRevision, manifestHash: preview.manifestHash, excludedAt: new Date().toISOString(), reason: '用户未选择此项导入；原文件保留，未声明来源已复核。' })
+  }
+  const next: NovelImportEvidencePreview = { ...preview,
+    volumes: preview.volumes.map((volume, vi) => ({ ...volume, chapters: volume.chapters.filter((chapter, ci) => { if (chapters.has(`${vi}:${ci}`)) return true; exclude('chapter', chapter); return false }) })).filter(volume => volume.chapters.length),
+    plans: preview.plans?.filter((item, index) => { if (plans.has(index)) return true; exclude('plan', item); return false }),
+    memories: preview.memories?.filter((item, index) => { if (memories.has(index)) return true; exclude('memory', item); return false }),
+    metadataSelection: input.metadataSelection ?? preview.metadataSelection, contentExclusions,
+  }
+  if (!hasImportContent(next)) reject('IMPORT_NO_BODY', '请至少选择一项非空章节、计划、记忆或作品信息。')
+  // Existing source evidence and hashes stay authoritative. Selection is not review.
+  const contentHash = previewContentHash(next)
+  next.decisions = (preview.decisions ?? []).filter(decision => decision.action === 'exclude' || contentExclusions.length === (preview.contentExclusions?.length ?? 0) && decision.contentHash === contentHash)
+  const coverExclusions = unselectedExportCovers(next)
+  if (coverExclusions.length) return applySourceReview(next, { expectedManifestRevision: next.manifestRevision, manifestHash: next.manifestHash, reportHash: next.reportHash!, decisions: coverExclusions })
+  return refreshPreviewWarnings(next)
 }
 
 export function applySourceReview(preview: NovelImportEvidencePreview, input: z.infer<typeof novelImportReviewSchema>): NovelImportEvidencePreview {
@@ -133,7 +185,7 @@ export function applySourceReview(preview: NovelImportEvidencePreview, input: z.
   const retained = (entry: { source?: NovelImportPreview['volumes'][number]['chapters'][number]['source'] }) => !entry.source || !selected.some(item => withinSource(chapterSource(entry.source!), item.source))
   const plans = preview.plans?.filter(retained)
   const memories = preview.memories?.filter(retained)
-  if (!volumes.some(v => v.chapters.some(c => c.content.trim())) && !routedContentCount({ plans, memories })) reject('IMPORT_NO_BODY', '排除后没有可导入的章节、计划或记忆，请重新解析或更换文件。')
+  if (!hasImportContent({ ...preview, volumes, plans, memories })) reject('IMPORT_NO_BODY', '排除后没有可导入内容，请重新解析或更换文件。')
   const next: NovelImportEvidencePreview = { ...preview, volumes, ...(plans ? { plans } : {}), ...(memories ? { memories } : {}), decisions: [...decisions.values()] }
   const contentHash = previewContentHash(next)
   // Old review decisions are invalidated by body exclusion; new choices bind the actual result.

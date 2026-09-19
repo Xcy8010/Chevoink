@@ -21,6 +21,7 @@ export const novelImportCommitSchema = z.object({ approvalId: z.string().uuid(),
 export const novelImportRestoreConfirmSchema = z.object({ targetHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
 export const novelImportRestoreSchema = z.object({ restoreApprovalId: z.string().uuid(), targetHash: z.string().regex(/^[a-f0-9]{64}$/), idempotencyKey: z.string().min(8).max(128) }).strict()
 export const novelImportIntentConfirmSchema = z.object({ step: z.union([z.literal(1), z.literal(2)]), targetHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
+export const novelImportSelectionIntentConfirmSchema = z.object({ targetHash: z.string().regex(/^[a-f0-9]{64}$/), confirmed: z.literal(true) }).strict()
 export type NovelImportVolume = z.infer<typeof novelImportVolumeSchema>
 export type NovelImportModelSelection = z.infer<typeof novelImportModelSchema>
 export type NovelImportManifestEdit = z.infer<typeof novelImportManifestEditSchema>

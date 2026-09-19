@@ -1,13 +1,13 @@
 import { Router, json, type Request, type Response, type NextFunction } from 'express'
 import { z, ZodError } from 'zod'
-import { novelImportCommitSchema, novelImportConfirmSchema, novelImportCreateSchema, novelImportIntentConfirmSchema, novelImportRestoreSchema, novelImportRestoreConfirmSchema } from '../../shared/contracts/novel-import.js'
-import { analyzeNovelImport, attachNovelImportSource, authenticateNovelImportHuman, cancelNovelImport, commitNovelImport, confirmNovelImport, confirmNovelImportIntent, editNovelImportPreview, getNovelImportPreview, getNovelImportStatus, listNovelImports, novelImportCapabilities, preflightNovelImport, prepareNovelImport, previewNovelImportRestore, rebaseNovelImport, restoreNovelImport, uploadNovelImportSource, type NovelImportHuman } from '../lib/novel-import-service.js'
+import { novelImportCommitSchema, novelImportConfirmSchema, novelImportCreateSchema, novelImportIntentConfirmSchema, novelImportSelectionIntentConfirmSchema, novelImportRestoreSchema, novelImportRestoreConfirmSchema } from '../../shared/contracts/novel-import.js'
+import { analyzeNovelImport, attachNovelImportSource, authenticateNovelImportHuman, cancelNovelImport, commitNovelImport, confirmNovelImport, confirmNovelImportIntent, confirmNovelImportSelectionIntent, editNovelImportPreview, getNovelImportPreview, getNovelImportStatus, listNovelImports, novelImportCapabilities, preflightNovelImport, prepareNovelImport, previewNovelImportRestore, rebaseNovelImport, restoreNovelImport, uploadNovelImportSource, type NovelImportHuman } from '../lib/novel-import-service.js'
 import { DataAccessError } from '../lib/prisma.js'
 import { buildError, buildSuccess, createRequestId } from '../lib/http.js'
 import { env } from '../config/env.js'
 import { downloadNovelImportSource } from '../lib/novel-import-service.js'
 import { importSuggestionQuoteSchema, importSuggestionSchema, listImportSuggestions, quoteImportSuggestion, requestImportSuggestion } from '../lib/novel-import/suggestions.js'
-import { getNovelImportPreviewSummary, getNovelImportChapter, getNovelImportReport, downloadNovelImportImage, editNovelImportStructure, reviewNovelImportSources, getNovelImportRestorePreview, getNovelImportCapabilities } from '../lib/novel-import-service.js'
+import { getNovelImportPreviewSummary, getNovelImportChapter, getNovelImportReport, downloadNovelImportImage, editNovelImportStructure, selectNovelImportContent, reviewNovelImportSources, getNovelImportRestorePreview, getNovelImportCapabilities } from '../lib/novel-import-service.js'
 
 // Mount before a broad JSON parser to permit bounded full-preview edits without
 // increasing the application's global JSON/Base64 limits. Raw uploads are streams.
@@ -43,7 +43,7 @@ router.use((req, res, next) => {
   // GET/download/raw source do not consume JSON at all. Only the manifest body
   // needs the large limit; every other mutation is bounded to 16 KiB.
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method) || (req.method === 'PUT' && /^\/[^/]+\/source$/.test(req.path))) return next()
-  if (req.method === 'POST' && /^\/[^/]+\/review$/.test(req.path)) return reviewJson(req, res, next)
+  if (req.method === 'POST' && /^\/[^/]+\/(?:review|selection)$/.test(req.path)) return reviewJson(req, res, next)
   return (req.method === 'PATCH' && /^\/[^/]+\/(?:manifest|structure)$/.test(req.path) ? manifestJson : smallJson)(req, res, next)
 })
 router.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -89,6 +89,11 @@ router.get('/:jobId/chapters/:volumeIndex/:chapterIndex', route((req, human) => 
 }))
 router.patch('/:jobId/structure', route((req, human) => editNovelImportStructure(human, id(req), req.body)))
 router.post('/:jobId/review', route((req, human) => reviewNovelImportSources(human, id(req), req.body)))
+router.post('/:jobId/selection', route((req, human) => selectNovelImportContent(human, id(req), req.body)))
+router.post('/intents/:intentId/confirm-selection', route((req, human) => {
+  const input = novelImportSelectionIntentConfirmSchema.parse(req.body)
+  return confirmNovelImportSelectionIntent(human, idSchema.parse(req.params.intentId), input.targetHash)
+}))
 router.get('/:jobId/artifacts/:artifactId', (req, res) => {
   Promise.resolve().then(() => downloadNovelImportImage(res.locals.importHuman as NovelImportHuman, id(req), idSchema.parse(req.params.artifactId))).then(({ bytes }) => {
     res.setHeader('Content-Type', 'image/png')

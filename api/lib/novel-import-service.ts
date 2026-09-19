@@ -8,9 +8,9 @@ import { requireSessionUserId } from './auth-session.js'
 import { deleteUnreferencedImportBlob, discardImportBlob, importBytesHash, readImportBlob, storeImportJson, storeImportStream, validateImportFilename } from './novel-import-storage.js'
 import { NovelImportParseError } from './novel-import/parsers/types.js'
 import { getDocumentImportReadiness, parseConfiguredNovelImportDocument } from './novel-import/runtime.js'
-import { applySourceReview, applyStructureEdit, assertLegacyContentConserved, canonicalPreviewHash, previewReportDto, refreshPreviewWarnings, reportHash, routedContentCount } from './novel-import/preview.js'
+import { applyContentSelection, applySourceReview, applyStructureEdit, assertLegacyContentConserved, canonicalPreviewHash, hasImportContent, hasImportMetadataSelection, previewReportDto, refreshPreviewWarnings, reportHash, routedContentCount } from './novel-import/preview.js'
 import { hydrateStoredPreview, readPreviewArtifact, readStoredChapter, storePreviewImages, storePreviewParts, summarizePreview, verifyPreviewImages, type StoredPreview } from './novel-import/preview-storage.js'
-import { novelImportReviewSchema, novelImportStructureSchema, type NovelImportDocumentReport, type NovelImportEvidencePreview, type NovelImportChapterDto } from '../../shared/contracts/novel-import-preview.js'
+import { novelImportReviewSchema, novelImportSelectionSchema, novelImportStructureSchema, type NovelImportDocumentReport, type NovelImportEvidencePreview, type NovelImportChapterDto } from '../../shared/contracts/novel-import-preview.js'
 import { assertManagedAttachmentAccess, readAuthorizedAgentAttachment } from './agent-attachment-storage.js'
 import { lockNovelActiveScope } from './data/novel-write-lock.js'
 import { assertNovelImportMutationCount, hashNovelImportRows, hashNovelImportTarget, invalidateNovelImportSources, novelImportBackupSchema, novelImportMetadata } from './data/novel-import.js'
@@ -150,11 +150,24 @@ export async function confirmNovelImportIntent(human: NovelImportHuman, intentId
     return preflightDto(await tx.novelImportIntent.update({ where: { id: intent.id }, data: { confirmationStep: step } }), t)
   })
 }
+export async function confirmNovelImportSelectionIntent(human: NovelImportHuman, intentId: string, targetHash: string) {
+  humanOnly(human); enabled()
+  return novelImportTransaction(async tx => {
+    const t = await target(tx, human); rollout(t)
+    const intent = intentValid(await tx.novelImportIntent.findUnique({ where: { id: intentId } }), human, t.hash, false)
+    if (targetHash !== t.hash) fail('IMPORT_TARGET_CHANGED', '作品已变化，请重新核对所选内容。')
+    // The selection UI records one explicit human action. Step 2 is the legacy
+    // storage representation of a completed intent, not two fabricated clicks.
+    return preflightDto(await tx.novelImportIntent.update({ where: { id: intent.id }, data: { confirmationStep: 2 } }), t)
+  })
+}
 export async function prepareNovelImport(scope: NovelImportScope, intentId: string, selection: NovelImportModelSelection = { kind: 'basic' }) {
   enabled(); const modelSelection = novelImportModelSchema.parse(selection)
   const id = await novelImportTransaction(async tx => {
     const t = await target(tx, scope); rollout(t)
-    const intent = intentValid(await tx.novelImportIntent.findUnique({ where: { id: intentId } }), scope, t.hash, true)
+    // Parsing creates only private preview data. Final content authorization still
+    // requires the completed intent in confirm/commit before any manuscript write.
+    const intent = intentValid(await tx.novelImportIntent.findUnique({ where: { id: intentId } }), scope, t.hash, false)
     const prior = await tx.novelImportJob.findUnique({ where: { intentId } }); if (prior) return prior.id
     if (await tx.novelImportJob.count({ where: { userId: scope.userId, createdAt: { gte: new Date(Date.now() - 86400_000) } } }) >= NOVEL_IMPORT_DAILY_LIMITS.jobs) fail('IMPORT_DAILY_JOB_LIMIT', '24小时内最多创建10个导入任务，取消不会重置配额；请使用已有任务或24小时后重试。', 429)
     // Preserve existing work across clients/racing retries; replacing a job requires explicit cancellation.
@@ -290,7 +303,7 @@ async function persistPreview(scope: NovelImportScope, jobId: string, expected: 
       // Publish the usable preview and release its write lease atomically. A
       // reader may confirm as soon as this transaction commits, before pruning
       // or the failure-cleanup finally below has finished.
-      await tx.novelImportJob.update({ where: { id: jobId }, data: { status: preview.warnings.some(w => w.blocking) || (!preview.volumes.some(v => v.chapters.some(c => c.content.trim())) && !routedContentCount(preview)) ? 'needs_review' : 'ready', manifestRevision: preview.manifestRevision, manifestHash: preview.manifestHash, leaseOwner: null, leaseUntil: null, jobVersion: { increment: 1 }, errorCode: null } })
+      await tx.novelImportJob.update({ where: { id: jobId }, data: { status: preview.warnings.some(w => w.blocking) || !hasImportContent(preview) ? 'needs_review' : 'ready', manifestRevision: preview.manifestRevision, manifestHash: preview.manifestHash, leaseOwner: null, leaseUntil: null, jobVersion: { increment: 1 }, errorCode: null } })
       const obsolete = await tx.novelImportManifest.findMany({ where: { jobId, revision: { lte: preview.manifestRevision - NOVEL_IMPORT_PREVIEW_LIMITS.retainedRevisions } }, select: { id: true, storageKey: true }, take: NOVEL_IMPORT_PREVIEW_LIMITS.revisions })
       await tx.novelImportManifest.deleteMany({ where: { jobId, id: { in: obsolete.map(row => row.id) } } })
       return obsolete.map(row => row.storageKey)
@@ -423,7 +436,18 @@ export async function editNovelImportStructure(human: NovelImportHuman, jobId: s
   if (!['ready', 'needs_review', 'awaiting_confirmation'].includes(job.status)) fail('IMPORT_STATE_INVALID', '请等待解析完成后修改。')
   const old = await getNovelImportPreview(human, jobId)
   const body = { ...applyStructureEdit(old, edit), manifestRevision: old.manifestRevision + 1 }
-  assertNovelImportContent(body.volumes, { allowOversizedChapters: true, allowEmptyBody: routedContentCount(body) > 0 })
+  assertNovelImportContent(body.volumes, { allowOversizedChapters: true, allowEmptyBody: routedContentCount(body) > 0 || hasImportMetadataSelection(body) })
+  const preview = { ...body, manifestHash: hashNovelImportPreview(body) }
+  await persistPreview(human, jobId, job, preview)
+  return summarizePreview(preview)
+}
+export async function selectNovelImportContent(human: NovelImportHuman, jobId: string, input: unknown) {
+  humanOnly(human); enabled()
+  const selection = novelImportSelectionSchema.parse(input)
+  const job = await ownedJob(prisma, human, jobId); live(job)
+  if (!['ready', 'needs_review', 'awaiting_confirmation'].includes(job.status)) fail('IMPORT_STATE_INVALID', '请等待解析完成后选择导入内容。')
+  const old = await getNovelImportPreview(human, jobId)
+  const body = { ...applyContentSelection(old, selection), manifestRevision: old.manifestRevision + 1 }
   const preview = { ...body, manifestHash: hashNovelImportPreview(body) }
   await persistPreview(human, jobId, job, preview)
   return summarizePreview(preview)
@@ -455,7 +479,7 @@ export async function confirmNovelImport(human: NovelImportHuman, jobId: string,
   humanOnly(human); enabled()
   const preview = await getNovelImportPreview(human, jobId)
   assertNovelImportPreviewComplete(preview)
-  assertNovelImportContent(preview.volumes, { allowEmptyBody: routedContentCount(preview) > 0 })
+  assertNovelImportContent(preview.volumes, { allowEmptyBody: routedContentCount(preview) > 0 || hasImportMetadataSelection(preview) })
   if (preview.warnings.some(w => w.blocking)) fail('IMPORT_INCOMPLETE_CONTENT', '存在未解决的来源完整性问题。')
   return novelImportTransaction(async tx => {
     const job = await ownedJob(tx, human, jobId); live(job)
@@ -495,7 +519,7 @@ export async function commitNovelImport(scope: NovelImportScope, jobId: string, 
   }
   const preview = await getNovelImportPreview(scope, jobId)
   assertNovelImportPreviewComplete(preview)
-  assertNovelImportContent(preview.volumes, { allowEmptyBody: routedContentCount(preview) > 0 })
+  assertNovelImportContent(preview.volumes, { allowEmptyBody: routedContentCount(preview) > 0 || hasImportMetadataSelection(preview) })
   if (preview.warnings.some(w => w.blocking)) fail('IMPORT_INCOMPLETE_CONTENT', '存在未解决的完整性问题。')
   const source = await prisma.novelImportSource.findUniqueOrThrow({ where: { jobId } })
   await readImportBlob(source.storageKey, source.sha256)

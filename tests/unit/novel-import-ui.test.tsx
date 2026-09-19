@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import ImportDialog, { type ImportDialogProps } from '../../src/features/studio/components/ImportDialog'
 import type { NovelImportClient } from '../../src/features/studio/import-api'
 import type { NovelImportJobStatus, NovelImportPreflight, NovelImportPreview, NovelImportReceipt } from '../../shared/contracts/novel-import'
+import type { NovelImportPreviewSummary, NovelImportReportDto } from '../../shared/contracts/novel-import-preview'
 import { canSubmitImport, IMPORT_MERGE_DELIMITER, importChapterMergeIssue, importModelSelection, mergeImportChapters, moveImportChapter, reorderImportItem, splitImportChapter } from '../../src/features/studio/lib/import-preview'
 import { ImportPreviewEditor } from '../../src/features/studio/components/import-preview-editor'
 import { clearImportHandoff, readImportHandoff, readImportJobId } from '../../src/features/studio/lib/import-handoff'
@@ -20,12 +21,35 @@ const check: NovelImportPreflight = { intentId: 'intent', targetHash: hash, chap
 const status: NovelImportJobStatus = { jobId: 'job-a', novelId: 'a', status: 'ready', jobVersion: 1, manifestRevision: 1, manifestHash: hash, sourceHash: hash, targetHash: hash, errorCode: null, expiresAt: expiry, receipt: null }
 const preview: NovelImportPreview = { manifestRevision: 1, manifestHash: hash, sourceHash: hash, parserVersion: '1', sourceChars: 4, volumes: [{ title: '正文卷', chapters: [{ title: '原章', content: '原文正文', source: { filename: '小说.txt' } }] }], metadata: { title: '识别书名', summary: '识别简介', tags: ['标签'] }, metadataSelection: {}, warnings: [] }
 const receipt: NovelImportReceipt = { jobId: 'job-a', novelId: 'a', backupId: 'backup', volumeCount: 1, chapterCount: 1, wordCount: 4, firstChapterId: 'new-chapter', targetHash: hash, restoreExpiresAt: expiry }
+const selectionHash = 'b'.repeat(64)
+const selectionSummary: NovelImportPreviewSummary = {
+  manifestRevision: 1, manifestHash: hash, sourceHash: hash, parserVersion: '1', sourceChars: 20,
+  metadata: { title: '识别书名', summary: '识别简介', tags: ['标签'] }, metadataSelection: {}, warnings: [],
+  volumes: [{ title: '正文卷', chapters: [
+    { title: '第一章', source: { filename: '小说.txt' }, volumeIndex: 0, chapterIndex: 0, contentHash: hash, characters: 4, nonEmpty: true },
+    { title: '第二章', source: { filename: '小说.txt' }, volumeIndex: 0, chapterIndex: 1, contentHash: hash, characters: 4, nonEmpty: true },
+  ] }],
+  plans: [{ title: '计划一', content: '计划一内容', source: { filename: '计划.txt' } }, { title: '计划二', content: '计划二内容', source: { filename: '计划.txt' } }],
+  memories: [{ title: '记忆一', content: '记忆一内容', memoryType: 'characterCard', source: { filename: '人物.txt' } }, { title: '记忆二', content: '记忆二内容', memoryType: 'worldbuilding', source: { filename: '世界.txt' } }],
+}
+const selectionReport: NovelImportReportDto = { manifestRevision: 1, manifestHash: hash, reportHash: hash, sourceHash: hash, partialImport: false, items: [], issues: [], decisions: [], artifacts: [] }
+
+function selectionPreviewClient(initial: NovelImportPreviewSummary = selectionSummary, updated: NovelImportPreviewSummary = selectionSummary) {
+  const nextReport = { ...selectionReport, manifestRevision: updated.manifestRevision, manifestHash: updated.manifestHash, sourceHash: updated.sourceHash }
+  return {
+    summary: vi.fn().mockResolvedValue(initial),
+    report: vi.fn().mockResolvedValueOnce(selectionReport).mockResolvedValue(nextReport),
+    selection: vi.fn().mockResolvedValue(updated),
+    chapter: vi.fn(), structure: vi.fn(), review: vi.fn(),
+  } as unknown as ImportDialogProps['previewClient']
+}
 
 function fixture(overrides: Partial<ImportDialogProps> = {}) {
   const client: NovelImportClient = {
     capabilities: vi.fn().mockResolvedValue({ enabled: true, overwriteEnabled: true, aiEnabled: false, sourceBytes: 10000, formats: ['zip', 'txt', 'md', 'pdf', 'doc', 'docx'].map(extension => ({ extension, enabled: extension !== 'doc', reason: extension === 'doc' ? '转换器未开放' : undefined })), limitations: ['公开章节覆盖暂未开放'] }),
     list: vi.fn().mockResolvedValue([]), preflight: vi.fn().mockResolvedValue(check),
     confirmIntent: vi.fn().mockImplementation(async (_novelId, _intent, step) => ({ ...check, confirmationStep: step })),
+    confirmSelectionIntent: vi.fn().mockResolvedValue({ ...check, confirmationStep: 2 }),
     create: vi.fn().mockResolvedValue({ ...status, status: 'uploading' }),
     upload: vi.fn().mockResolvedValue({ ...status, status: 'uploaded' }),
     attachment: vi.fn().mockResolvedValue({ ...status, status: 'uploaded' }),
@@ -48,8 +72,7 @@ async function armedClick(name: string | RegExp) {
 async function uploadAndParse() {
   fireEvent.change(screen.getByLabelText('选择导入文件'), { target: { files: [new File(['原文正文'], '小说.txt', { type: 'text/plain' })] } })
   await armedClick('上传并检查文件')
-  await armedClick('开始确定性解析')
-  await screen.findByLabelText('原文正文')
+  await waitFor(() => expect(screen.queryByLabelText('原文正文') ?? screen.queryByText('选择要导入的内容')).toBeTruthy())
 }
 
 describe('import confirmations and ownership', () => {
@@ -69,6 +92,20 @@ describe('import confirmations and ownership', () => {
     expect(props.onImported).not.toHaveBeenCalled()
     expect(client.preflight).not.toHaveBeenCalled()
     expect(client.create).not.toHaveBeenCalled()
+  })
+
+  it('restores a read-only history job through the current intent on one-click import', async () => {
+    const { props, client } = fixture({ initialView: 'history' })
+    vi.mocked(client.list).mockResolvedValue([status])
+    vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
+    render(<ImportDialog {...props} />)
+    await screen.findByRole('dialog', { name: '导入记录与恢复' })
+    await armedClick(/任务 job-a/)
+    await screen.findByLabelText('原文正文')
+    expect(client.rebase).not.toHaveBeenCalled()
+    await armedClick('一键导入')
+    await waitFor(() => expect(client.rebase).toHaveBeenCalledWith('a', 'job-a', 'intent'))
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
   })
 
   it('restores only after a separate impact confirmation and prevents duplicate dispatch', async () => {
@@ -108,32 +145,23 @@ describe('import confirmations and ownership', () => {
     expect(props.onImported).not.toHaveBeenCalled()
   })
 
-  it('requires two independent confirmations even for a blank existing chapter, not double-click/Enter', async () => {
+  it('defers overwrite authorization until the final one-click submit, not parsing', async () => {
     const { props, client } = fixture()
     render(<ImportDialog {...props} />)
-    await screen.findByRole('dialog', { name: '是否合并导入当前作品？' })
-    expect(screen.queryByLabelText('选择导入文件')).toBeNull()
-    expect(document.activeElement?.textContent).toBe('取消')
-    await armedClick('是，继续')
-    await screen.findByRole('dialog', { name: '再次确认合并导入' })
-    const second = screen.getByRole('button', { name: '确认进入解析预览' }) as HTMLButtonElement
-    expect(second.disabled).toBe(true)
-    fireEvent.click(second, { detail: 2 })
-    fireEvent.keyDown(second, { key: 'Enter', repeat: true })
-    expect(client.confirmIntent).toHaveBeenCalledTimes(1)
-    await armedClick('确认进入解析预览')
     await screen.findByLabelText('选择导入文件')
-    expect(client.confirmIntent).toHaveBeenNthCalledWith(1, 'a', check, 1)
-    expect(client.confirmIntent).toHaveBeenNthCalledWith(2, 'a', { ...check, confirmationStep: 1 }, 2)
-    expect(client.create).not.toHaveBeenCalled()
-    expect(client.commit).not.toHaveBeenCalled()
+    expect(client.confirmSelectionIntent).not.toHaveBeenCalled()
+    await uploadAndParse()
+    expect(client.confirmSelectionIntent).not.toHaveBeenCalled()
+    await armedClick('一键导入')
+    expect(client.confirmSelectionIntent).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
   })
 
-  it('second-step cancel/Escape does not upload or write and restores focus', async () => {
+  it('cancel/Escape closes the selection panel without uploading or writing', async () => {
     const { props, client } = fixture()
     const trigger = document.createElement('button'); document.body.append(trigger); trigger.focus()
     const view = render(<ImportDialog {...props} />)
-    await armedClick('是，继续')
+    await screen.findByLabelText('选择导入文件')
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(props.onClose).toHaveBeenCalledTimes(1)
     view.unmount()
@@ -143,14 +171,15 @@ describe('import confirmations and ownership', () => {
     trigger.remove()
   })
 
-  it('returning from the second confirmation obtains a new challenge instead of replaying step one', async () => {
-    const { props, client } = fixture()
+  it('rechecking obtains a new intent instead of replaying a stale selection authorization', async () => {
+    const { props, client } = fixture({ initialJobId: status.jobId })
     render(<ImportDialog {...props} />)
-    await armedClick('是，继续')
+    await screen.findByLabelText('原文正文')
     vi.mocked(client.preflight).mockResolvedValueOnce({ ...check, intentId: 'new-intent' })
-    await armedClick('返回')
-    await armedClick('是，继续')
-    expect(client.confirmIntent).toHaveBeenNthCalledWith(2, 'a', { ...check, intentId: 'new-intent' }, 1)
+    fireEvent.click(screen.getByText('遇到问题？查看详情'))
+    await armedClick('重新检查')
+    expect(client.preflight).toHaveBeenLastCalledWith('a', undefined)
+    expect(client.confirmSelectionIntent).not.toHaveBeenCalled()
     expect(client.commit).not.toHaveBeenCalled()
   })
 
@@ -196,7 +225,7 @@ describe('import confirmations and ownership', () => {
     expect(screen.getByRole('alert').textContent).toContain('文件为空')
     expect(client.create).not.toHaveBeenCalled()
     await uploadAndParse()
-    expect((screen.getByRole('button', { name: '导入 1 卷 1 章' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: '一键导入' }) as HTMLButtonElement).disabled).toBe(true)
     for (const checkbox of screen.getAllByRole('checkbox')) expect((checkbox as HTMLInputElement).checked).toBe(false)
     expect(client.commit).not.toHaveBeenCalled()
   })
@@ -209,8 +238,8 @@ describe('import confirmations and ownership', () => {
     await uploadAndParse()
     expect(client.create).toHaveBeenCalledWith('a', 'intent', { kind: 'custom', customModelId: 'selected-not-newest' })
     expect(client.upload).toHaveBeenCalledWith('a', 'job-a', expect.any(File))
-    await waitFor(() => expect((screen.getByRole('button', { name: '导入 1 卷 1 章' }) as HTMLButtonElement).disabled).toBe(false))
-    const submit = screen.getByRole('button', { name: '导入 1 卷 1 章' })
+    await waitFor(() => expect((screen.getByRole('button', { name: '一键导入' }) as HTMLButtonElement).disabled).toBe(false))
+    const submit = screen.getByRole('button', { name: '一键导入' })
     fireEvent.click(submit); fireEvent.click(submit)
     await screen.findByText('导入完成')
     expect(client.confirm).toHaveBeenCalledTimes(1)
@@ -219,13 +248,122 @@ describe('import confirmations and ownership', () => {
     expect(props.onImported).toHaveBeenCalledWith(receipt)
   })
 
+  it('keeps only explicitly selected chapter/plan/memory indices and confirms the returned revision', async () => {
+    const updated = { ...selectionSummary, manifestRevision: 2, manifestHash: selectionHash, metadataSelection: { title: '识别书名' } }
+    const { props, client } = fixture({ previewClient: selectionPreviewClient(selectionSummary, updated) })
+    vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
+    render(<ImportDialog {...props} />)
+    await screen.findByLabelText('选择导入文件'); await uploadAndParse()
+    const footer = screen.getByRole('dialog').querySelector('footer')!
+    expect([...footer.querySelectorAll('button')].map(button => button.textContent?.trim())).toEqual(['取消', '一键导入'])
+    fireEvent.click(screen.getByRole('checkbox', { name: /章节正文/ }))
+    fireEvent.click(screen.getByRole('checkbox', { name: /创作计划/ }))
+    fireEvent.click(screen.getByRole('checkbox', { name: /创作记忆/ }))
+    fireEvent.click(screen.getByText('选择具体章节'))
+    fireEvent.click(screen.getByRole('checkbox', { name: '第二章' }))
+    fireEvent.click(screen.getByText('选择具体计划'))
+    fireEvent.click(screen.getByRole('checkbox', { name: '计划二' }))
+    fireEvent.click(screen.getByText('选择具体记忆'))
+    fireEvent.click(screen.getByRole('checkbox', { name: '记忆一' }))
+    await armedClick('一键导入')
+    const previewClient = props.previewClient!
+    expect(previewClient.selection).toHaveBeenCalledWith('a', 'job-a', {
+      expectedManifestRevision: 1, manifestHash: hash,
+      chapters: [{ volumeIndex: 0, chapterIndex: 1 }], plans: [1], memories: [0], metadataSelection: {},
+    })
+    await waitFor(() => expect(client.confirm).toHaveBeenCalledWith('a', expect.objectContaining({ manifestRevision: 1 }), expect.objectContaining({ manifestRevision: 2, manifestHash: selectionHash })))
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
+  })
+
+  it('enables metadata-only selection while keeping an empty selection disabled', async () => {
+    const metadataOnly = { ...selectionSummary, volumes: [], plans: undefined, memories: undefined }
+    const updated = { ...metadataOnly, manifestRevision: 2, manifestHash: selectionHash, metadataSelection: { title: '识别书名' } }
+    const { props } = fixture({ previewClient: selectionPreviewClient(metadataOnly, updated) })
+    vi.mocked(props.client!.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
+    render(<ImportDialog {...props} />)
+    await screen.findByLabelText('选择导入文件'); await uploadAndParse()
+    const submit = screen.getByRole('button', { name: '一键导入' }) as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+    fireEvent.click(screen.getByRole('checkbox', { name: /作品信息/ }))
+    await waitFor(() => expect(submit.disabled).toBe(false))
+  })
+
+  it('does not confirm or commit when saving an explicit selection fails', async () => {
+    const { props, client } = fixture({ previewClient: selectionPreviewClient() })
+    vi.mocked(props.previewClient!.selection).mockRejectedValue(new Error('selection rejected'))
+    vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
+    render(<ImportDialog {...props} />)
+    await screen.findByLabelText('选择导入文件'); await uploadAndParse(); await armedClick('一键导入')
+    await screen.findByText('selection rejected')
+    expect(client.confirm).not.toHaveBeenCalled()
+    expect(client.commit).not.toHaveBeenCalled()
+  })
+
+  it('keeps a partial selection after an unknown selection response when the server revision is unchanged', async () => {
+    const updated = { ...selectionSummary, manifestRevision: 2, manifestHash: selectionHash }
+    const { props, client } = fixture({ previewClient: selectionPreviewClient() })
+    vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
+    vi.mocked(props.previewClient!.selection).mockRejectedValueOnce(new Error('selection timeout')).mockResolvedValue(updated)
+    vi.mocked(client.status).mockResolvedValueOnce(status).mockResolvedValue({ ...status, manifestRevision: 1, manifestHash: hash })
+    render(<ImportDialog {...props} />)
+    await screen.findByLabelText('选择导入文件'); await uploadAndParse()
+    fireEvent.click(screen.getByRole('checkbox', { name: /章节正文/ }))
+    fireEvent.click(screen.getByText('选择具体章节'))
+    fireEvent.click(screen.getByRole('checkbox', { name: '第二章' }))
+    await armedClick('一键导入')
+    await screen.findByText('selection timeout')
+    fireEvent.click(screen.getByText('遇到问题？查看详情'))
+    await armedClick('查询任务状态')
+    await waitFor(() => expect((screen.getByRole('button', { name: '一键导入' }) as HTMLButtonElement).disabled).toBe(false))
+    const previewClient = props.previewClient!
+    vi.mocked(previewClient.report).mockResolvedValue({ ...selectionReport, manifestRevision: 2, manifestHash: selectionHash })
+    await armedClick('一键导入')
+    expect(previewClient.selection).toHaveBeenNthCalledWith(2, 'a', 'job-a', expect.objectContaining({ chapters: [{ volumeIndex: 0, chapterIndex: 1 }] }))
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
+  })
+
+  it('rechecks a dirty selection against a changed target and keeps the explicit indices', async () => {
+    const { props, client } = fixture({ initialJobId: status.jobId, previewClient: selectionPreviewClient() })
+    vi.mocked(client.preflight).mockResolvedValue({ ...check, intentId: 'new-intent', targetHash: 'c'.repeat(64), chapterCount: 0, overwriteRequired: false })
+    render(<ImportDialog {...props} />)
+    await screen.findByRole('group', { name: '选择导入内容' })
+    fireEvent.click(screen.getByRole('checkbox', { name: /章节正文/ }))
+    fireEvent.click(screen.getByText('选择具体章节'))
+    fireEvent.click(screen.getByRole('checkbox', { name: '第二章' }))
+    await armedClick('重新检查')
+    await waitFor(() => expect(client.rebase).toHaveBeenLastCalledWith('a', 'job-a', 'new-intent'))
+    expect((screen.getByRole('checkbox', { name: '第二章' }) as HTMLInputElement).checked).toBe(true)
+    expect((screen.getByRole('checkbox', { name: '第一章' }) as HTMLInputElement).checked).toBe(false)
+  })
+
+  it('clears a partial selection when an unknown response is followed by a new server revision', async () => {
+    const updated = { ...selectionSummary, manifestRevision: 2, manifestHash: selectionHash }
+    const { props, client } = fixture({ previewClient: selectionPreviewClient(selectionSummary, updated) })
+    vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
+    vi.mocked(props.previewClient!.selection).mockRejectedValue(new Error('selection timeout'))
+    vi.mocked(props.previewClient!.summary).mockReset().mockResolvedValueOnce(selectionSummary).mockResolvedValue(updated)
+    vi.mocked(client.status).mockResolvedValueOnce(status).mockResolvedValue({ ...status, manifestRevision: 2, manifestHash: selectionHash })
+    render(<ImportDialog {...props} />)
+    await screen.findByLabelText('选择导入文件'); await uploadAndParse()
+    fireEvent.click(screen.getByRole('checkbox', { name: /章节正文/ }))
+    fireEvent.click(screen.getByText('选择具体章节'))
+    fireEvent.click(screen.getByRole('checkbox', { name: '第二章' }))
+    await armedClick('一键导入')
+    await screen.findByText('selection timeout')
+    fireEvent.click(screen.getByText('遇到问题？查看详情'))
+    await armedClick('查询任务状态')
+    await screen.findByText(/版本发生变化/)
+    expect((screen.getByRole('button', { name: '一键导入' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(client.commit).not.toHaveBeenCalled()
+  })
+
   it('never commits a late grant after switching novels', async () => {
     const { props, client } = fixture()
     vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
     let grant!: (value: { approvalId: string; expiresAt: string }) => void
     vi.mocked(client.confirm).mockImplementation(() => new Promise(resolve => { grant = resolve }))
     const view = render(<ImportDialog {...props} />)
-    await screen.findByLabelText('选择导入文件'); await uploadAndParse(); await armedClick('导入 1 卷 1 章')
+    await screen.findByLabelText('选择导入文件'); await uploadAndParse(); await armedClick('一键导入')
     await waitFor(() => expect(client.confirm).toHaveBeenCalledTimes(1))
     view.rerender(<ImportDialog {...props} novelId="b" novelTitle="作品 B" />)
     await act(async () => { grant({ approvalId: 'stale', expiresAt: expiry }) })
@@ -233,22 +371,22 @@ describe('import confirmations and ownership', () => {
     expect(props.onImported).not.toHaveBeenCalled()
   })
 
-  it('agent attachment hints still require two confirmations and explicit source selection', async () => {
+  it('agent attachment hints still require explicit source selection', async () => {
     const attachment = { url: '/api/uploads/agent-attachments/user/book.txt', runId: 'run' }
     const { props, client } = fixture({ agentAttachment: attachment })
     render(<ImportDialog {...props} />)
-    await armedClick('是，继续'); await armedClick('确认进入解析预览')
+    await screen.findByText(/Agent 交接的待导入附件/)
     expect(client.attachment).not.toHaveBeenCalled()
     await armedClick('上传并检查文件')
     await waitFor(() => expect(client.attachment).toHaveBeenCalledWith('a', 'job-a', attachment))
-    expect(client.analyze).not.toHaveBeenCalled()
+    expect(client.analyze).toHaveBeenCalledTimes(1)
     expect(client.commit).not.toHaveBeenCalled()
   })
 
   it('StrictMode does not issue two preflights or create jobs on initial render', async () => {
     const { props, client } = fixture()
     render(<StrictMode><ImportDialog {...props} /></StrictMode>)
-    await screen.findByRole('dialog', { name: '是否合并导入当前作品？' })
+    await screen.findByLabelText('选择导入文件')
     expect(client.preflight).toHaveBeenCalledTimes(1)
     expect(client.create).not.toHaveBeenCalled()
   })
@@ -256,18 +394,15 @@ describe('import confirmations and ownership', () => {
   it('traps focus and ignores IME Enter/Escape without confirming', async () => {
     const { props, client } = fixture()
     render(<ImportDialog {...props} />)
-    await screen.findByRole('dialog', { name: '是否合并导入当前作品？' })
-    const confirm = screen.getByRole('button', { name: '是，继续' })
-    await waitFor(() => expect((confirm as HTMLButtonElement).disabled).toBe(false))
+    await screen.findByLabelText('选择导入文件')
+    const confirm = screen.getByRole('button', { name: '取消' })
     confirm.focus()
     fireEvent.keyDown(confirm, { key: 'Tab' })
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: '收起导入面板' }))
-    fireEvent.keyDown(document.activeElement!, { key: 'Tab', shiftKey: true })
     expect(document.activeElement).toBe(confirm)
     fireEvent.compositionStart(confirm)
     fireEvent.keyDown(confirm, { key: 'Enter', isComposing: true, keyCode: 229 })
     fireEvent.keyDown(confirm, { key: 'Escape', isComposing: true })
-    expect(client.confirmIntent).not.toHaveBeenCalled()
+    expect(client.confirmSelectionIntent).not.toHaveBeenCalled()
     expect(props.onClose).not.toHaveBeenCalled()
     fireEvent.compositionEnd(confirm)
   })
@@ -285,23 +420,20 @@ describe('import confirmations and ownership', () => {
     expect(client.create).not.toHaveBeenCalled()
   })
 
-  it('persists preview edits with revision and forces save before import; Escape offers leave choices', async () => {
+  it('persists legacy preview edits with the current revision before one-click import', async () => {
     const { props, client } = fixture()
     vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
     render(<ImportDialog {...props} />)
     await screen.findByLabelText('选择导入文件'); await uploadAndParse()
     fireEvent.change(screen.getByLabelText('章名'), { target: { value: '新章名' } })
-    expect((screen.getByRole('button', { name: '导入 1 卷 1 章' }) as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.keyDown(document, { key: 'Escape' })
-    await screen.findByRole('dialog', { name: '预览调整尚未保存' })
-    expect(props.onClose).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: '保存并收起' }))
-    await waitFor(() => expect(props.onClose).toHaveBeenCalledTimes(1))
-    expect(client.edit).toHaveBeenCalledWith('a', 'job-a', expect.objectContaining({ expectedManifestRevision: 1, metadataSelection: {}, volumes: [{ title: '正文卷', chapters: [{ ...preview.volumes[0].chapters[0], title: '新章名' }] }] }))
-    expect(client.commit).not.toHaveBeenCalled()
+    await armedClick('一键导入')
+    await waitFor(() => expect(client.edit).toHaveBeenCalledWith('a', 'job-a', expect.objectContaining({ expectedManifestRevision: 1, metadataSelection: {}, volumes: [{ title: '正文卷', chapters: [{ ...preview.volumes[0].chapters[0], title: '新章名' }] }] })))
+    await waitFor(() => expect(client.confirm).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
+    expect(props.onImported).toHaveBeenCalledWith(receipt)
   })
 
-  it('routes native hardware-back cancellation through the unsaved-preview confirmation', async () => {
+  it('routes native hardware-back cancellation directly to close', async () => {
     const { props, client } = fixture()
     vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
     render(<ImportDialog {...props} />)
@@ -309,8 +441,7 @@ describe('import confirmations and ownership', () => {
     fireEvent.change(screen.getByLabelText('章名'), { target: { value: '尚未保存' } })
     const dialog = document.querySelector('dialog[open][data-native-back-dismiss]')!
     fireEvent(dialog, new Event('cancel', { cancelable: true }))
-    await screen.findByRole('dialog', { name: '预览调整尚未保存' })
-    expect(props.onClose).not.toHaveBeenCalled()
+    await waitFor(() => expect(props.onClose).toHaveBeenCalledTimes(1))
     expect(client.commit).not.toHaveBeenCalled()
   })
 
@@ -319,6 +450,7 @@ describe('import confirmations and ownership', () => {
     vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
     render(<ImportDialog {...props} />)
     await screen.findByLabelText('选择导入文件'); await uploadAndParse()
+    fireEvent.click(screen.getByText('遇到问题？查看详情'))
     fireEvent.click(screen.getByRole('button', { name: '取消任务' }))
     expect(client.cancel).not.toHaveBeenCalled()
     await armedClick('确认取消任务')
@@ -332,9 +464,10 @@ describe('import confirmations and ownership', () => {
     vi.mocked(client.commit).mockRejectedValue(new Error('network lost'))
     vi.mocked(client.status).mockResolvedValue({ ...status, status: 'succeeded', receipt })
     render(<ImportDialog {...props} />)
-    await screen.findByLabelText('选择导入文件'); await uploadAndParse(); await armedClick('导入 1 卷 1 章')
+    await screen.findByLabelText('选择导入文件'); await uploadAndParse(); await armedClick('一键导入')
     await screen.findByText('network lost')
-    expect((screen.getByRole('button', { name: '导入 1 卷 1 章' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: '一键导入' }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByText('遇到问题？查看详情'))
     fireEvent.click(screen.getByRole('button', { name: '查询任务状态' }))
     await screen.findByText('导入完成')
     expect(client.commit).toHaveBeenCalledTimes(1)
@@ -350,7 +483,9 @@ describe('import confirmations and ownership', () => {
     expect(screen.queryByText(/private-other/)).toBeNull()
     await armedClick(/任务 job-a/)
     await screen.findByLabelText('原文正文')
-    expect(client.rebase).toHaveBeenCalledWith('a', 'job-a', 'intent')
+    expect(client.rebase).not.toHaveBeenCalled()
+    await armedClick('一键导入')
+    await waitFor(() => expect(client.rebase).toHaveBeenCalledWith('a', 'job-a', 'intent'))
     expect(client.create).not.toHaveBeenCalled()
   })
 
@@ -361,10 +496,11 @@ describe('import confirmations and ownership', () => {
     expect(client.status).toHaveBeenCalledWith('a', status.jobId)
     expect(client.preflight).not.toHaveBeenCalled()
     expect(client.create).not.toHaveBeenCalled()
-    expect((screen.getByRole('button', { name: '导入 1 卷 1 章' }) as HTMLButtonElement).disabled).toBe(true)
+    await waitFor(() => expect((screen.getByRole('button', { name: '一键导入' }) as HTMLButtonElement).disabled).toBe(false))
     expect((screen.getByLabelText('章名') as HTMLInputElement).matches(':disabled')).toBe(true)
+    fireEvent.click(screen.getByText('遇到问题？查看详情'))
     fireEvent.click(screen.getByRole('button', { name: '重新检查' }))
-    await screen.findByRole('dialog', { name: '是否合并导入当前作品？' })
+    await waitFor(() => expect(client.preflight).toHaveBeenCalledTimes(1))
     expect(client.preflight).toHaveBeenCalledTimes(1)
     expect(client.commit).not.toHaveBeenCalled()
   })
@@ -379,7 +515,7 @@ describe('import confirmations and ownership', () => {
   })
 
   it('splits oversized preview at the textarea cursor, saves partial progress and preserves the final tail', async () => {
-    const content = `${'字'.repeat(200050)}末尾\n\n`
+    const content = `${'字'.repeat(100050)}末尾\n\n`
     const oversized: NovelImportPreview = { ...preview, sourceChars: content.length, volumes: [{ title: '正文卷', chapters: [{ ...preview.volumes[0].chapters[0], content }] }], warnings: [{ code: 'IMPORT_CHAPTER_TOO_LARGE', message: '请拆分超长章', blocking: true }] }
     const { props, client } = fixture()
     vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
@@ -388,24 +524,19 @@ describe('import confirmations and ownership', () => {
     render(<ImportDialog {...props} />)
     await screen.findByLabelText('选择导入文件'); await uploadAndParse()
     const split = async () => {
-      fireEvent.change(screen.getByLabelText('跳转字符位置'), { target: { value: '100000' } })
+      fireEvent.change(screen.getByLabelText('跳转字符位置'), { target: { value: '50000' } })
       fireEvent.click(screen.getByRole('button', { name: '定位拆分光标' }))
       await armedClick('在光标处拆分为两章')
-      await armedClick('保存预览调整')
-      await waitFor(() => expect(screen.queryByRole('button', { name: '保存预览调整' })).toBeNull())
+      await armedClick('一键导入')
+      await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
     }
-    expect((screen.getByRole('button', { name: '导入 1 卷 1 章' }) as HTMLButtonElement).disabled).toBe(true)
     await split()
-    expect((screen.getByRole('button', { name: '导入 1 卷 2 章' }) as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.click(screen.getByRole('button', { name: /^2\./ }))
-    await split()
-    const finalEdit = vi.mocked(client.edit).mock.calls[1][2]
+    const finalEdit = vi.mocked(client.edit).mock.calls[0][2]
     expect(finalEdit.volumes[0].chapters.map(c => c.content).join('')).toBe(content)
-    expect(finalEdit.volumes[0].chapters[2].content).toBe(`${'字'.repeat(50)}末尾\n\n`)
+    expect(finalEdit.volumes[0].chapters[1].content).toBe(`${'字'.repeat(50050)}末尾\n\n`)
     expect(finalEdit.volumes[0].chapters.every(c => c.source.filename === '小说.txt')).toBe(true)
-    await waitFor(() => expect((screen.getByRole('button', { name: '导入 1 卷 3 章' }) as HTMLButtonElement).disabled).toBe(false))
     expect(client.analyze).toHaveBeenCalledTimes(1)
-    expect(client.commit).not.toHaveBeenCalled()
+    expect(client.commit).toHaveBeenCalledTimes(1)
   })
 
   it('merges adjacent same-source bodies exactly and saves against the current revision before permitting import', async () => {
@@ -418,24 +549,19 @@ describe('import confirmations and ownership', () => {
     vi.mocked(client.edit).mockImplementation(async (_novel, _job, edit) => ({ ...mergedPreview, volumes: edit.volumes, metadataSelection: edit.metadataSelection ?? {}, manifestRevision: edit.expectedManifestRevision + 1 }))
     render(<ImportDialog {...props} />)
     await screen.findByLabelText('选择导入文件'); await uploadAndParse()
-    await waitFor(() => expect((screen.getByRole('button', { name: '导入 1 卷 2 章' }) as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect((screen.getByRole('button', { name: '一键导入' }) as HTMLButtonElement).disabled).toBe(false))
     expect(screen.getByText(/合并分隔符：空字符串/)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '与下一章合并（同来源）' }))
     expect((screen.getByLabelText('原文正文') as HTMLTextAreaElement).value).toBe(first.content + second.content)
     expect((screen.getByLabelText('章名') as HTMLInputElement).value).toBe(first.title)
-    expect((screen.getByRole('button', { name: '导入 1 卷 1 章' }) as HTMLButtonElement).disabled).toBe(true)
     expect(client.edit).not.toHaveBeenCalled()
-    await armedClick('保存预览调整')
-    await waitFor(() => expect(screen.queryByRole('button', { name: '保存预览调整' })).toBeNull())
+    await armedClick('一键导入')
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
     expect(client.edit).toHaveBeenCalledWith('a', 'job-a', expect.objectContaining({ expectedManifestRevision: 1, metadataSelection: {}, volumes: [{ title: '正文卷', chapters: [{ ...first, content: first.content + second.content }] }] }))
-    await waitFor(() => expect((screen.getByRole('button', { name: '导入 1 卷 1 章' }) as HTMLButtonElement).disabled).toBe(false))
-    fireEvent.change(screen.getByLabelText('章名'), { target: { value: '合并后改名' } })
-    await armedClick('保存预览调整')
-    await waitFor(() => expect(client.edit).toHaveBeenCalledTimes(2))
-    expect(vi.mocked(client.edit).mock.calls[1][2].expectedManifestRevision).toBe(2)
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
     expect(client.analyze).toHaveBeenCalledTimes(1)
-    expect(client.confirm).not.toHaveBeenCalled()
-    expect(client.commit).not.toHaveBeenCalled()
+    expect(client.confirm).toHaveBeenCalledTimes(1)
+    expect(client.commit).toHaveBeenCalledTimes(1)
   })
 
   it.each(['cross-source', 'over-limit'] as const)('disables %s merging with an actionable explanation and no mutation', reason => {
@@ -458,20 +584,17 @@ describe('import confirmations and ownership', () => {
     const picker = await screen.findByLabelText('选择导入文件')
     fireEvent.change(picker, { target: { files: [new File(['原文'], '小说.txt')] } })
     await armedClick('上传并检查文件')
-    await screen.findByRole('button', { name: '开始确定性解析' })
+    await screen.findByRole('button', { name: '重试确定性解析' })
     expect(screen.queryByRole('combobox', { name: '文本编码' })).toBeNull()
+    fireEvent.click(screen.getByText('遇到问题？查看详情'))
     fireEvent.click(screen.getByRole('checkbox', { name: /手动指定文本编码/ }))
     fireEvent.change(screen.getByRole('combobox', { name: '文本编码' }), { target: { value: 'gb18030' } })
-    expect(client.analyze).not.toHaveBeenCalled()
-    await armedClick('开始确定性解析')
-    await screen.findByRole('button', { name: '重试确定性解析' })
-    expect(screen.getByRole('alert').textContent).toContain('文本编码需要确认')
+    expect(client.analyze).toHaveBeenCalledWith('a', 'job-a')
+    expect(screen.getAllByRole('alert').some(item => item.textContent?.includes('文本编码需要确认'))).toBe(true)
     expect(screen.getByText('错误码：IMPORT_ENCODING_AMBIGUOUS')).toBeTruthy()
-    expect(client.analyze).toHaveBeenCalledWith('a', 'job-a', 'gb18030')
-    fireEvent.change(screen.getByRole('combobox', { name: '文本编码' }), { target: { value: 'utf-16le' } })
     await armedClick('重试确定性解析')
     await screen.findByLabelText('原文正文')
-    expect(client.retry).toHaveBeenCalledWith('a', 'job-a', 'utf-16le')
+    expect(client.retry).toHaveBeenCalledWith('a', 'job-a', 'gb18030')
     expect(client.create).toHaveBeenCalledTimes(1)
     expect(client.commit).not.toHaveBeenCalled()
   })
@@ -481,6 +604,7 @@ describe('import confirmations and ownership', () => {
     vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
     render(<ImportDialog {...props} />)
     await screen.findByLabelText('选择导入文件'); await uploadAndParse()
+    fireEvent.click(screen.getByText('遇到问题？查看详情'))
     fireEvent.click(screen.getByRole('checkbox', { name: /手动指定文本编码/ }))
     fireEvent.change(screen.getByRole('combobox', { name: '文本编码' }), { target: { value: 'utf-16be' } })
     fireEvent.click(screen.getByRole('button', { name: '按所选编码重新解析' }))

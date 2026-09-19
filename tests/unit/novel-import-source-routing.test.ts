@@ -4,13 +4,14 @@ import type { ParsedNovelImport } from '../../api/lib/novel-import/parsers/types
 import { createNovelImportPipeline } from '../../api/lib/novel-import/pipeline.js'
 import { createIsolatedNovelImportParser } from '../../api/lib/novel-import/isolated-parser.js'
 import { parseNovelImportFile } from '../../api/lib/novel-import/parser.js'
+import * as converters from '../../api/lib/novel-import/parsers/isolated.js'
 import { zipFiles } from './novel-import-parser.fixtures.js'
 import { applySourceReview, applyStructureEdit, assertNovelImportPreviewComplete, canonicalPreviewHash, previewContentHash, previewReportDto, reportHash } from '../../api/lib/novel-import/preview.js'
 import { novelImportReviewSchema, novelImportStructureSchema, type NovelImportDocumentReport, type NovelImportEvidencePreview } from '../../shared/contracts/novel-import-preview.js'
 
 // Keep the real pipeline/router/report composition; only replace the Worker boundary.
 vi.mock('../../api/lib/novel-import/isolated-parser.js', () => ({ createIsolatedNovelImportParser: vi.fn() }))
-afterEach(() => vi.resetAllMocks())
+afterEach(() => { vi.restoreAllMocks(); vi.resetAllMocks() })
 
 const hash = 'a'.repeat(64)
 function preview(): NovelImportEvidencePreview {
@@ -47,6 +48,42 @@ function reviewablePreview(): NovelImportEvidencePreview {
 }
 
 describe('source routing pipeline evidence', () => {
+  it('本站导出ZIP保留规划和明确正文，封面只安全转码而不产生正文OCR阻断', async () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=', 'base64')
+    const converter = vi.spyOn(converters, 'runConverter').mockResolvedValue({ base64: png.toString('base64'), width: 1, height: 1 })
+    const nativeParser = vi.fn().mockRejectedValue(new Error('cover must not invoke OCR'))
+    vi.mocked(createIsolatedNovelImportParser).mockReturnValue((bytes, filename, options) => parseNovelImportFile(bytes, filename, { ...options, resources: true, nativeParser }))
+    const result = await createNovelImportPipeline()(zipFiles({
+      '书/正文/第一卷/第0001章 秘密计划.txt': '秘密计划\n\n真实章节正文',
+      '书/规划/故事.txt': '规划逐字保留',
+      '书/目录/目录.txt': '目录不作正文',
+      '书/作品信息以及发布建议/作品信息.txt': '作品名称：原书\n简介：介绍\n作者：甲\n',
+      '书/作品信息以及发布建议/发布建议.txt': '发布建议不作正文',
+      '书/作品信息以及发布建议/封面.png': png,
+    }), 'export.zip', { sourceId: 'source' })
+    expect(converter).toHaveBeenCalledTimes(1)
+    expect(nativeParser).not.toHaveBeenCalled()
+    expect(result.parsed.volumes.flatMap(v => v.chapters)).toEqual([{ title: '秘密计划', content: '真实章节正文', source: 'export.zip!/书/正文/第一卷/第0001章 秘密计划.txt' }])
+    expect(result.parsed.plans).toEqual([{ title: '故事', content: '规划逐字保留', source: 'export.zip!/书/规划/故事.txt' }])
+    expect(result.report.items.filter(item => item.kind === 'block').map(item => item.text)).toEqual(expect.arrayContaining(['真实章节正文', '规划逐字保留']))
+    expect(result.report.items.find(item => item.kind === 'image')).toMatchObject({ status: 'native', source: 'export.zip!/书/作品信息以及发布建议/封面.png' })
+    expect(result.report.issues.filter(issue => issue.blocking).map(issue => issue.code)).toEqual(['IMPORT_IMAGE_STORAGE_REQUIRED'])
+    expect(result.artifacts).toHaveLength(1)
+  })
+
+  it('导出ZIP的空正文与未知附件仍阻断，不因作品信息或规划而隐藏', async () => {
+    vi.mocked(createIsolatedNovelImportParser).mockReturnValue((bytes, filename, options) => parseNovelImportFile(bytes, filename, { ...options, resources: true }))
+    const result = await createNovelImportPipeline()(zipFiles({
+      '书/正文/第一卷/第0001章 开篇.txt': '开篇\n\n',
+      '书/规划/故事.txt': '规划内容',
+      '书/作品信息以及发布建议/作品信息.txt': '作品名称：原书',
+      '书/作品信息以及发布建议/未知附件.bin': '未知内容',
+    }), 'export.zip', { sourceId: 'source' })
+    expect(result.report.complete).toBe(false)
+    expect(result.report.issues).toContainEqual(expect.objectContaining({ code: 'IMPORT_ARCHIVE_MEMBER_EMPTY', blocking: true }))
+    expect(result.report.issues).toContainEqual(expect.objectContaining({ code: 'IMPORT_ARCHIVE_MEMBER_EXCLUDED', blocking: true }))
+  })
+
   it('真实 ZIP 混合来源完整保留，失败成员不能假复核，只能明确排除', async () => {
     vi.mocked(createIsolatedNovelImportParser).mockReturnValue((bytes, filename, options) => parseNovelImportFile(bytes, filename, { ...options, resources: true }))
     const result = await createNovelImportPipeline()(zipFiles({

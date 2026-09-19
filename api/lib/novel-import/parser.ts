@@ -62,7 +62,9 @@ export async function parseNovelImportFile(buffer: Buffer, filename: string, opt
     if (!member) for (const chapter of result.volumes.flatMap((volume) => volume.chapters)) {
       if (chapter.content.length > 100_000) result.warnings.push({ code: 'IMPORT_CHAPTER_TOO_LARGE', message: '单章正文超过 10 万字符，请在预览中拆章；原文未截断。', source: chapter.source, blocking: true })
     }
-    if ((!member || !imageExtension.test(source)) && !result.volumes.some((volume) => volume.chapters.some((chapter) => chapter.content.trim()))) {
+    const exportedNonBody = extension === 'zip' && ((result.plans ?? []).some(plan => plan.content.trim())
+      || result.sourceChars > 0 && Object.keys(result.metadata).length > 0)
+    if ((!member || !imageExtension.test(source)) && !result.volumes.some((volume) => volume.chapters.some((chapter) => chapter.content.trim())) && !exportedNonBody) {
       result.warnings.push({ code: 'IMPORT_NO_BODY', message: '未取得非空正文，不能导入或覆盖作品。', source, blocking: true })
     }
     checkStructure(result)

@@ -13,6 +13,7 @@ const WORLD_MEMORY = /(世界观|背景|设定|worldbuilding|setting)/i
 // A narrative chapter may mention a plan/character in its title; that alone is
 // not evidence that the source is a planning document or a memory card.
 const CHAPTER_TITLE = /^(?:第\s*[零〇一二三四五六七八九十百千万两壹贰叁肆伍陆柒捌玖拾佰仟０-９\d]+\s*[章回节集]|chapter\s+[\divxlcdm]+\b)/i
+const EXPORT_CHAPTER_SOURCE = /!\/(?:[^/]+\/)?正文\/[^/]+\/第\d+章\s+[^/]+\.txt$/i
 
 export type RoutedImportPlan = { title: string; content: string; source?: string }
 export type RoutedImportMemory = { memoryType: 'characterCard' | 'worldbuilding' | 'storyBible'; title: string; content: string; source?: string }
@@ -23,15 +24,15 @@ export function normalizeImportTitle(title: string): string {
 }
 
 export function routeImportContent(parsed: ParsedNovelImport): ParsedNovelImport {
-  const plans: RoutedImportPlan[] = []
-  const memories: RoutedImportMemory[] = []
+  const plans: RoutedImportPlan[] = [...(parsed.plans ?? [])]
+  const memories: RoutedImportMemory[] = [...(parsed.memories ?? [])]
   const volumes: NovelImportVolume[] = []
   for (const volume of parsed.volumes) {
     const chapters: NovelImportVolume['chapters'] = []
     for (const chapter of volume.chapters) {
       const title = chapter.title.trim()
       // 空正文段落没有路由价值，保持原样交给既有完整性报告处理。
-      if (chapter.content.trim() && !CHAPTER_TITLE.test(title)) {
+      if (chapter.content.trim() && !CHAPTER_TITLE.test(title) && !EXPORT_CHAPTER_SOURCE.test(chapter.source)) {
         if (PLAN_TITLE.test(title)) {
           limit(plans.length < 200, '识别出的计划段落超过 200 个，请拆分文件。')
           plans.push({ title, content: chapter.content, source: chapter.source })

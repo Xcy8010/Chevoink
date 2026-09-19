@@ -34,6 +34,7 @@ function clientFixture() {
     capabilities: vi.fn().mockResolvedValue({ enabled: true, overwriteEnabled: true, aiEnabled: false, sourceBytes: 10000, formats: ['zip', 'txt', 'md', 'pdf', 'doc', 'docx'].map(extension => ({ extension, enabled: extension !== 'doc', reason: extension === 'doc' ? '转换器未开放' : undefined })), limitations: [] }),
     list: vi.fn().mockResolvedValue([]), preflight: vi.fn().mockResolvedValue(emptyCheck),
     confirmIntent: vi.fn().mockImplementation(async (_novelId, _intent, step) => ({ ...overwriteCheck, confirmationStep: step })),
+    confirmSelectionIntent: vi.fn().mockResolvedValue({ ...overwriteCheck, confirmationStep: 2 }),
     create: vi.fn().mockResolvedValue({ ...status, status: 'uploading' }),
     upload: vi.fn().mockResolvedValue({ ...status, status: 'uploaded' }),
     attachment: vi.fn().mockResolvedValue({ ...status, status: 'uploaded' }),
@@ -48,6 +49,7 @@ function clientFixture() {
 function previewFixture(report: NovelImportReportDto = cleanReport) {
   return {
     summary: vi.fn().mockResolvedValue(summary),
+    selection: vi.fn().mockResolvedValue(summary),
     chapter: vi.fn().mockResolvedValue({ ...summary.volumes[0].chapters[0], content: '原文正文', manifestRevision: 1, manifestHash: hash }),
     report: vi.fn().mockResolvedValue(report),
     structure: vi.fn().mockResolvedValue(summary),
@@ -85,7 +87,7 @@ describe('一键导入自动管线', () => {
   it('一键解析完成后停在预览，只有最终人工确认才写入', async () => {
     const { client, previewClient, props } = dialogProps()
     render(<ImportDialog {...props} />)
-    await screen.findByRole('button', { name: '导入 1 卷 1 章' })
+    await screen.findByRole('button', { name: '一键导入' })
     expect(client.create).toHaveBeenCalledTimes(1)
     expect(client.analyze).toHaveBeenCalledTimes(1)
     expect(previewClient.review).not.toHaveBeenCalled()
@@ -93,9 +95,10 @@ describe('一键导入自动管线', () => {
     expect(client.commit).not.toHaveBeenCalled()
     expect(props.onClose).not.toHaveBeenCalled()
     await waitFor(() => expect(document.querySelector('[class*="animate-spin"]')).toBeNull())
-    await armedClick('导入 1 卷 1 章')
+    await armedClick('一键导入')
     await waitFor(() => expect(props.onImported).toHaveBeenCalledWith(receipt))
-    expect(client.commit).toHaveBeenCalledTimes(1)
+    expect(previewClient.selection).toHaveBeenCalledWith('a', 'job-a', expect.objectContaining({ expectedManifestRevision: 1, manifestHash: hash }))
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
   })
 
   it('review 阻断项回预览，机器不代替人工核对', async () => {
@@ -127,7 +130,7 @@ describe('一键导入自动管线', () => {
     expect(screen.getByText(/缺页.pdf#page=2/)).toBeTruthy()
     expect(client.confirm).not.toHaveBeenCalled()
     expect(client.commit).not.toHaveBeenCalled()
-    await armedClick('部分导入：导入 1 卷 1 章')
+    await armedClick('一键导入')
     await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
   })
 
@@ -191,28 +194,27 @@ describe('一键导入自动管线', () => {
     expect(screen.getByRole('button', { name: /old-live/ })).toBeTruthy()
   })
 
-  it('合并语义保留双确认，之后只解析预览', async () => {
+  it('合并语义只在最终一键导入前授权，解析阶段不写入作品', async () => {
     const { client, props } = dialogProps()
     vi.mocked(client.preflight).mockResolvedValue(overwriteCheck)
     render(<ImportDialog {...props} />)
-    await screen.findByRole('dialog', { name: '是否合并导入当前作品？' })
-    expect(screen.getByText(/不匹配的现有内容保留/)).toBeTruthy()
-    expect(client.create).not.toHaveBeenCalled()
-    await armedClick('是，继续')
-    await screen.findByRole('dialog', { name: '再次确认合并导入' })
-    await armedClick('确认进入解析预览')
-    await screen.findByRole('button', { name: '确认合并并导入 1 卷 1 章' })
-    expect(client.confirmIntent).toHaveBeenCalledTimes(2)
+    await screen.findByRole('button', { name: '一键导入' })
+    expect(client.create).toHaveBeenCalledTimes(1)
+    expect(client.confirmSelectionIntent).not.toHaveBeenCalled()
     expect(client.commit).not.toHaveBeenCalled()
+    await armedClick('一键导入')
+    expect(client.confirmSelectionIntent).toHaveBeenCalledWith('a', expect.objectContaining({ intentId: 'intent' }))
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
   })
 
   it('部分提交结果未知时只核对状态，不重复 commit', async () => {
     const { client, props } = dialogProps()
     vi.mocked(client.commit).mockRejectedValue(new Error('提交连接中断'))
-    vi.mocked(client.status).mockResolvedValue({ ...status, status: 'succeeded', receipt })
+    vi.mocked(client.status).mockResolvedValueOnce(status).mockResolvedValue({ ...status, status: 'succeeded', receipt })
     render(<ImportDialog {...props} />)
-    await armedClick('导入 1 卷 1 章')
+    await armedClick('一键导入')
     await screen.findByText('提交连接中断')
+    fireEvent.click(screen.getByText('遇到问题？查看详情'))
     await armedClick('查询任务状态')
     await waitFor(() => expect(props.onImported).toHaveBeenCalledWith(receipt))
     expect(client.commit).toHaveBeenCalledTimes(1)
@@ -231,11 +233,11 @@ describe('一键导入自动管线', () => {
     const { client, previewClient, props } = dialogProps()
     previewClient.summary.mockResolvedValue({ ...summary, volumes: [], plans: [{ title: '原文计划', content: '原文计划内容', source: { filename: '计划.txt' } }], memories: [{ title: '人物卡', content: '人物原文内容', memoryType: 'characterCard', source: { filename: '人物.txt' } }] })
     render(<ImportDialog {...props} />)
-    await screen.findByLabelText('计划与记忆导入预览')
-    expect(screen.getByText('原文计划内容')).toBeTruthy()
-    expect(screen.getByText('人物原文内容')).toBeTruthy()
+    await screen.findByLabelText('选择导入内容')
+    expect(screen.getByRole('checkbox', { name: /创作计划/ })).toBeTruthy()
+    expect(screen.getByRole('checkbox', { name: /创作记忆/ })).toBeTruthy()
     expect(client.commit).not.toHaveBeenCalled()
-    await armedClick('导入 0 卷 0 章')
+    await armedClick('一键导入')
     await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
   })
 

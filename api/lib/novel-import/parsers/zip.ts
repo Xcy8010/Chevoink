@@ -2,7 +2,7 @@ import { scanArchive, readArchiveEntry, naturalCompare } from './archive.js'
 import { checkStructure, isFatal, limit, NOVEL_IMPORT_LIMITS, ParseContext } from './limits.js'
 import { decodeText, fileStem, headingKind } from './text.js'
 import { emptyImport, NovelImportParseError, type ParsedNovelImport } from './types.js'
-import { checkImportImages, imageExtension, stableImportId } from './images.js'
+import { checkImportImages, imageExtension, sanitizeImportImage, stableImportId } from './images.js'
 
 type MemberParser = (buffer: Buffer, source: string) => Promise<ParsedNovelImport>
 const SECTIONS = new Set(['正文', '规划', '目录', '作品信息以及发布建议'])
@@ -80,6 +80,33 @@ export async function parseZip(buffer: Buffer, source: string, context: ParseCon
         result.warnings.push({ code: 'IMPORT_ARCHIVE_MEMBER_UNSELECTED', message: '尚未选择作品，此成员未导入。', source: memberSource, blocking: true })
         continue
       }
+      const section = exportSection(entry.path)
+      if (native && section && section.root !== singleRoot) {
+        item.status = 'needs_review'
+        result.warnings.push({ code: 'IMPORT_ARCHIVE_MEMBER_UNSELECTED', message: '此成员位于已识别作品根目录以外，未合并导入，请单独选择作品。', source: memberSource, blocking: true })
+        continue
+      }
+      // Exact exporter layout declares this image to be an optional cover, not a
+      // scanned body page. Still decode/re-encode it; never run OCR on cover art.
+      if (native && section?.section === '作品信息以及发布建议' && section.rest.length === 1 && /^封面\.(?:png|jpe?g|webp)$/i.test(section.rest[0])) {
+        if (resources) {
+          const image = await sanitizeImportImage(data, memberSource, context)
+          result.images!.push(image); checkImportImages(result.images!)
+          result.evidence!.items.push({ id: image.id, kind: 'image', source: memberSource, status: 'native', excludable: true, artifactId: image.id })
+        } else item.status = 'excluded'
+        result.warnings.push({ code: 'IMPORT_ARCHIVE_COVER_OPTIONAL', message: '本站导出封面保留为可选图片，不作为正文或 OCR 页面。', source: memberSource, blocking: false })
+        continue
+      }
+      if (native && section?.section === '规划' && section.rest.length === 1 && /\.txt$/i.test(section.rest[0])) {
+        const decoded = decodeText(data, memberSource, encoding)
+        context.addChars(decoded.text.length); result.sourceChars += decoded.text.length
+        result.warnings.push(...decoded.warnings)
+        result.plans ??= []
+        limit(result.plans.length < 200, '导出规划超过 200 个，请拆分文件。')
+        result.plans.push({ title: fileStem(entry.path), content: decoded.text, source: memberSource })
+        if (!decoded.text.trim()) result.warnings.push({ code: 'IMPORT_ARCHIVE_MEMBER_EMPTY', message: '规划成员没有非空内容。', source: memberSource, blocking: true })
+        continue
+      }
       if (resources && imageExtension.test(entry.path)) {
         const parsed = await parseMember(data, memberSource)
         result.images!.push(...(parsed.images ?? [])); checkImportImages(result.images!)
@@ -90,17 +117,13 @@ export async function parseZip(buffer: Buffer, source: string, context: ParseCon
         item.status = 'needs_review'
         continue
       }
-      const section = exportSection(entry.path)
       if (!native && section && section.section !== '正文') {
         result.warnings.push({ code: 'IMPORT_ARCHIVE_STRUCTURE_AMBIGUOUS', message: '目录名类似辅助资料，但没有本站导出标记；原文保留预览，请确认是否属于正文。', source: memberSource, blocking: true })
       }
-      if (native && section && section.root !== singleRoot) {
-        item.status = 'needs_review'
-        result.warnings.push({ code: 'IMPORT_ARCHIVE_MEMBER_UNSELECTED', message: '此成员位于已识别作品根目录以外，未合并导入，请单独选择作品。', source: memberSource, blocking: true })
-        continue
-      }
       if (native && section?.section !== '正文') {
-        item.status = section ? 'excluded' : 'needs_review'
+        const known = section?.section === '目录' && section.rest.join('/') === '目录.txt'
+          || section?.section === '作品信息以及发布建议' && ['作品信息.txt', '发布建议.txt'].includes(section.rest.join('/'))
+        item.status = known ? 'excluded' : 'needs_review'
         if (section?.section === '作品信息以及发布建议' && section.rest.join('/') === '作品信息.txt') {
           const decoded = decodeText(data, memberSource, encoding)
           context.addChars(decoded.text.length)
@@ -108,7 +131,7 @@ export async function parseZip(buffer: Buffer, source: string, context: ParseCon
           result.metadata = { ...result.metadata, ...nativeMetadata(decoded.text) }
           result.warnings.push(...decoded.warnings)
         }
-        result.warnings.push({ code: 'IMPORT_ARCHIVE_MEMBER_EXCLUDED', message: section ? '本站导出中的规划、目录及发布建议等辅助资料不作为正文。' : '正文目录以外的未知成员未导入，请确认。', source: memberSource, blocking: !section })
+        result.warnings.push({ code: 'IMPORT_ARCHIVE_MEMBER_EXCLUDED', message: known ? '本站导出中的目录及发布建议等辅助资料不作为正文。' : '正文目录以外的未知成员未导入，请确认。', source: memberSource, blocking: !known })
         continue
       }
       if (native && section) {

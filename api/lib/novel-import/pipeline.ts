@@ -49,7 +49,8 @@ export function buildNovelImportReport(parsed: ParsedNovelImport, filename: stri
   add({ id: rootId, kind: 'file', source: filename, status: 'native', excludable: false })
   for (const item of parsed.evidence?.items ?? []) add({ ...item, ...(item.id === rootId ? { excludable: false } : {}) })
   // Pure text/DOCX have character/member provenance, not fictitious PDF page numbers.
-  for (const volume of parsed.volumes) for (const chapter of volume.chapters) {
+  for (const chapter of [...parsed.volumes.flatMap(volume => volume.chapters), ...(parsed.plans ?? []), ...(parsed.memories ?? [])]) {
+    if (!chapter.source) throw new NovelImportParseError('IMPORT_PROTOCOL_INVALID', '解析内容缺少来源标识。')
     const pageMatch = /(?:#|&)page=(\d+)(?=$|[#&])/.exec(chapter.source)
     if (pageMatch) {
       const pageSource = chapter.source.slice(0, pageMatch.index + pageMatch[0].length)
@@ -63,7 +64,7 @@ export function buildNovelImportReport(parsed: ParsedNovelImport, filename: stri
     }
   }
   for (const image of parsed.images ?? []) add({ id: image.id, kind: 'image', source: image.source,
-    parentId: rootId, status: 'needs_review', excludable: true, artifactId: image.id })
+    parentId: rootId, status: items.get(image.id)?.status === 'native' ? 'native' : 'needs_review', excludable: true, artifactId: image.id })
   // Failed pure-PDF pages / failed ZIP members must exist even when no chapter was returned.
   for (const warning of parsed.warnings) {
     if (!warning.source) continue

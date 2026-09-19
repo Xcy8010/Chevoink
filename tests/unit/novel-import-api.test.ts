@@ -92,3 +92,18 @@ it('explicit reparse preserves detected encoding and sends a separate rebuild fl
     method: 'POST', body: '{"reparse":true}', timeoutMs: 120_000,
   })
 })
+
+it('serializes explicit chapter, plan, memory and metadata selection against the bound revision', async () => {
+  const edit = {
+    expectedManifestRevision: 3,
+    manifestHash: 'a'.repeat(64),
+    chapters: [{ volumeIndex: 0, chapterIndex: 1 }],
+    plans: [2],
+    memories: [0],
+    metadataSelection: { title: '识别书名' },
+  }
+  await importPreviewApi.selection('novel-a', 'job-a', edit)
+  expect(requestData).toHaveBeenCalledWith('/api/novels/novel-a/imports/job-a/selection', {
+    method: 'POST', body: JSON.stringify(edit),
+  })
+})
