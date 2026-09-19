@@ -28,7 +28,7 @@ const report: NovelImportReportDto = { manifestRevision: 1, manifestHash: hash, 
 const chapterDto = (index: number, revision = 1): NovelImportChapterDto => ({ ...summary.volumes[0].chapters[index], content: contents[index], manifestRevision: revision, manifestHash: hash })
 const job = { jobId: 'job-a', novelId: 'a', status: 'ready' as const, jobVersion: 1, manifestRevision: 1, manifestHash: hash, sourceHash: hash, targetHash: hash, errorCode: null, expiresAt: expiry, receipt: null }
 function previewClient() {
-  return { summary: vi.fn().mockResolvedValue(summary), report: vi.fn().mockResolvedValue(report), chapter: vi.fn().mockImplementation(async (_n, _j, revision, _v, index) => chapterDto(index, revision)), structure: vi.fn().mockResolvedValue(summary), review: vi.fn().mockResolvedValue(summary) } satisfies typeof importPreviewApi
+  return { summary: vi.fn().mockResolvedValue(summary), report: vi.fn().mockResolvedValue(report), selection: vi.fn().mockResolvedValue(summary), chapter: vi.fn().mockImplementation(async (_n, _j, revision, _v, index) => chapterDto(index, revision)), structure: vi.fn().mockResolvedValue(summary), review: vi.fn().mockResolvedValue(summary) } satisfies typeof importPreviewApi
 }
 async function clickArmed(name: string | RegExp) {
   const target = await screen.findByRole('button', { name })
@@ -36,7 +36,7 @@ async function clickArmed(name: string | RegExp) {
   fireEvent.click(target)
 }
 function dialogFixture() {
-  const client = { ...novelImportApi, capabilities: vi.fn().mockResolvedValue({ enabled: true, restoreEnabled: false, overwriteEnabled: true, aiEnabled: false, sourceBytes: 50000, formats: [], limitations: [] }), list: vi.fn().mockResolvedValue([job]), preflight: vi.fn().mockResolvedValue({ intentId: 'intent', targetHash: hash, volumeCount: 0, chapterCount: 0, nonEmptyChapterCount: 0, overwriteRequired: false, confirmationStep: 0, expiresAt: expiry }), rebase: vi.fn().mockResolvedValue(job), preview: vi.fn(), confirm: vi.fn(), commit: vi.fn() }
+  const client = { ...novelImportApi, capabilities: vi.fn().mockResolvedValue({ enabled: true, restoreEnabled: false, overwriteEnabled: true, aiEnabled: false, sourceBytes: 50000, formats: [], limitations: [] }), list: vi.fn().mockResolvedValue([job]), status: vi.fn().mockResolvedValue(job), preflight: vi.fn().mockResolvedValue({ intentId: 'intent', targetHash: hash, volumeCount: 0, chapterCount: 0, nonEmptyChapterCount: 0, overwriteRequired: false, confirmationStep: 0, expiresAt: expiry }), rebase: vi.fn().mockResolvedValue(job), preview: vi.fn(), confirm: vi.fn().mockResolvedValue({ approvalId: 'approval', expiresAt: expiry }), commit: vi.fn().mockResolvedValue({ jobId: 'job-a', novelId: 'a', backupId: 'backup', volumeCount: 1, chapterCount: 1, wordCount: 20, firstChapterId: 'first', targetHash: hash, restoreExpiresAt: expiry }) }
   const modern = previewClient()
   const props = { open: true, novelId: 'a', novelTitle: '作品A', modelSelection: { kind: 'basic' as const }, beforeImport: vi.fn().mockResolvedValue(true), onClose: vi.fn(), onImported: vi.fn(), client, previewClient: modern }
   return { props, client, modern }
@@ -76,20 +76,19 @@ describe('revision-bound on-demand preview', () => {
     const { props, client, modern } = dialogFixture()
     render(<ImportDialog {...props} />)
     await clickArmed(/任务 job-a/)
-    await screen.findByLabelText('原文正文')
+    await screen.findByRole('group', { name: '选择导入内容' })
     expect(client.preview).not.toHaveBeenCalled()
-    expect(modern.chapter).toHaveBeenCalledTimes(1)
-    fireEvent.change(screen.getByLabelText('章名'), { target: { value: '改名首章' } })
-    expect((screen.getByRole('button', { name: '导入 1 卷 3 章' }) as HTMLButtonElement).disabled).toBe(true)
-    await clickArmed('保存预览调整')
-    await waitFor(() => expect(modern.structure).toHaveBeenCalledTimes(1))
-    const payload = modern.structure.mock.calls[0][2] as ImportStructureEdit
-    expect(payload.volumes[0].chapters[0].title).toBe('改名首章')
-    expect(payload.volumes[0].chapters[1].segments).toEqual([{ volumeIndex: 0, chapterIndex: 1, start: 0, end: contents[1].length }])
+    fireEvent.click(screen.getByText('选择具体章节'))
+    fireEvent.click(screen.getByRole('checkbox', { name: '第1章' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: '第3章' }))
+    await clickArmed('一键导入')
+    await waitFor(() => expect(modern.selection).toHaveBeenCalledTimes(1))
+    const payload = modern.selection.mock.calls[0][2] as { expectedManifestRevision: number; manifestHash: string; chapters: unknown[]; plans: unknown[]; memories: unknown[]; metadataSelection: Record<string, unknown> }
+    expect(payload).toEqual({ expectedManifestRevision: 1, manifestHash: hash, chapters: [{ volumeIndex: 0, chapterIndex: 1 }], plans: [], memories: [], metadataSelection: {} })
     expect(JSON.stringify(payload)).not.toContain('"content":')
-    expect(modern.chapter.mock.calls.some(call => call[4] === 1)).toBe(false)
-    expect(client.confirm).not.toHaveBeenCalled()
-    expect(client.commit).not.toHaveBeenCalled()
+    expect(modern.chapter).not.toHaveBeenCalled()
+    expect(modern.structure).not.toHaveBeenCalled()
+    await waitFor(() => expect(client.commit).toHaveBeenCalledTimes(1))
   })
 
   it('allows read-only history navigation but disables editing, with no late body from another selection', async () => {
@@ -137,12 +136,17 @@ describe('revision-bound on-demand preview', () => {
 
   it('uses summary nonEmpty and completeness gates, not positive character count, before import', async () => {
     const { props, modern, client } = dialogFixture()
-    modern.summary.mockResolvedValue({ ...summary, volumes: [{ title: '卷', chapters: summary.volumes[0].chapters.map(chapter => ({ ...chapter, nonEmpty: false })) }] })
+    const emptySummary = { ...summary, volumes: [{ title: '卷', chapters: summary.volumes[0].chapters.map(chapter => ({ ...chapter, nonEmpty: false })) }] }
+    modern.summary.mockResolvedValue(emptySummary)
+    modern.selection.mockResolvedValue(emptySummary)
     render(<ImportDialog {...props} />)
     await clickArmed(/任务 job-a/)
-    await screen.findByLabelText('原文正文')
-    expect((screen.getByRole('button', { name: '导入 1 卷 3 章' }) as HTMLButtonElement).disabled).toBe(true)
+    await screen.findByRole('group', { name: '选择导入内容' })
+    await clickArmed('一键导入')
+    await screen.findByText(/所选内容尚不能导入/)
+    expect(modern.selection).toHaveBeenCalledTimes(1)
     expect(client.commit).not.toHaveBeenCalled()
+    expect(client.confirm).not.toHaveBeenCalled()
   })
 })
 

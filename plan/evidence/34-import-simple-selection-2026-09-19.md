@@ -23,3 +23,5 @@
 本地定向回归（Node 22.23.2，2026-09-19）：UI/auto/API 三套共 75/75 通过（3 suites）；backend selection/parser/source-routing/service/preview/content-routing/API 共 233/233 通过（7 suites）。本机 test guard 报告测试数据库不可用；上述结果未把数据库跳过视为发布通过，隔离数据库的完整四闸以同 SHA CI 为准。
 
 静态与构建（同 Node）：`npm run check` 通过；`npm run lint` 通过，新增选择组件有 2 条既有 Fast Refresh warning、0 errors；`npm run build` 通过（Vite 3281 modules transformed）。尚未为此轮提交/推送/部署。不使用生产作者正文做写测试，不包含原目录未发布 AI 分类和数据库迁移。
+
+CI 前补适配：旧 `novel-import-preview-ui` 的两个 ImportDialog 断言已迁移到选择接口（只提交 manifest revision/hash 与索引，不请求全文，不发送 content）；其余结构编辑器和来源安全断言保留。本地该文件 13/13 通过。
