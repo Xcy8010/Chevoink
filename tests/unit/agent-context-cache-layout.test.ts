@@ -204,7 +204,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(content).toContain('技能操作：作者明确要求')
     expect(content).toContain('历史工具记录')
     expect(content).toContain('站内作品标签库')
-    expect(content).toContain('作者当前编辑的章节以尾部快照为准；未指明章节时优先针对该章节操作。')
+    expect(content).toContain('作者当前编辑的章节以尾部快照为准；未指明章节时优先针对该章节操作，但“写下一章”要求准备新章，不能默认操作编辑器中的旧章。')
     expect(content).toContain('服务端工作区快照协议')
     expect(content).toContain('作者当前明确硬约束优先于 soft Skill')
 
