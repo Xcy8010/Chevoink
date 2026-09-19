@@ -185,6 +185,21 @@ describe('BYOK paid-tool isolation', () => {
 })
 
 describe('original task context on resume', () => {
+  it('stops on the first output-limit failure without retrying or executing a same-batch bridge commit', async () => {
+    const critic = tool('continuity_validate', async () => { throw new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', 'output limit') })
+    const commit = tool('chapter_bridge_commit', async () => ({ output: '不得执行的提交' }))
+    mocks.tools = [critic, commit]
+    queue(response('', [call('check', 'continuity_validate'), call('commit', 'chapter_bridge_commit'), call('repeat', 'continuity_validate')]), response('检查未完成，已保留正文并停止提交。'))
+    await run()
+    expect(critic.execute).toHaveBeenCalledTimes(1)
+    expect(commit.execute).not.toHaveBeenCalled()
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    const wrap = mocks.chat.mock.calls[1][0] as Parameters<typeof chatType>[0]
+    expect(wrap.tools).toEqual([])
+    for (const id of ['commit', 'repeat']) expect(wrap.messages).toContainEqual(expect.objectContaining({ role: 'tool', toolCallId: id, content: expect.stringContaining('未执行') }))
+    expect(events().filter(event => event.type === 'tool.result')).toEqual([expect.objectContaining({ callId: 'check', ok: false, summary: '模型输出达到上限，检查未完成' })])
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'failed' }))
+  })
   it.each(['quality_analyze', 'continuity_validate', 'creative_critique', 'cover_generate'])('stops repeated %s provider failures even when parameters change within a batch', async name => {
     const failing = tool(name, async () => { throw new DataAccessError(502, 'AI_PROVIDER_TIMEOUT', 'gateway timeout') })
     mocks.tools = [failing]

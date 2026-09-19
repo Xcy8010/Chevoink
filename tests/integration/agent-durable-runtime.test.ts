@@ -1616,6 +1616,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
         requests++
         const body = JSON.parse(String(init.body))
+        expect(body.max_tokens).toBe(16_384)
         expect(body.tools).toBeUndefined()
         expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
         if (scenario === 'long') { expect(body.messages[1].content).toContain('开头锚点'); expect(body.messages[1].content).toContain('末尾锚点'); expect(body.messages[1].content).toContain(before) }
@@ -1815,10 +1816,12 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       const ctx: ToolContext = { ...f, callId: 'critic', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
       expect(await continuityValidateTool.execute(ctx, { compilationId })).toMatchObject({ summary: '连续性检查 · 自动修订 1 处' })
       expect(completion).toHaveBeenCalledTimes(1)
+      expect(completion.mock.calls[0][2]).toMatchObject({ maxOutputTokens: 16_384, reasoningEffort: 'low' })
       const updated = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
       expect(saved.validation).toMatchObject({ checkedRevision: updated.revision - 1 })
       expect(await continuityValidateTool.execute(ctx, { compilationId })).toMatchObject({ summary: '连续性检查 · 0 错误 0 警告' })
+      expect(completion.mock.calls[1][2]).toMatchObject({ maxOutputTokens: 16_384, reasoningEffort: 'low' })
       expect(completion).toHaveBeenCalledTimes(2)
       expect(completion.mock.calls[1][1]).toContain(updated.content)
       expect(completion.mock.calls[1][1]).toContain('本次只读复核')

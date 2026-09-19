@@ -20,7 +20,7 @@ import { validateStoryContinuity, continuityRepairRounds, MAX_CONTINUITY_AUTO_RE
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { normalizeToolInput } from './input-validation.js'
-import { parseIndependentContinuityResult, parseContinuityPatches, continuityCriticSystem, continuityReviewTail } from './story-compiler-tools.js'
+import { parseIndependentContinuityResult, parseContinuityPatches, continuityCriticSystem, continuityReviewTail, CONTINUITY_MAX_OUTPUT_TOKENS } from './story-compiler-tools.js'
 import { recalcNovelStats } from './novel-tools.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
 
@@ -99,7 +99,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     if (runtime.tier !== 'speed') return runtimeError('RUNTIME_IDENTITY_CONFLICT', '独立复核档位不可用，不允许静默替换。')
     const price = await resolveDurableTokenPrice(lease, `${capability.operationKey}:critic-price`, 'speed', runtime.multiplierBps)
     if (price.version !== 'credits-v2-itemized') return runtimeError('RUNTIME_PRICE_REQUIRED', '独立复核需要已批准的V2价目。')
-    work = { ...work, route: { provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel, baseUrl: runtime.baseUrl ?? env.aiTextBaseUrl, maxOutputTokens: env.aiTextMaxOutputTokens }, price }
+    work = { ...work, route: { provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel, baseUrl: runtime.baseUrl ?? env.aiTextBaseUrl, maxOutputTokens: CONTINUITY_MAX_OUTPUT_TOKENS }, price }
   }
   work = workSchema.parse(work)
   const prepared = await prepareToolCursorOperation(lease, cursor, { key: capability.operationKey, action: tool.name, callId: ctx.callId,

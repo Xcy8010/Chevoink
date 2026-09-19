@@ -40,6 +40,11 @@ const BUILD_WRITE = { plan: 'deny', build: 'allow', review: 'deny' } as const
 const asStrings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 
+// Thinking and final JSON share the provider's completion allowance. A full
+// chapter review needs room for both; keep a finite tool-specific ceiling rather
+// than inheriting the generic 8K text allowance or retrying a paid truncation.
+export const CONTINUITY_MAX_OUTPUT_TOKENS = 16_384
+
 const independentContinuityResultSchema = z.object({
   findings: z.array(continuityFindingInputSchema).max(30),
 })
@@ -608,7 +613,7 @@ export const continuityValidateTool = defineTool({
     const criticResponses = await Promise.all(criticPrompts.map((systemPrompt, index) => generateTextCompletion(
       systemPrompt,
       criticInput,
-      { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: ctx.signal, userId: ctx.userId, action: index === 0 ? 'agent3ContinuityCritic' : 'agent3ContinuityCriticSecondPass', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0.15, reasoningEffort: 'low' },
+      { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: ctx.signal, userId: ctx.userId, action: index === 0 ? 'agent3ContinuityCritic' : 'agent3ContinuityCriticSecondPass', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0.15, reasoningEffort: 'low', maxOutputTokens: CONTINUITY_MAX_OUTPUT_TOKENS },
     )))
     ctx.signal.throwIfAborted()
     const parsedCriticResponses = criticResponses.map(parseIndependentContinuityResult)

@@ -47,6 +47,16 @@ describe('explicit zero provider usage is not missing usage', () => {
     expect(fetcher).toHaveBeenCalledOnce()
     expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ responseTokens: 8192 }))
   })
+  it('reserves room for thinking and the final continuity JSON, preserving reported usage above the generic ceiling', async () => {
+    const fetcher = vi.fn(async () => new Response('data: {"choices":[{"delta":{"reasoning_content":"检查过程"}}]}\n\ndata: {"choices":[{"delta":{"content":"{\\"findings\\":[]}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":9000}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
+    vi.stubGlobal('fetch', fetcher)
+    await expect(generateTextCompletion('system', '完整正文', { userId: 'test', action: 'agent3ContinuityCritic', maxOutputTokens: 16_384, reasoningEffort: 'low' })).resolves.toBe('{"findings":[]}')
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body).toMatchObject({ max_tokens: 16_384, reasoning_effort: 'low' })
+    expect(body.messages[1].content).toBe('完整正文')
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ responseTokens: 9000 }))
+  })
   it('classifies gateway HTML timeouts without reporting a malformed quality report or redispatching', async () => {
     const fetcher = vi.fn(async () => new Response('<html>Gateway Timeout</html>', { status: 504 }))
     vi.stubGlobal('fetch', fetcher)

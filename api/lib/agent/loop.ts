@@ -214,6 +214,7 @@ const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
 
 type ToolCallOutcome = {
   providerFailure?: boolean
+  providerFailureCode?: string
   recoveryCode?: string
   argumentFailure?: boolean
   observation: string
@@ -498,7 +499,7 @@ export async function handleToolCall(
       const guidance = error.code === 'AI_PROVIDER_OUTPUT_LIMIT'
         ? '输出预算已达上限，不要原样重复付费调用；保留进度并报告检查未完成，不能将截断报告当作通过。'
         : '最多重试一次，仍失败则保留进度并报告阻塞。'
-      return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。${guidance}`, 'failed'), providerFailure: true }
+      return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。${guidance}`, 'failed'), providerFailure: true, providerFailureCode: error.code }
     }
     console.warn('[agent-tool-failure]', { runId, tool: call.name, code: error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR', durationMs: Date.now() - startedAt })
     const recovery = error instanceof DataAccessError ? toolFailureRecovery(error.code) : undefined
@@ -1653,7 +1654,8 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
           else if (outcome.providerFailure) {
             const failures = (toolProviderFailures.get(call.name) ?? 0) + 1
             toolProviderFailures.set(call.name, failures)
-            if (failures >= 2) forceWrapUpReason = `${outcome.part.title}连续两次模型响应失败，已停止重复请求。已保存内容与进度保留，该操作尚未完成；请稍后继续或检查模型服务。`
+            if (outcome.providerFailureCode === 'AI_PROVIDER_OUTPUT_LIMIT') forceWrapUpReason = `${outcome.part.title}输出达到上限，检查未完成；已停止重复付费请求及后续提交。已保存内容与进度保留，不能将截断报告当作通过；需调整检查输出预算后再恢复。`
+            else if (failures >= 2) forceWrapUpReason = `${outcome.part.title}连续两次模型响应失败，已停止重复请求。已保存内容与进度保留，该操作尚未完成；请稍后继续或检查模型服务。`
           }
         }
         if (outcome.part.status === 'success') argumentFailures.delete(call.name)
