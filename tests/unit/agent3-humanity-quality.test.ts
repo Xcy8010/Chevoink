@@ -21,7 +21,7 @@ describe('next chapter delivery evidence', () => {
   it('zero tool output or a completed todo list cannot certify a chapter', async () => {
     const { db, findMany } = makeDb([])
     expect(await hasCommittedTaskChapter(db, 'u', 'n', 'r')).toBe(false)
-    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', run: { taskRootId: 'root' }, status: { not: 'abandoned' } } }))
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', run: { userId: 'u', novelId: 'n', taskRootId: 'root' }, status: { not: 'abandoned' } } }))
   })
   it('accepts a previously committed current revision after resume without requiring another rewrite', async () => {
     expect(await hasCommittedTaskChapter(makeDb([row]).db, 'u', 'n', 'r')).toBe(true)
@@ -53,7 +53,7 @@ describe('质量检查默认目标', () => {
     const { db, run, compilations } = database(['new-chapter'])
     expect(await resolveQualityChapterTarget(input, db)).toBe('new-chapter')
     expect(run).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'r', userId: 'u', novelId: 'n' } }))
-    expect(compilations).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', status: 'active', run: { taskRootId: 'root' } }, take: 2 }))
+    expect(compilations).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', status: 'active', run: { userId: 'u', novelId: 'n', taskRootId: 'root' } }, take: 2 }))
   })
   it('显式章节保持优先，无编译的普通审阅继续使用当前编辑章节', async () => {
     const { db, compilations } = database([])
@@ -64,19 +64,23 @@ describe('质量检查默认目标', () => {
   it('传统续跑按合同ID关联，只接受同会话同作品同用户的原任务', async () => {
     const { db, run, compilations } = database(['target'], null)
     const taskSpec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '写下一章' })
-    run.mockResolvedValue({ taskRootId: null, runtimeProtocolVersion: 0, sessionId: 's', taskSpec })
+    const startedAt = new Date('2026-09-19T19:22:41Z')
+    run.mockResolvedValue({ taskRootId: null, runtimeProtocolVersion: 0, sessionId: 's', taskSpec, createdAt: startedAt })
     expect(await resolveQualityChapterTarget(input, db)).toBe('target')
     expect(compilations).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({ run: {
       userId: 'u', novelId: 'n', sessionId: 's', runtimeProtocolVersion: 0, taskRootId: null, taskSpec: { path: ['id'], equals: taskSpec.id },
     } }) }))
+    expect(compilations).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      AND: [{ OR: [{ chapterId: null }, { chapter: { createdAt: { gte: startedAt } } }] }],
+    }) }))
     run.mockResolvedValue({ taskRootId: null, runtimeProtocolVersion: 0, sessionId: 's', taskSpec: { ...taskSpec, runId: 'foreign' } })
     await resolveQualityChapterTarget(input, db)
-    expect(compilations).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({ runId: 'r' }) }))
+    expect(compilations).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({ run: { id: 'r', userId: 'u', novelId: 'n' } }) }))
   })
   it('指定编译必须在当前运行作用域，不能失败后回退旧章节', async () => {
     const { db, compilations } = database([], null)
     await expect(resolveQualityChapterTarget({ ...input, compilationId: 'foreign' }, db)).rejects.toMatchObject({ code: 'QUALITY_TARGET_AMBIGUOUS' })
-    expect(compilations).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', status: 'active', runId: 'r', id: 'foreign' } }))
+    expect(compilations).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', status: 'active', run: { id: 'r', userId: 'u', novelId: 'n' }, id: 'foreign' } }))
   })
   it.each([[null], ['a', 'b']])('未绑定或多个活跃章节要求明确目标，不猜测', async (...chapters) => {
     const { db } = database(chapters)
