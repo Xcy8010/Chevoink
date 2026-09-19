@@ -27,7 +27,7 @@ export function ImportCoverPicker({ novelId, jobId, summary, report, selectedId,
   }
   return <section className="space-y-2 rounded-lg border border-[var(--border-subtle)] p-3" aria-label="可选导入封面">
     <h3 className="text-sm font-medium">封面选择（默认保留现有封面）</h3>
-    <p className="text-xs">应用封面后作为作品封面公开可访问，不发布新正文。查看候选图不会应用；取消选择只保留现有封面，不会删除封面。保存预览后，仍须最终确认导入。</p>
+    <p className="text-xs">选中的图片将在点击“一键导入”后作为作品封面公开显示。查看图片不会应用封面；不选则保留现有封面。</p>
     <label className="flex min-h-11 items-center gap-3 text-sm"><input type="radio" className="h-5 w-5" name={group} disabled={disabled} checked={!selectedId} onChange={() => { if (!disabled) onSelect(undefined) }} />保留现有封面（取消候选选择）</label>
     {candidates.length === 0 && <p className="text-xs">未识别到封面候选，现有封面不变。</p>}
     {candidates.map(artifact => {

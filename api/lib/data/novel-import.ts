@@ -23,6 +23,8 @@ export const novelImportBackupSchema = z.object({
   version: z.literal(2).optional(),
   volumeIds: z.array(z.string()), chapterIds: z.array(z.string()), retainedEmptyVolumeIds: z.array(z.string()),
   importedVolumeIds: z.array(z.string()), importedChapterIds: z.array(z.string()),
+  reorderedChapters: z.array(z.object({ id: z.string(), volumeId: z.string(), orderIndex: z.number().int(), orderInVolume: z.number().int() })).optional(),
+  beforeVolumeCount: z.number().int().nonnegative().optional(), beforeChapterCount: z.number().int().nonnegative().optional(),
   metadata: z.object({ title: z.string(), displayTitle: z.string().nullable().optional(), summary: z.string(), tagNames: z.array(z.string()), wordCount: z.number(), chapterCount: z.number(), lastChapterTitle: z.string().nullable(), coverAssetId: z.string().nullable().optional(), coverPrompt: z.string().nullable().optional() }),
   metadataKeys: z.array(z.enum(['title', 'summary', 'tagNames', 'coverAssetId'])).optional(),
   retainedHash: z.string(),
@@ -30,6 +32,15 @@ export const novelImportBackupSchema = z.object({
 
 export function assertNovelImportMutationCount(actual: number, expected: number): void {
   if (actual !== expected) throw new DataAccessError(409, 'IMPORT_TARGET_CHANGED', '卷章范围已变化，未执行部分导入或恢复。')
+}
+
+/** Reserve disjoint negative slots before restoring/writing either unique order index. */
+export async function applyNovelImportChapterPositions(tx: Prisma.TransactionClient, novelId: string, rows: Array<{ id: string; volumeId: string; orderIndex: number; orderInVolume: number }>) {
+  if (!rows.length) return
+  const active = await tx.chapter.findMany({ where: { novelId, archivedAt: null }, select: { id: true, orderIndex: true, orderInVolume: true } })
+  const floor = active.reduce((value, chapter) => Math.min(value, chapter.orderIndex, chapter.orderInVolume), 0)
+  for (const [index, row] of rows.entries()) assertNovelImportMutationCount((await tx.chapter.updateMany({ where: { id: row.id, novelId, archivedAt: null }, data: { orderIndex: floor - index - 1, orderInVolume: floor - index - 1 } })).count, 1)
+  for (const row of rows) assertNovelImportMutationCount((await tx.chapter.updateMany({ where: { id: row.id, novelId, archivedAt: null }, data: { volumeId: row.volumeId, orderIndex: row.orderIndex, orderInVolume: row.orderInVolume, revision: { increment: 1 } } })).count, 1)
 }
 
 /** Invalidate derived facts in the SAME transaction as archival. Keep all rows

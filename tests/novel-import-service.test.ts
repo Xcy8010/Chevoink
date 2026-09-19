@@ -153,14 +153,15 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     await expect(preflightNovelImport(scope)).rejects.toMatchObject({ code: 'IMPORT_OVERWRITE_DISABLED' })
     expect(fixture.state.novelImportIntent).toHaveLength(0)
   })
-  it('retains every preexisting empty volume unchanged and appends new volumes after them', async () => {
+  it('reuses the preexisting empty default volume without changing its identity', async () => {
     const original = { id: 'default-volume', novelId: scope.novelId, title: '第一卷', orderIndex: 1, revision: 1, archivedAt: null }
     fixture.state.volume.push({ ...original })
     const result = await approved()
     expect(result.preview.warnings).toContainEqual(expect.objectContaining({ code: 'IMPORT_EMPTY_VOLUMES_RETAINED', blocking: false }))
     await commitNovelImport(scope, result.job.jobId, result.input)
     expect(fixture.state.volume[0]).toEqual(original)
-    expect(fixture.state.volume[1].orderIndex).toBe(2)
+    expect(fixture.state.volume).toHaveLength(1)
+    expect(fixture.state.chapter[0]).toMatchObject({ volumeId: original.id, orderIndex: 1, orderInVolume: 1 })
     expect(fixture.db.volume.updateMany).not.toHaveBeenCalled()
     expect(fixture.db.chapter.updateMany).not.toHaveBeenCalled()
   })
@@ -412,13 +413,13 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     const old = existingBook('旧草稿正文', true)
     const result = await committedForRestore()
     expect(fixture.state.chapter[0]).toMatchObject({ ...old.chapter, archivedAt: expect.any(Date), archivedByImportId: result.job.jobId, revision: 8 })
-    expect(fixture.state.volume[0]).toMatchObject({ ...old.volume, archivedAt: expect.any(Date), archivedByImportId: result.job.jobId, revision: 5 })
+    expect(fixture.state.volume[0]).toEqual(old.volume)
     expect(fixture.state.chapter[1]).toMatchObject({ status: 'draft', visibility: 'private', publishedContent: null })
     // Public comments/views are not creative edits and don't invalidate restoration.
     Object.assign(fixture.state.chapter[0], { commentCount: 19, updatedAt: new Date() })
     await restoreNovelImport(human(), result.job.jobId, result.restoreInput)
     expect(fixture.state.chapter[0]).toMatchObject({ ...old.chapter, revision: 9 })
-    expect(fixture.state.volume[0]).toMatchObject({ ...old.volume, revision: 6 })
+    expect(fixture.state.volume[0]).toEqual(old.volume)
     expect(fixture.state.chapter).toHaveLength(2)
     expect(fixture.state.chapter[1].archivedAt).toBeInstanceOf(Date)
     expect(fixture.state.novelImportCommit).toHaveLength(1)
@@ -465,11 +466,13 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     expect(fixture.state.chapter.find(c => c.id === 'c-match')!.archivedAt).toBeInstanceOf(Date)
     const keep = fixture.state.chapter.find(c => c.id === 'c-keep')!
     expect(keep.archivedAt).toBeNull(); expect(keep.content).toBe('别动我')
-    // 旧卷因成员未全部命中而保留，导入另建新卷写两章
+    // 同卷替换保留原位置，新章追加在该卷末尾，不另建同名卷。
     expect(fixture.state.volume.find(v => v.id === 'v1')!.archivedAt).toBeNull()
+    expect(fixture.state.volume).toHaveLength(1)
     expect(receipt).toMatchObject({ volumeCount: 1, chapterCount: 2 })
     const live = fixture.state.chapter.filter(c => c.archivedAt === null)
     expect(live.map(c => c.title).sort()).toEqual(['保留章', '第一章', '第二章'].sort())
+    expect([...live].sort((a, b) => Number(a.orderIndex) - Number(b.orderIndex)).map(c => [c.title, c.volumeId, c.orderInVolume])).toEqual([['第一章', 'v1', 1], ['保留章', 'v1', 2], ['第二章', 'v1', 3]])
     // 字数/章数对全部非归档章节重算：别动我3 + 新第一章6 + 新第二章4 = 13，共3章
     expect(fixture.state.novel[0]).toMatchObject({ wordCount: 13, chapterCount: 3 })
     // 备份快照只记被归档的旧行，可恢复

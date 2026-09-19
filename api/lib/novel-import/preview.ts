@@ -76,7 +76,7 @@ export function assertPreviewCoverSelection(preview: NovelImportEvidencePreview)
 }
 
 /** Authoritative confirmation/commit gate. Warning DTOs are never the evidence. */
-export function assertNovelImportPreviewComplete(input: NovelImportPreview): void {
+export function assertNovelImportPreviewComplete(input: NovelImportPreview, options: { verifiedImageStorage?: boolean } = {}): void {
   const preview: NovelImportEvidencePreview = input
   assertPreviewCoverSelection(preview)
   const state = resolutionState(preview)
@@ -85,7 +85,14 @@ export function assertNovelImportPreviewComplete(input: NovelImportPreview): voi
     if (state.excluded(item)) continue
     if (item.status === 'failed' || (item.status === 'needs_review' && !state.reviewed(item.id) && !state.issues.some(issue => issue.resolved && issue.itemIds.includes(item.id)))) reject('IMPORT_INCOMPLETE_CONTENT', '来源仍有未处理或待核验内容。')
   }
-  if (!state.report.complete && !state.report.issues.some(issue => issue.blocking)) reject('IMPORT_INCOMPLETE_CONTENT', '来源覆盖报告不完整，请重新解析。')
+  // Pipeline 2 previews created before the storage-completeness fix removed the
+  // storage issue but retained complete=false. Only verified, fully native image
+  // reports qualify; unknown coverage, OCR and missing sources remain blocked.
+  const storedImageCompleteness = options.verifiedImageStorage === true && state.report.parserVersion.endsWith('+document-pipeline-2')
+    && !!preview.artifacts?.length && !state.report.issues.some(issue => issue.blocking)
+    && state.report.items.every(item => item.status === 'native' || item.status === 'excluded')
+    && preview.artifacts.every(image => state.report.items.some(item => item.artifactId === image.id && item.source === image.source))
+  if (!state.report.complete && !state.report.issues.some(issue => issue.blocking) && !storedImageCompleteness) reject('IMPORT_INCOMPLETE_CONTENT', '来源覆盖报告不完整，请重新解析。')
   if (!hasImportContent(preview)) reject('IMPORT_NO_BODY', '请至少选择一项非空章节、计划、记忆或作品信息。')
   if (preview.volumes.some(v => v.chapters.some(c => c.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters))) reject('IMPORT_CHAPTER_TOO_LONG', '单章超过10万字符，请拆分。')
 }
@@ -107,6 +114,7 @@ export function previewReportDto(preview: NovelImportEvidencePreview, boundConte
     issues: state.issues, decisions: preview.decisions ?? [], artifacts: preview.artifacts ?? [], contentExclusions: preview.contentExclusions ?? [] }
 }
 
+const optionalExportCoverReason = '用户未选择本站导出封面；该图片与全部保留内容来源独立，不导入其图片或 OCR 内容。'
 function unselectedExportCovers(preview: NovelImportEvidencePreview): z.infer<typeof novelImportReviewSchema>['decisions'] {
   const report = preview.report!
   const kept = [...preview.volumes.flatMap(volume => volume.chapters), ...(preview.plans ?? []), ...(preview.memories ?? [])]
@@ -122,8 +130,9 @@ function unselectedExportCovers(preview: NovelImportEvidencePreview): z.infer<ty
     if (!report.items.some(item => item.artifactId === artifact.id && item.source === artifact.source)) continue
     if (kept.some(entry => withinSource(chapterSource(entry.source!), artifact.source) || withinSource(artifact.source, chapterSource(entry.source!)))) continue
     const file = report.items.find(item => item.kind === 'file' && item.excludable && item.source === artifact.source)
+    if (file?.status === 'native') continue // Optional native cover needs no source exclusion.
     if (!file || (preview.decisions ?? []).some(decision => decision.itemId === file.id && decision.action === 'exclude') || decisions.some(decision => decision.itemId === file.id)) continue
-    decisions.push({ itemId: file.id, action: 'exclude', reason: '用户未选择本站导出封面；该图片与全部保留内容来源独立，不导入其图片或 OCR 内容。' })
+    decisions.push({ itemId: file.id, action: 'exclude', reason: optionalExportCoverReason })
   }
   return decisions
 }
@@ -151,6 +160,16 @@ export function applyContentSelection(preview: NovelImportEvidencePreview, input
   // Existing source evidence and hashes stay authoritative. Selection is not review.
   const contentHash = previewContentHash(next)
   next.decisions = (preview.decisions ?? []).filter(decision => decision.action === 'exclude' || contentExclusions.length === (preview.contentExclusions?.length ?? 0) && decision.contentHash === contentHash)
+  // Old selection previews excluded even native optional covers. An explicit new
+  // cover selection supersedes ONLY that known automatic native-file exclusion;
+  // failed/OCR files and genuine manual exclusions remain authoritative.
+  const selectedCover = next.artifacts?.find(image => image.id === next.metadataSelection.coverArtifactId)
+  if (selectedCover && /^.+\.zip!\/(?:[^/]+\/)?作品信息以及发布建议\/封面\.(?:png|jpe?g|webp)$/i.test(selectedCover.source)
+    && next.report!.items.some(item => item.artifactId === selectedCover.id && item.source === selectedCover.source && item.status === 'native')) {
+    next.decisions = next.decisions.filter(decision => !(decision.action === 'exclude' && decision.reason === optionalExportCoverReason
+      && decision.sourceHash === next.sourceHash && decision.reportHash === next.reportHash
+      && next.report!.items.some(item => item.id === decision.itemId && item.kind === 'file' && item.status === 'native' && item.source === selectedCover.source)))
+  }
   const coverExclusions = unselectedExportCovers(next)
   if (coverExclusions.length) return applySourceReview(next, { expectedManifestRevision: next.manifestRevision, manifestHash: next.manifestHash, reportHash: next.reportHash!, decisions: coverExclusions })
   return refreshPreviewWarnings(next)

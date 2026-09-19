@@ -20,7 +20,7 @@ it('defaults to retaining the current cover and image viewing never authorizes r
   render(<ImportCoverPicker novelId="a" jobId="job" summary={summary} report={report} disabled={false} onSelect={onSelect} />)
   expect((screen.getByRole('radio', { name: /保留现有封面/ }) as HTMLInputElement).checked).toBe(true)
   expect((screen.getByRole('radio', { name: /使用封面/ }) as HTMLInputElement).checked).toBe(false)
-  expect(screen.getByText(/作为作品封面公开可访问，不发布新正文/)).toBeTruthy()
+  expect(screen.getByText(/选中的图片将在点击.*一键导入.*后作为作品封面公开显示/)).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: /查看候选/ }))
   expect(screen.getByRole('button', { name: '关闭来源图片' })).toBeTruthy()
   expect(onSelect).not.toHaveBeenCalled()

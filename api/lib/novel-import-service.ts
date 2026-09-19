@@ -9,15 +9,15 @@ import { deleteUnreferencedImportBlob, discardImportBlob, importBytesHash, readI
 import { NovelImportParseError } from './novel-import/parsers/types.js'
 import { getDocumentImportReadiness, parseConfiguredNovelImportDocument } from './novel-import/runtime.js'
 import { applyContentSelection, applySourceReview, applyStructureEdit, assertLegacyContentConserved, canonicalPreviewHash, hasImportContent, hasImportMetadataSelection, previewReportDto, refreshPreviewWarnings, reportHash, routedContentCount } from './novel-import/preview.js'
-import { hydrateStoredPreview, readPreviewArtifact, readStoredChapter, storePreviewImages, storePreviewParts, summarizePreview, verifyPreviewImages, type StoredPreview } from './novel-import/preview-storage.js'
+import { hydrateStoredPreview, readPreviewArtifact, readStoredChapter, storePreviewImages, storePreviewParts, finalizeStoredImageReport, summarizePreview, verifyPreviewImages, type StoredPreview } from './novel-import/preview-storage.js'
 import { novelImportReviewSchema, novelImportSelectionSchema, novelImportStructureSchema, type NovelImportDocumentReport, type NovelImportEvidencePreview, type NovelImportChapterDto } from '../../shared/contracts/novel-import-preview.js'
 import { assertManagedAttachmentAccess, readAuthorizedAgentAttachment } from './agent-attachment-storage.js'
 import { lockNovelActiveScope } from './data/novel-write-lock.js'
-import { assertNovelImportMutationCount, hashNovelImportRows, hashNovelImportTarget, invalidateNovelImportSources, novelImportBackupSchema, novelImportMetadata } from './data/novel-import.js'
+import { applyNovelImportChapterPositions, assertNovelImportMutationCount, hashNovelImportRows, hashNovelImportTarget, invalidateNovelImportSources, novelImportBackupSchema, novelImportMetadata } from './data/novel-import.js'
 import { verifyNovelImportOrigin } from './novel-import-origin.js'
 import { assertNovelImportPreviewComplete } from './novel-import/preview.js'
 import { NOVEL_IMPORT_PARSE_DEADLINE_MS, startNovelImportParseLease } from './novel-import/parse-lease.js'
-import { normalizeImportTitle } from './novel-import/content-routing.js'
+import { buildNovelImportPlacement } from './novel-import/placement.js'
 import { saveStoryMemory } from './agent/story-memory.js'
 export { NOVEL_IMPORT_PARSE_DEADLINE_MS } from './novel-import/parse-lease.js'
 
@@ -393,13 +393,13 @@ async function runParse(scope: NovelImportScope, claim: { job: NovelImportJob; s
       volumes: result.volumes.map(volume => ({ ...volume, chapters: volume.chapters.map(chapter => ({ ...chapter, source: { memberPath: chapter.source } })) })) })
     if (parsed.volumes.some(v => v.chapters.some(c => c.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters))) parsed.warnings.push({ code: 'IMPORT_CHAPTER_TOO_LONG', message: '单章超过10万字符，请在预览中拆分。', blocking: true })
     const currentTarget = await target(prisma, scope, false)
-    if (!currentTarget.chapters.length && currentTarget.volumes.length) parsed.warnings.push({ code: 'IMPORT_EMPTY_VOLUMES_RETAINED', message: `将保留现有 ${currentTarget.volumes.length} 个空卷，并在其后导入新卷；不会删除或改名原空卷。`, blocking: false })
+    if (!currentTarget.chapters.length && currentTarget.volumes.length) parsed.warnings.push({ code: 'IMPORT_EMPTY_VOLUMES_RETAINED', message: `将保留现有 ${currentTarget.volumes.length} 个空卷；导入时优先复用能唯一匹配的卷，未匹配的来源另建新卷。`, blocking: false })
     controller.signal.throwIfAborted()
     const artifacts = await storePreviewImages(claim.job, document.artifacts)
     const persistedIds = new Set(artifacts.map(artifact => artifact.id))
     if (document.report.items.some(item => item.artifactId && !persistedIds.has(item.artifactId))) fail('IMPORT_IMAGE_INVALID', '来源报告引用了缺失图片，不能保存为完整预览。')
     // Only the machine storage condition is resolved here; human quality issues remain immutable.
-    const report = { ...document.report, issues: document.report.issues.filter(issue => issue.code !== 'IMPORT_IMAGE_STORAGE_REQUIRED') }
+    const report = finalizeStoredImageReport(document.report, artifacts)
     const body = refreshPreviewWarnings({ ...parsed, sourceHash: claim.source.sha256, metadataSelection: {}, manifestRevision: claim.job.manifestRevision + 1, manifestHash: '', report, reportHash: reportHash(report), artifacts, decisions: [], partialImport: false })
     const preview: NovelImportEvidencePreview = { ...body, manifestHash: hashNovelImportPreview(body) }
     await persistPreview(scope, claim.job.id, claim.job, preview, claim.job.leaseOwner ?? undefined, controller.signal)
@@ -478,7 +478,7 @@ export async function rebaseNovelImport(human: NovelImportHuman, jobId: string, 
 export async function confirmNovelImport(human: NovelImportHuman, jobId: string, input: { manifestRevision: number; manifestHash: string; targetHash: string }) {
   humanOnly(human); enabled()
   const preview = await getNovelImportPreview(human, jobId)
-  assertNovelImportPreviewComplete(preview)
+  assertNovelImportPreviewComplete(preview, { verifiedImageStorage: true })
   assertNovelImportContent(preview.volumes, { allowEmptyBody: routedContentCount(preview) > 0 || hasImportMetadataSelection(preview) })
   if (preview.warnings.some(w => w.blocking)) fail('IMPORT_INCOMPLETE_CONTENT', '存在未解决的来源完整性问题。')
   return novelImportTransaction(async tx => {
@@ -518,7 +518,7 @@ export async function commitNovelImport(scope: NovelImportScope, jobId: string, 
     return existing.receipt as unknown as NovelImportReceipt
   }
   const preview = await getNovelImportPreview(scope, jobId)
-  assertNovelImportPreviewComplete(preview)
+  assertNovelImportPreviewComplete(preview, { verifiedImageStorage: true })
   assertNovelImportContent(preview.volumes, { allowEmptyBody: routedContentCount(preview) > 0 || hasImportMetadataSelection(preview) })
   if (preview.warnings.some(w => w.blocking)) fail('IMPORT_INCOMPLETE_CONTENT', '存在未解决的完整性问题。')
   const source = await prisma.novelImportSource.findUniqueOrThrow({ where: { jobId } })
@@ -562,39 +562,25 @@ export async function commitNovelImport(scope: NovelImportScope, jobId: string, 
       const asset = await tx.coverAsset.create({ data: { id: randomUUID(), novelId: scope.novelId, ownerUserId: scope.userId, sourceType: 'upload', imageUrl: coverImageUrl!, width: descriptor!.width, height: descriptor!.height } })
       coverAssetId = asset.id
     }
-    // 智能合并不破坏原作品：按归一化标题匹配，命中=归档旧行并导入新版本，未命中=追加；
-    // 源中没有的现有章节/卷一律保留，绝不整卷覆盖。
-    const existingByTitle = new Map(t.chapters.map(c => [normalizeImportTitle(c.title), c]))
-    const matchedChapters = new Map<string, (typeof t.chapters)[number]>()
-    for (const volume of preview.volumes) for (const chapter of volume.chapters) {
-      const key = normalizeImportTitle(chapter.title)
-      const existing = existingByTitle.get(key)
-      if (existing && !matchedChapters.has(key)) matchedChapters.set(key, existing)
+    // Match chapters only inside their uniquely resolved destination volume.
+    const placement = buildNovelImportPlacement(t.volumes, t.chapters, preview.volumes, randomUUID)
+    const archivedChapterRows = t.chapters.filter(chapter => placement.archivedChapterIds.includes(chapter.id))
+    const archivedVolumeRows: typeof t.volumes = []
+    if (t.volumes.length + placement.newVolumes.length > NOVEL_IMPORT_LIMITS.volumes) fail('IMPORT_LIMIT_EXCEEDED', '保留现有卷后总卷数超过200，请先整理卷。')
+    if (archivedChapterRows.length) {
+      assertNovelImportMutationCount((await tx.chapter.updateMany({ where: { novelId: scope.novelId, archivedAt: null, id: { in: placement.archivedChapterIds } }, data: { archivedAt: now, archivedByImportId: jobId, revision: { increment: 1 } } })).count, archivedChapterRows.length)
     }
-    const archivedChapterRows = [...matchedChapters.values()]
-    // 命中章节全部离开后变空的现有卷随同归档；其余现有卷（含空卷）原样保留。
-    const archivedVolumeRows = t.volumes.filter(volume => {
-      const members = t.chapters.filter(c => c.volumeId === volume.id)
-      return members.length > 0 && members.every(c => matchedChapters.has(normalizeImportTitle(c.title)))
-    })
-    if (t.volumes.length - archivedVolumeRows.length + preview.volumes.length > NOVEL_IMPORT_LIMITS.volumes) fail('IMPORT_LIMIT_EXCEEDED', '保留现有卷后总卷数超过200，请先整理卷。')
-    if (archivedChapterRows.length || archivedVolumeRows.length) {
-      assertNovelImportMutationCount((await tx.chapter.updateMany({ where: { novelId: scope.novelId, archivedAt: null, id: { in: archivedChapterRows.map(c => c.id) } }, data: { archivedAt: now, archivedByImportId: jobId, revision: { increment: 1 } } })).count, archivedChapterRows.length)
-      assertNovelImportMutationCount((await tx.volume.updateMany({ where: { novelId: scope.novelId, archivedAt: null, id: { in: archivedVolumeRows.map(v => v.id) } }, data: { archivedAt: now, archivedByImportId: jobId, revision: { increment: 1 } } })).count, archivedVolumeRows.length)
-      await invalidateNovelImportSources(tx, scope.novelId, archivedChapterRows.map(c => c.id), archivedVolumeRows.map(v => v.id))
-    }
-    // 新章节 orderIndex 接在保留章节之后；仅导入计划/记忆时完全不写卷章。
-    let orderIndex = Math.max(0, ...t.chapters.filter(c => !matchedChapters.has(normalizeImportTitle(c.title))).map(c => c.orderIndex))
-    let firstChapterId = ''; let lastChapterTitle = ''
-    const volumeOffset = Math.max(0, ...t.volumes.map(volume => volume.orderIndex))
-    const volumes = preview.volumes.map((v, index) => ({ id: randomUUID(), novelId: scope.novelId, title: v.title, orderIndex: volumeOffset + index + 1 }))
+    const changedVolumeIds = [...new Set(placement.chapters.map(chapter => chapter.volumeId))].filter(id => t.volumes.some(volume => volume.id === id))
+    await invalidateNovelImportSources(tx, scope.novelId, placement.archivedChapterIds, changedVolumeIds)
+    const volumes = placement.newVolumes.map(volume => ({ ...volume, novelId: scope.novelId }))
     if (volumes.length) assertNovelImportMutationCount((await tx.volume.createMany({ data: volumes })).count, volumes.length)
-    const chapters = preview.volumes.flatMap((volume, vi) => volume.chapters.map((chapter, ci) => {
-      const id = randomUUID(); if (!firstChapterId) firstChapterId = id
-      orderIndex++; lastChapterTitle = chapter.title
-      return { id, novelId: scope.novelId, authorId: scope.userId, title: chapter.title, content: chapter.content, volumeId: volumes[vi].id, orderIndex, orderInVolume: ci + 1, wordCount: chapter.content.length, status: 'draft' as const, visibility: 'private' as const }
-    }))
+    // Shift retained chapters before insertion; both unique indexes are released
+    // using disjoint temporary positions, and their original order is backed up.
+    await applyNovelImportChapterPositions(tx, scope.novelId, placement.reorderedAfter)
+    const chapters = placement.chapters.map(chapter => ({ ...chapter, novelId: scope.novelId, authorId: scope.userId, wordCount: chapter.content.length, status: 'draft' as const, visibility: 'private' as const }))
     if (chapters.length) assertNovelImportMutationCount((await tx.chapter.createMany({ data: chapters })).count, chapters.length)
+    const firstChapterId = [...chapters].sort((a, b) => a.orderIndex - b.orderIndex)[0]?.id ?? ''
+    const lastChapterTitle = placement.lastChapterTitle
     // 计划文件夹：复用该作品最近任务作载体（与手工新建计划同模式），同名计划就地更新。
     const plans = preview.plans ?? []
     if (plans.length) {
@@ -635,9 +621,9 @@ export async function commitNovelImport(scope: NovelImportScope, jobId: string, 
     const after = await target(tx, scope)
     const archivedVolumes = await tx.volume.findMany({ where: { id: { in: archivedVolumeRows.map(v => v.id) } }, orderBy: { id: 'asc' } })
     const archivedChapters = await tx.chapter.findMany({ where: { id: { in: archivedChapterRows.map(c => c.id) } }, orderBy: { id: 'asc' } })
-    const snapshot = { version: 2, volumeIds: archivedVolumeRows.map(v => v.id), chapterIds: archivedChapterRows.map(c => c.id), retainedEmptyVolumeIds: [], importedVolumeIds: volumes.map(v => v.id), importedChapterIds: chapters.map(c => c.id), metadata: novelImportMetadata(t.novel), metadataKeys: [...(m.title !== undefined ? ['title'] : []), ...(m.summary !== undefined ? ['summary'] : []), ...(m.tags !== undefined ? ['tagNames'] : []), ...(coverAssetId ? ['coverAssetId'] : [])], retainedHash: hashNovelImportRows(archivedVolumes, archivedChapters) }
+    const snapshot = { version: 2, volumeIds: archivedVolumeRows.map(v => v.id), chapterIds: archivedChapterRows.map(c => c.id), retainedEmptyVolumeIds: [], reorderedChapters: placement.reorderedBefore, beforeVolumeCount: t.volumes.length, beforeChapterCount: t.chapters.length, importedVolumeIds: volumes.map(v => v.id), importedChapterIds: chapters.map(c => c.id), metadata: novelImportMetadata(t.novel), metadataKeys: [...(m.title !== undefined ? ['title'] : []), ...(m.summary !== undefined ? ['summary'] : []), ...(m.tags !== undefined ? ['tagNames'] : []), ...(coverAssetId ? ['coverAssetId'] : [])], retainedHash: hashNovelImportRows(archivedVolumes, archivedChapters) }
     await tx.novelImportBackup.create({ data: { id: backupId, jobId, snapshot, beforeHash: t.hash, afterHash: after.hash, expiresAt: restoreExpiresAt } })
-    const receipt: NovelImportReceipt = { jobId, novelId: scope.novelId, backupId, volumeCount: volumes.length, chapterCount: chapters.length, wordCount, firstChapterId, targetHash: after.hash, restoreExpiresAt: restoreExpiresAt.toISOString(), partialImport: preview.partialImport === true, reportUrl: `/api/novels/${encodeURIComponent(scope.novelId)}/imports/${encodeURIComponent(jobId)}/report`, planCount: plans.length, memoryCount: memories.length }
+    const receipt: NovelImportReceipt = { jobId, novelId: scope.novelId, backupId, volumeCount: placement.volumeCount, chapterCount: chapters.length, wordCount, firstChapterId, targetHash: after.hash, restoreExpiresAt: restoreExpiresAt.toISOString(), partialImport: preview.partialImport === true, reportUrl: `/api/novels/${encodeURIComponent(scope.novelId)}/imports/${encodeURIComponent(jobId)}/report`, planCount: plans.length, memoryCount: memories.length }
     await tx.novelImportApproval.update({ where: { id: approval.id }, data: { consumedAt: now } })
     await tx.novelImportCommit.create({ data: { jobId, approvalId: approval.id, idempotencyKey: input.idempotencyKey, receipt: { ...receipt } } })
     await tx.novelImportJob.update({ where: { id: jobId }, data: { status: 'succeeded', jobVersion: { increment: 1 } } })
@@ -678,7 +664,7 @@ export async function getNovelImportRestorePreview(scope: NovelImportScope, jobI
       try { assertNovelImportRestoreBaseline(restoreBaseline(t, snapshot), backup.afterHash); await retainedRestoreRows(tx, scope, jobId, snapshot); await writeSafe(tx, scope) }
       catch (error) { if (!(error instanceof DataAccessError)) throw error; reason = error.code }
     }
-    return { canRestore: !reason, ...(reason ? { reason } : {}), currentTargetHash: restoreBaseline(t, snapshot), backupExpiresAt: backup.expiresAt.toISOString(), before: { volumes: snapshot.volumeIds.length + snapshot.retainedEmptyVolumeIds.length, chapters: snapshot.chapterIds.length }, current: { volumes: t.volumes.length, chapters: t.chapters.length }, metadataKeys: snapshot.metadataKeys ?? ['title', 'summary', 'tagNames'], restoredAt: backup.restoredAt?.toISOString() ?? null, receipt: backup.restoreReceipt as unknown as NovelImportRestoreReceipt | null }
+    return { canRestore: !reason, ...(reason ? { reason } : {}), currentTargetHash: restoreBaseline(t, snapshot), backupExpiresAt: backup.expiresAt.toISOString(), before: { volumes: snapshot.beforeVolumeCount ?? snapshot.volumeIds.length + snapshot.retainedEmptyVolumeIds.length, chapters: snapshot.beforeChapterCount ?? snapshot.chapterIds.length }, current: { volumes: t.volumes.length, chapters: t.chapters.length }, metadataKeys: snapshot.metadataKeys ?? ['title', 'summary', 'tagNames'], restoredAt: backup.restoredAt?.toISOString() ?? null, receipt: backup.restoreReceipt as unknown as NovelImportRestoreReceipt | null }
   })
 }
 
@@ -729,9 +715,10 @@ export async function restoreNovelImport(human: NovelImportHuman, jobId: string,
     const now = new Date()
     assertNovelImportMutationCount((await tx.chapter.updateMany({ where: { novelId: human.novelId, archivedAt: null, id: { in: snapshot.importedChapterIds } }, data: { archivedAt: now, archivedByImportId: jobId, revision: { increment: 1 } } })).count, snapshot.importedChapterIds.length)
     assertNovelImportMutationCount((await tx.volume.updateMany({ where: { novelId: human.novelId, archivedAt: null, id: { in: snapshot.importedVolumeIds } }, data: { archivedAt: now, archivedByImportId: jobId, revision: { increment: 1 } } })).count, snapshot.importedVolumeIds.length)
+    await applyNovelImportChapterPositions(tx, human.novelId, snapshot.reorderedChapters ?? [])
     assertNovelImportMutationCount((await tx.volume.updateMany({ where: { id: { in: snapshot.volumeIds }, novelId: human.novelId, archivedByImportId: jobId, archivedAt: { not: null } }, data: { archivedAt: null, archivedByImportId: null, revision: { increment: 1 } } })).count, snapshot.volumeIds.length)
     assertNovelImportMutationCount((await tx.chapter.updateMany({ where: { id: { in: snapshot.chapterIds }, novelId: human.novelId, archivedByImportId: jobId, archivedAt: { not: null } }, data: { archivedAt: null, archivedByImportId: null, revision: { increment: 1 } } })).count, snapshot.chapterIds.length)
-    await invalidateNovelImportSources(tx, human.novelId, snapshot.importedChapterIds, snapshot.importedVolumeIds)
+    await invalidateNovelImportSources(tx, human.novelId, snapshot.importedChapterIds, [...new Set([...snapshot.importedVolumeIds, ...t.chapters.filter(chapter => snapshot.importedChapterIds.includes(chapter.id)).map(chapter => chapter.volumeId)])])
     // Previously archived derivations remain invalid/reviewable after reactivation.
     await tx.novel.update({ where: { id: human.novelId }, data: { ...snapshot.metadata, manuscriptRevision: { increment: 1 } } })
     const after = await target(tx, human)

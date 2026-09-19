@@ -45,10 +45,21 @@ export async function storePreviewImages(claim: Claim, images: ImportImage[]): P
     const bytes = Buffer.from(image.bytes)
     if (image.mediaType !== 'image/png' || bytes.length !== image.byteLength || bytes.length > IMPORT_RESOURCE_LIMITS.imageBytes || importBytesHash(bytes) !== image.sha256 || bytes.length < 24 || !bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) || bytes.readUInt32BE(16) !== image.width || bytes.readUInt32BE(20) !== image.height || image.width * image.height > IMPORT_RESOURCE_LIMITS.pixels) fail('IMPORT_IMAGE_INVALID', '图片资源未通过完整性校验。')
     const artifact = await storeArtifact(claim, 'image', bytes, image.id)
-    descriptors.push({ id: image.id, source: image.source, sha256: image.sha256, bytes: image.byteLength, width: image.width, height: image.height, mediaType: 'image/png', coverCandidate: image.coverCandidate,
+    descriptors.push({ id: image.id, storageArtifactId: artifact.id, source: image.source, sha256: image.sha256, bytes: image.byteLength, width: image.width, height: image.height, mediaType: 'image/png', coverCandidate: image.coverCandidate,
       url: `/api/novels/${encodeURIComponent(claim.novelId)}/imports/${encodeURIComponent(claim.id)}/artifacts/${artifact.id}` })
   }
   return descriptors
+}
+
+/** Call only after storePreviewImages has verified and persisted every image. */
+export function finalizeStoredImageReport(report: NovelImportDocumentReport, artifacts: NovelImportArtifactDescriptor[]): NovelImportDocumentReport {
+  const ids = new Set(artifacts.map(image => image.id))
+  if (report.items.some(item => item.artifactId && !ids.has(item.artifactId))) fail('IMPORT_IMAGE_INVALID', '来源报告引用了缺失图片。')
+  const storageIssue = report.issues.some(issue => issue.code === 'IMPORT_IMAGE_STORAGE_REQUIRED')
+  if (storageIssue && !artifacts.length) fail('IMPORT_IMAGE_INVALID', '图片存储确认缺少已保存资源。')
+  const issues = report.issues.filter(issue => issue.code !== 'IMPORT_IMAGE_STORAGE_REQUIRED')
+  return { ...report, issues, complete: (report.complete || storageIssue) && !issues.some(issue => issue.blocking)
+    && !report.items.some(item => item.status === 'failed' || item.status === 'needs_review') }
 }
 
 export function summarizePreview(preview: NovelImportEvidencePreview): NovelImportPreviewSummary {
@@ -83,6 +94,7 @@ export async function verifyPreviewImages(scope: { novelId: string }, jobId: str
   for (const image of descriptors.values()) {
     const artifactId = image.url.startsWith(prefix) ? image.url.slice(prefix.length) : ''
     if (!/^[a-f0-9-]{36}$/.test(artifactId)) fail('IMPORT_IMAGE_INVALID', '图片不属于当前导入任务。')
+    if (image.storageArtifactId && image.storageArtifactId !== artifactId) fail('IMPORT_IMAGE_INVALID', '图片存储引用不一致。')
     const { artifact, bytes } = await readPreviewArtifact(jobId, artifactId, 'image')
     if (artifact.sha256 !== image.sha256 || bytes.length !== image.bytes) fail('IMPORT_IMAGE_INVALID', '图片资源已变化，请重新解析。')
   }

@@ -9,13 +9,80 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  DATABASE_URL: postgresql://chevoink_test_runner:isolated-ci-only@127.0.0.1:5432/chevoink_test
+  APP_ENV: test
+  TEST_DATABASE_REQUIRED: 'true'
+
 jobs:
-  ci:
-    name: check / lint / test / build / audit
+  static:
+    name: check / lint / build / audit
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    # Ephemeral cluster: bootstrap a non-superuser before any migration/test.
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装固定候选运行时
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 验证 Node/npm 与锁文件合同
+        run: npm run runtime:verify
+
+      - name: 生成 Prisma Client
+        run: npx prisma generate
+
+      - name: 类型检查
+        run: npm run check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: 文档隔离工作器协议测试（不代表原生 OCR 验收）
+        run: python3 -m unittest discover -s workers/document-import/tests -p 'test_*.py' -v
+
+      - name: 生成 Agent 3.0 确定性评测快照
+        run: |
+          DOTENV_CONFIG_QUIET=true npm --silent run agent3:eval > agent3-eval-report.json
+          node -e "JSON.parse(require('node:fs').readFileSync('agent3-eval-report.json', 'utf8'))"
+
+      - name: 保存 Agent 3.0 评测快照
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent3-eval-${{ github.sha }}
+          path: agent3-eval-report.json
+          retention-days: 30
+
+      - name: 构建
+        run: npm run build
+
+      - name: 生产依赖安全审计
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: 构建与测试依赖安全审计
+        run: npm audit --audit-level=high
+
+  test-shard:
+    name: test shard ${{ matrix.shard }}/3
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+
+    # Each shard owns a fresh PostgreSQL service. File parallelism remains off
+    # inside that database so existing transaction/worker invariants are unchanged.
     services:
       postgres:
         image: postgres:16
@@ -30,11 +97,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
-    env:
-      DATABASE_URL: postgresql://chevoink_test_runner:isolated-ci-only@127.0.0.1:5432/chevoink_test
-      APP_ENV: test
-      TEST_DATABASE_REQUIRED: 'true'
 
     steps:
       - name: 检出代码
@@ -76,37 +138,84 @@ jobs:
           cp tests/.env.test.example tests/.env.test
           # DATABASE_URL is inherited from the verified job environment.
 
-      - name: 类型检查
-        run: npm run check
+      - name: 测试分片（隔离数据库，生成 blob 与覆盖率）
+        # A partial shard cannot represent the global coverage score. The merge
+        # job below is the only place that evaluates the unchanged CI thresholds.
+        run: >-
+          npx vitest run
+          --shard=${{ matrix.shard }}/3
+          --reporter=default
+          --reporter=blob
+          --coverage
+          --coverage.thresholds.statements=0
+          --coverage.thresholds.branches=0
+          --coverage.thresholds.functions=0
+          --coverage.thresholds.lines=0
+          --no-file-parallelism
 
-      - name: Lint
-        run: npm run lint
-
-      - name: 文档隔离工作器协议测试（不代表原生 OCR 验收）
-        run: python3 -m unittest discover -s workers/document-import/tests -p 'test_*.py' -v
-
-      - name: 测试（含覆盖率门禁）
-        # Files share one isolated database and global worker quotas. Run files
-        # sequentially; explicit concurrent-request tests inside each file stay concurrent.
-        run: npx vitest run --coverage --no-file-parallelism
-
-      - name: 生成 Agent 3.0 确定性评测快照
-        run: |
-          DOTENV_CONFIG_QUIET=true npm --silent run agent3:eval > agent3-eval-report.json
-          node -e "JSON.parse(require('node:fs').readFileSync('agent3-eval-report.json', 'utf8'))"
-
-      - name: 保存 Agent 3.0 评测快照
+      - name: 保存 Vitest blob 报告
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: agent3-eval-${{ github.sha }}
-          path: agent3-eval-report.json
-          retention-days: 30
+          name: vitest-blob-${{ github.sha }}-${{ matrix.shard }}
+          path: .vitest-reports/*.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: 构建
-        run: npm run build
+  merge-coverage:
+    name: merge coverage / test report
+    needs: test-shard
+    if: needs.test-shard.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
-      - name: 生产依赖安全审计
-        run: npm audit --omit=dev --audit-level=high
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
 
-      - name: 构建与测试依赖安全审计
-        run: npm audit --audit-level=high
+      - name: 安装固定候选运行时
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 下载全部 Vitest blob 报告
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vitest-blob-${{ github.sha }}-*
+          path: .vitest-reports
+          merge-multiple: true
+
+      - name: 验证三个分片报告齐全
+        shell: bash
+        run: |
+          test -f .vitest-reports/blob-1-3.json
+          test -f .vitest-reports/blob-2-3.json
+          test -f .vitest-reports/blob-3-3.json
+          count=$(find .vitest-reports -maxdepth 1 -type f -name 'blob-*.json' | wc -l)
+          test "$count" -eq 3
+
+      - name: 合并测试结果并执行全局覆盖率门禁
+        # vitest.config.ts supplies the unchanged CI thresholds (30/73/52/30).
+        # --merge-reports runs no tests and therefore needs no database service.
+        run: npx vitest --merge-reports .vitest-reports --coverage
+
+  # Keep the existing required status context while making the expensive work
+  # explicit above. This fails closed if any static, shard, or merge gate fails.
+  ci:
+    name: check / lint / test / build / audit
+    if: always()
+    needs: [static, test-shard, merge-coverage]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 聚合全部 CI 门禁
+        shell: bash
+        run: |
+          test "${{ needs.static.result }}" = success
+          test "${{ needs.test-shard.result }}" = success
+          test "${{ needs.merge-coverage.result }}" = success

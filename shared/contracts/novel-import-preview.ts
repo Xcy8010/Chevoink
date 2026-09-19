@@ -26,7 +26,7 @@ export interface NovelImportContentExclusion {
   source?: NovelImportPreview['volumes'][number]['chapters'][number]['source']
   manifestRevision: number; manifestHash: string; excludedAt: string; reason: string
 }
-export interface NovelImportArtifactDescriptor { id: string; source: string; sha256: string; bytes: number; mediaType: 'image/png'; width: number; height: number; coverCandidate: boolean; url: string }
+export interface NovelImportArtifactDescriptor { id: string; storageArtifactId?: string; source: string; sha256: string; bytes: number; mediaType: 'image/png'; width: number; height: number; coverCandidate: boolean; url: string }
 export interface NovelImportReportItem {
   id: string; kind: 'file' | 'page' | 'block' | 'region' | 'image'; source: string; parentId?: string
   status: 'native' | 'ocr' | 'needs_review' | 'failed' | 'verified_blank' | 'excluded'

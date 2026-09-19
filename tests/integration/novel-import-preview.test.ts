@@ -58,6 +58,8 @@ afterAll(async () => {
       const keys = [...await prisma.novelImportSource.findMany({ where: { job: { userId } }, select: { storageKey: true } }), ...await prisma.novelImportManifest.findMany({ where: { job: { userId } }, select: { storageKey: true } }), ...await prisma.novelImportArtifact.findMany({ where: { job: { userId } }, select: { storageKey: true } })].map(row => row.storageKey)
       await prisma.chapter.deleteMany({ where: { novelId: { in: novels }, authorId: userId } })
       await prisma.volume.deleteMany({ where: { novelId: { in: novels } } })
+      await prisma.novel.updateMany({ where: { id: { in: novels }, authorId: userId }, data: { coverAssetId: null } })
+      await prisma.coverAsset.deleteMany({ where: { ownerUserId: userId } })
       await prisma.novel.deleteMany({ where: { id: { in: novels }, authorId: userId } })
       await prisma.user.deleteMany({ where: { id: { in: [userId, otherId] } } })
       await prisma.novelImportGarbage.deleteMany({ where: { storageKey: { in: keys } } })
@@ -171,5 +173,34 @@ describe.skipIf(!available)('import report, resources and lazy preview in isolat
     await request(app).get(url).set('Cookie', cookie()).expect(200)
     await request(app).get(`${ready.base}/report`).set('Cookie', cookie()).expect(200)
     vi.stubEnv('NOVEL_IMPORT_ENABLED', 'true')
+  }, 60_000)
+  it('imports an exported WebP cover with its original chapters after real image storage without artificial review', async () => {
+    const webp = await sharp({ create: { width: 16, height: 24, channels: 3, background: '#246' } }).webp().toBuffer()
+    const ready = await prepare(zipFiles({
+      '原书/正文/第一卷/第0001章 开始.txt': '开始\n\n逐字保留的章节正文',
+      '原书/作品信息以及发布建议/作品信息.txt': '作品名称：原书\n作者：测试',
+      '原书/作品信息以及发布建议/封面.webp': webp,
+    }), 'export.zip')
+    const evidence = await report(ready.base)
+    expect(evidence.issues.filter(issue => issue.blocking)).toEqual([])
+    const image = evidence.artifacts[0]
+    expect(image.source).toMatch(/封面\.webp$/)
+    expect(image.id).not.toBe(image.storageArtifactId)
+    expect(image.url).toBe(`${ready.base}/artifacts/${image.storageArtifactId}`)
+    await request(app).get(image.url).set('Cookie', cookie()).expect(200)
+    const full = await request(app).get(`${ready.base}/preview`).set('Cookie', cookie())
+    expect(full.status, JSON.stringify(full.body)).toBe(200)
+    expect(full.body.data.report.complete).toBe(true)
+    const saved = await request(app).post(`${ready.base}/selection`).set('Cookie', cookie()).send({
+      expectedManifestRevision: ready.summary.manifestRevision, manifestHash: ready.summary.manifestHash,
+      chapters: [{ volumeIndex: 0, chapterIndex: 0 }], plans: [], memories: [], metadataSelection: { coverArtifactId: image.id },
+    })
+    expect(saved.status, JSON.stringify(saved.body)).toBe(200)
+    expect((await report(ready.base)).decisions).toEqual([])
+    await commit(ready.base, ready.targetHash, saved.body.data)
+    const novel = await prisma.novel.findUniqueOrThrow({ where: { id: novelId } })
+    expect(novel.coverAssetId).toBeTruthy()
+    const chapters = await prisma.chapter.findMany({ where: { novelId, archivedAt: null } })
+    expect(chapters.map(chapter => chapter.content)).toEqual(['逐字保留的章节正文'])
   }, 60_000)
 })
