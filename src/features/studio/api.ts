@@ -8,6 +8,7 @@ import type {
   ChangeSet,
   CreateChapterRequest,
   CreateVolumeRequest,
+  DeleteVolumeRequest,
   CreateNovelRequest,
   CreateNovelResponse,
   CreateAgentSessionResponse,
@@ -485,8 +486,11 @@ export async function moveVolume(
   return data.volume
 }
 
-export async function deleteVolume(novelId: string, volumeId: string): Promise<void> {
-  await requestData<{ deleted: true }>(`/api/novels/${novelId}/volumes/${volumeId}`, { method: 'DELETE' })
+export async function deleteVolume(novelId: string, volumeId: string, payload?: DeleteVolumeRequest): Promise<void> {
+  await requestData<{ deleted: true }>(`/api/novels/${novelId}/volumes/${volumeId}`, {
+    method: 'DELETE',
+    ...(payload ? { body: JSON.stringify(payload) } : {}),
+  })
 }
 
 export async function moveChapter(

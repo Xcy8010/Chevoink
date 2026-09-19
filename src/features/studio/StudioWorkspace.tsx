@@ -22,6 +22,7 @@ import { downloadCoverAssetImage } from './cover-image'
 import { getMe } from '../community/api'
 import ChapterSettingsPanel from './components/ChapterSettingsPanel'
 import ChapterSidebar from './components/ChapterSidebar'
+import VolumeSettingsDialog from './components/VolumeSettingsDialog'
 import ChangeSetDrawer from './components/ChangeSetDrawer'
 import PlanSettingsPanel from './components/PlanSettingsPanel'
 import { StudioSkeleton } from '@/components/ui/Skeleton'
@@ -87,6 +88,10 @@ export default function StudioWorkspace() {
   const toast = useToast()
   const [searchParams, setSearchParams] = useSearchParams()
   const activeNovelId = novelId ?? DEFAULT_NOVEL_ID
+  const workspaceOwnerRef = useRef({ novelId: activeNovelId, epoch: 0 })
+  if (workspaceOwnerRef.current.novelId !== activeNovelId) workspaceOwnerRef.current = { novelId: activeNovelId, epoch: workspaceOwnerRef.current.epoch + 1 }
+  const [volumeSettings, setVolumeSettings] = useState<{ novelId: string; volumeId: string; epoch: number } | null>(null)
+  useEffect(() => () => { workspaceOwnerRef.current = { ...workspaceOwnerRef.current, epoch: workspaceOwnerRef.current.epoch + 1 } }, [])
   const taskUiUserId = useShellStore(state => state.sessionUser?.id)
   const queryClient = useQueryClient()
 
@@ -1096,10 +1101,13 @@ export default function StudioWorkspace() {
     [],
   )
 
-  const refreshWorkspaceAfterAgentWrite = useCallback(async () => {
+  const refreshWorkspaceAfterAgentWrite = useCallback(async (throwOnError = false) => {
+    const owner = workspaceOwnerRef.current
+    if (owner.novelId !== activeNovelId) return
     agentWorkspaceDirtyRef.current = false
     try {
       const payload = await getStudioPayload(activeNovelId)
+      if (workspaceOwnerRef.current !== owner) return
       // Agent 改过书名/简介/标签后必须同步重置作品表单，否则 novelDirty 会被判为脏，
       // 1200ms 自动保存会用旧表单把 Agent 刚落库的内容覆盖回去；
       // 仅当用户自己有未保存的手动修改时才保留表单不动
@@ -1111,7 +1119,8 @@ export default function StudioWorkspace() {
       // 当前打开的章节被回退删除：回落到首章或目录。
       // 失效的 selectedChapterId 会让后续发送在后端报章节 404，
       // 此前前端把它误判成会话删除而清空整段对话（P0 数据丢失事故根因）
-      if (selectedChapterId && !payload.chapters.some((chapter) => chapter.id === selectedChapterId)) {
+      const currentChapterId = selectedChapterIdStateRef.current
+      if (currentChapterId && !payload.chapters.some((chapter) => chapter.id === currentChapterId)) {
         const fallbackChapter = payload.chapters[0] ?? null
         setSelectedChapterId(fallbackChapter?.id ?? null)
         setSelectedTreeItemId(fallbackChapter ? `chapter:${fallbackChapter.id}` : 'catalog')
@@ -1144,14 +1153,16 @@ export default function StudioWorkspace() {
 
       const changedChapterIds = agentChangedChapterIdsRef.current
       agentChangedChapterIdsRef.current = new Set()
-      if (selectedChapterId && changedChapterIds.has(selectedChapterId) && !chapterDirty) {
+      if (currentChapterId && changedChapterIds.has(currentChapterId) && !chapterDirtyRef.current) {
         void chapterQueryRefetchRef.current()
       }
-    } catch {
+    } catch (error) {
+      if (workspaceOwnerRef.current !== owner) return
       // 静默失败：run 结束或下一次写入事件仍会触发刷新
       agentWorkspaceDirtyRef.current = true
+      if (throwOnError) throw error
     }
-  }, [activeNovelId, chapterDirty, queryClient, selectedChapterId, syncStudioPayload])
+  }, [activeNovelId, queryClient, syncStudioPayload])
 
   const handleAgentStreamEvent = useCallback(
     (event: AgentStreamEvent) => {
@@ -2341,6 +2352,51 @@ export default function StudioWorkspace() {
     activeNovelId, chapterDraft, chapterDirty, chapterDraftStateRef, pendingChapterReviewsRef, selectedChapterIdStateRef, promptConfirmPendingChapterReview, setChapterSaveState, setChapterSaveMessage, setChapters, setSelectedTreeItemId, setSelectedChapterId, setChapterDraft, setChapterDirty, setChapterLastSavedAt, setCurrentNovel, syncStudioPayload,
   })
 
+  async function beforeVolumeChange(): Promise<boolean> {
+    const owner = workspaceOwnerRef.current
+    if (owner.novelId !== activeNovelId || currentNovelStateRef.current?.id !== activeNovelId) return false
+    if (pendingChapterReviewsRef.current.length) {
+      toast.error('请先处理待审章节，再修改卷设置。')
+      return false
+    }
+    if (chapterSaveState === 'saving' || novelSaveState === 'saving') {
+      toast.error('当前修改正在保存，请保存完成后重试。')
+      return false
+    }
+    if (chapterDirtyRef.current) {
+      await persistChapter('manual')
+      if (workspaceOwnerRef.current === owner) toast.error('已尝试保存章节，请确认保存成功后再次操作。')
+      return false
+    }
+    if (novelDirty) {
+      try { await saveNovelMutation.mutateAsync({ reason: 'manual' }) } catch { return false }
+      if (workspaceOwnerRef.current === owner) toast.error('已保存作品设置，请再次操作以核对最新内容。')
+      return false
+    }
+    return workspaceOwnerRef.current === owner
+  }
+
+  async function handleOpenVolumeSettings(volumeId: string) {
+    const owner = workspaceOwnerRef.current
+    if (await beforeVolumeChange() && workspaceOwnerRef.current === owner) setVolumeSettings({ novelId: activeNovelId, volumeId, epoch: owner.epoch })
+  }
+
+  async function refreshAfterVolumeChange() {
+    const owner = workspaceOwnerRef.current
+    await refreshWorkspaceAfterAgentWrite(true)
+    if (workspaceOwnerRef.current !== owner) return
+    const chapterId = selectedChapterIdStateRef.current
+    if (!chapterId || chapterDirtyRef.current || pendingChapterReviewsRef.current.length) return
+    const chapter = await getChapterContent(activeNovelId, chapterId)
+    if (workspaceOwnerRef.current !== owner || selectedChapterIdStateRef.current !== chapterId || chapterDirtyRef.current || pendingChapterReviewsRef.current.length) return
+    // Structure edits increment chapter revisions. Refresh the saved baseline
+    // before another automatic save can send the previous revision/order.
+    const draft = buildChapterDraft(chapter)
+    chapterDraftStateRef.current = draft
+    setChapterDraft(draft)
+    queryClient.setQueryData(['studio-chapter', activeNovelId, chapterId], chapter)
+  }
+
   const { coverPromptMutation, coverImageMutation, coverUploadMutation, coverSelectMutation } = useCoverActions({
     activeNovelId, currentNovel, coverForm, pendingCoverUploadFile, setCoverForm, setCoverKeywords, setCoverMessage, setActiveToolPanel, setMobileView, setCoverAssets, setSelectedCoverId, setWorkspaceDialog, setCoverGenerationBusy, setCurrentNovel, setPendingCoverUploadFile, syncStudioPayload,
   })
@@ -2508,6 +2564,8 @@ export default function StudioWorkspace() {
   }
 
   function handleChapterDraftChange(next: ChapterDraftState) {
+    chapterDraftStateRef.current = next
+    chapterDirtyRef.current = true
     setChapterDraft(next)
     setChapterDirty(true)
   }
@@ -3794,6 +3852,7 @@ export default function StudioWorkspace() {
                   onSelectChapter={handleSelectChapter}
                   onSelectPlan={handleSelectPlanFromTree}
                   onOpenChapterSettings={(chapterId) => handleSelectChapter(chapterId, { openSettings: true })}
+                    onOpenVolumeSettings={(volumeId) => void handleOpenVolumeSettings(volumeId)}
                   onOpenPlanSettings={setPlanSettingsPlanId}
                   onSelectCatalog={handleSelectCatalogFromTree}
                   onCreateChapter={handleRequestCreateChapter}
@@ -4090,6 +4149,7 @@ export default function StudioWorkspace() {
                     chapterCountLabel={chapterCountLabel} novelTitle={novelTitle} activeCoverLabel={coverLabel}
                     onSelectChapter={handleSelectWorkChapter} onSelectPlan={handleSelectPlanFromTree}
                     onOpenChapterSettings={(chapterId) => handleSelectChapter(chapterId, { openSettings: true })}
+                    onOpenVolumeSettings={(volumeId) => void handleOpenVolumeSettings(volumeId)}
                     onOpenPlanSettings={setPlanSettingsPlanId} onSelectCatalog={handleSelectCatalogFromTree}
                     onCreateVolume={handleRequestCreateVolume} onCreateChapter={handleRequestCreateChapter} onCreatePlan={handleRequestCreatePlan}
                     onRequestDeleteChapter={handleRequestDeleteChapterById} onRequestDeletePlan={handleRequestDeletePlan}
@@ -4180,6 +4240,7 @@ export default function StudioWorkspace() {
                     onSelectChapter={handleSelectChapter}
                     onSelectPlan={handleSelectPlanFromTree}
                     onOpenChapterSettings={(chapterId) => handleSelectChapter(chapterId, { openSettings: true })}
+                    onOpenVolumeSettings={(volumeId) => void handleOpenVolumeSettings(volumeId)}
                     onOpenPlanSettings={setPlanSettingsPlanId}
                     onSelectCatalog={handleSelectCatalogFromTree}
                     onCreateChapter={handleRequestCreateChapter}
@@ -4404,8 +4465,19 @@ export default function StudioWorkspace() {
             setWorkViewer('chapter')
           }
         }}
-        onRestored={refreshWorkspaceAfterAgentWrite}
+        onRestored={() => refreshWorkspaceAfterAgentWrite()}
         onViewChapter={handleSelectChapter}
+      /> : null}
+      {volumeSettings?.novelId === activeNovelId && volumeSettings.epoch === workspaceOwnerRef.current.epoch ? <VolumeSettingsDialog
+        key={`${volumeSettings.novelId}:${volumeSettings.volumeId}:${volumeSettings.epoch}`}
+        open
+        novelId={activeNovelId}
+        volumeId={volumeSettings.volumeId}
+        volumes={volumes}
+        chapters={chapters}
+        beforeChange={beforeVolumeChange}
+        onChanged={refreshAfterVolumeChange}
+        onClose={() => setVolumeSettings(null)}
       /> : null}
       <NovelCoverCropDialog
         open={Boolean(pendingCoverUploadFile)}

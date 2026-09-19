@@ -81,6 +81,7 @@ type ImmersiveComposerProps = {
   onDeletePlan: (planId: string) => void
   /** 作品树里点齿轮：切到该章并打开章节设置抽屉 */
   onOpenChapterSettings?: (chapterId: string) => void
+  onOpenVolumeSettings?: (volumeId: string) => void
   /** 计划改名（计划设置面板内） */
   onRenamePlan: (planId: string, title: string) => void
   onSelectCatalog: () => void
@@ -154,6 +155,7 @@ export default function ImmersiveComposer({
   onSelectPlan,
   onDeletePlan,
   onOpenChapterSettings,
+  onOpenVolumeSettings,
   onRenamePlan,
   onSelectCatalog,
   onCreateChapter,
@@ -533,6 +535,7 @@ export default function ImmersiveComposer({
                   setShowChapterSettings(true)
                 }}
                 onOpenPlanSettings={setPlanSettingsPlanId}
+                onOpenVolumeSettings={onOpenVolumeSettings}
                 onSelectCatalog={onSelectCatalog}
                 onCreateChapter={onCreateChapter}
                 onCreatePlan={onCreatePlan}
@@ -1112,6 +1115,10 @@ export default function ImmersiveComposer({
                     onOpenChapterSettings={(chapterId) => {
                       onOpenChapterSettings?.(chapterId)
                       setShowChapterSettings(true)
+                      setSheetOpen(false)
+                    }}
+                    onOpenVolumeSettings={(volumeId) => {
+                      onOpenVolumeSettings?.(volumeId)
                       setSheetOpen(false)
                     }}
                     onOpenPlanSettings={(planId) => {

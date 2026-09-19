@@ -193,17 +193,32 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     expect(fixture.db.volume.updateMany).not.toHaveBeenCalled()
     expect(fixture.db.chapter.updateMany).not.toHaveBeenCalled()
   })
-  it('renames a pristine placeholder for a named source and restores its original name and identity', async () => {
-    const original = { id: 'default-volume', novelId: scope.novelId, title: '第一卷', summary: null, orderIndex: 1, revision: 1, archivedAt: null, archivedByImportId: null }
+  it.each([1, 3])('renames the empty default volume at revision %s and restores its name and identity', async revision => {
+    const original = { id: 'default-volume', novelId: scope.novelId, title: '第一卷', summary: null, orderIndex: 1, revision, archivedAt: null, archivedByImportId: null }
     fixture.state.volume.push({ ...original })
     fixture.parse.mockResolvedValue({ volumes: [{ title: '淬火', chapters: [{ title: '合成章', content: '合成测试正文', source: 'original.txt#char=0-6' }] }], metadata: {}, warnings: [], sourceChars: 6, parserVersion: 'fixture-1' })
     const result = await committedForRestore()
-    expect(fixture.state.volume).toEqual([{ ...original, title: '淬火', revision: 2 }])
+    expect(fixture.state.volume).toEqual([{ ...original, title: '淬火', revision: revision + 1 }])
     expect(fixture.state.chapter[0]).toMatchObject({ volumeId: original.id, orderIndex: 1 })
     expect(fixture.state.novelImportBackup[0].snapshot).toMatchObject({ importedVolumeIds: [], renamedVolumes: [{ id: original.id, title: original.title }] })
     await restoreNovelImport(human(), result.job.jobId, result.restoreInput)
-    expect(fixture.state.volume).toEqual([{ ...original, revision: 3 }])
+    expect(fixture.state.volume).toEqual([{ ...original, revision: revision + 2 }])
     expect(fixture.state.chapter[0].archivedAt).toBeInstanceOf(Date)
+  })
+  it('repairs the historical empty-first-volume shell during reimport and restores both original volumes', async () => {
+    const original = existingBook('旧正文')
+    Object.assign(fixture.state.volume[0], { title: '淬火', orderIndex: 2 })
+    const empty = { id: 'empty-first', novelId: scope.novelId, title: '第一卷', summary: null, orderIndex: 1, revision: 1, archivedAt: null, archivedByImportId: null }
+    fixture.state.volume.push({ ...empty })
+    fixture.parse.mockResolvedValue({ volumes: [{ title: '淬火', chapters: [{ title: '第一章', content: '合成更新正文', source: 'original.txt#char=0-6' }] }], metadata: {}, warnings: [], sourceChars: 6, parserVersion: 'fixture-1' })
+    const result = await committedForRestore()
+    expect(fixture.state.volume[0]).toMatchObject({ id: original.volume.id, title: '淬火', orderIndex: 1, archivedAt: null })
+    expect(fixture.state.volume[1]).toMatchObject({ id: empty.id, archivedAt: expect.any(Date), archivedByImportId: result.job.jobId })
+    expect(fixture.state.novelImportBackup[0].snapshot).toMatchObject({ volumeIds: [empty.id], importedVolumeIds: [], movedVolumes: [{ id: original.volume.id, orderIndex: 2 }] })
+    await restoreNovelImport(human(), result.job.jobId, result.restoreInput)
+    expect(fixture.state.volume[0]).toMatchObject({ id: original.volume.id, title: '淬火', orderIndex: 2, archivedAt: null })
+    expect(fixture.state.volume[1]).toMatchObject({ ...empty, revision: 3 })
+    expect(fixture.state.chapter[0]).toMatchObject({ id: original.chapter.id, volumeId: original.volume.id, content: '旧正文', archivedAt: null })
   })
   it('keeps retained publication snapshots visible and never edits their identity', async () => {
     fixture.state.chapter.push({ id: 'archived', novelId: scope.novelId, status: 'draft', archivedAt: new Date(), publishedContent: '公开历史', publishedAt: null, publishedRevision: 2 })

@@ -41,6 +41,15 @@ export const moveVolumeSchema = z.object({
   expectedRevision: z.number().int().positive().optional(),
 })
 
+/** Human confirmation binds the exact chapters that will move with removal. */
+export const deleteVolumeSchema = z.object({
+  expectedRevision: z.number().int().positive(),
+  moveChapters: z.literal(true),
+  targetVolumeId: z.string().min(1),
+  expectedChapterRevisions: z.array(z.object({ id: z.string().min(1), revision: z.number().int().positive() }).strict()).max(10000),
+}).strict()
+export type DeleteVolumeRequest = z.infer<typeof deleteVolumeSchema>
+
 export const moveChapterSchema = z.object({
   targetVolumeId: z.string().min(1),
   position: z.number().int().positive(),

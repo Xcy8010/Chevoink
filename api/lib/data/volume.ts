@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 
 import type {
   CreateVolumeRequest,
+  DeleteVolumeRequest,
   MergeChaptersRequest,
   MoveChapterRequest,
   MoveVolumeRequest,
@@ -255,7 +256,7 @@ export async function moveVolumeData(
   return transaction ? move(transaction) : prisma.$transaction(move)
 }
 
-export async function deleteVolumeData(userId: string, novelId: string, volumeId: string, transaction?: Prisma.TransactionClient): Promise<boolean> {
+export async function deleteVolumeData(userId: string, novelId: string, volumeId: string, transaction?: Prisma.TransactionClient, input?: DeleteVolumeRequest): Promise<boolean> {
   await ensureNovelOwner(userId, novelId, transaction)
   const remove = async (tx: Prisma.TransactionClient) => {
     await lockNovelActiveScope(tx, novelId)
@@ -263,6 +264,33 @@ export async function deleteVolumeData(userId: string, novelId: string, volumeId
     const target = volumes.find((item) => item.id === volumeId)
     if (!target) return false
     if (volumes.length === 1) throw new DataAccessError(400, 'LAST_VOLUME_REQUIRED', '作品必须至少保留一卷。')
+    if (input) {
+      assertExpectedRevision(input.expectedRevision, target.revision, '卷')
+      const layout = await loadLayout(tx, novelId)
+      const source = layout.byVolume.get(volumeId) ?? []
+      const expected = new Map(input.expectedChapterRevisions.map(chapter => [chapter.id, chapter.revision]))
+      if (!input.moveChapters || expected.size !== input.expectedChapterRevisions.length || expected.size !== source.length || source.some(chapter => expected.get(chapter.id) !== chapter.revision)) {
+        throw new DataAccessError(409, 'VOLUME_REVISION_CONFLICT', '卷内章节已变化，请重新查看并确认删除。')
+      }
+      const index = volumes.findIndex(volume => volume.id === volumeId)
+      const destination = volumes[index > 0 ? index - 1 : 1]
+      if (input.targetVolumeId !== destination.id) throw new DataAccessError(409, 'VOLUME_REVISION_CONFLICT', '相邻卷已变化，请重新查看并确认删除。')
+      const adjacent = layout.byVolume.get(destination.id) ?? []
+      layout.byVolume.set(destination.id, index > 0 ? [...adjacent, ...source] : [...source, ...adjacent])
+      layout.byVolume.delete(volumeId)
+      const remaining = volumes.filter(volume => volume.id !== volumeId)
+      await rewriteChapterLayout(tx, remaining, layout.byVolume)
+      // Historical import versions retain their FK; hiding the removed volume
+      // preserves those records without exposing it in the active work tree.
+      if (await tx.chapter.count({ where: { volumeId } })) {
+        await updateActiveVolume(tx, { id: volumeId, novelId, revision: target.revision }, { archivedAt: new Date(), archivedByImportId: null, revision: { increment: 1 } })
+      } else {
+        assertActiveWriteCount((await tx.volume.deleteMany({ where: { id: volumeId, novelId, revision: target.revision, ...activeVolumeWhere } })).count, 'volume')
+      }
+      await rewriteVolumeOrder(tx, remaining)
+      await recalculateNovelStats(tx, novelId)
+      return true
+    }
     // Retained chapters still own this FK; an apparently empty active volume
     // cannot be physically deleted while it contains historical records.
     if (await tx.chapter.count({ where: { volumeId } })) {

@@ -571,15 +571,17 @@ export async function commitNovelImport(scope: NovelImportScope, jobId: string, 
     }
     // Match chapters only inside their uniquely resolved destination volume.
     const placement = buildNovelImportPlacement(t.volumes, t.chapters, preview.volumes, randomUUID)
-    for (const volume of placement.renamedVolumes) assertNovelImportMutationCount((await tx.volume.updateMany({ where: { id: volume.id, novelId: scope.novelId, archivedAt: null, title: volume.beforeTitle, revision: 1 }, data: { title: volume.title, revision: { increment: 1 } } })).count, 1)
+    for (const volume of placement.renamedVolumes) assertNovelImportMutationCount((await tx.volume.updateMany({ where: { id: volume.id, novelId: scope.novelId, archivedAt: null, title: volume.beforeTitle, revision: t.volumes.find(original => original.id === volume.id)!.revision }, data: { title: volume.title, revision: { increment: 1 } } })).count, 1)
     const archivedChapterRows = t.chapters.filter(chapter => placement.archivedChapterIds.includes(chapter.id))
-    const archivedVolumeRows: typeof t.volumes = []
+    const archivedVolumeRows = t.volumes.filter(volume => placement.retiredVolumes.some(retired => retired.id === volume.id))
+    if (archivedVolumeRows.length) assertNovelImportMutationCount((await tx.volume.updateMany({ where: { novelId: scope.novelId, archivedAt: null, id: { in: archivedVolumeRows.map(volume => volume.id) } }, data: { archivedAt: now, archivedByImportId: jobId, revision: { increment: 1 } } })).count, archivedVolumeRows.length)
+    for (const volume of placement.movedVolumes) assertNovelImportMutationCount((await tx.volume.updateMany({ where: { id: volume.id, novelId: scope.novelId, archivedAt: null, orderIndex: volume.beforeOrderIndex }, data: { orderIndex: volume.orderIndex, revision: { increment: 1 } } })).count, 1)
     if (t.volumes.length + placement.newVolumes.length > NOVEL_IMPORT_LIMITS.volumes) fail('IMPORT_LIMIT_EXCEEDED', '保留现有卷后总卷数超过200，请先整理卷。')
     if (archivedChapterRows.length) {
       assertNovelImportMutationCount((await tx.chapter.updateMany({ where: { novelId: scope.novelId, archivedAt: null, id: { in: placement.archivedChapterIds } }, data: { archivedAt: now, archivedByImportId: jobId, revision: { increment: 1 } } })).count, archivedChapterRows.length)
     }
     const changedVolumeIds = [...new Set(placement.chapters.map(chapter => chapter.volumeId))].filter(id => t.volumes.some(volume => volume.id === id))
-    await invalidateNovelImportSources(tx, scope.novelId, placement.archivedChapterIds, changedVolumeIds)
+    await invalidateNovelImportSources(tx, scope.novelId, placement.archivedChapterIds, [...changedVolumeIds, ...archivedVolumeRows.map(volume => volume.id)])
     const volumes = placement.newVolumes.map(volume => ({ ...volume, novelId: scope.novelId }))
     if (volumes.length) assertNovelImportMutationCount((await tx.volume.createMany({ data: volumes })).count, volumes.length)
     // Shift retained chapters before insertion; both unique indexes are released
@@ -630,7 +632,7 @@ export async function commitNovelImport(scope: NovelImportScope, jobId: string, 
     const archivedVolumes = await tx.volume.findMany({ where: { id: { in: archivedVolumeRows.map(v => v.id) } }, orderBy: { id: 'asc' } })
     const archivedChapters = await tx.chapter.findMany({ where: { id: { in: archivedChapterRows.map(c => c.id) } }, orderBy: { id: 'asc' } })
     const snapshot = { version: 2, volumeIds: archivedVolumeRows.map(v => v.id), chapterIds: archivedChapterRows.map(c => c.id), retainedEmptyVolumeIds: [], reorderedChapters: placement.reorderedBefore, beforeVolumeCount: t.volumes.length, beforeChapterCount: t.chapters.length, importedVolumeIds: volumes.map(v => v.id), importedChapterIds: chapters.map(c => c.id), metadata: novelImportMetadata(t.novel), metadataKeys: [...(m.title !== undefined ? ['title'] : []), ...(m.summary !== undefined ? ['summary'] : []), ...(m.tags !== undefined ? ['tagNames'] : []), ...(coverAssetId ? ['coverAssetId'] : [])], retainedHash: hashNovelImportRows(archivedVolumes, archivedChapters) }
-    await tx.novelImportBackup.create({ data: { id: backupId, jobId, snapshot: { ...snapshot, renamedVolumes: placement.renamedVolumes.map(volume => ({ id: volume.id, title: volume.beforeTitle })) }, beforeHash: t.hash, afterHash: after.hash, expiresAt: restoreExpiresAt } })
+    await tx.novelImportBackup.create({ data: { id: backupId, jobId, snapshot: { ...snapshot, renamedVolumes: placement.renamedVolumes.map(volume => ({ id: volume.id, title: volume.beforeTitle })), movedVolumes: placement.movedVolumes.map(volume => ({ id: volume.id, orderIndex: volume.beforeOrderIndex })) }, beforeHash: t.hash, afterHash: after.hash, expiresAt: restoreExpiresAt } })
     const receipt: NovelImportReceipt = { jobId, novelId: scope.novelId, backupId, volumeCount: placement.volumeCount, chapterCount: chapters.length, wordCount, firstChapterId, targetHash: after.hash, restoreExpiresAt: restoreExpiresAt.toISOString(), partialImport: preview.partialImport === true, reportUrl: `/api/novels/${encodeURIComponent(scope.novelId)}/imports/${encodeURIComponent(jobId)}/report`, planCount: plans.length, memoryCount: memories.length }
     await tx.novelImportApproval.update({ where: { id: approval.id }, data: { consumedAt: now } })
     await tx.novelImportCommit.create({ data: { jobId, approvalId: approval.id, idempotencyKey: input.idempotencyKey, receipt: { ...receipt } } })
@@ -724,6 +726,7 @@ export async function restoreNovelImport(human: NovelImportHuman, jobId: string,
     assertNovelImportMutationCount((await tx.chapter.updateMany({ where: { novelId: human.novelId, archivedAt: null, id: { in: snapshot.importedChapterIds } }, data: { archivedAt: now, archivedByImportId: jobId, revision: { increment: 1 } } })).count, snapshot.importedChapterIds.length)
     assertNovelImportMutationCount((await tx.volume.updateMany({ where: { novelId: human.novelId, archivedAt: null, id: { in: snapshot.importedVolumeIds } }, data: { archivedAt: now, archivedByImportId: jobId, revision: { increment: 1 } } })).count, snapshot.importedVolumeIds.length)
     await applyNovelImportChapterPositions(tx, human.novelId, snapshot.reorderedChapters ?? [])
+    for (const volume of snapshot.movedVolumes ?? []) assertNovelImportMutationCount((await tx.volume.updateMany({ where: { id: volume.id, novelId: human.novelId, archivedAt: null }, data: { orderIndex: volume.orderIndex, revision: { increment: 1 } } })).count, 1)
     for (const volume of snapshot.renamedVolumes ?? []) assertNovelImportMutationCount((await tx.volume.updateMany({ where: { id: volume.id, novelId: human.novelId, archivedAt: null }, data: { title: volume.title, revision: { increment: 1 } } })).count, 1)
     assertNovelImportMutationCount((await tx.volume.updateMany({ where: { id: { in: snapshot.volumeIds }, novelId: human.novelId, archivedByImportId: jobId, archivedAt: { not: null } }, data: { archivedAt: null, archivedByImportId: null, revision: { increment: 1 } } })).count, snapshot.volumeIds.length)
     assertNovelImportMutationCount((await tx.chapter.updateMany({ where: { id: { in: snapshot.chapterIds }, novelId: human.novelId, archivedByImportId: jobId, archivedAt: { not: null } }, data: { archivedAt: null, archivedByImportId: null, revision: { increment: 1 } } })).count, snapshot.chapterIds.length)

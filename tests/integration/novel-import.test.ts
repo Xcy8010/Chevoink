@@ -13,6 +13,8 @@ import { maintainNovelImports } from '../../api/lib/novel-import-maintenance.js'
 import { readImportBlob } from '../../api/lib/novel-import-storage.js'
 import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
 import { drainNovelImportEffects } from '../../api/lib/novel-import-effects.js'
+import { normalizeNovelStructure } from '../../api/lib/data/volume.js'
+import { zipFiles } from '../unit/novel-import-parser.fixtures.js'
 
 // Identity, host allowlist AND least-privilege role are verified, not just a name.
 // Missing migrations on a reachable verified DB fail the suite; never catch/skip.
@@ -24,7 +26,7 @@ let novelId = '', directory = ''
 const cookie = (owner = userId) => `chevoink_session=${buildSessionTokens(owner, 0).accessToken}`
 const base = () => `/api/novels/${novelId}/imports`
 
-async function prepare(source = '第一章 起点\n这是作者拥有的测试正文。\n\n第二章 远行\n这是第二章的独立原文。') {
+async function prepare(source: string | Buffer = '第一章 起点\n这是作者拥有的测试正文。\n\n第二章 远行\n这是第二章的独立原文。', filename = 'book.txt') {
   const preflight = await request(app).post(`${base()}/preflight`).set('Cookie', cookie()).send({})
   expect(preflight.status).toBe(200)
   if (preflight.body.data.overwriteRequired) for (const step of [1, 2]) {
@@ -34,7 +36,7 @@ async function prepare(source = '第一章 起点\n这是作者拥有的测试�
   const create = await request(app).post(base()).set('Cookie', cookie()).send({ intentId: preflight.body.data.intentId })
   expect(create.status).toBe(200)
   const jobId: string = create.body.data.jobId
-  const upload = await request(app).put(`${base()}/${jobId}/source?filename=book.txt`).set('Cookie', cookie()).type('application/octet-stream').send(Buffer.from(source))
+  const upload = await request(app).put(`${base()}/${jobId}/source?filename=${filename}`).set('Cookie', cookie()).type('application/octet-stream').send(typeof source === 'string' ? Buffer.from(source) : source)
   expect(upload.status).toBe(200)
   const analyze = await request(app).post(`${base()}/${jobId}/analyze`).set('Cookie', cookie()).send({})
   expect(analyze.status, JSON.stringify(analyze.body)).toBe(200)
@@ -43,8 +45,8 @@ async function prepare(source = '第一章 起点\n这是作者拥有的测试�
   expect(preview.status).toBe(200)
   return { jobId, preview: preview.body.data, targetHash: preflight.body.data.targetHash as string }
 }
-async function approve(source?: string) {
-  const prepared = await prepare(source)
+async function approve(source?: string | Buffer, filename?: string) {
+  const prepared = await prepare(source, filename)
   const grant = await request(app).post(`${base()}/${prepared.jobId}/confirm`).set('Cookie', cookie()).send({ manifestRevision: prepared.preview.manifestRevision, manifestHash: prepared.preview.manifestHash, targetHash: prepared.targetHash })
   expect(grant.status).toBe(200)
   return { ...prepared, input: { approvalId: grant.body.data.approvalId as string, idempotencyKey: randomUUID() } }
@@ -219,8 +221,8 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
     expect(await prisma.chapter.count({ where: { novelId, volumeId: original.id, archivedAt: null } })).toBe(2)
     expect(await prisma.volume.count({ where: { novelId, archivedAt: { not: null } } })).toBe(0)
   })
-  it('renames the pristine default volume for an unnumbered source and restores the old name', async () => {
-    const original = await prisma.volume.create({ data: { novelId, title: '第一卷', orderIndex: 1 } })
+  it.each([1, 3])('renames the empty default volume at revision %s and restores the old name', async revision => {
+    const original = await prisma.volume.create({ data: { novelId, title: '第一卷', orderIndex: 1, revision } })
     const ready = await approve('第一章 合成起点\n仅供测试的合成正文。')
     // Synthetic preview rename models the unnumbered ZIP directory without private source text.
     const edited = await request(app).patch(`${base()}/${ready.jobId}/manifest`).set('Cookie', cookie()).send({ expectedManifestRevision: ready.preview.manifestRevision, volumes: ready.preview.volumes.map((v: { chapters: unknown[] }) => ({ title: '淬火', chapters: v.chapters })), metadataSelection: {} })
@@ -230,11 +232,42 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
     expect(grant.status).toBe(200)
     const committed = await request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send({ approvalId: grant.body.data.approvalId, idempotencyKey: randomUUID() })
     expect(committed.status, JSON.stringify(committed.body)).toBe(200)
-    expect(await prisma.volume.findMany({ where: { novelId, archivedAt: null } })).toEqual([expect.objectContaining({ id: original.id, title: '淬火', orderIndex: 1, revision: 2 })])
+    expect(await prisma.volume.findMany({ where: { novelId, archivedAt: null } })).toEqual([expect.objectContaining({ id: original.id, title: '淬火', orderIndex: 1, revision: revision + 1 })])
     const restored = await request(app).post(`${base()}/${ready.jobId}/restore`).set('Cookie', cookie()).send(await restoreApproval(ready.jobId))
     expect(restored.status, JSON.stringify(restored.body)).toBe(200)
-    expect(await prisma.volume.findMany({ where: { novelId, archivedAt: null } })).toEqual([expect.objectContaining({ id: original.id, title: '第一卷', orderIndex: 1, revision: 3 })])
+    expect(await prisma.volume.findMany({ where: { novelId, archivedAt: null } })).toEqual([expect.objectContaining({ id: original.id, title: '第一卷', orderIndex: 1, revision: revision + 2 })])
     expect(await prisma.chapter.count({ where: { novelId, archivedAt: null } })).toBe(0)
+  })
+  it('imports an unnumbered export ZIP into the actual newly-created and normalized default volume', async () => {
+    const created = await request(app).post('/api/novels').set('Cookie', cookie()).send({ title: `新建链路-${randomUUID()}`, summary: '合成测试作品', visibility: 'private', status: 'draft', tags: [] })
+    expect(created.status, JSON.stringify(created.body)).toBe(201)
+    novelId = created.body.data.novel.id; novelIds.push(novelId)
+    const listed = await request(app).get(`/api/novels/${novelId}/volumes`).set('Cookie', cookie())
+    expect(listed.status).toBe(200)
+    await prisma.$transaction(tx => normalizeNovelStructure(tx, novelId))
+    const original = await prisma.volume.findFirstOrThrow({ where: { novelId, archivedAt: null } })
+    expect(original).toMatchObject({ title: '第一卷', orderIndex: 1, revision: 1, summary: null })
+    const source = zipFiles(Object.fromEntries([1, 2, 3, 4].map(n => [`正文/淬火/第${String(n).padStart(4, '0')}章 合成${n}.txt`, `仅供回归测试的合成正文${n}。`])))
+    const ready = await approve(source, 'synthetic.zip')
+    const committed = await request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send(ready.input)
+    expect(committed.status, JSON.stringify(committed.body)).toBe(200)
+    expect(await prisma.volume.findMany({ where: { novelId, archivedAt: null } })).toEqual([expect.objectContaining({ id: original.id, title: '淬火', orderIndex: 1 })])
+    expect(await prisma.chapter.count({ where: { novelId, volumeId: original.id, archivedAt: null } })).toBe(4)
+  })
+  it('repairs the historical empty first volume during reimport and restores exact original structure', async () => {
+    const first = await prisma.volume.create({ data: { novelId, title: '第一卷', orderIndex: 1 } })
+    const second = await prisma.volume.create({ data: { novelId, title: '淬火', orderIndex: 2 } })
+    const old = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId: second.id, title: '起点', content: '合成旧正文', orderIndex: 1, orderInVolume: 1 } })
+    await prisma.novel.update({ where: { id: novelId }, data: { chapterCount: 1, wordCount: old.content.length, lastChapterTitle: old.title } })
+    const ready = await approve(zipFiles({ '正文/淬火/第0001章 起点.txt': '合成更新正文。' }), 'synthetic.zip')
+    const committed = await request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send(ready.input)
+    expect(committed.status, JSON.stringify(committed.body)).toBe(200)
+    expect(await prisma.volume.findMany({ where: { novelId, archivedAt: null } })).toEqual([expect.objectContaining({ id: second.id, orderIndex: 1, title: '淬火' })])
+    expect(await prisma.volume.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ archivedAt: expect.any(Date), archivedByImportId: ready.jobId })
+    const restored = await request(app).post(`${base()}/${ready.jobId}/restore`).set('Cookie', cookie()).send(await restoreApproval(ready.jobId))
+    expect(restored.status, JSON.stringify(restored.body)).toBe(200)
+    expect((await prisma.volume.findMany({ where: { novelId, archivedAt: null }, orderBy: { orderIndex: 'asc' } })).map(v => [v.id, v.title, v.orderIndex])).toEqual([[first.id, first.title, 1], [second.id, second.title, 2]])
+    expect(await prisma.chapter.findMany({ where: { novelId, archivedAt: null } })).toEqual([expect.objectContaining({ id: old.id, volumeId: second.id, content: old.content, orderIndex: 1, orderInVolume: 1 })])
   })
   it('reuses the first volume, isolates namesakes in the second, and restores unique chapter positions', async () => {
     const first = await prisma.volume.create({ data: { novelId, title: '第一卷', orderIndex: 1 } })

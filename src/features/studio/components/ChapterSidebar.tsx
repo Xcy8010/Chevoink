@@ -66,6 +66,8 @@ type ChapterSidebarProps = {
   onMovePlan?: (planId: string, position: number) => void | Promise<void>
   /** 打开章节设置抽屉（会先切到该章） */
   onOpenChapterSettings: (chapterId: string) => void
+  /** 打开卷设置抽屉；卷行的章数在悬停、聚焦或触摸时可达 */
+  onOpenVolumeSettings?: (volumeId: string) => void
   /** 打开计划设置抽屉（改名 / 删除） */
   onOpenPlanSettings: (planId: string) => void
   /** 右键删除章节：确认弹窗与删除逻辑在 workspace 层 */
@@ -92,6 +94,7 @@ export default function ChapterSidebar({
   onMoveChapter,
   onMovePlan,
   onOpenChapterSettings,
+  onOpenVolumeSettings,
   onOpenPlanSettings,
   onRequestDeleteChapter,
   onRequestDeletePlan,
@@ -317,13 +320,31 @@ export default function ChapterSidebar({
                           setDropTarget(null)
                         }}
                         className={cn(
-                          'flex items-center gap-1.5 rounded-md border border-transparent px-2 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors',
+                          'group/volume flex items-center gap-1.5 rounded-md border border-transparent px-2 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors',
                           dropTarget === `volume:${volume.id}` && 'border-[var(--border-strong)] bg-[var(--surface-muted)]',
                         )}
                       >
                         <NotebookText className="h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]" />
                         <span className="truncate">第 {volume.orderIndex} 卷 · {volume.title}</span>
-                        <span className="ml-auto shrink-0 text-[10px] text-[var(--text-tertiary)]">共{volumeChapters.length}章</span>
+                        {onOpenVolumeSettings ? (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              onOpenVolumeSettings(volume.id)
+                            }}
+                            className="ml-auto inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-full px-1.5 text-[10px] text-[var(--text-tertiary)] transition hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                            aria-label={`卷设置：${volume.title}`}
+                            title="卷设置"
+                          >
+                            <span className="md:group-hover/volume:hidden md:group-focus-within/volume:hidden">共{volumeChapters.length}章</span>
+                            <span className="hidden items-center gap-1 md:group-hover/volume:inline-flex md:group-focus-within/volume:inline-flex">
+                              <Settings2 className="h-3 w-3" />设置
+                            </span>
+                          </button>
+                        ) : (
+                          <span className="ml-auto shrink-0 text-[10px] text-[var(--text-tertiary)]">共{volumeChapters.length}章</span>
+                        )}
                       </div>
                       <div className="ml-2.5 border-l border-[var(--border-subtle)] pl-1 md:border-transparent md:transition-colors md:group-hover/tree:border-[var(--border-subtle)]">
                   {volumeChapters.map((chapter) => {

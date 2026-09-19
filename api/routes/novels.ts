@@ -7,6 +7,7 @@ import {
   bulkReplacePreviewRequestSchema,
   createChapterSchema,
   createVolumeSchema,
+  deleteVolumeSchema,
   mergeChaptersSchema,
   moveChapterSchema,
   moveVolumeSchema,
@@ -453,7 +454,8 @@ router.delete('/:novelId/volumes/:volumeId', async (req: Request, res: Response)
   try {
     const userId = requireSessionUserId(req)
     requireAgent2Feature('volume', userId)
-    const deleted = await deleteVolumeData(userId, req.params.novelId, req.params.volumeId)
+    const input = req.body && Object.keys(req.body).length ? parseBody(deleteVolumeSchema, req.body, '卷删除参数不正确。') : undefined
+    const deleted = await deleteVolumeData(userId, req.params.novelId, req.params.volumeId, undefined, input)
     if (!deleted) {
       res.status(404).json(buildError(requestId, 'VOLUME_NOT_FOUND', '未找到卷。'))
       return
