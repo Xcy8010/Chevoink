@@ -4,6 +4,7 @@ import type { AgentQueueAction, AgentQueueSnapshot, EnqueueAgentRequest } from '
 import type {
   AgentSession,
   AgentSessionRunStatusPayload,
+  AgentTodoItem,
   AgentUIMessage,
   ApiResponse,
   ContextDetail,
@@ -139,18 +140,19 @@ export function resolveAgentQuestion(
 /** 会话消息 + activeRunId（服务端仍在进行的 run，刷新后据此续接直播）；
  * runLimit 时按 run 轮次分页（50 轮/页，用户端手动加载更早），不传则全量 */
 export type AgentSessionMessagesPagination = { hasMore: boolean; earliestRunStartedAt: string | null }
+export type AgentAuthorEndedPayload = { fulfilled: boolean; todoItems?: AgentTodoItem[] }
 /** 分支溯源：非空说明本任务是副本，forkedAt 之后的对话属于分支内新增 */
 export type AgentSessionForkInfo = { forkedFromSessionId: string; forkedFromMessageId: string | null; forkedAt: string | null }
 
 export function fetchAgentSessionMessages(
   sessionId: string,
   options?: { runLimit?: number; beforeRunStartedAt?: string | null },
-): Promise<{ messages: AgentUIMessage[]; activeRunId: string | null; resumeRunId?: string | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }> {
+): Promise<{ messages: AgentUIMessage[]; activeRunId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }> {
   const query = new URLSearchParams()
   if (options?.runLimit != null) query.set('runLimit', String(options.runLimit))
   if (options?.beforeRunStartedAt) query.set('before', options.beforeRunStartedAt)
   const suffix = query.toString() ? `?${query.toString()}` : ''
-  return requestData<{ messages: AgentUIMessage[]; activeRunId: string | null; resumeRunId?: string | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }>(
+  return requestData<{ messages: AgentUIMessage[]; activeRunId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }>(
     `/api/agent/sessions/${sessionId}/messages${suffix}`,
   )
 }

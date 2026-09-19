@@ -43,3 +43,89 @@ it('uses terminal event time only for the completed run, keeping creation time u
   expect(messages[0].completedAt).toBeUndefined()
   expect(messages[2].completedAt).toBeUndefined()
 })
+
+it('treats a trusted author-ended terminal event as cancelled work, not a failed run', () => {
+  useAgentStore.setState({
+    runId: 'r',
+    activeSessionId: 's',
+    phase: 'running',
+    authorEnded: null,
+    runningSessionIds: new Set(['s']),
+    sessionSignals: {},
+    todos: [{ content: '旧待办', status: 'in_progress' }],
+    lastSeq: 0,
+  })
+  useAgentStore.getState().applyEvent({
+    type: 'run.finished',
+    runId: 'r',
+    seq: 1,
+    ts: new Date().toISOString(),
+    status: 'cancelled',
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    artifacts: [],
+    outputSummary: '作者已结束',
+    authorEnded: {
+      fulfilled: false,
+      todoItems: [{ id: 'todo-1', content: '未执行项', status: 'cancelled', reason: 'author_ended' }],
+    },
+  })
+  const state = useAgentStore.getState()
+  expect(state.phase).toBe('cancelled')
+  expect(state.authorEnded).toMatchObject({ fulfilled: false })
+  expect(state.todos).toEqual([{ id: 'todo-1', content: '未执行项', status: 'cancelled', reason: 'author_ended' }])
+  expect(state.runningSessionIds.has('s')).toBe(false)
+  expect(state.sessionSignals).toEqual({})
+})
+
+it('reconciles an author-ended terminal poll even when the local run was already removed', () => {
+  useAgentStore.setState({
+    runId: 'old-run',
+    activeSessionId: 's',
+    phase: 'failed',
+    authorEnded: null,
+    runningSessionIds: new Set(),
+    sessionSignals: {
+      s: { runId: 'old-run', kind: 'failed', at: 1 },
+      other: { runId: 'other-run', kind: 'failed', at: 1 },
+    },
+    resumeableRunId: 'old-run',
+  })
+  useAgentStore.getState().syncRemoteRunStatuses({
+    s: {
+      runId: 'new-run',
+      status: 'cancelled',
+      finishedAt: new Date().toISOString(),
+      authorEnded: { fulfilled: false, todoItems: [{ id: 'todo-cancelled', content: '未执行项', status: 'cancelled' }] },
+    },
+    other: {
+      runId: 'other-run',
+      status: 'cancelled',
+      finishedAt: new Date().toISOString(),
+      authorEnded: { fulfilled: false },
+    },
+  })
+  const state = useAgentStore.getState()
+  expect(state.phase).toBe('cancelled')
+  expect(state.runId).toBe('new-run')
+  expect(state.authorEnded?.fulfilled).toBe(false)
+  expect(state.sessionSignals).toEqual({})
+  expect(state.resumeableRunId).toBeNull()
+})
+
+it('does not let a late running poll erase author-ended state for the same run', () => {
+  useAgentStore.setState({
+    runId: 'run-1',
+    activeSessionId: 's',
+    phase: 'cancelled',
+    authorEnded: { fulfilled: false },
+    runningSessionIds: new Set(),
+    sessionSignals: {},
+  })
+  useAgentStore.getState().syncRemoteRunStatuses({
+    s: { runId: 'run-1', status: 'running', finishedAt: null },
+  })
+  const state = useAgentStore.getState()
+  expect(state.authorEnded).toMatchObject({ fulfilled: false })
+  expect(state.phase).toBe('cancelled')
+  expect(state.runningSessionIds.has('s')).toBe(false)
+})

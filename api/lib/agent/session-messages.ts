@@ -1,3 +1,5 @@
+import { readAuthorEnded } from './author-ended.js'
+import type { AgentRun } from '../../../shared/contracts/index.js'
 import type { AgentRollbackSnapshot, AgentUIMessage } from '../../../shared/contracts/index.js'
 import type { AgentMessagePart } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
@@ -74,18 +76,19 @@ async function normalizeLegacyViewedImageUrls(userId: string, parts: AgentMessag
 /** 刷新后「继续执行」按钮的数据来源：当前无活跃 run 时，仅当会话「最近一个」run 停在 failed/paused 才供前端续跑。
  * 不能取历史任意 failed run：旧 run 失败后作者已开新 run 并正常收尾时，任务已闭环，
  * 刷新后不应再冒「继续执行」按钮（作者反馈：收尾完成后刷新仍见按钮）。 */
-async function getSessionRunState(sessionId: string): Promise<{ activeRunId: string | null; resumeRunId: string | null }> {
+async function getSessionRunState(sessionId: string): Promise<{ activeRunId: string | null; resumeRunId: string | null; authorEnded?: AgentRun['authorEnded'] }> {
   const local = getActiveRunIdBySession(sessionId)
   if (local) return { activeRunId: local, resumeRunId: null }
   const run = await prisma.agentRun.findFirst({
     where: { sessionId },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    select: { id: true, status: true, runtimeProtocolVersion: true, taskRoot: { select: { status: true } } },
+    select: { id: true, status: true, usage: true, runtimeProtocolVersion: true, taskRoot: { select: { status: true } } },
   })
   const durableActive = run?.runtimeProtocolVersion === 1 && run.taskRoot?.status === 'active'
     && ['queued', 'running', 'awaiting_approval'].includes(run.status)
-  return { activeRunId: durableActive ? run.id : null,
-    resumeRunId: run && (run.status === 'failed' || run.status === 'paused') ? run.id : null }
+  const ending = readAuthorEnded(run?.usage)
+  return { activeRunId: durableActive ? run.id : null, ...ending,
+    resumeRunId: !ending.authorEnded && run && (run.status === 'failed' || run.status === 'paused') ? run.id : null }
 }
 
 /** 拉取会话消息（parts 结构），用于历史恢复与切换会话；回滚快照仅服务端使用，返回前剥离；
@@ -108,6 +111,7 @@ export async function listLoopSessionMessages(
   activeRunId: string | null
   /** 无活跃 run 但存在可续跑的 failed/paused run：前端据此在刷新后仍显示「继续执行」按钮 */
   resumeRunId: string | null
+  authorEnded?: AgentRun['authorEnded']
   pagination: { hasMore: boolean; earliestRunStartedAt: string | null }
   /** 分支溯源：非空时前端在复制过来的对话下方渲染「从聊天中继续」分隔线 */
   fork: { forkedFromSessionId: string; forkedFromMessageId: string | null; forkedAt: string | null } | null

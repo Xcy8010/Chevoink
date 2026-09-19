@@ -41,7 +41,7 @@ export async function advanceDurableContinuation(token: RunLeaseToken) {
     if ((last.content ?? '') !== result.content || result.toolCalls.length) return runtimeError('RUNTIME_RECEIPT_INVALID', '继续判定与原模型回复不一致。')
     const todos = await readDurableTodoItems(tx, lease.taskRootId, frame.revision)
     const reason = result.finishReason === 'length' ? 'truncated' : !result.content.trim() ? 'empty_response'
-      : promisesFurtherAction(result.content) ? 'promised_action' : todos.some(item => item.status !== 'completed') ? 'unfinished_todos' : null
+      : promisesFurtherAction(result.content) ? 'promised_action' : todos.some(item => item.status === 'pending' || item.status === 'in_progress') ? 'unfinished_todos' : null
     if (!reason) return null
     return appendContinuation(tx, lease, frame, reason)
   })

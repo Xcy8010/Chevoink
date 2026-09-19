@@ -7,6 +7,7 @@ import type { chatWithTools as chatType } from '../../api/lib/ai-service.js'
 const mocks = vi.hoisted(() => ({
   chat: vi.fn(), emit: vi.fn(), persist: vi.fn(async () => ({})), dispose: vi.fn(async () => {}),
   update: vi.fn<(input: { data: Record<string, unknown> }) => Promise<{ taskSpec: TaskSpec | null; usage?: unknown; currentTurn?: number; startedAt?: Date; events?: Array<{ type: string; createdAt: Date }> }>>(async () => ({ taskSpec: null })), previous: vi.fn(async () => null),
+  committedChapter: vi.fn(async () => false),
   todos: vi.fn(async (): Promise<AgentTodoItem[]> => []),
   priorRuns: vi.fn(),
   report: vi.fn(async () => ({ chineseCharacters: 0, content: '' })),
@@ -41,6 +42,7 @@ vi.mock('../../api/lib/agent/skills/receipts.js', () => ({ recordSkillLoads: moc
 vi.mock('../../api/lib/agent/skills/service.js', async () => ({ resolveEnabledRuntimeSkills: vi.fn(async () => (await import('../../api/lib/agent/skills/index.js')).skillCatalog) }))
 vi.mock('../../api/lib/agent/context-engine.js', () => ({ captureUserDirectives: vi.fn(), compactSessionContext: vi.fn(async () => null) }))
 vi.mock('../../api/lib/agent/story-memory.js', () => ({ syncNovelMemoryProjection: vi.fn(async () => null) }))
+vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChapter: mocks.committedChapter }))
 vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportForDelivery: mocks.report }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
 vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: () => ({ emit: mocks.emit, emitTransient: mocks.emit,
@@ -49,7 +51,7 @@ vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: () => ({ em
   }),
 }), disposeRunEventBus: mocks.dispose }))
 vi.mock('../../api/lib/agent/permissions.js', () => ({ cancelAllQuestions: vi.fn(), grantAlwaysAllow: vi.fn(), hasAlwaysAllow: () => false, rejectAllApprovals: vi.fn(), waitForApproval: vi.fn() }))
-vi.mock('../../api/lib/agent/tools/todo-tools.js', () => ({ loadSessionTodoItems: mocks.todos, renderTodoItems: (items: AgentTodoItem[]) => JSON.stringify(items) }))
+vi.mock('../../api/lib/agent/tools/todo-tools.js', () => ({ loadSessionTodoItems: mocks.todos, cancelTaskTodoItems: vi.fn(async () => []), renderTodoItems: (items: AgentTodoItem[]) => JSON.stringify(items) }))
 vi.mock('../../api/lib/agent/task-lineage.js', () => ({ getTaskRunIds: async () => ['run'] }))
 vi.mock('../../api/lib/agent/tools/task-orchestration-tools.js', () => ({ ORCHESTRATION_TOOL_NAMES: new Set(), assertOrchestrationResumeGuard: vi.fn(), buildOrchestrationResumeNote: vi.fn() }))
 vi.mock('../../api/lib/agent/session-title.js', () => ({ autoNameSession: vi.fn() }))
@@ -86,6 +88,7 @@ beforeEach(() => {
   mocks.original.mockReset()
   mocks.original.mockResolvedValue({ parts: [{ type: 'text', text: '核对原任务的剩余工作。' }] })
   mocks.todos.mockResolvedValue([])
+  mocks.committedChapter.mockResolvedValue(false)
   mocks.previous.mockResolvedValue(null)
   mocks.priorRuns.mockReset()
   mocks.priorRuns.mockResolvedValue([])
@@ -900,5 +903,73 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
       expect(mocks.update.mock.calls.filter(([input]) => ['completed', 'failed', 'paused'].includes(String(input.data.status)))).toHaveLength(1)
       expect(mocks.dispose).toHaveBeenCalledOnce()
     } finally { mocks.update.mockImplementation(original) }
+  })
+})
+
+
+describe('author-directed task ending in the real execution loop', () => {
+  function answerTool(answer: string) {
+    return tool('ask_user', async () => ({ output: `作者的回答：${answer}`, display: { kind: 'question', question: '如何处理剩余工作？', options: [{ label: '继续' }, { label: '结束' }], answer } }))
+  }
+  it('honors the real author answer, skips the same-batch write, and does not fake an unfinished outcome', async () => {
+    const write = tool('chapter_write', async () => ({ output: '不应执行' }), false)
+    mocks.tools = [answerTool('待办为啥变成六条了？不都完成了吗？全部标注完成，然后结束'), write]
+    queue(response('', [call('answer', 'ask_user'), call('write', 'chapter_write')]))
+    await run('写下一章')
+    expect(write.execute).not.toHaveBeenCalled()
+    expect(mocks.chat).toHaveBeenCalledTimes(1)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'cancelled', authorEnded: { fulfilled: false } })
+    expect(mocks.update.mock.calls.at(-1)?.[0].data.usage).toMatchObject({ authorEnded: { fulfilled: false } })
+  })
+  it('finishes a verified next chapter successfully when the author ends the remaining work', async () => {
+    mocks.committedChapter.mockResolvedValue(true)
+    mocks.tools = [answerTool('现在结束任务')]
+    queue(response('', [call('answer', 'ask_user')]))
+    await run('写下一章')
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', authorEnded: { fulfilled: true } })
+    expect(mocks.chat).toHaveBeenCalledTimes(1)
+  })
+  it.each(['不要结束，继续检查', '写完后结束', '如果已经完成就结束', '结束任务（不是现在）'])('does not treat a conditional or negated answer as immediate termination: %s', async answer => {
+    mocks.tools = [answerTool(answer)]
+    queue(response('', [call('answer', 'ask_user')]), response('已完成检查。'))
+    await run()
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(events().at(-1)).not.toHaveProperty('authorEnded')
+  })
+  it('recognizes a selected ending option with its exact persisted label and detail', async () => {
+    mocks.tools = [tool('ask_user', async () => ({ output: '作者的回答已保存', display: {
+      kind: 'question', question: '下一步？', options: [{ label: '先结束本任务', detail: '本任务到此交付，保留已写内容' }],
+      answer: '先结束本任务（本任务到此交付，保留已写内容）',
+    } }))]
+    queue(response('', [call('answer', 'ask_user')]))
+    await run('写下一章')
+    expect(mocks.chat).toHaveBeenCalledTimes(1)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'cancelled', authorEnded: { fulfilled: false } })
+  })
+  it('does not resume an author-ended task from a typed continuation', async () => {
+    mocks.previous.mockResolvedValueOnce({ id: 'previous', usage: { authorEnded: { fulfilled: false } }, runtimeProtocolVersion: 0, taskRootId: null } as never)
+    await run('继续')
+    expect(mocks.chat).not.toHaveBeenCalled()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'cancelled', authorEnded: { fulfilled: false } })
+  })
+  it('cancelled todos cannot stand in for missing next-chapter evidence', async () => {
+    mocks.tools.push(tool('todo_write', async () => ({ output: '已撤销', display: { kind: 'todoList', items: [{ content: '写下一章', status: 'cancelled', reason: '不再执行' }] } })))
+    queue(response('', [call('todo', 'todo_write')]), ...Array.from({ length: 5 }, () => response('任务已结束。')))
+    await run('写下一章')
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+  })
+  it('does not accept model prose as author cancellation', async () => {
+    queue(...Array.from({ length: 5 }, () => response('作者要求结束，本任务已结束。')))
+    await run('写下一章')
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(events().at(-1)).not.toHaveProperty('authorEnded')
+  })
+  it('does not let obsolete pending bookkeeping overrule a verified single next-chapter deliverable', async () => {
+    mocks.committedChapter.mockResolvedValue(true)
+    mocks.tools.push(tool('todo_write', async () => ({ output: '旧重复清单', display: { kind: 'todoList', items: [{ content: '检查上一章', status: 'pending' }] } })))
+    queue(response('', [call('todo', 'todo_write')]), response('新章正文及终态已提交。'))
+    await run('写下一章')
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
   })
 })

@@ -3,8 +3,11 @@ import type { AgentExecutionMode, EntityId } from './models.js'
 
 /** 任务待办项：todo_write 工具全量维护，驱动 Agent 面板待办清单与循环防早停 */
 export interface AgentTodoItem {
+  /** Stable within a task; optional only for historical receipts. */
+  id?: string
   content: string
-  status: 'pending' | 'in_progress' | 'completed'
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+  reason?: string
 }
 
 /** 一次模型调用/一次 run 的 token 用量 */
@@ -333,6 +336,7 @@ export type AgentStreamEventBody =
   | { type: 'run.paused'; reason: 'user_stop' | 'approval_timeout' | 'model_stalled' | 'needs_input' }
   | {
       type: 'run.finished'
+      authorEnded?: { fulfilled: boolean; todoItems?: AgentTodoItem[] }
       status: 'succeeded' | 'failed' | 'cancelled'
       usage: AgentTokenUsage
       artifacts: AgentArtifactRef[]

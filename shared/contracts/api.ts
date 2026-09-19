@@ -500,6 +500,7 @@ export type ListAgentSessionsResponse = ApiSuccess<{
  * running/queued→转圈、awaiting_approval→黄点（同时覆盖权限审批与 ask_user 挂起）、
  * completed/failed/cancelled→终态（绿/红点，仅本页面会话内由事件层实时记录，此接口不回传历史终态）。 */
 export type AgentSessionRunStatus = {
+  authorEnded?: { fulfilled: boolean; todoItems?: import('./agent-events.js').AgentTodoItem[] }
   runId: string
   status: AgentRunStatus
   finishedAt: string | null

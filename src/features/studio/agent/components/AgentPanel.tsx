@@ -191,6 +191,7 @@ export function AgentPanel({
   const workConversation = useWorkConversation()
   const runId = useAgentStore((state) => state.runId)
   const phase = useAgentStore((state) => state.phase)
+  const authorEnded = useAgentStore((state) => state.authorEnded)
   const resumeableRunId = useAgentStore((state) => state.resumeableRunId)
   const messages = useAgentStore((state) => state.messages)
   const { recentConversationText, blockInfoById, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
@@ -235,6 +236,7 @@ export function AgentPanel({
         connect(payload.activeRunId, 0)
       } else {
         now.restoreMessages(payload.messages, sessionId)
+        now.setAuthorEnded(payload.authorEnded ?? null)
         now.noteResumeableRun(payload.resumeRunId ?? null)
       }
     }).catch(() => { /* Next queue poll retries; never erase existing history. */ })
@@ -601,6 +603,7 @@ export function AgentPanel({
           connect(activeRunId, 0)
         } else {
           useAgentStore.getState().restoreMessages(history, sessionId)
+          useAgentStore.getState().setAuthorEnded(payload.authorEnded ?? null)
           // 无活跃 run：若服务端派生出可续跑的 failed/paused run，刷新后仍保留「继续执行」按钮
           useAgentStore.getState().noteResumeableRun(payload.resumeRunId ?? null)
         }
@@ -723,7 +726,7 @@ export function AgentPanel({
   )
 
 
-  const canContinue = (Boolean(runId) && (phase === 'paused' || phase === 'failed')) || (!runId && Boolean(resumeableRunId))
+  const canContinue = !authorEnded && ((Boolean(runId) && (phase === 'paused' || phase === 'failed')) || (!runId && Boolean(resumeableRunId)))
   const combinedError = actionError ?? errorMessage
 
   const handleCopyText = useCallback(async (id: string, text: string) => {
@@ -833,9 +836,10 @@ export function AgentPanel({
     try {
       // 删除/回退后的重拉：不带分页参数走全量，避免已加载的更早轮次被页窗口截掉；
       // 同时清掉分页游标，防止顶部按钮残留过期状态
-      const { messages: history } = await fetchAgentSessionMessages(sessionId)
+      const { messages: history, authorEnded } = await fetchAgentSessionMessages(sessionId)
       setOlderPagination(null)
       useAgentStore.getState().restoreMessages(history, sessionId)
+      useAgentStore.getState().setAuthorEnded(authorEnded ?? null)
     } catch {
       /* 拉取失败保留现有消息 */
     }

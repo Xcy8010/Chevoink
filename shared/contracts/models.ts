@@ -868,6 +868,7 @@ export interface AgentSession {
 }
 
 export interface AgentRun {
+  authorEnded?: { fulfilled: boolean; todoItems?: import('./agent-events.js').AgentTodoItem[] }
   id: EntityId
   sessionId: EntityId
   userId: EntityId

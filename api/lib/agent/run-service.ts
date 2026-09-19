@@ -1,3 +1,5 @@
+import { readAuthorEnded } from './author-ended.js'
+import { hasAuthorEnded } from './completion-guard.js'
 import type { Response } from 'express'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
@@ -536,6 +538,7 @@ export async function streamLoopRun(
         usage: savedUsage.success ? savedUsage.data : { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         artifacts: [],
         outputSummary: latest?.outputSummary ?? '',
+        ...readAuthorEnded(latest.usage),
       })
     }
     // No local bus is not an execution verdict. For queued/running/approval
@@ -698,6 +701,7 @@ async function continueLoopRunLocked(
   model?: ContinueLoopRunModelSelection,
 ): Promise<StartAgentLoopRunResponse> {
   const run = await findOwnedLoopRun(userId, runId)
+  if (hasAuthorEnded(run.usage)) throw new DataAccessError(409, 'RUN_AUTHOR_ENDED', '原任务已按作者要求结束，请发送明确的新任务；已有成果保留。')
   await prisma.$transaction(tx => assertAgentManuscriptCurrent(tx, { userId, novelId: run.novelId, runId }))
 
   assertTaskAuthorizationRuntimeReady(run.taskSpec, { userId, sessionId: run.sessionId, novelId: run.novelId })
@@ -1185,6 +1189,7 @@ export function toAgentSession(record: {
   }
 }
 
+
 function toAgentRun(record: {
   id: string
   sessionId: string
@@ -1202,6 +1207,7 @@ function toAgentRun(record: {
   finishedAt?: Date | string | null
   createdAt?: Date | string | null
   updatedAt?: Date | string | null
+  usage?: unknown
 }): AgentRun {
   return {
     id: record.id,
@@ -1216,6 +1222,7 @@ function toAgentRun(record: {
     status: record.status,
     inputSummary: record.inputSummary ?? null,
     outputSummary: record.outputSummary ?? null,
+    ...readAuthorEnded(record.usage),
     errorMessage: record.errorMessage ?? null,
     startedAt: toIso(record.startedAt),
     finishedAt: toIso(record.finishedAt),
@@ -1726,7 +1733,7 @@ export async function listSessionRunStatuses(userId: string, sessionIds: string[
     },
     orderBy: { createdAt: 'desc' },
     take: 500,
-    select: { id: true, sessionId: true, status: true, finishedAt: true },
+    select: { id: true, sessionId: true, status: true, finishedAt: true, usage: true },
   })
 
   const statuses: AgentSessionRunStatusPayload['statuses'] = {}
@@ -1737,6 +1744,7 @@ export async function listSessionRunStatuses(userId: string, sessionIds: string[
       runId: run.id,
       status: run.status as AgentRunStatus,
       finishedAt: run.finishedAt?.toISOString() ?? null,
+      ...readAuthorEnded(run.usage),
     }
   }
   return { statuses }

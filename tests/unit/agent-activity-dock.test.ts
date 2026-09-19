@@ -35,4 +35,18 @@ describe('Agent activity presentation', () => {
     expect(markup).toContain('接受全部')
     expect(markup).toContain('拒绝全部')
   })
+
+  it('keeps cancelled todos out of completed counts and shows a running item as active', () => {
+    const todos = [
+      { id: 'todo-done', content: '完成第二章', status: 'completed' as const },
+      { id: 'todo-cancelled', content: '整理第三章', status: 'cancelled' as const, reason: 'author_ended' },
+      { id: 'todo-running', content: '检查第四章', status: 'in_progress' as const },
+    ] as unknown as typeof baseProps.todos
+    const markup = renderToStaticMarkup(createElement(AgentActivityBar, { ...baseProps, todos, runActive: true, appearance: 'dock' }))
+    expect(markup).toContain('1/2 已完成 · 1 项已取消')
+    expect(markup).toContain('已取消 1 项')
+    expect(markup).toContain('整理第三章')
+    expect(markup).toContain('执行中')
+    expect(markup).toContain('animate-spin')
+  })
 })

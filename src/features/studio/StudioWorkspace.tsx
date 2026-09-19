@@ -57,7 +57,7 @@ import { fetchAgentSessions, updateAgentSessionSettings } from './agent/agentApi
 import { AgentActivityBar } from './agent/components/AgentActivityBar'
 import AgentMemoryCenter from './agent/components/AgentMemoryCenter'
 import ContextDetailDialog from './agent/components/ContextDetailDialog'
-import { WORKSPACE_WRITE_TOOLS, useAgentStore, type ComposerReference } from './agent/agentStore'
+import { isRunActive, WORKSPACE_WRITE_TOOLS, useAgentStore, type ComposerReference } from './agent/agentStore'
 import { getMessageText } from './agent/lib/panel-helpers'
 import { PanelResizeHandle } from './panel-resize'
 import type { AgentArtifact, AgentLocalRollbackSnapshot, AgentRunState, ChapterDraftState, ChapterPendingReview, CoverFormState, EditableNovelStatus, EditorSelectionState, MobileView, NovelFormState, PlanPendingReview, ProjectNotesState, SaveState, ToolPanel, WorkspaceDocumentView, WorkspacePlanFile } from './types'
@@ -207,6 +207,7 @@ export default function StudioWorkspace() {
   const workspaceActivitiesVersion = useAgentStore((state) => state.activitiesVersion)
   const agentTodos = useAgentStore((state) => state.todos)
   const agentTodosVersion = useAgentStore((state) => state.todosVersion)
+  const agentPhase = useAgentStore((state) => state.phase)
   const agentMessages = useAgentStore((state) => state.messages)
   const liveToolDrafts = useAgentStore((state) => state.liveToolDrafts)
   const autoFollow = useAgentStore((state) => state.autoFollow)
@@ -4132,7 +4133,7 @@ export default function StudioWorkspace() {
                   activitiesVersion={workspaceActivitiesVersion}
                   todos={agentTodos}
                   todosVersion={agentTodosVersion}
-                  runActive={agentRunState.active}
+                  runActive={isRunActive(agentPhase)}
                   pendingReviewCount={pendingChapterReviews.length + (pendingPlanReview ? 1 : 0)}
                   reviewBusy={pendingChapterReviewBusy || pendingPlanReviewBusy}
                   onApproveAllReviews={handleApproveAllPendingReviews}

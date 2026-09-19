@@ -92,6 +92,26 @@ it('does not auto-open todo updates, retains pending rows and opens only on clic
   view.rerender(<AgentActivityBar {...props} todosVersion={3} />)
   expect(button.getAttribute('aria-expanded')).toBe('true')
 })
+it('shows the active spinner above the composer and keeps cancelled work separate from the live plan', () => {
+  const todos = [
+    { id: 'todo-done', content: '已完成', status: 'completed' as const },
+    { id: 'todo-cancelled', content: '已取消项', status: 'cancelled' as const, reason: 'author_ended' },
+    { id: 'todo-running', content: '正在执行', status: 'in_progress' as const },
+  ] as unknown as typeof props.todos
+  const view = render(<AgentActivityBar {...props} todos={todos} runActive />)
+  const button = screen.getByRole('button', { name: '待办进度' })
+  expect(button.textContent).toContain('1/2')
+  expect(button.textContent).toContain('1项已取消')
+  expect(button.textContent).toContain('正在执行')
+  expect(button.querySelector('.animate-spin')).toBeTruthy()
+
+  fireEvent.click(button)
+  expect(screen.getByText('已取消 1 项')).toBeTruthy()
+  expect(screen.getByText('已取消项')).toBeTruthy()
+  expect(screen.getAllByText('正在执行')).toHaveLength(2)
+  expect(document.querySelectorAll('.animate-spin').length).toBe(2)
+  view.unmount()
+})
 it('hover uses an unclipped portal; item and summary navigate correct document', () => {
   const view = render(<AgentActivityBar {...props} />)
   fireEvent.pointerEnter(screen.getByText('2 个工作区变更').closest('button')!.parentElement!.parentElement!)

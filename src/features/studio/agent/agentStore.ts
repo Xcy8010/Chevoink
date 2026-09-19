@@ -43,6 +43,7 @@ export type PendingApproval = {
  * 仅记录本页面会话内实时收到的事件；切走窗口后的运行/挂起状态由服务端 run-status 轮询兑底。 */
 export type SessionSignalKind = 'done' | 'attention' | 'failed'
 export type SessionSignal = { runId: string; kind: SessionSignalKind; at: number }
+export type AgentAuthorEnded = { fulfilled: boolean; todoItems?: AgentTodoItem[] }
 
 /** ask_user 工具挂起中的提问，驱动专门的提问卡片 UI */
 export type PendingQuestion = {
@@ -199,6 +200,8 @@ type AgentStoreState = {
       支撑「继续执行」按钮在刷新后仍显示，不依赖活体 store 状态 */
   resumeableRunId: string | null
   phase: AgentRunPhase
+  /** 可信作者结束信号；用于区分作者主动结束与真实执行失败，禁止误显示继续/红灯。 */
+  authorEnded: AgentAuthorEnded | null
   agentTitle: string
   messages: AgentUIMessage[]
   pendingApproval: PendingApproval | null
@@ -260,6 +263,8 @@ type AgentStoreState = {
   resumeRun: (runId: string, sessionId: string | null) => void
   /** 记录刷新后从服务端派生的可续跑 run（拉历史消息时写入，续跑成功后清空） */
   noteResumeableRun: (runId: string | null) => void
+  /** 刷新历史或终态事件提供作者结束事实，并优先采用其最终待办快照。 */
+  setAuthorEnded: (value: AgentAuthorEnded | null) => void
   restoreMessages: (messages: AgentUIMessage[], sessionId?: string | null) => void
   /** 加载更早对话：把更早轮次前插合并（按 id 去重），不触碰进行中的 run */
   prependMessages: (messages: AgentUIMessage[]) => void
@@ -511,6 +516,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   runId: null,
   resumeableRunId: null,
   phase: 'idle',
+  authorEnded: null,
   agentTitle: '写作主控',
   messages: [],
   pendingApproval: null,
@@ -548,6 +554,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     set((state) => ({
       runId,
       phase: 'starting',
+      authorEnded: null,
       activeSessionId: sessionId,
       loadedSessionId: sessionId,
       pendingApproval: null,
@@ -602,6 +609,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       runId,
       resumeableRunId: null,
       phase: 'starting',
+      authorEnded: null,
       activeSessionId: sessionId,
       loadedSessionId: sessionId,
       pendingApproval: null,
@@ -632,6 +640,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       messages: restored,
       phase: 'idle',
       runId: null,
+      authorEnded: null,
       resumeableRunId: null,
       activeSessionId: null,
       loadedSessionId: sessionId,
@@ -676,6 +685,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       runId: null,
       resumeableRunId: null,
       phase: 'idle',
+      authorEnded: null,
       activeSessionId: null,
       loadedSessionId: null,
       pendingApproval: null,
@@ -703,6 +713,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   noteResumeableRun: (runId) =>
     set((state) => (state.resumeableRunId === runId ? {} : { resumeableRunId: runId })),
 
+  setAuthorEnded: (value) => set((state) => ({
+    authorEnded: value,
+    ...(value?.todoItems ? { todos: value.todoItems, todosVersion: state.todosVersion + 1 } : {}),
+  })),
+
   dismissSessionSignal: (sessionId) =>
     set((state) => {
       const signal = state.sessionSignals[sessionId]
@@ -721,10 +736,41 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     set((state) => {
       const running = new Set(state.runningSessionIds)
       const signals = { ...state.sessionSignals }
+      let authorEnded = state.authorEnded
+      let authorEndedTodos: AgentTodoItem[] | undefined
+      let phase = state.phase
+      let runId = state.runId
       let changed = false
       for (const [sessionId, entry] of Object.entries(statuses)) {
         if (!entry) continue
+        const remoteAuthorEnded = (entry as AgentSessionRunStatus & { authorEnded?: AgentAuthorEnded }).authorEnded
+        const isActiveSession = sessionId === state.activeSessionId
+        if (isActiveSession && isRunActive(state.phase) && state.runId && state.runId !== entry.runId) continue
+        // A late status for an older run must not overwrite a live newer run.
+        // Once the same run has authorEnded, however, a stale `running` poll must
+        // not clear that terminal fact again.
+        const acceptsAuthorEnded = isActiveSession && Boolean(remoteAuthorEnded)
+          && (!isRunActive(state.phase) || !state.runId || state.runId === entry.runId)
+        const appliesAuthorEnded = Boolean(remoteAuthorEnded) && (!isActiveSession || acceptsAuthorEnded)
+        if (acceptsAuthorEnded && remoteAuthorEnded) {
+          authorEnded = remoteAuthorEnded
+          authorEndedTodos = remoteAuthorEnded.todoItems
+          runId = entry.runId
+          phase = remoteAuthorEnded.fulfilled ? 'succeeded' : 'cancelled'
+          changed = true
+        }
+        if (appliesAuthorEnded && signals[sessionId]) {
+          delete signals[sessionId]
+          changed = true
+        }
         if (entry.status === 'running' || entry.status === 'queued' || entry.status === 'awaiting_approval') {
+          const sameAuthorEndedRun = isActiveSession && Boolean(authorEnded) && runId === entry.runId
+          if (isActiveSession && authorEnded && !sameAuthorEndedRun) {
+            authorEnded = null
+            authorEndedTodos = undefined
+            changed = true
+          }
+          if (sameAuthorEndedRun) continue
           if (!running.has(sessionId)) { running.add(sessionId); changed = true }
           if (entry.status === 'awaiting_approval') {
             // 挂起持续提示：兜底刷新或跨窗口期间丢失的本地黄点
@@ -744,14 +790,23 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         if (!running.has(sessionId)) continue
         running.delete(sessionId)
         changed = true
-        const kind: SessionSignalKind | null =
-          entry.status === 'completed' ? 'done' : entry.status === 'failed' || entry.status === 'cancelled' ? 'failed' : null
+        const kind: SessionSignalKind | null = appliesAuthorEnded
+          ? null
+          : entry.status === 'completed' ? 'done' : entry.status === 'failed' || entry.status === 'cancelled' ? 'failed' : null
         if (!kind) continue
         // 已完成（绿）不打扰正在查看该任务的作者；异常中止（红）当前窗口内同样要显示
         if (kind === 'done' && sessionId === state.activeSessionId) continue
         signals[sessionId] = { runId: entry.runId, kind, at: Date.now() }
       }
-      return changed ? { runningSessionIds: running, sessionSignals: signals } : {}
+      return changed ? {
+        runningSessionIds: running,
+        sessionSignals: signals,
+        phase,
+        runId,
+        authorEnded,
+        ...(authorEndedTodos ? { todos: authorEndedTodos, todosVersion: state.todosVersion + 1 } : {}),
+        ...(authorEnded ? { resumeableRunId: null } : {}),
+      } : {}
     }),
 
   setComposerDraft: (value) => set({ composerDraft: value }),
@@ -1139,6 +1194,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           return {
             ...base,
             phase: event.status,
+            authorEnded: event.authorEnded ?? null,
             usage: event.usage,
             outputSummary: event.outputSummary,
             pendingApproval: null,
@@ -1147,8 +1203,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             messages: settleRunningToolParts(state.messages, '已中断').map(message => message.role === 'assistant' && message.runId === event.runId
               ? { ...message, completedAt: event.status === 'succeeded' ? event.ts : null } : message),
             workspaceActivities: settleRunningActivities(state.workspaceActivities),
+            ...(event.authorEnded?.todoItems ? { todos: event.authorEnded.todoItems, todosVersion: state.todosVersion + 1 } : {}),
             ...withoutRunningSession(state),
-            ...(event.status === 'succeeded' ? withoutActiveSessionSignal(state) : noteSessionSignal(state, 'failed')),
+            ...(event.status === 'succeeded' || event.authorEnded ? withoutActiveSessionSignal(state) : noteSessionSignal(state, 'failed')),
           }
 
         case 'error':

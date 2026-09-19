@@ -10,7 +10,7 @@ import { DataAccessError } from '../../prisma.js'
 import { normalizeToolInput } from './input-validation.js'
 import { todoWriteTool, prepareTodoUpdate, renderTodoItems } from './todo-tools.js'
 
-const itemsSchema = z.array(z.object({ content: z.string().min(1).max(100), status: z.enum(['pending', 'in_progress', 'completed']) }).strict()).max(20)
+const itemsSchema = z.array(z.object({ id: z.string().max(64).optional(), reason: z.string().max(200).optional(), content: z.string().min(1).max(100), status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']) }).strict()).max(20)
 const resultSchema = z.object({ todoItems: itemsSchema, toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() })
 
 /** Author directives share the task-state transaction boundary. Saving a
@@ -85,19 +85,22 @@ export async function executeDurableTodo(ctx: ToolContext, raw: unknown): Promis
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '待办不属于原任务范围。')
     const previous = await readDurableTodoItems(tx, root.id, cursor.expectedRevision)
-    const { items, changed } = prepareTodoUpdate(previous, args.items)
+    const { items, changed, error } = prepareTodoUpdate(previous, args.items, args.changeReason)
+    if (error) return runtimeJson({ todoItems: previous, toolResult: { outcome: 'failed', summary: '待办更新未接受', output: `${error}\n本任务实际清单：\n${renderTodoItems(previous)}`, display: { kind: 'todoList', items: previous } } }).value
     const completed = items.filter(item => item.status === 'completed').length
+    const cancelled = items.filter(item => item.status === 'cancelled').length
+    const progress = `${completed}/${items.length - cancelled}${cancelled ? `，${cancelled} 项已取消` : ''}`
     if (!changed) return runtimeJson({ todoItems: items, toolResult: { summary: '待办清单未变更',
       output: `待办清单未变更，不清空或覆盖原清单。仅长任务/复杂任务开工前建立至少两项真实工作；禁止为收尾补造完成项。${items.length ? `\n本任务原清单：\n${renderTodoItems(items)}` : '\n本任务没有清单；已完成请直接交付，否则继续实际工作。'}` } }).value
     const existing = await tx.agentArtifact.findFirst({ where: { artifactType: 'chapterPlan', metadata: { path: ['todoList'], equals: true },
       run: { taskRootId: root.id, userId: ctx.userId, sessionId: ctx.sessionId } }, select: { id: true } })
-    const data = { content: JSON.stringify(items), summary: `待办 ${completed}/${items.length}`, metadata: { todoList: true, taskRootId: root.id, todoRunId: ctx.runId } }
+    const data = { content: JSON.stringify(items), summary: `待办 ${progress}`, metadata: { todoList: true, taskRootId: root.id, todoRunId: ctx.runId } }
     if (existing) await tx.agentArtifact.update({ where: { id: existing.id }, data })
     else await tx.agentArtifact.create({ data: { ...data, runId: ctx.runId, artifactType: 'chapterPlan', title: '任务待办清单' } })
     ctx.signal.throwIfAborted()
     // Todo bookkeeping is never budget/checkpoint progress or proof of completion.
-    return runtimeJson({ todoItems: items, toolResult: { summary: `待办 ${completed}/${items.length} 已完成`,
-      output: `待办清单已更新（${completed}/${items.length} 已完成）：\n${renderTodoItems(items)}\n${completed < items.length ? '继续执行未完成工作；受阻应如实说明，不得假勾选。' : '请核对实际交付，不以勾选清单替代成果验证。'}`,
+    return runtimeJson({ todoItems: items, toolResult: { summary: `待办 ${progress} 已完成`,
+      output: `待办清单已更新（${progress} 已完成）：\n${renderTodoItems(items)}\n${items.some(item => item.status === 'pending' || item.status === 'in_progress') ? '继续执行未完成工作；受阻应如实说明，不得假勾选。' : '请核对实际交付，不以勾选清单替代成果验证。'}`,
       display: { kind: 'todoList', items } } }).value
   })
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })

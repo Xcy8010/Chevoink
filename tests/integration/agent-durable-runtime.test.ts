@@ -1,3 +1,4 @@
+import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { Prisma } from '@prisma/client'
@@ -51,7 +52,7 @@ import { getStructureReportObservation } from '../../api/lib/data-access.js'
 import { taskContextListTool, taskContextReadTool, executionContextReadTool } from '../../api/lib/agent/tools/task-context-tools.js'
 import { sessionHistorySearchTool, sessionMessageReadTool } from '../../api/lib/agent/tools/session-history-tools.js'
 import { executeDurableRead } from '../../api/lib/agent/tools/durable-read.js'
-import { todoWriteTool } from '../../api/lib/agent/tools/todo-tools.js'
+import { todoWriteTool, withTodoIds } from '../../api/lib/agent/tools/todo-tools.js'
 import { executeDurableTodo } from '../../api/lib/agent/tools/durable-todo.js'
 import { prepareStoryCompilation, saveSceneTasks, recordStoryCompilerWrite, validateStoryContinuity, commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
 import { storyCompilerPrepareTool, sceneTaskBuildTool, chapterBridgeGetTool, continuityValidateTool, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
@@ -2063,11 +2064,11 @@ describe.runIf(available)('compiler transaction and root continuity', () => {
 })
 
 describe.runIf(available)('durable task todos', () => {
-  it.each(['build', 'plan', 'review', 'late', 'empty', 'single', 'replay', 'corrupt', 'rollback', 'isolation', 'resume'] as const)('%s keeps task progress in confirmed receipts', async scenario => {
+  it.each(['build', 'plan', 'review', 'late', 'empty', 'single', 'replay', 'corrupt', 'rollback', 'isolation', 'resume', 'cancelled'] as const)('%s keeps task progress in confirmed receipts', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
       const mode = scenario === 'plan' || scenario === 'review' ? scenario : 'build'
-      const initial = [{ content: '步骤一', status: 'in_progress' }, { content: '步骤二', status: 'pending' }]
+      const initial = withTodoIds([{ content: '步骤一', status: 'in_progress' }, { content: '步骤二', status: 'pending' }])
       const args = { items: scenario === 'late' ? initial.map(item => ({ ...item, status: 'completed' })) : scenario === 'empty' ? [] : scenario === 'single' ? initial.slice(0, 1) : initial }
       const ignored = ['late', 'empty', 'single'].includes(scenario)
       const initialized = await initializeExecutionState(lease, { configuration: { version: 1, mode, agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
@@ -2077,7 +2078,7 @@ describe.runIf(available)('durable task todos', () => {
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '分两步处理本章' }, { role: 'assistant', content: null, toolCalls: [
             { id: 'todo-first', name: 'todo_write', arguments: JSON.stringify(args) },
-            { id: 'todo-next', name: 'todo_write', arguments: JSON.stringify({ items: [{ content: '步骤一', status: 'completed' }] }) },
+            { id: 'todo-next', name: 'todo_write', arguments: JSON.stringify({ items: scenario === 'cancelled' ? initial.map(item => ({ ...item, status: 'cancelled', reason: '重复清单，剩余项不再执行' })) : [{ ...initial[0], status: 'completed' }] }) },
           ] }], successfulToolSignatures: [] } })
       let otherArtifact: { id: string; content: string } | undefined
       if (scenario === 'isolation') {
@@ -2122,9 +2123,19 @@ describe.runIf(available)('durable task todos', () => {
         lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'todo-resume-worker')
       }
       await executeDurableToolStep(lease, new AbortController().signal)
-      expect(JSON.parse((await prisma.agentArtifact.findUniqueOrThrow({ where: { id: artifact!.id } })).content)).toEqual([
-        { content: '步骤一', status: 'completed' }, initial[1],
-      ])
+      const expected = scenario === 'cancelled'
+        ? initial.map(item => ({ ...item, status: 'cancelled', reason: '重复清单，剩余项不再执行' }))
+        : [{ ...initial[0], status: 'completed' }, initial[1]]
+      expect(JSON.parse((await prisma.agentArtifact.findUniqueOrThrow({ where: { id: artifact!.id } })).content)).toEqual(expected)
+      if (scenario === 'cancelled') {
+        const own = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '正文终态仍未提交' })
+        const frame = (await loadExecutionState(f.userId, lease.runId)).frame
+        const saved = await saveExecutionState(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+          snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: '已取消剩余清单。' }] } })
+        const evidence = await collectDurableCompletionEvidence(lease, { expectedRevision: saved.revision, expectedHash: saved.snapshotHash })
+        expect(evidence.snapshot).toMatchObject({ todos: expected, blockers: [{ code: 'uncommitted_compilation', reference: own.compilation.id }] })
+        expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe('active')
+      }
       if (otherArtifact) expect((await prisma.agentArtifact.findUniqueOrThrow({ where: { id: otherArtifact.id } })).content).toBe(otherArtifact.content)
       const receipts = await prisma.agentEffectReceipt.findMany({ where: { operation: { taskRootId: f.rootId } } })
       for (const receipt of receipts) expect(receipt.result).not.toHaveProperty('progress')
@@ -2134,7 +2145,7 @@ describe.runIf(available)('durable task todos', () => {
         expect(events.filter(event => event.type === 'tool.call')).toHaveLength(2)
         const finished = events.filter(event => event.type === 'tool.result')
         expect(finished).toHaveLength(2)
-        expect(finished.at(-1)).toMatchObject({ ok: true, display: { kind: 'todoList', items: [{ content: '步骤一', status: 'completed' }, initial[1]] } })
+        expect(finished.at(-1)).toMatchObject({ ok: true, display: { kind: 'todoList', items: expected } })
       }
     })
   })

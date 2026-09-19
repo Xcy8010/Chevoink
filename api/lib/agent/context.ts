@@ -247,8 +247,8 @@ async function buildTodoDigest(sessionId: string, runId: string): Promise<string
     return null
   }
 
-  const unfinished = items.filter((item) => item.status !== 'completed').length
-  return `[系统] 当前任务的待办清单最新状态（${items.length - unfinished}/${items.length} 已完成）：
+  const unfinished = items.filter((item) => item.status === 'pending' || item.status === 'in_progress').length
+  return `[系统] 当前任务的待办清单最新状态（${items.filter(item => item.status === 'completed').length}/${items.length} 已完成，${items.filter(item => item.status === 'cancelled').length} 已取消）：
 ${renderTodoItems(items)}
 注意：这是本任务待办的最新状态，其他任务的清单不属于本任务。标记为 [x] 的项已真实完成，严禁重做或删除。仅进度实际变化时才用 todo_write 更新，全部完成后保留原清单，不用一条收尾总结替换它。另外：若作者的最新一条消息是在答复你上一条回复结尾的提问或建议（如「好的」「可以」「继续」），优先执行那个提问对应的操作，再回到本清单。${unfinished > 0 ? '\n清单里还有未完成项：除非作者提出了新任务或正在答复你的提问，否则请从第一条未完成项接着执行（先用 chapter_read 等工具核实它的实际进度再动笔）。' : ''}`
 }

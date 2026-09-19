@@ -38,14 +38,14 @@ import { intersectToolAuthority, snapshotToolAuthority, restrictToolsToTask } fr
 import { assertTaskAuthorizationRuntimeReady } from './task-authorization.js'
 import { assertLegacyRuntimeCompatible, startLegacyRuntimeRun } from './runtime-identity.js'
 import { normalizeToolInput, validateToolInput } from './tools/input-validation.js'
-import { loadSessionTodoItems, renderTodoItems } from './tools/todo-tools.js'
+import { loadSessionTodoItems, renderTodoItems, cancelTaskTodoItems } from './tools/todo-tools.js'
 import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { getTaskRunIds } from './task-lineage.js'
 import type { AgentTool, ToolContext } from './tools/types.js'
 import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestrationResumeNote } from './tools/task-orchestration-tools.js'
 import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-text.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
-import { createEmptyResponseGuard, createProtocolRecoveryGuard, hasDurableProgress, hasReadProgress, isContinuationRequest, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
+import { createEmptyResponseGuard, createProtocolRecoveryGuard, hasDurableProgress, hasReadProgress, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { toolFailureRecovery } from './tool-failure-recovery.js'
 import { createRepeatDetector } from './repeat-detect.js'
 import {
@@ -522,20 +522,21 @@ async function finalizeLegacyRun(
   errorMessage?: string,
   allowContextSideEffects = true,
   checkpoint?: RunCheckpointState,
+  authorEnded?: { fulfilled: boolean; todoItems?: AgentTodoItem[] },
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
 
   const terminalBody = status === 'paused'
     ? { type: 'run.paused' as const, reason: 'user_stop' as const }
-    : { type: 'run.finished' as const, status, usage, artifacts: [], outputSummary }
+    : { type: 'run.finished' as const, status, usage, artifacts: [], outputSummary, ...(authorEnded ? { authorEnded } : {}) }
   const committed = await bus.commitTerminal(terminalBody, tx => tx.agentRun.update({
       where: { id: runId, runtimeProtocolVersion: 0, taskRootId: null },
       data: {
         status: dbStatus,
         outputSummary: outputSummary || null,
         errorMessage: errorMessage ?? null,
-        usage: { ...usage, ...(checkpoint ? { checkpoint } : {}) },
+        usage: { ...usage, ...(checkpoint ? { checkpoint } : {}), ...(authorEnded ? { authorEnded: { fulfilled: authorEnded.fulfilled, ...(authorEnded.todoItems ? { todoItems: authorEnded.todoItems.map(item => ({ ...item })) } : {}) } } : {}) },
         currentTurn,
         finishedAt: status === 'paused' ? null : new Date(),
       },
@@ -783,6 +784,12 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     const previousTask = !params.resume && continuingTask && !storedRun.taskSpec
       ? await prisma.agentRun.findFirst({ where: { sessionId: params.sessionId, userId: params.userId, novelId: params.novelId, id: { not: runId }, engine: 'loop' }, orderBy: { createdAt: 'desc' }, select: { id: true, taskSpec: true, taskRootId: true, runtimeProtocolVersion: true, usage: true, currentTurn: true, startedAt: true } })
       : null
+    if (hasAuthorEnded(previousTask?.usage) || params.resume && hasAuthorEnded(storedRun.usage)) {
+      const notice = '原任务已按作者要求结束，不能自动恢复剩余工作。如需继续创作，请发送明确的新任务；已有成果保留。'
+      await announceStopReason(notice)
+      await finalizeRun(runId, bus, 'cancelled', usage, turn, notice, undefined, true, undefined, { fulfilled: false })
+      return
+    }
     if (previousTask) assertLegacyRuntimeCompatible(previousTask)
     assertTaskAuthorizationRuntimeReady(previousTask?.taskSpec, { userId: params.userId, sessionId: params.sessionId, novelId: params.novelId })
     const parsedTaskSpec = taskSpecSchema.safeParse(storedRun.taskSpec ?? previousTask?.taskSpec)
@@ -1166,6 +1173,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     // 续跑时从会话恢复既有清单，新任务从空开始（避免上一个任务的残留待办干扰）
     let todoItems: AgentTodoItem[] = continuingTask ? await loadSessionTodoItems(params.sessionId, await getTaskRunIds(params.sessionId, runId)) : []
     let todoReminders = 0
+    let authorEndRequested = false
     if (continuingTask) messages.push({ role: 'user', content: `[系统] 恢复指定任务 ${taskSpec.id}，不是恢复整个会话的历史工作。原目标：${taskSpec.goals.join('；')}。\n${renderTodoItems(todoItems)}\n历史中其他任务的并行窗口、待办与一次性指令不构成本任务的授权；禁止重新启动它们。被停止时生成但未成功执行的工具不是已保存成果。先核对本任务已保存进度，执行剩余工作。仅尚有多个独立执行单元的长任务或复杂任务需要建立待办；没有清单不是未完成的证据，确已完成时直接交付，禁止在结尾补造已完成清单、提交空清单或覆盖历史待办。不得仅回复下一步打算就结束，也不得将未完成项标为已完成。` })
     let consecutiveStructureFailures = 0
     // A4：长上下文提醒消息（单实例，每轮移除后重新追加到队尾，保证只存在一条且最靠近当前轮）
@@ -1251,7 +1259,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
         ])
       }
       // 待办未完成时以 failed 收尾：前端据此展示「继续执行」按钮，一键接着跑完剩余待办
-      const todoLeft = todoItems.filter((item) => item.status !== 'completed').length
+      const todoLeft = todoItems.filter((item) => item.status === 'pending' || item.status === 'in_progress').length
       if (todoLeft > 0) {
         await finalizeRun(
           runId,
@@ -1279,7 +1287,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     }
     const tryCheckpointResume = async (trigger: 'budget' | 'turns'): Promise<boolean> => {
       const checkpoint = evaluateCheckpoint({
-        todoLeft: todoItems.filter((item) => item.status !== 'completed').length,
+        todoLeft: todoItems.filter((item) => item.status === 'pending' || item.status === 'in_progress').length,
         // Every accepted terminal response returns before reaching this boundary.
         // A missing/completed checklist is not proof that pending tool work is done.
         taskPending: true,
@@ -1310,7 +1318,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       await persistCheckpoint()
       // compaction：先压缩久远工具参数与输出；下一轮发送前再按真实 token 预算判断是否需要折叠完整工具轮。
       compactEarlyToolPayloads(messages, CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS)
-      const todoLeft = todoItems.filter((item) => item.status !== 'completed').length
+      const todoLeft = todoItems.filter((item) => item.status === 'pending' || item.status === 'in_progress').length
       const notice = `已到检查点 ${resumeCount}/${CHECKPOINT_MAX_RESUMES}（${trigger === 'budget' ? '预算片用尽' : '轮次片用尽'}） · 累计消耗 ${(taskTokens() / 10_000).toFixed(0)} 万 tokens · 剩余待办 ${todoLeft} 项 · 自动续跑中`
       // 检查点可见性：落库+直播的系统行，刷新后仍在（产品化参照 codex 的自动 compaction 提示）
       const noticeId = randomUUID()
@@ -1573,7 +1581,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
 
         // 防早停：待办清单还有未完成项就想结束（典型症状：连写六章只写两章就问“要不要继续”），
         // 回填强指令让它接着执行下一条待办，最多拦截 4 次避免死循环
-        const unfinishedTodos = todoItems.filter((item) => item.status !== 'completed')
+        const unfinishedTodos = todoItems.filter((item) => item.status === 'pending' || item.status === 'in_progress')
         const reportMinimum = taskSpec.intent === 'research_analysis'
           ? Math.max(0, ...taskSpec.expectedOutputs.filter(item => item.required).map(item => item.minimumChineseCharacters ?? 0)) : 0
         const report = taskSpec.intent === 'research_analysis' ? await (await import('./research-sources.js')).readResearchReportForDelivery({
@@ -1582,9 +1590,11 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
         const reportIncomplete = Boolean(report && report.chineseCharacters < reportMinimum)
         const reportReminder = reportIncomplete
           ? `\n本任务报告main已保存${report!.chineseCharacters}个汉字，要求至少${reportMinimum}个。先用research_report_read核对区块与revision，再用research_report_save只保存缺失或待修订区块；不得重写整份或凑字。来源读取失败时先核对搜索实际返回的URL、错误分类及页面真实链接，在既有预算内尝试可用来源，不编造地址、不重复请求已失败且未变化的来源。记录未取得的资料与受限原因，不能把简介或乱码当正文，也不能宣称已读全书；仅在确实需要用户提供信息时使用ask_user，不把上传小说作为排查404的前提。` : ''
-        const chapterIncomplete = requiresNextChapterDelivery(taskSpec.goals)
+        const nextChapterRequired = requiresNextChapterDelivery(taskSpec.goals)
+        const chapterIncomplete = nextChapterRequired
           && !await (await import('./humanity-quality.js')).hasCommittedTaskChapter(prisma, params.userId, params.novelId, runId)
-        const prematureFinish = chapterIncomplete || reportIncomplete || unfinishedTodos.length > 0 || result.finishReason === 'length' || promisesFurtherAction(cleanContent) || (expectsPlanSave && !planSavePerformed)
+        const todoIncomplete = unfinishedTodos.length > 0 && !(nextChapterRequired && !chapterIncomplete && taskSpec.goals.length === 1)
+        const prematureFinish = chapterIncomplete || reportIncomplete || todoIncomplete || result.finishReason === 'length' || promisesFurtherAction(cleanContent) || (expectsPlanSave && !planSavePerformed)
         if (prematureFinish && todoReminders < 4) {
           requireNativeToolCall = true
           todoReminders += 1
@@ -1709,11 +1719,15 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
             }
           }
         }
+        if (call.name === 'ask_user' && outcome.part.status === 'success' && outcome.part.display?.kind === 'question'
+          && !outcome.part.display.unanswered && outcome.part.display.answer && isExplicitAuthorEnd(outcome.part.display.answer, outcome.part.display.options)) {
+          authorEndRequested = true
+        }
         parts.push(outcome.part)
         // 子 Agent 内嵌执行产生的内部工具卡片随父消息一并直播与落库，刷新后仍可展开查看
         if (outcome.extraParts?.length) parts.push(...outcome.extraParts)
         messages.push({ role: 'tool', toolCallId: call.id, content: outcome.observation })
-        if (structureCircuitTripped || forceWrapUpReason) {
+        if (structureCircuitTripped || forceWrapUpReason || authorEndRequested) {
           break
         }
       }
@@ -1728,6 +1742,31 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
       await persistCheckpoint()
       bus.emit({ type: 'step.finish', turn, usage: result.usage })
+
+      if (authorEndRequested) {
+        // This control decision comes only from the actual authenticated answer,
+        // never from model prose, a todo completion claim or a historical reply.
+        todoItems = await cancelTaskTodoItems(params.sessionId, await getTaskRunIds(params.sessionId, runId), '作者明确要求结束，剩余工作不再执行')
+        const chapterRequired = requiresNextChapterDelivery(taskSpec.goals)
+        const reportRequired = taskSpec.intent === 'research_analysis'
+        const report = reportRequired ? await (await import('./research-sources.js')).readResearchReportForDelivery({
+          userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId,
+        }) : null
+        const reportMinimum = Math.max(0, ...taskSpec.expectedOutputs.filter(item => item.required).map(item => item.minimumChineseCharacters ?? 0))
+        const fulfilled = chapterRequired
+          ? await (await import('./humanity-quality.js')).hasCommittedTaskChapter(prisma, params.userId, params.novelId, runId)
+          : reportRequired ? Boolean(report?.content && report.chineseCharacters >= reportMinimum)
+            : expectsPlanSave && planSavePerformed
+        const notice = fulfilled
+          ? '本任务成果已保存并核验。已按作者要求结束，剩余待办不再执行，未将其标为完成。'
+          : '已按作者要求结束，保留已保存内容。剩余工作不再执行，未将未完成成果标为完成。'
+        const endMessageId = randomUUID()
+        bus.emit({ type: 'message.start', messageId: endMessageId, role: 'assistant' })
+        bus.emit({ type: 'text.final', messageId: endMessageId, text: notice, asReasoning: false })
+        await persistMessage(endMessageId, runId, params.sessionId, 'assistant', [{ type: 'text', text: notice }])
+        await finalizeRun(runId, bus, fulfilled ? 'succeeded' : 'cancelled', usage, turn, notice, undefined, true, undefined, { fulfilled, todoItems })
+        return
+      }
 
       if (blockedRepeat >= 4) forceWrapUpReason = '连续重复调用已拦截，且未产生新的工具进展（防空转循环）。'
       if (structureCircuitTripped) {

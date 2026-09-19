@@ -67,8 +67,26 @@ export function hasDurableProgress(part: Extract<AgentMessagePart, { type: 'tool
   if (display?.kind === 'qualityReport') return part.snapshot?.target === 'chapter' && part.snapshot.field === 'content'
   if (display?.kind === 'planDiff') return display.before !== display.after
   if (display?.kind === 'todoList') {
-    const completed = new Set(previousTodos.filter(item => item.status === 'completed').map(item => item.content))
-    return display.items.some(item => item.status === 'completed' && !completed.has(item.content))
+    const completed = new Set(previousTodos.filter(item => item.status === 'completed').flatMap(item => [item.content, ...(item.id ? [item.id] : [])]))
+    return display.items.some(item => item.status === 'completed' && !completed.has(item.id ?? item.content) && !completed.has(item.content))
   }
   return display?.kind === 'planFile' || (part.toolName === 'chapter_create' && display?.kind === 'chapterRef')
+}
+
+/** Only a fresh authenticated ask_user answer is eligible for this classifier.
+ * Conditional future endings and prose/model claims are not cancellation. */
+export function isExplicitAuthorEnd(answer: string, options: Array<{ label: string; detail?: string }> = []): boolean {
+  const selected = options.find(option => answer === option.label || Boolean(option.detail) && answer === `${option.label}（${option.detail}）`)
+  const fullText = (selected?.label ?? answer).trim().replace(/[。！!\s]+$/u, '')
+  if (/(?:不要|不许|别|不能|不得).{0,6}(?:结束|停止|取消)|(?:如果|假如|等到|完成后|做完|写完|检查完|之后再)/u.test(fullText)) return false
+  const text = fullText.split(/[。！？!?\n]/u).map(part => part.trim()).filter(Boolean).at(-1) ?? ''
+  const end = '(?:结束(?:(?:本次|当前|这次|这个|本)?(?:任务|执行|运行|工作))?|停止(?:(?:本次|当前|这次|这个|本)?(?:任务|执行|运行|工作))?|取消(?:剩余|后续|本次|当前)?(?:任务|工作|执行)|到此为止|不再继续(?:执行|工作|任务)?)'
+  return new RegExp(`^(?:(?:请|现在|立即|直接|先|就|可以|好了|好的|好)[，,\\s]*)*${end}(?:吧|即可|就好)?$`, 'u').test(text)
+    || new RegExp(`^(?:把|将)?(?:全部|所有|剩余)(?:待办|任务|事项|项目|项)?(?:都)?(?:标注|标记|标为|标成)(?:为)?(?:已)?完成[，,、\\s]*(?:然后|并|再)?[，,\\s]*${end}$`, 'u').test(text)
+}
+
+export function hasAuthorEnded(usage: unknown): boolean {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage) || !('authorEnded' in usage)) return false
+  const ended = usage.authorEnded
+  return Boolean(ended && typeof ended === 'object' && !Array.isArray(ended) && 'fulfilled' in ended && typeof ended.fulfilled === 'boolean')
 }
