@@ -1,5 +1,4 @@
 import { Router, type Request, type Response } from 'express'
-import { z } from 'zod'
 
 import {
   FIXED_NOVEL_COVER_HEIGHT,
@@ -57,17 +56,9 @@ import { storeNovelCoverDataUrl } from '../lib/novel-cover-storage.js'
 import { parseBody } from '../lib/parse-body.js'
 import { sendRouteError } from '../lib/route-error.js'
 import { requireAgent2Feature } from '../lib/agent2-feature-flags.js'
+import { novelExportSchema as exportNovelSchema } from '../../shared/contracts/novel-export.js'
 
 const router = Router()
-
-/** 一键导出选项：四类内容可勾选，chapterIds 缺省导出全部章节 */
-const exportNovelSchema = z.object({
-  includePlans: z.boolean().optional(),
-  includeCatalog: z.boolean().optional(),
-  includeInfo: z.boolean().optional(),
-  includeChapters: z.boolean().optional(),
-  chapterIds: z.array(z.string().min(1)).optional(),
-})
 
 async function handleNovelDetailRequest(req: Request, res: Response, novelId: string): Promise<void> {
   const requestId = createRequestId()

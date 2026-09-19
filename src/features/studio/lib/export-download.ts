@@ -1,15 +1,10 @@
 import { buildApiUrl } from '@/app/api-base'
 import { buildAuthHeader } from '@/lib/auth-token'
 import { openExternalUrl } from '@/lib/native-app'
+import type { NovelExportOptions } from '../../../../shared/contracts/novel-export.js'
 
 /** 一键导出选项：与后端 exportNovelSchema 对齐 */
-export type NovelExportRequest = {
-  includePlans: boolean
-  includeCatalog: boolean
-  includeInfo: boolean
-  includeChapters: boolean
-  chapterIds?: string[]
-}
+export type NovelExportRequest = NovelExportOptions
 
 /** 一次性下载链接（APP 壳外跳系统浏览器专用） */
 export type NovelExportLink = {

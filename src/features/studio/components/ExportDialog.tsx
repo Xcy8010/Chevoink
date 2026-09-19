@@ -21,10 +21,11 @@ type ExportDialogProps = {
   onClose: () => void
 }
 
-type SectionKey = 'plans' | 'catalog' | 'chapters' | 'info'
+type SectionKey = 'plans' | 'memories' | 'catalog' | 'chapters' | 'info'
 
 const SECTION_OPTIONS: Array<{ key: SectionKey; label: string; hint: string }> = [
   { key: 'plans', label: '规划', hint: '计划文件夹内的全部创作计划' },
+  { key: 'memories', label: '创作记忆', hint: '当前作品的创作记忆，逐条保存为 txt' },
   { key: 'catalog', label: '目录', hint: '全部章节的目录清单' },
   { key: 'chapters', label: '章节', hint: '各章正文，按卷分文件夹逐章存为 txt' },
   { key: 'info', label: '作品信息以及发布建议', hint: '作品信息 + AI 生成的番茄小说发布建议与封面图片' },
@@ -67,11 +68,12 @@ function CheckboxRow({
   )
 }
 
-/** 一键导出弹窗：勾选四类内容，章节支持全量或按章自选，确认后服务端打包 zip 直接下载 */
+/** 一键导出弹窗：勾选内容，章节支持全量或按章自选，确认后服务端打包 zip 直接下载 */
 export default function ExportDialog({ open, novelId, novelTitle, chapters, onClose }: ExportDialogProps) {
   const toast = useToast()
   const [sections, setSections] = useState<Record<SectionKey, boolean>>({
     plans: true,
+    memories: true,
     catalog: true,
     chapters: true,
     info: true,
@@ -85,7 +87,7 @@ export default function ExportDialog({ open, novelId, novelTitle, chapters, onCl
   // 每次打开重置为「全部导出」，避免沿用上次勾选造成意外裁剪
   useEffect(() => {
     if (open) {
-      setSections({ plans: true, catalog: true, chapters: true, info: true })
+      setSections({ plans: true, memories: true, catalog: true, chapters: true, info: true })
       setChapterMode('all')
       setSelectedChapterIds([])
       setExporting(false)
@@ -115,6 +117,7 @@ export default function ExportDialog({ open, novelId, novelTitle, chapters, onCl
     try {
       const options: NovelExportRequest = {
         includePlans: sections.plans,
+        includeMemories: sections.memories,
         includeCatalog: sections.catalog,
         includeInfo: sections.info,
         includeChapters: sections.chapters,

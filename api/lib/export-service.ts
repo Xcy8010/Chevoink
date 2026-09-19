@@ -5,15 +5,9 @@ import { listNovelPlanArtifacts } from './agent/plan-artifacts.js'
 import { readNovelCoverBuffer } from './novel-cover-storage.js'
 import { buildZipBuffer, type ZipEntry } from './zip-writer.js'
 import { activeChapterScope } from './data-access.js'
+import type { NovelExportOptions } from '../../shared/contracts/novel-export.js'
 
-/** 一键导出选项：四类内容可勾选，章节支持全量或按 ID 子集 */
-export type NovelExportOptions = {
-  includePlans?: boolean
-  includeCatalog?: boolean
-  includeInfo?: boolean
-  includeChapters?: boolean
-  chapterIds?: string[]
-}
+export type { NovelExportOptions } from '../../shared/contracts/novel-export.js'
 
 export type NovelExportResult = {
   buffer: Buffer
@@ -148,7 +142,7 @@ async function resolvePublishAdvice(
 }
 
 /**
- * 组装一键导出 zip：作品名 > 规划 / 目录 / 章节 / 作品信息以及发布建议 四个文件夹。
+ * 组装一键导出 zip：按选择包含规划、创作记忆、目录、正文与作品信息。
  * 发布建议走 AI 生成并钳制到番茄词表；AI 不可用时降级为提示文案，不阻断导出。
  */
 export async function buildNovelExportZip(
@@ -180,8 +174,10 @@ export async function buildNovelExportZip(
   const includeCatalog = options.includeCatalog !== false
   const includeInfo = options.includeInfo !== false
   const includeChapters = options.includeChapters !== false
+  // Old clients retain their existing export scope; memory is explicitly opt-in.
+  const includeMemories = options.includeMemories === true
 
-  if (!includePlans && !includeCatalog && !includeInfo && !includeChapters) {
+  if (!includePlans && !includeCatalog && !includeInfo && !includeChapters && !includeMemories) {
     throw new DataAccessError(400, 'VALIDATION_ERROR', '请至少勾选一项导出内容。')
   }
 
@@ -216,6 +212,23 @@ export async function buildNovelExportZip(
   const text = (value: string) => Buffer.from(value, 'utf8')
   const summaryParts: string[] = []
   let adviceCreditsExhausted = false
+
+  if (includeMemories) {
+    // Same effective-card scope as listStoryMemories/listStoryMemorySets, without
+    // the panel's pagination. Runtime/session memories live in other tables.
+    const memories = await prisma.projectMemoryEntry.findMany({
+      where: { novelId, novel: { authorId: userId }, status: { in: ['confirmed', 'inferred'] }, reviewStatus: { not: 'rejected' } },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+      select: { id: true, memoryType: true, title: true, content: true },
+    })
+    for (const [index, memory] of memories.entries()) {
+      const title = sanitizePathComponent(memory.title.replace(/\p{Cc}/gu, ' '), '未命名记忆').replace(/[. ]+$/g, '') || '未命名记忆'
+      // A unique ordinal survives duplicate titles, sanitization collisions and
+      // Windows case-insensitive extraction. Content remains byte-for-byte UTF-8.
+      entries.push({ path: `${root}/创作记忆/${String(index + 1).padStart(4, '0')}-${memory.memoryType} ${title}.txt`, data: text(memory.content) })
+    }
+    summaryParts.push(`${memories.length} 条创作记忆`)
+  }
 
   if (includePlans) {
     const { items } = await listNovelPlanArtifacts(userId, novelId)
