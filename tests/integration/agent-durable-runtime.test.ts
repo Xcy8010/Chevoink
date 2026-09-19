@@ -2069,7 +2069,9 @@ describe.runIf(available)('durable task todos', () => {
       let lease = await claim(f)
       const mode = scenario === 'plan' || scenario === 'review' ? scenario : 'build'
       const initial = withTodoIds([{ content: '步骤一', status: 'in_progress' }, { content: '步骤二', status: 'pending' }])
-      const args = { items: scenario === 'late' ? initial.map(item => ({ ...item, status: 'completed' })) : scenario === 'empty' ? [] : scenario === 'single' ? initial.slice(0, 1) : initial }
+      // Creation has no server-issued IDs yet; subsequent calls use the receipt IDs.
+      const creation = initial.map(({ content, status }) => ({ content, status }))
+      const args = { items: scenario === 'late' ? creation.map(item => ({ ...item, status: 'completed' })) : scenario === 'empty' ? [] : scenario === 'single' ? creation.slice(0, 1) : creation }
       const ignored = ['late', 'empty', 'single'].includes(scenario)
       const initialized = await initializeExecutionState(lease, { configuration: { version: 1, mode, agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },

@@ -20,7 +20,7 @@ const todoWriteParameters = z.object({
   items: z
     .array(
       z.object({
-        id: z.string().min(1).max(64).optional().describe('更新已有项原样带回 id；修改描述也沿用原 id'),
+        id: z.string().min(1).max(64).optional().describe('首次创建省略 id；更新已有项原样带回回执 id，修改描述也沿用原 id'),
         reason: z.string().min(1).max(200).optional().describe('取消必填原因：重复、超出本任务或作者撤销，不代表完成'),
         content: z.string().min(1).max(100).describe('待办内容，一句话说清要完成什么（如「写第三章正文」）'),
         status: todoStatusSchema.describe('pending=未开始；in_progress=进行中（同一时刻最多 1 项）；completed=已完成；cancelled=取消/不再执行，必须 reason，不算完成'),
@@ -76,7 +76,7 @@ export function prepareTodoUpdate(previous: AgentTodoItem[], requested: AgentTod
   for (const item of requested) {
     if (!item.id && baseline.filter(old => old.content === item.content).length > 1) return reject('存在同名待办，请用各自原 id 指明更新或取消哪一项。')
     const old = item.id ? byId.get(item.id) : byContent.get(item.content)
-    if (item.id && !old) return reject('待办 id 不属于当前清单；请使用回执中的原 id。')
+    if (item.id && !old) return reject('待办 id 不属于当前清单；首次创建请省略 id，更新已有项请使用回执中的原 id。')
     if (!old && item.status === 'completed') return baseline.length ? reject('不能用新描述提交已完成项；请沿用原 id 更新既有待办。') : unchanged
     if (!old && baseline.length && !changeReason?.trim()) return reject('已有清单不能因改写描述而追加新项。更新时带回原 id；确有新增工作须提供 changeReason。')
     if (item.status === 'cancelled' && (!old || !item.reason?.trim())) return reject('只能取消已有项，并须说明 reason；取消不等于完成。')
