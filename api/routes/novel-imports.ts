@@ -75,7 +75,7 @@ router.post('/intents/:intentId/confirm', route((req, human) => {
 }))
 router.post('/', route((req, human) => {
   const input = novelImportCreateSchema.parse(req.body)
-  return prepareNovelImport(human, input.intentId, input.modelSelection)
+  return prepareNovelImport(human, input.intentId, input.modelSelection, input.replaceUnfinished)
 }))
 router.get('/:jobId', route((req, human) => getNovelImportStatus(human, id(req))))
 router.get('/:jobId/preview', route((req, human) => {

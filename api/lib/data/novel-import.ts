@@ -23,6 +23,7 @@ export const novelImportBackupSchema = z.object({
   version: z.literal(2).optional(),
   volumeIds: z.array(z.string()), chapterIds: z.array(z.string()), retainedEmptyVolumeIds: z.array(z.string()),
   importedVolumeIds: z.array(z.string()), importedChapterIds: z.array(z.string()),
+  renamedVolumes: z.array(z.object({ id: z.string(), title: z.string() })).optional(),
   reorderedChapters: z.array(z.object({ id: z.string(), volumeId: z.string(), orderIndex: z.number().int(), orderInVolume: z.number().int() })).optional(),
   beforeVolumeCount: z.number().int().nonnegative().optional(), beforeChapterCount: z.number().int().nonnegative().optional(),
   metadata: z.object({ title: z.string(), displayTitle: z.string().nullable().optional(), summary: z.string(), tagNames: z.array(z.string()), wordCount: z.number(), chapterCount: z.number(), lastChapterTitle: z.string().nullable(), coverAssetId: z.string().nullable().optional(), coverPrompt: z.string().nullable().optional() }),

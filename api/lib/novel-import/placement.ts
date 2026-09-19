@@ -2,7 +2,7 @@ import type { NovelImportPreview } from '../../../shared/contracts/novel-import.
 import { DataAccessError } from '../prisma.js'
 import { normalizeImportTitle } from './content-routing.js'
 
-type ExistingVolume = { id: string; title: string; orderIndex: number }
+type ExistingVolume = { id: string; title: string; orderIndex: number; revision?: number; summary?: string | null }
 type ExistingChapter = { id: string; title: string; volumeId: string; orderIndex: number; orderInVolume: number }
 export type ImportChapterPosition = Pick<ExistingChapter, 'id' | 'volumeId' | 'orderIndex' | 'orderInVolume'>
 const ambiguous = (): never => { throw new DataAccessError(409, 'IMPORT_PLACEMENT_AMBIGUOUS', '卷章名称存在歧义，未改动作品；请调整来源卷名或重复章名后重新导入。') }
@@ -25,9 +25,10 @@ function volumeLabel(title: string) {
 export function buildNovelImportPlacement(existingVolumes: ExistingVolume[], existingChapters: ExistingChapter[], input: NovelImportPreview['volumes'], newId: () => string) {
   const originals = [...existingVolumes].sort(byOrder)
   const newVolumes: ExistingVolume[] = []
+  const renamedVolumes: Array<{ id: string; beforeTitle: string; title: string }> = []
   const claimed = new Set<string>(), archivedChapterIds = new Set<string>()
   const imported: Array<{ id: string; title: string; content: string; volumeId: string; orderIndex: number; orderInVolume: number }> = []
-  if (!input.length) return { newVolumes, volumeCount: 0, archivedChapterIds: [] as string[], chapters: imported, reorderedBefore: [] as ImportChapterPosition[], reorderedAfter: [] as ImportChapterPosition[], lastChapterTitle: [...existingChapters].sort((a, b) => b.orderIndex - a.orderIndex)[0]?.title ?? '' }
+  if (!input.length) return { newVolumes, renamedVolumes, volumeCount: 0, archivedChapterIds: [] as string[], chapters: imported, reorderedBefore: [] as ImportChapterPosition[], reorderedAfter: [] as ImportChapterPosition[], lastChapterTitle: [...existingChapters].sort((a, b) => b.orderIndex - a.orderIndex)[0]?.title ?? '' }
   const layout = new Map(originals.map(volume => [volume.id, existingChapters.filter(chapter => chapter.volumeId === volume.id).sort((a, b) => a.orderInVolume - b.orderInVolume || a.orderIndex - b.orderIndex || a.id.localeCompare(b.id))]))
   if (existingChapters.some(chapter => !layout.has(chapter.volumeId))) ambiguous()
   let volumeOrder = Math.max(0, ...originals.map(volume => volume.orderIndex))
@@ -41,6 +42,13 @@ export function buildNovelImportPlacement(existingVolumes: ExistingVolume[], exi
     if (!candidates.length && label.name === '正文卷' && originals.length) {
       if (originals.length !== 1) ambiguous()
       candidates = originals
+    }
+    // A pristine, sole default volume is the empty-work destination. Never
+    // infer a placeholder among multiple volumes or once any chapter exists.
+    const placeholder = originals[0]
+    if (!candidates.length && label.ordinal === undefined && !claimed.size && originals.length === 1 && !existingChapters.length && placeholder.title === '第一卷' && placeholder.orderIndex === 1 && placeholder.revision === 1 && placeholder.summary === null) {
+      candidates = [placeholder]
+      renamedVolumes.push({ id: placeholder.id, beforeTitle: placeholder.title, title: volume.title })
     }
     if (candidates.length > 1) ambiguous()
     const destination = candidates[0] ?? { id: newId(), title: volume.title, orderIndex: ++volumeOrder }
@@ -71,7 +79,7 @@ export function buildNovelImportPlacement(existingVolumes: ExistingVolume[], exi
   for (const volume of [...originals, ...newVolumes]) for (const [index, chapter] of (layout.get(volume.id) ?? []).entries()) positions.push({ id: chapter.id, volumeId: volume.id, orderIndex: ++orderIndex, orderInVolume: index + 1 })
   const byId = new Map(positions.map(position => [position.id, position]))
   const reordered = existingChapters.filter(chapter => !archivedChapterIds.has(chapter.id) && (chapter.orderIndex !== byId.get(chapter.id)!.orderIndex || chapter.orderInVolume !== byId.get(chapter.id)!.orderInVolume))
-  return { newVolumes, volumeCount: claimed.size, archivedChapterIds: [...archivedChapterIds],
+  return { newVolumes, renamedVolumes, volumeCount: claimed.size, archivedChapterIds: [...archivedChapterIds],
     chapters: imported.map(chapter => ({ ...chapter, ...byId.get(chapter.id)! })),
     reorderedBefore: reordered.map(({ id, volumeId, orderIndex, orderInVolume }) => ({ id, volumeId, orderIndex, orderInVolume })),
     reorderedAfter: reordered.map(chapter => byId.get(chapter.id)!),

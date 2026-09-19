@@ -161,7 +161,8 @@ export async function confirmNovelImportSelectionIntent(human: NovelImportHuman,
     return preflightDto(await tx.novelImportIntent.update({ where: { id: intent.id }, data: { confirmationStep: 2 } }), t)
   })
 }
-export async function prepareNovelImport(scope: NovelImportScope, intentId: string, selection: NovelImportModelSelection = { kind: 'basic' }) {
+export async function prepareNovelImport(scope: NovelImportScope, intentId: string, selection: NovelImportModelSelection = { kind: 'basic' }, replaceUnfinished = false) {
+  if (replaceUnfinished) humanOnly(scope as NovelImportHuman)
   enabled(); const modelSelection = novelImportModelSchema.parse(selection)
   const id = await novelImportTransaction(async tx => {
     const t = await target(tx, scope); rollout(t)
@@ -170,11 +171,17 @@ export async function prepareNovelImport(scope: NovelImportScope, intentId: stri
     const intent = intentValid(await tx.novelImportIntent.findUnique({ where: { id: intentId } }), scope, t.hash, false)
     const prior = await tx.novelImportJob.findUnique({ where: { intentId } }); if (prior) return prior.id
     if (await tx.novelImportJob.count({ where: { userId: scope.userId, createdAt: { gte: new Date(Date.now() - 86400_000) } } }) >= NOVEL_IMPORT_DAILY_LIMITS.jobs) fail('IMPORT_DAILY_JOB_LIMIT', '24小时内最多创建10个导入任务，取消不会重置配额；请使用已有任务或24小时后重试。', 429)
-    // Preserve existing work across clients/racing retries; replacing a job requires explicit cancellation.
+    // Replacing previews is authorized only by a new human file selection. The
+    // novel lock serializes this with commits; retries reuse the intent above.
     const liveJobs = await tx.novelImportJob.findMany({ where: { userId: scope.userId, status: { in: LIVE }, expiresAt: { gt: new Date() } }, select: { id: true, novelId: true } })
-    if (liveJobs.some(job => job.novelId === scope.novelId)) fail('IMPORT_ACTIVE_JOB_EXISTS', '此作品已有未完成导入，请继续已有任务或明确取消后再创建。')
-    if (liveJobs.length >= 3) fail('IMPORT_LIMIT_EXCEEDED', '其他作品仍有过多未完成导入任务，请完成或取消后重试。', 429)
+    if (!replaceUnfinished && liveJobs.some(job => job.novelId === scope.novelId)) fail('IMPORT_ACTIVE_JOB_EXISTS', '此作品已有未完成导入，请继续已有任务或重新选择文件。')
+    if (liveJobs.filter(job => !replaceUnfinished || job.novelId !== scope.novelId).length >= 3) fail('IMPORT_LIMIT_EXCEEDED', '其他作品仍有过多未完成导入任务，请完成或取消后重试。', 429)
     if (modelSelection.kind === 'custom' && !await tx.aiModelConfig.findFirst({ where: { id: modelSelection.customModelId, ownerUserId: scope.userId, enabled: true }, select: { id: true } })) fail('IMPORT_MODEL_UNAVAILABLE', '本次自定义模型不可用。', 403)
+    if (replaceUnfinished) {
+      // Keep a tombstone until normal retention cleanup: in-flight parsers and
+      // uploads must observe cancellation, never publish after being replaced.
+      await tx.novelImportJob.updateMany({ where: { ...scope, status: { in: [...LIVE, 'failed'] } }, data: { status: 'cancelled', errorCode: 'IMPORT_REPLACED', leaseEpoch: { increment: 1 }, leaseOwner: null, leaseUntil: null, jobVersion: { increment: 1 } } })
+    }
     const job = await tx.novelImportJob.create({ data: { id: randomUUID(), ...scope, agentRunId: intent.agentRunId, agentToolCallId: intent.agentToolCallId, intentId: intent.id, targetHash: t.hash, modelSelection, expiresAt: expiry(7 * 86400_000) } })
     return job.id
   })
@@ -192,7 +199,7 @@ export async function getNovelImportStatus(scope: NovelImportScope, jobId: strin
 }
 export async function listNovelImports(scope: NovelImportScope) {
   await owner(prisma, scope)
-  const jobs = await prisma.novelImportJob.findMany({ where: scope, orderBy: { createdAt: 'desc' }, take: 20 })
+  const jobs = await prisma.novelImportJob.findMany({ where: { ...scope, OR: [{ errorCode: null }, { errorCode: { not: 'IMPORT_REPLACED' } }] }, orderBy: { createdAt: 'desc' }, take: 20 })
   return Promise.all(jobs.map(j => getNovelImportStatus(scope, j.id)))
 }
 export async function downloadNovelImportSource(scope: NovelImportScope, jobId: string) {
@@ -564,6 +571,7 @@ export async function commitNovelImport(scope: NovelImportScope, jobId: string, 
     }
     // Match chapters only inside their uniquely resolved destination volume.
     const placement = buildNovelImportPlacement(t.volumes, t.chapters, preview.volumes, randomUUID)
+    for (const volume of placement.renamedVolumes) assertNovelImportMutationCount((await tx.volume.updateMany({ where: { id: volume.id, novelId: scope.novelId, archivedAt: null, title: volume.beforeTitle, revision: 1 }, data: { title: volume.title, revision: { increment: 1 } } })).count, 1)
     const archivedChapterRows = t.chapters.filter(chapter => placement.archivedChapterIds.includes(chapter.id))
     const archivedVolumeRows: typeof t.volumes = []
     if (t.volumes.length + placement.newVolumes.length > NOVEL_IMPORT_LIMITS.volumes) fail('IMPORT_LIMIT_EXCEEDED', '保留现有卷后总卷数超过200，请先整理卷。')
@@ -622,7 +630,7 @@ export async function commitNovelImport(scope: NovelImportScope, jobId: string, 
     const archivedVolumes = await tx.volume.findMany({ where: { id: { in: archivedVolumeRows.map(v => v.id) } }, orderBy: { id: 'asc' } })
     const archivedChapters = await tx.chapter.findMany({ where: { id: { in: archivedChapterRows.map(c => c.id) } }, orderBy: { id: 'asc' } })
     const snapshot = { version: 2, volumeIds: archivedVolumeRows.map(v => v.id), chapterIds: archivedChapterRows.map(c => c.id), retainedEmptyVolumeIds: [], reorderedChapters: placement.reorderedBefore, beforeVolumeCount: t.volumes.length, beforeChapterCount: t.chapters.length, importedVolumeIds: volumes.map(v => v.id), importedChapterIds: chapters.map(c => c.id), metadata: novelImportMetadata(t.novel), metadataKeys: [...(m.title !== undefined ? ['title'] : []), ...(m.summary !== undefined ? ['summary'] : []), ...(m.tags !== undefined ? ['tagNames'] : []), ...(coverAssetId ? ['coverAssetId'] : [])], retainedHash: hashNovelImportRows(archivedVolumes, archivedChapters) }
-    await tx.novelImportBackup.create({ data: { id: backupId, jobId, snapshot, beforeHash: t.hash, afterHash: after.hash, expiresAt: restoreExpiresAt } })
+    await tx.novelImportBackup.create({ data: { id: backupId, jobId, snapshot: { ...snapshot, renamedVolumes: placement.renamedVolumes.map(volume => ({ id: volume.id, title: volume.beforeTitle })) }, beforeHash: t.hash, afterHash: after.hash, expiresAt: restoreExpiresAt } })
     const receipt: NovelImportReceipt = { jobId, novelId: scope.novelId, backupId, volumeCount: placement.volumeCount, chapterCount: chapters.length, wordCount, firstChapterId, targetHash: after.hash, restoreExpiresAt: restoreExpiresAt.toISOString(), partialImport: preview.partialImport === true, reportUrl: `/api/novels/${encodeURIComponent(scope.novelId)}/imports/${encodeURIComponent(jobId)}/report`, planCount: plans.length, memoryCount: memories.length }
     await tx.novelImportApproval.update({ where: { id: approval.id }, data: { consumedAt: now } })
     await tx.novelImportCommit.create({ data: { jobId, approvalId: approval.id, idempotencyKey: input.idempotencyKey, receipt: { ...receipt } } })
@@ -716,6 +724,7 @@ export async function restoreNovelImport(human: NovelImportHuman, jobId: string,
     assertNovelImportMutationCount((await tx.chapter.updateMany({ where: { novelId: human.novelId, archivedAt: null, id: { in: snapshot.importedChapterIds } }, data: { archivedAt: now, archivedByImportId: jobId, revision: { increment: 1 } } })).count, snapshot.importedChapterIds.length)
     assertNovelImportMutationCount((await tx.volume.updateMany({ where: { novelId: human.novelId, archivedAt: null, id: { in: snapshot.importedVolumeIds } }, data: { archivedAt: now, archivedByImportId: jobId, revision: { increment: 1 } } })).count, snapshot.importedVolumeIds.length)
     await applyNovelImportChapterPositions(tx, human.novelId, snapshot.reorderedChapters ?? [])
+    for (const volume of snapshot.renamedVolumes ?? []) assertNovelImportMutationCount((await tx.volume.updateMany({ where: { id: volume.id, novelId: human.novelId, archivedAt: null }, data: { title: volume.title, revision: { increment: 1 } } })).count, 1)
     assertNovelImportMutationCount((await tx.volume.updateMany({ where: { id: { in: snapshot.volumeIds }, novelId: human.novelId, archivedByImportId: jobId, archivedAt: { not: null } }, data: { archivedAt: null, archivedByImportId: null, revision: { increment: 1 } } })).count, snapshot.volumeIds.length)
     assertNovelImportMutationCount((await tx.chapter.updateMany({ where: { id: { in: snapshot.chapterIds }, novelId: human.novelId, archivedByImportId: jobId, archivedAt: { not: null } }, data: { archivedAt: null, archivedByImportId: null, revision: { increment: 1 } } })).count, snapshot.chapterIds.length)
     await invalidateNovelImportSources(tx, human.novelId, snapshot.importedChapterIds, [...new Set([...snapshot.importedVolumeIds, ...t.chapters.filter(chapter => snapshot.importedChapterIds.includes(chapter.id)).map(chapter => chapter.volumeId)])])

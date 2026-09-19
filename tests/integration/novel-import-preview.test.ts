@@ -88,6 +88,23 @@ describe.skipIf(!available)('import report, resources and lazy preview in isolat
     vi.restoreAllMocks()
     await prisma.novelImportJob.updateMany({ where: { userId, status: { notIn: ['succeeded', 'cancelled'] } }, data: { status: 'cancelled', leaseOwner: null, leaseUntil: null, leaseEpoch: { increment: 1 } } })
   })
+  it('atomically replaces an unfinished import and replays the same intent without cancelling its replacement', async () => {
+    const ready = await prepare()
+    const preflight = await request(app).post(`${root()}/preflight`).set('Cookie', cookie()).send({}).expect(200)
+    const input = { intentId: preflight.body.data.intentId, replaceUnfinished: true }
+    const responses = await Promise.all([0, 1].map(() => request(app).post(root()).set('Cookie', cookie()).send(input)))
+    for (const response of responses) expect(response.status, JSON.stringify(response.body)).toBe(200)
+    const replacementId = responses[0].body.data.jobId as string
+    expect(responses[1].body.data.jobId).toBe(replacementId)
+    expect(replacementId).not.toBe(ready.jobId)
+    const old = await prisma.novelImportJob.findUniqueOrThrow({ where: { id: ready.jobId } })
+    expect(old).toMatchObject({ status: 'cancelled', errorCode: 'IMPORT_REPLACED', leaseOwner: null, leaseUntil: null })
+    const history = await request(app).get(root()).set('Cookie', cookie()).expect(200)
+    expect(history.body.data.map((job: { jobId: string }) => job.jobId)).toEqual([replacementId])
+    const staleAnalyze = await request(app).post(`${ready.base}/analyze`).set('Cookie', cookie()).send({})
+    expect(staleAnalyze.body.error.code).toBe('IMPORT_CANCELLED')
+    expect(await prisma.novelImportJob.count({ where: { novelId, status: 'uploading' } })).toBe(1)
+  })
   it('persists split blobs, reads summary/report without chapter blobs, and hydrates one selected chapter', async () => {
     const ready = await prepare()
     const manifest = await prisma.novelImportManifest.findUniqueOrThrow({ where: { jobId_revision: { jobId: ready.jobId, revision: 1 } } })

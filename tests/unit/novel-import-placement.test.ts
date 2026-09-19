@@ -4,12 +4,42 @@ import { buildNovelImportPlacement } from '../../api/lib/novel-import/placement.
 const volume = (id: string, title: string, orderIndex: number) => ({ id, title, orderIndex })
 const chapter = (id: string, volumeId: string, title: string, orderIndex: number, orderInVolume = 1) => ({ id, volumeId, title, orderIndex, orderInVolume })
 const source = (title: string, ...titles: string[]) => ({ title, chapters: titles.map(title => ({ title, content: `原文${title}` })) })
-const plan = (volumes: ReturnType<typeof volume>[], chapters: ReturnType<typeof chapter>[], input: ReturnType<typeof source>[]) => {
+const plan = (volumes: Parameters<typeof buildNovelImportPlacement>[0], chapters: ReturnType<typeof chapter>[], input: ReturnType<typeof source>[]) => {
   let id = 0
   return buildNovelImportPlacement(volumes, chapters, input, () => `new-${++id}`)
 }
 
 describe('import volume placement', () => {
+  it('reuses and renames the sole pristine default volume for an unnumbered source volume', () => {
+    const result = plan([{ ...volume('v1', '第一卷', 1), revision: 1, summary: null }], [], [source('淬火', '甲', '乙', '丙', '丁')])
+    expect(result.newVolumes).toEqual([])
+    expect(result.renamedVolumes).toEqual([{ id: 'v1', beforeTitle: '第一卷', title: '淬火' }])
+    expect(result.chapters.map(c => c.volumeId)).toEqual(['v1', 'v1', 'v1', 'v1'])
+  })
+  it('never infers a placeholder from edited, populated or multiple empty volumes', () => {
+    const pristine = { ...volume('v1', '第一卷', 1), revision: 1, summary: null }
+    for (const [volumes, chapters] of [
+      [[{ ...pristine, revision: 2 }], []],
+      [[{ ...pristine, summary: '用户卷纲' }], []],
+      [[pristine], [chapter('a', 'v1', '既有正文', 1)]],
+      [[pristine, volume('v2', '用户空卷', 2)], []],
+    ] as Array<[Parameters<typeof buildNovelImportPlacement>[0], ReturnType<typeof chapter>[]]>) {
+      const result = buildNovelImportPlacement(volumes, chapters, [source('淬火', '甲')], () => 'new')
+      expect(result.renamedVolumes).toEqual([])
+      expect(result.newVolumes).toHaveLength(1)
+    }
+  })
+  it('leaves an old extra empty first volume untouched when reimporting the existing named volume', () => {
+    const result = plan([volume('v1', '第一卷', 1), volume('v2', '淬火', 2)], [chapter('a', 'v2', '甲', 1)], [source('淬火', '甲')])
+    expect(result.renamedVolumes).toEqual([])
+    expect(result.newVolumes).toEqual([])
+    expect(result.chapters[0].volumeId).toBe('v2')
+  })
+  it('does not repurpose first volume when the source explicitly names a later ordinal', () => {
+    const result = plan([{ ...volume('v1', '第一卷', 1), revision: 1, summary: null }], [], [source('第二卷', '甲')])
+    expect(result.renamedVolumes).toEqual([])
+    expect(result.newVolumes).toEqual([expect.objectContaining({ title: '第二卷', orderIndex: 2 })])
+  })
   it.each(['第一卷', '第1卷', '第0001卷·启程', '正文卷'])('reuses default first volume for %s and preserves source order', title => {
     const result = plan([volume('v1', '第一卷', 1)], [], [source(title, '第一章', '第二章', '第三章', '第四章')])
     expect(result.newVolumes).toEqual([])

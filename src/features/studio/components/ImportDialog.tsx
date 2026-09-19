@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { LoaderCircle, Upload } from 'lucide-react'
-import type { NovelImportCapabilities, NovelImportJobStatus, NovelImportModelSelection, NovelImportPreflight, NovelImportPreview, NovelImportReceipt, NovelImportStatus } from '../../../../shared/contracts/novel-import.js'
+import type { NovelImportCapabilities, NovelImportJobStatus, NovelImportModelSelection, NovelImportPreflight, NovelImportPreview, NovelImportReceipt } from '../../../../shared/contracts/novel-import.js'
 import { novelImportApi, type NovelImportClient } from '../import-api'
 import { canSubmitImport, importPreviewCounts } from '../lib/import-preview'
 import { ImportDialogShell } from './import-dialog-shell'
@@ -46,8 +46,6 @@ type Stage = 'loading' | 'history' | 'workspace' | 'auto' | 'cancel' | 'restore'
 const previewStatuses = new Set(['ready', 'needs_review', 'awaiting_confirmation'])
 const terminalStatuses = new Set(['succeeded', 'cancelled', 'expired', 'failed'])
 const formats = ['zip', 'txt', 'md', 'pdf', 'doc', 'docx']
-/** Existing jobs must be resumed or explicitly cancelled, never silently replaced. */
-const liveStatuses = new Set<NovelImportStatus>(['uploading', 'uploaded', 'parsing', 'needs_review', 'ready', 'awaiting_confirmation'])
 
 function canSubmitSummary(summary: NovelImportPreviewSummary, report: NovelImportReportDto | null) {
   const routedExtra = Boolean(summary.plans?.length || summary.memories?.length || Object.keys(summary.metadataSelection).length)
@@ -239,9 +237,8 @@ function ImportDialogSession(props: ImportDialogProps) {
       const history = await client.list(novelId)
       if (!alive()) return
       setJobs(history.filter(item => item.novelId === novelId))
-      if (history.some(item => item.novelId === novelId && liveStatuses.has(item.status))) throw new Error('当前作品已有未完成导入，请恢复该任务；不会自动取消其他任务。')
       setUncertain(true)
-      const next = await client.create(novelId, intent.intentId, latest.current.modelSelection)
+      const next = await client.create(novelId, intent.intentId, latest.current.modelSelection, true)
       if (!alive()) return
       if (next.novelId !== novelId) throw new Error('任务作品不匹配。')
       setJob(next); setPreview(null); setUncertain(false)
@@ -357,13 +354,11 @@ function ImportDialogSession(props: ImportDialogProps) {
     setFile(source)
     setAutoStep('正在创建任务并上传文件…')
     autoTarget.current = 15
-    // Do not invoke create when it could replace another active task.
     const history = await client.list(novelId)
     if (!alive()) return
     setJobs(history.filter(item => item.novelId === novelId))
-    if (history.some(item => item.novelId === novelId && liveStatuses.has(item.status))) throw new AutoImportFallback('当前作品已有未完成导入，请恢复该任务；不会自动取消其他任务。')
     setUncertain(true)
-    const created = await client.create(novelId, intent.intentId, latest.current.modelSelection)
+    const created = await client.create(novelId, intent.intentId, latest.current.modelSelection, true)
     if (!alive()) return
     if (created.novelId !== novelId) throw new Error('任务作品不匹配。')
     setJob(created); setUncertain(false)

@@ -15,6 +15,13 @@ it('uses the existing authenticated response wrapper for a raw binary upload, no
   })
 })
 
+it('sends replacement only when a new source explicitly opts in', async () => {
+  await novelImportApi.create('novel-a', 'intent-a', { kind: 'basic' })
+  await novelImportApi.create('novel-a', 'intent-b', { kind: 'custom', customModelId: 'model-a' }, true)
+  expect(requestData).toHaveBeenNthCalledWith(1, '/api/novels/novel-a/imports', { method: 'POST', body: JSON.stringify({ intentId: 'intent-a', modelSelection: { kind: 'basic' } }) })
+  expect(requestData).toHaveBeenNthCalledWith(2, '/api/novels/novel-a/imports', { method: 'POST', body: JSON.stringify({ intentId: 'intent-b', modelSelection: { kind: 'custom', customModelId: 'model-a' }, replaceUnfinished: true }) })
+})
+
 it('capability and persistent history queries are GET-only and do not mint intents', async () => {
   await novelImportApi.capabilities('a')
   await novelImportApi.list('a')

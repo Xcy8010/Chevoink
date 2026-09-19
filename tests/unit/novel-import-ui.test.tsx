@@ -236,7 +236,7 @@ describe('import confirmations and ownership', () => {
     render(<ImportDialog {...props} />)
     await screen.findByLabelText('选择导入文件')
     await uploadAndParse()
-    expect(client.create).toHaveBeenCalledWith('a', 'intent', { kind: 'custom', customModelId: 'selected-not-newest' })
+    expect(client.create).toHaveBeenCalledWith('a', 'intent', { kind: 'custom', customModelId: 'selected-not-newest' }, true)
     expect(client.upload).toHaveBeenCalledWith('a', 'job-a', expect.any(File))
     await waitFor(() => expect((screen.getByRole('button', { name: '一键导入' }) as HTMLButtonElement).disabled).toBe(false))
     const submit = screen.getByRole('button', { name: '一键导入' })
@@ -246,6 +246,17 @@ describe('import confirmations and ownership', () => {
     expect(client.commit).toHaveBeenCalledTimes(1)
     expect(client.commit).toHaveBeenCalledWith('a', 'job-a', 'approval', 'novel-import:job-a')
     expect(props.onImported).toHaveBeenCalledWith(receipt)
+  })
+
+  it('replaces an unfinished job atomically when a newly selected file is uploaded', async () => {
+    const { props, client } = fixture()
+    vi.mocked(client.list).mockResolvedValue([{ ...status, jobId: 'old-live' }])
+    vi.mocked(client.preflight).mockResolvedValue({ ...check, chapterCount: 0, overwriteRequired: false })
+    render(<ImportDialog {...props} />)
+    await screen.findByLabelText('选择导入文件')
+    await uploadAndParse()
+    expect(client.create).toHaveBeenCalledWith('a', 'intent', { kind: 'custom', customModelId: 'selected-not-newest' }, true)
+    expect(client.cancel).not.toHaveBeenCalled()
   })
 
   it('keeps only explicitly selected chapter/plan/memory indices and confirms the returned revision', async () => {
@@ -379,6 +390,7 @@ describe('import confirmations and ownership', () => {
     expect(client.attachment).not.toHaveBeenCalled()
     await armedClick('上传并检查文件')
     await waitFor(() => expect(client.attachment).toHaveBeenCalledWith('a', 'job-a', attachment))
+    expect(client.create).toHaveBeenCalledWith('a', 'intent', { kind: 'custom', customModelId: 'selected-not-newest' }, true)
     expect(client.analyze).toHaveBeenCalledTimes(1)
     expect(client.commit).not.toHaveBeenCalled()
   })

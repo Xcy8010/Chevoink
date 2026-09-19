@@ -134,6 +134,34 @@ beforeEach(() => {
 })
 
 describe('staged import authorization and durability (DB mocked; not concurrency release evidence)', () => {
+  it('replaces only this work’s unfinished previews, fences workers and hides tombstones', async () => {
+    const first = await prepared()
+    const old = fixture.state.novelImportJob[0]
+    Object.assign(old, { status: 'parsing', leaseOwner: 'old-worker', leaseUntil: new Date(Date.now() + 60_000) })
+    const epoch = Number(old.leaseEpoch)
+    fixture.state.novelImportJob.push({ ...old, id: 'other-work', novelId: 'another-novel', intentId: 'other-intent' })
+    fixture.state.novelImportJob.push({ ...old, id: 'completed', intentId: 'completed-intent', status: 'succeeded' })
+    const intent = await preflightNovelImport(scope)
+    const replacement = await prepareNovelImport(human(), intent.intentId, { kind: 'basic' }, true)
+    expect(replacement.jobId).not.toBe(first.job.jobId)
+    expect(old).toMatchObject({ status: 'cancelled', errorCode: 'IMPORT_REPLACED', leaseOwner: null, leaseUntil: null, leaseEpoch: epoch + 1 })
+    expect(fixture.state.novelImportJob.find(job => job.id === 'other-work')?.status).toBe('parsing')
+    expect(fixture.state.novelImportJob.find(job => job.id === 'completed')?.status).toBe('succeeded')
+    expect((await listNovelImports(scope)).map(job => job.jobId)).toEqual(['completed', replacement.jobId])
+    expect((await prepareNovelImport(human(), intent.intentId, { kind: 'basic' }, true)).jobId).toBe(replacement.jobId)
+    expect((await getNovelImportStatus(scope, replacement.jobId)).status).toBe('uploading')
+    await expect(analyzeNovelImport(scope, first.job.jobId)).rejects.toMatchObject({ code: 'IMPORT_CANCELLED' })
+  })
+  it('keeps the prior preview when replacement creation fails and requires a real human', async () => {
+    const first = await prepared()
+    const intent = await preflightNovelImport(scope)
+    await expect(prepareNovelImport(scope, intent.intentId, { kind: 'basic' }, true)).rejects.toThrow()
+    await expect(prepareNovelImport(human(), intent.intentId, { kind: 'custom', customModelId: 'missing' }, true)).rejects.toMatchObject({ code: 'IMPORT_MODEL_UNAVAILABLE' })
+    fixture.db.novelImportJob.create.mockRejectedValueOnce(new Error('create unavailable'))
+    await expect(prepareNovelImport(human(), intent.intentId, { kind: 'basic' }, true)).rejects.toThrow('create unavailable')
+    expect((await getNovelImportStatus(scope, first.job.jobId)).status).toBe('ready')
+    expect(await listNovelImports(scope)).toHaveLength(1)
+  })
   it('publishes ready and releases the preview lease in the same database update', async () => {
     const result = await prepared()
     // Checking only the final row would miss the old ready-before-finally race.
@@ -164,6 +192,18 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     expect(fixture.state.chapter[0]).toMatchObject({ volumeId: original.id, orderIndex: 1, orderInVolume: 1 })
     expect(fixture.db.volume.updateMany).not.toHaveBeenCalled()
     expect(fixture.db.chapter.updateMany).not.toHaveBeenCalled()
+  })
+  it('renames a pristine placeholder for a named source and restores its original name and identity', async () => {
+    const original = { id: 'default-volume', novelId: scope.novelId, title: '第一卷', summary: null, orderIndex: 1, revision: 1, archivedAt: null, archivedByImportId: null }
+    fixture.state.volume.push({ ...original })
+    fixture.parse.mockResolvedValue({ volumes: [{ title: '淬火', chapters: [{ title: '合成章', content: '合成测试正文', source: 'original.txt#char=0-6' }] }], metadata: {}, warnings: [], sourceChars: 6, parserVersion: 'fixture-1' })
+    const result = await committedForRestore()
+    expect(fixture.state.volume).toEqual([{ ...original, title: '淬火', revision: 2 }])
+    expect(fixture.state.chapter[0]).toMatchObject({ volumeId: original.id, orderIndex: 1 })
+    expect(fixture.state.novelImportBackup[0].snapshot).toMatchObject({ importedVolumeIds: [], renamedVolumes: [{ id: original.id, title: original.title }] })
+    await restoreNovelImport(human(), result.job.jobId, result.restoreInput)
+    expect(fixture.state.volume).toEqual([{ ...original, revision: 3 }])
+    expect(fixture.state.chapter[0].archivedAt).toBeInstanceOf(Date)
   })
   it('keeps retained publication snapshots visible and never edits their identity', async () => {
     fixture.state.chapter.push({ id: 'archived', novelId: scope.novelId, status: 'draft', archivedAt: new Date(), publishedContent: '公开历史', publishedAt: null, publishedRevision: 2 })

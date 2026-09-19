@@ -181,17 +181,16 @@ describe('一键导入自动管线', () => {
     expect(client.cancel).not.toHaveBeenCalled()
   })
 
-  it('已有未完成任务时不创建、不取消任何任务', async () => {
+  it('明确新文件时原子替换已有未完成任务，不由客户端先取消旧任务', async () => {
     const { client, props } = dialogProps()
     vi.mocked(client.list).mockResolvedValue([
       { ...status, jobId: 'old-live' },
       { ...status, jobId: 'other-novel', novelId: 'b' },
     ])
     render(<ImportDialog {...props} />)
-    await screen.findByText(/当前作品已有未完成导入/)
+    await screen.findByRole('button', { name: '一键导入' })
+    expect(client.create).toHaveBeenCalledWith('a', 'intent', { kind: 'basic' }, true)
     expect(client.cancel).not.toHaveBeenCalled()
-    expect(client.create).not.toHaveBeenCalled()
-    expect(screen.getByRole('button', { name: /old-live/ })).toBeTruthy()
   })
 
   it('合并语义只在最终一键导入前授权，解析阶段不写入作品', async () => {
