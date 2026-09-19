@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { env } from '../../../config/env.js'
+import { REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
 import { DataAccessError } from '../../prisma.js'
 import { getModelTierRuntime } from '../../credits.js'
 import { resolveDurableTokenPrice } from '../../billing/resolve-token-price.js'
@@ -98,7 +99,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     if (runtime.tier !== 'speed') return runtimeError('RUNTIME_IDENTITY_CONFLICT', '独立质量模型档位不可替换。')
     const price = await resolveDurableTokenPrice(lease, `${cap.operationKey}:quality-price`, 'speed', runtime.multiplierBps)
     if (price.version !== 'credits-v2-itemized') return runtimeError('RUNTIME_PRICE_REQUIRED', '质量模型需要V2价目。')
-    work = { ...work, route: { provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel, baseUrl: runtime.baseUrl ?? env.aiTextBaseUrl, maxOutputTokens: env.aiTextMaxOutputTokens }, price }
+    work = { ...work, route: { provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel, baseUrl: runtime.baseUrl ?? env.aiTextBaseUrl, maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS }, price }
   }
   work = workSchema.parse(work)
   const prepared = await prepareToolCursorOperation(lease, cursor, { key: cap.operationKey, action: tool.name, callId: ctx.callId, effectDomain: 'compiler', targetId: lease.taskRootId,

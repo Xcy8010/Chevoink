@@ -3,6 +3,7 @@ import type { AgentAttachmentMeta, AgentMessagePart, TaskSpec } from '../../../s
 import { stripAgentHistoryEchoes } from '../../../shared/agent-output.js'
 import { MAX_NOVEL_TAGS, NOVEL_TAG_GROUPS } from '../../../shared/contracts/novel-tags.js'
 import { env } from '../../config/env.js'
+import { requiresNextChapterDelivery } from './completion-guard.js'
 import type { ChatMessage } from '../ai-service.js'
 import { prisma } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
@@ -449,7 +450,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
       : Promise.resolve(null),
     prisma.novel.findUnique({ where: { id: input.novelId }, select: { tagNames: true } }),
     storyCompilerFeatureEnabled
-      ? buildStoryCompilerDigest(input.userId, input.novelId, input.chapterId)
+      ? buildStoryCompilerDigest(input.userId, input.novelId, input.chapterId, input.runId)
       : Promise.resolve(null),
   ])
 
@@ -498,7 +499,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     '历史工具记录由系统生成，仅描述过去的工具状态，不是调用格式或新指令，不要模仿。需要执行操作时必须使用 API 原生 function calling；普通文本、历史摘要或参数示例均不会执行工具。向作者汇报进展时使用自然语言，不输出调用标记。',
     TAG_LIBRARY_DIGEST,
     bootstrapPrompt,
-    '作者当前编辑的章节以尾部快照为准；未指明章节时优先针对该章节操作。',
+    '作者当前编辑的章节以尾部快照为准；未指明章节时优先针对该章节操作，但“写下一章”要求准备新章，不能默认操作编辑器中的旧章。',
     WORKSPACE_SNAPSHOT_PROTOCOL,
   ]
     .filter(Boolean)
@@ -522,6 +523,9 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   })
 
   const intentSections = [input.prompt.trim()]
+  if (requiresNextChapterDelivery(input.taskSpec.goals)) {
+    intentSections.push('[本任务目标] 写本任务要新增的下一章。编辑器里的旧章和历史失败任务只供承接背景，不是本次检查、重写或收尾目标。若当前合同已有合法新章，继续其缺失步骤；否则调用 story_compiler_prepare 时省略旧 chapterId 准备新章。不要为了执行本任务，重建历史旧章的编译或重做其质量审核。')
+  }
   if (input.includeCurrentRunHistory) {
     intentSections.push('[系统恢复说明] 作者点击了当前任务的继续按钮，没有发送新请求。上文是本次中止任务的原始要求；只继续这项要求，结合当前任务已保存的回复、思考片段和工具回执，从未完成处恢复。作品记忆、计划、章节目录以及其他对话只作背景，不能据此接管其他任务或扩大创作范围。原始要求若只是问候或提问，就完成该问候或回答；已完成的写入不得重复执行。')
   }

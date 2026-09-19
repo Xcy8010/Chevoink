@@ -8,6 +8,9 @@ import app from '../../api/app.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
+import { chapterBridgeGetTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { resolveQualityChapterTarget } from '../../api/lib/agent/humanity-quality.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import {
   commitChapterBridge,
@@ -19,6 +22,7 @@ import {
   validateStoryContinuity,
   reserveContinuityRepair,
   continuityRepairRounds,
+  buildStoryCompilerDigest,
 } from '../../api/lib/agent/story-compiler.js'
 
 const dbAvailable = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
@@ -63,6 +67,44 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       data: { sessionId: session.id, userId, novelId, chapterId: chapter2Id, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', engine: 'loop' },
     })
     runId = run.id
+  })
+
+  it('keeps a fresh next-chapter contract separate from old and already-contaminated compilations', async () => {
+    const { sessionId } = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { sessionId: true } })
+    const freshId = randomUUID()
+    const task = buildTaskSpec({ runId: freshId, novelId, chapterId: chapter1Id, prompt: '写下一章', mode: 'build' })
+    await prisma.agentRun.create({ data: { id: freshId, sessionId, userId, novelId, chapterId: chapter1Id, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', engine: 'loop', runtimeProtocolVersion: 0, taskSpec: task } })
+    const old = await prepareStoryCompilation({ userId, novelId, runId, chapterId: chapter1Id, mode: 'balanced', intentSummary: '检查原章节' })
+    const original = await prisma.chapter.findUniqueOrThrow({ where: { id: chapter1Id } })
+    const ctx: ToolContext = { userId, novelId, runId: freshId, chapterId: chapter1Id, sessionId, callId: 'next', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', emit: () => {}, signal: new AbortController().signal }
+    expect((await chapterBridgeGetTool.execute(ctx, { compilationId: old.compilation.id })).outcome).toBe('failed')
+    // Reproduce the already-persisted historical bug: the new contract owns an
+    // old-chapter compilation. Ownership alone must not legalize that target.
+    await prisma.storyCompilation.update({ where: { id: old.compilation.id }, data: { runId: freshId } })
+    expect((await chapterBridgeGetTool.execute(ctx, { compilationId: old.compilation.id })).outcome).toBe('failed')
+    expect((await buildStoryCompilerDigest(userId, novelId, chapter1Id, freshId)) ?? '').not.toContain(old.compilation.id)
+    for (const target of [{ chapterId: chapter1Id }, { fallbackChapterId: chapter1Id }, { compilationId: old.compilation.id }]) {
+      await expect(resolveQualityChapterTarget({ userId, novelId, runId: freshId, ...target })).rejects.toMatchObject({ code: 'QUALITY_TASK_TARGET_REQUIRED' })
+    }
+    await expect(prepareStoryCompilation({ userId, novelId, runId: freshId, chapterId: chapter1Id, mode: 'balanced', intentSummary: '恢复旧章' })).rejects.toMatchObject({ code: 'STORY_TASK_TARGET_MISMATCH' })
+    await storyCompilerPrepareTool.execute(ctx, { intentSummary: '写下一章' })
+    const fresh = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: freshId, chapterId: null } })
+    expect(fresh.targetOrderIndex).toBe(4)
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: old.compilation.id } })).status).toBe('active')
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter1Id } })).toEqual(original)
+    // A real new chapter created during this contract remains available from a
+    // typed continuation in the same session, without adopting unrelated tasks.
+    const ownChapter = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId, orderIndex: 4, orderInVolume: 4, title: '第四章 新目标', content: '', wordCount: 0, status: 'draft', visibility: 'private', revision: 1 } })
+    await prisma.storyCompilation.update({ where: { id: fresh.id }, data: { chapterId: ownChapter.id } })
+    const continuationId = randomUUID()
+    await prisma.agentRun.create({ data: { id: continuationId, sessionId, userId, novelId, chapterId: chapter1Id, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', engine: 'loop', runtimeProtocolVersion: 0, taskSpec: { ...task, runId: continuationId } } })
+    const continued = await chapterBridgeGetTool.execute({ ...ctx, runId: continuationId }, { compilationId: fresh.id })
+    expect(continued.outcome).not.toBe('failed')
+    expect(await resolveQualityChapterTarget({ userId, novelId, runId: continuationId, chapterId: ownChapter.id })).toBe(ownChapter.id)
+    expect(await resolveQualityChapterTarget({ userId, novelId, runId: continuationId, fallbackChapterId: chapter1Id })).toBe(ownChapter.id)
+    // Keep the shared fixture's original chapter count/order intact.
+    await prisma.storyCompilation.deleteMany({ where: { runId: { in: [freshId, continuationId] } } })
+    await prisma.chapter.delete({ where: { id: ownChapter.id } })
   })
 
   it('reads an explicit whole-book chapter number without guessing IDs and never substitutes the editor chapter', async () => {

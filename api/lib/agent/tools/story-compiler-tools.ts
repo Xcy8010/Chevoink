@@ -8,6 +8,7 @@ import {
   storyStateSchema,
 } from '../../../../shared/contracts/index.js'
 import { generateTextCompletion } from '../../ai-service.js'
+import { generateReviewCompletion, REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { activeChapterScope } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
@@ -19,6 +20,7 @@ import {
   commitChapterBridge,
   getStoryCharterBundle,
   prepareStoryCompilation,
+  compilationRunScope,
   saveReaderPromise,
   saveSceneTasks,
   upsertStoryCharter,
@@ -42,8 +44,9 @@ const asStrings = (value: unknown): string[] =>
 
 // Thinking and final JSON share the provider's completion allowance. A full
 // chapter review needs room for both; keep a finite tool-specific ceiling rather
-// than inheriting the generic 8K text allowance or retrying a paid truncation.
-export const CONTINUITY_MAX_OUTPUT_TOKENS = 16_384
+// than inheriting the generic 8K text allowance. Confirmed truncation recovery
+// is separately bounded by generateReviewCompletion.
+export const CONTINUITY_MAX_OUTPUT_TOKENS = REVIEW_MAX_OUTPUT_TOKENS
 
 const independentContinuityResultSchema = z.object({
   findings: z.array(continuityFindingInputSchema).max(30),
@@ -110,7 +113,7 @@ async function applyRigorousContinuityRepairs(
       response = await generateTextCompletion(
         '你是中文网文连续性修订编辑。只修复清单内可证实的事实错误，警告和审美建议不改写。保留作者原有词汇、句式、节奏、叙述视角和人物声口；禁止同义替换、扩写、润色或重写相邻段落。集中输出最小必要补丁，不改变章节目标和已成立事实。oldText 必须从正文逐字复制、连续且唯一；找不到可安全定位的项不要编造。严格只输出 JSON：{"patches":[{"oldText":"正文逐字片段","newText":"替换文本"}]}。',
         `章节：《${chapter.title}》@r${chapter.revision}\n问题：\n${findings.map((item, index) => `${index + 1}. [${item.severity}/${item.signal}] ${item.evidence}；建议：${item.suggestion}`).join('\n')}\n\n正文：\n${chapter.content}`,
-        { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: ctx.signal, userId: ctx.userId, novelId: ctx.novelId, chapterId: chapter.id, action: attempt === 0 ? 'agent3RigorousContinuityRepair' : 'agent3RigorousContinuityRepairRetry', targetType: 'chapter', targetId: chapter.id, temperature: 0.3, reasoningEffort: 'low' },
+        { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: ctx.signal, userId: ctx.userId, novelId: ctx.novelId, chapterId: chapter.id, action: attempt === 0 ? 'agent3RigorousContinuityRepair' : 'agent3RigorousContinuityRepairRetry', targetType: 'chapter', targetId: chapter.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS },
       )
     } catch (error) {
       ctx.signal.throwIfAborted()
@@ -318,7 +321,8 @@ export const storyCompilerPrepareTool = defineTool({
   async execute(ctx, args) {
     const prepared = await prepareStoryCompilation({
       userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
-      chapterId: args.chapterId ?? (args.targetOrderIndex === undefined ? ctx.chapterId ?? undefined : undefined),
+      chapterId: args.chapterId,
+      fallbackChapterId: args.targetOrderIndex === undefined ? ctx.chapterId ?? undefined : undefined,
       targetOrderIndex: args.targetOrderIndex,
       mode: ctx.qualityMode,
       intentSummary: args.intentSummary,
@@ -456,20 +460,14 @@ export const sceneTaskBuildTool = defineTool({
         userId: ctx.userId,
         novelId: ctx.novelId,
         status: 'active',
-        ...(ctx.durableCompiler ? { id: ctx.durableCompiler.baseline?.id ?? '__missing__', run: { taskRootId: ctx.durableCompiler.lease.taskRootId } } : { OR: [
-          ...(args.compilationId ? [{ id: args.compilationId }] : []),
-          { runId: ctx.runId },
-          ...(ctx.chapterId ? [{ chapterId: ctx.chapterId }] : []),
-        ] }),
+        ...await compilationRunScope(db, ctx),
+        ...(ctx.durableCompiler ? { id: ctx.durableCompiler.baseline?.id ?? '__missing__' } : args.compilationId ? { id: args.compilationId } : {}),
       },
       include: { sceneTasks: { orderBy: { ordinal: 'asc' } } },
       orderBy: { updatedAt: 'desc' },
       take: 6,
     })
-    const compilation = ctx.durableCompiler ? candidates[0] : candidates.find((item) => item.runId === ctx.runId)
-      ?? (ctx.chapterId ? candidates.find((item) => item.chapterId === ctx.chapterId) : undefined)
-      ?? (args.compilationId ? candidates.find((item) => item.id === args.compilationId) : undefined)
-      ?? candidates[0]
+    const compilation = candidates[0]
     if (!compilation) return { outcome: 'failed' as const, output: '没有找到当前任务的活跃章节编译状态；请只重新执行一次 story_compiler_prepare。', summary: '未找到场景编译状态' }
     if (!['prepare', 'beat'].includes(compilation.stage) && compilation.sceneTasks.length > 0) {
       return {
@@ -494,14 +492,16 @@ export const chapterBridgeGetTool = defineTool({
   name: 'chapter_bridge_get',
   title: '读取章节桥',
   description:
-    '读取当前或最近一次 Story Compiler 的 Chapter Bridge、Scene Task 与阶段状态。续写完整章节前需要核对；局部润色、查标题、改元数据时禁止调用。该工具只读，不会创建新桥；创建写作任务用 story_compiler_prepare。',
+    '只读取当前任务合同的 Chapter Bridge、Scene Task 与阶段状态，不接管同作品历史失败任务。没有本任务编译时先用 story_compiler_prepare 建立；写下一章不要将编辑器当前旧章当作目标。该工具只读。',
   parameters: z.object({ compilationId: z.string().min(1).optional() }),
   permission: ALL_READ,
   readOnly: true,
   async execute(ctx, args) {
-    const compilation = await (ctx.transaction ?? prisma).storyCompilation.findFirst({
+    const db = ctx.transaction ?? prisma
+    const scope = await compilationRunScope(db, ctx)
+    const compilation = await db.storyCompilation.findFirst({
       where: { userId: ctx.userId, novelId: ctx.novelId, ...(args.compilationId ? { id: args.compilationId } : {}),
-        ...(ctx.durableCompiler ? { run: { taskRootId: ctx.durableCompiler.lease.taskRootId } } : {}) },
+        ...scope },
       orderBy: { updatedAt: 'desc' },
       include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { title: true, revision: true } } },
     })
@@ -556,7 +556,7 @@ export const continuityValidateTool = defineTool({
       include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
       orderBy: { updatedAt: 'desc' },
     })
-    if (!compilation?.chapter || !compilation.bridge) return { output: '编译任务不存在或尚未写入目标章节，不能执行独立连续性检查。' }
+    if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, summary: '本任务连续性检查未执行', output: '本任务编译不存在或尚未写入目标章节，未执行独立连续性检查。历史任务的编译编号不能在本任务使用；按当前作者目标准备并写入本任务章节，不恢复无关旧章检查。' }
     const chapter = compilation.chapter
     const quality = await getLatestQualityReport(ctx.userId, ctx.novelId, chapter.id)
     // After quality has repaired this revision, continuity must verify without
@@ -610,10 +610,20 @@ export const continuityValidateTool = defineTool({
         continuityReviewTail(compilation.validation, chapter.revision, allowRepair, args.focus),
       ].filter(Boolean).join('\n')
     const criticPrompts = [continuityCriticSystem]
-    const criticResponses = await Promise.all(criticPrompts.map((systemPrompt, index) => generateTextCompletion(
+    const criticResponses = await Promise.all(criticPrompts.map((systemPrompt, index) => generateReviewCompletion(
       systemPrompt,
       criticInput,
-      { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: ctx.signal, userId: ctx.userId, action: index === 0 ? 'agent3ContinuityCritic' : 'agent3ContinuityCriticSecondPass', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0.15, reasoningEffort: 'low', maxOutputTokens: CONTINUITY_MAX_OUTPUT_TOKENS },
+      { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: ctx.signal, userId: ctx.userId, action: index === 0 ? 'agent3ContinuityCritic' : 'agent3ContinuityCriticSecondPass', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0.15, reasoningEffort: 'low' },
+      async () => {
+        const current = await prisma.storyCompilation.findFirst({
+          where: { id: compilation.id, userId: ctx.userId, novelId: ctx.novelId, status: 'active', ...await qualityCompilationScope(prisma, ctx.userId, ctx.novelId, ctx.runId) },
+          include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
+        })
+        const source = bridge.fromChapterId ? await prisma.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { revision: true } }) : null
+        if (JSON.stringify(current) !== JSON.stringify(compilation) || source?.revision !== sourceChapter?.revision) {
+          throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文或章节桥已变化，未重发旧版本连续性检查，请读取当前版本。')
+        }
+      },
     )))
     ctx.signal.throwIfAborted()
     const parsedCriticResponses = criticResponses.map(parseIndependentContinuityResult)

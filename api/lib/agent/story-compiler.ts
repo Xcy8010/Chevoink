@@ -15,6 +15,8 @@ import { activeChapterScope } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { saveStoryMemory } from './story-memory.js'
 import { qualityReportMatchesContent } from './quality-report-contract.js'
+import { taskSpecSchema } from '../../../shared/contracts/index.js'
+import { requiresNextChapterDelivery } from './completion-guard.js'
 
 type PreparedBridge = {
   lastUnfinishedAction: string
@@ -184,6 +186,7 @@ export async function prepareStoryCompilation(input: {
   novelId: string
   runId: string
   chapterId?: string
+  fallbackChapterId?: string
   targetOrderIndex?: number
   mode: StoryCompilerMode
   intentSummary: string
@@ -193,7 +196,15 @@ export async function prepareStoryCompilation(input: {
   await lockNovelActiveScope(db, input.novelId)
   const scope = await compilationRunScope(db, input)
   await assertOwnedNovel(input.userId, input.novelId, db)
-  const target = await resolveTarget(input.userId, input.novelId, input.chapterId, input.targetOrderIndex, db)
+  const run = await db.agentRun.findFirst({ where: { id: input.runId, userId: input.userId, novelId: input.novelId }, select: { taskSpec: true } })
+  const task = taskSpecSchema.safeParse(run?.taskSpec)
+  const nextChapter = task.success && task.data.runId === input.runId && task.data.scope.novelId === input.novelId && requiresNextChapterDelivery(task.data.goals)
+  const continuing = nextChapter && !input.chapterId && input.targetOrderIndex === undefined
+    ? await db.storyCompilation.findFirst({ where: { userId: input.userId, novelId: input.novelId, ...scope, status: 'active' }, orderBy: { updatedAt: 'desc' }, select: { chapterId: true, targetOrderIndex: true } }) : null
+  const target = await resolveTarget(input.userId, input.novelId, input.chapterId ?? continuing?.chapterId ?? (!nextChapter ? input.fallbackChapterId : undefined), input.targetOrderIndex ?? continuing?.targetOrderIndex, db)
+  if (nextChapter && target.chapter && !await db.storyCompilation.findFirst({ where: { userId: input.userId, novelId: input.novelId, ...scope, chapterId: target.chapter.id }, select: { id: true } })) {
+    throw new DataAccessError(409, 'STORY_TASK_TARGET_MISMATCH', '当前任务要求写下一章，不能接管历史任务的旧章检查或重写。请省略已有chapterId，以新的目标序号准备下一章；历史正文仅作承接参考。')
+  }
   const [bundle, previousChapter, recentChapters] = await Promise.all([
     getStoryCharterBundle(input.userId, input.novelId, db),
     db.chapter.findFirst({
@@ -353,12 +364,27 @@ export async function saveSceneTasks(input: {
   return tx.sceneTask.findMany({ where: { compilationId: compilation.id }, orderBy: { ordinal: 'asc' } })
 }
 
-/** Only explicit durable identity joins runs; historical conversation is not authority. */
-async function compilationRunScope(db: Prisma.TransactionClient, input: { userId: string; novelId: string; runId: string }): Promise<Prisma.StoryCompilationWhereInput> {
-  const run = await db.agentRun.findFirst({ where: { id: input.runId, userId: input.userId, novelId: input.novelId }, select: { taskRootId: true, runtimeProtocolVersion: true } })
+/** Only durable identity or a validated legacy task contract joins runs.
+ * A next-chapter contract cannot inherit an older chapter even if a historical
+ * bug already attached a compilation for that chapter to this same contract. */
+export async function compilationRunScope(db: Prisma.TransactionClient, input: { userId: string; novelId: string; runId: string }): Promise<Prisma.StoryCompilationWhereInput> {
+  const run = await db.agentRun.findFirst({ where: { id: input.runId, userId: input.userId, novelId: input.novelId }, select: { taskRootId: true, runtimeProtocolVersion: true, taskSpec: true, sessionId: true } })
   if (!run) throw new DataAccessError(404, 'RUN_NOT_FOUND', '章节编译运行不存在或不属于当前任务。')
   if (run.runtimeProtocolVersion > 0 && !run.taskRootId) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '持久运行缺少原任务身份。')
-  return run.taskRootId ? { run: { taskRootId: run.taskRootId } } : { runId: input.runId }
+  const task = taskSpecSchema.safeParse(run.taskSpec)
+  const validTask = task.success && task.data.runId === input.runId && task.data.scope.novelId === input.novelId
+  const runWhere: Prisma.AgentRunWhereInput = run.taskRootId
+    ? { userId: input.userId, novelId: input.novelId, taskRootId: run.taskRootId }
+    : run.runtimeProtocolVersion === 0 && validTask
+      ? { userId: input.userId, novelId: input.novelId, sessionId: run.sessionId, runtimeProtocolVersion: 0, taskRootId: null, taskSpec: { path: ['id'], equals: task.data.id } }
+      : { id: input.runId, userId: input.userId, novelId: input.novelId }
+  const scope: Prisma.StoryCompilationWhereInput = { run: runWhere }
+  if (validTask && requiresNextChapterDelivery(task.data.goals)) {
+    const firstRun = await db.agentRun.findFirst({ where: runWhere, orderBy: { createdAt: 'asc' }, select: { createdAt: true } })
+    if (!firstRun) throw new DataAccessError(404, 'RUN_NOT_FOUND', '章节编译原任务不存在。')
+    scope.AND = [{ OR: [{ chapterId: null }, { chapter: { createdAt: { gte: firstRun.createdAt } } }] }]
+  }
+  return scope
 }
 
 /**
@@ -617,14 +643,15 @@ export async function commitChapterBridge(input: {
   return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: compilation.chapter.revision, skippedMemoryCount }
 }
 
-export async function buildStoryCompilerDigest(userId: string, novelId: string, chapterId: string | null) {
+export async function buildStoryCompilerDigest(userId: string, novelId: string, _chapterId: string | null, runId?: string) {
+  const scope = runId ? await compilationRunScope(prisma, { userId, novelId, runId }) : null
   const [bundle, active, latestBridge] = await Promise.all([
     getStoryCharterBundle(userId, novelId),
-    prisma.storyCompilation.findFirst({
-      where: { userId, novelId, status: 'active', ...(chapterId ? { OR: [{ chapterId }, { chapterId: null }] } : {}) },
+    scope ? prisma.storyCompilation.findFirst({
+      where: { userId, novelId, ...scope, status: 'active' },
       orderBy: { updatedAt: 'desc' },
       include: { sceneTasks: { orderBy: { ordinal: 'asc' } }, bridge: true },
-    }),
+    }) : Promise.resolve(null),
     prisma.chapterBridge.findFirst({
       where: { userId, novelId, committedAt: { not: null } },
       orderBy: { committedAt: 'desc' },
@@ -636,7 +663,7 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
     'Story Compiler 3.0 状态：',
     bundle.charter ? `创作宪章 r${bundle.charter.revision}：${clip(bundle.charter.oneLinePromise, 240)}` : '创作宪章：尚未建立（新书长纲前应先建立）',
     bundle.promises.length ? `待兑现读者承诺：${bundle.promises.slice(0, 5).map((item) => `${item.title}（${item.payoffHorizon}）`).join('；')}` : '待兑现读者承诺：无',
-    active ? `当前编译：${active.id}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，Scene Task ${active.sceneTasks.length} 个` : '',
+    active ? `本任务编译：${active.id}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，Scene Task ${active.sceneTasks.length} 个` : '本任务尚未建立编译；历史检查失败不构成恢复旧任务的授权。写下一章时以前文为参考，为新章建立本任务编译。',
     latestBridge?.toChapter ? `最近已提交桥：第 ${latestBridge.toChapter.orderIndex} 章《${latestBridge.toChapter.title}》r${latestBridge.toChapter.revision}；未完成动作：${latestBridge.lastUnfinishedAction || '无'}；开放钩子：${asStringArray(latestBridge.openLoops).slice(0, 4).join('、') || '无'}` : '',
   ].filter(Boolean)
   return lines.join('\n')

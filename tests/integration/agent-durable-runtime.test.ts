@@ -1487,6 +1487,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
         requests++
         const body = JSON.parse(String(init.body))
+        expect(body.max_tokens).toBe(16_384)
         expect(body.tools).toBeUndefined()
         expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
         if (scenario === 'long') { expect(body.messages[1].content).toContain('开头锚点'); expect(body.messages[1].content).toContain('末尾锚点'); expect(body.messages[1].content).toContain(before) }

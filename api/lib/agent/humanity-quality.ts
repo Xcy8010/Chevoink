@@ -19,6 +19,8 @@ import { activeChapterScope } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { taskSpecSchema } from '../../../shared/contracts/index.js'
+import { compilationRunScope } from './story-compiler.js'
+import { requiresNextChapterDelivery } from './completion-guard.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from './craft-library.js'
 import { recalcNovelStats } from './tools/novel-tools.js'
@@ -223,17 +225,12 @@ export async function getOwnedQualityChapter(userId: string, novelId: string, ch
 
 export async function qualityCompilationScope(db: Prisma.TransactionClient, userId: string, novelId: string, runId?: string | null): Promise<Prisma.StoryCompilationWhereInput> {
   if (!runId) return {}
-  const run = await db.agentRun.findFirst({ where: { id: runId, userId, novelId }, select: { taskRootId: true, taskSpec: true, sessionId: true, runtimeProtocolVersion: true } })
-  if (!run) throw new DataAccessError(409, 'QUALITY_RUN_SCOPE_INVALID', '质量检查不属于当前作品任务。')
-  if (run.taskRootId) return { run: { taskRootId: run.taskRootId } }
-  // Typed continuation has a new run ID but retains the server-validated task
-  // contract. Match that contract, never every historical run in the session.
-  const spec = taskSpecSchema.safeParse(run.taskSpec)
-  if (run.runtimeProtocolVersion === 0 && spec.success && spec.data.runId === runId && spec.data.scope.novelId === novelId) {
-    return { run: { userId, novelId, sessionId: run.sessionId, runtimeProtocolVersion: 0, taskRootId: null,
-      taskSpec: { path: ['id'], equals: spec.data.id } } }
+  try {
+    return await compilationRunScope(db, { userId, novelId, runId })
+  } catch (error) {
+    if (error instanceof DataAccessError && error.code === 'RUN_NOT_FOUND') throw new DataAccessError(409, 'QUALITY_RUN_SCOPE_INVALID', '质量检查不属于当前作品任务。')
+    throw error
   }
-  return { runId }
 }
 
 /** Server-side next-chapter delivery evidence, including resumed task lineage. */
@@ -258,6 +255,20 @@ export async function resolveQualityChapterTarget(
   input: { userId: string; novelId: string; runId?: string; chapterId?: string; compilationId?: string; fallbackChapterId?: string | null },
   db: Prisma.TransactionClient = prisma,
 ) {
+  if (input.runId) {
+    const run = await db.agentRun.findFirst({ where: { id: input.runId, userId: input.userId, novelId: input.novelId }, select: { taskSpec: true } })
+    const task = taskSpecSchema.safeParse(run?.taskSpec)
+    if (task.success && task.data.runId === input.runId && task.data.scope.novelId === input.novelId && requiresNextChapterDelivery(task.data.goals)) {
+      const scope = await qualityCompilationScope(db, input.userId, input.novelId, input.runId)
+      const targets = await db.storyCompilation.findMany({
+        where: { userId: input.userId, novelId: input.novelId, status: 'active', ...scope,
+          ...(input.chapterId ? { chapterId: input.chapterId } : {}), ...(input.compilationId ? { id: input.compilationId } : {}) },
+        select: { chapterId: true }, take: 2,
+      })
+      if (targets.length === 1 && targets[0].chapterId) return targets[0].chapterId
+      throw new DataAccessError(409, 'QUALITY_TASK_TARGET_REQUIRED', '当前任务要求写下一章，请先准备并写入本任务的新章，再检查质量；不能回到历史旧章重复修订。')
+    }
+  }
   if (input.chapterId) return input.chapterId
   if (!input.runId) {
     if (input.compilationId) throw new DataAccessError(409, 'QUALITY_RUN_SCOPE_INVALID', '请在当前任务中指定质量检查的章节。')
