@@ -39,3 +39,7 @@ The three plan failures were provider output truncations (4120/8109/5348 receive
 本地119项定向单测通过；类型构建通过。新增 durable append/replay/stale-hash 数据库回归等待同 SHA CI 隔离库运行。本地无测试数据库，未将跳过的集成检查计为通过。发布四闸与部署结果以对应提交的CI和发布核验为准。
 
 119 targeted unit tests passed locally; TypeScript build passed. Durable append/replay/stale-hash integration cases require the same-SHA isolated CI database. No local database skips count as release evidence. Full gates and deployment are recorded by the matching commit's CI and release verification.
+
+首轮CI发现长计划分页影响durable上下文归档的3项既有保护测试。已恢复durable默认全文交给原归档读取链路；显式部分读取不发放完整读取基线，保留原测试断言。修正提交须重新通过完整CI后才可部署。
+
+The first CI exposed three durable archive regressions from default pagination. Durable default reads now retain the existing full-output archive flow; explicit partial reads do not grant a full-read baseline. Original assertions remain intact, and the corrective commit must pass full CI before deployment.
