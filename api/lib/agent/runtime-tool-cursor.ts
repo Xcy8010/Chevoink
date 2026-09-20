@@ -120,6 +120,7 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
       : approval ? '本次未执行。审批已拒绝或超时；不得换工具、换窗口或重复发起相同操作绕过用户决定。说明未完成部分，等待明确的新指示。'
       : code === 'TOOL_NOT_AUTHORIZED' ? '本次未执行。只能使用当前任务授权的工具，不得从历史任务或其他窗口恢复权限。'
       : code === 'TOOL_SCHEMA_INVALID' ? `本次未执行，已有内容未改动。参数字段校验失败：${validationHint}。请按原工具结构修正这些字段后再调用，不重复发送相同参数，也不要删除必要场景来绕过校验。`
+      : code === 'TOOL_ARGUMENTS_INCOMPLETE' && call.name === 'plan_save' ? '计划未写入。先plan_read核对已保存部分；长计划按完整小节分次保存，每次建议不超过2000字符且独立调用。首次保存首节，后续mode=append并携带planId及contentHash作为expectedContentHash；完成全部小节才可汇报完成。不能补括号执行残文、重复已保存内容或缩短原目标。'
       : '本次未执行。请按公布的工具参数结构重新生成完整参数，不重复发送相同损坏参数。'
     const receipt = await recordToolFailureInTransaction(tx, token, { operationId: operation.id, inputHash: operation.inputHash, code, output, summary })
     return { operation, pending, receipt }

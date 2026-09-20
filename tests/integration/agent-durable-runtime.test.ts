@@ -1,5 +1,5 @@
 import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
@@ -2767,12 +2767,13 @@ describe.runIf(available)('durable chapter creation', () => {
 })
 
 describe.runIf(available)('durable actual plan writes', () => {
-  it.each(['create', 'update', 'conflict', 'missing', 'placeholder', 'review'] as const)('%s', async scenario => {
+  it.each(['create', 'update', 'conflict', 'missing', 'placeholder', 'review', 'append', 'append-stale'] as const)('%s', async scenario => {
     await fixture(async f => {
       const lease = await claim(f)
-      const existing = ['update', 'conflict'].includes(scenario) ? await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'chapterPlan', title: '原计划', content: '原始完整计划', metadata: { savedAsPlan: true } } }) : null
+      const existing = ['update', 'conflict', 'append', 'append-stale'].includes(scenario) ? await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'chapterPlan', title: '原计划', content: '原始完整计划', metadata: { savedAsPlan: true } } }) : null
       const args = { title: '章节规划', content: scenario === 'placeholder' ? 'placeholder' : '第一场景审俘，第二场景核对口供，第三场景整理证据。',
-        ...(existing ? { planId: existing.id } : scenario === 'missing' ? { planId: 'missing-plan' } : {}) }
+        ...(existing ? { planId: existing.id } : scenario === 'missing' ? { planId: 'missing-plan' } : {}),
+        ...(scenario.startsWith('append') ? { mode: 'append' as const, expectedContentHash: createHash('sha256').update(scenario === 'append-stale' ? '过期正文' : existing!.content).digest('hex') } : {}) }
       const mode = scenario === 'review' ? 'review' as const : 'plan' as const
       const state = await initializeExecutionState(lease, { configuration: { version: 1, mode, agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: modelRouteRevision({ provider: 'fixture', model: 'fixture', endpoint: 'https://provider.invalid/v1', reasoningEffort: 'high' }) },
@@ -2791,16 +2792,16 @@ describe.runIf(available)('durable actual plan writes', () => {
       }
       const result = await planSaveTool.execute(ctx, args)
       expect(await planSaveTool.execute(ctx, args)).toEqual(result)
-      const failed = ['conflict', 'missing', 'placeholder'].includes(scenario)
+      const failed = ['conflict', 'missing', 'placeholder', 'append-stale'].includes(scenario)
       expect(result.outcome === 'failed').toBe(failed)
       expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(2)
       const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId } })
       expect(artifacts).toHaveLength(existing || !failed ? 1 : 0)
       if (!failed) {
-        expect(artifacts[0].content).toBe(args.content)
+        expect(artifacts[0].content).toBe(scenario === 'append' ? `${existing!.content}\n\n${args.content}` : args.content)
         const receipt = await prisma.agentEffectReceipt.findFirst({ where: { operation: { taskRootId: f.rootId } } })
         expect(receipt?.result).toMatchObject({ progress: { kind: 'content_revision', targetId: artifacts[0].id } })
-      } else if (existing) expect(artifacts[0].content).toBe('作者修改后的计划')
+      } else if (existing) expect(artifacts[0].content).toBe(scenario === 'conflict' ? '作者修改后的计划' : existing.content)
     })
   }, 30_000)
 })

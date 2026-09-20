@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
 
 import type { Prisma } from '@prisma/client'
 
@@ -39,11 +40,11 @@ export const memorySaveTool = defineTool({
       ])
       .describe('记忆类型'),
     title: z.string().min(1).max(120).describe('记忆标题（如角色名、章节名、设定名）'),
-    content: z.string().min(1).max(4000).describe('记忆内容，事实化、结构化表述'),
+    content: z.string().min(1).max(4000).describe('记忆内容，事实化、结构化表述，最多4000字符；不同主题分别保存，不截断事实'),
     importance: z.number().int().min(1).max(100).describe('重要性 1-100：核心主角/主线设定 80+，一般设定 50-70'),
     sourceChapterId: z.string().optional().describe('来源章节 ID（章节摘要必填）'),
     revision: z.number().int().positive().optional().describe('读取到的来源章节版本'),
-    sourceQuote: z.string().trim().min(1).max(4000).optional().describe('支持记忆的逐字原文，禁止改写引用'),
+    sourceQuote: z.string().trim().min(1).max(4000).optional().describe('仅用于来源章节的逐字原文，必须同时传真实sourceChapterId。规划/待定设定不是章节证据，不把摘要或计划包装成引用；无章节依据时仅提交待审候选，不传revision/sourceQuote'),
     memoryId: z.string().optional().describe('要修订的既有记忆卡片id；提交关联候选，作者确认前保留旧卡'),
     overwrite: z.boolean().optional().describe('旧客户端兼容参数，不授予自动覆盖或作者确认权限'),
   }),
@@ -62,6 +63,11 @@ export const memorySaveTool = defineTool({
     }
     const result: Record<string, unknown> = { ...source }
     result.memoryType = result.memoryType ?? result.type ?? result.memory_type
+    // Only established equivalent names; unknown types still fail schema validation.
+    if (typeof result.memoryType === 'string') {
+      const aliases: Record<string, string> = { world_setting: 'worldbuilding', setting: 'worldbuilding', world_building: 'worldbuilding', character_card: 'characterCard', chapter_summary: 'chapterSummary', story_bible: 'storyBible' }
+      result.memoryType = aliases[result.memoryType] ?? result.memoryType
+    }
     result.title = result.title ?? result.name ?? result.subject
     result.content = result.content ?? result.text ?? result.body ?? result.summary
     result.importance = result.importance ?? result.priority ?? result.weight ?? 70
@@ -114,10 +120,12 @@ export const planSaveTool = defineTool({
   name: 'plan_save',
   title: '写入计划',
   description:
-    '把完整的创作计划/规划文档写入作品树的「计划」文件夹。规划类诉求（如"帮我规划第六章"）完成分析后必须调用本工具落盘完整计划。修订已有计划必须传 planId 就地更新，禁止另存一份同名计划；不传 planId 时若存在同名计划也会自动转为更新。同一次任务里同一份计划只落盘一次，后续都是修订。本工具只用于写入/修订，查看既有计划内容请用只读的 plan_read，禁止用本工具重写一遍来代替读取。不要把计划内容粘贴在回复正文里。',
+    '把创作计划写入作品树「计划」文件夹。规划诉求必须落盘完整目标。长计划按完整小节分次写入，每次建议不超过2000字符且独立调用；首次保存首节，后续mode=append带planId和expectedContentHash追加，直到全部完成。修订已有计划必须传planId就地更新，不另建同名副本；默认replace替换全文，不传planId时同名自动更新。查看先plan_read，不重写代替读取。不要把计划全文粘贴在回复里。',
   parameters: z.object({
     title: z.string().min(2).max(60).describe('计划标题，如"第六章规划"'),
-    content: z.string().min(1).describe('完整的计划正文（Markdown）。必须一次传入全文，禁止传 placeholder/待补充等占位文本，否则会被拦截'),
+    content: z.string().min(1).describe('Markdown正文。长计划分完整小节写入，每次建议不超过2000字符且只调用一次plan_save；首次保存首节，后续mode=append追加，不能缩短原目标或把首节说成全文完成。禁止占位文本'),
+    mode: z.enum(['replace', 'append']).optional().describe('默认replace替换全文；长计划用append逐节追加，每次等待回执再写下一节'),
+    expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('append必填，使用最近plan_save或plan_read返回的contentHash，防重复追加与覆盖并发修改'),
     planId: z
       .string()
       .optional()
@@ -155,7 +163,7 @@ export const planSaveTool = defineTool({
       const wrapped = obj[wrapKey]
       const direct = unwrapWrapped(wrapped)
       if (direct) {
-        obj = { ...direct, planId: obj.planId ?? direct.planId }
+        obj = { ...direct, planId: obj.planId ?? direct.planId, mode: obj.mode ?? direct.mode, expectedContentHash: obj.expectedContentHash ?? direct.expectedContentHash }
         break
       }
     }
@@ -178,7 +186,7 @@ export const planSaveTool = defineTool({
         (value) => value !== null && typeof value === 'object' && !Array.isArray(value),
       ) as Record<string, unknown> | undefined
       if (nested && (nested.title !== undefined || nested.content !== undefined)) {
-        obj = { ...nested, planId: obj.planId ?? nested.planId }
+        obj = { ...nested, planId: obj.planId ?? nested.planId, mode: obj.mode ?? nested.mode, expectedContentHash: obj.expectedContentHash ?? nested.expectedContentHash }
       }
     }
 
@@ -200,7 +208,7 @@ export const planSaveTool = defineTool({
     // 最后一层保守恢复：根对象里若只有一段明显的长文本，把它视为计划正文；ID、标题与说明不参与。
     if (result.content === undefined) {
       const candidates = Object.entries(result)
-        .filter(([key, value]) => !['title', 'name', 'planTitle', 'planId', 'id', 'reason', 'summary'].includes(key) && typeof value === 'string')
+        .filter(([key, value]) => !['title', 'name', 'planTitle', 'planId', 'id', 'reason', 'summary', 'mode', 'expectedContentHash'].includes(key) && typeof value === 'string')
         .map(([, value]) => value as string)
         .filter((value) => value.trim().length >= 20)
         .sort((left, right) => right.length - left.length)
@@ -250,6 +258,11 @@ export const planSaveTool = defineTool({
     }
     const db = ctx.transaction ?? prisma
     const title = args.title.trim()
+    ctx.signal.throwIfAborted()
+    if (args.mode === 'append' && (!args.planId || !args.expectedContentHash)) return {
+      outcome: 'failed', summary: '追加计划需要已保存的目标版本',
+      output: '先用 plan_read 读取已保存计划，再带 planId、contentHash（作为expectedContentHash）及mode=append追加完整小节。未执行任何写入。',
+    }
 
     // 优先 planId 精确定位；不传时按同作品同标题兜底去重，防止模型忘传 planId 导致重复落盘
     const existing = args.planId
@@ -280,15 +293,21 @@ export const planSaveTool = defineTool({
 
     // 防误清空护栏：模型偶发把占位文本当正文传入（如 "placeholder"），或把长计划覆盖成几句话，
     // 这里直接拦截不落库，并要求携带完整正文重试，避免既有计划被意外摧毁
+    const appending = args.mode === 'append'
+    if (existing && args.expectedContentHash && createHash('sha256').update(existing.content).digest('hex') !== args.expectedContentHash) return {
+      outcome: 'failed', summary: '计划版本已变化，未重复写入', output: '先用 plan_read 核对当前正文及contentHash；确认本小节是否已保存，仅追加尚未保存的小节，不原样重试旧版本。',
+    }
+    const content = appending && existing ? `${existing.content}\n\n${args.content}` : args.content
+    const contentHash = createHash('sha256').update(content).digest('hex')
     const nextContent = args.content.trim()
     const looksPlaceholder = /^(placeholder|todo|tbd|n\/a|待补充|待填充|待完善|占位|暂无|略)[\s.。…]*$/i.test(nextContent)
     const beforeLength = existing?.content.trim().length ?? 0
     const shrunkTooMuch =
-      Boolean(existing) && beforeLength >= 200 && nextContent.length < Math.min(80, Math.ceil(beforeLength * 0.1))
+      !appending && Boolean(existing) && beforeLength >= 200 && nextContent.length < Math.min(80, Math.ceil(beforeLength * 0.1))
     if (looksPlaceholder || shrunkTooMuch) {
       return {
         output: existing
-          ? `已拦截本次计划更新：传入内容疑似占位或不完整（${nextContent.length} 字，原计划 ${beforeLength} 字），计划《${existing.title}》保持原样未被修改。plan_save 必须一次传入完整的计划正文（Markdown 全文），请带上 planId=${existing.id} 和完整内容重新调用；如确需删除计划请改用 plan_delete。`
+          ? `已拦截本次计划更新：传入内容疑似占位或不完整（${nextContent.length} 字，原计划 ${beforeLength} 字），计划《${existing.title}》保持原样未被修改。${appending ? '追加必须传入一个完整小节，不能传占位文本；保留mode=append和expectedContentHash，不重发整份长计划。' : '替换必须传入完整正文；长计划新增内容应使用mode=append逐小节追加。'}请带上planId=${existing.id}重新调用；如确需删除计划请改用plan_delete。`
           : `已拦截本次计划写入：传入内容疑似占位文本（「${nextContent.slice(0, 20)}」），未创建任何计划。请携带完整的计划正文（Markdown 全文）重新调用 plan_save。`,
         summary: '计划写入已拦截：疑似占位/不完整内容',
         outcome: 'failed',
@@ -302,13 +321,24 @@ export const planSaveTool = defineTool({
         ...((existing.metadata as Record<string, unknown> | null) ?? {}),
         savedAsPlan: true,
       }
+      ctx.signal.throwIfAborted()
+      if (appending || args.expectedContentHash) {
+        const saved = await db.agentArtifact.updateMany({
+          where: { id: existing.id, content: existing.content, title: existing.title, updatedAt: existing.updatedAt },
+          data: { title: appending ? existing.title : title, content, metadata: metadata as Prisma.InputJsonValue },
+        })
+        if (saved.count !== 1) return { outcome: 'failed', summary: '计划版本已变化，未追加', output: '并发修改已发生，未写入。请plan_read核对正文和contentHash后再继续，不能重复追加已保存小节。' }
+        return { summary: `${appending ? '追加' : '更新'}计划《${appending ? existing.title : title}》 · ${args.content.length} 字`,
+          output: `${appending ? '已追加一个完整小节' : '已按核对版本更新计划'}，planId=${existing.id}，contentHash=${contentHash}，累计${content.length}字。继续追加剩余小节直到原计划完整，不重复已保存内容。`,
+          display: { kind: 'planDiff', artifactId: existing.id, title: appending ? existing.title : title, beforeTitle: existing.title, before: existing.content, after: content } }
+      }
       const updated = await db.agentArtifact.update({
         where: { id: existing.id },
         data: { title, content: args.content, metadata: metadata as Prisma.InputJsonValue },
       })
 
       return {
-        output: `已就地更新既有计划《${beforeTitle}》（planId=${updated.id}，${args.content.length} 字），没有新建副本，作者会看到变更审查条。回复正文只允许一句话：「已更新计划《${title}》，可在左侧作品树查看。」禁止粘贴计划内容或罗列问题。`,
+        output: `已就地更新既有计划《${beforeTitle}》（planId=${updated.id}，contentHash=${contentHash}，${args.content.length} 字），没有新建副本。如长计划尚未完整，继续mode=append追加剩余小节；只有完成原目标后才向作者汇报完成。`,
         summary: `更新计划《${title}》 · ${args.content.length} 字`,
         display: {
           kind: 'planDiff',
@@ -332,7 +362,7 @@ export const planSaveTool = defineTool({
     })
 
     return {
-      output: `已把《${title}》写入计划文件夹（planId=${artifact.id}，${args.content.length} 字），作者已能看到并可直接编辑。后续修订请带 planId=${artifact.id} 就地更新。回复正文只允许一句话：「已把《${title}》写入计划文件夹，可在左侧作品树查看和编辑。」禁止粘贴计划内容或罗列问题；如需作者决策请用 ask_user。`,
+      output: `已把《${title}》写入计划文件夹（planId=${artifact.id}，contentHash=${contentHash}，${args.content.length} 字）。如长计划尚未完整，继续mode=append追加剩余小节；只有完成原目标后才向作者汇报完成。后续修订带planId就地更新，不新建副本。`,
       summary: `写入计划《${title}》 · ${args.content.length} 字`,
       display: { kind: 'planFile', artifactId: artifact.id, title, content: args.content },
     }

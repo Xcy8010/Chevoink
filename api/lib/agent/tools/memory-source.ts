@@ -6,7 +6,7 @@ import type { ToolContext } from './types.js'
 export async function resolveMemorySource(ctx: ToolContext, args: { sourceChapterId?: string; revision?: number; sourceQuote?: string }) {
   ctx.signal.throwIfAborted()
   if (!args.sourceChapterId) {
-    if (args.revision !== undefined || args.sourceQuote) throw new DataAccessError(400, 'MEMORY_SOURCE_REQUIRED', '原文依据必须同时指定来源章节。')
+    if (args.revision !== undefined || args.sourceQuote) throw new DataAccessError(400, 'MEMORY_SOURCE_REQUIRED', '原文依据必须同时指定真实来源章节。sourceQuote仅接受章节逐字原文，不接受规划、概述或模型生成引用；当前引用未核验，未写入记忆。无来源的独立规划候选与章节事实不同，不应伪造章节依据。')
     return { sourceType: 'artifact' as const, sourceId: ctx.runId, confidence: 0.5 }
   }
   const chapter = await (ctx.transaction ?? prisma).chapter.findFirst({

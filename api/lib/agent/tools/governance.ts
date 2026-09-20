@@ -107,7 +107,7 @@ export const AGENT_TOOL_GOVERNANCE = {
   novel_create: { category: 'write', risk: 'medium', postconditions: ['bootstrap_scope_verified', 'novel_initialized', 'rollback_snapshot_created'] },
   novel_rename: { category: 'write', risk: 'medium', postconditions: ['novel_scope_verified', 'rollback_snapshot_created'] },
   novel_update_meta: { category: 'write', risk: 'medium', postconditions: ['novel_scope_verified', 'rollback_snapshot_created'] },
-  plan_save: { category: 'write', risk: 'medium', postconditions: ['novel_scope_verified', 'plan_artifact_persisted'] },
+  plan_save: { category: 'write', risk: 'medium', postconditions: ['novel_scope_verified', 'plan_artifact_persisted', 'append_content_hash_verified'] },
   plan_rename: { category: 'write', risk: 'medium', postconditions: ['artifact_scope_verified'] },
   plan_delete: { category: 'write', risk: 'high', postconditions: ['artifact_scope_verified', 'plan_removed'] },
   cover_prompt_set: { category: 'write', risk: 'medium', postconditions: ['novel_scope_verified', 'rollback_snapshot_created'] },

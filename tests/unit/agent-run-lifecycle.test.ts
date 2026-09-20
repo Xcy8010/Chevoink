@@ -671,6 +671,17 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
       expect.objectContaining({ callId: 'partial', ok: false }), expect.objectContaining({ callId: 'valid', ok: true }),
     ]))
   })
+  it('guides a truncated plan into bounded section saves without executing the partial payload', async () => {
+    const save = vi.fn(async () => ({ output: '已保存计划' }))
+    mocks.tools = [tool('plan_save', save, false)]
+    queue(response('', [{ ...call('partial-plan', 'plan_save', '{"content":"未完整'), incomplete: true }]), response('', [call('whole-section', 'plan_save')]), response('已保存。'))
+    await run('制定计划')
+    expect(save).toHaveBeenCalledTimes(1)
+    const next = JSON.stringify(mocks.chat.mock.calls[1][0].messages)
+    expect(next).toContain('mode=append')
+    expect(next).toContain('expectedContentHash')
+    expect(events().filter(event => event.type === 'tool.result')).toEqual(expect.arrayContaining([expect.objectContaining({ callId: 'partial-plan', ok: false })]))
+  })
   it('rejects duplicate calls before any running event/card, retaining one complete call/result pair', async () => {
     queue(response('', [call('a')]), response('', [call('b')]), response())
     await run()

@@ -7,7 +7,7 @@ import { commitOperationEffect, recordToolFailure } from '../runtime-operations.
 import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { DataAccessError } from '../../prisma.js'
 
-type PlanArgs = { title?: string; content?: string; planId?: string }
+type PlanArgs = { title?: string; content?: string; planId?: string; mode?: 'replace' | 'append'; expectedContentHash?: string }
 export const planTargetHash = (plan: { id: string; title: string; content: string; metadata: Prisma.JsonValue }) => runtimeJson({ id: plan.id, title: plan.title, content: plan.content, metadata: plan.metadata }).hash
 
 /** Real plan_save implementation executes through the same tx as receipt/outbox. */

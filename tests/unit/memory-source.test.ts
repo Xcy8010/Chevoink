@@ -44,3 +44,12 @@ it('oversized memory text fails validation instead of silently truncating facts'
   const raw = { memoryType: 'worldbuilding', title: '设定', content: '字'.repeat(4001), importance: 80 }
   expect(memorySaveTool.parameters.safeParse(memorySaveTool.coerceArgs!(raw)).success).toBe(false)
 })
+it.each(['setting', 'world_setting', 'world_building'])('normalizes equivalent worldbuilding type %s without changing facts', memoryType => {
+  const raw = { memoryType, title: '设定', content: '待作者确认的设定', importance: 80 }
+  expect(memorySaveTool.parameters.parse(memorySaveTool.coerceArgs!(raw))).toEqual({ ...raw, memoryType: 'worldbuilding' })
+})
+it('rejects unknown memory types and orphan quotes rather than fabricating evidence', async () => {
+  expect(memorySaveTool.parameters.safeParse(memorySaveTool.coerceArgs!({ memoryType: 'invented', title: '设定', content: '内容' })).success).toBe(false)
+  await expect(resolveMemorySource(ctx, { sourceQuote: '模型生成的引文' })).rejects.toMatchObject({ code: 'MEMORY_SOURCE_REQUIRED' })
+  expect(saveStoryMemory).not.toHaveBeenCalled()
+})

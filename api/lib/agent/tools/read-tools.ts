@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
 
 import { prisma } from '../../prisma.js'
 import { activeChapterScope, activeVolumeWhere } from '../../data/internal.js'
@@ -320,6 +321,8 @@ export const planReadTool = defineTool({
     '只读查看「计划」文件夹里某份既有计划的完整正文。回顾整体规划、确认某章定位、修订计划前，都必须先用本工具读取；绝对禁止用 plan_save 重写一遍来代替读取。不传 planId 时返回最近更新的一份计划。',
   parameters: z.object({
     planId: z.string().optional().describe('计划 id（上下文的计划清单提供）；缺省返回最近更新的一份'),
+    offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional().describe('长计划分段读取的字符起点，默认0；追加前可读取尾部核对已保存小节'),
+    limit: z.number().int().min(1).max(8000).optional().describe('本次最多读取字符数，默认8000'),
   }),
   permission: READ_PERMISSION,
   readOnly: true,
@@ -345,15 +348,18 @@ export const planReadTool = defineTool({
 
     if (!plan) {
       return {
-        outcome: 'failed',
+        ...(args.planId ? { outcome: 'failed' as const } : {}),
+        summary: args.planId ? '指定计划不存在' : '计划文件夹为空',
         output: args.planId
           ? `未找到 planId=${args.planId} 对应的计划，请核对上下文里的计划清单。`
           : '计划文件夹目前是空的，还没有任何计划。',
       }
     }
 
+    const offset = Math.min(args.offset ?? 0, plan.content.length)
+    const end = Math.min(offset + (args.limit ?? 8000), plan.content.length)
     return {
-      output: `《${plan.title}》（planId=${plan.id}，${plan.content.length} 字）：\n${ctx.transaction ? plan.content : clip(plan.content, 8000)}`,
+      output: `《${plan.title}》（planId=${plan.id}，contentHash=${createHash('sha256').update(plan.content).digest('hex')}，${plan.content.length} 字，本次${offset}–${end}）：\n${plan.content.slice(offset, end)}${end < plan.content.length ? `\n[尚有后文；使用plan_read、同一planId和offset=${end}继续读取，不能把本段当全文]` : ''}`,
       summary: `读取计划《${plan.title}》`,
       observedState: { kind: 'plan', id: plan.id, hash: planTargetHash(plan) },
     }

@@ -315,6 +315,8 @@ export async function handleToolCall(
       ? '使用原生 scene_task_build：顶层 tasks 数组包含本章完整的 1–4 个场景；每项 purpose/goal/obstacle/choice/cost/turn 各一句短句，entryState/exitState 只填变化字段，可省略 compilationId/styleBudget/alternatives。不要写正文或重复整章设定。'
       : call.incomplete && ['chapter_write', 'chapter_append'].includes(call.name)
         ? '本次正文没有写入。先核对目标章节已保存内容；可将完整写作目标拆为完整段落逐次写入/追加，每次参数必须完整闭合，累计内容仍须满足原目标。不得重复覆盖已保存正文、补括号执行残文或缩短目标冒充完成。'
+      : call.incomplete && call.name === 'plan_save'
+        ? '本次计划未写入。长计划按完整小节分次保存，每次建议不超过2000字符，独立调用plan_save，不与其他长参数工具挤在同一轮。先plan_read核对；首次保存首节，后续使用mode=append、planId及回执contentHash作为expectedContentHash。保留完整规划目标，逐节完成；不能补括号执行残文，也不能将首节当整份计划完成。'
       : '使用该工具公布的 JSON Schema；字符串换行写成 \\n，键名与字符串使用双引号，不要输出 Markdown 或另一层工具调用信封。'
     const observation = `工具 ${call.name} 未执行。${call.incomplete ? '供应商明确返回 length，参数生成未完成，不能补齐括号后冒充完整操作。' : 'JSON 语法无法安全解析；不能仅凭格式错误推断网络截断。'}接收参数共 ${call.arguments.length} 字符。${correction}请修正后重试，不重复发送相同损坏参数。`
     console.warn('[agent-tool-arguments]', { runId, tool: call.name, chars: call.arguments.length, incomplete: Boolean(call.incomplete) })
