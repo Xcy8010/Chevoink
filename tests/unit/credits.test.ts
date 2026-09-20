@@ -6,7 +6,23 @@ import {
   getCreditActivityModelLabel,
   getCreditWindow,
   parseModelCapabilities,
+  resolveCustomReasoningEffort,
 } from '../../api/lib/credits.js'
+
+describe('custom model verified capabilities', () => {
+  it('adapts unavailable effort labels without rejecting a valid configured model', () => {
+    expect(resolveCustomReasoningEffort('max', ['low', 'medium', 'high'])).toBe('high')
+    expect(resolveCustomReasoningEffort('medium', ['low', 'high', 'max'])).toBe('low')
+    expect(resolveCustomReasoningEffort('high', ['low', 'medium', 'high'])).toBe('high')
+    expect(resolveCustomReasoningEffort('max', ['none'])).toBe('none')
+  })
+  it('carries verified protocol choices and leaves legacy/built-in inference unchanged', () => {
+    expect(parseModelCapabilities({ reasoningEfforts: ['none'], defaultReasoningEffort: 'none', reasoningParameterMode: 'omit', outputTokenParameter: 'max_completion_tokens' }))
+      .toMatchObject({ reasoningParameterMode: 'omit', outputTokenParameter: 'max_completion_tokens', reasoningEfforts: ['none'] })
+    expect(parseModelCapabilities({})).not.toHaveProperty('reasoningParameterMode')
+    expect(parseModelCapabilities({ outputTokenParameter: 'arbitrary' })).not.toHaveProperty('outputTokenParameter')
+  })
+})
 
 describe('Credits token pricing', () => {
   it('charges 1 Credit for 10,000 input tokens', () => {

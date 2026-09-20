@@ -9,8 +9,9 @@ import { requireSessionUserId } from '../lib/auth-session.js'
 import { buildSuccess, createRequestId } from '../lib/http.js'
 import { sendRouteError } from '../lib/route-error.js'
 import { DataAccessError, prisma } from '../lib/prisma.js'
-import { encryptSecret } from '../lib/secret-box.js'
+import { decryptSecret, encryptSecret } from '../lib/secret-box.js'
 import { parseBody } from '../lib/parse-body.js'
+import { validateCustomModelCapabilities } from '../lib/custom-model-validation.js'
 
 const router = Router()
 
@@ -29,12 +30,20 @@ const customModelCreateSchema = z.object({
   contextWindowTokens: z.number().int().min(16_000).max(4_000_000).optional(),
 })
 const customModelUpdateSchema = customModelCreateSchema.partial()
-const DEEPSEEK_REASONING_EFFORTS = new Set(['low', 'high', 'max'])
-
-function assertProviderReasoningEfforts(provider: string, reasoningEfforts: string[]): void {
-  if (provider.trim().toLowerCase() !== 'deepseek') return
-  if (reasoningEfforts.some((effort) => !DEEPSEEK_REASONING_EFFORTS.has(effort))) {
-    throw new DataAccessError(400, 'REASONING_EFFORT_UNSUPPORTED', 'DeepSeek 仅支持 low、high 和 max 推理强度。')
+const validatingUsers = new Set<string>()
+async function validateModel(userId: string, res: Response, input: Parameters<typeof validateCustomModelCapabilities>[0]) {
+  if (validatingUsers.has(userId)) throw new DataAccessError(409, 'CUSTOM_MODEL_VALIDATING', '正在校验模型，请稍候。')
+  validatingUsers.add(userId)
+  const controller = new AbortController()
+  const cancel = () => controller.abort()
+  res.once('close', cancel)
+  try {
+    const capabilities = await validateCustomModelCapabilities({ ...input, signal: controller.signal })
+    if (controller.signal.aborted) throw new DataAccessError(409, 'CUSTOM_MODEL_VALIDATION_CANCELLED', '模型校验已取消。')
+    return capabilities
+  } finally {
+    res.off('close', cancel)
+    validatingUsers.delete(userId)
   }
 }
 
@@ -119,14 +128,9 @@ router.post('/models', async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = requireSessionUserId(req)
     const body = parseBody(customModelCreateSchema, req.body, '请完整填写自定义模型配置。')
-    const reasoningEfforts = body.reasoningEfforts ?? (body.provider.trim().toLowerCase() === 'deepseek' ? ['low', 'high', 'max'] : ['high'])
-    const defaultReasoningEffort = body.defaultReasoningEffort ?? 'high'
-    assertProviderReasoningEfforts(body.provider, reasoningEfforts)
-    if (!reasoningEfforts.includes(defaultReasoningEffort)) {
-      throw new DataAccessError(400, 'VALIDATION_ERROR', '默认推理强度必须包含在模型支持档位中。')
-    }
     const count = await prisma.aiModelConfig.count({ where: { ownerUserId: userId } })
     if (count >= 10) throw new DataAccessError(409, 'CUSTOM_MODEL_LIMIT', '每个账户最多保存 10 个自定义模型。')
+    const capabilities = await validateModel(userId, res, body)
     const model = await prisma.aiModelConfig.create({
       data: {
         ownerUserId: userId,
@@ -141,9 +145,7 @@ router.post('/models', async (req: Request, res: Response): Promise<void> => {
         enabled: body.enabled ?? true,
         selectable: true,
         metadata: {
-          reasoningEfforts,
-          defaultReasoningEffort,
-          visionEnabled: body.visionEnabled ?? false,
+          ...capabilities,
           ...(body.contextWindowTokens ? { contextWindowTokens: body.contextWindowTokens } : {}),
         },
       },
@@ -162,14 +164,14 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
     const target = await prisma.aiModelConfig.findFirst({ where: { id: req.params.modelId, ownerUserId: userId } })
     if (!target) throw new DataAccessError(404, 'CUSTOM_MODEL_NOT_FOUND', '自定义模型不存在。')
     const currentCapabilities = parseModelCapabilities(target.metadata, target.provider)
-    const nextReasoningEfforts = body.reasoningEfforts ?? currentCapabilities.reasoningEfforts
-    const nextDefaultReasoningEffort = body.defaultReasoningEffort ?? currentCapabilities.defaultReasoningEffort
-    assertProviderReasoningEfforts(body.provider ?? target.provider, nextReasoningEfforts)
-    if (!nextReasoningEfforts.includes(nextDefaultReasoningEffort)) {
-      throw new DataAccessError(400, 'VALIDATION_ERROR', '默认推理强度必须包含在模型支持档位中。')
-    }
-    await prisma.aiModelConfig.update({
-      where: { id: target.id },
+    const apiKey = body.apiKey ?? (target.apiKeyCiphertext ? decryptSecret(target.apiKeyCiphertext) : null)
+    if (!apiKey || !(body.baseUrl ?? target.baseUrl)) throw new DataAccessError(400, 'CUSTOM_MODEL_REQUIRED', '请填写模型地址和 API Key。')
+    const capabilities = await validateModel(userId, res, {
+      provider: body.provider ?? target.provider, modelName: body.modelName ?? target.modelName,
+      baseUrl: (body.baseUrl ?? target.baseUrl)!, apiKey,
+    })
+    const updated = await prisma.aiModelConfig.updateMany({
+      where: { id: target.id, ownerUserId: userId, updatedAt: target.updatedAt },
       data: {
         provider: body.provider,
         displayName: body.displayName,
@@ -179,13 +181,12 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
         enabled: body.enabled,
         metadata: {
           ...(target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata) ? target.metadata : {}),
-          reasoningEfforts: nextReasoningEfforts,
-          defaultReasoningEffort: nextDefaultReasoningEffort,
-          visionEnabled: body.visionEnabled ?? currentCapabilities.visionEnabled,
+          ...capabilities,
           contextWindowTokens: body.contextWindowTokens ?? currentCapabilities.contextWindowTokens,
         },
       },
     })
+    if (updated.count !== 1) throw new DataAccessError(409, 'CUSTOM_MODEL_CHANGED', '校验期间模型已变更，请重新打开配置后保存。')
     res.status(200).json(buildSuccess(requestId, { ok: true }))
   } catch (error) {
     sendRouteError(res, requestId, error)

@@ -1230,6 +1230,9 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
         providerApiKey: modelRuntime.apiKey,
         provider: modelRuntime.provider,
         reasoningEffort: modelRuntime.reasoningEffort,
+        reasoningParameterMode: modelRuntime.reasoningParameterMode,
+        thinkingEnabled: modelRuntime.thinkingEnabled,
+        outputTokenParameter: modelRuntime.outputTokenParameter,
         temperature: taskSpec.creativeFreedom === 'stable' ? 0.45 : taskSpec.creativeFreedom === 'bold' ? 0.85 : 0.65,
         onChunk: (chunk) => {
           if (chunk.type === 'text-delta') {
@@ -1407,6 +1410,9 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
         providerApiKey: modelRuntime.apiKey,
         provider: modelRuntime.provider,
         reasoningEffort: modelRuntime.reasoningEffort,
+        reasoningParameterMode: modelRuntime.reasoningParameterMode,
+        thinkingEnabled: modelRuntime.thinkingEnabled,
+        outputTokenParameter: modelRuntime.outputTokenParameter,
         temperature: taskSpec.creativeFreedom === 'stable' ? 0.45 : taskSpec.creativeFreedom === 'bold' ? 0.85 : 0.65,
         onChunk: (chunk) => {
           if (chunk.type === 'text-delta') {

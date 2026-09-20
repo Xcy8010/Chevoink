@@ -180,6 +180,9 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         providerApiKey: params.modelRuntime.apiKey,
         provider: params.modelRuntime.provider,
         reasoningEffort: params.modelRuntime.reasoningEffort,
+        reasoningParameterMode: params.modelRuntime.reasoningParameterMode,
+        thinkingEnabled: params.modelRuntime.thinkingEnabled,
+        outputTokenParameter: params.modelRuntime.outputTokenParameter,
         temperature: 0.6,
         signal: params.toolContextBase.signal,
         usageLog: {
@@ -255,6 +258,9 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
           providerApiKey: params.modelRuntime.apiKey,
           provider: params.modelRuntime.provider,
           reasoningEffort: params.modelRuntime.reasoningEffort,
+          reasoningParameterMode: params.modelRuntime.reasoningParameterMode,
+          thinkingEnabled: params.modelRuntime.thinkingEnabled,
+          outputTokenParameter: params.modelRuntime.outputTokenParameter,
           temperature: 0.6,
           signal: params.toolContextBase.signal,
           usageLog: {

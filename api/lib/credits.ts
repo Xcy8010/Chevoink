@@ -65,6 +65,9 @@ export function getCreditActivityModelLabel(providerType: 'text' | 'image', mode
 }
 
 export type ModelCapabilities = {
+  thinkingEnabled?: boolean
+  outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
+  reasoningParameterMode?: 'native' | 'omit'
   reasoningEfforts: ModelReasoningEffort[]
   defaultReasoningEffort: ModelReasoningEffort
   visionEnabled: boolean
@@ -85,6 +88,11 @@ export function parseModelCapabilities(metadata: Prisma.JsonValue | null | undef
     ? record.defaultReasoningEffort as ModelReasoningEffort
     : 'high'
   return {
+    ...(typeof record.thinkingEnabled === 'boolean' ? { thinkingEnabled: record.thinkingEnabled } : {}),
+    ...(record.outputTokenParameter === 'max_tokens' || record.outputTokenParameter === 'max_completion_tokens'
+      ? { outputTokenParameter: record.outputTokenParameter } : {}),
+    ...(record.reasoningParameterMode === 'native' || record.reasoningParameterMode === 'omit'
+      ? { reasoningParameterMode: record.reasoningParameterMode } : {}),
     reasoningEfforts,
     defaultReasoningEffort: reasoningEfforts.includes(configuredDefault) ? configuredDefault : reasoningEfforts[0] ?? 'high',
     visionEnabled: record.visionEnabled === true,
@@ -95,6 +103,14 @@ export function parseModelCapabilities(metadata: Prisma.JsonValue | null | undef
       ? record.contextWindowTokens
       : null,
   }
+}
+
+/** Preserve exact native choices; map unavailable UI strengths to the nearest supported level. */
+export function resolveCustomReasoningEffort(requested: ModelReasoningEffort, supported: ModelReasoningEffort[]): ModelReasoningEffort {
+  if (supported.includes(requested)) return requested
+  const order: ModelReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+  const candidates = [...supported].sort((a, b) => order.indexOf(a) - order.indexOf(b))
+  return candidates.reduce((best, item) => Math.abs(order.indexOf(item) - order.indexOf(requested)) < Math.abs(order.indexOf(best) - order.indexOf(requested)) ? item : best, candidates[0] ?? 'high')
 }
 
 function isConfiguredBuiltIn(item: { tier: string | null; modelName: string; baseUrl: string | null; apiKeyCiphertext: string | null }): boolean {
@@ -604,6 +620,9 @@ export async function getAuxiliaryModelRuntime(userId: string) {
 }
 
 export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userId?: string, customModelId?: string | null, requestedReasoningEffort?: ModelReasoningEffort): Promise<{
+  thinkingEnabled?: boolean
+  outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
+  reasoningParameterMode?: 'native' | 'omit'
   tier: CreditModelTier
   tokenPrice?: TokenPrice
   multiplierBps: number
@@ -624,8 +643,7 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
     })
     if (!custom || !custom.baseUrl || !custom.apiKeyCiphertext) throw new DataAccessError(404, 'CUSTOM_MODEL_NOT_FOUND', '自定义模型不存在、未启用或配置不完整。')
     const capabilities = parseModelCapabilities(custom.metadata, custom.provider)
-    const reasoningEffort = requestedReasoningEffort ?? capabilities.defaultReasoningEffort
-    if (!capabilities.reasoningEfforts.includes(reasoningEffort)) throw new DataAccessError(400, 'REASONING_EFFORT_UNSUPPORTED', '该模型不支持所选推理强度。')
+    const reasoningEffort = resolveCustomReasoningEffort(requestedReasoningEffort ?? capabilities.defaultReasoningEffort, capabilities.reasoningEfforts)
     return { tier, multiplierBps: 0, provider: custom.provider, modelName: custom.modelName, baseUrl: custom.baseUrl, apiKey: decryptSecret(custom.apiKeyCiphertext), reasoningEffort, ...capabilities }
   }
   const config = await prisma.aiModelConfig.findFirst({

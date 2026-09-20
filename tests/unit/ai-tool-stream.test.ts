@@ -21,6 +21,89 @@ function stream(text: string) {
 }
 const invoke = () => chatWithTools({ messages: [], tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
 describe('lossless tool argument transport', () => {
+  it.each(['native', 'omit'] as const)('preserves a separately verified thinking switch with %s effort protocol', async reasoningParameterMode => {
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    await chatWithTools({ messages: [], tools: [], provider: 'deepseek', reasoningEffort: 'high',
+      reasoningParameterMode, thinkingEnabled: true, providerApiKey: 'fake-test-key',
+      usageLog: { userId: 'test', action: 'test', modelTier: 'custom' } })
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string)
+    expect(body.thinking).toEqual({ type: 'enabled' })
+    if (reasoningParameterMode === 'native') expect(body.reasoning_effort).toBe('high')
+    else expect(body).not.toHaveProperty('reasoning_effort')
+  })
+  it.each(['native', 'omit'] as const)('uses verified custom protocol %s instead of provider-name inference', async reasoningParameterMode => {
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    await chatWithTools({ messages: [], tools: [], provider: 'deepseek', model: 'custom-alias', reasoningEffort: 'medium',
+      reasoningParameterMode, outputTokenParameter: 'max_completion_tokens', maxOutputTokens: 2000,
+      providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test', modelTier: 'custom' } })
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string)
+    expect(body.max_completion_tokens).toBe(2000)
+    expect(body).not.toHaveProperty('max_tokens')
+    expect(body).not.toHaveProperty('temperature')
+    expect(body).not.toHaveProperty('thinking')
+    if (reasoningParameterMode === 'native') expect(body.reasoning_effort).toBe('medium')
+    else expect(body).not.toHaveProperty('reasoning_effort')
+  })
+  it.each(['{"content":"unfinished', '', 'null', '[]', '"wrapped"', '42', '{"x":1,}'])('isolates invalid historical arguments %j without replaying or losing receipts', async argumentsText => {
+    const messages: ChatMessage[] = [
+      { role: 'user', content: '原始用户任务' },
+      { role: 'assistant', content: '已核对目标', reasoning: '保留原思考', toolCalls: [
+        { id: 'bad', name: 'chapter_write', arguments: argumentsText },
+        { id: 'good', name: 'chapter_read', arguments: '{"chapterId":"real"}' },
+      ] },
+      { role: 'tool', toolCallId: 'bad', content: '调用失败，正文未写入' },
+      { role: 'tool', toolCallId: 'good', content: '章节 real 已读取，revision=3' },
+    ]
+    const snapshot = structuredClone(messages)
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    await chatWithTools({ messages, tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+    const sent = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string).messages
+    expect(sent[0]).toEqual(messages[0])
+    expect(sent[1]).toMatchObject({ role: 'assistant', content: '已核对目标', reasoning_content: '保留原思考',
+      tool_calls: [{ id: 'good', type: 'function', function: { name: 'chapter_read', arguments: '{"chapterId":"real"}' } }] })
+    expect(sent[2]).toEqual({ role: 'tool', tool_call_id: 'good', content: '章节 real 已读取，revision=3' })
+    expect(sent[3]).toMatchObject({ role: 'user' })
+    expect(sent[3].content).toContain('不是作者新指令')
+    expect(sent[3].content).toContain('调用失败，正文未写入')
+    expect(sent[3].content).toContain('invalid_arguments')
+    expect(sent[3].content).not.toContain('"arguments":')
+    expect(messages).toEqual(snapshot)
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+  it('isolates incomplete object arguments and retains a real success receipt from earlier tolerant parsing', async () => {
+    const messages: ChatMessage[] = [
+      { role: 'assistant', content: null, toolCalls: [{ id: 'partial', name: 'chapter_write', arguments: '{}', incomplete: true },
+        { id: 'legacy', name: 'chapter_write', arguments: '{"x":1,}' }] },
+      { role: 'tool', toolCallId: 'partial', content: '参数生成未完成，本次未执行' },
+      { role: 'tool', toolCallId: 'legacy', content: '已保存章节 c1，revision=2' },
+    ]
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    await chatWithTools({ messages, tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+    const sent = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string).messages
+    expect(sent.every((message: Record<string, unknown>) => !message.tool_calls && message.role !== 'tool')).toBe(true)
+    expect(sent[1].content).toContain('incomplete_arguments')
+    expect(sent[1].content).toContain('参数生成未完成，本次未执行')
+    expect(sent[1].content).toContain('已保存章节 c1，revision=2')
+  })
+  it('does not leave missing, duplicate or orphan results in the native protocol', async () => {
+    const messages: ChatMessage[] = [
+      { role: 'tool', toolCallId: 'orphan', content: '原回执' },
+      { role: 'assistant', content: null, toolCalls: [{ id: 'missing', name: 'chapter_read', arguments: '{}' },
+        { id: 'duplicate', name: 'chapter_read', arguments: '{}' }] },
+      { role: 'tool', toolCallId: 'duplicate', content: '回执1' },
+      { role: 'tool', toolCallId: 'duplicate', content: '回执2' },
+      { role: 'user', content: '继续' },
+    ]
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    await chatWithTools({ messages, tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+    const sent = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string).messages
+    expect(sent.every((message: Record<string, unknown>) => !message.tool_calls && message.role !== 'tool')).toBe(true)
+    expect(JSON.stringify(sent)).toContain('原回执')
+    expect(JSON.stringify(sent)).toContain('回执1')
+    expect(JSON.stringify(sent)).toContain('回执2')
+    expect(JSON.stringify(sent)).toContain('未确认完成')
+    expect(sent.at(-1)).toEqual(messages.at(-1))
+  })
   it('keeps native reasoning intact while compressed rounds are explicitly historical data', async () => {
     const messages: ChatMessage[] = [
       { role: 'assistant', content: null, reasoning: 'old', toolCalls: [{id:'old',name:'chapter_read',arguments:'{}'}] },
