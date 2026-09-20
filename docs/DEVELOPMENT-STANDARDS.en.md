@@ -35,6 +35,8 @@ Version 2.0 · 2026-09-08. Applies to fixes, optimization, refactoring and new f
 
 ## 3. Frontend state, queues and layout
 
+- Do not add explanatory UI copy for new features or improvements unless the user requests it. Avoid dedicated frontend text describing implementation details or changes.
+
 - Scope explicitly: shared left sidebar; task-local drafts/right panels/viewer widths; novel/object-owned pending chapter/plan reviews. A novelId alone cannot distinguish tasks within one novel.
 - Restore incoming state before persisting it. A ref set to “hydrated” before state commits must not write outgoing values into the incoming key. Test StrictMode, A→B→A, refresh, unmount and rapid switches.
 - Async results must validate originating task/novel/revision or epoch before changing the current view, draft or selection.

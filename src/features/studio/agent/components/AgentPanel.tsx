@@ -1144,11 +1144,11 @@ export function AgentPanel({
       {/* 消息流 */}
       <div data-agent-body className="agent-conversation-body">
       <div ref={scrollRef} onScroll={handleMessagesScroll} className="agent-conversation-scroll min-h-0 overflow-y-auto">
-      <div className="agent-conversation-width">
+      <div className={cn('agent-conversation-width', conversationLoading && 'flex items-center justify-center')}>
         {conversationLoading ? (
           /* 任何「归属不明」的中间态都走 Codex 式 Agent 图标流光（居中）：图标形状作 mask、渐变光带扫过。
              必须排在内容分支之前：否则请求一返回就被 conversationReady 短路掉，1.5s 保底窗口形同虚设 */
-          <div className="flex min-h-full items-center justify-center py-10" role="status" aria-label="正在载入对话">
+          <div className="flex items-center justify-center" role="status" aria-label="正在载入对话">
             <span
               className="block h-12 w-12 bg-[length:220%_100%] bg-[linear-gradient(100deg,var(--text-tertiary)_38%,var(--text-primary)_50%,var(--text-tertiary)_62%)] motion-safe:animate-[agent-icon-shimmer_1.5s_linear_infinite] [mask-image:url(/chevoink-agent.png)] [mask-position:center] [mask-repeat:no-repeat] [mask-size:contain]"
             />

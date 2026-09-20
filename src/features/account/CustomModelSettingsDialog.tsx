@@ -98,7 +98,6 @@ export function CustomModelSettingsContent({ active = true }: { active?: boolean
     <div className="mt-4 space-y-1 rounded-[12px] bg-[var(--surface-muted)] px-3.5 py-3 text-xs leading-5 text-[var(--text-secondary)]">
       <p><span className="text-[var(--text-tertiary)]">服务地址：</span>{form.provider === 'custom' ? (form.baseUrl.trim() || '待填写 OpenAI 兼容地址') : selectedProvider.baseUrl}</p>
       <p><span className="text-[var(--text-tertiary)]">计费规则：</span>{selectedProvider.billing}</p>
-      <p>保存时自动检测模型能力。会发起少量测试请求，费用按供应商规则计算；未确认图片能力时使用平台视觉工具。</p>
     </div>
     <div className="mt-4 flex items-center justify-between gap-4"><div className="flex items-center gap-3"><Toggle disabled={isSaving} checked={form.enabled} onChange={(enabled) => setForm((value) => ({ ...value, enabled }))} label="启用此模型" /><span className="text-sm">启用此模型</span></div>{selectedProvider.apiUrl ? <a href={selectedProvider.apiUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">获取 API Key <ArrowUpRight className="h-3.5 w-3.5" /></a> : null}</div>
     {error ? <p className="mt-4 text-xs text-rose-600">{error}</p> : null}<div className="mt-6 flex justify-end gap-2"><Button variant="ghost" disabled={isSaving} onClick={leaveEdit}>取消</Button><Button variant="secondary" disabled={isSaving} onClick={submitSave}>{isSaving ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}{isSaving ? '正在校验…' : '校验并保存'}</Button></div>

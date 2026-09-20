@@ -48,7 +48,7 @@ it('hides manually configured capabilities and sends only model identity setting
   expect(screen.queryByText('支持的推理强度')).toBeNull()
   expect(screen.queryByText('默认强度')).toBeNull()
   expect(screen.queryByText('模型支持图片输入')).toBeNull()
-  expect(screen.getByText(/保存时自动检测模型能力/)).toBeTruthy()
+  expect(screen.queryByText(/保存时自动检测模型能力/)).toBeNull()
 
   fillRequiredFields()
   fireEvent.click(screen.getByRole('button', { name: '校验并保存' }))
