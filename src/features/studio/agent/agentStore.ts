@@ -740,6 +740,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       let authorEndedTodos: AgentTodoItem[] | undefined
       let phase = state.phase
       let runId = state.runId
+      let pendingApproval = state.pendingApproval
+      let pendingQuestion = state.pendingQuestion
+      let liveToolDrafts = state.liveToolDrafts
+      let messages = state.messages
+      let workspaceActivities = state.workspaceActivities
       let changed = false
       for (const [sessionId, entry] of Object.entries(statuses)) {
         if (!entry) continue
@@ -787,6 +792,28 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         }
         // 终态：仅此前已登记运行中的会话才产出一次性信号（历史终态不回传，避免误报未读）；
         // paused 为作者主动停止，只撤登记不提示
+        const isCurrentTerminal = isActiveSession && state.runId === entry.runId && isRunActive(state.phase)
+        if (isCurrentTerminal) {
+          // SSE 连接恰好在终态帧前断开时，服务端的已持久化 run-status 是唯一可信兜底。
+          // 这里收敛本地运行态，不把最终回答或工具结果伪造成新的 SSE 事件。
+          phase = entry.status === 'completed'
+            ? 'succeeded'
+            : entry.status === 'paused'
+              ? 'paused'
+              : entry.status === 'cancelled'
+                ? 'cancelled'
+                : 'failed'
+          pendingApproval = null
+          pendingQuestion = null
+          liveToolDrafts = {}
+          messages = settleRunningToolParts(messages, '本轮已结束，未收到工具完成结果').map((message) =>
+            entry.status === 'completed' && message.role === 'assistant' && message.runId === entry.runId && entry.finishedAt
+              ? { ...message, completedAt: entry.finishedAt }
+              : message,
+          )
+          workspaceActivities = settleRunningActivities(workspaceActivities)
+          changed = true
+        }
         if (!running.has(sessionId)) continue
         running.delete(sessionId)
         changed = true
@@ -804,6 +831,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         phase,
         runId,
         authorEnded,
+        pendingApproval,
+        pendingQuestion,
+        liveToolDrafts,
+        messages,
+        workspaceActivities,
         ...(authorEndedTodos ? { todos: authorEndedTodos, todosVersion: state.todosVersion + 1 } : {}),
         ...(authorEnded ? { resumeableRunId: null } : {}),
       } : {}

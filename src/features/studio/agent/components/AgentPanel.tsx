@@ -51,6 +51,7 @@ import {
   deleteAgentSessionMessage,
   fetchAgentSessionMessages,
   fetchAgentSessions,
+  fetchSessionsRunStatus,
   forkAgentSession,
   renameAgentSession,
   rollbackAgentSessionMessage,
@@ -210,13 +211,37 @@ export function AgentPanel({
   // 本轮服务端技能路由结果：让作者看得见 Agent 到底用了哪些技能
   const skillRoute = useAgentStore((state) => state.skillRoute)
 
-  const { connect, disconnect } = useAgentStream(onStreamEvent)
-  const queueQuery = useQuery({ queryKey: ['agent-queue', sessionId], queryFn: () => fetchAgentQueue(sessionId!), enabled: Boolean(sessionId), refetchInterval: 2000 })
-  const queueRetry = useRef<{ signature: string; id: string } | null>(null)
   const viewSession = useRef(sessionId)
   viewSession.current = sessionId
   const viewScope = useRef(voiceScopeKey)
   viewScope.current = voiceScopeKey
+  const terminalProbe = useRef<{ runId: string | null; at: number }>({ runId: null, at: 0 })
+  const reconcileActiveStreamError = useCallback((candidateRunId: string) => {
+    if (!sessionId) return
+    const live = useAgentStore.getState()
+    if (live.activeSessionId !== sessionId || live.runId !== candidateRunId || !isRunActive(live.phase)) return
+    const now = Date.now()
+    if (terminalProbe.current.runId === candidateRunId && now - terminalProbe.current.at < 1_500) return
+    terminalProbe.current = { runId: candidateRunId, at: now }
+    void fetchSessionsRunStatus([sessionId]).then(({ statuses }) => {
+      if (viewSession.current !== sessionId) return
+      const current = useAgentStore.getState()
+      const remote = statuses[sessionId]
+      if (
+        !remote ||
+        current.activeSessionId !== sessionId ||
+        current.runId !== candidateRunId ||
+        remote.runId !== candidateRunId ||
+        !isRunActive(current.phase)
+      ) return
+      current.syncRemoteRunStatuses({ [sessionId]: remote })
+    }).catch(() => {
+      // EventSource 会继续按 Last-Event-ID 重连；状态查询失败不能把任务误判为中止。
+    })
+  }, [sessionId])
+  const { connect, disconnect } = useAgentStream(onStreamEvent, reconcileActiveStreamError)
+  const queueQuery = useQuery({ queryKey: ['agent-queue', sessionId], queryFn: () => fetchAgentQueue(sessionId!), enabled: Boolean(sessionId), refetchInterval: 2000 })
+  const queueRetry = useRef<{ signature: string; id: string } | null>(null)
 
   // Server dispatch works even with no browser open. Discover each new run and
   // hydrate its history before connecting, including runs finished between polls.

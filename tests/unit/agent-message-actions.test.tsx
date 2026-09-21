@@ -129,3 +129,30 @@ it('does not let a late running poll erase author-ended state for the same run',
   expect(state.phase).toBe('cancelled')
   expect(state.runningSessionIds.has('s')).toBe(false)
 })
+
+it('settles the current run from a persisted terminal status when the terminal SSE frame is lost', () => {
+  const finishedAt = '2026-09-21T10:58:19.745Z'
+  useAgentStore.setState({
+    runId: 'run-1',
+    activeSessionId: 's',
+    phase: 'running',
+    pendingApproval: { callId: 'call-1', toolName: 'chapter_write', title: '写入正文', args: {}, allowAlways: false, expiresAt: finishedAt },
+    pendingQuestion: { callId: 'question-1', question: '是否继续？', options: [] },
+    liveToolDrafts: {},
+    runningSessionIds: new Set(['s']),
+    sessionSignals: {},
+    messages: [{ id: 'assistant-1', runId: 'run-1', role: 'assistant', parts: [], createdAt: '2026-09-21T10:57:00.000Z' }],
+    workspaceActivities: [],
+  })
+
+  useAgentStore.getState().syncRemoteRunStatuses({
+    s: { runId: 'run-1', status: 'completed', finishedAt },
+  })
+
+  const state = useAgentStore.getState()
+  expect(state.phase).toBe('succeeded')
+  expect(state.pendingApproval).toBeNull()
+  expect(state.pendingQuestion).toBeNull()
+  expect(state.runningSessionIds.has('s')).toBe(false)
+  expect(state.messages[0].completedAt).toBe(finishedAt)
+})

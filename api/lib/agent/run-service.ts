@@ -463,10 +463,8 @@ export async function streamLoopRun(
     'X-Accel-Buffering': 'no',
   })
 
-  const writeEvent = (event: AgentStreamEvent) => {
-    res.write(`id: ${event.seq}\n`)
-    res.write(`event: ${event.type}\n`)
-    res.write(`data: ${JSON.stringify(event)}\n\n`)
+  const writeEvent = (event: AgentStreamEvent, onFlushed?: () => void) => {
+    res.write(`id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`, onFlushed)
     ;(res as Response & { flush?: () => void }).flush?.()
   }
 
@@ -486,21 +484,31 @@ export async function streamLoopRun(
     let unsubscribe: () => void = () => undefined
     let subscriptionReady = false
     let terminalDuringReplay = false
+    let terminalCloseTimer: ReturnType<typeof setTimeout> | null = null
     let finished = false
     const finish = () => {
       if (finished) return
       finished = true
       unsubscribe()
       clearInterval(heartbeat)
+      if (terminalCloseTimer !== null) clearTimeout(terminalCloseTimer)
       if (!res.writableEnded) res.end()
     }
 
     unsubscribe = bus.subscribe((event) => {
-      writeEvent(event)
-      if (event.type === 'run.finished' || event.type === 'run.paused' || (event.type === 'error' && !event.recoverable)) {
+      const terminal = event.type === 'run.finished' || event.type === 'run.paused' || (event.type === 'error' && !event.recoverable)
+      if (!terminal) {
+        writeEvent(event)
+        return
+      }
+      // 终态包必须先写入响应缓冲再关闭 SSE。此前同一调用栈里 write 后立即 end，
+      // 在部分浏览器/代理组合下会让最后一个事件丢失，UI 只能等轮询收敛。
+      terminalCloseTimer ??= setTimeout(finish, 1_000)
+      writeEvent(event, () => {
         if (subscriptionReady) finish()
         else terminalDuringReplay = true
-      }
+      })
+      // 慢客户端不能让已完成 run 的订阅永久滞留；正常情况下 write 回调会先触发。
     }, sinceSeq)
     subscriptionReady = true
     if (terminalDuringReplay) finish()

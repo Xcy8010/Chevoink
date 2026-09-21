@@ -81,10 +81,15 @@ function mergePendingEvents(pending: AgentStreamEvent[]): AgentStreamEvent[] {
   return merged
 }
 
-export function useAgentStream(onEvent?: (event: AgentStreamEvent) => void) {
+export function useAgentStream(
+  onEvent?: (event: AgentStreamEvent) => void,
+  onActiveConnectionError?: (runId: string) => void,
+) {
   const sourceRef = useRef<EventSource | null>(null)
   const onEventRef = useRef(onEvent)
   onEventRef.current = onEvent
+  const onActiveConnectionErrorRef = useRef(onActiveConnectionError)
+  onActiveConnectionErrorRef.current = onActiveConnectionError
 
   // delta 批处理队列：每帧（页面后台时降级 100ms 定时器）冲刷一次
   const pendingRef = useRef<AgentStreamEvent[]>([])
@@ -186,10 +191,15 @@ export function useAgentStream(onEvent?: (event: AgentStreamEvent) => void) {
       // 仅在 run 已终结时主动关闭，避免死循环重连；等待回答/审批（awaiting_input/awaiting_approval）
       // 期间长时间无事件可能被代理掰断，必须保持重连才能收到后续事件
       source.onerror = () => {
-        const { phase } = useAgentStore.getState()
-        if (!isRunActive(phase)) {
+        if (sourceRef.current !== source) return
+        const { phase, runId: currentRunId } = useAgentStore.getState()
+        if (!isRunActive(phase) || currentRunId !== runId) {
           disconnect()
+          return
         }
+        // 服务端已经提交终态而 SSE 最后一个帧因连接关闭丢失时，立即由调用方读取
+        // 已持久化的状态；网络短暂断开仍保持 EventSource 自带的重连，不猜测任务结果。
+        onActiveConnectionErrorRef.current?.(runId)
       }
     },
     [disconnect, flushPending, scheduleFlush],
