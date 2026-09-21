@@ -57,4 +57,31 @@ describe('built-in route pools', () => {
     await withModelRoutePool(explicit, invoke)
     expect(invoke.mock.calls[1][0]).toBe(explicit)
   })
+  it('retries a BYOK 429 once after its cooldown without changing its model or account', async () => {
+    vi.useFakeTimers()
+    try {
+      const byok = { ...params, usageLog: { ...params.usageLog, modelTier: 'custom' }, providerApiKey: 'byok-secret' }
+      const invoke = vi.fn().mockRejectedValueOnce(new ModelRouteRejected(429)).mockResolvedValueOnce('ok')
+      const pending = withModelRoutePool(byok, invoke)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(await pending).toBe('ok')
+      expect(invoke).toHaveBeenCalledTimes(2)
+      expect(invoke.mock.calls[1][0]).toMatchObject({ model: byok.model, providerBaseUrl: byok.providerBaseUrl, providerApiKey: 'byok-secret' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('returns an actionable Chinese error after the single safe BYOK retry is still rate limited', async () => {
+    vi.useFakeTimers()
+    try {
+      const invoke = vi.fn().mockRejectedValue(new ModelRouteRejected(429))
+      const pending = withModelRoutePool({ ...params, usageLog: { ...params.usageLog, modelTier: 'custom' } }, invoke)
+      const assertion = expect(pending).rejects.toThrow('系统已等待后安全重试一次')
+      await vi.advanceTimersByTimeAsync(60_000)
+      await assertion
+      expect(invoke).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

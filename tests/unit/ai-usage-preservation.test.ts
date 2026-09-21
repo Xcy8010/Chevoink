@@ -94,7 +94,7 @@ describe('explicit zero provider usage is not missing usage', () => {
   })
   it('releases a provider-rejected auxiliary request rather than holding the account', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"message":"rate limited"}}', { status: 429 })))
-    await expect(generateTextCompletion('system', 'user', { userId: 'test', action: 'test' })).rejects.toThrow('rate limited')
+    await expect(generateTextCompletion('system', 'user', { userId: 'test', action: 'test' })).rejects.toThrow('每分钟请求或 Token 限制')
     expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } }))
     expect(mocks.charge).not.toHaveBeenCalled()
   })
