@@ -174,7 +174,7 @@ export default function ExportDialog({ open, novelId, novelTitle, chapters, onCl
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-3">
           <p className="px-3 pb-1 text-xs font-medium text-[var(--text-tertiary)]">导出内容</p>
           <div className="space-y-0.5">
             {SECTION_OPTIONS.map((option) => (
@@ -218,7 +218,7 @@ export default function ExportDialog({ open, novelId, novelTitle, chapters, onCl
                 </div>
               </div>
               {chapterMode === 'custom' ? (
-                <div className="max-h-56 overflow-y-auto p-1.5">
+                <div className="scrollbar-none max-h-56 overflow-y-auto overscroll-contain p-1.5">
                   <div className="flex items-center justify-between px-2 pb-1">
                     <p className="text-[11px] text-[var(--text-tertiary)]">已选 {selectedChapterIds.length} 章</p>
                     <button

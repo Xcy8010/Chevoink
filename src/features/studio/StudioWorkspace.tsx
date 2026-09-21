@@ -2,6 +2,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ComponentProps } from 'react'
 import { hasComposerDraft, promoteComposerDraft } from './agent/composer-drafts'
+import { workspaceBodyChanges } from './agent/workspace-body-changes'
 import { shouldRetainAgentTaskWindow } from './lib/agent-session'
 import { useShellStore } from '@/store/useShellStore'
 import { BookOpen, BookOpenText, Brain, Bug, ChevronLeft, FileText, Flag, FolderDown, ImagePlus, Lightbulb, LogOut, MessageSquareText, MoreHorizontal, Network, PanelRightOpen, PenLine, RefreshCcw, Settings2, SlidersHorizontal, Trash2, Upload, Wrench } from 'lucide-react'
@@ -205,6 +206,7 @@ export default function StudioWorkspace() {
   const featureFlags = studioQuery.data?.featureFlags ?? DEFAULT_AGENT2_FEATURE_FLAGS
   const workspaceActivities = useAgentStore((state) => state.workspaceActivities)
   const workspaceActivitiesVersion = useAgentStore((state) => state.activitiesVersion)
+  const hasVisibleWorkspaceChanges = useMemo(() => workspaceBodyChanges(workspaceActivities).length > 0, [workspaceActivities])
   const agentTodos = useAgentStore((state) => state.todos)
   const agentTodosVersion = useAgentStore((state) => state.todosVersion)
   const agentPhase = useAgentStore((state) => state.phase)
@@ -4128,7 +4130,7 @@ export default function StudioWorkspace() {
               <WorkPerspective
                 conversationRail={<AgentConversationRail conversations={agentConversationRailItems} onSelectConversation={(messageId) => window.dispatchEvent(new CustomEvent('chevoink:agent-conversation-navigate', { detail: { messageId } }))} />}
                 conversation={<div className="mx-auto h-full min-h-0 w-full max-w-4xl px-4 py-2">{renderWritingAgent(undefined, false, workViewer ? 'inline' : 'responsive')}</div>}
-                activityDock={(workspaceActivities.length > 0 || agentTodos.length > 0 || pendingChapterReviews.length > 0 || Boolean(pendingPlanReview)) ? <div className="flex h-full min-h-0 flex-col"><div className="rounded-[20px] bg-[var(--surface-muted)] p-3"><p className="px-2 pb-1 pt-1 text-sm font-semibold text-[var(--text-secondary)]">任务状态</p><AgentActivityBar
+                activityDock={(hasVisibleWorkspaceChanges || agentTodos.some(item => item.status !== 'cancelled') || pendingChapterReviews.length > 0 || Boolean(pendingPlanReview)) ? <div className="flex h-full min-h-0 flex-col"><div className="rounded-[20px] bg-[var(--surface-muted)] p-3"><p className="px-2 pb-1 pt-1 text-sm font-semibold text-[var(--text-secondary)]">任务状态</p><AgentActivityBar
                   activities={workspaceActivities}
                   activitiesVersion={workspaceActivitiesVersion}
                   todos={agentTodos}

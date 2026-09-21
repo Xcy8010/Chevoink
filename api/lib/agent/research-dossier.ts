@@ -1,3 +1,4 @@
+import { auxiliaryTextModel } from './auxiliary-text-model.js'
 import { createHash } from 'node:crypto'
 
 import type { Prisma, ResearchDossier } from '@prisma/client'
@@ -277,7 +278,7 @@ export async function buildResearchDossier(
     sourceText,
   ].join('\n')
   const synthesize = dependencies.synthesize ?? ((system, prompt) => generateTextCompletion(system, prompt, {
-    modelRuntime: dependencies.modelRuntime?.tier === 'custom' ? dependencies.modelRuntime : undefined,
+    modelRuntime: auxiliaryTextModel(dependencies.modelRuntime),
     userId,
     action: 'agentResearchDossier',
     novelId,

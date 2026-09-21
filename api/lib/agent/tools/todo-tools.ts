@@ -73,7 +73,10 @@ export function prepareTodoUpdate(previous: AgentTodoItem[], requested: AgentTod
   const byContent = new Map(baseline.map(item => [item.content, item]))
   const updates = new Map<string, AgentTodoItem>()
   const added: AgentTodoItem[] = []
-  for (const item of requested) {
+  for (const requestedItem of requested) {
+    // A brand-new list has no server identities to reference. Model-invented
+    // IDs are replaced with our stable IDs; foreign IDs on updates still fail.
+    const item = baseline.length ? requestedItem : { ...requestedItem, id: undefined }
     if (!item.id && baseline.filter(old => old.content === item.content).length > 1) return reject('存在同名待办，请用各自原 id 指明更新或取消哪一项。')
     const old = item.id ? byId.get(item.id) : byContent.get(item.content)
     if (item.id && !old) return reject('待办 id 不属于当前清单；首次创建请省略 id，更新已有项请使用回执中的原 id。')

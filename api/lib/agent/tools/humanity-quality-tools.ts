@@ -1,3 +1,4 @@
+import { auxiliaryTextModel } from '../auxiliary-text-model.js'
 import { z } from 'zod'
 
 import { env } from '../../../config/env.js'
@@ -141,7 +142,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
       response = await generateTextCompletion(
         `你是与 Writer/Critic 上下文隔离的局部修订编辑。只替换每条 evidence 本身，不扩写相邻内容，不改变事实、情节结果、人物知识或作者刻意的口语与断句。删除优先于同义词替换；补写只补建议中缺失的具体动作、选择或后果。punctuation_misuse 只移除误用符号，保留人物直接话语和逐字引文。replacement 可以为空。严格只输出 JSON：{"patches":[{"findingId":"原 id","replacement":"只替换证据范围的文本"}]}。必须为每个输入 id 返回且只返回一次。`,
         remaining.map((finding) => `findingId=${finding.id}\nsignal=${finding.signal}\nevidence=「${finding.evidenceExcerpt}」\n原因=${finding.explanation}\n最小修法=${finding.suggestion}`).join('\n\n'),
-        { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: attempt === 0 ? 'agent3HumanityRevision' : 'agent3HumanityRevisionRetry', novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS },
+        { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: attempt === 0 ? 'agent3HumanityRevision' : 'agent3HumanityRevisionRetry', novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS },
       )
     } catch (error) {
       ctx.signal.throwIfAborted()
@@ -232,7 +233,7 @@ ${bundle.chapter.content}
     try {
       response = await generateReviewCompletion(
         buildCriticSystem('balanced'), userPrompt,
-        { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: 'agent3HumanityCritic', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low' },
+        { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: 'agent3HumanityCritic', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low' },
         async () => {
           const current = await buildHumanityQualityContext(ctx.userId, ctx.novelId, chapterId, ctx.runId)
           if (current.chapter.revision !== bundle.chapter.revision || current.chapter.content !== bundle.chapter.content
@@ -266,7 +267,7 @@ ${bundle.chapter.content}
           corrected = await generateTextCompletion(
           qualityEvidenceCorrectionSystem,
           `待定位意见：${JSON.stringify(invalid)}\n完整正文：\n${bundle.chapter.content}`,
-          { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: 'agent3HumanityEvidenceCorrection', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS },
+          { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: 'agent3HumanityEvidenceCorrection', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS },
           )
         } catch (error) {
           ctx.signal.throwIfAborted()

@@ -206,7 +206,7 @@ export default function SkillManagerDialog({
           <div><h2 className="text-sm font-semibold">{title}</h2><p className="mt-0.5 text-[10px] text-[var(--text-tertiary)]">{importMode ? '只导入明确许可的来源；先留作草稿，再测试发布。' : '把会反复使用的写作规则存为私有草稿；发布前可测试与回滚。'}</p></div>
           <button type="button" onClick={onClose} className="ml-auto flex h-9 w-9 items-center justify-center rounded-[9px] hover:bg-[var(--surface-muted)]" aria-label="关闭"><X className="h-4 w-4" /></button>
         </header>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+        <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 md:p-5">
           {!skill || editingVersion ? (
             <SkillEditor
               editor={editor}

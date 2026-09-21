@@ -54,6 +54,14 @@ it('renames by stable ID without growing or reordering the plan', () => {
   expect(updated.items).toEqual([previous[0], { ...previous[1], content: '第二章写作及核验', status: 'completed' }])
   expect(updated.items).toHaveLength(2)
 })
+it('replaces invented IDs only when creating a genuinely empty task list', () => {
+  const request = [{ id: 'step-1', content: '核对章节', status: 'in_progress' as const }, { id: 'step-2', content: '完成修订', status: 'pending' as const }]
+  const result = prepareTodoUpdate([], request)
+  expect(result.changed).toBe(true)
+  expect(result.items.map(item => item.id)).toEqual(withTodoIds(request.map(({ content, status }) => ({ content, status }))).map(item => item.id))
+  expect(result.items.map(item => item.status)).toEqual(['in_progress', 'pending'])
+  expect(prepareTodoUpdate(result.items, request).error).toContain('不属于')
+})
 it('rejects description-only additions and foreign IDs, allows justified new work', () => {
   expect(prepareTodoUpdate(previous, [{ content: '重述第二章工作', status: 'pending' }]).error).toContain('原 id')
   expect(prepareTodoUpdate(previous, [{ id: 'other-task', content: '一', status: 'pending' }]).error).toContain('不属于')

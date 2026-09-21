@@ -1,3 +1,4 @@
+import { auxiliaryTextModel } from './auxiliary-text-model.js'
 import { generateTextCompletion } from '../ai-service.js'
 import { prisma } from '../prisma.js'
 
@@ -45,7 +46,7 @@ export async function autoNameSession(input: {
         input.prompt.slice(0, 500),
         {
           userId: input.userId,
-          modelRuntime: input.modelRuntime?.tier === 'custom' ? input.modelRuntime : undefined,
+          modelRuntime: auxiliaryTextModel(input.modelRuntime),
           action: 'agentSessionAutoName',
           novelId: input.novelId,
           targetType: 'agentSession',

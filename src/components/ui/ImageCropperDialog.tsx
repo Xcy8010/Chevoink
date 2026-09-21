@@ -156,9 +156,9 @@ export default function ImageCropperDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]">
-      <div className="w-full max-w-[640px] rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-[var(--shadow-modal)] sm:p-6">
-        <div className="flex items-start justify-between gap-4">
+    <div className="fixed inset-0 z-50 flex min-h-0 items-center justify-center overflow-hidden bg-black/45 p-4 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="flex max-h-[calc(100dvh-2rem)] min-h-0 w-full max-w-[640px] flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 shadow-[var(--shadow-modal)] sm:max-h-[calc(100dvh-3rem)] sm:p-6">
+        <div className="flex shrink-0 items-start justify-between gap-4 px-5 pt-5 sm:px-0 sm:pt-0">
           <div className="space-y-1">
             <h3 className="text-lg font-semibold text-[var(--text-primary)]">{title}</h3>
             <p className="text-sm leading-6 text-[var(--text-secondary)]">{description}</p>
@@ -173,9 +173,10 @@ export default function ImageCropperDialog({
           </button>
         </div>
 
-        <div
-          ref={viewportRef}
-          className="relative mt-4 w-full touch-none select-none overflow-hidden rounded-[var(--radius-lg)] bg-black/80"
+        <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-5 pt-4 [-webkit-overflow-scrolling:touch] sm:px-0 sm:pb-0 sm:pt-4">
+          <div
+            ref={viewportRef}
+            className="relative w-full touch-none select-none overflow-hidden rounded-[var(--radius-lg)] bg-black/80"
           style={{ aspectRatio: `${aspect} / 1`, cursor: dragRef.current ? 'grabbing' : 'grab' }}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
@@ -197,7 +198,7 @@ export default function ImageCropperDialog({
               transform: `translate(calc(-50% + ${offset.x}px), calc(-50% + ${offset.y}px))`,
             }}
           />
-        </div>
+          </div>
 
         <div className="mt-4 flex items-center gap-3">
           <Minus className="h-4 w-4 shrink-0 text-[var(--text-tertiary)]" />
@@ -214,13 +215,14 @@ export default function ImageCropperDialog({
           <Plus className="h-4 w-4 shrink-0 text-[var(--text-tertiary)]" />
         </div>
 
-        <div className="mt-5 flex justify-end gap-3">
+        <div className="mt-5 flex flex-wrap justify-end gap-3">
           <Button type="button" variant="secondary" onClick={onCancel} disabled={submitting}>
             取消
           </Button>
           <Button type="button" variant="primary" onClick={handleConfirm} disabled={submitting || !imageSize}>
             {submitting ? '保存中…' : '保存封面'}
           </Button>
+        </div>
         </div>
       </div>
     </div>

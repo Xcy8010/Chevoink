@@ -1,4 +1,5 @@
 import { beforeEach, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { resolveMemorySource } from '../../api/lib/agent/tools/memory-source.js'
 import { memorySaveTool } from '../../api/lib/agent/tools/write-tools.js'
 import { memoryEventSaveTool, memoryRelationSaveTool } from '../../api/lib/agent/tools/memory-tools.js'
@@ -19,6 +20,22 @@ it('binds chapter scope/revision and validates literal quote', async () => {
   const evidence = await resolveMemorySource(ctx, { sourceChapterId: 'c', revision: 2, sourceQuote: '钥匙交给顾棠' })
   expect(prisma.chapter.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'c', novelId: 'n', authorId: 'u' } }))
   expect(evidence).toMatchObject({ sourceType: 'chapter', revision: 2, span: { start: 3, end: 9, quoteHash: expect.stringMatching(/^[a-f0-9]{64}$/) } })
+})
+it('binds whitespace-only quote differences to the exact original UTF16 span and hash', async () => {
+  const content = '💡林舟把钥匙\r\n　交给顾棠。'
+  vi.mocked(prisma.chapter.findFirst).mockResolvedValue({ id: 'c', revision: 2, content } as never)
+  const evidence = await resolveMemorySource(ctx, { sourceChapterId: 'c', revision: 2, sourceQuote: '钥匙交给顾棠' })
+  const original = '钥匙\r\n　交给顾棠'
+  expect(evidence).toMatchObject({ span: { start: content.indexOf('钥匙'), end: content.indexOf('。'), quoteHash: createHash('sha256').update(original).digest('hex') } })
+})
+it.each([
+  ['甲\n乙和甲 乙', '甲乙'],
+  ['a b', 'ab'],
+  ['钥匙交给顾棠。', '钥匙，交给顾棠。'],
+])('refuses ambiguous layout matches or changed words/punctuation', async (content, sourceQuote) => {
+  vi.mocked(prisma.chapter.findFirst).mockResolvedValue({ id: 'c', revision: 2, content } as never)
+  await expect(resolveMemorySource(ctx, { sourceChapterId: 'c', sourceQuote })).rejects.toMatchObject({ code: 'MEMORY_EVIDENCE_MISMATCH' })
+  expect(saveStoryMemory).not.toHaveBeenCalled()
 })
 it('rejects forged, cross-work, stale or missing evidence before a memory write', async () => {
   await expect(resolveMemorySource(ctx, { sourceChapterId: 'c', revision: 1 })).rejects.toMatchObject({ code: 'MEMORY_SOURCE_REQUIRED' })

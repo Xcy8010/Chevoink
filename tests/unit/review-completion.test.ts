@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const complete = vi.hoisted(() => vi.fn())
 vi.mock('../../api/lib/ai-service.js', () => ({ generateTextCompletion: complete }))
 import { DataAccessError } from '../../api/lib/prisma.js'
 import { generateReviewCompletion } from '../../api/lib/agent/review-completion.js'
 
 beforeEach(() => { complete.mockReset() })
+afterEach(() => vi.useRealTimers())
 const options = { userId: 'user', action: 'agent3HumanityCritic', reasoningEffort: 'low' as const }
 describe('bounded review completion recovery', () => {
   it('recovers confirmed truncation once with the complete input and larger allowance', async () => {
@@ -12,14 +13,28 @@ describe('bounded review completion recovery', () => {
     const signal = new AbortController().signal
     await expect(generateReviewCompletion('审查规则', '正文首\n完整原文\n正文尾', { ...options, signal })).resolves.toBe('{"findings":[]}')
     expect(complete.mock.calls).toEqual([
-      ['审查规则', '正文首\n完整原文\n正文尾', { ...options, signal, maxOutputTokens: 16_384 }],
-      ['审查规则', '正文首\n完整原文\n正文尾', { ...options, signal, action: 'agent3HumanityCriticOutputRecovery', maxOutputTokens: 32_768 }],
+      ['审查规则', '正文首\n完整原文\n正文尾', { ...options, signal: expect.any(AbortSignal), maxOutputTokens: 16_384 }],
+      ['审查规则', '正文首\n完整原文\n正文尾', { ...options, signal: expect.any(AbortSignal), action: 'agent3HumanityCriticOutputRecovery', maxOutputTokens: 32_768 }],
     ])
+    expect(complete.mock.calls[0][2].signal).toBe(complete.mock.calls[1][2].signal)
   })
   it('never makes a third paid call when the larger allowance also truncates', async () => {
     complete.mockRejectedValue(new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', 'length'))
     await expect(generateReviewCompletion('s', 'c', options)).rejects.toMatchObject({ code: 'AI_PROVIDER_OUTPUT_LIMIT' })
     expect(complete).toHaveBeenCalledTimes(2)
+  })
+  it('aborts a hanging provider without resetting the shared deadline for recovery', async () => {
+    vi.useFakeTimers()
+    complete.mockImplementationOnce(() => new Promise((_resolve, reject) => setTimeout(() => reject(new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', 'length')), 120_000)))
+      .mockImplementationOnce((_system, _content, input) => new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true })))
+    const result = generateReviewCompletion('s', 'c', options)
+    const assertion = expect(result).rejects.toMatchObject({ code: 'AI_PROVIDER_TIMEOUT' })
+    await vi.advanceTimersByTimeAsync(180_000)
+    await assertion
+    expect(complete).toHaveBeenCalledTimes(2)
+    expect(complete.mock.calls[0][2].signal).toBe(complete.mock.calls[1][2].signal)
+    expect(complete.mock.calls[1][2].signal.aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
   })
   it.each(['AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_TIMEOUT', 'AI_PROVIDER_INCOMPLETE', 'CREDITS_EXHAUSTED'])('does not redispatch uncertain/credit failure %s', async code => {
     complete.mockRejectedValue(new DataAccessError(502, code, 'failure'))

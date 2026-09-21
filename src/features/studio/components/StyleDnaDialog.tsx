@@ -59,14 +59,14 @@ export default function StyleDnaDialog({ chapters, profile, busy, onClose, onSub
 
   const valid = Boolean(title.trim() && (selectedChapterIds.length > 0 || uploadedFile) && consent && !fileError)
   return createPortal(
-    <dialog ref={dialogRef} data-native-back-dismiss onCancel={event => { event.preventDefault(); if (!busy) onClose() }} className="studio-workspace m-auto max-h-[94dvh] w-[min(760px,96vw)] overflow-hidden rounded-2xl border-0 bg-transparent p-0 text-[var(--text-primary)] backdrop:bg-black/45" aria-label="添加写作样章">
+    <dialog ref={dialogRef} data-native-back-dismiss onCancel={event => { event.preventDefault(); if (!busy) onClose() }} className="studio-workspace m-auto h-[94dvh] max-h-[94dvh] w-[min(760px,96vw)] overflow-hidden rounded-2xl border-0 bg-transparent p-0 text-[var(--text-primary)] backdrop:bg-black/45 md:h-auto" aria-label="添加写作样章">
       <section className="flex h-full w-full flex-col bg-[var(--surface-default)] md:h-auto md:max-h-[86vh] md:w-[min(760px,calc(100vw-48px))] md:rounded-[14px] md:border md:border-[var(--border-default)]">
         <header className="flex shrink-0 items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-3 md:px-5">
           <Fingerprint className="h-4 w-4 text-[var(--text-secondary)]" />
           <div><h2 className="text-sm font-semibold text-[var(--text-primary)]">添加写作样章</h2><p className="mt-0.5 text-[10px] text-[var(--text-tertiary)]">保存后可查看原文，再选择模型开始学习；保存本身不调用模型。</p></div>
           <button type="button" onClick={onClose} className="ml-auto flex h-9 w-9 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)]" aria-label="关闭"><X className="h-4 w-4" /></button>
         </header>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+        <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 md:p-5">
           {error ? <p role="alert" className="text-sm text-[var(--color-error)]">{error}</p> : null}
           {profile ? <div className="grid grid-cols-2 gap-x-6 gap-y-2 border-b border-[var(--border-subtle)] pb-4 text-[10px] text-[var(--text-secondary)] sm:grid-cols-4">
             <span>对白 {Math.round(profile.stats.dialogueRatio * 100)}%</span><span>句中位 {profile.stats.medianSentenceChars} 字</span><span>段中位 {profile.stats.medianParagraphChars} 字</span><span>修辞 {Math.round(profile.stats.imageryDensity * 100)}%</span>
@@ -76,7 +76,7 @@ export default function StyleDnaDialog({ chapters, profile, busy, onClose, onSub
             <section>
               <h3 className="text-xs font-medium text-[var(--text-primary)]">从当前作品选择</h3>
               <p className="mt-1 text-[10px] text-[var(--text-tertiary)]">最多 12 章，可与上传样章同时使用。</p>
-              <div className="mt-3 max-h-60 overflow-y-auto border-y border-[var(--border-subtle)] py-1">
+              <div className="scrollbar-none mt-3 max-h-60 overflow-y-auto overscroll-contain border-y border-[var(--border-subtle)] py-1">
                 {chapters.length === 0 ? <p className="py-6 text-center text-[10px] text-[var(--text-tertiary)]">当前作品还没有可选章节。</p> : chapters.map((chapter) => {
                   const checked = selectedChapterIds.includes(chapter.id)
                   return <label key={chapter.id} className="flex cursor-pointer items-center gap-2 px-1 py-2 text-[11px] hover:bg-[var(--surface-muted)]">

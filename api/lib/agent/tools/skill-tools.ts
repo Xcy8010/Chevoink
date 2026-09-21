@@ -1,3 +1,4 @@
+import { auxiliaryTextModel } from '../auxiliary-text-model.js'
 import { z } from 'zod'
 
 import { generateTextCompletion } from '../../ai-service.js'
@@ -203,7 +204,7 @@ export const creativeCritiqueTool = defineTool({
     const critique = await generateTextCompletion(
       `你是与写作者上下文隔离的小说批评编辑。只依据给定原文指出问题，不续写、不改写、不套固定检查表。每条含编号、短引文、问题和修改方向；把事实硬伤与审美建议分开。\n${resources}`,
       `章节：${chapter.title}，revision=${chapter.revision}，范围=[${start},${end})\n原文：\n${text}`,
-      { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: ctx.signal, userId: ctx.userId, action: 'agentCreativeCritique', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'chapter', targetId: chapter.id, temperature: 0.25 },
+      { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: ctx.signal, userId: ctx.userId, action: 'agentCreativeCritique', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'chapter', targetId: chapter.id, temperature: 0.25 },
     )
     const artifact = await prisma.agentArtifact.create({
       data: { runId: ctx.runId, artifactType: 'continuityReview', title: `${chapter.title} · 独立批评`, content: critique, summary: `revision ${chapter.revision} / ${args.skillIds.join(',')}`, metadata: { chapterId: chapter.id, revision: chapter.revision, start, end, skillIds: args.skillIds, phase: 'critique' } },
@@ -235,7 +236,7 @@ export const creativeRevisionDraftTool = defineTool({
     const revised = await generateTextCompletion(
       `你是与 Draft/Critique 上下文隔离的修订编辑。只落实 selectedFindings，不顺手应用其他建议，不改变未授权事实和情节。只输出可替换原文的修订文本。\n${resources}`,
       `作者选中的批评项：\n${args.selectedFindings.map((item, index) => `${index + 1}. ${item}`).join('\n')}\n待修订原文：\n${source}`,
-      { modelRuntime: ctx.modelRuntime?.tier === 'custom' ? ctx.modelRuntime : undefined, signal: ctx.signal, userId: ctx.userId, action: 'agentCreativeRevision', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'chapter', targetId: chapter.id, temperature: args.creativeFreedom === 'stable' ? 0.35 : args.creativeFreedom === 'bold' ? 0.75 : 0.55 },
+      { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: ctx.signal, userId: ctx.userId, action: 'agentCreativeRevision', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'chapter', targetId: chapter.id, temperature: args.creativeFreedom === 'stable' ? 0.35 : args.creativeFreedom === 'bold' ? 0.75 : 0.55 },
     )
     const artifact = await prisma.agentArtifact.create({
       data: { runId: ctx.runId, artifactType: 'rewriteSelection', title: `${chapter.title} · 选择性修订稿`, content: revised, summary: `${args.selectedFindings.length} 项选中意见`, metadata: { chapterId: chapter.id, revision: chapter.revision, start, end, critiqueArtifactId: critique.id, phase: 'revision' } },
