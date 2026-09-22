@@ -54,6 +54,8 @@ type Props = {
   currentSession?: AgentSession | null
   onSelectSession?: (sessionId: string) => void
   onTaskForked?: (session: AgentSession) => void
+  /** 归档任务完成：通知宿主回收对应任务窗口，避免归档后还留在任务列表 */
+  onTaskArchived?: (sessionId: string) => void
   embedded?: boolean
 }
 
@@ -185,6 +187,7 @@ export default function AgentOperationsCenter({
   currentSession,
   onSelectSession,
   onTaskForked,
+  onTaskArchived,
   embedded = false,
 }: Props) {
   const [tab, setTab] = useState<Tab>('tasks')
@@ -314,7 +317,7 @@ export default function AgentOperationsCenter({
                           <span className="mt-1 block truncate text-xs text-[var(--text-secondary)]">{item.novelTitle ?? '当前作品'} · {new Date(item.lastRunAt ?? item.updatedAt).toLocaleString()}</span>
                         </button>
                         <button type="button" className={cn('inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]', item.pinnedAt && 'bg-[var(--surface-muted)] text-[var(--text-primary)]')} onClick={() => void execute(async () => { await updateAgentSessionSettings(item.id, { pinned: !item.pinnedAt }); await Promise.all([refreshTasks(), refreshNovelTasks()]) })} title={item.pinnedAt ? '取消置顶' : '置顶'} aria-label={item.pinnedAt ? '取消置顶' : '置顶'}><Pin className="h-3.5 w-3.5" /></button>
-                        <button type="button" className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]" onClick={() => void execute(async () => { await updateAgentSessionSettings(item.id, { status: item.status === 'archived' ? 'active' : 'archived' }); await Promise.all([refreshTasks(), refreshNovelTasks()]) })} title={item.status === 'archived' ? '恢复任务' : '归档任务'} aria-label={item.status === 'archived' ? '恢复任务' : '归档任务'}><Archive className="h-3.5 w-3.5" /></button>
+                        <button type="button" className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]" onClick={() => void execute(async () => { const archiving = item.status !== 'archived'; await updateAgentSessionSettings(item.id, { status: archiving ? 'archived' : 'active' }); if (archiving) onTaskArchived?.(item.id); await Promise.all([refreshTasks(), refreshNovelTasks()]) })} title={item.status === 'archived' ? '恢复任务' : '归档任务'} aria-label={item.status === 'archived' ? '恢复任务' : '归档任务'}><Archive className="h-3.5 w-3.5" /></button>
                         <button type="button" onClick={() => openTask(item)} className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[var(--text-tertiary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]" aria-label={`打开${item.title}`}><ChevronRight className="h-4 w-4" /></button>
                       </div>
                     ))}

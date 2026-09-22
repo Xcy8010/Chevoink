@@ -493,8 +493,10 @@ export default function StudioWorkspace() {
     }
   }
 
-  async function loadAgentTaskWindow(taskWindowId: string) {
-    const targetTaskWindow = agentTaskWindows.find((taskWindow) => taskWindow.id === taskWindowId)
+  async function loadAgentTaskWindow(taskWindowId: string, materializedWindow?: AgentTaskWindowState) {
+    const targetTaskWindow = materializedWindow ?? agentTaskWindows.find(
+      (taskWindow) => taskWindow.id === taskWindowId || taskWindow.sessionId === taskWindowId,
+    )
     if (!targetTaskWindow) {
       return
     }
@@ -510,11 +512,11 @@ export default function StudioWorkspace() {
     const loadedTaskWindow = await hydrateAgentTaskWindow(targetTaskWindow)
 
     setAgentTaskWindows((current) =>
-      current.map((taskWindow) => (taskWindow.id === taskWindowId ? loadedTaskWindow : taskWindow)),
+      current.map((taskWindow) => (taskWindow.id === targetTaskWindow.id ? loadedTaskWindow : taskWindow)),
     )
 
     // 补载期间用户可能已切到别的任务窗口，此时不得用旧窗口状态覆盖
-    if (appliedAgentTaskWindowIdRef.current !== taskWindowId) {
+    if (appliedAgentTaskWindowIdRef.current !== targetTaskWindow.id) {
       return
     }
 
@@ -3221,6 +3223,18 @@ export default function StudioWorkspace() {
     applyAgentTaskWindowState(nextTaskWindow)
   }
 
+  /**
+   * 归档任务完成：归档与删除同为窗口回收，回收后任务不再留在列表里；
+   * 但当前任务若仍在运行则保留现场，避免把正在进行的对话拉走
+   * （服务端已置归档，刷新或重进作品后会从窗口列表自然消失）。
+   */
+  function handleAgentTaskArchived(archivedTaskId: string) {
+    if (agentRunState.active && (activeAgentTaskWindowId === archivedTaskId || agentSessionId === archivedTaskId)) {
+      return
+    }
+    handleAgentTaskDeleted(archivedTaskId)
+  }
+
   /** 任务切出分支：把新会话登记成任务窗口并切过去（跳作品时走深链） */
   function handleAgentTaskForked(session: AgentSession) {
     void queryClient.invalidateQueries({ queryKey: ['agent', 'sessions'] })
@@ -3291,6 +3305,28 @@ export default function StudioWorkspace() {
     }
 
     pruneTemporaryTaskWindows(taskWindowId)
+
+    // 已归档任务恢复后本地窗口已被回收：按服务端会话现场补建窗口再打开，
+    // 否则从归档内容切回来时点击会没有反应
+    if (!agentTaskWindows.some((taskWindow) => taskWindow.id === taskWindowId || taskWindow.sessionId === taskWindowId)) {
+      try {
+        const sessions = await listWritingAgentSessions(activeNovelId)
+        const session = sessions.find((item) => item.id === taskWindowId)
+        if (!session) {
+          return
+        }
+        const materializedTaskWindow = buildAgentTaskWindowFromSession(session)
+        setAgentTaskWindows((current) => [
+          materializedTaskWindow,
+          ...current.filter((taskWindow) => taskWindow.id !== materializedTaskWindow.id),
+        ])
+        await loadAgentTaskWindow(materializedTaskWindow.id, materializedTaskWindow)
+      } catch {
+        setSessionResolutionError('任务读取失败，请重试。')
+      }
+      return
+    }
+
     await loadAgentTaskWindow(taskWindowId)
   }
 
@@ -4341,11 +4377,11 @@ export default function StudioWorkspace() {
             chapterId={selectedChapterId}
             runIds={agentArtifacts.map((artifact) => artifact.runId).filter((runId): runId is string => Boolean(runId))}
             onSelectSession={(sessionId) => {
-              setAgentSessionId(sessionId)
-              setActiveAgentTaskWindowId(sessionId)
               setStudioSettingsOpen(false)
+              void handleSelectAgentTaskWindow(sessionId)
             }}
             onTaskForked={handleAgentTaskForked}
+            onTaskArchived={handleAgentTaskArchived}
           />
 
           {activeToolPanel && activeToolPanel !== 'assistant' ? (

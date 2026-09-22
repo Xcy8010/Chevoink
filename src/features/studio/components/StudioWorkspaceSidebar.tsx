@@ -51,7 +51,7 @@ type Props = {
   onRenameTask: (taskId: string, title: string) => void
   /** 作品行的「新建对话」：跳作品时宿主先切作品再开新任务窗口 */
   onCreateTaskInNovel: (novelId: string) => void
-  /** 任务删除完成（含本地临时窗口）：宿主移除任务窗口，必要时补一个新窗口 */
+  /** 任务删除或归档完成（含本地临时窗口）：宿主移除任务窗口，必要时回落或补一个新窗口 */
   onTaskDeleted: (taskId: string) => void
   /** 任务切出分支成功：宿主把新会话登记为任务窗口并切过去 */
   onTaskForked: (session: AgentSession) => void
@@ -157,6 +157,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
   const [rename, setRename] = useState<RenameTarget | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [danger, setDanger] = useState<DangerAction | null>(null)
+  const [archiveTarget, setArchiveTarget] = useState<ContextTargetInput | null>(null)
   const [taskCard, setTaskCard] = useState<TaskCard | null>(null)
   const taskCardTimerRef = useRef<number | null>(null)
   const [busy, setBusy] = useState(false)
@@ -379,8 +380,30 @@ export default function StudioWorkspaceSidebar(props: Props) {
       await refreshNavigation()
     } finally { setBusy(false); setContext(null) }
   }
-  async function archive(target: ContextTargetInput) {
+  /**
+   * 归档确认：归档统一走确认弹窗并说明找回入口。临时窗口还没落库、
+   * 运行中或等待确认的任务现场不能被拉走，这两种情况只提示不弹窗。
+   */
+  function requestArchive(target: ContextTargetInput) {
+    setContext(null)
     if ('temporary' in target && target.temporary) return
+    const remoteStatus = remoteRunStatuses[target.id]?.status
+    const taskBusy =
+      target.kind === 'task' &&
+      (runningSessionIds.has(target.id) ||
+        remoteStatus === 'running' ||
+        remoteStatus === 'queued' ||
+        remoteStatus === 'awaiting_approval' ||
+        (target.id === props.activeTaskId && props.taskSwitchLocked))
+    if (taskBusy) {
+      toast.error('任务正在运行或等待确认，结束后才能归档。')
+      return
+    }
+    setArchiveTarget(target)
+  }
+  async function runArchive() {
+    const target = archiveTarget
+    if (!target) return
     setBusy(true)
     try {
       if (target.kind === 'novel') {
@@ -389,12 +412,18 @@ export default function StudioWorkspaceSidebar(props: Props) {
           const next = novels.find((item) => item.id !== target.id)
           if (next) props.onSelectNovel(next.id); else props.onCreateNovel()
         }
+        toast.success('作品已归档，可在左侧栏「更多 → 归档内容」中找回并恢复。')
       } else {
         await updateAgentSessionSettings(target.id, { status: 'archived' })
-        if (target.id === props.activeTaskId) props.onCreateTask()
+        // 归档与删除同为窗口回收：不能新建任务窗口（否则作者会看到「归档了却又冒出一个新任务」），
+        // 且必须移除本地窗口，被归档的任务才不会继续留在列表里
+        props.onTaskDeleted(target.id)
+        toast.success('任务已归档，可在左侧栏「更多 → 归档内容」中找回并恢复。')
       }
       await refreshNavigation()
-    } finally { setBusy(false); setContext(null) }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '归档失败，请稍后再试。')
+    } finally { setBusy(false); setArchiveTarget(null) }
   }
   function beginRename(target: ContextTargetInput) {
     setRename({ kind: target.kind, id: target.id, title: target.title }); setRenameValue(target.title); setContext(null)
@@ -493,7 +522,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
           : signal?.kind === 'done' && !active
             ? <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
             : <span className="h-1.5 w-1.5 rounded-full" aria-hidden="true" />
-    return <div key={`${task.novelId}:${task.id}`} className="group/task relative" onMouseEnter={(event) => scheduleTaskCard(event, task)} onMouseLeave={hideTaskCard}><button type="button" onClick={() => props.onSelectTask(task.id, task.novelId)} onContextMenu={(event) => openContext(event, { kind: 'task', id: task.id, novelId: task.novelId, title: task.title, pinned: Boolean(task.pinnedAt), temporary: task.temporary })} disabled={props.taskSwitchLocked} className={cn('group flex w-full items-center gap-2 rounded-[8px] pl-2.5 pr-2 text-left text-[12px] transition-colors disabled:opacity-50', compact ? 'h-8' : 'h-9', active ? 'bg-[var(--surface-muted)] font-medium text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]')} aria-current={active ? 'page' : undefined}><span className="flex h-3 w-3 shrink-0 items-center justify-center">{indicator}</span><span className="min-w-0 flex-1 truncate">{task.title || '新任务'}</span>{task.isBranch ? <GitBranch className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" aria-label="分支任务" /> : null}{task.pinnedAt ? <Pin className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" /> : null}{/* 悬停时右侧让位给置顶/归档按钮，避免按钮盖住标题末尾 */}{task.temporary ? null : <span className="w-0 shrink-0 transition-[width] duration-150 group-hover/task:w-[46px]" aria-hidden="true" />}</button>{task.temporary ? null : <div className="absolute right-1 top-0 flex h-full items-center gap-0.5 opacity-0 transition-opacity group-hover/task:opacity-100 focus-within:opacity-100"><button type="button" disabled={busy} onClick={() => void togglePin({ kind: 'task', id: task.id, novelId: task.novelId, title: task.title, pinned: Boolean(task.pinnedAt), temporary: task.temporary })} className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] disabled:opacity-40" aria-label={task.pinnedAt ? '取消置顶' : '置顶任务'} title={task.pinnedAt ? '取消置顶' : '置顶'}>{task.pinnedAt ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}</button><button type="button" disabled={busy} onClick={() => void archive({ kind: 'task', id: task.id, novelId: task.novelId, title: task.title, pinned: Boolean(task.pinnedAt), temporary: task.temporary })} className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] disabled:opacity-40" aria-label="归档任务" title="归档"><Archive className="h-3.5 w-3.5" /></button></div>}</div>
+    return <div key={`${task.novelId}:${task.id}`} className="group/task relative" onMouseEnter={(event) => scheduleTaskCard(event, task)} onMouseLeave={hideTaskCard}><button type="button" onClick={() => props.onSelectTask(task.id, task.novelId)} onContextMenu={(event) => openContext(event, { kind: 'task', id: task.id, novelId: task.novelId, title: task.title, pinned: Boolean(task.pinnedAt), temporary: task.temporary })} disabled={props.taskSwitchLocked} className={cn('group flex w-full items-center gap-2 rounded-[8px] pl-2.5 pr-2 text-left text-[12px] transition-colors disabled:opacity-50', compact ? 'h-8' : 'h-9', active ? 'bg-[var(--surface-muted)] font-medium text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]')} aria-current={active ? 'page' : undefined}><span className="flex h-3 w-3 shrink-0 items-center justify-center">{indicator}</span><span className="min-w-0 flex-1 truncate">{task.title || '新任务'}</span>{task.isBranch ? <GitBranch className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" aria-label="分支任务" /> : null}{task.pinnedAt ? <Pin className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" /> : null}{/* 悬停时右侧让位给置顶/归档按钮，避免按钮盖住标题末尾 */}{task.temporary ? null : <span className="w-0 shrink-0 transition-[width] duration-150 group-hover/task:w-[46px]" aria-hidden="true" />}</button>{task.temporary ? null : <div className="absolute right-1 top-0 flex h-full items-center gap-0.5 opacity-0 transition-opacity group-hover/task:opacity-100 focus-within:opacity-100"><button type="button" disabled={busy} onClick={() => void togglePin({ kind: 'task', id: task.id, novelId: task.novelId, title: task.title, pinned: Boolean(task.pinnedAt), temporary: task.temporary })} className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] disabled:opacity-40" aria-label={task.pinnedAt ? '取消置顶' : '置顶任务'} title={task.pinnedAt ? '取消置顶' : '置顶'}>{task.pinnedAt ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}</button><button type="button" disabled={busy} onClick={() => requestArchive({ kind: 'task', id: task.id, novelId: task.novelId, title: task.title, pinned: Boolean(task.pinnedAt), temporary: task.temporary })} className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] disabled:opacity-40" aria-label="归档任务" title="归档"><Archive className="h-3.5 w-3.5" /></button></div>}</div>
   }
 
   function body() {
@@ -548,6 +577,11 @@ export default function StudioWorkspaceSidebar(props: Props) {
       : { title: '创建任务分支', description: `将复制一份「${danger.title}」的副本（标题带角标区分），完整带上现有对话上下文，在分支里接着聊不会影响原任务。`, bullets: ['原任务的对话与已写入内容保持不变', '分支里的新对话不会回流到原任务'], confirmLabel: '创建分支', requiredText: undefined, tone: 'default' as const }
     : null
 
+  const archiveCopy = archiveTarget ? archiveTarget.kind === 'novel'
+    ? { title: '归档作品', description: `将归档《${archiveTarget.title}》。归档后作品会从创作区列表收起，可随时恢复。`, bullets: ['作品内容、章节与任务对话都会完整保留', '归档后可在左侧栏「更多 → 归档内容」中找到它', '恢复后会重新出现在创作区项目列表'], confirmLabel: '确认归档' }
+    : { title: '归档任务', description: `将归档任务「${archiveTarget.title}」。归档后它会从任务列表收起，可随时恢复。`, bullets: ['任务不会被删除，对话记录与已写入作品的正文保留', '归档后可在左侧栏「更多 → 归档内容」中找到它', '恢复后会重新出现在所属作品的任务列表'], confirmLabel: '确认归档' }
+    : null
+
   const foundSessions = searchText.trim() ? (searchQuery.data?.items ?? []) : sessions.slice(0, 10)
   const needle = searchText.trim().toLocaleLowerCase()
   const foundNovels = novels.filter((item) => !needle || novelTitle(item).toLocaleLowerCase().includes(needle))
@@ -565,7 +599,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
       {context.kind === 'task' ? <><button type="button" disabled={context.temporary} onClick={() => void copyTaskId(context.id)} className={menuItem} title={context.temporary ? '新对话发出第一条消息后才有任务 ID' : '复制任务 ID'}><Copy className="h-3.5 w-3.5" />复制任务 ID</button><button type="button" disabled={busy || context.temporary} onClick={() => { const target = { kind: 'forkTask' as const, id: context.id, title: context.title }; setContext(null); setDanger(target) }} className={menuItem} title={context.temporary ? '新对话还没有可复制的上下文' : '复制成同名分支任务'}><GitBranch className="h-3.5 w-3.5" />创建分支</button></> : null}
       {context.kind === 'novel' && context.id === props.currentNovelId ? <><div className={menuDivider} />{props.onOpenNovelMeta ? <button type="button" onClick={() => { setContext(null); props.onOpenNovelMeta?.() }} className={menuItem}><Settings2 className="h-3.5 w-3.5" />作品设置</button> : null}{props.onPublishNovel ? <button type="button" onClick={() => { setContext(null); props.onPublishNovel?.() }} className={menuItem}><Upload className="h-3.5 w-3.5" />{publishLabel}</button> : null}{props.onToggleNovelCompletion && props.currentNovelStatus ? <button type="button" onClick={() => { setContext(null); props.onToggleNovelCompletion?.() }} className={menuItem}>{novelCompleted ? <RotateCcw className="h-3.5 w-3.5" /> : <Flag className="h-3.5 w-3.5" />}{novelCompleted ? '继续连载' : '完结作品'}</button> : null}<button type="button" onClick={() => { contextTriggerRef.current?.focus(); setContext(null); props.onImportNovel() }} className={cn(menuItem, 'min-h-11')}><Upload className="h-3.5 w-3.5" />一键导入</button>{props.onExportNovel ? <button type="button" onClick={() => { setContext(null); props.onExportNovel?.() }} className={menuItem}><FolderDown className="h-3.5 w-3.5" />一键导出</button> : null}</> : null}
       <div className={menuDivider} />
-      <button type="button" disabled={busy || ('temporary' in context && context.temporary)} onClick={() => void archive(context)} className={cn(menuItem, 'text-amber-700')}><Archive className="h-3.5 w-3.5" />归档</button>
+      <button type="button" disabled={busy || ('temporary' in context && context.temporary)} onClick={() => requestArchive(context)} className={cn(menuItem, 'text-amber-700')}><Archive className="h-3.5 w-3.5" />归档</button>
       {context.kind === 'novel'
         ? <button type="button" disabled={busy} onClick={() => requestDeleteNovel({ id: context.id, title: context.title })} className={cn(menuItem, 'text-rose-600')}><Trash2 className="h-3.5 w-3.5" />删除作品</button>
         : <button type="button" disabled={busy} onClick={() => { const target = { kind: 'deleteTask' as const, id: context.id, title: context.title, temporary: context.temporary }; setContext(null); setDanger(target) }} className={cn(menuItem, 'text-rose-600')}><Trash2 className="h-3.5 w-3.5" />删除任务</button>}
@@ -583,6 +617,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
     </div> : null}
 
     {dangerCopy ? <DangerConfirmDialog open title={dangerCopy.title} description={dangerCopy.description} bullets={dangerCopy.bullets} requiredText={dangerCopy.requiredText} confirmLabel={dangerCopy.confirmLabel} tone={dangerCopy.tone} busy={busy} onConfirm={() => void runDangerAction()} onCancel={() => setDanger(null)} /> : null}
+    {archiveCopy ? <DangerConfirmDialog open title={archiveCopy.title} description={archiveCopy.description} bullets={archiveCopy.bullets} confirmLabel={archiveCopy.confirmLabel} tone="default" busy={busy} onConfirm={() => void runArchive()} onCancel={() => setArchiveTarget(null)} /> : null}
     {rename ? <div className="fixed inset-0 z-[195] flex items-center justify-center bg-black/25 p-4" onMouseDown={() => setRename(null)}><form onSubmit={(event) => { event.preventDefault(); void commitRename() }} onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-2xl"><h2 className="text-sm font-semibold">重命名{rename.kind === 'novel' ? '作品' : '任务'}</h2><input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} maxLength={160} className="mt-4 h-10 w-full rounded-[9px] border border-[var(--border-subtle)] bg-transparent px-3 text-sm outline-none focus:border-[var(--border-strong)]" /><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setRename(null)} className="h-9 rounded-[9px] px-3 text-xs hover:bg-[var(--surface-muted)]">取消</button><button type="submit" disabled={busy || !renameValue.trim()} className="h-9 rounded-[9px] bg-[var(--surface-contrast)] px-4 text-xs font-medium text-[var(--text-contrast)] disabled:opacity-45">保存</button></div></form></div> : null}
     <InviteCreditsDialog open={inviteOpen} referral={referralQuery.data ?? null} copied={inviteCopied} onCopy={() => void copyInvite()} onClose={() => { autoCopyRef.current = false; setInviteOpen(false) }} />
     <FeedbackDialog open={feedbackKind !== null} kind={feedbackKind ?? 'bug'} source="studio-work" onClose={() => setFeedbackKind(null)} />

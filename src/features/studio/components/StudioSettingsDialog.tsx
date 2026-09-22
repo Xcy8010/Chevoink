@@ -75,6 +75,8 @@ type Props = {
   runIds?: string[]
   onSelectSession?: (sessionId: string) => void
   onTaskForked?: (session: AgentSession) => void
+  /** 操作中心归档任务完成：宿主回收对应任务窗口（运行中的当前窗口保留现场） */
+  onTaskArchived?: (sessionId: string) => void
   /** 当前作品的导入记录与恢复入口；宿主负责关闭设置并打开导入弹窗历史视图 */
   onOpenImportHistory?: () => void
 }
@@ -805,7 +807,7 @@ export default function StudioSettingsDialog(props: Props) {
 
         <main className={cn('scrollbar-none min-h-0 flex-1 overflow-y-auto', props.section === 'operations' ? 'p-0' : 'px-5 py-7 sm:px-8 lg:px-10 lg:py-9')}>
           {props.section === 'operations' ? (
-            <AgentOperationsCenter embedded open onClose={props.onClose} novelId={props.novelId} sessionId={props.sessionId} chapterId={props.chapterId} runIds={props.runIds ?? []} onSelectSession={props.onSelectSession} onTaskForked={props.onTaskForked} />
+            <AgentOperationsCenter embedded open onClose={props.onClose} novelId={props.novelId} sessionId={props.sessionId} chapterId={props.chapterId} runIds={props.runIds ?? []} onSelectSession={props.onSelectSession} onTaskForked={props.onTaskForked} onTaskArchived={props.onTaskArchived} />
           ) : (
             <div className="mx-auto w-full max-w-[920px]">
               {props.section === 'general' ? <GeneralPanel {...props} /> : null}
