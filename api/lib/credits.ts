@@ -213,13 +213,14 @@ async function listPublicModelOptions(): Promise<CreditModelOption[]> {
   })
   const activePrices = await getActiveTokenPrices([...BUILT_IN_MODEL_TIERS])
   if (configs.length === 0) return MODEL_FALLBACKS.map(item => {
-    const price = activePrices.get(item.tier)
+    const price = item.multiplier === 0 ? undefined : activePrices.get(item.tier)
     return { ...item, pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null }
   })
   return configs.flatMap((item) => {
     if (!item.tier || !['lite', 'speed', 'standard', 'performance', 'ultimate'].includes(item.tier)) return []
     const capabilities = parseModelCapabilities(item.metadata, item.provider)
-    const price = activePrices.get(item.tier)
+    // 0 倍率档对用户公示为免费：不列分项费率，历史费率卡不参与免费档结算。
+    const price = item.multiplierBps === 0 ? undefined : activePrices.get(item.tier)
     return [{
       pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
       tier: item.tier as CreditModelOption['tier'],
@@ -668,7 +669,8 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
   return {
     tier,
     multiplierBps: config.multiplierBps,
-    tokenPrice: await getActiveTokenPrice(tier) ?? undefined,
+    // 0 倍率免费档不绑定费率卡：价格语义恒为免费，展示与指纹不带历史卡价。
+    tokenPrice: config.multiplierBps === 0 ? undefined : (await getActiveTokenPrice(tier) ?? undefined),
     provider: config.provider,
     modelName: config.modelName === 'unconfigured' ? null : config.modelName,
     baseUrl: config.baseUrl,
