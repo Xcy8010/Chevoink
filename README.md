@@ -1,3 +1,5 @@
+
+
 <p align="center">
   <a href="https://chevoink.chevolink.com">
     <img src="docs/assets/chevoink-readme-banner.png" alt="Chevoink 启创墨域 — AI 创作与阅读平台" width="1200">
@@ -244,7 +246,7 @@ Agent 支持有预算和进展校验的长任务续跑；暂停后恢复原任�
 npm ci
 
 # 2. 配置环境变量（参考 .env.example，填入数据库连接、AI Key 等）
-copy .env.example .env
+cp .env.example .env
 
 # 3. 初始化数据库
 npm run prisma:generate
