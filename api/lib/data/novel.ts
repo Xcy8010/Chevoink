@@ -9,7 +9,7 @@ import { NOVEL_TAG_GROUPS } from '../../../shared/contracts/novel-tags.js'
 import { hotScore, RECOMMEND_ALGORITHM_VERSIONS } from '../../../shared/recommend/scoring.js'
 import { storeNovelCoverDataUrl, storeNovelCoverFromRemoteUrl } from '../novel-cover-storage.js'
 import { DataAccessError, prisma } from '../prisma.js'
-import { buildPagination, buildSlug, chapterListItemSelect, commentInclude, ensureNonEmptyText, ensureNovelOwner, ensureUserExists, novelInclude, recalculateNovelStats, toChapterListItem, toComment, toNovel, toNovelCard, toPublishedChapterListItem, toPublishedVolumeListItem, toVolumeListItem } from './internal.js'
+import { buildPagination, buildSlug, chapterListItemSelect, commentInclude, ensureNonEmptyText, ensureNovelOwner, ensureUserExists, novelInclude, recalculateNovelStats, toComment, toNovel, toNovelCard, toPublishedChapterListItem, toPublishedVolumeListItem } from './internal.js'
 import { publicChapterWhere } from './chapter.js'
 import { searchableNovelWhere } from './search.js'
 import { DEFAULT_VOLUME_TITLE } from './volume.js'
@@ -480,12 +480,10 @@ export async function getNovelDetailData(
 
   return {
     novel: novelPayload,
-    volumes: volumeRecords.map((volume) =>
-      isOwner ? toVolumeListItem(volume) : toPublishedVolumeListItem(volume),
-    ),
-    chapters: chapterRecords.map((chapter) =>
-      isOwner ? toChapterListItem(chapter) : toPublishedChapterListItem(chapter),
-    ),
+    // 统一读发布态：作者与读者走同一份最近发布快照映射（标题/字数/卷内统计），
+    // 创作稿只在创作区展示，避免作者在阅读链路看到的与实际发布不一致
+    volumes: volumeRecords.map(toPublishedVolumeListItem),
+    chapters: chapterRecords.map(toPublishedChapterListItem),
     topComments: commentRecords.map(toComment),
     relatedNovels: relatedRecords.map((record) => toNovelCard(record)),
     /** 相关推荐算法版本（方案 Phase 0） */

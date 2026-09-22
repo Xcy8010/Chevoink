@@ -184,7 +184,7 @@ export default function NovelDetailDesktop({ state }: NovelDetailDesktopProps) {
             <div className="flex items-baseline justify-between gap-3">
               <dt className="shrink-0 text-[var(--text-tertiary)]">最新章节</dt>
               <dd className="min-w-0 truncate text-right text-[var(--text-secondary)]">
-                {latestPublishedChapter?.title ?? detail.novel.lastChapterTitle ?? '暂未更新'}
+                {latestPublishedChapter?.title ?? '暂未更新'}
               </dd>
             </div>
             <div className="flex items-baseline justify-between gap-3">

@@ -36,6 +36,7 @@ import {
 import {
   deleteLoopSessionMessage,
   listLoopSessionMessages,
+  previewLoopSessionRollback,
   rollbackLoopSessionFromMessage,
 } from '../lib/agent/session-messages.js'
 import { buildError, buildSuccess, createRequestId } from '../lib/http.js'
@@ -805,6 +806,19 @@ router.post('/sessions/:sessionId/messages/:messageId/rollback', async (req: Req
   try {
     const userId = requireSessionUserId(req)
     const payload = await rollbackLoopSessionFromMessage(userId, req.params.sessionId, req.params.messageId)
+    res.status(200).json(buildSuccess(requestId, payload))
+  } catch (error) {
+    sendRouteError(res, requestId, error)
+  }
+})
+
+// 回退影响预览（只读）：确认弹窗展示将删除/还原/保留的章节与对话记录
+router.get('/sessions/:sessionId/messages/:messageId/rollback-preview', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+
+  try {
+    const userId = requireSessionUserId(req)
+    const payload = await previewLoopSessionRollback(userId, req.params.sessionId, req.params.messageId)
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)

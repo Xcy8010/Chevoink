@@ -9,11 +9,11 @@ const m = vi.hoisted(() => ({
     novel: { findFirst: vi.fn(), update: vi.fn() },
     agentRun: { findFirst: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn() },
     agentSession: { findFirst: vi.fn() }, agentMessage: { findFirst: vi.fn(), findMany: vi.fn() },
-    agentArtifact: { deleteMany: vi.fn() },
+    agentArtifact: { deleteMany: vi.fn(), count: vi.fn() },
     changeSet: { findFirst: vi.fn(), update: vi.fn() }, changeSetPatch: { updateMany: vi.fn() },
     storyBranch: { findFirst: vi.fn(), update: vi.fn() },
     memoryExtractionJob: { findUniqueOrThrow: vi.fn(), update: vi.fn() },
-    projectMemoryEntry: { deleteMany: vi.fn(), findFirst: vi.fn(), findUniqueOrThrow: vi.fn(), update: vi.fn() },
+    projectMemoryEntry: { deleteMany: vi.fn(), count: vi.fn(), findFirst: vi.fn(), findUniqueOrThrow: vi.fn(), update: vi.fn() },
     memoryEvidence: { findMany: vi.fn() }, storyEntity: { findMany: vi.fn() },
     memoryRevision: { findFirst: vi.fn() },
   }, stats: vi.fn(), normalize: vi.fn(),
@@ -36,7 +36,7 @@ import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
 import { assertAgentManuscriptCurrent, withAgentManuscriptWrite } from '../../api/lib/agent/manuscript-scope.js'
 import { applyChangeSetData, rollbackChangeSetData } from '../../api/lib/data/changeset.js'
 import { mergeStoryBranch } from '../../api/lib/agent/productivity.js'
-import { rollbackLoopSessionFromMessage } from '../../api/lib/agent/session-messages.js'
+import { previewLoopSessionRollback, rollbackLoopSessionFromMessage } from '../../api/lib/agent/session-messages.js'
 import { applyMemoryExtractionJob, resolveMemoryReview, getMemoryGraph } from '../../api/lib/agent/story-memory.js'
 
 const tx = m.db as unknown as Prisma.TransactionClient
@@ -57,6 +57,8 @@ beforeEach(() => {
   m.db.chapter.updateMany.mockResolvedValue({ count: 1 })
   m.db.chapter.deleteMany.mockResolvedValue({ count: 1 })
   m.db.chapter.count.mockResolvedValue(1)
+  m.db.projectMemoryEntry.count.mockResolvedValue(0)
+  m.db.agentArtifact.count.mockResolvedValue(0)
 })
 
 describe('import manuscript epoch', () => {
@@ -136,12 +138,99 @@ describe('retained chapter write protection', () => {
       ...(toolName === 'chapter_create' ? { display: { kind: 'chapterRef', chapterId: 'c' } }
         : { snapshot: { target: 'chapter', targetId: 'c', field: 'content', previousValue: 'Before' } }),
     }] }])
-    m.db.chapter.count.mockResolvedValue(0)
+    m.db.chapter.findMany.mockResolvedValue([])
     await expect(rollbackLoopSessionFromMessage('u', 's', 'message')).rejects.toMatchObject({ code: 'CHAPTER_REVISION_CONFLICT' })
     expect(m.db.chapter.deleteMany).not.toHaveBeenCalled()
     expect(m.db.chapter.updateMany).not.toHaveBeenCalled()
     expect(m.db.agentRun.deleteMany).not.toHaveBeenCalled()
     expect(m.normalize).not.toHaveBeenCalled()
+  })
+})
+
+describe('session rollback published chapter protection', () => {
+  const mockRollbackScope = () => {
+    m.db.agentSession.findFirst.mockResolvedValue({ id: 's', novelId: 'n' })
+    m.db.agentMessage.findFirst.mockResolvedValue({ runId: 'r' })
+    m.db.agentRun.findUnique.mockResolvedValue({ id: 'r', createdAt: new Date() })
+    m.db.agentRun.findMany.mockResolvedValue([{ id: 'r' }])
+  }
+
+  it('keeps published chapters intact (no row delete / no blank restore) but still removes history', async () => {
+    mockRollbackScope()
+    m.db.agentMessage.findMany.mockResolvedValue([{ parts: [
+      { type: 'tool-call', status: 'success', toolName: 'chapter_create', display: { kind: 'chapterRef', chapterId: 'c' } },
+      { type: 'tool-call', status: 'success', snapshot: { target: 'chapter', targetId: 'c', field: 'content', previousValue: '' } },
+      { type: 'tool-call', status: 'success', snapshot: { target: 'novel', targetId: 'n', field: 'summary', previousValue: '旧简介' } },
+    ] }])
+    m.db.chapter.findMany.mockResolvedValue([
+      { id: 'c', title: '第五章 · 草稿名', publishedTitle: '第五章 · 发布名', status: 'published', publishedRevision: 38 },
+    ])
+
+    await expect(rollbackLoopSessionFromMessage('u', 's', 'message')).resolves.toEqual({
+      rolledBack: true,
+      removedRunCount: 1,
+      protectedChapters: [{ chapterId: 'c', title: '第五章 · 发布名' }],
+    })
+    expect(m.db.chapter.deleteMany).not.toHaveBeenCalled()
+    expect(m.db.chapter.updateMany).not.toHaveBeenCalled()
+    // 作品信息快照不属于章节保护范围，仍按回退还原
+    expect(m.db.novel.update).toHaveBeenCalledWith({ where: { id: 'n' }, data: { summary: '旧简介' } })
+    expect(m.db.agentRun.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['r'] } } })
+    expect(m.stats).toHaveBeenCalledWith(tx, 'n')
+  })
+
+  it('still removes created draft chapters and restores draft snapshots', async () => {
+    mockRollbackScope()
+    m.db.agentMessage.findMany.mockResolvedValue([{ parts: [
+      { type: 'tool-call', status: 'success', toolName: 'chapter_create', display: { kind: 'chapterRef', chapterId: 'c-new' } },
+      { type: 'tool-call', status: 'success', snapshot: { target: 'chapter', targetId: 'c-draft', field: 'content', previousValue: '旧正文' } },
+    ] }])
+    m.db.chapter.findMany.mockResolvedValue([
+      { id: 'c-new', title: '新章', publishedTitle: null, status: 'draft', publishedRevision: null },
+      { id: 'c-draft', title: '草稿章', publishedTitle: null, status: 'draft', publishedRevision: null },
+    ])
+    m.db.chapter.findFirst.mockResolvedValue({ id: 'c-draft', revision: 5 })
+
+    await expect(rollbackLoopSessionFromMessage('u', 's', 'message')).resolves.toEqual({
+      rolledBack: true,
+      removedRunCount: 1,
+      protectedChapters: [],
+    })
+    expect(m.db.chapter.deleteMany).toHaveBeenCalledWith({ where: { id: 'c-new', authorId: 'u', ...activeChapterScope('n') } })
+    expect(m.db.chapter.updateMany).toHaveBeenCalled()
+    expect(m.db.chapter.updateMany.mock.calls[0][0].where.AND[0]).toEqual({ id: 'c-draft', novelId: 'n', authorId: 'u', revision: 5 })
+  })
+
+  it('preview reports removal/restore/protection without writing anything', async () => {
+    mockRollbackScope()
+    m.db.agentMessage.findMany.mockResolvedValue([{ parts: [
+      { type: 'tool-call', status: 'success', toolName: 'chapter_create', display: { kind: 'chapterRef', chapterId: 'c-new' } },
+      { type: 'tool-call', status: 'success', snapshot: { target: 'chapter', targetId: 'c-draft', field: 'content', previousValue: '旧正文' } },
+      { type: 'tool-call', status: 'success', snapshot: { target: 'chapter', targetId: 'c-live', field: 'title', previousValue: '旧标题' } },
+      { type: 'tool-call', status: 'success', snapshot: { target: 'novel', targetId: 'n', field: 'summary', previousValue: '旧简介' } },
+    ] }])
+    m.db.chapter.findMany.mockResolvedValue([
+      { id: 'c-new', title: '新章', publishedTitle: null, status: 'draft', publishedRevision: null },
+      { id: 'c-draft', title: '草稿章', publishedTitle: null, status: 'draft', publishedRevision: null },
+      { id: 'c-live', title: '第五章 · 草稿名', publishedTitle: '第五章', status: 'published', publishedRevision: 38 },
+    ])
+    m.db.projectMemoryEntry.count.mockResolvedValue(3)
+    m.db.agentArtifact.count.mockResolvedValue(2)
+
+    await expect(previewLoopSessionRollback('u', 's', 'message')).resolves.toEqual({
+      removedChapters: [{ chapterId: 'c-new', title: '新章' }],
+      restoredChapters: [{ chapterId: 'c-draft', title: '草稿章' }],
+      protectedChapters: [{ chapterId: 'c-live', title: '第五章' }],
+      novelFields: ['summary'],
+      removedRunCount: 1,
+      removedMemoryCount: 3,
+      removedArtifactCount: 2,
+    })
+    expect(m.db.chapter.deleteMany).not.toHaveBeenCalled()
+    expect(m.db.chapter.updateMany).not.toHaveBeenCalled()
+    expect(m.db.agentRun.deleteMany).not.toHaveBeenCalled()
+    expect(m.db.projectMemoryEntry.deleteMany).not.toHaveBeenCalled()
+    expect(m.db.agentArtifact.deleteMany).not.toHaveBeenCalled()
   })
 })
 

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import {
   Check,
   CircleAlert,
+  CircleCheck,
   Copy,
   FileText,
   GitBranch,
@@ -12,6 +13,7 @@ import {
   Pencil,
   PencilLine,
   Pin,
+  ShieldCheck,
   SlidersHorizontal,
   SquarePen,
   Trash2,
@@ -25,6 +27,7 @@ import { copyToClipboard } from '@/lib/clipboard'
 import { cn } from '@/lib/utils'
 import type {
   AgentAttachmentMeta,
+  AgentRollbackImpactPreview,
   AgentSession,
   AgentStreamEvent,
   CreativeFreedom,
@@ -51,6 +54,7 @@ import {
   deleteAgentSessionMessage,
   fetchAgentSessionMessages,
   fetchAgentSessions,
+  fetchRollbackImpactPreview,
   fetchSessionsRunStatus,
   forkAgentSession,
   renameAgentSession,
@@ -358,6 +362,10 @@ export function AgentPanel({
     | null
   >(null)
   const [confirmBusy, setConfirmBusy] = useState(false)
+  // 回退影响预览：弹窗打开时拉取，与服务端执行共享同一分类逻辑
+  const [rollbackPreview, setRollbackPreview] = useState<RollbackPreviewState | null>(null)
+  // 操作成功提示（如回退后保留已发布章节）：下次操作或发送时清除
+  const [actionNotice, setActionNotice] = useState<string | null>(null)
   // 分支溯源：本会话是副本时后端随消息一起返回，用于底部「从聊天中继续」提示
   const [forkInfo, setForkInfo] = useState<{ sessionId: string; forkedAt: string | null } | null>(null)
   // 待确认的分支创建：messageId 为空表示从整段对话切分支
@@ -662,6 +670,7 @@ export function AgentPanel({
   const handleSend = useCallback(
     async (prompt: string, attachments: AgentAttachmentMeta[], freedom: CreativeFreedom, selectedQualityMode: StoryCompilerMode, pinnedSkillIds: string[], pinnedSubagentId?: string) => {
       setActionError(null)
+      setActionNotice(null)
       // 用户主动发言视为回到对话最新处，重新开启自动跟随
       pinnedToBottomRef.current = true
       try {
@@ -902,10 +911,27 @@ export function AgentPanel({
     }
   }, [sessionId, olderPagination, loadingOlder])
 
+  // 刚发出的用户消息在本地是临时 id（local-*），服务端落库用的是另一个 uuid：
+  // 直接拿临时 id 调删除/回退/预览会 404「消息不存在或已被删除」，先按 runId 对齐到真实 id
+  const resolveTargetMessageId = useCallback(async (messageId: string): Promise<string> => {
+    if (!messageId.startsWith('local-') || !sessionId) {
+      return messageId
+    }
+    const localMessage = useAgentStore
+      .getState()
+      .messages.find((item) => item.id === messageId)
+    const { messages: history } = await fetchAgentSessionMessages(sessionId)
+    const serverMessage = history.find(
+      (item) => item.role === 'user' && localMessage != null && item.runId === localMessage.runId,
+    )
+    return serverMessage?.id ?? messageId
+  }, [sessionId])
+
   const handleConfirmAction = useCallback(async () => {
     if (!confirmAction) {
       return
     }
+    setActionNotice(null)
     setConfirmBusy(true)
     try {
       if (confirmAction.kind === 'deleteSession') {
@@ -915,24 +941,18 @@ export function AgentPanel({
         // 这里再调 onNewSession 会抢先插一个空白窗口，把作者丢到欢迎页
         onSessionDeleted?.(confirmAction.sessionId)
       } else if (sessionId) {
-        // 刚发出的用户消息在本地是临时 id（local-*），服务端落库用的是另一个 uuid：
-        // 直接拿临时 id 调删除/回退会 404「消息不存在或已被删除」，先按 runId 对齐到真实 id
-        let targetMessageId = confirmAction.messageId
-        if (targetMessageId.startsWith('local-')) {
-          const localMessage = useAgentStore
-            .getState()
-            .messages.find((item) => item.id === targetMessageId)
-          const { messages: history } = await fetchAgentSessionMessages(sessionId)
-          const serverMessage = history.find(
-            (item) => item.role === 'user' && localMessage != null && item.runId === localMessage.runId,
-          )
-          targetMessageId = serverMessage?.id ?? targetMessageId
-        }
+        // 预览已对齐过的目标直接用；否则按 runId 对齐（本地临时 id → 服务端 uuid）
+        const targetMessageId = rollbackPreview?.sourceMessageId === confirmAction.messageId && rollbackPreview.targetMessageId
+          ? rollbackPreview.targetMessageId
+          : await resolveTargetMessageId(confirmAction.messageId)
         if (confirmAction.kind === 'deleteMessage') {
           await deleteAgentSessionMessage(sessionId, targetMessageId)
           await reloadMessages()
         } else {
-          await rollbackAgentSessionMessage(sessionId, targetMessageId)
+          const result = await rollbackAgentSessionMessage(sessionId, targetMessageId)
+          if (result.protectedChapters?.length) {
+            setActionNotice(`已保留 ${result.protectedChapters.length} 章已发布内容（${result.protectedChapters.map((chapter) => `《${chapter.title}》`).join('、')}），未随回退改动。`)
+          }
           await reloadMessages()
           onWorkspaceRollback?.()
         }
@@ -955,7 +975,7 @@ export function AgentPanel({
     } finally {
       setConfirmBusy(false)
     }
-  }, [confirmAction, sessionId, onSessionDeleted, onWorkspaceRollback, reloadMessages])
+  }, [confirmAction, sessionId, onSessionDeleted, onWorkspaceRollback, reloadMessages, resolveTargetMessageId, rollbackPreview])
 
   const confirmDialogCopy = confirmAction
     ? confirmAction.kind === 'deleteSession'
@@ -972,10 +992,42 @@ export function AgentPanel({
           }
         : {
             title: '回退到此对话之前',
-            description: '将撤销这轮及之后所有对话对作品的修改，并删除这些对话记录。此操作不可恢复。',
+            description: '将撤销这轮及之后所有对话对作品的修改，并删除这些对话记录。已发布章节的标题与正文会保留，不受回退影响。',
             confirmLabel: '回退',
           }
     : null
+
+  // 回退确认弹窗打开时加载影响预览：与服务端执行共享同一分类逻辑；
+  // 加载失败不阻断操作（后端执行时仍会保护已发布章节，此处仅作展示）
+  useEffect(() => {
+    if (confirmAction?.kind !== 'rollbackMessage' || !sessionId) {
+      setRollbackPreview(null)
+      return
+    }
+    const sourceMessageId = confirmAction.messageId
+    let cancelled = false
+    setRollbackPreview({ status: 'loading', sourceMessageId })
+    void (async () => {
+      try {
+        const targetMessageId = await resolveTargetMessageId(sourceMessageId)
+        const preview = await fetchRollbackImpactPreview(sessionId, targetMessageId)
+        if (!cancelled) {
+          setRollbackPreview({ status: 'ready', sourceMessageId, targetMessageId, preview })
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setRollbackPreview({
+            status: 'error',
+            sourceMessageId,
+            error: error instanceof Error ? error.message : '影响预览加载失败，回退仍会保护已发布章节。',
+          })
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [confirmAction, sessionId, resolveTargetMessageId])
 
   useLayoutEffect(() => {
     const node = scrollRef.current
@@ -1398,6 +1450,22 @@ export function AgentPanel({
         </div>
       ) : null}
 
+      {/* 操作成功提示（如回退后保留已发布章节） */}
+      {actionNotice ? (
+        <div className="mx-4 mb-2 flex items-start gap-2 rounded-[14px] border border-emerald-200 bg-emerald-50 px-3 py-2">
+          <CircleCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />
+          <p className="min-w-0 flex-1 text-xs leading-5 text-emerald-700">{actionNotice}</p>
+          <button
+            type="button"
+            onClick={() => setActionNotice(null)}
+            className="shrink-0 text-emerald-500 transition-colors hover:text-emerald-700"
+            aria-label="关闭提示"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ) : null}
+
       {/* 输入区 */}
       {skillRoute && skillRoute.selected.length > 0 ? (
         <div className="mx-4 mb-2 flex items-center gap-1.5 text-[11px] text-[var(--text-tertiary)]">
@@ -1488,7 +1556,11 @@ export function AgentPanel({
         busy={confirmBusy}
         onConfirm={() => void handleConfirmAction()}
         onCancel={() => setConfirmAction(null)}
-      />
+      >
+        {confirmAction?.kind === 'rollbackMessage' && rollbackPreview?.sourceMessageId === confirmAction.messageId ? (
+          <RollbackImpactPreviewBody state={rollbackPreview} />
+        ) : null}
+      </ConfirmDialog>
       <DangerConfirmDialog
         open={Boolean(forkTarget)}
         tone="default"
@@ -1509,6 +1581,70 @@ export function AgentPanel({
       />
       {/* 任务重命名弹窗（原 StudioCommandBar 任务三点菜单迁入） */}
       {taskRenaming ? <div className="fixed inset-0 z-[170] flex items-center justify-center bg-black/25 p-4" onMouseDown={() => setTaskRenaming(false)}><form onSubmit={(event) => { event.preventDefault(); if (taskTitleDraft.trim()) onRenameTask?.(taskTitleDraft.trim()); setTaskRenaming(false) }} onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-md rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-2xl"><h2 className="text-sm font-semibold">编辑任务名称</h2><input autoFocus maxLength={160} value={taskTitleDraft} onChange={(event) => setTaskTitleDraft(event.target.value)} className="mt-4 h-10 w-full rounded-[9px] border border-[var(--border-subtle)] bg-transparent px-3 text-sm outline-none focus:border-[var(--border-strong)]" /><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setTaskRenaming(false)} className="h-9 rounded-[9px] px-3 text-xs hover:bg-[var(--surface-muted)]">取消</button><button type="submit" disabled={!taskTitleDraft.trim()} className="h-9 rounded-[9px] bg-[var(--surface-contrast)] px-4 text-xs font-medium text-[var(--text-contrast)] disabled:opacity-45">保存</button></div></form></div> : null}
+    </div>
+  )
+}
+
+const ROLLBACK_NOVEL_FIELD_LABELS: Record<string, string> = {
+  title: '作品标题',
+  summary: '作品简介',
+  coverPrompt: '封面描述',
+  coverAssetId: '作品封面',
+  status: '发布状态',
+}
+
+type RollbackPreviewState = {
+  status: 'loading' | 'ready' | 'error'
+  sourceMessageId: string
+  targetMessageId?: string
+  preview?: AgentRollbackImpactPreview
+  error?: string
+}
+
+/** 回退确认弹窗的影响清单：已发布章节的保留提示放在最前，让作者先看到什么不会被改动 */
+function RollbackImpactPreviewBody({ state }: { state: RollbackPreviewState }) {
+  if (state.status === 'loading') {
+    return (
+      <p className="mt-4 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-muted)]/60 px-3 py-2.5 text-xs leading-5 text-[var(--text-tertiary)]">
+        正在计算影响范围…
+      </p>
+    )
+  }
+  if (state.status === 'error' || !state.preview) {
+    return (
+      <p className="mt-4 rounded-[14px] border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs leading-5 text-rose-600">
+        {state.error ?? '影响预览加载失败，回退仍会保护已发布章节。'}
+      </p>
+    )
+  }
+  const { preview } = state
+  return (
+    <div className="mt-4 space-y-2 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-muted)]/60 px-3 py-2.5 text-xs leading-5 text-[var(--text-secondary)]">
+      {preview.protectedChapters.length ? (
+        <p className="flex items-start gap-1.5 text-emerald-700">
+          <ShieldCheck className="mt-1 h-3.5 w-3.5 shrink-0" />
+          <span>已发布章节保留不改动：{preview.protectedChapters.map((chapter) => `《${chapter.title}》`).join('、')}</span>
+        </p>
+      ) : null}
+      {preview.removedChapters.length ? (
+        <p>将删除未发布章节：{preview.removedChapters.map((chapter) => `《${chapter.title}》`).join('、')}</p>
+      ) : null}
+      {preview.restoredChapters.length ? (
+        <p>将还原为历史正文：{preview.restoredChapters.map((chapter) => `《${chapter.title}》`).join('、')}</p>
+      ) : null}
+      {!preview.removedChapters.length && !preview.restoredChapters.length && !preview.protectedChapters.length ? (
+        <p>未检测到对章节内容的改动。</p>
+      ) : null}
+      {preview.novelFields.length ? (
+        <p>将还原作品信息：{preview.novelFields.map((field) => ROLLBACK_NOVEL_FIELD_LABELS[field] ?? field).join('、')}</p>
+      ) : null}
+      <p>
+        将删除 {preview.removedRunCount} 轮对话记录
+        {preview.removedMemoryCount > 0 || preview.removedArtifactCount > 0
+          ? `（含 ${preview.removedMemoryCount} 条项目记忆、${preview.removedArtifactCount} 个产物）`
+          : ''}
+        。
+      </p>
     </div>
   )
 }

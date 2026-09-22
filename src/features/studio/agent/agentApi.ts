@@ -13,6 +13,8 @@ import type {
   ModelReasoningEffort,
   ResolveAgentApprovalRequest,
   ResolveAgentQuestionRequest,
+  AgentRollbackImpactPreview,
+  AgentRollbackResult,
   StartAgentLoopRunRequest,
   StartAgentLoopRunResponse,
   StoryMemoryCard,
@@ -374,14 +376,24 @@ export function deleteAgentSessionMessage(
   )
 }
 
-/** 回退到某轮对话之前：逆序恢复写操作快照并删除该轮及之后的对话 */
+/** 回退到某轮对话之前：逆序恢复写操作快照并删除该轮及之后的对话；已发布章节保留不改动 */
 export function rollbackAgentSessionMessage(
   sessionId: string,
   messageId: string,
-): Promise<{ rolledBack: true; removedRunCount: number }> {
-  return requestData<{ rolledBack: true; removedRunCount: number }>(
+): Promise<AgentRollbackResult> {
+  return requestData<AgentRollbackResult>(
     `/api/agent/sessions/${sessionId}/messages/${messageId}/rollback`,
     { method: 'POST' },
+  )
+}
+
+/** 回退影响预览：确认弹窗展示将删除/还原/保留的章节与对话记录（与服务端执行同一分类逻辑） */
+export function fetchRollbackImpactPreview(
+  sessionId: string,
+  messageId: string,
+): Promise<AgentRollbackImpactPreview> {
+  return requestData<AgentRollbackImpactPreview>(
+    `/api/agent/sessions/${sessionId}/messages/${messageId}/rollback-preview`,
   )
 }
 

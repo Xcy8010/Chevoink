@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
 import { createPortal } from 'react-dom'
 
@@ -13,6 +14,8 @@ type ConfirmDialogProps = {
   busy?: boolean
   onConfirm: () => void
   onCancel: () => void
+  /** 描述下方的自定义内容（如回退影响预览清单） */
+  children?: ReactNode
 }
 
 export default function ConfirmDialog({
@@ -25,6 +28,7 @@ export default function ConfirmDialog({
   busy = false,
   onConfirm,
   onCancel,
+  children,
 }: ConfirmDialogProps) {
   if (!open) {
     return null
@@ -59,6 +63,8 @@ export default function ConfirmDialog({
             <X className="h-4 w-4" />
           </Button>
         </div>
+
+        {children}
 
         <div className="mt-6 flex items-center justify-end gap-2">
           <Button onClick={onCancel} variant="ghost" disabled={busy}>

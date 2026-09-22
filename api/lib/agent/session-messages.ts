@@ -1,6 +1,7 @@
+import type { Prisma } from '@prisma/client'
 import { readAuthorEnded } from './author-ended.js'
 import type { AgentRun } from '../../../shared/contracts/index.js'
-import type { AgentRollbackSnapshot, AgentUIMessage } from '../../../shared/contracts/index.js'
+import type { AgentRollbackChapterRef, AgentRollbackImpactPreview, AgentRollbackResult, AgentRollbackSnapshot, AgentUIMessage } from '../../../shared/contracts/index.js'
 import type { AgentMessagePart } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { activeChapterScope, assertActiveWriteCount, recalculateNovelStats, updateActiveChapter } from '../data/internal.js'
@@ -316,15 +317,93 @@ function collectRollbackActions(records: Array<{ parts: unknown }>): CollectedRo
   return actions
 }
 
-/**
- * 回退到某轮对话之前：逆序重放该轮及之后所有写操作的快照（新建章节直接删除），
- * 然后删除这些 run（级联清理消息/事件/记忆/产物）。
- */
-export async function rollbackLoopSessionFromMessage(
+type RollbackChapterRow = {
+  id: string
+  title: string
+  publishedTitle: string | null
+  status: string
+  publishedRevision: number | null
+}
+
+type RollbackClassification = {
+  missingIds: string[]
+  removedRefs: AgentRollbackChapterRef[]
+  restoredRefs: AgentRollbackChapterRef[]
+  protectedRefs: AgentRollbackChapterRef[]
+  novelFields: string[]
+}
+
+/** 已发布章节的创作稿不允许被回退破坏：新建章节的删除、正文/标题的快照还原一律跳过。
+ * 否则章节行会被物理删除（读者端断链消失），或正文被还原成空快照（创作区被清空）。 */
+function isPublishedChapterRow(row: Pick<RollbackChapterRow, 'status' | 'publishedRevision'>): boolean {
+  return row.status === 'published' || row.publishedRevision != null
+}
+
+/** 分类回退动作的目标：不存在的目标保持原 409 语义；已发布章节进保护清单；其余按删除/还原归类 */
+async function classifyRollbackActions(
+  db: Prisma.TransactionClient,
+  userId: string,
+  novelId: string,
+  actions: CollectedRollback[],
+): Promise<RollbackClassification> {
+  const chapterIds = [...new Set(actions.flatMap(action => action.kind === 'created_chapter'
+    ? [action.chapterId] : action.snapshot.target === 'chapter' ? [action.snapshot.targetId] : []))]
+  const rows: RollbackChapterRow[] = chapterIds.length
+    ? await db.chapter.findMany({
+        where: { id: { in: chapterIds }, authorId: userId, ...activeChapterScope(novelId) },
+        select: { id: true, title: true, publishedTitle: true, status: true, publishedRevision: true },
+      })
+    : []
+  const byId = new Map(rows.map(row => [row.id, row] as const))
+  const toRef = (row: RollbackChapterRow): AgentRollbackChapterRef => ({ chapterId: row.id, title: row.publishedTitle ?? row.title })
+
+  const classification: RollbackClassification = { missingIds: [], removedRefs: [], restoredRefs: [], protectedRefs: [], novelFields: [] }
+  const protectedIds = new Set<string>()
+  const removedIds = new Set<string>()
+  const restoredIds = new Set<string>()
+
+  for (const action of actions) {
+    if (action.kind === 'snapshot' && action.snapshot.target === 'novel') {
+      if (!classification.novelFields.includes(action.snapshot.field)) {
+        classification.novelFields.push(action.snapshot.field)
+      }
+      continue
+    }
+
+    const chapterId = action.kind === 'created_chapter' ? action.chapterId : action.snapshot.targetId
+    const row = byId.get(chapterId)
+    if (!row) {
+      if (!classification.missingIds.includes(chapterId)) {
+        classification.missingIds.push(chapterId)
+      }
+      continue
+    }
+
+    if (isPublishedChapterRow(row)) {
+      if (!protectedIds.has(chapterId)) {
+        protectedIds.add(chapterId)
+        classification.protectedRefs.push(toRef(row))
+      }
+    } else if (action.kind === 'created_chapter') {
+      if (!removedIds.has(chapterId)) {
+        removedIds.add(chapterId)
+        classification.removedRefs.push(toRef(row))
+      }
+    } else if (!restoredIds.has(chapterId)) {
+      restoredIds.add(chapterId)
+      classification.restoredRefs.push(toRef(row))
+    }
+  }
+
+  return classification
+}
+
+/** 回退执行与影响预览共用的目标解析：校验会话归属与活跃 run，返回待回退的 run 与动作清单 */
+async function resolveRollbackScope(
   userId: string,
   sessionId: string,
   messageId: string,
-): Promise<{ rolledBack: true; removedRunCount: number }> {
+): Promise<{ session: { id: string; novelId: string }; runIds: string[]; actions: CollectedRollback[] }> {
   const { session, message } = await findOwnedSessionMessage(userId, sessionId, messageId)
 
   const targetRun = await prisma.agentRun.findUnique({
@@ -350,18 +429,35 @@ export async function rollbackLoopSessionFromMessage(
 
   // 后发生的先恢复：同一字段多次写入时最终回到最早的 previousValue
   const actions = collectRollbackActions(records).reverse()
+  return { session, runIds, actions }
+}
 
-  await prisma.$transaction(async (tx) => {
+/**
+ * 回退到某轮对话之前：逆序重放该轮及之后所有写操作的快照（新建章节直接删除），
+ * 然后删除这些 run（级联清理消息/事件/记忆/产物）。
+ * 已发布章节受保护：新建删除与正文/标题快照还原一律跳过，只保留现状。
+ */
+export async function rollbackLoopSessionFromMessage(
+  userId: string,
+  sessionId: string,
+  messageId: string,
+): Promise<AgentRollbackResult> {
+  const { session, runIds, actions } = await resolveRollbackScope(userId, sessionId, messageId)
+
+  const result = await prisma.$transaction(async (tx) => {
     await lockNovelActiveScope(tx, session.novelId)
     for (const runId of runIds) await assertAgentManuscriptCurrent(tx, { userId, novelId: session.novelId, runId })
     // Validate the entire rollback before deleting history or touching content.
     // Old run snapshots are not authority to modify import-retained chapters.
-    const targetIds = [...new Set(actions.flatMap(action => action.kind === 'created_chapter'
-      ? [action.chapterId] : action.snapshot.target === 'chapter' ? [action.snapshot.targetId] : []))]
-    const activeTargets = await tx.chapter.count({ where: { id: { in: targetIds }, authorId: userId, ...activeChapterScope(session.novelId) } })
-    if (activeTargets !== targetIds.length) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '回滚目标已归档或不存在，未修改正文或任务历史。')
+    // 已发布章节进入保护清单：读者端不能因回退断链，创作区正文也不能被回退清空。
+    const classification = await classifyRollbackActions(tx, userId, session.novelId, actions)
+    if (classification.missingIds.length) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '回滚目标已归档或不存在，未修改正文或任务历史。')
+    const protectedIds = new Set(classification.protectedRefs.map((reference) => reference.chapterId))
     for (const action of actions) {
       if (action.kind === 'created_chapter') {
+        if (protectedIds.has(action.chapterId)) {
+          continue
+        }
         const deleted = await tx.chapter.deleteMany({ where: { id: action.chapterId, authorId: userId, ...activeChapterScope(session.novelId) } })
         assertActiveWriteCount(deleted.count, 'chapter')
         continue
@@ -369,6 +465,9 @@ export async function rollbackLoopSessionFromMessage(
 
       const { snapshot } = action
       if (snapshot.target === 'chapter') {
+        if (protectedIds.has(snapshot.targetId)) {
+          continue
+        }
         const exists = await tx.chapter.findFirst({
           where: { id: snapshot.targetId, authorId: userId, ...activeChapterScope(session.novelId) },
           select: { id: true, revision: true },
@@ -418,7 +517,37 @@ export async function rollbackLoopSessionFromMessage(
     await tx.projectMemoryEntry.deleteMany({ where: { runId: { in: runIds } } })
     await tx.agentArtifact.deleteMany({ where: { runId: { in: runIds } } })
     await tx.agentRun.deleteMany({ where: { id: { in: runIds } } })
+
+    return { protectedChapters: classification.protectedRefs }
   })
 
-  return { rolledBack: true, removedRunCount: runIds.length }
+  return { rolledBack: true, removedRunCount: runIds.length, protectedChapters: result.protectedChapters }
+}
+
+/** 回退影响预览（只读）：确认弹窗前展示将删除/还原/保留的内容，不写任何数据；
+ * 与服务端执行共享同一分类逻辑，预览与回退结果保持一致 */
+export async function previewLoopSessionRollback(
+  userId: string,
+  sessionId: string,
+  messageId: string,
+): Promise<AgentRollbackImpactPreview> {
+  const { session, runIds, actions } = await resolveRollbackScope(userId, sessionId, messageId)
+
+  const classification = await classifyRollbackActions(prisma, userId, session.novelId, actions)
+  if (classification.missingIds.length) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '回滚目标已归档或不存在，未修改正文或任务历史。')
+
+  const [removedMemoryCount, removedArtifactCount] = await Promise.all([
+    prisma.projectMemoryEntry.count({ where: { runId: { in: runIds } } }),
+    prisma.agentArtifact.count({ where: { runId: { in: runIds } } }),
+  ])
+
+  return {
+    removedChapters: classification.removedRefs,
+    restoredChapters: classification.restoredRefs,
+    protectedChapters: classification.protectedRefs,
+    novelFields: classification.novelFields,
+    removedRunCount: runIds.length,
+    removedMemoryCount,
+    removedArtifactCount,
+  }
 }

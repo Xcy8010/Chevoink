@@ -224,6 +224,37 @@ export interface AgentRollbackSnapshot {
   previousValue: string | null
 }
 
+/** 回退影响的章节引用：已发布章节优先展示读者可见的发布标题 */
+export interface AgentRollbackChapterRef {
+  chapterId: EntityId
+  title: string
+}
+
+/** 回退影响预览：确认弹窗在回退前向作者展示将删除/还原/保留的内容 */
+export interface AgentRollbackImpactPreview {
+  /** 将被删除的未发布新建章节 */
+  removedChapters: AgentRollbackChapterRef[]
+  /** 将被还原为历史正文/标题的未发布章节 */
+  restoredChapters: AgentRollbackChapterRef[]
+  /** 已发布章节：标题与正文不随回退改动，保留现状 */
+  protectedChapters: AgentRollbackChapterRef[]
+  /** 将被还原的作品信息字段（title/summary/coverPrompt/coverAssetId/status） */
+  novelFields: string[]
+  /** 将被删除的对话轮数 */
+  removedRunCount: number
+  /** 随对话一并删除的项目记忆条数 */
+  removedMemoryCount: number
+  /** 随对话一并删除的产物数量 */
+  removedArtifactCount: number
+}
+
+/** 回退执行结果：删除的对话轮数 + 受保护的已发布章节清单（前端据此提示「已保留」） */
+export interface AgentRollbackResult {
+  rolledBack: true
+  removedRunCount: number
+  protectedChapters: AgentRollbackChapterRef[]
+}
+
 export interface AgentRunAgentSummary {
   type: string
   title: string
