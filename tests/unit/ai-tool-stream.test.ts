@@ -128,6 +128,11 @@ describe('lossless tool argument transport', () => {
     await expect(invoke()).rejects.toMatchObject({ code: 'AI_PROVIDER_INCOMPLETE' })
     expect(fetch).toHaveBeenCalledTimes(1)
   })
+  it('classifies a connection-level transport failure without retrying the request', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed') }))
+    await expect(invoke()).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR', status: 502 })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
   it('requests native tool calls during correction without changing the allowed tool list', async () => {
     stream(`data: ${JSON.stringify(delta('{}', true))}\n\ndata: ${JSON.stringify(ending('tool_calls'))}\n\n`)
     const tools = [{ type: 'function' as const, function: { name: 'scene_task_build', description: 'test', parameters: { type: 'object' } } }]

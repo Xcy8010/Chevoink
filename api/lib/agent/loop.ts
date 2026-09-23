@@ -544,8 +544,11 @@ async function finalizeLegacyRun(
       },
       select: { userId: true, sessionId: true, novelId: true, taskSpec: true },
     }))
-    .catch(() => {
-      console.error('[agent-loop] run 状态落库未确认', { runId, requestedStatus: dbStatus })
+    .catch((error) => {
+      // R01/R09：不确定的提交结果不得重试或改写终态；但错误详情必须保留，
+      // 否则只能靠事后推断（如事务超时/连接抖动），无法定位卡死原因。
+      console.error('[agent-loop] run 状态落库未确认', { runId, requestedStatus: dbStatus,
+        reason: error instanceof Error ? error.message : String(error) })
       return null
     })
   const finalizedRun = committed?.result

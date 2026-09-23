@@ -1,7 +1,7 @@
 import app from './app.js'
 import { dispatchStyleLearning } from './lib/agent/style-learning.js'
 import { env } from './config/env.js'
-import { recoverOrphanLoopRuns, recoverDurableLoopRuns } from './lib/agent/run-service.js'
+import { recoverOrphanLoopRuns, recoverDurableLoopRuns, recoverStaleLoopRuns } from './lib/agent/run-service.js'
 import { runDueAgentSchedules } from './lib/agent/productivity.js'
 import { dispatchQueuedRequests } from './lib/agent/request-queue.js'
 import { reconcileCreditRefunds, reconcileTokenSettlements } from './lib/credits.js'
@@ -33,6 +33,8 @@ function recoverSavedTasks() {
   void recoverDurableLoopRuns().catch(() => {
     console.error('[agent-loop] 持久任务恢复扫描失败，原状态保留，等待下一次扫描')
   })
+  // 运行期僵尸收敛：终态落库失败/执行器异常退出的旧协议 run 不会等到下次重启才收尾
+  void recoverStaleLoopRuns()
   if (!refundSweepRunning) {
     refundSweepRunning = true
     void Promise.allSettled([reconcileCreditRefunds(), reconcileTokenSettlements()]).then(results => {

@@ -26,7 +26,7 @@ import { planTargetHash } from '../../api/lib/agent/tools/durable-plan.js'
 import type { AgentTool, ToolContext } from '../../api/lib/agent/tools/types.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { fenceLocallyStoppedLegacyRun, pauseDurableTask, pauseLegacyOrphanRun, recoverLegacyOrphanRun, finalizeDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
-import { stopLoopRun, streamLoopRun, executePersistedLoopRun, initializePersistedLoopRun, recoverDurableLoopRuns, continueLoopRun, deleteAgentSessionData } from '../../api/lib/agent/run-service.js'
+import { stopLoopRun, streamLoopRun, executePersistedLoopRun, initializePersistedLoopRun, recoverDurableLoopRuns, recoverStaleLoopRuns, continueLoopRun, deleteAgentSessionData } from '../../api/lib/agent/run-service.js'
 import * as contextAssembler from '../../api/lib/agent/context.js'
 import * as agentDefinitions from '../../api/lib/agent/agents.js'
 import { getActiveRun, countActiveRunsByUser, registerActiveRun, deregisterActiveRun } from '../../api/lib/agent/active-runs.js'
@@ -3646,6 +3646,30 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
           .toMatchObject({ billingStatus: 'pending_usage', usageSource: 'unknown', requestTokens: null, responseTokens: null, creditChargeMilli: 0 })
       } finally {
         await prisma.aiUsageLog.delete({ where: { id: usage.id } })
+      }
+    })
+  })
+
+  it('sweeps executor-less stale protocol-zero runs while protecting a locally registered executor', async () => {
+    await fixture(async f => {
+      const quiet = new Date(Date.now() - 30 * 60_000)
+      const zombie = await prisma.agentRun.create({ data: { id: randomUUID(), userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
+        status: 'running', engine: 'loop', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator' } })
+      const registered = await prisma.agentRun.create({ data: { id: randomUUID(), userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
+        status: 'running', engine: 'loop', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator' } })
+      await prisma.agentRun.updateMany({ where: { id: { in: [zombie.id, registered.id] } }, data: { updatedAt: quiet } })
+      registerActiveRun(registered.id, { controller: new AbortController(), sessionId: f.sessionId, userId: f.userId })
+      try {
+        await recoverStaleLoopRuns()
+        expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: zombie.id } })).status).toBe('failed')
+        expect(await prisma.agentMessage.count({ where: { runId: zombie.id } })).toBe(1)
+        expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: registered.id } })).status).toBe('running')
+        // 幂等重扫：已收敛的行不再入选，仍在内存注册的 run 不受打扰
+        await recoverStaleLoopRuns()
+        expect(await prisma.agentMessage.count({ where: { runId: zombie.id } })).toBe(1)
+        expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: registered.id } })).status).toBe('running')
+      } finally {
+        deregisterActiveRun(registered.id)
       }
     })
   })

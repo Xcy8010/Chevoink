@@ -1,8 +1,8 @@
 import { expect, it, vi } from 'vitest'
-const mocks = vi.hoisted(() => ({ recover: vi.fn(), durable: vi.fn().mockResolvedValue([]), listen: vi.fn((_port: number, _host: string, ready: () => void) => { ready(); return { close: vi.fn() } }), schedules: vi.fn(), queue: vi.fn(), styleQueue: vi.fn().mockResolvedValue(undefined) }))
+const mocks = vi.hoisted(() => ({ recover: vi.fn(), durable: vi.fn().mockResolvedValue([]), stale: vi.fn().mockResolvedValue(undefined), listen: vi.fn((_port: number, _host: string, ready: () => void) => { ready(); return { close: vi.fn() } }), schedules: vi.fn(), queue: vi.fn(), styleQueue: vi.fn().mockResolvedValue(undefined) }))
 vi.mock('../../api/app.js', () => ({ default: { listen: mocks.listen } }))
 vi.mock('../../api/config/env.js', () => ({ env: { port: 3001, serverUrl: 'test' } }))
-vi.mock('../../api/lib/agent/run-service.js', () => ({ recoverOrphanLoopRuns: mocks.recover, recoverDurableLoopRuns: mocks.durable }))
+vi.mock('../../api/lib/agent/run-service.js', () => ({ recoverOrphanLoopRuns: mocks.recover, recoverDurableLoopRuns: mocks.durable, recoverStaleLoopRuns: mocks.stale }))
 vi.mock('../../api/lib/agent/productivity.js', () => ({ runDueAgentSchedules: mocks.schedules }))
 vi.mock('../../api/lib/agent/request-queue.js', () => ({ dispatchQueuedRequests: mocks.queue }))
 vi.mock('../../api/lib/agent/style-learning.js', () => ({ dispatchStyleLearning: mocks.styleQueue }))
@@ -19,9 +19,12 @@ it('finishes orphan recovery before listening or launching scheduled/queued runs
   expect(mocks.queue).not.toHaveBeenCalled()
   expect(mocks.styleQueue).not.toHaveBeenCalled()
   expect(mocks.durable).not.toHaveBeenCalled()
+  expect(mocks.stale).not.toHaveBeenCalled()
   finish()
   await starting
   expect(mocks.listen).toHaveBeenCalledTimes(1)
   expect(mocks.schedules).toHaveBeenCalledTimes(1)
   expect(mocks.durable).toHaveBeenCalledTimes(1)
+  // 60s 周期扫描挂载点：监听就绪后的恢复流程必须拉起运行期僵尸收敛看门狗
+  expect(mocks.stale).toHaveBeenCalledTimes(1)
 }, 20_000)

@@ -671,6 +671,12 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     if (!params.signal?.aborted && error instanceof TypeError && error.message === 'terminated') {
       throw new DataAccessError(502, 'AI_PROVIDER_INCOMPLETE', '模型连接中途断开，未取得完整结果；本轮工具未执行，已保存内容和已知用量保留。请稍后继续当前任务。')
     }
+    if (!params.signal?.aborted && error instanceof TypeError && error.message === 'fetch failed') {
+      // 连接层失败（DNS/握手/连接超时，Node undici 统一报 fetch failed）：包装为可分类的
+      // 供应商故障，避免裸 TypeError 冒到运行循环顶层退化成通用“内部异常”，也让工具路径
+      // 能按供应商故障给出可恢复指引。本路径不自动重试，不会重复扣费。
+      throw new DataAccessError(502, 'AI_PROVIDER_ERROR', '模型服务网络连接失败，本轮请求未完成；已保存内容和已知用量保留。请稍后继续当前任务。')
+    }
     throw error
   }
 

@@ -660,7 +660,57 @@ export async function recoverOrphanLoopRuns(): Promise<void> {
   }
 }
 
-/** 续跑时的模型选择：跟随作者当前选择；缺省沿用原任务档位。 */
+/**
+ * 运行期兜底（周期扫描）：进程存活期间产生的僵尸 run 收敛。
+ * 启动清理（recoverOrphanLoopRuns）只在进程启动时执行一次；若运行期间终态落库失败
+ * （事务超时/网络抖动）或执行器提前退出，run 会永远停在 queued/running，前端侧栏
+ * 持续“执行中”转圈。这里周期扫描「数据库仍活跃 + 本地无执行器 + 超过静谧窗口」的
+ * 旧协议 run，复用启动清理的收敛函数收尾（事务幂等：run 已终结时不重复补消息）。
+ * 静谧窗口只用于排除刚创建/刚退出的竞态，真正的活跃判据是本地执行器登记：
+ * 等待作者审批的长挂起任务仍在内存中，不会被误杀。
+ */
+const STALE_LOOP_RUN_QUIET_MS = 5 * 60_000
+let staleSweepRunning = false
+
+export async function recoverStaleLoopRuns(): Promise<void> {
+  if (staleSweepRunning) return
+  staleSweepRunning = true
+  try {
+    const cutoff = new Date(Date.now() - STALE_LOOP_RUN_QUIET_MS)
+    const stale = await prisma.agentRun.findMany({
+      where: {
+        engine: 'loop', runtimeProtocolVersion: 0, taskRootId: null,
+        status: { in: ['queued', 'running', 'awaiting_approval'] },
+        updatedAt: { lt: cutoff },
+      },
+      orderBy: { updatedAt: 'asc' }, take: 50,
+      select: { id: true, userId: true },
+    })
+    let recovered = 0
+    for (const run of stale) {
+      if (getActiveRun(run.id)) continue
+      try {
+        if (await recoverLegacyOrphanRun(run.userId, run.id)) recovered += 1
+      } catch (error) {
+        // 单条失败不得阻塞本轮其余候选：下轮扫描会重试（已收敛的行不再入选）
+        console.error('[agent-loop] 陈旧任务单条收敛失败，等待下一次扫描', { runId: run.id,
+          reason: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    if (recovered > 0) {
+      console.log(`[agent-loop] 陈旧任务收敛：${recovered} 个无执行器的进行中任务已标记为中断`)
+    }
+  } catch (error) {
+    // 扫描失败不是业务失败：保留原状态，等待下一次周期扫描重试
+    console.error('[agent-loop] 陈旧任务收敛扫描失败，等待下一次扫描', error)
+  } finally {
+    staleSweepRunning = false
+  }
+}
+
+/**
+ * 续跑时的模型选择：跟随作者当前选择；缺省沿用原任务档位。
+ */
 export type ContinueLoopRunModelSelection = {
   modelTier?: CreditModelTier
   customModelId?: string | null
