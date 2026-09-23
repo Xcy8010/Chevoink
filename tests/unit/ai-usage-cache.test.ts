@@ -122,12 +122,15 @@ describe('输出预算参数名适配', () => {
 })
 
 describe('评审调用推理降级', () => {
-  it('MiMo 的有界评审强制关思考（含主机名识别），其余供应商与显式 none 不受影响', () => {
+  it('有界评审对 MiMo/DeepSeek/GLM 强制关思考（含主机名与模型名识别），未知网关与显式 none 不受影响', () => {
     expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'xiaomi', model: 'mimo-v2.6-flash' })).toBe('none')
     expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'proxy', providerBaseUrl: 'https://api.xiaomimimo.com/v1', model: 'thinking-flash' })).toBe('none')
     expect(resolveBoundedReviewReasoningEffort(true, 'none', { provider: 'xiaomi', model: 'mimo-v2.6-flash' })).toBe('none')
-    expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'deepseek', model: 'deepseek-v4-flash' })).toBe('low')
+    expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'deepseek', model: 'deepseek-v4-flash' })).toBe('none')
+    expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'BigModel', model: 'glm-4.6' })).toBe('none')
+    expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'proxy', model: 'glm-4.5-air' })).toBe('none')
+    expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'openrouter', model: 'qwen3-max' })).toBe('low')
     expect(resolveBoundedReviewReasoningEffort(false, 'low', { provider: 'xiaomi', model: 'mimo-v2.6-flash' })).toBe('low')
-    expect(resolveBoundedReviewReasoningEffort(undefined, 'high', { provider: 'xiaomi', model: 'mimo-v2.6-flash' })).toBe('high')
+    expect(resolveBoundedReviewReasoningEffort(undefined, 'high', { provider: 'deepseek', model: 'deepseek-v4-flash' })).toBe('high')
   })
 })

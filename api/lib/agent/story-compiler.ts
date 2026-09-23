@@ -42,10 +42,36 @@ const clip = (value: string, max: number): string =>
 
 export const MAX_CONTINUITY_AUTO_REPAIRS = 1
 
+/** 连续未收敛检查的硬上限：同一次编译累计仍含 error 的检查达到该数后停止自动复查，
+ * 只把最近证据交给作者，避免“改一句→重查→又报别处”的循环反复磨损正文；
+ * 任一 0 error 的检查会把计数清零，作者显式指定 focus 的复核不受限。 */
+export const MAX_CONTINUITY_CHECKS = 3
+
 export function continuityRepairRounds(validation: unknown): number {
   if (!validation || typeof validation !== 'object' || Array.isArray(validation)) return 0
   const value = (validation as Record<string, unknown>).autoRepairRounds
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0
+}
+
+export function continuityCheckRounds(validation: unknown): number {
+  if (!validation || typeof validation !== 'object' || Array.isArray(validation)) return 0
+  const value = (validation as Record<string, unknown>).checkRounds
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0
+}
+
+/** Reserve before dispatch, so a failed critic pass cannot restart an unbounded check loop;
+ * a later 0-error report resets the counter in validateStoryContinuity. */
+export async function reserveContinuityCheck(userId: string, novelId: string, compilationId: string): Promise<boolean> {
+  return prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilationId} AND user_id = ${userId} AND novel_id = ${novelId} FOR UPDATE`
+    const compilation = await tx.storyCompilation.findFirst({ where: { id: compilationId, userId, novelId, status: 'active' } })
+    if (!compilation || continuityCheckRounds(compilation.validation) >= MAX_CONTINUITY_CHECKS) return false
+    const previous = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
+    await tx.storyCompilation.update({ where: { id: compilationId }, data: {
+      validation: { ...previous, checkRounds: continuityCheckRounds(previous) + 1 } as Prisma.InputJsonValue,
+    } })
+    return true
+  })
 }
 
 /** Reserve before dispatch, so crashes/resumes cannot restart an automatic repair loop. */
@@ -463,7 +489,7 @@ export async function validateStoryContinuity(input: {
   expectedChapterRevision?: number
   independentCheck?: 'complete' | 'unavailable'
   coverage?: { version: 1; contentHash: string; charCount: number; sourceHash: string | null }
-}, transaction?: Prisma.TransactionClient): Promise<{ checkedChapterId: string; checkedRevision: number; checkedAt: string; independentCheck: 'complete' | 'unavailable'; findings: ContinuityFindingInput[]; errorCount: number; warningCount: number }> {
+}, transaction?: Prisma.TransactionClient): Promise<{ checkedChapterId: string; checkedRevision: number; checkedAt: string; independentCheck: 'complete' | 'unavailable'; findings: ContinuityFindingInput[]; errorCount: number; warningCount: number; autoRepairRounds: number; checkRounds: number }> {
   if (!transaction) return prisma.$transaction(tx => validateStoryContinuity(input, tx))
   const db = transaction
   await lockNovelActiveScope(db, input.novelId)
@@ -502,8 +528,11 @@ export async function validateStoryContinuity(input: {
     }
   }
   const findings = [...deterministic, ...input.findings]
+  // 仍含 error 则保留计数（legacy 路径已由 reserveContinuityCheck 预留 +1），全部通过则清零。
+  const nextCheckRounds = findings.some((item) => item.severity === 'error') ? continuityCheckRounds(compilation.validation) : 0
   const validation = {
     autoRepairRounds: continuityRepairRounds(compilation.validation),
+    checkRounds: nextCheckRounds,
     checkedChapterId: compilation.chapter.id,
     checkedRevision: compilation.chapter.revision,
     checkedAt: new Date().toISOString(),

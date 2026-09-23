@@ -21,7 +21,10 @@ import {
   upsertStoryCharter,
   validateStoryContinuity,
   reserveContinuityRepair,
+  reserveContinuityCheck,
   continuityRepairRounds,
+  continuityCheckRounds,
+  MAX_CONTINUITY_CHECKS,
   buildStoryCompilerDigest,
 } from '../../api/lib/agent/story-compiler.js'
 
@@ -137,6 +140,21 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     const rePrepared = await prepareStoryCompilation(input)
     expect(continuityRepairRounds(rePrepared.compilation.validation)).toBe(1)
     expect(await reserveContinuityRepair(userId, novelId, rePrepared.compilation.id)).toBe(false)
+  })
+
+  it('连续性检查额度：并发不超发、仍含错误时累计、0 错误检查清零并重新放行', async () => {
+    const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { runId, chapterId: chapter3Id, status: 'active' }, orderBy: { createdAt: 'desc' } })
+    const attempts = await Promise.all(Array.from({ length: 4 }, () => reserveContinuityCheck(userId, novelId, compilation.id)))
+    expect(attempts.filter(Boolean)).toHaveLength(MAX_CONTINUITY_CHECKS)
+    expect(await reserveContinuityCheck(userId, novelId, compilation.id)).toBe(false)
+    await validateStoryContinuity({ userId, novelId, compilationId: compilation.id,
+      findings: [{ signal: 'body', severity: 'error', evidence: '林舟左臂受伤', suggestion: '保留伤势限制' }], independentCheck: 'complete' })
+    const afterError = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+    expect(continuityCheckRounds(afterError.validation)).toBe(MAX_CONTINUITY_CHECKS)
+    await validateStoryContinuity({ userId, novelId, compilationId: compilation.id, findings: [], independentCheck: 'complete' })
+    const afterPass = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+    expect(continuityCheckRounds(afterPass.validation)).toBe(0)
+    expect(await reserveContinuityCheck(userId, novelId, compilation.id)).toBe(true)
   })
 
   it('建立作品宪章和读者承诺，并以不可逆哈希保存写作意图', async () => {

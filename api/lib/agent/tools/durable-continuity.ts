@@ -16,7 +16,7 @@ import { commitOperationEffect, recordToolFailure } from '../runtime-operations.
 import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { callDurableAuxiliary, auxiliaryRouteSchema } from '../runtime-auxiliary-call.js'
 import type { AuxiliaryModelStep } from '../runtime-auxiliary-model.js'
-import { validateStoryContinuity, continuityRepairRounds, MAX_CONTINUITY_AUTO_REPAIRS } from '../story-compiler.js'
+import { validateStoryContinuity, continuityRepairRounds, continuityCheckRounds, MAX_CONTINUITY_AUTO_REPAIRS, MAX_CONTINUITY_CHECKS } from '../story-compiler.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { normalizeToolInput } from './input-validation.js'
@@ -85,6 +85,12 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       chapterId: compilation.chapter.id, compilationId: compilation.id, chapterRevision: compilation.chapter.revision,
       status: { notIn: ['analyzing', 'stale', 'failed'] } }, select: { id: true } })
     const reusable = (!args.focus || continuityRepairRounds(compilation.validation) >= MAX_CONTINUITY_AUTO_REPAIRS) && cached.success && cached.data.checkedRevision === compilation.chapter.revision && runtimeJson(cached.data.coverage).hash === runtimeJson(coverage).hash
+    // 连续未收敛的检查到顶：不再启动新 critic（也不在 prepare 里改库，否则会立即失效冻结哈希），
+    // 只把最近证据留给作者，防止“改一句→重查→又报别处”的无限循环；计数结算在提交事务里完成。
+    if (!args.focus && !reusable && continuityCheckRounds(compilation.validation) >= MAX_CONTINUITY_CHECKS) return {
+      kind: 'rejected' as const, code: 'CONTINUITY_CHECK_BUDGET_EXCEEDED',
+      message: `同一章节连续性检查已连续 ${MAX_CONTINUITY_CHECKS} 次检出错误且未收敛，自动复查已停止，避免反复改写损伤正文。不要再修改正文或重复调用检查；如实向作者报告最近一次检查的未解决项，由作者决定如何收尾。`,
+    }
     const repair = !quality && continuityRepairRounds(compilation.validation) < MAX_CONTINUITY_AUTO_REPAIRS && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(compilation.chapter.id)
     return { kind: 'check' as const, version: 1 as const, compiler: baseline, chapter: compilation.chapter, sourceId, coverage,
       criticSystem: continuityCriticSystem, repairSystem: repairPrompt,
@@ -157,8 +163,10 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       await assertCurrent(tx, frozen)
       const report = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, compilationId: frozen.compiler.id, findings: parsed.findings,
         expectedChapterRevision: frozen.chapter.revision, independentCheck: parsed.structured ? 'complete' : 'unavailable', coverage: frozen.coverage }, tx)
-      if (repairAttempted) await tx.storyCompilation.update({ where: { id: frozen.compiler.id }, data: {
-        validation: runtimeJson({ ...report, autoRepairRounds: repairRounds + 1 }).value,
+      // durable 在提交事务里结算检查额度：仍含 error 则累计 +1，全部通过则清零（与 legacy 预留语义一致）。
+      const nextCheckRounds = report.errorCount > 0 ? report.checkRounds + 1 : 0
+      if (repairAttempted || nextCheckRounds !== report.checkRounds) await tx.storyCompilation.update({ where: { id: frozen.compiler.id }, data: {
+        validation: runtimeJson({ ...report, autoRepairRounds: repairAttempted ? repairRounds + 1 : report.autoRepairRounds, checkRounds: nextCheckRounds }).value,
       } })
       const { after, applied } = applyContinuityPatches(frozen.chapter.content, repaired?.patches ?? [])
       const changed = after !== frozen.chapter.content

@@ -409,7 +409,7 @@ type ProviderReasoningInput = {
   reasoningEffort: import('../../shared/contracts/index.js').ModelReasoningEffort
 }
 
-function isGlmProvider(input: ProviderReasoningInput): boolean {
+function isGlmProvider(input: { provider?: string | null; providerBaseUrl?: string | null; model: string }): boolean {
   const provider = input.provider?.trim().toLowerCase() ?? ''
   const baseUrl = input.providerBaseUrl?.trim().toLowerCase() ?? ''
   const model = input.model.trim().toLowerCase()
@@ -493,15 +493,18 @@ export function resolveTextOutputTokenParameter(
 }
 
 /**
- * MiMo 思考不可控（无预算参数），评审类有界调用上思考可占输出九成、单次拖到数分钟并推高限流失败率；
- * 实测关思考后 20-45s 完成且 findings 检出保持一致，输出契约（JSON）不变，仅在评审调用上关思考。
+ * 有界评审调用（critic/复核/修订）统一关闭思考：MiMo 思考不可控（无预算参数），实测关思考后
+ * 20-45s 完成且 findings 检出保持一致；deepseek/GLM 的 payload 构建均已支持 none→关闭思考，
+ * 一并纳入以缩短评审耗时。未知第三方网关不发送 none 语义，避免 400。
  */
 export function resolveBoundedReviewReasoningEffort(
   boundedReview: boolean | undefined,
   effort: import('../../shared/contracts/index.js').ModelReasoningEffort,
   input: { provider?: string | null; providerBaseUrl?: string | null; model: string },
 ): import('../../shared/contracts/index.js').ModelReasoningEffort {
-  return boundedReview && effort !== 'none' && isMimoProvider(input) ? 'none' : effort
+  if (!boundedReview || effort === 'none') return effort
+  // 判定集与 buildProviderReasoningPayload 的显式分支保持一致，避免“判定 none 但走通用分支”的错配
+  return isMimoProvider(input) || (input.provider?.trim().toLowerCase() ?? '') === 'deepseek' || isGlmProvider(input) ? 'none' : effort
 }
 
 /** DeepSeek thinking accepts native tools, but rejects forced tool choice.
