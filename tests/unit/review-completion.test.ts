@@ -14,8 +14,8 @@ describe('bounded review completion recovery', () => {
     const signal = new AbortController().signal
     await expect(generateReviewCompletion('审查规则', '正文首\n完整原文\n正文尾', { ...options, signal })).resolves.toBe('{"findings":[]}')
     expect(complete.mock.calls).toEqual([
-      ['审查规则', '正文首\n完整原文\n正文尾', { ...options, signal: expect.any(AbortSignal), maxOutputTokens: 16_384 }],
-      ['审查规则', '正文首\n完整原文\n正文尾', { ...options, signal: expect.any(AbortSignal), action: 'agent3HumanityCriticOutputRecovery', maxOutputTokens: 32_768 }],
+      ['审查规则', '正文首\n完整原文\n正文尾', { ...options, signal: expect.any(AbortSignal), maxOutputTokens: 16_384, boundedReview: true }],
+      ['审查规则', '正文首\n完整原文\n正文尾', { ...options, signal: expect.any(AbortSignal), action: 'agent3HumanityCriticOutputRecovery', maxOutputTokens: 32_768, boundedReview: true }],
     ])
     expect(complete.mock.calls[0][2].signal).toBe(complete.mock.calls[1][2].signal)
   })

@@ -24,7 +24,7 @@ export async function generateReviewCompletion(
   options = { ...options, signal }
   try {
     try {
-      const result = await generateTextCompletion(system, content, { ...options, maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS })
+      const result = await generateTextCompletion(system, content, { ...options, maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true })
       signal.throwIfAborted()
       return result
     } catch (error) {
@@ -34,7 +34,7 @@ export async function generateReviewCompletion(
       signal.throwIfAborted()
       // Recovery shares the original deadline and model; it cannot buy more time.
       const result = await generateTextCompletion(system, content, {
-        ...options, action: `${options.action}OutputRecovery`, maxOutputTokens: RECOVERY_MAX_OUTPUT_TOKENS,
+        ...options, action: `${options.action}OutputRecovery`, maxOutputTokens: RECOVERY_MAX_OUTPUT_TOKENS, boundedReview: true,
       })
       signal.throwIfAborted()
       return result

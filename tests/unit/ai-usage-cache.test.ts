@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildProviderReasoningPayload, extractCacheTokens, resolveTextOutputTokenParameter } from '../../api/lib/ai-service.js'
+import { buildProviderReasoningPayload, extractCacheTokens, resolveBoundedReviewReasoningEffort, resolveTextOutputTokenParameter } from '../../api/lib/ai-service.js'
 
 describe('供应商 usage 缓存命中双格式解析', () => {
   it('DeepSeek 顶层 hit/miss 字段优先，原样透传', () => {
@@ -118,5 +118,16 @@ describe('输出预算参数名适配', () => {
     expect(resolveTextOutputTokenParameter(undefined, { provider: 'xiaomi', model: 'mimo-v2.6-flash' }, false)).toBe('max_tokens')
     expect(resolveTextOutputTokenParameter('max_tokens', { provider: 'xiaomi', model: 'mimo-v2.6-flash' }, true)).toBe('max_tokens')
     expect(resolveTextOutputTokenParameter('max_completion_tokens', { provider: 'deepseek', model: 'deepseek-v4-flash' }, false)).toBe('max_completion_tokens')
+  })
+})
+
+describe('评审调用推理降级', () => {
+  it('MiMo 的有界评审强制关思考（含主机名识别），其余供应商与显式 none 不受影响', () => {
+    expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'xiaomi', model: 'mimo-v2.6-flash' })).toBe('none')
+    expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'proxy', providerBaseUrl: 'https://api.xiaomimimo.com/v1', model: 'thinking-flash' })).toBe('none')
+    expect(resolveBoundedReviewReasoningEffort(true, 'none', { provider: 'xiaomi', model: 'mimo-v2.6-flash' })).toBe('none')
+    expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'deepseek', model: 'deepseek-v4-flash' })).toBe('low')
+    expect(resolveBoundedReviewReasoningEffort(false, 'low', { provider: 'xiaomi', model: 'mimo-v2.6-flash' })).toBe('low')
+    expect(resolveBoundedReviewReasoningEffort(undefined, 'high', { provider: 'xiaomi', model: 'mimo-v2.6-flash' })).toBe('high')
   })
 })

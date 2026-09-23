@@ -52,6 +52,8 @@ type TextCompletionOptions = {
   multiplierBps?: number
   /** 每次调用的输出 token 上限：仅在显式传入时随请求下发 max_tokens；不传则保持历史行为（交由供应商默认）。 */
   maxOutputTokens?: number
+  /** 有界评审调用（critic/独立复核）。网关可按模型特性收紧采样：输出契约不变，仅影响过程开销。 */
+  boundedReview?: boolean
 }
 
 function ensureTextProviderConfigured(apiKey?: string | null) {
@@ -488,6 +490,18 @@ export function resolveTextOutputTokenParameter(
 ): 'max_tokens' | 'max_completion_tokens' {
   if (explicit) return explicit
   return hasExplicitOutputBudget && isMimoProvider(input) ? 'max_completion_tokens' : 'max_tokens'
+}
+
+/**
+ * MiMo 思考不可控（无预算参数），评审类有界调用上思考可占输出九成、单次拖到数分钟并推高限流失败率；
+ * 实测关思考后 20-45s 完成且 findings 检出保持一致，输出契约（JSON）不变，仅在评审调用上关思考。
+ */
+export function resolveBoundedReviewReasoningEffort(
+  boundedReview: boolean | undefined,
+  effort: import('../../shared/contracts/index.js').ModelReasoningEffort,
+  input: { provider?: string | null; providerBaseUrl?: string | null; model: string },
+): import('../../shared/contracts/index.js').ModelReasoningEffort {
+  return boundedReview && effort !== 'none' && isMimoProvider(input) ? 'none' : effort
 }
 
 /** DeepSeek thinking accepts native tools, but rejects forced tool choice.
@@ -993,6 +1007,9 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   const requestedReasoning = options.reasoningEffort ?? modelRuntime.reasoningEffort
   const completionReasoning = modelRuntime.reasoningEfforts && !modelRuntime.reasoningEfforts.includes(requestedReasoning)
     ? modelRuntime.reasoningEffort : requestedReasoning
+  const effectiveReasoning = resolveBoundedReviewReasoningEffort(options.boundedReview, completionReasoning, {
+    provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, model: modelRuntime.modelName ?? env.aiTextModel,
+  })
   ensureTextProviderConfigured(modelRuntime.apiKey)
   await assertCreditAccess(options.userId, modelRuntime.tier, false)
 
@@ -1032,7 +1049,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
         provider: modelRuntime.provider,
         providerBaseUrl: modelRuntime.baseUrl,
         model: modelRuntime.modelName ?? env.aiTextModel,
-        reasoningEffort: completionReasoning,
+        reasoningEffort: effectiveReasoning,
       }),
       messages: [
         { role: 'system', content: systemPrompt },
