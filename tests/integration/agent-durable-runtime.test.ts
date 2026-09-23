@@ -1290,7 +1290,7 @@ describe.runIf(available)('durable domain postconditions', () => {
 })
 
 describe.runIf(available)('quality report integrity and atomic repair', () => {
-  it.each(['complete', 'unavailable', 'unlocated', 'ambiguous', 'report-rollback', 'stale-source', 'repair', 'repair-rollback', 'no-op', 'empty', 'concurrent', 'wrong-compilation', 'tool-fallback', 'foreign-run', 'legacy-report', 'hash-mismatch', 'outer-transaction', 'outer-rollback', 'evidence-corrected', 'evidence-unresolved', 'evidence-ambiguous', 'evidence-credit-failure', 'quality-provider-failure', 'quality-timeout-fallback', 'continuity-provider-failure'] as const)('%s cannot promote unverified reports or partially repair', async scenario => {
+  it.each(['complete', 'unavailable', 'unlocated', 'ambiguous', 'report-rollback', 'stale-source', 'repair', 'repair-rollback', 'no-op', 'empty', 'concurrent', 'wrong-compilation', 'tool-fallback', 'foreign-run', 'legacy-report', 'hash-mismatch', 'outer-transaction', 'outer-rollback', 'evidence-corrected', 'evidence-partial', 'evidence-unresolved', 'evidence-ambiguous', 'evidence-credit-failure', 'quality-provider-failure', 'quality-timeout-fallback', 'continuity-provider-failure'] as const)('%s cannot promote unverified reports or partially repair', async scenario => {
     await fixture(async f => {
       const compilation = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '质量检查' })
       const compilationId = compilation.compilation.id
@@ -1325,18 +1325,25 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
         if (scenario === 'evidence-ambiguous') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '原文原文' } })
         const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
         const finding = { signal: 'emotion_grounding', severity: 'warning', quote: '原...文', explanation: '缺少动作', suggestion: '局部调整', confidence: 0.9 }
-        const model = vi.spyOn(aiService, 'generateTextCompletion').mockResolvedValueOnce(JSON.stringify({ findings: [finding] }))
+        // 一条可绑定、一条不可绑定：部分证据缺失不再让整个报告 failed，未定位计数进入指标，章节桥仍可提交。
+        const partial = { signal: 'reader_pull', severity: 'warning', quote: '这段引用不在正文里', explanation: '缺少拉力', suggestion: '补充动作', confidence: 0.8 }
+        const model = vi.spyOn(aiService, 'generateTextCompletion').mockResolvedValueOnce(JSON.stringify({ findings: scenario === 'evidence-partial' ? [finding, partial] : [finding] }))
         if (scenario === 'evidence-credit-failure') model.mockRejectedValueOnce(new DataAccessError(402, 'CREDITS_EXHAUSTED', 'fixture credit gate'))
         else model.mockResolvedValueOnce(JSON.stringify({ corrections: scenario === 'evidence-unresolved' ? [] : [{ index: 0, quote: '原文' }] }))
         const action = qualityAnalyzeTool.execute(ctx, { chapterId: f.chapterId, compilationId })
         if (scenario === 'evidence-credit-failure') await expect(action).rejects.toMatchObject({ code: 'CREDITS_EXHAUSTED' })
-        else if (scenario === 'evidence-corrected') expect(await action).not.toHaveProperty('outcome')
+        else if (scenario === 'evidence-corrected' || scenario === 'evidence-partial') expect(await action).not.toHaveProperty('outcome')
         else expect(await action).toMatchObject({ outcome: 'failed', summary: '质量证据定位未完成' })
         expect(model).toHaveBeenCalledTimes(2)
         expect(model.mock.calls[1][2].action).toBe('agent3HumanityEvidenceCorrection')
         const saved = await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: f.chapterId }, include: { findings: true } })
-        expect(saved.status).toBe(scenario === 'evidence-corrected' ? 'needs_repair' : 'failed')
+        expect(saved.status).toBe(scenario === 'evidence-corrected' || scenario === 'evidence-partial' ? 'needs_repair' : 'failed')
         if (scenario === 'evidence-corrected') expect(saved.findings[0]).toMatchObject({ evidenceExcerpt: '原文', explanation: finding.explanation, suggestion: finding.suggestion })
+        if (scenario === 'evidence-partial') {
+          expect(saved.deterministicMetrics).toMatchObject({ independentCheck: 'complete', unlocatedFindings: 1, criticFindingCount: 2, droppedFindings: 0 })
+          expect(saved.findings.filter(item => item.source === 'critic')).toEqual([expect.objectContaining({ evidenceExcerpt: '原文', explanation: finding.explanation })])
+          expect(await commitChapterBridge({ userId: f.userId, novelId: f.novelId, compilationId, chapterSummary: '摘要', exitState: state, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '脚印', requireQuality: true, qualityReportId: saved.id })).toMatchObject({ compilationId, chapterRevision: 1 })
+        }
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: before.content, revision: before.revision })
         return
       }

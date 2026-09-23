@@ -34,7 +34,7 @@ import {
 import { defineTool, type ToolContext } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
 import { qualityReportMatchesContent } from '../quality-report-contract.js'
-import { correctQualityEvidence, qualityEvidenceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
+import { coerceCriticFindings, correctQualityEvidence, qualityEvidenceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
 
 const READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const WRITE = { plan: 'deny', build: 'allow', review: 'allow' } as const
@@ -50,7 +50,6 @@ const REPAIR_BLOCK_CODES = new Set([
   'QUALITY_REPAIR_NO_CHANGE',
 ])
 
-const criticEnvelopeSchema = z.object({ findings: z.array(criticQualityFindingSchema).max(24) })
 const repairEnvelopeSchema = z.object({
   patches: z.array(z.object({ findingId: z.string().min(1), replacement: z.string().max(2_000) })).min(1).max(12),
 })
@@ -110,7 +109,7 @@ export function buildCriticSystem(lens: 'balanced' | 'story' | 'style'): string 
       : '融合审查全部十三类信号，但没有证据的类别必须省略。'
   return `你是与正文 Writer 上下文隔离的中文网文质量编辑。${lensRule}
 十三类 signal 及边界：style_drift=相邻段落声音突变；orphaned_sophistication=修辞缺少人物视角/意象链/语境支撑；plot_progress=场景没有改变动作/信息/关系/资源/风险；description_load=描写不服务当前场景；emotion_grounding=情绪缺少触发/选择/后果支撑；explanation_echo=动作或对白后重复解释；sentence_homology=非刻意的连续同构句；image_repetition=近期意象机械复用；character_voice=角色句长/词汇/回避方式/知识边界混同；causal_gap=转折缺少人物选择或已知条件；chapter_bridge=上章终态被忽略或机械复述；reader_pull=该章承担拉读功能却没有未完成动作/信息差/关系余波/价值变化；punctuation_misuse=把「」等引号当成圈重点符号包裹叙述、画面、纸面文字或转场过程，而不是人物直接话语或逐字引文。
-只报告可以用正文逐字短引文证明、且存在最小修法的问题；quote 必须是正文中连续、逐字、唯一可定位的片段，不得改写或用省略号拼接。
+只报告可以用正文逐字短引文证明、且存在最小修法的问题；quote 必须从正文原文中连续复制、逐字一致并保留原有标点、引号与换行（可跨段落），且全文唯一可定位；不得改写、缩写或用省略号拼接；若同一短语在正文多次出现，扩大到相邻上下文使整条引用唯一。
 不得把词汇本身当问题：熵、量子、铁锈味、华丽句、口语、断句、留白、无悬念收束都可能合理。只有题材/人物/场景功能/局部频率/上下文铺垫共同提供证据时才提示。
 不得要求每章固定钩子、固定对白比例或固定节奏；不得把作者的不规则声音清洗成统一白开水。
 emotion_grounding 按“触发→解释→身体或注意→冲动→选择→后果”检查，但正文不必写全链，只要最有力的两三环成立即可。
@@ -222,6 +221,7 @@ ${bundle.chapter.content}
 正文结束。`
     let rawCriticFindings: z.infer<typeof criticQualityFindingSchema>[] = []
     let criticFallback = false
+    let droppedCriticFindings = 0
     let correctionError: unknown
     let attemptedEvidenceCorrection = false
     // Provider, credit and configuration failures retain their real error code.
@@ -249,8 +249,14 @@ ${bundle.chapter.content}
     }
     if (!criticFallback) {
       try {
-        rawCriticFindings = criticEnvelopeSchema.parse(parseJsonObject(response)).findings
-          .filter((finding, index, all) => all.findIndex((item) => item.signal === finding.signal && item.quote === finding.quote) === index)
+        // 逐条容错：单项字段超界（如 confidence>1、quote>360）只降级该条，绝不因一处格式偏差把整份有效审查判成失败。
+        const coerced = coerceCriticFindings(parseJsonObject(response))
+        // 全部条目都不可用（或连 findings 信封都没有）才算格式不完整；空数组是合法的“未发现问题”。
+        if (!coerced || (coerced.findings.length === 0 && coerced.dropped > 0)) criticFallback = true
+        else {
+          rawCriticFindings = coerced.findings
+          droppedCriticFindings = coerced.dropped
+        }
       } catch {
         ctx.signal.throwIfAborted()
         criticFallback = true
@@ -287,6 +293,7 @@ ${bundle.chapter.content}
       compilationId: args.compilationId ?? bundle.compilation?.id,
       chapterId, chapterRevision: bundle.chapter.revision, mode: ctx.qualityMode,
       deterministicMetrics: deterministic.metrics, deterministicFindings: deterministic.findings, criticFindings, criticComplete: !criticFallback,
+      criticDropped: droppedCriticFindings,
     })
     if (created.compilationId) {
       await prisma.storyCompilation.updateMany({
@@ -299,8 +306,16 @@ ${bundle.chapter.content}
     if (report.status === 'failed') return { outcome: 'failed' as const,
       output: criticFallback
         ? '质量模型返回的报告格式不完整，不能判定质量通过。确定性报告和正文已保留；不得重复改写正文来解决格式错误。'
-        : `质量模型已完成审查，但部分引用仍无法唯一定位，或意见数量超过报告上限；${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。已保留可定位的意见和正文，禁止反复调用全量检查或修改正文来凑通过。`,
+        : `质量模型返回的全部引用都无法在正文中逐字定位（可能审查了其他文本或引用严重变形），${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`,
       summary: criticFallback ? '质量报告格式不完整' : '质量证据定位未完成', display: reportDisplay(report) }
+    const reportMetrics: Record<string, unknown> = report.deterministicMetrics && typeof report.deterministicMetrics === 'object' && !Array.isArray(report.deterministicMetrics) ? report.deterministicMetrics : {}
+    const unlocatedCount = typeof reportMetrics.unlocatedFindings === 'number' ? reportMetrics.unlocatedFindings : 0
+    const droppedCount = typeof reportMetrics.droppedFindings === 'number' ? reportMetrics.droppedFindings : 0
+    const bindingNote = [
+      unlocatedCount ? `${unlocatedCount} 条模型意见因引用无法逐字定位未纳入报告` : '',
+      droppedCount ? `${droppedCount} 条因字段不完整未纳入报告` : '',
+    ].filter(Boolean).join('；')
+    const bindingSuffix = bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : ''
     const warningCount = report.findings.filter((finding) => finding.severity === 'warning').length
     const advisoryCount = report.findings.filter((finding) => finding.severity === 'advisory').length
     const selected = ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(report.chapterId)
@@ -312,14 +327,14 @@ ${bundle.chapter.content}
         const repaired = await applySelectedQualityRepairs(ctx, report, selected)
         if (repaired) {
           return {
-            output: `严谨创作质量检查完成：一次融合审查定位 ${report.findings.length} 项证据，已自动原子修订 ${repaired.patchCount} 处${repaired.missingCount ? `，另有 ${repaired.missingCount} 项因无法安全定位保留待审` : ''}。质量报告已绑定修订后的 r${repaired.result.updated.revision}，无需再次质量检查或选择；正文已变化，提交章节终态前必须调用 continuity_validate 只读复核当前版本，不能沿用旧连续性报告。`,
+            output: `严谨创作质量检查完成：一次融合审查定位 ${report.findings.length} 项证据，已自动原子修订 ${repaired.patchCount} 处${repaired.missingCount ? `，另有 ${repaired.missingCount} 项因无法安全定位保留待审` : ''}。质量报告已绑定修订后的 r${repaired.result.updated.revision}，无需再次质量检查或选择；正文已变化，提交章节终态前必须调用 continuity_validate 只读复核当前版本，不能沿用旧连续性报告。${bindingSuffix}`,
             summary: `人类感质量检查 · 自动修订 ${repaired.patchCount} 处`,
             display: reportDisplay(repaired.report),
             snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },
           }
         }
         return {
-          output: `质量检查已完成并保留报告：发现 ${warningCount} 个需关注问题、${advisoryCount} 个审美建议；局部修订器本次未返回可安全验证的补丁，正文保持不变。后续再次检查会直接复用本报告，不会循环重试。`,
+          output: `质量检查已完成并保留报告：发现 ${warningCount} 个需关注问题、${advisoryCount} 个审美建议；局部修订器本次未返回可安全验证的补丁，正文保持不变。后续再次检查会直接复用本报告，不会循环重试。${bindingSuffix}`,
           summary: `人类感质量检查${criticFallback ? '（确定性兜底）' : ''} · 修订未应用`,
           display: reportDisplay(report),
         }
@@ -328,7 +343,7 @@ ${bundle.chapter.content}
         // 绝不能把 CHECK 步骤标成「执行失败」挡住后续提交链路。
         if (!(error instanceof DataAccessError) || !REPAIR_BLOCK_CODES.has(error.code)) throw error
         return {
-          output: `质量检查完成：一次融合审查定位 ${report.findings.length} 项证据（${warningCount} 个需关注、${advisoryCount} 个审美建议）。自动局部修订被轮次保护拦截（${error.message}）正文保持 r${report.chapterRevision} 不变，剩余问题保留在报告中交作者审阅。检查视为已完成：禁止再次调用 quality_analyze，可直接继续后续流程。`,
+          output: `质量检查完成：一次融合审查定位 ${report.findings.length} 项证据（${warningCount} 个需关注、${advisoryCount} 个审美建议）。自动局部修订被轮次保护拦截（${error.message}）正文保持 r${report.chapterRevision} 不变，剩余问题保留在报告中交作者审阅。检查视为已完成：禁止再次调用 quality_analyze，可直接继续后续流程。${bindingSuffix}`,
           summary: `人类感质量检查 · 剩余问题交作者审阅`,
           display: reportDisplay(report),
         }
@@ -336,10 +351,10 @@ ${bundle.chapter.content}
     }
     return {
       output: report.findings.length
-        ? `质量检查完成：${warningCount} 个需关注问题、${advisoryCount} 个审美建议。当前模式仅展示报告，或章节受作者保护，因此未自动改动；本轮不会重复检查或要求选择。`
+        ? `质量检查完成：${warningCount} 个需关注问题、${advisoryCount} 个审美建议。当前模式仅展示报告，或章节受作者保护，因此未自动改动；本轮不会重复检查或要求选择。${bindingSuffix}`
         : criticFallback
           ? `质量报告 ${report.id} 已完成确定性检查兜底；独立 Critic 本次未返回结构化内容，正文保持不变，可继续当前任务。`
-          : `质量报告 ${report.id} 通过：确定性检查与独立 Critic 均未发现有证据的问题。`,
+          : `质量报告 ${report.id} 通过：确定性检查与独立 Critic 均未发现有证据的问题。${bindingSuffix}`,
       summary: `人类感质量检查${criticFallback ? '（确定性兜底）' : ''} · ${warningCount} 关注 ${advisoryCount} 建议`,
       display: reportDisplay(report),
     }

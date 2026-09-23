@@ -25,6 +25,7 @@ import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from './craft-library.js'
 import { recalcNovelStats } from './tools/novel-tools.js'
 import { enqueueChapterMemoryExtraction } from './story-memory.js'
+import { locateQuoteSpans } from './quality-evidence.js'
 
 export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v2'
 export const MAX_QUALITY_REPAIR_ROUNDS = 1
@@ -326,19 +327,20 @@ export function locateCriticFindings(content: string, findings: CriticQualityFin
   const located: LocatedQualityFinding[] = []
   const occupied = new Set<string>()
   for (const finding of findings) {
-    const quote = finding.quote.trim()
-    let start = content.indexOf(quote)
-    if (!quote || start < 0 || content.indexOf(quote, start + 1) >= 0) continue
-    while (start >= 0 && occupied.has(`${finding.signal}:${start}`)) start = content.indexOf(quote, start + 1)
-    if (start < 0) continue
-    occupied.add(`${finding.signal}:${start}`)
+    // 逐字优先、等价变形（引号样式/全半角/省略号/跨段落换行）回映射兜底；证据始终取自正文原文切片。
+    const spans = locateQuoteSpans(content, finding.quote)
+    if (spans.length !== 1) continue
+    const span = spans[0]
+    if (occupied.has(`${finding.signal}:${span.start}`)) continue
+    occupied.add(`${finding.signal}:${span.start}`)
+    const end = Math.min(span.end, span.start + 360)
     located.push({
       signal: finding.signal,
       source: 'critic',
       severity: finding.severity,
-      start,
-      end: start + quote.length,
-      evidence: clip(quote, 360),
+      start: span.start,
+      end,
+      evidence: content.slice(span.start, end),
       explanation: finding.explanation,
       suggestion: finding.suggestion,
       confidence: finding.confidence,
@@ -350,8 +352,11 @@ export function locateCriticFindings(content: string, findings: CriticQualityFin
 export function prepareQualityFindings(content: string, deterministicFindings: LocatedQualityFinding[], criticFindings: CriticQualityFinding[], criticComplete: boolean) {
   const located = locateCriticFindings(content, criticFindings)
   const all = [...deterministicFindings, ...located].filter((finding, index, values) => values.findIndex(item => item.signal === finding.signal && item.start === finding.start && item.end === finding.end) === index)
-  return { findings: all.slice(0, 36), complete: criticComplete && located.length === criticFindings.length && all.length <= 36,
-    unlocatedFindings: criticFindings.length - located.length, omittedFindings: Math.max(0, all.length - 36) }
+  // 独立检查按“有正文证据可核验”判定完成：部分引用不可定位时保留已绑定意见并只记录未定位计数；
+  // 全部引用都不可定位意味着报告没有一条可核验证据（可能审查了其他文本），仍视为未完成，不能冒充通过。
+  // 超 36 条仅截断并记录 omittedFindings，绝不让数量上限把有效检查变成 failed 死锁。
+  return { findings: all.slice(0, 36), complete: criticComplete && (criticFindings.length === 0 || located.length > 0),
+    unlocatedFindings: criticFindings.length - located.length, omittedFindings: Math.max(0, all.length - 36), criticFindingCount: criticFindings.length }
 }
 
 export async function persistHumanityQualityReport(input: {
@@ -367,6 +372,8 @@ export async function persistHumanityQualityReport(input: {
   criticFindings: CriticQualityFinding[]
   /** Explicit successful independent response, never inferred from an empty array. */
   criticComplete?: boolean
+  /** 逐条容错解析时被丢弃的 critic 条目数，仅作审计指标，不影响判定。 */
+  criticDropped?: number
 }, transaction?: Prisma.TransactionClient): Promise<ChapterQualityReport & { findings: Array<{ id: string; signal: string; source: string; severity: string; startOffset: number; endOffset: number; evidenceExcerpt: string; explanation: string; suggestion: string; disposition: QualityFindingDisposition }> }> {
   if (!transaction) return prisma.$transaction(tx => persistHumanityQualityReport(input, tx))
   const tx = transaction
@@ -376,7 +383,7 @@ export async function persistHumanityQualityReport(input: {
   const chapter = await getOwnedQualityChapter(input.userId, input.novelId, input.chapterId, tx)
   if (chapter.revision !== input.chapterRevision) throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '章节在质量检查期间已被修改，请基于最新版本重新检查。')
 
-  const { findings, complete, unlocatedFindings, omittedFindings } = prepareQualityFindings(chapter.content, input.deterministicFindings, input.criticFindings, input.criticComplete === true)
+  const { findings, complete, unlocatedFindings, omittedFindings, criticFindingCount } = prepareQualityFindings(chapter.content, input.deterministicFindings, input.criticFindings, input.criticComplete === true)
   const actionableCount = findings.filter((finding) => finding.severity !== 'advisory').length
   const scope = await qualityCompilationScope(tx, input.userId, input.novelId, input.runId)
   if (input.compilationId && !await tx.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, chapterId: input.chapterId, ...scope } })) {
@@ -392,7 +399,7 @@ export async function persistHumanityQualityReport(input: {
       chapterId: input.chapterId, chapterRevision: chapter.revision, mode: input.mode,
       status: !complete ? 'failed' : actionableCount > 0 ? 'needs_repair' : 'passed', repairRound: 0,
       deterministicMetrics: { ...input.deterministicMetrics, independentCheck: complete ? 'complete' : 'unavailable', contentHash: hashText(chapter.content),
-        unlocatedFindings, omittedFindings } as Prisma.InputJsonValue,
+        unlocatedFindings, omittedFindings, criticFindingCount, droppedFindings: input.criticDropped ?? 0 } as Prisma.InputJsonValue,
       criticVersion: HUMANITY_CRITIC_VERSION, checkedAt: new Date(),
       findings: {
         create: findings.map((finding) => ({
