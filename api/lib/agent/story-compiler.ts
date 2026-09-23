@@ -283,7 +283,9 @@ export async function prepareStoryCompilation(input: {
     where: { userId: input.userId, novelId: input.novelId, ...scope, targetOrderIndex: target.targetOrderIndex },
     select: { validation: true },
   })
+  // 同目标章节的修复与检查额度跨重准备继承：否则重新 prepare 就能重置预算、绕开收敛保险丝。
   const autoRepairRounds = Math.max(0, ...priorRepairStates.map(item => continuityRepairRounds(item.validation)))
+  const checkRounds = Math.max(0, ...priorRepairStates.map(item => continuityCheckRounds(item.validation)))
   await db.storyCompilation.updateMany({
     where: { userId: input.userId, novelId: input.novelId, ...scope, status: 'active' },
     data: { status: 'abandoned' },
@@ -306,7 +308,10 @@ export async function prepareStoryCompilation(input: {
       targetOrderIndex: target.targetOrderIndex,
       mode: input.mode,
       sourcePromptHash: promptHash(input.intentSummary),
-      ...(autoRepairRounds > 0 ? { validation: { autoRepairRounds } } : {}),
+      ...(autoRepairRounds > 0 || checkRounds > 0 ? { validation: {
+        ...(autoRepairRounds > 0 ? { autoRepairRounds } : {}),
+        ...(checkRounds > 0 ? { checkRounds } : {}),
+      } } : {}),
       preparedContext: preparedContext as Prisma.InputJsonValue,
       bridge: {
         create: {
