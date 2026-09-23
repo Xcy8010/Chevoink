@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { SseDataDecoder } from './ai-sse.js'
+import { SseDataDecoder, readWithIdleTimeout } from './ai-sse.js'
 import { beginDurableChat, type DurableChatExecution } from './agent/runtime-provider.js'
 import { validateModelCursor } from './agent/runtime-model-cursor.js'
 import type { settleProviderOperation } from './agent/runtime-settlement.js'
@@ -206,6 +206,7 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
   if (!response.ok || !response.headers.get('content-type')?.includes('text/event-stream') || !response.body) return { ...await parseJsonResponse(response), localOutputEstimate: undefined }
   let content = '', reasoning = '', done = false, truncated = false, lastSaved = 0
   let usage: JsonProviderPayload['usage']
+  let reasoningTokens: number | undefined
   const decoder = new TextDecoder()
   const reader = response.body.getReader()
   const frames = new SseDataDecoder(data => {
@@ -226,6 +227,8 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
       const cache = extractCacheTokens(frame.usage)
       if (cache.hit !== null) usage.prompt_cache_hit_tokens = cache.hit
       if (cache.miss !== null) usage.prompt_cache_miss_tokens = cache.miss
+      const reasoningCount = frame.usage.completion_tokens_details?.reasoning_tokens
+      if (typeof reasoningCount === 'number' && Number.isSafeInteger(reasoningCount) && reasoningCount >= 0 && reasoningCount <= 2147483647) reasoningTokens = reasoningCount
     }
     if (frame.choices?.[0]?.finish_reason === 'length') truncated = true
     if (frame.choices?.[0]?.finish_reason === 'stop') done = true
@@ -235,7 +238,9 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
   })
   try {
     for (;;) {
-      const chunk = await reader.read()
+      // 静默看门狗：网关挂死时快速释放，不占用整次调用的等待上限
+      const chunk = await readWithIdleTimeout(reader, env.aiTextStreamIdleMs, () => new DataAccessError(504, 'AI_PROVIDER_TIMEOUT',
+        '模型流式响应长时间无新数据，已中止本次请求；检查未完成，已保存正文保留。'))
       if (chunk.done) break
       frames.push(decoder.decode(chunk.value, { stream: true }))
       if (Date.now() - lastSaved >= 1000) { await saveOutputEvidence(usageId, inputEstimate, reasoning + content); lastSaved = Date.now() }
@@ -243,7 +248,7 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
     frames.push(decoder.decode(), true)
     if (truncated) throw new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', '模型输出达到上限，未将部分检查结果当作完成。')
     if (!done) throw new DataAccessError(502, 'AI_PROVIDER_INCOMPLETE', '模型连接提前结束，未将部分检查结果当作完成。')
-    return { choices: [{ message: { content } }], usage, localOutputEstimate: estimateTokenCount(reasoning + content) }
+    return { choices: [{ message: { content } }], usage, localOutputEstimate: estimateTokenCount(reasoning + content), reasoningTokens }
   } finally {
     await reader.cancel().catch(() => {})
     reader.releaseLock()
@@ -263,6 +268,8 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
 type JsonProviderPayload = {
   /** Server-only measurement; JSON gateways cannot supply this field. */
   localOutputEstimate?: number
+  /** 供应商报告的思考 token（completion_tokens_details.reasoning_tokens）；仅用于观测。 */
+  reasoningTokens?: number
   error?: { message?: unknown }
   data?: unknown
   choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>
@@ -426,6 +433,17 @@ function supportsGlmReasoningEffort(model: string): boolean {
   return Boolean(version && (version.major > 5 || (version.major === 5 && version.minor >= 2)))
 }
 
+/** MiMo（小米）网关只认 max_completion_tokens，因此按供应商/模型名/主机名三路识别。 */
+export function isMimoProvider(input: { provider?: string | null; providerBaseUrl?: string | null; model: string }): boolean {
+  const provider = input.provider?.trim().toLowerCase() ?? ''
+  if (provider === 'xiaomi' || provider === 'mimo' || provider === 'xiaomimimo') return true
+  const model = input.model.trim().toLowerCase()
+  if (model.startsWith('mimo-') || model.startsWith('mimo_') || model.startsWith('xiaomi/')) return true
+  let hostname = ''
+  try { hostname = new URL(input.providerBaseUrl ?? '').hostname.toLowerCase() } catch { /* model/provider still identify proxies */ }
+  return hostname === 'xiaomimimo.com' || hostname.endsWith('.xiaomimimo.com')
+}
+
 /**
  * 各 OpenAI-compatible 供应商的推理参数并不完全兼容。
  * GLM 缓存无需请求参数；这里只避免旧版 GLM 收到仅 5.2+ 支持的 reasoning_effort。
@@ -451,7 +469,25 @@ export function buildProviderReasoningPayload(input: ProviderReasoningInput): Re
         : {}),
     }
   }
+  // MiMo 思考只能开/关（默认开），不发送会被它忽略的 reasoning_effort
+  if (isMimoProvider(input)) {
+    return { thinking: { type: input.reasoningEffort === 'none' ? 'disabled' : 'enabled' } }
+  }
   return { reasoning_effort: input.reasoningEffort }
+}
+
+/**
+ * MiMo 不识别 max_tokens；仅在调用方显式给出输出预算（连续性/评审等有界调用）时
+ * 切换到 max_completion_tokens，无预算的辅助调用保持既有回退行为以避免新的截断面。
+ * 模型配置里显式验证过的 outputTokenParameter 始终优先。
+ */
+export function resolveTextOutputTokenParameter(
+  explicit: 'max_tokens' | 'max_completion_tokens' | undefined,
+  input: { provider?: string | null; providerBaseUrl?: string | null; model: string },
+  hasExplicitOutputBudget: boolean,
+): 'max_tokens' | 'max_completion_tokens' {
+  if (explicit) return explicit
+  return hasExplicitOutputBudget && isMimoProvider(input) ? 'max_completion_tokens' : 'max_tokens'
 }
 
 /** DeepSeek thinking accepts native tools, but rejects forced tool choice.
@@ -962,6 +998,9 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
 
   const startedAt = Date.now()
   const endpoint = `${(modelRuntime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`
+  const outputTokenParameter = resolveTextOutputTokenParameter(modelRuntime.outputTokenParameter,
+    { provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, model: modelRuntime.modelName ?? env.aiTextModel },
+    options.maxOutputTokens != null)
   const prepared = await prepareTextUsage({ userId: options.userId, action: options.action,
     inputEstimate: estimateTokenCount(`${systemPrompt}\n${userPrompt}`), maxOutput: options.maxOutputTokens ?? env.aiTextMaxOutputTokens,
     modelName: modelRuntime.modelName ?? env.aiTextModel, modelTier: modelRuntime.tier,
@@ -982,8 +1021,9 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     body: JSON.stringify({
       model: modelRuntime.modelName ?? env.aiTextModel,
       ...(modelRuntime.reasoningParameterMode ? {} : { temperature: options.temperature ?? 0.7 }),
-      // 与主循环 chatWithTools、durable 质量路径一致：显式传入时下发 max_tokens 上限，避免评审/修订输出失控膨胀。
-      [modelRuntime.outputTokenParameter ?? 'max_tokens']: options.maxOutputTokens ?? env.aiTextMaxOutputTokens,
+      // 与主循环 chatWithTools、durable 质量路径一致：显式传入时下发输出上限，避免评审/修订输出失控膨胀；
+      // MiMo 网关需用 max_completion_tokens（思考+回答共享预算），其余供应商保持 max_tokens
+      [outputTokenParameter]: options.maxOutputTokens ?? env.aiTextMaxOutputTokens,
       stream: true,
       stream_options: { include_usage: true },
       ...buildProviderReasoningPayload({
@@ -1002,6 +1042,10 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   })
 
   const payload = await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom')
+  if (payload.reasoningTokens != null) console.info('[ai-reasoning-usage]', {
+    action: options.action, model: modelRuntime.modelName ?? env.aiTextModel,
+    reasoningTokens: payload.reasoningTokens, completionTokens: payload.usage?.completion_tokens ?? null, durationMs: Date.now() - startedAt,
+  })
 
   const content = payload.choices?.[0]?.message?.content
   const validContent = response.ok && typeof content === 'string' && Boolean(content.trim())

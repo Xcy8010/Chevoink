@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const complete = vi.hoisted(() => vi.fn())
 vi.mock('../../api/lib/ai-service.js', () => ({ generateTextCompletion: complete }))
+import { env } from '../../api/config/env.js'
 import { DataAccessError } from '../../api/lib/prisma.js'
 import { generateReviewCompletion } from '../../api/lib/agent/review-completion.js'
 
@@ -29,7 +30,8 @@ describe('bounded review completion recovery', () => {
       .mockImplementationOnce((_system, _content, input) => new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true })))
     const result = generateReviewCompletion('s', 'c', options)
     const assertion = expect(result).rejects.toMatchObject({ code: 'AI_PROVIDER_TIMEOUT' })
-    await vi.advanceTimersByTimeAsync(180_000)
+    // 等待上限跟随 env（默认 4 分钟）：不再叠加旧的 180s 硬帽
+    await vi.advanceTimersByTimeAsync(env.aiTextTimeoutMs)
     await assertion
     expect(complete).toHaveBeenCalledTimes(2)
     expect(complete.mock.calls[0][2].signal).toBe(complete.mock.calls[1][2].signal)

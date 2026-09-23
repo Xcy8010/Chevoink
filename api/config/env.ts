@@ -88,7 +88,11 @@ export const env = {
     process.env.AI_TEXT_CONTEXT_COMPRESS_LEVEL2,
     950000,
   ),
-  aiTextTimeoutMs: parsePositiveNumber(process.env.AI_TEXT_TIMEOUT_MS, 180000),
+  // 单次文本调用等待上限：连续性/质量评审需要思考型模型足够余量；
+  // 挂死连接由 aiTextStreamIdleMs 兜底，不再依赖缩短总时限
+  aiTextTimeoutMs: parsePositiveNumber(process.env.AI_TEXT_TIMEOUT_MS, 240000),
+  // 流式响应 chunk 间最大静默：超过视为网关挂死，主动中止并释放并发（区别于整次调用的总时限）
+  aiTextStreamIdleMs: parsePositiveNumber(process.env.AI_TEXT_STREAM_IDLE_MS, 90000),
   // 单轮 LLM 调用的最大输出 token：不传时 DeepSeek 默认仅 4096，写长章节时工具参数会被截断；
   // deepseek-chat 输出上限 8192，默认拉满，换更强模型时可通过环境变量上调
   aiTextMaxOutputTokens: parsePositiveNumber(process.env.AI_TEXT_MAX_OUTPUT_TOKENS, 8192),

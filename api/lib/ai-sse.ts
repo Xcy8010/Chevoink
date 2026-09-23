@@ -33,3 +33,19 @@ export class SseDataDecoder {
     }
   }
 }
+
+/** Guard one stream read with an inactivity window: a silent gateway must fail
+ * fast instead of holding the caller until the outer call deadline. */
+export function readWithIdleTimeout<T>(
+  reader: ReadableStreamDefaultReader<T>,
+  idleMs: number,
+  onTimeout: () => Error,
+): Promise<ReadableStreamReadResult<T>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(onTimeout()), idleMs)
+    reader.read().then(
+      value => { clearTimeout(timer); resolve(value) },
+      error => { clearTimeout(timer); reject(error) },
+    )
+  })
+}

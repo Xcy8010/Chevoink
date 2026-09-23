@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildProviderReasoningPayload, extractCacheTokens } from '../../api/lib/ai-service.js'
+import { buildProviderReasoningPayload, extractCacheTokens, resolveTextOutputTokenParameter } from '../../api/lib/ai-service.js'
 
 describe('供应商 usage 缓存命中双格式解析', () => {
   it('DeepSeek 顶层 hit/miss 字段优先，原样透传', () => {
@@ -90,5 +90,33 @@ describe('供应商推理参数适配', () => {
       thinking: { type: 'enabled' },
       reasoning_effort: 'high',
     })
+  })
+
+  it('MiMo 只发送 thinking 开关，不发送会被它忽略的 reasoning_effort', () => {
+    expect(buildProviderReasoningPayload({ provider: 'xiaomi', model: 'mimo-v2.6-flash', reasoningEffort: 'high' })).toEqual({
+      thinking: { type: 'enabled' },
+    })
+    expect(buildProviderReasoningPayload({ provider: 'custom-gateway', model: 'xiaomi/mimo-v2.6-flash', reasoningEffort: 'none' })).toEqual({
+      thinking: { type: 'disabled' },
+    })
+  })
+
+  it('供应商名自定义时也能通过主机名识别 MiMo 网关', () => {
+    expect(buildProviderReasoningPayload({ provider: 'proxy', providerBaseUrl: 'https://api.xiaomimimo.com/v1', model: 'thinking-flash', reasoningEffort: 'low' })).toEqual({
+      thinking: { type: 'enabled' },
+    })
+  })
+})
+
+describe('输出预算参数名适配', () => {
+  it('MiMo 在有界调用中改用 max_completion_tokens，其它供应商保持 max_tokens', () => {
+    expect(resolveTextOutputTokenParameter(undefined, { provider: 'xiaomi', model: 'mimo-v2.6-flash' }, true)).toBe('max_completion_tokens')
+    expect(resolveTextOutputTokenParameter(undefined, { provider: 'deepseek', model: 'deepseek-v4-flash' }, true)).toBe('max_tokens')
+  })
+
+  it('无显式预算的辅助调用与显式能力配置都不被覆盖', () => {
+    expect(resolveTextOutputTokenParameter(undefined, { provider: 'xiaomi', model: 'mimo-v2.6-flash' }, false)).toBe('max_tokens')
+    expect(resolveTextOutputTokenParameter('max_tokens', { provider: 'xiaomi', model: 'mimo-v2.6-flash' }, true)).toBe('max_tokens')
+    expect(resolveTextOutputTokenParameter('max_completion_tokens', { provider: 'deepseek', model: 'deepseek-v4-flash' }, false)).toBe('max_completion_tokens')
   })
 })

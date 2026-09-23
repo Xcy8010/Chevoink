@@ -17,7 +17,9 @@ export async function generateReviewCompletion(
   options.signal?.throwIfAborted()
   const originalSignal = options.signal
   const deadline = new AbortController()
-  const timer = setTimeout(() => deadline.abort(), Math.min(env.aiTextTimeoutMs, 180_000))
+  // 等待上限跟随 env 配置：思考型模型（MiMo 等）单次检查可接近 4 分钟，
+  // 挂死连接由流式静默看门狗（aiTextStreamIdleMs）提前释放，不再叠加更短的硬帽
+  const timer = setTimeout(() => deadline.abort(), env.aiTextTimeoutMs)
   const signal = originalSignal ? AbortSignal.any([originalSignal, deadline.signal]) : deadline.signal
   options = { ...options, signal }
   try {

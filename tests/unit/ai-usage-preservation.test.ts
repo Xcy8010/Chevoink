@@ -8,6 +8,7 @@ vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: (value: string) =
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
   resolveTokenPrice: async () => ({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 }) }))
 import { chatWithTools, generateTextCompletion, generateCoverImageData } from '../../api/lib/ai-service.js'
+import { env } from '../../api/config/env.js'
 
 beforeEach(() => {
   mocks.findModel.mockReset().mockResolvedValue(null)
@@ -56,6 +57,35 @@ describe('explicit zero provider usage is not missing usage', () => {
     expect(body.messages[1].content).toBe('完整正文')
     expect(fetcher).toHaveBeenCalledOnce()
     expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ responseTokens: 9000 }))
+  })
+  it('sends MiMo the thinking switch and an enforceable max_completion_tokens budget instead of the ignored max_tokens', async () => {
+    const fetcher = vi.fn(async () => new Response('data: {"choices":[{"delta":{"reasoning_content":"核对过程"}}]}\n\ndata: {"choices":[{"delta":{"content":"{\\"findings\\":[]}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":9000,"completion_tokens_details":{"reasoning_tokens":6000}}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
+    vi.stubGlobal('fetch', fetcher)
+    mocks.runtime.mockResolvedValue({ tier: 'standard', apiKey: 'fixture-not-a-key', provider: 'xiaomi', baseUrl: 'https://api.xiaomimimo.com/v1', reasoningEffort: 'low', multiplierBps: 0, modelName: 'mimo-v2.6-flash' })
+    await expect(generateTextCompletion('system', '完整正文', { userId: 'test', action: 'agent3ContinuityCritic', maxOutputTokens: 16_384, reasoningEffort: 'low' })).resolves.toBe('{"findings":[]}')
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body.max_completion_tokens).toBe(16_384)
+    expect(body).not.toHaveProperty('max_tokens')
+    expect(body.thinking).toEqual({ type: 'enabled' })
+    expect(body).not.toHaveProperty('reasoning_effort')
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ responseTokens: 9000 }))
+  })
+  it('aborts a silent MiMo stream after the idle window instead of waiting for the whole call deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetcher = vi.fn(async () => new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"reasoning_content":"思考"}}]}\n\n'))
+        // 之后保持静默，模拟网关挂死
+      } }), { headers: { 'content-type': 'text/event-stream' } }))
+      vi.stubGlobal('fetch', fetcher)
+      mocks.runtime.mockResolvedValue({ tier: 'standard', apiKey: 'fixture-not-a-key', provider: 'xiaomi', baseUrl: 'https://api.xiaomimimo.com/v1', reasoningEffort: 'low', multiplierBps: 0, modelName: 'mimo-v2.6-flash' })
+      const result = generateTextCompletion('system', '完整正文', { userId: 'test', action: 'agent3ContinuityCritic', maxOutputTokens: 16_384, reasoningEffort: 'low' })
+      const assertion = expect(result).rejects.toMatchObject({ code: 'AI_PROVIDER_TIMEOUT' })
+      await vi.advanceTimersByTimeAsync(env.aiTextStreamIdleMs)
+      await assertion
+      expect(fetcher).toHaveBeenCalledOnce()
+    } finally { vi.useRealTimers() }
   })
   it('classifies gateway HTML timeouts without reporting a malformed quality report or redispatching', async () => {
     const fetcher = vi.fn(async () => new Response('<html>Gateway Timeout</html>', { status: 504 }))
