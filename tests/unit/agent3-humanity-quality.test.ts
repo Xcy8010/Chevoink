@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 
 import {
@@ -10,6 +10,10 @@ import { analyzeDeterministicQuality, calibrateCriticFindings, resolveQualityCha
 import { allTools } from '../../api/lib/agent/tools/registry.js'
 import { AGENT_TOOL_GOVERNANCE } from '../../api/lib/agent/tools/governance.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import * as humanityQuality from '../../api/lib/agent/humanity-quality.js'
+import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
+import { DataAccessError } from '../../api/lib/prisma.js'
+import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 describe('next chapter delivery evidence', () => {
   const row = { status: 'completed', stage: 'commit', chapterId: 'c', chapter: { id: 'c', novelId: 'n', wordCount: 3000, revision: 4,
@@ -104,6 +108,26 @@ describe('质量检查默认目标', () => {
     expect(compilations).not.toHaveBeenCalled()
     expect(await resolveQualityChapterTarget({ ...input, runId: undefined }, db)).toBe('old-editor')
     await expect(resolveQualityChapterTarget({ ...input, runId: undefined, compilationId: 'c' }, db)).rejects.toMatchObject({ code: 'QUALITY_RUN_SCOPE_INVALID' })
+  })
+})
+
+describe('质量检查工具与编号配对失败回执', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+  const ctx: ToolContext = { userId: 'u', novelId: 'n', chapterId: 'editor-chapter', sessionId: 's', runId: 'r',
+    callId: 'quality', mode: 'build', creativeFreedom: 'stable', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal }
+  it('章号与编译号不匹配保持失败回执，不把编号混用变成运行异常', async () => {
+    const conflict = new DataAccessError(409, 'QUALITY_TARGET_AMBIGUOUS', 'chapterId 与 compilationId 不对应')
+    const resolve = vi.spyOn(humanityQuality, 'resolveQualityChapterTarget').mockRejectedValue(conflict)
+    expect(await qualityAnalyzeTool.execute(ctx, { chapterId: 'target', compilationId: 'compiler' })).toEqual({
+      outcome: 'failed', summary: '质量检查目标不匹配', output: conflict.message,
+    })
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ userId: 'u', novelId: 'n', runId: 'r',
+      chapterId: 'target', compilationId: 'compiler', fallbackChapterId: 'editor-chapter' }))
+  })
+  it('运行作用域等真实错误保持上抛，不被失败回执吞掉', async () => {
+    const failure = new DataAccessError(409, 'QUALITY_RUN_SCOPE_INVALID', '编译编号必须属于当前任务')
+    vi.spyOn(humanityQuality, 'resolveQualityChapterTarget').mockRejectedValue(failure)
+    await expect(qualityAnalyzeTool.execute(ctx, { chapterId: 'target', compilationId: 'compiler' })).rejects.toBe(failure)
   })
 })
 

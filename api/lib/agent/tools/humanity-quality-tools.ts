@@ -188,10 +188,19 @@ export const qualityAnalyzeTool = defineTool({
     }
   },
   async execute(ctx, args) {
-    const chapterId = await resolveQualityChapterTarget({
-      userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
-      chapterId: args.chapterId, compilationId: args.compilationId, fallbackChapterId: ctx.chapterId,
-    })
+    let chapterId: string | null | undefined
+    try {
+      chapterId = await resolveQualityChapterTarget({
+        userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
+        chapterId: args.chapterId, compilationId: args.compilationId, fallbackChapterId: ctx.chapterId,
+      })
+    } catch (error) {
+      // 配对校验前移后仍保留工具失败回执；供应商和其他运行错误不在此吞掉。
+      if (error instanceof DataAccessError && error.code === 'QUALITY_TARGET_AMBIGUOUS') return {
+        outcome: 'failed' as const, summary: '质量检查目标不匹配', output: error.message,
+      }
+      throw error
+    }
     if (!chapterId) return { output: '请先指定要检查的章节，或在章节查看器中打开目标章节。' }
     const bundle = await buildHumanityQualityContext(ctx.userId, ctx.novelId, chapterId, ctx.runId)
     if (args.compilationId && args.compilationId !== bundle.compilation?.id) return {
