@@ -1,4 +1,6 @@
 import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
+import { loadCurrentTodoSnapshot } from '../../api/lib/agent/session-messages.js'
+import * as runtimeReducer from '../../api/lib/agent/runtime-reducer.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { Prisma } from '@prisma/client'
@@ -1587,6 +1589,89 @@ describe.runIf(available)('durable quality actual tool chain', () => {
   })
 })
 
+describe.runIf(available)('既有章节独立检查', () => {
+  it.each(['continuity_validate', 'quality_analyze'] as const)('无需准备编译即可独立执行 %s，并复用当前报告', async name => {
+    await fixture(async f => {
+      const lease = await claim(f)
+      const tool = name === 'continuity_validate' ? continuityValidateTool : qualityAnalyzeTool
+      const tools = [chapterReadTool, tool]
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: tools.map(item => ({ type: 'function', function: { name: item.name, description: item.description, parameters: z.toJSONSchema(item.parameters, { io: 'input' }) } })),
+        toolAuthority: tools.map(item => ({ name: item.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages: [{ role: 'user', content: '只检查已有章' }, { role: 'assistant', content: null, toolCalls: [
+            { id: 'read', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
+            { id: 'check', name, arguments: JSON.stringify({ chapterId: f.chapterId }) },
+            { id: 'cached', name, arguments: JSON.stringify({ chapterId: f.chapterId }) },
+          ] }], successfulToolSignatures: [] } })
+      const window = getCreditWindow()
+      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
+        baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['low'], visionEnabled: false, contextWindowTokens: null })
+      vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
+        rateCardId: 'standalone-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
+      const fetchMock = vi.fn(async () => new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`))
+      vi.stubGlobal('fetch', fetchMock)
+      const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const step = () => executeDurableToolStep(lease, new AbortController().signal)
+      await step()
+      for (let i = 0; i < 2; i++) {
+        const result = await step()
+        expect(result).toMatchObject({ kind: 'tool' })
+        if (result.kind === 'tool') expect(result.result.outcome).not.toBe('failed')
+      }
+      expect(fetchMock).toHaveBeenCalledOnce()
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+      expect(await prisma.storyCompilation.count({ where: { novelId: f.novelId } })).toBe(0)
+      expect(await prisma.chapterBridge.count({ where: { novelId: f.novelId } })).toBe(0)
+      if (name === 'continuity_validate') {
+        expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview' } })).toBe(1)
+        const ctx: ToolContext = { ...f, callId: 'legacy-cache', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', emit: () => {}, signal: new AbortController().signal }
+        expect((await continuityValidateTool.execute(ctx, { chapterId: f.chapterId })).outcome).not.toBe('failed')
+        expect(fetchMock).toHaveBeenCalledOnce()
+      }
+    }, undefined, '检查当前既有章节')
+  })
+
+  it.each(['unread', 'wrong-id', 'stale', 'cancelled', 'format'] as const)('独立连续性检查 %s 不保存伪通过报告或修改正文', async scenario => {
+    await fixture(async f => {
+      const lease = await claim(f)
+      const tools = [chapterReadTool, continuityValidateTool]
+      const signal = new AbortController()
+      const calls = [{ id: 'read', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
+        { id: 'check', name: 'continuity_validate', arguments: JSON.stringify({ chapterId: scenario === 'wrong-id' ? randomUUID() : f.chapterId }) }]
+      if (scenario === 'unread') calls.shift()
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
+        toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages: [{ role: 'user', content: '只检查已有章' }, { role: 'assistant', content: null, toolCalls: calls }], successfulToolSignatures: [] } })
+      const window = getCreditWindow()
+      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
+        baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['low'], visionEnabled: false, contextWindowTokens: null })
+      vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
+        rateCardId: 'standalone-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
+      const fetchMock = vi.fn(async () => {
+        if (scenario === 'stale') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者的新正文', revision: { increment: 1 } } })
+        if (scenario === 'cancelled') signal.abort()
+        return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: scenario === 'format' ? '无法提供结构化报告' : '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      if (scenario !== 'unread') await executeDurableToolStep(lease, signal.signal)
+      const check = executeDurableToolStep(lease, signal.signal)
+      if (scenario === 'cancelled') await expect(check).rejects.toBeDefined()
+      else expect(await check).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
+      expect(fetchMock).toHaveBeenCalledTimes(['unread', 'wrong-id'].includes(scenario) ? 0 : 1)
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(scenario === 'stale' ? '作者的新正文' : '原文')
+      expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview' } })).toBe(0)
+      expect(await prisma.storyCompilation.count({ where: { novelId: f.novelId } })).toBe(0)
+    }, undefined, '检查当前既有章节')
+  })
+})
+
 describe.runIf(available)('durable continuity actual tool chain', () => {
   it.each(['success', 'repair', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
@@ -2070,8 +2155,41 @@ describe.runIf(available)('compiler transaction and root continuity', () => {
   })
 })
 
+describe.runIf(available)('传统任务待办快照', () => {
+  it('较新副本覆盖旧消息，续跑继承但新任务不串用，作者结束保持取消语义', async () => {
+    await fixture(async f => {
+      const original = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+      const createLegacy = (id: string, taskSpec: typeof f.spec, offset: number) => prisma.agentRun.create({ data: {
+        id, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, engine: 'loop', runtimeProtocolVersion: 0,
+        mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'completed',
+        taskSpec, createdAt: new Date(original.createdAt.getTime() + offset),
+      } })
+      const firstId = randomUUID()
+      const spec = buildTaskSpec({ runId: firstId, novelId: f.novelId, chapterId: f.chapterId, prompt: '检查本章并报告' })
+      await createLegacy(firstId, spec, 100)
+      const pending = withTodoIds([{ content: '检查正文', status: 'in_progress' }, { content: '保存报告', status: 'pending' }])
+      const done = pending.map(item => ({ ...item, status: 'completed' as const }))
+      await prisma.agentMessage.create({ data: { sessionId: f.sessionId, runId: firstId, role: 'assistant', createdAt: new Date(100),
+        parts: runtimeJson([{ type: 'tool-call', toolName: 'todo_write', status: 'success', display: { kind: 'todoList', items: pending } }]).value } })
+      await prisma.agentArtifact.create({ data: { runId: firstId, artifactType: 'chapterPlan', title: '待办', content: JSON.stringify(done), metadata: { todoList: true }, updatedAt: new Date(200) } })
+      expect(await loadCurrentTodoSnapshot(f.userId, f.sessionId)).toEqual({ runId: firstId, taskId: spec.id, items: done })
+      const continuationId = randomUUID()
+      await createLegacy(continuationId, spec, 200)
+      expect(await loadCurrentTodoSnapshot(f.userId, f.sessionId)).toEqual({ runId: continuationId, taskId: spec.id, items: done })
+      const freshId = randomUUID()
+      const fresh = buildTaskSpec({ runId: freshId, novelId: f.novelId, chapterId: f.chapterId, prompt: '询问其他问题' })
+      await createLegacy(freshId, fresh, 300)
+      expect(await loadCurrentTodoSnapshot(f.userId, f.sessionId)).toEqual({ runId: freshId, taskId: fresh.id, items: [] })
+      const cancelled = pending.map(item => ({ ...item, status: 'cancelled' as const, reason: '作者结束' }))
+      await prisma.agentRun.update({ where: { id: freshId }, data: { usage: { authorEnded: { fulfilled: false, todoItems: cancelled } } } })
+      expect((await loadCurrentTodoSnapshot(f.userId, f.sessionId))?.items).toEqual(cancelled)
+      expect(await loadCurrentTodoSnapshot('another-user', f.sessionId)).toBeNull()
+    })
+  })
+})
+
 describe.runIf(available)('durable task todos', () => {
-  it.each(['build', 'plan', 'review', 'late', 'empty', 'single', 'replay', 'corrupt', 'rollback', 'isolation', 'resume', 'cancelled'] as const)('%s keeps task progress in confirmed receipts', async scenario => {
+  it.each(['build', 'plan', 'review', 'late', 'empty', 'single', 'replay', 'corrupt', 'rollback', 'isolation', 'resume', 'cancelled', 'pending-snapshot'] as const)('%s keeps task progress in confirmed receipts', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
       const mode = scenario === 'plan' || scenario === 'review' ? scenario : 'build'
@@ -2109,7 +2227,11 @@ describe.runIf(available)('durable task todos', () => {
       expect(first.kind).toBe('tool')
       const artifact = await prisma.agentArtifact.findFirst({ where: { runId: f.runId } })
       expect(Boolean(artifact)).toBe(!ignored)
-      if (ignored) return
+      if (ignored) {
+        if (first.kind === 'tool') expect(first.result.outcome === 'failed').toBe(scenario !== 'empty')
+        expect((await loadCurrentTodoSnapshot(f.userId, f.sessionId))?.items).toEqual([])
+        return
+      }
       expect(JSON.parse(artifact!.content)).toEqual(initial)
       if (scenario === 'replay') {
         const ctx: ToolContext = { ...f, mode, callId: 'todo-first', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {},
@@ -2125,6 +2247,13 @@ describe.runIf(available)('durable task todos', () => {
       }
       // A stale/corrupt display copy must not become the authoritative prior list.
       await prisma.agentArtifact.update({ where: { id: artifact!.id }, data: { content: 'stale UI copy' } })
+      expect((await loadCurrentTodoSnapshot(f.userId, f.sessionId))?.items).toEqual(scenario === 'isolation' ? [] : initial)
+      if (scenario === 'pending-snapshot') {
+        const reduce = vi.spyOn(runtimeReducer, 'reduceExecutionReceipt').mockRejectedValueOnce(new Error('fixture-before-reduce'))
+        await expect(executeDurableToolStep(lease, new AbortController().signal)).rejects.toThrow('fixture-before-reduce')
+        expect((await loadCurrentTodoSnapshot(f.userId, f.sessionId))?.items).toEqual(initial)
+        reduce.mockRestore()
+      }
       if (scenario === 'resume') {
         await pauseDurableTask(f.userId, lease.runId)
         const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { runId: lease.runId, type: 'run.paused' } })
@@ -2136,6 +2265,7 @@ describe.runIf(available)('durable task todos', () => {
         ? initial.map(item => ({ ...item, status: 'cancelled', reason: '重复清单，剩余项不再执行' }))
         : [{ ...initial[0], status: 'completed' }, initial[1]]
       expect(JSON.parse((await prisma.agentArtifact.findUniqueOrThrow({ where: { id: artifact!.id } })).content)).toEqual(expected)
+      if (scenario !== 'isolation') expect(await loadCurrentTodoSnapshot(f.userId, f.sessionId)).toEqual({ runId: lease.runId, taskId: f.rootId, items: expected })
       if (scenario === 'cancelled') {
         const own = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '正文终态仍未提交' })
         const frame = (await loadExecutionState(f.userId, lease.runId)).frame

@@ -1,6 +1,10 @@
 import type { Prisma } from '@prisma/client'
 import { readAuthorEnded } from './author-ended.js'
-import type { AgentRun } from '../../../shared/contracts/index.js'
+import type { AgentRun, AgentTodoSnapshot } from '../../../shared/contracts/index.js'
+import { getTaskRunIds } from './task-lineage.js'
+import { loadSessionTodoItems } from './tools/todo-tools.js'
+import { readDurableTodoItems } from './tools/durable-todo.js'
+import { readExecutionStateInTransaction } from './runtime-state.js'
 import type { AgentRollbackChapterRef, AgentRollbackImpactPreview, AgentRollbackResult, AgentRollbackSnapshot, AgentUIMessage } from '../../../shared/contracts/index.js'
 import type { AgentMessagePart } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
@@ -92,10 +96,27 @@ async function getSessionRunState(sessionId: string): Promise<{ activeRunId: str
     resumeRunId: !ending.authorEnded && run && (run.status === 'failed' || run.status === 'paused') ? run.id : null }
 }
 
-/** 拉取会话消息（parts 结构），用于历史恢复与切换会话；回滚快照仅服务端使用，返回前剥离；
- * 附带 activeRunId：前端刷新后据此续接进行中的任务直播。
- * 分页模式（传 runLimit）：按 run 轮次分组取页，整轮返回永不截半轮；
- * 只服务用户端历史展示，Agent 上下文组装走服务端自身链路不受影响 */
+/** 读取当前逻辑任务的权威清单，避免会话旧消息和衍生副本覆盖真实状态。 */
+export async function loadCurrentTodoSnapshot(userId: string, sessionId: string): Promise<AgentTodoSnapshot | null> {
+  return prisma.$transaction(async tx => {
+    const run = await tx.agentRun.findFirst({ where: { userId, sessionId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { id: true, taskSpec: true, taskRootId: true, runtimeProtocolVersion: true, usage: true } })
+    if (!run) return null
+    const spec = run.taskSpec
+    const taskId = run.taskRootId ?? (spec && typeof spec === 'object' && !Array.isArray(spec) && typeof spec.id === 'string' ? spec.id : run.id)
+    const ended = readAuthorEnded(run.usage).authorEnded
+    if (ended?.todoItems) return { runId: run.id, taskId, items: ended.todoItems }
+    if (run.runtimeProtocolVersion === 1 && run.taskRootId) {
+      // 初次准入尚未初始化时清单为空；已提交但尚未 reduce 的操作不能倒灌进执行状态。
+      const head = await tx.agentExecutionState.findUnique({ where: { taskRootId: run.taskRootId } })
+      if (!head) return { runId: run.id, taskId, items: [] }
+      const state = await readExecutionStateInTransaction(tx, run.taskRootId)
+      return { runId: run.id, taskId, items: await readDurableTodoItems(tx, run.taskRootId, state.head.revision, state.frame.state.pendingOperationId) }
+    }
+    return { runId: run.id, taskId, items: await loadSessionTodoItems(sessionId, await getTaskRunIds(sessionId, run.id, tx), tx) }
+  }, { isolationLevel: 'RepeatableRead' })
+}
+
 export type ListSessionMessagesOptions = {
   /** 加载更早游标：只取早于该时间开始的 run 轮次 */
   beforeRunStartedAt?: string | null
@@ -103,6 +124,7 @@ export type ListSessionMessagesOptions = {
   runLimit?: number
 }
 
+/** 拉取整轮消息与当前任务状态；分页仅影响历史展示，不影响 Agent 执行上下文。 */
 export async function listLoopSessionMessages(
   userId: string,
   sessionId: string,
@@ -113,6 +135,7 @@ export async function listLoopSessionMessages(
   /** 无活跃 run 但存在可续跑的 failed/paused run：前端据此在刷新后仍显示「继续执行」按钮 */
   resumeRunId: string | null
   authorEnded?: AgentRun['authorEnded']
+  todoSnapshot: AgentTodoSnapshot | null
   pagination: { hasMore: boolean; earliestRunStartedAt: string | null }
   /** 分支溯源：非空时前端在复制过来的对话下方渲染「从聊天中继续」分隔线 */
   fork: { forkedFromSessionId: string; forkedFromMessageId: string | null; forkedAt: string | null } | null
@@ -179,6 +202,7 @@ export async function listLoopSessionMessages(
     return {
       messages: pagedMessages,
       ...await getSessionRunState(sessionId),
+      todoSnapshot: await loadCurrentTodoSnapshot(userId, sessionId),
       pagination: {
         hasMore,
         earliestRunStartedAt: pageRuns.length ? pageRuns[pageRuns.length - 1].createdAt.toISOString() : null,
@@ -240,6 +264,7 @@ export async function listLoopSessionMessages(
   return {
     messages,
     ...await getSessionRunState(sessionId),
+    todoSnapshot: await loadCurrentTodoSnapshot(userId, sessionId),
     pagination: { hasMore: false, earliestRunStartedAt: null },
     fork,
   }

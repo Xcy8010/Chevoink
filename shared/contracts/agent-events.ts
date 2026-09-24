@@ -1,7 +1,14 @@
 import type { AgentAttachmentMeta } from './agent-attachments.js'
 import type { AgentExecutionMode, EntityId } from './models.js'
 
-/** 任务待办项：todo_write 工具全量维护，驱动 Agent 面板待办清单与循环防早停 */
+/** 当前逻辑任务的权威待办；空清单不回退到会话历史。 */
+export interface AgentTodoSnapshot {
+  runId: EntityId
+  taskId: EntityId
+  items: AgentTodoItem[]
+}
+
+/** 任务待办项：todo_write 工具全量维护，驱动 Agent 面板待办清单与循环防早停。 */
 export interface AgentTodoItem {
   /** Stable within a task; optional only for historical receipts. */
   id?: string

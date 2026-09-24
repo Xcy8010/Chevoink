@@ -149,12 +149,12 @@ export type AgentSessionForkInfo = { forkedFromSessionId: string; forkedFromMess
 export function fetchAgentSessionMessages(
   sessionId: string,
   options?: { runLimit?: number; beforeRunStartedAt?: string | null },
-): Promise<{ messages: AgentUIMessage[]; activeRunId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }> {
+): Promise<{ messages: AgentUIMessage[]; activeRunId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }> {
   const query = new URLSearchParams()
   if (options?.runLimit != null) query.set('runLimit', String(options.runLimit))
   if (options?.beforeRunStartedAt) query.set('before', options.beforeRunStartedAt)
   const suffix = query.toString() ? `?${query.toString()}` : ''
-  return requestData<{ messages: AgentUIMessage[]; activeRunId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }>(
+  return requestData<{ messages: AgentUIMessage[]; activeRunId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }>(
     `/api/agent/sessions/${sessionId}/messages${suffix}`,
   )
 }

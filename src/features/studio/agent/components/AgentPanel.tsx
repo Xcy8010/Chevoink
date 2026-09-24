@@ -260,17 +260,30 @@ export function AgentPanel({
       const now = useAgentStore.getState()
       if (now.runId === latestId) return
       if (payload.activeRunId) {
-        now.restoreMessages(payload.messages.filter(message => !(message.runId === payload.activeRunId && message.role === 'assistant')), sessionId)
+        now.restoreMessages(payload.messages.filter(message => !(message.runId === payload.activeRunId && message.role === 'assistant')), sessionId, payload.todoSnapshot)
         now.resumeRun(payload.activeRunId, sessionId)
         connect(payload.activeRunId, 0)
       } else {
-        now.restoreMessages(payload.messages, sessionId)
+        now.restoreMessages(payload.messages, sessionId, payload.todoSnapshot)
         now.setAuthorEnded(payload.authorEnded ?? null)
         now.noteResumeableRun(payload.resumeRunId ?? null)
       }
     }).catch(() => { /* Next queue poll retries; never erase existing history. */ })
     return () => { cancelled = true }
   }, [sessionId, queueQuery.data, queueQuery.dataUpdatedAt, connect])
+
+  // 开始/结束时仅同步当前任务清单；请求期间有新待办事件或切换任务则丢弃响应。
+  const todoSyncStage = phase === 'starting' ? null : isRunActive(phase) ? 'active' : 'settled'
+  useEffect(() => {
+    if (!sessionId || !runId || !todoSyncStage) return
+    let cancelled = false
+    const version = useAgentStore.getState().todosVersion
+    void fetchAgentSessionMessages(sessionId, { runLimit: 1 }).then(payload => {
+      if (cancelled || viewSession.current !== sessionId || !payload.todoSnapshot) return
+      useAgentStore.getState().reconcileTodoSnapshot(payload.todoSnapshot, sessionId, runId, version)
+    }).catch(() => { /* 保留直播进度，刷新历史时再次校准。 */ })
+    return () => { cancelled = true }
+  }, [sessionId, runId, todoSyncStage])
 
   // 更早对话分页：每页最多 50 轮 run，用户手动点击顶部按钮加载更早内容
   const [olderPagination, setOlderPagination] = useState<{ hasMore: boolean; before: string | null } | null>(null)
@@ -631,11 +644,12 @@ export function AgentPanel({
             .restoreMessages(
               history.filter((message) => !(message.runId === activeRunId && message.role === 'assistant')),
               sessionId,
+              payload.todoSnapshot,
             )
           useAgentStore.getState().resumeRun(activeRunId, sessionId)
           connect(activeRunId, 0)
         } else {
-          useAgentStore.getState().restoreMessages(history, sessionId)
+          useAgentStore.getState().restoreMessages(history, sessionId, payload.todoSnapshot)
           useAgentStore.getState().setAuthorEnded(payload.authorEnded ?? null)
           // 无活跃 run：若服务端派生出可续跑的 failed/paused run，刷新后仍保留「继续执行」按钮
           useAgentStore.getState().noteResumeableRun(payload.resumeRunId ?? null)
@@ -870,9 +884,11 @@ export function AgentPanel({
     try {
       // 删除/回退后的重拉：不带分页参数走全量，避免已加载的更早轮次被页窗口截掉；
       // 同时清掉分页游标，防止顶部按钮残留过期状态
-      const { messages: history, authorEnded } = await fetchAgentSessionMessages(sessionId)
+      const beforeRunId = useAgentStore.getState().runId
+      const { messages: history, authorEnded, todoSnapshot } = await fetchAgentSessionMessages(sessionId)
+      if (viewSession.current !== sessionId || useAgentStore.getState().runId !== beforeRunId) return
       setOlderPagination(null)
-      useAgentStore.getState().restoreMessages(history, sessionId)
+      useAgentStore.getState().restoreMessages(history, sessionId, todoSnapshot)
       useAgentStore.getState().setAuthorEnded(authorEnded ?? null)
     } catch {
       /* 拉取失败保留现有消息 */
@@ -893,6 +909,7 @@ export function AgentPanel({
     setLoadingOlder(true)
     try {
       const payload = await fetchAgentSessionMessages(sessionId, { runLimit: 50, beforeRunStartedAt: before })
+      if (viewSession.current !== sessionId || useAgentStore.getState().loadedSessionId !== sessionId) return
       setOlderPagination(payload.pagination ? { hasMore: payload.pagination.hasMore, before: payload.pagination.earliestRunStartedAt } : null)
       useAgentStore.getState().prependMessages(payload.messages)
       if (anchorId) {

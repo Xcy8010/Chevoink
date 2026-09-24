@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 
 import type { AgentMessagePart, AgentTodoItem } from '../../../../shared/contracts/index.js'
@@ -67,24 +68,27 @@ export function prepareTodoUpdate(previous: AgentTodoItem[], requested: AgentTod
   const unchanged = { items: previous, changed: false }
   const reject = (error: string) => ({ ...unchanged, error })
   if (!requested.length) return unchanged
-  if (!previous.length && (requested.length < 2 || requested.every(item => item.status === 'completed'))) return unchanged
+  if (!previous.length && (requested.length < 2 || requested.some(item => item.status === 'completed'))) return reject('本任务没有可更新的清单。不能用单项或已完成项补造待办；不要操作其他任务清单，也不要为了消除提示新增无关工作。')
   const baseline = withTodoIds(previous)
   const byId = new Map(baseline.map(item => [item.id, item]))
-  const byContent = new Map(baseline.map(item => [item.content, item]))
+  const contentKey = (value: string) => value.normalize('NFKC').replace(/\s+/gu, '').replace(/[。.!！]+$/u, '')
+  const byContent = new Map(baseline.map(item => [contentKey(item.content), item]))
   const updates = new Map<string, AgentTodoItem>()
   const added: AgentTodoItem[] = []
   for (const requestedItem of requested) {
     // A brand-new list has no server identities to reference. Model-invented
     // IDs are replaced with our stable IDs; foreign IDs on updates still fail.
     const item = baseline.length ? requestedItem : { ...requestedItem, id: undefined }
-    if (!item.id && baseline.filter(old => old.content === item.content).length > 1) return reject('存在同名待办，请用各自原 id 指明更新或取消哪一项。')
-    const old = item.id ? byId.get(item.id) : byContent.get(item.content)
+    if (!item.id && baseline.filter(old => contentKey(old.content) === contentKey(item.content)).length > 1) return reject('存在同名待办，请用各自原 id 指明更新或取消哪一项。')
+    const old = item.id ? byId.get(item.id) : byContent.get(contentKey(item.content))
     if (item.id && !old) return reject('待办 id 不属于当前清单；首次创建请省略 id，更新已有项请使用回执中的原 id。')
     if (!old && item.status === 'completed') return baseline.length ? reject('不能用新描述提交已完成项；请沿用原 id 更新既有待办。') : unchanged
     if (!old && baseline.length && !changeReason?.trim()) return reject('已有清单不能因改写描述而追加新项。更新时带回原 id；确有新增工作须提供 changeReason。')
     if (item.status === 'cancelled' && (!old || !item.reason?.trim())) return reject('只能取消已有项，并须说明 reason；取消不等于完成。')
-    if (!old && added.some(entry => entry.content === item.content)) return reject('同一待办不能在一次更新中重复出现。')
-    const next = old ? { ...old, ...item, id: old.id, ...(old.status === 'completed' || old.status === 'cancelled' ? { status: old.status } : {}) } : withTodoIds([...baseline, ...added, item]).at(-1)!
+    if (!old && added.some(entry => contentKey(entry.content) === contentKey(item.content))) return reject('同一待办不能在一次更新中重复出现。')
+    if (old && contentKey(old.content) !== contentKey(item.content) && baseline.some(entry => entry.id !== old.id && contentKey(entry.content) === contentKey(item.content))) return reject('改名会与既有待办重复；请保留原项，并按原 id 取消重复项。')
+    if (old && (old.status === 'completed' || old.status === 'cancelled') && item.status !== old.status) return reject(`待办“${old.content}”已经${old.status === 'completed' ? '完成' : '取消'}，本次状态更新未应用；取消不能改标完成。`)
+    const next = old ? { ...old, ...item, id: old.id } : withTodoIds([...baseline, ...added, item]).at(-1)!
     if (updates.has(next.id!)) return reject('同一待办不能在一次更新中重复出现。')
     updates.set(next.id!, next)
     if (!old) added.push(next)
@@ -92,6 +96,14 @@ export function prepareTodoUpdate(previous: AgentTodoItem[], requested: AgentTod
   // Preserve plan order; editing a title is not adding another task.
   const items = [...baseline.map(item => updates.get(item.id!) ?? item), ...added]
   if (items.length > 20) return reject('待办最多 20 项，请按原 id 整理重复项。')
+  // 拒绝同批改名/新增制造的新重复；历史同名项仍可按原编号取消。
+  for (const item of updates.values()) {
+    const old = byId.get(item.id)
+    if ((!old || contentKey(old.content) !== contentKey(item.content))
+      && items.some(other => other.id !== item.id && contentKey(other.content) === contentKey(item.content))) {
+      return reject('本次更新产生重复待办；请沿用原 id 更新或取消重复项。')
+    }
+  }
   let activeSeen = false
   const normalized = items.map(item => item.status === 'in_progress'
     ? activeSeen ? { ...item, status: 'pending' as const } : (activeSeen = true, item)
@@ -114,15 +126,15 @@ function todoArtifactWhere(sessionId: string, runIds?: string[]) {
  * 按时间比较成功工具快照与持久化副本，避免同批工具或作者结束后读到旧消息。
  * 仅在当前任务谱系内读取；历史无编号清单在读取时补稳定编号。
  */
-export async function loadSessionTodoItems(sessionId: string, runIds?: string[]): Promise<AgentTodoItem[]> {
-  const recent = await prisma.agentMessage.findMany({
+export async function loadSessionTodoItems(sessionId: string, runIds?: string[], db: Prisma.TransactionClient = prisma): Promise<AgentTodoItem[]> {
+  const recent = await db.agentMessage.findMany({
     where: { sessionId, role: 'assistant', ...(runIds ? { runId: { in: runIds } } : {}) },
     orderBy: { createdAt: 'desc' },
     take: 40,
     select: { parts: true, createdAt: true },
   })
 
-  const artifact = await prisma.agentArtifact.findFirst({
+  const artifact = await db.agentArtifact.findFirst({
     where: todoArtifactWhere(sessionId, runIds), orderBy: { updatedAt: 'desc' },
     select: { content: true, updatedAt: true },
   })
@@ -177,7 +189,7 @@ export const todoWriteTool = defineTool({
   name: 'todo_write',
   title: '更新待办清单',
   description:
-    '按原 id 更新状态或修改说明，禁止改描述新增重复项。开工前一次列出已知步骤并按序执行，每项开工先设 in_progress，真实完成后立即设 completed；确有范围变化才带 changeReason 新增。重复项或不再执行项沿用原 id 设 cancelled 并填 reason，不得假标 completed。仅用于长任务、复杂任务（如连写多章、跨章批量整改、多项独立交付步骤）：开工前建立至少两项真实待办，再逐项推进。简单问答、单处修改、简单单步操作不需要清单。首次创建不能全是 completed；禁止在收尾时补写完成清单或用一条总结覆盖旧清单。已真实交付的既有项可批量标记 completed，已完成项不回退、原项不遗漏。有未完成项就继续执行，无法完成时说明阻塞，不得假勾选。空数组不会清空旧清单；进度未变化不要重复调用。',
+    '按原 id 更新状态或修改说明，禁止改描述新增重复项。开工前一次列出已知步骤并按序执行，每项开工先设 in_progress，真实完成后立即设 completed；确有范围变化才带 changeReason 新增。重复项或不再执行项沿用原 id 设 cancelled 并填 reason，不得假标 completed。仅用于长任务、复杂任务（如连写多章、跨章批量整改、多项独立交付步骤）：开工前建立至少两项真实待办，再逐项推进。简单问答、单处修改、简单单步操作不需要清单。首次创建不能包含 completed；禁止在收尾时补写完成清单或用一条总结覆盖旧清单。已真实交付的既有项可批量标记 completed，已完成项不回退、原项不遗漏。有未完成项就继续执行，无法完成时说明阻塞，不得假勾选。空数组不会清空旧清单；进度未变化不要重复调用。',
   parameters: todoWriteParameters,
   coerceArgs(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw

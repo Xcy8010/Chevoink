@@ -2,9 +2,45 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { MessageTime, UserMessageActions } from '../../src/features/studio/agent/components/MessageActions'
-import { useAgentStore } from '../../src/features/studio/agent/agentStore'
+import { useAgentStore, readSessionMessagesCache } from '../../src/features/studio/agent/agentStore'
+import type { AgentTodoItem, AgentUIMessage } from '../../shared/contracts/index.js'
 
 afterEach(cleanup)
+
+it('权威待办覆盖旧消息，分页和会话缓存不会回退状态', () => {
+  const old: AgentTodoItem[] = [{ id: 'a', content: '写章节', status: 'in_progress' }, { id: 'b', content: '重复工作', status: 'pending' }]
+  const current: AgentTodoItem[] = [{ ...old[0], status: 'completed' }, { ...old[1], status: 'cancelled', reason: '重复' }]
+  const history: AgentUIMessage[] = [{ id: 'todo-history', runId: 'r', role: 'assistant', createdAt: new Date().toISOString(), parts: [
+    { type: 'tool-call', callId: 'todo', toolName: 'todo_write', title: '待办', status: 'success', display: { kind: 'todoList', items: old } },
+  ] }]
+  useAgentStore.getState().restoreMessages(history, 'todo-session', { runId: 'r', taskId: 'task', items: current })
+  expect(useAgentStore.getState().todos).toEqual(current)
+  useAgentStore.getState().prependMessages([{ ...history[0], id: 'older' }])
+  expect(useAgentStore.getState().todos).toEqual(current)
+  useAgentStore.getState().resetRun()
+  useAgentStore.getState().restoreMessages(readSessionMessagesCache('todo-session')!, 'todo-session')
+  expect(useAgentStore.getState().todos).toEqual(current)
+  useAgentStore.getState().restoreMessages(history, 'todo-session', { runId: 'new', taskId: 'new-task', items: [] })
+  expect(useAgentStore.getState().todos).toEqual([])
+})
+
+it('新任务清空旧待办并拒绝迟到快照和覆盖实时结果', () => {
+  const items: AgentTodoItem[] = [{ id: 'a', content: '既有项', status: 'pending' }]
+  useAgentStore.getState().beginRun('r1', '继续', 's1')
+  const version = useAgentStore.getState().todosVersion
+  useAgentStore.getState().reconcileTodoSnapshot({ runId: 'r1', taskId: 't1', items }, 's1', 'r1', version)
+  expect(useAgentStore.getState().todos).toEqual(items)
+  useAgentStore.getState().beginRun('r2', '独立检查', 's1')
+  useAgentStore.getState().reconcileTodoSnapshot({ runId: 'r1', taskId: 't1', items }, 's1', 'r1', version)
+  expect(useAgentStore.getState().todos).toEqual([])
+  const newerVersion = useAgentStore.getState().todosVersion
+  useAgentStore.setState({ todos: [{ ...items[0], status: 'completed' }], todosVersion: newerVersion + 1 })
+  useAgentStore.getState().reconcileTodoSnapshot({ runId: 'r2', taskId: 't2', items }, 's1', 'r2', newerVersion)
+  expect(useAgentStore.getState().todos[0].status).toBe('completed')
+  useAgentStore.getState().beginRun('r3', '另一会话', 's2')
+  useAgentStore.getState().reconcileTodoSnapshot({ runId: 'r2', taskId: 't2', items }, 's1', 'r2', useAgentStore.getState().todosVersion)
+  expect(useAgentStore.getState().todos).toEqual([])
+})
 
 it('renders all actions together with 24-hour local time and preserves callbacks', () => {
   const onCopy = vi.fn(), onRollback = vi.fn(), onDelete = vi.fn()

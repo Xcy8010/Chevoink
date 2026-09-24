@@ -6,6 +6,7 @@ import type {
   AgentSessionRunStatus,
   AgentStreamEvent,
   AgentTodoItem,
+  AgentTodoSnapshot,
   AgentTokenUsage,
   AgentToolDisplayPayload,
   AgentToolDraft,
@@ -265,7 +266,8 @@ type AgentStoreState = {
   noteResumeableRun: (runId: string | null) => void
   /** 刷新历史或终态事件提供作者结束事实，并优先采用其最终待办快照。 */
   setAuthorEnded: (value: AgentAuthorEnded | null) => void
-  restoreMessages: (messages: AgentUIMessage[], sessionId?: string | null) => void
+  restoreMessages: (messages: AgentUIMessage[], sessionId?: string | null, snapshot?: AgentTodoSnapshot | null) => void
+  reconcileTodoSnapshot: (snapshot: AgentTodoSnapshot, sessionId: string, runId: string, expectedVersion: number) => void
   /** 加载更早对话：把更早轮次前插合并（按 id 去重），不触碰进行中的 run */
   prependMessages: (messages: AgentUIMessage[]) => void
     /** 标记指定会话开始/结束历史水合：与 loadedSessionId 一同构成加载态判定依据 */
@@ -411,7 +413,7 @@ function deriveSessionStateFromMessages(messages: AgentUIMessage[]): {
       if (part.type !== 'tool-call') {
         continue
       }
-      if (part.display?.kind === 'todoList') {
+      if (part.status === 'success' && part.display?.kind === 'todoList' && message.runId === messages.at(-1)?.runId) {
         todos = part.display.items
       }
       if (!WORKSPACE_WRITE_TOOLS.has(part.toolName) && part.display?.kind !== 'chapterDiff' && part.display?.kind !== 'planDiff') {
@@ -490,15 +492,15 @@ function settleRunningActivities(activities: WorkspaceActivity[]): WorkspaceActi
 /** 会话消息缓存：切回读过的任务窗口时同步复原，做到「有缓存直接显示」而不是重新拉取闪加载态。
     store 只能持有当前会话一份 messages，因此缓存放在模块层（不参与订阅，不引发重渲染） */
 const SESSION_MESSAGES_CACHE_LIMIT = 12
-const sessionMessagesCache = new Map<string, AgentUIMessage[]>()
+const sessionMessagesCache = new Map<string, { messages: AgentUIMessage[]; todos: AgentTodoItem[] }>()
 
-function writeSessionMessagesCache(sessionId: string | null, messages: AgentUIMessage[]) {
+function writeSessionMessagesCache(sessionId: string | null, messages: AgentUIMessage[], todos: AgentTodoItem[]) {
   if (!sessionId || messages.length === 0) {
     return
   }
   // 重新插入以维持访问顺序，超出上限时淘汰最久未用的会话
-sessionMessagesCache.delete(sessionId)
-  sessionMessagesCache.set(sessionId, messages)
+  sessionMessagesCache.delete(sessionId)
+  sessionMessagesCache.set(sessionId, { messages, todos })
   while (sessionMessagesCache.size > SESSION_MESSAGES_CACHE_LIMIT) {
     const oldest = sessionMessagesCache.keys().next().value
     if (oldest === undefined) {
@@ -509,7 +511,7 @@ sessionMessagesCache.delete(sessionId)
 }
 
 export function readSessionMessagesCache(sessionId: string): AgentUIMessage[] | null {
-  return sessionMessagesCache.get(sessionId) ?? null
+  return sessionMessagesCache.get(sessionId)?.messages ?? null
 }
 
 export const useAgentStore = create<AgentStoreState>((set, get) => ({
@@ -579,7 +581,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...(state.sessionSignals[sessionId] ? (() => { const next = { ...state.sessionSignals }; delete next[sessionId]; return { sessionSignals: next } })() : {}),
           }
         : {}),
-      // 工作区变更与待办按任务窗口（会话）累计，新 run 不清空；
+      // 待办属于逻辑任务，等待服务端恢复当前任务，不能继承整个会话的旧清单。
+      todos: [],
+      todosVersion: state.todosVersion + 1,
+      // 工作区变更仍按会话累计；
       // 上一个任务若被停止后遗留了「执行中」的工具卡片（终态事件丢失时），开新任务前一并收尾
       workspaceActivities: settleRunningActivities(state.workspaceActivities),
       messages: [
@@ -633,9 +638,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // 不清空变更/待办：历史部分由 restoreMessages 推导，活跃 run 部分由事件重放按 callId 去重补齐
     })),
 
-  restoreMessages: (messages, sessionId = null) => {
+  restoreMessages: (messages, sessionId = null, snapshot) => {
     const restored = decorateAcceptedMessages(messages)
-    writeSessionMessagesCache(sessionId, restored)
+    const derived = deriveSessionStateFromMessages(restored)
+    const cached = sessionId ? sessionMessagesCache.get(sessionId) : undefined
+    const todos = snapshot !== undefined ? snapshot?.items ?? [] : cached?.messages === messages ? cached.todos : derived.todos
+    writeSessionMessagesCache(sessionId, restored, todos)
     set((state) => ({
       messages: restored,
       phase: 'idle',
@@ -650,12 +658,18 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       errorCode: null,
       liveToolDrafts: {},
       toolNavigationRequest: null,
-      // 从历史工具轨迹恢复会话级变更与待办；不递增触发版本，避免历史恢复误自动展开
-      ...deriveSessionStateFromMessages(restored),
+      // 工作区活动取历史轨迹，待办取任务级快照；分页不应覆盖此快照。
+      workspaceActivities: derived.workspaceActivities,
+      todos,
       // 只清除属于本会话的水合标记，避免覆盖后发起的其它会话
       hydratingSessionId: state.hydratingSessionId === sessionId ? null : state.hydratingSessionId,
     }))
   },
+
+  reconcileTodoSnapshot: (snapshot, sessionId, runId, expectedVersion) => set(state => {
+    if (state.loadedSessionId !== sessionId || state.runId !== runId || snapshot.runId !== runId || state.todosVersion !== expectedVersion) return {}
+    return { todos: snapshot.items }
+  }),
 
   beginSessionHydration: (sessionId) => set({ hydratingSessionId: sessionId }),
 
@@ -672,15 +686,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       const merged = [...older, ...state.messages]
       return {
         messages: merged,
-        // 更早轮次含写工具轨迹：重派生变更/待办但不递增触发版本，避免历史误自动展开
-        ...deriveSessionStateFromMessages(merged),
+        // 分页仅补充会话活动，绝不把任务待办倒退到旧消息快照。
+        workspaceActivities: deriveSessionStateFromMessages(merged).workspaceActivities,
       }
     }),
 
   resetRun: () => {
     // 离开旧会话前把最新消息（含刚直播完的内容）快照进缓存：切回来可零延迟复原
-    const { loadedSessionId: leavingSessionId, messages: leavingMessages } = get()
-    writeSessionMessagesCache(leavingSessionId, leavingMessages)
+    const { loadedSessionId: leavingSessionId, messages: leavingMessages, todos } = get()
+    writeSessionMessagesCache(leavingSessionId, leavingMessages, todos)
     set({
       runId: null,
       resumeableRunId: null,

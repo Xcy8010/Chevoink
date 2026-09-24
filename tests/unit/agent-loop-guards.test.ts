@@ -18,6 +18,11 @@ it('requires actual chapter delivery only for explicit next-chapter instructions
   for (const goal of ['告诉我原因', '不要写下一章', '写下一章之前先告诉我计划', '为什么没有写下一章', '分析这本小说']) expect(requiresNextChapterDelivery([goal])).toBe(false)
 })
 
+it('仅明确执行当前未完成待办时继承原任务，询问或假勾选不授予续跑', () => {
+  for (const prompt of ['把待办没完成的都完成', '请把当前待办清单里未完成的任务全部做完。', '待办未完成项继续完成']) expect(isContinuationRequest(prompt), prompt).toBe(true)
+  for (const prompt of ['为啥里面还有31章的任务', '为什么待办没标完成', '把所有待办标记完成', '取消未完成待办', '把其他任务待办完成', '写下一章', '待办未完成项都完成，然后删除旧章节']) expect(isContinuationRequest(prompt), prompt).toBe(false)
+})
+
 describe('protocol recovery budgets', () => {
   it('replays the incident: invalid / native / invalid / native / invalid is not a consecutive failure', () => {
     const guard = createProtocolRecoveryGuard()

@@ -30,6 +30,8 @@ export function createProtocolRecoveryGuard() {
 
 /** Only unambiguous continuation commands inherit the previous task. */
 export function isContinuationRequest(prompt: string): boolean {
+  // 明确推进当前待办仍是原任务；询问状态、要求取消或提出新章节不扩大为续跑授权。
+  if (/^(?:请|请你|帮我)?\s*(?:把)?(?:当前|这个|这份|之前|剩余)?(?:的)?待办(?:清单|任务)?(?:中|里|里面)?(?:的)?(?:还)?(?:没完成|未完成|剩余)(?:的)?(?:任务|工作|项)?(?:都|全部)?(?:继续)?(?:完成|做完|执行完)(?:一下)?[。！!\s]*$/u.test(prompt.trim())) return true
   return /^(?:请|请你|帮我)?\s*(?:继续|接着)(?:(?:执行|完成|处理)?(?:之前|此前|刚才|上次|上一轮|剩余|未完成)的?(?:任务|工作|整改|内容)?|执行|完成)?[。！!\s]*$/u.test(prompt.trim())
 }
 

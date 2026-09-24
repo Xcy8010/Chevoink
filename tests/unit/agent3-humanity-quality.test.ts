@@ -55,6 +55,17 @@ describe('质量检查默认目标', () => {
     expect(run).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'r', userId: 'u', novelId: 'n' } }))
     expect(compilations).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', status: 'active', run: { userId: 'u', novelId: 'n', taskRootId: 'root' } }, take: 2 }))
   })
+  it('章节与编译编号配对校验，不能跨任务或混用对象身份', async () => {
+    const { db } = database([])
+    const findFirst = vi.fn().mockResolvedValue({ chapterId: 'target' })
+    db.storyCompilation.findFirst = findFirst
+    expect(await resolveQualityChapterTarget({ ...input, chapterId: 'target', compilationId: 'compiler' }, db)).toBe('target')
+    expect(findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: 'compiler', run: { userId: 'u', novelId: 'n', taskRootId: 'root' } }) }))
+    await expect(resolveQualityChapterTarget({ ...input, chapterId: 'wrong', compilationId: 'compiler' }, db)).rejects.toMatchObject({ code: 'QUALITY_TARGET_AMBIGUOUS' })
+    findFirst.mockResolvedValue(null)
+    await expect(resolveQualityChapterTarget({ ...input, chapterId: 'target', compilationId: 'foreign' }, db)).rejects.toMatchObject({ code: 'QUALITY_TARGET_AMBIGUOUS' })
+    await expect(resolveQualityChapterTarget({ ...input, runId: undefined, chapterId: 'target', compilationId: 'compiler' }, db)).rejects.toMatchObject({ code: 'QUALITY_RUN_SCOPE_INVALID' })
+  })
   it('显式章节保持优先，无编译的普通审阅继续使用当前编辑章节', async () => {
     const { db, compilations } = database([])
     expect(await resolveQualityChapterTarget({ ...input, chapterId: 'explicit' }, db)).toBe('explicit')

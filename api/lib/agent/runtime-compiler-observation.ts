@@ -31,7 +31,7 @@ export async function readCompilerObservation(tx: RuntimeTx, rootId: string, rev
         || runtimeJson(receipt.result).hash !== receipt.resultHash || event.eventKey !== `effect:${operation.id}`
         || runtimeJson(event.payload).hash !== runtimeJson({ operationId: operation.id, resultHash: receipt.resultHash }).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '编译观察回执损坏。')
       const result = z.object({ compilerState: compilerObservationSchema, toolResult: z.object({ output: z.string() }) }).safeParse(receipt.result)
-      if (operation.action === 'quality_analyze' && receipt.result && typeof receipt.result === 'object' && !Array.isArray(receipt.result) && !('compilerState' in receipt.result)) continue // Standalone chapter review has no compiler observation.
+      if (['quality_analyze', 'continuity_validate'].includes(operation.action) && receipt.result && typeof receipt.result === 'object' && !Array.isArray(receipt.result) && !('compilerState' in receipt.result)) continue // 独立章检查不产生编译观察。
       if (!result.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '编译观察缺少目标身份。')
       if (id && result.data.compilerState.id !== id) continue
       const pending = await readExecutionFrame(tx, rootId, source + 1)

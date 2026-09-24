@@ -220,7 +220,7 @@ export async function getOwnedQualityChapter(userId: string, novelId: string, ch
     where: { id: chapterId, ...activeChapterScope(novelId), authorId: userId },
     include: { novel: { select: { title: true, categoryName: true, tagNames: true } } },
   })
-  if (!chapter) throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '章节不存在或不属于当前作品。')
+  if (!chapter) throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', 'chapterId 不是当前作品的有效章节编号，请使用 chapter_read 或作品目录返回的真实 chapterId；不能填 compilationId，也无需为独立检查准备新编译。')
   return chapter
 }
 
@@ -256,6 +256,7 @@ export async function resolveQualityChapterTarget(
   input: { userId: string; novelId: string; runId?: string; chapterId?: string; compilationId?: string; fallbackChapterId?: string | null },
   db: Prisma.TransactionClient = prisma,
 ) {
+  if (input.compilationId && !input.runId) throw new DataAccessError(409, 'QUALITY_RUN_SCOPE_INVALID', '编译编号必须属于当前任务；独立审阅仅传真实 chapterId。')
   if (input.runId) {
     const run = await db.agentRun.findFirst({ where: { id: input.runId, userId: input.userId, novelId: input.novelId }, select: { taskSpec: true } })
     const task = taskSpecSchema.safeParse(run?.taskSpec)
@@ -270,7 +271,14 @@ export async function resolveQualityChapterTarget(
       throw new DataAccessError(409, 'QUALITY_TASK_TARGET_REQUIRED', '当前任务要求写下一章，请先准备并写入本任务的新章，再检查质量；不能回到历史旧章重复修订。')
     }
   }
-  if (input.chapterId) return input.chapterId
+  if (input.chapterId) {
+    if (input.compilationId) {
+      const compilation = await db.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: 'active',
+        ...await qualityCompilationScope(db, input.userId, input.novelId, input.runId) }, select: { chapterId: true } })
+      if (!compilation || compilation.chapterId !== input.chapterId) throw new DataAccessError(409, 'QUALITY_TARGET_AMBIGUOUS', 'chapterId 与 compilationId 不对应或编译不属于本任务；章节编号与编译编号不可混用。独立检查既有章只传 chapter_read 返回的 chapterId，无需准备编译。')
+    }
+    return input.chapterId
+  }
   if (!input.runId) {
     if (input.compilationId) throw new DataAccessError(409, 'QUALITY_RUN_SCOPE_INVALID', '请在当前任务中指定质量检查的章节。')
     return input.fallbackChapterId

@@ -10,7 +10,8 @@ const ctx = { sessionId: 's', runId: 'current-task-run' } as ToolContext
 beforeEach(() => { vi.resetAllMocks(); db.messages.mockResolvedValue([]); db.artifact.mockResolvedValue(null) })
 it('does not create retrospective completion lists or single-step checklists', () => {
   for (const items of [[], [{ content: '已写完第22章', status: 'completed' }], [{ content: '改标题', status: 'pending' }], [{ content: '已写', status: 'completed' }, { content: '已审', status: 'completed' }]] as AgentTodoItem[][]) {
-    expect(prepareTodoUpdate([], items)).toEqual({ items: [], changed: false })
+    expect(prepareTodoUpdate([], items)).toMatchObject({ items: [], changed: false })
+    if (items.length) expect(prepareTodoUpdate([], items).error).toContain('没有可更新的清单')
   }
 })
 it('permits a multi-step plan before execution, then real completion of existing items', () => {
@@ -27,14 +28,20 @@ it('preserves omitted completed and pending work instead of replacing it with a 
 })
 it('keeps completed status and skips identical snapshots', () => {
   expect(prepareTodoUpdate(previous, previous).changed).toBe(false)
-  expect(prepareTodoUpdate(previous, [{ ...previous[0], status: 'pending' }, previous[1]])).toEqual({ items: previous, changed: false })
+  expect(prepareTodoUpdate(previous, [{ ...previous[0], status: 'pending' }, previous[1]])).toMatchObject({ items: previous, changed: false, error: expect.stringContaining('未应用') })
 })
 it('empty and completed-only tool calls neither persist nor emit a replacement todo display', async () => {
   for (const items of [[], [{ content: '写第22章已完成', status: 'completed' }]] as AgentTodoItem[][]) {
     const args = todoWriteTool.parameters.parse({ items })
     const result = await todoWriteTool.execute(ctx, args)
-    expect(result.display).toBeUndefined()
-    expect(result.summary).toBe('待办清单未变更')
+    if (items.length) {
+      expect(result.outcome).toBe('failed')
+      expect(result.summary).toBe('待办更新未接受')
+      expect(result.display).toEqual({ kind: 'todoList', items: [] })
+    } else {
+      expect(result.display).toBeUndefined()
+      expect(result.summary).toBe('待办清单未变更')
+    }
   }
   expect(db.create).not.toHaveBeenCalled()
   expect(db.update).not.toHaveBeenCalled()
@@ -105,6 +112,18 @@ it('assigns distinct stable IDs to historical same-title rows and requires expli
 })
 it('rejects duplicate content on initial creation instead of manufacturing duplicate IDs', () => {
   expect(prepareTodoUpdate([], [{ content: '重复', status: 'pending' }, { content: '重复', status: 'pending' }]).error).toContain('重复')
+  expect(prepareTodoUpdate([], [{ content: '写第３２章正文。', status: 'pending' }, { content: '写第32章正文', status: 'pending' }]).error).toContain('重复')
+  const old = withTodoIds([{ content: '写第32章正文', status: 'in_progress' }, { content: '复核', status: 'pending' }])
+  const next = prepareTodoUpdate(old, [{ content: '写第３２章正文。', status: 'completed' }])
+  expect(next.items).toHaveLength(2)
+  expect(next.items[0]).toMatchObject({ id: old[0].id, status: 'completed' })
+  expect(prepareTodoUpdate(old, [{ ...old[1], content: old[0].content }]).error).toContain('重复')
+})
+
+it('拒绝同批改名或追加制造的新重复', () => {
+  const initial = withTodoIds([{ content: '甲', status: 'pending' }, { content: '乙', status: 'pending' }])
+  expect(prepareTodoUpdate(initial, initial.map(item => ({ ...item, content: '丙' }))).error).toContain('重复')
+  expect(prepareTodoUpdate(initial, [{ ...initial[0], content: '丙' }, { content: '丙', status: 'pending' }], '新增工作').error).toContain('重复')
 })
 
 it('does not reuse a renamed item ID when its old title is added as new work', () => {

@@ -45,9 +45,9 @@ export async function executeDurableDirective(ctx: ToolContext, tool: AgentTool,
 }
 
 /** Only this root's confirmed/reduced receipt is authoritative; the artifact is a UI copy. */
-export async function readDurableTodoItems(tx: RuntimeTx, rootId: string, revision: number) {
+export async function readDurableTodoItems(tx: RuntimeTx, rootId: string, revision: number, pendingOperationId?: string | null) {
   const event = await tx.agentExecutionOutbox.findFirst({ where: { taskRootId: rootId, type: 'effect.committed',
-    operation: { action: 'todo_write', status: 'succeeded' } }, orderBy: { sequence: 'desc' }, include: { operation: { include: { effectReceipt: true } } } })
+    operation: { action: 'todo_write', status: 'succeeded', ...(pendingOperationId ? { id: { not: pendingOperationId } } : {}) } }, orderBy: { sequence: 'desc' }, include: { operation: { include: { effectReceipt: true } } } })
   if (!event) return []
   const operation = event.operation!, receipt = operation.effectReceipt
   if (!receipt || operation.taskRootId !== rootId || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import type { Prisma } from '@prisma/client'
 import { auxiliaryTextModel } from '../auxiliary-text-model.js'
 import { z } from 'zod'
 
@@ -14,7 +16,7 @@ import { DataAccessError, prisma } from '../../prisma.js'
 import { activeChapterScope } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
-import { getLatestQualityReport, qualityCompilationScope } from '../humanity-quality.js'
+import { getLatestQualityReport, qualityCompilationScope, resolveQualityChapterTarget } from '../humanity-quality.js'
 import { recordChapterBaseline } from '../baseline.js'
 import { enqueueChapterMemoryExtraction, processMemoryExtractionJob } from '../story-memory.js'
 import {
@@ -339,7 +341,7 @@ export const storyCompilerPrepareTool = defineTool({
       bridge.openLoops.length ? `开放钩子：${bridge.openLoops.slice(0, 4).join('；')}` : '无已记录开放钩子',
     ]
     return {
-      output: `PREPARE 完成，compilationId=${prepared.compilation.id}，目标全书第 ${prepared.compilation.targetOrderIndex} 章。${prepared.charter ? `已加载 Story Charter r${prepared.charter.revision}` : '当前无 Story Charter，旧作可继续，但新书长纲应先建立。'}下一步只调用一次 scene_task_build 生成 1–4 个 Scene Task，禁止直接跳到正文；精品候选取舍由服务端记录，不需要手工补 alternatives。\n${items.join('\n')}`,
+      output: `PREPARE 完成，compilationId=${prepared.compilation.id}，chapterId=${prepared.compilation.chapterId ?? '尚未创建（写入后取真实编号）'}，目标全书第 ${prepared.compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。${prepared.charter ? `已加载 Story Charter r${prepared.charter.revision}` : '当前无 Story Charter，旧作可继续，但新书长纲应先建立。'}下一步只调用一次 scene_task_build 生成 1–4 个 Scene Task，禁止直接跳到正文；精品候选取舍由服务端记录，不需要手工补 alternatives。\n${items.join('\n')}`,
       summary: `准备第 ${prepared.compilation.targetOrderIndex} 章写作`,
       display: {
         kind: 'storyCompiler', compilationId: prepared.compilation.id, phase: 'prepare', title: '准备章节写作',
@@ -519,20 +521,68 @@ export const chapterBridgeGetTool = defineTool({
       `开放钩子：${asStrings(bridge.openLoops).join('；') || '无'}`,
     ]
     return {
-      output: `compilationId=${compilation.id}，阶段=${compilation.stage}，状态=${compilation.status}，目标第 ${compilation.targetOrderIndex} 章。\n${items.join('\n')}\nScene Task：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜目标 ${task.goal}｜阻力 ${task.obstacle}｜代价 ${task.cost}｜转折 ${task.turn}`).join('\n') || '尚未建立'}`,
+      output: `compilationId=${compilation.id}，chapterId=${compilation.chapterId ?? '尚未创建'}，阶段=${compilation.stage}，状态=${compilation.status}，目标第 ${compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。\n${items.join('\n')}\nScene Task：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜目标 ${task.goal}｜阻力 ${task.obstacle}｜代价 ${task.cost}｜转折 ${task.turn}`).join('\n') || '尚未建立'}`,
       summary: `读取第 ${compilation.targetOrderIndex} 章章节桥`,
       display: { kind: 'storyCompiler', compilationId: compilation.id, phase: compilation.stage, title: '章节桥', detail: `第 ${compilation.targetOrderIndex} 章 · ${compilation.stage}`, items },
     }
   },
 })
 
+/** 独立审阅只读取当前正文和真实前章，不创建场景任务、不接管旧任务的提交状态。 */
+export async function buildStandaloneContinuityContext(ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId' | 'chapterId'>, chapterId?: string, db: Prisma.TransactionClient = prisma) {
+  const targetId = await resolveQualityChapterTarget({ ...ctx, chapterId, fallbackChapterId: ctx.chapterId }, db)
+  if (!targetId) throw new DataAccessError(400, 'CHAPTER_NOT_FOUND', '请从 chapter_read 或作品目录取得真实 chapterId；无需准备章节写作。')
+  const chapter = await db.chapter.findFirst({ where: { id: targetId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) },
+    select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
+  if (!chapter) throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', 'chapterId 不是当前作品的有效章节编号；不要使用 compilationId 或猜测编号，请读取作品目录。')
+  if (!chapter.content.trim()) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '目标正文为空，未调用检查模型。')
+  const preceding = await db.chapter.findMany({ where: { authorId: ctx.userId, ...activeChapterScope(ctx.novelId), orderIndex: { lt: chapter.orderIndex } },
+    orderBy: { orderIndex: 'desc' }, take: 3, select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
+  const charter = await db.storyCharter.findUnique({ where: { novelId: ctx.novelId } })
+  const contextHash = createHash('sha256').update(JSON.stringify({ chapter, preceding, charter })).digest('hex')
+  const criticInput = `独立连续性审阅；没有场景计划不构成错误，不要求补建编译或提交章节桥。仅审阅所给正文与前三章范围，不能声称验证未提供的全书。\n作品约定（不是已经发生的事实）：${JSON.stringify(charter)}\n前章正文：${JSON.stringify([...preceding].reverse())}\n目标章节 chapterId=${chapter.id}，《${chapter.title}》@r${chapter.revision}\n完整正文：\n${chapter.content}`
+  return { chapter, contextHash, criticInput }
+}
+
+function standaloneReviewKey(contextHash: string, focus?: string) {
+  return createHash('sha256').update(JSON.stringify({ protocol: 1, contextHash, focus: focus ?? '' })).digest('hex')
+}
+
+export async function readStandaloneContinuityReport(ctx: ToolContext, contextHash: string, focus?: string, db: Prisma.TransactionClient = prisma) {
+  const artifact = await db.agentArtifact.findFirst({ where: { runId: ctx.runId, run: { userId: ctx.userId, novelId: ctx.novelId }, artifactType: 'continuityReview',
+    metadata: { path: ['standaloneKey'], equals: standaloneReviewKey(contextHash, focus) } }, orderBy: { createdAt: 'desc' } })
+  if (!artifact) return null
+  const metadata = z.object({ findings: z.array(continuityFindingInputSchema) }).safeParse(artifact.metadata)
+  return metadata.success ? { artifact, findings: metadata.data.findings } : null
+}
+
+export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string): Promise<import('./types.js').ToolResult> {
+  ctx.signal.throwIfAborted()
+  await assertAgentManuscriptCurrent(db, ctx)
+  await db.$queryRaw`SELECT id FROM chapters WHERE id = ${context.chapter.id} FOR UPDATE`
+  const current = await buildStandaloneContinuityContext(ctx, context.chapter.id, db)
+  if (current.contextHash !== context.contextHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、前章或作品约定已变化，本次报告未保存为当前版本结果；请重新读取。')
+  ctx.signal.throwIfAborted()
+  if (!parsed.structured) return { outcome: 'failed', summary: '独立连续性复核未完成', output: '模型没有返回完整结构化报告，未判定通过；正文与章节桥均未修改。' }
+  const cached = await readStandaloneContinuityReport(ctx, context.contextHash, focus, db)
+  const findings = cached?.findings ?? parsed.findings
+  const errors = findings.filter(item => item.severity === 'error').length
+  const warnings = findings.length - errors
+  const output = `独立连续性检查《${context.chapter.title}》@r${context.chapter.revision}：${errors} 错误、${warnings} 警告。仅完成审阅，正文未修改，不需要补建编译或提交章节桥。\n${findings.map(item => `[${item.severity}/${item.signal}] ${item.evidence}；${item.suggestion}`).join('\n')}`
+  const artifact = cached?.artifact ?? await db.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: `${context.chapter.title} · 连续性检查`, content: output,
+    summary: `${errors} 错误、${warnings} 警告`, metadata: { standaloneContinuity: true, standaloneKey: standaloneReviewKey(context.contextHash, focus), chapterId: context.chapter.id, revision: context.chapter.revision, contextHash: context.contextHash, findings } } })
+  ctx.signal.throwIfAborted()
+  return { summary: `独立连续性检查 · ${errors} 错误 ${warnings} 警告`, output: `artifactId=${artifact.id}\n${artifact.content}`, observedState: { kind: 'chapter', id: context.chapter.id, revision: context.chapter.revision } }
+}
+
 export const continuityValidateTool = defineTool({
   name: 'continuity_validate',
   title: '检查章节连续性',
   description:
-    'Story Compiler 的 CHECK 步骤。依据 Chapter Bridge、Scene Task 与完整正文检查人物知识、时空、身体、物品、关系、情绪余波、钩子与首尾结构，并执行版本、章序、空正文、场景数量硬检查。严谨创作仅对可证实的事实错误做一次集中最小修订；警告只报告，不润色。修订后只读复核，不反复改写。质量修订完成后本工具仅复核，不能再使质量报告失效。不得由主写 Agent 自报 findings。',
+    '检查章节连续性。独立审阅既有章：先读取目标章节，再传真实 chapterId，无需 story_compiler_prepare、scene_task_build 或提交章节桥；只保存检查报告，不改正文。写作流水线 CHECK：传本任务 compilationId，保留场景与版本校验、一次有界事实修订及质量后只读复核。chapterId 与 compilationId 是不同对象，禁止混用；不得由主写 Agent 自报 findings。',
   parameters: z.object({
-    compilationId: z.string().min(1).optional(),
+    chapterId: z.string().min(1).optional().describe('既有章节的真实编号，从 chapter_read 或作品目录取得；不能填编译编号'),
+    compilationId: z.string().min(1).optional().describe('仅检查当前写作流水线时传；独立审阅既有章节省略'),
     focus: z.string().max(500).optional().describe('作者明确要求额外关注的连续性范围；未指定时不传'),
   }),
   coerceArgs(raw) {
@@ -541,6 +591,7 @@ export const continuityValidateTool = defineTool({
     const record = source as Record<string, unknown>
     return {
       ...record,
+      chapterId: firstDefined(record, ['chapterId', 'chapter_id']),
       compilationId: firstDefined(record, ['compilationId', 'compilation_id', 'compilerId', 'compiler_id']),
       focus: firstDefined(record, ['focus', 'scope', 'attention']),
     }
@@ -554,12 +605,24 @@ export const continuityValidateTool = defineTool({
         novelId: ctx.novelId,
         status: 'active',
         ...await qualityCompilationScope(prisma, ctx.userId, ctx.novelId, ctx.runId),
+        ...(args.chapterId ? { chapterId: args.chapterId } : {}),
         ...(args.compilationId ? { id: args.compilationId } : {}),
       },
       include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
       orderBy: { updatedAt: 'desc' },
     })
-    if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, summary: '本任务连续性检查未执行', output: '本任务编译不存在或尚未写入目标章节，未执行独立连续性检查。历史任务的编译编号不能在本任务使用；按当前作者目标准备并写入本任务章节，不恢复无关旧章检查。' }
+    if (!args.compilationId && (!compilation || args.chapterId)) {
+      const context = await buildStandaloneContinuityContext(ctx, args.chapterId)
+      const cached = await readStandaloneContinuityReport(ctx, context.contextHash, args.focus)
+      if (cached) return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, { structured: true, findings: cached.findings }, tx, args.focus))
+      const assertCurrent = async () => {
+        if ((await buildStandaloneContinuityContext(ctx, context.chapter.id)).contextHash !== context.contextHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查资料已变化，请读取当前版本。')
+      }
+      const response = await generateReviewCompletion(continuityCriticSystem, `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, args.focus)}`,
+        { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: context.chapter.id, targetType: 'chapter', targetId: context.chapter.id, temperature: 0.15, reasoningEffort: 'low' }, assertCurrent)
+      return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, parseIndependentContinuityResult(response), tx, args.focus))
+    }
+    if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, summary: '本任务连续性检查未执行', output: '指定编译不属于本任务或尚未写入正文。独立检查既有章节请省略 compilationId、传真实 chapterId；不要为检查创建新章或接管旧编译。' }
     const chapter = compilation.chapter
     const quality = await getLatestQualityReport(ctx.userId, ctx.novelId, chapter.id)
     // After quality has repaired this revision, continuity must verify without
