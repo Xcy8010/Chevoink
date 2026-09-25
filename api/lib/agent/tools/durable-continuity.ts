@@ -12,6 +12,7 @@ import { withRunLease } from '../runtime-lease.js'
 import { readExecutionStateInTransaction } from '../runtime-state.js'
 import { compilerStateHash, compilerObservationSchema } from '../runtime-compiler-observation.js'
 import { readObservedBaseline } from '../runtime-observed-baseline.js'
+import { qualityReportMatchesContent } from '../quality-report-contract.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
 import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
@@ -63,9 +64,11 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
   const lease = { ...capability.lease }, cursor = { ...capability.cursor }, baseline = capability.baseline && { ...capability.baseline }
   const normalize = (value: unknown) => Object.fromEntries(Object.entries(tool.parameters.parse(normalizeToolInput(tool, value)) as Record<string, unknown>).filter(([, item]) => item !== undefined))
   const args = normalize(raw)
+  let recoveredWork = false
   let work = await withRunLease(lease, async tx => {
     const existing = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: capability.operationKey } } })
     if (existing) {
+      recoveredWork = true
       if (runtimeJson(existing.inputSnapshot).hash !== existing.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性工具原输入损坏。')
       const saved = z.object({ input: z.object({ work: workSchema }) }).safeParse(existing.inputSnapshot)
       if (!saved.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性检查缺少原业务快照，不能用当前正文补造。')
@@ -91,12 +94,17 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     if (args.chapterId && args.chapterId !== compilation.chapter.id) return { kind: 'rejected' as const, code: 'QUALITY_TARGET_AMBIGUOUS', message: 'chapterId 与 compilationId 不对应；未检查其他章节。' }
     const sourceId = compilation.bridge.fromChapterId
     const source = sourceId ? await tx.chapter.findFirst({ where: { id: sourceId, ...activeChapterScope(ctx.novelId) }, select: { id: true, revision: true, content: true } }) : null
+    if (!compilation.chapter.content.trim() || compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4
+      || sourceId && source?.revision !== compilation.bridge.sourceRevision) return {
+      kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '正文为空、场景数量不合法或前章版本变化；先修复章节桥前置状态，不启动正文修订。',
+    }
     const coverage = { version: 1 as const, contentHash: runtimeJson({ content: compilation.chapter.content }).hash,
       charCount: compilation.chapter.content.length, sourceHash: source ? runtimeJson(source).hash : null }
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
     const quality = await tx.chapterQualityReport.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId,
       chapterId: compilation.chapter.id, compilationId: compilation.id, chapterRevision: compilation.chapter.revision,
-      status: { notIn: ['analyzing', 'stale', 'failed'] } }, select: { id: true } })
+      repairRound: { gt: 0 }, status: 'repaired' }, select: { status: true, chapterRevision: true, deterministicMetrics: true } })
+    const verificationOnly = quality && qualityReportMatchesContent(quality, compilation.chapter.revision, compilation.chapter.content)
     const reusable = (!args.focus || continuityRepairRounds(compilation.validation) >= MAX_CONTINUITY_AUTO_REPAIRS) && cached.success && cached.data.checkedRevision === compilation.chapter.revision && runtimeJson(cached.data.coverage).hash === runtimeJson(coverage).hash
     // 连续未收敛的检查到顶：不再启动新 critic（也不在 prepare 里改库，否则会立即失效冻结哈希），
     // 只把最近证据留给作者，防止“改一句→重查→又报别处”的无限循环；计数结算在提交事务里完成。
@@ -104,7 +112,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       kind: 'rejected' as const, code: 'CONTINUITY_CHECK_BUDGET_EXCEEDED',
       message: `同一章节连续性检查已连续 ${MAX_CONTINUITY_CHECKS} 次检出错误且未收敛，自动复查已停止，避免反复改写损伤正文。不要再修改正文或重复调用检查；如实向作者报告最近一次检查的未解决项，由作者决定如何收尾。`,
     }
-    const repair = !quality && continuityRepairRounds(compilation.validation) < MAX_CONTINUITY_AUTO_REPAIRS && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(compilation.chapter.id)
+    const repair = !verificationOnly && continuityRepairRounds(compilation.validation) < MAX_CONTINUITY_AUTO_REPAIRS && state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(compilation.chapter.id)
     return { kind: 'check' as const, version: 1 as const, compiler: baseline, chapter: compilation.chapter, sourceId, coverage,
       criticSystem: continuityCriticSystem, repairSystem: repairPrompt,
       criticInput: [`章节：《${compilation.chapter.title}》`,
@@ -116,7 +124,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     if (!(error instanceof DataAccessError) || !knownFailures.has(error.code)) throw error
     return { kind: 'rejected' as const, code: error.code, message: error.message }
   })
-  if (work.kind === 'check' && !work.cached && !work.route) {
+  if (!recoveredWork && work.kind === 'check' && (!work.cached || work.repair && work.cached.length > 0) && !work.route) {
     const runtime = await getModelTierRuntime('speed', ctx.userId, null, 'low')
     if (runtime.tier !== 'speed') return runtimeError('RUNTIME_IDENTITY_CONFLICT', '独立复核档位不可用，不允许静默替换。')
     const price = await resolveDurableTokenPrice(lease, `${capability.operationKey}:critic-price`, 'speed', runtime.multiplierBps)
@@ -169,14 +177,14 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       const current = await tx.storyCompilation.findFirstOrThrow({ where: { id: compiler.id, userId: ctx.userId, novelId: ctx.novelId } })
       return continuityRepairRounds(current.validation)
     })
-    const errors = parsed.findings.filter(item => item.severity === 'error')
-    const repairAttempted = !frozen.cached && parsed.structured && errors.length > 0 && frozen.repair && repairRounds < MAX_CONTINUITY_AUTO_REPAIRS
+    const repairFindings = parsed.findings.filter(item => item.severity === 'error' || item.severity === 'warning')
+    const repairAttempted = parsed.structured && repairFindings.length > 0 && frozen.repair && !!frozen.route && repairRounds < MAX_CONTINUITY_AUTO_REPAIRS
     if (repairAttempted) {
       const proposed = critic ? parseContinuityPatches(critic.content, frozen.chapter.content) : null
       if (proposed?.length) repaired = { patches: proposed }
       for (const step of ['continuity_repair', 'continuity_repair_retry'] as const) {
         if (repaired) break
-        const result = await call(step, frozen.repairSystem, `仅修事实错误，禁止文风润色、同义替换或扩写相邻段落，保留作者句式和人物声口。章节：《${frozen.chapter.title}》@r${frozen.chapter.revision}\n问题：${JSON.stringify(errors)}\n完整正文：\n${frozen.chapter.content}`, 0.3)
+        const result = await call(step, frozen.repairSystem, `逐项处理有证据的连续性错误与警告，不因warning跳过；仅作事实纠正或必要衔接澄清，禁止文风润色、同义替换或扩写相邻段落，保留作者句式和人物声口。章节：《${frozen.chapter.title}》@r${frozen.chapter.revision}\n问题：${JSON.stringify(repairFindings)}\n完整正文：\n${frozen.chapter.content}`, 0.3)
         if (result.finishReason !== 'stop' || result.toolCalls.length) continue
         try { const start = result.content.indexOf('{'), end = result.content.lastIndexOf('}'); repaired = repairsSchema.parse(JSON.parse(result.content.slice(start, end + 1))) } catch { /* one separately receipted format retry */ }
         if (repaired) break
@@ -214,7 +222,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
           display: { kind: 'chapterDiff', chapterId: frozen.chapter.id, chapterTitle: frozen.chapter.title, before: frozen.chapter.content, after, appliedDirectly: true, revision },
           snapshot: { target: 'chapter', targetId: frozen.chapter.id, field: 'content', previousValue: frozen.chapter.content } }
         : { summary: `连续性检查${frozen.cached ? '（复用）' : ''} · ${report.errorCount} 错误 ${report.warningCount} 警告`,
-          output: `${report.errorCount ? '检查仍有错误，不能提交。' : '完整正文连续性检查通过。'}${repairRounds >= MAX_CONTINUITY_AUTO_REPAIRS ? '自动修订已完成一次，仅复核；不要重复检查追求零警告，有未解决错误应明确报告。' : ''}${frozen.cached ? '复用当前正文与来源的已确认检查，不重复调用模型。' : ''}\n${report.findings.map(item => `[${item.severity}/${item.signal}] ${item.evidence}；${item.suggestion}`).join('\n')}`,
+          output: `${report.errorCount ? '检查仍有错误，不能提交。' : '完整正文连续性检查通过。'}${repairRounds >= MAX_CONTINUITY_AUTO_REPAIRS ? '自动修订已完成一次，仅复核；不要重复检查追求零警告，有未解决错误应明确报告。' : ''}${repairAttempted ? '已尝试集中修订，但未获得可安全应用的实际改动；意见保留待审，不冒充已修复。' : ''}${frozen.cached ? '复用当前正文与来源的已确认检查；不会重复调用 Critic。' : ''}\n${report.findings.map(item => `[${item.severity}/${item.signal}] ${item.evidence}；${item.suggestion}`).join('\n')}`,
           display: { kind: 'storyCompiler', compilationId: compiler.id, phase: report.errorCount ? 'repair' : 'check', title: '连续性检查', detail: `${report.errorCount} 错误 · ${report.warningCount} 警告`, errorCount: report.errorCount, warningCount: report.warningCount, items: report.findings.map(item => item.evidence) } }
       const stateHash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, compiler.id)
       if (!stateHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查后的编译状态缺失。')

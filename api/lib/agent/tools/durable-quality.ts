@@ -19,7 +19,7 @@ import type { AuxiliaryModelStep } from '../runtime-auxiliary-model.js'
 import { analyzeDeterministicQuality, applyQualityRepair, buildHumanityQualityContext, calibrateCriticFindings,
   getLatestQualityReport, getQualityReport, HUMANITY_CRITIC_VERSION, persistHumanityQualityReport, prepareQualityFindings,
   renderQualityLearning, renderVoiceAndAnchorContext, resolveQualityChapterTarget } from '../humanity-quality.js'
-import { qualityReportMatchesContent } from '../quality-report-contract.js'
+import { qualityReportMatchesContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
 import { coerceCriticFindings, correctQualityEvidence, qualityEvidenceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
 import { buildCriticSystem, reportDisplay } from './humanity-quality-tools.js'
 import { normalizeToolInput } from './input-validation.js'
@@ -57,9 +57,11 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
   const lease = { ...cap.lease }, cursor = { ...cap.cursor }, baseline = cap.baseline && { ...cap.baseline }
   const normalize = (value: unknown) => Object.fromEntries(Object.entries(tool.parameters.parse(normalizeToolInput(tool, value)) as Record<string, unknown>).filter(([, value]) => value !== undefined))
   const args = normalize(raw)
+  let recoveredWork = false
   let work = await withRunLease(lease, async tx => {
     const existing = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: cap.operationKey } } })
     if (existing) {
+      recoveredWork = true
       if (jsonHash(existing.inputSnapshot) !== existing.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原质量输入损坏。')
       return z.object({ input: z.object({ work: workSchema }) }).parse(existing.inputSnapshot).input.work
     }
@@ -89,7 +91,8 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     return { kind: 'check' as const, version: 1 as const, compiler: bundle.compilation ? baseline : null,
       chapter: { id: chapterId, title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content }, contextHash: jsonHash(bundle),
       recentContents: bundle.recentChapters.map(item => item.content), feedback: bundle.feedback,
-      mode: state.configuration.qualityMode, repair: state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId),
+      mode: state.configuration.qualityMode, repair: state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId)
+        && (!cached || !!existingReport && qualityAutoRepairPending(existingReport) && (!!bundle.compilation || existingReport.runId === ctx.runId)),
       criticInput: [`章节：《${bundle.chapter.title}》@r${bundle.chapter.revision}`, `题材与风格：${JSON.stringify(bundle.charter ?? bundle.chapter.novel)}`,
         `章节桥与场景：${JSON.stringify(bundle.compilation ?? null)}`, renderVoiceAndAnchorContext(bundle), renderQualityLearning(bundle.feedback),
         `确定性统计（不是结论）：${JSON.stringify(deterministic.metrics)}`, `完整正文：\n${bundle.chapter.content}`].join('\n'),
@@ -99,7 +102,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     if (!(error instanceof DataAccessError) || !known.has(error.code)) throw error
     return { kind: 'rejected' as const, code: error.code, message: error.message }
   })
-  if (work.kind === 'check' && !work.cached && !work.route) {
+  if (!recoveredWork && work.kind === 'check' && (!work.cached || work.repair) && !work.route) {
     const runtime = await getModelTierRuntime('speed', ctx.userId, null, 'low')
     if (runtime.tier !== 'speed') return runtimeError('RUNTIME_IDENTITY_CONFLICT', '独立质量模型档位不可替换。')
     const price = await resolveDurableTokenPrice(lease, `${cap.operationKey}:quality-price`, 'speed', runtime.multiplierBps)
@@ -151,13 +154,12 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     }
     const deterministic = analyzeDeterministicQuality(frozen.chapter.content, frozen.recentContents)
     const evaluated = prepareQualityFindings(frozen.chapter.content, deterministic.findings, findings, complete)
-    const selected: Array<(typeof evaluated.findings)[number] & { key: string }> = []
-    if (!frozen.cached && evaluated.complete && frozen.repair) for (const finding of evaluated.findings) {
-      if (finding.severity === 'advisory') continue
-      if (selected.some(item => item.start < finding.end && finding.start < item.end)) continue
-      selected.push({ ...finding, key: `${finding.signal}:${finding.start}:${finding.end}` })
-      if (selected.length === 8) break
-    }
+    const cachedReport = frozen.cached ? await withRunLease(lease, tx => getQualityReport(ctx.userId, ctx.novelId, frozen.cached!.id, tx)) : null
+    const candidates = cachedReport ? cachedReport.findings : evaluated.findings.map(item => ({ ...item, startOffset: item.start, endOffset: item.end }))
+    // 老协议缓存操作没有冻结修订价目，不为恢复中的操作追加新的付费阶段。
+    const canRepair = frozen.repair && (!frozen.cached ? evaluated.complete : !!frozen.route && !!cachedReport && qualityAutoRepairPending(cachedReport))
+    const selected = canRepair ? selectAutomaticQualityFindings<(typeof candidates)[number]>(candidates).map(item => ({ ...item,
+      start: item.startOffset, end: item.endOffset, key: `${item.signal}:${item.startOffset}:${item.endOffset}` })) : []
     const patches = new Map<string, string>()
     if (selected.length) for (const step of ['quality_repair', 'quality_repair_retry'] as const) {
       const remaining = selected.filter(item => !patches.has(item.key))
@@ -183,11 +185,11 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
         const replacement = patches.get(`${item.signal}:${item.startOffset}:${item.endOffset}`)
         return replacement === undefined || replacement === frozen.chapter.content.slice(item.startOffset, item.endOffset) ? [] : [{ findingId: item.id, replacement }]
       })
-      const repaired = replacements.length ? await applyQualityRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id, replacements }, tx) : null
+      const repaired = replacements.length ? await applyQualityRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id, replacements, signal: ctx.signal }, tx) : null
       if (repaired) report = await getQualityReport(ctx.userId, ctx.novelId, report.id, tx)
       if (frozen.compiler && !frozen.cached && !repaired) await tx.storyCompilation.update({ where: { id: frozen.compiler.id }, data: { stage: 'check' } })
       let bindingNote = ''
-      if (!frozen.cached) {
+      if (!frozen.cached || selected.length) {
         const metrics = report.deterministicMetrics
         if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) return runtimeError('RUNTIME_RECEIPT_INVALID', '质量报告缺少确定性指标。')
         const unlocatedCount = typeof metrics.unlocatedFindings === 'number' ? metrics.unlocatedFindings : 0
@@ -195,11 +197,14 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
         bindingNote = [unlocatedCount ? `${unlocatedCount} 条模型意见因引用无法逐字定位未纳入报告` : '',
           droppedCount ? `${droppedCount} 条因字段不完整未纳入报告` : ''].filter(Boolean).join('；')
         await tx.chapterQualityReport.update({ where: { id: report.id }, data: { deterministicMetrics: { ...metrics,
+          ...(selected.length ? { autoRepairAttempted: true } : {}),
           qualityContextHash: reviewContextHash(await buildHumanityQualityContext(ctx.userId, ctx.novelId, frozen.chapter.id, ctx.runId, tx)) } } })
       }
-      const note = bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : ''
+      const remaining = report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
+      const note = (bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : '')
+        + (remaining ? `仍有 ${remaining} 项未应用（无安全补丁、范围重叠、数量上限或本次未获修订授权），保留待审，不冒充已修复，不为清零建议循环改写。` : '')
       const toolResult: ToolResult = { ...(report.status === 'failed' ? { outcome: 'failed' as const } : {}), summary: repaired ? `质量检查 · 自动修订 ${repaired.repairedFindingIds.length} 处` : frozen.cached ? '复用当前质量报告' : '人类感质量检查',
-        output: `质量报告 ${report.id} · ${report.status} · r${report.chapterRevision}。${report.status === 'failed' ? '独立检查未完整完成（格式不完整或全部引用无法逐字定位），不能提交章节桥；可重试一次完整检查，禁止改写正文来凑通过。' : `${repaired ? '安全修订已原子写入；需对新版本重新检查连续性，不能沿用旧版验证。' : frozen.cached ? '复用原报告，不重复请求模型或修订。' : '报告已保存；没有可验证补丁的意见保留待审，不冒充已修复。'}${note}`}`,
+        output: `质量报告 ${report.id} · ${report.status} · r${report.chapterRevision}。${report.status === 'failed' ? '独立检查未完整完成（格式不完整或全部引用无法逐字定位），不能提交章节桥；可重试一次完整检查，禁止改写正文来凑通过。' : `${repaired ? '安全修订已原子写入；需对新版本重新检查连续性，不能沿用旧版验证。' : selected.length ? '已尝试集中处理警告与建议，但未得到可安全应用的实际改动；同一报告不循环重试。' : frozen.cached ? '复用原报告，不重复请求模型或修订。' : '报告已保存；没有可验证补丁的意见保留待审，不冒充已修复。'}${note}`}`,
         observedState: { kind: 'chapter', id: frozen.chapter.id, revision: report.chapterRevision },
         display: repaired ? { kind: 'chapterDiff', chapterId: frozen.chapter.id, chapterTitle: frozen.chapter.title, before: repaired.before, after: repaired.after, appliedDirectly: true, revision: report.chapterRevision } : reportDisplay(report),
         ...(repaired ? { snapshot: { target: 'chapter' as const, targetId: frozen.chapter.id, field: 'content', previousValue: repaired.before } } : {}) }

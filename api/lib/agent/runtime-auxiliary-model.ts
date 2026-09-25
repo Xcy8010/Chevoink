@@ -7,6 +7,8 @@ import { argumentNormalizationSchema } from './runtime-tool-cursor.js'
 import { assertToolApproval } from './runtime-approval.js'
 import { durableChatResultSchema } from './runtime-common.js'
 import { preparePricedProviderOperationInTransaction, type DurableTokenPrice } from './runtime-settlement.js'
+import { compilerStateHash, compilerObservationSchema } from './runtime-compiler-observation.js'
+import { qualityAutoRepairPending, qualityReportMatchesContent } from './quality-report-contract.js'
 
 const steps = {
   continuity_critic: { parent: 'continuity_validate', previous: null },
@@ -24,6 +26,38 @@ const isolatedRequest = z.object({ body: z.object({
   messages: z.array(z.object({ role: z.enum(['system', 'user']), content: z.string() })).min(1),
   tools: z.array(z.never()).optional(),
 }) })
+
+/** 缓存报告只能替代首个修订步骤的 Critic 前置；仍核验原任务、报告哈希和正文版本。 */
+async function hasFrozenRepairReport(tx: Prisma.TransactionClient, lease: RunLeaseToken, snapshot: unknown, step: AuxiliaryModelStep) {
+  if (step !== 'quality_repair' && step !== 'continuity_repair') return false
+  const parsed = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.literal(1), repair: z.literal(true),
+    compiler: compilerObservationSchema.nullable(), chapter: z.object({ id: z.string(), revision: z.number(), content: z.string() }),
+    cached: z.unknown(), coverage: z.unknown().optional() }) }) }).safeParse(snapshot)
+  if (!parsed.success) return false
+  const work = parsed.data.input.work
+  const run = await tx.agentRun.findFirst({ where: { id: lease.runId, userId: lease.userId, taskRootId: lease.taskRootId }, select: { novelId: true } })
+  if (!run) return false
+  const novelId = run.novelId
+  if (work.compiler && await compilerStateHash(tx, lease.userId, novelId, lease.taskRootId, work.compiler.id) !== work.compiler.hash) return false
+  if (step === 'quality_repair') {
+    const cached = z.object({ id: z.string(), hash: z.string() }).safeParse(work.cached)
+    if (!cached.success) return false
+    const report = await tx.chapterQualityReport.findFirst({ where: { id: cached.data.id, userId: lease.userId, novelId: novelId },
+      include: { chapter: true, findings: { orderBy: { startOffset: 'asc' } } } })
+    return !!report && report.compilationId === (work.compiler?.id ?? null) && (!!work.compiler || report.runId === lease.runId)
+      && report.chapterId === work.chapter.id && report.chapter.revision === work.chapter.revision && report.chapter.content === work.chapter.content
+      && runtimeJson(JSON.parse(JSON.stringify(report))).hash === cached.data.hash && qualityAutoRepairPending(report)
+      && qualityReportMatchesContent(report, work.chapter.revision, work.chapter.content)
+  }
+  if (!work.compiler || !Array.isArray(work.cached)) return false
+  const compilation = await tx.storyCompilation.findFirst({ where: { id: work.compiler.id, userId: lease.userId, novelId: novelId,
+    status: 'active', run: { taskRootId: lease.taskRootId } }, include: { chapter: true } })
+  const validation = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(z.unknown()), coverage: z.unknown() }).safeParse(compilation?.validation)
+  return !!compilation?.chapter && compilation.chapterId === work.chapter.id && compilation.chapter.revision === work.chapter.revision
+    && compilation.chapter.content === work.chapter.content && validation.success && validation.data.checkedRevision === work.chapter.revision
+    && runtimeJson(validation.data.findings).hash === runtimeJson(work.cached).hash && !!work.coverage
+    && runtimeJson(validation.data.coverage).hash === runtimeJson(work.coverage).hash
+}
 
 /** Only server-defined steps of an admitted pending tool can call a critic.
  * Child requests have independent immutable inputs/prices/usage; they do not
@@ -56,7 +90,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
     if (state.configuration.mode !== 'build' || !grant || grant.permission === 'deny'
       || !state.configuration.tools.some(tool => tool.function.name === parent.action)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务不允许独立检查或修订。')
     if (grant.permission === 'ask' || grant.alwaysConfirm) await assertToolApproval(tx, lease, source.snapshotHash, original.callId, parent.action, call.arguments, original.normalization.normalizedArgsHash)
-    if (contract.previous) {
+    if (contract.previous && !await hasFrozenRepairReport(tx, lease, parent.inputSnapshot, captured.step)) {
       const prerequisite = contract.previous
       const previous = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: `aux:${parent.id}:${prerequisite}` } } })
       if (!previous || previous.parentOperationId !== parent.id || previous.status !== 'succeeded') return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '前一个独立模型步骤尚无确认结果，不能跳过或以新步骤重试。')

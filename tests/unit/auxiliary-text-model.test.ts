@@ -8,6 +8,7 @@ vi.mock('../../api/lib/agent/humanity-quality.js', async original => ({
     compilation: null, charter: null, recentChapters: [], feedback: [], profiles: [], anchors: [] })),
   getLatestQualityReport: vi.fn(async () => null), persistHumanityQualityReport: mocks.persist, getQualityReport: mocks.report,
   selectQualityFindings: vi.fn(async () => undefined),
+  reserveQualityAutoRepair: vi.fn(async () => true),
 }))
 import { auxiliaryTextModel } from '../../api/lib/agent/auxiliary-text-model.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
@@ -60,7 +61,7 @@ describe('auxiliary text model inheritance', () => {
   })
   it.each(['lite', 'custom'] as const)('keeps %s through automatic repair and its bounded format retry', async tier => {
     const selected = runtime(tier)
-    mocks.report.mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 1, repairRound: 0, status: 'needs_repair', findings: [
+    mocks.report.mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 1, repairRound: 0, status: 'needs_repair', deterministicMetrics: { independentCheck: 'complete' }, findings: [
       { id: 'finding', signal: 'emotion_grounding', severity: 'warning', disposition: 'pending', startOffset: 0, endOffset: 6,
         evidenceExcerpt: '她关上了门。', explanation: '提示', suggestion: '待审' },
     ] })
@@ -71,7 +72,8 @@ describe('auxiliary text model inheritance', () => {
     const result = await qualityAnalyzeTool.execute({ ...context(selected), creativeFreedom: 'balanced' }, {})
     expect(mocks.complete.mock.calls.map(call => call[2].action)).toEqual(['agent3HumanityCritic', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry'])
     for (const call of mocks.complete.mock.calls) expect(call[2].modelRuntime).toBe(selected)
-    expect(result.output).toContain('正文保持不变')
+    expect(result.output).toContain('正文未修改')
+    expect(result.output).toContain('同一报告不循环重试')
     expect(result.snapshot).toBeUndefined()
   })
 })

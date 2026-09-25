@@ -26,6 +26,7 @@ import { assertCraftOutputSafe } from './craft-library.js'
 import { recalcNovelStats } from './tools/novel-tools.js'
 import { enqueueChapterMemoryExtraction } from './story-memory.js'
 import { locateQuoteSpans } from './quality-evidence.js'
+import { qualityAutoRepairPending, qualityReportMatchesContent } from './quality-report-contract.js'
 
 export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v2'
 export const MAX_QUALITY_REPAIR_ROUNDS = 1
@@ -437,6 +438,34 @@ export async function getLatestQualityReport(userId: string, novelId: string, ch
   })
 }
 
+/** 传统执行器在模型调用前预留一次尝试，避免空补丁、崩溃或缓存续跑重复付费改文。 */
+export async function reserveQualityAutoRepair(input: { userId: string; novelId: string; runId: string; reportId: string }) {
+  return prisma.$transaction(async tx => {
+    await lockNovelActiveScope(tx, input.novelId)
+    await assertAgentManuscriptCurrent(tx, input)
+    const report = await getQualityReport(input.userId, input.novelId, input.reportId, tx)
+    if (report.compilationId) {
+      await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${report.compilationId} FOR UPDATE`
+      if (!await tx.storyCompilation.findFirst({ where: { id: report.compilationId, userId: input.userId, novelId: input.novelId,
+        chapterId: report.chapterId, status: 'active', ...await qualityCompilationScope(tx, input.userId, input.novelId, input.runId) } })) {
+        throw new DataAccessError(409, 'QUALITY_COMPILATION_SCOPE_INVALID', '质量修订报告不属于本任务的活跃编译。')
+      }
+    } else if (report.runId !== input.runId) return false
+    await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${report.chapterId} FOR UPDATE`
+    await tx.$queryRaw`SELECT id FROM chapter_quality_reports WHERE id = ${report.id} FOR UPDATE`
+    const current = await getQualityReport(input.userId, input.novelId, input.reportId, tx)
+    if (!qualityReportMatchesContent(current, current.chapter.revision, current.chapter.content)) {
+      throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '正文或报告已变化，未启动旧报告修订。')
+    }
+    if (!qualityAutoRepairPending(current)) return false
+    const metrics = current.deterministicMetrics as Prisma.JsonObject
+    await tx.chapterQualityReport.update({ where: { id: current.id }, data: {
+      deterministicMetrics: { ...metrics, autoRepairAttempted: true },
+    } })
+    return true
+  })
+}
+
 export async function selectQualityFindings(userId: string, novelId: string, reportId: string, selectedIds: string[]) {
   const report = await getQualityReport(userId, novelId, reportId)
   if (report.chapter.revision !== report.chapterRevision) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '章节已变化，请重新检查后再选择修订项。')
@@ -455,6 +484,7 @@ export async function applyQualityRepair(input: {
   runId?: string | null
   reportId: string
   replacements: Array<{ findingId: string; replacement: string }>
+  signal?: AbortSignal
 }, transaction?: Prisma.TransactionClient) {
   input = { ...input, replacements: input.replacements.map(item => ({ ...item })) }
   const report = await getQualityReport(input.userId, input.novelId, input.reportId, transaction ?? prisma)
@@ -463,7 +493,7 @@ export async function applyQualityRepair(input: {
   const findingById = new Map(report.findings.map((finding) => [finding.id, finding]))
   const patches = input.replacements.map((replacement) => {
     const finding = findingById.get(replacement.findingId)
-    if (!finding) throw new DataAccessError(400, 'QUALITY_FINDING_SCOPE_INVALID', '修订项不属于该报告。')
+    if (!finding || finding.authorFeedback === 'rejected' || finding.disposition === 'repaired') throw new DataAccessError(400, 'QUALITY_FINDING_SCOPE_INVALID', '修订项不属于该报告、已修复或已被作者拒绝。')
     const before = report.chapter.content.slice(finding.startOffset, finding.endOffset)
     if (hashText(before) !== finding.evidenceHash) throw new DataAccessError(409, 'QUALITY_EVIDENCE_STALE', '质量证据已变化，请重新检查。')
     return { finding, before, replacement: replacement.replacement }
@@ -492,10 +522,11 @@ export async function applyQualityRepair(input: {
     await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${report.chapter.id} FOR UPDATE`
     await tx.$queryRaw`SELECT id FROM chapter_quality_reports WHERE id = ${report.id} FOR UPDATE`
     const current = await getQualityReport(input.userId, input.novelId, input.reportId, tx)
-    const fingerprint = (value: typeof current) => JSON.stringify(value.findings.map(item => ({ id: item.id, start: item.startOffset, end: item.endOffset, evidenceHash: item.evidenceHash, disposition: item.disposition })).sort((a, b) => a.id.localeCompare(b.id)))
+    const fingerprint = (value: typeof current) => JSON.stringify(value.findings.map(item => ({ id: item.id, start: item.startOffset, end: item.endOffset, evidenceHash: item.evidenceHash, disposition: item.disposition, authorFeedback: item.authorFeedback })).sort((a, b) => a.id.localeCompare(b.id)))
     if (current.chapterRevision !== report.chapterRevision || current.chapter.content !== report.chapter.content || current.repairRound !== report.repairRound
       || current.status !== report.status || current.status === 'stale' || JSON.stringify(current.deterministicMetrics) !== JSON.stringify(report.deterministicMetrics)
       || fingerprint(current) !== fingerprint(report)) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '质量报告、作者选择或正文已变化，未应用旧修订。')
+    input.signal?.throwIfAborted()
     const write = await tx.chapter.updateMany({
       where: { id: report.chapter.id, ...activeChapterScope(input.novelId), authorId: input.userId, revision: report.chapterRevision, content: report.chapter.content },
       data: { content: after, wordCount: after.length, revision: { increment: 1 } },
@@ -533,6 +564,7 @@ export async function applyQualityRepair(input: {
     }
     const { recordWritingSignal } = await import('./writing-experiments.js')
     await recordWritingSignal(input.userId, input.novelId, 'quality_revision_round', 1, tx)
+    input.signal?.throwIfAborted()
     return updatedChapter
   }
   const updated = transaction ? await apply(transaction) : await prisma.$transaction(apply)

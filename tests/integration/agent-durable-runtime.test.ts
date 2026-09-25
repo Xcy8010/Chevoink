@@ -1478,7 +1478,10 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         calls[0] = { id: 'read', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) }
         calls[1].arguments = JSON.stringify({ chapterId: f.chapterId })
       }
-      if (scenario === 'full-chain') calls.push({ id: 'continuity', name: 'continuity_validate', arguments: JSON.stringify({ compilationId }) }, { id: 'commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId }) })
+      if (scenario === 'full-chain') {
+        calls.splice(1, 0, { id: 'continuity-first', name: 'continuity_validate', arguments: JSON.stringify({ compilationId }) }, { id: 'continuity-recheck', name: 'continuity_validate', arguments: JSON.stringify({ compilationId }) })
+        calls.push({ id: 'continuity', name: 'continuity_validate', arguments: JSON.stringify({ compilationId }) }, { id: 'commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId }) })
+      }
       if (scenario === 'missing') calls.shift()
       await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
@@ -1492,7 +1495,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['low'], visionEnabled: false, contextWindowTokens: null })
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'quality-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
-      const repairing = ['repair', 'format-retry', 'rollback-resume', 'repair-stale'].includes(scenario)
+      const repairing = ['repair', 'evidence-corrected', 'format-retry', 'rollback-resume', 'repair-stale'].includes(scenario)
       let requests = 0
       const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
         requests++
@@ -1509,8 +1512,15 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         const content = scenario === 'evidence-corrected' || scenario === 'evidence-unresolved'
           ? requests === 1
             ? JSON.stringify({ findings: [{ signal: 'emotion_grounding', severity: 'advisory', quote: '错误引用', explanation: '需要更具体动作', suggestion: '保留待审', confidence: 0.9 }] })
-            : JSON.stringify({ corrections: [{ index: 0, quote: scenario === 'evidence-corrected' ? '原文' : '仍不存在' }] })
-          : scenario === 'context-change' || scenario === 'full-chain' ? '{"findings":[]}' : scenario === 'format' || scenario === 'format-retry' && requests === 2 ? 'broken JSON'
+            : requests === 2 ? JSON.stringify({ corrections: [{ index: 0, quote: scenario === 'evidence-corrected' ? '原文' : '仍不存在' }] })
+              : '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}'
+          : scenario === 'full-chain' ? [
+            '{"findings":[{"signal":"body","severity":"warning","evidence":"原文承接不足","suggestion":"局部澄清"}],"patches":[{"oldText":"原文","newText":"新文"}]}',
+            '{"findings":[]}',
+            '{"findings":[{"signal":"emotion_grounding","severity":"advisory","quote":"新文","explanation":"需要具体动作","suggestion":"局部落实","confidence":0.9}]}',
+            '{"patches":[{"key":"emotion_grounding:0:2","replacement":"终文"}]}',
+            '{"findings":[{"signal":"body","severity":"warning","evidence":"终文仍需作者审阅","suggestion":"保留待审"}],"patches":[{"oldText":"终文","newText":"禁止继续改写"}]}',
+          ][requests - 1] : scenario === 'context-change' ? '{"findings":[]}' : scenario === 'format' || scenario === 'format-retry' && requests === 2 ? 'broken JSON'
           : requests === 1 ? JSON.stringify({ findings: repairing || scenario === 'protected' ? [{ signal: 'emotion_grounding', severity: 'warning', quote: '原文', explanation: '缺少动作', suggestion: '改成新文', confidence: 0.9 }] : [] })
           : '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}'
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: scenario === 'truncated' ? 'length' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
@@ -1551,6 +1561,10 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toBeNull()
         return
       }
+      if (scenario === 'full-chain') {
+        expect(await step()).toMatchObject({ result: { summary: '连续性检查 · 自动修订 1 处' } })
+        expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('连续性检查') } })
+      }
       const result = await step()
       const failed = ['evidence-unresolved', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('质量检查') } })
@@ -1562,11 +1576,12 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('completed')
         expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(2)
       }
-      const expectedRequests = scenario === 'missing' ? 0 : scenario === 'format-retry' ? 3 : ['context-change', 'full-chain', 'evidence-corrected', 'evidence-unresolved'].includes(scenario) ? 2 : repairing ? 2 : 1
+      const expectedRequests = scenario === 'missing' ? 0 : scenario === 'full-chain' ? 5 : ['format-retry', 'evidence-corrected'].includes(scenario) ? 3 : ['context-change', 'evidence-unresolved'].includes(scenario) ? 2 : repairing ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-      expect(chapter.content).toBe(scenario === 'stale-chapter' || scenario === 'repair-stale' ? '用户新文' : repairing ? '新文' : before)
+      expect(chapter.content).toBe(scenario === 'stale-chapter' || scenario === 'repair-stale' ? '用户新文' : scenario === 'full-chain' ? '终文' : repairing ? '新文' : before)
+      if (scenario === 'full-chain') expect(chapter.revision).toBe(3)
       if (scenario === 'standalone') {
         expect(await prisma.chapterQualityReport.count({ where: { chapterId: f.chapterId, compilationId: null } })).toBe(1)
         return
@@ -1576,7 +1591,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source'].includes(scenario)) expect(reports).toHaveLength(0)
       else {
         expect(reports).toHaveLength(scenario === 'context-change' ? 2 : 1)
-        expect(reports[0]).toMatchObject({ chapterRevision: repairing ? 2 : 1, status: failed ? 'failed' : repairing ? 'repaired' : scenario === 'protected' ? 'needs_repair' : 'passed' })
+        expect(reports[0]).toMatchObject({ chapterRevision: scenario === 'full-chain' ? 3 : repairing ? 2 : 1, status: failed ? 'failed' : repairing || scenario === 'full-chain' ? 'repaired' : scenario === 'protected' ? 'needs_repair' : 'passed' })
       }
       if (repairing && scenario !== 'repair-stale') {
         expect(chapter.revision).toBe(2)
@@ -1585,6 +1600,101 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       const events = await publishDurableEvents(f.userId, lease.runId)
       expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'quality_analyze')).toMatchObject(['success', 'repair', 'context-change'].includes(scenario) ? [{ ok: true }, { ok: true }] : [{ ok: !failed }])
+    })
+  })
+})
+
+describe.runIf(available).each(['continuity', 'quality'] as const)('严谨创作缓存补做修订 %s', family => {
+  it.each(['apply', 'empty', 'stable', 'bold', 'protected', 'cancelled', 'stale', 'rollback-resume'] as const)('%s 保留一次修订、真实版本和付费回执', async scenario => {
+    await fixture(async f => {
+      let lease = await claim(f)
+      const { compilation } = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '落实检查意见' })
+      const compilationId = compilation.id
+      const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
+      await saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进', entryState: state, goal: '找线索', obstacle: '门锁', choice: '绕路', cost: '时间', turn: '发现脚印', exitState: state,
+        styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
+      if (family === 'continuity') {
+        await validateStoryContinuity({ ...f, compilationId, findings: ['body', 'object', 'knowledge'].map(signal => ({ signal: signal as 'body' | 'object' | 'knowledge', severity: 'warning', evidence: '原文承接风险', suggestion: '局部澄清' })),
+          expectedChapterRevision: 1, independentCheck: 'complete', coverage: { version: 1, contentHash: runtimeJson({ content: '原文' }).hash, charCount: 2, sourceHash: null } })
+      } else {
+        const report = await persistHumanityQualityReport({ ...f, compilationId, chapterId: f.chapterId, chapterRevision: 1, mode: 'premium', deterministicMetrics: {}, deterministicFindings: [], criticComplete: true,
+          criticFindings: [{ signal: 'emotion_grounding', severity: 'advisory', quote: '原文', explanation: '缺少动作', suggestion: '局部改动', confidence: 0.9 }] })
+        const bundle = await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId)
+        const context = { chapter: { title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content, novel: bundle.chapter.novel }, charter: bundle.charter,
+          compiler: { id: bundle.compilation!.id, bridge: bundle.compilation!.bridge, sceneTasks: bundle.compilation!.sceneTasks }, profiles: bundle.profiles, anchors: bundle.anchors, recentChapters: bundle.recentChapters, feedback: bundle.feedback }
+        await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { deterministicMetrics: { ...report.deterministicMetrics as Prisma.JsonObject, qualityContextHash: runtimeJson(JSON.parse(JSON.stringify(context))).hash } } })
+      }
+      const tool = family === 'continuity' ? continuityValidateTool : qualityAnalyzeTool
+      const tools = [chapterBridgeGetTool, tool]
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: scenario === 'stable' || scenario === 'bold' ? scenario : 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: tools.map(item => ({ type: 'function', function: { name: item.name, description: item.description, parameters: z.toJSONSchema(item.parameters, { io: 'input' }) } })),
+        toolAuthority: tools.map(item => ({ name: item.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: scenario === 'protected' ? [f.chapterId] : [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages: [{ role: 'user', content: '落实本章检查意见' }, { role: 'assistant', content: null, toolCalls: [
+            { id: 'bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) },
+            { id: 'repair', name: tool.name, arguments: JSON.stringify({ compilationId }) },
+            { id: 'again', name: tool.name, arguments: JSON.stringify({ compilationId }) },
+          ] }], successfulToolSignatures: [] } })
+      const window = getCreditWindow()
+      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      const runtime = vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
+        baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['low'], visionEnabled: false, contextWindowTokens: null })
+      vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
+        rateCardId: 'cached-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
+      const signal = new AbortController()
+      const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
+        const body = JSON.parse(String(init.body))
+        expect(body.messages[1].content).toContain('原文')
+        expect(body.messages[1].content).not.toContain('确定性统计')
+        if (scenario === 'cancelled') signal.abort()
+        if (scenario === 'stale') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者新文', revision: { increment: 1 } } })
+        const content = scenario === 'empty' ? '{"patches":[]}' : family === 'quality'
+          ? '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}' : '{"patches":[{"oldText":"原文","newText":"新文"}]}'
+        return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      const step = () => executeDurableToolStep(lease, signal.signal)
+      await step()
+      if (scenario === 'rollback-resume') {
+        const original = runtimeOperations.commitOperationEffect
+        vi.spyOn(runtimeOperations, 'commitOperationEffect').mockImplementationOnce((token, id, digest, work) => original(token, id, digest, async tx => { await work(tx); throw new Error('缓存修订回滚') }))
+        await expect(step()).rejects.toThrow('缓存修订回滚')
+        expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).revision).toBe(1)
+        await pauseDurableTask(f.userId, lease.runId)
+        const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' } })
+        const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: pause.id })
+        lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'cached-resume')
+        runtime.mockRejectedValue(new Error('恢复不能解析新路由'))
+      }
+      if (scenario === 'cancelled') {
+        await expect(step()).rejects.toBeDefined()
+        expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('原文')
+        return
+      }
+      const result = await step()
+      const changed = scenario === 'apply' || scenario === 'rollback-resume'
+      if (changed) expect(result).toMatchObject({ result: { summary: expect.stringContaining('自动修订 1 处') } })
+      else if (scenario === 'stale') expect(result).toMatchObject({ result: { outcome: 'failed' } })
+      else {
+        expect(result.kind).toBe('tool')
+        if (result.kind === 'tool') expect(result.result.outcome).not.toBe('failed')
+        await step()
+      }
+      const requests = changed || scenario === 'stale' ? 1 : scenario === 'empty' ? family === 'quality' ? 2 : 1 : 0
+      expect(fetchMock).toHaveBeenCalledTimes(requests)
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(requests)
+      const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      expect(chapter.content).toBe(changed ? '新文' : scenario === 'stale' ? '作者新文' : '原文')
+      expect(chapter.revision).toBe(changed || scenario === 'stale' ? 2 : 1)
+      if (family === 'quality') {
+        const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: f.chapterId } })
+        expect(report.repairRound).toBe(changed ? 1 : 0)
+        if (changed || scenario === 'empty') expect(report.deterministicMetrics).toMatchObject({ autoRepairAttempted: true })
+      } else if (changed || scenario === 'empty') {
+        const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
+        expect(saved.validation).toMatchObject({ autoRepairRounds: 1, checkedRevision: 1 })
+      }
     })
   })
 })
@@ -1673,7 +1783,7 @@ describe.runIf(available)('既有章节独立检查', () => {
 })
 
 describe.runIf(available)('durable continuity actual tool chain', () => {
-  it.each(['success', 'repair', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied'] as const)('%s preserves paid results and atomic business effects', async scenario => {
+  it.each(['success', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     await fixture(async f => {
       let lease = await claim(f)
@@ -1705,7 +1815,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['low'], visionEnabled: false, contextWindowTokens: null })
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'continuity-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
-      const repairing = ['repair', 'fused-repair', 'format-retry', 'rollback-resume', 'repair-stale'].includes(scenario)
+      const repairing = ['repair', 'warnings', 'fused-repair', 'format-retry', 'rollback-resume', 'repair-stale'].includes(scenario)
       let requests = 0
       const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
         requests++
@@ -1721,7 +1831,8 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         if (scenario === 'late-resume') await pauseDurableTask(f.userId, lease.runId)
         const content = scenario === 'fused-repair' ? '{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订"}],"patches":[{"oldText":"原文","newText":"新文"}]}'
           : scenario === 'format' || scenario === 'format-retry' && requests === 2 ? 'broken JSON'
-          : requests === 1 ? JSON.stringify({ findings: repairing || scenario === 'protected' ? [{ signal: 'body', severity: 'error', evidence: '原文有身体状态冲突', suggestion: '改成新文' }] : [] })
+          : requests === 1 ? JSON.stringify({ findings: scenario === 'warnings' ? ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在承接风险', suggestion: '局部澄清' }))
+            : repairing || scenario === 'protected' ? [{ signal: 'body', severity: 'error', evidence: '原文有身体状态冲突', suggestion: '改成新文' }] : [] })
           : '{"patches":[{"oldText":"原文","newText":"新文"}]}'
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: scenario === 'truncated' ? 'length' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       })

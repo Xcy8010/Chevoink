@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
+import { createHash } from 'node:crypto'
+import * as aiService from '../../api/lib/ai-service.js'
+import * as review from '../../api/lib/agent/review-completion.js'
+import { selectAutomaticQualityFindings, qualityAutoRepairPending } from '../../api/lib/agent/quality-report-contract.js'
 
 import {
   humanityQualitySignalSchema,
@@ -128,6 +132,89 @@ describe('质量检查工具与编号配对失败回执', () => {
     const failure = new DataAccessError(409, 'QUALITY_RUN_SCOPE_INVALID', '编译编号必须属于当前任务')
     vi.spyOn(humanityQuality, 'resolveQualityChapterTarget').mockRejectedValue(failure)
     await expect(qualityAnalyzeTool.execute(ctx, { chapterId: 'target', compilationId: 'compiler' })).rejects.toBe(failure)
+  })
+})
+
+describe('严谨创作自动落实质量建议', () => {
+  afterEach(() => vi.restoreAllMocks())
+  const digest = (content: string) => createHash('sha256').update(content).digest('hex')
+  function fixture(cached: boolean, behavior = 'apply') {
+    const content = Array.from({ length: 8 }, (_, index) => `证据${index}。`).join('')
+    const chapter = { id: 'c', title: '本章', revision: 1, content, novel: { tagNames: [] } }
+    const report = { id: 'q', runId: 'r', compilationId: null, chapterId: 'c', chapterRevision: 1, status: 'passed', repairRound: 0,
+      criticVersion: humanityQuality.HUMANITY_CRITIC_VERSION, chapter, deterministicMetrics: { independentCheck: 'complete', contentHash: digest(content) },
+      findings: Array.from({ length: 8 }, (_, index) => ({ id: `f${index}`, signal: 'emotion_grounding', severity: 'advisory', disposition: 'pending', authorFeedback: null,
+        startOffset: index * 4, endOffset: index * 4 + 4, evidenceExcerpt: `证据${index}。`, explanation: '需要具体动作', suggestion: '局部补足' })) } as unknown as Awaited<ReturnType<typeof humanityQuality.getQualityReport>>
+    vi.spyOn(humanityQuality, 'resolveQualityChapterTarget').mockResolvedValue('c')
+    vi.spyOn(humanityQuality, 'buildHumanityQualityContext').mockResolvedValue({ chapter, compilation: null, charter: null, recentChapters: [], profiles: [], anchors: [], feedback: [] } as unknown as Awaited<ReturnType<typeof humanityQuality.buildHumanityQualityContext>>)
+    vi.spyOn(humanityQuality, 'getLatestQualityReport').mockResolvedValue(cached ? report : null)
+    vi.spyOn(humanityQuality, 'getQualityReport').mockImplementation(async () => report)
+    vi.spyOn(humanityQuality, 'analyzeDeterministicQuality').mockReturnValue({ metrics: {}, findings: [] })
+    vi.spyOn(humanityQuality, 'persistHumanityQualityReport').mockResolvedValue(report)
+    const critic = vi.spyOn(review, 'generateReviewCompletion').mockResolvedValue('{"findings":[]}')
+    const reserve = vi.spyOn(humanityQuality, 'reserveQualityAutoRepair').mockImplementation(async () => {
+      if (!qualityAutoRepairPending(report)) return false
+      report.deterministicMetrics = { ...report.deterministicMetrics as Prisma.JsonObject, autoRepairAttempted: true }
+      return true
+    })
+    vi.spyOn(humanityQuality, 'selectQualityFindings').mockResolvedValue(report)
+    const model = vi.spyOn(aiService, 'generateTextCompletion').mockImplementation(async () => JSON.stringify({ patches: report.findings.flatMap(finding => {
+      const patch = { findingId: finding.id, replacement: behavior === 'no-op' ? finding.evidenceExcerpt : '具体动作。' }
+      return behavior === 'duplicate' ? [patch, patch] : [patch]
+    }) }))
+    const write = vi.spyOn(humanityQuality, 'applyQualityRepair').mockImplementation(async input => {
+      if (behavior === 'stale') throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '正文版本已变化')
+      input.signal?.throwIfAborted()
+      report.status = 'repaired'; report.repairRound = 1; report.chapterRevision = 2
+      report.chapter = { ...report.chapter, revision: 2, content: '修订正文' }
+      report.deterministicMetrics = { ...report.deterministicMetrics as Prisma.JsonObject, repairedContentHash: digest('修订正文') }
+      report.findings.forEach(item => { item.disposition = 'repaired' })
+      return { report, updated: report.chapter, before: content, after: '修订正文', repairedFindingIds: input.replacements.map(item => item.findingId) }
+    })
+    const ctx: ToolContext = { userId: 'u', novelId: 'n', chapterId: 'c', sessionId: 's', runId: 'r', callId: 'q', mode: 'build',
+      creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
+    return { ctx, report, critic, reserve, model, write }
+  }
+  it.each([false, true])('0关注8建议全部进入一次安全修订，缓存=%s', async cached => {
+    const f = fixture(cached)
+    expect(await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })).toMatchObject({ summary: '人类感质量检查 · 自动修订 8 处' })
+    expect(f.critic).toHaveBeenCalledTimes(cached ? 0 : 1)
+    expect(f.model).toHaveBeenCalledOnce()
+    expect(f.write.mock.calls[0][0].replacements).toHaveLength(8)
+    expect(f.report.findings.every(item => item.disposition === 'repaired')).toBe(true)
+  })
+  it.each(['stable', 'bold', 'protected', 'review', 'attempted', 'repaired', 'rejected', 'cancelled'] as const)('%s 不生成越权或重复修订', async scenario => {
+    const f = fixture(true)
+    if (scenario === 'stable' || scenario === 'bold') f.ctx.creativeFreedom = scenario
+    if (scenario === 'protected') f.ctx.protectedChapterIds = new Set(['c'])
+    if (scenario === 'review') f.ctx.mode = 'review'
+    if (scenario === 'attempted') f.report.deterministicMetrics = { ...f.report.deterministicMetrics as Prisma.JsonObject, autoRepairAttempted: true }
+    if (scenario === 'repaired') f.report.repairRound = 1
+    if (scenario === 'rejected') f.report.findings.forEach(item => { item.authorFeedback = 'rejected' })
+    if (scenario === 'cancelled') f.ctx.signal = AbortSignal.abort()
+    const action = qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    if (scenario === 'cancelled') await expect(action).rejects.toBeDefined()
+    else await action
+    expect(f.reserve).not.toHaveBeenCalled(); expect(f.model).not.toHaveBeenCalled(); expect(f.write).not.toHaveBeenCalled()
+  })
+  it.each(['no-op', 'duplicate', 'stale'])('%s 不伪报已修改，缓存不再派发', async behavior => {
+    const f = fixture(true, behavior)
+    const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(result.summary).toContain('修订未应用')
+    if (behavior === 'stale') expect(result.outcome).toBe('failed')
+    else expect(f.write).not.toHaveBeenCalled()
+    const calls = f.model.mock.calls.length
+    await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(f.model).toHaveBeenCalledTimes(calls)
+    expect(f.report.findings.every(item => item.disposition !== 'repaired')).toBe(true)
+  })
+  it('建议参与修订但不得挤掉错误，重叠与作者拒绝仍受保护', () => {
+    const findings = Array.from({ length: 10 }, (_, i) => ({ id: i, severity: 'advisory', startOffset: i * 10, endOffset: i * 10 + 10 }))
+    const selected = selectAutomaticQualityFindings([...findings, { ...findings[0], id: 10, severity: 'error' }, { ...findings[1], id: 11, authorFeedback: 'rejected' }])
+    expect(selected).toHaveLength(8)
+    expect(selected[0].id).toBe(10)
+    expect(selected.map(item => item.id)).not.toContain(0)
+    expect(selected.map(item => item.id)).not.toContain(11)
   })
 })
 

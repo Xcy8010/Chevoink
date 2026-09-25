@@ -25,22 +25,23 @@ import {
   persistHumanityQualityReport,
   recordQualityFindingFeedback,
   resolveQualityChapterTarget,
+  reserveQualityAutoRepair,
   renderQualityLearning,
   renderVoiceAndAnchorContext,
   saveCharacterVoiceProfile,
   saveExperienceAnchor,
   selectQualityFindings,
 } from '../humanity-quality.js'
-import { defineTool, type ToolContext } from './types.js'
+import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
-import { qualityReportMatchesContent } from '../quality-report-contract.js'
+import { qualityReportMatchesContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
 import { coerceCriticFindings, correctQualityEvidence, qualityEvidenceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
 
 const READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const WRITE = { plan: 'deny', build: 'allow', review: 'allow' } as const
 const CONTENT_WRITE = { plan: 'deny', build: 'allow', review: 'deny' } as const
 
-/** 自动修订阶段的可预期拦截码：命中时检查仍视为完成（报告交付、剩余交作者审阅），不把工具标成执行失败 */
+/** 自动修订的可预期拦截：保留报告；过期证据或范围冲突仍返回失败，不能冒充已修复。 */
 const REPAIR_BLOCK_CODES = new Set([
   'QUALITY_REPAIR_LIMIT',
   'QUALITY_REPORT_STALE',
@@ -119,15 +120,40 @@ severity 只能是 advisory 或 warning；审美意见绝不报 error。找不�
 
 type QualityReport = Awaited<ReturnType<typeof getQualityReport>>
 
-function automaticRepairFindings(report: QualityReport, includeAdvisory = false) {
-  const selected: QualityReport['findings'] = []
-  for (const finding of report.findings) {
-    if ((!includeAdvisory && finding.severity === 'advisory') || finding.disposition === 'repaired') continue
-    if (selected.some((item) => finding.startOffset < item.endOffset && item.startOffset < finding.endOffset)) continue
-    selected.push(finding)
-    if (selected.length >= 8) break
+async function finishQualityReview(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false): Promise<ToolResult> {
+  const warningCount = report.findings.filter(finding => finding.severity === 'warning').length
+  const advisoryCount = report.findings.filter(finding => finding.severity === 'advisory').length
+  const automatic = ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(report.chapterId)
+  const selected = automatic && qualityAutoRepairPending(report) ? selectAutomaticQualityFindings(report.findings) : []
+  if (selected.length) {
+    ctx.signal.throwIfAborted()
+    try {
+      if (await reserveQualityAutoRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id })) {
+        const repaired = await applySelectedQualityRepairs(ctx, report, selected)
+        if (repaired) {
+          const remaining = repaired.report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
+          return {
+            output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。质量报告已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 只读复核当前版本。${bindingSuffix}`,
+            summary: `人类感质量检查 · 自动修订 ${repaired.patchCount} 处`, display: reportDisplay(repaired.report),
+            snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },
+          }
+        }
+        return { output: `质量检查已完成：${warningCount} 个需关注问题、${advisoryCount} 个建议；已尝试集中修订，但未获得可安全验证且实际改变正文的补丁，正文未修改，意见保留待审。同一报告不循环重试。${bindingSuffix}`,
+          summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
+      }
+    } catch (error) {
+      ctx.signal.throwIfAborted()
+      if (!(error instanceof DataAccessError) || !REPAIR_BLOCK_CODES.has(error.code)) throw error
+      const stale = !['QUALITY_REPAIR_LIMIT', 'QUALITY_REPAIR_NO_CHANGE'].includes(error.code)
+      return { ...(stale ? { outcome: 'failed' as const } : {}),
+        output: `质量报告已保留，自动修订未应用：${error.message}。${stale ? '当前证据或版本不可用于本次修订，不能据此宣称已修复或直接提交；请核对当前正文与报告。' : '剩余意见保留待审，不重复自动改写。'}${bindingSuffix}`,
+        summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
+    }
   }
-  return selected
+  const reason = !automatic ? '当前模式不自动修订或章节受保护，正文未改动'
+    : report.findings.length ? '自动修订已尝试、报告不属于当前修订任务或没有待处理的安全候选；剩余意见仍保留待审' : '未发现有证据的问题'
+  return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；检查通过不等于所有建议已修复。${bindingSuffix}`,
+    summary: cached ? '复用当前质量报告' : `人类感质量检查 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
 }
 
 async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityReport, selected: QualityReport['findings']) {
@@ -152,7 +178,9 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
     try {
       const parsedAttempt = repairEnvelopeSchema.parse(parseJsonObject(response))
       for (const patch of parsedAttempt.patches) {
-        if (selectedById.has(patch.findingId)) patches.set(patch.findingId, patch)
+        const finding = selectedById.get(patch.findingId)
+        if (finding && parsedAttempt.patches.filter(item => item.findingId === patch.findingId).length === 1
+          && patch.replacement !== report.chapter.content.slice(finding.startOffset, finding.endOffset)) patches.set(patch.findingId, patch)
       }
     } catch {
       // 第一次格式不完整时由第二次只重试缺失项；两次都失败才让工具明确失败。
@@ -163,7 +191,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
   if (replacements.length === 0) return null
   // 模型若仍漏掉个别项，只应用已逐字绑定的安全补丁，并把漏项退回待审，不让整章修订归零。
   await selectQualityFindings(ctx.userId, ctx.novelId, report.id, replacements.map((patch) => patch.findingId))
-  const result = await applyQualityRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id, replacements })
+  const result = await applyQualityRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id, replacements, signal: ctx.signal })
   recordChapterBaseline(ctx.runId, result.updated.id, result.updated.revision)
   return { result, patchCount: result.repairedFindingIds.length, missingCount: selected.length - result.repairedFindingIds.length, report: await getQualityReport(ctx.userId, ctx.novelId, report.id) }
 }
@@ -210,7 +238,7 @@ export const qualityAnalyzeTool = defineTool({
     const existing = await getLatestQualityReport(ctx.userId, ctx.novelId, chapterId)
     if (existing && existing.compilationId === (bundle.compilation?.id ?? null) && existing.criticVersion === HUMANITY_CRITIC_VERSION && qualityReportMatchesContent(existing, bundle.chapter.revision, bundle.chapter.content)) {
       const hydrated = await getQualityReport(ctx.userId, ctx.novelId, existing.id)
-      return { output: `当前 revision 已有质量报告 ${hydrated.id}，已直接复用；不会再次调用 Critic 或自动重试修订。`, summary: '复用当前质量报告', display: reportDisplay(hydrated) }
+      return finishQualityReview(ctx, hydrated, '', true)
     }
     const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map((chapter) => chapter.content))
     const charterContext = bundle.charter
@@ -325,48 +353,7 @@ ${bundle.chapter.content}
       droppedCount ? `${droppedCount} 条因字段不完整未纳入报告` : '',
     ].filter(Boolean).join('；')
     const bindingSuffix = bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : ''
-    const warningCount = report.findings.filter((finding) => finding.severity === 'warning').length
-    const advisoryCount = report.findings.filter((finding) => finding.severity === 'advisory').length
-    const selected = ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(report.chapterId)
-      ? automaticRepairFindings(report)
-      : []
-    if (selected.length > 0) {
-      try {
-        await selectQualityFindings(ctx.userId, ctx.novelId, report.id, selected.map((finding) => finding.id))
-        const repaired = await applySelectedQualityRepairs(ctx, report, selected)
-        if (repaired) {
-          return {
-            output: `严谨创作质量检查完成：一次融合审查定位 ${report.findings.length} 项证据，已自动原子修订 ${repaired.patchCount} 处${repaired.missingCount ? `，另有 ${repaired.missingCount} 项因无法安全定位保留待审` : ''}。质量报告已绑定修订后的 r${repaired.result.updated.revision}，无需再次质量检查或选择；正文已变化，提交章节终态前必须调用 continuity_validate 只读复核当前版本，不能沿用旧连续性报告。${bindingSuffix}`,
-            summary: `人类感质量检查 · 自动修订 ${repaired.patchCount} 处`,
-            display: reportDisplay(repaired.report),
-            snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },
-          }
-        }
-        return {
-          output: `质量检查已完成并保留报告：发现 ${warningCount} 个需关注问题、${advisoryCount} 个审美建议；局部修订器本次未返回可安全验证的补丁，正文保持不变。后续再次检查会直接复用本报告，不会循环重试。${bindingSuffix}`,
-          summary: `人类感质量检查${criticFallback ? '（确定性兜底）' : ''} · 修订未应用`,
-          display: reportDisplay(report),
-        }
-      } catch (error) {
-        // 修订轮次保护/证据过期等可预期拦截：检查本身已完成，报告照常交付，剩余问题交作者审阅；
-        // 绝不能把 CHECK 步骤标成「执行失败」挡住后续提交链路。
-        if (!(error instanceof DataAccessError) || !REPAIR_BLOCK_CODES.has(error.code)) throw error
-        return {
-          output: `质量检查完成：一次融合审查定位 ${report.findings.length} 项证据（${warningCount} 个需关注、${advisoryCount} 个审美建议）。自动局部修订被轮次保护拦截（${error.message}）正文保持 r${report.chapterRevision} 不变，剩余问题保留在报告中交作者审阅。检查视为已完成：禁止再次调用 quality_analyze，可直接继续后续流程。${bindingSuffix}`,
-          summary: `人类感质量检查 · 剩余问题交作者审阅`,
-          display: reportDisplay(report),
-        }
-      }
-    }
-    return {
-      output: report.findings.length
-        ? `质量检查完成：${warningCount} 个需关注问题、${advisoryCount} 个审美建议。当前模式仅展示报告，或章节受作者保护，因此未自动改动；本轮不会重复检查或要求选择。${bindingSuffix}`
-        : criticFallback
-          ? `质量报告 ${report.id} 已完成确定性检查兜底；独立 Critic 本次未返回结构化内容，正文保持不变，可继续当前任务。`
-          : `质量报告 ${report.id} 通过：确定性检查与独立 Critic 均未发现有证据的问题。${bindingSuffix}`,
-      summary: `人类感质量检查${criticFallback ? '（确定性兜底）' : ''} · ${warningCount} 关注 ${advisoryCount} 建议`,
-      display: reportDisplay(report),
-    }
+    return finishQualityReview(ctx, report, bindingSuffix)
   },
 })
 
