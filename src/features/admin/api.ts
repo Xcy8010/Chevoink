@@ -146,6 +146,7 @@ export function getAdminModelManagement(): Promise<AdminModelManagementPayload> 
 }
 
 export function updateAdminModel(modelId: string, payload: {
+  freePromotion?: import('../../../shared/model-promotion').ModelPromotion | null
   routes?: import('../../../shared/contracts/model-routes').ModelRouteInput[]
   provider?: string; displayName?: string; modelName?: string; baseUrl?: string | null; apiKey?: string
   multiplier?: number; enabled?: boolean; selectable?: boolean; isDefault?: boolean

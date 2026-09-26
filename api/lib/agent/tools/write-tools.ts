@@ -8,6 +8,7 @@ import { saveStoryMemory } from '../story-memory.js'
 import { defineTool, type ToolResult } from './types.js'
 import { executeDurablePlanSave } from './durable-plan.js'
 import { resolveMemorySource } from './memory-source.js'
+import { recordPlanContentHash } from './plan-observation.js'
 
 /**
  * 记忆与计划写工具集。
@@ -125,7 +126,7 @@ export const planSaveTool = defineTool({
     title: z.string().min(2).max(60).describe('计划标题，如"第六章规划"'),
     content: z.string().min(1).describe('Markdown正文。长计划分完整小节写入，每次建议不超过2000字符且只调用一次plan_save；首次保存首节，后续mode=append追加，不能缩短原目标或把首节说成全文完成。禁止占位文本'),
     mode: z.enum(['replace', 'append']).optional().describe('默认replace替换全文；长计划用append逐节追加，每次等待回执再写下一节'),
-    expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('append必填，使用最近plan_save或plan_read返回的contentHash，防重复追加与覆盖并发修改'),
+    expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('版本保护，可传最近plan_save或plan_read返回的contentHash；省略时只使用本次执行中服务端已记录的读取/保存版本，没有记录必须先plan_read。不要猜测或计算hash'),
     planId: z
       .string()
       .optional()
@@ -254,12 +255,14 @@ export const planSaveTool = defineTool({
       const capturedArgs = { ...args }
       return executeDurablePlanSave(capturedCtx, capturedArgs,
         raw => Object.fromEntries(Object.entries(planSaveTool.parameters.parse(planSaveTool.coerceArgs!(raw))).filter(([, value]) => value !== undefined)),
-        tx => planSaveTool.execute({ ...capturedCtx, durablePlan: undefined, transaction: tx }, capturedArgs))
+        (tx, verifiedContentHash) => planSaveTool.execute({ ...capturedCtx, durablePlan: undefined, transaction: tx,
+          planContentHashes: capturedArgs.planId && verifiedContentHash ? new Map([[capturedArgs.planId, verifiedContentHash]]) : undefined }, capturedArgs))
     }
     const db = ctx.transaction ?? prisma
     const title = args.title.trim()
     ctx.signal.throwIfAborted()
-    if (args.mode === 'append' && (!args.planId || !args.expectedContentHash)) return {
+    const expectedContentHash = args.expectedContentHash ?? (args.planId ? ctx.planContentHashes?.get(args.planId) : undefined)
+    if (args.mode === 'append' && (!args.planId || !expectedContentHash)) return {
       outcome: 'failed', summary: '追加计划需要已保存的目标版本',
       output: '先用 plan_read 读取已保存计划，再带 planId、contentHash（作为expectedContentHash）及mode=append追加完整小节。未执行任何写入。',
     }
@@ -294,7 +297,11 @@ export const planSaveTool = defineTool({
     // 防误清空护栏：模型偶发把占位文本当正文传入（如 "placeholder"），或把长计划覆盖成几句话，
     // 这里直接拦截不落库，并要求携带完整正文重试，避免既有计划被意外摧毁
     const appending = args.mode === 'append'
-    if (existing && args.expectedContentHash && createHash('sha256').update(existing.content).digest('hex') !== args.expectedContentHash) return {
+    if (appending && existing && (existing.content === args.content || existing.content.endsWith(`\n\n${args.content}`))) return {
+      outcome: 'failed', summary: '相同小节已在计划末尾，未重复追加',
+      output: `planId=${existing.id} 的末尾已有本次完整小节。请plan_read核对后继续下一节，不要重复追加，也不能据此声称整份计划完成。`,
+    }
+    if (existing && expectedContentHash && createHash('sha256').update(existing.content).digest('hex') !== expectedContentHash) return {
       outcome: 'failed', summary: '计划版本已变化，未重复写入', output: '先用 plan_read 核对当前正文及contentHash；确认本小节是否已保存，仅追加尚未保存的小节，不原样重试旧版本。',
     }
     const content = appending && existing ? `${existing.content}\n\n${args.content}` : args.content
@@ -322,12 +329,13 @@ export const planSaveTool = defineTool({
         savedAsPlan: true,
       }
       ctx.signal.throwIfAborted()
-      if (appending || args.expectedContentHash) {
+      if (appending || expectedContentHash) {
         const saved = await db.agentArtifact.updateMany({
           where: { id: existing.id, content: existing.content, title: existing.title, updatedAt: existing.updatedAt },
           data: { title: appending ? existing.title : title, content, metadata: metadata as Prisma.InputJsonValue },
         })
         if (saved.count !== 1) return { outcome: 'failed', summary: '计划版本已变化，未追加', output: '并发修改已发生，未写入。请plan_read核对正文和contentHash后再继续，不能重复追加已保存小节。' }
+        recordPlanContentHash(ctx, existing.id, contentHash)
         return { summary: `${appending ? '追加' : '更新'}计划《${appending ? existing.title : title}》 · ${args.content.length} 字`,
           output: `${appending ? '已追加一个完整小节' : '已按核对版本更新计划'}，planId=${existing.id}，contentHash=${contentHash}，累计${content.length}字。继续追加剩余小节直到原计划完整，不重复已保存内容。`,
           display: { kind: 'planDiff', artifactId: existing.id, title: appending ? existing.title : title, beforeTitle: existing.title, before: existing.content, after: content } }
@@ -336,6 +344,7 @@ export const planSaveTool = defineTool({
         where: { id: existing.id },
         data: { title, content: args.content, metadata: metadata as Prisma.InputJsonValue },
       })
+      recordPlanContentHash(ctx, updated.id, contentHash)
 
       return {
         output: `已就地更新既有计划《${beforeTitle}》（planId=${updated.id}，contentHash=${contentHash}，${args.content.length} 字），没有新建副本。如长计划尚未完整，继续mode=append追加剩余小节；只有完成原目标后才向作者汇报完成。`,
@@ -360,6 +369,7 @@ export const planSaveTool = defineTool({
         metadata: { savedAsPlan: true },
       },
     })
+    recordPlanContentHash(ctx, artifact.id, contentHash)
 
     return {
       output: `已把《${title}》写入计划文件夹（planId=${artifact.id}，contentHash=${contentHash}，${args.content.length} 字）。如长计划尚未完整，继续mode=append追加剩余小节；只有完成原目标后才向作者汇报完成。后续修订带planId就地更新，不新建副本。`,

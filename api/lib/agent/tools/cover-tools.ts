@@ -2,10 +2,10 @@ import { z } from 'zod'
 
 import { FIXED_NOVEL_COVER_SIZE } from '../../../../shared/contracts/index.js'
 import { generateCoverImageData } from '../../ai-service.js'
-import { recoverCoverAssetStorageData } from '../../data-access.js'
 import { prisma } from '../../prisma.js'
 import { enforceCoverTitleInPrompt } from './cover-prompt.js'
 import { defineTool } from './types.js'
+import { applyCoverSelection, prepareCoverSelection } from './cover-application.js'
 
 const WRITE_PERMISSION = { plan: 'deny', build: 'allow', review: 'deny' } as const
 
@@ -68,56 +68,15 @@ export const coverGenerateTool = defineTool({
 export const coverApplyTool = defineTool({
   name: 'cover_apply',
   title: '应用封面',
-  description: '把 cover_generate 生成的某张候选图设为当前作品的正式封面。coverAssetId 来自 cover_generate 的返回结果。',
+  description: '按作者明确要求，把候选图或当前任务中作者上传的图片设为当前作品封面。候选图传 coverAssetId，上传图片传附件真实 attachmentUrl，二选一。直接应用作者指定图片，不要重新生成。',
   parameters: z.object({
-    coverAssetId: z.string().describe('要应用的封面资源 ID'),
-  }),
+    coverAssetId: z.string().trim().min(1).max(64).optional().describe('要应用的封面候选资源 ID'),
+    attachmentUrl: z.string().min(1).max(1024).optional().describe('当前任务的用户图片附件 URL'),
+  }).refine(value => Boolean(value.coverAssetId) !== Boolean(value.attachmentUrl), '请选择一个封面候选或图片附件'),
   permission: WRITE_PERMISSION,
   readOnly: false,
   async execute(ctx, args) {
-    const asset = await prisma.coverAsset.findFirst({
-      where: { id: args.coverAssetId, ownerUserId: ctx.userId },
-      select: { id: true, imageUrl: true },
-    })
-
-    if (!asset) {
-      // 列出该作品最近的候选 ID，让模型直接改用已有候选，而不是重新生成
-      const candidates = await prisma.coverAsset.findMany({
-        where: { ownerUserId: ctx.userId, novelId: ctx.novelId },
-        orderBy: { createdAt: 'desc' },
-        take: 5,
-        select: { id: true },
-      })
-      const hint = candidates.length
-        ? `该作品已有的候选（最新在前）：${candidates.map((item) => item.id).join('、')}。请从中选一个重新调用 cover_apply，不要重新生成。`
-        : '该作品还没有任何封面候选，需要先用 cover_generate 生成。'
-      return { output: `封面资源 ${args.coverAssetId} 不存在或不属于当前用户。${hint}` }
-    }
-
-    const novel = await prisma.novel.findFirst({
-      where: { id: ctx.novelId, authorId: ctx.userId },
-      select: { coverAssetId: true, title: true },
-    })
-
-    if (!novel) {
-      return { output: '未找到当前作品。' }
-    }
-
-    // Applying a retained provider result retries only its local storage. It
-    // must not generate a replacement image or incur another fixed fee.
-    const recovered = await recoverCoverAssetStorageData(ctx.userId, asset.id)
-    asset.imageUrl = recovered.imageUrl
-
-    await prisma.$transaction([
-      prisma.coverAsset.update({ where: { id: asset.id }, data: { novelId: ctx.novelId } }),
-      prisma.novel.update({ where: { id: ctx.novelId }, data: { coverAssetId: asset.id } }),
-    ])
-
-    return {
-      output: `已把封面应用到作品《${novel.title}》。`,
-      summary: `应用封面到《${novel.title}》`,
-      display: { kind: 'coverImages', images: [{ id: asset.id, url: asset.imageUrl }] },
-      snapshot: { target: 'novel', targetId: ctx.novelId, field: 'coverAssetId', previousValue: novel.coverAssetId },
-    }
+    const cover = await prepareCoverSelection(ctx, args)
+    return prisma.$transaction(tx => applyCoverSelection(ctx, cover, tx))
   },
 })

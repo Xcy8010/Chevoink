@@ -99,6 +99,7 @@ function errorMessage(error: unknown): string {
 
 /** Local PCM capture only. The sole output is a draft callback, never a send action. */
 export function useVoiceInput(options: VoiceInputOptions): VoiceInputController {
+  const modelEventSource = useRef(Symbol('voice-pack-owner'))
   const [status, setStatus] = useState<VoiceInputStatus>('checking')
   const desktopStatus = useRef(status)
   desktopStatus.current = status
@@ -163,24 +164,32 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
   useLayoutEffect(() => {
     mounted.current = true
     cancel()
-    const id = generation.current
     const cacheCheck = new AbortController()
     transition('checking')
     // Cache inspection never downloads model assets or requests microphone access.
-    void getVoiceModelStatus().then(async (available) => {
-      if (!mounted.current || id !== generation.current) return
+    let refreshSequence = 0
+    const refreshModel = (event?: Event) => {
+      if (event instanceof CustomEvent && event.detail === modelEventSource.current) return
+      if (!['idle', 'checking', 'needs-download', 'error'].includes(phase.current)) return
+      const id = generation.current
+      const refresh = ++refreshSequence
+      void getVoiceModelStatus().then(async (available) => {
+      if (!mounted.current || id !== generation.current || refresh !== refreshSequence) return
       // HTTP cache can be evicted independently from the engine's CacheStorage.
       // only-if-cached guarantees mount/scope changes never silently download.
       if (available) {
         try { await prepareCaptureWorklet(cacheCheck.signal, 'only-if-cached') } catch { available = false }
       }
-      if (!mounted.current || id !== generation.current) return
+      if (!mounted.current || id !== generation.current || refresh !== refreshSequence) return
       ready.current = available
       setModelReady(available)
-      if (phase.current === 'checking') transition('idle')
+      if (phase.current === 'checking' || (available && phase.current === 'needs-download')) transition('idle')
     }).catch((cause: unknown) => {
       if (mounted.current && id === generation.current) fail(cause)
     })
+    }
+    refreshModel()
+    window.addEventListener('chevoink:voice-pack-changed', refreshModel)
     const onHidden = () => { if (document.hidden) cancel() }
     const onPageHide = () => cancel()
     document.addEventListener('visibilitychange', onHidden)
@@ -191,6 +200,7 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
       invalidate()
       document.removeEventListener('visibilitychange', onHidden)
       window.removeEventListener('pagehide', onPageHide)
+      window.removeEventListener('chevoink:voice-pack-changed', refreshModel)
     }
   }, [options.scopeKey, options.disabled, cancel, fail, invalidate, transition])
 
@@ -218,6 +228,7 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
       controller.current = null
       ownsEngine.current = false
       transition('idle')
+      window.dispatchEvent(new CustomEvent('chevoink:voice-pack-changed', { detail: modelEventSource.current }))
     } catch (cause) {
       if (valid(id, scope)) fail(cause)
     }
@@ -238,6 +249,7 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInputController 
       if (!valid(id, scope)) return
       setProgress(0)
       transition('needs-download')
+      window.dispatchEvent(new CustomEvent('chevoink:voice-pack-changed', { detail: modelEventSource.current }))
     } catch (cause) {
       if (valid(id, scope)) fail(cause)
     }

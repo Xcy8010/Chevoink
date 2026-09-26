@@ -118,6 +118,25 @@ export function compactEarlyToolPayloads(messages: ChatMessage[], keepRecentTool
   return collapseEarlyToolRounds(messages, keepRecentToolOutputs)
 }
 
+/** Old reasoning is neither an author directive nor an execution receipt. Keep
+ * the latest assistant round and every incomplete protocol round intact. */
+export function releaseCompletedReasoning(messages: ChatMessage[]): number {
+  let latestAssistant = -1
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index].role === 'assistant') { latestAssistant = index; break }
+  }
+  const completed = new Set(completedToolRounds(messages, 0).map(round => round.index))
+  let released = 0
+  for (let index = 0; index < latestAssistant; index++) {
+    const message = messages[index]
+    if (message.role !== 'assistant' || !message.reasoning
+      || (message.toolCalls?.length && !completed.has(index))) continue
+    released += estimateTextTokens(message.reasoning)
+    messages[index] = { ...message, reasoning: undefined }
+  }
+  return released
+}
+
 /**
  * Second-stage compaction used only when the request still exceeds the hard
  * safety budget. Completed old assistant/tool protocol pairs are replaced by

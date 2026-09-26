@@ -3,6 +3,7 @@ import { toOpenAIParameters } from '../tool-schema.js'
 import type { AgentExecutionMode } from '../../../../shared/contracts/index.js'
 import type { OpenAIToolDefinition } from '../../ai-service.js'
 import { coverApplyTool, coverGenerateTool } from './cover-tools.js'
+import { accountCreditsTool, accountCreditHistoryTool, accountNovelsTool, sessionRenameTool } from './account-tools.js'
 import { readFileTool, viewImageTool } from './attachment-tools.js'
 import {
   chapterAppendTool,
@@ -129,6 +130,7 @@ export const allTools: AgentTool<any>[] = [
   readFileTool,
   novelExportTool,
   novelImportTool,
+  accountCreditsTool, accountCreditHistoryTool, accountNovelsTool, sessionRenameTool,
   volumeListTool,
   structureOutlineTool,
   projectSearchTool,

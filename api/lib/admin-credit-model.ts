@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
+import { effectiveModelMultiplier, readModelPromotion, modelPromotionSchema } from '../../shared/model-promotion.js'
 
 import type { AdminCreditsManagementPayload, AdminModelManagementPayload } from '../../shared/contracts/index.js'
 import type { ModelReasoningEffort } from '../../shared/contracts/index.js'
@@ -297,12 +298,13 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
       const databaseReady = model.modelName !== 'unconfigured' && Boolean(model.baseUrl && model.apiKeyCiphertext)
       const fallback = databaseReady ? null : toolEnvironmentFallback(modelKind)
       const configurationReady = databaseReady || Boolean(fallback) || (model.tier === 'speed' && model.modelName !== 'unconfigured')
-      const price = modelKind === 'text' && model.tier ? prices.get(model.tier) : null
+      const price = modelKind === 'text' && model.tier && effectiveModelMultiplier(model) !== 0 && !readModelPromotion(model.metadata) ? prices.get(model.tier) : null
       return {
         routes: presentModelRoutes(model.metadata),
         pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
         id: model.id, tier: model.tier, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
-        modelName: fallback?.modelName ?? model.modelName, baseUrl: fallback?.baseUrl ?? model.baseUrl, multiplier: model.multiplierBps / 10_000,
+        modelName: fallback?.modelName ?? model.modelName, baseUrl: fallback?.baseUrl ?? model.baseUrl, multiplier: effectiveModelMultiplier(model) / 10_000,
+        freePromotion: readModelPromotion(model.metadata),
         enabled: model.enabled || Boolean(fallback), selectable: model.selectable, isDefault: model.isDefault,
         apiKeyConfigured: Boolean(model.apiKeyCiphertext) || Boolean(fallback?.apiKeyConfigured), requestCount: row?._count._all ?? 0,
         requestTokens: row?._sum.requestTokens ?? 0, responseTokens: row?._sum.responseTokens ?? 0,
@@ -318,6 +320,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
 }
 
 export type UpdateAdminModelInput = {
+  freePromotion?: import('../../shared/model-promotion.js').ModelPromotion | null
   routes?: ModelRouteInput[]
   provider?: string
   displayName?: string
@@ -346,6 +349,15 @@ function assertProviderReasoningEfforts(provider: string, reasoningEfforts: Mode
 export async function updateAdminModel(modelId: string, input: UpdateAdminModelInput): Promise<void> {
   await prisma.$transaction(async (tx) => {
     const model = await tx.aiModelConfig.findFirstOrThrow({ where: { id: modelId, ownerUserId: null } })
+    const freePromotion = input.freePromotion === undefined ? (input.multiplier === undefined ? readModelPromotion(model.metadata) : null) : input.freePromotion
+    if (freePromotion) {
+      const parsed = modelPromotionSchema.safeParse(freePromotion)
+      if (!parsed.success || (input.multiplier ?? model.multiplierBps / 10000) !== 0
+        || (input.freePromotion !== undefined && Date.parse(freePromotion.endsAt) <= Date.now())
+        || !['lite', 'speed', 'standard', 'performance', 'ultimate', 'basic'].includes(model.tier ?? '')) {
+        throw new DataAccessError(400, 'MODEL_PROMOTION_INVALID', '限时免费须使用 0 倍率、未来截止时间及有效的到期倍率。')
+      }
+    }
     const currentCapabilities = parseModelCapabilities(model.metadata, model.provider)
     const reasoningEfforts = input.reasoningEfforts ?? currentCapabilities.reasoningEfforts
     const defaultReasoningEffort = input.defaultReasoningEffort ?? currentCapabilities.defaultReasoningEffort
@@ -371,13 +383,16 @@ export async function updateAdminModel(modelId: string, input: UpdateAdminModelI
         modelName: input.modelName?.trim() || undefined,
         baseUrl: input.baseUrl === undefined ? undefined : input.baseUrl?.trim() || null,
         apiKeyCiphertext: input.apiKey?.trim() ? encryptSecret(input.apiKey.trim()) : undefined,
-        multiplierBps: input.multiplier === undefined ? undefined : Math.round(input.multiplier * 10_000),
+        multiplierBps: input.multiplier === undefined
+          ? (input.freePromotion === null ? effectiveModelMultiplier(model) : undefined)
+          : Math.round(input.multiplier * 10_000),
         enabled: input.enabled,
         selectable: input.selectable,
         isDefault: input.isDefault,
         metadata: {
           ...(model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata : {}),
           ...(routes ? { routes } : {}),
+          freePromotion,
           reasoningEfforts,
           defaultReasoningEffort,
           visionEnabled: input.visionEnabled ?? currentCapabilities.visionEnabled,

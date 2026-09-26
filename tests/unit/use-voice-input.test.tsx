@@ -157,6 +157,21 @@ describe('useVoiceInput local PCM lifecycle', () => {
     expect(addModule.mock.calls[0][0]).toBe(cachedUrl)
     expect(fetch).toHaveBeenCalledOnce()
   })
+  it('refreshes another mounted controller after language-pack settings change without requesting the microphone', async () => {
+    vi.mocked(engine.getVoiceModelStatus).mockResolvedValue(false)
+    const hook = await setup()
+    await act(async () => hook.result.current.start())
+    expect(hook.result.current.state).toBe('needs-download')
+    vi.mocked(engine.getVoiceModelStatus).mockResolvedValue(true)
+    await act(async () => window.dispatchEvent(new CustomEvent('chevoink:voice-pack-changed', { detail: Symbol('settings') })))
+    await waitFor(() => expect(hook.result.current.modelReady).toBe(true))
+    expect(hook.result.current.state).toBe('idle')
+    expect(permission).not.toHaveBeenCalled()
+    expect(engine.prepareVoiceModel).not.toHaveBeenCalled()
+    vi.mocked(engine.getVoiceModelStatus).mockResolvedValue(false)
+    await act(async () => window.dispatchEvent(new CustomEvent('chevoink:voice-pack-changed', { detail: Symbol('settings') })))
+    await waitFor(() => expect(hook.result.current.modelReady).toBe(false))
+  })
 
   it('passes actual mono PCM and sampleRate, preserves the final worklet block and only emits draft text', async () => {
     const { result, onTranscript } = await record()

@@ -5,6 +5,7 @@ import { validateModelCursor } from './agent/runtime-model-cursor.js'
 import type { settleProviderOperation } from './agent/runtime-settlement.js'
 import { withLeaseHeartbeat } from './agent/runtime-heartbeat.js'
 import { resolveDurableTokenPrice, resolveTokenPrice } from './billing/resolve-token-price.js'
+import { effectiveModelMultiplier, type ModelPromotion } from '../../shared/model-promotion.js'
 
 import { fetch as undiciFetch, Agent as UndiciAgent } from 'undici'
 
@@ -522,6 +523,8 @@ export function buildProviderToolChoice(input: ProviderReasoningInput, requested
 }
 
 export type ChatWithToolsParams = {
+  /** Server-resolved offer; reevaluate only before a new provider operation. */
+  freePromotion?: ModelPromotion | null
   /** Internal protocol correction only; never grants additional tool authority. */
   toolChoice?: 'required'
   /** Internal callers freeze this value with their durable request. */
@@ -627,6 +630,11 @@ function toProviderMessages(messages: ChatMessage[]) {
  * 支持 AbortSignal 真实中断上游请求，每次调用都落 AiUsageLog。
  */
 export async function chatWithTools(params: ChatWithToolsParams): Promise<ChatCompletionResult> {
+  if (!params.durableExecution && params.freePromotion && params.usageLog.modelTier !== 'custom') {
+    params = { ...params, usageLog: { ...params.usageLog, multiplierBps: effectiveModelMultiplier({
+      multiplierBps: params.usageLog.multiplierBps ?? 10000, metadata: { freePromotion: params.freePromotion },
+    }) } }
+  }
   params = { ...params, usageLog: { ...params.usageLog },
     ...(params.durableExecution ? { messages: JSON.parse(JSON.stringify(params.messages)), tools: JSON.parse(JSON.stringify(params.tools)),
       durableExecution: { ...params.durableExecution, lease: { ...params.durableExecution.lease },
@@ -996,7 +1004,10 @@ export async function generateTextCompletion(
 ) {
   options = { ...options }
   options.signal?.throwIfAborted()
-  const modelRuntime = options.modelRuntime ?? await getModelTierRuntime(options.modelTier ?? 'speed', options.userId)
+  const sourceRuntime = options.modelRuntime ?? await getModelTierRuntime(options.modelTier ?? 'speed', options.userId)
+  const modelRuntime = sourceRuntime.tier === 'custom' ? sourceRuntime : { ...sourceRuntime, multiplierBps: effectiveModelMultiplier({
+    multiplierBps: sourceRuntime.multiplierBps, metadata: { freePromotion: sourceRuntime.freePromotion },
+  }) }
   return withModelRoutePool({ messages: [], tools: [], model: modelRuntime.modelName ?? undefined,
     provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, providerApiKey: modelRuntime.apiKey,
     signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route =>

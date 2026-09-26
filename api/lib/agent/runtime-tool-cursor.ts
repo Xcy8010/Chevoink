@@ -148,7 +148,7 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     const plan = input.effectDomain === 'plan'
     const read = input.effectDomain === 'read'
     const metadata = input.effectDomain === 'metadata'
-    if (metadata && (!['novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品设置能力不能用于其他动作。')
+    if (metadata && (!['cover_apply', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品设置能力不能用于其他动作。')
     const memory = input.effectDomain === 'memory'
     if (memory && (!['memory_save', 'memory_event_save', 'memory_relation_save'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '记忆能力仅允许原任务保存记忆。')
     const task = input.effectDomain === 'task' && ['todo_write', 'directive_save', 'directive_supersede'].includes(input.action) && input.targetId === token.taskRootId
@@ -156,7 +156,7 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     const structure = input.effectDomain === 'structure'
     const compiler = input.effectDomain === 'compiler'
     if (compiler && (!['story_compiler_prepare', 'scene_task_build', 'continuity_validate', 'chapter_bridge_commit', 'quality_analyze'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '编译能力只允许本任务的准备、场景构建、连续性/质量检查与终态提交。')
-    if ((!read && !task && !memory && (plan || (metadata && ['story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action)) ? !['plan', 'build'].includes(current.configuration.mode) : current.configuration.mode !== 'build')) || !grant || grant.permission === 'deny'
+    if ((!read && !task && !memory && input.action !== 'session_rename' && (plan || (metadata && ['story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action)) ? !['plan', 'build'].includes(current.configuration.mode) : current.configuration.mode !== 'build')) || !grant || grant.permission === 'deny'
       || (!plan && !read && !structure && !task && !compiler && !memory && !metadata && current.configuration.protectedChapterIds.includes(input.targetId))) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原冻结授权不允许此次工具效果。')
     let index = frame.state.messages.length - 1
     while (index >= 0 && frame.state.messages[index].role === 'tool') index--

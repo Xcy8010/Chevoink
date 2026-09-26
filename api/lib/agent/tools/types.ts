@@ -20,6 +20,8 @@ export type ToolContext = {
   chapterId: string | null
   sessionId: string
   runId: string
+  /** Per-execution server observations; never populated from tool arguments. */
+  planContentHashes?: Map<string, string>
   /** 作者明确要求“已有/前文保持不变”时，本轮启动前已存在的章节集合。 */
   protectedChapterIds?: ReadonlySet<string>
   /** Current server admission ceiling; inline children must inherit and intersect it. */
@@ -67,6 +69,8 @@ export type ToolResult = {
   observedState?: { kind: 'chapter'; id: string; revision: number } | { kind: 'plan'; id: string; hash: string } | { kind: 'volume'; id: string; revision: number } | { kind: 'novel'; id: string; hash: string } | { kind: 'charter'; id: string; hash: string }
   /** Explicit observed failure; never infer success just because execute resolved. */
   outcome?: 'failed'
+  /** Bounded diagnostic code, never a copy of private tool arguments. */
+  failureCode?: string
   /** 回填给模型的观察结果：简洁、面向下一步决策 */
   output: string
   /** 给前端渲染的结构化数据（diff、封面图、计划等） */

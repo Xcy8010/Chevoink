@@ -54,6 +54,7 @@ export type AgentToolDisplayPayload =
     }
   | { kind: 'markdown'; markdown: string }
   | { kind: 'chapterRef'; chapterId: EntityId; title: string; wordCount: number }
+  | { kind: 'sessionRename'; sessionId: EntityId; title: string }
   | { kind: 'plan'; summary: string; steps: Array<{ title: string; detail?: string }> }
   | { kind: 'planFile'; artifactId: EntityId; title: string; content: string }
   | {
@@ -353,6 +354,8 @@ export type AgentStreamEventBody =
       toolName: string
       ok: boolean
       summary: string
+      failureCode?: string
+      invalidFields?: string[]
       display?: AgentToolDisplayPayload
       durationMs: number
       /** 非 undefined 表示这是子 Agent 内嵌执行内部的工具调用，值为所属 subagent_run 调用的 callId */

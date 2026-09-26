@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 
 import { Prisma, type CreditLedgerEntry } from '@prisma/client'
 import { z } from 'zod'
+import { effectiveModelMultiplier, readModelPromotion } from '../../shared/model-promotion.js'
 
 import { BUILT_IN_MODEL_TIERS, SERVER_MODEL_TIERS, taskSpecSchema } from '../../shared/contracts/index.js'
 import type {
@@ -220,12 +221,14 @@ async function listPublicModelOptions(): Promise<CreditModelOption[]> {
     if (!item.tier || !['lite', 'speed', 'standard', 'performance', 'ultimate'].includes(item.tier)) return []
     const capabilities = parseModelCapabilities(item.metadata, item.provider)
     // 0 倍率档对用户公示为免费：不列分项费率，历史费率卡不参与免费档结算。
-    const price = item.multiplierBps === 0 ? undefined : activePrices.get(item.tier)
+    const multiplierBps = effectiveModelMultiplier(item)
+    const price = multiplierBps === 0 || readModelPromotion(item.metadata) ? undefined : activePrices.get(item.tier)
     return [{
       pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
       tier: item.tier as CreditModelOption['tier'],
       label: item.displayName,
-      multiplier: item.multiplierBps / 10000,
+      multiplier: multiplierBps / 10000,
+      freePromotion: multiplierBps === 0 ? readModelPromotion(item.metadata) : null,
       available: item.enabled && item.selectable && isConfiguredBuiltIn(item),
       selectedByDefault: item.isDefault,
       ...capabilities,
@@ -281,10 +284,11 @@ export function calculateCreditActivityStreaks(activityDates: string[], todayKey
 async function toCreditSummary(
   account: Awaited<ReturnType<typeof ensureAccountWithDb>>['account'],
   setting: Awaited<ReturnType<typeof getGlobalSetting>>,
+  db: Prisma.TransactionClient = prisma,
 ): Promise<CreditAccountSummary> {
   const dailyRemainingMilli = Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli)
   const totalRemainingMilli = dailyRemainingMilli + Math.max(0, account.bonusBalanceMilli)
-  const reservedMilli = await reservedTokenCredits(prisma, account.userId)
+  const reservedMilli = await reservedTokenCredits(db, account.userId)
   const usedPercent = account.dailyAllowanceMilli > 0
     ? Math.min(100, Math.round((account.dailyUsedMilli / account.dailyAllowanceMilli) * 1000) / 10)
     : 100
@@ -308,9 +312,9 @@ async function toCreditSummary(
   }
 }
 
-export async function getCreditSummary(userId: string): Promise<CreditAccountSummary> {
-  const { account, setting } = await ensureCreditAccount(userId)
-  return toCreditSummary(account, setting)
+export async function getCreditSummary(userId: string, db: Prisma.TransactionClient = prisma): Promise<CreditAccountSummary> {
+  const { account, setting } = await ensureAccountWithDb(db, userId, new Date())
+  return toCreditSummary(account, setting, db)
 }
 
 export async function getCreditUsage(userId: string, take = 100): Promise<CreditUsagePayload> {
@@ -591,7 +595,7 @@ export async function assertCreditAccess(userId: string, tier: CreditModelTier =
   if (tier === 'custom') return
   const model = await prisma.aiModelConfig.findFirst({
     where: { ownerUserId: null, tier, enabled: true, ...(requireSelectable ? { selectable: true } : {}) },
-    select: { tier: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, multiplierBps: true },
+    select: { tier: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, multiplierBps: true, metadata: true },
   })
   if (!model || !isConfiguredBuiltIn(model)) {
     const configuredModels = await prisma.aiModelConfig.count({ where: { ownerUserId: null } })
@@ -600,7 +604,7 @@ export async function assertCreditAccess(userId: string, tier: CreditModelTier =
     throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '该模型档位尚未开放。')
   }
   // 0 倍率档位的模型不消耗 Credits：额度耗尽或全被预留时仍须放行，否则免费档在 0 余额下不可用。
-  if (model.multiplierBps === 0) return
+  if (effectiveModelMultiplier(model) === 0) return
   const remaining = Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli) + account.bonusBalanceMilli
   if (remaining <= 0) {
     throw new DataAccessError(402, 'CREDITS_EXHAUSTED', '今日额度已用尽，可邀请好友获得额外额度。')
@@ -626,6 +630,7 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
   reasoningParameterMode?: 'native' | 'omit'
   tier: CreditModelTier
   tokenPrice?: TokenPrice
+  freePromotion?: import('../../shared/model-promotion.js').ModelPromotion | null
   multiplierBps: number
   provider: string
   modelName: string | null
@@ -668,9 +673,12 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
   if (!capabilities.reasoningEfforts.includes(reasoningEffort)) throw new DataAccessError(400, 'REASONING_EFFORT_UNSUPPORTED', '该模型不支持所选推理强度。')
   return {
     tier,
-    multiplierBps: config.multiplierBps,
+    multiplierBps: effectiveModelMultiplier(config),
+    freePromotion: readModelPromotion(config.metadata),
     // 0 倍率免费档不绑定费率卡：价格语义恒为免费，展示与指纹不带历史卡价。
-    tokenPrice: config.multiplierBps === 0 ? undefined : (await getActiveTokenPrice(tier) ?? undefined),
+    tokenPrice: readModelPromotion(config.metadata)
+      ? tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier: tier, multiplierBps: effectiveModelMultiplier(config) })
+      : effectiveModelMultiplier(config) === 0 ? undefined : (await getActiveTokenPrice(tier) ?? undefined),
     provider: config.provider,
     modelName: config.modelName === 'unconfigured' ? null : config.modelName,
     baseUrl: config.baseUrl,

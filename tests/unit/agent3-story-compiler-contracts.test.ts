@@ -90,6 +90,15 @@ describe('严谨创作落实连续性警告', () => {
 })
 
 describe('Agent 3.0 Story Compiler 契约', () => {
+  it('完整字符串化场景数组按等价表示恢复，残文及超额场景仍拒绝', () => {
+    const tool = allTools.find(item => item.name === 'scene_task_build')!
+    const tasks = [{ goal: '守住城门' }, { goal: '护送百姓' }]
+    expect(tool.parameters.parse(tool.coerceArgs!({ tasks: JSON.stringify(tasks) })))
+      .toEqual(tool.parameters.parse(tool.coerceArgs!({ tasks })))
+    for (const value of ['[{"goal":"残文', JSON.stringify([...tasks, ...tasks, tasks[0]]), '{"goal":"非数组"}']) {
+      expect(tool.parameters.safeParse(tool.coerceArgs!({ tasks: value })).success).toBe(false)
+    }
+  })
   it('严谨规则落实警告与建议但不授权只读或保护章写入', () => {
     const text = renderTaskSpec(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '写下一章', creativeFreedom: 'balanced' }))
     expect(text).toContain('连续性错误与警告、人类感质量警告与建议都要落实')

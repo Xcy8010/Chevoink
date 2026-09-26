@@ -3,7 +3,7 @@ import { runtimeError, runtimeJson } from './runtime-common.js'
 import { readTaskBudgetInTransaction, taskTurnLimit } from './runtime-budget.js'
 import { readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { commitRuntimeCheckpointInTransaction, durableProgressSchema, CHECKPOINT_ACTIONS } from './runtime-checkpoint.js'
-import { archiveEarlyToolRounds, estimateChatMessagesTokens, estimateToolDefinitionTokens } from './context-budget.js'
+import { archiveEarlyToolRounds, estimateChatMessagesTokens, estimateToolDefinitionTokens, releaseCompletedReasoning } from './context-budget.js'
 import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
 import { randomUUID } from 'node:crypto'
@@ -23,8 +23,9 @@ export async function advanceDurableContext(token: RunLeaseToken, inputLimit?: n
     // Keep the latest complete tool round: replacing it with an assistant
     // archive note would be mistaken for a final answer by the executor.
     const archived = archiveEarlyToolRounds(frame.state.messages, { revision: frame.revision, hash: frame.snapshotHash }, modelPressure ? 1 : 8)
+    const releasedReasoningTokens = modelPressure ? releaseCompletedReasoning(archived.messages) : 0
     const afterBytes = Buffer.byteLength(JSON.stringify(archived.messages), 'utf8')
-    if (!archived.archivedRounds || afterBytes >= beforeBytes) return null
+    if ((!archived.archivedRounds && !releasedReasoningTokens) || afterBytes >= beforeBytes) return null
     const tool = configuration.tools.find(item => item.function.name === executionContextReadTool.name)
     const grant = configuration.toolAuthority.find(item => item.name === executionContextReadTool.name)
     if (!tool || !grant || grant.permission !== 'allow' || grant.alwaysConfirm
@@ -34,7 +35,7 @@ export async function advanceDurableContext(token: RunLeaseToken, inputLimit?: n
     await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: lease.taskRootId, runId: lease.runId,
       eventKey: `context:${lease.taskRootId}:${frame.revision}`, type: 'execution.context.archived',
       payload: { version: 1, sourceRevision: frame.revision, sourceHash: frame.snapshotHash, revision: next.revision,
-        snapshotHash: next.snapshotHash, archivedRounds: archived.archivedRounds, beforeBytes, afterBytes,
+        snapshotHash: next.snapshotHash, archivedRounds: archived.archivedRounds, releasedReasoningTokens, beforeBytes, afterBytes,
         ...(inputLimit !== undefined ? { inputLimit, modelPressure } : {}) } } })
     return next
   })

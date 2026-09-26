@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ active: vi.fn(), migrated: vi.fn() }))
+const mocks = vi.hoisted(() => ({ active: vi.fn(), migrated: vi.fn(), model: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } },
-  prisma: { creditRateCardEvent: { findFirst: mocks.migrated } },
+  prisma: { creditRateCardEvent: { findFirst: mocks.migrated }, aiModelConfig: { findFirst: mocks.model } },
 }))
 vi.mock('../../api/lib/billing/rate-cards.js', () => ({ getActiveTokenPrice: mocks.active }))
 import { resolveTokenPrice } from '../../api/lib/billing/resolve-token-price.js'
@@ -17,9 +17,16 @@ beforeEach(() => {
   vi.clearAllMocks()
   mocks.active.mockResolvedValue(null)
   mocks.migrated.mockResolvedValue(null)
+  mocks.model.mockResolvedValue(null)
 })
 
 describe('zero-rate built-in tiers are permanently free', () => {
+  it('honors the explicitly configured post-offer multiplier instead of a stale card', async () => {
+    mocks.model.mockResolvedValue({ metadata: { freePromotion: { endsAt: '2026-09-25T12:00:00Z', afterMultiplier: 1.5 } } })
+    mocks.active.mockResolvedValue(legacyStandardCard)
+    await expect(resolveTokenPrice('standard', 15000)).resolves.toEqual({ version: 'credits-v1-exact', modelTier: 'standard', multiplierBps: 15000 })
+    expect(mocks.active).not.toHaveBeenCalled()
+  })
   it('returns exact-zero V1 pricing for a zero-rate tier even when a legacy active card exists', async () => {
     mocks.active.mockResolvedValue(legacyStandardCard)
     await expect(resolveTokenPrice('standard', 0)).resolves.toEqual({ version: 'credits-v1-exact', modelTier: 'standard', multiplierBps: 0 })

@@ -49,6 +49,7 @@ import type {
 import { updateNovelMeta } from '../api'
 import { fetchAgentSessions, updateAgentSessionSettings } from '../agent/agentApi'
 import AgentOperationsCenter from '../agent/components/AgentOperationsCenter'
+import VoicePackSettings from './VoicePackSettings'
 
 export type StudioSettingsSection =
   | 'general'
@@ -58,6 +59,7 @@ export type StudioSettingsSection =
   | 'writing'
   | 'operations'
   | 'archives'
+  | 'language-packs'
 
 type Props = {
   open: boolean
@@ -97,6 +99,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
       { id: 'profile', label: '个人资料', description: '作者身份与公开信息', keywords: '头像 昵称 简介 作者 账号', icon: UserRound },
       { id: 'appearance', label: '外观', description: '主题与正文排版', keywords: '主题 浅色 深色 字体 字号 行距 宽度 动画', icon: Eye },
       { id: 'models', label: '模型', description: '自定义模型与密钥', keywords: '模型 API Key DeepSeek GLM 推理', icon: BrainCircuit },
+      { id: 'language-packs', label: '语言包', description: '', keywords: '语音 本机 下载 删除 语言包', icon: Activity },
     ],
   },
   {
@@ -114,6 +117,7 @@ const SECTION_META: Record<StudioSettingsSection, { title: string; description: 
   profile: { title: '个人资料', description: '维护作者身份、公开简介与账户入口。' },
   appearance: { title: '外观', description: '调整创作区主题与正文排版，修改会立即生效。' },
   models: { title: '模型', description: '管理当前账户可用于 Agent 的自定义模型。' },
+  'language-packs': { title: '语言包', description: '' },
   writing: { title: '写作偏好', description: '设置当前作品的创作自由度与正文跟随方式。' },
   operations: { title: 'Agent 操作', description: '管理任务分支、专业子 Agent、定时计划、权限和评测。' },
   archives: { title: '归档', description: '查看并恢复已归档作品与 Agent 任务。' },
@@ -814,6 +818,7 @@ export default function StudioSettingsDialog(props: Props) {
               {props.section === 'profile' ? <ProfilePanel /> : null}
               {props.section === 'appearance' ? <AppearancePanel /> : null}
               {props.section === 'models' ? <CustomModelSettingsContent active /> : null}
+              {props.section === 'language-packs' ? <VoicePackSettings /> : null}
               {props.section === 'writing' ? <WritingPanel {...props} /> : null}
               {props.section === 'archives' ? <ArchivesPanel novels={props.novels} /> : null}
             </div>

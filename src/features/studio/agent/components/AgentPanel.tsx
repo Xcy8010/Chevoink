@@ -400,6 +400,13 @@ export function AgentPanel({
     refetchInterval: active ? 20_000 : 60_000,
   })
   const refetchCredits = creditSummaryQuery.refetch
+  useEffect(() => {
+    const expiries = creditSummaryQuery.data?.models.flatMap(model => model.freePromotion ? [Date.parse(model.freePromotion.endsAt)] : []) ?? []
+    const next = Math.min(...expiries.filter(time => time > Date.now()))
+    if (!Number.isFinite(next)) return
+    const timer = window.setTimeout(() => { void refetchCredits() }, Math.min(2_147_483_647, Math.max(0, next - Date.now()) + 50))
+    return () => window.clearTimeout(timer)
+  }, [creditSummaryQuery.data?.models, refetchCredits])
   const previousActiveRef = useRef(active)
   const referralQuery = useQuery({
     queryKey: ['credits', 'referral'],

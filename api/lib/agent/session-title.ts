@@ -68,17 +68,9 @@ export async function autoNameSession(input: {
       return
     }
 
-    // 并发保护：落库前再确认仍是默认标题（用户可能已手动重命名）
-    const latest = await prisma.agentSession.findUnique({
-      where: { id: input.sessionId },
-      select: { title: true },
-    })
-    if (!latest || !isDefaultSessionTitle(latest.title)) {
-      return
-    }
-
-    await prisma.agentSession.update({
-      where: { id: input.sessionId },
+    // Compare-and-set: a user/tool rename during generation wins atomically.
+    await prisma.agentSession.updateMany({
+      where: { id: input.sessionId, userId: input.userId, novelId: input.novelId, title: session.title },
       data: { title: title.slice(0, 20) },
     })
   } catch (error) {

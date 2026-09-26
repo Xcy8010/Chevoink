@@ -16,6 +16,7 @@ import {
   estimateChatMessagesTokens,
   estimateToolDefinitionTokens,
   resolveAgentContextBudget,
+  releaseCompletedReasoning,
 } from './context-budget.js'
 
 /**
@@ -111,6 +112,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
     }
   }
   const parentAuthority = params.toolContextBase.toolAuthority
+  const planContentHashes = new Map<string, string>()
   if (!parentAuthority) {
     return {
       ok: false, denied: true, report: '父任务授权快照缺失，子 Agent 未启动；请由主任务重新核验授权。',
@@ -138,11 +140,12 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
     const toolTokens = estimateToolDefinitionTokens(requestTools)
     let requestTokens = estimateChatMessagesTokens(messages) + toolTokens
     if (requestTokens >= contextBudget.compactAtTokens) {
+      releaseCompletedReasoning(messages)
       compactEarlyToolPayloads(messages)
       requestTokens = estimateChatMessagesTokens(messages) + toolTokens
     }
     if (requestTokens > contextBudget.hardRequestTokens) {
-      collapseEarlyToolRounds(messages)
+      collapseEarlyToolRounds(messages, 1)
       requestTokens = estimateChatMessagesTokens(messages) + toolTokens
     }
     return requestTokens <= contextBudget.hardRequestTokens
@@ -173,6 +176,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
       }
 
       const result = await chatWithTools({
+        freePromotion: params.modelRuntime.freePromotion,
         messages,
         tools: openAITools,
         model: params.modelRuntime.modelName ?? definition.model,
@@ -231,7 +235,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         const outcome = await handleToolCall(
           call,
           tools,
-          { ...params.toolContextBase, mode: params.mode, toolAuthority, callId: call.id },
+          { ...params.toolContextBase, planContentHashes, mode: params.mode, toolAuthority, callId: call.id },
           params.bus,
           params.messageId,
           params.parentRunId,
@@ -251,6 +255,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
           break
         }
         const wrapUp = await chatWithTools({
+          freePromotion: params.modelRuntime.freePromotion,
           messages,
           tools: [],
           model: params.modelRuntime.modelName ?? definition.model,

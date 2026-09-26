@@ -15,6 +15,7 @@ export const SERVER_MODEL_TIERS = [...BUILT_IN_MODEL_TIERS, 'basic'] as const
 export type ModelReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type CreditModelOption = {
+  freePromotion?: import('../model-promotion.js').ModelPromotion | null
   pricing?: CreditLedgerItem['pricing']
   tier: Exclude<CreditModelTier, 'custom'>
   label: string

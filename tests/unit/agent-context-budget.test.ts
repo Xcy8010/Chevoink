@@ -10,6 +10,7 @@ import {
   estimateToolDefinitionTokens,
   resolveAgentContextBudget,
   resolveDurableInputLimit,
+  releaseCompletedReasoning,
 } from '../../api/lib/agent/context-budget.js'
 
 describe('durable input admission', () => {
@@ -32,6 +33,25 @@ function buildToolRound(id: string, argumentText: string, outputText: string): C
 }
 
 describe('Agent 运行中上下文预算与压缩', () => {
+  it('窗口紧张时保留最新调用和原始要求，释放已结束的旧思考和大工具结果', () => {
+    const messages: ChatMessage[] = [{ role: 'user', content: '只研究附件，不写正文' },
+      ...buildToolRound('files', '{}', '附件原文'.repeat(30000)),
+      { role: 'assistant', content: null, reasoning: '历史思考'.repeat(10000) },
+      ...buildToolRound('latest', '{}', '最新结果')]
+    const latest = structuredClone(messages.slice(-2))
+    expect(compactEarlyToolPayloads(messages, 8).collapsedToolRounds).toBe(0)
+    expect(releaseCompletedReasoning(messages)).toBeGreaterThan(0)
+    expect(collapseEarlyToolRounds(messages, 1).collapsedToolRounds).toBe(1)
+    expect(messages[0].content).toBe('只研究附件，不写正文')
+    expect(messages.slice(-2)).toEqual(latest)
+    expect(estimateChatMessagesTokens(messages)).toBeLessThan(1000)
+  })
+  it('未完成调用的思考与调用参数不被清理', () => {
+    const pending: ChatMessage = { role: 'assistant', content: null, reasoning: '需要保留', toolCalls: [{ id: 'pending', name: 'read_file', arguments: '{}' }] }
+    const messages: ChatMessage[] = [pending, { role: 'user', content: '等待' }, { role: 'assistant', content: '最新', reasoning: '最新思考' }]
+    expect(releaseCompletedReasoning(messages)).toBe(0)
+    expect(messages[0]).toBe(pending)
+  })
   it('持久归档保留原数组和作者要求，并指向准确原文索引', () => {
     const messages: ChatMessage[] = [{ role: 'user', content: '只处理第19章，不能继承旧任务。' },
       ...buildToolRound('old', JSON.stringify({ content: '正文'.repeat(800) }), '失败'.repeat(800)),

@@ -390,6 +390,14 @@ export const sceneTaskBuildTool = defineTool({
       }
     }
     const next = { ...source }
+    // Some OpenAI-compatible gateways encode the nested array once more.
+    // Parse only complete JSON arrays; never repair truncation or drop scenes.
+    if (typeof next.tasks === 'string') {
+      try {
+        const decoded: unknown = JSON.parse(next.tasks)
+        if (Array.isArray(decoded)) next.tasks = decoded
+      } catch { /* Keep the original for a field-level schema rejection. */ }
+    }
     if (!next.compilationId && typeof next.compilation_id === 'string') next.compilationId = next.compilation_id
     if (!next.tasks && Array.isArray(next.sceneTasks)) next.tasks = next.sceneTasks
     if (!next.tasks && Array.isArray(next.scene_tasks)) next.tasks = next.scene_tasks

@@ -1171,6 +1171,11 @@ export default function StudioWorkspace() {
 
   const handleAgentStreamEvent = useCallback(
     (event: AgentStreamEvent) => {
+      if (event.type === 'tool.result' && event.ok && event.display?.kind === 'sessionRename') {
+        const renamed = event.display
+        setAgentTaskWindows(current => current.map(item => item.sessionId === renamed.sessionId ? { ...item, title: renamed.title, customNamed: true } : item))
+        void queryClient.invalidateQueries({ queryKey: ['agent', 'sessions'] })
+      }
       if (event.type === 'tool.delta' && event.draft?.kind === 'chapter') {
         const targetId = event.draft.targetId
           ?? (event.draft.toolName === 'chapter_create' ? null : selectedChapterIdStateRef.current)

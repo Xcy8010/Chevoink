@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express'
 import { modelRoutesInputSchema } from '../../shared/contracts/model-routes.js'
+import { modelPromotionSchema } from '../../shared/model-promotion.js'
 import { createRateCard, transitionRateCard, listRateCards, rateCardEvidenceSchema } from '../lib/billing/rate-cards.js'
 import { itemizedTokenPriceSchema } from '../lib/billing/token-price.js'
 import { z } from 'zod'
@@ -181,6 +182,7 @@ const adminBatchCreditsSchema = adminDangerActionSchema.extend({ userIds: z.arra
 const adminBatchPauseCreditsSchema = adminBatchCreditsSchema.extend({ paused: z.boolean() })
 const modelReasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const adminModelUpdateSchema = z.object({
+  freePromotion: modelPromotionSchema.nullable().optional(),
   routes: modelRoutesInputSchema.optional(),
   provider: z.string().trim().min(1).max(40).optional(),
   displayName: z.string().trim().min(1).max(80).optional(),

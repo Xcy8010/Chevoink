@@ -85,8 +85,8 @@ export async function executeDurableTodo(ctx: ToolContext, raw: unknown): Promis
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '待办不属于原任务范围。')
     const previous = await readDurableTodoItems(tx, root.id, cursor.expectedRevision)
-    const { items, changed, error } = prepareTodoUpdate(previous, args.items, args.changeReason)
-    if (error) return runtimeJson({ todoItems: previous, toolResult: { outcome: 'failed', summary: '待办更新未接受', output: `${error}\n本任务实际清单：\n${renderTodoItems(previous)}`, display: { kind: 'todoList', items: previous } } }).value
+    const { items, changed, error, failureCode } = prepareTodoUpdate(previous, args.items, args.changeReason)
+    if (error) return runtimeJson({ todoItems: previous, toolResult: { outcome: 'failed', failureCode: failureCode ?? 'TODO_UPDATE_REJECTED', summary: '待办更新未接受', output: `${error}\n本任务实际清单：\n${renderTodoItems(previous)}`, display: { kind: 'todoList', items: previous } } }).value
     const completed = items.filter(item => item.status === 'completed').length
     const cancelled = items.filter(item => item.status === 'cancelled').length
     const progress = `${completed}/${items.length - cancelled}${cancelled ? `，${cancelled} 项已取消` : ''}`

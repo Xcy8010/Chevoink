@@ -7,6 +7,12 @@ vi.mock('../../api/lib/agent/task-lineage.js', () => ({ getTaskRunIds: async () 
 import { prepareTodoUpdate, todoWriteTool, withTodoIds, loadSessionTodoItems, cancelTaskTodoItems } from '../../api/lib/agent/tools/todo-tools'
 const previous: AgentTodoItem[] = withTodoIds([{ content: '写第一章', status: 'completed' }, { content: '写第二章', status: 'in_progress' }])
 const ctx = { sessionId: 's', runId: 'current-task-run' } as ToolContext
+it('returns stable non-content diagnostic codes without relaxing identity or terminal-state checks', () => {
+  expect(prepareTodoUpdate(previous, [{ id: 'other-task', content: '写第二章', status: 'completed' }]).failureCode).toBe('TODO_FOREIGN_ID')
+  expect(prepareTodoUpdate(previous, [{ ...previous[0], status: 'pending' }]).failureCode).toBe('TODO_TERMINAL_IMMUTABLE')
+  expect(prepareTodoUpdate(previous, [{ ...previous[1], status: 'cancelled' }]).failureCode).toBe('TODO_CANCEL_REASON_REQUIRED')
+  expect(prepareTodoUpdate(previous, [{ content: '写第三章', status: 'pending' }]).failureCode).toBe('TODO_CHANGE_REASON_REQUIRED')
+})
 beforeEach(() => { vi.resetAllMocks(); db.messages.mockResolvedValue([]); db.artifact.mockResolvedValue(null) })
 it('does not create retrospective completion lists or single-step checklists', () => {
   for (const items of [[], [{ content: '已写完第22章', status: 'completed' }], [{ content: '改标题', status: 'pending' }], [{ content: '已写', status: 'completed' }, { content: '已审', status: 'completed' }]] as AgentTodoItem[][]) {

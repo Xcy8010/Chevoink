@@ -36,12 +36,17 @@ describe('Agent import is a verified human handoff, not implicit write approval'
       .rejects.toMatchObject({ code: 'IMPORT_NOT_ENABLED' })
     expect(db.novel.findFirst).not.toHaveBeenCalled()
   })
-  it('verifies original run and refuses a non-durable write fallback', async () => {
+  it('verifies original run and prepares an ordinary human import without a write exemption', async () => {
     expect(await assertOriginalImportAttachment(context(), url)).toMatchObject({ url })
     expect(db.agentRun.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: {
       id: 'run', userId: 'owner', novelId: 'book', sessionId: 'session',
     } }))
-    await expect(novelImportTool.execute(context(), { action: 'prepare', attachmentUrl: url })).rejects.toMatchObject({ code: 'IMPORT_DURABLE_RUNTIME_REQUIRED' })
+    const result = await novelImportTool.execute(context(), { action: 'prepare', attachmentUrl: url })
+    expect(result.output).toContain('尚未写入作品')
+    expect(result.output).toContain('importRunId=run')
+    expect(result.output).toContain(encodeURIComponent(url))
+    expect(result.output).not.toContain('importCallId')
+    await expect(novelImportTool.execute(context(), { action: 'commit', jobId: '77777777-7777-4777-8777-777777777777' })).rejects.toMatchObject({ code: 'IMPORT_DURABLE_RUNTIME_REQUIRED' })
     expect(novelImportTool.readOnly).toBe(false)
     expect(novelImportTool.dangerous).toBe(true)
   })

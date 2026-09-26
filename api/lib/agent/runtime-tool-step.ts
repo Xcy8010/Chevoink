@@ -44,16 +44,20 @@ import { directiveListTool, directiveSaveTool, directiveSupersedeTool } from './
 import { styleProfileGetTool, retrievalTraceReadTool, craftSearchTool, styleLeakageCheckTool } from './tools/craft-library-tools.js'
 import { researchDossierGetTool, firstThreePrototypeGetTool } from './tools/research-dossier-tools.js'
 import { novelImportTool } from './tools/import-tools.js'
+import { accountCreditsTool, accountCreditHistoryTool, accountNovelsTool, sessionRenameTool } from './tools/account-tools.js'
 import { executeDurableImport } from './runtime-import.js'
+import { coverApplyTool } from './tools/cover-tools.js'
 
-const HISTORY_READ_ACTIONS = ['task_context_list', 'task_context_read', 'session_history_search', 'session_message_read'] as const
+const HISTORY_READ_ACTIONS = ['account_credits', 'account_credit_history', 'account_novels', 'task_context_list', 'task_context_read', 'session_history_search', 'session_message_read'] as const
 const DOMAIN_READ_ACTIONS = ['craft_search', 'style_leakage_check', 'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get'] as const
 
 function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
   return { ...tool, execute: (ctx, args) => tool.execute(ctx, tool.parameters.parse(args)) }
 }
 const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
+  checkedAdapter(coverApplyTool),
   checkedAdapter(novelImportTool),
+  checkedAdapter(accountCreditsTool), checkedAdapter(accountCreditHistoryTool), checkedAdapter(accountNovelsTool), checkedAdapter(sessionRenameTool),
   checkedAdapter(projectSearchTool), checkedAdapter(entityResolveTool), checkedAdapter(impactAnalyzeTool), checkedAdapter(structureValidateTool),
   checkedAdapter(storyCharterGetTool), checkedAdapter(storyCharterSaveTool), checkedAdapter(readerPromiseSaveTool), checkedAdapter(readerPromiseUpdateTool), checkedAdapter(qualityReportGetTool),
   checkedAdapter(executionContextReadTool),

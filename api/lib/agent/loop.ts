@@ -74,6 +74,7 @@ import {
   estimateChatMessagesTokens,
   estimateToolDefinitionTokens,
   resolveAgentContextBudget,
+  releaseCompletedReasoning,
 } from './context-budget.js'
 
 /**
@@ -328,6 +329,7 @@ export async function handleToolCall(
       toolName: call.name,
       ok: false,
       summary: call.incomplete ? '模型输出达上限，参数未完成' : '参数解析失败',
+      failureCode: call.incomplete ? 'TOOL_ARGUMENTS_INCOMPLETE' : 'TOOL_ARGUMENTS_INVALID',
       durationMs: Date.now() - startedAt,
       ...subagentMark,
     })
@@ -355,6 +357,8 @@ export async function handleToolCall(
 
   bus.emit({ type: 'tool.call', messageId, callId: call.id, toolName: call.name, title: basePart.title, args: parsedArgs, autoApproved, ...subagentMark })
 
+  let failureCode: string | undefined
+  let invalidFields: string[] | undefined
   const fail = (summary: string, observation: string, status: 'failed' | 'denied'): ToolCallOutcome => {
     bus.emit({
       type: 'tool.result',
@@ -363,6 +367,8 @@ export async function handleToolCall(
       toolName: call.name,
       ok: false,
       summary,
+      failureCode,
+      invalidFields,
       durationMs: Date.now() - startedAt,
       ...subagentMark,
     })
@@ -372,6 +378,7 @@ export async function handleToolCall(
   const permission = tool.permission[ctx.mode]
 
   if (coercionFailed) {
+    failureCode = 'TOOL_NORMALIZATION_FAILED'
     return fail('参数归一化失败', `工具 ${call.name} 的参数无法安全归一化，本次未执行。历史摘要、_contextCompacted 与嵌套对象占位符不是可执行参数，不要解包或重发摘要；请回读真实目标并按已公布的参数结构重新构建完整参数。`, 'failed')
   }
 
@@ -386,6 +393,8 @@ export async function handleToolCall(
   const validated = validateToolInput(tool, parsedArgs)
 
   if (!validated.success) {
+    failureCode = 'TOOL_SCHEMA_INVALID'
+    invalidFields = validated.error.issues.slice(0, 8).map(issue => issue.path.map(String).join('.').slice(0, 120) || '(root)')
     const issues = validated.error.issues
       .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
       .join('；')
@@ -441,6 +450,7 @@ export async function handleToolCall(
 
   try {
     const result = await tool.execute(ctx, validated.data)
+    failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
     if (result.outcome === 'failed') return fail(result.summary ?? '执行未完成', wrapToolOutput(tool.name, result.output), 'failed')
     const durationMs = Date.now() - startedAt
     const summary = result.summary ?? `${tool.title}完成`
@@ -471,6 +481,7 @@ export async function handleToolCall(
       },
     }
   } catch (error) {
+    failureCode = error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR'
     if (ctx.signal.aborted) return fail('已中断', '用户已请求暂停，停止后续执行；已保存内容保留。', 'failed')
     if (error instanceof DataAccessError && error.code.startsWith('CREDITS_')) {
       // 自定义档与 0 倍率免费档的主模型调用不占用平台 Credits：额度类失败只让该工具失败，不终止整个 run。
@@ -1117,6 +1128,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       let collapsedToolRounds = 0
 
       if (beforeTokens >= contextBudget.compactAtTokens) {
+        releaseCompletedReasoning(messages)
         const firstStage = compactEarlyToolPayloads(messages, CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS)
         compactedToolArguments += firstStage.compactedToolArguments
         compactedToolOutputs += firstStage.compactedToolOutputs
@@ -1124,7 +1136,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
         afterTokens = firstStage.afterTokens + toolDefinitionTokens
       }
       if (afterTokens > contextBudget.hardRequestTokens) {
-        const secondStage = collapseEarlyToolRounds(messages, CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS)
+        const secondStage = collapseEarlyToolRounds(messages, 1)
         collapsedToolRounds += secondStage.collapsedToolRounds
         afterTokens = secondStage.afterTokens + toolDefinitionTokens
       }
@@ -1147,6 +1159,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     // plan/18：轮次片/预算片可被检查点续跑刷新，改 let；预算从「只能下调」改为 clamp 到硬顶（默认 500 万）
 
     const toolContext: ToolContext = {
+      planContentHashes: new Map(),
       userId: params.userId,
       novelId: params.novelId,
       chapterId: params.chapterId,
@@ -1225,6 +1238,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       }
       const observeWrapUsage = trackRequestUsage(usage)
       const wrapUp = await chatWithTools({
+        freePromotion: modelRuntime.freePromotion,
         onUsage: observeWrapUsage,
         messages,
         tools: [],
@@ -1404,6 +1418,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
 
       const observeTurnUsage = trackRequestUsage(usage)
       const result = await chatWithTools({
+        freePromotion: modelRuntime.freePromotion,
         onUsage: observeTurnUsage,
         messages,
         tools: openAITools,

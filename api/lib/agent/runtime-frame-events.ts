@@ -92,11 +92,12 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
     if (appended.role === 'tool') {
       const operation = await tx.agentOperation.findFirst({ where: { id: previous.state.pendingOperationId!, taskRootId: source.taskRootId }, include: { effectReceipt: true } })
       const receipt = operation?.effectReceipt
-      const parsedResult = z.object({ toolResult: z.object({ summary: z.string(), display: z.unknown().optional(), outcome: z.literal('failed').optional() }) }).safeParse(receipt?.result)
+      const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ summary: z.string(), failureCode: z.string().optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional() }) }).safeParse(receipt?.result)
       if (!operation || !receipt || !parsedResult.success || !['succeeded', 'failed'].includes(operation.status)
         || runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具结果事件缺少完整回执。')
       return [{ type: 'tool.result', messageId, callId: appended.toolCallId, toolName: operation.action, ok: operation.status === 'succeeded' && parsedResult.data.toolResult.outcome !== 'failed',
         summary: humanizeAgentVisibleText(parsedResult.data.toolResult.summary), durationMs: Math.max(0, receipt.createdAt.getTime() - operation.createdAt.getTime()),
+        ...(parsedResult.data.code || parsedResult.data.toolResult.failureCode ? { failureCode: parsedResult.data.code ?? parsedResult.data.toolResult.failureCode } : {}),
         ...(operation.status === 'succeeded' && parsedResult.data.toolResult.display ? { display: parsedResult.data.toolResult.display as AgentToolDisplayPayload } : {}) }]
     }
   }

@@ -69,7 +69,7 @@ export function AgentMobileModelSheet(props: Props) {
         </header>
         <div className="min-h-0 overflow-y-auto overscroll-contain px-3 py-3">
           <p className="px-3 pb-2 text-xs text-[var(--text-tertiary)]">内置模型 · Credits 倍率</p>
-          {props.modelOptions.filter(option => option.available).map(option => row(option.tier, option.label, props.modelTier === option.tier, `${option.multiplier.toFixed(1)}x`, () => props.onTier(option.tier), option.multiplier === 0 ? <span className="shrink-0 rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-[var(--color-error)]">免费</span> : undefined))}
+          {props.modelOptions.filter(option => option.available).map(option => row(option.tier, option.label, props.modelTier === option.tier, `${option.multiplier.toFixed(1)}x`, () => props.onTier(option.tier), option.multiplier === 0 ? <span className="shrink-0 rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-[var(--color-error)]">{option.freePromotion ? '限时免费' : '免费'}</span> : undefined))}
           {props.customModels.some(model => model.enabled) && <p className="px-3 pb-2 pt-4 text-xs text-[var(--text-tertiary)]">自定义模型</p>}
           {props.customModels.filter(model => model.enabled).map(model => row(model.id, model.displayName, props.modelTier === 'custom' && props.customModelId === model.id, '自有密钥', () => props.onCustom(model.id)))}
           <section className="mt-3 border-t border-[var(--border-subtle)] px-3 pt-4">

@@ -543,7 +543,7 @@ function ImportDialogSession(props: ImportDialogProps) {
 
   }
   return <ImportDialogShell title={title} description={`目标作品：《${novelTitle}》`} compact={stage === 'workspace' && !!summary} stage={stage} onClose={close} footer={footer}>
-    {props.agentAttachment && <p className="mb-3 text-xs">收起面板不会取消 Agent 等待。尚未创建导入任务时，可回到 Agent 停止任务；已创建后可使用“取消任务”停止后续处理。</p>}
+    {props.agentAttachment?.callId && <p className="mb-3 text-xs">收起面板不会取消 Agent 等待。尚未创建导入任务时，可回到 Agent 停止任务；已创建后可使用“取消任务”停止后续处理。</p>}
     {busy && <p role="status" className="mb-3 flex items-center gap-2 text-sm"><LoaderCircle className="h-4 w-4 motion-safe:animate-spin" />{busy}</p>}
     {error && <p role="alert" className="mb-3 break-words rounded-lg bg-rose-500/10 p-3 text-sm text-rose-600">{error}</p>}
     {body}

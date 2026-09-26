@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import type { ToolContext, ToolResult } from './types.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
@@ -12,7 +13,7 @@ export const planTargetHash = (plan: { id: string; title: string; content: strin
 
 /** Real plan_save implementation executes through the same tx as receipt/outbox. */
 export async function executeDurablePlanSave(ctx: ToolContext, args: PlanArgs, normalize: (raw: unknown) => unknown,
-  write: (tx: Prisma.TransactionClient) => Promise<ToolResult>, action: 'plan_save' | 'plan_rename' | 'plan_delete' = 'plan_save'): Promise<ToolResult> {
+  write: (tx: Prisma.TransactionClient, verifiedContentHash?: string) => Promise<ToolResult>, action: 'plan_save' | 'plan_rename' | 'plan_delete' = 'plan_save'): Promise<ToolResult> {
   const capability = ctx.durablePlan && { ...ctx.durablePlan, lease: { ...ctx.durablePlan.lease }, cursor: { ...ctx.durablePlan.cursor }, expected: { ...ctx.durablePlan.expected } }
   if (!capability || capability.lease.userId !== ctx.userId || capability.lease.runId !== ctx.runId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '计划写入能力与原任务不一致。')
   const grant = ctx.toolAuthority?.get(action)
@@ -38,7 +39,7 @@ export async function executeDurablePlanSave(ctx: ToolContext, args: PlanArgs, n
     const target = await tx.agentArtifact.findFirst({ where: { artifactType: 'chapterPlan', run: { userId: ctx.userId, novelId: ctx.novelId },
       ...(args.planId ? { id: args.planId } : { title: args.title?.trim() ?? '', metadata: { path: ['savedAsPlan'], equals: true } }) }, orderBy: { updatedAt: 'desc' } })
     if ((target?.id ?? null) !== expected.id || (target ? planTargetHash(target) : null) !== expected.hash) runtimeError('PLAN_REVISION_CONFLICT', '计划已被修改，请重新读取后建立新操作，未覆盖作者修改。')
-    const result = await write(tx)
+    const result = await write(tx, target ? createHash('sha256').update(target.content).digest('hex') : undefined)
     if (result.outcome === 'failed') throw new DataAccessError(409, 'PLAN_WRITE_REJECTED', result.output)
     const artifactId = result.display && 'artifactId' in result.display ? result.display.artifactId : undefined
     const saved = artifactId ? await tx.agentArtifact.findFirst({ where: { id: artifactId, run: { userId: ctx.userId, novelId: ctx.novelId } } }) : null

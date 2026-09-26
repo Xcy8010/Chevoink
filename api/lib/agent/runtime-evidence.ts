@@ -7,7 +7,7 @@ import { durableProgressSchema } from './runtime-checkpoint.js'
 
 const inputSchema = z.object({ input: z.object({ callId: z.string(), normalization: z.object({ sourceRevision: z.number().int().nonnegative() }) }) })
 const resultSchema = z.object({ toolResult: z.object({ output: z.string(), summary: z.string(), outcome: z.literal('failed').optional() }).passthrough(), progress: z.unknown().optional() })
-const reads = new Set(['chapter_read', 'plan_read', 'novel_get_context', 'chapter_list_summaries', 'memory_search', 'volume_list', 'structure_outline',
+const reads = new Set(['account_credits', 'account_credit_history', 'account_novels', 'chapter_read', 'plan_read', 'novel_get_context', 'chapter_list_summaries', 'memory_search', 'volume_list', 'structure_outline',
   'task_context_list', 'task_context_read', 'session_history_search', 'session_message_read', 'chapter_bridge_get',
   'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get', 'research_dossier_get', 'first_three_prototype_get',
   'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'style_profile_get', 'retrieval_trace_read', 'craft_search', 'style_leakage_check'])

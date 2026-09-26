@@ -11,9 +11,32 @@ const hash = (text: string) => createHash('sha256').update(text).digest('hex')
 const ctx = { userId: 'u', novelId: 'n', runId: 'r', signal: new AbortController().signal } as ToolContext
 const original = { id: 'p', title: '原计划', content: '前文'.repeat(200), metadata: { savedAsPlan: true }, updatedAt: new Date(0) }
 beforeEach(() => {
+  ctx.planContentHashes = undefined
   vi.clearAllMocks()
   vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue(original as never)
   vi.mocked(prisma.agentArtifact.updateMany).mockResolvedValue({ count: 1 })
+})
+it('uses only this execution’s observed version when the model omits a hash', async () => {
+  ctx.planContentHashes = new Map()
+  const withoutHash = { ...args(), expectedContentHash: undefined }
+  expect((await planSaveTool.execute(ctx, withoutHash)).outcome).toBe('failed')
+  await planReadTool.execute(ctx, { planId: 'p' })
+  expect((await planSaveTool.execute(ctx, withoutHash)).outcome).not.toBe('failed')
+  expect(ctx.planContentHashes.get('p')).toBe(hash(original.content + '\n\n下一节完整内容'))
+})
+it('does not use cached observations to override a stale explicit hash or a concurrent edit', async () => {
+  ctx.planContentHashes = new Map([['p', hash(original.content)]])
+  expect((await planSaveTool.execute(ctx, { ...args(), expectedContentHash: 'a'.repeat(64) })).outcome).toBe('failed')
+  vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue({ ...original, content: original.content + '作者修改' } as never)
+  expect((await planSaveTool.execute(ctx, { ...args(), expectedContentHash: undefined })).outcome).toBe('failed')
+  expect(prisma.agentArtifact.updateMany).not.toHaveBeenCalled()
+})
+it('rejects a duplicate last section even with a fresh server observation', async () => {
+  const content = original.content + '\n\n下一节完整内容'
+  ctx.planContentHashes = new Map([['p', hash(content)]])
+  vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue({ ...original, content } as never)
+  expect((await planSaveTool.execute(ctx, { ...args(), expectedContentHash: undefined })).outcome).toBe('failed')
+  expect(prisma.agentArtifact.updateMany).not.toHaveBeenCalled()
 })
 const args = () => planSaveTool.parameters.parse({ title: '原计划', planId: 'p', mode: 'append', expectedContentHash: hash(original.content), content: '下一节完整内容' })
 it('preserves append guards through envelopes and never mistakes a version hash for content', () => {

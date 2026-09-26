@@ -64,11 +64,11 @@ export function withTodoIds(items: AgentTodoItem[]): AgentTodoItem[] {
   })
 }
 
-export function prepareTodoUpdate(previous: AgentTodoItem[], requested: AgentTodoItem[], changeReason?: string): { items: AgentTodoItem[]; changed: boolean; error?: string } {
+export function prepareTodoUpdate(previous: AgentTodoItem[], requested: AgentTodoItem[], changeReason?: string): { items: AgentTodoItem[]; changed: boolean; error?: string; failureCode?: string } {
   const unchanged = { items: previous, changed: false }
-  const reject = (error: string) => ({ ...unchanged, error })
+  const reject = (failureCode: string, error: string) => ({ ...unchanged, error, failureCode })
   if (!requested.length) return unchanged
-  if (!previous.length && (requested.length < 2 || requested.some(item => item.status === 'completed'))) return reject('本任务没有可更新的清单。不能用单项或已完成项补造待办；不要操作其他任务清单，也不要为了消除提示新增无关工作。')
+  if (!previous.length && (requested.length < 2 || requested.some(item => item.status === 'completed'))) return reject('TODO_BASELINE_REQUIRED', '本任务没有可更新的清单。不能用单项或已完成项补造待办；不要操作其他任务清单，也不要为了消除提示新增无关工作。')
   const baseline = withTodoIds(previous)
   const byId = new Map(baseline.map(item => [item.id, item]))
   const contentKey = (value: string) => value.normalize('NFKC').replace(/\s+/gu, '').replace(/[。.!！]+$/u, '')
@@ -79,29 +79,29 @@ export function prepareTodoUpdate(previous: AgentTodoItem[], requested: AgentTod
     // A brand-new list has no server identities to reference. Model-invented
     // IDs are replaced with our stable IDs; foreign IDs on updates still fail.
     const item = baseline.length ? requestedItem : { ...requestedItem, id: undefined }
-    if (!item.id && baseline.filter(old => contentKey(old.content) === contentKey(item.content)).length > 1) return reject('存在同名待办，请用各自原 id 指明更新或取消哪一项。')
+    if (!item.id && baseline.filter(old => contentKey(old.content) === contentKey(item.content)).length > 1) return reject('TODO_AMBIGUOUS_ID', '存在同名待办，请用各自原 id 指明更新或取消哪一项。')
     const old = item.id ? byId.get(item.id) : byContent.get(contentKey(item.content))
-    if (item.id && !old) return reject('待办 id 不属于当前清单；首次创建请省略 id，更新已有项请使用回执中的原 id。')
-    if (!old && item.status === 'completed') return baseline.length ? reject('不能用新描述提交已完成项；请沿用原 id 更新既有待办。') : unchanged
-    if (!old && baseline.length && !changeReason?.trim()) return reject('已有清单不能因改写描述而追加新项。更新时带回原 id；确有新增工作须提供 changeReason。')
-    if (item.status === 'cancelled' && (!old || !item.reason?.trim())) return reject('只能取消已有项，并须说明 reason；取消不等于完成。')
-    if (!old && added.some(entry => contentKey(entry.content) === contentKey(item.content))) return reject('同一待办不能在一次更新中重复出现。')
-    if (old && contentKey(old.content) !== contentKey(item.content) && baseline.some(entry => entry.id !== old.id && contentKey(entry.content) === contentKey(item.content))) return reject('改名会与既有待办重复；请保留原项，并按原 id 取消重复项。')
-    if (old && (old.status === 'completed' || old.status === 'cancelled') && item.status !== old.status) return reject(`待办“${old.content}”已经${old.status === 'completed' ? '完成' : '取消'}，本次状态更新未应用；取消不能改标完成。`)
+    if (item.id && !old) return reject('TODO_FOREIGN_ID', '待办 id 不属于当前清单；首次创建请省略 id，更新已有项请使用回执中的原 id。')
+    if (!old && item.status === 'completed') return baseline.length ? reject('TODO_COMPLETION_TARGET_REQUIRED', '不能用新描述提交已完成项；请沿用原 id 更新既有待办。') : unchanged
+    if (!old && baseline.length && !changeReason?.trim()) return reject('TODO_CHANGE_REASON_REQUIRED', '已有清单不能因改写描述而追加新项。更新时带回原 id；确有新增工作须提供 changeReason。')
+    if (item.status === 'cancelled' && (!old || !item.reason?.trim())) return reject('TODO_CANCEL_REASON_REQUIRED', '只能取消已有项，并须说明 reason；取消不等于完成。')
+    if (!old && added.some(entry => contentKey(entry.content) === contentKey(item.content))) return reject('TODO_DUPLICATE', '同一待办不能在一次更新中重复出现。')
+    if (old && contentKey(old.content) !== contentKey(item.content) && baseline.some(entry => entry.id !== old.id && contentKey(entry.content) === contentKey(item.content))) return reject('TODO_DUPLICATE', '改名会与既有待办重复；请保留原项，并按原 id 取消重复项。')
+    if (old && (old.status === 'completed' || old.status === 'cancelled') && item.status !== old.status) return reject('TODO_TERMINAL_IMMUTABLE', `待办“${old.content}”已经${old.status === 'completed' ? '完成' : '取消'}，本次状态更新未应用；取消不能改标完成。`)
     const next = old ? { ...old, ...item, id: old.id } : withTodoIds([...baseline, ...added, item]).at(-1)!
-    if (updates.has(next.id!)) return reject('同一待办不能在一次更新中重复出现。')
+    if (updates.has(next.id!)) return reject('TODO_DUPLICATE', '同一待办不能在一次更新中重复出现。')
     updates.set(next.id!, next)
     if (!old) added.push(next)
   }
   // Preserve plan order; editing a title is not adding another task.
   const items = [...baseline.map(item => updates.get(item.id!) ?? item), ...added]
-  if (items.length > 20) return reject('待办最多 20 项，请按原 id 整理重复项。')
+  if (items.length > 20) return reject('TODO_LIMIT', '待办最多 20 项，请按原 id 整理重复项。')
   // 拒绝同批改名/新增制造的新重复；历史同名项仍可按原编号取消。
   for (const item of updates.values()) {
     const old = byId.get(item.id)
     if ((!old || contentKey(old.content) !== contentKey(item.content))
       && items.some(other => other.id !== item.id && contentKey(other.content) === contentKey(item.content))) {
-      return reject('本次更新产生重复待办；请沿用原 id 更新或取消重复项。')
+      return reject('TODO_DUPLICATE', '本次更新产生重复待办；请沿用原 id 更新或取消重复项。')
     }
   }
   let activeSeen = false
@@ -247,8 +247,8 @@ export const todoWriteTool = defineTool({
     // 的 todo_write 清单），跨 run / 续跑也能拿到真实前态；避免 artifact 副本停在旧任务导致
     // previous 退化为空，从而把本应已完成的旧项误判为本轮“一次完成多项”而被拒。
     const previous = await loadSessionTodoItems(ctx.sessionId, runIds)
-    const { items, changed, error } = prepareTodoUpdate(previous, args.items, args.changeReason)
-    if (error) return { outcome: 'failed', summary: '待办更新未接受', output: `${error}\n本任务实际清单：\n${renderTodoItems(previous)}`, display: { kind: 'todoList', items: previous } }
+    const { items, changed, error, failureCode } = prepareTodoUpdate(previous, args.items, args.changeReason)
+    if (error) return { outcome: 'failed', failureCode, summary: '待办更新未接受', output: `${error}\n本任务实际清单：\n${renderTodoItems(previous)}`, display: { kind: 'todoList', items: previous } }
     if (!changed) return {
       output: `待办清单未变更，未清空或覆盖原清单。仅在长任务/复杂任务开工前建立至少两项未完成工作，或更新既有项真实进度；不要为收尾补造 completed 项，也不要重试无变化的清单。${previous.length ? `\n本任务原清单仍为：\n${renderTodoItems(previous)}` : '\n本任务没有清单；如已完成请直接交付，否则继续实际工作。'}`,
       summary: '待办清单未变更',

@@ -416,6 +416,7 @@ export type AdminCreditsManagementPayload = {
 
 export type AdminModelManagementPayload = {
   models: Array<{
+    freePromotion?: import('../model-promotion.js').ModelPromotion | null
     routes?: import('./model-routes.js').ModelRouteView[]
     id: string
     pricing?: import('./credits.js').CreditLedgerItem['pricing']
