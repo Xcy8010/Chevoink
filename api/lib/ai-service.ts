@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import { currentGoalExecution, withGoalExecutionContext, withoutGoalEffects } from './agent/goal-context.js'
+import { readGoalExecution } from './agent/goal-fence.js'
+import { assertGoalProviderAdmission, reserveGoalUsage, syncGoalLegacyUsage } from './agent/goal-budget.js'
 import { SseDataDecoder, readWithIdleTimeout } from './ai-sse.js'
 import { beginDurableChat, type DurableChatExecution } from './agent/runtime-provider.js'
 import { validateModelCursor } from './agent/runtime-model-cursor.js'
@@ -112,6 +115,7 @@ async function recordUsage(input: {
   modelTier?: CreditModelTier | null
   multiplierBps?: number
 }) {
+  return withoutGoalEffects(async () => {
   const data = {
       userId: input.userId,
       novelId: input.novelId ?? null,
@@ -165,7 +169,9 @@ async function recordUsage(input: {
     // and makes continuation repeat paid work. All public generation entrypoints
     // retain assertCreditAccess before contacting the provider.
   }
+  await syncGoalLegacyUsage(usageLog.id)
   return usageLog
+  })
 }
 
 /** Save the rate before contacting a provider. A later configuration change
@@ -184,6 +190,7 @@ async function prepareTextUsage(input: {
     billingEvidence: { policy: FALLBACK_USAGE_POLICY, inputEstimate, outputEstimate: 0, responseObserved: false },
     billingSnapshot: price, usageSource: 'prepared', billingStatus: 'prepared' } })
   try {
+    await reserveGoalUsage(`legacy:${prepared.id}`, inputEstimate + maxOutput)
     if (input.modelTier !== 'custom') await reserveTokenCredits(input.userId, prepared.id, inputEstimate, maxOutput)
   } catch (error) { await markUnobservedUsage(prepared.id, false); throw error }
   return prepared
@@ -194,6 +201,7 @@ async function markUnobservedUsage(id: string | undefined, dispatched = true) {
   await prisma.aiUsageLog.updateMany({ where: { id, billingStatus: 'prepared' },
     data: { usageSource: 'unknown', billingStatus: dispatched ? 'pending_usage' : 'not_dispatched',
       ...(!dispatched ? { reservedCreditMilli: 0, reservationExpiresAt: null } : {}) } }).catch(() => undefined)
+  await syncGoalLegacyUsage(id)
 }
 
 async function saveOutputEvidence(id: string, inputEstimate: number, output: string) {
@@ -630,17 +638,30 @@ function toProviderMessages(messages: ChatMessage[]) {
  * 支持 AbortSignal 真实中断上游请求，每次调用都落 AiUsageLog。
  */
 export async function chatWithTools(params: ChatWithToolsParams): Promise<ChatCompletionResult> {
+  // Snapshot durable inputs before the first await. Callers commonly reuse the
+  // request object to prepare a replay; a mutation while the goal context is
+  // being loaded must never change the frozen model request.
+  const frozenParams = snapshotDurableChatParams(params)
+  const runId = frozenParams.usageLog.agentRunId ?? (frozenParams.usageLog.targetType === 'agentRun' ? frozenParams.usageLog.targetId : undefined)
+  const context = currentGoalExecution() ?? (runId ? await readGoalExecution(frozenParams.usageLog.userId, runId) : undefined)
+  return withGoalExecutionContext(context, () => withoutGoalEffects(() => chatWithGoalAccounting(frozenParams)))
+}
+
+function snapshotDurableChatParams(params: ChatWithToolsParams): ChatWithToolsParams {
+  if (!params.durableExecution) return params
+  return { ...params, messages: JSON.parse(JSON.stringify(params.messages)), tools: JSON.parse(JSON.stringify(params.tools)),
+    durableExecution: { ...params.durableExecution, lease: { ...params.durableExecution.lease },
+      ...(params.durableExecution.price ? { price: structuredClone(params.durableExecution.price) } : {}),
+      ...(params.durableExecution.cursor ? { cursor: { ...params.durableExecution.cursor } } : {}) } }
+}
+
+async function chatWithGoalAccounting(params: ChatWithToolsParams): Promise<ChatCompletionResult> {
   if (!params.durableExecution && params.freePromotion && params.usageLog.modelTier !== 'custom') {
     params = { ...params, usageLog: { ...params.usageLog, multiplierBps: effectiveModelMultiplier({
       multiplierBps: params.usageLog.multiplierBps ?? 10000, metadata: { freePromotion: params.freePromotion },
     }) } }
   }
-  params = { ...params, usageLog: { ...params.usageLog },
-    ...(params.durableExecution ? { messages: JSON.parse(JSON.stringify(params.messages)), tools: JSON.parse(JSON.stringify(params.tools)),
-      durableExecution: { ...params.durableExecution, lease: { ...params.durableExecution.lease },
-        ...(params.durableExecution.price ? { price: structuredClone(params.durableExecution.price) } : {}),
-        ...(params.durableExecution.cursor ? { cursor: { ...params.durableExecution.cursor } } : {}) } } : {}),
-  }
+  params = { ...params, usageLog: { ...params.usageLog } }
   if (!params.durableExecution) return withModelRoutePool(params, chatWithToolsImpl)
   return withLeaseHeartbeat(params.durableExecution.lease, params.signal, signal => chatWithToolsImpl({ ...params, signal }))
 }
@@ -691,14 +712,13 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     messages: params.messages, tools: params.tools, tier,
     route: { provider: params.provider ?? env.aiTextProvider, model, endpoint, reasoningEffort },
   })
-  if (params.durableExecution && tier === 'custom') throw new DataAccessError(409, 'RUNTIME_PRICE_INVALID', '自定义模型的持久计量豁免路径尚未接入。')
   if (params.durableExecution?.price && params.durableExecution.price.modelTier !== tier) throw new DataAccessError(409, 'RUNTIME_PRICE_INVALID', '冻结价目与模型档位不一致。')
   const durable = params.durableExecution ? await beginDurableChat({
     execution: params.durableExecution, userId: params.usageLog.userId, agentRunId: params.usageLog.agentRunId,
     action: params.usageLog.action, provider: params.provider ?? env.aiTextProvider, model,
     request: { endpoint, body: JSON.parse(encodedBody) },
     price: params.durableExecution.price ?? await resolveDurableTokenPrice(params.durableExecution.lease, params.durableExecution.operationKey,
-      tier as Exclude<CreditModelTier, 'custom'>, params.usageLog.multiplierBps ?? 10000),
+      tier, params.usageLog.multiplierBps ?? 10000),
     admit: async () => {
       params.signal?.throwIfAborted()
       ensureTextProviderConfigured(params.providerApiKey)
@@ -716,7 +736,11 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     params.signal.throwIfAborted()
   }
   let response: Response
+  let providerDispatched = false
   try {
+    await assertGoalProviderAdmission()
+    params.signal?.throwIfAborted()
+    providerDispatched = true
     response = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -728,7 +752,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     })
   } catch (error) {
     await durable?.interrupted(params.signal?.aborted ? 'aborted' : 'transport_error')
-    await markUnobservedUsage(prepared?.id)
+    await markUnobservedUsage(prepared?.id, providerDispatched)
     if (!params.signal?.aborted && error instanceof TypeError && error.message === 'terminated') {
       throw new DataAccessError(502, 'AI_PROVIDER_INCOMPLETE', '模型连接中途断开，未取得完整结果；本轮工具未执行，已保存内容和已知用量保留。请稍后继续当前任务。')
     }
@@ -761,6 +785,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     if (prepared && [400, 401, 403, 404, 422, 429].includes(response.status) && reportedPrompt == null && reportedCompletion == null) {
       await prisma.aiUsageLog.updateMany({ where: { id: prepared.id, billingStatus: 'prepared' },
         data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } })
+      await syncGoalLegacyUsage(prepared.id)
     } else await markUnobservedUsage(prepared?.id)
     if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)) throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
     throw new DataAccessError(
@@ -1002,6 +1027,10 @@ export async function generateTextCompletion(
   userPrompt: string,
   options: TextCompletionOptions,
 ) {
+  return withoutGoalEffects(() => generateGoalTextCompletion(systemPrompt, userPrompt, options))
+}
+
+async function generateGoalTextCompletion(systemPrompt: string, userPrompt: string, options: TextCompletionOptions) {
   options = { ...options }
   options.signal?.throwIfAborted()
   const sourceRuntime = options.modelRuntime ?? await getModelTierRuntime(options.modelTier ?? 'speed', options.userId)
@@ -1041,6 +1070,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   let dispatched = false
   try {
   options.signal?.throwIfAborted()
+  await assertGoalProviderAdmission()
   dispatched = true
   const response = await fetch(endpoint, {
     signal: options.signal,
@@ -1138,6 +1168,7 @@ async function generateImageUrls(
   prompt: string,
   size: string,
   count: number,
+  options: { signal?: AbortSignal; beforeDispatch?: () => Promise<void> } = {},
 ) {
   const configured = await getToolModelRuntime('tool:image-generation')
   const imageBaseUrl = configured?.baseUrl ?? env.aiImageBaseUrl
@@ -1146,6 +1177,8 @@ async function generateImageUrls(
   ensureImageProviderConfigured(imageApiKey)
 
   const startedAt = Date.now()
+  await options.beforeDispatch?.()
+  options.signal?.throwIfAborted()
   // Node 内置 fetch 默认 5 分钟头超时，第三方生图服务经常超过，这里用 undici 显式放宽到 aiImageTimeoutMs
   const response = await undiciFetch(imageBaseUrl, {
     method: 'POST',
@@ -1160,11 +1193,12 @@ async function generateImageUrls(
       n: count,
     }),
     dispatcher: imageFetchAgent,
+    signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(env.aiImageTimeoutMs)]) : AbortSignal.timeout(env.aiImageTimeoutMs),
   })
 
   const payload = await parseJsonResponse(response as unknown as Response)
   if (!response.ok) {
-    throw new DataAccessError(
+    throw new ImageProviderFailure(response.status,
       502,
       'AI_PROVIDER_ERROR',
       typeof payload.error?.message === 'string' ? payload.error.message : '图片模型服务暂时不可用。',
@@ -1191,6 +1225,12 @@ async function generateImageUrls(
   }
 
   return { imageUrls, modelName: imageModel, durationMs: Date.now() - startedAt }
+}
+
+class ImageProviderFailure extends DataAccessError {
+  constructor(readonly providerStatus: number, status: number, code: string, message: string) {
+    super(status, code, message)
+  }
 }
 
 export async function getAiConfigPayload() {
@@ -1302,6 +1342,7 @@ export async function generateCoverPromptData(userId: string, input: GenerateCov
 export async function generateCoverImageData(
   userId: string,
   input: GenerateCoverImageRequest & { novelId?: string | null; negativePrompt?: string | null },
+  options: { signal?: AbortSignal } = {},
 ) {
   // This service is shared by HTTP and Agent callers. Validate before charging,
   // rather than relying on the HTTP route's count clamp or a tool's schema.
@@ -1312,8 +1353,21 @@ export async function generateCoverImageData(
     throw new DataAccessError(400, 'IMAGE_PROMPT_INVALID', '请提供封面提示词。')
   }
   if (input.novelId) await ensureNovelOwner(userId, input.novelId)
+  options.signal?.throwIfAborted()
+  const goal = currentGoalExecution()
   const chargeKey = `image:${randomUUID()}`
-  await consumeCredits({
+  const observation = goal ? await withoutGoalEffects(() => prisma.aiUsageLog.create({ data: {
+    userId, novelId: input.novelId ?? null, agentRunId: goal.runId, providerType: 'image', providerMode: env.aiProviderMode,
+    modelName: env.aiImageModel, action: 'generateCoverImage', durationMs: 0, billingStatus: 'prepared', usageSource: 'unknown',
+    targetType: 'imageCharge', targetId: chargeKey,
+  } })) : null
+  if (observation) await reserveGoalUsage(`legacy:${observation.id}`, 0)
+  let charged = false, dispatched = false
+  let generated: { imageUrls: string[]; modelName: string; durationMs: number }
+  try {
+  await assertGoalProviderAdmission()
+  options.signal?.throwIfAborted()
+  await withoutGoalEffects(() => consumeCredits({
     userId,
     amountMilli: IMAGE_CALL_MILLI,
     kind: 'usage',
@@ -1321,21 +1375,45 @@ export async function generateCoverImageData(
     idempotencyKey: chargeKey,
     referenceId: input.novelId ?? null,
     metadata: { count: input.count, size: input.size },
-  })
-  let generated: { imageUrls: string[]; modelName: string; durationMs: number }
-  try {
-    generated = await generateImageUrls(input.prompt, input.size, input.count)
+  }))
+  charged = true
+    generated = await generateImageUrls(input.prompt, input.size, input.count, { signal: options.signal, beforeDispatch: async () => {
+      await assertGoalProviderAdmission()
+      options.signal?.throwIfAborted()
+      if (observation) await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observation.id }, data: { billingStatus: 'pending_usage', creditChargeMilli: IMAGE_CALL_MILLI } }))
+      options.signal?.throwIfAborted()
+      dispatched = true
+    } })
   } catch (error) {
+    if (observation) {
+      const rejected = error instanceof ImageProviderFailure && [400, 401, 403, 404, 422, 429].includes(error.providerStatus)
+      await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observation.id }, data: {
+        billingStatus: !dispatched ? 'not_dispatched' : rejected ? 'provider_rejected' : 'pending_usage',
+        creditChargeMilli: charged ? IMAGE_CALL_MILLI : 0,
+      } }))
+      await syncGoalLegacyUsage(observation.id)
+    }
+    if (!charged) throw error
     const outcome = error instanceof DataAccessError && error.code === 'AI_PROVIDER_EMPTY_RESPONSE' ? 'empty'
-      : error instanceof DataAccessError && error.code === 'AI_PROVIDER_ERROR' ? 'rejected' : 'unknown'
-    await recordImageRefundIntent(userId, chargeKey, { outcome, deliveredImages: 0 })
+      : !dispatched || error instanceof DataAccessError && error.code === 'AI_PROVIDER_ERROR' ? 'rejected' : 'unknown'
+    await withoutGoalEffects(() => recordImageRefundIntent(userId, chargeKey, { outcome, deliveredImages: 0 }))
     // The obligation is durable before attempting the wallet update. The
     // existing bounded server reconciler retries any failed immediate attempt.
-    await reconcileCreditRefunds({ userId, limit: 10 }).catch(() => {
+    await withoutGoalEffects(() => reconcileCreditRefunds({ userId, limit: 10 })).catch(() => {
       console.warn('[credits] Image refund persisted; wallet reconciliation deferred')
     })
     throw error
   }
+  if (observation) {
+    // Image generation uses the existing fixed-per-call tariff, not text
+    // tokens. An actual image response confirms this non-token operation.
+    await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observation.id }, data: {
+      modelName: generated.modelName, durationMs: generated.durationMs, requestTokens: 0, responseTokens: 0,
+      creditChargeMilli: IMAGE_CALL_MILLI, usageSource: 'fixed_unit', billingStatus: 'observed',
+    } }))
+    await syncGoalLegacyUsage(observation.id)
+  }
+  options.signal?.throwIfAborted()
   const images = await createCoverAssetsData({
     userId,
     prompt: input.prompt,
@@ -1348,7 +1426,7 @@ export async function generateCoverImageData(
 
   // Usage persistence is not a provider failure. In particular it must never
   // enter the no-result refund branch after the image was generated.
-  await recordUsage({ userId, providerType: 'image', action: 'generateCoverImage', modelName: generated.modelName,
+  if (!observation) await recordUsage({ userId, providerType: 'image', action: 'generateCoverImage', modelName: generated.modelName,
     targetType: 'coverAsset', targetId: images[0]?.id, durationMs: generated.durationMs })
 
   return {

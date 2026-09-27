@@ -1,0 +1,208 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, expect, it, vi } from 'vitest'
+
+import { AgentGoalBar } from '../../src/features/studio/agent/components/AgentGoalBar'
+import { GoalEditorDialog } from '../../src/features/studio/agent/components/GoalEditorDialog'
+import { formatCreditsMicros, formatGoalReason } from '../../src/features/studio/agent/components/goal-formatters'
+import { GoalResumeDialog } from '../../src/features/studio/agent/components/GoalResumeDialog'
+import { GoalModeChip } from '../../src/features/studio/agent/components/GoalModeChip'
+import type { AgentGoalDetail, AgentGoalSnapshot } from '../../shared/contracts/agent-goal.js'
+import { activateComposerDraft, promoteComposerDraft } from '../../src/features/studio/agent/composer-drafts'
+import { useAgentStore } from '../../src/features/studio/agent/agentStore'
+import { buildGoalResumeModel } from '../../src/features/studio/agent/goal-command'
+
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+})
+
+const goal: AgentGoalSnapshot = {
+  id: 'goal-1', sessionId: 'session-1', novelId: 'novel-1', objective: '完成第一卷大纲并写好前三章', revision: 1, pendingRevision: null,
+  status: 'active', phase: 'executing', stateVersion: 2, currentRunId: 'run-1', reasonCode: null,
+  tokenLimit: '50000', tokensUsed: '1200', tokensReserved: '100', creditsUsedMicros: '3000', activeTimeMs: '120000', activeTimeLimitMs: '3600000',
+  activeSince: '2026-09-27T00:00:00.000Z', serverTime: '2026-09-27T00:02:00.000Z', createdAt: '2026-09-27T00:00:00.000Z', updatedAt: '2026-09-27T00:02:00.000Z', finishedAt: null,
+}
+
+it('opens and cancels the goal mode chip with a touch-sized cancel target', () => {
+  const onOpen = vi.fn(), onCancel = vi.fn()
+  render(<GoalModeChip active={false} draft onOpen={onOpen} onCancel={onCancel} busy={false} />)
+  fireEvent.click(screen.getByRole('button', { name: '目标模式' }))
+  fireEvent.click(screen.getByRole('button', { name: '取消目标模式' }))
+  expect(onOpen).toHaveBeenCalledOnce()
+  expect(onCancel).toHaveBeenCalledOnce()
+  expect(screen.getByRole('button', { name: '取消目标模式' }).className).toContain('h-11')
+})
+
+it('renders goal status and routes bar actions', () => {
+  const callbacks = { onEdit: vi.fn(), onPause: vi.fn(), onResume: vi.fn(), onCancel: vi.fn(), onExpand: vi.fn(), onDismiss: vi.fn() }
+  const view = render(<AgentGoalBar goal={goal} busy={false} {...callbacks} />)
+  expect(screen.getByText('进行中的目标')).toBeTruthy()
+  expect(screen.getByText(goal.objective)).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '修改目标' }))
+  fireEvent.click(screen.getByRole('button', { name: '暂停目标' }))
+  fireEvent.click(screen.getByRole('button', { name: '取消目标' }))
+  fireEvent.click(screen.getByRole('button', { name: '展开目标详情' }))
+  expect(callbacks.onEdit).toHaveBeenCalledOnce()
+  expect(callbacks.onPause).toHaveBeenCalledOnce()
+  expect(callbacks.onCancel).toHaveBeenCalledOnce()
+  expect(callbacks.onExpand).toHaveBeenCalledOnce()
+  view.rerender(<AgentGoalBar goal={{ ...goal, status: 'paused', phase: 'idle', activeSince: null }} busy={false} {...callbacks} />)
+  fireEvent.click(screen.getByRole('button', { name: '继续目标' }))
+  expect(callbacks.onResume).toHaveBeenCalledOnce()
+})
+
+it('keeps active duration across snapshots and counts an active waiting interval', () => {
+  vi.useFakeTimers()
+  const performanceNow = vi.spyOn(performance, 'now').mockReturnValue(1_000)
+  const view = render(<AgentGoalBar goal={{ ...goal, activeTimeMs: '0', phase: 'awaiting_input' }} busy={false} onEdit={vi.fn()} onPause={vi.fn()} onResume={vi.fn()} onCancel={vi.fn()} onExpand={vi.fn()} onDismiss={vi.fn()} />)
+  expect(screen.getByText('2分00秒')).toBeTruthy()
+
+  performanceNow.mockReturnValue(2_500)
+  view.rerender(<AgentGoalBar goal={{ ...goal, activeTimeMs: '0', phase: 'awaiting_input' }} busy={false} onEdit={vi.fn()} onPause={vi.fn()} onResume={vi.fn()} onCancel={vi.fn()} onExpand={vi.fn()} onDismiss={vi.fn()} />)
+  expect(screen.getByText('2分01秒')).toBeTruthy()
+
+  performanceNow.mockReturnValue(3_000)
+  view.rerender(<AgentGoalBar goal={{ ...goal, activeTimeMs: '0', phase: 'awaiting_input', serverTime: '2026-09-27T00:02:10.000Z' }} busy={false} onEdit={vi.fn()} onPause={vi.fn()} onResume={vi.fn()} onCancel={vi.fn()} onExpand={vi.fn()} onDismiss={vi.fn()} />)
+  expect(screen.getByText('2分10秒')).toBeTruthy()
+})
+
+it('keeps an edited draft when the save returns a conflict error', () => {
+  const onSave = vi.fn()
+  const view = render(<GoalEditorDialog open goal={goal} busy={false} onClose={vi.fn()} onSave={onSave} />)
+  const editor = screen.getByRole('textbox', { name: '目标' })
+  fireEvent.change(editor, { target: { value: '保留这份本地修改' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存目标' }))
+  expect(onSave).toHaveBeenCalledWith('保留这份本地修改')
+  view.rerender(<GoalEditorDialog open goal={goal} busy={false} error="目标已在另一处更新。" onClose={vi.fn()} onSave={onSave} />)
+  expect((screen.getByRole('textbox', { name: '目标' }) as HTMLTextAreaElement).value).toBe('保留这份本地修改')
+  expect(screen.getByRole('alert').textContent).toContain('目标已在另一处更新。')
+})
+
+it('shows usage, evidence and revision history in goal details', () => {
+  const detail: AgentGoalDetail = {
+    goal,
+    revisions: [{ revision: 1, objective: goal.objective, createdAt: goal.createdAt }],
+    evidence: [{ criterionId: 'author-objective', description: '前三章已完成', kind: 'objective', targetId: null, status: 'verified', receipt: {}, verifiedAt: goal.updatedAt }],
+    nextRevisionCursor: null,
+    nextEvidenceCursor: null,
+    completion: { progressHash: 'a'.repeat(64), canConfirm: false, needsAuthorVerification: false, blockers: [] },
+  }
+  render(<GoalEditorDialog open goal={goal} detail={detail} busy={false} onClose={vi.fn()} onSave={vi.fn()} />)
+  expect(screen.getByText('1200/50000')).toBeTruthy()
+  expect(screen.getByText('0.003')).toBeTruthy()
+  expect(screen.getByText('版本历史')).toBeTruthy()
+  expect(screen.getByText('前三章已完成')).toBeTruthy()
+  expect(screen.queryByRole('button', { name: '确认目标完成' })).toBeNull()
+})
+
+it('refreshes goal details and traps focus until the editor closes', () => {
+  const trigger = document.createElement('button')
+  document.body.append(trigger)
+  trigger.focus()
+  const onLoadDetail = vi.fn()
+  const view = render(<GoalEditorDialog open goal={goal} detail={null} busy={false} onLoadDetail={onLoadDetail} onClose={vi.fn()} onSave={vi.fn()} />)
+  const dialog = screen.getByRole('dialog')
+  expect(dialog.contains(document.activeElement)).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: '刷新目标详情' }))
+  expect(onLoadDetail).toHaveBeenCalledOnce()
+
+  const focusables = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]'))
+  const first = focusables[0]
+  const last = focusables.at(-1)!
+  first.focus()
+  fireEvent.keyDown(first, { key: 'Tab', shiftKey: true })
+  expect(document.activeElement).toBe(last)
+  last.focus()
+  fireEvent.keyDown(last, { key: 'Tab' })
+  expect(document.activeElement).toBe(first)
+
+  view.rerender(<GoalEditorDialog open={false} goal={goal} busy={false} onLoadDetail={onLoadDetail} onClose={vi.fn()} onSave={vi.fn()} />)
+  expect(document.activeElement).toBe(trigger)
+  trigger.remove()
+})
+
+it('formats credit micros exactly and keeps implementation reason codes out of the UI', () => {
+  expect(formatCreditsMicros('1000000')).toBe('1')
+  expect(formatCreditsMicros('1234567')).toBe('1.234567')
+  expect(formatCreditsMicros('3000')).toBe('0.003')
+  expect(formatGoalReason('GOAL_SCOPE_DECISION_REQUIRED')).toBe('请明确目标范围')
+  expect(formatGoalReason('GOAL_UNKNOWN')).toBe('等待处理')
+})
+
+it('shows author confirmation only for a confirmable completion review', () => {
+  const onConfirmCompletion = vi.fn()
+  const detail: AgentGoalDetail = {
+    goal,
+    revisions: [],
+    evidence: [],
+    nextRevisionCursor: null,
+    nextEvidenceCursor: null,
+    completion: { progressHash: 'b'.repeat(64), canConfirm: true, needsAuthorVerification: true, blockers: [] },
+  }
+  render(<GoalEditorDialog open goal={goal} detail={detail} busy={false} onClose={vi.fn()} onSave={vi.fn()} onConfirmCompletion={onConfirmCompletion} />)
+  fireEvent.click(screen.getByRole('button', { name: '确认目标完成' }))
+  expect(onConfirmCompletion).toHaveBeenCalledOnce()
+})
+
+it('requires an explicit budget increase before resuming a budget-limited goal', () => {
+  const onResume = vi.fn()
+  const limited = { ...goal, status: 'budget_limited' as const, phase: 'idle' as const }
+  render(<GoalResumeDialog open goal={limited} busy={false} onClose={vi.fn()} onResume={onResume} />)
+  fireEvent.click(screen.getByRole('button', { name: '继续目标' }))
+  expect(screen.getByRole('alert').textContent).toContain('提高至少一项')
+  fireEvent.change(screen.getByRole('spinbutton', { name: '提高 Token 上限' }), { target: { value: '60000' } })
+  fireEvent.click(screen.getByRole('button', { name: '继续目标' }))
+  expect(onResume).toHaveBeenCalledWith({ tokenLimit: 60000 })
+})
+
+it('uses the current effective model when a goal resumes', () => {
+  expect(buildGoalResumeModel('basic', 'stale-byok', 'low')).toEqual({ modelTier: 'speed', reasoningEffort: 'low' })
+  expect(buildGoalResumeModel('custom', 'byok-current', 'xhigh')).toEqual({ modelTier: 'custom', customModelId: 'byok-current', reasoningEffort: 'xhigh' })
+  expect(buildGoalResumeModel('speed', 'stale-byok', 'high')).toEqual({ modelTier: 'speed', reasoningEffort: 'high' })
+})
+
+it('restores focus when the resume dialog closes from Escape', () => {
+  const trigger = document.createElement('button')
+  document.body.append(trigger)
+  trigger.focus()
+  const onClose = vi.fn()
+  const view = render(<GoalResumeDialog open goal={goal} busy={false} onClose={onClose} onResume={vi.fn()} />)
+  const dialog = screen.getByRole('dialog')
+  expect(dialog.contains(document.activeElement)).toBe(true)
+  fireEvent.keyDown(dialog, { key: 'Escape' })
+  expect(onClose).toHaveBeenCalledOnce()
+  view.rerender(<GoalResumeDialog open={false} goal={goal} busy={false} onClose={onClose} onResume={vi.fn()} />)
+  expect(document.activeElement).toBe(trigger)
+  trigger.remove()
+})
+
+it('keeps goal draft mode in the task scope during local-window promotion', () => {
+  activateComposerDraft('goal-draft-a')
+  useAgentStore.setState({ composerDraft: '持续完成这一组结果', goalMode: true })
+  activateComposerDraft('goal-draft-b')
+  expect(useAgentStore.getState().goalMode).toBe(false)
+  promoteComposerDraft('goal-draft-a', 'goal-session-a')
+  activateComposerDraft('goal-session-a')
+  expect(useAgentStore.getState().goalMode).toBe(true)
+  expect(useAgentStore.getState().composerDraft).toBe('持续完成这一组结果')
+})
+
+it('accepts the first snapshot after switching sessions while rejecting the old stream', () => {
+  const store = useAgentStore.getState()
+  store.setGoalSnapshot(goal, 'session-1', 5)
+  store.setGoalSnapshot(null, 'session-2')
+  store.setGoalSnapshot({ ...goal, id: 'goal-2', sessionId: 'session-2', stateVersion: 1 }, 'session-2', 1)
+  expect(useAgentStore.getState().goal?.sessionId).toBe('session-2')
+  expect(useAgentStore.getState().goalEventSequence).toBe(1)
+  store.setGoalSnapshot(null, 'session-2', 0)
+  expect(useAgentStore.getState().goal?.sessionId).toBe('session-2')
+  store.setGoalSnapshot(goal, 'session-1', 6)
+  expect(useAgentStore.getState().goal?.sessionId).toBe('session-2')
+  store.setGoalSnapshot(null, 'session-1')
+  store.setGoalSnapshot(goal, 'session-1', 7)
+  store.setGoalSnapshot({ ...goal, id: 'goal-3', stateVersion: 1 }, 'session-1', 8)
+  expect(useAgentStore.getState().goal?.id).toBe('goal-3')
+  useAgentStore.setState({ goal: null, goalSessionId: null, goalEventSequence: 0 })
+})

@@ -1,9 +1,9 @@
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { Prisma } from '@prisma/client'
-import { prisma } from '../prisma.js'
 import { DURABLE_RUNTIME_VERSION, lockOwnedRun, runtimeError, runtimeId, runtimeJson, runtimeTransaction } from './runtime-common.js'
 import { createTaskBudgetPolicy } from './runtime-budget.js'
 import { recordTaskContentBaseline } from './runtime-postconditions.js'
+import { assertRunGoalFence } from './goal-fence.js'
 
 function frozenSpec(raw: unknown) {
   const parsed = taskSpecSchema.safeParse(raw)
@@ -21,12 +21,15 @@ export async function initializeDurableTask(input: { userId: string; runId: stri
   runtimeId(input.sourceMessageId)
   const budgetPolicy = createTaskBudgetPolicy(input.tokenBudget)
   return runtimeTransaction(async tx => {
+    const goalBinding = await tx.agentGoalExecution.findUnique({ where: { runId: input.runId } })
+    if (goalBinding) await (await import('./goal-fence.js')).assertRunGoalFence(tx, input.userId, input.runId)
     const run = await lockOwnedRun(tx, input.userId, input.runId)
     if (run.runtimeProtocolVersion === 0 && run.status !== 'queued') runtimeError('RUNTIME_NOT_ACTIVE', '只能在旧执行器启动之前建立持久任务。')
     const { spec, frozen } = frozenSpec(run.taskSpec)
     if (spec.scope.novelId !== run.novelId || (run.taskRootId && run.taskRootId !== spec.id)
       || ![0, DURABLE_RUNTIME_VERSION].includes(run.runtimeProtocolVersion)) runtimeError('RUNTIME_SCOPE_MISMATCH', '任务根或版本不匹配，不能重建为新任务。')
-    const message = await tx.agentMessage.findFirst({ where: { id: input.sourceMessageId, runId: run.id, sessionId: run.sessionId, role: 'user' } })
+    const message = await tx.agentMessage.findFirst({ where: { id: input.sourceMessageId, runId: run.id, sessionId: run.sessionId,
+      role: goalBinding && goalBinding.trigger !== 'author' ? 'system' : 'user' } })
     if (!message) return runtimeError('RUNTIME_SOURCE_REQUIRED', '缺少本任务的原始用户消息，不能从历史摘要补造授权。')
     const request = runtimeJson(message.parts)
     const digest = runtimeJson({ spec: frozen.value, request: request.value }).hash
@@ -44,6 +47,7 @@ export async function initializeDurableTask(input: { userId: string; runId: stri
       if (!budget || budget.policyHash !== budgetPolicy.hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '恢复不能修改原任务预算合同。')
     }
     await tx.agentRun.update({ where: { id: run.id }, data: { taskRootId: root.id, runtimeProtocolVersion: DURABLE_RUNTIME_VERSION } })
+    if (goalBinding) await tx.agentGoalExecution.update({ where: { runId: run.id }, data: { taskRootId: root.id } })
     return root
   })
 }
@@ -75,12 +79,18 @@ export function assertLegacyRuntimeCompatible(run: { runtimeProtocolVersion?: nu
 /** Atomic admission: checking the version after an unconditional status update is too late. */
 export async function startLegacyRuntimeRun(userId: string, runId: string, resume = false) {
   try {
-    return await prisma.agentRun.update({
-      where: { id: runId, userId, runtimeProtocolVersion: 0, taskRootId: null,
-        status: resume ? { in: ['paused', 'failed'] } : 'queued' },
-      data: { status: 'running', ...(!resume ? { startedAt: new Date() } : {}), errorMessage: null },
-      select: { taskSpec: true, taskRootId: true, runtimeProtocolVersion: true, usage: true, currentTurn: true, startedAt: true,
-        events: { where: { type: { in: ['run.started', 'run.paused', 'run.finished'] } }, orderBy: { seq: 'asc' }, select: { type: true, createdAt: true } } },
+    return await runtimeTransaction(async tx => {
+      // Goal control is the admission fence. It must run in the same
+      // transaction as the status CAS so a paused/cancelled goal cannot be
+      // resurrected by an old legacy startup path.
+      await assertRunGoalFence(tx, userId, runId)
+      return tx.agentRun.update({
+        where: { id: runId, userId, runtimeProtocolVersion: 0, taskRootId: null,
+          status: resume ? { in: ['paused', 'failed'] } : 'queued' },
+        data: { status: 'running', ...(!resume ? { startedAt: new Date() } : {}), errorMessage: null },
+        select: { taskSpec: true, taskRootId: true, runtimeProtocolVersion: true, usage: true, currentTurn: true, startedAt: true,
+          events: { where: { type: { in: ['run.started', 'run.paused', 'run.finished'] } }, orderBy: { seq: 'asc' }, select: { type: true, createdAt: true } } },
+      })
     })
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {

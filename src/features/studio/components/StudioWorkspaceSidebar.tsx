@@ -21,6 +21,7 @@ import { deleteNovelWorkspace, updateNovelMeta } from '../api'
 import { deleteAgentSession, fetchAgentSessions, fetchSessionsRunStatus, forkAgentSession, renameAgentSession, updateAgentSessionSettings } from '../agent/agentApi'
 import ChevoinkAgentMark from '../agent/components/ChevoinkAgentMark'
 import { useAgentStore } from '../agent/agentStore'
+import { selectAgentActivityRunActive, selectAgentGoalView } from '../agent/goal-selectors'
 import { formatTaskRelativeTime } from '../lib/relative-time'
 import type { AgentTaskSidebarItem } from './AgentTaskSidebar'
 import DangerConfirmDialog from './DangerConfirmDialog'
@@ -224,6 +225,10 @@ export default function StudioWorkspaceSidebar(props: Props) {
   const sessionSignals = useAgentStore((state) => state.sessionSignals)
   const runningSessionIds = useAgentStore((state) => state.runningSessionIds)
   const agentPhase = useAgentStore((state) => state.phase)
+  const agentRunId = useAgentStore((state) => state.runId)
+  const agentRunGoalId = useAgentStore((state) => state.runGoalId)
+  const agentGoal = useAgentStore((state) => state.goal)
+  const agentGoalSessionId = useAgentStore((state) => state.goalSessionId)
   /** 正在直播的会话：phase 只对它成立，不能拿去判断其他任务行 */
   const livePhaseSessionId = useAgentStore((state) => state.activeSessionId)
   const trackedRunningIds = useMemo(() => [...runningSessionIds], [runningSessionIds])
@@ -504,11 +509,16 @@ export default function StudioWorkspaceSidebar(props: Props) {
     // 正在直播的任务窗口以本地 phase 为唯一真相：run-status 轮询最多滞后 10s，
     // 作者答完选择后不能再残留黄点，必须立即回到转圈
     const livePhase = active && livePhaseSessionId === task.id ? agentPhase : null
+    const goalView = livePhase
+      ? selectAgentGoalView({ goal: agentGoal, goalSessionId: agentGoalSessionId, sessionId: task.id, runId: agentRunId, phase: livePhase, runGoalId: agentRunGoalId })
+      : null
     const awaiting = livePhase
-      ? livePhase === 'awaiting_approval' || livePhase === 'awaiting_input'
+      ? goalView?.goal ? goalView.waiting : livePhase === 'awaiting_approval' || livePhase === 'awaiting_input'
       : signal?.kind === 'attention' || remoteStatus === 'awaiting_approval'
     const spinning = livePhase
-      ? livePhase === 'starting' || livePhase === 'running'
+      ? goalView?.goal
+        ? selectAgentActivityRunActive(goalView, livePhase)
+        : livePhase === 'starting' || livePhase === 'running'
       : runningSessionIds.has(task.id) || remoteStatus === 'running' || remoteStatus === 'queued'
     // 异常中止持续显示（含当前任务窗口内），直到作者发新提示词或任务恢复运行
     const aborted = signal?.kind === 'failed' || livePhase === 'failed' || livePhase === 'cancelled'

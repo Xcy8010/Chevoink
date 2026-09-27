@@ -58,7 +58,8 @@ import { fetchAgentSessions, updateAgentSessionSettings } from './agent/agentApi
 import { AgentActivityBar } from './agent/components/AgentActivityBar'
 import AgentMemoryCenter from './agent/components/AgentMemoryCenter'
 import ContextDetailDialog from './agent/components/ContextDetailDialog'
-import { isRunActive, WORKSPACE_WRITE_TOOLS, useAgentStore, type ComposerReference } from './agent/agentStore'
+import { WORKSPACE_WRITE_TOOLS, useAgentStore, type ComposerReference } from './agent/agentStore'
+import { selectAgentActivityRunActive, selectAgentGoalView } from './agent/goal-selectors'
 import { getMessageText } from './agent/lib/panel-helpers'
 import { PanelResizeHandle } from './panel-resize'
 import type { AgentArtifact, AgentLocalRollbackSnapshot, AgentRunState, ChapterDraftState, ChapterPendingReview, CoverFormState, EditableNovelStatus, EditorSelectionState, MobileView, NovelFormState, PlanPendingReview, ProjectNotesState, SaveState, ToolPanel, WorkspaceDocumentView, WorkspacePlanFile } from './types'
@@ -210,6 +211,10 @@ export default function StudioWorkspace() {
   const agentTodos = useAgentStore((state) => state.todos)
   const agentTodosVersion = useAgentStore((state) => state.todosVersion)
   const agentPhase = useAgentStore((state) => state.phase)
+  const agentRunId = useAgentStore((state) => state.runId)
+  const agentRunGoalId = useAgentStore((state) => state.runGoalId)
+  const agentGoal = useAgentStore((state) => state.goal)
+  const agentGoalSessionId = useAgentStore((state) => state.goalSessionId)
   const agentMessages = useAgentStore((state) => state.messages)
   const liveToolDrafts = useAgentStore((state) => state.liveToolDrafts)
   const autoFollow = useAgentStore((state) => state.autoFollow)
@@ -230,6 +235,8 @@ export default function StudioWorkspace() {
     const initialTask = selectInitialTask(snapshot?.tasks ?? [], snapshot?.activeTaskId, searchParams.get('session'))
     return initialTask?.sessionId ?? null
   })
+  const agentGoalView = selectAgentGoalView({ goal: agentGoal, goalSessionId: agentGoalSessionId, sessionId: agentSessionId, runId: agentRunId, phase: agentPhase, runGoalId: agentRunGoalId })
+  const activityRunActive = selectAgentActivityRunActive(agentGoalView, agentPhase)
   // 会话解析中：切换作品/首载时任务窗口的 sessionId 需等服务端会话列表合并后才能定案，
   // 这段中间态禁止 AgentPanel 渲染空态欢迎页（否则欢迎页会显示整个网络请求时长）
   const [agentSessionsResolving, setAgentSessionsResolving] = useState(false)
@@ -1215,7 +1222,7 @@ export default function StudioWorkspace() {
           Object.fromEntries(
             event.sessions.map((item) => [
               item.sessionId,
-              { runId: item.runId, status: 'running' as const, finishedAt: null },
+              { runId: item.runId, runGoalId: null, status: 'running' as const, finishedAt: null },
             ]),
           ),
         )
@@ -3565,6 +3572,35 @@ export default function StudioWorkspace() {
     toast.success('已把选中内容添加到输入框。')
   }
 
+  /** 目标模式可由无会话的本地窗口直接原子创建；先提升草稿作用域，再切换到服务端 session。 */
+  function handleGoalSessionCreated(sessionId: string, objective: string) {
+    const currentTaskWindow = activeAgentTaskWindow
+    const title = Array.from(objective.trim()).slice(0, 60).join('') || '新任务'
+    const now = new Date().toISOString()
+    void queryClient.invalidateQueries({ queryKey: ['agent', 'sessions'] })
+    if (taskUiScope) {
+      const nextScope = `${taskScopeOwner}:${activeNovelId}:${sessionId}`
+      promoteComposerDraft(taskUiScope, nextScope)
+      writeWorkPanelUi(nextScope, { rightOpen: workRightOpen, viewer: workViewer, inspectorTab: workInspectorTab, selectedTreeItemId, selectedChapterId })
+      try {
+        const split = localStorage.getItem(`chevoink:work-split-v2:${taskUiScope}`)
+        if (split) localStorage.setItem(`chevoink:work-split-v2:${nextScope}`, split)
+      } catch { /* Optional layout persistence. */ }
+    }
+    if (taskLocationRef.current.novelId === activeNovelId && taskLocationRef.current.taskId === currentTaskWindow?.id) {
+      setAgentSessionId(sessionId)
+      setActiveAgentTaskWindowId(sessionId)
+    }
+    setAgentTaskWindows((current) => {
+      const matched = currentTaskWindow?.id
+      if (!matched) return current
+      return current.map((taskWindow) => taskWindow.id === matched
+        ? { ...taskWindow, id: sessionId, sessionId, title: taskWindow.customNamed ? taskWindow.title : title,
+          temporary: false, loaded: true, updatedAt: now, createdAt: now }
+        : taskWindow)
+    })
+  }
+
   // Agent Loop 新链路：首次发送前懒创建会话，并同步任务窗口状态
   async function ensureAgentLoopSession(): Promise<string> {
     if (agentSessionId) {
@@ -3637,6 +3673,7 @@ export default function StudioWorkspace() {
           }
           selection={editorSelection.text.trim() ? editorSelection : null}
           ensureSession={ensureAgentLoopSession}
+          onGoalSessionCreated={handleGoalSessionCreated}
           onStreamEvent={handleAgentStreamEvent}
           pendingReviewCount={pendingChapterReviews.length + (pendingPlanReview ? 1 : 0)}
           reviewBusy={pendingChapterReviewBusy || pendingPlanReviewBusy}
@@ -4176,7 +4213,7 @@ export default function StudioWorkspace() {
                   activitiesVersion={workspaceActivitiesVersion}
                   todos={agentTodos}
                   todosVersion={agentTodosVersion}
-                  runActive={isRunActive(agentPhase)}
+                  runActive={activityRunActive}
                   pendingReviewCount={pendingChapterReviews.length + (pendingPlanReview ? 1 : 0)}
                   reviewBusy={pendingChapterReviewBusy || pendingPlanReviewBusy}
                   onApproveAllReviews={handleApproveAllPendingReviews}

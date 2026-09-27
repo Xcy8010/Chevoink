@@ -6,6 +6,9 @@ const m = vi.hoisted(() => ({
   tx: {
     $queryRaw: vi.fn(),
     agentRun: { findFirst: vi.fn() },
+    // Legacy runs have no AgentGoalExecution; keep the new goal fence on its
+    // ordinary no-goal branch while preserving all manuscript assertions.
+    agentGoalExecution: { findUnique: vi.fn() },
     chapter: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), updateMany: vi.fn(), create: vi.fn(), count: vi.fn() },
     volume: { findFirst: vi.fn() }, agentTaskRoot: { findUniqueOrThrow: vi.fn() },
   },
@@ -60,6 +63,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   m.tx.$queryRaw.mockResolvedValue([{ id: 'n' }])
   m.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 0 } })
+  m.tx.agentGoalExecution.findUnique.mockResolvedValue(null)
   clearRunBaselines('r')
   m.db.$transaction.mockImplementation(work => work(tx))
   m.db.chapter.findFirst.mockResolvedValue(row)

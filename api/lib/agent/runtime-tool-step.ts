@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import { toOpenAIParameters } from './tool-schema.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { env } from '../../config/env.js'
@@ -22,7 +23,7 @@ import { settleProviderOperation } from './runtime-settlement.js'
 import { volumeListTool, volumeCreateTool, structureOutlineTool, volumeUpdateTool, volumeMoveTool, volumeDeleteTool, chapterMoveTool, chapterMoveToVolumeTool, chapterSplitTool, chapterMergeTool } from './tools/structure-tools.js'
 import { STRUCTURE_MUTATIONS, structureContentTargets } from './runtime-common.js'
 import { executeDurableStructure } from './tools/durable-structure.js'
-import type { AgentTool, ToolContext } from './tools/types.js'
+import type { AgentTool, ToolContext, ToolResult } from './tools/types.js'
 import { taskContextListTool, taskContextReadTool, executionContextReadTool } from './tools/task-context-tools.js'
 import { sessionHistorySearchTool, sessionMessageReadTool } from './tools/session-history-tools.js'
 import { executeDurableRead } from './tools/durable-read.js'
@@ -47,6 +48,12 @@ import { novelImportTool } from './tools/import-tools.js'
 import { accountCreditsTool, accountCreditHistoryTool, accountNovelsTool, sessionRenameTool } from './tools/account-tools.js'
 import { executeDurableImport } from './runtime-import.js'
 import { coverApplyTool } from './tools/cover-tools.js'
+import { withGoalExecutionContext, withGoalEffects } from './goal-context.js'
+import { readGoalExecution } from './goal-fence.js'
+import { goalReadTool, goalReportTool } from './tools/goal-tools.js'
+import { prepareToolCursorOperation } from './runtime-tool-cursor.js'
+import { commitOperationEffect } from './runtime-operations.js'
+import type { CreditModelTier, ModelReasoningEffort } from '../../../shared/contracts/index.js'
 
 const HISTORY_READ_ACTIONS = ['account_credits', 'account_credit_history', 'account_novels', 'task_context_list', 'task_context_read', 'session_history_search', 'session_message_read'] as const
 const DOMAIN_READ_ACTIONS = ['craft_search', 'style_leakage_check', 'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get'] as const
@@ -56,6 +63,7 @@ function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
 }
 const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(coverApplyTool),
+  checkedAdapter(goalReadTool), checkedAdapter(goalReportTool),
   checkedAdapter(novelImportTool),
   checkedAdapter(accountCreditsTool), checkedAdapter(accountCreditHistoryTool), checkedAdapter(accountNovelsTool), checkedAdapter(sessionRenameTool),
   checkedAdapter(projectSearchTool), checkedAdapter(entityResolveTool), checkedAdapter(impactAnalyzeTool), checkedAdapter(structureValidateTool),
@@ -84,6 +92,11 @@ const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
 /** One real tool step, selected exclusively from saved execution state.
  * Not yet the full scheduler: unadapted tools must not fall back to legacy effects. */
 export async function executeDurableToolStep(token: RunLeaseToken, signal: AbortSignal) {
+  const context = await readGoalExecution(token.userId, token.runId)
+  return withGoalExecutionContext(context, () => withGoalEffects(() => executeGoalDurableToolStep(token, signal)))
+}
+
+async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSignal) {
   const lease = { ...token }
   signal.throwIfAborted()
   const selected = await withRunLease(lease, async tx => {
@@ -115,6 +128,8 @@ export async function executeDurableToolStep(token: RunLeaseToken, signal: Abort
     const grant = current.configuration.toolAuthority.find(item => item.name === call.name)
     const definition = current.configuration.tools.find(item => item.function.name === call.name)
     const tool = adapters.get(call.name)
+    const goalTool = call.name === 'goal_read' || call.name === 'goal_report'
+    if (goalTool && !await readGoalExecution(lease.userId, lease.runId, tx)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '目标工具仅允许目标归属执行使用。')
     if (!grant || grant.permission === 'deny' || !definition || call.incomplete) return { reject: { cursor, callId: call.id } }
     if (!tool) return runtimeError('RUNTIME_TOOL_ADAPTER_REQUIRED', '此工具的持久适配尚未接入，不能执行旧效果路径。')
     if (runtimeJson(toOpenAIParameters(tool.parameters)).hash !== runtimeJson(definition.function.parameters).hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '工具 schema 与原任务不一致。')
@@ -130,9 +145,13 @@ export async function executeDurableToolStep(token: RunLeaseToken, signal: Abort
     const ctx: ToolContext = { userId: lease.userId, runId: lease.runId, novelId: root.novelId, sessionId: root.sessionId,
       chapterId: originalChapterId, callId: call.id, mode: current.configuration.mode, creativeFreedom: current.configuration.creativeFreedom,
       qualityMode: current.configuration.qualityMode, protectedChapterIds: new Set(current.configuration.protectedChapterIds),
-      toolAuthority: new Map(current.configuration.toolAuthority.map(item => [item.name, item])), signal, emit: () => {} }
+      toolAuthority: new Map(current.configuration.toolAuthority.map(item => [item.name, item])), signal, emit: () => {},
+      modelSelection: { tier: current.configuration.model.tier as CreditModelTier,
+        customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
+        provider: current.configuration.model.provider, modelName: current.configuration.model.modelName, routeRevision: current.configuration.model.routeRevision } }
     const capability = { lease, cursor, operationKey: `exec:${frame.state.nextOperationSequence}` }
-    if (['execution_context_read', 'chapter_read', 'plan_read', 'novel_get_context', 'chapter_list_summaries', 'memory_search', 'volume_list', 'structure_outline', ...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].includes(call.name)) ctx.durableRead = capability
+    if (goalTool) ctx.durableRead = capability
+    else if (['execution_context_read', 'chapter_read', 'plan_read', 'novel_get_context', 'chapter_list_summaries', 'memory_search', 'volume_list', 'structure_outline', ...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].includes(call.name)) ctx.durableRead = capability
     else if (call.name === 'ask_user') { /* Persistent question step below; no legacy waiter. */ }
     else if (call.name === 'novel_import') ctx.durableImport = capability
     else if ((METADATA_ACTIONS as readonly string[]).includes(call.name)) ctx.durableMetadata = capability
@@ -203,6 +222,7 @@ export async function executeDurableToolStep(token: RunLeaseToken, signal: Abort
   const historyAction = [...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].find(name => name === selected.tool.name)
   if (selected.tool.name === 'ask_user') return executeDurableQuestion(lease, selected.cursor, selected.ctx, selected.tool, selected.args)
   if (selected.tool.name === 'novel_import') return executeDurableImport(selected.ctx, selected.tool, selected.args)
+  if (selected.tool.name === 'goal_read' || selected.tool.name === 'goal_report') return executeDurableGoalTool(selected.ctx, selected.tool, selected.args)
   if (historyAction) {
     const normalize = (raw: unknown) => Object.fromEntries(Object.entries(selected.tool.parameters.parse(normalizeToolInput(selected.tool, raw)) as Record<string, unknown>).filter(([, value]) => value !== undefined))
     return { kind: 'tool' as const, result: await executeDurableRead(selected.ctx, historyAction, selected.args, normalize,
@@ -224,4 +244,27 @@ export async function executeDurableToolStep(token: RunLeaseToken, signal: Abort
   return { kind: 'tool' as const, result: selected.ctx.durableStructure
     ? await executeDurableStructure(selected.ctx, selected.tool, selected.args)
     : await selected.tool.execute(selected.ctx, selected.args) }
+}
+
+/** Goal observations/reports are model tools, but they still need the same
+ * cursor, frozen-policy and receipt boundary as every durable tool. The read
+ * domain is used only for cursor admission; goal_report performs its own
+ * goal-fenced write in the operation transaction. */
+async function executeDurableGoalTool(ctx: ToolContext, tool: AgentTool, args: Record<string, unknown>) {
+  const capability = ctx.durableRead
+  if (!capability || capability.lease.userId !== ctx.userId || capability.lease.runId !== ctx.runId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '目标工具缺少原任务能力。')
+  const lease = { ...capability.lease }, cursor = { ...capability.cursor }
+  const normalize = (raw: unknown) => Object.fromEntries(Object.entries(tool.parameters.parse(normalizeToolInput(tool, raw)) as Record<string, unknown>).filter(([, value]) => value !== undefined))
+  const effective = normalize(args)
+  const prepared = await prepareToolCursorOperation(lease, cursor, { key: capability.operationKey, action: tool.name, callId: ctx.callId,
+    targetId: lease.taskRootId, effectDomain: 'read', effectiveArgs: effective, normalize,
+    operationInput: runtimeJson({ callId: ctx.callId, args: effective }).value })
+  const receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx => {
+    ctx.signal.throwIfAborted()
+    const result = await tool.execute({ ...ctx, durableRead: undefined, transaction: tx }, effective)
+    ctx.signal.throwIfAborted()
+    return runtimeJson({ toolResult: result }).value
+  })
+  await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
+  return { kind: 'tool' as const, result: z.object({ toolResult: z.object({ output: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult }
 }

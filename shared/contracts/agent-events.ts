@@ -475,6 +475,8 @@ export type CreativeFreedom = 'stable' | 'balanced' | 'bold'
 export interface StartAgentLoopRunResponse {
   runId: EntityId
   sessionId: EntityId
+  /** 服务端确认本轮是否由目标执行；普通运行明确返回 null。 */
+  runGoalId: EntityId | null
   status: string
   streamUrl: string
 }

@@ -7,6 +7,8 @@ import type {
   AgentWorkspaceToolPermission,
   CreativeFreedom,
   StoryCompilerMode,
+  CreditModelTier,
+  ModelReasoningEffort,
 } from '../../../../shared/contracts/index.js'
 import type { AgentStreamEventBody } from '../../../../shared/contracts/index.js'
 import type { getModelTierRuntime } from '../../credits.js'
@@ -51,6 +53,9 @@ export type ToolContext = {
   qualityMode: StoryCompilerMode
   /** 主 run 解析好的模型运行时：子 Agent 跟随主 run 的模型与额度计费（未注入时工具自行回退） */
   modelRuntime?: Awaited<ReturnType<typeof getModelTierRuntime>>
+  /** Durable admission's frozen model identity for auxiliary adapters. */
+  modelSelection?: { tier: CreditModelTier; customModelId: string | null; reasoningEffort: ModelReasoningEffort;
+    provider: string; modelName: string | null; routeRevision: string }
   /** 工具内部可发进度事件（进入统一事件总线） */
   emit: (event: AgentStreamEventBody) => void
   signal: AbortSignal

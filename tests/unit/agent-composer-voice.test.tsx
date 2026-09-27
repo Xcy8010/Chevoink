@@ -22,7 +22,7 @@ beforeEach(() => {
   voice.state = 'idle'
   vi.clearAllMocks()
   activateComposerDraft('u:n1:t1')
-  useAgentStore.setState({ composerDraft: '已有草稿', composerReferences: [], composerAttachments: [], composerUploading: 0, composerSkillIds: [], composerSubagent: null })
+  useAgentStore.setState({ composerDraft: '已有草稿', composerReferences: [], composerAttachments: [], composerUploading: 0, composerSkillIds: [], composerSubagent: null, goalMode: false })
 })
 afterEach(cleanup)
 
@@ -36,6 +36,35 @@ describe('Agent voice draft integration', () => {
     expect(useAgentStore.getState().composerSubagent?.id).toBe('helper')
     await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送' })))
     expect(useAgentStore.getState().composerSubagent).toBeNull()
+  })
+  it('opens goal mode from the plus menu and promotes a leading goal command safely', () => {
+    useAgentStore.setState({ composerDraft: '' })
+    const onGoalOpen = vi.fn()
+    const input = { ...props(), goalCreationEnabled: true, onGoalOpen }
+    render(<AgentComposer {...input} />)
+    fireEvent.click(screen.getByLabelText('添加内容'))
+    fireEvent.click(screen.getByRole('button', { name: '目标' }))
+    expect(onGoalOpen).toHaveBeenCalledOnce()
+
+    const editor = screen.getByRole('textbox', { name: 'Agent 提示词' })
+    editor.textContent = '/goal 完成前三章'
+    fireEvent.input(editor)
+    expect(useAgentStore.getState().goalMode).toBe(true)
+    expect(useAgentStore.getState().composerDraft).toBe('完成前三章')
+  })
+  it('hides goal creation when the capability is closed and sends /goal as ordinary text', async () => {
+    useAgentStore.setState({ composerDraft: '' })
+    const onSend = vi.fn().mockResolvedValue(undefined)
+    render(<AgentComposer {...props()} goalCreationEnabled={false} onSend={onSend} />)
+    fireEvent.click(screen.getByLabelText('添加内容'))
+    expect(screen.queryByRole('button', { name: '目标' })).toBeNull()
+
+    const editor = screen.getByRole('textbox', { name: 'Agent 提示词' })
+    editor.textContent = '/goal 写三章'
+    fireEvent.input(editor)
+    expect(useAgentStore.getState().goalMode).toBe(false)
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送' })))
+    expect(onSend).toHaveBeenCalledWith('/goal 写三章', [], 'balanced', 'premium', [])
   })
   it('restores the helper per task across A→B→A without leaking selection', () => {
     useAgentStore.setState({ composerSubagent: { id: 'helper', name: '资料助手', novelId: 'n1' } })

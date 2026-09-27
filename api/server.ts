@@ -4,6 +4,8 @@ import { env } from './config/env.js'
 import { recoverOrphanLoopRuns, recoverDurableLoopRuns, recoverStaleLoopRuns } from './lib/agent/run-service.js'
 import { runDueAgentSchedules } from './lib/agent/productivity.js'
 import { dispatchQueuedRequests } from './lib/agent/request-queue.js'
+import { dispatchAgentGoals } from './lib/agent/goal-supervisor.js'
+import { reconcileGoalUsage } from './lib/agent/goal-budget.js'
 import { reconcileCreditRefunds, reconcileTokenSettlements } from './lib/credits.js'
 import { recoverNovelImportJobs } from './lib/novel-import-service.js'
 import { isNovelImportMaintenanceEnabled, maintainNovelImports } from './lib/novel-import-maintenance.js'
@@ -37,7 +39,7 @@ function recoverSavedTasks() {
   void recoverStaleLoopRuns()
   if (!refundSweepRunning) {
     refundSweepRunning = true
-    void Promise.allSettled([reconcileCreditRefunds(), reconcileTokenSettlements()]).then(results => {
+    void Promise.allSettled([reconcileCreditRefunds(), reconcileTokenSettlements(), reconcileGoalUsage()]).then(results => {
       if (results.some(result => result.status === 'rejected')) console.error('[credits] 费用对账扫描暂时失败，持久记录保留')
     }).finally(() => { refundSweepRunning = false })
   }
@@ -56,7 +58,10 @@ const scheduleTimer = setInterval(() => {
   recoverSavedTasks()
 }, 60_000)
 scheduleTimer.unref()
-const queueTimer = setInterval(() => void dispatchQueuedRequests(), 2000)
+const queueTimer = setInterval(() => {
+  // Author messages get first admission; both schedulers also enforce priority inside the DB lock.
+  void dispatchQueuedRequests().then(() => dispatchAgentGoals()).catch(() => console.error('[agent-goal] 调度暂时不可用'))
+}, 2000)
 queueTimer.unref()
 const styleTimer = setInterval(() => {
   void dispatchStyleLearning().catch(() => console.error('[style-learning] 学习队列暂时不可用，未重发模型请求'))

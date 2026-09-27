@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Request } from 'express'
 import { Prisma, type NovelImportJob, type NovelImportIntent } from '@prisma/client'
 import { z } from 'zod'
+import { agentGoalExecutionOptionsSchema } from '../../shared/contracts/agent-goal.js'
 import { NOVEL_IMPORT_LIMITS, novelImportCommitSchema, novelImportRestoreSchema, novelImportManifestEditSchema, novelImportModelSchema, novelImportVolumeSchema, novelImportSourceSchema, novelImportMetadataSchema, type NovelImportCapabilities, type NovelImportJobStatus, type NovelImportModelSelection, type NovelImportPreflight, type NovelImportPreview, type NovelImportReceipt, type NovelImportRestorePreview, type NovelImportRestoreReceipt } from '../../shared/contracts/novel-import.js'
 import { prisma, DataAccessError } from './prisma.js'
 import { requireSessionUserId } from './auth-session.js'
@@ -11,7 +12,7 @@ import { getDocumentImportReadiness, parseConfiguredNovelImportDocument } from '
 import { applyContentSelection, applySourceReview, applyStructureEdit, assertLegacyContentConserved, canonicalPreviewHash, hasImportContent, hasImportMetadataSelection, previewReportDto, refreshPreviewWarnings, reportHash, routedContentCount } from './novel-import/preview.js'
 import { hydrateStoredPreview, readPreviewArtifact, readStoredChapter, storePreviewImages, storePreviewParts, finalizeStoredImageReport, summarizePreview, verifyPreviewImages, type StoredPreview } from './novel-import/preview-storage.js'
 import { novelImportReviewSchema, novelImportSelectionSchema, novelImportStructureSchema, type NovelImportDocumentReport, type NovelImportEvidencePreview, type NovelImportChapterDto } from '../../shared/contracts/novel-import-preview.js'
-import { assertManagedAttachmentAccess, readAuthorizedAgentAttachment } from './agent-attachment-storage.js'
+import { isManagedAttachmentOwnedBy, MANAGED_AGENT_ATTACHMENT_PREFIX, assertManagedAttachmentAccess, readAuthorizedAgentAttachment, resolveManagedAttachmentPath } from './agent-attachment-storage.js'
 import { lockNovelActiveScope } from './data/novel-write-lock.js'
 import { applyNovelImportChapterPositions, assertNovelImportMutationCount, hashNovelImportRows, hashNovelImportTarget, invalidateNovelImportSources, novelImportBackupSchema, novelImportMetadata } from './data/novel-import.js'
 import { verifyNovelImportOrigin } from './novel-import-origin.js'
@@ -19,6 +20,7 @@ import { assertNovelImportPreviewComplete } from './novel-import/preview.js'
 import { NOVEL_IMPORT_PARSE_DEADLINE_MS, startNovelImportParseLease } from './novel-import/parse-lease.js'
 import { buildNovelImportPlacement } from './novel-import/placement.js'
 import { saveStoryMemory } from './agent/story-memory.js'
+import { runtimeJson } from './agent/runtime-common.js'
 export { NOVEL_IMPORT_PARSE_DEADLINE_MS } from './novel-import/parse-lease.js'
 
 type Tx = Prisma.TransactionClient
@@ -116,6 +118,74 @@ async function writeSafe(tx: Tx, scope: NovelImportScope, bound?: { agentRunId: 
   if (await tx.agentQueuedRequest.count({ where: { session: { novelId: scope.novelId }, status: { in: ['pending', 'held', 'dispatching'] } } })) fail('IMPORT_WRITE_BUSY', '作品有尚未发送的 Agent 需求，请先处理或取消后重试。')
   if (await tx.changeSet.count({ where: { novelId: scope.novelId, status: { in: ['draft', 'approved', 'applying'] } } })) fail('IMPORT_WRITE_BUSY', '作品存在待处理修改，请先处理后重试。')
 }
+
+const novelImportAttachmentSchema = z.object({ type: z.literal('attachment'), kind: z.literal('file'),
+  name: z.string().min(1).max(255), url: z.string().min(1).max(1024) })
+type NovelImportAttachmentDb = Pick<Tx, 'agentMessage' | 'agentGoalExecution' | 'agentGoalRevision' | 'legacyAgentAttachmentGrant'>
+
+function importAttachmentFromParts(parts: unknown, url: string) {
+  if (!Array.isArray(parts)) return undefined
+  const result = parts.map(part => novelImportAttachmentSchema.safeParse(part)).find(item => item.success && item.data.url === url)
+  return result?.success ? result.data : undefined
+}
+
+async function assertNovelImportAttachmentOwnership(db: Pick<Tx, 'legacyAgentAttachmentGrant'>, url: string, userId: string) {
+  if (!resolveManagedAttachmentPath(url)) fail('IMPORT_ATTACHMENT_SCOPE', '附件归属尚未核验，请重新上传。', 403)
+  if (isManagedAttachmentOwnedBy(url, userId)) return
+  if (url.slice(MANAGED_AGENT_ATTACHMENT_PREFIX.length).includes('/')) fail('IMPORT_ATTACHMENT_SCOPE', '附件不属于当前用户，请重新上传。', 403)
+  const grant = await db.legacyAgentAttachmentGrant.findUnique({ where: { url }, select: { ownerUserId: true, revokedAt: true } })
+  if (!grant || grant.ownerUserId !== userId || grant.revokedAt) fail('IMPORT_ATTACHMENT_SCOPE', '附件归属尚未核验，请重新上传。', 403)
+}
+
+/**
+ * Return an attachment from a run only after proving its message and, for a
+ * goal continuation's system message, its persisted goal snapshot. System
+ * text is never an attachment grant by itself. The goal revision's attachment
+ * snapshot is compared with the current immutable attachment set so a stale
+ * or edited goal cannot lend a file to an import job.
+ */
+export async function assertNovelImportAttachment(db: NovelImportAttachmentDb, scope: NovelImportScope & { sessionId: string }, runId: string, url: string) {
+  const run = await db.agentMessage.findFirst({ where: { runId, sessionId: scope.sessionId, role: 'user' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { parts: true } })
+  const userAttachment = importAttachmentFromParts(run?.parts, url)
+  if (userAttachment) {
+    await assertNovelImportAttachmentOwnership(db, url, scope.userId)
+    return userAttachment
+  }
+
+  // A steering message is a later user message. Keep the original fast path
+  // above for ordinary callers, then inspect the bounded run history only when
+  // the first user message did not carry this URL.
+  const laterUsers = await db.agentMessage.findMany({ where: { runId, sessionId: scope.sessionId, role: 'user' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: 64, select: { parts: true } })
+  const steeringAttachment = laterUsers.map(message => importAttachmentFromParts(message.parts, url)).find(Boolean)
+  if (steeringAttachment) {
+    await assertNovelImportAttachmentOwnership(db, url, scope.userId)
+    return steeringAttachment
+  }
+
+  const system = await db.agentMessage.findFirst({ where: { runId, sessionId: scope.sessionId, role: 'system' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { parts: true } })
+  const systemAttachment = importAttachmentFromParts(system?.parts, url)
+  if (!systemAttachment) fail('IMPORT_ATTACHMENT_SCOPE', '本次原始用户消息中没有此文件，请重新上传。', 403)
+
+  const execution = await db.agentGoalExecution.findUnique({ where: { runId }, include: { goal: true } })
+  const goal = execution?.goal
+  if (!execution || !goal || goal.userId !== scope.userId || goal.novelId !== scope.novelId || goal.sessionId !== scope.sessionId
+    || goal.status !== 'active' || goal.pendingRevision != null || goal.currentRevision !== execution.goalRevision || goal.epoch !== execution.epoch) {
+    fail('IMPORT_ATTACHMENT_SCOPE', '目标执行与原始附件版本不一致，请重新上传。', 403)
+  }
+  const revision = await db.agentGoalRevision.findUnique({ where: { goalId_revision: { goalId: goal.id, revision: execution.goalRevision } }, select: { request: true } })
+  const revisionOptions = agentGoalExecutionOptionsSchema.safeParse(revision?.request)
+  const currentOptions = agentGoalExecutionOptionsSchema.safeParse(goal.executionOptions)
+  if (!revisionOptions.success || !currentOptions.success
+    || runtimeJson(revisionOptions.data.attachments ?? []).hash !== runtimeJson(currentOptions.data.attachments ?? []).hash
+    || !currentOptions.data.attachments?.some(attachment => attachment.kind === 'file' && attachment.name === systemAttachment.name && attachment.url === url)) {
+    fail('IMPORT_ATTACHMENT_SCOPE', '目标执行与原始附件版本不一致，请重新上传。', 403)
+  }
+  await assertNovelImportAttachmentOwnership(db, url, scope.userId)
+  return systemAttachment
+}
 function intentValid(intent: NovelImportIntent | null, scope: NovelImportScope, hash: string, complete: boolean) {
   if (!intent || intent.userId !== scope.userId || intent.novelId !== scope.novelId) fail('IMPORT_APPROVAL_REQUIRED', '请重新进行导入确认。')
   if (intent.expiresAt <= new Date()) fail('IMPORT_APPROVAL_EXPIRED', '确认已过期，请重新确认。')
@@ -210,10 +280,13 @@ export async function downloadNovelImportSource(scope: NovelImportScope, jobId: 
   const bytes = await readImportBlob(source.storageKey, source.sha256)
   return { filename, bytes }
 }
-export async function uploadNovelImportSource(scope: NovelImportScope, jobId: string, filename: string, stream: AsyncIterable<Uint8Array>, signal?: AbortSignal) {
+export async function uploadNovelImportSource(scope: NovelImportScope, jobId: string, filename: string, stream: AsyncIterable<Uint8Array>, signal?: AbortSignal,
+  attachmentOrigin?: { runId: string }) {
   enabled(); validateImportFilename(filename)
   const claim = await novelImportTransaction(async tx => {
     const job = await ownedJob(tx, scope, jobId); live(job)
+    if (attachmentOrigin && job.agentRunId && job.agentRunId !== attachmentOrigin.runId) fail('IMPORT_ORIGIN_CONFLICT', '此导入已绑定其他原始任务，请在原导入面板处理。')
+    if (attachmentOrigin && !job.agentRunId && job.agentToolCallId) fail('IMPORT_ORIGIN_CONFLICT', '此导入的原始调用绑定不完整，请重新发起导入。')
     if (job.status !== 'uploading' || (job.leaseUntil && job.leaseUntil > new Date())) fail('IMPORT_WRITE_BUSY', '任务不能接收此上传。')
     const recentSources = await tx.novelImportSource.findMany({ where: { job: { userId: scope.userId }, createdAt: { gte: new Date(Date.now() - 86400_000) } }, select: { bytes: true } })
     const reserved = await tx.novelImportJob.count({ where: { userId: scope.userId, status: 'uploading', leaseUntil: { gt: new Date() } } })
@@ -227,6 +300,16 @@ export async function uploadNovelImportSource(scope: NovelImportScope, jobId: st
     await novelImportTransaction(async tx => {
       const job = await ownedJob(tx, scope, jobId); live(job)
       if (job.status !== 'uploading' || job.leaseEpoch !== claim.leaseEpoch || job.leaseOwner !== claim.leaseOwner || !job.leaseUntil || job.leaseUntil <= new Date()) fail('IMPORT_LEASE_LOST', '上传已失效，请重试。')
+      if (attachmentOrigin && job.agentRunId && job.agentRunId !== attachmentOrigin.runId) fail('IMPORT_ORIGIN_CONFLICT', '此导入已绑定其他原始任务，请在原导入面板处理。')
+      if (attachmentOrigin && !job.agentRunId && job.agentToolCallId) fail('IMPORT_ORIGIN_CONFLICT', '此导入的原始调用绑定不完整，请重新发起导入。')
+      if (attachmentOrigin && !job.agentRunId) {
+        const bound = await tx.novelImportJob.updateMany({ where: { id: jobId, userId: scope.userId, novelId: scope.novelId,
+          status: 'uploading', leaseEpoch: claim.leaseEpoch, leaseOwner: claim.leaseOwner, agentRunId: null, agentToolCallId: null },
+          // Legacy handoff records only the verified source run. Leaving the
+          // call id null keeps this upload outside the durable write exemption.
+          data: { agentRunId: attachmentOrigin.runId, jobVersion: { increment: 1 } } })
+        if (bound.count !== 1) fail('IMPORT_ORIGIN_CONFLICT', '导入任务已变化，请刷新后重试。')
+      }
       await tx.novelImportSource.create({ data: { id: randomUUID(), jobId, filename, ...saved } })
       await tx.novelImportJob.update({ where: { id: jobId }, data: { status: 'uploaded', leaseOwner: null, leaseUntil: null, jobVersion: { increment: 1 } } })
     })
@@ -246,14 +329,11 @@ export async function attachNovelImportSource(human: NovelImportHuman, jobId: st
   if (!run) fail('IMPORT_ATTACHMENT_SCOPE', '附件不属于此作品任务。', 403)
   const session = await prisma.agentSession.findFirst({ where: { id: run.sessionId, userId: human.userId, novelId: human.novelId }, select: { id: true } })
   if (!session) fail('IMPORT_ATTACHMENT_SCOPE', '附件会话归属无效。', 403)
-  const original = await prisma.agentMessage.findFirst({ where: { runId: run.id, sessionId: session.id, role: 'user' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { parts: true } })
-  const partSchema = z.object({ type: z.literal('attachment'), kind: z.literal('file'), name: z.string().min(1).max(255), url: z.string().max(1024) })
-  const attachment = (Array.isArray(original?.parts) ? original.parts : []).map(part => partSchema.safeParse(part)).find(part => part.success && part.data.url === input.url)
-  if (!attachment?.success) fail('IMPORT_ATTACHMENT_SCOPE', '本次原始用户消息中没有此文件，请重新上传。', 403)
+  const attachment = await assertNovelImportAttachment(prisma, { ...human, sessionId: session.id }, run.id, input.url)
   await assertManagedAttachmentAccess(input.url, human.userId)
   signal?.throwIfAborted()
   const bytes = await readAuthorizedAgentAttachment(input.url, human.userId)
-  return uploadNovelImportSource(human, jobId, attachment.data.name, (async function* () { yield bytes })(), signal)
+  return uploadNovelImportSource(human, jobId, attachment.name, (async function* () { yield bytes })(), signal, { runId: run.id })
 }
 
 const parsedVolumeSchema = novelImportVolumeSchema.extend({ chapters: z.array(novelImportVolumeSchema.shape.chapters.element.extend({ content: z.string().max(NOVEL_IMPORT_LIMITS.characters) })).max(NOVEL_IMPORT_LIMITS.chapters) })

@@ -9,13 +9,14 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from 'react'
-import { ArrowUp, BookOpenText, Check, ChevronDown, ChevronRight, Feather, FileText, Image, LoaderCircle, Mic, Pencil, Play, Plus, Rocket, Scale, Settings2, Square, Wrench, X } from 'lucide-react'
+import { ArrowUp, BookOpenText, Check, ChevronDown, ChevronRight, Feather, FileText, Image, LoaderCircle, Mic, Pencil, Play, Plus, Rocket, Scale, Settings2, Square, Target, Wrench, X } from 'lucide-react'
 import { ReasoningSlider } from './ReasoningSlider'
 import StyleLearningDialog from '../../components/StyleLearningDialog'
 import { SubagentPicker } from './SubagentPicker'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast-context'
 import { AgentMobileModelSheet } from './AgentMobileModelSheet'
+import { GoalModeChip } from './GoalModeChip'
 
 import {
   AGENT_FILE_ACCEPT,
@@ -47,6 +48,7 @@ import {
   parseComposerReferenceTransfer,
   referenceKindLabel,
 } from '../composer-content'
+import { parseGoalCommand } from '../goal-command'
 
 /**
  * Agent 输入区：
@@ -92,6 +94,14 @@ type AgentComposerProps = {
   skills?: AgentSkillListItem[]
   /** 打开技能区：作者在菜单里发现要新建/导入/启用技能时直达。 */
   onOpenSkillManager?: () => void
+  /** Server capability for creating a new persistent goal. Existing goals remain controllable when false. */
+  goalCreationEnabled?: boolean
+  goalActive?: boolean
+  goalBusy?: boolean
+  onGoalOpen?: () => void
+  onGoalCancel?: () => void
+  onGoalSubmit?: (objective: string, attachments: AgentAttachmentMeta[], creativeFreedom: CreativeFreedom, qualityMode: StoryCompilerMode, pinnedSkillIds: string[], pinnedSubagentId?: string) => Promise<void> | void
+  onGoalCommand?: (action: 'edit' | 'pause' | 'resume' | 'clear') => Promise<void> | void
 }
 
 type ParsedComposerContent = {
@@ -261,6 +271,13 @@ export function AgentComposer({
   referenceOptions,
   skills = [],
   onOpenSkillManager,
+  goalCreationEnabled = false,
+  goalActive = false,
+  goalBusy = false,
+  onGoalOpen,
+  onGoalCancel,
+  onGoalSubmit,
+  onGoalCommand,
 }: AgentComposerProps) {
   useLayoutEffect(() => { activateComposerDraft(voiceScopeKey) }, [voiceScopeKey])
   // 草稿与附件存在全局 store：面板在沉浸/普通视图间重挂载时不丢失未发送内容
@@ -277,8 +294,11 @@ export function AgentComposer({
   // 手动指定的技能同样提升到全局：面板重挂载后选中态不丢
   const pinnedSkillIds = useAgentStore((state) => state.composerSkillIds)
   const pinnedSubagent = useAgentStore((state) => state.composerSubagent)
+  const goalMode = useAgentStore((state) => state.goalMode)
+  const setGoalMode = useAgentStore((state) => state.setGoalMode)
   const toggleComposerSkill = useAgentStore((state) => state.toggleComposerSkill)
   const setComposerSkillIds = useAgentStore((state) => state.setComposerSkillIds)
+  const canUseGoalEntry = goalCreationEnabled || goalActive
   // 启动中（建会话 + 启动 run 的网络往返）：成功后才清空草稿，避免内容“瞬间消失”观感
   const [sending, setSending] = useState(false)
   const [dragActive, setDragActive] = useState(false)
@@ -423,10 +443,18 @@ export function AgentComposer({
     selection?.addRange(range)
   }, [prompt, references, voiceActive])
 
-  const syncComposerFromDom = (): ParsedComposerContent => {
+  const syncComposerFromDom = (composing = false): ParsedComposerContent => {
     const editor = editorRef.current
     if (!editor) return { draft: prompt, references }
     const next = readComposerContent(editor, references)
+    if (!goalMode && canUseGoalEntry) {
+      const command = parseGoalCommand(next.draft, composing)
+      if (command.kind === 'enable') {
+        setGoalMode(true)
+        setComposerContent(command.body, next.references)
+        return { draft: command.body, references: next.references }
+      }
+    }
     setComposerContent(next.draft, next.references)
     return next
   }
@@ -584,7 +612,31 @@ export function AgentComposer({
     sendLock.current = true
     setSending(true)
     try {
-      if (pinnedSubagent) await onSend(effectivePrompt, pending, creativeFreedom, qualityMode, pinned, pinnedSubagent.id)
+      const parsedCommand = parseGoalCommand(current.draft)
+      // A capability failure must not turn a leading /goal into a persistent
+      // goal request. Existing goal controls remain available through their
+      // explicit commands while the creation entry is closed.
+      const command = !canUseGoalEntry && parsedCommand.kind === 'enable'
+        ? { kind: 'ordinary' as const }
+        : parsedCommand
+      if (command.kind === 'invalid') {
+        setAttachError(command.message)
+        return
+      }
+      if (command.kind === 'control') {
+        await onGoalCommand?.(command.action)
+        if (command.action === 'clear') setGoalMode(false)
+      } else if (canUseGoalEntry && (goalMode || command.kind === 'enable') && onGoalSubmit) {
+        const objective = command.kind === 'enable' ? command.body.trim() : effectivePrompt.trim()
+        if (!objective) {
+          onGoalOpen?.()
+          setGoalMode(true)
+          return
+        }
+        if (pinnedSubagent) await onGoalSubmit(objective, pending, creativeFreedom, qualityMode, pinned, pinnedSubagent.id)
+        else await onGoalSubmit(objective, pending, creativeFreedom, qualityMode, pinned)
+        setGoalMode(false)
+      } else if (pinnedSubagent) await onSend(effectivePrompt, pending, creativeFreedom, qualityMode, pinned, pinnedSubagent.id)
       else await onSend(effectivePrompt, pending, creativeFreedom, qualityMode, pinned)
       if (sendingScope) updateComposerDraft(sendingScope, draft => draft.composerDraft === current.draft ? { ...draft, composerDraft: '', composerReferences: [], composerAttachments: [], composerSkillIds: [], composerSubagent: draft.composerSubagent?.id === pinnedSubagent?.id ? null : draft.composerSubagent } : draft)
       if (currentScope.current !== sendingScope) return
@@ -740,7 +792,7 @@ export function AgentComposer({
           aria-multiline="true"
           contentEditable={!disabled && !voiceActive && !sending}
           suppressContentEditableWarning
-          onInput={syncComposerFromDom}
+          onInput={(event) => syncComposerFromDom((event.nativeEvent as InputEvent).isComposing)}
           onClick={handleEditorClick}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
@@ -805,6 +857,15 @@ export function AgentComposer({
                 <span><span className="block font-medium">上传文件</span><span className="mt-0.5 block text-[10px] text-[var(--text-tertiary)]">PDF、DOCX、TXT、Markdown</span></span>
               </button>
               <button type="button" onClick={() => { attachmentMenuRef.current?.removeAttribute('open'); setStyleLearningOpen(true) }} className="flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left text-xs text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"><BookOpenText className="h-4 w-4 text-[var(--text-tertiary)]" /><span><span className="block font-medium">样章学习与写作风格</span><span className="mt-0.5 block text-[10px] text-[var(--text-tertiary)]">查看文件、学习依据和自动使用的规则</span></span></button>
+              {canUseGoalEntry ? <button
+                type="button"
+                disabled={disabled || sending}
+                onClick={() => { attachmentMenuRef.current?.removeAttribute('open'); onGoalOpen?.() }}
+                className="flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-40"
+              >
+                <Target className="h-4 w-4 text-[var(--text-tertiary)]" />
+                <span className="block font-medium">目标</span>
+              </button> : null}
               <div className="mx-3 my-1 border-t border-[var(--border-subtle)]" />
               <button
                 type="button"
@@ -947,6 +1008,10 @@ export function AgentComposer({
               ))}
             </div>
           </details>
+          {canUseGoalEntry ? <GoalModeChip active={goalActive} draft={goalMode} busy={goalBusy || sending || disabled} onOpen={() => onGoalOpen?.()} onCancel={() => {
+            if (goalActive) onGoalCancel?.()
+            else setGoalMode(false)
+          }} /> : null}
           <details ref={modelMenuRef} className="group/model relative z-[120] ml-auto min-w-0" data-disabled={disabled || undefined} onToggle={(event) => { if (!(event.currentTarget as HTMLDetailsElement).open) { setMobileModelsOpen(false); setEditingReasoningTier(null) } }}>
             <summary
               onClick={(event) => {

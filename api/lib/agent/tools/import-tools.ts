@@ -1,9 +1,8 @@
 import { z } from 'zod'
 import { DataAccessError, prisma } from '../../prisma.js'
-import { isManagedAttachmentOwnedBy, resolveManagedAttachmentPath } from '../../agent-attachment-storage.js'
 import { defineTool } from './types.js'
 import type { ToolContext } from './types.js'
-import { getNovelImportStatus } from '../../novel-import-service.js'
+import { assertNovelImportAttachment, getNovelImportStatus } from '../../novel-import-service.js'
 
 export const novelImportArguments = z.discriminatedUnion('action', [
   z.object({ action: z.literal('prepare'), attachmentUrl: z.string().min(1).max(1024) }).strict(),
@@ -41,6 +40,7 @@ export const novelImportTool = defineTool({
       // callId: this is an ordinary human import, never a durable write exemption.
       const url = `/studio/novel/${encodeURIComponent(ctx.novelId)}?${new URLSearchParams({ importRunId: ctx.runId, importAttachmentUrl: args.attachmentUrl })}`
       const markdown = `[选择内容并导入](${url})`
+      await (await import('../goal-runtime.js')).setGoalRunPhase(ctx.userId, ctx.runId, 'awaiting_input', 'GOAL_IMPORT_AWAITING_AUTHOR')
       return { output: `已准备本次上传文件的导入入口，作者可直接选择内容并确认。尚未写入作品；不要手工重写文件内容、反复轮询或声称导入完成。\n${markdown}`, summary: '导入文件已准备，等待选择内容', display: { kind: 'markdown', markdown } }
     }
     // Legacy callers cannot consume human approval as a durable write exemption.
@@ -52,25 +52,7 @@ export async function assertOriginalImportAttachment(ctx: ToolContext, attachmen
     const db = ctx.transaction ?? prisma
     const run = await db.agentRun.findFirst({ where: { id: ctx.runId, userId: ctx.userId, novelId: ctx.novelId, sessionId: ctx.sessionId }, select: { id: true } })
     if (!run) throw new DataAccessError(403, 'IMPORT_ATTACHMENT_SCOPE', '文件必须来自当前作品任务的用户上传。')
-    const original = await db.agentMessage.findFirst({ where: { runId: run.id, sessionId: ctx.sessionId, role: 'user' },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { parts: true } })
-    const attachmentSchema = z.object({ type: z.literal('attachment'), kind: z.literal('file'),
-      name: z.string().min(1).max(255), url: z.string().min(1).max(1024) })
-    const attachment = (Array.isArray(original?.parts) ? original.parts : [])
-      .map(part => attachmentSchema.safeParse(part)).find(result => result.success && result.data.url === attachmentUrl)
-    if (!attachment?.success || !resolveManagedAttachmentPath(attachmentUrl)) {
-      throw new DataAccessError(403, 'IMPORT_ATTACHMENT_SCOPE', '未在本次原始用户消息中找到该文件，请重新上传后发起导入。')
-    }
-    if (!isManagedAttachmentOwnedBy(attachmentUrl, ctx.userId)) {
-      if (attachmentUrl.slice('/api/uploads/agent-attachments/'.length).includes('/')) {
-        throw new DataAccessError(403, 'IMPORT_ATTACHMENT_SCOPE', '附件不属于当前用户，请重新上传。')
-      }
-      const grant = await db.legacyAgentAttachmentGrant.findUnique({ where: { url: attachmentUrl },
-        select: { ownerUserId: true, revokedAt: true } })
-      if (!grant || grant.ownerUserId !== ctx.userId || grant.revokedAt) {
-        throw new DataAccessError(403, 'IMPORT_ATTACHMENT_SCOPE', '附件归属尚未核验，请重新上传。')
-      }
-    }
+    const attachment = await assertNovelImportAttachment(db, { userId: ctx.userId, novelId: ctx.novelId, sessionId: ctx.sessionId }, run.id, attachmentUrl)
     ctx.signal.throwIfAborted()
-    return attachment.data
+    return attachment
 }

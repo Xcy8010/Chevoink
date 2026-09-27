@@ -9,6 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../../api/lib/prisma.js', () => ({
   prisma: {
     agentRun: { findFirst: vi.fn(async () => null) },
+    // Context assembly covers ordinary runs; no persisted goal execution is
+    // attached to this fixture.
+    agentGoalExecution: { findUnique: vi.fn(async () => null) },
     novel: { findUnique: vi.fn(), findFirst: vi.fn() },
     projectMemoryEntry: { findMany: vi.fn() },
     agentMessage: { findMany: vi.fn() },

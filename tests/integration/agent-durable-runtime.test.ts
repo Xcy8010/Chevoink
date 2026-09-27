@@ -60,6 +60,7 @@ import { prepareStoryCompilation, saveSceneTasks, recordStoryCompilerWrite, vali
 import { storyCompilerPrepareTool, sceneTaskBuildTool, chapterBridgeGetTool, continuityValidateTool, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import * as aiService from '../../api/lib/ai-service.js'
 import { executeDurableCompiler } from '../../api/lib/agent/tools/durable-compiler.js'
+import { callDurableAuxiliary, auxiliaryRouteForRuntime, resolveDurableAuxiliaryRuntime } from '../../api/lib/agent/runtime-auxiliary-call.js'
 import { applyContinuityPatches } from '../../api/lib/agent/tools/durable-continuity.js'
 import { persistHumanityQualityReport, applyQualityRepair, getQualityReport, buildHumanityQualityContext } from '../../api/lib/agent/humanity-quality.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
@@ -2007,6 +2008,53 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
   })
 })
 
+describe.runIf(available)('auxiliary model route inheritance (isolated PG)', () => {
+  it.each(['free', 'byok'] as const)('free and BYOK auxiliary calls preserve the admitted %s runtime', async kind => {
+    await fixture(async f => {
+      const lease = await claim(f)
+      const tool = continuityValidateTool
+      const isByok = kind === 'byok'
+      const runtime = {
+        tier: isByok ? 'custom' as const : 'speed' as const,
+        multiplierBps: 0,
+        provider: isByok ? 'fixture-byok' : 'fixture-free',
+        modelName: isByok ? 'fixture-byok-model' : 'fixture-free-model',
+        baseUrl: isByok ? 'https://byok.invalid/v1' : 'https://free.invalid/v1',
+        apiKey: 'fixture-key', reasoningEffort: 'low' as const, reasoningEfforts: ['low' as const],
+        visionEnabled: false, contextWindowTokens: 64_000,
+      }
+      const selection = { tier: runtime.tier, customModelId: isByok ? 'fixture-byok-config' : null, reasoningEffort: 'low' as const }
+      const configuration = { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: runtime.tier, provider: runtime.provider, modelName: runtime.modelName, customModelId: selection.customModelId, reasoningEffort: 'low', routeRevision: 'a'.repeat(64) },
+        tools: [{ type: 'function' as const, function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } }],
+        toolAuthority: [{ name: tool.name, permission: 'allow' as const, alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] }
+      const initial = await initializeExecutionState(lease, { configuration, snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0,
+        phase: 'idle', pendingOperationId: null, messages: [{ role: 'user' as const, content: '检查本章' },
+          { role: 'assistant' as const, content: null, toolCalls: [{ id: 'critic-call', name: tool.name, arguments: '{}' }] }], successfulToolSignatures: [] } })
+      const parent = await prepareToolCursorOperation(lease, { expectedRevision: 0, expectedHash: initial.frame.snapshotHash }, {
+        key: 'exec:0', action: tool.name, callId: 'critic-call', targetId: f.chapterId, effectDomain: 'chapter',
+        operationInput: { callId: 'critic-call', args: {} }, effectiveArgs: {}, normalize: parsed => tool.parameters.parse(parsed),
+      })
+      const resolved = await resolveDurableAuxiliaryRuntime({ userId: f.userId, modelRuntime: runtime, modelSelection: selection })
+      const route = auxiliaryRouteForRuntime(resolved.runtime, resolved.selection, 1024)
+      const price: DurableTokenPrice = { version: 'credits-v1-exact', modelTier: runtime.tier, multiplierBps: 0 }
+      const fetchMock = vi.fn(async () => new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 1 } })}\n\ndata: [DONE]\n\n`))
+      vi.stubGlobal('fetch', fetchMock)
+      const runtimeSpy = vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(runtime)
+      const result = await callDurableAuxiliary({ lease, parentOperationId: parent.operation.id, step: 'continuity_critic', route, price,
+        system: 'fixture system', content: 'fixture content', temperature: 0.15, signal: new AbortController().signal, assertCurrent: async () => {} })
+      expect(result).toMatchObject({ content: '{"findings":[]}', billing: { status: 'settled', chargedMilli: 0 } })
+      expect(runtimeSpy).toHaveBeenCalledWith(runtime.tier, f.userId, selection.customModelId, 'low')
+      expect(fetchMock).toHaveBeenCalledOnce()
+      const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { parentOperationId: parent.operation.id } } })
+      expect(attempt).toMatchObject({ provider: runtime.provider, model: runtime.modelName, status: 'succeeded' })
+      expect(JSON.stringify(attempt.requestSnapshot)).not.toContain('fixture-key')
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(1)
+      expect(await prisma.creditLedgerEntry.findFirstOrThrow({ where: { userId: f.userId } })).toMatchObject({ deltaMilli: 0, multiplierBps: 0 })
+    })
+  }, 30_000)
+})
+
 describe.runIf(available)('continuity validation and atomic commit', () => {
   it('fuses safe repairs into one critic request, still requires full revised-text verification, and reuses that result', async () => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
@@ -2598,8 +2646,11 @@ describe.runIf(available)('durable worker orchestration', () => {
     try { await fixture(async f => {
       let lease = await claim(f)
       const continues = scenario.startsWith('continuation-')
-      const completes = ['complete', 'prepare-gap', 'attempt-gap', 'checkpoint', 'checkpoint-gap', 'checkpoint-noop'].includes(scenario) || continues && scenario !== 'continuation-stagnant'
-      const expectedRequests = continues ? scenario === 'continuation-stagnant' ? 6 : 3 : completes ? 2 : scenario === 'approval' || scenario === 'unknown' || scenario === 'checkpoint-no-progress' ? 1 : 0
+      // A prepare gap is safe to recreate; once dispatch marking itself has
+      // failed, the attempt is closed as unsent and the run remains blocked
+      // until an explicit reconciliation, so it cannot be treated as done.
+      const completes = ['complete', 'prepare-gap', 'v1-price', 'checkpoint', 'checkpoint-gap', 'checkpoint-noop'].includes(scenario) || continues && scenario !== 'continuation-stagnant'
+      const expectedRequests = scenario === 'attempt-gap' ? 0 : continues ? scenario === 'continuation-stagnant' ? 6 : 3 : completes ? 2 : scenario === 'approval' || scenario === 'unknown' || scenario === 'checkpoint-no-progress' ? 1 : 0
       const writes = scenario === 'checkpoint' || scenario === 'checkpoint-gap' || scenario === 'checkpoint-noop'
       const tools = writes ? [chapterReadTool, chapterWriteTool] : [chapterReadTool]
       const window = getCreditWindow()
@@ -2659,7 +2710,13 @@ describe.runIf(available)('durable worker orchestration', () => {
       if (scenario === 'prepare-gap' || scenario === 'attempt-gap') {
         await expect(run).rejects.toThrow('fixture before')
         expect(fetch).not.toHaveBeenCalled()
-        expect((await loadExecutionState(f.userId, f.runId)).frame.state.phase).toBe('awaiting_operation')
+        const pending = await loadExecutionState(f.userId, f.runId)
+        expect(pending.frame.state.phase).toBe('awaiting_operation')
+        if (scenario === 'attempt-gap') {
+          const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operationId: pending.frame.state.pendingOperationId! } })
+          expect(attempt).toMatchObject({ status: 'cancelled', dispatchedAt: null, result: { outcome: 'cancelled', result: { dispatched: false } } })
+          expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: pending.frame.state.pendingOperationId! } })).toMatchObject({ status: 'cancelled' })
+        }
         await pauseDurableTask(f.userId, f.runId)
         const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { runId: f.runId, type: 'run.paused' } })
         const resumed = await resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id })
@@ -2668,7 +2725,8 @@ describe.runIf(available)('durable worker orchestration', () => {
       }
       if (scenario === 'unknown') await expect(run).rejects.toThrow()
       else if (scenario === 'checkpoint-no-progress') await expect(run).rejects.toMatchObject({ code: 'RUNTIME_PROGRESS_REQUIRED' })
-      else if (scenario === 'route-change' || scenario === 'v1-price') await expect(run).rejects.toMatchObject({ code: scenario === 'route-change' ? 'RUNTIME_IDENTITY_CONFLICT' : 'RUNTIME_PRICE_REQUIRED' })
+      else if (scenario === 'route-change') await expect(run).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+      else if (scenario === 'attempt-gap') await expect(run).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
       else expect(await run).toMatchObject({ kind: scenario === 'approval' ? 'waiting_approval' : scenario === 'continuation-stagnant' ? 'needs_attention' : 'completion_review' })
       expect(fetch).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(scenario === 'unknown' ? 0 : expectedRequests)
@@ -3279,14 +3337,15 @@ describe.runIf(available)('model tool model durable execution chain', () => {
 })
 
 describe.runIf(available)('actual model adapter execution cursor', () => {
-  it.each(['normal', 'v2-price', 'concurrent', 'prepare-state-gap', 'result-state-gap', 'unknown', 'context', 'route', 'tool-list', 'pending-tools', 'mutated-input', 'stop-resume'] as const)('%s', async scenario => {
+  it.each(['normal', 'v2-price', 'byok-v1', 'concurrent', 'prepare-state-gap', 'result-state-gap', 'unknown', 'context', 'route', 'tool-list', 'pending-tools', 'mutated-input', 'stop-resume'] as const)('%s', async scenario => {
     await fixture(async f => {
       const window = getCreditWindow()
       await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 1, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
       let lease = await claim(f)
-      const route = { provider: 'fixture', model: 'fixture', endpoint: 'https://provider.invalid/v1/chat/completions', reasoningEffort: 'high' }
+      const byok = scenario === 'byok-v1'
+      const route = { provider: byok ? 'fixture-byok' : 'fixture', model: byok ? 'fixture-byok' : 'fixture', endpoint: 'https://provider.invalid/v1/chat/completions', reasoningEffort: 'high' }
       const configuration = { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
-        model: { tier: 'speed', provider: route.provider, modelName: route.model, customModelId: null, reasoningEffort: route.reasoningEffort, routeRevision: modelRouteRevision(route) },
+        model: { tier: byok ? 'custom' : 'speed', provider: route.provider, modelName: route.model, customModelId: byok ? 'fixture-byok-model' : null, reasoningEffort: route.reasoningEffort, routeRevision: modelRouteRevision(route) },
         tools: [], toolAuthority: [], protectedChapterIds: [], pinnedSkillVersions: [] }
       const messages: import('../../api/lib/ai-service.js').ChatMessage[] = [{ role: 'user', content: '修改本章' }]
       if (scenario === 'pending-tools') messages.push({ role: 'assistant', content: null, toolCalls: [{ id: 'unanswered', name: 'chapter_read', arguments: '{}' }] })
@@ -3296,7 +3355,7 @@ describe.runIf(available)('actual model adapter execution cursor', () => {
         reasoningEffort: 'high' as const, providerApiKey: 'fixture-not-real', providerBaseUrl: 'https://provider.invalid/v1',
         durableExecution: { lease, operationKey: 'exec:0', attemptKey: '1', cursor: { expectedRevision: 0, expectedHash: initial.frame.snapshotHash },
           ...(scenario === 'v2-price' ? { price: { version: 'credits-v2-itemized' as const, modelTier: 'speed' as const, multiplierBps: 10000, rateCardId: 'fixture-model-v2', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } } } : {}) },
-        usageLog: { userId: f.userId, agentRunId: f.runId, action: 'fixture' } }
+        usageLog: { userId: f.userId, agentRunId: f.runId, action: 'fixture', modelTier: byok ? 'custom' as const : 'speed' as const } }
       if (scenario === 'context') request.messages = [{ role: 'user', content: '错误地恢复其他章节' }]
       if (scenario === 'route') request.providerBaseUrl = 'https://changed-provider.invalid/v1'
       if (scenario === 'tool-list') request.tools = [{ type: 'function', function: { name: 'unexpected', description: '', parameters: {} } }]
@@ -3354,9 +3413,9 @@ describe.runIf(available)('actual model adapter execution cursor', () => {
           request.durableExecution.lease = lease
           request.usageLog.agentRunId = lease.runId
         }
-      } else expect(await running).toMatchObject({ content: '完整结果', billing: { status: 'settled', chargedMilli: 1, exhausted: true } })
+      } else expect(await running).toMatchObject({ content: '完整结果', billing: { status: 'settled', chargedMilli: byok ? 0 : 1, exhausted: byok ? false : true } })
       request.messages = [{ role: 'user', content: '修改本章' }]
-      expect(await chatWithTools(request)).toMatchObject({ content: '完整结果', billing: { chargedMilli: 1 } })
+      expect(await chatWithTools(request)).toMatchObject({ content: '完整结果', billing: { chargedMilli: byok ? 0 : 1 } })
       expect(fetchMock).toHaveBeenCalledOnce()
       const restored = await loadExecutionState(f.userId, lease.runId)
       expect(restored.frame.revision).toBe(2)

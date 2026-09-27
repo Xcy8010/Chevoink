@@ -2,6 +2,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { useRunControls } from '../../src/features/studio/agent/components/use-run-controls'
+import type { ContinueAgentLoopRunModel } from '../../src/features/studio/agent/agentApi'
 
 const mocks = vi.hoisted(() => ({ resume: vi.fn(), stop: vi.fn(), approval: vi.fn(), question: vi.fn(), begin: vi.fn(), restore: vi.fn() }))
 vi.mock('../../src/features/studio/agent/agentApi', () => ({
@@ -14,11 +15,11 @@ vi.mock('../../src/features/studio/agent/agentStore', () => ({
 }))
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 
-function fixture() {
+function fixture(selectedModelRef?: { current: ContinueAgentLoopRunModel | null }) {
   const connect = vi.fn(), setActionError = vi.fn()
   const hook = renderHook(({ sessionId, runId }) => useRunControls({
     sessionId, runId, resumeableRunId: null, phase: 'running',
-    pendingApproval: null, pendingQuestion: null, connect, setActionError,
+    pendingApproval: null, pendingQuestion: null, connect, setActionError, selectedModelRef,
   }), { initialProps: { sessionId: 'a', runId: 'run' } })
   return { ...hook, connect, setActionError }
 }
@@ -32,8 +33,18 @@ it('deduplicates concurrent resume clicks and connects once', async () => {
   expect(mocks.resume).toHaveBeenCalledTimes(1)
   await act(async () => { finish({ runId: 'resumed' }); await Promise.all([first, second]) })
   expect(connect).toHaveBeenCalledExactlyOnceWith('resumed')
-  expect(mocks.restore).toHaveBeenCalledExactlyOnceWith('resumed', 'a')
+  expect(mocks.restore).toHaveBeenCalledExactlyOnceWith('resumed', 'a', undefined)
   expect(mocks.begin).not.toHaveBeenCalled()
+})
+
+it('passes the current free or BYOK model selection when continuing a run', async () => {
+  mocks.resume.mockResolvedValue({ runId: 'resumed' })
+  const selectedModelRef = { current: { modelTier: 'custom' as const, customModelId: 'byok-1', reasoningEffort: 'xhigh' as const } }
+  const { result } = fixture(selectedModelRef)
+
+  await act(async () => { await result.current.handleContinue() })
+
+  expect(mocks.resume).toHaveBeenCalledExactlyOnceWith('run', selectedModelRef.current)
 })
 
 it('does not hydrate an old resume into another window', async () => {

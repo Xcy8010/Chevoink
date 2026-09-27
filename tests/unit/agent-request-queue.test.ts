@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   transaction: vi.fn(), query: vi.fn(),
-  owned: vi.fn(), find: vi.fn(), unique: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn(), many: vi.fn(), latest: vi.fn(), start: vi.fn(), active: vi.fn(), activeId: vi.fn(), stop: vi.fn(), fork: vi.fn(),
+  owned: vi.fn(), find: vi.fn(), unique: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn(), many: vi.fn(), latest: vi.fn(), goal: vi.fn(), start: vi.fn(), active: vi.fn(), activeId: vi.fn(), stop: vi.fn(), fork: vi.fn(),
 }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } },
-  prisma: { $transaction: mocks.transaction, user: { findUnique: async () => ({ bannedAt: null }) }, agentSession: { findFirst: mocks.owned }, agentRun: { findFirst: mocks.latest }, agentQueuedRequest: { findFirst: mocks.find, findUnique: mocks.unique, count: mocks.count, create: mocks.create, updateMany: mocks.update, findMany: mocks.many } },
+  prisma: { $transaction: mocks.transaction, user: { findUnique: async () => ({ bannedAt: null }) }, agentSession: { findFirst: mocks.owned }, agentRun: { findFirst: mocks.latest }, agentGoal: { findFirst: mocks.goal }, agentQueuedRequest: { findFirst: mocks.find, findUnique: mocks.unique, count: mocks.count, create: mocks.create, updateMany: mocks.update, findMany: mocks.many } },
 }))
 vi.mock('../../api/lib/agent/run-service.js', () => ({ startLoopRunLocked: mocks.start, forkAgentSessionData: mocks.fork, toAgentSession: (s: unknown) => s }))
 vi.mock('../../api/lib/agent/active-runs.js', () => ({ hasActiveRunInSession: mocks.active, getActiveRunIdBySession: mocks.activeId, stopAgentRun: mocks.stop }))
@@ -24,6 +24,8 @@ beforeEach(() => {
   mocks.find.mockResolvedValue(item)
   mocks.many.mockResolvedValue([item])
   mocks.latest.mockResolvedValue({ id: 'r', status: 'completed' })
+  // Ordinary queue fixture: no active AgentGoal owns this session.
+  mocks.goal.mockResolvedValue(null)
   mocks.count.mockResolvedValue(0)
   mocks.update.mockResolvedValue({ count: 1 })
   mocks.start.mockResolvedValue({ runId: 'next' })

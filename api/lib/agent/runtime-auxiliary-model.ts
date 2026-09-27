@@ -67,7 +67,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
 }) {
   const lease = { ...token }, captured = { ...input, request: runtimeJson(input.request).value, price: { ...input.price } }
   if (!stepSchema.safeParse(captured.step).success || captured.key !== `aux:${captured.parentOperationId}:${captured.step}`
-    || captured.action !== captured.step || captured.price.version !== 'credits-v2-itemized') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '独立模型必须使用原工具的固定步骤身份和V2价目。')
+    || captured.action !== captured.step) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '独立模型必须使用原工具的固定步骤身份和冻结价目。')
   if (!isolatedRequest.safeParse(captured.request).success) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '独立复核只能接收隔离的文本输入，不携带主对话工具历史或执行工具权限。')
   return withRunLease(lease, async tx => {
     const state = await readExecutionStateInTransaction(tx, lease.taskRootId)

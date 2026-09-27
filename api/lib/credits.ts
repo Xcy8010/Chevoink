@@ -737,6 +737,11 @@ function assertChargeReplay(existing: Prisma.CreditLedgerEntryGetPayload<Record<
 
 /** Caller owns the Serializable transaction and retries the whole unit, never just this debit. */
 export async function consumeCreditsInTransaction(tx: Prisma.TransactionClient, input: ConsumeCreditInput): Promise<CreditChargeResult> {
+  const { admitGoalFixedCharge, recordGoalFixedCharge } = await import('./agent/goal-fixed-billing.js')
+  const goalBinding = await admitGoalFixedCharge(tx, input.userId, input.sourceType)
+  if (goalBinding) input = { ...input, metadata: {
+    ...(input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata) ? input.metadata : {}), goalBinding,
+  } }
   const request = validateBillingInput(() => prepareCreditRequest(input))
   // Async transactions and retries must use exactly the input that was fingerprinted.
   input = request.snapshot
@@ -745,6 +750,7 @@ export async function consumeCreditsInTransaction(tx: Prisma.TransactionClient, 
   const existing = await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: input.idempotencyKey } })
   if (existing) {
     assertChargeReplay(existing, input, request.fingerprint)
+    await recordGoalFixedCharge(tx, existing, goalBinding)
     const { account } = await ensureAccountWithDb(tx, input.userId)
     return {
       chargedMilli: Math.max(0, -existing.deltaMilli),
@@ -776,7 +782,7 @@ export async function consumeCreditsInTransaction(tx: Prisma.TransactionClient, 
       bonusBalanceMilli: { decrement: bonusCharge },
     },
   })
-  await tx.creditLedgerEntry.create({
+  const ledgerEntry = await tx.creditLedgerEntry.create({
     data: {
       id: randomUUID(),
       userId: input.userId,
@@ -794,6 +800,7 @@ export async function consumeCreditsInTransaction(tx: Prisma.TransactionClient, 
       metadata: request.metadata,
     },
   })
+  await recordGoalFixedCharge(tx, ledgerEntry, goalBinding)
   return {
     chargedMilli: actualCharge,
     remainingMilli: Math.max(0, updated.dailyAllowanceMilli - updated.dailyUsedMilli) + updated.bonusBalanceMilli,
@@ -933,6 +940,8 @@ export async function refundCreditCharge(userId: string, originalIdempotencyKey:
         if (original && original.userId !== userId) {
           throw new DataAccessError(409, 'CREDIT_IDEMPOTENCY_CONFLICT', '退款请求身份不一致，需要核对原记录。')
         }
+        const { lockGoalFixedRefund, recordGoalFixedRefund } = await import('./agent/goal-fixed-billing.js')
+        const goalRefund = await lockGoalFixedRefund(tx, original)
         if (existingRefund) {
           const metadata = existingRefund.metadata
           if (existingRefund.userId !== userId || existingRefund.kind !== 'refund' || !original
@@ -941,6 +950,7 @@ export async function refundCreditCharge(userId: string, originalIdempotencyKey:
             throw new DataAccessError(409, 'CREDIT_IDEMPOTENCY_CONFLICT', '退款请求身份不一致，需要核对原记录。')
           }
           await tx.creditRefundIntent.updateMany({ where: { originalEntryId: original.id, settledAt: null }, data: { settledAt: new Date() } })
+          await recordGoalFixedRefund(tx, goalRefund)
           return
         }
         if (!original || original.deltaMilli >= 0) return
@@ -975,6 +985,7 @@ export async function refundCreditCharge(userId: string, originalIdempotencyKey:
           },
         })
         await tx.creditRefundIntent.updateMany({ where: { originalEntryId: original.id, settledAt: null }, data: { settledAt: new Date() } })
+        await recordGoalFixedRefund(tx, goalRefund)
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
       return
     } catch (error) {

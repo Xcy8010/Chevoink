@@ -60,6 +60,16 @@ export const AGENT_TOOL_GOVERNANCE = {
     risk: 'medium',
     postconditions: ['session_owner_verified', 'target_idle_verified', 'self_send_rejected'],
   },
+  goal_read: {
+    category: 'read',
+    risk: 'low',
+    postconditions: ['goal_execution_scope_verified', 'current_revision_domain_facts_only', 'model_completion_authority_denied'],
+  },
+  goal_report: {
+    category: 'workflow',
+    risk: 'medium',
+    postconditions: ['goal_execution_scope_verified', 'domain_evidence_rechecked', 'unknown_scope_waits_for_author', 'model_cannot_finalize_goal'],
+  },
   story_charter_get: { category: 'read', risk: 'low', postconditions: ['novel_scope_verified', 'active_promises_only'] },
   chapter_bridge_get: { category: 'read', risk: 'low', postconditions: ['novel_scope_verified', 'bridge_revision_reported'] },
   quality_report_get: { category: 'read', risk: 'low', postconditions: ['novel_scope_verified', 'chapter_revision_reported'] },

@@ -33,6 +33,13 @@ describe('zero-rate built-in tiers are permanently free', () => {
     expect(mocks.active).not.toHaveBeenCalled()
     expect(mocks.migrated).not.toHaveBeenCalled()
   })
+  it('uses an exact-zero V1 price for owner-authenticated BYOK without consulting platform cards', async () => {
+    mocks.active.mockResolvedValue(legacyStandardCard)
+    mocks.migrated.mockResolvedValue({ id: 'rate-card-event' })
+    await expect(resolveTokenPrice('custom', 99999)).resolves.toEqual({ version: 'credits-v1-exact', modelTier: 'custom', multiplierBps: 0 })
+    expect(mocks.active).not.toHaveBeenCalled()
+    expect(mocks.migrated).not.toHaveBeenCalled()
+  })
   it('still binds a paid tier to its active rate card', async () => {
     const card = {
       version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 11000, rateCardId: 'speed-card',

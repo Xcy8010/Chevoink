@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ToolContext } from '../api/lib/agent/tools/types.js'
 
 const { db } = vi.hoisted(() => ({ db: {
-  novel: { findFirst: vi.fn() }, agentRun: { findFirst: vi.fn() },
-  agentMessage: { findFirst: vi.fn() }, legacyAgentAttachmentGrant: { findUnique: vi.fn() },
+  novel: { findFirst: vi.fn() }, agentRun: { findFirst: vi.fn() }, agentGoalExecution: { findUnique: vi.fn() },
+  agentMessage: { findFirst: vi.fn(), findMany: vi.fn() }, legacyAgentAttachmentGrant: { findUnique: vi.fn() },
   novelImportJob: { findFirst: vi.fn() },
 } }))
 vi.mock('../api/lib/prisma.js', async importOriginal => {
@@ -11,7 +11,7 @@ vi.mock('../api/lib/prisma.js', async importOriginal => {
   return { ...actual, prisma: db }
 })
 const { status } = vi.hoisted(() => ({ status: vi.fn() }))
-vi.mock('../api/lib/novel-import-service.js', () => ({ getNovelImportStatus: status }))
+vi.mock('../api/lib/novel-import-service.js', async importOriginal => ({ ...(await importOriginal<typeof import('../api/lib/novel-import-service.js')>()), getNovelImportStatus: status }))
 import { assertOriginalImportAttachment, novelImportTool } from '../api/lib/agent/tools/import-tools.js'
 
 const url = '/api/uploads/agent-attachments/owner/file.txt'
@@ -25,6 +25,8 @@ beforeEach(() => {
   db.novel.findFirst.mockResolvedValue({ id: 'book' })
   db.agentRun.findFirst.mockResolvedValue({ id: 'run' })
   db.agentMessage.findFirst.mockResolvedValue({ parts: [{ type: 'attachment', kind: 'file', name: '原文.txt', url }] })
+  db.agentMessage.findMany.mockResolvedValue([])
+  db.agentGoalExecution.findUnique.mockResolvedValue(null)
   db.legacyAgentAttachmentGrant.findUnique.mockResolvedValue(null)
 })
 afterEach(() => vi.unstubAllEnvs())

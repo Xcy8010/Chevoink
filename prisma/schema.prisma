@@ -1373,12 +1373,155 @@ model AgentSession {
   childSubtasks      AgentSubtask[]       @relation("ChildAgentSubtask")
   schedules          AgentSchedule[]
   queuedRequests     AgentQueuedRequest[]
+  goals              AgentGoal[]
 
   @@index([userId, novelId])
   @@index([novelId, updatedAt])
   @@index([forkedFromSessionId])
   @@index([spawnedFromSessionId])
+  @@unique([id, userId, novelId])
   @@map("agent_sessions")
+}
+
+// Persistent goals are additive: existing task roots and authorizations stay immutable.
+model AgentGoal {
+  id                String @id @default(cuid()) @db.VarChar(64)
+  userId            String @map("user_id") @db.VarChar(64)
+  novelId           String @map("novel_id") @db.VarChar(64)
+  sessionId         String @map("session_id") @db.VarChar(64)
+  currentRevision   Int @default(1) @map("current_revision")
+  pendingRevision   Int? @map("pending_revision")
+  resumeStatus      String? @map("resume_status") @db.VarChar(24)
+  status            String @default("active") @db.VarChar(24)
+  phase             String @default("queued") @db.VarChar(24)
+  stateVersion      Int @default(1) @map("state_version")
+  epoch             BigInt @default(1)
+  currentRunId      String? @map("current_run_id") @db.VarChar(64)
+  executionOptions  Json @map("execution_options")
+  continuationIndex Int @default(0) @map("continuation_index")
+  reasonCode        String? @map("reason_code") @db.VarChar(96)
+  nextEligibleAt    DateTime? @map("next_eligible_at")
+  blockFingerprint  String? @map("block_fingerprint") @db.VarChar(64)
+  blockCount        Int @default(0) @map("block_count")
+  progressHash      String? @map("progress_hash") @db.VarChar(64)
+  activeSince       DateTime? @map("active_since")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  finishedAt        DateTime? @map("finished_at")
+  session           AgentSession @relation(fields: [sessionId, userId, novelId], references: [id, userId, novelId], onDelete: Cascade)
+  revisions         AgentGoalRevision[]
+  executions        AgentGoalExecution[]
+  budget            AgentGoalBudget?
+  events            AgentGoalEvent[]
+  evidence          AgentGoalEvidence[]
+  usage             AgentGoalUsage[]
+  // A partial unique session index for non-terminal goals is installed by migration.
+  @@index([status, nextEligibleAt])
+  @@index([userId, sessionId, createdAt])
+  @@map("agent_goals")
+}
+
+model AgentGoalRevision {
+  goalId        String @map("goal_id") @db.VarChar(64)
+  revision      Int
+  objective     String
+  request       Json
+  authorityHash String @map("authority_hash") @db.VarChar(64)
+  sourceActionId String @map("source_action_id") @db.VarChar(64)
+  createdAt     DateTime @default(now()) @map("created_at")
+  goal          AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  @@id([goalId, revision])
+  @@map("agent_goal_revisions")
+}
+
+model AgentGoalExecution {
+  id                String @id @default(cuid()) @db.VarChar(64)
+  goalId            String @map("goal_id") @db.VarChar(64)
+  goalRevision      Int @map("goal_revision")
+  epoch             BigInt
+  taskRootId        String? @map("task_root_id") @db.VarChar(64)
+  runId             String @unique @map("run_id") @db.VarChar(64)
+  continuationIndex Int @map("continuation_index")
+  trigger           String @db.VarChar(32)
+  sourceEventId     String @unique @map("source_event_id") @db.VarChar(160)
+  createdAt         DateTime @default(now()) @map("created_at")
+  goal              AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  run               AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  @@unique([goalId, continuationIndex])
+  @@index([goalId, goalRevision])
+  @@map("agent_goal_executions")
+}
+
+model AgentGoalBudget {
+  goalId            String @id @map("goal_id") @db.VarChar(64)
+  tokenLimit        BigInt @map("token_limit")
+  platformTokenCap  BigInt @map("platform_token_cap")
+  tokensUsed        BigInt @default(0) @map("tokens_used")
+  tokensReserved    BigInt @default(0) @map("tokens_reserved")
+  creditsUsedMicros BigInt @default(0) @map("credits_used_micros")
+  activeTimeMs      BigInt @default(0) @map("active_time_ms")
+  activeTimeLimitMs BigInt @map("active_time_limit_ms")
+  platformTimeCapMs BigInt @map("platform_time_cap_ms")
+  goal              AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  @@map("agent_goal_budgets")
+}
+
+model AgentGoalEvent {
+  id             String @id @default(cuid()) @db.VarChar(64)
+  sequence       Int @unique @default(autoincrement())
+  goalId         String @map("goal_id") @db.VarChar(64)
+  sessionId      String @map("session_id") @db.VarChar(64)
+  stateVersion   Int @map("state_version")
+  goalRevision   Int @map("goal_revision")
+  type           String @db.VarChar(48)
+  payload        Json
+  createdAt      DateTime @default(now()) @map("created_at")
+  goal           AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  @@unique([goalId, stateVersion])
+  @@index([sessionId, sequence])
+  @@map("agent_goal_events")
+}
+
+model AgentGoalCommand {
+  userId      String @map("user_id") @db.VarChar(64)
+  requestId   String @map("request_id") @db.VarChar(64)
+  requestHash String @map("request_hash") @db.VarChar(64)
+  response    Json
+  createdAt   DateTime @default(now()) @map("created_at")
+  @@id([userId, requestId])
+  @@map("agent_goal_commands")
+}
+
+model AgentGoalEvidence {
+  id          String @id @default(cuid()) @db.VarChar(64)
+  goalId      String @map("goal_id") @db.VarChar(64)
+  revision    Int
+  criterionId String @map("criterion_id") @db.VarChar(64)
+  description String
+  kind        String @db.VarChar(32)
+  targetId    String? @map("target_id") @db.VarChar(64)
+  status      String @default("pending") @db.VarChar(24)
+  receipt     Json
+  verifiedAt  DateTime? @map("verified_at")
+  goal        AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  @@unique([goalId, revision, criterionId])
+  @@map("agent_goal_evidence")
+}
+
+model AgentGoalUsage {
+  sourceKey       String @id @map("source_key") @db.VarChar(192)
+  goalId          String @map("goal_id") @db.VarChar(64)
+  runId           String @map("run_id") @db.VarChar(64)
+  reservedTokens  BigInt @default(0) @map("reserved_tokens")
+  inputTokens     BigInt @default(0) @map("input_tokens")
+  outputTokens    BigInt @default(0) @map("output_tokens")
+  creditsMicros   BigInt @default(0) @map("credits_micros")
+  status          String @default("reserved") @db.VarChar(24)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  goal            AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  @@index([goalId, status])
+  @@map("agent_goal_usage")
 }
 
 model AgentQueuedRequest {
@@ -1521,6 +1664,7 @@ model AgentEvalComparison {
 }
 
 model AgentRun {
+  goalExecution     AgentGoalExecution?
   manuscriptRevision Int @default(0) @map("manuscript_revision")
   id                 String                 @id @default(cuid()) @db.VarChar(64)
   sessionId          String                 @map("session_id") @db.VarChar(64)

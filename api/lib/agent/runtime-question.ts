@@ -9,6 +9,7 @@ import { commitOperationEffectInTransaction } from './runtime-operations.js'
 import { reduceExecutionReceipt } from './runtime-reducer.js'
 import { normalizeToolInput } from './tools/input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './tools/types.js'
+import { assertGoalRevisionFence, readGoalExecution } from './goal-fence.js'
 
 export const durableQuestionSchema = z.object({ version: z.literal(1), operationId: z.string(), callId: z.string(),
   question: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string().optional() })), expiresAt: z.string().datetime() }).strict()
@@ -62,6 +63,8 @@ export async function resolveDurableQuestion(input: { userId: string; runId: str
   const captured = { ...input, answer: input.answer.trim() }
   if (!captured.answer || captured.answer.length > 4000) return runtimeError('RUNTIME_INPUT_INVALID', '回答内容无效。')
   return runtimeTransaction(async tx => {
+    const goal = await readGoalExecution(captured.userId, captured.runId, tx)
+    if (goal) await assertGoalRevisionFence(tx, goal)
     const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
     const request = await tx.agentExecutionOutbox.findFirst({ where: { id: captured.requestId, taskRootId: root.id, type: 'question.requested' } })
     const question = durableQuestionSchema.safeParse(request?.payload)

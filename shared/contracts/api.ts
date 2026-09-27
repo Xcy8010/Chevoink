@@ -502,6 +502,8 @@ export type ListAgentSessionsResponse = ApiSuccess<{
 export type AgentSessionRunStatus = {
   authorEnded?: { fulfilled: boolean; todoItems?: import('./agent-events.js').AgentTodoItem[] }
   runId: string
+  /** 服务端确认最新 run 是否属于目标；普通 run 为 null。 */
+  runGoalId: string | null
   status: AgentRunStatus
   finishedAt: string | null
 }

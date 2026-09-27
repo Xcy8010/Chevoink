@@ -558,10 +558,12 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     )
   }
 
+  const goalMessages = await (await import('./goal-runtime.js')).buildGoalContextMessages(input.userId, input.runId)
   return {
     skillRoute,
     messages: [
       { role: 'system', content: systemPrompt },
+      ...goalMessages,
       ...history,
       // 动态快照紧跟在历史之后：system 不含逐轮变动内容，缓存前缀止于 system+history，
       // 快照/todoDigest/taskSpec/意图都是每轮重建的尾部增量，不破坏已缓存的历史前缀

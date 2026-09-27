@@ -9,7 +9,7 @@ import { readModelPromotion } from '../../../shared/model-promotion.js'
 
 /** Recover an operation's exact price before consulting today's active rate card.
  * No fee changes on replay, even after the old card is retired. */
-export async function resolveDurableTokenPrice(lease: RunLeaseToken, key: string, modelTier: Exclude<CreditModelTier, 'custom'>, multiplierBps: number): Promise<TokenPrice> {
+export async function resolveDurableTokenPrice(lease: RunLeaseToken, key: string, modelTier: CreditModelTier, multiplierBps: number): Promise<TokenPrice> {
   const saved = await withRunLease(lease, async tx => {
     const operation = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: key } } })
     if (!operation) return null
@@ -24,7 +24,8 @@ export async function resolveDurableTokenPrice(lease: RunLeaseToken, key: string
 }
 
 /** Used before default/non-streaming requests as well as durable operations. */
-export async function resolveTokenPrice(modelTier: Exclude<CreditModelTier, 'custom'>, multiplierBps: number): Promise<TokenPrice> {
+export async function resolveTokenPrice(modelTier: CreditModelTier, multiplierBps: number): Promise<TokenPrice> {
+  if (modelTier === 'custom') return tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier, multiplierBps: 0 })
   // 0 倍率档由产品公示为真免费：恒定按 v1-exact 零费结算，历史遗留费率卡不得再对免费档收费。
   // 与准入 assertCreditAccess、预留豁免 reserveTokenCredits 保持同一判定源（倍率为 0）。
   if (multiplierBps === 0) return tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier, multiplierBps: 0 })

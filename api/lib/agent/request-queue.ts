@@ -67,6 +67,7 @@ export async function actOnQueuedRequest(userId: string, sessionId: string, id: 
     const item = await prisma.agentQueuedRequest.findFirst({ where: { id, userId, sessionId, status: { in: editable }, revision } })
     if (!item) throw conflict()
     const input = startAgentLoopRunSchema.parse(item.payload)
+    if (action === 'steer' && await (await import('./goal-service.js')).steerGoalQueuedRequest(userId, sessionId, id, revision)) return {}
     if (action === 'new' || action === 'fork') {
       // Move the durable request in the SAME transaction as creating the window.
       // Failed network replies therefore cannot create duplicate windows/prompts.
@@ -116,14 +117,17 @@ async function dispatchSession(candidate: AgentQueuedRequest) {
     const item = await prisma.agentQueuedRequest.findFirst({ where: { sessionId: candidate.sessionId, userId: candidate.userId, status: { in: editable } }, orderBy: [{ priority: 'desc' }, { sequence: 'asc' }] })
     if (!item || item.status === 'held') return
     const latest = await latestRun(item.sessionId)
-    if (!queueCanDispatch(latest?.status, item.priority)) return
+    const goal = await prisma.agentGoal.findFirst({ where: { sessionId: item.sessionId, userId: item.userId, status: { notIn: ['completed', 'cancelled'] } } })
+    if (goal) {
+      if (goal.status !== 'active' || goal.pendingRevision || ['queued', 'running', 'awaiting_approval'].includes(latest?.status ?? '')) return
+    } else if (!queueCanDispatch(latest?.status, item.priority)) return
     try {
       const user = await prisma.user.findUnique({ where: { id: item.userId }, select: { bannedAt: true } })
       if (!user || user.bannedAt) throw new DataAccessError(403, 'ACCOUNT_UNAVAILABLE', '当前账号无法启动任务，需求已保留。')
       const input = startAgentLoopRunSchema.parse(item.payload)
       await startLoopRunLocked(item.userId, input, { queuedRequest: { id: item.id, revision: item.revision } })
     } catch (error) {
-      if (error instanceof DataAccessError && ['RUN_IN_PROGRESS', 'RUN_LIMIT', 'QUEUE_CHANGED'].includes(error.code)) return
+      if (error instanceof DataAccessError && ['RUN_IN_PROGRESS', 'RUN_LIMIT', 'QUEUE_CHANGED', 'GOAL_VERSION_CONFLICT', 'GOAL_EXECUTION_FENCED', 'GOAL_NOT_ACTIVE'].includes(error.code)) return
       // Never silently discard a draft or repeatedly spend credits retrying it.
       await prisma.agentQueuedRequest.updateMany({ where: { id: item.id, status: 'pending', revision: item.revision }, data: { status: 'held', error: error instanceof DataAccessError ? error.message : '发送失败，需求已保留。请稍后调整方向重试。', revision: { increment: 1 } } })
     }

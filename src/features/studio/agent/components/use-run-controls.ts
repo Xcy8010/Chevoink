@@ -56,7 +56,7 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
     if (!target) return
     setActionError(null)
     await command(`continue:${target}`, () => continueAgentLoopRun(target, selectedModelRef?.current ?? null), (result) => {
-      useAgentStore.getState().resumeRun(result.runId, sessionId)
+      useAgentStore.getState().resumeRun(result.runId, sessionId, result.runGoalId)
       connect(result.runId)
     }, '续跑失败，请稍后再试。')
   }, [runId, resumeableRunId, sessionId, connect, command, setActionError, selectedModelRef])

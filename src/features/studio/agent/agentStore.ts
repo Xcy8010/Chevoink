@@ -2,6 +2,7 @@ import { create } from 'zustand'
 
 import type {
   AgentAttachmentMeta,
+  AgentGoalSnapshot,
   AgentMessagePart,
   AgentSessionRunStatus,
   AgentStreamEvent,
@@ -197,6 +198,8 @@ const WRITE_TOOL_LABELS: Record<string, string> = {
 
 type AgentStoreState = {
   runId: string | null
+  /** 服务端确认当前 run 的目标归属；普通 run 明确为 null。 */
+  runGoalId: string | null
   /** 刷新后从 DB 派生的可续跑 run（无活跃 run 但上一轮 failed/paused）：
       支撑「继续执行」按钮在刷新后仍显示，不依赖活体 store 状态 */
   resumeableRunId: string | null
@@ -225,8 +228,14 @@ type AgentStoreState = {
   /** 正在拉取历史的会话 id：加载态的全局唯一真相。
       旧实现靠各面板实例各自的布尔标记，一旦标记与全局 messages 失配就会误渲染空态欢迎页 */
   hydratingSessionId: string | null
+  /** 当前会话的目标快照；通过 stateVersion/事件序列拒绝旧的跨窗口更新。 */
+  goal: AgentGoalSnapshot | null
+  goalSessionId: string | null
+  goalEventSequence: number
   /** 输入框草稿：提升到全局 store，避免面板重挂载时丢失未发送内容 */
   composerDraft: string
+  /** 目标输入模式属于任务窗口草稿，不能与普通发送模式混用。 */
+  goalMode: boolean
   /** 输入框附件（已上传成功的元数据）：同草稿提升全局，沉浸/普通视图重挂载不丢 */
   composerAttachments: AgentAttachmentMeta[]
   /** 查看器选区引用：以附件标签展示，发送时才序列化进提示词。 */
@@ -259,9 +268,9 @@ type AgentStoreState = {
   memorySpotlight: MemorySpotlightRequest | null
   /** 事件 reducer：live 与 replay 共用同一构建逻辑 */
   applyEvent: (event: AgentStreamEvent) => void
-  beginRun: (runId: string, userPrompt: string, sessionId: string | null, attachments?: AgentAttachmentMeta[]) => void
+  beginRun: (runId: string, userPrompt: string, sessionId: string | null, attachments?: AgentAttachmentMeta[], runGoalId?: string | null) => void
   /** 续接服务端仍在进行的 run（刷新后恢复）：不追加用户消息，从 seq 0 重放事件重建直播 */
-  resumeRun: (runId: string, sessionId: string | null) => void
+  resumeRun: (runId: string, sessionId: string | null, runGoalId?: string | null) => void
   /** 记录刷新后从服务端派生的可续跑 run（拉历史消息时写入，续跑成功后清空） */
   noteResumeableRun: (runId: string | null) => void
   /** 刷新历史或终态事件提供作者结束事实，并优先采用其最终待办快照。 */
@@ -273,6 +282,8 @@ type AgentStoreState = {
     /** 标记指定会话开始/结束历史水合：与 loadedSessionId 一同构成加载态判定依据 */
   beginSessionHydration: (sessionId: string) => void
   endSessionHydration: (sessionId: string) => void
+  setGoalSnapshot: (goal: AgentGoalSnapshot | null, sessionId: string | null, sequence?: number, forceClear?: boolean) => void
+  setGoalMode: (value: boolean) => void
   resetRun: () => void
   clearError: () => void
   /** 作者回到该任务窗口：清除完成/待确认未读信号与运行中登记（异常中止的红点持久保留） */
@@ -516,6 +527,7 @@ export function readSessionMessagesCache(sessionId: string): AgentUIMessage[] | 
 
 export const useAgentStore = create<AgentStoreState>((set, get) => ({
   runId: null,
+  runGoalId: null,
   resumeableRunId: null,
   phase: 'idle',
   authorEnded: null,
@@ -535,7 +547,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   activeSessionId: null,
   loadedSessionId: null,
   hydratingSessionId: null,
+  goal: null,
+  goalSessionId: null,
+  goalEventSequence: 0,
   composerDraft: '',
+  goalMode: false,
   composerAttachments: [],
   composerReferences: [],
   composerUploading: 0,
@@ -552,9 +568,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   toolNavigationRequest: null,
   memorySpotlight: null,
 
-  beginRun: (runId, userPrompt, sessionId, attachments) =>
+  beginRun: (runId, userPrompt, sessionId, attachments, runGoalId = null) =>
     set((state) => ({
       runId,
+      runGoalId,
       phase: 'starting',
       authorEnded: null,
       activeSessionId: sessionId,
@@ -609,9 +626,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       ],
     })),
 
-  resumeRun: (runId, sessionId) =>
+  resumeRun: (runId, sessionId, runGoalId = null) =>
     set((state) => ({
       runId,
+      runGoalId,
       resumeableRunId: null,
       phase: 'starting',
       authorEnded: null,
@@ -648,6 +666,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       messages: restored,
       phase: 'idle',
       runId: null,
+      runGoalId: null,
       authorEnded: null,
       resumeableRunId: null,
       activeSessionId: null,
@@ -676,6 +695,25 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   endSessionHydration: (sessionId) =>
     set((state) => (state.hydratingSessionId === sessionId ? { hydratingSessionId: null } : {})),
 
+  setGoalSnapshot: (goal, sessionId, sequence = 0, forceClear = false) =>
+    set((state) => {
+      // A new view must first be able to replace the old session's snapshot;
+      // once scoped, later events from that old stream are still rejected.
+      if (sessionId && state.goalSessionId && state.goalSessionId !== sessionId) {
+        if (goal === null) return { goal: null, goalSessionId: sessionId, goalEventSequence: sequence > 0 ? sequence : 0 }
+        return {}
+      }
+      // A delayed initial null snapshot must not erase a newer local/API snapshot.
+      // Goals remain as terminal rows, so a same-session null never represents a
+      // legitimate replacement once a snapshot has been observed.
+      if (!forceClear && sessionId && goal === null && state.goalSessionId === sessionId && state.goal) return {}
+      if (sessionId && sequence > 0 && sequence < state.goalEventSequence) return {}
+      if (goal && state.goal && state.goalSessionId === sessionId && goal.id === state.goal.id && goal.stateVersion < state.goal.stateVersion) return {}
+      return { goal, goalSessionId: sessionId, goalEventSequence: sequence > 0 ? sequence : state.goalEventSequence }
+    }),
+
+  setGoalMode: (value) => set({ goalMode: value }),
+
   prependMessages: (incoming) =>
     set((state) => {
       const known = new Set(state.messages.map((message) => message.id))
@@ -697,11 +735,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     writeSessionMessagesCache(leavingSessionId, leavingMessages, todos)
     set({
       runId: null,
+      runGoalId: null,
       resumeableRunId: null,
       phase: 'idle',
       authorEnded: null,
       activeSessionId: null,
       loadedSessionId: null,
+      goal: null,
+      goalSessionId: null,
+      goalEventSequence: 0,
       pendingApproval: null,
       pendingQuestion: null,
       usage: emptyUsage,
@@ -754,6 +796,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       let authorEndedTodos: AgentTodoItem[] | undefined
       let phase = state.phase
       let runId = state.runId
+      let runGoalId = state.runGoalId
       let pendingApproval = state.pendingApproval
       let pendingQuestion = state.pendingQuestion
       let liveToolDrafts = state.liveToolDrafts
@@ -765,6 +808,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         const remoteAuthorEnded = (entry as AgentSessionRunStatus & { authorEnded?: AgentAuthorEnded }).authorEnded
         const isActiveSession = sessionId === state.activeSessionId
         if (isActiveSession && isRunActive(state.phase) && state.runId && state.runId !== entry.runId) continue
+        if (isActiveSession && state.runId === entry.runId && runGoalId !== (entry.runGoalId ?? null)) {
+          runGoalId = entry.runGoalId ?? null
+          changed = true
+        }
         // A late status for an older run must not overwrite a live newer run.
         // Once the same run has authorEnded, however, a stale `running` poll must
         // not clear that terminal fact again.
@@ -775,6 +822,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           authorEnded = remoteAuthorEnded
           authorEndedTodos = remoteAuthorEnded.todoItems
           runId = entry.runId
+          runGoalId = entry.runGoalId ?? null
           phase = remoteAuthorEnded.fulfilled ? 'succeeded' : 'cancelled'
           changed = true
         }
@@ -844,6 +892,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         sessionSignals: signals,
         phase,
         runId,
+        runGoalId,
         authorEnded,
         pendingApproval,
         pendingQuestion,

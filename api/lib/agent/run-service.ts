@@ -64,6 +64,8 @@ import { resolveDurableQuestion } from './runtime-question.js'
 import { streamDurableRun } from './runtime-stream.js'
 import { isDefaultSessionTitle } from './session-title.js'
 import { withUserRunLock } from './run-lock.js'
+import { admitGoalRun, bindGoalRun, type GoalRunAdmission } from './goal-run-admission.js'
+import { assertGoalFence, readGoalExecution } from './goal-fence.js'
 
 /**
  * Agent Loop 新链路的路由服务层（plan/13 §4.9）。
@@ -80,12 +82,15 @@ export type StartLoopRunOptions = {
    */
   concurrencyScope?: 'interactive' | 'orchestration'
   queuedRequest?: { id: string; revision: number }
+  /** Internal scheduler capability; never part of an HTTP or model-tool schema. */
+  goal?: GoalRunAdmission
 }
 
 const durableProcessOwner = `api:${randomUUID()}`
 
 // Internal profiles/budgets are not added to the public HTTP schema.
 const persistedStartSchema = startAgentLoopRunSchema.extend({
+  prompt: z.string().trim().min(1).max(24_000),
   agentProfile: z.enum(['orchestrator', 'research', 'continuity', 'quality', 'lore']).optional(),
   tokenBudget: z.number().int().positive().optional(),
 })
@@ -126,7 +131,9 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const input: StartAgentLoopRunRequest = admitted ?? JSON.parse(JSON.stringify(supplied))
   if (run.sessionId !== input.sessionId || run.novelId !== input.novelId || run.chapterId !== (input.chapterId?.trim() || null)
     || (run.mode === 'act' ? 'build' : run.mode) !== input.mode) throw new DataAccessError(409, 'RUN_INPUT_MISMATCH', '初始化范围与原任务不一致。')
-  const original = await prisma.agentMessage.findFirst({ where: { runId, sessionId: run.sessionId, role: 'user' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+  const goalBinding = await prisma.agentGoalExecution.findUnique({ where: { runId } })
+  const original = await prisma.agentMessage.findFirst({ where: { runId, sessionId: run.sessionId,
+    role: goalBinding && goalBinding.trigger !== 'author' ? 'system' : 'user' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
   const parts = [{ type: 'text', text: input.prompt }, ...(input.attachments ?? []).map(item => ({ type: 'attachment', kind: item.kind, name: item.name, url: item.url, size: item.size }))]
   if (!original || runtimeJson(original.parts).hash !== runtimeJson(JSON.parse(JSON.stringify(parts))).hash) throw new DataAccessError(409, 'RUN_INPUT_MISMATCH', '初始化必须使用已保存的完整原始请求。')
   if (run.runtimeProtocolVersion === 1 && run.taskRootId && await prisma.agentExecutionState.findUnique({ where: { taskRootId: run.taskRootId } })) return loadExecutionState(userId, runId)
@@ -134,12 +141,12 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   await assertManagedAttachmentsAccess(input.attachments, userId)
   const runtime = await getModelTierRuntime(run.modelTier as import('../../../shared/contracts/index.js').CreditModelTier, userId, run.customModelId,
     run.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort)
-  if (runtime.tier !== run.modelTier || run.customModelId) throw new DataAccessError(409, 'RUNTIME_MODEL_ADAPTER_REQUIRED', '原模型模式尚未接入持久执行，不能替换模型。')
+  if (runtime.tier !== run.modelTier || run.modelTier === 'custom' && !run.customModelId) throw new DataAccessError(409, 'RUNTIME_MODEL_ADAPTER_REQUIRED', '原模型配置缺少可核验的模型身份。')
   const agent = getAgentDefinition(input.agentProfile ?? 'orchestrator')
   // The gated durable runtime has no inline-subagent adapter yet; never silently discard an explicit selection.
   if (input.pinnedSubagentId) throw new DataAccessError(409, 'RUNTIME_SUBAGENT_ADAPTER_REQUIRED', '当前持久执行协议暂未接入手动子 Agent，请使用普通任务执行。')
   const session = await prisma.agentSession.findFirstOrThrow({ where: { id: run.sessionId, userId } })
-  const scoped = getToolsForAgent(agent, input.mode, resolveAgent2FeatureFlags(userId))
+  const scoped = getToolsForAgent(agent, input.mode, resolveAgent2FeatureFlags(userId), { goalOwned: Boolean(goalBinding) })
     .filter(tool => !session.spawnedFromSessionId || !ORCHESTRATION_TOOL_NAMES.has(tool.name))
   const contextRead: import('./tools/types.js').AgentTool = { ...executionContextReadTool,
     execute: (ctx, args) => executionContextReadTool.execute(ctx, executionContextReadTool.parameters.parse(args)) }
@@ -159,14 +166,15 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
     return task
   })
   const assembled = await assembleContext({ agent, mode: input.mode, userId, sessionId: run.sessionId, runId, novelId: run.novelId, chapterId: run.chapterId,
-    prompt: input.prompt, selection: input.selection, attachments: input.attachments, visionEnabled: false, taskSpec: spec,
+    prompt: input.prompt, selection: input.selection, attachments: input.attachments, visionEnabled: runtime.visionEnabled, taskSpec: spec,
     modelTier: runtime.tier, modelName: runtime.modelName, contextWindowTokens: runtime.contextWindowTokens, pinnedSkillIds: input.pinnedSkillIds })
   await initializeDurableTask({ userId, runId, sourceMessageId: original.id, tokenBudget: input.tokenBudget })
   const lease = await acquireRunLease({ userId, runId, ownerId: durableProcessOwner, claimId: randomUUID() })
   try {
     return await initializeExecutionState(lease, { configuration: { version: 1, mode: input.mode, agentType: agent.type,
       creativeFreedom: input.creativeFreedom ?? 'balanced', qualityMode: input.qualityMode ?? 'premium',
-      model: { tier: runtime.tier, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel, customModelId: null,
+      model: { tier: runtime.tier, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel,
+        customModelId: runtime.tier === 'custom' ? run.customModelId : null,
         maxOutputTokens: env.aiTextMaxOutputTokens, contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
         reasoningEffort: runtime.reasoningEffort, routeRevision: modelRouteRevision({ provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel,
           endpoint: `${(runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: runtime.reasoningEffort }) },
@@ -231,6 +239,7 @@ async function executeOwnedPersistedLoopRun(run: AgentRunRecord) {
     result = await runReviewedDurableExecution(lease, controller.signal)
   } catch (error) {
     executionFailed = true
+    await (await import('./goal-service.js')).noteGoalResourceFailure(userId, runId, error)
     // Preserve the failed operation/cursor. Only the still-current owner may
     // close its run; an expired worker must never pause a replacement worker.
     if (lease && !controller.signal.aborted) {
@@ -277,6 +286,15 @@ export async function startLoopRunLocked(
   options: StartLoopRunOptions = {},
 ): Promise<StartAgentLoopRunResponse> {
   input = persistedStartSchema.parse(JSON.parse(JSON.stringify(input)))
+  let steering: StartAgentLoopRunRequest | undefined
+  if (!options.goal) {
+    const resolved = await (await import('./goal-author-admission.js')).resolveGoalAuthorAdmission(userId, input,
+      options.queuedRequest ? `goal-steer:${options.queuedRequest.id}:${options.queuedRequest.revision}` : `goal-steer:${randomUUID()}`,
+      options.concurrencyScope === 'orchestration')
+    input = resolved.input
+    steering = resolved.steering
+    if (resolved.admission) options = { ...options, goal: resolved.admission }
+  }
   const session = await prisma.agentSession.findFirst({
     where: { id: input.sessionId, userId },
   })
@@ -290,6 +308,8 @@ export async function startLoopRunLocked(
   }
 
   await assertManagedAttachmentsAccess(input.attachments, userId)
+
+  if (steering) await assertManagedAttachmentsAccess(steering.attachments, userId)
 
   const modelTier = input.modelTier ?? 'speed'
   if (input.pinnedSubagentId) {
@@ -360,6 +380,7 @@ export async function startLoopRunLocked(
   // a claimed prompt; orphan recovery leaves that run visible for manual resume.
   const queuedRequest = options.queuedRequest
   const admittedMessageId = randomUUID()
+  let initializeGoalDurable = false
   const admittedParts = [{ type: 'text', text: input.prompt }, ...(input.attachments ?? []).map(attachment => ({
     type: 'attachment', kind: attachment.kind, name: attachment.name, url: attachment.url, size: attachment.size,
   }))]
@@ -368,6 +389,10 @@ export async function startLoopRunLocked(
     // durable resume admission lock and count saved work before creating more.
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${userId}`}, 0))::text`
     await lockNovelActiveScope(tx, session.novelId)
+    if (!options.goal && await tx.agentGoal.count({ where: { sessionId: session.id, status: { notIn: ['completed', 'cancelled'] } } })) {
+      throw new DataAccessError(409, 'GOAL_VERSION_CONFLICT', '窗口已有新目标，请重新发送补充。')
+    }
+    const goalAdmission = options.goal ? await admitGoalRun(tx, userId, session.id, session.novelId, options.goal, input.prompt) : null
     const manuscript = await tx.novel.findFirst({ where: { id: session.novelId, authorId: userId }, select: { manuscriptRevision: true } })
     if (!manuscript) throw new DataAccessError(404, 'NOVEL_NOT_FOUND', '作品不存在或无权访问。')
     if (chapterId && !await tx.chapter.findFirst({ where: { id: chapterId, authorId: userId, ...activeChapterScope(session.novelId) }, select: { id: true } })) {
@@ -387,8 +412,33 @@ export async function startLoopRunLocked(
       })
       if (claimed.count !== 1) throw new DataAccessError(409, 'QUEUE_CHANGED', '待发需求已变更，请刷新。')
     }
-    const created = await tx.agentRun.create({ ...runData, data: { ...runData.data, manuscriptRevision: manuscript.manuscriptRevision } })
-    await tx.agentMessage.create({ data: { id: admittedMessageId, runId: created.id, sessionId: session.id, role: 'user', parts: admittedParts } })
+    const previousRun = goalAdmission?.previous?.run
+    const durablePrevious = previousRun?.runtimeProtocolVersion === 1 && previousRun.taskRootId ? previousRun : null
+    initializeGoalDurable = Boolean(durablePrevious && durablePrevious.status === 'completed')
+    const previousSpec = initializeGoalDurable ? null : previousRun?.taskSpec
+    let created = await tx.agentRun.create({ ...runData, data: { ...runData.data, manuscriptRevision: manuscript.manuscriptRevision,
+      ...(previousSpec && typeof previousSpec === 'object' && !Array.isArray(previousSpec) ? { taskSpec: previousSpec as Prisma.InputJsonValue } : {}) } })
+    await tx.agentMessage.create({ data: { id: admittedMessageId, runId: created.id, sessionId: session.id,
+      role: options.goal && options.goal.trigger !== 'author' ? 'system' : 'user', parts: admittedParts } })
+    if (steering) await tx.agentMessage.create({ data: { runId: created.id, sessionId: session.id, role: 'user', parts: [
+      { type: 'text', text: steering.prompt }, ...(steering.attachments ?? []).map(item => ({
+        type: 'attachment', kind: item.kind, name: item.name, url: item.url, size: item.size,
+      })),
+    ] } })
+    if (goalAdmission && options.goal) await bindGoalRun(tx, goalAdmission, options.goal, created.id)
+    if (durablePrevious && !initializeGoalDurable) {
+      // Continue the saved durable cursor and immutable root; no fresh budget/configuration or paid replay.
+      await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${durablePrevious.taskRootId} FOR UPDATE`
+      const root = await tx.agentTaskRoot.findFirstOrThrow({ where: { id: durablePrevious.taskRootId!, userId, sessionId: session.id, novelId: session.novelId } })
+      if (!['active', 'paused'].includes(root.status) || await tx.agentRunLease.count({ where: { run: { taskRootId: root.id }, enabled: true } })) {
+        throw new DataAccessError(409, 'GOAL_RECONCILIATION_REQUIRED', '原执行所有权尚未释放，目标进度已保留。')
+      }
+      await readExecutionStateInTransaction(tx, root.id)
+      await tx.agentTaskRoot.update({ where: { id: root.id }, data: { status: 'active' } })
+      created = await tx.agentRun.update({ where: { id: created.id }, data: { taskRootId: root.id, runtimeProtocolVersion: 1,
+        currentTurn: durablePrevious.currentTurn, executionLease: { create: {} } } })
+      await tx.agentGoalExecution.update({ where: { runId: created.id }, data: { taskRootId: root.id } })
+    }
     if (queuedRequest) await tx.agentQueuedRequest.update({ where: { id: queuedRequest.id }, data: { runId: created.id } })
     return created
   })
@@ -396,7 +446,22 @@ export async function startLoopRunLocked(
   void import('./writing-experiments.js').then(({ recordSevenDayContinuation }) => recordSevenDayContinuation(userId, session.novelId)).catch(() => {})
 
   // 异步执行循环，路由立即返回，前端连 stream 拿事件
-  void executeAgentRun({
+  if (initializeGoalDurable || run.runtimeProtocolVersion === 1) {
+    void (async () => {
+      if (initializeGoalDurable) await initializePersistedLoopRun(userId, run.id)
+      await executePersistedLoopRun(userId, run.id)
+    })().catch(async error => {
+      const code = error instanceof DataAccessError ? error.code : 'GOAL_EXECUTION_UNAVAILABLE'
+      console.error('[agent-goal] 持久执行等待恢复', { runId: run.id, code })
+      // A bootstrap failure must not leave a queued run looking like an active
+      // owner forever. Existing durable attempts retain their own recovery path.
+      if (initializeGoalDurable) await prisma.$transaction(async tx => {
+        await (await import('./goal-fence.js')).assertRunGoalFence(tx, userId, run.id)
+        await tx.agentRun.updateMany({ where: { id: run.id, userId, status: 'queued' },
+          data: { status: 'failed', finishedAt: new Date(), errorMessage: code } })
+      }).catch(() => console.error('[agent-goal] 初始化状态等待数据库核对', { runId: run.id }))
+    })
+  } else void executeAgentRun({
     runId: run.id,
     admittedMessageId,
     sessionId: session.id,
@@ -416,11 +481,14 @@ export async function startLoopRunLocked(
     tokenBudget: input.tokenBudget,
     pinnedSkillIds: input.pinnedSkillIds ?? [],
     pinnedSubagentId: input.pinnedSubagentId,
+    internalGoalContinuation: Boolean(options.goal && options.goal.trigger !== 'author'),
+    goalSteering: steering,
   })
 
   return {
     runId: run.id,
     sessionId: session.id,
+    runGoalId: options.goal?.goalId ?? null,
     status: 'running',
     streamUrl: `/api/agent/runs/${run.id}/stream`,
   }
@@ -574,7 +642,7 @@ export async function resolveLoopRunApproval(
     return resolveDurableApproval({ userId, runId, requestId: approvalId, callId, approved, alwaysAllow })
   }
 
-  const resolved = resolveApproval(runId, callId, approved, alwaysAllow)
+  const resolved = await resolveCurrentGoalResponse(userId, runId, () => resolveApproval(runId, callId, approved, alwaysAllow))
 
   if (!resolved) {
     throw new DataAccessError(409, 'APPROVAL_NOT_PENDING', '该审批已处理或已超时。')
@@ -597,7 +665,7 @@ export async function resolveLoopRunQuestion(
     return resolveDurableQuestion({ userId, runId, callId, answer, requestId })
   }
 
-  const resolved = resolveQuestionAnswer(runId, callId, answer)
+  const resolved = await resolveCurrentGoalResponse(userId, runId, () => resolveQuestionAnswer(runId, callId, answer))
 
   if (!resolved) {
     throw new DataAccessError(409, 'QUESTION_NOT_PENDING', '该提问已处理或已超时。')
@@ -606,8 +674,19 @@ export async function resolveLoopRunQuestion(
   return { resolved: true }
 }
 
+/** Serialize legacy mailbox consumption with goal controls; a stale card cannot wake an old epoch. */
+async function resolveCurrentGoalResponse(userId: string, runId: string, resolve: () => boolean): Promise<boolean> {
+  const goal = await readGoalExecution(userId, runId)
+  if (!goal) return resolve()
+  return prisma.$transaction(async tx => {
+    await assertGoalFence(tx, goal)
+    return resolve()
+  })
+}
+
 export async function stopLoopRun(userId: string, runId: string): Promise<{ stopped: boolean }> {
   const run = await findOwnedLoopRun(userId, runId)
+  if (await (await import('./goal-service.js')).pauseGoalForRun(userId, runId)) return { stopped: true }
 
   if (run.runtimeProtocolVersion !== 0 || run.taskRootId) {
     const paused = await pauseDurableTask(userId, runId)
@@ -763,6 +842,8 @@ async function continueLoopRunLocked(
   model?: ContinueLoopRunModelSelection,
 ): Promise<StartAgentLoopRunResponse> {
   const run = await findOwnedLoopRun(userId, runId)
+  const goalExecution = await prisma.agentGoalExecution.findUnique({ where: { runId } })
+  if (goalExecution) throw new DataAccessError(409, 'GOAL_RESUME_REQUIRED', '请使用目标条的继续操作，原目标预算与进度会保留。')
   if (hasAuthorEnded(run.usage)) throw new DataAccessError(409, 'RUN_AUTHOR_ENDED', '原任务已按作者要求结束，请发送明确的新任务；已有成果保留。')
   await prisma.$transaction(tx => assertAgentManuscriptCurrent(tx, { userId, novelId: run.novelId, runId }))
 
@@ -783,7 +864,7 @@ async function continueLoopRunLocked(
         console.error('[agent-loop] 原任务续跑未完成', { runId: resumed.run.id, code: error instanceof DataAccessError ? error.code : 'RESUME_FAILED' })
       })
     }
-    return { runId: resumed.run.id, sessionId: run.sessionId, status: resumed.run.status, streamUrl: `/api/agent/runs/${resumed.run.id}/stream` }
+    return { runId: resumed.run.id, sessionId: run.sessionId, runGoalId: null, status: resumed.run.status, streamUrl: `/api/agent/runs/${resumed.run.id}/stream` }
   }
   assertLegacyRuntimeCompatible(run)
 
@@ -901,6 +982,7 @@ async function continueLoopRunLocked(
   return {
     runId: run.id,
     sessionId: run.sessionId,
+    runGoalId: null,
     status: 'running',
     streamUrl: `/api/agent/runs/${run.id}/stream`,
   }
@@ -1795,7 +1877,7 @@ export async function listSessionRunStatuses(userId: string, sessionIds: string[
     },
     orderBy: { createdAt: 'desc' },
     take: 500,
-    select: { id: true, sessionId: true, status: true, finishedAt: true, usage: true },
+    select: { id: true, sessionId: true, status: true, finishedAt: true, usage: true, goalExecution: { select: { goalId: true } } },
   })
 
   const statuses: AgentSessionRunStatusPayload['statuses'] = {}
@@ -1804,6 +1886,7 @@ export async function listSessionRunStatuses(userId: string, sessionIds: string[
     if (statuses[run.sessionId]) continue
     statuses[run.sessionId] = {
       runId: run.id,
+      runGoalId: run.goalExecution?.goalId ?? null,
       status: run.status as AgentRunStatus,
       finishedAt: run.finishedAt?.toISOString() ?? null,
       ...readAuthorEnded(run.usage),

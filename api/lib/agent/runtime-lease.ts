@@ -1,4 +1,5 @@
 import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
+import { assertRunGoalFence } from './goal-fence.js'
 
 export type RunLeaseToken = { userId: string; runId: string; taskRootId: string; ownerId: string; claimId: string; epoch: bigint }
 const MAX_EPOCH = 9_223_372_036_854_775_807n
@@ -22,6 +23,7 @@ export async function acquireRunLease(input: { userId: string; runId: string; ow
   const captured = { ...input }; const ttlMs = ttl(captured.ttlMs ?? 30000)
   runtimeId(captured.ownerId, 96); runtimeId(captured.claimId)
   return runtimeTransaction(async tx => {
+    await assertRunGoalFence(tx, captured.userId, captured.runId)
     const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
     active(run, root)
     const old = await tx.agentRunLease.upsert({ where: { runId: run.id }, create: { runId: run.id }, update: {} })
@@ -42,6 +44,7 @@ export async function acquireRunLease(input: { userId: string; runId: string; ow
 export async function withRunLease<T>(token: RunLeaseToken, work: (tx: RuntimeTx) => Promise<T>): Promise<T> {
   const captured = { ...token }
   return runtimeTransaction(async tx => {
+    await assertRunGoalFence(tx, captured.userId, captured.runId)
     const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
     active(run, root)
     const check = async () => {

@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express'
 import styleLearningRouter from './style-learning.js'
+import agentGoalsRouter from './agent-goals.js'
 import { z } from 'zod'
 
 import {
@@ -79,6 +80,7 @@ import {
 
 const router = Router()
 router.use(styleLearningRouter)
+router.use(agentGoalsRouter)
 import { actOnQueuedRequest, enqueueRequest, listQueuedRequests } from '../lib/agent/request-queue.js'
 
 router.get('/sessions/:sessionId/queue', async (req, res) => {

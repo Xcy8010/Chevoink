@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const db = vi.hoisted(() => ({
   agentRun: { findFirst: vi.fn(), findMany: vi.fn() },
+  agentGoalExecution: { findUnique: vi.fn() },
   agentSession: { findUnique: vi.fn(), findMany: vi.fn() },
   agentArtifact: { findMany: vi.fn() }, projectMemoryEntry: { findMany: vi.fn() }, $transaction: vi.fn(),
 }))
@@ -12,6 +13,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   db.agentRun.findFirst.mockResolvedValue(record)
   db.agentRun.findMany.mockResolvedValue([record])
+  db.agentGoalExecution.findUnique.mockResolvedValue(null)
   db.agentSession.findMany.mockResolvedValue([{ id: 'session' }])
   db.agentSession.findUnique.mockResolvedValue({ id: 'session', userId: 'user' })
   db.agentArtifact.findMany.mockResolvedValue([])
@@ -24,10 +26,12 @@ describe('author-ended run API boundary', () => {
     expect(db.$transaction).not.toHaveBeenCalled()
   })
   it('polls only the newest run disposition and clears ending when a new task starts', async () => {
-    expect((await listSessionRunStatuses('user', ['session'])).statuses.session?.authorEnded).toEqual(ended)
+    expect((await listSessionRunStatuses('user', ['session'])).statuses.session).toMatchObject({ runId: 'run', runGoalId: null, authorEnded: ended })
     db.agentRun.findMany.mockResolvedValue([{ ...record, id: 'new', status: 'running', usage: {} }, record])
     expect((await listSessionRunStatuses('user', ['session'])).statuses.session).toMatchObject({ runId: 'new', status: 'running' })
     expect((await listSessionRunStatuses('user', ['session'])).statuses.session?.authorEnded).toBeUndefined()
+    db.agentRun.findMany.mockResolvedValue([{ ...record, id: 'goal-run', status: 'running', usage: {}, goalExecution: { goalId: 'goal-1' } }, record])
+    expect((await listSessionRunStatuses('user', ['session'])).statuses.session).toMatchObject({ runId: 'goal-run', runGoalId: 'goal-1' })
   })
   it('restores author-ended disposition and cancelled items on history refresh', async () => {
     const history = await listAgentSessionHistoryData('user', 'session')

@@ -78,6 +78,7 @@ import {
 import { sessionHistorySearchTool, sessionMessageReadTool } from './session-history-tools.js'
 import { taskContextListTool, taskContextReadTool } from './task-context-tools.js'
 import { taskSendTool, taskSpawnTool, taskWaitTool } from './task-orchestration-tools.js'
+import { goalReadTool, goalReportTool } from './goal-tools.js'
 import {
   chapterBridgeCommitTool,
   chapterBridgeGetTool,
@@ -161,6 +162,9 @@ export const allTools: AgentTool<any>[] = [
   styleLeakageCheckTool,
   researchDossierGetTool,
   firstThreePrototypeGetTool,
+  // 目标（仅由目标归属过滤层暴露）
+  goalReadTool,
+  goalReportTool,
   // 写
   chapterCreateTool,
   chapterWriteTool,
@@ -231,6 +235,15 @@ export const allTools: AgentTool<any>[] = [
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 const toolsByName = new Map(allTools.map((tool) => [tool.name, tool]))
+
+/** Goal tools are a server-owned capability, never a consequence of the
+ * orchestrator's catch-all registry entry. Callers must prove goal ownership
+ * before opting into this set. */
+export const GOAL_TOOL_NAMES: ReadonlySet<string> = new Set(['goal_read', 'goal_report'])
+
+export function filterGoalToolsForExecution(tools: AgentTool[], goalOwned: boolean): AgentTool[] {
+  return goalOwned ? tools : tools.filter((tool) => !GOAL_TOOL_NAMES.has(tool.name))
+}
 
 export function getToolByName(name: string): AgentTool | undefined {
   return toolsByName.get(name)

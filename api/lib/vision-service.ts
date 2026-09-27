@@ -3,6 +3,8 @@ import { DataAccessError, prisma } from './prisma.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { getToolModelRuntime, type ToolModelRuntime } from './tool-model-config.js'
 import { readBoundedPublicBody } from './public-http.js'
+import { currentGoalExecution, withoutGoalEffects } from './agent/goal-context.js'
+import { assertGoalProviderAdmission, reserveGoalUsage, syncGoalLegacyUsage } from './agent/goal-budget.js'
 
 /**
  * GLM-4.1V 视觉推理旁路（ds-vision-skill 模式）：
@@ -75,12 +77,22 @@ async function requestOnce(image: { buffer: Buffer; mime: string }, question: st
   const startedAt = Date.now()
   // Separate vision calls are internal image usage, not another user token
   // charge. Null means unreported; never estimate tokens from the image bytes.
-  const observation = await prisma.aiUsageLog.create({ data: { userId: scope.userId, agentRunId: scope.runId,
+  const goal = currentGoalExecution()
+  const observation = await withoutGoalEffects(() => prisma.aiUsageLog.create({ data: { userId: scope.userId, agentRunId: scope.runId,
     targetType: 'agentRun', targetId: scope.runId, providerType: 'image', providerMode: env.aiProviderMode,
-    modelName, action: 'view_image', durationMs: 0, requestTokens: null, responseTokens: null } })
+    modelName, action: 'view_image', durationMs: 0, requestTokens: null, responseTokens: null,
+    ...(goal ? { billingStatus: 'prepared', usageSource: 'unknown' } : {}) } }))
   let promptTokens: number | null = null, completionTokens: number | null = null
+  let dispatched = false, rejected = false
   try {
+  // This is only a conservative admission reservation, never billed or
+  // recorded as observed tokens. The image provider's own usage is authoritative.
+  await reserveGoalUsage(`legacy:${observation.id}`, 32768 + question.length + 4096)
+  await assertGoalProviderAdmission()
   scope.signal.throwIfAborted()
+  if (goal) await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observation.id }, data: { billingStatus: 'pending_usage' } }))
+  scope.signal.throwIfAborted()
+  dispatched = true
   const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     redirect: 'error',
@@ -90,6 +102,7 @@ async function requestOnce(image: { buffer: Buffer; mime: string }, question: st
     },
     body: JSON.stringify({
       model: modelName,
+      ...(goal ? { max_tokens: 4096 } : {}),
       messages: [
         {
           role: 'user',
@@ -103,6 +116,7 @@ async function requestOnce(image: { buffer: Buffer; mime: string }, question: st
     signal: AbortSignal.any([scope.signal, AbortSignal.timeout(env.aiVisionTimeoutMs)]),
   })
 
+  rejected = [400, 401, 403, 404, 422, 429].includes(response.status)
   const body = (await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8')
   let decoded: unknown
   try { decoded = JSON.parse(body) } catch {
@@ -138,8 +152,12 @@ async function requestOnce(image: { buffer: Buffer; mime: string }, question: st
   return description
   } finally {
     try {
-      await prisma.aiUsageLog.update({ where: { id: observation.id }, data: { requestTokens: promptTokens,
-        responseTokens: completionTokens, durationMs: Math.min(2147483647, Date.now() - startedAt) } })
+      await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observation.id }, data: { requestTokens: promptTokens,
+        responseTokens: completionTokens, durationMs: Math.min(2147483647, Date.now() - startedAt),
+        ...(goal ? { billingStatus: !dispatched ? 'not_dispatched' : rejected ? 'provider_rejected'
+          : promptTokens !== null && completionTokens !== null ? 'exempt' : 'pending_usage',
+          usageSource: promptTokens !== null && completionTokens !== null ? 'reported' : 'unknown' } : {}) } }))
+      if (goal) await syncGoalLegacyUsage(observation.id)
     } catch {
       // The pre-dispatch observation remains unknown, not zero. A telemetry
       // outage must not discard paid output or replace the provider's error.

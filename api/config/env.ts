@@ -42,6 +42,7 @@ function parseReasoningEffort(value: string | undefined): 'low' | 'high' | 'max'
 }
 
 export const env = {
+  agentGoalEnabled: parseBoolean(process.env.AGENT_GOAL_ENABLED, false),
   appName: process.env.APP_NAME ?? '启创墨域',
   appEnv: process.env.APP_ENV ?? 'development',
   port: parsePositiveNumber(process.env.APP_PORT, 3001),

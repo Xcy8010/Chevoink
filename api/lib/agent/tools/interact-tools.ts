@@ -88,6 +88,8 @@ export const askUserTool = defineTool({
       .update({ where: { id: ctx.runId }, data: { status: 'awaiting_approval' } })
       .catch(() => {})
 
+    const { setGoalRunPhase } = await import('../goal-runtime.js')
+    await setGoalRunPhase(ctx.userId, ctx.runId, 'awaiting_input')
     const result = await waitForQuestionAnswer(
       ctx.runId,
       ctx.callId,
@@ -95,6 +97,11 @@ export const askUserTool = defineTool({
       ctx.signal,
     )
 
+    const goalContext = (await import('../goal-context.js')).currentGoalExecution()
+    if (result.answer === null && goalContext) {
+      return (await import('../goal-store.js')).goalError('GOAL_AUTHOR_INPUT_REQUIRED', '目标等待作者回答，未选择默认方向继续。')
+    }
+    if (!ctx.signal.aborted) await setGoalRunPhase(ctx.userId, ctx.runId, 'executing')
     await prisma.agentRun
       .update({ where: { id: ctx.runId }, data: { status: 'running' } })
       .catch(() => {})

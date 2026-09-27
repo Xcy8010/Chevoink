@@ -2,13 +2,13 @@ import { useAgentStore } from './agentStore'
 import { registerDesktopSave } from '@/lib/desktop-lifecycle'
 
 type State = ReturnType<typeof useAgentStore.getState>
-type Draft = Pick<State, 'composerDraft' | 'composerAttachments' | 'composerReferences' | 'composerSkillIds' | 'composerSubagent' | 'composerUploading'>
+type Draft = Pick<State, 'composerDraft' | 'composerAttachments' | 'composerReferences' | 'composerSkillIds' | 'composerSubagent' | 'composerUploading' | 'goalMode'>
 const prefix = 'chevoink:task-draft:v1:'
 const cache = new Map<string, Draft>()
 const aliases = new Map<string, string>()
 let active: string | undefined
-const empty = (): Draft => ({ composerDraft: '', composerAttachments: [], composerReferences: [], composerSkillIds: [], composerSubagent: null, composerUploading: 0 })
-const pick = (state: State): Draft => ({ composerDraft: state.composerDraft, composerAttachments: state.composerAttachments, composerReferences: state.composerReferences, composerSkillIds: state.composerSkillIds, composerSubagent: state.composerSubagent, composerUploading: state.composerUploading })
+const empty = (): Draft => ({ composerDraft: '', composerAttachments: [], composerReferences: [], composerSkillIds: [], composerSubagent: null, composerUploading: 0, goalMode: false })
+const pick = (state: State): Draft => ({ composerDraft: state.composerDraft, composerAttachments: state.composerAttachments, composerReferences: state.composerReferences, composerSkillIds: state.composerSkillIds, composerSubagent: state.composerSubagent, composerUploading: state.composerUploading, goalMode: state.goalMode })
 const resolve = (scope: string): string => aliases.get(scope) ?? scope
 
 registerDesktopSave(() => {
@@ -25,7 +25,7 @@ registerDesktopSave(() => {
 export function hasComposerDraft(scope: string): boolean {
   const key = resolve(scope)
   const draft = active === key ? pick(useAgentStore.getState()) : read(key)
-  return Boolean(draft.composerDraft.trim()) || draft.composerAttachments.length > 0
+  return Boolean(draft.composerDraft.trim()) || draft.goalMode || draft.composerAttachments.length > 0
     || draft.composerReferences.length > 0 || draft.composerSkillIds.length > 0 || Boolean(draft.composerSubagent) || draft.composerUploading > 0
 }
 

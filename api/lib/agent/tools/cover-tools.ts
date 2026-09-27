@@ -43,7 +43,7 @@ export const coverGenerateTool = defineTool({
       size: FIXED_NOVEL_COVER_SIZE,
       count: args.count ?? 1,
       novelId: ctx.novelId,
-    })
+    }, { signal: ctx.signal })
 
     if (images.length === 0) {
       return { output: '封面生成失败：图像服务没有返回结果，可稍后重试或调整提示词。' }

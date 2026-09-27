@@ -81,18 +81,21 @@ async function normalizeLegacyViewedImageUrls(userId: string, parts: AgentMessag
 /** 刷新后「继续执行」按钮的数据来源：当前无活跃 run 时，仅当会话「最近一个」run 停在 failed/paused 才供前端续跑。
  * 不能取历史任意 failed run：旧 run 失败后作者已开新 run 并正常收尾时，任务已闭环，
  * 刷新后不应再冒「继续执行」按钮（作者反馈：收尾完成后刷新仍见按钮）。 */
-async function getSessionRunState(sessionId: string): Promise<{ activeRunId: string | null; resumeRunId: string | null; authorEnded?: AgentRun['authorEnded'] }> {
+async function getSessionRunState(sessionId: string): Promise<{ activeRunId: string | null; runGoalId: string | null; resumeRunId: string | null; authorEnded?: AgentRun['authorEnded'] }> {
   const local = getActiveRunIdBySession(sessionId)
-  if (local) return { activeRunId: local, resumeRunId: null }
+  if (local) {
+    const localRun = await prisma.agentRun.findUnique({ where: { id: local }, select: { goalExecution: { select: { goalId: true } } } })
+    return { activeRunId: local, runGoalId: localRun?.goalExecution?.goalId ?? null, resumeRunId: null }
+  }
   const run = await prisma.agentRun.findFirst({
     where: { sessionId },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    select: { id: true, status: true, usage: true, runtimeProtocolVersion: true, taskRoot: { select: { status: true } } },
+    select: { id: true, status: true, usage: true, runtimeProtocolVersion: true, taskRoot: { select: { status: true } }, goalExecution: { select: { goalId: true } } },
   })
   const durableActive = run?.runtimeProtocolVersion === 1 && run.taskRoot?.status === 'active'
     && ['queued', 'running', 'awaiting_approval'].includes(run.status)
   const ending = readAuthorEnded(run?.usage)
-  return { activeRunId: durableActive ? run.id : null, ...ending,
+  return { activeRunId: durableActive ? run.id : null, runGoalId: durableActive ? run.goalExecution?.goalId ?? null : null, ...ending,
     resumeRunId: !ending.authorEnded && run && (run.status === 'failed' || run.status === 'paused') ? run.id : null }
 }
 
@@ -132,6 +135,8 @@ export async function listLoopSessionMessages(
 ): Promise<{
   messages: AgentUIMessage[]
   activeRunId: string | null
+  /** 服务端确认 activeRunId 的目标归属；普通运行或无活跃 run 为 null。 */
+  runGoalId: string | null
   /** 无活跃 run 但存在可续跑的 failed/paused run：前端据此在刷新后仍显示「继续执行」按钮 */
   resumeRunId: string | null
   authorEnded?: AgentRun['authorEnded']

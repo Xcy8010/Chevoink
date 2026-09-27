@@ -5,7 +5,7 @@ import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const fixture = vi.hoisted(() => {
-  const names = ['novel', 'volume', 'chapter', 'coverAsset', 'readingProgress', 'agentRun', 'agentQueuedRequest', 'agentSession', 'agentMessage', 'agentArtifact', 'changeSet', 'aiModelConfig', 'novelImportIntent', 'novelImportJob', 'novelImportSource', 'novelImportManifest', 'novelImportApproval', 'novelImportCommit', 'novelImportBackup', 'novelImportGarbage', 'novelImportArtifact', 'novelImportEvent', 'projectMemoryEntry', 'memoryExtractionJob', 'storyEvent', 'storyEntity', 'foreshadowThread', 'entityRelation', 'storyCompilation', 'sceneTask', 'chapterBridge', 'chapterQualityReport', 'styleProfile', 'styleLearningJob']
+  const names = ['novel', 'volume', 'chapter', 'coverAsset', 'readingProgress', 'agentRun', 'agentQueuedRequest', 'agentSession', 'agentMessage', 'agentGoal', 'agentGoalExecution', 'agentGoalRevision', 'agentArtifact', 'changeSet', 'aiModelConfig', 'novelImportIntent', 'novelImportJob', 'novelImportSource', 'novelImportManifest', 'novelImportApproval', 'novelImportCommit', 'novelImportBackup', 'novelImportGarbage', 'novelImportArtifact', 'novelImportEvent', 'projectMemoryEntry', 'memoryExtractionJob', 'storyEvent', 'storyEntity', 'foreshadowThread', 'entityRelation', 'storyCompilation', 'sceneTask', 'chapterBridge', 'chapterQualityReport', 'styleProfile', 'styleLearningJob']
   type Row = Record<string, unknown>
   const state: Record<string, Row[]> = Object.fromEntries(names.map(name => [name, []]))
   const matches = (row: Row, where: Row = {}): boolean => Object.entries(where).every(([key, value]) => {
@@ -18,6 +18,7 @@ const fixture = vi.hoisted(() => {
     if (key === 'patches') return ((row.patches ?? []) as Row[]).some(p => matches(p, (value as Row).some as Row))
     if (key === 'jobId_kind') return matches(row, value as Row)
     if (key === 'jobId_revision') return matches(row, value as Row)
+    if (key === 'goalId_revision') return matches(row, value as Row)
     if (value && typeof value === 'object' && !(value instanceof Date)) {
       const filter = value as Row
       if ('in' in filter) return (filter.in as unknown[]).includes(row[key])
@@ -54,7 +55,7 @@ vi.mock('../api/lib/auth-session.js', async () => {
   const { DataAccessError } = await import('../api/lib/prisma.js')
   return { requireSessionUserId: (req: Request) => { const user = req.headers['x-test-user']; if (typeof user !== 'string') throw new DataAccessError(401, 'AUTH_REQUIRED', '请登录。'); return user } }
 })
-vi.mock('../api/lib/agent-attachment-storage.js', () => ({ assertManagedAttachmentAccess: fixture.attachmentAccess, readAuthorizedAgentAttachment: fixture.attachmentRead }))
+vi.mock('../api/lib/agent-attachment-storage.js', async importOriginal => ({ ...(await importOriginal<typeof import('../api/lib/agent-attachment-storage.js')>()), assertManagedAttachmentAccess: fixture.attachmentAccess, readAuthorizedAgentAttachment: fixture.attachmentRead }))
 vi.mock('../api/lib/novel-import/isolated-parser.js', () => ({ parseNovelImportFileIsolated: fixture.parse }))
 vi.mock('../api/lib/novel-import/pipeline.js', () => ({ parseNovelImportDocument: async (bytes: Buffer, filename: string, options: { sourceId: string; sourceHash: string }) => {
   const parsed = await fixture.parse(bytes, filename, options)
@@ -745,6 +746,65 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     fixture.state.agentMessage.push({ runId: 'run', sessionId: 'session', role: 'user', parts: [] })
     await expect(attachNovelImportSource(human(), job.jobId, { runId: 'run', url: 'file:///etc/passwd' })).rejects.toMatchObject({ code: 'IMPORT_ATTACHMENT_SCOPE' })
     expect(fixture.attachmentRead).not.toHaveBeenCalled()
+  })
+  it('binds a verified human handoff to the source run while keeping the legacy call unbound', async () => {
+    const intent = await preflightNovelImport(scope); const job = await prepareNovelImport(scope, intent.intentId)
+    const runId = 'legacy-source-run'
+    fixture.state.agentRun.push({ id: runId, userId: scope.userId, novelId: scope.novelId, sessionId: 'session' })
+    fixture.state.agentSession.push({ id: 'session', userId: scope.userId, novelId: scope.novelId })
+    fixture.state.agentMessage.push({ runId, sessionId: 'session', role: 'user', parts: [{ type: 'attachment', kind: 'file', name: '原文.txt', url: '/api/uploads/agent-attachments/user-a/source.txt' }] })
+    fixture.attachmentAccess.mockResolvedValue(undefined)
+    fixture.attachmentRead.mockResolvedValue(Buffer.from('真实附件'))
+
+    await attachNovelImportSource(human(), job.jobId, { runId, url: '/api/uploads/agent-attachments/user-a/source.txt' })
+
+    expect(fixture.state.novelImportJob.find(row => row.id === job.jobId)).toMatchObject({ agentRunId: runId, agentToolCallId: null, status: 'uploaded' })
+    expect(fixture.attachmentRead).toHaveBeenCalledWith('/api/uploads/agent-attachments/user-a/source.txt', scope.userId)
+  })
+  it('rejects a system-message attachment without a current goal revision mapping', async () => {
+    const intent = await preflightNovelImport(scope); const job = await prepareNovelImport(scope, intent.intentId)
+    const runId = 'unmapped-system-run'
+    const url = '/api/uploads/agent-attachments/user-a/system.txt'
+    fixture.state.agentRun.push({ id: runId, userId: scope.userId, novelId: scope.novelId, sessionId: 'session' })
+    fixture.state.agentSession.push({ id: 'session', userId: scope.userId, novelId: scope.novelId })
+    fixture.state.agentMessage.push({ runId, sessionId: 'session', role: 'system', parts: [{ type: 'attachment', kind: 'file', name: 'system.txt', url }] })
+
+    await expect(attachNovelImportSource(human(), job.jobId, { runId, url })).rejects.toMatchObject({ code: 'IMPORT_ATTACHMENT_SCOPE' })
+    expect(fixture.attachmentRead).not.toHaveBeenCalled()
+  })
+  it('accepts a goal system attachment only when the current revision snapshot carries the same file', async () => {
+    const intent = await preflightNovelImport(scope); const job = await prepareNovelImport(scope, intent.intentId)
+    const runId = 'goal-system-run'
+    const url = '/api/uploads/agent-attachments/user-a/goal.txt'
+    const options = { mode: 'build', attachments: [{ id: 'goal-file', kind: 'file', name: 'goal.txt', url }] }
+    const goal = { id: 'goal-1', userId: scope.userId, novelId: scope.novelId, sessionId: 'session', status: 'active', pendingRevision: null, currentRevision: 1, epoch: 1n, executionOptions: options }
+    fixture.state.agentRun.push({ id: runId, userId: scope.userId, novelId: scope.novelId, sessionId: 'session' })
+    fixture.state.agentSession.push({ id: 'session', userId: scope.userId, novelId: scope.novelId })
+    fixture.state.agentMessage.push({ runId, sessionId: 'session', role: 'system', parts: [{ type: 'attachment', kind: 'file', name: 'goal.txt', url }] })
+    fixture.state.agentGoal.push(goal)
+    fixture.state.agentGoalExecution.push({ runId, goalId: goal.id, goalRevision: 1, epoch: 1n, goal })
+    fixture.state.agentGoalRevision.push({ goalId: goal.id, revision: 1, request: options })
+    fixture.attachmentAccess.mockResolvedValue(undefined)
+    fixture.attachmentRead.mockResolvedValue(Buffer.from('目标附件'))
+
+    await attachNovelImportSource(human(), job.jobId, { runId, url })
+
+    expect(fixture.state.novelImportJob.find(row => row.id === job.jobId)).toMatchObject({ agentRunId: runId, agentToolCallId: null, status: 'uploaded' })
+  })
+  it('accepts a verified attachment from a later steering user message', async () => {
+    const intent = await preflightNovelImport(scope); const job = await prepareNovelImport(scope, intent.intentId)
+    const runId = 'steering-source-run'
+    const url = '/api/uploads/agent-attachments/user-a/steering.txt'
+    fixture.state.agentRun.push({ id: runId, userId: scope.userId, novelId: scope.novelId, sessionId: 'session' })
+    fixture.state.agentSession.push({ id: 'session', userId: scope.userId, novelId: scope.novelId })
+    fixture.state.agentMessage.push({ runId, sessionId: 'session', role: 'user', parts: [{ type: 'text', text: '补充要求' }] })
+    fixture.state.agentMessage.push({ runId, sessionId: 'session', role: 'user', parts: [{ type: 'attachment', kind: 'file', name: 'steering.txt', url }] })
+    fixture.attachmentAccess.mockResolvedValue(undefined)
+    fixture.attachmentRead.mockResolvedValue(Buffer.from('补充附件'))
+
+    await attachNovelImportSource(human(), job.jobId, { runId, url })
+
+    expect(fixture.state.novelImportJob.find(row => row.id === job.jobId)).toMatchObject({ agentRunId: runId, agentToolCallId: null, status: 'uploaded' })
   })
   it('status/list do not leak source paths, bodies or other users jobs', async () => {
     await prepared()

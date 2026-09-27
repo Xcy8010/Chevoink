@@ -8,6 +8,9 @@ const m = vi.hoisted(() => ({
     chapter: { findFirst: vi.fn(), findMany: vi.fn(), count: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
     novel: { findFirst: vi.fn(), update: vi.fn() },
     agentRun: { findFirst: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn() },
+    // These fixtures cover legacy/import writes. A null goal execution keeps
+    // the new fence on its ordinary path without changing import assertions.
+    agentGoalExecution: { findUnique: vi.fn() },
     agentSession: { findFirst: vi.fn() }, agentMessage: { findFirst: vi.fn(), findMany: vi.fn() },
     agentArtifact: { deleteMany: vi.fn(), count: vi.fn() },
     changeSet: { findFirst: vi.fn(), update: vi.fn() }, changeSetPatch: { updateMany: vi.fn() },
@@ -53,6 +56,7 @@ beforeEach(() => {
   m.db.$transaction.mockImplementation(work => work(tx))
   m.db.$queryRaw.mockResolvedValue([{ id: 'n' }])
   m.db.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 2, novel: { authorId: 'u', manuscriptRevision: 2 } })
+  m.db.agentGoalExecution.findUnique.mockResolvedValue(null)
   m.db.chapter.findFirst.mockResolvedValue(chapter)
   m.db.chapter.updateMany.mockResolvedValue({ count: 1 })
   m.db.chapter.deleteMany.mockResolvedValue({ count: 1 })

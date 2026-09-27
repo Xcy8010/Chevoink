@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import { DataAccessError, prisma } from '../prisma.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
+import { assertRunGoalFence } from './goal-fence.js'
 
 type WriteScope = { userId: string; novelId: string; runId: string; transaction?: Prisma.TransactionClient }
 
@@ -9,6 +10,7 @@ type WriteScope = { userId: string; novelId: string; runId: string; transaction?
  * Call inside the effect transaction, BEFORE any chapter/volume observation. */
 export async function assertAgentManuscriptCurrent(tx: Prisma.TransactionClient, scope: WriteScope): Promise<void> {
   await lockNovelActiveScope(tx, scope.novelId)
+  await assertRunGoalFence(tx, scope.userId, scope.runId)
   const run = await tx.agentRun.findFirst({
     where: { id: scope.runId, userId: scope.userId, novelId: scope.novelId },
     select: { manuscriptRevision: true, novel: { select: { authorId: true, manuscriptRevision: true } } },

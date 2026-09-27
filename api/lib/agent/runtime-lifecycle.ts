@@ -7,6 +7,7 @@ import { collectCompletionEvidenceInTransaction } from './runtime-completion-evi
 import { prepareOperationInTransaction, commitOperationEffectInTransaction } from './runtime-operations.js'
 import { promisesFurtherAction } from './completion-guard.js'
 import { z } from 'zod'
+import { assertRunGoalFence } from './goal-fence.js'
 
 const liveStatuses = ['queued', 'running', 'awaiting_approval'] as const
 const maxEpoch = 9223372036854775807n
@@ -16,6 +17,7 @@ const maxEpoch = 9223372036854775807n
 export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expectedRevision: number; expectedHash: string }) {
   const lease = { ...token }, expected = { ...cursor }
   return runtimeTransaction(async tx => {
+    await assertRunGoalFence(tx, lease.userId, lease.runId)
     const { run, root } = await lockRunRoot(tx, lease.userId, lease.runId)
     const held = await tx.agentRunLease.findUnique({ where: { runId: run.id } })
     const now = await databaseNow(tx)

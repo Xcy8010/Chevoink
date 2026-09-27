@@ -9,6 +9,7 @@ import { consumeCredits, WEB_SEARCH_CALL_MILLI, recordSearchRefundIntent, getSea
 import { DataAccessError } from '../../prisma.js'
 import type { WebSearchOutcome } from '../../web-search-service.js'
 import { getCachedWebSearch, setCachedWebSearch } from '../permissions.js'
+import { withoutGoalEffects } from '../goal-context.js'
 import { defineTool } from './types.js'
 import type { ToolContext } from './types.js'
 import { registerResearchSource, registerResearchSources, resolveResearchSource, saveResearchContent, readResearchContent,
@@ -166,9 +167,9 @@ export const webSearchTool = defineTool({
         throw error
       }
       if (!cached && error instanceof WebSearchError && error.attempts.length && error.attempts.every(attempt => ['failed', 'aborted'].includes(attempt.outcome))) {
-        await recordSearchRefundIntent(ctx.userId, chargeKey, { attempts: error.attempts })
+        await withoutGoalEffects(() => recordSearchRefundIntent(ctx.userId, chargeKey, { attempts: error.attempts }))
         // Intent survives any settlement failure; the bounded server sweep retries it.
-        await reconcileCreditRefunds({ userId: ctx.userId, limit: 10 }).catch(() => undefined)
+        await withoutGoalEffects(() => reconcileCreditRefunds({ userId: ctx.userId, limit: 10 })).catch(() => undefined)
       }
       ctx.signal.throwIfAborted()
       // Only expose bounded protocol facts, never upstream response bodies,

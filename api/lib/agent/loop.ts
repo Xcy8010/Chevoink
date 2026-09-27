@@ -16,6 +16,8 @@ import type {
 import { env } from '../../config/env.js'
 import { chatWithTools, type ChatMessage, type ToolCallRequest } from '../ai-service.js'
 import { DataAccessError, prisma } from '../prisma.js'
+import { withGoalEffects, withGoalExecutionContext } from './goal-context.js'
+import { readGoalExecution } from './goal-fence.js'
 import { getModelTierRuntime } from '../credits.js'
 import { readManagedImageDataUrl } from '../agent-attachment-storage.js'
 import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, type AgentDefinition } from './agents.js'
@@ -87,6 +89,9 @@ import {
  */
 
 export type ExecuteAgentRunParams = {
+  /** Only a scheduler-admitted goal execution may use a system admission message. */
+  internalGoalContinuation?: boolean
+  goalSteering?: import('../../../shared/contracts/index.js').StartAgentLoopRunRequest
   /** Server-created original message, committed with new-run admission. */
   admittedMessageId?: string
   runId: string
@@ -429,7 +434,10 @@ export async function handleToolCall(
       expiresAt,
     })
 
+    const { setGoalRunPhase } = await import('./goal-runtime.js')
+    await setGoalRunPhase(ctx.userId, runId, 'awaiting_approval')
     const decision = await waitForApproval(runId, call.id, tool.name, env.agentApprovalTimeoutMs, ctx.signal)
+    if (!ctx.signal.aborted) await setGoalRunPhase(ctx.userId, runId, 'executing')
     bus.emit({ type: 'permission.resolved', callId: call.id, approved: decision.approved })
     await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } }).catch(() => {})
 
@@ -449,7 +457,8 @@ export async function handleToolCall(
   }
 
   try {
-    const result = await tool.execute(ctx, validated.data)
+    const goalContext = await readGoalExecution(ctx.userId, ctx.runId)
+    const result = await withGoalExecutionContext(goalContext, () => withGoalEffects(() => tool.execute(ctx, validated.data)))
     failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
     if (result.outcome === 'failed') return fail(result.summary ?? '执行未完成', wrapToolOutput(tool.name, result.output), 'failed')
     const durationMs = Date.now() - startedAt
@@ -543,7 +552,11 @@ async function finalizeLegacyRun(
   const terminalBody = status === 'paused'
     ? { type: 'run.paused' as const, reason: 'user_stop' as const }
     : { type: 'run.finished' as const, status, usage, artifacts: [], outputSummary, ...(authorEnded ? { authorEnded } : {}) }
-  const committed = await bus.commitTerminal(terminalBody, tx => tx.agentRun.update({
+  let goalFenced = false
+  const committed = await bus.commitTerminal(terminalBody, async tx => {
+    const owner = await tx.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { userId: true } })
+    await (await import('./goal-fence.js')).assertRunGoalFence(tx, owner.userId, runId)
+    return tx.agentRun.update({
       where: { id: runId, runtimeProtocolVersion: 0, taskRootId: null },
       data: {
         status: dbStatus,
@@ -554,8 +567,13 @@ async function finalizeLegacyRun(
         finishedAt: status === 'paused' ? null : new Date(),
       },
       select: { userId: true, sessionId: true, novelId: true, taskSpec: true },
-    }))
+    })
+  })
     .catch((error) => {
+      if (error instanceof DataAccessError && error.code === 'GOAL_EXECUTION_FENCED') {
+        goalFenced = true
+        return null
+      }
       // R01/R09：不确定的提交结果不得重试或改写终态；但错误详情必须保留，
       // 否则只能靠事后推断（如事务超时/连接抖动），无法定位卡死原因。
       console.error('[agent-loop] run 状态落库未确认', { runId, requestedStatus: dbStatus,
@@ -564,7 +582,17 @@ async function finalizeLegacyRun(
     })
   const finalizedRun = committed?.result
 
-  if (status !== 'paused' && finalizedRun && allowContextSideEffects) {
+  if (finalizedRun) await (await import('./goal-runtime.js')).noteGoalRunFinished(finalizedRun.userId, runId).catch(error => {
+    if (!(error instanceof DataAccessError && error.code === 'GOAL_EXECUTION_FENCED')) {
+      console.error('[agent-goal] 活动时间待同步', { runId })
+    }
+  })
+
+  const goalExecution = finalizedRun ? await readGoalExecution(finalizedRun.userId, runId) : undefined
+  // Goal tools/commit receipts own their memory work. Starting a separate
+  // paid graph rebuild after publishing the run's terminal event would escape
+  // its budget/activity/cancellation boundary.
+  if (status !== 'paused' && finalizedRun && allowContextSideEffects && !goalExecution) {
     await Promise.all([
       compactSessionContext(finalizedRun.userId, finalizedRun.sessionId, false).catch((error) => {
         console.error('[agent-loop] 对话结束后自动整理上下文失败', runId, error)
@@ -575,7 +603,7 @@ async function finalizeLegacyRun(
     ])
   }
 
-  if (!finalizedRun) {
+  if (!finalizedRun && !goalFenced) {
     // R01/R09: a DB failure is not proof of either completion or rollback.
     // Preserve saved messages, stop the local executor, and report uncertainty;
     // do not fabricate run.finished or retry finalization as a different status.
@@ -788,16 +816,20 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       ...attachmentParts,
     ]
     if (params.admittedMessageId) {
-      const admitted = await prisma.agentMessage.findFirst({ where: { id: userMessageId, runId, sessionId: params.sessionId, role: 'user' }, select: { parts: true } })
+      const goalExecution = params.internalGoalContinuation ? await readGoalExecution(params.userId, runId) : undefined
+      if (params.internalGoalContinuation && !goalExecution) throw new DataAccessError(409, 'GOAL_SCOPE_MISMATCH', '自动接续缺少目标归属。')
+      const admitted = await prisma.agentMessage.findFirst({ where: { id: userMessageId, runId, sessionId: params.sessionId,
+        role: params.internalGoalContinuation ? 'system' : 'user' }, select: { parts: true } })
       const { runtimeJson } = await import('./runtime-common.js')
       if (params.resume || !admitted || runtimeJson(admitted.parts).hash !== runtimeJson(JSON.parse(JSON.stringify(userParts))).hash) {
         throw new DataAccessError(409, 'RUN_INPUT_MISMATCH', '原始请求与已保存消息不一致，不能覆盖或猜测任务。')
       }
     } else if (!params.resume) await persistMessage(userMessageId, runId, params.sessionId, 'user', userParts)
 
-    const continuingTask = Boolean(params.resume) || isContinuationRequest(params.prompt)
+    const ownedGoalExecution = await readGoalExecution(params.userId, runId)
+    const continuingTask = Boolean(params.resume || params.internalGoalContinuation) || (!ownedGoalExecution && isContinuationRequest(params.prompt))
     // Typed “continue” starts a new run but must retain the original task scope/constraints.
-    const previousTask = !params.resume && continuingTask && !storedRun.taskSpec
+    const previousTask = !ownedGoalExecution && !params.resume && continuingTask && !storedRun.taskSpec
       ? await prisma.agentRun.findFirst({ where: { sessionId: params.sessionId, userId: params.userId, novelId: params.novelId, id: { not: runId }, engine: 'loop' }, orderBy: { createdAt: 'desc' }, select: { id: true, taskSpec: true, taskRootId: true, runtimeProtocolVersion: true, usage: true, currentTurn: true, startedAt: true } })
       : null
     if (hasAuthorEnded(previousTask?.usage) || params.resume && hasAuthorEnded(storedRun.usage)) {
@@ -928,7 +960,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       } })
     } else await persistCheckpoint()
     if (!params.resume && taskSpec.intent !== 'research_analysis') {
-      await captureUserDirectives({
+      await withGoalExecutionContext(ownedGoalExecution, () => withGoalEffects(() => captureUserDirectives({
         userId: params.userId,
         novelId: params.novelId,
         sessionId: params.sessionId,
@@ -936,7 +968,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
         sourceMessageId: userMessageId,
         taskSpec,
         prompt: params.prompt,
-      })
+      })))
     }
     // 仅压缩已终态的旧 run；当前正在执行的消息永不进入检查点。
     await compactSessionContext(params.userId, params.sessionId, false).catch((error) => {
@@ -944,7 +976,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     })
 
     // 首次对话且仍是默认标题时异步自动命名（仅一次，不阻塞循环）
-    if (!params.resume) {
+    if (!params.resume && !ownedGoalExecution) {
       void autoNameSession({
         modelRuntime,
         sessionId: params.sessionId,
@@ -982,17 +1014,8 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       pinnedSkillIds: params.pinnedSkillIds ?? [],
     })
     const messages: ChatMessage[] = assembledContext.messages
-    // 子 Agent 目录注入：主控据此按触发条件用 subagent_run 像调工具一样内嵌调用子 Agent（codex/Zcode 模式）
-    if (agent.type === 'orchestrator') {
-      const { renderSubagentCatalog } = await import('./productivity.js')
-      const catalog = await renderSubagentCatalog(params.userId, params.novelId, params.pinnedSubagentId)
-      insertSubagentCatalog(messages, catalog)
-    }
-    // 仅恢复指定任务的协作关系，禁止把同会话中旧任务的窗口重新激活。
-    const orchestrationResumeNote = await buildOrchestrationResumeNote(params.sessionId, runId, continuingTask)
-    if (orchestrationResumeNote) {
-      messages.push({ role: 'user', content: orchestrationResumeNote })
-    }
+    // The last assembled user message is the original goal input. Attach its
+    // pixels before adding steering or orchestration messages to the tail.
     if (directVisionEnabled) {
       for (let index = messages.length - 1; index >= 0; index -= 1) {
         const message = messages[index]
@@ -1003,6 +1026,20 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
         ]
         break
       }
+    }
+    if (params.goalSteering && ownedGoalExecution) {
+      messages.push(await (await import('./goal-steering-message.js')).buildGoalSteeringMessage(params.goalSteering, params.userId, Boolean(modelRuntime.visionEnabled)))
+    }
+    // 子 Agent 目录注入：主控据此按触发条件用 subagent_run 像调工具一样内嵌调用子 Agent（codex/Zcode 模式）
+    if (agent.type === 'orchestrator') {
+      const { renderSubagentCatalog } = await import('./productivity.js')
+      const catalog = await renderSubagentCatalog(params.userId, params.novelId, params.pinnedSubagentId)
+      insertSubagentCatalog(messages, catalog)
+    }
+    // 仅恢复指定任务的协作关系，禁止把同会话中旧任务的窗口重新激活。
+    const orchestrationResumeNote = await buildOrchestrationResumeNote(params.sessionId, runId, continuingTask)
+    if (orchestrationResumeNote) {
+      messages.push({ role: 'user', content: orchestrationResumeNote })
     }
 
     if (assembledContext.skillRoute) {
@@ -1099,7 +1136,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
 
     const featureFlags = resolveAgent2FeatureFlags(params.userId)
     const sessionPolicy = await prisma.agentSession.findUnique({ where: { id: params.sessionId }, select: { toolPolicy: true, sandboxMode: true, spawnedFromSessionId: true } })
-    const scopedTools = restrictToolsToTask(getToolsForAgent(agent, params.mode, featureFlags), taskSpec)
+    const scopedTools = restrictToolsToTask(getToolsForAgent(agent, params.mode, featureFlags, { goalOwned: Boolean(ownedGoalExecution) }), taskSpec)
     // 派生窗口禁用跨任务编排：否则 b 再派生 e、e 再派生 f 会指数级打爆并发与额度，
     // 而且互相等待还会直接死锁；派生窗口的职责就是干完自己那一份并交回摘要
     const orchestrationScopedTools = sessionPolicy?.spawnedFromSessionId
@@ -1829,6 +1866,9 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     await announceStopReason(turnLimitReason)
     await finalizeRun(runId, bus, 'failed', usage, turn, lastAssistantText.slice(0, 300), turnLimitReason)
   } catch (error) {
+    await (await import('./goal-service.js')).noteGoalResourceFailure(params.userId, runId, error).catch(() => {
+      console.error('[agent-goal] 资源限制状态待恢复', { runId })
+    })
     if (error instanceof DataAccessError && error.code === 'TASK_AUTHORIZATION_RUNTIME_UPGRADE_REQUIRED') {
       // Admission did not succeed. In particular a rejected resume must not
       // overwrite another execution's status via the budget-restoration branch.

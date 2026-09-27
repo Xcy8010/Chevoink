@@ -3,6 +3,8 @@ import { recoverCoverAssetStorageData } from '../../data-access.js'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { prepareAttachmentCover } from './attachment-cover.js'
 import type { ToolContext, ToolResult } from './types.js'
+import { currentGoalExecution } from '../goal-context.js'
+import { assertGoalFence } from '../goal-fence.js'
 
 export type CoverSelection = { id: string; imageUrl: string; upload?: { width: number; height: number } }
 
@@ -24,6 +26,8 @@ export async function prepareCoverSelection(ctx: ToolContext, args: { attachment
 /** Also used inside the durable effect transaction, behind its lease/approval fence. */
 export async function applyCoverSelection(ctx: ToolContext, cover: CoverSelection, tx: Prisma.TransactionClient): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
+  const goal = currentGoalExecution()
+  if (goal) await assertGoalFence(tx, goal)
   const novel = await tx.novel.findFirst({ where: { id: ctx.novelId, authorId: ctx.userId }, select: { title: true, coverAssetId: true } })
   if (!novel) throw new DataAccessError(404, 'NOVEL_NOT_FOUND', '作品不存在或无权修改。')
   if (cover.upload) await tx.coverAsset.upsert({ where: { id: cover.id },
@@ -34,6 +38,12 @@ export async function applyCoverSelection(ctx: ToolContext, cover: CoverSelectio
   ctx.signal.throwIfAborted()
   await tx.coverAsset.update({ where: { id: asset.id }, data: { novelId: ctx.novelId } })
   await tx.novel.update({ where: { id: ctx.novelId }, data: { coverAssetId: asset.id } })
+  if (goal) await tx.agentGoalEvidence.upsert({ where: { goalId_revision_criterionId: {
+    goalId: goal.goalId, revision: goal.revision, criterionId: 'cover-applied',
+  } }, create: { goalId: goal.goalId, revision: goal.revision, criterionId: 'cover-applied',
+    kind: 'cover-application', description: '当前目标已应用作品封面。', targetId: asset.id, status: 'verified',
+    receipt: { runId: ctx.runId, novelId: ctx.novelId, coverAssetId: asset.id }, verifiedAt: new Date(),
+  }, update: { targetId: asset.id, status: 'verified', receipt: { runId: ctx.runId, novelId: ctx.novelId, coverAssetId: asset.id }, verifiedAt: new Date() } })
   return { output: `已把${cover.upload ? '上传图片' : '候选图'}设为《${novel.title}》的封面。`, summary: '已应用作品封面',
     display: { kind: 'coverImages', images: [{ id: asset.id, url: asset.imageUrl }] },
     snapshot: { target: 'novel', targetId: ctx.novelId, field: 'coverAssetId', previousValue: novel.coverAssetId } }

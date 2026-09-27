@@ -6,7 +6,7 @@ import type { chatWithTools as chatType } from '../../api/lib/ai-service.js'
 
 const mocks = vi.hoisted(() => ({
   chat: vi.fn(), emit: vi.fn(), persist: vi.fn(async () => ({})), dispose: vi.fn(async () => {}),
-  update: vi.fn<(input: { data: Record<string, unknown> }) => Promise<{ taskSpec: TaskSpec | null; usage?: unknown; currentTurn?: number; startedAt?: Date; events?: Array<{ type: string; createdAt: Date }> }>>(async () => ({ taskSpec: null })), previous: vi.fn(async () => null),
+  update: vi.fn<(input: { data: Record<string, unknown> }) => Promise<{ taskSpec: TaskSpec | null; usage?: unknown; currentTurn?: number; startedAt?: Date; events?: Array<{ type: string; createdAt: Date }> }>>(async () => ({ taskSpec: null })), owner: vi.fn(async () => ({ userId: 'user' })), previous: vi.fn(async () => null),
   committedChapter: vi.fn(async () => false),
   todos: vi.fn(async (): Promise<AgentTodoItem[]> => []),
   priorRuns: vi.fn(),
@@ -16,18 +16,32 @@ const mocks = vi.hoisted(() => ({
   hiddenTools: [] as AgentTool[],
   skillReceipt: vi.fn(async () => ({})), skillLoads: vi.fn(async (...args: unknown[]) => { void args }),
 }))
+
+// These cases exercise an ordinary (non-goal-owned) loop.  Keep the goal
+// lookup explicit so the test fixture cannot accidentally hit the real
+// AgentGoalExecution delegate when the loop checks its ownership boundary.
+vi.mock('../../api/lib/agent/goal-fence.js', () => ({
+  readGoalExecution: vi.fn(async () => undefined),
+  assertGoalFence: vi.fn(async () => undefined),
+  assertRunGoalFence: vi.fn(async () => undefined),
+}))
 vi.mock('../../api/lib/ai-service.js', () => ({ chatWithTools: mocks.chat }))
-vi.mock('../../api/lib/prisma.js', () => ({
+vi.mock('../../api/lib/prisma.js', () => {
+  const db: Record<string, unknown> = {
   DataAccessError: class extends Error {
     constructor(readonly status: number, readonly code: string, message: string) { super(message) }
   },
-  prisma: {
-    agentRun: { update: mocks.update, findFirst: mocks.previous, findMany: mocks.priorRuns },
-    agentSession: { update: vi.fn(async () => ({})), findUnique: vi.fn(async () => null) },
-    agentMessage: { upsert: mocks.persist, findUnique: vi.fn(async () => null), findFirst: mocks.original },
-    agentSkillRun: { upsert: mocks.skillReceipt },
-  },
-}))
+  agentRun: { update: mocks.update, findUniqueOrThrow: mocks.owner, findFirst: mocks.previous, findMany: mocks.priorRuns },
+  agentSession: { update: vi.fn(async () => ({})), findUnique: vi.fn(async () => null) },
+  agentMessage: { upsert: mocks.persist, findUnique: vi.fn(async () => null), findFirst: mocks.original },
+  agentSkillRun: { upsert: mocks.skillReceipt },
+  $transaction: vi.fn(async (work: (tx: Record<string, unknown>) => Promise<unknown>) => work(db)),
+  }
+  return {
+  DataAccessError: db.DataAccessError,
+  prisma: db,
+  }
+})
 vi.mock('../../api/lib/credits.js', () => ({ getModelTierRuntime: vi.fn(async () => ({ tier: 'speed', contextWindowTokens: 128000 })) }))
 vi.mock('../../api/lib/agent/agents.js', () => ({
   getAgentDefinition: () => ({ type: 'test', model: 'test', title: '测试' }),
@@ -46,8 +60,8 @@ vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChap
 vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportForDelivery: mocks.report }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
 vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: () => ({ emit: mocks.emit, emitTransient: mocks.emit,
-  commitTerminal: async (body: AgentStreamEventBody, work: (tx: { agentRun: { update: typeof mocks.update } }) => Promise<unknown>) => ({
-    result: await work({ agentRun: { update: mocks.update } }), publish: () => mocks.emit(body),
+  commitTerminal: async (body: AgentStreamEventBody, work: (tx: { agentRun: { findUniqueOrThrow: typeof mocks.owner; update: typeof mocks.update } }) => Promise<unknown>) => ({
+    result: await work({ agentRun: { findUniqueOrThrow: mocks.owner, update: mocks.update } }), publish: () => mocks.emit(body),
   }),
 }), disposeRunEventBus: mocks.dispose }))
 vi.mock('../../api/lib/agent/permissions.js', () => ({ cancelAllQuestions: vi.fn(), grantAlwaysAllow: vi.fn(), hasAlwaysAllow: () => false, rejectAllApprovals: vi.fn(), waitForApproval: vi.fn() }))

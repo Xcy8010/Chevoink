@@ -1,4 +1,5 @@
 import { Prisma, PrismaClient } from '@prisma/client'
+import { withGoalDatabaseFences } from './agent/goal-database.js'
 // Resolve the application's selected environment before deriving pool options.
 import '../config/env.js'
 
@@ -35,7 +36,7 @@ if (process.env.NODE_ENV !== 'production') {
   globalThis.__chevoinkPrisma__ = prismaClient
 }
 
-export const prisma = prismaClient
+export const prisma = withGoalDatabaseFences(prismaClient)
 
 export class DataAccessError extends Error {
   status: number

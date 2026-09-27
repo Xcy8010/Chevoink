@@ -2,6 +2,7 @@
 import { expect, it } from 'vitest'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 import { activateComposerDraft, promoteComposerDraft, updateComposerDraft } from '../../src/features/studio/agent/composer-drafts'
+import type { AgentAttachmentMeta } from '../../shared/contracts/agent-attachments'
 it('isolates same-novel windows and synchronously persists even the last keystroke', () => {
   activateComposerDraft('draft-test:u:n:a')
   useAgentStore.getState().setComposerContent('123', [])
@@ -33,4 +34,21 @@ it('promotes a temporary window and routes late async results only to its origin
   expect(useAgentStore.getState().composerDraft).toBe('别覆盖')
   activateComposerDraft('session-test')
   expect(useAgentStore.getState().composerDraft).toBe('')
+})
+
+it('promotes goal drafts with uploaded attachment metadata into the created session', () => {
+  const attachment: AgentAttachmentMeta = {
+    id: 'attachment-promotion-1', kind: 'image', name: '参考.webp', url: '/api/agent/attachments/attachment-promotion-1', size: 128,
+  }
+  activateComposerDraft('temporary-goal-attachment')
+  useAgentStore.getState().setComposerDraft('写三章')
+  useAgentStore.getState().setComposerAttachments([attachment])
+  useAgentStore.getState().setGoalMode(true)
+
+  promoteComposerDraft('temporary-goal-attachment', 'session-goal-attachment')
+  activateComposerDraft('session-goal-attachment')
+
+  expect(useAgentStore.getState().composerDraft).toBe('写三章')
+  expect(useAgentStore.getState().composerAttachments).toEqual([attachment])
+  expect(useAgentStore.getState().goalMode).toBe(true)
 })

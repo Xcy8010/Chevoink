@@ -180,7 +180,7 @@ export async function prepareProviderAttempt(token: RunLeaseToken, input: {
 }
 
 /** Only dispatchGranted=true permits a network call; a lost commit reply requires reconciliation. */
-export async function markProviderDispatched(token: RunLeaseToken, attemptId: string) {
+export async function markProviderDispatched(token: RunLeaseToken, attemptId: string, goalTokenEstimate?: number) {
   token = { ...token }
   return withRunLease(token, async tx => {
     const attempt = await tx.agentProviderAttempt.findUnique({ where: { id: attemptId } })
@@ -192,9 +192,53 @@ export async function markProviderDispatched(token: RunLeaseToken, attemptId: st
     if (operation.parentOperationId) await assertCurrentToolPolicy(tx, token, await ownedOperation(tx, token, operation.parentOperationId))
     await assertProviderBudget(tx, token.taskRootId)
     await assertPendingProviderState(tx, token.taskRootId, attempt.operationId)
+    const context = await (await import('./goal-fence.js')).readGoalExecution(token.userId, token.runId, tx)
+    if (context) {
+      const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: context.goalId } })
+      if (goal.currentRunId === token.runId && ['awaiting_input', 'awaiting_approval'].includes(goal.phase)) {
+        runtimeError('GOAL_AUTHOR_INPUT_REQUIRED', '目标等待作者决定，不能派发新模型请求。')
+      }
+      await (await import('./goal-budget.js')).reserveGoalUsageInTransaction(tx, `durable:${attempt.id}`, goalTokenEstimate ?? NaN, context)
+    }
     const updated = await tx.agentProviderAttempt.update({ where: { id: attempt.id }, data: { status: 'dispatched', dispatchedAt: await databaseNow(tx) } })
     await tx.agentOperation.update({ where: { id: attempt.operationId }, data: { status: 'dispatched' } })
     return { dispatchGranted: true, attempt: updated }
+  })
+}
+
+/**
+ * Close a provider attempt that is still provably unsent.  This is deliberately
+ * lease-free: a budget rejection or an expired owner epoch must not leave a
+ * prepared operation in the goal's unresolved set.  The caller invokes this
+ * only before the dispatch marker is committed and before any network call.
+ * An attempt that has a dispatch timestamp is never changed by this helper.
+ */
+export async function markProviderNotDispatched(input: {
+  userId: string; attemptId: string; requestHash: string; code: string
+}) {
+  const captured = { ...input }
+  runtimeId(captured.userId); runtimeId(captured.attemptId); runtimeId(captured.code, 96)
+  return runtimeTransaction(async tx => {
+    const initial = await tx.agentProviderAttempt.findFirst({
+      where: { id: captured.attemptId, operation: { taskRoot: { userId: captured.userId } } },
+      include: { operation: true },
+    })
+    if (!initial) return runtimeError('RUNTIME_SCOPE_MISMATCH', '供应商尝试不存在或无权访问。')
+    await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${initial.operation.taskRootId} FOR UPDATE`
+    const attempt = await tx.agentProviderAttempt.findUniqueOrThrow({ where: { id: captured.attemptId }, include: { operation: true } })
+    if (attempt.requestHash !== captured.requestHash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '供应商尝试不匹配原请求。')
+    if (!attempt.requestSnapshot || runtimeJson(attempt.requestSnapshot).hash !== attempt.requestHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原供应商请求快照缺失或损坏。')
+    if (attempt.dispatchedAt || attempt.status !== 'prepared' || attempt.operation.status !== 'prepared') return attempt
+    const result = runtimeJson({ outcome: 'cancelled', result: { code: captured.code, dispatched: false } })
+    const updated = await tx.agentProviderAttempt.update({ where: { id: attempt.id }, data: {
+      status: 'cancelled', result: result.value, resultHash: result.hash, completedAt: await databaseNow(tx),
+    } })
+    await tx.agentOperation.update({ where: { id: attempt.operationId }, data: { status: 'cancelled' } })
+    await outbox(tx, { taskRootId: attempt.operation.taskRootId, operationId: attempt.operationId, runId: attempt.runId,
+      eventKey: `provider.not_dispatched:${attempt.id}`, type: 'provider.not_dispatched', payload: {
+        attemptId: attempt.id, requestHash: attempt.requestHash, code: captured.code, resultHash: result.hash,
+      } })
+    return updated
   })
 }
 

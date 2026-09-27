@@ -1,7 +1,7 @@
 import type { AgentExecutionMode, AgentSessionToolPolicy, AgentSandboxMode, AgentWorkspaceToolPermission } from '../../../shared/contracts/index.js'
 import { env } from '../../config/env.js'
 import type { AgentTool } from './tools/types.js'
-import { getToolsForMode } from './tools/registry.js'
+import { filterGoalToolsForExecution, getToolsForMode } from './tools/registry.js'
 import type { Agent2FeatureFlags } from '../../../shared/contracts/index.js'
 import { AGENT_TOOL_GOVERNANCE } from './tools/governance.js'
 
@@ -68,8 +68,10 @@ export function getToolsForAgent(
   agent: AgentDefinition,
   mode: AgentExecutionMode,
   featureFlags?: Agent2FeatureFlags,
+  options: { goalOwned?: boolean } = {},
 ): AgentTool[] {
   let modeTools = getToolsForMode(mode)
+  modeTools = filterGoalToolsForExecution(modeTools, options.goalOwned === true)
 
   if (featureFlags) {
     const disabled = new Set<string>()

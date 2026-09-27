@@ -135,6 +135,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
   const openAITools = toOpenAITools(tools)
 
   const messages = buildSubagentMessages(params)
+  messages.splice(1, 0, ...await (await import('./goal-runtime.js')).buildGoalContextMessages(params.userId, params.parentRunId))
   const contextBudget = resolveAgentContextBudget(params.modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens, env.aiTextMaxOutputTokens)
   const prepareContextForRequest = (requestTools = openAITools): boolean => {
     const toolTokens = estimateToolDefinitionTokens(requestTools)

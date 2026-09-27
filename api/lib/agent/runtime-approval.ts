@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
+import { assertGoalRevisionFence, readGoalExecution } from './goal-fence.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
 import { parseToolArgsTolerant } from './tool-argument-parser.js'
@@ -99,6 +100,8 @@ export async function resolveDurableApproval(input: { userId: string; runId: str
   if (typeof input.callId !== 'string' || !input.callId || typeof input.approved !== 'boolean' || typeof input.alwaysAllow !== 'boolean') runtimeError('RUNTIME_INPUT_INVALID', '审批身份与决定字段不完整。')
   if (input.alwaysAllow) runtimeError('RUNTIME_APPROVAL_SCOPE_INVALID', '本次审批只允许当前调用，不能扩展为会话永久授权。')
   return runtimeTransaction(async tx => {
+    const goal = await readGoalExecution(input.userId, input.runId, tx)
+    if (goal) await assertGoalRevisionFence(tx, goal)
     const { run, root } = await lockRunRoot(tx, input.userId, input.runId)
     const request = await tx.agentExecutionOutbox.findFirst({ where: { id: input.requestId, taskRootId: root.id, type: 'approval.requested' } })
     const parsed = requestSchema.safeParse(request?.payload)

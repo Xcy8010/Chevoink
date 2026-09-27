@@ -9,6 +9,8 @@ import { getAuxiliaryModelRuntime } from '../credits.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { activeChapterScope, activeVolumeWhere } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
+import { currentGoalEffectScope, type GoalExecutionContext } from './goal-context.js'
+import { assertGoalRevisionFence } from './goal-fence.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { memoryGraphProposalSchema, projectReviewedMemoryGraph, type MemoryGraphProposal } from './memory-graph-proposal.js'
 
@@ -334,15 +336,57 @@ export async function searchStoryMemory(input: {
     .slice(0, input.limit ?? 8)
 }
 
+const goalMemoryBindingSchema = z.object({
+  goalId: z.string().min(1),
+  revision: z.number().int().nonnegative(),
+  epoch: z.string().regex(/^\d+$/),
+  userId: z.string().min(1),
+  novelId: z.string().min(1),
+  sessionId: z.string().min(1),
+  runId: z.string().min(1),
+}).strict()
+
+type GoalMemoryBinding = z.infer<typeof goalMemoryBindingSchema>
+
+function memoryJobGoalBinding(diff: unknown): GoalExecutionContext | undefined {
+  if (!diff || typeof diff !== 'object' || Array.isArray(diff)) return undefined
+  const raw = (diff as Record<string, unknown>).goalBinding
+  if (raw === undefined) return undefined
+  const parsed = goalMemoryBindingSchema.safeParse(raw)
+  if (!parsed.success) throw new DataAccessError(409, 'MEMORY_JOB_SOURCE_MISMATCH', '记忆任务目标绑定损坏。')
+  return { ...parsed.data, epoch: BigInt(parsed.data.epoch) }
+}
+
+async function assertMemoryJobGoalBinding(tx: Prisma.TransactionClient, job: { novelId: string; diff: unknown }) {
+  const binding = memoryJobGoalBinding(job.diff)
+  if (!binding) return undefined
+  if (binding.novelId !== job.novelId) throw new DataAccessError(409, 'MEMORY_JOB_SOURCE_MISMATCH', '记忆任务目标与作品来源不一致。')
+  await assertGoalRevisionFence(tx, binding)
+  const execution = await tx.agentGoalExecution.findFirst({ where: { goalId: binding.goalId, goalRevision: binding.revision,
+    epoch: binding.epoch, runId: binding.runId }, select: { id: true } })
+  if (!execution) throw new DataAccessError(409, 'MEMORY_JOB_SOURCE_MISMATCH', '记忆任务目标执行映射不一致。')
+  return binding
+}
+
 export async function enqueueChapterMemoryExtraction(input: {
   novelId: string; chapterId: string; chapterRevision: number; before: string; after: string
 }, transaction?: Prisma.TransactionClient) {
+  const goal = currentGoalEffectScope()
+  const goalBinding: GoalMemoryBinding | undefined = goal && {
+    goalId: goal.goalId, revision: goal.revision, epoch: goal.epoch.toString(), userId: goal.userId,
+    novelId: goal.novelId, sessionId: goal.sessionId, runId: goal.runId,
+  }
+  const diff = {
+    beforeHash: createHash('sha256').update(input.before).digest('hex'),
+    after: input.after,
+    ...(goalBinding ? { goalBinding } : {}),
+  }
   const job = await (transaction ?? prisma).memoryExtractionJob.upsert({
     where: { idempotencyKey: `${input.chapterId}:${input.chapterRevision}` },
     create: {
       novelId: input.novelId, chapterId: input.chapterId, chapterRevision: input.chapterRevision,
       idempotencyKey: `${input.chapterId}:${input.chapterRevision}`,
-      diff: { beforeHash: createHash('sha256').update(input.before).digest('hex'), after: input.after },
+      diff,
     },
     update: {},
   })
@@ -361,6 +405,9 @@ export async function processMemoryExtractionJob(jobId: string): Promise<void> {
       await tx.$queryRaw`SELECT id FROM memory_extraction_jobs WHERE id = ${jobId} FOR UPDATE`
       const job = await tx.memoryExtractionJob.findUnique({ where: { id: jobId } })
       if (!job || job.diff && typeof job.diff === 'object' && !Array.isArray(job.diff) && job.diff.durableTaskRootId) return
+      const now = new Date()
+      if (job.status !== 'pending' && !(job.status === 'failed' && job.leaseUntil !== null && job.leaseUntil < now)) return
+      await assertMemoryJobGoalBinding(tx, job)
       const claim = await tx.memoryExtractionJob.updateMany({
         where: { id: jobId, OR: [{ status: 'pending' }, { status: 'failed', leaseUntil: { lt: new Date() } }] },
         data: { status: 'processing', leaseUntil: new Date(Date.now() + 60_000), attempts: { increment: 1 }, errorMessage: null },
@@ -385,12 +432,16 @@ export async function processMemoryExtractionJob(jobId: string): Promise<void> {
  * holds the task lease for the whole application and receipt commit. */
 export async function applyMemoryExtractionJob(tx: Prisma.TransactionClient, jobId: string, scope?: { userId: string; novelId: string; runId: string; taskRootId: string }): Promise<{ status: 'applied' | 'stale'; memoryIds: string[] }> {
     const job = await tx.memoryExtractionJob.findUniqueOrThrow({ where: { id: jobId } })
+    const goalBinding = await assertMemoryJobGoalBinding(tx, job)
     if (scope && job.novelId !== scope.novelId || job.diff && typeof job.diff === 'object' && !Array.isArray(job.diff)
       && job.diff.durableTaskRootId && job.diff.durableTaskRootId !== scope?.taskRootId) throw new DataAccessError(409, 'MEMORY_JOB_SOURCE_MISMATCH', '记忆任务需要原持久任务控制权。')
     await lockNovelActiveScope(tx, job.novelId)
     const chapter = await tx.chapter.findFirst({
       where: { id: job.chapterId, ...activeChapterScope(job.novelId) }, include: { novel: { select: { authorId: true } }, volume: { select: { id: true, title: true, revision: true } } },
     })
+    if (goalBinding && chapter && chapter.novel.authorId !== goalBinding.userId) {
+      throw new DataAccessError(409, 'MEMORY_JOB_SOURCE_MISMATCH', '记忆任务目标与作品作者不一致。')
+    }
     if (!chapter || chapter.revision !== job.chapterRevision) {
       await tx.memoryExtractionJob.update({ where: { id: jobId }, data: { status: 'completed', errorMessage: 'stale_revision_skipped', leaseUntil: null } })
       return { status: 'stale', memoryIds: [] }

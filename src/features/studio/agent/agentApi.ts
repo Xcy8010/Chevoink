@@ -29,6 +29,11 @@ import type {
   AgentSubtaskRole,
   AgentSubtaskLogsView,
   AgentSubtaskView,
+  AgentGoalDetail,
+  AgentGoalSnapshot,
+  ActOnAgentGoalRequest,
+  CreateAgentGoalRequest,
+  UpdateAgentGoalRequest,
   StoryBranchDiffView,
   StoryBranchView,
 } from '../../../../shared/contracts/index.js'
@@ -149,12 +154,12 @@ export type AgentSessionForkInfo = { forkedFromSessionId: string; forkedFromMess
 export function fetchAgentSessionMessages(
   sessionId: string,
   options?: { runLimit?: number; beforeRunStartedAt?: string | null },
-): Promise<{ messages: AgentUIMessage[]; activeRunId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }> {
+): Promise<{ messages: AgentUIMessage[]; activeRunId: string | null; runGoalId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }> {
   const query = new URLSearchParams()
   if (options?.runLimit != null) query.set('runLimit', String(options.runLimit))
   if (options?.beforeRunStartedAt) query.set('before', options.beforeRunStartedAt)
   const suffix = query.toString() ? `?${query.toString()}` : ''
-  return requestData<{ messages: AgentUIMessage[]; activeRunId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }>(
+  return requestData<{ messages: AgentUIMessage[]; activeRunId: string | null; runGoalId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }>(
     `/api/agent/sessions/${sessionId}/messages${suffix}`,
   )
 }
@@ -400,4 +405,63 @@ export function fetchRollbackImpactPreview(
 export function buildAgentStreamUrl(runId: string, sinceSeq?: number): string {
   const suffix = sinceSeq && sinceSeq > 0 ? `?since=${sinceSeq}` : ''
   return buildApiUrl(`/api/agent/runs/${runId}/stream${suffix}`)
+}
+
+export type AgentGoalEvent = {
+  sequence?: number
+  goalId?: string
+  sessionId?: string
+  stateVersion?: number
+  goalRevision?: number
+  type?: string
+  snapshot: AgentGoalSnapshot | null
+}
+
+export type AgentGoalCapabilities = { enabled: boolean }
+
+/** Goal creation is feature gated; failures deliberately leave the entry point closed. */
+export function fetchAgentGoalCapabilities(): Promise<AgentGoalCapabilities> {
+  return requestData<AgentGoalCapabilities>('/api/agent/goal-capabilities')
+}
+
+export function fetchAgentGoal(sessionId: string): Promise<AgentGoalSnapshot | null> {
+  return requestData<AgentGoalSnapshot | null>(`/api/agent/sessions/${encodeURIComponent(sessionId)}/goal`)
+}
+
+export function createAgentGoal(sessionId: string, input: CreateAgentGoalRequest): Promise<AgentGoalSnapshot> {
+  return requestData<AgentGoalSnapshot>(`/api/agent/sessions/${encodeURIComponent(sessionId)}/goals`, {
+    method: 'POST', body: JSON.stringify(input),
+  })
+}
+
+/** 首次发送目标时由后端原子创建 session 与 goal，避免前端先建空会话。 */
+export function createAgentGoalForNovel(novelId: string, input: CreateAgentGoalRequest): Promise<AgentGoalSnapshot> {
+  return requestData<AgentGoalSnapshot>('/api/agent/goals', {
+    method: 'POST', body: JSON.stringify({ novelId, ...input }),
+  })
+}
+
+export function updateAgentGoal(sessionId: string, goalId: string, input: UpdateAgentGoalRequest): Promise<AgentGoalSnapshot> {
+  return requestData<AgentGoalSnapshot>(`/api/agent/sessions/${encodeURIComponent(sessionId)}/goals/${encodeURIComponent(goalId)}`, {
+    method: 'PATCH', body: JSON.stringify(input),
+  })
+}
+
+export function actOnAgentGoal(sessionId: string, goalId: string, input: ActOnAgentGoalRequest): Promise<AgentGoalSnapshot> {
+  return requestData<AgentGoalSnapshot>(`/api/agent/sessions/${encodeURIComponent(sessionId)}/goals/${encodeURIComponent(goalId)}/actions`, {
+    method: 'POST', body: JSON.stringify(input),
+  })
+}
+
+export function fetchAgentGoalDetail(sessionId: string, goalId: string, cursors?: { revision?: number; evidence?: string }): Promise<AgentGoalDetail> {
+  const query = new URLSearchParams()
+  if (cursors?.revision) query.set('revision', String(cursors.revision))
+  if (cursors?.evidence) query.set('evidence', cursors.evidence)
+  const suffix = query.toString() ? `?${query.toString()}` : ''
+  return requestData<AgentGoalDetail>(`/api/agent/sessions/${encodeURIComponent(sessionId)}/goals/${encodeURIComponent(goalId)}${suffix}`)
+}
+
+export function buildAgentGoalStreamUrl(sessionId: string, afterSequence = 0): string {
+  const suffix = afterSequence > 0 ? `?afterSequence=${encodeURIComponent(String(afterSequence))}` : ''
+  return buildApiUrl(`/api/agent/sessions/${encodeURIComponent(sessionId)}/goal-events${suffix}`)
 }
