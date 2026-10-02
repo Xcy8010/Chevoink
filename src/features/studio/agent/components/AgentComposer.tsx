@@ -698,7 +698,7 @@ export function AgentComposer({
       onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDragActive(true) }}
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false) }}
       onDrop={(event) => void handleDrop(event)}
-      className={`agent-composer-glass relative z-[80] rounded-[20px] border bg-[var(--studio-composer-bg,var(--surface-default))] p-2.5 shadow-sm transition-colors ${dragActive ? 'border-[var(--text-primary)]' : 'border-[var(--border-subtle)]'}`}
+      className={`agent-composer-glass ${goalActive || goalMode ? 'agent-composer-goal' : ''} relative z-[80] rounded-[20px] border bg-[var(--studio-composer-bg,var(--surface-default))] p-2.5 shadow-sm transition-colors ${dragActive ? 'border-[var(--text-primary)]' : 'border-[var(--border-subtle)]'}`}
     >
       {dragActive ? <div className="pointer-events-none absolute inset-1 z-20 flex items-center justify-center rounded-[16px] bg-[var(--surface-default)]/95 text-xs font-medium text-[var(--text-primary)]">松开即可添加引用、图片或文件</div> : null}
       {pinnedSubagent ? <div className="mb-2 flex items-center gap-2 px-1 text-[11px] text-[var(--text-primary)]"><span className="min-w-0 truncate">本轮子 Agent：{pinnedSubagent.name}</span><button type="button" disabled={sending || voiceActive} onClick={() => useAgentStore.setState({ composerSubagent: null })} aria-label="取消指定子 Agent" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md hover:bg-[var(--surface-muted)]"><X className="h-3.5 w-3.5" /></button></div> : null}
@@ -1008,7 +1008,7 @@ export function AgentComposer({
               ))}
             </div>
           </details>
-          {canUseGoalEntry ? <GoalModeChip active={goalActive} draft={goalMode} busy={goalBusy || sending || disabled} onOpen={() => onGoalOpen?.()} onCancel={() => {
+          {canUseGoalEntry ? <GoalModeChip active={goalActive} draft={goalMode} busy={goalBusy || sending || (!goalActive && disabled)} onOpen={() => onGoalOpen?.()} onCancel={() => {
             if (goalActive) onGoalCancel?.()
             else setGoalMode(false)
           }} /> : null}

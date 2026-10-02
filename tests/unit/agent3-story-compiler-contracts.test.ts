@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '../../api/lib/prisma.js'
+import { DataAccessError } from '../../api/lib/prisma.js'
 import * as compiler from '../../api/lib/agent/story-compiler.js'
 import * as quality from '../../api/lib/agent/humanity-quality.js'
 import * as review from '../../api/lib/agent/review-completion.js'
@@ -25,7 +26,7 @@ describe('严谨创作落实连续性警告', () => {
     const findings = ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在衔接风险', suggestion: '局部澄清' }))
     const validation = { independentCheck: 'complete', checkedRevision: 1, findings, errorCount: 0, warningCount: 3, autoRepairRounds: 0 }
     const compilation = { id: 'comp', chapterId: 'c', chapter, bridge: { fromChapterId: null }, sceneTasks: [{ ordinal: 1 }], validation: cached ? validation : null, status: 'active' }
-    vi.spyOn(prisma.storyCompilation, 'findFirst').mockResolvedValue(compilation as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findFirst>>)
+    const findCompilation = vi.spyOn(prisma.storyCompilation, 'findFirst').mockResolvedValue(compilation as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findFirst>>)
     vi.spyOn(prisma.storyCompilation, 'findMany').mockResolvedValue([compilation] as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findMany>>)
     vi.spyOn(quality, 'qualityCompilationScope').mockResolvedValue({ run: { id: 'r' } })
     const qualityReport = vi.spyOn(quality, 'getLatestQualityReport').mockResolvedValue(null)
@@ -45,7 +46,7 @@ describe('严谨创作落实连续性警告', () => {
     vi.spyOn(flags, 'isAgent2FeatureEnabled').mockReturnValue(false)
     vi.spyOn(novelTools, 'recalcNovelStats').mockResolvedValue(undefined)
     const ctx: ToolContext = { userId: 'u', novelId: 'n', runId: 'r', sessionId: 's', callId: 'check', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
-    return { ctx, chapter, compilation, validation, qualityReport, reserve, critic, repair, write }
+    return { ctx, chapter, compilation, validation, qualityReport, reserve, critic, repair, write, findCompilation }
   }
   it.each([false, true])('0错误3警告执行一次集中修订，缓存=%s', async cached => {
     const f = fixture(cached)
@@ -57,6 +58,42 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.write.mock.calls[0][0].data.content).toBe('新文')
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     expect(f.repair).toHaveBeenCalledOnce()
+  })
+  it('allows bounded output recovery after reserving a check without mistaking bookkeeping for a body edit', async () => {
+    const f = fixture(false)
+    f.ctx.creativeFreedom = 'stable'
+    // Real DB reads return independent snapshots, including our reservation write.
+    let current = structuredClone(f.compilation)
+    f.findCompilation.mockImplementation(async () => structuredClone(current) as never)
+    vi.mocked(compiler.reserveContinuityCheck).mockImplementation(async () => {
+      current = { ...current, validation: { checkRounds: 1 } } as typeof current
+      Object.assign(current, { updatedAt: new Date() })
+      return true
+    })
+    f.critic.mockRestore()
+    f.repair.mockRejectedValueOnce(new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', 'output ceiling'))
+      .mockResolvedValueOnce('{"findings":[]}')
+    await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
+    expect(f.repair).toHaveBeenCalledTimes(2)
+    expect(f.repair.mock.calls[1][2]).toMatchObject({ action: 'agent3ContinuityCriticOutputRecovery', boundedReview: true, maxOutputTokens: 32768 })
+    expect(compiler.validateStoryContinuity).toHaveBeenCalledWith(expect.objectContaining({ independentCheck: 'complete', expectedChapterRevision: 1 }))
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it.each(['chapter', 'bridge', 'scenes', 'removed', 'after-response'] as const)('rejects genuinely changed %s before recovery or applying the result', async change => {
+    const f = fixture(false)
+    let current: typeof f.compilation | null = structuredClone(f.compilation)
+    f.findCompilation.mockImplementation(async () => structuredClone(current) as never)
+    f.critic.mockImplementation(async (_system, _content, _options, beforeRecovery) => {
+      if (change === 'chapter' || change === 'after-response') current!.chapter.revision++
+      if (change === 'bridge') Object.assign(current!.bridge, { location: 'changed' })
+      if (change === 'scenes') current!.sceneTasks[0].ordinal++
+      if (change === 'removed') current = null
+      if (change !== 'after-response') await beforeRecovery?.()
+      return '{"findings":[]}'
+    })
+    await expect(continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
+    expect(compiler.validateStoryContinuity).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
   })
   it.each(['stable', 'bold', 'protected', 'review', 'repaired-quality', 'checked-quality', 'budget', 'unsafe', 'cancelled', 'invalid-scenes'] as const)('%s 保留权限、版本与一次修订边界', async scenario => {
     const f = fixture(true)

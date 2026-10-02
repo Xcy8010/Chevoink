@@ -30,6 +30,23 @@ async function invoke(usages: Array<Record<string, unknown>>) {
 }
 
 describe('explicit zero provider usage is not missing usage', () => {
+  it.each(['speed', 'custom'] as const)('sends non-thinking critic requests for %s without changing the selected model or main-turn effort', async tier => {
+    const runtime = { tier, provider: 'deepseek', modelName: 'deepseek-flash', apiKey: 'fixture-not-a-key', baseUrl: 'https://fixture.test/v1',
+      reasoningEffort: 'high' as const, reasoningEfforts: ['low', 'high'] as const, thinkingEnabled: true, reasoningParameterMode: 'native' as const,
+      multiplierBps: 0, visionEnabled: false, contextWindowTokens: 128000 }
+    const fetcher = vi.fn(async () => new Response('data: {"choices":[{"delta":{"content":"{\\"findings\\":[]}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":8}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
+    vi.stubGlobal('fetch', fetcher)
+    await generateTextCompletion('system', '完整正文', { userId: 'test', action: 'agent3ContinuityCritic', boundedReview: true, maxOutputTokens: 16384,
+      modelRuntime: { ...runtime, reasoningEfforts: [...runtime.reasoningEfforts] } })
+    await chatWithTools({ messages: [{ role: 'user', content: '完整正文' }], tools: [], ...runtime, model: runtime.modelName,
+      providerApiKey: runtime.apiKey, providerBaseUrl: runtime.baseUrl, boundedReview: true, usageLog: { userId: 'test', action: 'continuity_critic', modelTier: tier, multiplierBps: 0 } })
+    for (const call of vi.mocked(fetch).mock.calls) {
+      const body = JSON.parse(String(call[1]?.body))
+      expect(body).toMatchObject({ model: 'deepseek-flash', thinking: { type: 'disabled' } })
+      expect(body.reasoning_effort).toBeUndefined()
+    }
+    expect(runtime.reasoningEffort).toBe('high')
+  })
   it.each([429, 500, 503])('routes a rejected HTTP %s request to another configured account', async status => {
     const primary = { id: `primary-${status}`, tier: 'speed', provider: 'openai', modelName: 'fixture', baseUrl: 'https://primary.test/v1', apiKeyCiphertext: 'fixture-not-a-key', metadata: { routes: [{ id: `00000000-0000-4000-8000-000000000${status}`, label: 'backup', provider: 'openai', modelName: 'backup', baseUrl: 'https://backup.test/v1', apiKeyCiphertext: 'other-fixture-key', enabled: true }] } }
     mocks.findModel.mockResolvedValue(primary)

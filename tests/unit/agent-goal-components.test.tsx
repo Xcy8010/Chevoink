@@ -29,10 +29,15 @@ it('toggles the compact draft entry and opens details for an active goal', () =>
   const view = render(<GoalModeChip active={false} draft onOpen={onOpen} onCancel={onCancel} busy={false} />)
   fireEvent.click(screen.getByRole('button', { name: '取消目标模式' }))
   expect(onCancel).toHaveBeenCalledOnce()
-  expect(screen.getAllByRole('button')).toHaveLength(1)
+  expect(onOpen).not.toHaveBeenCalled()
   view.rerender(<GoalModeChip active draft={false} onOpen={onOpen} onCancel={onCancel} busy={false} />)
   fireEvent.click(screen.getByRole('button', { name: '打开目标详情' }))
   expect(onOpen).toHaveBeenCalledOnce()
+  fireEvent.click(screen.getByRole('button', { name: '取消目标' }))
+  expect(onCancel).toHaveBeenCalledTimes(2)
+  view.rerender(<GoalModeChip active draft={false} onOpen={onOpen} onCancel={onCancel} busy />)
+  fireEvent.click(screen.getByRole('button', { name: '取消目标' }))
+  expect(onCancel).toHaveBeenCalledTimes(2)
 })
 
 it('renders goal status and routes bar actions', () => {

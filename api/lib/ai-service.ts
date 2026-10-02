@@ -412,12 +412,19 @@ export type ChatCompletionResult = {
 }
 
 type ProviderReasoningInput = {
+  boundedReview?: boolean
   thinkingEnabled?: boolean
   reasoningParameterMode?: 'native' | 'omit'
   provider?: string | null
   providerBaseUrl?: string | null
   model: string
   reasoningEffort: import('../../shared/contracts/index.js').ModelReasoningEffort
+}
+
+function isDeepSeekProvider(input: { provider?: string | null; providerBaseUrl?: string | null; model: string }): boolean {
+  if (input.provider?.trim().toLowerCase() === 'deepseek' || /(?:^|\/)deepseek[-_]/i.test(input.model.trim())) return true
+  try { return new URL(input.providerBaseUrl ?? '').hostname.toLowerCase() === 'api.deepseek.com' }
+  catch { return false }
 }
 
 function isGlmProvider(input: { provider?: string | null; providerBaseUrl?: string | null; model: string }): boolean {
@@ -462,12 +469,17 @@ export function isMimoProvider(input: { provider?: string | null; providerBaseUr
  * GLM 缓存无需请求参数；这里只避免旧版 GLM 收到仅 5.2+ 支持的 reasoning_effort。
  */
 export function buildProviderReasoningPayload(input: ProviderReasoningInput): Record<string, unknown> {
+  // Validated BYOK thinking=true describes capability, not a mandate for every
+  // request. Critics must override it before the generic native branch.
+  if (input.boundedReview && input.thinkingEnabled !== false
+    && (isDeepSeekProvider(input) || isMimoProvider(input) || isGlmProvider(input) && supportsGlmThinking(input.model))) {
+    return { thinking: { type: 'disabled' } }
+  }
   if (input.reasoningParameterMode) return {
     ...(input.thinkingEnabled ? { thinking: { type: 'enabled' } } : {}),
     ...(input.reasoningParameterMode === 'native' ? { reasoning_effort: input.reasoningEffort } : {}),
   }
-  const provider = input.provider?.trim().toLowerCase() ?? ''
-  if (provider === 'deepseek') {
+  if (isDeepSeekProvider(input)) {
     return {
       thinking: { type: input.reasoningEffort === 'none' ? 'disabled' : 'enabled' },
       ...(input.reasoningEffort === 'none' ? {} : { reasoning_effort: input.reasoningEffort }),
@@ -515,7 +527,7 @@ export function resolveBoundedReviewReasoningEffort(
 ): import('../../shared/contracts/index.js').ModelReasoningEffort {
   if (!boundedReview || effort === 'none') return effort
   // 判定集与 buildProviderReasoningPayload 的显式分支保持一致，避免“判定 none 但走通用分支”的错配
-  return isMimoProvider(input) || (input.provider?.trim().toLowerCase() ?? '') === 'deepseek' || isGlmProvider(input) ? 'none' : effort
+  return isMimoProvider(input) || isDeepSeekProvider(input) || isGlmProvider(input) ? 'none' : effort
 }
 
 /** DeepSeek thinking accepts native tools, but rejects forced tool choice.
@@ -533,6 +545,8 @@ export function buildProviderToolChoice(input: ProviderReasoningInput, requested
 }
 
 export type ChatWithToolsParams = {
+  /** Internal critic/repair calls only; main creative turns retain author effort. */
+  boundedReview?: boolean
   /** Server-resolved offer; reevaluate only before a new provider operation. */
   freePromotion?: ModelPromotion | null
   /** Internal protocol correction only; never grants additional tool authority. */
@@ -691,6 +705,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   }
 
   Object.assign(body, buildProviderReasoningPayload({
+    boundedReview: params.boundedReview,
     thinkingEnabled: params.thinkingEnabled,
     reasoningParameterMode: params.reasoningParameterMode,
     provider: params.provider,
@@ -1052,9 +1067,6 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   const requestedReasoning = options.reasoningEffort ?? modelRuntime.reasoningEffort
   const completionReasoning = modelRuntime.reasoningEfforts && !modelRuntime.reasoningEfforts.includes(requestedReasoning)
     ? modelRuntime.reasoningEffort : requestedReasoning
-  const effectiveReasoning = resolveBoundedReviewReasoningEffort(options.boundedReview, completionReasoning, {
-    provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, model: modelRuntime.modelName ?? env.aiTextModel,
-  })
   ensureTextProviderConfigured(modelRuntime.apiKey)
   await assertCreditAccess(options.userId, modelRuntime.tier, false)
 
@@ -1090,12 +1102,13 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
       stream: true,
       stream_options: { include_usage: true },
       ...buildProviderReasoningPayload({
+        boundedReview: options.boundedReview,
         thinkingEnabled: modelRuntime.thinkingEnabled,
         reasoningParameterMode: modelRuntime.reasoningParameterMode,
         provider: modelRuntime.provider,
         providerBaseUrl: modelRuntime.baseUrl,
         model: modelRuntime.modelName ?? env.aiTextModel,
-        reasoningEffort: effectiveReasoning,
+        reasoningEffort: completionReasoning,
       }),
       messages: [
         { role: 'system', content: systemPrompt },

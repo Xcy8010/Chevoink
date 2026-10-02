@@ -63,7 +63,7 @@ export function AgentGoalBar({ goal, busy, onEdit, onPause, onResume, onCancel, 
   const canEdit = !terminal
 
   return (
-    <section aria-label="目标条" className="relative mx-3 -mb-3 flex min-w-0 items-center gap-1.5 rounded-t-[14px] border border-b-0 border-[var(--border-subtle)] bg-[var(--surface-muted)] px-2.5 pb-3 text-xs text-[var(--text-primary)] sm:mx-4">
+    <section aria-label="目标条" className="agent-goal-bar relative mx-3 -mb-3 flex min-w-0 items-center gap-1.5 rounded-t-[14px] border border-b-0 border-[var(--border-subtle)] bg-[var(--surface-muted)] px-2.5 pb-3 text-xs text-[var(--text-primary)] sm:mx-4">
       {presentation.running ? <LoaderCircle aria-hidden="true" className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--text-secondary)] motion-reduce:animate-none" /> : <Target aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />}
       <div className="flex min-w-0 flex-1 items-center gap-2">
         <span className="shrink-0 font-medium mobile:max-w-24 mobile:truncate">{presentation.label}</span>

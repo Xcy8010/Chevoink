@@ -122,6 +122,23 @@ describe('输出预算参数名适配', () => {
 })
 
 describe('评审调用推理降级', () => {
+  it.each([
+    { provider: 'deepseek', model: 'deepseek-flash' },
+    { provider: 'openai-compatible', model: 'deepseek/deepseek-v4-flash' },
+    { provider: 'proxy', model: 'alias', providerBaseUrl: 'https://api.deepseek.com/v1' },
+    { provider: 'zhipu', model: 'glm-5.2' },
+    { provider: 'xiaomi', model: 'mimo-v2.6-flash' },
+  ])('critic overrides the validated thinking flag for $provider/$model', route => {
+    const input = { ...route, reasoningEffort: 'high' as const, thinkingEnabled: true, reasoningParameterMode: 'native' as const }
+    expect(buildProviderReasoningPayload({ ...input, boundedReview: true })).toEqual({ thinking: { type: 'disabled' } })
+    expect(buildProviderReasoningPayload(input)).toEqual({ thinking: { type: 'enabled' }, reasoning_effort: 'high' })
+    expect(buildProviderReasoningPayload({ ...input, boundedReview: true, reasoningParameterMode: 'omit' })).toEqual({ thinking: { type: 'disabled' } })
+  })
+  it('preserves verified parameters for gateways rejecting thinking and for unknown models', () => {
+    expect(buildProviderReasoningPayload({ provider: 'deepseek', model: 'alias', boundedReview: true, thinkingEnabled: false, reasoningParameterMode: 'native', reasoningEffort: 'low' }))
+      .toEqual({ reasoning_effort: 'low' })
+    expect(buildProviderReasoningPayload({ provider: 'proxy', model: 'unknown', boundedReview: true, reasoningParameterMode: 'omit', reasoningEffort: 'high' })).toEqual({})
+  })
   it('有界评审对 MiMo/DeepSeek/GLM 强制关思考（含主机名与模型名识别），未知网关与显式 none 不受影响', () => {
     expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'xiaomi', model: 'mimo-v2.6-flash' })).toBe('none')
     expect(resolveBoundedReviewReasoningEffort(true, 'low', { provider: 'proxy', providerBaseUrl: 'https://api.xiaomimimo.com/v1', model: 'thinking-flash' })).toBe('none')

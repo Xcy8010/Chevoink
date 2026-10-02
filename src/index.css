@@ -865,6 +865,8 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 .agent-floating-footer [data-agent-composer], .agent-floating-footer [data-agent-activity] { pointer-events: none; }
 .agent-floating-footer [data-agent-composer] > *, .agent-floating-footer .agent-activity-capsule { pointer-events: auto; }
 .agent-composer-glass { background: var(--studio-composer-bg, var(--surface-default)); }
+html.dark .studio-workspace .agent-goal-bar { background: #262626; }
+html.dark .studio-workspace .agent-composer-goal { background: #333333; }
 @supports (backdrop-filter: blur(8px)) {
   .agent-composer-glass {
     background: color-mix(in srgb, var(--studio-composer-bg, var(--surface-default)) 90%, transparent);

@@ -634,6 +634,13 @@ export const continuityValidateTool = defineTool({
     }
     if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, summary: '本任务连续性检查未执行', output: '指定编译不属于本任务或尚未写入正文。独立检查既有章节请省略 compilationId、传真实 chapterId；不要为检查创建新章或接管旧编译。' }
     const chapter = compilation.chapter
+    // Compare the review's actual inputs, not bookkeeping modified by our own
+    // reserveContinuityCheck (validation.checkRounds / updatedAt).
+    const reviewInput = (value: typeof compilation | null) => value && JSON.stringify({
+      id: value.id, runId: value.runId, status: value.status,
+      chapter: value.chapter, bridge: value.bridge, sceneTasks: value.sceneTasks,
+    })
+    const frozenReviewInput = reviewInput(compilation)
     const quality = await getLatestQualityReport(ctx.userId, ctx.novelId, chapter.id)
     // After quality has repaired this revision, continuity must verify without
     // rewriting it again and invalidating quality in an endless ping-pong.
@@ -676,9 +683,9 @@ export const continuityValidateTool = defineTool({
       const latestWarnings = latest.filter((item) => item.severity === 'warning').length
       return {
         outcome: 'failed' as const,
-        summary: `连续性检查已停止 · ${MAX_CONTINUITY_CHECKS} 次未收敛（${latestErrors} 错误 ${latestWarnings} 警告）`,
-        output: `同一章节的连续性检查已连续 ${MAX_CONTINUITY_CHECKS} 次检出错误且未收敛，为避免反复改写继续损伤正文，自动复查已停止。不要再修改正文或重复调用检查；如实向作者报告以下未解决项，由作者决定如何收尾：\n${latest.map((item, index) => `${index + 1}. [${item.severity === 'error' ? '错误' : '警告'}/${item.signal}] ${item.evidence}；最小修法：${item.suggestion}`).join('\n') || '（最近一次检查无结构化明细，仅确定性检查未通过）'}`,
-        display: { kind: 'storyCompiler', compilationId: compilation.id, phase: 'repair', title: '连续性检查', detail: `已停止自动复查 · ${MAX_CONTINUITY_CHECKS} 次未收敛`, items: latest.map((item) => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`), errorCount: latestErrors, warningCount: latestWarnings },
+        summary: `连续性检查已停止 · 已达 ${MAX_CONTINUITY_CHECKS} 次自动检查上限`,
+        output: `同一章节已尝试 ${MAX_CONTINUITY_CHECKS} 次自动检查，尚未取得通过结果；供应商调用失败也计入尝试，不代表正文有错。不要再修改正文或重复调用检查；如实报告最近的失败原因或以下未解决项：\n${latest.map((item, index) => `${index + 1}. [${item.severity === 'error' ? '错误' : '警告'}/${item.signal}] ${item.evidence}；最小修法：${item.suggestion}`).join('\n') || '（没有可用的完整检查报告，不能判定通过或正文有错）'}`,
+        display: { kind: 'storyCompiler', compilationId: compilation.id, phase: 'repair', title: '连续性检查', detail: `已停止自动复查 · 已尝试 ${MAX_CONTINUITY_CHECKS} 次`, items: latest.map((item) => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`), errorCount: latestErrors, warningCount: latestWarnings },
       }
     }
     const allowRepair = !verificationOnly && ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(chapter.id)
@@ -698,23 +705,26 @@ export const continuityValidateTool = defineTool({
         `当前正文：\n${chapter.content}`,
         continuityReviewTail(compilation.validation, chapter.revision, allowRepair, args.focus),
       ].filter(Boolean).join('\n')
+    const assertCurrent = async () => {
+      const current = await prisma.storyCompilation.findFirst({
+        where: { id: compilation.id, userId: ctx.userId, novelId: ctx.novelId, status: 'active', ...await qualityCompilationScope(prisma, ctx.userId, ctx.novelId, ctx.runId) },
+        include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
+      })
+      const source = bridge.fromChapterId ? await prisma.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { revision: true } }) : null
+      if (reviewInput(current) !== frozenReviewInput || source?.revision !== sourceChapter?.revision) {
+        throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文或章节桥已变化，未应用或重发旧版本连续性检查，请读取当前版本。')
+      }
+    }
+    await assertCurrent()
     const criticPrompts = [continuityCriticSystem]
     const criticResponses = await Promise.all(criticPrompts.map((systemPrompt, index) => generateReviewCompletion(
       systemPrompt,
       criticInput,
       { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: ctx.signal, userId: ctx.userId, action: index === 0 ? 'agent3ContinuityCritic' : 'agent3ContinuityCriticSecondPass', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0.15, reasoningEffort: 'low' },
-      async () => {
-        const current = await prisma.storyCompilation.findFirst({
-          where: { id: compilation.id, userId: ctx.userId, novelId: ctx.novelId, status: 'active', ...await qualityCompilationScope(prisma, ctx.userId, ctx.novelId, ctx.runId) },
-          include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
-        })
-        const source = bridge.fromChapterId ? await prisma.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { revision: true } }) : null
-        if (JSON.stringify(current) !== JSON.stringify(compilation) || source?.revision !== sourceChapter?.revision) {
-          throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文或章节桥已变化，未重发旧版本连续性检查，请读取当前版本。')
-        }
-      },
+      assertCurrent,
     )))
     ctx.signal.throwIfAborted()
+    await assertCurrent()
     const parsedCriticResponses = criticResponses.map(parseIndependentContinuityResult)
     const criticFallback = parsedCriticResponses.some((response) => !response.structured)
     const independentFindings = parsedCriticResponses

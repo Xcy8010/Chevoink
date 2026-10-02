@@ -2017,10 +2017,11 @@ describe.runIf(available)('auxiliary model route inheritance (isolated PG)', () 
       const runtime = {
         tier: isByok ? 'custom' as const : 'speed' as const,
         multiplierBps: 0,
-        provider: isByok ? 'fixture-byok' : 'fixture-free',
-        modelName: isByok ? 'fixture-byok-model' : 'fixture-free-model',
+        provider: 'deepseek',
+        modelName: isByok ? 'deepseek-flash' : 'deepseek-v4-flash',
         baseUrl: isByok ? 'https://byok.invalid/v1' : 'https://free.invalid/v1',
         apiKey: 'fixture-key', reasoningEffort: 'low' as const, reasoningEfforts: ['low' as const],
+        thinkingEnabled: true, reasoningParameterMode: 'native' as const, outputTokenParameter: 'max_completion_tokens' as const,
         visionEnabled: false, contextWindowTokens: 64_000,
       }
       const selection = { tier: runtime.tier, customModelId: isByok ? 'fixture-byok-config' : null, reasoningEffort: 'low' as const }
@@ -2046,6 +2047,10 @@ describe.runIf(available)('auxiliary model route inheritance (isolated PG)', () 
       expect(result).toMatchObject({ content: '{"findings":[]}', billing: { status: 'settled', chargedMilli: 0 } })
       expect(runtimeSpy).toHaveBeenCalledWith(runtime.tier, f.userId, selection.customModelId, 'low')
       expect(fetchMock).toHaveBeenCalledOnce()
+      const requestBody = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+      expect(requestBody).toMatchObject({ thinking: { type: 'disabled' }, max_completion_tokens: 1024 })
+      expect(requestBody.reasoning_effort).toBeUndefined()
+      expect(requestBody.max_tokens).toBeUndefined()
       const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { parentOperationId: parent.operation.id } } })
       expect(attempt).toMatchObject({ provider: runtime.provider, model: runtime.modelName, status: 'succeeded' })
       expect(JSON.stringify(attempt.requestSnapshot)).not.toContain('fixture-key')

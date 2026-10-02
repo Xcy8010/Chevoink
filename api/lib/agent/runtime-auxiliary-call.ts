@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { SERVER_MODEL_TIERS } from '../../../shared/contracts/credits.js'
 import type { CreditModelTier, ModelReasoningEffort } from '../../../shared/contracts/credits.js'
 import { env } from '../../config/env.js'
-import { chatWithTools, type ChatCompletionResult } from '../ai-service.js'
+import { chatWithTools, resolveTextOutputTokenParameter, type ChatCompletionResult } from '../ai-service.js'
 import { getModelTierRuntime } from '../credits.js'
 import { auxiliaryTextModel } from './auxiliary-text-model.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
@@ -108,5 +108,7 @@ export async function callDurableAuxiliary(input: {
   }
   return chatWithTools({ messages: [{ role: 'system', content: system }, { role: 'user', content }], tools: [], provider: input.route.provider, model: input.route.model,
     providerBaseUrl: input.route.baseUrl, providerApiKey: runtime.apiKey, reasoningEffort: runtime.reasoningEffort, temperature, maxOutputTokens: input.route.maxOutputTokens, signal: input.signal,
+    boundedReview: true, thinkingEnabled: runtime.thinkingEnabled, reasoningParameterMode: runtime.reasoningParameterMode,
+    outputTokenParameter: resolveTextOutputTokenParameter(runtime.outputTokenParameter, { provider: input.route.provider, providerBaseUrl: input.route.baseUrl, model: input.route.model }, true),
     durableExecution: execution, usageLog: { userId: lease.userId, agentRunId: lease.runId, action: step, modelTier: routeTier, multiplierBps: input.price.multiplierBps } })
 }
