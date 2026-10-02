@@ -87,7 +87,6 @@ import { MessageTime, UserMessageActions } from './MessageActions'
 import { AgentComposer } from './AgentComposer'
 import { AgentGoalBar } from './AgentGoalBar'
 import { GoalEditorDialog, type GoalEditBase } from './GoalEditorDialog'
-import { GoalResumeDialog, type GoalResumeLimits } from './GoalResumeDialog'
 import { AgentQueueTray } from './AgentQueueTray'
 import { AgentMessageParts } from './AgentMessageParts'
 import { AgentPermissionCard } from './AgentPermissionCard'
@@ -372,7 +371,6 @@ export function AgentPanel({
   const [goalBusy, setGoalBusy] = useState(false)
   const [goalEditorOpen, setGoalEditorOpen] = useState(false)
   const [goalEditorInitialObjective, setGoalEditorInitialObjective] = useState<string | undefined>(undefined)
-  const [goalResumeOpen, setGoalResumeOpen] = useState(false)
   const [goalError, setGoalError] = useState<string | undefined>(undefined)
   const [goalDetail, setGoalDetail] = useState<AgentGoalDetail | null>(null)
   const [goalDetailBusy, setGoalDetailBusy] = useState(false)
@@ -381,7 +379,6 @@ export function AgentPanel({
     goalEditorEpoch.current += 1
     setGoalEditorOpen(false)
     setGoalEditorInitialObjective(undefined)
-    setGoalResumeOpen(false)
     setGoalBusy(false)
     setGoalDetailBusy(false)
     setGoalError(undefined)
@@ -635,21 +632,23 @@ export function AgentPanel({
     }
   }, [goal, sessionId, setGoalMode, setGoalSnapshot])
 
-  const handleGoalResume = useCallback(async (limits?: GoalResumeLimits) => {
+  const handleGoalResume = useCallback(async () => {
     if (!goal || !sessionId) {
       setGoalError('当前没有可继续的目标。')
       return
     }
+    if (goalBusy) return
     setGoalBusy(true)
     setGoalError(undefined)
+    setActionError(null)
     try {
       const snapshot = await actOnAgentGoal(sessionId, goal.id, {
-        requestId: crypto.randomUUID(), expectedStateVersion: goal.stateVersion, action: 'resume', budgetChange: limits,
+        requestId: crypto.randomUUID(), expectedStateVersion: goal.stateVersion, action: 'resume',
         model: buildGoalResumeModel(modelTier, customModelId, selectedReasoningEffort),
       })
       setGoalSnapshot(snapshot, sessionId)
       setGoalDetail(null)
-      setGoalResumeOpen(false)
+      useAgentStore.getState().clearError()
     } catch (error) {
       const message = error instanceof Error ? error.message : '目标继续失败，请稍后重试。'
       setGoalError(message)
@@ -657,7 +656,7 @@ export function AgentPanel({
     } finally {
       setGoalBusy(false)
     }
-  }, [customModelId, goal, modelTier, selectedReasoningEffort, sessionId, setGoalSnapshot])
+  }, [customModelId, goal, goalBusy, modelTier, selectedReasoningEffort, sessionId, setGoalSnapshot])
 
   const handleGoalSubmit = useCallback(async (objective: string, attachments: AgentAttachmentMeta[], freedom: CreativeFreedom, selectedQualityMode: StoryCompilerMode, pinnedSkillIds: string[], pinnedSubagentId?: string) => {
     if (goal && goal.status !== 'cancelled' && goal.status !== 'completed') {
@@ -764,23 +763,16 @@ export function AgentPanel({
     else setGoalMode(true)
   }, [goal, openGoalEditor, setGoalMode])
 
-  const openGoalResume = useCallback(() => {
-    if (!goal || !['paused', 'blocked', 'usage_limited', 'budget_limited'].includes(goal.status)) return
-    setGoalError(undefined)
-    setGoalResumeOpen(true)
-  }, [goal])
-
   const handleGoalCommand = useCallback(async (action: 'edit' | 'pause' | 'resume' | 'clear') => {
     if (action === 'edit') { handleGoalOpen(); return }
     if (action === 'clear' && !goal) { setGoalMode(false); return }
     if (action === 'resume') {
       if (!goal) { setGoalError('当前没有可继续的目标。'); return }
-      setGoalError(undefined)
-      setGoalResumeOpen(true)
+      await handleGoalResume()
       return
     }
     await handleGoalAction(action === 'clear' ? 'cancel' : action)
-  }, [goal, handleGoalAction, handleGoalOpen, setGoalMode])
+  }, [goal, handleGoalAction, handleGoalOpen, handleGoalResume, setGoalMode])
 
   useEffect(() => {
     const options = creditSummaryQuery.data?.models
@@ -1818,16 +1810,6 @@ export function AgentPanel({
       />
       {workConversation.collapsed ? <WorkConversationRestore onExpand={workConversation.expand} recentMessage={recentConversationText} /> : null}
       <div data-agent-composer className={`px-4 pb-4 transition-[margin] duration-200${composerInsetClassName ? ` ${composerInsetClassName}` : ''}`}>
-      {goal ? <AgentGoalBar
-        goal={goal}
-        busy={goalBusy}
-        onEdit={() => openGoalEditor()}
-        onPause={() => void handleGoalAction('pause')}
-        onResume={openGoalResume}
-        onCancel={() => void handleGoalAction('cancel')}
-        onExpand={() => openGoalEditor()}
-        onDismiss={() => setGoalSnapshot(null, sessionId, 0, true)}
-      /> : null}
       {sessionId ? <AgentQueueTray key={sessionId} items={queueQuery.data?.items ?? []} onAction={async (item, action, prompt) => {
         const result = await actOnAgentQueue(sessionId, item.id, action, item.revision, prompt)
         await queueQuery.refetch()
@@ -1836,6 +1818,16 @@ export function AgentPanel({
           else onSelectSession?.(result.session.id)
         }
       }} /> : null}
+      {goal ? <AgentGoalBar
+        goal={goal}
+        busy={goalBusy}
+        onEdit={() => openGoalEditor()}
+        onPause={() => void handleGoalAction('pause')}
+        onResume={() => void handleGoalResume()}
+        onCancel={() => void handleGoalAction('cancel')}
+        onExpand={() => openGoalEditor()}
+        onDismiss={() => setGoalSnapshot(null, sessionId, 0, true)}
+      /> : null}
         <AgentComposer
           novelId={novelId}
           voiceScopeKey={voiceScopeKey}
@@ -1898,14 +1890,6 @@ export function AgentPanel({
         onRestartEdit={() => { setGoalError(undefined); setActionError(null) }}
         onClose={() => { if (!goalBusy) { goalEditorEpoch.current += 1; setGoalEditorOpen(false); setGoalEditorInitialObjective(undefined); setGoalError(undefined) } }}
         onSave={(objective, base) => { void handleGoalSave(objective, base) }}
-      />
-      <GoalResumeDialog
-        open={goalResumeOpen}
-        goal={goal}
-        busy={goalBusy}
-        error={goalError}
-        onClose={() => { if (!goalBusy) { setGoalResumeOpen(false); setGoalError(undefined) } }}
-        onResume={(limits) => { void handleGoalResume(limits) }}
       />
       {attachmentPreview && (
         <ImageLightbox

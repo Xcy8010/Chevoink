@@ -96,6 +96,17 @@ beforeEach(() => {
 })
 
 describe('goal supervisor acceptance boundaries', () => {
+  it('automatically continues unfinished work using the selected BYOK model', async () => {
+    configure(goal({ executionOptions: { mode: 'build', modelTier: 'custom', customModelId: 'author-model', reasoningEffort: 'high' } }))
+    mocks.inspectGoalEvidence.mockResolvedValue({ progressHash: 'chapter-one-done', blockers: [{ code: 'CHAPTER_NOT_COMMITTED', id: 'chapter-two' }],
+      needsScopeDecision: false, hasDeliverable: true, requirements: { needsAuthorVerification: false } })
+    await superviseAgentGoal('user-1', 'session-1', 'goal-1')
+    expect(mocks.startLoopRun).toHaveBeenCalledWith('user-1', expect.objectContaining({
+      modelTier: 'custom', customModelId: 'author-model', reasoningEffort: 'high', prompt: '写三章',
+    }), expect.objectContaining({ goal: expect.objectContaining({ trigger: 'goal_auto', goalId: 'goal-1' }) }))
+    expect(mocks.actOnAgentGoal).not.toHaveBeenCalled()
+  })
+
   it('finishes from current deterministic domain receipts without requiring a model completion report', async () => {
     mocks.inspectGoalEvidence.mockResolvedValue({ objective: '写三章', progressHash: 'three-current-chapters', blockers: [],
       needsScopeDecision: false, hasDeliverable: true, requirements: { needsAuthorVerification: false } })

@@ -11,6 +11,7 @@ import { databaseNow, runtimeJson, runtimeTransaction } from './runtime-common.j
 import { assertGoalVersion, changeGoal, closeGoalActivity, goalError, goalSnapshot, lockGoalSession, lockOwnedGoal,
   writeGoalEvent, type GoalTx } from './goal-store.js'
 import { inspectGoalEvidence } from './goal-evidence.js'
+import { goalResumeBudget } from './goal-resume-budget.js'
 
 export function requireGoalEnabled() {
   if (!env.agentGoalEnabled) goalError('GOAL_DISABLED', '目标模式暂未开放。', 503)
@@ -149,15 +150,20 @@ export async function actOnAgentGoal(userId: string, sessionId: string, goalId: 
         return goalError('GOAL_RECONCILIATION_REQUIRED', '尚有执行结果待核对，请稍后继续。')
       }
       const budget = await tx.agentGoalBudget.findUniqueOrThrow({ where: { goalId } })
-      const tokenLimit = BigInt(body.budgetChange?.tokenLimit ?? budget.tokenLimit)
-      const timeLimit = BigInt(body.budgetChange?.activeTimeLimitMs ?? budget.activeTimeLimitMs)
-      if (tokenLimit > budget.platformTokenCap || timeLimit > budget.platformTimeCapMs || tokenLimit < budget.tokenLimit || timeLimit < budget.activeTimeLimitMs
-        || tokenLimit <= budget.tokensUsed || timeLimit <= budget.activeTimeMs) return goalError('GOAL_BUDGET_REQUIRED', '请明确增加可用预算，且不得超过平台上限。')
-      await tx.agentGoalBudget.update({ where: { goalId }, data: { tokenLimit, activeTimeLimitMs: timeLimit } })
+      const nextBudget = goalResumeBudget(budget, goal.status === 'budget_limited', {
+        tokens: BigInt(Math.floor(env.agentRunTokenBudgetCeiling)),
+        timeMs: BigInt(Math.floor(env.agentRunWallClockLongMinutes * 60_000)),
+      }, body.budgetChange)
+      if (nextBudget.tokenLimit > nextBudget.platformTokenCap || nextBudget.activeTimeLimitMs > nextBudget.platformTimeCapMs
+        || nextBudget.tokenLimit < budget.tokenLimit || nextBudget.activeTimeLimitMs < budget.activeTimeLimitMs
+        || nextBudget.tokenLimit <= budget.tokensUsed + budget.tokensReserved || nextBudget.activeTimeLimitMs <= budget.activeTimeMs) {
+        return goalError('GOAL_BUDGET_REQUIRED', '当前执行预算不可用，请稍后继续。')
+      }
+      await tx.agentGoalBudget.update({ where: { goalId }, data: nextBudget })
       // Execution options are separately versioned; never rewrite an immutable objective revision.
       const options = body.model ? { ...(goal.executionOptions as Record<string, Prisma.JsonValue>), ...body.model } : goal.executionOptions
       const snapshot = (await changeGoal(tx, goal, { status: 'active', phase: 'queued', epoch: { increment: 1 }, executionOptions: options as Prisma.InputJsonValue,
-        nextEligibleAt: now, reasonCode: null }, 'state.changed')).snapshot
+        nextEligibleAt: now, reasonCode: null, blockCount: 0, blockFingerprint: null }, 'state.changed')).snapshot
       return { snapshot: await receipt(tx, userId, body.requestId, hash, snapshot), runIds: [] }
     }
     await closeGoalActivity(tx, goal, now)

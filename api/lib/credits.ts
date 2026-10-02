@@ -588,11 +588,13 @@ export async function reserveTokenCredits(userId: string, usageId: string, input
 }
 
 export async function assertCreditAccess(userId: string, tier: CreditModelTier = 'speed', requireSelectable = true): Promise<void> {
+  // Credits suspension controls platform-funded calls. BYOK ownership and model
+  // availability are checked by getModelTierRuntime; account bans remain in auth.
+  if (tier === 'custom') return
   const { account, setting } = await ensureCreditAccount(userId)
   if (account.suspendedAt) {
     throw new DataAccessError(423, setting.globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED', setting.globallyPaused ? '公测模型服务已由管理员暂停，请稍后再试。' : '当前账户的模型使用权限已暂停。')
   }
-  if (tier === 'custom') return
   const model = await prisma.aiModelConfig.findFirst({
     where: { ownerUserId: null, tier, enabled: true, ...(requireSelectable ? { selectable: true } : {}) },
     select: { tier: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, multiplierBps: true, metadata: true },

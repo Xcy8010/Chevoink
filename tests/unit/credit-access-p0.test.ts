@@ -56,9 +56,15 @@ describe('P0 credit admission and auxiliary model ownership', () => {
     expect(mocks.pending).not.toHaveBeenCalled()
     await expect(assertCreditAccess('owner', 'speed')).rejects.toMatchObject({ code: 'CREDITS_EXHAUSTED' })
   })
-  it('still rejects suspended BYOK accounts', async () => {
+  it.each([false, true])('allows BYOK when platform credits are suspended (global=%s)', async (globallyPaused) => {
+    mocks.setting.mockResolvedValue({ globallyPaused, dailyAllowanceMilli: 450000, resetHourUtc8: 15 })
     mocks.account.mockResolvedValue({ suspendedAt: new Date() })
-    await expect(assertCreditAccess('owner', 'custom')).rejects.toMatchObject({ code: 'CREDITS_ACCOUNT_SUSPENDED' })
+    await expect(assertCreditAccess('owner', 'custom')).resolves.toBeUndefined()
+    expect(mocks.account).not.toHaveBeenCalled()
+    expect(mocks.pending).not.toHaveBeenCalled()
+    await expect(assertCreditAccess('owner', 'speed')).rejects.toMatchObject({
+      code: globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED',
+    })
   })
   it('resolves only an enabled model owned by the caller for standalone export and graph', async () => {
     mocks.model.mockResolvedValueOnce({ id: 'custom' }).mockResolvedValueOnce({ provider: 'openai', modelName: 'custom', baseUrl: 'https://fixture.example/v1', apiKeyCiphertext: 'fixture', metadata: {} })

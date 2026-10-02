@@ -130,6 +130,26 @@ describe.skipIf(!dbAvailable)('agent goal service (isolated test DB)', () => {
     expect(await prisma.agentGoalRevision.count({ where: { goalId: created.id } })).toBe(2)
   })
 
+  it('renews an exhausted goal in one author action and replays without granting twice', async () => {
+    const fixture = await createFixture()
+    const created = await createAgentGoal(fixture.userId, { sessionId: fixture.sessionId }, createInput())
+    await prisma.agentGoalBudget.update({ where: { goalId: created.id }, data: {
+      tokensUsed: BigInt(created.tokenLimit), activeTimeMs: BigInt(created.activeTimeLimitMs), creditsUsedMicros: 5000n,
+    } })
+    await prisma.agentGoal.update({ where: { id: created.id }, data: { status: 'budget_limited', phase: 'idle', blockCount: 3, blockFingerprint: 'old-blocker' } })
+    const request = { requestId: randomUUID(), expectedStateVersion: created.stateVersion, action: 'resume' as const,
+      model: { modelTier: 'custom' as const, customModelId: 'authors-custom-model', reasoningEffort: 'high' as const } }
+    const resumed = await actOnAgentGoal(fixture.userId, fixture.sessionId, created.id, request)
+    expect(resumed).toMatchObject({ status: 'active', phase: 'queued', tokensUsed: created.tokenLimit,
+      activeTimeMs: created.activeTimeLimitMs, creditsUsedMicros: '5000' })
+    expect(BigInt(resumed.tokenLimit)).toBe(BigInt(created.tokenLimit) * 2n)
+    expect(BigInt(resumed.activeTimeLimitMs)).toBe(BigInt(created.activeTimeLimitMs) * 2n)
+    expect(await actOnAgentGoal(fixture.userId, fixture.sessionId, created.id, request)).toEqual(resumed)
+    const stored = await prisma.agentGoal.findUniqueOrThrow({ where: { id: created.id } })
+    expect(stored.executionOptions).toMatchObject(request.model)
+    expect(stored).toMatchObject({ blockCount: 0, blockFingerprint: null })
+  })
+
   it('retains cumulative usage while resuming with increased budget', async () => {
     const fixture = await createFixture()
     const created = await createAgentGoal(fixture.userId, { sessionId: fixture.sessionId }, {

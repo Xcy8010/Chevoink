@@ -5,7 +5,6 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { AgentGoalBar } from '../../src/features/studio/agent/components/AgentGoalBar'
 import { GoalEditorDialog } from '../../src/features/studio/agent/components/GoalEditorDialog'
 import { formatCreditsMicros, formatGoalReason } from '../../src/features/studio/agent/components/goal-formatters'
-import { GoalResumeDialog } from '../../src/features/studio/agent/components/GoalResumeDialog'
 import { GoalModeChip } from '../../src/features/studio/agent/components/GoalModeChip'
 import type { AgentGoalDetail, AgentGoalSnapshot } from '../../shared/contracts/agent-goal.js'
 import { activateComposerDraft, promoteComposerDraft } from '../../src/features/studio/agent/composer-drafts'
@@ -25,14 +24,15 @@ const goal: AgentGoalSnapshot = {
   activeSince: '2026-09-27T00:00:00.000Z', serverTime: '2026-09-27T00:02:00.000Z', createdAt: '2026-09-27T00:00:00.000Z', updatedAt: '2026-09-27T00:02:00.000Z', finishedAt: null,
 }
 
-it('opens and cancels the goal mode chip with a touch-sized cancel target', () => {
+it('toggles the compact draft entry and opens details for an active goal', () => {
   const onOpen = vi.fn(), onCancel = vi.fn()
-  render(<GoalModeChip active={false} draft onOpen={onOpen} onCancel={onCancel} busy={false} />)
-  fireEvent.click(screen.getByRole('button', { name: '目标模式' }))
+  const view = render(<GoalModeChip active={false} draft onOpen={onOpen} onCancel={onCancel} busy={false} />)
   fireEvent.click(screen.getByRole('button', { name: '取消目标模式' }))
-  expect(onOpen).toHaveBeenCalledOnce()
   expect(onCancel).toHaveBeenCalledOnce()
-  expect(screen.getByRole('button', { name: '取消目标模式' }).className).toContain('h-11')
+  expect(screen.getAllByRole('button')).toHaveLength(1)
+  view.rerender(<GoalModeChip active draft={false} onOpen={onOpen} onCancel={onCancel} busy={false} />)
+  fireEvent.click(screen.getByRole('button', { name: '打开目标详情' }))
+  expect(onOpen).toHaveBeenCalledOnce()
 })
 
 it('renders goal status and routes bar actions', () => {
@@ -200,36 +200,10 @@ it('shows author confirmation only for a confirmable completion review', () => {
   expect(onConfirmCompletion).toHaveBeenCalledOnce()
 })
 
-it('requires an explicit budget increase before resuming a budget-limited goal', () => {
-  const onResume = vi.fn()
-  const limited = { ...goal, status: 'budget_limited' as const, phase: 'idle' as const }
-  render(<GoalResumeDialog open goal={limited} busy={false} onClose={vi.fn()} onResume={onResume} />)
-  fireEvent.click(screen.getByRole('button', { name: '继续目标' }))
-  expect(screen.getByRole('alert').textContent).toContain('提高至少一项')
-  fireEvent.change(screen.getByRole('spinbutton', { name: '提高 Token 上限' }), { target: { value: '60000' } })
-  fireEvent.click(screen.getByRole('button', { name: '继续目标' }))
-  expect(onResume).toHaveBeenCalledWith({ tokenLimit: 60000 })
-})
-
 it('uses the current effective model when a goal resumes', () => {
   expect(buildGoalResumeModel('basic', 'stale-byok', 'low')).toEqual({ modelTier: 'speed', reasoningEffort: 'low' })
   expect(buildGoalResumeModel('custom', 'byok-current', 'xhigh')).toEqual({ modelTier: 'custom', customModelId: 'byok-current', reasoningEffort: 'xhigh' })
   expect(buildGoalResumeModel('speed', 'stale-byok', 'high')).toEqual({ modelTier: 'speed', reasoningEffort: 'high' })
-})
-
-it('restores focus when the resume dialog closes from Escape', () => {
-  const trigger = document.createElement('button')
-  document.body.append(trigger)
-  trigger.focus()
-  const onClose = vi.fn()
-  const view = render(<GoalResumeDialog open goal={goal} busy={false} onClose={onClose} onResume={vi.fn()} />)
-  const dialog = screen.getByRole('dialog')
-  expect(dialog.contains(document.activeElement)).toBe(true)
-  fireEvent.keyDown(dialog, { key: 'Escape' })
-  expect(onClose).toHaveBeenCalledOnce()
-  view.rerender(<GoalResumeDialog open={false} goal={goal} busy={false} onClose={onClose} onResume={vi.fn()} />)
-  expect(document.activeElement).toBe(trigger)
-  trigger.remove()
 })
 
 it('keeps goal draft mode in the task scope during local-window promotion', () => {

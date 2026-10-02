@@ -1,4 +1,4 @@
-import { CheckCircle2, Clock3, Expand, LoaderCircle, Pause, Pencil, Play, Target, X } from 'lucide-react'
+import { CheckCircle2, Expand, LoaderCircle, Pause, Play, Target, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
 import { agentGoalPresentation } from '../../../../../shared/contracts/agent-goal.js'
@@ -43,7 +43,7 @@ function durationAt(goal: AgentGoalSnapshot, anchorRef: { current: DurationAncho
 }
 
 function actionClass(disabled = false) {
-  return `inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[9px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 ${disabled ? 'cursor-wait opacity-40' : ''}`
+  return `inline-flex h-8 w-8 mobile:h-11 mobile:w-9 shrink-0 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 ${disabled ? 'cursor-wait opacity-40' : ''}`
 }
 
 export function AgentGoalBar({ goal, busy, onEdit, onPause, onResume, onCancel, onExpand, onDismiss }: AgentGoalBarProps) {
@@ -63,19 +63,16 @@ export function AgentGoalBar({ goal, busy, onEdit, onPause, onResume, onCancel, 
   const canEdit = !terminal
 
   return (
-    <section aria-label="目标条" className="flex min-w-0 items-center gap-2 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]">
-      <Target aria-hidden="true" className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
+    <section aria-label="目标条" className="relative mx-3 -mb-3 flex min-w-0 items-center gap-1.5 rounded-t-[14px] border border-b-0 border-[var(--border-subtle)] bg-[var(--surface-muted)] px-2.5 pb-3 text-xs text-[var(--text-primary)] sm:mx-4">
+      {presentation.running ? <LoaderCircle aria-hidden="true" className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--text-secondary)] motion-reduce:animate-none" /> : <Target aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />}
       <div className="flex min-w-0 flex-1 items-center gap-2">
-        <span className="shrink-0 font-medium">{presentation.label}</span>
-        <span className="min-w-0 flex-1 truncate" title={goal.objective}>{goal.objective}</span>
+        <span className="shrink-0 font-medium mobile:max-w-24 mobile:truncate">{presentation.label}</span>
+        <button type="button" disabled={busy || !canEdit} onClick={onEdit} aria-label="修改目标" className="min-w-0 flex-1 truncate text-left text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-2" title={goal.objective}>{goal.objective}</button>
         <span className="hidden shrink-0 items-center gap-1 tabular-nums text-[var(--text-tertiary)] sm:inline-flex">
-          <Clock3 aria-hidden="true" className="h-3.5 w-3.5" />
           {formatDuration(durationAt(goal, durationAnchorRef))}
         </span>
       </div>
       <div className="flex shrink-0 items-center gap-0.5" role="group" aria-label="目标操作">
-        {presentation.running ? <LoaderCircle aria-hidden="true" className="mx-1 h-3.5 w-3.5 animate-spin text-[var(--text-secondary)] motion-reduce:animate-none" /> : null}
-        {canEdit ? <button type="button" disabled={busy} onClick={onEdit} className={actionClass(busy)} aria-label="修改目标" title="修改目标"><Pencil aria-hidden="true" className="h-4 w-4" /></button> : null}
         {presentation.canPause ? <button type="button" disabled={busy} onClick={onPause} className={actionClass(busy)} aria-label="暂停目标" title="暂停目标"><Pause aria-hidden="true" className="h-4 w-4" /></button> : null}
         {presentation.canResume ? <button type="button" disabled={busy} onClick={onResume} className={actionClass(busy)} aria-label="继续目标" title="继续目标"><Play aria-hidden="true" className="h-4 w-4" /></button> : null}
         {!terminal && goal.status !== 'cancelled' ? <button type="button" disabled={busy} onClick={onCancel} className={actionClass(busy)} aria-label="取消目标" title="取消目标"><X aria-hidden="true" className="h-4 w-4" /></button> : null}
