@@ -22,6 +22,7 @@ async function createFixture(): Promise<Fixture> {
 
 async function cleanupFixture(fixture: Fixture) {
   await prisma.agentGoalCommand.deleteMany({ where: { userId: fixture.userId } })
+  await prisma.aiUsageLog.deleteMany({ where: { userId: fixture.userId } })
   await prisma.agentSession.deleteMany({ where: { id: fixture.sessionId } })
   await prisma.novel.deleteMany({ where: { id: fixture.novelId } })
   await prisma.user.delete({ where: { id: fixture.userId } }).catch(() => undefined)
@@ -167,5 +168,51 @@ describe.skipIf(!dbAvailable)('agent goal service (isolated test DB)', () => {
     })
 
     expect(resumed).toMatchObject({ status: 'active', phase: 'queued', tokensUsed: '123', tokensReserved: '7', creditsUsedMicros: '5000', activeTimeMs: '2000', tokenLimit: '2000', activeTimeLimitMs: '120000' })
+  })
+
+  it.each(['paused', 'usage_limited'] as const)('resumes %s with saved BYOK interruption evidence once, without wallet charges', async status => {
+    const fixture = await createFixture()
+    const created = await createAgentGoal(fixture.userId, { sessionId: fixture.sessionId }, createInput())
+    await prisma.agentGoal.update({ where: { id: created.id }, data: { status, phase: 'idle' } })
+    const usage = await prisma.aiUsageLog.create({ data: {
+      userId: fixture.userId, novelId: fixture.novelId, targetType: 'agentRun', targetId: 'interrupted-run',
+      providerType: 'text', providerMode: 'provider', modelName: 'deepseek-flash', modelTier: 'custom',
+      action: 'agent3HumanityCritic', durationMs: 1000, billingStatus: 'pending_usage', usageSource: 'unknown',
+      billingEvidence: { policy: 'observed-output-estimate-2026-09-09', inputEstimate: 4997, outputEstimate: 370, responseObserved: true },
+    } })
+    await prisma.agentGoalUsage.create({ data: { sourceKey: `legacy:${usage.id}`, goalId: created.id,
+      runId: 'interrupted-run', status: 'unknown', reservedTokens: 21381n } })
+    await prisma.agentGoalBudget.update({ where: { goalId: created.id }, data: { tokensUsed: 100n, tokensReserved: 21381n } })
+    const request = { requestId: randomUUID(), expectedStateVersion: created.stateVersion, action: 'resume' as const }
+    const resumed = await actOnAgentGoal(fixture.userId, fixture.sessionId, created.id, request)
+    expect(resumed).toMatchObject({ status: 'active', phase: 'queued', tokensUsed: '5467', tokensReserved: '0', creditsUsedMicros: '0' })
+    expect(resumed.stateVersion).toBeGreaterThan(created.stateVersion + 1)
+    expect(await actOnAgentGoal(fixture.userId, fixture.sessionId, created.id, request)).toEqual(resumed)
+    expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usage.id } })).toMatchObject({
+      billingStatus: 'exempt', usageSource: 'estimated', requestTokens: 4997, responseTokens: 370, creditChargeMilli: 0,
+    })
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: fixture.userId } })).toBe(0)
+    expect(await prisma.agentGoalUsage.findUniqueOrThrow({ where: { sourceKey: `legacy:${usage.id}` } })).toMatchObject({ status: 'known', reservedTokens: 0n })
+  })
+
+  it('does not release an unobserved request or reconcile for an unauthorized author', async () => {
+    const fixture = await createFixture()
+    const other = await createFixture()
+    const created = await createAgentGoal(fixture.userId, { sessionId: fixture.sessionId }, createInput())
+    await prisma.agentGoal.update({ where: { id: created.id }, data: { status: 'paused', phase: 'idle' } })
+    const usage = await prisma.aiUsageLog.create({ data: {
+      userId: fixture.userId, targetType: 'agentRun', providerType: 'text', providerMode: 'provider',
+      modelName: 'custom-model', modelTier: 'custom', action: 'test', durationMs: 0,
+      billingStatus: 'pending_usage', usageSource: 'unknown',
+      billingEvidence: { policy: 'observed-output-estimate-2026-09-09', inputEstimate: 500, outputEstimate: 0, responseObserved: false },
+    } })
+    await prisma.agentGoalUsage.create({ data: { sourceKey: `legacy:${usage.id}`, goalId: created.id,
+      runId: 'unknown-run', status: 'unknown', reservedTokens: 1000n } })
+    await prisma.agentGoalBudget.update({ where: { goalId: created.id }, data: { tokensReserved: 1000n } })
+    const request = { requestId: randomUUID(), expectedStateVersion: created.stateVersion, action: 'resume' as const }
+    await expect(actOnAgentGoal(other.userId, fixture.sessionId, created.id, request)).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    await expect(actOnAgentGoal(fixture.userId, fixture.sessionId, created.id, request)).rejects.toMatchObject({ code: 'GOAL_RECONCILIATION_REQUIRED' })
+    expect((await readAgentGoal(fixture.userId, fixture.sessionId))?.status).toBe('paused')
+    expect((await prisma.agentGoalBudget.findUniqueOrThrow({ where: { goalId: created.id } })).tokensReserved).toBe(1000n)
   })
 })

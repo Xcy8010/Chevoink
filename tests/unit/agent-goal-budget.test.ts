@@ -296,6 +296,22 @@ describe('goal budget accounting', () => {
     }))
   })
 
+  it('reconciles a paid, settled output estimate without losing counts or charging again', async () => {
+    mocks.prisma.aiUsageLog.findUnique.mockResolvedValue({
+      providerType: 'text', modelTier: 'speed', requestTokens: null, responseTokens: null,
+      billingStatus: 'settled', usageSource: 'unknown', creditChargeMilli: 4,
+      billingEvidence: { policy: 'observed-output-estimate-2026-09-09', inputEstimate: 50, outputEstimate: 12, responseObserved: true },
+    })
+    mocks.prisma.agentGoalUsage.findUnique.mockResolvedValue({ ...usage(), goal: { novelId: context.novelId } })
+    mocks.runtimeTransaction.mockImplementation(async work => work(mocks.tx))
+    mocks.tx.agentGoalUsage.findUniqueOrThrow.mockResolvedValue(usage())
+    mocks.tx.agentGoal.findUniqueOrThrow.mockResolvedValue(goal)
+    await syncGoalLegacyUsage('paid-interrupted')
+    expect(mocks.tx.agentGoalUsage.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: 'known', inputTokens: 50n, outputTokens: 20n, reservedTokens: 0n, creditsMicros: 4000n }),
+    }))
+  })
+
   it('releases a reservation only for a hashed, explicitly not-dispatched cancellation', async () => {
     const result = { outcome: 'cancelled', result: { code: 'RUNTIME_PRE_DISPATCH_FAILED', dispatched: false } }
     configureDurableSync({

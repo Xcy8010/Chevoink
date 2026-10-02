@@ -12,6 +12,7 @@ import { assertGoalVersion, changeGoal, closeGoalActivity, goalError, goalSnapsh
   writeGoalEvent, type GoalTx } from './goal-store.js'
 import { inspectGoalEvidence } from './goal-evidence.js'
 import { goalResumeBudget } from './goal-resume-budget.js'
+import { reconcileGoalUsage } from './goal-budget.js'
 
 export function requireGoalEnabled() {
   if (!env.agentGoalEnabled) goalError('GOAL_DISABLED', '目标模式暂未开放。', 503)
@@ -116,6 +117,20 @@ export async function actOnAgentGoal(userId: string, sessionId: string, goalId: 
   const body = actOnAgentGoalSchema.parse(input)
   if (body.action === 'resume') requireGoalEnabled()
   const hash = runtimeJson({ operation: 'action', sessionId, goalId, body }).hash
+  // Authenticate and validate the author's version before reconciling. Usage
+  // receipts increment stateVersion themselves, but cannot invalidate this resume.
+  const resumeFence = body.action === 'resume' ? await runtimeTransaction(async tx => {
+    const goal = await lockOwnedGoal(tx, userId, sessionId, goalId)
+    const previous = await replay(tx, userId, body.requestId, hash)
+    if (previous) return { previous, epoch: goal.epoch, revision: goal.currentRevision }
+    assertGoalVersion(goal, body.expectedStateVersion)
+    if (!['paused', 'blocked', 'usage_limited', 'budget_limited'].includes(goal.status) || goal.pendingRevision) {
+      return goalError('GOAL_NOT_RESUMABLE', '目标当前不能继续。')
+    }
+    return { previous: null, epoch: goal.epoch, revision: goal.currentRevision }
+  }) : null
+  if (resumeFence?.previous) return resumeFence.previous
+  if (resumeFence) await reconcileGoalUsage(goalId, { userId, sessionId })
   const result = await runtimeTransaction(async tx => {
     const goal = await lockOwnedGoal(tx, userId, sessionId, goalId)
     const previous = await replay(tx, userId, body.requestId, hash)
@@ -125,7 +140,11 @@ export async function actOnAgentGoal(userId: string, sessionId: string, goalId: 
       if (body.action === 'resume') return goalError('GOAL_NOT_RESUMABLE', '已结束的目标不能恢复，请发送新目标。')
       return { snapshot: await receipt(tx, userId, body.requestId, hash, await goalSnapshot(tx, goal)), runIds: [] }
     }
-    assertGoalVersion(goal, body.expectedStateVersion)
+    if (resumeFence) {
+      if (goal.epoch !== resumeFence.epoch || goal.currentRevision !== resumeFence.revision || goal.pendingRevision) {
+        return goalError('GOAL_VERSION_CONFLICT', '目标状态已变化，请读取最新状态后继续。')
+      }
+    } else assertGoalVersion(goal, body.expectedStateVersion)
     const now = await databaseNow(tx)
     if (body.action === 'confirm_completion') {
       if (goal.pendingRevision) return goalError('GOAL_VERSION_CONFLICT', '请等待目标更新后核对成果。')

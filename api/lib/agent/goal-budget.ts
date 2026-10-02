@@ -6,6 +6,7 @@ import { currentGoalExecution, withoutGoalEffects, type GoalExecutionContext } f
 import { assertGoalFence } from './goal-fence.js'
 import { changeGoal, goalError } from './goal-store.js'
 import { databaseNow, runtimeTransaction, runtimeJson } from './runtime-common.js'
+import { fallbackUsageEvidenceSchema } from '../billing/reservation-policy.js'
 
 /** Reserve before dispatch, once per provider attempt (including routed failures and auxiliary calls). */
 export async function reserveGoalUsage(sourceKey: string, estimatedTokens: number, context = currentGoalExecution()) {
@@ -79,13 +80,31 @@ export async function observeGoalUsage(sourceKey: string, observation: GoalUsage
 }
 
 export async function syncGoalLegacyUsage(usageId: string) {
-  const log = await withoutGoalEffects(() => prisma.aiUsageLog.findUnique({ where: { id: usageId } }))
+  let log = await withoutGoalEffects(() => prisma.aiUsageLog.findUnique({ where: { id: usageId } }))
   if (!log) return
+  const evidence = fallbackUsageEvidenceSchema.safeParse(log.billingEvidence)
+  // Interrupted BYOK responses have no wallet settlement worker. Finalize only
+  // persisted, observed output; a prepared/live or wholly unknown call stays unresolved.
+  if (log.providerType === 'text' && log.modelTier === 'custom' && log.billingStatus === 'pending_usage'
+    && log.usageSource === 'unknown' && evidence.success && evidence.data.responseObserved) {
+    await withoutGoalEffects(() => prisma.aiUsageLog.updateMany({ where: { id: usageId, modelTier: 'custom',
+      billingStatus: 'pending_usage', usageSource: 'unknown', billingEvidence: { equals: log!.billingEvidence! } },
+    data: { requestTokens: log!.requestTokens ?? evidence.data.inputEstimate,
+      responseTokens: log!.responseTokens ?? evidence.data.outputEstimate, usageSource: 'estimated',
+      billingStatus: 'exempt', billingRetryAt: null, reservedCreditMilli: 0, reservationExpiresAt: null } }))
+    log = await withoutGoalEffects(() => prisma.aiUsageLog.findUnique({ where: { id: usageId } }))
+    if (!log) return
+  }
   const rejected = ['provider_rejected', 'not_dispatched'].includes(log.billingStatus ?? '')
   const fixedImage = log.providerType === 'image' && log.action === 'generateCoverImage' && log.usageSource === 'fixed_unit'
     && log.billingStatus === 'observed' && log.requestTokens === 0 && log.responseTokens === 0
-  const known = fixedImage || log.billingStatus !== 'pending_settlement' && log.requestTokens !== null && log.responseTokens !== null && ['reported', 'estimated'].includes(log.usageSource ?? '')
-  await observeGoalUsage(`legacy:${usageId}`, { inputTokens: log.requestTokens, outputTokens: log.responseTokens,
+  // The platform worker preserves raw provider counts when settling estimates.
+  // Its settled receipt is authoritative even when those raw counts are absent.
+  const settledEstimate = log.billingStatus === 'settled' && log.usageSource !== 'reported'
+    && evidence.success && evidence.data.responseObserved
+  const known = fixedImage || settledEstimate || log.billingStatus !== 'pending_settlement' && log.requestTokens !== null && log.responseTokens !== null && ['reported', 'estimated'].includes(log.usageSource ?? '')
+  await observeGoalUsage(`legacy:${usageId}`, { inputTokens: log.requestTokens ?? (settledEstimate ? evidence.data.inputEstimate : null),
+    outputTokens: log.responseTokens ?? (settledEstimate ? evidence.data.outputEstimate : null),
     creditsMilli: fixedImage ? 0 : log.creditChargeMilli, status: rejected ? 'rejected' : known ? 'known'
       : ['pending_usage', 'pending_settlement'].includes(log.billingStatus ?? '') ? 'unknown' : 'reserved' })
 }

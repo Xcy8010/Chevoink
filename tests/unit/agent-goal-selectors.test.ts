@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { selectAgentActivityRunActive, selectAgentGoalView } from '../../src/features/studio/agent/goal-selectors'
+import { keepInterruptedRunExpanded, selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../../src/features/studio/agent/goal-selectors'
 import type { AgentGoalSnapshot } from '../../shared/contracts/agent-goal.js'
 
 const goal: AgentGoalSnapshot = {
@@ -15,6 +15,21 @@ const select = (overrides: Partial<AgentGoalSnapshot> = {}, extra: Partial<Param
 })
 
 describe('selectAgentGoalView', () => {
+  it.each(['paused', 'usage_limited', 'budget_limited', 'blocked'] as const)('honors %s before a delayed run terminal event arrives', status => {
+    const view = select({ status, phase: 'idle' })
+    expect(selectAgentPanelPhase(view, 'running')).toBe('paused')
+    expect(selectAgentActivityRunActive(view, 'running')).toBe(false)
+    expect(keepInterruptedRunExpanded(selectAgentPanelPhase(view, 'running'), 'run-1', 'run-1')).toBe(true)
+    expect(keepInterruptedRunExpanded('paused', 'older-run', 'run-1')).toBe(false)
+  })
+
+  it('keeps quota failures expanded and resumes live feedback only for the current run', () => {
+    expect(keepInterruptedRunExpanded('failed', 'run-1', 'run-1')).toBe(true)
+    expect(keepInterruptedRunExpanded('succeeded', 'run-1', 'run-1')).toBe(false)
+    expect(selectAgentPanelPhase(select(), 'running')).toBe('running')
+    expect(selectAgentPanelPhase(select({ status: 'paused' }, { runId: 'ordinary', runGoalId: null }), 'running')).toBe('running')
+    expect(selectAgentPanelPhase(select({ status: 'completed' }), 'running')).toBe('succeeded')
+  })
   it('rejects a goal from another session before projecting any status', () => {
     const view = select({}, { sessionId: 'session-2' })
     expect(view.goal).toBeNull()

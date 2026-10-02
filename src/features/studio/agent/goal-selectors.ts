@@ -67,3 +67,16 @@ export function selectAgentActivityRunActive(view: AgentGoalView, phase: AgentRu
   if (view.terminal) return view.runBelongsToGoal ? false : isRunActive(phase)
   return view.running
 }
+
+/** Goal control is authoritative before the old run's terminal SSE arrives. */
+export function selectAgentPanelPhase(view: AgentGoalView, phase: AgentRunPhase): AgentRunPhase {
+  if (!view.goal || !view.runBelongsToGoal) return phase
+  if (view.goal.status === 'completed') return 'succeeded'
+  if (view.goal.status === 'cancelled') return 'cancelled'
+  if (['paused', 'blocked', 'usage_limited', 'budget_limited', 'updating'].includes(view.goal.status)) return 'paused'
+  return phase
+}
+
+export function keepInterruptedRunExpanded(phase: AgentRunPhase, messageRunId: string, runId: string | null): boolean {
+  return messageRunId === runId && (phase === 'paused' || phase === 'failed')
+}

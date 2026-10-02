@@ -72,7 +72,7 @@ import {
   type ContinueAgentLoopRunModel,
 } from '../agentApi'
 import { isRunActive, readSessionMessagesCache, useAgentStore, type ComposerReference } from '../agentStore'
-import { selectAgentActivityRunActive, selectAgentGoalView } from '../goal-selectors'
+import { keepInterruptedRunExpanded, selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../goal-selectors'
 import { buildGoalResumeModel } from '../goal-command'
 import { formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMessages, skillPhaseLabel } from '../lib/panel-helpers'
 import { useProcessingHint } from '../useProcessingHint'
@@ -470,8 +470,9 @@ export function AgentPanel({
   const { scrollRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll } = useMessageScroll({
     messages, pendingApproval, pendingQuestion, conversationLoading, collapsed: workConversation.collapsed,
   })
-  const active = isRunActive(phase)
   const goalView = selectAgentGoalView({ goal, goalSessionId, sessionId, runId, phase, runGoalId })
+  const panelPhase = selectAgentPanelPhase(goalView, phase)
+  const active = isRunActive(panelPhase)
   const activityRunActive = selectAgentActivityRunActive(goalView, phase)
   const creditSummaryQuery = useQuery({
     queryKey: ['credits', 'summary'],
@@ -508,7 +509,7 @@ export function AgentPanel({
     [skillsQuery.data],
   )
   // 参数生成、工具间等待等阶段也需要动态反馈；不能因已经输出过正文而永久隐藏。
-  const awaiting = useProcessingHint(messages, runId, phase, Boolean(pendingApproval || pendingQuestion))
+  const awaiting = useProcessingHint(messages, runId, panelPhase, Boolean(pendingApproval || pendingQuestion), activityRunActive)
 
   // AgentPanel stays mounted while authors switch works. Re-hydrate the per-work
   // freedom setting instead of carrying the previous work's value into the new one.
@@ -857,8 +858,9 @@ export function AgentPanel({
 
   const [expandedBlocks, setExpandedBlocks] = useState<Record<string, boolean>>({})
   const handleToggleBlockSummary = useCallback((blockId: string) => {
-    setExpandedBlocks((current) => ({ ...current, [blockId]: !current[blockId] }))
-  }, [])
+    const interrupted = keepInterruptedRunExpanded(panelPhase, messages.find(message => message.id === blockId)?.runId ?? '', runId ?? resumeableRunId)
+    setExpandedBlocks((current) => ({ ...current, [blockId]: !(current[blockId] ?? interrupted) }))
+  }, [messages, panelPhase, runId, resumeableRunId])
 
   useEffect(
     () => () => {
@@ -1076,7 +1078,7 @@ export function AgentPanel({
   )
 
 
-  const canContinue = !authorEnded && ((Boolean(runId) && (phase === 'paused' || phase === 'failed')) || (!runId && Boolean(resumeableRunId)))
+  const canContinue = !authorEnded && ((Boolean(runId) && (panelPhase === 'paused' || panelPhase === 'failed')) || (!runId && Boolean(resumeableRunId)))
   const combinedError = actionError ?? errorMessage
 
   const handleCopyText = useCallback(async (id: string, text: string) => {
@@ -1388,19 +1390,19 @@ export function AgentPanel({
             </div> : null}
           </div>
         )}
-        {phase !== 'idle' ? (
+        {panelPhase !== 'idle' ? (
           <span
             className={cn(
               'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium',
               mobileIntegratedHeader && 'hidden',
               active
                 ? 'bg-[var(--surface-muted)] text-[var(--text-primary)]'
-                : phase === 'failed'
+                : panelPhase === 'failed'
                   ? 'bg-rose-50 text-rose-600'
                   : 'bg-[var(--surface-muted)] text-[var(--text-secondary)]',
             )}
           >
-            {phaseLabel[phase] ?? phase}
+            {phaseLabel[panelPhase] ?? panelPhase}
           </span>
         ) : null}
         <span className={cn('ml-auto shrink-0 text-[10px] tabular-nums text-[var(--text-secondary)]', mobileIntegratedHeader && 'hidden')}>
@@ -1635,7 +1637,8 @@ export function AgentPanel({
               const block = blockInfoById.get(message.id)
               const isBlockFirst = block?.firstId === message.id
               const isBlockLast = block?.lastId === message.id
-              const blockExpanded = block ? !!expandedBlocks[block.firstId] : false
+              const keepExpanded = keepInterruptedRunExpanded(panelPhase, message.runId, runId ?? resumeableRunId)
+              const blockExpanded = block ? expandedBlocks[block.firstId] ?? keepExpanded : keepExpanded
               // 仅当前 run 的消息视为活跃：新任务开始时历史块保持折叠，不会被全局 active 连带展开
               const messageRunActive = active && message.runId === runId
               const blockCollapsed = !messageRunActive && !blockExpanded
@@ -1712,7 +1715,7 @@ export function AgentPanel({
                 <span className="h-px flex-1 bg-[var(--border-subtle)]" />
               </div>
             ) : null}
-            <ProcessingHint visible={awaiting} />
+            {activityRunActive ? <ProcessingHint visible={awaiting} /> : null}
             {pendingApproval ? (
               <AgentPermissionCard approval={pendingApproval} onResolve={handleResolveApproval} />
             ) : null}
@@ -1835,7 +1838,7 @@ export function AgentPanel({
           voiceScopeKey={voiceScopeKey}
           voiceDisabled={voiceDisabled || sessionResolving}
           running={active}
-          onContinue={canContinue ? handleContinue : undefined}
+          onContinue={canContinue ? goalView.goal && !goalView.terminal ? handleGoalResume : handleContinue : undefined}
           disabled={conversationLoading}
           onSend={(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId) => handleSend(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId)}
           creativeFreedom={creativeFreedom}

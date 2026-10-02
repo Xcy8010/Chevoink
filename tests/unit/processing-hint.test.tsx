@@ -8,6 +8,19 @@ import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 import { OUTPUT_SILENCE_MS, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
+it('cancels the fallback timer when goal control suppresses a stale running phase', () => {
+  vi.useFakeTimers()
+  useAgentStore.setState({ lastVisibleOutput: { runId: 'r', at: Date.now() } })
+  const view = renderHook(({ enabled }) => useProcessingHint([], 'r', 'running', false, enabled), { initialProps: { enabled: true } })
+  expect(vi.getTimerCount()).toBe(1)
+  view.rerender({ enabled: false })
+  expect(vi.getTimerCount()).toBe(0)
+  act(() => vi.advanceTimersByTime(5000))
+  expect(view.result.current).toBe(false)
+  view.rerender({ enabled: true })
+  expect(view.result.current).toBe(true)
+})
+
 it.each(['text.delta', 'reasoning.delta'] as const)('hides on real %s output and returns only after silence without another event', type => {
   vi.useFakeTimers()
   const message: AgentUIMessage = { id: 'm', runId: 'r', role: 'assistant', createdAt: new Date().toISOString(), parts: [] }
