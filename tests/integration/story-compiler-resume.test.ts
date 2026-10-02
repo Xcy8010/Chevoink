@@ -20,8 +20,17 @@ async function fixture(work: (f: Awaited<ReturnType<typeof createFixture>>) => P
 }
 
 async function cleanupFixture(userId: string) {
-  // Sessions own goals/runs; novels restrict their author relation, and volumes
-  // restrict chapter deletion. Follow the same dependency order as DB fixtures.
+  // Goal deletion cascades revisions/executions (including their deferred FK).
+  // Runs RESTRICT session deletion; artifacts RESTRICT run deletion. The goal's
+  // currentRunId is an unreferenced scalar, so removing goals first also clears
+  // that pointer before its run is deleted. Match the proven runtime DB fixture.
+  await prisma.agentGoal.deleteMany({ where: { userId } })
+  await prisma.agentArtifact.deleteMany({ where: { run: { userId } } })
+  // COMMIT creates memory proposals; their novel FK is RESTRICT. Deleting these
+  // owned proposals cascades their MemoryEvidence/MemoryRevision children.
+  await prisma.projectMemoryEntry.deleteMany({ where: { novel: { authorId: userId } } })
+  await prisma.agentRun.deleteMany({ where: { userId } })
+  await prisma.agentTaskRoot.deleteMany({ where: { userId } })
   await prisma.agentSession.deleteMany({ where: { userId } })
   await prisma.chapter.deleteMany({ where: { authorId: userId } })
   await prisma.novel.deleteMany({ where: { authorId: userId } })

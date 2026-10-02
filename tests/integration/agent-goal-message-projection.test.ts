@@ -8,10 +8,18 @@ const dbAvailable = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(hand
 const users: string[] = []
 
 afterEach(async () => {
-  for (const userId of users.splice(0)) {
-    await prisma.agentSession.deleteMany({ where: { userId } })
-    await prisma.novel.deleteMany({ where: { authorId: userId } })
-    await prisma.user.delete({ where: { id: userId } })
+  while (users.length) {
+    const userId = users[users.length - 1]
+    // agent_runs_session_id_fkey is RESTRICT. Goal dependants and run
+    // messages cascade, but runs must be removed before their session.
+    await prisma.$transaction([
+      prisma.agentGoal.deleteMany({ where: { userId } }),
+      prisma.agentRun.deleteMany({ where: { userId } }),
+      prisma.agentSession.deleteMany({ where: { userId } }),
+      prisma.novel.deleteMany({ where: { authorId: userId } }),
+      prisma.user.delete({ where: { id: userId } }),
+    ])
+    users.pop()
   }
 })
 afterAll(() => prisma.$disconnect())
