@@ -72,7 +72,8 @@ import {
   type ContinueAgentLoopRunModel,
 } from '../agentApi'
 import { isRunActive, readSessionMessagesCache, useAgentStore, type ComposerReference } from '../agentStore'
-import { keepInterruptedRunExpanded, selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../goal-selectors'
+import { selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../goal-selectors'
+import { useMessageBlockExpansion } from './use-message-block-expansion'
 import { buildGoalResumeModel } from '../goal-command'
 import { formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMessages, skillPhaseLabel } from '../lib/panel-helpers'
 import { useProcessingHint } from '../useProcessingHint'
@@ -856,11 +857,9 @@ export function AgentPanel({
   }, [copyInviteLink, inviteDialogOpen, referralQuery.data?.inviteUrl])
 
 
-  const [expandedBlocks, setExpandedBlocks] = useState<Record<string, boolean>>({})
-  const handleToggleBlockSummary = useCallback((blockId: string) => {
-    const interrupted = keepInterruptedRunExpanded(panelPhase, messages.find(message => message.id === blockId)?.runId ?? '', runId ?? resumeableRunId)
-    setExpandedBlocks((current) => ({ ...current, [blockId]: !(current[blockId] ?? interrupted) }))
-  }, [messages, panelPhase, runId, resumeableRunId])
+  const { isExpanded: isBlockExpanded, toggle: handleToggleBlockSummary } = useMessageBlockExpansion({
+    sessionId, messages, blocks: blockInfoById, goalView, phase: panelPhase, runId: runId ?? resumeableRunId,
+  })
 
   useEffect(
     () => () => {
@@ -1570,6 +1569,9 @@ export function AgentPanel({
             ) : null}
             {messages.map((message) => {
               if (message.role === 'user') {
+                // System continuation prompts remain available inside the open
+                // process; only genuine author messages create a new boundary.
+                if (message.goalContinuation && message.goalId && !isBlockExpanded(blockInfoById.get(message.id), message.runId)) return null
                 return (
                 <div
                   key={message.id}
@@ -1637,8 +1639,7 @@ export function AgentPanel({
               const block = blockInfoById.get(message.id)
               const isBlockFirst = block?.firstId === message.id
               const isBlockLast = block?.lastId === message.id
-              const keepExpanded = keepInterruptedRunExpanded(panelPhase, message.runId, runId ?? resumeableRunId)
-              const blockExpanded = block ? expandedBlocks[block.firstId] ?? keepExpanded : keepExpanded
+              const blockExpanded = isBlockExpanded(block, message.runId)
               // 仅当前 run 的消息视为活跃：新任务开始时历史块保持折叠，不会被全局 active 连带展开
               const messageRunActive = active && message.runId === runId
               const blockCollapsed = !messageRunActive && !blockExpanded

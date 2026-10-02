@@ -93,8 +93,7 @@ describe('质量检查默认目标', () => {
       AND: [{ OR: [{ chapterId: null }, { chapter: { createdAt: { gte: startedAt } } }] }],
     }) }))
     run.mockResolvedValue({ taskRootId: null, runtimeProtocolVersion: 0, sessionId: 's', taskSpec: { ...taskSpec, runId: 'foreign' } })
-    await resolveQualityChapterTarget(input, db)
-    expect(compilations).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({ run: { id: 'r', userId: 'u', novelId: 'n' } }) }))
+    await expect(resolveQualityChapterTarget(input, db)).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })
   })
   it('指定编译必须在当前运行作用域，不能失败后回退旧章节', async () => {
     const { db, compilations } = database([], null)

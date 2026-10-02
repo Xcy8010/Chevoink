@@ -81,5 +81,5 @@ export function selectAgentPanelPhase(view: AgentGoalView, phase: AgentRunPhase)
 }
 
 export function keepInterruptedRunExpanded(phase: AgentRunPhase, messageRunId: string, runId: string | null): boolean {
-  return messageRunId === runId && (phase === 'paused' || phase === 'failed')
+  return messageRunId === runId && (phase === 'paused' || phase === 'failed' || phase === 'cancelled')
 }

@@ -18,8 +18,7 @@ import { DataAccessError, prisma } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
-import { taskSpecSchema } from '../../../shared/contracts/index.js'
-import { compilationRunScope } from './story-compiler.js'
+import { compilationRunScope, readCompilerTaskIdentity } from './story-compiler.js'
 import { requiresNextChapterDelivery } from './completion-guard.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from './craft-library.js'
@@ -240,12 +239,24 @@ export async function hasCommittedTaskChapter(db: Prisma.TransactionClient, user
   const scope = await qualityCompilationScope(db, userId, novelId, runId)
   const rows = await db.storyCompilation.findMany({
     where: { userId, novelId, ...scope, status: { not: 'abandoned' } },
-    select: { status: true, stage: true, chapterId: true,
+    select: { status: true, stage: true, chapterId: true, createdAt: true,
       chapter: { select: { id: true, novelId: true, revision: true, wordCount: true, archivedAt: true,
         volume: { select: { novelId: true, archivedAt: true } } } },
       bridge: { select: { toChapterId: true, targetRevision: true, committedAt: true } } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   })
-  return rows.length > 0 && rows.every(row => row.status === 'completed' && row.stage === 'commit'
+  // Historical re-preparation can leave an old active compiler for the same
+  // chapter. Only its newest preparation certifies that target; other unfinished
+  // chapters still prevent the task from claiming delivery.
+  const targets = new Map<string, Date>()
+  const current = rows.filter(row => {
+    if (!row.chapterId) return true
+    const newer = targets.get(row.chapterId)
+    if (newer && row.createdAt && newer > row.createdAt) return false
+    if (row.createdAt) targets.set(row.chapterId, row.createdAt)
+    return true
+  })
+  return current.length > 0 && current.every(row => row.status === 'completed' && row.stage === 'commit'
     && row.chapter && row.chapter.novelId === novelId && row.chapter.wordCount > 0
     && row.chapter.archivedAt === null && row.chapter.volume.archivedAt === null && row.chapter.volume.novelId === novelId
     && row.chapterId === row.chapter.id && row.bridge?.toChapterId === row.chapter.id
@@ -259,9 +270,11 @@ export async function resolveQualityChapterTarget(
 ) {
   if (input.compilationId && !input.runId) throw new DataAccessError(409, 'QUALITY_RUN_SCOPE_INVALID', '编译编号必须属于当前任务；独立审阅仅传真实 chapterId。')
   if (input.runId) {
-    const run = await db.agentRun.findFirst({ where: { id: input.runId, userId: input.userId, novelId: input.novelId }, select: { taskSpec: true } })
-    const task = taskSpecSchema.safeParse(run?.taskSpec)
-    if (task.success && task.data.runId === input.runId && task.data.scope.novelId === input.novelId && requiresNextChapterDelivery(task.data.goals)) {
+    const { task } = await readCompilerTaskIdentity(db, { ...input, runId: input.runId }).catch(error => {
+      if (error instanceof DataAccessError && error.code === 'RUN_NOT_FOUND') throw new DataAccessError(409, 'QUALITY_RUN_SCOPE_INVALID', '质量检查不属于当前作品任务。')
+      throw error
+    })
+    if (task && requiresNextChapterDelivery(task.goals)) {
       const scope = await qualityCompilationScope(db, input.userId, input.novelId, input.runId)
       const targets = await db.storyCompilation.findMany({
         where: { userId: input.userId, novelId: input.novelId, status: 'active', ...scope,
@@ -432,9 +445,9 @@ export async function getQualityReport(userId: string, novelId: string, reportId
   return report
 }
 
-export async function getLatestQualityReport(userId: string, novelId: string, chapterId: string, db: Prisma.TransactionClient = prisma) {
+export async function getLatestQualityReport(userId: string, novelId: string, chapterId: string, db: Prisma.TransactionClient = prisma, compilationId?: string | null) {
   return db.chapterQualityReport.findFirst({
-    where: { userId, novelId, chapterId }, include: { findings: { orderBy: { startOffset: 'asc' } } }, orderBy: { createdAt: 'desc' },
+    where: { userId, novelId, chapterId, ...(compilationId !== undefined ? { compilationId } : {}) }, include: { findings: { orderBy: { startOffset: 'asc' } } }, orderBy: { createdAt: 'desc' },
   })
 }
 

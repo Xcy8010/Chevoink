@@ -610,6 +610,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           id: `local-${Date.now()}`,
           runId,
           role: 'user',
+          goalId: runGoalId,
           // 附件随提示词一起发送：本地用户消息即时回显附件 part
           parts: [
             { type: 'text', text: userPrompt },
@@ -1026,6 +1027,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                 id: event.messageId,
                 runId: event.runId,
                 role: 'assistant',
+                goalId: event.runId === state.runId ? state.runGoalId : null,
                 parts: [],
                 createdAt: event.ts,
               },

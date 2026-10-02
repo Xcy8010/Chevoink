@@ -80,7 +80,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     }
     const state = await readExecutionStateInTransaction(tx, lease.taskRootId)
     const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map(item => item.content))
-    const existingReport = await getLatestQualityReport(ctx.userId, ctx.novelId, chapterId, tx)
+    const existingReport = await getLatestQualityReport(ctx.userId, ctx.novelId, chapterId, tx, bundle.compilation?.id ?? null)
     const cacheMetrics = existingReport?.deterministicMetrics
     const matchingContext = !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics) && cacheMetrics.qualityContextHash === reviewContextHash(bundle)
     const cached = existingReport && existingReport.compilationId === (bundle.compilation?.id ?? null) && existingReport.criticVersion === HUMANITY_CRITIC_VERSION

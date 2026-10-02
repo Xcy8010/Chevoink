@@ -822,6 +822,17 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     }) }))
   })
 
+  it('persists a copied legacy goal contract run binding even without a previousTask lookup', async () => {
+    const taskSpec = buildTaskSpec({ runId: 'original', novelId: 'novel', prompt: '检查章节' })
+    mocks.update.mockResolvedValueOnce({ taskSpec, usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10 }, currentTurn: 0 })
+    queue(response())
+    await run('检查章节')
+    expect(mocks.previous).not.toHaveBeenCalled()
+    expect(mocks.update.mock.calls).toContainEqual([expect.objectContaining({ where: { id: 'run' },
+      data: expect.objectContaining({ taskSpec: { ...taskSpec, runId: 'run' } }) })])
+    expect(assembleContext).toHaveBeenCalledWith(expect.objectContaining({ taskSpec: { ...taskSpec, runId: 'run' } }))
+  })
+
   it('typed continuation includes all local run usage once, without double-counting inherited snapshots', async () => {
     const taskSpec = buildTaskSpec({ runId: 'original', novelId: 'novel', chapterId: null, prompt: '检查章节' })
     const base = { status: 'paused', currentTurn: 1, startedAt: new Date(), taskSpec }

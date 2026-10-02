@@ -25,8 +25,9 @@ describe('严谨创作落实连续性警告', () => {
     const chapter = { id: 'c', title: '本章', revision: 1, content: '原文', orderIndex: 1 }
     const findings = ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在衔接风险', suggestion: '局部澄清' }))
     const validation = { independentCheck: 'complete', checkedRevision: 1, findings, errorCount: 0, warningCount: 3, autoRepairRounds: 0 }
-    const compilation = { id: 'comp', chapterId: 'c', chapter, bridge: { fromChapterId: null }, sceneTasks: [{ ordinal: 1 }], validation: cached ? validation : null, status: 'active' }
-    const findCompilation = vi.spyOn(prisma.storyCompilation, 'findFirst').mockResolvedValue(compilation as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findFirst>>)
+    const compilation = { id: 'comp', createdAt: new Date(1), chapterId: 'c', chapter, bridge: { fromChapterId: null }, sceneTasks: [{ ordinal: 1 }], validation: cached ? validation : null, status: 'active' }
+    const findCompilation = vi.spyOn(prisma.storyCompilation, 'findFirst').mockImplementation(async args => args?.where?.createdAt
+      ? null : compilation as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findFirst>>)
     vi.spyOn(prisma.storyCompilation, 'findMany').mockResolvedValue([compilation] as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findMany>>)
     vi.spyOn(quality, 'qualityCompilationScope').mockResolvedValue({ run: { id: 'r' } })
     const qualityReport = vi.spyOn(quality, 'getLatestQualityReport').mockResolvedValue(null)

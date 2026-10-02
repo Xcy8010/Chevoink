@@ -15,7 +15,23 @@ import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { getActiveRunIdBySession, hasActiveRunInSession } from './active-runs.js'
 import { publishDurableEvents } from './runtime-event-projection.js'
 
-const historyRunState = { select: { runtimeProtocolVersion: true, status: true, finishedAt: true, taskRoot: { select: { status: true } } } } as const
+const historyRunState = { select: { runtimeProtocolVersion: true, status: true, finishedAt: true, taskRoot: { select: { status: true } },
+  goalExecution: { select: { goalId: true, trigger: true } },
+  messages: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: 1, select: { id: true } } } } satisfies Prisma.AgentRunDefaultArgs
+
+function historyGoalMetadata(record: { id: string; role: string; run: {
+  goalExecution: { goalId: string; trigger: string } | null; messages: Array<{ id: string }>
+} }) {
+  const execution = record.run.goalExecution
+  return {
+    goalId: execution?.goalId ?? null,
+    // New continuations are explicit system records. Legacy goal_auto runs
+    // stored their initial prompt as user; later real author messages remain
+    // natural boundaries even when attached to the same execution.
+    goalContinuation: Boolean(execution && (record.role === 'system'
+      || record.role === 'user' && execution.trigger === 'goal_auto' && record.run.messages[0]?.id === record.id)),
+  }
+}
 
 function visibleHistoryParts(parts: AgentMessagePart[], run: { runtimeProtocolVersion: number; taskRoot: { status: string } | null }): AgentMessagePart[] {
   const stopped = run.runtimeProtocolVersion === 1 && ['paused', 'completed'].includes(run.taskRoot?.status ?? '')
@@ -197,7 +213,8 @@ export async function listLoopSessionMessages(
       pagedMessages.push({
         id: record.id,
         runId: record.runId,
-        role: record.role as 'user' | 'assistant',
+        ...historyGoalMetadata(record),
+        role: record.role === 'assistant' ? 'assistant' : 'user',
         parts: await normalizeLegacyViewedImageUrls(userId, stripped),
         createdAt: record.createdAt.toISOString(),
         completedAt: record.role === 'assistant' && record.run.status === 'completed' ? record.run.finishedAt?.toISOString() ?? null : null,
@@ -259,7 +276,8 @@ export async function listLoopSessionMessages(
     messages.push({
       id: record.id,
       runId: record.runId,
-      role: record.role as 'user' | 'assistant',
+      ...historyGoalMetadata(record),
+      role: record.role === 'assistant' ? 'assistant' : 'user',
       parts: await normalizeLegacyViewedImageUrls(userId, stripped),
       createdAt: record.createdAt.toISOString(),
       completedAt: record.role === 'assistant' && record.run.status === 'completed' ? record.run.finishedAt?.toISOString() ?? null : null,

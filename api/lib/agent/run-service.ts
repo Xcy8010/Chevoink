@@ -3,7 +3,7 @@ import { hasAuthorEnded } from './completion-guard.js'
 import type { Response } from 'express'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { startAgentLoopRunSchema } from '../../../shared/contracts/index.js'
+import { startAgentLoopRunSchema, taskSpecSchema } from '../../../shared/contracts/index.js'
 
 import type { AgentRun as AgentRunRecord, Prisma } from '@prisma/client'
 
@@ -416,8 +416,15 @@ export async function startLoopRunLocked(
     const durablePrevious = previousRun?.runtimeProtocolVersion === 1 && previousRun.taskRootId ? previousRun : null
     initializeGoalDurable = Boolean(durablePrevious && durablePrevious.status === 'completed')
     const previousSpec = initializeGoalDurable ? null : previousRun?.taskSpec
-    let created = await tx.agentRun.create({ ...runData, data: { ...runData.data, manuscriptRevision: manuscript.manuscriptRevision,
-      ...(previousSpec && typeof previousSpec === 'object' && !Array.isArray(previousSpec) ? { taskSpec: previousSpec as Prisma.InputJsonValue } : {}) } })
+    let created = await tx.agentRun.create({ ...runData, data: { ...runData.data, manuscriptRevision: manuscript.manuscriptRevision } })
+    if (previousSpec && typeof previousSpec === 'object' && !Array.isArray(previousSpec)) {
+      const inherited = taskSpecSchema.safeParse(previousSpec)
+      created = await tx.agentRun.update({ where: { id: created.id }, data: {
+        // Invalid legacy shapes retain the loop's existing conservative fallback;
+        // only a validated contract receives a new attempt binding.
+        taskSpec: inherited.success ? { ...inherited.data, runId: created.id } as Prisma.InputJsonValue : previousSpec as Prisma.InputJsonValue,
+      } })
+    }
     await tx.agentMessage.create({ data: { id: admittedMessageId, runId: created.id, sessionId: session.id,
       role: options.goal && options.goal.trigger !== 'author' ? 'system' : 'user', parts: admittedParts } })
     if (steering) await tx.agentMessage.create({ data: { runId: created.id, sessionId: session.id, role: 'user', parts: [

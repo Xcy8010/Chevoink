@@ -470,6 +470,9 @@ export const sceneTaskBuildTool = defineTool({
   readOnly: false,
   async execute(ctx, args) {
     const db = ctx.transaction ?? prisma
+    if (args.compilationId && ctx.durableCompiler?.baseline && args.compilationId !== ctx.durableCompiler.baseline.id) {
+      return { outcome: 'failed' as const, output: '指定编译编号与本任务读取的编译身份不一致，请先读取该明确编号。', summary: '场景编译身份不匹配' }
+    }
     const candidates = await db.storyCompilation.findMany({
       where: {
         userId: ctx.userId,
@@ -517,7 +520,7 @@ export const chapterBridgeGetTool = defineTool({
     const compilation = await db.storyCompilation.findFirst({
       where: { userId: ctx.userId, novelId: ctx.novelId, ...(args.compilationId ? { id: args.compilationId } : {}),
         ...scope },
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { title: true, revision: true } } },
     })
     if (!compilation?.bridge) return { outcome: 'failed' as const, output: '当前任务没有可读取的 Chapter Bridge。完整章节写作请先调用 story_compiler_prepare。' }
@@ -792,6 +795,9 @@ export const chapterBridgeCommitTool = defineTool({
   async execute(ctx, args) {
     const db = ctx.transaction ?? prisma
     const scope = await qualityCompilationScope(db, ctx.userId, ctx.novelId, ctx.runId)
+    if (args.compilationId && ctx.durableCompiler?.baseline && args.compilationId !== ctx.durableCompiler.baseline.id) {
+      return { outcome: 'failed' as const, output: '指定编译编号与本任务读取的编译身份不一致。请用 chapter_bridge_get 读取该明确编号，不会替换为其他编译提交。', summary: '章节编译身份不匹配' }
+    }
     const targetId = ctx.durableCompiler?.baseline?.id ?? args.compilationId
     const candidates = await db.storyCompilation.findMany({
       where: {
@@ -802,11 +808,17 @@ export const chapterBridgeCommitTool = defineTool({
         ...(targetId ? { id: targetId } : {}),
       },
       include: { chapter: true, bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } },
-      orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }],
+      // Preparation establishes the current identity. An older active attempt
+      // must not hide a newer completed compilation of this same logical task.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: 2,
     })
-    const compilation: (typeof candidates)[number] | undefined = candidates.find((item) => item.status === 'active') ?? candidates[0]
-    if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, output: '没有找到当前任务指定的章节编译状态。历史章节桥可读不代表当前任务可提交它；不要反复增删 compilationId 重试。若本轮已获准继续该章节，请用 story_compiler_prepare(chapterId=目标已有章节ID) 建立本任务编译并完成检查；不要重写正文或接管其他任务。', summary: '未找到章节编译状态' }
+    const compilation = candidates[0]
+    if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, output: '没有找到当前任务指定的章节编译状态。请用 chapter_bridge_get 核对本任务已保存的编译编号与阶段；恢复身份无法核实时停止，不重建场景或重写正文来绕过。', summary: '未找到章节编译状态' }
+    if (compilation.status === 'active' && await db.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, ...scope,
+      chapterId: compilation.chapterId, createdAt: { gt: compilation.createdAt } }, select: { id: true } })) {
+      return { outcome: 'failed' as const, output: '该章节已有本任务后续准备的编译身份，旧编译不能覆盖它。请读取当前任务章节桥，保留已保存的正文、场景与检查记录。', summary: '章节编译已被后续准备替代' }
+    }
     if (compilation.status === 'completed') {
       if (compilation.bridge.targetRevision !== compilation.chapter.revision) return { outcome: 'failed' as const,
         output: '已提交的章节桥对应旧正文版本，当前正文已变化；请为当前任务重新准备并检查，不能把旧提交当作当前版本完成。', summary: '章节桥版本已过期' }
@@ -816,7 +828,7 @@ export const chapterBridgeCommitTool = defineTool({
     let qualityReportId: string | undefined
     if (requireQuality) {
       if (compilation.chapterId) {
-        const report = await getLatestQualityReport(ctx.userId, ctx.novelId, compilation.chapterId, db)
+        const report = await getLatestQualityReport(ctx.userId, ctx.novelId, compilation.chapterId, db, compilation.id)
         if (!report || report.chapterRevision !== compilation.chapter.revision || ['analyzing', 'stale', 'failed'].includes(report.status)) {
           return { outcome: 'failed' as const, output: '当前章节最新 revision 尚未完成单次人类感质量检查。只调用一次 quality_analyze；该工具会自动完成有证据的局部修订，禁止手动选择或反复检查。', summary: '等待单次质量检查' }
         }

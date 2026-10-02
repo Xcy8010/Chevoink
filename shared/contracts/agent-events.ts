@@ -436,6 +436,10 @@ export interface AgentUIMessage {
   createdAt: string
   /** Actual successful run completion; absent while running or on legacy data. */
   completedAt?: string | null
+  /** Persisted goal execution ownership; null denotes an ordinary run. */
+  goalId?: EntityId | null
+  /** A system-authored goal continuation prompt, including legacy goal_auto input. */
+  goalContinuation?: boolean
 }
 
 /** POST /api/agent/runs 新链路入参（模型自主决策，不再需要 task 类型） */

@@ -235,7 +235,7 @@ export const qualityAnalyzeTool = defineTool({
       outcome: 'failed' as const, output: '指定的编译不属于当前任务与章节的活跃状态；请核对章节桥。本次未调用质量模型，也不会改用其他任务的编译。', summary: '质量检查目标不匹配',
     }
     if (!bundle.chapter.content.trim()) return { output: '章节正文为空，无法执行人类感质量检查。', summary: '质量检查跳过空正文' }
-    const existing = await getLatestQualityReport(ctx.userId, ctx.novelId, chapterId)
+    const existing = await getLatestQualityReport(ctx.userId, ctx.novelId, chapterId, prisma, bundle.compilation?.id ?? null)
     if (existing && existing.compilationId === (bundle.compilation?.id ?? null) && existing.criticVersion === HUMANITY_CRITIC_VERSION && qualityReportMatchesContent(existing, bundle.chapter.revision, bundle.chapter.content)) {
       const hydrated = await getQualityReport(ctx.userId, ctx.novelId, existing.id)
       return finishQualityReview(ctx, hydrated, '', true)

@@ -39,4 +39,30 @@ describe('message presentation projection', () => {
     expect(result.recentConversationText).toBe(`new ${'字'.repeat(996)}`)
     expect(result.lastAssistantId).toBe('r')
   })
+
+  it('groups resumed runs of the same goal and retains the continuation record in its process', () => {
+    const messages = [
+      { ...message('u1', 'user'), goalId: 'goal' },
+      { ...message('a1', 'assistant', [{ type: 'reasoning', text: 'before pause' }]), goalId: 'goal', runId: 'r1' },
+      { ...message('resume', 'user', [{ type: 'text', text: 'system resume' }]), goalId: 'goal', goalContinuation: true, runId: 'r2' },
+      { ...message('a2', 'assistant', [{ type: 'text', text: 'final' }]), goalId: 'goal', runId: 'r2' },
+    ]
+    const result = projectMessages(messages)
+    const block = { firstId: 'a1', lastId: 'a2', ops: 1, goalId: 'goal' }
+    expect([...result.blockInfoById]).toEqual([['a1', block], ['resume', block], ['a2', block]])
+    expect(result.recentConversationText).toBe('final')
+    expect(projectMessages(messages.slice(0, 3)).recentConversationText).not.toBe('system resume')
+  })
+
+  it('preserves natural author boundaries and separates goals from ordinary assistant work', () => {
+    const result = projectMessages([
+      { ...message('a1', 'assistant'), goalId: 'g1' },
+      { ...message('natural', 'user'), goalId: 'g1', goalContinuation: false },
+      { ...message('a2', 'assistant'), goalId: 'g1' },
+      { ...message('a3', 'assistant'), goalId: 'g2' },
+      message('ordinary', 'assistant'),
+    ])
+    expect(result.blockInfoById.has('natural')).toBe(false)
+    expect([...result.blockInfoById.values()].map(block => block.firstId)).toEqual(['a1', 'a2', 'a3', 'ordinary'])
+  })
 })

@@ -934,7 +934,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
           creativeFreedom: params.creativeFreedom,
           qualityMode: params.qualityMode,
         })
-    let taskSpecChanged = !parsedTaskSpec.success || Boolean(previousTask)
+    let taskSpecChanged = !parsedTaskSpec.success || Boolean(previousTask) || parsedTaskSpec.data.runId !== runId
     if (params.resume || previousTask) {
       const narrowed = narrowLegacyConversationTask(narrowLegacyResearchTask(taskSpec, contextPrompt), contextPrompt)
       taskSpecChanged ||= narrowed !== taskSpec
