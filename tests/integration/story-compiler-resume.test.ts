@@ -1,18 +1,25 @@
 import { randomUUID } from 'node:crypto'
-import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { env } from '../../api/config/env.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
-import { buildStoryCompilerDigest, prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { buildStoryCompilerDigest, commitChapterBridge, prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import { getLatestQualityReport, hasCommittedTaskChapter, persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { chapterBridgeCommitTool, chapterBridgeGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { assertRunGoalFence, readGoalExecution } from '../../api/lib/agent/goal-fence.js'
+import { assertAgentManuscriptCurrent } from '../../api/lib/agent/manuscript-scope.js'
 
 const available = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
+const previousGoalEnabled = env.agentGoalEnabled
 afterEach(() => vi.restoreAllMocks())
-afterAll(() => prisma.$disconnect())
+afterAll(async () => {
+  env.agentGoalEnabled = previousGoalEnabled
+  await prisma.$disconnect()
+})
 
 async function fixture(work: (f: Awaited<ReturnType<typeof createFixture>>) => Promise<void>) {
   const f = await createFixture()
@@ -48,13 +55,15 @@ async function createFixture() {
     const originalId = randomUUID(), resumedId = randomUUID()
     const task = buildTaskSpec({ runId: originalId, novelId: novel.id, chapterId: chapter.id, prompt: '完成当前章节' })
     const runData = { userId: user.id, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, mode: 'act' as const,
+      manuscriptRevision: novel.manuscriptRevision,
       action: 'workspaceAgent', agentType: 'writingOrchestrator' as const, engine: 'loop' as const, taskSpec: JSON.parse(JSON.stringify(task)) }
     await prisma.agentRun.create({ data: { ...runData, id: originalId, status: 'paused' } })
     // Reproduce the persisted production defect: goal admission copied the whole
     // contract, retaining the original attempt id on a new execution.
     await prisma.agentRun.create({ data: { ...runData, id: resumedId, status: 'running' } })
     const goal = await prisma.agentGoal.create({ data: { userId: user.id, novelId: novel.id, sessionId: session.id,
-      currentRunId: resumedId, continuationIndex: 2, executionOptions: {},
+      currentRunId: resumedId, continuationIndex: 2, executionOptions: {}, epoch: 2n,
+      status: 'active', currentRevision: 1, pendingRevision: null,
       revisions: { create: { revision: 1, objective: '完成当前章节', request: {}, sourceActionId: randomUUID(),
         authorityHash: runtimeJson({ objective: '完成当前章节', options: {}, novelId: novel.id, userId: user.id }).hash } },
     } })
@@ -66,7 +75,16 @@ async function createFixture() {
       callId: 'resume-commit', mode: 'build', creativeFreedom: 'stable', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
     const prepared = await prepareStoryCompilation({ userId: user.id, novelId: novel.id, runId: originalId,
       chapterId: chapter.id, mode: 'balanced', intentSummary: '完成当前章节' })
-    return { ctx, originalId, task, chapter, compilationId: prepared.compilation.id }
+    // Prove the actual resumed execution is writable before the test reaches any
+    // quality/commit assertions: feature, owner/scope, active goal/run, revision,
+    // epoch and manuscript generation must satisfy the production guards.
+    expect(await readGoalExecution(ctx.userId, ctx.runId)).toEqual({ goalId: goal.id, revision: 1, epoch: 2n,
+      userId: ctx.userId, novelId: ctx.novelId, sessionId: ctx.sessionId, runId: ctx.runId })
+    await prisma.$transaction(async tx => {
+      expect(await assertRunGoalFence(tx, ctx.userId, ctx.runId)).toMatchObject({ goalId: goal.id, revision: 1, epoch: 2n })
+      await assertAgentManuscriptCurrent(tx, ctx)
+    })
+    return { ctx, originalId, task, chapter, manuscriptRevision: novel.manuscriptRevision, compilationId: prepared.compilation.id }
   } catch (error) {
     try { await cleanupFixture(user.id) } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], 'Compiler resume fixture setup and cleanup failed')
@@ -86,6 +104,7 @@ async function check(f: Awaited<ReturnType<typeof createFixture>>, compilationId
 }
 
 describe.skipIf(!available)('compiler recovery through historical goal continuation (isolated DB)', () => {
+  beforeAll(() => { env.agentGoalEnabled = true })
   it('reads and commits the original compilation, scenes and version-bound report exactly once', async () => {
     vi.spyOn(flags, 'isAgent2FeatureEnabled').mockReturnValue(true)
     await fixture(async f => {
@@ -100,6 +119,10 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       const first = await chapterBridgeCommitTool.execute(f.ctx, {})
       expect(first).toMatchObject({ summary: '提交章节桥与故事终态', display: { compilationId: f.compilationId } })
       const memoryCount = await prisma.projectMemoryEntry.count({ where: { novelId: f.ctx.novelId } })
+      expect(memoryCount).toBeGreaterThan(0)
+      expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.ctx.novelId, runId: f.ctx.runId } })).toBe(memoryCount)
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.originalId } })).status).toBe('paused')
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId } })).runId).toBe(f.originalId)
       expect(await chapterBridgeCommitTool.execute(f.ctx, {})).toMatchObject({ summary: '章节终态已提交', display: { compilationId: f.compilationId } })
       expect(await prisma.storyCompilation.count({ where: { novelId: f.ctx.novelId } })).toBe(1)
       expect(await prisma.chapterQualityReport.count({ where: { novelId: f.ctx.novelId } })).toBe(1)
@@ -174,6 +197,33 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       expect(await prisma.storyCompilation.count({ where: { novelId: f.ctx.novelId } })).toBe(1)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId } })).status).toBe('active')
       expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: f.compilationId } })).committedAt).toBeNull()
+    })
+  })
+
+  it.each(['paused-run', 'wrong-task', 'stale-epoch'] as const)('rejects commit by %s before any bridge, scene, or memory effect', async scenario => {
+    await fixture(async f => {
+      const report = await check(f)
+      let committingRunId = f.ctx.runId
+      if (scenario === 'paused-run') await prisma.agentRun.update({ where: { id: committingRunId }, data: { status: 'paused' } })
+      if (scenario === 'stale-epoch') await prisma.agentGoal.updateMany({ where: { userId: f.ctx.userId }, data: { epoch: 3n } })
+      if (scenario === 'wrong-task') {
+        committingRunId = randomUUID()
+        const otherTask = buildTaskSpec({ runId: committingRunId, novelId: f.ctx.novelId, chapterId: f.chapter.id, prompt: '另一个任务' })
+        const otherSession = await prisma.agentSession.create({ data: { userId: f.ctx.userId, novelId: f.ctx.novelId, title: '不同任务' } })
+        await prisma.agentRun.create({ data: { id: committingRunId, userId: f.ctx.userId, novelId: f.ctx.novelId, sessionId: otherSession.id,
+          chapterId: f.chapter.id, manuscriptRevision: f.manuscriptRevision,
+          mode: 'act', status: 'running', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop',
+          taskSpec: JSON.parse(JSON.stringify(otherTask)) } })
+      }
+      const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId }, include: { bridge: true, sceneTasks: true } })
+      const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
+      await expect(commitChapterBridge({ userId: f.ctx.userId, novelId: f.ctx.novelId, runId: committingRunId,
+        compilationId: f.compilationId, chapterSummary: '未授权提交', exitState: state, lastUnfinishedAction: '', hookDecision: '',
+        delayedHookReason: '', openingStructure: '动作', endingStructure: '转折', requireQuality: true, qualityReportId: report.id }))
+        .rejects.toMatchObject({ code: scenario === 'wrong-task' ? 'COMPILATION_NOT_FOUND' : 'GOAL_EXECUTION_FENCED' })
+      expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId }, include: { bridge: true, sceneTasks: true } })).toEqual(before)
+      expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.ctx.novelId } })).toBe(0)
+      expect(await prisma.chapterQualityReport.count({ where: { novelId: f.ctx.novelId } })).toBe(1)
     })
   })
 })

@@ -3,12 +3,14 @@ import type { Prisma } from '@prisma/client'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 const db = vi.hoisted(() => ({
   novel: { findFirst: vi.fn() }, agentRun: { findFirst: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn() },
-  storyCompilation: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), create: vi.fn() },
-  chapterBridge: { findFirst: vi.fn() }, storyCharter: { findFirst: vi.fn() }, readerPromise: { findMany: vi.fn() }, projectMemoryEntry: { findMany: vi.fn() }, $transaction: vi.fn(), $queryRaw: vi.fn(),
+  storyCompilation: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() },
+  chapterBridge: { findFirst: vi.fn(), update: vi.fn() }, sceneTask: { updateMany: vi.fn() }, agentGoalExecution: { findUnique: vi.fn() },
+  storyCharter: { findFirst: vi.fn() }, readerPromise: { findMany: vi.fn() }, projectMemoryEntry: { findMany: vi.fn() }, $transaction: vi.fn(), $queryRaw: vi.fn(),
 }))
 vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<typeof import('../../api/lib/prisma.js')>(), prisma: db }))
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
-import { buildStoryCompilerDigest, compilationRunScope, prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
+import { buildStoryCompilerDigest, commitChapterBridge, compilationRunScope, prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
+import * as memory from '../../api/lib/agent/story-memory.js'
 import { hasCommittedTaskChapter } from '../../api/lib/agent/humanity-quality.js'
 import { chapterBridgeCommitTool, chapterBridgeGetTool, continuityValidateTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 
@@ -18,6 +20,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   db.$transaction.mockImplementation(fn => fn(db)); db.$queryRaw.mockResolvedValue([{ id: 'n' }])
   db.novel.findFirst.mockResolvedValue({ id: 'n', chapterCount: 31 })
+  db.agentGoalExecution.findUnique.mockResolvedValue(null)
   db.agentRun.findFirst.mockResolvedValue({ createdAt: new Date('2026-09-20T03:22:41Z'), runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: spec('写下一章') })
   db.chapter.findFirst.mockImplementation(async ({ where }) => where.id ? { id: where.id, title: '原章节', orderIndex: where.id === 'old31' ? 31 : 32, revision: 3, content: '已保存正文' } : where.orderIndex?.lt ? null : { orderIndex: 31 })
   db.chapter.findMany.mockResolvedValue([]); db.storyCompilation.findFirst.mockResolvedValue(null); db.storyCompilation.findMany.mockResolvedValue([])
@@ -107,6 +110,27 @@ describe('story compiler task identity', () => {
       db.agentRun.findFirst.mockResolvedValue({ runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec })
       expect(await compilationRunScope(db as unknown as Prisma.TransactionClient, ctx)).toEqual({ run: { id: ctx.runId, userId: 'u', novelId: 'n' } })
     }
+  })
+  it('binds resumed commit memory to the current execution without changing the original compiler owner', async () => {
+    const currentTask = spec('修改当前章节')
+    db.agentRun.findFirst.mockImplementation(async ({ where, select }) => select?.manuscriptRevision
+      ? { manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 0 } }
+      : where.status ? { id: 'new-run' }
+        : { runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: currentTask })
+    db.storyCompilation.findFirst.mockResolvedValue({ id: 'original-compiler', runId: 'original-run', chapterId: 'old31', status: 'active',
+      chapter: { id: 'old31', revision: 3, content: '已保存正文', title: '原章节' }, sceneTasks: [],
+      bridge: { id: 'bridge', fromChapterId: null, recentOpenings: [], recentEndings: [] },
+      validation: { independentCheck: 'complete', checkedRevision: 3, errorCount: 0 } })
+    const save = vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'proposal', action: 'created', status: 'candidate' })
+    try {
+      await commitChapterBridge({ userId: 'u', novelId: 'n', runId: 'new-run', compilationId: 'original-compiler', chapterSummary: '原章节摘要',
+        exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+        lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '转折' })
+      expect(save).toHaveBeenCalledTimes(2)
+      for (const [input] of save.mock.calls) expect(input).toMatchObject({ runId: 'new-run', sourceChapterId: 'old31' })
+      expect(db.storyCompilation.findFirst.mock.calls[0][0].where.run.taskSpec).toEqual({ path: ['id'], equals: currentTask.id })
+      expect(db.storyCompilation.update.mock.calls[0][0].data).not.toHaveProperty('runId')
+    } finally { save.mockRestore() }
   })
   it('prepares chapter32 for a fresh next-chapter request even when the editor selects chapter31', async () => {
     const result = await storyCompilerPrepareTool.execute(ctx, { intentSummary: '写下一章' })

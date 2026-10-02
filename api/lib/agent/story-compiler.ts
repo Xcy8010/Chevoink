@@ -18,6 +18,7 @@ import { qualityReportMatchesContent } from './quality-report-contract.js'
 import { taskSpecSchema } from '../../../shared/contracts/index.js'
 import { requiresNextChapterDelivery } from './completion-guard.js'
 import { runtimeJson } from './runtime-common.js'
+import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 
 type PreparedBridge = {
   lastUnfinishedAction: string
@@ -578,6 +579,8 @@ export async function validateStoryContinuity(input: {
 export async function commitChapterBridge(input: {
   userId: string
   novelId: string
+  /** Current authorized attempt; compilation.runId remains its original owner. */
+  runId?: string
   compilationId: string
   chapterSummary: string
   exitState: StoryState
@@ -592,9 +595,19 @@ export async function commitChapterBridge(input: {
   if (!transaction) return prisma.$transaction(tx => commitChapterBridge(input, tx))
   const db = transaction
   await lockNovelActiveScope(db, input.novelId)
+  let scope: Prisma.StoryCompilationWhereInput = {}
+  if (input.runId) {
+    await assertAgentManuscriptCurrent(db, { userId: input.userId, novelId: input.novelId, runId: input.runId })
+    await db.$queryRaw`SELECT id FROM agent_runs WHERE id = ${input.runId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
+    if (!await db.agentRun.findFirst({ where: { id: input.runId, userId: input.userId, novelId: input.novelId,
+      status: { in: ['queued', 'running', 'awaiting_approval'] } }, select: { id: true } })) {
+      throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '提交执行已暂停或结束，不能再产生章节终态与记忆。')
+    }
+    scope = await compilationRunScope(db, { ...input, runId: input.runId })
+  }
   await db.$queryRaw`SELECT id FROM story_compilations WHERE id = ${input.compilationId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
   const compilation = await db.storyCompilation.findFirst({
-    where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: 'active' },
+    where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: 'active', ...scope },
     include: { bridge: true, sceneTasks: true, chapter: true },
   })
   if (!compilation?.chapter || !compilation.bridge) {
@@ -669,7 +682,7 @@ export async function commitChapterBridge(input: {
     saveProposal({
       userId: input.userId,
       novelId: input.novelId,
-      runId: compilation.runId,
+      runId: input.runId ?? compilation.runId,
       sourceChapterId: compilation.chapter.id,
       memoryType: 'chapterSummary',
       layer: 'L2',
@@ -683,7 +696,7 @@ export async function commitChapterBridge(input: {
     saveProposal({
       userId: input.userId,
       novelId: input.novelId,
-      runId: compilation.runId,
+      runId: input.runId ?? compilation.runId,
       sourceChapterId: compilation.chapter.id,
       memoryType: 'sceneState',
       layer: 'L2',
