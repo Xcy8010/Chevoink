@@ -8,6 +8,7 @@ import { getLatestQualityReport, hasCommittedTaskChapter, persistHumanityQuality
 import { chapterBridgeCommitTool, chapterBridgeGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 const available = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 afterEach(() => vi.restoreAllMocks())
@@ -15,7 +16,16 @@ afterAll(() => prisma.$disconnect())
 
 async function fixture(work: (f: Awaited<ReturnType<typeof createFixture>>) => Promise<void>) {
   const f = await createFixture()
-  try { await work(f) } finally { await prisma.user.delete({ where: { id: f.ctx.userId } }) }
+  try { await work(f) } finally { await cleanupFixture(f.ctx.userId) }
+}
+
+async function cleanupFixture(userId: string) {
+  // Sessions own goals/runs; novels restrict their author relation, and volumes
+  // restrict chapter deletion. Follow the same dependency order as DB fixtures.
+  await prisma.agentSession.deleteMany({ where: { userId } })
+  await prisma.chapter.deleteMany({ where: { authorId: userId } })
+  await prisma.novel.deleteMany({ where: { authorId: userId } })
+  await prisma.user.delete({ where: { id: userId } })
 }
 
 async function createFixture() {
@@ -35,7 +45,10 @@ async function createFixture() {
     // contract, retaining the original attempt id on a new execution.
     await prisma.agentRun.create({ data: { ...runData, id: resumedId, status: 'running' } })
     const goal = await prisma.agentGoal.create({ data: { userId: user.id, novelId: novel.id, sessionId: session.id,
-      currentRunId: resumedId, continuationIndex: 2, executionOptions: {} } })
+      currentRunId: resumedId, continuationIndex: 2, executionOptions: {},
+      revisions: { create: { revision: 1, objective: '完成当前章节', request: {}, sourceActionId: randomUUID(),
+        authorityHash: runtimeJson({ objective: '完成当前章节', options: {}, novelId: novel.id, userId: user.id }).hash } },
+    } })
     await prisma.agentGoalExecution.createMany({ data: [
       { goalId: goal.id, goalRevision: 1, epoch: 1n, runId: originalId, continuationIndex: 1, trigger: 'author', sourceEventId: randomUUID() },
       { goalId: goal.id, goalRevision: 1, epoch: 2n, runId: resumedId, continuationIndex: 2, trigger: 'goal_auto', sourceEventId: randomUUID() },
@@ -46,7 +59,9 @@ async function createFixture() {
       chapterId: chapter.id, mode: 'balanced', intentSummary: '完成当前章节' })
     return { ctx, originalId, task, chapter, compilationId: prepared.compilation.id }
   } catch (error) {
-    await prisma.user.delete({ where: { id: user.id } })
+    try { await cleanupFixture(user.id) } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Compiler resume fixture setup and cleanup failed')
+    }
     throw error
   }
 }

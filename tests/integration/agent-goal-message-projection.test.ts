@@ -23,6 +23,8 @@ describe.skipIf(!dbAvailable)('goal history ownership (isolated test DB)', () =>
     const novel = await prisma.novel.create({ data: { authorId: user.id, title: 'goal-history', slug: randomUUID(), summary: '' } })
     const session = await prisma.agentSession.create({ data: { userId: user.id, novelId: novel.id, title: 'goal-history' } })
     const goal = await prisma.agentGoal.create({ data: { userId: user.id, novelId: novel.id, sessionId: session.id, status: 'completed', executionOptions: {} } })
+    await prisma.agentGoalRevision.create({ data: { goalId: goal.id, revision: 1, objective: 'goal-history',
+      request: {}, authorityHash: 'a'.repeat(64), sourceActionId: randomUUID() } })
     const runIds: string[] = []
     const messageIds: string[] = []
     const start = Date.parse('2026-10-01T00:00:00Z')
