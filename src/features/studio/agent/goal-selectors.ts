@@ -21,6 +21,8 @@ type SelectAgentGoalViewInput = {
   goalSessionId: string | null
   sessionId: string | null
   runId: string | null
+  /** 刷新后没有直播 run 时，服务端确认可继续的历史 run。 */
+  resumeableRunId?: string | null
   phase: AgentRunPhase
   /** 服务端确认的当前 run 目标归属；null 明确表示普通 run，undefined 兼容旧接口。 */
   runGoalId?: string | null
@@ -33,7 +35,7 @@ type SelectAgentGoalViewInput = {
  * 浏览器是否仍持有这个目标的 run。等待作者输入/确认时目标保持可见，
  * 但不能被其它表面显示成“正在运行”。
  */
-export function selectAgentGoalView({ goal, goalSessionId, sessionId, runId, phase, runGoalId }: SelectAgentGoalViewInput): AgentGoalView {
+export function selectAgentGoalView({ goal, goalSessionId, sessionId, runId, resumeableRunId, phase, runGoalId }: SelectAgentGoalViewInput): AgentGoalView {
   const scopedGoal = goal && goalSessionId === sessionId && sessionId === goal.sessionId ? goal : null
   if (!scopedGoal) {
     return { goal: null, presentation: null, ownedRun: false, runBelongsToGoal: false, waiting: false, running: false, canPauseOwnedRun: false, terminal: false }
@@ -43,7 +45,8 @@ export function selectAgentGoalView({ goal, goalSessionId, sessionId, runId, pha
   const terminal = scopedGoal.status === 'completed' || scopedGoal.status === 'cancelled'
   const waiting = scopedGoal.status === 'active' && ['awaiting_input', 'awaiting_approval', 'awaiting_provider', 'reconciling'].includes(scopedGoal.phase)
   const ownedRun = Boolean(scopedGoal.currentRunId && scopedGoal.currentRunId === runId)
-  const runBelongsToGoal = runGoalId === undefined ? ownedRun : runGoalId === scopedGoal.id
+  const restoredGoalRun = Boolean(!runId && resumeableRunId && resumeableRunId === scopedGoal.currentRunId)
+  const runBelongsToGoal = restoredGoalRun || (runGoalId === undefined ? ownedRun : runGoalId === scopedGoal.id)
   const running = ownedRun && isRunActive(phase) && presentation.running && !waiting
 
   return {

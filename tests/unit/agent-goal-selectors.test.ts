@@ -30,6 +30,17 @@ describe('selectAgentGoalView', () => {
     expect(selectAgentPanelPhase(select({ status: 'paused' }, { runId: 'ordinary', runGoalId: null }), 'running')).toBe('running')
     expect(selectAgentPanelPhase(select({ status: 'completed' }), 'running')).toBe('succeeded')
   })
+
+  it('restores a paused goal after refresh without requiring a live SSE run', () => {
+    const restored = select({ status: 'paused', phase: 'idle' }, { runId: null, resumeableRunId: 'run-1', runGoalId: null, phase: 'idle' })
+    expect(restored.runBelongsToGoal).toBe(true)
+    expect(restored.ownedRun).toBe(false)
+    expect(selectAgentPanelPhase(restored, 'idle')).toBe('paused')
+    expect(selectAgentActivityRunActive(restored, 'idle')).toBe(false)
+    expect(keepInterruptedRunExpanded(selectAgentPanelPhase(restored, 'idle'), 'run-1', 'run-1')).toBe(true)
+    const other = select({ status: 'paused' }, { runId: null, resumeableRunId: 'other-run', runGoalId: null, phase: 'idle' })
+    expect(selectAgentPanelPhase(other, 'idle')).toBe('idle')
+  })
   it('rejects a goal from another session before projecting any status', () => {
     const view = select({}, { sessionId: 'session-2' })
     expect(view.goal).toBeNull()

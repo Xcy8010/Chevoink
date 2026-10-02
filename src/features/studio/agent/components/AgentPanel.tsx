@@ -470,7 +470,7 @@ export function AgentPanel({
   const { scrollRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll } = useMessageScroll({
     messages, pendingApproval, pendingQuestion, conversationLoading, collapsed: workConversation.collapsed,
   })
-  const goalView = selectAgentGoalView({ goal, goalSessionId, sessionId, runId, phase, runGoalId })
+  const goalView = selectAgentGoalView({ goal, goalSessionId, sessionId, runId, resumeableRunId, phase, runGoalId })
   const panelPhase = selectAgentPanelPhase(goalView, phase)
   const active = isRunActive(panelPhase)
   const activityRunActive = selectAgentActivityRunActive(goalView, phase)
@@ -1838,7 +1838,7 @@ export function AgentPanel({
           voiceScopeKey={voiceScopeKey}
           voiceDisabled={voiceDisabled || sessionResolving}
           running={active}
-          onContinue={canContinue ? goalView.goal && !goalView.terminal ? handleGoalResume : handleContinue : undefined}
+          onContinue={canContinue ? goalView.runBelongsToGoal && !goalView.terminal ? handleGoalResume : handleContinue : undefined}
           disabled={conversationLoading}
           onSend={(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId) => handleSend(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId)}
           creativeFreedom={creativeFreedom}
