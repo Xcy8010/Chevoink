@@ -646,15 +646,17 @@ export function AgentPanel({
         requestId: crypto.randomUUID(), expectedStateVersion: goal.stateVersion, action: 'resume',
         model: buildGoalResumeModel(modelTier, customModelId, selectedReasoningEffort),
       })
+      if (viewSession.current !== sessionId || useAgentStore.getState().goal?.id !== goal.id) return
       setGoalSnapshot(snapshot, sessionId)
       setGoalDetail(null)
       useAgentStore.getState().clearError()
     } catch (error) {
+      if (viewSession.current !== sessionId || useAgentStore.getState().goal?.id !== goal.id) return
       const message = error instanceof Error ? error.message : '目标继续失败，请稍后重试。'
       setGoalError(message)
       setActionError(message)
     } finally {
-      setGoalBusy(false)
+      if (viewSession.current === sessionId && useAgentStore.getState().goal?.id === goal.id) setGoalBusy(false)
     }
   }, [customModelId, goal, goalBusy, modelTier, selectedReasoningEffort, sessionId, setGoalSnapshot])
 
