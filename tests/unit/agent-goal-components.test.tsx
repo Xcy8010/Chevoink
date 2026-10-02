@@ -74,10 +74,64 @@ it('keeps an edited draft when the save returns a conflict error', () => {
   const editor = screen.getByRole('textbox', { name: '目标' })
   fireEvent.change(editor, { target: { value: '保留这份本地修改' } })
   fireEvent.click(screen.getByRole('button', { name: '保存目标' }))
-  expect(onSave).toHaveBeenCalledWith('保留这份本地修改')
-  view.rerender(<GoalEditorDialog open goal={goal} busy={false} error="目标已在另一处更新。" onClose={vi.fn()} onSave={onSave} />)
+  expect(onSave).toHaveBeenCalledWith('保留这份本地修改', expect.objectContaining({ revision: 1, stateVersion: 2 }))
+  view.rerender(<GoalEditorDialog open goal={{ ...goal, objective: '另一窗口已保存的内容', revision: 2, stateVersion: 4 }} busy={false} error="目标已在另一处更新。" onClose={vi.fn()} onSave={onSave} />)
   expect((screen.getByRole('textbox', { name: '目标' }) as HTMLTextAreaElement).value).toBe('保留这份本地修改')
   expect(screen.getByRole('alert').textContent).toContain('目标已在另一处更新。')
+  fireEvent.click(screen.getByRole('button', { name: '保存目标' }))
+  expect(onSave).toHaveBeenLastCalledWith('保留这份本地修改', expect.objectContaining({ revision: 1, stateVersion: 2 }))
+  fireEvent.click(screen.getByRole('button', { name: '读取新版并重新编辑' }))
+  expect((screen.getByRole('textbox', { name: '目标' }) as HTMLTextAreaElement).value).toBe('另一窗口已保存的内容')
+  fireEvent.change(screen.getByRole('textbox', { name: '目标' }), { target: { value: '基于新版重新修改' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存目标' }))
+  expect(onSave).toHaveBeenLastCalledWith('基于新版重新修改', expect.objectContaining({ revision: 2, stateVersion: 4 }))
+})
+
+it('validates Unicode code points without truncating the draft', () => {
+  const onSave = vi.fn()
+  render(<GoalEditorDialog open goal={goal} busy={false} onClose={vi.fn()} onSave={onSave} />)
+  const editor = screen.getByRole('textbox', { name: '目标' }) as HTMLTextAreaElement
+  expect(editor.hasAttribute('maxlength')).toBe(false)
+  const valid = '𠀀'.repeat(12_000)
+  fireEvent.change(editor, { target: { value: valid } })
+  fireEvent.click(screen.getByRole('button', { name: '保存目标' }))
+  expect(onSave).toHaveBeenCalledWith(valid, expect.objectContaining({ id: goal.id }))
+  onSave.mockClear()
+  const oversized = `${valid}🌟`
+  fireEvent.change(editor, { target: { value: oversized } })
+  fireEvent.click(screen.getByRole('button', { name: '保存目标' }))
+  expect(onSave).not.toHaveBeenCalled()
+  expect(editor.value).toBe(oversized)
+  expect(screen.getByRole('alert').textContent).toContain('12,000')
+})
+
+it('waits for a pending revision before accepting another edit', () => {
+  const onSave = vi.fn()
+  const view = render(<GoalEditorDialog open goal={goal} busy={false} onClose={vi.fn()} onSave={onSave} />)
+  fireEvent.change(screen.getByRole('textbox', { name: '目标' }), { target: { value: '本地草稿' } })
+  const pending = { ...goal, objective: '远端更新', status: 'updating' as const, pendingRevision: 2, stateVersion: 3 }
+  view.rerender(<GoalEditorDialog open goal={pending} busy={false} onClose={vi.fn()} onSave={onSave} />)
+  expect((screen.getByRole('button', { name: '保存目标' }) as HTMLButtonElement).disabled).toBe(true)
+  expect((screen.getByRole('button', { name: '读取新版并重新编辑' }) as HTMLButtonElement).disabled).toBe(true)
+  expect((screen.getByRole('textbox', { name: '目标' }) as HTMLTextAreaElement).value).toBe('本地草稿')
+  view.rerender(<GoalEditorDialog open goal={{ ...pending, status: 'paused', pendingRevision: null, revision: 2, stateVersion: 4 }} busy={false} onClose={vi.fn()} onSave={onSave} />)
+  fireEvent.click(screen.getByRole('button', { name: '读取新版并重新编辑' }))
+  fireEvent.click(screen.getByRole('button', { name: '保存目标' }))
+  expect(onSave).toHaveBeenCalledWith('远端更新', expect.objectContaining({ revision: 2, stateVersion: 4 }))
+})
+
+it('starts from the current snapshot after closing or switching goals', () => {
+  const props = { busy: false, onClose: vi.fn(), onSave: vi.fn() }
+  const view = render(<GoalEditorDialog open goal={goal} {...props} />)
+  fireEvent.change(screen.getByRole('textbox', { name: '目标' }), { target: { value: '未保存草稿' } })
+  view.rerender(<GoalEditorDialog open={false} goal={goal} {...props} />)
+  const updated = { ...goal, objective: '最新目标', revision: 2, stateVersion: 3 }
+  view.rerender(<GoalEditorDialog open goal={updated} {...props} />)
+  expect((screen.getByRole('textbox', { name: '目标' }) as HTMLTextAreaElement).value).toBe('最新目标')
+  fireEvent.click(screen.getByRole('button', { name: '保存目标' }))
+  expect(props.onSave).toHaveBeenLastCalledWith('最新目标', expect.objectContaining({ revision: 2, stateVersion: 3 }))
+  view.rerender(<GoalEditorDialog open goal={{ ...goal, id: 'other-goal', sessionId: 'other-session', objective: '另一任务' }} {...props} />)
+  expect((screen.getByRole('textbox', { name: '目标' }) as HTMLTextAreaElement).value).toBe('另一任务')
 })
 
 it('shows usage, evidence and revision history in goal details', () => {
@@ -204,5 +258,12 @@ it('accepts the first snapshot after switching sessions while rejecting the old 
   store.setGoalSnapshot(goal, 'session-1', 7)
   store.setGoalSnapshot({ ...goal, id: 'goal-3', stateVersion: 1 }, 'session-1', 8)
   expect(useAgentStore.getState().goal?.id).toBe('goal-3')
+  const newer = { ...goal, id: 'goal-4', stateVersion: 1, createdAt: '2026-09-28T00:00:00.000Z' }
+  store.setGoalSnapshot(newer, 'session-1', 9)
+  store.setGoalSnapshot(goal, 'session-1', 0)
+  store.setGoalSnapshot({ ...goal, id: 'goal-3' }, 'session-1', 10)
+  expect(useAgentStore.getState().goal?.id).toBe('goal-4')
+  store.setGoalSnapshot({ ...newer, id: 'duplicate-event' }, 'session-1', 9)
+  expect(useAgentStore.getState().goal?.id).toBe('goal-4')
   useAgentStore.setState({ goal: null, goalSessionId: null, goalEventSequence: 0 })
 })

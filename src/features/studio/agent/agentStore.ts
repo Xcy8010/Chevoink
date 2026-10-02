@@ -707,7 +707,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // Goals remain as terminal rows, so a same-session null never represents a
       // legitimate replacement once a snapshot has been observed.
       if (!forceClear && sessionId && goal === null && state.goalSessionId === sessionId && state.goal) return {}
-      if (sessionId && sequence > 0 && sequence < state.goalEventSequence) return {}
+      if (sessionId && sequence > 0 && sequence <= state.goalEventSequence) return {}
+      if (goal && state.goal && state.goalSessionId === sessionId && goal.id !== state.goal.id && !forceClear) {
+        if (goal.createdAt < state.goal.createdAt || (sequence === 0 && goal.createdAt === state.goal.createdAt)) return {}
+      }
       if (goal && state.goal && state.goalSessionId === sessionId && goal.id === state.goal.id && goal.stateVersion < state.goal.stateVersion) return {}
       return { goal, goalSessionId: sessionId, goalEventSequence: sequence > 0 ? sequence : state.goalEventSequence }
     }),

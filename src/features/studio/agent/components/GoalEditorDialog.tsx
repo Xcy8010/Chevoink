@@ -3,10 +3,12 @@ import { createPortal } from 'react-dom'
 import { CheckCircle2, History, LoaderCircle, RefreshCw, Save, Target, X } from 'lucide-react'
 
 import type { AgentGoalSnapshot } from '../../../../../shared/contracts/agent-goal.js'
-import { agentGoalPresentation } from '../../../../../shared/contracts/agent-goal.js'
+import { agentGoalObjectiveSchema, agentGoalPresentation } from '../../../../../shared/contracts/agent-goal.js'
 import type { AgentGoalDetail } from '../../../../../shared/contracts/agent-goal.js'
 import { formatCreditsMicros, formatGoalReason } from './goal-formatters'
 import { useDialogFocusTrap } from '../../components/use-dialog-focus-trap'
+
+export type GoalEditBase = Pick<AgentGoalSnapshot, 'id' | 'sessionId' | 'revision' | 'stateVersion'>
 
 type GoalEditorDialogProps = {
   open: boolean
@@ -18,31 +20,41 @@ type GoalEditorDialogProps = {
   detailBusy?: boolean
   onLoadDetail?: () => void
   onConfirmCompletion?: () => void
+  onRestartEdit?: () => void
   onClose: () => void
-  onSave: (objective: string) => void
+  onSave: (objective: string, base?: GoalEditBase) => void
 }
 
-export function GoalEditorDialog({ open, goal, initialObjective, busy, error, detail, detailBusy = false, onLoadDetail, onConfirmCompletion, onClose, onSave }: GoalEditorDialogProps) {
+export function GoalEditorDialog({ open, goal, initialObjective, busy, error, detail, detailBusy = false, onLoadDetail, onConfirmCompletion, onRestartEdit, onClose, onSave }: GoalEditorDialogProps) {
   const [objective, setObjective] = useState('')
   const [validationError, setValidationError] = useState('')
+  const [base, setBase] = useState<GoalEditBase>()
+  const editIdentity = useRef<{ id?: string; sessionId?: string; initialObjective?: string } | null>(null)
   const panel = useRef<HTMLElement>(null)
   const readOnly = goal?.status === 'completed' || goal?.status === 'cancelled'
+  const updating = goal?.pendingRevision != null
 
   useEffect(() => {
-    if (!open) return
+    if (!open) { editIdentity.current = null; return }
+    const previous = editIdentity.current
+    if (previous && previous.id === goal?.id && previous.sessionId === goal?.sessionId && previous.initialObjective === initialObjective) return
+    editIdentity.current = { id: goal?.id, sessionId: goal?.sessionId, initialObjective }
     setObjective(initialObjective ?? goal?.objective ?? '')
+    setBase(goal ?? undefined)
     setValidationError('')
-  }, [goal?.id, goal?.objective, initialObjective, open])
+  }, [goal, initialObjective, open])
 
   useDialogFocusTrap({ panel, open, onClose: () => { if (!busy) onClose() } })
 
   if (!open) return null
 
   const save = () => {
-    const value = objective.trim()
-    if (!value) { setValidationError('请输入目标。'); return }
-    onSave(value)
+    if (updating) return
+    const result = agentGoalObjectiveSchema.safeParse(objective)
+    if (!result.success) { setValidationError(result.error.issues[0].message); return }
+    onSave(result.data, base)
   }
+  const hasNewVersion = goal && base && goal.id === base.id && goal.stateVersion > base.stateVersion
 
   return createPortal(
     <div className="studio-workspace fixed inset-0 z-[160] flex min-h-0 items-center justify-center overflow-hidden bg-[rgba(15,23,42,0.32)] px-3 py-3 backdrop-blur-[2px] sm:px-4 sm:py-6" role="presentation" onClick={onClose}>
@@ -56,8 +68,14 @@ export function GoalEditorDialog({ open, goal, initialObjective, busy, error, de
 
         <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 [-webkit-overflow-scrolling:touch] sm:px-5">
           <label className="block text-xs font-medium text-[var(--text-primary)]" htmlFor="agent-goal-objective">目标</label>
-          <textarea id="agent-goal-objective" aria-label="目标" value={objective} maxLength={12000} disabled={busy || readOnly} onChange={event => { setObjective(event.target.value); setValidationError('') }} className="mt-2 min-h-36 w-full resize-y rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 py-2.5 text-sm leading-6 text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--text-secondary)] focus:ring-2 focus:ring-[var(--text-secondary)]/15 disabled:opacity-60" placeholder="写下要持续完成的结果" />
+          <textarea id="agent-goal-objective" aria-label="目标" value={objective} disabled={busy || readOnly} onChange={event => { setObjective(event.target.value); setValidationError('') }} className="mt-2 min-h-36 w-full resize-y rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 py-2.5 text-sm leading-6 text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--text-secondary)] focus:ring-2 focus:ring-[var(--text-secondary)]/15 disabled:opacity-60" placeholder="写下要持续完成的结果" />
           <p className="mt-1 text-right text-[10px] tabular-nums text-[var(--text-tertiary)]">{Array.from(objective).length}/12,000</p>
+          {hasNewVersion && !readOnly ? <button type="button" disabled={busy || updating} onClick={() => {
+            setObjective(goal.objective)
+            setBase(goal)
+            setValidationError('')
+            onRestartEdit?.()
+          }} className="min-h-11 rounded-[9px] px-2 text-xs text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 disabled:opacity-40">读取新版并重新编辑</button> : null}
 
           {goal ? (
             <details className="mt-3 rounded-[12px] border border-[var(--border-subtle)]" open>
@@ -89,7 +107,7 @@ export function GoalEditorDialog({ open, goal, initialObjective, busy, error, de
 
         <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border-subtle)] px-4 py-3 sm:px-5">
           <button type="button" disabled={busy} onClick={onClose} className="min-h-11 rounded-[9px] px-3 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-2 disabled:opacity-40">取消</button>
-          {!readOnly ? <button type="button" disabled={busy || !objective.trim()} onClick={save} className="inline-flex min-h-11 items-center gap-1.5 rounded-[9px] bg-[var(--surface-contrast)] px-3.5 text-xs font-medium text-[var(--text-contrast)] transition-opacity hover:opacity-85 focus-visible:outline focus-visible:outline-2 disabled:cursor-not-allowed disabled:opacity-40" aria-label="保存目标">{busy ? <LoaderCircle aria-hidden="true" className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : <Save aria-hidden="true" className="h-3.5 w-3.5" />}{busy ? '保存中…' : '保存目标'}</button> : null}
+          {!readOnly ? <button type="button" disabled={busy || updating || !objective.trim()} onClick={save} className="inline-flex min-h-11 items-center gap-1.5 rounded-[9px] bg-[var(--surface-contrast)] px-3.5 text-xs font-medium text-[var(--text-contrast)] transition-opacity hover:opacity-85 focus-visible:outline focus-visible:outline-2 disabled:cursor-not-allowed disabled:opacity-40" aria-label="保存目标">{busy || updating ? <LoaderCircle aria-hidden="true" className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : <Save aria-hidden="true" className="h-3.5 w-3.5" />}{updating ? '更新中…' : busy ? '保存中…' : '保存目标'}</button> : null}
         </footer>
       </section>
     </div>,

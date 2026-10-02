@@ -86,7 +86,7 @@ import { AgentActivityBar } from './AgentActivityBar'
 import { MessageTime, UserMessageActions } from './MessageActions'
 import { AgentComposer } from './AgentComposer'
 import { AgentGoalBar } from './AgentGoalBar'
-import { GoalEditorDialog } from './GoalEditorDialog'
+import { GoalEditorDialog, type GoalEditBase } from './GoalEditorDialog'
 import { GoalResumeDialog, type GoalResumeLimits } from './GoalResumeDialog'
 import { AgentQueueTray } from './AgentQueueTray'
 import { AgentMessageParts } from './AgentMessageParts'
@@ -376,6 +376,17 @@ export function AgentPanel({
   const [goalError, setGoalError] = useState<string | undefined>(undefined)
   const [goalDetail, setGoalDetail] = useState<AgentGoalDetail | null>(null)
   const [goalDetailBusy, setGoalDetailBusy] = useState(false)
+  const goalEditorEpoch = useRef(0)
+  useEffect(() => {
+    goalEditorEpoch.current += 1
+    setGoalEditorOpen(false)
+    setGoalEditorInitialObjective(undefined)
+    setGoalResumeOpen(false)
+    setGoalBusy(false)
+    setGoalDetailBusy(false)
+    setGoalError(undefined)
+    setGoalDetail(null)
+  }, [sessionId, goal?.id])
   // 续跑必须跟随作者当前的模型选择：ref 在下方每次渲染同步最新值，点击续跑时读取。
   // 否则旧任务保存的收费档会重新把 0 余额用户拦在额度闸门外。
   const continueModelRef = useRef<ContinueAgentLoopRunModel | null>(null)
@@ -562,24 +573,28 @@ export function AgentPanel({
 
   const loadGoalDetail = useCallback(async (target = goal) => {
     if (!target || !sessionId) return
+    const editorEpoch = goalEditorEpoch.current
     setGoalDetailBusy(true)
-    setGoalError(undefined)
     try {
       const detail = await fetchAgentGoalDetail(sessionId, target.id)
       const currentGoal = useAgentStore.getState().goal
-      if (viewSession.current === sessionId && currentGoal?.id === target.id && detail.goal.stateVersion >= currentGoal.stateVersion) setGoalDetail(detail)
+      if (viewSession.current === sessionId && goalEditorEpoch.current === editorEpoch && currentGoal?.id === target.id && detail.goal.stateVersion >= currentGoal.stateVersion) {
+        setGoalDetail(detail)
+        setGoalSnapshot(detail.goal, sessionId, 0)
+      }
     } catch (error) {
-      if (viewSession.current === sessionId) {
+      if (viewSession.current === sessionId && goalEditorEpoch.current === editorEpoch && useAgentStore.getState().goal?.id === target.id) {
         const message = error instanceof Error ? error.message : '目标详情读取失败，请稍后重试。'
         setGoalError(message)
         setActionError(message)
       }
     } finally {
-      setGoalDetailBusy(false)
+      if (viewSession.current === sessionId && goalEditorEpoch.current === editorEpoch) setGoalDetailBusy(false)
     }
-  }, [goal, sessionId])
+  }, [goal, sessionId, setGoalSnapshot])
 
   const openGoalEditor = useCallback((initialObjective?: string) => {
+    goalEditorEpoch.current += 1
     setGoalEditorInitialObjective(initialObjective)
     setGoalError(undefined)
     setGoalDetail(null)
@@ -671,7 +686,7 @@ export function AgentPanel({
       const snapshot = sessionId
         ? await createAgentGoal(sessionId, input)
         : await createAgentGoalForNovel(novelId, input)
-      setGoalSnapshot(snapshot, snapshot.sessionId, 0)
+      setGoalSnapshot(snapshot, snapshot.sessionId, 0, true)
       setGoalDetail(null)
       setGoalMode(false)
       if (!sessionId) onGoalSessionCreated?.(snapshot.sessionId, objective)
@@ -685,29 +700,37 @@ export function AgentPanel({
     }
   }, [customModelId, goal, modelTier, novelId, onGoalSessionCreated, openGoalEditor, selectedReasoningEffort, sessionId, setGoalMode, setGoalSnapshot])
 
-  const handleGoalSave = useCallback(async (objective: string) => {
-    if (!goal || !sessionId) return
+  const handleGoalSave = useCallback(async (objective: string, base?: GoalEditBase) => {
+    if (!goal || !sessionId || !base || base.id !== goal.id || base.sessionId !== sessionId) return
+    const editorEpoch = goalEditorEpoch.current
     setGoalBusy(true)
     setGoalError(undefined)
     try {
-      const snapshot = await updateAgentGoal(sessionId, goal.id, {
-        requestId: crypto.randomUUID(), expectedStateVersion: goal.stateVersion, expectedRevision: goal.revision, objective,
+      const snapshot = await updateAgentGoal(sessionId, base.id, {
+        requestId: crypto.randomUUID(), expectedStateVersion: base.stateVersion, expectedRevision: base.revision, objective,
       })
+      if (viewSession.current !== sessionId || goalEditorEpoch.current !== editorEpoch || useAgentStore.getState().goal?.id !== base.id) return
       setGoalSnapshot(snapshot, sessionId, 0)
+      goalEditorEpoch.current += 1
+      setGoalBusy(false)
+      setGoalDetailBusy(false)
       setGoalDetail(null)
       setGoalEditorOpen(false)
       setGoalEditorInitialObjective(undefined)
     } catch (error) {
+      if (viewSession.current !== sessionId || goalEditorEpoch.current !== editorEpoch || useAgentStore.getState().goal?.id !== base.id) return
       const message = error instanceof Error ? error.message : '目标修改失败，请读取新版后重试。'
       setGoalError(message)
       setActionError(message)
+      if (error instanceof AgentApiError && error.status === 409) void loadGoalDetail(goal)
     } finally {
-      setGoalBusy(false)
+      if (viewSession.current === sessionId && goalEditorEpoch.current === editorEpoch) setGoalBusy(false)
     }
-  }, [goal, sessionId, setGoalSnapshot])
+  }, [goal, loadGoalDetail, sessionId, setGoalSnapshot])
 
   const handleGoalConfirmCompletion = useCallback(async () => {
     if (!goal || !sessionId || !goalDetail?.completion.canConfirm || !goalDetail.completion.needsAuthorVerification) return
+    const editorEpoch = goalEditorEpoch.current
     setGoalBusy(true)
     setGoalError(undefined)
     try {
@@ -717,17 +740,22 @@ export function AgentPanel({
         action: 'confirm_completion',
         completion: { progressHash: goalDetail.completion.progressHash },
       })
+      if (viewSession.current !== sessionId || goalEditorEpoch.current !== editorEpoch || useAgentStore.getState().goal?.id !== goal.id) return
       setGoalSnapshot(snapshot, sessionId)
+      goalEditorEpoch.current += 1
+      setGoalBusy(false)
+      setGoalDetailBusy(false)
       setGoalDetail(null)
       setGoalEditorOpen(false)
       setGoalEditorInitialObjective(undefined)
       setGoalMode(false)
     } catch (error) {
+      if (viewSession.current !== sessionId || goalEditorEpoch.current !== editorEpoch || useAgentStore.getState().goal?.id !== goal.id) return
       const message = error instanceof Error ? error.message : '确认目标完成失败，请读取最新详情后重试。'
       setGoalError(message)
       setActionError(message)
     } finally {
-      setGoalBusy(false)
+      if (viewSession.current === sessionId && goalEditorEpoch.current === editorEpoch) setGoalBusy(false)
     }
   }, [goal, goalDetail, sessionId, setGoalMode, setGoalSnapshot])
 
@@ -1867,8 +1895,9 @@ export function AgentPanel({
         detailBusy={goalDetailBusy}
         onLoadDetail={() => { void loadGoalDetail() }}
         onConfirmCompletion={() => { void handleGoalConfirmCompletion() }}
-        onClose={() => { if (!goalBusy) { setGoalEditorOpen(false); setGoalEditorInitialObjective(undefined); setGoalError(undefined) } }}
-        onSave={(objective) => { void handleGoalSave(objective) }}
+        onRestartEdit={() => { setGoalError(undefined); setActionError(null) }}
+        onClose={() => { if (!goalBusy) { goalEditorEpoch.current += 1; setGoalEditorOpen(false); setGoalEditorInitialObjective(undefined); setGoalError(undefined) } }}
+        onSave={(objective, base) => { void handleGoalSave(objective, base) }}
       />
       <GoalResumeDialog
         open={goalResumeOpen}

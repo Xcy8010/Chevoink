@@ -43,6 +43,7 @@ export function useAgentGoalStream(onSnapshot?: GoalSnapshotHandler) {
     const source = new EventSource(buildAgentGoalStreamUrl(sessionId, afterSequence), { withCredentials: true })
     sourceRef.current = source
     const handle = (eventType: string) => (raw: MessageEvent) => {
+      if (sourceRef.current !== source) return
       const parsed = readEvent(parseSnapshot(raw.data), eventType)
       if (parsed) callbackRef.current?.(sessionId, parsed.goal, parsed.sequence)
     }
