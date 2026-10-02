@@ -62,7 +62,7 @@ export async function validateCustomModelCapabilities(input: {
   const total = new AbortController()
   const totalTimer = setTimeout(() => total.abort(), 50_000)
   const signal = input.signal ? AbortSignal.any([input.signal, total.signal]) : total.signal
-  const dispatcher = new Agent({ connections: 1, pipelining: 1, maxHeaderSize: 16384,
+  const dispatcher = new Agent({ connections: 1, pipelining: 1, maxHeaderSize: 16384, allowH2: false,
     connect: { lookup: publicEgressLookup, timeout: 8000 }, headersTimeout: 12_000, bodyTimeout: 12_000 })
   let requests = 0
   let outputTokenParameter: 'max_tokens' | 'max_completion_tokens' = 'max_tokens'

@@ -121,7 +121,7 @@ export async function getPublicHttpBytes(value: string, options: {
   const timer = setTimeout(() => controller.abort(new Error('PUBLIC_FETCH_TIMEOUT')), options.timeoutMs)
   const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal
   const dispatcher = new Agent({
-    connections: 1, pipelining: 1, maxHeaderSize: 16384,
+    connections: 1, pipelining: 1, maxHeaderSize: 16384, allowH2: false,
     connect: { lookup: publicEgressLookup, timeout: Math.min(options.timeoutMs, 10000) },
   })
   let response: Awaited<ReturnType<typeof fetch>> | undefined

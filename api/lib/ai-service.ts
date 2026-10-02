@@ -76,6 +76,8 @@ function ensureImageProviderConfigured(apiKey: string) {
 const imageFetchAgent = new UndiciAgent({
   headersTimeout: env.aiImageTimeoutMs,
   bodyTimeout: env.aiImageTimeoutMs,
+  // undici 8 默认开启 HTTP/2；生图提供方按 HTTP/1.1 语义放宽超时，保持既有行为显式关闭 H2。
+  allowH2: false,
 })
 
 /**

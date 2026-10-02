@@ -69,7 +69,7 @@ async function readHosted(url: URL, provider: 'jina' | 'firecrawl', external: Ab
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error('HOSTED_READER_TIMEOUT')), 8000)
   const signal = AbortSignal.any([external, controller.signal])
-  const dispatcher = new Agent({ connections: 1, maxHeaderSize: 16384, connect: { lookup: publicEgressLookup, timeout: 8000 } })
+  const dispatcher = new Agent({ connections: 1, maxHeaderSize: 16384, allowH2: false, connect: { lookup: publicEgressLookup, timeout: 8000 } })
   let response: Awaited<ReturnType<typeof fetch>> | undefined
   try {
     await checkHostedTarget(url, signal)
