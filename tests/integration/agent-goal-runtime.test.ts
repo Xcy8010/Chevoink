@@ -17,6 +17,8 @@ import { observeGoalUsage } from '../../api/lib/agent/goal-budget.js'
 import { withGoalDatabaseFences } from '../../api/lib/agent/goal-database.js'
 import { withGoalEffects, withGoalExecutionContext, type GoalExecutionContext } from '../../api/lib/agent/goal-context.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
+import { readGoalSavedProgress } from '../../api/lib/agent/goal-saved-progress.js'
+import { inspectGoalEvidence } from '../../api/lib/agent/goal-evidence.js'
 
 const available = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 
@@ -89,6 +91,7 @@ async function fixture(tokenLimit = 5_000): Promise<Fixture> {
 
 async function cleanup(userId: string) {
   await prisma.agentGoal.deleteMany({ where: { userId } })
+  await prisma.agentArtifact.deleteMany({ where: { run: { userId } } })
   await prisma.agentRun.deleteMany({ where: { userId } })
   await prisma.agentTaskRoot.deleteMany({ where: { userId } })
   await prisma.agentSession.deleteMany({ where: { userId } })
@@ -126,8 +129,16 @@ describe.skipIf(!available)('agent goal runtime transaction fences (isolated tes
     } finally { env.agentGoalEnabled = true }
   })
 
-  it('recovers a persisted pending revision once while preserving a paused goal and its cumulative budget', async () => {
+  it('recovers a pending revision once and resumes saved progress without author resend or old completion credit', async () => {
     const f = await fixture(); fixtures.push(f)
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const compilation = await prisma.storyCompilation.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId,
+      chapterId: f.chapterId, targetOrderIndex: 1, sourcePromptHash: 'fixture-saved-result', preparedContext: {}, status: 'completed' } })
+    await prisma.chapterBridge.create({ data: { userId: f.userId, novelId: f.novelId, compilationId: compilation.id,
+      toChapterId: f.chapterId, targetOrderIndex: 1, targetRevision: chapter.revision, committedAt: new Date(),
+      knowledgeState: {}, bodyState: {}, objectState: {}, relationshipState: {}, emotionAftermath: {}, recentOpenings: [], recentEndings: [], openLoops: [] } })
+    const plan = await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'chapterPlan', title: '已保存计划', content: '原版本已保存的大纲', metadata: { savedAsPlan: true } } })
+    const messageCount = await prisma.agentMessage.count({ where: { sessionId: f.sessionId } })
     await pauseGoalForRun(f.userId, f.runId)
     await prisma.agentGoalBudget.update({ where: { goalId: f.goalId }, data: { tokensUsed: 321n } })
     const paused = await readAgentGoal(f.userId, f.sessionId)
@@ -140,6 +151,24 @@ describe.skipIf(!available)('agent goal runtime transaction fences (isolated tes
     expect(await prisma.agentGoalRevision.count({ where: { goalId: f.goalId } })).toBe(2)
     expect(await prisma.agentGoalEvent.count({ where: { goalId: f.goalId, type: 'revision.applied' } })).toBe(1)
     expect(await prisma.agentGoalExecution.count({ where: { goalId: f.goalId } })).toBe(1)
+    const resumed = await actOnAgentGoal(f.userId, f.sessionId, f.goalId, { requestId: randomUUID(), expectedStateVersion: updated!.stateVersion, action: 'resume' })
+    expect(resumed).toMatchObject({ status: 'active', phase: 'queued', revision: 2, objective: '制定第二版大纲', tokensUsed: '321' })
+    expect(await prisma.agentMessage.count({ where: { sessionId: f.sessionId } })).toBe(messageCount)
+    const stored = await prisma.agentGoal.findUniqueOrThrow({ where: { id: f.goalId } })
+    const saved = await prisma.$transaction(tx => readGoalSavedProgress(tx, stored))
+    expect(saved).toMatchObject({ completionCredit: false, truncated: false })
+    expect(saved.entries).toContainEqual(expect.objectContaining({ kind: 'chapter', id: f.chapterId, sourceRevision: 1, verification: 'current', currentRevision: chapter.revision }))
+    expect(saved.entries).toContainEqual(expect.objectContaining({ kind: 'plan', id: plan.id, sourceRevision: 1, verification: 'current' }))
+    const current = await prisma.$transaction(tx => inspectGoalEvidence(tx, stored))
+    expect(current.facts.chapters).toEqual([])
+    expect(current.facts.plans).toEqual([])
+    expect(current.hasDeliverable).toBe(false)
+    expect(await prisma.$transaction(tx => readGoalSavedProgress(tx, { ...stored, userId: 'unowned-fixture-user' })))
+      .toEqual({ completionCredit: false, entries: [], truncated: false })
+    await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: { increment: 1 }, content: '作者后续修改的正文' } })
+    expect((await prisma.$transaction(tx => readGoalSavedProgress(tx, stored))).entries.find(item => item.kind === 'chapter')?.verification).toBe('changed')
+    await prisma.chapter.update({ where: { id: f.chapterId }, data: { archivedAt: new Date() } })
+    expect((await prisma.$transaction(tx => readGoalSavedProgress(tx, stored))).entries.find(item => item.kind === 'chapter')?.verification).toBe('unavailable')
   })
 
   it('consumes a current legacy answer once and rejects its old mailbox after the goal epoch changes', async () => {

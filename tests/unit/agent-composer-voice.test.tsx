@@ -5,6 +5,7 @@ import { AgentComposer } from '../../src/features/studio/agent/components/AgentC
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 import { activateComposerDraft } from '../../src/features/studio/agent/composer-drafts'
+import type { AgentGoalSnapshot, AgentUIMessage } from '../../shared/contracts/index.js'
 
 const voice = vi.hoisted(() => ({ options: undefined as undefined | { onTranscript: (text: string) => void }, state: 'idle', start: vi.fn(), cancel: vi.fn(), removeModel: vi.fn() }))
 vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ info: vi.fn() }) }))
@@ -139,6 +140,27 @@ describe('Agent voice draft integration', () => {
     await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送' })))
     expect(input.onContinue).not.toHaveBeenCalled()
     expect(input.onSend).toHaveBeenCalled()
+  })
+  it('continues an edited paused goal without resending its objective, clearing the draft state or replacing saved messages', async () => {
+    const goal: AgentGoalSnapshot = { id: 'goal', sessionId: 'session', novelId: 'n1', objective: '修订后的目标', revision: 2, pendingRevision: null,
+      status: 'paused', phase: 'idle', stateVersion: 7, currentRunId: 'saved-run', reasonCode: 'AUTHOR_PAUSED', tokenLimit: '50000', tokensUsed: '1200',
+      tokensReserved: '0', creditsUsedMicros: '3000', activeTimeMs: '120000', activeTimeLimitMs: '3600000', activeSince: null,
+      serverTime: '', createdAt: '', updatedAt: '', finishedAt: null }
+    const messages: AgentUIMessage[] = [
+      { id: 'author', role: 'user', runId: 'saved-run', goalId: 'goal', createdAt: '', parts: [{ type: 'text', text: '原目标' }] },
+      { id: 'saved', role: 'assistant', runId: 'saved-run', goalId: 'goal', createdAt: '', parts: [{ type: 'text', text: '已保存第一章' }] },
+    ]
+    useAgentStore.setState({ composerDraft: '', composerSkillIds: ['selected'], goalMode: false, goal, messages })
+    const input = { ...props(), goalActive: true, onContinue: vi.fn().mockResolvedValue(undefined), onGoalSubmit: vi.fn() }
+    render(<AgentComposer {...input} />)
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: '继续运行' })))
+    expect(input.onContinue).toHaveBeenCalledOnce()
+    expect(input.onContinue.mock.calls[0]).toEqual([])
+    expect(input.onSend).not.toHaveBeenCalled()
+    expect(input.onGoalSubmit).not.toHaveBeenCalled()
+    expect(useAgentStore.getState()).toMatchObject({ composerDraft: '', composerSkillIds: ['selected'], goalMode: false, goal, messages })
+    expect(useAgentStore.getState().messages).toBe(messages)
+    expect(screen.getByRole('textbox', { name: 'Agent 提示词' }).textContent).toBe('')
   })
   it('only inserts a transcript into the draft and never sends', () => {
     const input = props()

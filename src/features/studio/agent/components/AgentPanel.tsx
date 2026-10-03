@@ -79,7 +79,7 @@ import { formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMes
 import { useProcessingHint } from '../useProcessingHint'
 import { useAgentStream } from '../useAgentStream'
 import { useAgentGoalStream } from '../useAgentGoalStream'
-import { projectMessages } from '../lib/message-projection'
+import { projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
@@ -1569,9 +1569,9 @@ export function AgentPanel({
             ) : null}
             {messages.map((message) => {
               if (message.role === 'user') {
-                // System continuation prompts remain available inside the open
-                // process; only genuine author messages create a new boundary.
-                if (message.goalContinuation && message.goalId && !isBlockExpanded(blockInfoById.get(message.id), message.runId)) return null
+                // Expanding execution history must not turn internal goal
+                // continuation context into another author request.
+                if (!shouldRenderAuthorMessage(message)) return null
                 return (
                 <div
                   key={message.id}

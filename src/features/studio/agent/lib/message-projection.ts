@@ -3,6 +3,11 @@ import { getMessageText } from './panel-helpers'
 
 export type MessageBlock = { firstId: string; lastId: string; ops: number; goalId?: string }
 
+/** Internal goal dispatch records are context, never an additional author message. */
+export function shouldRenderAuthorMessage(message: AgentUIMessage): boolean {
+  return message.role === 'user' && !message.goalContinuation
+}
+
 /** Pure presentation projection: never mutates messages or changes run state. */
 export function projectMessages(messages: readonly AgentUIMessage[]) {
   const blockInfoById = new Map<string, MessageBlock>()

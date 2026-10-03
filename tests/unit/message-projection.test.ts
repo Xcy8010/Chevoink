@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentUIMessage } from '../../shared/contracts/index.js'
-import { projectMessages } from '../../src/features/studio/agent/lib/message-projection.js'
+import { projectMessages, shouldRenderAuthorMessage } from '../../src/features/studio/agent/lib/message-projection.js'
 
 const message = (id: string, role: AgentUIMessage['role'], parts: AgentUIMessage['parts'] = []): AgentUIMessage => ({
   id, role, parts, runId: 'run', createdAt: '2026-09-08T00:00:00Z',
@@ -40,7 +40,7 @@ describe('message presentation projection', () => {
     expect(result.lastAssistantId).toBe('r')
   })
 
-  it('groups resumed runs of the same goal and retains the continuation record in its process', () => {
+  it('groups resumed runs of the same goal while keeping internal continuation records outside author presentation', () => {
     const messages = [
       { ...message('u1', 'user'), goalId: 'goal' },
       { ...message('a1', 'assistant', [{ type: 'reasoning', text: 'before pause' }]), goalId: 'goal', runId: 'r1' },
@@ -52,6 +52,21 @@ describe('message presentation projection', () => {
     expect([...result.blockInfoById]).toEqual([['a1', block], ['resume', block], ['a2', block]])
     expect(result.recentConversationText).toBe('final')
     expect(projectMessages(messages.slice(0, 3)).recentConversationText).not.toBe('system resume')
+    expect(messages.filter(shouldRenderAuthorMessage).map(item => item.id)).toEqual(['u1'])
+  })
+
+  it('preserves real author and steering messages while suppressing tagged internal context without mutating history', () => {
+    const messages = [
+      { ...message('original', 'user'), goalId: 'goal', goalContinuation: false },
+      { ...message('internal', 'user'), goalId: 'goal', goalContinuation: true },
+      { ...message('legacy-internal', 'user'), goalContinuation: true },
+      { ...message('steering', 'user'), goalId: 'goal', goalContinuation: false },
+      message('ordinary', 'user'),
+      { ...message('progress', 'assistant'), goalId: 'goal' },
+    ]
+    const before = structuredClone(messages)
+    expect(messages.filter(shouldRenderAuthorMessage).map(item => item.id)).toEqual(['original', 'steering', 'ordinary'])
+    expect(messages).toEqual(before)
   })
 
   it('preserves natural author boundaries and separates goals from ordinary assistant work', () => {

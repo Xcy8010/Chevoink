@@ -4,6 +4,7 @@ import { prisma } from '../../prisma.js'
 import { readGoalExecution, assertGoalFence } from '../goal-fence.js'
 import { changeGoal, closeGoalActivity, goalSnapshot } from '../goal-store.js'
 import { inspectGoalEvidence } from '../goal-evidence.js'
+import { readGoalSavedProgress } from '../goal-saved-progress.js'
 import { databaseNow, runtimeJson } from '../runtime-common.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 
@@ -35,10 +36,10 @@ async function readCurrentGoal(ctx: ToolContext, tx: import('@prisma/client').Pr
   return goal ? { execution, goal } : null
 }
 
-function evidenceOutput(snapshot: unknown, inspection: Awaited<ReturnType<typeof inspectGoalEvidence>>) {
+function evidenceOutput(snapshot: unknown, inspection: Awaited<ReturnType<typeof inspectGoalEvidence>>, savedProgress: Awaited<ReturnType<typeof readGoalSavedProgress>>) {
   return JSON.stringify({ goal: snapshot, objective: inspection.objective, requirements: inspection.requirements,
     facts: inspection.facts, blockers: inspection.blockers, needsScopeDecision: inspection.needsScopeDecision,
-    hasDeliverable: inspection.hasDeliverable, progressHash: inspection.progressHash })
+    hasDeliverable: inspection.hasDeliverable, progressHash: inspection.progressHash, savedProgress })
 }
 
 /** Read the server-owned goal snapshot and current domain receipts. */
@@ -55,10 +56,11 @@ export const goalReadTool = defineTool({
       if (!current) return null
       const inspection = await inspectGoalEvidence(tx, current.goal)
       const snapshot = await goalSnapshot(tx, current.goal)
-      return { snapshot, inspection }
+      const savedProgress = await readGoalSavedProgress(tx, current.goal)
+      return { snapshot, inspection, savedProgress }
     })
     if (!result) return { outcome: 'failed', failureCode: 'GOAL_SCOPE_MISMATCH', output: '当前执行没有可读取的目标归属。' }
-    return { output: evidenceOutput(result.snapshot, result.inspection), summary: '读取当前目标状态' }
+    return { output: evidenceOutput(result.snapshot, result.inspection, result.savedProgress), summary: '读取当前目标状态' }
   },
 })
 

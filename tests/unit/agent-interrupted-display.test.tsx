@@ -4,7 +4,7 @@ import { afterEach, expect, it } from 'vitest'
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
 import { selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../../src/features/studio/agent/goal-selectors'
 import { useMessageBlockExpansion } from '../../src/features/studio/agent/components/use-message-block-expansion'
-import { projectMessages } from '../../src/features/studio/agent/lib/message-projection'
+import { projectMessages, shouldRenderAuthorMessage } from '../../src/features/studio/agent/lib/message-projection'
 import { ProcessingHint } from '../../src/features/studio/agent/components/ProcessingHint'
 import type { AgentGoalSnapshot, AgentMessagePart, AgentUIMessage } from '../../shared/contracts/index.js'
 import type { AgentRunPhase } from '../../src/features/studio/agent/agentStore'
@@ -29,11 +29,12 @@ const resumedMessages: AgentUIMessage[] = [
 ]
 
 /** Uses the panel's real projection, expansion controller and parts renderer. */
-function Fixture({ status, messages = initialMessages, sessionId = 's', goalId = 'g', runId = 'r1', runPhase = 'running', runGoalId = goalId }: {
+function Fixture({ status, messages = initialMessages, sessionId = 's', goalId = 'g', runId = 'r1', runPhase = 'running', runGoalId = goalId, revision = 1, objective = '原目标' }: {
   status: AgentGoalSnapshot['status']; messages?: AgentUIMessage[]; sessionId?: string; goalId?: string
   runId?: string | null; runPhase?: AgentRunPhase; runGoalId?: string | null
+  revision?: number; objective?: string
 }) {
-  const goal = { id: goalId, sessionId, status, phase: status === 'active' ? 'executing' : 'idle', currentRunId: runId ?? 'r2' } as AgentGoalSnapshot
+  const goal = { id: goalId, sessionId, status, revision, objective, phase: status === 'active' ? 'executing' : 'idle', currentRunId: runId ?? 'r2' } as AgentGoalSnapshot
   const view = selectAgentGoalView({ goal, goalSessionId: sessionId, sessionId, runId, resumeableRunId: runId ? null : 'r2', runGoalId, phase: runPhase })
   const phase = selectAgentPanelPhase(view, runPhase)
   const active = selectAgentActivityRunActive(view, runPhase)
@@ -43,7 +44,7 @@ function Fixture({ status, messages = initialMessages, sessionId = 's', goalId =
     {messages.map(item => {
       const block = blockInfoById.get(item.id)
       const expanded = isExpanded(block, item.runId)
-      if (item.role === 'user') return item.goalContinuation && !expanded ? null : <div key={item.id}>{item.parts.map(part => part.type === 'text' ? part.text : '').join('')}</div>
+      if (item.role === 'user') return shouldRenderAuthorMessage(item) ? <div key={item.id}>{item.parts.map(part => part.type === 'text' ? part.text : '').join('')}</div> : null
       return <AgentMessageParts key={item.id} parts={item.parts} streaming={false} runActive={active && item.runId === runId}
         blockId={block?.firstId} summaryCount={item.id === block?.firstId ? block.ops : undefined}
         summaryExpanded={expanded} onToggleSummary={toggle} textCollapsible={item.id !== block?.lastId && (block?.ops ?? 0) > 0} />
@@ -71,14 +72,14 @@ it('continues folding completed work by default', () => {
   expect(screen.queryByText('正在处理...')).toBeNull()
 })
 
-it('pause -> resume -> completed folds every run and system prompt into one process, including a manual expansion', () => {
+it('pause -> resume -> completed retains one execution process without presenting internal prompts even during manual expansion', () => {
   const ui = render(<Fixture status="paused" />)
   fireEvent.click(screen.getByRole('button', { name: '已处理 2 个操作' }))
   fireEvent.click(screen.getByRole('button', { name: '已处理 2 个操作' }))
   ui.rerender(<Fixture status="active" messages={resumedMessages} runId="r2" />)
   expect(screen.getByText('a1检查')).toBeTruthy()
   expect(screen.getByText('a2检查')).toBeTruthy()
-  expect(screen.getByText('系统续跑记录')).toBeTruthy()
+  expect(screen.queryByText('系统续跑记录')).toBeNull()
   ui.rerender(<Fixture status="completed" messages={resumedMessages} runId="r2" />)
   expect(screen.getAllByRole('button', { name: '已处理 4 个操作' })).toHaveLength(1)
   expect(screen.queryByText('a1检查')).toBeNull()
@@ -89,9 +90,37 @@ it('pause -> resume -> completed folds every run and system prompt into one proc
   expect(screen.queryByText('正在处理...')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: '已处理 4 个操作' }))
   expect(screen.getByText('a1检查')).toBeTruthy()
-  expect(screen.getByText('系统续跑记录')).toBeTruthy()
+  expect(screen.queryByText('系统续跑记录')).toBeNull()
   ui.rerender(<Fixture status="completed" messages={[...resumedMessages]} runId="r2" />)
   expect(screen.getByText('a1检查')).toBeTruthy()
+})
+
+it.each(['active', 'paused', 'completed'] as const)('%s goal history preserves author steering and saved progress after an edited revision without a duplicate prompt', status => {
+  const messages: AgentUIMessage[] = [
+    { id: 'author', runId: 'r1', goalId: 'g', role: 'user', parts: [{ type: 'text', text: '作者原目标' }], createdAt: '2026-10-01T00:00:00Z' },
+    ...initialMessages,
+    { ...resumedMessages[1], parts: [{ type: 'text', text: '内部重复原目标' }] },
+    { id: 'steering', runId: 'r2', goalId: 'g', goalContinuation: false, role: 'user', parts: [{ type: 'text', text: '作者真实修改要求' }], createdAt: '2026-10-01T00:01:01Z' },
+    message('a2', 'r2'),
+  ]
+  const before = structuredClone(messages)
+  const ui = render(<Fixture status={status} messages={messages} runId="r2" revision={2} objective="作者修订后的目标" />)
+  expect(screen.getByText('作者原目标')).toBeTruthy()
+  expect(screen.getByText('作者真实修改要求')).toBeTruthy()
+  expect(screen.queryByText('内部重复原目标')).toBeNull()
+  // The genuine steering boundary keeps its own execution block, and both
+  // blocks retain their saved operations when the author opens the history.
+  const buttons = screen.getAllByRole('button', { name: '已处理 2 个操作' })
+  if (!screen.queryByText('a1检查')) fireEvent.click(buttons[0])
+  if (!screen.queryByText('a2检查')) fireEvent.click(buttons[1])
+  expect(screen.getByText('a1检查')).toBeTruthy()
+  expect(screen.getByText('a2检查')).toBeTruthy()
+  expect(screen.queryByText('内部重复原目标')).toBeNull()
+  ui.rerender(<Fixture status={status} messages={[...messages]} runId={null} runPhase="idle" runGoalId={null} revision={2} objective="作者修订后的目标" />)
+  expect(screen.getByText('作者原目标')).toBeTruthy()
+  expect(screen.getByText('作者真实修改要求')).toBeTruthy()
+  expect(screen.queryByText('内部重复原目标')).toBeNull()
+  expect(messages).toEqual(before)
 })
 
 it('a successful run cannot fold an unfinished goal', () => {
