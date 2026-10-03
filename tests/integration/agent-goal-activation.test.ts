@@ -25,6 +25,7 @@ import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import type { ChatMessage } from '../../api/lib/ai-service.js'
 import { prepareToolCursorOperation } from '../../api/lib/agent/runtime-tool-cursor.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { admitGoalRun } from '../../api/lib/agent/goal-run-admission.js'
 import { getAgentDefinition, getToolsForAgent } from '../../api/lib/agent/agents.js'
 import { intersectToolAuthority, restrictToolsToTask } from '../../api/lib/agent/tool-authority.js'
@@ -209,8 +210,15 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     })
     if (operationStatus === 'unknown') await prisma.agentOperation.update({ where: { id: pending.operation.id }, data: { status: 'unknown' } })
     const initial = (await readAgentGoal(f.userId, f.sessionId))!
-    const paused = await actOnAgentGoal(f.userId, f.sessionId, initial.id, { requestId: randomUUID(), expectedStateVersion: initial.stateVersion, action: 'pause' })
-    await actOnAgentGoal(f.userId, f.sessionId, initial.id, { requestId: randomUUID(), expectedStateVersion: paused.stateVersion, action: 'resume' })
+    const enableRequestId = `enable:${runtimeJson({ runId: f.runId }).hash.slice(0, 56)}`
+    const enableCommand = await prisma.agentGoalCommand.findUniqueOrThrow({ where: { userId_requestId: { userId: f.userId, requestId: enableRequestId } } })
+    const pauseRequestId = randomUUID(), resumeRequestId = randomUUID()
+    const paused = await actOnAgentGoal(f.userId, f.sessionId, initial.id, { requestId: pauseRequestId, expectedStateVersion: initial.stateVersion, action: 'pause' })
+    await actOnAgentGoal(f.userId, f.sessionId, initial.id, { requestId: resumeRequestId, expectedStateVersion: paused.stateVersion, action: 'resume' })
+    const commandsBeforeReadiness = await prisma.agentGoalCommand.findMany({ where: { userId: f.userId }, orderBy: { requestId: 'asc' } })
+    expect(commandsBeforeReadiness).toHaveLength(3)
+    expect(commandsBeforeReadiness.map(command => command.requestId).sort()).toEqual([enableRequestId, pauseRequestId, resumeRequestId].sort())
+    expect(commandsBeforeReadiness.filter(command => command.requestId.startsWith('enable:'))).toEqual([enableCommand])
     const action = await prisma.$transaction(async tx => reconcileGoalActivation(tx, await lockOwnedGoal(tx, f.userId, f.sessionId, initial.id), new Date()))
     const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: root.id, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
     if (operationStatus === 'unknown') {
@@ -262,6 +270,8 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     expect(await prisma.agentEffectReceipt.count({ where: { operationId: pending.operation.id } })).toBe(0)
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id } } })).toBe(0)
     await prisma.novel.update({ where: { id: f.novelId }, data: { manuscriptRevision: manuscript.manuscriptRevision } })
+    const commandsBeforeResume = await prisma.agentGoalCommand.findMany({ where: { userId: f.userId }, orderBy: { requestId: 'asc' } })
+    expect(commandsBeforeResume).toEqual(commandsBeforeReadiness)
     const resumed = await resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id, activation: { goalId: initial.id, epoch: ready.epoch } })
     expect(await prisma.agentGoalExecution.findUniqueOrThrow({ where: { runId: resumed.run.id } })).toMatchObject({
       goalId: initial.id, goalRevision: 1, epoch: ready.epoch, taskRootId: root.id,
@@ -281,7 +291,9 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     expect((await executeDurableToolStep(owner, f.ctx.signal)).kind).toBe('idle')
     expect(await prisma.agentOperation.count({ where: { taskRootId: root.id, operationKey: key } })).toBe(1)
     expect(await prisma.agentEffectReceipt.count({ where: { operationId: pending.operation.id } })).toBe(1)
-    expect(await prisma.agentGoalCommand.count({ where: { userId: f.userId } })).toBe(1)
+    expect(await prisma.agentGoalCommand.findMany({ where: { userId: f.userId }, orderBy: { requestId: 'asc' } })).toEqual(commandsBeforeResume)
+    expect(await prisma.agentGoalCommand.count({ where: { userId: f.userId, requestId: { startsWith: 'enable:' } } })).toBe(1)
+    expect(await prisma.agentGoalCommand.count({ where: { userId: f.userId } })).toBe(3)
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id } } })).toBe(0)
     await releaseRunLease(owner)
   })
