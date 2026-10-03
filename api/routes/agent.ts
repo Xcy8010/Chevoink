@@ -92,7 +92,7 @@ router.post('/queue', async (req, res) => {
   const requestId = createRequestId()
   try {
     const body = parseBody(z.object({ id: z.string().uuid(), input: startAgentLoopRunSchema }), req.body, '待发需求参数无效。')
-    res.json(buildSuccess(requestId, await enqueueRequest(requireSessionUserId(req), body.id, body.input)))
+    res.json(buildSuccess(requestId, await enqueueRequest(requireSessionUserId(req), body.id, body.input, 'http')))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 router.post('/sessions/:sessionId/queue/:id', async (req, res) => {
@@ -869,7 +869,7 @@ router.post('/runs', async (req: Request, res: Response): Promise<void> => {
       reasoningEffort: body.reasoningEffort,
       pinnedSkillIds: body.pinnedSkillIds,
       pinnedSubagentId: body.pinnedSubagentId,
-    })
+    }, { humanOrigin: 'http' })
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)

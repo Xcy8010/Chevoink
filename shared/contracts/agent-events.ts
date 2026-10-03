@@ -280,6 +280,7 @@ export interface AgentArtifactRef {
  * live 与 replay 同源：全部事件按 seq 持久化，重连用 Last-Event-ID 续传。
  */
 export type AgentStreamEventBody =
+  | { type: 'goal.snapshot'; snapshot: import('./agent-goal.js').AgentGoalSnapshot }
   | { type: 'run.started'; agent: AgentRunAgentSummary; mode: AgentExecutionMode; title: string }
   | {
       type: 'skill.route'

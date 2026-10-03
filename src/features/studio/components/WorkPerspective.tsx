@@ -6,6 +6,7 @@ import { FLOATING_DOCK_MIN_CLEARANCE, shouldShowWorkActivityDock } from './work-
 import { advanceWorkSplitGesture, fitWorkSplit, resizeWorkSplit, WORK_SPLIT, type WorkSplit, type WorkSplitGesture } from './work-split'
 import { WorkConversationContext } from './work-conversation-context'
 import { useWorkSplitMotion } from './use-work-split-motion'
+import { WORK_OPEN_DOCUMENT } from './work-viewer-events'
 
 type Props = {
   conversationRail: ReactNode; conversation: ReactNode; activityDock?: ReactNode
@@ -31,7 +32,7 @@ function restoreSplit(scope: string | undefined, fallback: WorkSplit): WorkSplit
 }
 type Gesture = WorkSplitGesture & { pointer: number }
 
-export default function WorkPerspective({ conversationRail, conversation, activityDock, inspector, viewer, viewerIdentity, scopeKey, outerSidebarOpen = true, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
+export default function WorkPerspective({ conversationRail, conversation, activityDock, inspector, viewer, scopeKey, outerSidebarOpen = true, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
   const root = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
   const [split, setSplit] = useState<WorkSplit>(() => {
@@ -61,20 +62,22 @@ export default function WorkPerspective({ conversationRail, conversation, activi
   const expand = useCallback(() => update({ ...splitRef.current, chatCollapsed: false, viewerCollapsed: true, inspectorCollapsed: true }), [update])
   const context = useMemo(() => ({ collapsed: geometry.chatCollapsed, expand }), [geometry.chatCollapsed, expand])
   useEffect(() => {
-    const openDocument = () => update({ ...splitRef.current, viewerCollapsed: false, inspectorCollapsed: false })
-    window.addEventListener('chevoink:work-open-document', openDocument)
-    return () => window.removeEventListener('chevoink:work-open-document', openDocument)
-  }, [update])
+    const openDocument = (event: Event) => {
+      if (!scopeKey || (event as CustomEvent<{ scope?: string }>).detail?.scope !== scopeKey) return
+      update({ ...splitRef.current, viewerCollapsed: false, inspectorCollapsed: false })
+    }
+    window.addEventListener(WORK_OPEN_DOCUMENT, openDocument)
+    return () => window.removeEventListener(WORK_OPEN_DOCUMENT, openDocument)
+  }, [scopeKey, update])
   // Prop changes caused by task hydration are not user open/close commands.
-  const inputs = useRef({ scopeKey, rightOpen, viewerIdentity, hasViewer })
+  const inputs = useRef({ scopeKey, rightOpen, hasViewer })
   useEffect(() => {
     const old = inputs.current
-    inputs.current = { scopeKey, rightOpen, viewerIdentity, hasViewer }
+    inputs.current = { scopeKey, rightOpen, hasViewer }
     if (old.scopeKey !== scopeKey) return
     if (old.rightOpen !== rightOpen) update({ ...splitRef.current, inspectorCollapsed: !rightOpen, ...(!rightOpen ? { chatCollapsed: false } : {}) })
-    if (old.viewerIdentity !== viewerIdentity && viewerIdentity) update({ ...splitRef.current, viewerCollapsed: false })
     if (old.hasViewer !== hasViewer && !hasViewer) update({ ...splitRef.current, chatCollapsed: false })
-  }, [scopeKey, rightOpen, viewerIdentity, hasViewer, update])
+  }, [scopeKey, rightOpen, hasViewer, update])
   useEffect(() => {
     if (viewer) { setRetainedViewer(viewer); return }
     const timer = window.setTimeout(() => setRetainedViewer(undefined), 240)

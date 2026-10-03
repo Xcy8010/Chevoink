@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const db = vi.hoisted(() => ({
   agentRun: { findFirst: vi.fn(), findMany: vi.fn() },
   agentGoalExecution: { findUnique: vi.fn() },
+  agentGoal: { findFirst: vi.fn() },
   agentSession: { findUnique: vi.fn(), findMany: vi.fn() },
   agentArtifact: { findMany: vi.fn() }, projectMemoryEntry: { findMany: vi.fn() }, $transaction: vi.fn(),
 }))
@@ -14,6 +15,7 @@ beforeEach(() => {
   db.agentRun.findFirst.mockResolvedValue(record)
   db.agentRun.findMany.mockResolvedValue([record])
   db.agentGoalExecution.findUnique.mockResolvedValue(null)
+  db.agentGoal.findFirst.mockResolvedValue({ id: 'pending-goal' })
   db.agentSession.findMany.mockResolvedValue([{ id: 'session' }])
   db.agentSession.findUnique.mockResolvedValue({ id: 'session', userId: 'user' })
   db.agentArtifact.findMany.mockResolvedValue([])
@@ -24,6 +26,8 @@ describe('author-ended run API boundary', () => {
   it('rejects resume before mutation or paid execution', async () => {
     await expect(continueLoopRun('user', 'run')).rejects.toMatchObject({ code: 'RUN_AUTHOR_ENDED', status: 409 })
     expect(db.$transaction).not.toHaveBeenCalled()
+    expect(db.agentGoal.findFirst).not.toHaveBeenCalled()
+    expect(db.agentGoalExecution.findUnique).not.toHaveBeenCalled()
   })
   it('polls only the newest run disposition and clears ending when a new task starts', async () => {
     expect((await listSessionRunStatuses('user', ['session'])).statuses.session).toMatchObject({ runId: 'run', runGoalId: null, authorEnded: ended })

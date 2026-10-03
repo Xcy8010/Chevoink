@@ -134,11 +134,11 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
   requireApproval?: boolean;
   effectDomain?: 'chapter' | 'plan' | 'read' | 'structure' | 'task' | 'compiler' | 'memory' | 'metadata' | 'import';
   normalize: (parsed: unknown) => unknown
-}) {
+}, transaction?: import('./runtime-common.js').RuntimeTx) {
   token = { ...token }; cursor = { ...cursor }
   input = { ...input, operationInput: runtimeJson(input.operationInput).value, effectiveArgs: runtimeJson(input.effectiveArgs).value }
   if (!Number.isSafeInteger(cursor.expectedRevision) || cursor.expectedRevision < 0) runtimeError('RUNTIME_STATE_INVALID', '工具执行位置无效。')
-  return withRunLease(token, async tx => {
+  const work = async (tx: import('./runtime-common.js').RuntimeTx) => {
     const current = await readExecutionStateInTransaction(tx, token.taskRootId)
     const frame = await readExecutionFrame(tx, token.taskRootId, cursor.expectedRevision)
     if (frame.snapshotHash !== cursor.expectedHash || frame.state.phase !== 'idle' || input.key !== `exec:${frame.state.nextOperationSequence}`) runtimeError('RUNTIME_STATE_CONFLICT', '工具必须从原执行位置准入。')
@@ -180,5 +180,6 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     const pending = await saveExecutionStateInTransaction(tx, token, { ...cursor, snapshot: { ...frame.state, phase: 'awaiting_operation',
       pendingOperationId: operation.id, nextOperationSequence: frame.state.nextOperationSequence + 1 } })
     return { operation, pending }
-  })
+  }
+  return transaction ? (await import('./runtime-lease.js')).withRunLeaseInTransaction(transaction, token, work) : withRunLease(token, work)
 }

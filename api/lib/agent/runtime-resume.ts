@@ -17,7 +17,7 @@ const live = ['queued', 'running', 'awaiting_approval'] as const
  * Caller supplies the exact original run/pause identity; an old tab cannot
  * authorize a later pause, task, or new objective.
  * This creates queued work, not a claim that an executor has started. */
-export async function resumeDurableTask(input: { userId: string; runId: string; pauseEventId: string }) {
+export async function resumeDurableTask(input: { userId: string; runId: string; pauseEventId: string; activation?: { goalId: string; epoch: bigint } }) {
   const captured = { ...input }, resumedRunId = randomUUID(), eventId = randomUUID()
   runtimeId(captured.userId); runtimeId(captured.runId); runtimeId(captured.pauseEventId)
   const concurrencyLimit = env.agentUserMaxConcurrent
@@ -25,6 +25,17 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
   return runtimeTransaction(async tx => {
     // Shared by durable resume admissions across processes; never hold over HTTP.
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${captured.userId}`}, 0))::text`
+    let activationGoal: import('@prisma/client').AgentGoal | null = null
+    if (captured.activation) {
+      const source = await tx.agentRun.findFirst({ where: { id: captured.runId, userId: captured.userId } })
+      if (!source) return runtimeError('RUNTIME_SCOPE_MISMATCH', '原任务不存在。')
+      activationGoal = await (await import('./goal-store.js')).lockOwnedGoal(tx, captured.userId, source.sessionId, captured.activation.goalId)
+      if (activationGoal.status !== 'active' || activationGoal.epoch !== captured.activation.epoch || activationGoal.currentRunId !== source.id
+        || activationGoal.reasonCode !== 'GOAL_ACTIVATION_RESUME_READY') return runtimeError('GOAL_VERSION_CONFLICT', '原任务继续授权已变化。')
+      const consent = await tx.agentGoalEvidence.findUnique({ where: { goalId_revision_criterionId: { goalId: activationGoal.id, revision: 1, criterionId: 'activation-resume' } } })
+      if (consent?.status !== 'verified' || !consent.receipt || typeof consent.receipt !== 'object' || Array.isArray(consent.receipt)
+        || consent.receipt.epoch !== String(activationGoal.epoch) || consent.receipt.sourceRunId !== captured.runId) return runtimeError('GOAL_VERSION_CONFLICT', '缺少本次作者继续授权。')
+    }
     const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
     await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: run.id, novelId: run.novelId })
     if (root.authorizationMode !== 'legacy') runtimeError('TASK_AUTHORIZATION_NOT_ACTIVATED', '阶段授权执行器尚未接入，不能降级恢复。')
@@ -77,6 +88,14 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
       modelTier: state.configuration.model.tier, customModelId: state.configuration.model.customModelId,
       reasoningEffort: state.configuration.model.reasoningEffort, createdAt: now } })
     await tx.agentTaskRoot.update({ where: { id: root.id }, data: { status: 'active' } })
+    if (activationGoal) {
+      const index = activationGoal.continuationIndex + 1
+      await tx.agentGoalExecution.create({ data: { goalId: activationGoal.id, goalRevision: activationGoal.currentRevision, epoch: activationGoal.epoch,
+        taskRootId: root.id, runId: resumed.id, continuationIndex: index, trigger: 'activation_resume', sourceEventId: `activation-resume:${pause.id}` } })
+      await tx.agentGoalEvidence.update({ where: { goalId_revision_criterionId: { goalId: activationGoal.id, revision: 1, criterionId: 'activation-resume' } }, data: { status: 'consumed' } })
+      await (await import('./goal-store.js')).changeGoal(tx, activationGoal, { continuationIndex: index, currentRunId: resumed.id,
+        phase: 'executing', reasonCode: null, nextEligibleAt: null, activeSince: now }, 'activation.continued')
+    }
     await tx.agentExecutionOutbox.create({ data: { id: eventId, taskRootId: root.id, runId: resumed.id, eventKey, type: 'run.resume.queued',
       payload: { sourceRunId: run.id, runId: resumed.id, pauseEventId: pause.id, revision: state.frame.revision,
         snapshotHash: state.frame.snapshotHash, configurationHash: state.head.configurationHash } } })

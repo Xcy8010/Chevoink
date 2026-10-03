@@ -43,7 +43,13 @@ export async function acquireRunLease(input: { userId: string; runId: string; ow
 /** Serializes revocation and effects; expiry is rechecked before transaction commit. */
 export async function withRunLease<T>(token: RunLeaseToken, work: (tx: RuntimeTx) => Promise<T>): Promise<T> {
   const captured = { ...token }
-  return runtimeTransaction(async tx => {
+  return runtimeTransaction(tx => withRunLeaseInTransaction(tx, captured, work))
+}
+
+/** Allows a dedicated adapter to acquire user/manuscript/session/goal first.
+ * The same transaction rechecks ownership before and after its DB-only work. */
+export async function withRunLeaseInTransaction<T>(tx: RuntimeTx, token: RunLeaseToken, work: (tx: RuntimeTx) => Promise<T>): Promise<T> {
+    const captured = { ...token }
     await assertRunGoalFence(tx, captured.userId, captured.runId)
     const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
     active(run, root)
@@ -57,7 +63,6 @@ export async function withRunLease<T>(token: RunLeaseToken, work: (tx: RuntimeTx
     const result = await work(tx)
     await check()
     return result
-  })
 }
 
 export async function renewRunLease(token: RunLeaseToken, ttlMs = 30000): Promise<void> {

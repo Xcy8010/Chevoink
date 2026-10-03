@@ -13,6 +13,7 @@ import { assertGoalVersion, changeGoal, closeGoalActivity, goalError, goalSnapsh
 import { inspectGoalEvidence } from './goal-evidence.js'
 import { goalResumeBudget } from './goal-resume-budget.js'
 import { reconcileGoalUsage } from './goal-budget.js'
+import { readGoalActivationReceipt } from './goal-activation.js'
 
 export function requireGoalEnabled() {
   if (!env.agentGoalEnabled) goalError('GOAL_DISABLED', '目标模式暂未开放。', 503)
@@ -79,10 +80,33 @@ export async function createAgentGoal(userId: string, target: { sessionId: strin
 export async function revokeGoalExecutions(tx: GoalTx, goal: AgentGoal, now: Date): Promise<string[]> {
   const executions = await tx.agentGoalExecution.findMany({ where: { goalId: goal.id }, select: { runId: true } })
   const runIds = executions.map(row => row.runId)
+  const activation = await readGoalActivationReceipt(tx, goal)
+  if (activation) {
+    const source = await tx.agentRun.findFirst({ where: { id: activation.receipt.sourceRunId, userId: goal.userId, novelId: goal.novelId, sessionId: goal.sessionId } })
+    if (source) {
+      const sourceRuns = await tx.agentRun.findMany({ where: { userId: goal.userId, novelId: goal.novelId, sessionId: goal.sessionId,
+        ...(source.taskRootId ? { taskRootId: source.taskRootId } : { taskSpec: { path: ['id'], equals: activation.receipt.sourceRootId } }) }, select: { id: true } })
+      for (const run of sourceRuns) if (!runIds.includes(run.id)) runIds.push(run.id)
+      const children = await tx.agentRun.findMany({ where: { userId: goal.userId, novelId: goal.novelId,
+        session: { spawnedFromRunId: { in: sourceRuns.map(run => run.id) } } }, select: { id: true } })
+      for (const run of children) if (!runIds.includes(run.id)) runIds.push(run.id)
+    }
+  }
   if (!runIds.length) return []
-  await tx.agentRunLease.updateMany({ where: { runId: { in: runIds } }, data: { epoch: { increment: 1 }, enabled: false, expiresAt: now } })
+  if (activation) for (const runId of [...runIds].sort()) await tx.$queryRaw`SELECT id FROM agent_runs WHERE id = ${runId} FOR UPDATE`
   const runs = await tx.agentRun.findMany({ where: { id: { in: runIds } }, select: { taskRootId: true } })
   const roots = runs.flatMap(run => run.taskRootId ? [run.taskRootId] : [])
+  if (activation) for (const rootId of [...new Set(roots)].sort()) {
+    await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${rootId} FOR UPDATE`
+    const live = await tx.agentRun.findMany({ where: { taskRootId: rootId, status: { in: ['queued', 'running', 'awaiting_approval'] } }, select: { id: true } })
+    if (live.length) {
+      const { randomUUID } = await import('node:crypto')
+      const id = randomUUID()
+      await tx.agentExecutionOutbox.create({ data: { id, taskRootId: rootId, runId: live[0].id,
+        eventKey: `pause:${id}`, type: 'run.paused', payload: { reason: 'user_stop', runIds: live.map(run => run.id) } } })
+    }
+  }
+  await tx.agentRunLease.updateMany({ where: { runId: { in: runIds } }, data: { epoch: { increment: 1 }, enabled: false, expiresAt: now } })
   await tx.agentTaskRoot.updateMany({ where: { id: { in: roots }, status: 'active' }, data: { status: 'paused' } })
   await tx.agentRun.updateMany({ where: { id: { in: runIds }, status: { in: ['queued', 'running', 'awaiting_approval'] } },
     data: { status: 'paused', finishedAt: now } })
@@ -98,6 +122,8 @@ export async function updateAgentGoal(userId: string, sessionId: string, goalId:
     const previous = await replay(tx, userId, body.requestId, hash)
     if (previous) return { snapshot: previous, runIds: [] }
     assertGoalVersion(goal, body.expectedStateVersion, body.expectedRevision)
+    const activation = await readGoalActivationReceipt(tx, goal)
+    if (activation && !activation.receipt.baselineBound) return goalError('GOAL_RECONCILIATION_REQUIRED', '原任务尚未完成结算，请稍后修改目标。')
     if (terminal(goal) || goal.pendingRevision) return goalError('GOAL_CONFLICT', '当前目标不能修改。')
     const revision = goal.currentRevision + 1
     const now = await databaseNow(tx)
@@ -165,6 +191,20 @@ export async function actOnAgentGoal(userId: string, sessionId: string, goalId: 
       if (!['paused', 'blocked', 'usage_limited', 'budget_limited'].includes(goal.status) || goal.pendingRevision) {
         return goalError('GOAL_NOT_RESUMABLE', '目标当前不能继续。')
       }
+      const activation = await readGoalActivationReceipt(tx, goal)
+      if (activation && goal.currentRevision === 1) {
+        if (body.model || body.budgetChange) return goalError('GOAL_ACTIVATION_SCOPE_IMMUTABLE', '继续原任务不能替换模型、权限或增加预算。')
+        const source = await tx.agentRun.findFirst({ where: { id: goal.currentRunId ?? activation.receipt.sourceRunId, userId, sessionId, novelId: goal.novelId } })
+        if (!source || ['queued', 'running', 'awaiting_approval'].includes(source.status)) return goalError('GOAL_RECONCILIATION_REQUIRED', '原任务尚未收尾，请稍后继续。')
+        if (await tx.agentGoalUsage.count({ where: { goalId, status: { in: ['reserved', 'unknown'] } } })) return goalError('GOAL_RECONCILIATION_REQUIRED', '原任务用量仍待核对，请稍后继续。')
+        const snapshot = (await changeGoal(tx, goal, { status: 'active', phase: 'reconciling', activeSince: null, nextEligibleAt: null,
+          epoch: { increment: 1 }, reasonCode: 'GOAL_ACTIVATION_PENDING' }, 'activation.resume_requested')).snapshot
+        await tx.agentGoalEvidence.upsert({ where: { goalId_revision_criterionId: { goalId, revision: 1, criterionId: 'activation-resume' } },
+          create: { goalId, revision: 1, criterionId: 'activation-resume', kind: 'author-resume', description: '作者要求继续原任务。', status: 'verified', verifiedAt: now,
+            receipt: { epoch: String(goal.epoch + 1n), sourceRunId: source.id, requestId: body.requestId } },
+          update: { status: 'verified', verifiedAt: now, receipt: { epoch: String(goal.epoch + 1n), sourceRunId: source.id, requestId: body.requestId } } })
+        return { snapshot: await receipt(tx, userId, body.requestId, hash, snapshot), runIds: [] }
+      }
       if (await tx.agentGoalUsage.count({ where: { goalId, status: { in: ['reserved', 'unknown'] } } })) {
         return goalError('GOAL_RECONCILIATION_REQUIRED', '尚有执行结果待核对，请稍后继续。')
       }
@@ -230,7 +270,22 @@ export async function readAgentGoalDetail(userId: string, sessionId: string, goa
 /** The public stop endpoint uses this instead of leaving a goal eligible for auto continuation. */
 export async function pauseGoalForRun(userId: string, runId: string): Promise<boolean> {
   const execution = await prisma.agentGoalExecution.findUnique({ where: { runId }, include: { goal: true } })
-  if (!execution || execution.goal.userId !== userId) return false
+  if (!execution) {
+    const pending = await prisma.agentGoal.findFirst({ where: { userId, currentRunId: runId, status: { notIn: ['completed', 'cancelled'] },
+      evidence: { some: { criterionId: 'activation-source' } } } })
+    if (!pending) return false
+    const stopped = await runtimeTransaction(async tx => {
+      const goal = await lockOwnedGoal(tx, userId, pending.sessionId, pending.id)
+      if (terminal(goal) || goal.currentRunId !== runId) return []
+      const now = await databaseNow(tx)
+      const ids = await revokeGoalExecutions(tx, goal, now)
+      await changeGoal(tx, goal, { status: 'paused', phase: 'idle', epoch: { increment: 1 }, activeSince: null, nextEligibleAt: null, reasonCode: 'AUTHOR_PAUSED' })
+      return ids
+    })
+    stopped.forEach(stopAgentRun)
+    return true
+  }
+  if (execution.goal.userId !== userId) return false
   const runIds = await runtimeTransaction(async tx => {
     const goal = await lockOwnedGoal(tx, userId, execution.goal.sessionId, execution.goalId)
     // The stop button names a run, so an old run's delayed request cannot
@@ -256,6 +311,8 @@ export async function steerGoalQueuedRequest(userId: string, sessionId: string, 
   if (!candidate) return false
   const runIds = await runtimeTransaction(async tx => {
     const goal = await lockOwnedGoal(tx, userId, sessionId, candidate.id)
+    const activation = await readGoalActivationReceipt(tx, goal)
+    if (activation && !activation.receipt.baselineBound) return goalError('GOAL_RECONCILIATION_REQUIRED', '原任务尚未完成结算，补充消息已保留。')
     if (goal.status !== 'active' || goal.pendingRevision) return goalError('GOAL_NOT_ACTIVE', '请先继续当前目标，补充消息仍保留。')
     const now = await databaseNow(tx)
     await tx.agentQueuedRequest.updateMany({ where: { userId, sessionId, status: { in: ['pending', 'held'] } }, data: { priority: 0 } })

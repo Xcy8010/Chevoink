@@ -11,6 +11,7 @@ import { startLoopRun } from './run-service.js'
 import { reconcileGoalUsage } from './goal-budget.js'
 import { runtimeJson } from './runtime-common.js'
 import { hasAuthorEnded } from './completion-guard.js'
+import { reconcileGoalActivation } from './goal-activation-supervisor.js'
 
 /** Database is the scheduler: polling only wakes persisted, eligible goals; it never polls a model. */
 export async function superviseAgentGoal(userId: string, sessionId: string, goalId: string) {
@@ -22,8 +23,10 @@ export async function superviseAgentGoal(userId: string, sessionId: string, goal
   const action = await runtimeTransaction(async tx => {
     let goal = await lockOwnedGoal(tx, userId, sessionId, goalId)
     const now = await databaseNow(tx)
+    if (!env.agentGoalEnabled && goal.status === 'active') return { kind: 'pause' as const, version: goal.stateVersion }
+    const activation = await reconcileGoalActivation(tx, goal, now)
+    if (activation) return activation === true ? null : activation
     if (['completed', 'cancelled'].includes(goal.status)) return null
-    if (!env.agentGoalEnabled) return { kind: 'pause' as const, version: goal.stateVersion }
     if (goal.pendingRevision) {
       if (await tx.agentGoalUsage.count({ where: { goalId, status: { in: ['reserved', 'unknown'] } } })) return null
       const revision = await tx.agentGoalRevision.findUniqueOrThrow({ where: { goalId_revision: { goalId, revision: goal.pendingRevision } } })
@@ -155,6 +158,20 @@ export async function superviseAgentGoal(userId: string, sessionId: string, goal
   if (action.kind === 'pause') {
     await actOnAgentGoal(userId, sessionId, goalId, { requestId: randomUUID(), expectedStateVersion: action.version, action: 'pause' }); return
   }
+  if (action.kind === 'activation_continue') {
+    try { await (await import('./run-service.js')).continueActivatedGoalRun(userId, action.runId, action.goal.id, action.goal.epoch) }
+    catch (error) {
+      const code = error instanceof DataAccessError ? error.code : 'GOAL_DISPATCH_UNAVAILABLE'
+      if (['RUN_IN_PROGRESS', 'RUN_LIMIT', 'RUNTIME_LEASE_BUSY', 'GOAL_VERSION_CONFLICT'].includes(code)) return
+      await runtimeTransaction(async tx => {
+        const goal = await lockOwnedGoal(tx, userId, sessionId, goalId)
+        if (goal.epoch !== action.goal.epoch || goal.status !== 'active') return
+        await changeGoal(tx, goal, { status: code.startsWith('CREDITS_') ? 'usage_limited' : code.includes('EXHAUSTED') ? 'budget_limited' : 'blocked',
+          phase: 'idle', nextEligibleAt: null, activeSince: null, reasonCode: code })
+      })
+    }
+    return
+  }
   try {
     const goal = action.goal
     await startLoopRun(userId, { ...action.options, sessionId, novelId: goal.novelId, prompt: action.objective }, { goal: {
@@ -187,7 +204,8 @@ let scanCursor: string | undefined
 export async function dispatchAgentGoals() {
   // Cursor only provides fairness; every decision remains DB fenced. Waiting
   // goals cannot permanently occupy the first batch and starve later sessions.
-  const goals = await prisma.agentGoal.findMany({ where: { OR: [{ status: { in: ['active', 'updating'] } }, { pendingRevision: { not: null } }] },
+  const goals = await prisma.agentGoal.findMany({ where: { OR: [{ status: { in: ['active', 'updating'] } }, { pendingRevision: { not: null } },
+    { evidence: { some: { criterionId: 'activation-source', receipt: { path: ['baselineBound'], equals: false } } } }] },
     select: { id: true, userId: true, sessionId: true }, orderBy: { id: 'asc' }, take: 50,
     ...(scanCursor ? { cursor: { id: scanCursor }, skip: 1 } : {}) })
   scanCursor = goals.length === 50 ? goals.at(-1)?.id : undefined

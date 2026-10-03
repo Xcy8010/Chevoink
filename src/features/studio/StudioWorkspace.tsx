@@ -83,6 +83,9 @@ import { useCoverActions } from './components/use-cover-actions'
 import { usePlanSync } from './components/use-plan-sync'
 import { createPlanDocumentActions } from './components/plan-document-actions'
 import { createPlanReviewActions } from './components/plan-review-actions'
+import { openWorkDocument } from './components/work-viewer-events'
+import { adoptChapterResult, canApplyChapterSnapshot } from './components/chapter-stream-handoff'
+import { useChapterSnapshot } from './components/use-chapter-snapshot'
 
 export default function StudioWorkspace() {
   const { novelId } = useParams()
@@ -269,6 +272,8 @@ export default function StudioWorkspace() {
   const workPanelScope = useWorkPanelState(taskUiScope,
     { rightOpen: workRightOpen, viewer: workViewer, inspectorTab: workInspectorTab, selectedTreeItemId, selectedChapterId },
     { setRightOpen: setWorkRightOpen, setViewer: setWorkViewer, setInspectorTab: setWorkInspectorTab, setSelectedTreeItemId, setSelectedChapterId })
+  const chapterStreamOwnerRef = useRef({ novelId: activeNovelId, scope: taskUiScope, sessionId: agentSessionId })
+  chapterStreamOwnerRef.current = { novelId: activeNovelId, scope: taskUiScope, sessionId: agentSessionId }
   const [agentRunState, setAgentRunState] = useState<AgentRunState>(createIdleAgentRunState)
   const [agentArtifacts, setAgentArtifacts] = useState<AgentArtifact[]>([])
   const [activeAgentArtifactId, setActiveAgentArtifactId] = useState<string | null>(null)
@@ -915,18 +920,6 @@ export default function StudioWorkspace() {
   })
 
   useEffect(() => {
-    if (!chapterQuery.data || !selectedChapterId || chapterQuery.data.id !== selectedChapterId) {
-      return
-    }
-
-    setChapterDraft(buildChapterDraft(chapterQuery.data))
-    setChapterDirty(false)
-    setChapterSaveState('saved')
-    setChapterLastSavedAt(chapterQuery.data.updatedAt)
-    setChapterSaveMessage(`已同步到 ${formatDateTime(chapterQuery.data.updatedAt)}`)
-  }, [chapterQuery.data, selectedChapterId])
-
-  useEffect(() => {
     if (!chapterQuery.isError) {
       return
     }
@@ -968,6 +961,10 @@ export default function StudioWorkspace() {
   chapterDraftStateRef.current = chapterDraft
   const chapterDirtyRef = useRef(chapterDirty)
   chapterDirtyRef.current = chapterDirty
+  useChapterSnapshot({ data: chapterQuery.data, selectedChapterId, novelId: activeNovelId, scope: taskUiScope,
+    hydratedScope: workPanelScope, draftRef: chapterDraftStateRef, dirtyRef: chapterDirtyRef,
+    setDraft: setChapterDraft, setDirty: setChapterDirty, setSaveState: setChapterSaveState,
+    setLastSavedAt: setChapterLastSavedAt, setSaveMessage: setChapterSaveMessage })
   // 切章守卫与编辑器 blur flush 可能几乎同时触发保存，in-flight 期间直接跳过，避免并发写同一章节。
   const selectedChapterIdStateRef = useRef(selectedChapterId)
   selectedChapterIdStateRef.current = selectedChapterId
@@ -993,8 +990,10 @@ export default function StudioWorkspace() {
     }
     setSelectedTreeItemId(`chapter:${chapterId}`)
     setSelectedChapterId(chapterId)
+    selectedChapterIdStateRef.current = chapterId
     setEditorChapterSettingsOpen(false)
     setChapterDraft(null)
+    chapterDraftStateRef.current = null
     setChapterSaveState('idle')
     setChapterSaveMessage('Agent 正在写这一章，已自动跟随…')
   }
@@ -1037,6 +1036,13 @@ export default function StudioWorkspace() {
           1,
         localOnly: false,
       }
+
+      const live = useAgentStore.getState()
+      adoptChapterResult({ event, origin: { novelId: activeNovelId, scope: taskUiScope, sessionId: agentSessionId },
+        current: chapterStreamOwnerRef.current, activeSessionId: live.activeSessionId, activeRunId: live.runId,
+        selectedChapterId: selectedChapterIdStateRef.current, dirty: chapterDirtyRef.current, draft: chapterDraftStateRef.current },
+      afterState, { draftRef: chapterDraftStateRef, dirtyRef: chapterDirtyRef, setDraft: setChapterDraft,
+        setDirty: setChapterDirty, setSaveState: setChapterSaveState })
 
       // 同一章节连续写入（如 chapter_write 后再 append）：保留最早的 before/回滚快照，仅推进 after；
       // 其他章节的审查态不受影响（fix：新章写入不再覆盖旧章未定夺的审查）
@@ -1110,7 +1116,7 @@ export default function StudioWorkspace() {
         }),
       ])
     },
-    [],
+    [activeNovelId, taskUiScope, agentSessionId],
   )
 
   const refreshWorkspaceAfterAgentWrite = useCallback(async (throwOnError = false) => {
@@ -1599,9 +1605,10 @@ export default function StudioWorkspace() {
     ? activeLiveToolDraft?.content
     : undefined
   const selectChapterFromToolRef = useRef(handleSelectChapter)
-  const { handleSelectPlanFromTree, handleRequestDeletePlan, handleRequestCreatePlan, handleRenamePlan, handleWorkspaceDocumentChange } = createPlanDocumentActions({
+  const { handleSelectPlanFromTree: selectPlanFromTree, handleRequestDeletePlan, handleRequestCreatePlan, handleRenamePlan, handleWorkspaceDocumentChange } = createPlanDocumentActions({
     activeNovelId, savedPlanFiles, agentArtifacts, selectedTreeItemId, catalogPreview, setSelectedTreeItemId, setWorkViewer, setMobileView, setActiveAgentArtifactId, setAgentArtifacts, setServerPlanFiles, setChapterSaveState, setChapterSaveMessage, setAgentRunState, setWorkspaceDialog, setCatalogDocument, updateAgentArtifact, schedulePlanServerSync,
   })
+  const handleSelectPlanFromTree = (planId: string) => { openWorkDocument(taskUiScope); selectPlanFromTree(planId) }
   const selectPlanFromToolRef = useRef(handleSelectPlanFromTree)
   const selectAgentTaskWindowFromToolRef = useRef(handleSelectAgentTaskWindow)
   selectChapterFromToolRef.current = handleSelectChapter
@@ -1623,7 +1630,7 @@ export default function StudioWorkspace() {
         clearToolNavigationRequest()
         return
       }
-      window.dispatchEvent(new Event('chevoink:work-open-document'))
+      openWorkDocument(taskUiScope)
       selectChapterFromToolRef.current(chapterId)
       if (workspacePerspective === 'work') {
         setWorkInspectorTab('work')
@@ -1639,7 +1646,7 @@ export default function StudioWorkspace() {
         : typeof args.planId === 'string' ? args.planId : null
       const target = savedPlanFiles.find((plan) => plan.id === artifactId || plan.backendArtifactId === artifactId)
       if (target) {
-        window.dispatchEvent(new Event('chevoink:work-open-document'))
+        openWorkDocument(taskUiScope)
         selectPlanFromToolRef.current(target.id)
         if (workspacePerspective === 'work') {
           setWorkInspectorTab('work')
@@ -1660,7 +1667,7 @@ export default function StudioWorkspace() {
       }
     }
     clearToolNavigationRequest()
-  }, [chapters, toast, clearToolNavigationRequest, savedPlanFiles, toolNavigationRequest, workspacePerspective, setIdeSidebarTab, setIdeTreeOpen, setWorkInspectorTab, setWorkRightOpen, setWorkViewer])
+  }, [chapters, toast, clearToolNavigationRequest, savedPlanFiles, toolNavigationRequest, workspacePerspective, taskUiScope, setIdeSidebarTab, setIdeTreeOpen, setWorkInspectorTab, setWorkRightOpen, setWorkViewer])
 
   // 记忆沉淀卡点击：把记忆面板切到可见位置，由当前可见的记忆中心实例开覆层闪卡
   useEffect(() => {
@@ -2472,7 +2479,10 @@ export default function StudioWorkspace() {
 
       const cachedChapter = queryClient.getQueryData<Chapter>(['studio-chapter', activeNovelId, nextChapterId])
       if (cachedChapter) {
-        setChapterDraft(buildChapterDraft(cachedChapter))
+        const incoming = buildChapterDraft(cachedChapter)
+        if (!canApplyChapterSnapshot(chapterDraftStateRef.current, incoming, chapterDirtyRef.current)) return
+        chapterDraftStateRef.current = incoming
+        setChapterDraft(incoming)
         setChapterDirty(false)
         setChapterSaveState('saved')
         setChapterLastSavedAt(cachedChapter.updatedAt)
@@ -3393,6 +3403,7 @@ export default function StudioWorkspace() {
   }
 
   function handleSelectCatalogFromTree() {
+    openWorkDocument(taskUiScope)
     setSelectedTreeItemId('catalog')
     setWorkViewer('document')
     setMobileView('editor')
@@ -3545,6 +3556,7 @@ export default function StudioWorkspace() {
     : undefined
 
   function handleSelectWorkChapter(chapterId: string) {
+    openWorkDocument(taskUiScope)
     handleSelectChapter(chapterId)
     setWorkViewer('chapter')
   }
@@ -4547,7 +4559,7 @@ export default function StudioWorkspace() {
           }
         }}
         onRestored={() => refreshWorkspaceAfterAgentWrite()}
-        onViewChapter={handleSelectChapter}
+          onViewChapter={handleSelectWorkChapter}
       /> : null}
       {volumeSettings?.novelId === activeNovelId && volumeSettings.epoch === workspaceOwnerRef.current.epoch ? <VolumeSettingsDialog
         key={`${volumeSettings.novelId}:${volumeSettings.volumeId}:${volumeSettings.epoch}`}

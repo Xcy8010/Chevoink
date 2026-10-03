@@ -66,6 +66,7 @@ import { isDefaultSessionTitle } from './session-title.js'
 import { withUserRunLock } from './run-lock.js'
 import { admitGoalRun, bindGoalRun, type GoalRunAdmission } from './goal-run-admission.js'
 import { assertGoalFence, readGoalExecution } from './goal-fence.js'
+import { withHumanAdmission } from './goal-activation-authority.js'
 
 /**
  * Agent Loop 新链路的路由服务层（plan/13 §4.9）。
@@ -75,6 +76,8 @@ import { assertGoalFence, readGoalExecution } from './goal-fence.js'
  */
 
 export type StartLoopRunOptions = {
+  /** Issued only by the authenticated HTTP boundary, never inferred from user-role messages. */
+  humanOrigin?: 'http'
   /**
    * 并发额度作用域：interactive=作者手工发起（受 agentUserMaxConcurrent 约束）；
    * orchestration=task_spawn / task_send 拉起的跨任务编排，改用编排专用上限（主控 + 派生窗口）。
@@ -117,7 +120,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const { applySessionToolPolicy, getAgentDefinition, getToolsForAgent } = await import('./agents.js')
   const { resolveAgent2FeatureFlags } = await import('../agent2-feature-flags.js')
   const { assembleContext } = await import('./context.js')
-  const { snapshotToolAuthority } = await import('./tool-authority.js')
+  const { snapshotToolAuthority, intersectToolAuthority } = await import('./tool-authority.js')
   const { toOpenAITools } = await import('./tools/registry.js')
   const { executionContextReadTool } = await import('./tools/task-context-tools.js')
   const { ORCHESTRATION_TOOL_NAMES } = await import('./tools/task-orchestration-tools.js')
@@ -132,11 +135,11 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   if (run.sessionId !== input.sessionId || run.novelId !== input.novelId || run.chapterId !== (input.chapterId?.trim() || null)
     || (run.mode === 'act' ? 'build' : run.mode) !== input.mode) throw new DataAccessError(409, 'RUN_INPUT_MISMATCH', '初始化范围与原任务不一致。')
   const goalBinding = await prisma.agentGoalExecution.findUnique({ where: { runId } })
+  if (run.runtimeProtocolVersion === 1 && run.taskRootId && await prisma.agentExecutionState.findUnique({ where: { taskRootId: run.taskRootId } })) return loadExecutionState(userId, runId)
   const original = await prisma.agentMessage.findFirst({ where: { runId, sessionId: run.sessionId,
-    role: goalBinding && goalBinding.trigger !== 'author' ? 'system' : 'user' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+    role: goalBinding && !['author', 'activation_baseline'].includes(goalBinding.trigger) ? 'system' : 'user' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
   const parts = [{ type: 'text', text: input.prompt }, ...(input.attachments ?? []).map(item => ({ type: 'attachment', kind: item.kind, name: item.name, url: item.url, size: item.size }))]
   if (!original || runtimeJson(original.parts).hash !== runtimeJson(JSON.parse(JSON.stringify(parts))).hash) throw new DataAccessError(409, 'RUN_INPUT_MISMATCH', '初始化必须使用已保存的完整原始请求。')
-  if (run.runtimeProtocolVersion === 1 && run.taskRootId && await prisma.agentExecutionState.findUnique({ where: { taskRootId: run.taskRootId } })) return loadExecutionState(userId, runId)
   if (run.status !== 'queued') throw new DataAccessError(409, 'RUN_IN_PROGRESS', '不能重新初始化已启动任务。')
   await assertManagedAttachmentsAccess(input.attachments, userId)
   const runtime = await getModelTierRuntime(run.modelTier as import('../../../shared/contracts/index.js').CreditModelTier, userId, run.customModelId,
@@ -150,8 +153,13 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
     .filter(tool => !session.spawnedFromSessionId || !ORCHESTRATION_TOOL_NAMES.has(tool.name))
   const contextRead: import('./tools/types.js').AgentTool = { ...executionContextReadTool,
     execute: (ctx, args) => executionContextReadTool.execute(ctx, executionContextReadTool.parameters.parse(args)) }
-  const tools = applySessionToolPolicy([...scoped, contextRead], input.mode, session.toolPolicy,
+  const currentTools = applySessionToolPolicy([...scoped, contextRead], input.mode, session.toolPolicy,
     session.sandboxMode === 'read_only' || session.sandboxMode === 'full_access' ? session.sandboxMode : 'workspace')
+  const activationCeiling = goalBinding ? await prisma.$transaction(async tx => {
+    const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: goalBinding.goalId } })
+    return (await import('./goal-activation.js')).readGoalActivationToolCeiling(tx, goal)
+  }) : null
+  const tools = activationCeiling ? intersectToolAuthority(currentTools, input.mode, new Map(activationCeiling)) : currentTools
   const spec = await runtimeTransaction(async tx => {
     const current = await lockOwnedRun(tx, userId, runId)
     if (current.status !== 'queued') throw new DataAccessError(409, 'RUN_IN_PROGRESS', '初始化期间任务状态已变化。')
@@ -370,7 +378,8 @@ export async function startLoopRunLocked(
       status: 'queued',
       engine: 'loop',
       inputSummary: input.prompt.slice(0, 300),
-      startRequest: JSON.parse(JSON.stringify(input)) as Prisma.InputJsonValue,
+      startRequest: JSON.parse(JSON.stringify(options.humanOrigin === 'http' && !options.goal && options.concurrencyScope !== 'orchestration'
+        ? withHumanAdmission(input) : input)) as Prisma.InputJsonValue,
       modelTier,
       customModelId: modelTier === 'custom' ? input.customModelId : null,
       reasoningEffort: modelRuntime.reasoningEffort,
@@ -811,6 +820,12 @@ export async function continueLoopRun(
   return withUserRunLock(userId, () => continueLoopRunLocked(userId, runId, model))
 }
 
+/** Called only after the locked activation supervisor has consumed the source
+ * settlement barrier. Restores the same task, original model and frozen grants. */
+export async function continueActivatedGoalRun(userId: string, runId: string, goalId: string, epoch: bigint) {
+  return withUserRunLock(userId, () => continueLoopRunLocked(userId, runId, undefined, { goalId, epoch }))
+}
+
 /** B0 recovery batch for existing durable tasks, separate from legacy cleanup.
  * Discovery is only a hint: the
  * dispatcher must acquire the original lease and revalidate the saved frame.
@@ -847,11 +862,25 @@ async function continueLoopRunLocked(
   userId: string,
   runId: string,
   model?: ContinueLoopRunModelSelection,
+  activation?: { goalId: string; epoch: bigint },
 ): Promise<StartAgentLoopRunResponse> {
   const run = await findOwnedLoopRun(userId, runId)
-  const goalExecution = await prisma.agentGoalExecution.findUnique({ where: { runId } })
-  if (goalExecution) throw new DataAccessError(409, 'GOAL_RESUME_REQUIRED', '请使用目标条的继续操作，原目标预算与进度会保留。')
+  // The author's explicit end is final, before any goal/control lookup or
+  // admission transaction can reinterpret this as a resumable execution.
   if (hasAuthorEnded(run.usage)) throw new DataAccessError(409, 'RUN_AUTHOR_ENDED', '原任务已按作者要求结束，请发送明确的新任务；已有成果保留。')
+  const goalExecution = await prisma.agentGoalExecution.findUnique({ where: { runId } })
+  if (!activation && await prisma.agentGoal.findFirst({ where: { userId, sessionId: run.sessionId, currentRunId: runId,
+    status: { notIn: ['completed', 'cancelled'] }, evidence: { some: { criterionId: 'activation-source' } } } })) {
+    throw new DataAccessError(409, 'GOAL_RESUME_REQUIRED', '请使用目标条继续原任务，原预算与权限会保留。')
+  }
+  if (goalExecution && (!activation || goalExecution.goalId !== activation.goalId)) throw new DataAccessError(409, 'GOAL_RESUME_REQUIRED', '请使用目标条的继续操作，原目标预算与进度会保留。')
+  const activationReceipt = activation ? await runtimeTransaction(async tx => {
+    const goal = await (await import('./goal-store.js')).lockOwnedGoal(tx, userId, run.sessionId, activation.goalId)
+    if (goal.status !== 'active' || goal.epoch !== activation.epoch || goal.currentRunId !== runId || goal.reasonCode !== 'GOAL_ACTIVATION_RESUME_READY') throw new DataAccessError(409, 'GOAL_VERSION_CONFLICT', '原任务继续授权已变化。')
+    const source = await (await import('./goal-activation.js')).readGoalActivationReceipt(tx, goal)
+    if (!source?.receipt.baselineBound) throw new DataAccessError(409, 'GOAL_RECONCILIATION_REQUIRED', '原执行尚未完成结算。')
+    return source.receipt
+  }) : null
   await prisma.$transaction(tx => assertAgentManuscriptCurrent(tx, { userId, novelId: run.novelId, runId }))
 
   assertTaskAuthorizationRuntimeReady(run.taskSpec, { userId, sessionId: run.sessionId, novelId: run.novelId })
@@ -863,7 +892,7 @@ async function continueLoopRunLocked(
     const pause = await prisma.agentExecutionOutbox.findFirst({ where: { taskRootId: run.taskRootId, type: 'run.paused',
       payload: { path: ['runIds'], array_contains: [runId] } }, orderBy: { sequence: 'desc' }, select: { id: true } })
     if (!pause) throw new DataAccessError(409, 'STALE_RESUME_TARGET', '缺少本次任务的原暂停记录。')
-    const resumed = await resumeDurableTask({ userId, runId, pauseEventId: pause.id })
+    const resumed = await resumeDurableTask({ userId, runId, pauseEventId: pause.id, ...(activation ? { activation } : {}) })
     // The original saved frame is the only input. No assembleContext, new user
     // message, model/skill selection, or fresh budget is allowed on this path.
     if (!getActiveRun(resumed.run.id) && ['queued', 'running'].includes(resumed.run.status)) {
@@ -871,7 +900,7 @@ async function continueLoopRunLocked(
         console.error('[agent-loop] 原任务续跑未完成', { runId: resumed.run.id, code: error instanceof DataAccessError ? error.code : 'RESUME_FAILED' })
       })
     }
-    return { runId: resumed.run.id, sessionId: run.sessionId, runGoalId: null, status: resumed.run.status, streamUrl: `/api/agent/runs/${resumed.run.id}/stream` }
+    return { runId: resumed.run.id, sessionId: run.sessionId, runGoalId: activation?.goalId ?? null, status: resumed.run.status, streamUrl: `/api/agent/runs/${resumed.run.id}/stream` }
   }
   assertLegacyRuntimeCompatible(run)
 
@@ -984,12 +1013,14 @@ async function continueLoopRunLocked(
     modelTier: nextTier,
     customModelId: nextCustomModelId,
     reasoningEffort: nextReasoningEffort,
+    ...(activation && activationReceipt ? { activationResume: activation,
+      toolAuthorityCeiling: new Map(activationReceipt.toolAuthority) } : {}),
   })
 
   return {
     runId: run.id,
     sessionId: run.sessionId,
-    runGoalId: null,
+    runGoalId: activation?.goalId ?? null,
     status: 'running',
     streamUrl: `/api/agent/runs/${run.id}/stream`,
   }

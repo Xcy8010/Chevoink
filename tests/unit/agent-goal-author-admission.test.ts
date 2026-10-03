@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ goal: vi.fn(), revision: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } },
-  prisma: { agentGoal: { findFirst: mocks.goal }, agentGoalRevision: { findUniqueOrThrow: mocks.revision } },
+  prisma: { agentGoal: { findFirst: mocks.goal }, agentGoalRevision: { findUniqueOrThrow: mocks.revision }, agentGoalEvidence: { findUnique: async () => null } },
 }))
 import { resolveGoalAuthorAdmission } from '../../api/lib/agent/goal-author-admission.js'
 

@@ -65,6 +65,8 @@ export const AGENT_TOOL_GOVERNANCE = {
     risk: 'low',
     postconditions: ['goal_execution_scope_verified', 'current_revision_domain_facts_only', 'model_completion_authority_denied'],
   },
+  goal_enable: { category: 'workflow', risk: 'medium',
+    postconditions: ['server_human_source_verified', 'original_task_scope_preserved', 'deferred_activation_only', 'idempotent_goal_receipt', 'no_current_run_rebinding'] },
   goal_report: {
     category: 'workflow',
     risk: 'medium',

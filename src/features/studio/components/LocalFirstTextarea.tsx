@@ -1,6 +1,7 @@
 ﻿import { forwardRef, useCallback, useEffect, useRef, useState, type ChangeEvent, type CompositionEvent, type FocusEvent, type SyntheticEvent, type TextareaHTMLAttributes } from 'react'
 
 import { cn } from '@/lib/utils'
+import { useLayoutEffect } from 'react'
 import { isWindowsDesktopApp } from '@/lib/desktop-app'
 import { registerDesktopSave } from '@/lib/desktop-lifecycle'
 
@@ -57,6 +58,12 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
   const commitTimerRef = useRef<number | null>(null)
   const selectionTimerRef = useRef<number | null>(null)
   const composingRef = useRef(false)
+  const documentKeyRef = useRef(resetKey)
+  const currentKeyRef = useRef(resetKey)
+  currentKeyRef.current = resetKey
+  const readOnlyRef = useRef(readOnly)
+  readOnlyRef.current = readOnly
+  const authorCommitRef = useRef<{ key: string | undefined; commit: (value: string) => void } | null>(null)
   const lastSelectionCollapsedRef = useRef<boolean | null>(null)
   const onCommitRef = useRef(onCommit)
   const onSelectionChangeRef = useRef(onSelectionChange)
@@ -73,8 +80,11 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
   const flushPending = useCallback(() => {
     clearCommitTimer()
     if (localRef.current !== committedRef.current) {
+      const author = authorCommitRef.current
+      if (author && author.key !== currentKeyRef.current) return
       committedRef.current = localRef.current
-      onCommitRef.current(localRef.current)
+      const commit = readOnlyRef.current ? author?.commit ?? onCommitRef.current : onCommitRef.current
+      commit(localRef.current)
     }
   }, [clearCommitTimer])
 
@@ -99,18 +109,22 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
 
   // 外部权威值变化（Agent 写入、审查保留/撤销、服务端同步、切章）时覆盖本地。
   // 本地上报后的回声（value === committedRef）不会触发覆盖，光标与滚动保持稳定。
-  useEffect(() => {
-    if (readOnly) return
-    if (value === committedRef.current) return
+  useLayoutEffect(() => {
+    if (documentKeyRef.current !== resetKey || composingRef.current) return
+    if (value === committedRef.current && !readOnly) return
+    // Preserve a pending author edit before an Agent lock supersedes the displayed buffer.
+    if (readOnly && !composingRef.current) flushPending()
     clearCommitTimer()
     committedRef.current = value
     localRef.current = value
     setLocal(value)
-  }, [clearCommitTimer, readOnly, value])
+  }, [clearCommitTimer, flushPending, readOnly, resetKey, value])
 
   // resetKey（章节/文档 id）变化时强制重置，即使两份内容恰好相同。
-  useEffect(() => {
-    if (readOnly) return
+  useLayoutEffect(() => {
+    documentKeyRef.current = resetKey
+    authorCommitRef.current = null
+    composingRef.current = false
     clearCommitTimer()
     committedRef.current = value
     localRef.current = value
@@ -124,7 +138,11 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
       if (commitTimerRef.current !== null) window.clearTimeout(commitTimerRef.current)
       if (selectionTimerRef.current !== null) window.clearTimeout(selectionTimerRef.current)
       if (!composingRef.current && localRef.current !== committedRef.current) {
-        onCommitRef.current(localRef.current)
+        const author = authorCommitRef.current
+        if (!author || author.key === currentKeyRef.current) {
+          const commit = readOnlyRef.current ? author?.commit ?? onCommitRef.current : onCommitRef.current
+          commit(localRef.current)
+        }
       }
     },
     [],
@@ -142,6 +160,7 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
   }, [])
 
   const handleChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
+    authorCommitRef.current = { key: resetKey, commit: onCommitRef.current }
     const next = event.currentTarget.value
     setLocal(next)
     localRef.current = next
@@ -149,12 +168,15 @@ const LocalFirstTextarea = forwardRef<HTMLTextAreaElement, LocalFirstTextareaPro
   }
 
   const handleCompositionStart = () => {
+    clearCommitTimer()
+    authorCommitRef.current = { key: resetKey, commit: onCommitRef.current }
     composingRef.current = true
   }
 
   const handleCompositionEnd = (event: CompositionEvent<HTMLTextAreaElement>) => {
     composingRef.current = false
-    const next = event.currentTarget.value
+    if (authorCommitRef.current?.key !== resetKey) return
+    const next = readOnly ? localRef.current : event.currentTarget.value
     setLocal(next)
     localRef.current = next
     // 组合结束后尽快上报，缩短自动保存的追平窗口。

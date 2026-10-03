@@ -50,7 +50,7 @@ import { executeDurableImport } from './runtime-import.js'
 import { coverApplyTool } from './tools/cover-tools.js'
 import { withGoalExecutionContext, withGoalEffects } from './goal-context.js'
 import { readGoalExecution } from './goal-fence.js'
-import { goalReadTool, goalReportTool } from './tools/goal-tools.js'
+import { goalEnableTool, goalReadTool, goalReportTool } from './tools/goal-tools.js'
 import { prepareToolCursorOperation } from './runtime-tool-cursor.js'
 import { commitOperationEffect } from './runtime-operations.js'
 import type { CreditModelTier, ModelReasoningEffort } from '../../../shared/contracts/index.js'
@@ -63,7 +63,7 @@ function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
 }
 const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(coverApplyTool),
-  checkedAdapter(goalReadTool), checkedAdapter(goalReportTool),
+  checkedAdapter(goalEnableTool), checkedAdapter(goalReadTool), checkedAdapter(goalReportTool),
   checkedAdapter(novelImportTool),
   checkedAdapter(accountCreditsTool), checkedAdapter(accountCreditHistoryTool), checkedAdapter(accountNovelsTool), checkedAdapter(sessionRenameTool),
   checkedAdapter(projectSearchTool), checkedAdapter(entityResolveTool), checkedAdapter(impactAnalyzeTool), checkedAdapter(structureValidateTool),
@@ -150,7 +150,8 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
         provider: current.configuration.model.provider, modelName: current.configuration.model.modelName, routeRevision: current.configuration.model.routeRevision } }
     const capability = { lease, cursor, operationKey: `exec:${frame.state.nextOperationSequence}` }
-    if (goalTool) ctx.durableRead = capability
+    if (call.name === 'goal_enable') ctx.durableGoalActivation = capability
+    else if (goalTool) ctx.durableRead = capability
     else if (['execution_context_read', 'chapter_read', 'plan_read', 'novel_get_context', 'chapter_list_summaries', 'memory_search', 'volume_list', 'structure_outline', ...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].includes(call.name)) ctx.durableRead = capability
     else if (call.name === 'ask_user') { /* Persistent question step below; no legacy waiter. */ }
     else if (call.name === 'novel_import') ctx.durableImport = capability
@@ -222,6 +223,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   const historyAction = [...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].find(name => name === selected.tool.name)
   if (selected.tool.name === 'ask_user') return executeDurableQuestion(lease, selected.cursor, selected.ctx, selected.tool, selected.args)
   if (selected.tool.name === 'novel_import') return executeDurableImport(selected.ctx, selected.tool, selected.args)
+  if (selected.tool.name === 'goal_enable') return { kind: 'tool' as const, result: await selected.tool.execute(selected.ctx, selected.args) }
   if (selected.tool.name === 'goal_read' || selected.tool.name === 'goal_report') return executeDurableGoalTool(selected.ctx, selected.tool, selected.args)
   if (historyAction) {
     const normalize = (raw: unknown) => Object.fromEntries(Object.entries(selected.tool.parameters.parse(normalizeToolInput(selected.tool, raw)) as Record<string, unknown>).filter(([, value]) => value !== undefined))

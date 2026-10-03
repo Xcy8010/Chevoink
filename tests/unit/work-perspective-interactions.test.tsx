@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import WorkPerspective from '../../src/features/studio/components/WorkPerspective'
 import { useWorkConversation } from '../../src/features/studio/components/work-conversation-context'
+import { openWorkDocument } from '../../src/features/studio/components/work-viewer-events'
 
 function Conversation() {
   const { collapsed, expand } = useWorkConversation()
@@ -26,6 +27,26 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); delete document.documentElement.dataset.studioResizing })
 function move(root: Element, x: number) { fireEvent.pointerMove(root, { clientX: x }); act(() => vi.advanceTimersByTime(300)) }
+it('preserves a folded viewer through delayed hydration, task revisit and remount, but opens for an explicit scoped selection', () => {
+  const saved = { viewer: 600, inspector: 400, viewerCollapsed: true, inspectorCollapsed: false, chatCollapsed: false }
+  localStorage.setItem('chevoink:work-split-v2:task-a', JSON.stringify(saved))
+  const view = render(<WorkPerspective {...props()} viewer={undefined} viewerIdentity={null} />)
+  view.rerender(<WorkPerspective {...props()} />)
+  const folded = () => view.container.querySelector('[data-studio-panel="workViewer"]')?.getAttribute('aria-hidden')
+  expect(folded()).toBe('true')
+  view.rerender(<WorkPerspective {...props('task-b')} />)
+  act(() => openWorkDocument('task-a'))
+  view.rerender(<WorkPerspective {...props()} viewerIdentity="chapter-2" />)
+  expect(folded()).toBe('true')
+  expect(JSON.parse(localStorage.getItem('chevoink:work-split-v2:task-a')!).viewerCollapsed).toBe(true)
+  act(() => openWorkDocument('task-a'))
+  expect(folded()).toBe('false')
+  fireEvent.click(screen.getByRole('button', { name: '展开对话' }))
+  view.unmount()
+  const reopened = render(<WorkPerspective {...props()} viewer={undefined} viewerIdentity={null} />)
+  reopened.rerender(<WorkPerspective {...props()} />)
+  expect(reopened.container.querySelector('[data-studio-panel="workViewer"]')?.getAttribute('aria-hidden')).toBe('true')
+})
 it('restores A/B/A widths and explicit collapsed flags, including remount', () => {
   localStorage.setItem('chevoink:work-split-v2:task-a', JSON.stringify({ viewer: 260, inspector: 220, viewerCollapsed: true, inspectorCollapsed: true, chatCollapsed: false }))
   localStorage.setItem('chevoink:work-split-v2:task-b', JSON.stringify({ viewer: 380, inspector: 240, viewerCollapsed: false, inspectorCollapsed: false, chatCollapsed: false }))

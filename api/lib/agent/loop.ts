@@ -89,6 +89,9 @@ import {
  */
 
 export type ExecuteAgentRunParams = {
+  /** Dedicated server goal activation resume; no manual budget grant. */
+  activationResume?: { goalId: string; epoch: bigint }
+  toolAuthorityCeiling?: import('./tool-authority.js').ToolAuthority
   /** Only a scheduler-admitted goal execution may use a system admission message. */
   internalGoalContinuation?: boolean
   goalSteering?: import('../../../shared/contracts/index.js').StartAgentLoopRunRequest
@@ -458,7 +461,7 @@ export async function handleToolCall(
 
   try {
     const goalContext = await readGoalExecution(ctx.userId, ctx.runId)
-    const result = await withGoalExecutionContext(goalContext, () => withGoalEffects(() => tool.execute(ctx, validated.data)))
+    const result = await withGoalExecutionContext(goalContext, () => withGoalEffects(() => tool.execute({ ...ctx, inlineChild: Boolean(subagent) }, validated.data)))
     failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
     if (result.outcome === 'failed') return fail(result.summary ?? '执行未完成', wrapToolOutput(tool.name, result.output), 'failed')
     const durationMs = Date.now() - startedAt
@@ -763,7 +766,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
   }
 
   try {
-    const storedRun = await startLegacyRuntimeRun(params.userId, runId, Boolean(params.resume))
+    const storedRun = await startLegacyRuntimeRun(params.userId, runId, Boolean(params.resume), params.activationResume)
     assertLegacyRuntimeCompatible(storedRun)
     executionStartedAt = Date.now()
     if (params.resume) {
@@ -904,7 +907,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     // 手动续跑（作者显式点击「继续」或输入继续指令）：自动检查点续跑受总 token 硬顶约束，
     // 但显式人工入口允许在硬顶之上再授予有限数量的预算片（plan/18「继续执行」手动入口），
     // 避免任务被自动硬顶永久死锁；片数上限持久化在 checkpoint 里，连点不能无限放大成本。
-    if (params.resume || previousTask) {
+    if ((params.resume || previousTask) && !params.activationResume) {
       const grant = resolveManualResumeGrant({
         taskTokens: taskTokens(), runTokenBudget,
         turnsUsed: turn + inheritedTurns, maxTurns,
@@ -935,7 +938,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
           qualityMode: params.qualityMode,
         })
     let taskSpecChanged = !parsedTaskSpec.success || Boolean(previousTask) || parsedTaskSpec.data.runId !== runId
-    if (params.resume || previousTask) {
+    if ((params.resume || previousTask) && !params.activationResume) {
       const narrowed = narrowLegacyConversationTask(narrowLegacyResearchTask(taskSpec, contextPrompt), contextPrompt)
       taskSpecChanged ||= narrowed !== taskSpec
       taskSpec = narrowed
@@ -1142,12 +1145,18 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     const orchestrationScopedTools = sessionPolicy?.spawnedFromSessionId
       ? scopedTools.filter((tool) => !ORCHESTRATION_TOOL_NAMES.has(tool.name))
       : scopedTools
-    const tools = applySessionToolPolicy(
+    const currentTools = applySessionToolPolicy(
       orchestrationScopedTools,
       params.mode,
       sessionPolicy?.toolPolicy,
       sessionPolicy?.sandboxMode === 'read_only' || sessionPolicy?.sandboxMode === 'full_access' ? sessionPolicy.sandboxMode : 'workspace',
     )
+    const activationCeiling = ownedGoalExecution ? await prisma.$transaction(async tx => {
+      const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: ownedGoalExecution.goalId } })
+      return (await import('./goal-activation.js')).readGoalActivationToolCeiling(tx, goal)
+    }) : null
+    const ceiling = params.toolAuthorityCeiling ?? (activationCeiling ? new Map(activationCeiling) : null)
+    const tools = ceiling ? intersectToolAuthority(currentTools, params.mode, ceiling) : currentTools
     const openAITools = toOpenAITools(tools)
     const contextBudget = resolveAgentContextBudget(modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens, env.aiTextMaxOutputTokens)
 
@@ -1394,8 +1403,17 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     }
 
     // 轮次片耗尽时在 while 条件里做检查点续跑（成功则 maxTurns 已刷新、继续循环），不可续跑才落入下方收尾
+    const seenGoalConsents = new Set<string>()
     while (turn + inheritedTurns < maxTurns || await tryCheckpointResume('turns')) {
       if (controller.signal.aborted) throw new DOMException('run aborted', 'AbortError')
+      if (!sessionPolicy?.spawnedFromSessionId && agent.type === 'orchestrator') {
+        const consent = await (await import('./goal-consent.js')).consumeLegacyGoalConsent({ userId: params.userId,
+          sessionId: params.sessionId, novelId: params.novelId, runId })
+        if (consent && !seenGoalConsents.has(consent.id)) {
+          messages.push({ role: 'user', content: consent.prompt })
+          seenGoalConsents.add(consent.id)
+        }
+      }
       // Every request path, including no-tool/protocol retries, passes this budget gate.
       if (taskTokens() >= runTokenBudget && !(await tryCheckpointResume('budget'))) {
         const reason = checkpointStopMessage()

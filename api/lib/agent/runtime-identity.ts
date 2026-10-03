@@ -29,7 +29,7 @@ export async function initializeDurableTask(input: { userId: string; runId: stri
     if (spec.scope.novelId !== run.novelId || (run.taskRootId && run.taskRootId !== spec.id)
       || ![0, DURABLE_RUNTIME_VERSION].includes(run.runtimeProtocolVersion)) runtimeError('RUNTIME_SCOPE_MISMATCH', '任务根或版本不匹配，不能重建为新任务。')
     const message = await tx.agentMessage.findFirst({ where: { id: input.sourceMessageId, runId: run.id, sessionId: run.sessionId,
-      role: goalBinding && goalBinding.trigger !== 'author' ? 'system' : 'user' } })
+      role: goalBinding && !['author', 'activation_baseline'].includes(goalBinding.trigger) ? 'system' : 'user' } })
     if (!message) return runtimeError('RUNTIME_SOURCE_REQUIRED', '缺少本任务的原始用户消息，不能从历史摘要补造授权。')
     const request = runtimeJson(message.parts)
     const digest = runtimeJson({ spec: frozen.value, request: request.value }).hash
@@ -77,13 +77,28 @@ export function assertLegacyRuntimeCompatible(run: { runtimeProtocolVersion?: nu
 }
 
 /** Atomic admission: checking the version after an unconditional status update is too late. */
-export async function startLegacyRuntimeRun(userId: string, runId: string, resume = false) {
+export async function startLegacyRuntimeRun(userId: string, runId: string, resume = false, activation?: { goalId: string; epoch: bigint }) {
   try {
     return await runtimeTransaction(async tx => {
+      if (activation) {
+        const { lockOwnedGoal, changeGoal, goalError } = await import('./goal-store.js')
+        const run = await tx.agentRun.findFirst({ where: { id: runId, userId } })
+        if (!run) return runtimeError('RUNTIME_SCOPE_MISMATCH', '原任务不存在。')
+        const goal = await lockOwnedGoal(tx, userId, run.sessionId, activation.goalId)
+        const grant = await tx.agentGoalEvidence.findUnique({ where: { goalId_revision_criterionId: { goalId: goal.id, revision: 1, criterionId: 'activation-resume' } } })
+        if (!resume || goal.status !== 'active' || goal.epoch !== activation.epoch || goal.currentRunId !== runId
+          || goal.reasonCode !== 'GOAL_ACTIVATION_RESUME_READY' || grant?.status !== 'verified'
+          || !grant.receipt || typeof grant.receipt !== 'object' || Array.isArray(grant.receipt)
+          || grant.receipt.epoch !== String(goal.epoch) || grant.receipt.sourceRunId !== runId) return goalError('GOAL_VERSION_CONFLICT', '原任务继续授权已变化。')
+        await tx.agentGoalExecution.update({ where: { runId }, data: { epoch: goal.epoch } })
+        await (await import('./goal-fence.js')).assertGoalRevisionFence(tx, { userId, sessionId: goal.sessionId, novelId: goal.novelId, goalId: goal.id, revision: goal.currentRevision, epoch: goal.epoch, runId })
+        await tx.agentGoalEvidence.update({ where: { id: grant.id }, data: { status: 'consumed' } })
+        await changeGoal(tx, goal, { phase: 'executing', reasonCode: null, activeSince: new Date(), nextEligibleAt: null }, 'activation.continued')
+      }
       // Goal control is the admission fence. It must run in the same
       // transaction as the status CAS so a paused/cancelled goal cannot be
       // resurrected by an old legacy startup path.
-      await assertRunGoalFence(tx, userId, runId)
+      if (!activation) await assertRunGoalFence(tx, userId, runId)
       return tx.agentRun.update({
         where: { id: runId, userId, runtimeProtocolVersion: 0, taskRootId: null,
           status: resume ? { in: ['paused', 'failed'] } : 'queued' },

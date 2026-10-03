@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(), execute: vi.fn(), active: vi.fn(() => false), prepare: vi.fn(),
-  runUpdate: vi.fn(), creditAccess: vi.fn(), tierRuntime: vi.fn(),
+  runUpdate: vi.fn(), creditAccess: vi.fn(), tierRuntime: vi.fn(), goal: vi.fn(), binding: vi.fn(),
   transaction: vi.fn(), tx: { $queryRaw: vi.fn(), agentRun: { findFirst: vi.fn() }, agentGoalExecution: { findUnique: vi.fn(async () => null) } },
 }))
 vi.mock('../../api/lib/agent/events.js', () => ({ prepareRunEventResume: mocks.prepare }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } },
-  prisma: { $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoalExecution: { findUnique: vi.fn(async () => null) }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) } },
+  prisma: { $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoal: { findFirst: mocks.goal }, agentGoalExecution: { findUnique: mocks.binding }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) } },
 }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.creditAccess, getModelTierRuntime: mocks.tierRuntime }))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: mocks.execute }))
@@ -21,6 +21,8 @@ beforeEach(() => {
   mocks.tx.$queryRaw.mockResolvedValue([{ id: 'n' }])
   mocks.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 0 } })
   mocks.tx.agentGoalExecution.findUnique.mockResolvedValue(null)
+  mocks.goal.mockResolvedValue(null)
+  mocks.binding.mockResolvedValue(null)
   mocks.active.mockReturnValue(false)
   mocks.count.mockResolvedValue(0)
   mocks.prepare.mockResolvedValue(72)
@@ -28,6 +30,19 @@ beforeEach(() => {
   mocks.message.mockResolvedValue({ parts: [{ type: 'text', text: '写第19章。' + '完整原始要求'.repeat(100) }] })
 })
 describe('continue API exact target', () => {
+  it.each(['pending-activation', 'goal-bound'])('requires human goal controls for %s without changing model or starting paid work', async kind => {
+    if (kind === 'pending-activation') mocks.goal.mockResolvedValue({ id: 'pending-goal' })
+    else mocks.binding.mockResolvedValue({ goalId: 'bound-goal' })
+    await expect(continueLoopRun('u', 'run19', { modelTier: 'lite', customModelId: null, reasoningEffort: 'high' }))
+      .rejects.toMatchObject({ code: 'GOAL_RESUME_REQUIRED', status: 409 })
+    expect(mocks.goal).toHaveBeenCalledWith({ where: { userId: 'u', sessionId: 's', currentRunId: 'run19',
+      status: { notIn: ['completed', 'cancelled'] }, evidence: { some: { criterionId: 'activation-source' } } } })
+    expect(mocks.transaction).not.toHaveBeenCalled()
+    expect(mocks.runUpdate).not.toHaveBeenCalled()
+    expect(mocks.creditAccess).not.toHaveBeenCalled()
+    expect(mocks.prepare).not.toHaveBeenCalled()
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
   it.each([null, { parts: [] }, { parts: [{ type: 'text', text: '   ' }] }])('does not reconstruct a missing original request from inputSummary: %j', async message => {
     mocks.message.mockResolvedValue(message)
     await expect(continueLoopRun('u', 'run19')).rejects.toMatchObject({ code: 'RUN_INPUT_REQUIRED' })

@@ -21,6 +21,7 @@ import { advanceDurableMemory } from './runtime-memory.js'
 import { estimateChatMessagesTokens, estimateToolDefinitionTokens, resolveDurableInputLimit } from './context-budget.js'
 import { readDurableImportBoundary, waitForDurableImport } from './runtime-import.js'
 import { modelRouteRevision } from './runtime-model-cursor.js'
+import { consumeDurableGoalConsent } from './goal-consent.js'
 
 const reasoning = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const durableModelTier = z.enum([...SERVER_MODEL_TIERS, 'custom'] as [string, ...string[]])
@@ -237,6 +238,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   // Goal continuations carry the author's real steering message in AgentMessage;
   // append it to the immutable execution frame only once, at an idle boundary.
   await consumeDurableSteering(lease)
+  await consumeDurableGoalConsent(lease)
   // A resumed goal may have an explicitly selected model. Update only the
   // frozen route while retaining the original root, frame history and budget.
   await refreshDurableGoalModel(lease)

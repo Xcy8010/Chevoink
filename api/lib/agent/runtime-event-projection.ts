@@ -19,7 +19,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
   return runtimeTransaction(async tx => {
     const { root } = await lockRunRoot(tx, userId, runId)
     const sources = await tx.agentExecutionOutbox.findMany({ where: { taskRootId: root.id,
-      OR: [{ type: { in: ['approval.requested', 'approval.resolved', 'execution.state.saved', 'question.requested', 'import.requested', 'import.commit_requested'] } },
+      OR: [{ type: { in: ['approval.requested', 'approval.resolved', 'execution.state.saved', 'question.requested', 'import.requested', 'import.commit_requested', 'goal.activation_registered'] } },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'completed' } },
         { type: 'run.paused', payload: { path: ['runIds'], array_contains: [runId] } }],
       projections: { none: { runId } } }, orderBy: { sequence: 'asc' }, take: limit })
@@ -28,7 +28,15 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
     const events: AgentStreamEvent[] = []
     for (const source of sources) {
       let bodies: import('../../../shared/contracts/index.js').AgentStreamEventBody[]
-      if (source.type === 'import.requested' || source.type === 'import.commit_requested') {
+      if (source.type === 'goal.activation_registered') {
+        const effect = await tx.agentEffectReceipt.findUnique({ where: { operationId: source.operationId ?? '' }, include: { operation: true } })
+        const result = z.object({ toolResult: z.object({ goalSnapshot: z.object({ id: z.string(), sessionId: z.literal(root.sessionId), novelId: z.literal(root.novelId), currentRunId: z.string() }).passthrough() }) }).safeParse(effect?.result)
+        const event = z.object({ operationId: z.string(), snapshot: z.unknown() }).safeParse(source.payload)
+        if (!effect || !result.success || !event.success || effect.operation.action !== 'goal_enable' || effect.operation.taskRootId !== root.id
+          || source.runId !== effect.runId || source.eventKey !== `goal-activation:${effect.operationId}` || event.data.operationId !== effect.operationId
+          || runtimeJson(effect.result).hash !== effect.resultHash || runtimeJson(event.data.snapshot).hash !== runtimeJson(result.data.toolResult.goalSnapshot).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '目标登记事件缺少原调用回执。')
+        bodies = [{ type: 'goal.snapshot', snapshot: result.data.toolResult.goalSnapshot as unknown as import('../../../shared/contracts/agent-goal.js').AgentGoalSnapshot }]
+      } else if (source.type === 'import.requested' || source.type === 'import.commit_requested') {
         const waiting = source.type === 'import.requested' ? novelImportWaitingSchema.parse(source.payload) : importCommitWaitingSchema.parse(source.payload)
         const operation = await tx.agentOperation.findFirst({ where: { id: waiting.operationId, taskRootId: root.id, kind: 'tool', action: 'novel_import' } })
         const input = z.object({ input: z.object({ callId: z.string(), novelId: z.string(), args: z.unknown(), normalization: z.object({ sourceRevision: z.number().int().nonnegative() }) }) }).safeParse(operation?.inputSnapshot)

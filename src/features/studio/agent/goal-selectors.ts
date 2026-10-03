@@ -67,6 +67,7 @@ export function selectAgentGoalView({ goal, goalSessionId, sessionId, runId, res
  */
 export function selectAgentActivityRunActive(view: AgentGoalView, phase: AgentRunPhase): boolean {
   if (!view.goal) return isRunActive(phase)
+  if (!view.runBelongsToGoal) return isRunActive(phase)
   if (view.terminal) return view.runBelongsToGoal ? false : isRunActive(phase)
   return view.running
 }

@@ -28,6 +28,9 @@ export type ToolContext = {
   protectedChapterIds?: ReadonlySet<string>
   /** Current server admission ceiling; inline children must inherit and intersect it. */
   toolAuthority?: ToolAuthority
+  /** Internal execution provenance, never populated from model arguments. */
+  inlineChild?: boolean
+  durableGoalActivation?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   /** Internal, frozen at admission. Never populated from model arguments. */
   durableContent?: { lease: RunLeaseToken; operationKey: string; chapterId: string; expectedRevision: number;
     cursor?: import('../runtime-tool-cursor.js').ToolExecutionCursor }

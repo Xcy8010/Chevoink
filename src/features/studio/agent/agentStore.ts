@@ -1002,6 +1002,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       const base = { lastSeq: event.seq }
 
       switch (event.type) {
+        case 'goal.snapshot': {
+          const snapshot = event.snapshot
+          if (event.runId !== state.runId || snapshot.currentRunId !== event.runId || snapshot.sessionId !== state.activeSessionId
+            || (state.goal && state.goalSessionId === snapshot.sessionId && (snapshot.id === state.goal.id
+              ? snapshot.stateVersion < state.goal.stateVersion : snapshot.createdAt <= state.goal.createdAt))) return {}
+          return { ...base, goal: snapshot, goalSessionId: snapshot.sessionId, goalMode: true }
+        }
         case 'run.started':
           return { ...base, phase: 'running', agentTitle: event.agent.title }
 
