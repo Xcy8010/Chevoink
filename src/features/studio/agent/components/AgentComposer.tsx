@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -9,7 +10,7 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from 'react'
-import { ArrowUp, BookOpenText, Check, ChevronDown, ChevronRight, Feather, FileText, Image, LoaderCircle, Mic, Pencil, Play, Plus, Rocket, Scale, Settings2, Square, Target, Wrench, X } from 'lucide-react'
+import { ArrowUp, Bot, BookOpenText, Check, ChevronDown, ChevronRight, Feather, FileText, Image, LoaderCircle, Mic, Pencil, Play, Plus, Rocket, Scale, Settings2, Square, Target, Wrench, X } from 'lucide-react'
 import { ReasoningSlider } from './ReasoningSlider'
 import StyleLearningDialog from '../../components/StyleLearningDialog'
 import { SubagentPicker } from './SubagentPicker'
@@ -49,6 +50,7 @@ import {
   referenceKindLabel,
 } from '../composer-content'
 import { parseGoalCommand } from '../goal-command'
+import { findComposerSlashToken, type ComposerSlashToken } from './composer-slash'
 
 /**
  * Agent 输入区：
@@ -99,7 +101,6 @@ type AgentComposerProps = {
   goalActive?: boolean
   goalBusy?: boolean
   onGoalOpen?: () => void
-  onGoalCancel?: () => void
   onGoalSubmit?: (objective: string, attachments: AgentAttachmentMeta[], creativeFreedom: CreativeFreedom, qualityMode: StoryCompilerMode, pinnedSkillIds: string[], pinnedSubagentId?: string) => Promise<void> | void
   onGoalCommand?: (action: 'edit' | 'pause' | 'resume' | 'clear') => Promise<void> | void
 }
@@ -273,9 +274,7 @@ export function AgentComposer({
   onOpenSkillManager,
   goalCreationEnabled = false,
   goalActive = false,
-  goalBusy = false,
   onGoalOpen,
-  onGoalCancel,
   onGoalSubmit,
   onGoalCommand,
 }: AgentComposerProps) {
@@ -306,6 +305,16 @@ export function AgentComposer({
   const [referencePickerOpen, setReferencePickerOpen] = useState(false)
   const [referenceSearch, setReferenceSearch] = useState('')
   const [skillPickerOpen, setSkillPickerOpen] = useState(false)
+  const [subagentPickerOpen, setSubagentPickerOpen] = useState(false)
+  const [slashToken, setSlashToken] = useState<ComposerSlashToken | null>(null)
+  const [slashSubmenu, setSlashSubmenu] = useState<string | null>(null)
+  const [slashIndex, setSlashIndex] = useState(0)
+  const slashListId = useId()
+  const slashSignature = useRef('')
+  const dismissedSlash = useRef<string | null>(null)
+  const composingRef = useRef(false)
+  const slashCardRef = useRef<HTMLDivElement | null>(null)
+  const slashReturnCaret = useRef<{ offset: number; preceding: string[] } | null>(null)
   const [editingReasoningTier, setEditingReasoningTier] = useState<Exclude<CreditModelTier, 'custom'> | null>(null)
   // 手机端模型二级列表改为受控视图：触屏没有 hover，靠 focus-within 显示会残留/溢出，
   // 点击「模型」行进入模型列表、返回或选中后回到根视图；桌面端仍走 hover/focus 行为完全不变
@@ -322,6 +331,7 @@ export function AgentComposer({
   const [pendingVoice, setPendingVoice] = useState<{ scope: string; text: string } | null>(null)
   const voiceUndo = useRef<{ scope: string; after: string; draft: string; references: ComposerReference[] } | null>(null)
   const caretAfterVoice = useRef<number | null>(null)
+  const slashCaretReferences = useRef<string[] | null>(null)
   const scope = voiceScopeKey ?? ''
   const voice = useVoiceInput({
     scopeKey: scope,
@@ -344,9 +354,44 @@ export function AgentComposer({
     voiceBookmark.current = null
     voiceUndo.current = null
     caretAfterVoice.current = null
+    slashCaretReferences.current = null
     setPendingVoice(null)
     setMobileModelSheetOpen(false)
-  }, [scope])
+    setSlashToken(null)
+    setSlashSubmenu(null)
+    setReferencePickerOpen(false)
+    setReferenceSearch('')
+    setSkillPickerOpen(false)
+    setSubagentPickerOpen(false)
+    attachmentMenuRef.current?.removeAttribute('open')
+    dismissedSlash.current = null
+    slashReturnCaret.current = null
+    composingRef.current = false
+  }, [scope, novelId])
+
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => {
+      if (!slashToken && !slashSubmenu) return
+      const target = event.target as Node
+      if (editorRef.current?.contains(target) || slashCardRef.current?.contains(target)) return
+      const current = editorRef.current ? readComposerContent(editorRef.current, references) : null
+      if (slashToken && current) dismissedSlash.current = `${slashToken.start}:${slashToken.end}:${current.draft}`
+      setSlashToken(null)
+      setSlashSubmenu(null)
+      setReferencePickerOpen(false)
+      setReferenceSearch('')
+      setSkillPickerOpen(false)
+      setSubagentPickerOpen(false)
+      slashReturnCaret.current = null
+    }
+    document.addEventListener('pointerdown', dismiss)
+    return () => document.removeEventListener('pointerdown', dismiss)
+  }, [slashToken, slashSubmenu, references])
+
+  useEffect(() => {
+    if (disabled || sending || voiceActive) { setSlashToken(null); setSlashSubmenu(null) }
+  }, [disabled, sending, voiceActive])
+
 
   function applyVoiceText(text: string, offset?: number, preceding?: string[]) {
     const current = useAgentStore.getState()
@@ -426,22 +471,39 @@ export function AgentComposer({
   useLayoutEffect(() => {
     const editor = editorRef.current
     if (voiceActive || caretAfterVoice.current === null || !editor) return
-    let remaining = caretAfterVoice.current
+    const offset = caretAfterVoice.current
     caretAfterVoice.current = null
+    const preceding = slashCaretReferences.current
+    slashCaretReferences.current = null
+    restoreEditorCaret(offset, preceding)
+  }, [prompt, references, voiceActive])
+
+  function restoreEditorCaret(offset: number, preceding: string[] | null = null) {
+    const editor = editorRef.current
+    if (!editor) return
+    let remaining = offset
     editor.focus()
     const range = document.createRange()
     range.selectNodeContents(editor)
     range.collapse(false)
     for (const node of Array.from(editor.childNodes)) {
+      if (preceding && node instanceof HTMLElement && node.dataset.composerReference) {
+        if (remaining === 0 && !preceding.includes(node.dataset.composerReference)) break
+        range.setStartAfter(node)
+        range.collapse(true)
+        continue
+      }
       if (node.nodeType !== Node.TEXT_NODE) continue
       const length = node.textContent?.length ?? 0
-      if (remaining <= length) { range.setStart(node, remaining); range.collapse(true); break }
+      if (remaining < length || (!preceding && remaining === length)) { range.setStart(node, remaining); range.collapse(true); break }
       remaining -= length
+      range.setStartAfter(node)
+      range.collapse(true)
     }
     const selection = window.getSelection()
     selection?.removeAllRanges()
     selection?.addRange(range)
-  }, [prompt, references, voiceActive])
+  }
 
   const syncComposerFromDom = (composing = false): ParsedComposerContent => {
     const editor = editorRef.current
@@ -546,6 +608,7 @@ export function AgentComposer({
     event.preventDefault()
     insertPlainText(event.currentTarget, event.clipboardData.getData('text/plain'))
     syncComposerFromDom()
+    refreshSlashToken()
   }
 
   const attachReference = async (input: Omit<ComposerReference, 'offset'>) => {
@@ -656,6 +719,28 @@ export function AgentComposer({
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (voiceActive) { event.preventDefault(); return }
+    if (event.nativeEvent.isComposing || composingRef.current || event.keyCode === 229) return
+    if (slashVisible && event.key === 'Escape') {
+      event.preventDefault()
+      if (slashToken) dismissedSlash.current = `${slashToken.start}:${slashToken.end}:${prompt}`
+      dismissSlashMenu()
+      return
+    }
+    if (slashVisible && !slashSubmenu && event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      const tool = matchingTools.find(tool => tool.id === activeSlashTool)
+      if (tool && !event.ctrlKey && !event.metaKey && !event.altKey) selectTool(tool, true)
+      return
+    }
+    if (slashVisible && !slashSubmenu && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault()
+        const count = matchingTools.filter(tool => !tool.disabled).length
+        setSlashIndex(index => count ? (index + (event.key === 'ArrowDown' ? 1 : -1) + count) % count : 0)
+        return
+      }
+    }
+    if (slashVisible && slashSubmenu && event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); return }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) {
       const undo = voiceUndo.current
       if (undo?.scope === scope && undo.after === composerSignature(useAgentStore.getState().composerDraft, useAgentStore.getState().composerReferences)) {
@@ -674,6 +759,7 @@ export function AgentComposer({
       event.preventDefault()
       insertPlainText(event.currentTarget, '\n')
       syncComposerFromDom()
+      refreshSlashToken()
       return
     }
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -685,11 +771,220 @@ export function AgentComposer({
   const handleEditorClick = (event: MouseEvent<HTMLDivElement>) => {
     if (voiceActive) return
     const removeButton = (event.target as HTMLElement).closest<HTMLElement>('[data-remove-composer-reference]')
-    if (!removeButton) return
+    if (!removeButton) { refreshSlashToken(); return }
     event.preventDefault()
     removeButton.closest<HTMLElement>('[data-composer-reference]')?.remove()
     syncComposerFromDom()
     editorRef.current?.focus()
+  }
+
+  const tools = [
+    { id: 'image', label: '上传图片', hint: 'PNG、JPG、WebP，最多 6 张', aliases: 'image photo', icon: Image, disabled: imageFull, action: () => { imageInputRef.current?.click(); closeToolMenus() } },
+    { id: 'file', label: '上传文件', hint: 'PDF、DOCX、TXT、Markdown', aliases: 'file upload', icon: FileText, disabled: fileFull, action: () => { fileInputRef.current?.click(); closeToolMenus() } },
+    { id: 'style', label: '样章学习与写作风格', hint: '查看文件、学习依据和自动使用的规则', aliases: 'style', icon: BookOpenText, action: () => { closeToolMenus(); setStyleLearningOpen(true) } },
+    ...(canUseGoalEntry ? [{ id: 'goal', label: '目标', aliases: 'goal', icon: Target, disabled: disabled || sending, action: () => { closeToolMenus(); onGoalOpen?.() } }] : []),
+    { id: 'reference', label: '引用作品内容', hint: '点选目录、计划或章节，也可从作品树拖入。', aliases: 'reference chapter', icon: BookOpenText, expanded: referencePickerOpen, action: () => setReferencePickerOpen(value => !value) },
+    { id: 'subagent', label: '指定子 Agent', hint: '选择后随需求发送，不立即执行', aliases: 'subagent agent', icon: Bot, disabled: disabled || sending || voiceActive, expanded: subagentPickerOpen, action: () => setSubagentPickerOpen(value => !value) },
+    ...(skills.length > 0 || onOpenSkillManager ? [{ id: 'skill', label: '技能', hint: '不选时由 Agent 自动判断；点选后本轮必定调用。', aliases: 'skill', icon: Wrench, expanded: skillPickerOpen, action: () => setSkillPickerOpen(value => !value) }] : []),
+  ]
+  const matchingTools = tools.filter(tool => !slashToken?.query || `${tool.label} ${tool.aliases}`.toLocaleLowerCase('zh-CN').includes(slashToken.query))
+  const slashVisible = !disabled && !sending && !voiceActive && (Boolean(slashToken) && matchingTools.length > 0 || slashSubmenu !== null)
+  const enabledSlashTools = matchingTools.filter(tool => !tool.disabled)
+  const activeSlashTool = enabledSlashTools[slashIndex % Math.max(1, enabledSlashTools.length)]?.id
+
+  useEffect(() => {
+    if (slashToken) document.getElementById(`${slashListId}-${activeSlashTool}`)?.scrollIntoView?.({ block: 'nearest' })
+  }, [slashIndex, slashToken, slashListId, activeSlashTool])
+
+  useLayoutEffect(() => {
+    const card = slashCardRef.current
+    if (!slashSubmenu || !card) return
+    let focused = false
+    const focusChild = (initial = false) => {
+      if (focused) return
+      if (!initial && document.activeElement !== card && !card.contains(document.activeElement)) { focused = true; return }
+      const child = card.querySelector<HTMLElement>('[data-slash-submenu] input:not(:disabled), [data-slash-submenu] button:not(:disabled)')
+      if (child) { child.focus(); focused = true }
+    }
+    focusChild(true)
+    if (!focused) card.focus()
+    const observer = new MutationObserver(() => focusChild())
+    observer.observe(card, { childList: true, subtree: true })
+    return () => observer.disconnect()
+  }, [slashSubmenu])
+
+  function dismissSlashMenu() {
+    const bookmark = slashReturnCaret.current
+    closeToolMenus()
+    if (bookmark) restoreEditorCaret(bookmark.offset, bookmark.preceding)
+    else editorRef.current?.focus()
+  }
+
+  function closeToolMenus() {
+    attachmentMenuRef.current?.removeAttribute('open')
+    setSlashToken(null)
+    setSlashSubmenu(null)
+    setReferencePickerOpen(false)
+    setReferenceSearch('')
+    setSkillPickerOpen(false)
+    setSubagentPickerOpen(false)
+    slashReturnCaret.current = null
+  }
+
+  function refreshSlashToken(composing = false) {
+    const editor = editorRef.current
+    const selection = window.getSelection()
+    if (composing || composingRef.current || disabled || sending || voiceActive || !editor || !selection?.isCollapsed || !selection.rangeCount || !editor.contains(selection.anchorNode)) {
+      setSlashToken(null)
+      return
+    }
+    const range = selection.getRangeAt(0).cloneRange()
+    range.setStart(editor, 0)
+    const prefix = document.createElement('div')
+    prefix.append(range.cloneContents())
+    const content = readComposerContent(editor, references)
+    const token = findComposerSlashToken(content.draft, readComposerContent(prefix, references).draft.length)
+    // An atomic reference chip must never become part of the command token.
+    const validToken = token && !content.references.some(reference => reference.offset > token.start && reference.offset < token.end) ? token : null
+    const key = validToken ? `${validToken.start}:${validToken.end}:${content.draft}` : null
+    if (key !== dismissedSlash.current) dismissedSlash.current = null
+    setSlashToken(key === dismissedSlash.current ? null : validToken)
+    slashSignature.current = composerSignature(content.draft, content.references)
+    slashReturnCaret.current = null
+    setSlashSubmenu(null)
+    setSlashIndex(0)
+    if (validToken) attachmentMenuRef.current?.removeAttribute('open')
+  }
+
+  function selectTool(tool: (typeof tools)[number], fromSlash: boolean) {
+    if (tool.disabled || disabled || sending || voiceActive) return
+    if (fromSlash && slashToken) {
+      const editor = editorRef.current
+      if (!editor) return
+      const content = readComposerContent(editor, references)
+      if (composerSignature(content.draft, content.references) !== slashSignature.current) { closeToolMenus(); return }
+      const { start, end } = slashToken
+      const draft = content.draft.slice(0, start) + content.draft.slice(end)
+      const nextReferences = content.references.map(reference => ({ ...reference, offset: reference.offset >= end ? reference.offset - (end - start) : reference.offset }))
+      caretAfterVoice.current = start
+      slashCaretReferences.current = content.references.filter(reference => reference.offset <= start).map(reference => reference.id)
+      slashReturnCaret.current = { offset: start, preceding: slashCaretReferences.current }
+      setComposerContent(draft, nextReferences)
+      setSlashToken(null)
+      setReferencePickerOpen(false)
+      setSkillPickerOpen(false)
+      setSubagentPickerOpen(false)
+      if (['reference', 'skill', 'subagent'].includes(tool.id)) setSlashSubmenu(tool.id)
+    }
+    tool.action()
+  }
+
+  function renderToolMenu(fromSlash: boolean) {
+    if (!fromSlash && slashVisible) return null
+    const entries = fromSlash ? slashSubmenu ? tools.filter(tool => tool.id === slashSubmenu) : matchingTools : tools
+    return entries.map(tool => <div key={tool.id}>
+      <button
+        type="button"
+        id={fromSlash ? `${slashListId}-${tool.id}` : undefined}
+        role={fromSlash && !slashSubmenu ? 'option' : undefined}
+        aria-selected={fromSlash && !slashSubmenu ? activeSlashTool === tool.id : undefined}
+        aria-expanded={tool.expanded}
+        disabled={tool.disabled}
+        onMouseDown={event => { if (fromSlash) event.preventDefault() }}
+        onClick={() => selectTool(tool, fromSlash)}
+        className={cn('flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-40', fromSlash && !slashSubmenu && activeSlashTool === tool.id && 'bg-[var(--surface-muted)]')}
+      >
+        <tool.icon className="h-4 w-4 shrink-0 text-[var(--text-tertiary)]" />
+        <span className="min-w-0 flex-1"><span className="block font-medium">{tool.label}{tool.id === 'skill' && pinnedSkills.length > 0 ? `（已选 ${pinnedSkills.length}/${MAX_PINNED_SKILLS}）` : ''}</span>{tool.hint ? <span className="mt-0.5 block text-[10px] leading-4 text-[var(--text-tertiary)]">{tool.hint}</span> : null}</span>
+        {tool.expanded !== undefined ? <ChevronDown className={cn('h-3.5 w-3.5 shrink-0', tool.expanded && 'rotate-180')} /> : null}
+      </button>
+      {tool.id === 'reference' && (!fromSlash || slashSubmenu) ? <div data-slash-submenu>
+              {referencePickerOpen ? (
+                <div className="border-t border-[var(--border-subtle)] px-2 pb-2 pt-2">
+                  <input
+                    value={referenceSearch}
+                    onChange={(event) => setReferenceSearch(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); dismissSlashMenu() }; event.stopPropagation() }}
+                    placeholder="搜索章节或计划"
+                    className="h-8 w-full border border-[var(--border-subtle)] bg-[var(--surface-default)] px-2.5 text-[11px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] focus:border-[var(--border-strong)]"
+                  />
+                  <div className="mt-1 max-h-52 overflow-y-auto [scrollbar-width:thin]">
+                    {filteredReferenceOptions.length > 0 ? filteredReferenceOptions.map((reference) => (
+                      <button
+                        key={reference.id}
+                        type="button"
+                        onClick={() => {
+                          void attachReference(reference)
+                          closeToolMenus()
+                          setReferencePickerOpen(false)
+                          setReferenceSearch('')
+                        }}
+                        className="flex w-full items-center gap-2 px-2 py-2 text-left text-[11px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+                      >
+                        <span className="w-6 shrink-0 text-[10px] text-[var(--text-tertiary)]">{reference.kind === 'chapter' ? '章节' : reference.kind === 'plan' ? '计划' : '目录'}</span>
+                        <span className="min-w-0 flex-1 truncate">{reference.name}</span>
+                      </button>
+                    )) : <p className="px-2 py-4 text-center text-[11px] text-[var(--text-tertiary)]">没有匹配的作品内容</p>}
+                  </div>
+                </div>
+              ) : null}
+
+      </div> : null}
+      {tool.id === 'subagent' && (!fromSlash || slashSubmenu) ? <div data-slash-submenu>
+              <SubagentPicker hideTrigger open={subagentPickerOpen} onOpenChange={setSubagentPickerOpen} key={novelId} novelId={novelId} selectedId={pinnedSubagent?.id} disabled={disabled || sending || voiceActive} onSelect={item => {
+                useAgentStore.setState({ composerSubagent: { id: item.id, name: item.name, novelId } })
+                closeToolMenus()
+                editorRef.current?.focus()
+              }} />
+
+      </div> : null}
+      {tool.id === 'skill' && (!fromSlash || slashSubmenu) ? <div data-slash-submenu>
+                  {skillPickerOpen ? (
+                    <div className="border-t border-[var(--border-subtle)] px-2 pb-2 pt-1">
+                      <div className="max-h-52 overflow-y-auto [scrollbar-width:thin]">
+                        {skills.length > 0 ? skills.map((skill) => {
+                          const picked = pinnedSkillIds.includes(skill.id)
+                          const sourceLabel = skillSourceLabel(skill.source)
+                          return (
+                            <button
+                              key={skill.id}
+                              type="button"
+                              onClick={() => toggleComposerSkill(skill.id)}
+                              aria-pressed={picked}
+                              className="flex w-full items-start gap-2 px-2 py-2 text-left text-[11px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
+                            >
+                              <span className={cn('mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border', picked ? 'border-transparent bg-[var(--surface-contrast)] text-[var(--text-contrast)]' : 'border-[var(--border-strong)]')}>
+                                {picked ? <Check className="h-2.5 w-2.5" /> : null}
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="flex items-center gap-1.5">
+                                  <span className="truncate font-medium">{skill.name}</span>
+                                  {sourceLabel ? <span className="shrink-0 rounded-[4px] border border-[var(--border-subtle)] px-1 text-[9px] leading-4 text-[var(--text-tertiary)]">{sourceLabel}</span> : null}
+                                </span>
+                                <span className="mt-0.5 block truncate text-[10px] leading-4 text-[var(--text-tertiary)]">{skillHintLine(skill)}</span>
+                              </span>
+                            </button>
+                          )
+                        }) : <p className="px-2 py-4 text-center text-[11px] text-[var(--text-tertiary)]">当前作品还没有启用的技能</p>}
+                      </div>
+                      {onOpenSkillManager ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            closeToolMenus()
+                            setSkillPickerOpen(false)
+                            onOpenSkillManager()
+                          }}
+                          className="mt-1 flex w-full items-center gap-1.5 border-t border-[var(--border-subtle)] px-2 pt-2 text-left text-[11px] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                        >
+                          <Settings2 className="h-3.5 w-3.5" />
+                          <span>管理技能（新建、导入、启用）</span>
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+      </div> : null}
+    </div>)
   }
 
   return (
@@ -698,8 +993,17 @@ export function AgentComposer({
       onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDragActive(true) }}
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false) }}
       onDrop={(event) => void handleDrop(event)}
-      className={`agent-composer-glass ${goalActive || goalMode ? 'agent-composer-goal' : ''} relative z-[80] rounded-[20px] border bg-[var(--studio-composer-bg,var(--surface-default))] p-2.5 shadow-sm transition-colors ${dragActive ? 'border-[var(--text-primary)]' : 'border-[var(--border-subtle)]'}`}
+      className={`agent-composer-glass ${goalMode ? 'agent-composer-goal' : ''} relative z-[80] rounded-[20px] border bg-[var(--studio-composer-bg,var(--surface-default))] p-2.5 shadow-sm transition-colors ${dragActive ? 'border-[var(--text-primary)]' : 'border-[var(--border-subtle)]'}`}
     >
+      {slashVisible ? <div
+        ref={slashCardRef}
+        tabIndex={-1}
+        id={slashListId}
+        role={slashSubmenu ? 'region' : 'listbox'}
+        aria-label="工具"
+        onKeyDown={event => { if (!event.nativeEvent.isComposing && event.key === 'Escape') { event.preventDefault(); dismissSlashMenu() } }}
+        className="absolute bottom-full left-0 right-0 z-50 mb-2 max-h-[min(32rem,60dvh)] overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] py-1 shadow-[0_14px_34px_rgba(15,23,42,0.16)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&_*]:[scrollbar-width:none] [&_*::-webkit-scrollbar]:hidden"
+      >{renderToolMenu(true)}</div> : null}
       {dragActive ? <div className="pointer-events-none absolute inset-1 z-20 flex items-center justify-center rounded-[16px] bg-[var(--surface-default)]/95 text-xs font-medium text-[var(--text-primary)]">松开即可添加引用、图片或文件</div> : null}
       {pinnedSubagent ? <div className="mb-2 flex items-center gap-2 px-1 text-[11px] text-[var(--text-primary)]"><span className="min-w-0 truncate">本轮子 Agent：{pinnedSubagent.name}</span><button type="button" disabled={sending || voiceActive} onClick={() => useAgentStore.setState({ composerSubagent: null })} aria-label="取消指定子 Agent" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md hover:bg-[var(--surface-muted)]"><X className="h-3.5 w-3.5" /></button></div> : null}
       {pinnedSkills.length > 0 && (
@@ -790,9 +1094,16 @@ export function AgentComposer({
           role="textbox"
           aria-label="Agent 提示词"
           aria-multiline="true"
+          aria-haspopup="listbox"
+          aria-expanded={slashVisible}
+          aria-controls={slashVisible ? slashListId : undefined}
+          aria-activedescendant={slashVisible && !slashSubmenu && activeSlashTool ? `${slashListId}-${activeSlashTool}` : undefined}
           contentEditable={!disabled && !voiceActive && !sending}
           suppressContentEditableWarning
-          onInput={(event) => syncComposerFromDom((event.nativeEvent as InputEvent).isComposing)}
+          onInput={(event) => { const composing = (event.nativeEvent as InputEvent).isComposing || composingRef.current; syncComposerFromDom(composing); refreshSlashToken(composing) }}
+          onCompositionStart={() => { composingRef.current = true; setSlashToken(null); setSlashSubmenu(null) }}
+          onCompositionEnd={() => { composingRef.current = false; syncComposerFromDom(); refreshSlashToken() }}
+          onKeyUp={event => { if (!['ArrowUp', 'ArrowDown', 'Enter', 'Escape'].includes(event.key)) refreshSlashToken(event.nativeEvent.isComposing) }}
           onClick={handleEditorClick}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
@@ -830,7 +1141,7 @@ export function AgentComposer({
           />
           <details ref={attachmentMenuRef} className="group/attach relative" data-disabled={disabled || undefined}>
             <summary
-              onClick={(event) => { if (disabled) event.preventDefault() }}
+              onClick={(event) => { if (disabled) event.preventDefault(); else { setSlashToken(null); setSlashSubmenu(null) } }}
               className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-full text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] group-data-[disabled=true]/attach:pointer-events-none group-data-[disabled=true]/attach:opacity-40 [&::-webkit-details-marker]:hidden"
               aria-label="添加内容"
               title="添加图片、文件、作品引用，或指定本轮技能与子 Agent"
@@ -838,144 +1149,7 @@ export function AgentComposer({
               <Plus className="h-4 w-4 transition-transform group-open/attach:rotate-45" />
             </summary>
             <div className="absolute bottom-full left-0 z-50 mb-2 max-h-[min(32rem,60dvh)] w-64 overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] py-1 shadow-[0_14px_34px_rgba(15,23,42,0.16)]">
-              <button
-                type="button"
-                disabled={imageFull}
-                onClick={() => { imageInputRef.current?.click(); attachmentMenuRef.current?.removeAttribute('open') }}
-                className="flex w-full items-center gap-3 px-3 py-2 text-left text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-40"
-              >
-                <Image className="h-4 w-4 text-[var(--text-tertiary)]" />
-                <span><span className="block font-medium">上传图片</span><span className="mt-0.5 block text-[10px] text-[var(--text-tertiary)]">PNG、JPG、WebP，最多 6 张</span></span>
-              </button>
-              <button
-                type="button"
-                disabled={fileFull}
-                onClick={() => { fileInputRef.current?.click(); attachmentMenuRef.current?.removeAttribute('open') }}
-                className="flex w-full items-center gap-3 px-3 py-2 text-left text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-40"
-              >
-                <FileText className="h-4 w-4 text-[var(--text-tertiary)]" />
-                <span><span className="block font-medium">上传文件</span><span className="mt-0.5 block text-[10px] text-[var(--text-tertiary)]">PDF、DOCX、TXT、Markdown</span></span>
-              </button>
-              <button type="button" onClick={() => { attachmentMenuRef.current?.removeAttribute('open'); setStyleLearningOpen(true) }} className="flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left text-xs text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"><BookOpenText className="h-4 w-4 text-[var(--text-tertiary)]" /><span><span className="block font-medium">样章学习与写作风格</span><span className="mt-0.5 block text-[10px] text-[var(--text-tertiary)]">查看文件、学习依据和自动使用的规则</span></span></button>
-              {canUseGoalEntry ? <button
-                type="button"
-                disabled={disabled || sending}
-                onClick={() => { attachmentMenuRef.current?.removeAttribute('open'); onGoalOpen?.() }}
-                className="flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-40"
-              >
-                <Target className="h-4 w-4 text-[var(--text-tertiary)]" />
-                <span className="block font-medium">目标</span>
-              </button> : null}
-              <div className="mx-3 my-1 border-t border-[var(--border-subtle)]" />
-              <button
-                type="button"
-                onClick={() => setReferencePickerOpen((value) => !value)}
-                className="flex w-full items-start gap-3 px-3 py-2 text-left text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)]"
-                aria-expanded={referencePickerOpen}
-              >
-                <BookOpenText className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-tertiary)]" />
-                <span className="min-w-0 flex-1"><span className="block font-medium text-[var(--text-primary)]">引用作品内容</span><span className="mt-0.5 block text-[10px] leading-4 text-[var(--text-tertiary)]">点选目录、计划或章节，也可从作品树拖入。</span></span>
-                <ChevronDown className={`mt-0.5 h-3.5 w-3.5 transition-transform ${referencePickerOpen ? 'rotate-180' : ''}`} />
-              </button>
-              {referencePickerOpen ? (
-                <div className="border-t border-[var(--border-subtle)] px-2 pb-2 pt-2">
-                  <input
-                    value={referenceSearch}
-                    onChange={(event) => setReferenceSearch(event.target.value)}
-                    onKeyDown={(event) => event.stopPropagation()}
-                    placeholder="搜索章节或计划"
-                    className="h-8 w-full border border-[var(--border-subtle)] bg-[var(--surface-default)] px-2.5 text-[11px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] focus:border-[var(--border-strong)]"
-                  />
-                  <div className="mt-1 max-h-52 overflow-y-auto [scrollbar-width:thin]">
-                    {filteredReferenceOptions.length > 0 ? filteredReferenceOptions.map((reference) => (
-                      <button
-                        key={reference.id}
-                        type="button"
-                        onClick={() => {
-                          void attachReference(reference)
-                          attachmentMenuRef.current?.removeAttribute('open')
-                          setReferencePickerOpen(false)
-                          setReferenceSearch('')
-                        }}
-                        className="flex w-full items-center gap-2 px-2 py-2 text-left text-[11px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
-                      >
-                        <span className="w-6 shrink-0 text-[10px] text-[var(--text-tertiary)]">{reference.kind === 'chapter' ? '章节' : reference.kind === 'plan' ? '计划' : '目录'}</span>
-                        <span className="min-w-0 flex-1 truncate">{reference.name}</span>
-                      </button>
-                    )) : <p className="px-2 py-4 text-center text-[11px] text-[var(--text-tertiary)]">没有匹配的作品内容</p>}
-                  </div>
-                </div>
-              ) : null}
-              {/* 技能分组：不选时服务端自动路由，选了就是作者明确指令，本轮必定加载 */}
-              <SubagentPicker key={novelId} novelId={novelId} selectedId={pinnedSubagent?.id} disabled={disabled || sending || voiceActive} onSelect={item => {
-                useAgentStore.setState({ composerSubagent: { id: item.id, name: item.name, novelId } })
-                attachmentMenuRef.current?.removeAttribute('open')
-                editorRef.current?.focus()
-              }} />
-              {(skills.length > 0 || onOpenSkillManager) ? (
-                <>
-                  <div className="mx-3 my-1 border-t border-[var(--border-subtle)]" />
-                  <button
-                    type="button"
-                    onClick={() => setSkillPickerOpen((value) => !value)}
-                    className="flex w-full items-start gap-3 px-3 py-2 text-left text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)]"
-                    aria-expanded={skillPickerOpen}
-                  >
-                    <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-tertiary)]" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block font-medium text-[var(--text-primary)]">
-                        技能{pinnedSkills.length > 0 ? `（已选 ${pinnedSkills.length}/${MAX_PINNED_SKILLS}）` : ''}
-                      </span>
-                      <span className="mt-0.5 block text-[10px] leading-4 text-[var(--text-tertiary)]">不选时由 Agent 自动判断；点选后本轮必定调用。</span>
-                    </span>
-                    <ChevronDown className={`mt-0.5 h-3.5 w-3.5 transition-transform ${skillPickerOpen ? 'rotate-180' : ''}`} />
-                  </button>
-                  {skillPickerOpen ? (
-                    <div className="border-t border-[var(--border-subtle)] px-2 pb-2 pt-1">
-                      <div className="max-h-52 overflow-y-auto [scrollbar-width:thin]">
-                        {skills.length > 0 ? skills.map((skill) => {
-                          const picked = pinnedSkillIds.includes(skill.id)
-                          const sourceLabel = skillSourceLabel(skill.source)
-                          return (
-                            <button
-                              key={skill.id}
-                              type="button"
-                              onClick={() => toggleComposerSkill(skill.id)}
-                              aria-pressed={picked}
-                              className="flex w-full items-start gap-2 px-2 py-2 text-left text-[11px] text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
-                            >
-                              <span className={cn('mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border', picked ? 'border-transparent bg-[var(--surface-contrast)] text-[var(--text-contrast)]' : 'border-[var(--border-strong)]')}>
-                                {picked ? <Check className="h-2.5 w-2.5" /> : null}
-                              </span>
-                              <span className="min-w-0 flex-1">
-                                <span className="flex items-center gap-1.5">
-                                  <span className="truncate font-medium">{skill.name}</span>
-                                  {sourceLabel ? <span className="shrink-0 rounded-[4px] border border-[var(--border-subtle)] px-1 text-[9px] leading-4 text-[var(--text-tertiary)]">{sourceLabel}</span> : null}
-                                </span>
-                                <span className="mt-0.5 block truncate text-[10px] leading-4 text-[var(--text-tertiary)]">{skillHintLine(skill)}</span>
-                              </span>
-                            </button>
-                          )
-                        }) : <p className="px-2 py-4 text-center text-[11px] text-[var(--text-tertiary)]">当前作品还没有启用的技能</p>}
-                      </div>
-                      {onOpenSkillManager ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            attachmentMenuRef.current?.removeAttribute('open')
-                            setSkillPickerOpen(false)
-                            onOpenSkillManager()
-                          }}
-                          className="mt-1 flex w-full items-center gap-1.5 border-t border-[var(--border-subtle)] px-2 pt-2 text-left text-[11px] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
-                        >
-                          <Settings2 className="h-3.5 w-3.5" />
-                          <span>管理技能（新建、导入、启用）</span>
-                        </button>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </>
-              ) : null}
+              {renderToolMenu(false)}
             </div>
           </details>
           <details ref={creativeModeRef} className="group/mode relative" data-disabled={disabled || undefined}>
@@ -1008,10 +1182,7 @@ export function AgentComposer({
               ))}
             </div>
           </details>
-          {canUseGoalEntry ? <GoalModeChip active={goalActive} draft={goalMode} busy={goalBusy || sending || (!goalActive && disabled)} onOpen={() => onGoalOpen?.()} onCancel={() => {
-            if (goalActive) onGoalCancel?.()
-            else setGoalMode(false)
-          }} /> : null}
+          {canUseGoalEntry ? <GoalModeChip active={goalActive} draft={goalMode} busy={sending || voiceActive || disabled} onOpen={() => onGoalOpen?.()} onCancel={() => setGoalMode(false)} /> : null}
           <details ref={modelMenuRef} className="group/model relative z-[120] ml-auto min-w-0" data-disabled={disabled || undefined} onToggle={(event) => { if (!(event.currentTarget as HTMLDetailsElement).open) { setMobileModelsOpen(false); setEditingReasoningTier(null) } }}>
             <summary
               onClick={(event) => {

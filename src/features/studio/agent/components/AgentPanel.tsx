@@ -1872,10 +1872,6 @@ export function AgentPanel({
           goalActive={Boolean(goalView.goal && !goalView.terminal)}
           goalBusy={goalBusy}
           onGoalOpen={handleGoalOpen}
-          onGoalCancel={() => {
-            if (goalView.goal && !goalView.terminal) void handleGoalAction('cancel')
-            else setGoalMode(false)
-          }}
           onGoalSubmit={handleGoalSubmit}
           onGoalCommand={handleGoalCommand}
         />
