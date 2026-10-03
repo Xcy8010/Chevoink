@@ -385,19 +385,47 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
   })
   it('ordinary writer winning the shared gate makes an already-approved import fail without archival', async () => {
     const ready = await approve()
+    const beforeNovel = await prisma.novel.findUniqueOrThrow({ where: { id: novelId } })
+    const beforeApproval = await prisma.novelImportApproval.findUniqueOrThrow({ where: { id: ready.input.approvalId } })
     let unlock!: () => void; let acquired!: () => void
+    let writerPid = 0
     const locked = new Promise<void>(resolve => { acquired = resolve })
     const hold = new Promise<void>(resolve => { unlock = resolve })
     const writer = prisma.$transaction(async tx => {
-      await lockNovelActiveScope(tx, novelId); acquired(); await hold
+      await lockNovelActiveScope(tx, novelId)
+      writerPid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid
+      acquired(); await hold
       await tx.volume.create({ data: { novelId, title: '并发新卷必须保留', orderIndex: 1 } })
-    })
+    }, { timeout: 15_000 })
     await locked
     const importing = request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send(ready.input).then(response => response)
-    unlock(); await writer
-    expect((await importing).body.error.code).toBe('IMPORT_TARGET_CHANGED')
+    try {
+      // Observe the actual import waiter before releasing the writer. The job
+      // ownership read has already fixed its Serializable snapshot by then.
+      // Same-role activity is visible without elevated monitoring privileges.
+      await vi.waitFor(async () => {
+        const waiters = await prisma.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE usename = current_user AND wait_event_type = 'Lock'
+            AND query LIKE 'SELECT id FROM novels%FOR UPDATE%'
+            AND ${writerPid}::integer = ANY(pg_blocking_pids(pid))
+        `
+        expect(waiters.length).toBeGreaterThan(0)
+      }, { timeout: 5000 })
+    } finally {
+      unlock()
+      await Promise.all([writer, importing])
+    }
+    const response = await importing
+    expect(response.status).toBe(409)
+    expect(response.body.error.code).toBe('IMPORT_TARGET_CHANGED')
     expect(await prisma.novelImportCommit.count({ where: { jobId: ready.jobId } })).toBe(0)
-    expect(await prisma.volume.findFirstOrThrow({ where: { novelId } })).toMatchObject({ title: '并发新卷必须保留', archivedAt: null })
+    expect(await prisma.novelImportBackup.count({ where: { jobId: ready.jobId } })).toBe(0)
+    expect(await prisma.novelImportApproval.findUniqueOrThrow({ where: { id: ready.input.approvalId } })).toEqual(beforeApproval)
+    expect(await prisma.novel.findUniqueOrThrow({ where: { id: novelId } })).toEqual(beforeNovel)
+    expect(await prisma.chapter.count({ where: { novelId } })).toBe(0)
+    expect(await prisma.volume.findMany({ where: { novelId } })).toEqual([expect.objectContaining({ title: '并发新卷必须保留', archivedAt: null })])
+    expect((await prisma.novelImportJob.findUniqueOrThrow({ where: { id: ready.jobId } })).status).toBe('awaiting_confirmation')
   })
   it('restore rejects later current edits and preserves both versions with a durable conflict status', async () => {
     const volume = await prisma.volume.create({ data: { novelId, title: '原卷', orderIndex: 1 } })

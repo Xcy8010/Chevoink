@@ -818,7 +818,7 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     expect(hashNovelImportPreview({ ...preview, manifestHash: 'ignored' })).toBe(preview.manifestHash)
     expect(hashNovelImportPreview({ ...preview, metadataSelection: { title: 'changed' } })).not.toBe(preview.manifestHash)
   })
-  it('uses Serializable and retries only DB P2034 with a bounded limit', async () => {
+  it('uses Serializable and retries DB P2034 with a bounded limit', async () => {
     const conflict = new Prisma.PrismaClientKnownRequestError('conflict', { code: 'P2034', clientVersion: '6.12.0' })
     fixture.db.$transaction.mockRejectedValueOnce(conflict).mockRejectedValueOnce(conflict)
     await expect(novelImportTransaction(async () => 'ok')).resolves.toBe('ok')
@@ -826,6 +826,68 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     const calls = fixture.db.$transaction.mock.calls.length
     fixture.db.$transaction.mockRejectedValueOnce(new Error('not retryable'))
     await expect(novelImportTransaction(async () => 'no')).rejects.toThrow('not retryable')
+    expect(fixture.db.$transaction.mock.calls.length).toBe(calls + 1)
+  })
+  it('rechecks the approved target after rolling back an active volume-order collision', async () => {
+    existingBook()
+    fixture.parse.mockResolvedValue({ volumes: [
+      { title: '正文卷', chapters: [{ title: '第一章', content: '原文不改写', source: 'original.txt#char=0-8' }] },
+      { title: '新增卷', chapters: [{ title: '新章', content: '新增正文', source: 'original.txt#char=8-12' }] },
+    ], metadata: {}, warnings: [], sourceChars: 12, parserVersion: 'fixture-1' })
+    const result = await approved()
+    const before = structuredClone(fixture.state)
+    const conflict = new Prisma.PrismaClientKnownRequestError('active volume order conflict', { code: 'P2002', meta: { modelName: 'Volume', target: ['novel_id', 'order_index'] }, clientVersion: '6.12.0' })
+    fixture.db.volume.createMany.mockRejectedValueOnce(conflict)
+    const winner = { id: 'writer-volume', novelId: scope.novelId, title: '并发新卷必须保留', orderIndex: 2, archivedAt: null, revision: 1 }
+    fixture.db.$transaction.mockImplementationOnce(async (fn: (tx: typeof fixture.db) => Promise<unknown>) => {
+      try { return await fn(fixture.db) }
+      catch (error) {
+        // Simulate the committed ordinary writer outside the aborted snapshot.
+        Object.assign(fixture.state, structuredClone(before))
+        fixture.state.volume.push(winner)
+        throw error
+      }
+    })
+    const calls = fixture.db.$transaction.mock.calls.length
+    await expect(commitNovelImport(scope, result.job.jobId, result.input)).rejects.toMatchObject({ code: 'IMPORT_TARGET_CHANGED' })
+    expect(fixture.db.$transaction.mock.calls.length).toBe(calls + 2)
+    expect(fixture.db.volume.createMany).toHaveBeenCalledOnce()
+    expect(fixture.db.chapter.updateMany).toHaveBeenCalled()
+    expect(fixture.db.chapter.createMany).not.toHaveBeenCalled()
+    expect(fixture.state).toEqual({ ...before, volume: [...before.volume, winner] })
+  })
+  it('caps active volume-order retries at three transactions and preserves the original DB error', async () => {
+    const result = await approved()
+    const before = structuredClone(fixture.state)
+    const conflict = new Prisma.PrismaClientKnownRequestError('active volume order conflict', { code: 'P2002', meta: { modelName: 'Volume', target: ['novel_id', 'order_index'] }, clientVersion: '6.12.0' })
+    fixture.db.volume.createMany.mockRejectedValueOnce(conflict).mockRejectedValueOnce(conflict).mockRejectedValueOnce(conflict)
+    const calls = fixture.db.$transaction.mock.calls.length
+    await expect(commitNovelImport(scope, result.job.jobId, result.input)).rejects.toBe(conflict)
+    expect(fixture.db.$transaction.mock.calls.length).toBe(calls + 3)
+    expect(fixture.state).toEqual(before)
+  })
+  it.each([
+    undefined,
+    { modelName: 'Volume', target: ['id'] },
+    { modelName: 'Chapter', target: ['novel_id', 'order_index'] },
+    { target: ['novel_id', 'order_index'] },
+    { modelName: 'Volume', target: 'volumes_active_novel_order_key' },
+    { modelName: 'Volume', target: ['novel_id', 'order_index', 'id'] },
+  ])('does not retry unrelated or unrecognized insertion uniqueness errors: %j', async meta => {
+    const result = await approved()
+    const before = structuredClone(fixture.state)
+    const conflict = new Prisma.PrismaClientKnownRequestError('unique conflict', { code: 'P2002', meta, clientVersion: '6.12.0' })
+    fixture.db.volume.createMany.mockRejectedValueOnce(conflict)
+    const calls = fixture.db.$transaction.mock.calls.length
+    await expect(commitNovelImport(scope, result.job.jobId, result.input)).rejects.toBe(conflict)
+    expect(fixture.db.$transaction.mock.calls.length).toBe(calls + 1)
+    expect(fixture.state).toEqual(before)
+  })
+  it('does not retry P2002 from outside the scoped volume insertion', async () => {
+    const conflict = new Prisma.PrismaClientKnownRequestError('unique conflict', { code: 'P2002', meta: { modelName: 'Volume', target: ['novel_id', 'order_index'] }, clientVersion: '6.12.0' })
+    fixture.db.$transaction.mockRejectedValueOnce(conflict)
+    const calls = fixture.db.$transaction.mock.calls.length
+    await expect(novelImportTransaction(async () => 'no')).rejects.toBe(conflict)
     expect(fixture.db.$transaction.mock.calls.length).toBe(calls + 1)
   })
 })

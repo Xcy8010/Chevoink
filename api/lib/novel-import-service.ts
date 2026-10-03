@@ -65,13 +65,18 @@ export async function getNovelImportCapabilities(): Promise<NovelImportCapabilit
 }
 function enabled() { if (!novelImportCapabilities().enabled) fail('IMPORT_DISABLED', '作品导入尚未开放。', 503) }
 
-/** Retry DB serialization failures only. The callback must contain no I/O or model call. */
+class ImportVolumeOrderConflict extends Error {
+  constructor(readonly originalError: Prisma.PrismaClientKnownRequestError) { super('Import volume order changed during the transaction') }
+}
+
+/** Retry DB serialization failures and the scoped import insertion conflict only.
+ * The callback must contain no I/O or model call. */
 export async function novelImportTransaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try { return await prisma.$transaction(fn, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 5000, timeout: 20_000 }) }
     catch (error) {
-      const retryable = error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2034' || (error.code === 'P2010' && ['40001', '40P01'].includes(String(error.meta?.code))))
-      if (attempt >= 2 || !retryable) throw error
+      const retryable = error instanceof ImportVolumeOrderConflict || error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2034' || (error.code === 'P2010' && ['40001', '40P01'].includes(String(error.meta?.code))))
+      if (attempt >= 2 || !retryable) throw error instanceof ImportVolumeOrderConflict ? error.originalError : error
     }
   }
 }
@@ -663,7 +668,18 @@ export async function commitNovelImport(scope: NovelImportScope, jobId: string, 
     const changedVolumeIds = [...new Set(placement.chapters.map(chapter => chapter.volumeId))].filter(id => t.volumes.some(volume => volume.id === id))
     await invalidateNovelImportSources(tx, scope.novelId, placement.archivedChapterIds, [...changedVolumeIds, ...archivedVolumeRows.map(volume => volume.id)])
     const volumes = placement.newVolumes.map(volume => ({ ...volume, novelId: scope.novelId }))
-    if (volumes.length) assertNovelImportMutationCount((await tx.volume.createMany({ data: volumes })).count, volumes.length)
+    if (volumes.length) {
+      try { assertNovelImportMutationCount((await tx.volume.createMany({ data: volumes })).count, volumes.length) }
+      catch (error) {
+        // A Serializable snapshot can predate the shared-lock wait. PostgreSQL
+        // may report the active-order collision as P2002 rather than P2034.
+        // Roll back all writes, then recheck target/approval hashes in a fresh
+        // transaction. Other unique failures, including IDs, remain terminal.
+        const fields = error instanceof Prisma.PrismaClientKnownRequestError ? error.meta?.target : undefined
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002' && error.meta?.modelName === 'Volume' && Array.isArray(fields) && fields.length === 2 && fields[0] === 'novel_id' && fields[1] === 'order_index') throw new ImportVolumeOrderConflict(error)
+        throw error
+      }
+    }
     // Shift retained chapters before insertion; both unique indexes are released
     // using disjoint temporary positions, and their original order is backed up.
     await applyNovelImportChapterPositions(tx, scope.novelId, placement.reorderedAfter)
