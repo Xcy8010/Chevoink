@@ -1,17 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(), execute: vi.fn(), active: vi.fn(() => false), prepare: vi.fn(),
   runUpdate: vi.fn(), creditAccess: vi.fn(), tierRuntime: vi.fn(), goal: vi.fn(), binding: vi.fn(),
+  lockGoal: vi.fn(), activationSource: vi.fn(), reconcile: vi.fn(), resumeDurable: vi.fn(), pause: vi.fn(),
   transaction: vi.fn(), tx: { $queryRaw: vi.fn(), agentRun: { findFirst: vi.fn() }, agentGoalExecution: { findUnique: vi.fn(async () => null) } },
 }))
 vi.mock('../../api/lib/agent/events.js', () => ({ prepareRunEventResume: mocks.prepare }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } },
-  prisma: { $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoal: { findFirst: mocks.goal }, agentGoalExecution: { findUnique: mocks.binding }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) } },
+  prisma: { $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoal: { findFirst: mocks.goal }, agentGoalExecution: { findUnique: mocks.binding }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) }, agentExecutionOutbox: { findFirst: mocks.pause } },
 }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.creditAccess, getModelTierRuntime: mocks.tierRuntime }))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: mocks.execute }))
 vi.mock('../../api/lib/agent/active-runs.js', () => ({ getActiveRun: () => undefined, hasActiveRunInSession: mocks.active, countActiveRunsByUser: () => 0 }))
-import { continueLoopRun } from '../../api/lib/agent/run-service.js'
+vi.mock('../../api/lib/agent/goal-store.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/goal-store.js')>(), lockOwnedGoal: mocks.lockGoal }))
+vi.mock('../../api/lib/agent/goal-activation.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/goal-activation.js')>(), readGoalActivationReceipt: mocks.activationSource }))
+vi.mock('../../api/lib/agent/goal-activation-supervisor.js', () => ({ reconcileGoalActivation: mocks.reconcile }))
+vi.mock('../../api/lib/agent/runtime-resume.js', () => ({ resumeDurableTask: mocks.resumeDurable }))
+import { continueActivatedGoalRun, continueLoopRun } from '../../api/lib/agent/run-service.js'
 const run = { id: 'run19', sessionId: 's', userId: 'u', novelId: 'n', chapterId: 'c19', status: 'paused', engine: 'loop', mode: 'build', inputSummary: 'truncated', modelTier: 'speed', reasoningEffort: 'high', customModelId: null }
 beforeEach(() => {
   vi.resetAllMocks()
@@ -29,7 +34,56 @@ beforeEach(() => {
   mocks.find.mockResolvedValueOnce(run).mockResolvedValue({ id: 'run19' })
   mocks.message.mockResolvedValue({ parts: [{ type: 'text', text: '写第19章。' + '完整原始要求'.repeat(100) }] })
 })
+
+function activatedFixture(durable = false) {
+  const goal = { id: 'goal', status: 'active', currentRevision: 1, pendingRevision: null, epoch: 2n,
+    currentRunId: run.id, reasonCode: 'GOAL_ACTIVATION_RESUME_READY' }
+  mocks.binding.mockResolvedValue({ goalId: goal.id })
+  mocks.lockGoal.mockResolvedValue(goal)
+  mocks.activationSource.mockResolvedValue({ receipt: { baselineBound: true, toolAuthority: [] } })
+  mocks.reconcile.mockResolvedValue({ kind: 'activation_continue', goal, runId: run.id })
+  if (durable) {
+    mocks.find.mockReset().mockResolvedValue({ ...run, runtimeProtocolVersion: 1, taskRootId: 'root' })
+    mocks.pause.mockResolvedValue({ id: 'pause' })
+    // A recorded paused attempt is returned without dispatching a fake executor.
+    // The native transaction and live fence are exercised in the PostgreSQL gate.
+    mocks.resumeDurable.mockResolvedValue({ run: { ...run, id: 'resumed', runtimeProtocolVersion: 1, taskRootId: 'root' } })
+  }
+  return goal
+}
 describe('continue API exact target', () => {
+  it('validates the human activation before legacy manuscript admission and preserves the original ceiling', async () => {
+    const goal = activatedFixture()
+    expect(await continueActivatedGoalRun('u', run.id, goal.id, goal.epoch)).toMatchObject({ runId: run.id, runGoalId: goal.id })
+    expect(mocks.lockGoal).toHaveBeenCalledWith(mocks.tx, 'u', run.sessionId, goal.id)
+    expect(mocks.reconcile).toHaveBeenCalledWith(mocks.tx, goal, expect.any(Date))
+    expect(mocks.tx.agentRun.findFirst).toHaveBeenCalledWith({ where: { id: run.id, userId: 'u', novelId: 'n' },
+      select: { manuscriptRevision: true, novel: { select: { authorId: true, manuscriptRevision: true } } } })
+    expect(mocks.execute).toHaveBeenCalledWith(expect.objectContaining({ activationResume: { goalId: goal.id, epoch: goal.epoch },
+      toolAuthorityCeiling: new Map(), prompt: expect.any(String) }))
+    expect(mocks.runUpdate).not.toHaveBeenCalled()
+  })
+  it('delegates verified durable activation to the formal resume transaction without fencing its paused source as a writer', async () => {
+    const goal = activatedFixture(true)
+    expect(await continueActivatedGoalRun('u', run.id, goal.id, goal.epoch)).toMatchObject({ runId: 'resumed', runGoalId: goal.id })
+    expect(mocks.reconcile).toHaveBeenCalledWith(mocks.tx, goal, expect.any(Date))
+    expect(mocks.tx.agentRun.findFirst).not.toHaveBeenCalled()
+    expect(mocks.resumeDurable).toHaveBeenCalledWith({ userId: 'u', runId: run.id, pauseEventId: 'pause', activation: { goalId: goal.id, epoch: goal.epoch } })
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+  it.each(['stale-epoch', 'cancelled', 'pending-revision', 'unsettled', 'missing-baseline', 'imported-manuscript'])('rejects activation %s before dispatch or spending', async kind => {
+    const goal = activatedFixture()
+    if (kind === 'stale-epoch') mocks.lockGoal.mockResolvedValue({ ...goal, epoch: 3n })
+    if (kind === 'cancelled') mocks.lockGoal.mockResolvedValue({ ...goal, status: 'cancelled' })
+    if (kind === 'pending-revision') mocks.lockGoal.mockResolvedValue({ ...goal, pendingRevision: 2 })
+    if (kind === 'unsettled') mocks.reconcile.mockResolvedValue(true)
+    if (kind === 'missing-baseline') mocks.activationSource.mockResolvedValue({ receipt: { baselineBound: false } })
+    if (kind === 'imported-manuscript') mocks.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 1 } })
+    const code = kind === 'imported-manuscript' ? 'IMPORT_SCOPE_CHANGED' : ['unsettled', 'missing-baseline'].includes(kind) ? 'GOAL_RECONCILIATION_REQUIRED' : 'GOAL_VERSION_CONFLICT'
+    await expect(continueActivatedGoalRun('u', run.id, goal.id, goal.epoch)).rejects.toMatchObject({ code })
+    expect(mocks.execute).not.toHaveBeenCalled(); expect(mocks.resumeDurable).not.toHaveBeenCalled()
+    expect(mocks.runUpdate).not.toHaveBeenCalled(); expect(mocks.creditAccess).not.toHaveBeenCalled(); expect(mocks.prepare).not.toHaveBeenCalled()
+  })
   it.each(['pending-activation', 'goal-bound'])('requires human goal controls for %s without changing model or starting paid work', async kind => {
     if (kind === 'pending-activation') mocks.goal.mockResolvedValue({ id: 'pending-goal' })
     else mocks.binding.mockResolvedValue({ goalId: 'bound-goal' })

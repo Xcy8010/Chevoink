@@ -4,6 +4,7 @@ import { DURABLE_RUNTIME_VERSION, lockOwnedRun, runtimeError, runtimeId, runtime
 import { createTaskBudgetPolicy } from './runtime-budget.js'
 import { recordTaskContentBaseline } from './runtime-postconditions.js'
 import { assertRunGoalFence } from './goal-fence.js'
+import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 
 function frozenSpec(raw: unknown) {
   const parsed = taskSpecSchema.safeParse(raw)
@@ -80,10 +81,12 @@ export function assertLegacyRuntimeCompatible(run: { runtimeProtocolVersion?: nu
 export async function startLegacyRuntimeRun(userId: string, runId: string, resume = false, activation?: { goalId: string; epoch: bigint }) {
   try {
     return await runtimeTransaction(async tx => {
+      let activationNovelId: string | null = null
       if (activation) {
         const { lockOwnedGoal, changeGoal, goalError } = await import('./goal-store.js')
         const run = await tx.agentRun.findFirst({ where: { id: runId, userId } })
         if (!run) return runtimeError('RUNTIME_SCOPE_MISMATCH', '原任务不存在。')
+        activationNovelId = run.novelId
         const goal = await lockOwnedGoal(tx, userId, run.sessionId, activation.goalId)
         const grant = await tx.agentGoalEvidence.findUnique({ where: { goalId_revision_criterionId: { goalId: goal.id, revision: 1, criterionId: 'activation-resume' } } })
         if (!resume || goal.status !== 'active' || goal.epoch !== activation.epoch || goal.currentRunId !== runId
@@ -99,13 +102,15 @@ export async function startLegacyRuntimeRun(userId: string, runId: string, resum
       // transaction as the status CAS so a paused/cancelled goal cannot be
       // resurrected by an old legacy startup path.
       if (!activation) await assertRunGoalFence(tx, userId, runId)
-      return tx.agentRun.update({
+      const started = await tx.agentRun.update({
         where: { id: runId, userId, runtimeProtocolVersion: 0, taskRootId: null,
           status: resume ? { in: ['paused', 'failed'] } : 'queued' },
         data: { status: 'running', ...(!resume ? { startedAt: new Date() } : {}), errorMessage: null },
         select: { taskSpec: true, taskRootId: true, runtimeProtocolVersion: true, usage: true, currentTurn: true, startedAt: true,
           events: { where: { type: { in: ['run.started', 'run.paused', 'run.finished'] } }, orderBy: { seq: 'asc' }, select: { type: true, createdAt: true } } },
       })
+      if (activationNovelId) await assertAgentManuscriptCurrent(tx, { userId, novelId: activationNovelId, runId })
+      return started
     })
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {

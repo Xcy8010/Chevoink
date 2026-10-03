@@ -40,7 +40,7 @@ import { fenceLocallyStoppedLegacyRun, pauseDurableTask, pauseDurableTaskForAtte
 import { resumeDurableTask } from './runtime-resume.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { activeChapterScope } from '../data/internal.js'
-import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
+import { assertAgentManuscriptCurrent, assertAgentManuscriptRevisionCurrent } from './manuscript-scope.js'
 import { recoverRunElapsedMs, savedRunUsageSchema } from './checkpoint.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { assertCreditAccess, getModelTierRuntime } from '../credits.js'
@@ -876,12 +876,18 @@ async function continueLoopRunLocked(
   if (goalExecution && (!activation || goalExecution.goalId !== activation.goalId)) throw new DataAccessError(409, 'GOAL_RESUME_REQUIRED', '请使用目标条的继续操作，原目标预算与进度会保留。')
   const activationReceipt = activation ? await runtimeTransaction(async tx => {
     const goal = await (await import('./goal-store.js')).lockOwnedGoal(tx, userId, run.sessionId, activation.goalId)
-    if (goal.status !== 'active' || goal.epoch !== activation.epoch || goal.currentRunId !== runId || goal.reasonCode !== 'GOAL_ACTIVATION_RESUME_READY') throw new DataAccessError(409, 'GOAL_VERSION_CONFLICT', '原任务继续授权已变化。')
+    if (goal.status !== 'active' || goal.currentRevision !== 1 || goal.pendingRevision !== null
+      || goal.epoch !== activation.epoch || goal.currentRunId !== runId || goal.reasonCode !== 'GOAL_ACTIVATION_RESUME_READY') throw new DataAccessError(409, 'GOAL_VERSION_CONFLICT', '原任务继续授权已变化。')
     const source = await (await import('./goal-activation.js')).readGoalActivationReceipt(tx, goal)
     if (!source?.receipt.baselineBound) throw new DataAccessError(409, 'GOAL_RECONCILIATION_REQUIRED', '原执行尚未完成结算。')
+    const ready = await (await import('./goal-activation-supervisor.js')).reconcileGoalActivation(tx, goal, new Date())
+    if (!ready || ready === true || ready.kind !== 'activation_continue' || ready.runId !== runId) throw new DataAccessError(409, 'GOAL_RECONCILIATION_REQUIRED', '原任务尚未具备本次安全继续条件。')
+    // Durable admission rechecks the manuscript against its new attempt inside
+    // resumeDurableTask. Legacy also rechecks its full fence after the status CAS.
+    if (run.runtimeProtocolVersion !== 1 || !run.taskRootId) await assertAgentManuscriptRevisionCurrent(tx, { userId, novelId: run.novelId, runId })
     return source.receipt
   }) : null
-  await prisma.$transaction(tx => assertAgentManuscriptCurrent(tx, { userId, novelId: run.novelId, runId }))
+  if (!activation) await prisma.$transaction(tx => assertAgentManuscriptCurrent(tx, { userId, novelId: run.novelId, runId }))
 
   assertTaskAuthorizationRuntimeReady(run.taskSpec, { userId, sessionId: run.sessionId, novelId: run.novelId })
   if (run.runtimeProtocolVersion === 1 && run.taskRootId) {

@@ -30,14 +30,20 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
       const source = await tx.agentRun.findFirst({ where: { id: captured.runId, userId: captured.userId } })
       if (!source) return runtimeError('RUNTIME_SCOPE_MISMATCH', '原任务不存在。')
       activationGoal = await (await import('./goal-store.js')).lockOwnedGoal(tx, captured.userId, source.sessionId, captured.activation.goalId)
-      if (activationGoal.status !== 'active' || activationGoal.epoch !== captured.activation.epoch || activationGoal.currentRunId !== source.id
+      if (activationGoal.status !== 'active' || activationGoal.currentRevision !== 1 || activationGoal.pendingRevision !== null
+        || activationGoal.epoch !== captured.activation.epoch || activationGoal.currentRunId !== source.id
         || activationGoal.reasonCode !== 'GOAL_ACTIVATION_RESUME_READY') return runtimeError('GOAL_VERSION_CONFLICT', '原任务继续授权已变化。')
       const consent = await tx.agentGoalEvidence.findUnique({ where: { goalId_revision_criterionId: { goalId: activationGoal.id, revision: 1, criterionId: 'activation-resume' } } })
       if (consent?.status !== 'verified' || !consent.receipt || typeof consent.receipt !== 'object' || Array.isArray(consent.receipt)
         || consent.receipt.epoch !== String(activationGoal.epoch) || consent.receipt.sourceRunId !== captured.runId) return runtimeError('GOAL_VERSION_CONFLICT', '缺少本次作者继续授权。')
+      const ready = await (await import('./goal-activation-supervisor.js')).reconcileGoalActivation(tx, activationGoal, await databaseNow(tx))
+      const original = await (await import('./goal-activation.js')).readGoalActivationReceipt(tx, activationGoal)
+      if (!ready || ready === true || ready.kind !== 'activation_continue' || ready.runId !== captured.runId || !original?.receipt.baselineBound) {
+        return runtimeError('GOAL_RECONCILIATION_REQUIRED', '原任务尚未具备本次安全继续条件。')
+      }
     }
     const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
-    await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: run.id, novelId: run.novelId })
+    if (!activationGoal) await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: run.id, novelId: run.novelId })
     if (root.authorizationMode !== 'legacy') runtimeError('TASK_AUTHORIZATION_NOT_ACTIVATED', '阶段授权执行器尚未接入，不能降级恢复。')
     const pause = await tx.agentExecutionOutbox.findUnique({ where: { id: captured.pauseEventId } })
     const parsedPause = pausePayload.safeParse(pause?.payload)
@@ -67,6 +73,7 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
       const resumed = await tx.agentRun.findFirst({ where: { id: parsed.data.runId, taskRootId: root.id, userId: run.userId } })
       if (!resumed) return runtimeError('RUNTIME_RECEIPT_INVALID', '已准入的运行实例缺失，不能再建一个。')
       if (latestRun?.id !== resumed.id) runtimeError('STALE_RESUME_TARGET', '当前会话已有后续任务，旧恢复回执不能启动它。')
+      await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: resumed.id, novelId: resumed.novelId })
       return { run: resumed, taskRootId: root.id, replay: true as const }
     }
     if (root.status !== 'paused' || run.status !== 'paused' || state.frame.state.phase === 'completed') runtimeError('RUN_NOT_PAUSED', '仅本次已暂停且未完成的任务可恢复。')
@@ -92,6 +99,9 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
       const index = activationGoal.continuationIndex + 1
       await tx.agentGoalExecution.create({ data: { goalId: activationGoal.id, goalRevision: activationGoal.currentRevision, epoch: activationGoal.epoch,
         taskRootId: root.id, runId: resumed.id, continuationIndex: index, trigger: 'author', sourceEventId: `activation-resume:${pause.id}` } })
+      // A paused source is an admission identity, not a live writer. The new
+      // attempt must pass the unchanged full effect fence before consuming consent.
+      await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: resumed.id, novelId: resumed.novelId })
       await tx.agentGoalEvidence.update({ where: { goalId_revision_criterionId: { goalId: activationGoal.id, revision: 1, criterionId: 'activation-resume' } }, data: { status: 'consumed' } })
       await (await import('./goal-store.js')).changeGoal(tx, activationGoal, { continuationIndex: index, currentRunId: resumed.id,
         phase: 'executing', reasonCode: null, nextEligibleAt: null, activeSince: now }, 'activation.continued')

@@ -212,11 +212,20 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     const paused = await actOnAgentGoal(f.userId, f.sessionId, initial.id, { requestId: randomUUID(), expectedStateVersion: initial.stateVersion, action: 'pause' })
     await actOnAgentGoal(f.userId, f.sessionId, initial.id, { requestId: randomUUID(), expectedStateVersion: paused.stateVersion, action: 'resume' })
     const action = await prisma.$transaction(async tx => reconcileGoalActivation(tx, await lockOwnedGoal(tx, f.userId, f.sessionId, initial.id), new Date()))
+    const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: root.id, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
     if (operationStatus === 'unknown') {
       expect(action).toBe(true)
       expect(await prisma.agentGoalExecution.count({ where: { goalId: initial.id } })).toBe(0)
       expect(await prisma.agentEffectReceipt.count({ where: { operationId: pending.operation.id } })).toBe(0)
       expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(pending.pending.snapshotHash)
+      // A stale readiness marker cannot grant execution of an unknown operation.
+      const held = await prisma.agentGoal.update({ where: { id: initial.id }, data: { reasonCode: 'GOAL_ACTIVATION_RESUME_READY' } })
+      await expect(resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id,
+        activation: { goalId: initial.id, epoch: held.epoch } })).rejects.toMatchObject({ code: 'GOAL_RECONCILIATION_REQUIRED' })
+      expect(await prisma.agentGoal.findUniqueOrThrow({ where: { id: initial.id } })).toEqual(held)
+      expect(await prisma.agentRun.count({ where: { taskRootId: root.id } })).toBe(1)
+      expect(await prisma.agentEffectReceipt.count({ where: { operationId: pending.operation.id } })).toBe(0)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id } } })).toBe(0)
       return
     }
     expect(action).toMatchObject({ kind: 'activation_continue', runId: f.runId })
@@ -230,7 +239,29 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     } })
     expect(sourceEvidence.receipt).toMatchObject({ sourceRunId: f.runId, activationRunId: f.runId,
       sourceRootId: root.id, sourceMessageId: f.messageId, baselineBound: true })
-    const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: root.id, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
+    await expect(resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id,
+      activation: { goalId: initial.id, epoch: ready.epoch - 1n } })).rejects.toMatchObject({ code: 'GOAL_VERSION_CONFLICT' })
+    for (const control of [{ status: 'cancelled' }, { pendingRevision: 2 }] as const) {
+      const fenced = await prisma.agentGoal.update({ where: { id: initial.id }, data: control })
+      await expect(resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id,
+        activation: { goalId: initial.id, epoch: ready.epoch } })).rejects.toMatchObject({ code: 'GOAL_VERSION_CONFLICT' })
+      expect(await prisma.agentGoal.findUniqueOrThrow({ where: { id: initial.id } })).toEqual(fenced)
+      await prisma.agentGoal.update({ where: { id: initial.id }, data: { status: ready.status, pendingRevision: null } })
+    }
+    const manuscript = await prisma.novel.findUniqueOrThrow({ where: { id: f.novelId } })
+    const grantBefore = await prisma.agentGoalEvidence.findUniqueOrThrow({ where: {
+      goalId_revision_criterionId: { goalId: initial.id, revision: 1, criterionId: 'activation-resume' },
+    } })
+    await prisma.novel.update({ where: { id: f.novelId }, data: { manuscriptRevision: manuscript.manuscriptRevision + 1 } })
+    await expect(resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id,
+      activation: { goalId: initial.id, epoch: ready.epoch } })).rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })
+    expect(await prisma.agentGoalEvidence.findUniqueOrThrow({ where: { id: grantBefore.id } })).toEqual(grantBefore)
+    expect(await prisma.agentGoalExecution.count({ where: { goalId: initial.id } })).toBe(1)
+    expect(await prisma.agentRun.count({ where: { taskRootId: root.id } })).toBe(1)
+    expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: root.id } })).status).toBe('paused')
+    expect(await prisma.agentEffectReceipt.count({ where: { operationId: pending.operation.id } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id } } })).toBe(0)
+    await prisma.novel.update({ where: { id: f.novelId }, data: { manuscriptRevision: manuscript.manuscriptRevision } })
     const resumed = await resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id, activation: { goalId: initial.id, epoch: ready.epoch } })
     expect(await prisma.agentGoalExecution.findUniqueOrThrow({ where: { runId: resumed.run.id } })).toMatchObject({
       goalId: initial.id, goalRevision: 1, epoch: ready.epoch, taskRootId: root.id,
@@ -332,6 +363,22 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
       const action = await prisma.$transaction(async tx => reconcileGoalActivation(tx, await lockOwnedGoal(tx, f.userId, f.sessionId, initial.id), new Date()))
       expect(action).toMatchObject({ kind: 'activation_continue', runId: f.runId })
       const record = await prisma.agentGoal.findUniqueOrThrow({ where: { id: initial.id } })
+      if (round === 0) {
+        const manuscript = await prisma.novel.findUniqueOrThrow({ where: { id: f.novelId } })
+        const sourceBefore = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+        const bindingBefore = await prisma.agentGoalExecution.findUniqueOrThrow({ where: { runId: f.runId } })
+        const grantBefore = await prisma.agentGoalEvidence.findUniqueOrThrow({ where: {
+          goalId_revision_criterionId: { goalId: initial.id, revision: 1, criterionId: 'activation-resume' },
+        } })
+        await prisma.novel.update({ where: { id: f.novelId }, data: { manuscriptRevision: manuscript.manuscriptRevision + 1 } })
+        await expect(startLegacyRuntimeRun(f.userId, f.runId, true, { goalId: initial.id, epoch: record.epoch })).rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })
+        expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toEqual(sourceBefore)
+        expect(await prisma.agentGoalExecution.findUniqueOrThrow({ where: { runId: f.runId } })).toEqual(bindingBefore)
+        expect(await prisma.agentGoalEvidence.findUniqueOrThrow({ where: { id: grantBefore.id } })).toEqual(grantBefore)
+        expect(await prisma.agentGoal.findUniqueOrThrow({ where: { id: initial.id } })).toEqual(record)
+        expect(await prisma.agentProviderAttempt.count({ where: { runId: f.runId } })).toBe(0)
+        await prisma.novel.update({ where: { id: f.novelId }, data: { manuscriptRevision: manuscript.manuscriptRevision } })
+      }
       await startLegacyRuntimeRun(f.userId, f.runId, true, { goalId: initial.id, epoch: record.epoch })
       expect((await prisma.agentGoalEvidence.findUniqueOrThrow({ where: { goalId_revision_criterionId: { goalId: initial.id, revision: 1, criterionId: 'activation-resume' } } })).status).toBe('consumed')
       expect(await actOnAgentGoal(f.userId, f.sessionId, initial.id, request)).toEqual(granted)

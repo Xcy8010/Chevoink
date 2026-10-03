@@ -11,6 +11,17 @@ type WriteScope = { userId: string; novelId: string; runId: string; transaction?
 export async function assertAgentManuscriptCurrent(tx: Prisma.TransactionClient, scope: WriteScope): Promise<void> {
   await lockNovelActiveScope(tx, scope.novelId)
   await assertRunGoalFence(tx, scope.userId, scope.runId)
+  await assertManuscriptRevision(tx, scope)
+}
+
+/** Admission only: the caller must separately verify the author's exact resume
+ * grant. Every effect still uses assertAgentManuscriptCurrent and its live fence. */
+export async function assertAgentManuscriptRevisionCurrent(tx: Prisma.TransactionClient, scope: WriteScope): Promise<void> {
+  await lockNovelActiveScope(tx, scope.novelId)
+  await assertManuscriptRevision(tx, scope)
+}
+
+async function assertManuscriptRevision(tx: Prisma.TransactionClient, scope: WriteScope): Promise<void> {
   const run = await tx.agentRun.findFirst({
     where: { id: scope.runId, userId: scope.userId, novelId: scope.novelId },
     select: { manuscriptRevision: true, novel: { select: { authorId: true, manuscriptRevision: true } } },
