@@ -137,7 +137,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const goalBinding = await prisma.agentGoalExecution.findUnique({ where: { runId } })
   if (run.runtimeProtocolVersion === 1 && run.taskRootId && await prisma.agentExecutionState.findUnique({ where: { taskRootId: run.taskRootId } })) return loadExecutionState(userId, runId)
   const original = await prisma.agentMessage.findFirst({ where: { runId, sessionId: run.sessionId,
-    role: goalBinding && !['author', 'activation_baseline'].includes(goalBinding.trigger) ? 'system' : 'user' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+    role: goalBinding && goalBinding.trigger !== 'author' ? 'system' : 'user' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
   const parts = [{ type: 'text', text: input.prompt }, ...(input.attachments ?? []).map(item => ({ type: 'attachment', kind: item.kind, name: item.name, url: item.url, size: item.size }))]
   if (!original || runtimeJson(original.parts).hash !== runtimeJson(JSON.parse(JSON.stringify(parts))).hash) throw new DataAccessError(409, 'RUN_INPUT_MISMATCH', '初始化必须使用已保存的完整原始请求。')
   if (run.status !== 'queued') throw new DataAccessError(409, 'RUN_IN_PROGRESS', '不能重新初始化已启动任务。')

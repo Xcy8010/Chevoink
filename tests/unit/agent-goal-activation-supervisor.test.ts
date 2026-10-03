@@ -55,7 +55,27 @@ describe('deferred activation reconciliation barriers', () => {
   it('parks a completed ordinary run with no deliverable proof without creating another paid task', async () => {
     const f = fixture()
     await reconcileGoalActivation(f.tx, f.goal, new Date())
+    expect(f.db.agentGoalExecution.create).toHaveBeenCalledWith({ data: {
+      goalId: 'goal', goalRevision: 1, epoch: 2n, runId: 'source', taskRootId: null, continuationIndex: 1,
+      trigger: 'author', sourceEventId: 'activation:goal:source',
+    } })
+    expect(f.db.agentGoalEvidence.update).toHaveBeenCalledWith({ where: { id: 'receipt' }, data: {
+      receipt: expect.objectContaining({ sourceRunId: 'source', activationRunId: 'source', sourceRootId: 'root', sourceMessageId: 'human',
+        requestHash: 'request', consentHash: 'consent', baselineBound: true }),
+    } })
     expect(mocks.change).toHaveBeenLastCalledWith(f.tx, expect.anything(), expect.objectContaining({ phase: 'awaiting_input', reasonCode: 'GOAL_ACTIVATION_AUTHOR_INPUT_REQUIRED' }), 'activation.waiting')
+  })
+  it('keeps settled model-spawned children as subagents within the original activation receipt', async () => {
+    const f = fixture()
+    f.db.agentRun.findMany.mockReset().mockResolvedValueOnce([f.run]).mockResolvedValueOnce([{ id: 'child', status: 'completed', taskRootId: null }])
+    await reconcileGoalActivation(f.tx, f.goal, new Date())
+    expect(f.db.agentGoalExecution.create).toHaveBeenNthCalledWith(1, { data: expect.objectContaining({
+      runId: 'source', trigger: 'author', sourceEventId: 'activation:goal:source', continuationIndex: 1,
+    }) })
+    expect(f.db.agentGoalExecution.create).toHaveBeenNthCalledWith(2, { data: expect.objectContaining({
+      runId: 'child', trigger: 'subagent', sourceEventId: 'activation:goal:child', continuationIndex: 2,
+    }) })
+    expect(f.db.agentGoalExecution.create).toHaveBeenCalledTimes(2)
   })
   it('accepts actual domain completion without a second round', async () => {
     const f = fixture()

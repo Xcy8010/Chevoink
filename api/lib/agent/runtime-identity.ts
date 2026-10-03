@@ -29,7 +29,7 @@ export async function initializeDurableTask(input: { userId: string; runId: stri
     if (spec.scope.novelId !== run.novelId || (run.taskRootId && run.taskRootId !== spec.id)
       || ![0, DURABLE_RUNTIME_VERSION].includes(run.runtimeProtocolVersion)) runtimeError('RUNTIME_SCOPE_MISMATCH', '任务根或版本不匹配，不能重建为新任务。')
     const message = await tx.agentMessage.findFirst({ where: { id: input.sourceMessageId, runId: run.id, sessionId: run.sessionId,
-      role: goalBinding && !['author', 'activation_baseline'].includes(goalBinding.trigger) ? 'system' : 'user' } })
+      role: goalBinding && goalBinding.trigger !== 'author' ? 'system' : 'user' } })
     if (!message) return runtimeError('RUNTIME_SOURCE_REQUIRED', '缺少本任务的原始用户消息，不能从历史摘要补造授权。')
     const request = runtimeJson(message.parts)
     const digest = runtimeJson({ spec: frozen.value, request: request.value }).hash

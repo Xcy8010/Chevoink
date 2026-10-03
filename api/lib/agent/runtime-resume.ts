@@ -91,7 +91,7 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
     if (activationGoal) {
       const index = activationGoal.continuationIndex + 1
       await tx.agentGoalExecution.create({ data: { goalId: activationGoal.id, goalRevision: activationGoal.currentRevision, epoch: activationGoal.epoch,
-        taskRootId: root.id, runId: resumed.id, continuationIndex: index, trigger: 'activation_resume', sourceEventId: `activation-resume:${pause.id}` } })
+        taskRootId: root.id, runId: resumed.id, continuationIndex: index, trigger: 'author', sourceEventId: `activation-resume:${pause.id}` } })
       await tx.agentGoalEvidence.update({ where: { goalId_revision_criterionId: { goalId: activationGoal.id, revision: 1, criterionId: 'activation-resume' } }, data: { status: 'consumed' } })
       await (await import('./goal-store.js')).changeGoal(tx, activationGoal, { continuationIndex: index, currentRunId: resumed.id,
         phase: 'executing', reasonCode: null, nextEligibleAt: null, activeSince: now }, 'activation.continued')

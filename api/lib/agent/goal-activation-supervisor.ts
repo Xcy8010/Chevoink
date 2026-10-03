@@ -133,7 +133,7 @@ export async function reconcileGoalActivation(tx: GoalTx, goal: AgentGoal, now: 
       const previous = await tx.agentGoalExecution.findUnique({ where: { runId: run.id } })
       if (previous && previous.goalId !== goal.id) return goalError('GOAL_SCOPE_MISMATCH', '原任务已归属另一个目标。')
       if (!previous) await tx.agentGoalExecution.create({ data: { goalId: goal.id, goalRevision: 1, epoch: goal.epoch,
-        runId: run.id, taskRootId: run.taskRootId, continuationIndex: ++index, trigger: 'activation_baseline',
+        runId: run.id, taskRootId: run.taskRootId, continuationIndex: ++index, trigger: 'author',
         sourceEventId: `activation:${goal.id}:${run.id}`, ...(children.some(child => child.id === run.id) ? { trigger: 'subagent' } : {}) } })
     }
     await tx.agentGoalEvidence.update({ where: { id: activation.evidence.id }, data: { receipt: runtimeJson(activationReceiptSchema.parse({ ...saved, baselineBound: true })).value } })

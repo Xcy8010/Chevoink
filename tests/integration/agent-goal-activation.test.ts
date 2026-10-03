@@ -221,8 +221,29 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     }
     expect(action).toMatchObject({ kind: 'activation_continue', runId: f.runId })
     const ready = await prisma.agentGoal.findUniqueOrThrow({ where: { id: initial.id } })
+    expect(await prisma.agentGoalExecution.findUniqueOrThrow({ where: { runId: f.runId } })).toMatchObject({
+      goalId: initial.id, goalRevision: 1, epoch: ready.epoch, taskRootId: root.id,
+      trigger: 'author', sourceEventId: `activation:${initial.id}:${f.runId}`,
+    })
+    const sourceEvidence = await prisma.agentGoalEvidence.findUniqueOrThrow({ where: {
+      goalId_revision_criterionId: { goalId: initial.id, revision: 1, criterionId: 'activation-source' },
+    } })
+    expect(sourceEvidence.receipt).toMatchObject({ sourceRunId: f.runId, activationRunId: f.runId,
+      sourceRootId: root.id, sourceMessageId: f.messageId, baselineBound: true })
     const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: root.id, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
     const resumed = await resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id, activation: { goalId: initial.id, epoch: ready.epoch } })
+    expect(await prisma.agentGoalExecution.findUniqueOrThrow({ where: { runId: resumed.run.id } })).toMatchObject({
+      goalId: initial.id, goalRevision: 1, epoch: ready.epoch, taskRootId: root.id,
+      trigger: 'author', sourceEventId: `activation-resume:${pause.id}`,
+    })
+    expect((await prisma.agentGoalEvidence.findUniqueOrThrow({ where: { id: sourceEvidence.id } })).receipt).toEqual(sourceEvidence.receipt)
+    expect(await prisma.agentGoalEvidence.findUniqueOrThrow({ where: {
+      goalId_revision_criterionId: { goalId: initial.id, revision: 1, criterionId: 'activation-resume' },
+    } })).toMatchObject({ status: 'consumed', receipt: { sourceRunId: f.runId, epoch: String(ready.epoch) } })
+    expect(await prisma.agentMessage.count({ where: { runId: resumed.run.id } })).toBe(0)
+    expect(await prisma.agentMessage.findUniqueOrThrow({ where: { id: root.sourceMessageId } })).toMatchObject({
+      id: f.messageId, runId: f.runId, sessionId: f.sessionId, role: 'user',
+    })
     const owner = await acquireRunLease({ userId: f.userId, runId: resumed.run.id, ownerId: 'prepared-consent-resume', claimId: randomUUID() })
     expect((await loadExecutionState(f.userId, resumed.run.id)).frame.snapshotHash).toBe(pending.pending.snapshotHash)
     expect((await executeDurableToolStep(owner, f.ctx.signal)).kind).toBe('tool')
