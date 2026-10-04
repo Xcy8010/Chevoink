@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => {
   return {
     tx,
     prisma: {
+      agentChildExecutionGrant: { findFirst: vi.fn().mockResolvedValue(null) },
       agentGoalUsage: { findUnique: vi.fn() },
       aiUsageLog: { findUnique: vi.fn() },
       agentProviderAttempt: { findUnique: vi.fn() },

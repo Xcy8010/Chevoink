@@ -4,7 +4,7 @@ export type ImportSuggestionSelection = { manifestRevision: number; manifestHash
 export type ImportSuggestionBoundary = { offset: number; title: string }
 export type ImportSuggestionResult = { id: string; status: 'succeeded' | 'pending' | 'failed'; result: { boundaries: ImportSuggestionBoundary[]; note: string } | null; errorCode?: string | null }
 export type ImportSuggestionRecord = ImportSuggestionResult & ImportSuggestionSelection
-export type ImportSuggestionQuote = { fingerprint: string; modelName: string | null; kind: 'basic' | 'custom'; reasoningEffort: string; maxInputTokens: number; maxOutputTokens: number; notice: string }
+export type ImportSuggestionQuote = { fingerprint: string; modelName: string | null; kind: 'basic' | 'builtin' | 'custom'; reasoningEffort: string; maxInputTokens: number; maxOutputTokens: number; notice: string }
 const path = (novelId: string, jobId: string) => `/api/novels/${encodeURIComponent(novelId)}/imports/${encodeURIComponent(jobId)}/suggestions`
 export const importSuggestionsApi = {
   list: (novelId: string, jobId: string) => requestData<ImportSuggestionRecord[]>(path(novelId, jobId)),

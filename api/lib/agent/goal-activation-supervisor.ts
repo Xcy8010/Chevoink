@@ -66,7 +66,10 @@ export async function reconcileGoalActivation(tx: GoalTx, goal: AgentGoal, now: 
   for (const id of [...runIds].sort()) await tx.$queryRaw`SELECT id FROM agent_runs WHERE id = ${id} FOR UPDATE`
   if (source.run.taskRootId) await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${source.run.taskRootId} FOR UPDATE`
   const children = await tx.agentRun.findMany({ where: { userId: goal.userId, novelId: goal.novelId,
-    session: { spawnedFromRunId: { in: runIds } } }, select: { id: true, status: true, taskRootId: true } })
+    OR: [
+      { session: { spawnedFromRunId: { in: runIds } } },
+      { incomingChildGrant: { is: { parentRootId: { in: [...new Set(runs.flatMap(run => run.taskRootId ? [run.taskRootId] : []))] } } } },
+    ] }, select: { id: true, status: true, taskRootId: true } })
   if ([...runs, ...children].some(run => ['queued', 'running', 'awaiting_approval'].includes(run.status) || getActiveRun(run.id))) return true
   const allIds = [...runIds, ...children.map(run => run.id)]
   if (await tx.agentRunLease.count({ where: { runId: { in: allIds }, expiresAt: { gt: now } } })) return true

@@ -9,6 +9,8 @@ import { forkAgentSessionData, startLoopRunLocked, toAgentSession } from './run-
 import { withUserRunLock } from './run-lock.js'
 import { readHumanAdmission, withHumanAdmission } from './goal-activation-authority.js'
 import { bindCurrentTaskGoalConsent, goalConsentSchema } from './goal-consent.js'
+import { bindConfigurationConsent, configurationConsentSchema } from './configuration-journal.js'
+import { MAIN_RUN_FILTER } from './runtime-child.js'
 
 const editable = ['pending', 'held']
 const conflict = () => new DataAccessError(409, 'QUEUE_CHANGED', '待发需求已发送或被修改，请刷新后再操作。')
@@ -17,7 +19,7 @@ async function ownedSession(userId: string, sessionId: string) {
   if (!session) throw new DataAccessError(404, 'NOT_FOUND', '会话不存在或无权访问。')
   return session
 }
-const latestRun = (sessionId: string) => prisma.agentRun.findFirst({ where: { sessionId, engine: 'loop' }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true, status: true } })
+const latestRun = (sessionId: string) => prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId, engine: 'loop' }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true, status: true } })
 
 export function queueCanDispatch(status: string | undefined, priority: number): boolean {
   return !status || status === 'completed' || (priority > 0 && ['paused', 'failed', 'cancelled'].includes(status))
@@ -70,6 +72,7 @@ export async function enqueueRequest(userId: string, id: string, raw: StartAgent
       if (count >= 50) throw new DataAccessError(400, 'QUEUE_FULL', '待发需求最多保留 50 条，请先处理已有需求。')
       const request = { ...input, mode: 'build' as const }
       const consent = humanOrigin === 'http' ? await bindCurrentTaskGoalConsent(tx, userId, request) : null
+      const configurationConsent = humanOrigin === 'http' && !consent ? await bindConfigurationConsent(tx, userId, request) : null
       let alreadyEnabled = false
       if (consent) {
         const goal = await tx.agentGoal.findFirst({ where: { userId, sessionId: session.id, novelId: session.novelId, status: { notIn: ['completed', 'cancelled'] } } })
@@ -82,8 +85,10 @@ export async function enqueueRequest(userId: string, id: string, raw: StartAgent
           && activation.receipt.specHash === consent.sourceSpecHash && activation.receipt.messageHash === consent.sourceMessageHash)
       }
       await tx.agentQueuedRequest.create({ data: { id, userId, sessionId: session.id,
-        payload: (consent ? { ...withHumanAdmission(request), goalConsent: { ...consent, ...(alreadyEnabled ? { consumed: true, enabled: true } : {}) } } : humanOrigin === 'http' ? withHumanAdmission(request) : request) as Prisma.InputJsonValue,
-        ...(consent ? { status: alreadyEnabled ? 'consented' : 'held', error: alreadyEnabled ? null : '已关联当前任务；等待当前工具轮结束后启用目标模式。' } : {}) } })
+        payload: (consent ? { ...withHumanAdmission(request), goalConsent: { ...consent, ...(alreadyEnabled ? { consumed: true, enabled: true } : {}) } }
+          : configurationConsent ? { ...withHumanAdmission(request), configurationConsent } : humanOrigin === 'http' ? withHumanAdmission(request) : request) as Prisma.InputJsonValue,
+        ...(configurationConsent ? { status: 'held', error: '已关联当前任务，等待下一轮处理。' }
+          : consent ? { status: alreadyEnabled ? 'consented' : 'held', error: alreadyEnabled ? null : '已关联当前任务；等待当前工具轮结束后启用目标模式。' } : {}) } })
       return { id }
     })
   })
@@ -94,7 +99,8 @@ export async function actOnQueuedRequest(userId: string, sessionId: string, id: 
     await ownedSession(userId, sessionId)
     const item = await prisma.agentQueuedRequest.findFirst({ where: { id, userId, sessionId, status: { in: editable }, revision } })
     if (!item) throw conflict()
-    if (goalConsentSchema.safeParse((item.payload as Record<string, unknown>).goalConsent).success && action !== 'delete') {
+    if ((goalConsentSchema.safeParse((item.payload as Record<string, unknown>).goalConsent).success
+      || configurationConsentSchema.safeParse((item.payload as Record<string, unknown>).configurationConsent).success) && action !== 'delete') {
       throw new DataAccessError(409, 'GOAL_CONSENT_BOUND', '这条请求已关联原任务，不会作为新任务发送；原任务停止后请先处理原任务。')
     }
     const input = startAgentLoopRunSchema.parse(item.payload)

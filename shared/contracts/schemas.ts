@@ -126,6 +126,7 @@ const agentAttachmentsSchema = z.array(agentAttachmentMetaSchema)
 
 /** POST /api/agent/runs（原校验：四字段齐全；mode 管道保留但后端恒 build，见 agent.ts） */
 export const startAgentLoopRunSchema = z.object({
+  modelSelectionExplicit: z.literal(true).optional(),
   sessionId: z.string().min(1),
   novelId: z.string().min(1),
   chapterId: z.string().nullable().optional(),

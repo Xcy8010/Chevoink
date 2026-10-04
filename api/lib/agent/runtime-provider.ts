@@ -44,7 +44,7 @@ export async function beginDurableChat(input: {
   const goalContext = await readGoalExecution(input.userId, execution.lease.runId)
   const goalUsageKey = `durable:${attempt.id}`
   const withSettlement = async (result: ChatCompletionResult): Promise<ChatCompletionResult> => {
-    const billing = await settleProviderOperation(identity)
+    const billing = await settleProviderOperation({ ...identity, lease: execution.lease })
     await observeGoalUsage(goalUsageKey, { inputTokens: result.usage.promptTokens, outputTokens: result.usage.completionTokens,
       creditsMilli: billing.status === 'settled' ? billing.chargedMilli : 0, status: billing.status === 'settled' ? 'known' : 'unknown' })
     if (pending) await reduceExecutionReceipt(execution.lease, { expectedRevision: pending.revision, expectedHash: pending.snapshotHash, operationId: operation.id })

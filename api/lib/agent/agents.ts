@@ -17,9 +17,9 @@ export type AgentDefinition = {
 
 /**
  * 主控与四种专业子 Agent。子 Agent 使用显式工具白名单：
- * - 不含 todo_write（子 Agent 内嵌执行复用父 run 消息空间，避免污染主 run 待办清单）
+ * - 不含 todo_write（持久子 Agent 使用独立 run/执行帧，主 run 待办仍由主控维护）
  * - 不含 subagent_delegate / subagent_run（禁止嵌套递归，只有主控可调子 Agent）
- * - 写工具按需白名单化，写操作仍走会话工具策略 + 审批闸（子 Agent 审批透传到主 run）
+ * - 写工具按需白名单化；派生仍受父任务工具策略与审批限制，不能把 ask/deny 扩大为 allow
  */
 export const agentRegistry: AgentDefinition[] = [
   {
@@ -137,7 +137,7 @@ export function applySessionToolPolicy(
 ): AgentTool[] {
   const policy = rawPolicy && typeof rawPolicy === 'object' ? { ...DEFAULT_POLICY, ...(rawPolicy as Partial<AgentSessionToolPolicy>) } : DEFAULT_POLICY
   return tools.flatMap((tool) => {
-    if (sandboxMode === 'read_only' && !tool.readOnly) return []
+    if (sandboxMode === 'read_only' && !tool.readOnly && tool.name !== 'agent_configure' && tool.name !== 'model_assign') return []
     const key = governedPolicyKey(tool)
     if (!key) return [tool]
     const level = policy[key]

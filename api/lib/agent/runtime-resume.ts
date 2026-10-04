@@ -7,6 +7,7 @@ import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeJson, runtime
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
 import { readTaskBudgetInTransaction, taskTurnLimit } from './runtime-budget.js'
 import { durablePauseSchema } from './runtime-common.js'
+import { MAIN_RUN_FILTER } from './runtime-child.js'
 
 const pausePayload = durablePauseSchema
 const resumePayload = z.object({ sourceRunId: z.string(), runId: z.string(), pauseEventId: z.string(),
@@ -43,6 +44,7 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
       }
     }
     const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
+    if (await tx.agentChildExecutionGrant.findFirst({ where: { childRun: { taskRootId: root.id } } })) return runtimeError('RUNTIME_CHILD_SOURCE_REQUIRED', '子任务只能由原父任务恢复，不能从普通继续入口取得新的执行授权。')
     if (!activationGoal) await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: run.id, novelId: run.novelId })
     if (root.authorizationMode !== 'legacy') runtimeError('TASK_AUTHORIZATION_NOT_ACTIVATED', '阶段授权执行器尚未接入，不能降级恢复。')
     const pause = await tx.agentExecutionOutbox.findUnique({ where: { id: captured.pauseEventId } })
@@ -62,7 +64,7 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
       || state.frame.state.turn > taskTurnLimit(budget.policy, budget.budget.checkpointCount)) runtimeError('RUNTIME_STATE_CONFLICT', '原执行位置与预算合同不一致。')
     const eventKey = `resume:${pause.id}`
     const existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey } })
-    const latestRun = await tx.agentRun.findFirst({ where: { sessionId: root.sessionId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true } })
+    const latestRun = await tx.agentRun.findFirst({ where: { sessionId: root.sessionId, ...MAIN_RUN_FILTER }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true } })
     if (existing) {
       const parsed = resumePayload.safeParse(existing.payload)
       if (!parsed.success || existing.taskRootId !== root.id || existing.type !== 'run.resume.queued'
@@ -78,8 +80,8 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
     }
     if (root.status !== 'paused' || run.status !== 'paused' || state.frame.state.phase === 'completed') runtimeError('RUN_NOT_PAUSED', '仅本次已暂停且未完成的任务可恢复。')
     if (latestRun?.id !== run.id) runtimeError('STALE_RESUME_TARGET', '当前会话已有后续任务，请勿从旧入口恢复。')
-    if (await tx.agentRun.count({ where: { sessionId: root.sessionId, status: { in: [...live] } } })) runtimeError('RUN_IN_PROGRESS', '当前会话已有任务执行。')
-    if (await tx.agentRun.count({ where: { userId: run.userId, status: { in: [...live] } } }) >= concurrencyLimit) runtimeError('RUN_LIMIT', '同时进行的任务数已达上限。')
+    if (await tx.agentRun.count({ where: { sessionId: root.sessionId, status: { in: [...live] }, ...MAIN_RUN_FILTER } })) runtimeError('RUN_IN_PROGRESS', '当前会话已有任务执行。')
+    if (await tx.agentRun.count({ where: { userId: run.userId, status: { in: [...live] }, ...MAIN_RUN_FILTER } }) >= concurrencyLimit) runtimeError('RUN_LIMIT', '同时进行的任务数已达上限。')
     // A pause is required to revoke every old owner; do not repair a corrupt fence
     // by silently granting another executable run.
     if (await tx.agentRunLease.count({ where: { run: { taskRootId: root.id }, enabled: true } })) runtimeError('RUNTIME_STATE_CONFLICT', '暂停的所有权撤销尚未完整，不能恢复。')

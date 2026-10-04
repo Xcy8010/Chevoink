@@ -40,7 +40,7 @@ async function context(human: NovelImportHuman, jobId: string, input: Selection)
 
 export async function quoteImportSuggestion(human: NovelImportHuman, jobId: string, input: Selection) {
   const { route } = await context(human, jobId, input)
-  return { ...route, maxInputTokens: 8000, maxOutputTokens: 2000, notice: route.kind === 'custom' ? '使用本次选择的自定义模型，平台不扣模型额度；供应商可能收费。最多4次，每次最多8000输入、2000输出Token。' : '使用基础模型low，按现有额度规则预留并按用量结算。最多4次，每次最多8000输入、2000输出Token；仅提供分章建议。' }
+  return { ...route, maxInputTokens: 8000, maxOutputTokens: 2000, notice: route.kind === 'custom' ? '使用本次选择的自定义模型，平台不扣模型额度；供应商可能收费。最多4次，每次最多8000输入、2000输出Token。' : `使用${route.modelName ?? '内置模型'} ${route.reasoningEffort}，按现有额度规则预留并按用量结算。最多4次，每次最多8000输入、2000输出Token；仅提供分章建议。` }
 }
 
 export async function requestImportSuggestion(human: NovelImportHuman, jobId: string, input: z.infer<typeof importSuggestionSchema>) {

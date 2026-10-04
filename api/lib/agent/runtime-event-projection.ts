@@ -10,16 +10,20 @@ import { durableQuestionSchema } from './runtime-question.js'
 import { durableMessageId } from './runtime-frame-events.js'
 import { novelImportWaitingSchema } from '../novel-import-origin.js'
 import { importCommitWaitingSchema, importWaitingUrl } from './runtime-import.js'
+import { configurationResponseSchema } from './tools/configuration-tools.js'
+import { verifyChildGrant } from './runtime-child.js'
+import { readParentContentionScope } from './runtime-parent-contention.js'
 
 /** Only this DB-locked allocator writes UI events for the durable protocol.
  * New source families retain their outbox rows until their projector is added;
  * no global publishedAt cursor skips facts this version doesn't understand. */
 export async function publishDurableEvents(userId: string, runId: string, limit = 100) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) runtimeError('RUNTIME_INPUT_INVALID', '事件批次大小无效。')
+  const contentionScope = await readParentContentionScope(userId, runId)
   return runtimeTransaction(async tx => {
     const { root } = await lockRunRoot(tx, userId, runId)
     const sources = await tx.agentExecutionOutbox.findMany({ where: { taskRootId: root.id,
-      OR: [{ type: { in: ['approval.requested', 'approval.resolved', 'execution.state.saved', 'question.requested', 'import.requested', 'import.commit_requested', 'goal.activation_registered'] } },
+      OR: [{ type: { in: ['child.admitted', 'approval.requested', 'approval.resolved', 'execution.state.saved', 'question.requested', 'import.requested', 'import.commit_requested', 'goal.activation_registered', 'configuration.changed'] } },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'completed' } },
         { type: 'run.paused', payload: { path: ['runIds'], array_contains: [runId] } }],
       projections: { none: { runId } } }, orderBy: { sequence: 'asc' }, take: limit })
@@ -28,7 +32,37 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
     const events: AgentStreamEvent[] = []
     for (const source of sources) {
       let bodies: import('../../../shared/contracts/index.js').AgentStreamEventBody[]
-      if (source.type === 'goal.activation_registered') {
+      if (source.type === 'child.admitted') {
+        const payload = z.object({ version: z.literal(1), grantId: z.string(), childRunId: z.string(), sessionId: z.string(), kind: z.enum(['inline', 'spawned']),
+          index: z.number().int().nonnegative(), snapshotHash: z.string(), tokenCeiling: z.number().int().positive() }).strict().parse(source.payload)
+        const grant = await tx.agentChildExecutionGrant.findUnique({ where: { id: payload.grantId }, include: { childRun: true, parentOperation: true } })
+        if (!grant || grant.parentRootId !== root.id || grant.parentOperationId !== source.operationId || source.eventKey !== `child-admitted:${grant.id}`
+          || grant.childRunId !== payload.childRunId || grant.childRun.sessionId !== payload.sessionId || grant.kind !== payload.kind
+          || grant.childIndex !== payload.index || grant.snapshotHash !== payload.snapshotHash || grant.tokenCeiling !== payload.tokenCeiling
+          || runtimeJson(grant.parentOperation.inputSnapshot).hash !== grant.parentOperation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '子任务准入事件缺少原授权身份。')
+        const frozen = verifyChildGrant(grant)
+        const invocation = z.object({ input: z.object({ callId: z.string(), normalization: z.object({ sourceRevision: z.number() }) }) }).parse(grant.parentOperation.inputSnapshot)
+        const frame = await readExecutionFrame(tx, root.id, invocation.input.normalization.sourceRevision)
+        bodies = grant.kind === 'spawned' ? [{ type: 'task.spawned', messageId: durableMessageId(root.id, frame.state.turn), callId: invocation.input.callId,
+          sessions: [{ sessionId: grant.childRun.sessionId, runId: grant.childRunId, novelId: root.novelId, title: frozen.name }] }]
+          : [{ type: 'subagent.progress', messageId: durableMessageId(root.id, frame.state.turn), callId: invocation.input.callId, step: 0, message: '子 Agent 已准入，等待真实交付。' }]
+      } else if (source.type === 'configuration.changed') {
+        const payload = z.object({ callId: z.string(), requestHash: z.string(), configuration: configurationResponseSchema }).strict().parse(source.payload)
+        const command = await tx.agentConfigurationChange.findUnique({ where: { runId_callId: { runId: source.runId!, callId: payload.callId } } })
+        const effect = await tx.agentEffectReceipt.findUnique({ where: { operationId: source.operationId! }, include: { operation: true } })
+        const saved = command?.response as { configuration?: unknown } | undefined
+        const invocation = z.object({ input: z.object({ callId: z.string() }) }).safeParse(effect?.operation.inputSnapshot)
+        const outcome = z.object({ toolResult: z.object({ output: z.string() }) }).safeParse(effect?.result)
+        let response: unknown
+        try { response = outcome.success ? JSON.parse(outcome.data.toolResult.output) : undefined } catch { response = undefined }
+        if (!command || command.requestHash !== payload.requestHash || runtimeJson(saved?.configuration ?? command.response).hash !== runtimeJson(payload.configuration).hash
+          || source.eventKey !== `configuration:${source.runId}:${payload.callId}` || !effect || !['agent_configure', 'model_assign'].includes(effect.operation.action)
+          || !invocation.success || invocation.data.input.callId !== payload.callId || response === undefined || runtimeJson(response).hash !== runtimeJson(command.response).hash
+          || effect.operation.taskRootId !== root.id || effect.operation.status !== 'succeeded' || runtimeJson(effect.result).hash !== effect.resultHash) {
+          return runtimeError('RUNTIME_RECEIPT_INVALID', '配置事件缺少原切换回执。')
+        }
+        bodies = [{ type: 'run.configuration', ...payload.configuration }]
+      } else if (source.type === 'goal.activation_registered') {
         const effect = await tx.agentEffectReceipt.findUnique({ where: { operationId: source.operationId ?? '' }, include: { operation: true } })
         const result = z.object({ toolResult: z.object({ goalSnapshot: z.object({ id: z.string(), sessionId: z.literal(root.sessionId), novelId: z.literal(root.novelId), currentRunId: z.string() }).passthrough() }) }).safeParse(effect?.result)
         const event = z.object({ operationId: z.string(), snapshot: z.unknown() }).safeParse(source.payload)
@@ -80,7 +114,10 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           || decision.revision !== decision.sourceRevision + 1 || before.snapshotHash !== decision.sourceHash
           || frame.snapshotHash !== decision.snapshotHash || frame.state.phase !== 'completed'
           || runtimeJson(frame.state.messages).hash !== runtimeJson(before.state.messages).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '完成事件缺少原审查回执和终态执行帧。')
-        const usage = await tx.agentProviderUsageReceipt.aggregate({ where: { attempt: { operation: { taskRootId: root.id } } }, _sum: { promptTokens: true, completionTokens: true } })
+        const children = await tx.agentChildExecutionGrant.findMany({ where: { parentRootId: root.id }, include: { childRun: { select: { taskRootId: true } } } })
+        for (const child of children) verifyChildGrant(child)
+        const roots = [root.id, ...children.flatMap(child => child.childRun.taskRootId ? [child.childRun.taskRootId] : [])]
+        const usage = await tx.agentProviderUsageReceipt.aggregate({ where: { attempt: { operation: { taskRootId: { in: roots } } } }, _sum: { promptTokens: true, completionTokens: true } })
         const promptTokens = usage._sum.promptTokens ?? 0, completionTokens = usage._sum.completionTokens ?? 0
         bodies = [{ type: 'run.finished', status: 'succeeded', usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
           artifacts: [], outputSummary: candidate.content ?? '' }]
@@ -110,12 +147,13 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
       }
     }
     return events
-  })
+  }, { contentionScope })
 }
 
 /** Paginated replay never invents a terminal state from a disconnected process. */
 export async function loadDurableEvents(userId: string, runId: string, sinceSeq: number, limit = 200): Promise<AgentStreamEvent[]> {
   if (!Number.isSafeInteger(sinceSeq) || sinceSeq < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) runtimeError('RUNTIME_INPUT_INVALID', '事件游标无效。')
+  const contentionScope = await readParentContentionScope(userId, runId)
   return runtimeTransaction(async tx => {
     const { root } = await lockRunRoot(tx, userId, runId)
     const latest = await tx.agentRunEvent.findFirst({ where: { runId }, orderBy: { seq: 'desc' }, select: { seq: true } })
@@ -132,5 +170,5 @@ export async function loadDurableEvents(userId: string, runId: string, sinceSeq:
       if (event.seq !== record.seq || event.runId !== runId || event.type !== record.type) runtimeError('RUNTIME_RECEIPT_INVALID', '事件回放身份不一致。')
       return event
     })
-  })
+  }, { contentionScope })
 }

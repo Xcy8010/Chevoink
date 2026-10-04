@@ -31,7 +31,7 @@ export const humanAdmissionSchema = z.object({ version: z.literal(1), origin: z.
 /** Server-only metadata is never in startAgentLoopRunSchema. */
 export function withHumanAdmission(input: StartAgentLoopRunRequest) {
   const request = startAgentLoopRunSchema.parse(input)
-  return { ...request, humanAdmission: { version: 1 as const, origin: 'http' as const,
+  return { ...request, ...(input.modelAssignments ? { modelAssignments: input.modelAssignments } : {}), humanAdmission: { version: 1 as const, origin: 'http' as const,
     requestHash: runtimeJson(JSON.parse(JSON.stringify(request))).hash, objective: goalActivationObjective(request.prompt) } }
 }
 

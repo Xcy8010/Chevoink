@@ -289,4 +289,14 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(String(messages.at(-2)?.content)).toContain('本轮任务契约')
     expect(String(messages.at(-1)?.content)).toContain('把第三章开头改得更抓人')
   })
+  it('durable pinned guidance remains server context and preserves the original author message', async () => {
+    const { messages } = await assembleContext(buildInput())
+    const original = structuredClone(messages.at(-1))
+    const prefix = messages[0].content
+    insertSubagentCatalog(messages, '作者本轮手动指定 subagentId=reviewer-1；用 subagent_run 调用。', 'system')
+    expect(messages.at(-3)?.role).toBe('system')
+    expect(messages.at(-3)?.content).toContain('subagentId=reviewer-1')
+    expect(messages[0].content).toBe(prefix)
+    expect(messages.at(-1)).toEqual(original)
+  })
 })

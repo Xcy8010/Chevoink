@@ -11,7 +11,8 @@ vi.mock('../../api/lib/prisma.js', () => ({ prisma: m.db, DataAccessError: class
 } }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ requireAgent2Feature: vi.fn(), isAgent2FeatureEnabled: () => true }))
 vi.mock('../../api/lib/ai-service.js', () => ({ generateTextCompletion: vi.fn() }))
-vi.mock('../../api/lib/credits.js', () => ({ getModelTierRuntime: vi.fn(async () => ({ apiKey: 'fixture', modelName: 'fixture', baseUrl: 'https://fixture.invalid' })) }))
+vi.mock('../../api/lib/credits.js', () => ({ getModelTierRuntime: vi.fn(async () => ({ apiKey: 'fixture', modelName: 'fixture', baseUrl: 'https://fixture.invalid',
+  tier: 'standard', reasoningEffort: 'high', reasoningEfforts: ['high'], multiplierBps: 18000, visionEnabled: false, contextWindowTokens: 128000 })) }))
 import { changeStyleLearning, startStyleLearning } from '../../api/lib/agent/style-learning.js'
 
 beforeEach(() => {

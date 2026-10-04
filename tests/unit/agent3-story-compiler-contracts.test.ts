@@ -18,6 +18,8 @@ import { allTools } from '../../api/lib/agent/tools/registry.js'
 import { buildTaskSpec, renderTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { normalizeBeatCandidates } from '../../api/lib/agent/story-compiler.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
 
 describe('严谨创作落实连续性警告', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -26,6 +28,7 @@ describe('严谨创作落实连续性警告', () => {
     const findings = ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在衔接风险', suggestion: '局部澄清' }))
     const validation = { independentCheck: 'complete', checkedRevision: 1, findings, errorCount: 0, warningCount: 3, autoRepairRounds: 0 }
     const compilation = { id: 'comp', createdAt: new Date(1), chapterId: 'c', chapter, bridge: { fromChapterId: null }, sceneTasks: [{ ordinal: 1 }], validation: cached ? validation : null, status: 'active' }
+    Object.assign(validation, { coverage: compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: null }) })
     const findCompilation = vi.spyOn(prisma.storyCompilation, 'findFirst').mockImplementation(async args => args?.where?.createdAt
       ? null : compilation as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findFirst>>)
     vi.spyOn(prisma.storyCompilation, 'findMany').mockResolvedValue([compilation] as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findMany>>)
@@ -59,6 +62,28 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.write.mock.calls[0][0].data.content).toBe('新文')
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     expect(f.repair).toHaveBeenCalledOnce()
+  })
+  it('chapter-only CHECK uses the verified writing compiler and persists exact coverage, including a reused post-quality report', async () => {
+    const f = fixture(true)
+    vi.spyOn(compiler, 'isWritingTaskContinuityCompiler').mockResolvedValue(true)
+    f.ctx.creativeFreedom = 'stable'
+    f.compilation.validation = f.validation
+    await continuityValidateTool.execute(f.ctx, { chapterId: 'c' })
+    expect(vi.mocked(compiler.isWritingTaskContinuityCompiler).mock.calls[0][1]).toMatchObject({ compilationId: 'comp', chapterId: 'c', runId: 'r' })
+    expect(vi.mocked(compiler.validateStoryContinuity).mock.calls[0][0]).toMatchObject({ runId: 'r', compilationId: 'comp', expectedChapterRevision: 1,
+      coverage: compilerContinuityCoverage({ chapter: f.chapter, bridge: f.compilation.bridge, sceneTasks: f.compilation.sceneTasks, source: null }) })
+    expect(vi.mocked(compiler.validateStoryContinuity).mock.calls[0][0].signal).toBe(f.ctx.signal)
+    expect(f.critic).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it.each(['missing-coverage', 'different-scenes', 'different-focus'] as const)('%s cannot reuse a revision-only compiler report', async scenario => {
+    const f = fixture(true)
+    f.ctx.creativeFreedom = 'stable'
+    if (scenario === 'missing-coverage') Object.assign(f.validation, { coverage: undefined })
+    if (scenario === 'different-scenes') f.compilation.sceneTasks[0].ordinal = 2
+    await continuityValidateTool.execute(f.ctx, { compilationId: 'comp', ...(scenario === 'different-focus' ? { focus: '人物知识' } : {}) })
+    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.write).not.toHaveBeenCalled()
   })
   it('allows bounded output recovery after reserving a check without mistaking bookkeeping for a body edit', async () => {
     const f = fixture(false)
@@ -133,9 +158,20 @@ describe('Agent 3.0 Story Compiler 契约', () => {
     const tasks = [{ goal: '守住城门' }, { goal: '护送百姓' }]
     expect(tool.parameters.parse(tool.coerceArgs!({ tasks: JSON.stringify(tasks) })))
       .toEqual(tool.parameters.parse(tool.coerceArgs!({ tasks })))
+    expect(tool.parameters.parse(normalizeToolInput(tool, { tasks: JSON.stringify(JSON.stringify(tasks)) })))
+      .toEqual(tool.parameters.parse(normalizeToolInput(tool, { tasks })))
     for (const value of ['[{"goal":"残文', JSON.stringify([...tasks, ...tasks, tasks[0]]), '{"goal":"非数组"}']) {
       expect(tool.parameters.safeParse(tool.coerceArgs!({ tasks: value })).success).toBe(false)
     }
+  })
+  it('malformed complete inner JSON keeps its original tokens and refuses effects instead of guessing a stray closing bracket', () => {
+    const tool = allTools.find(item => item.name === 'scene_task_build')!
+    const malformed = '[{"goal":"寻找钥匙","exitState":{"action":"转身"]}}]'
+    const normalized = normalizeToolInput(tool, { tasks: malformed }) as { tasks: unknown }
+    expect(normalized.tasks).toBe(malformed)
+    const result = tool.parameters.safeParse(normalized)
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error.issues[0].message).toContain('原生 tasks 数组')
   })
   it('严谨规则落实警告与建议但不授权只读或保护章写入', () => {
     const text = renderTaskSpec(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '写下一章', creativeFreedom: 'balanced' }))

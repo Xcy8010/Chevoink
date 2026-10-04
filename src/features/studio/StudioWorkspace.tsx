@@ -978,6 +978,7 @@ export default function StudioWorkspace() {
     // Work 追踪不仅切章节：右侧作品树和正文查看器被折叠时也要恢复完整追踪布局。
     // 即使目标就是当前章，也必须先把被收起的面板重新打开。
     if (workspacePerspective === 'work') {
+      openWorkDocument(taskUiScope)
       setWorkInspectorTab('work')
       setWorkRightOpen(true)
       setWorkViewer('chapter')

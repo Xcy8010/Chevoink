@@ -2,6 +2,8 @@ import { Router, type Request, type Response } from 'express'
 import styleLearningRouter from './style-learning.js'
 import agentGoalsRouter from './agent-goals.js'
 import { z } from 'zod'
+import { patchModelAssignmentsSchema } from '../../shared/contracts/agent-model-assignments.js'
+import { getModelAssignments, patchModelAssignments } from '../lib/agent/model-assignments.js'
 
 import {
   continueAgentLoopRunSchema,
@@ -81,6 +83,22 @@ import {
 const router = Router()
 router.use(styleLearningRouter)
 router.use(agentGoalsRouter)
+router.get('/model-assignments', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const userId = requireSessionUserId(req)
+    const novelId = z.string().trim().min(1).max(64).optional().parse(req.query.novelId)
+    res.json(buildSuccess(requestId, await getModelAssignments(userId, novelId)))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+router.patch('/model-assignments', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const userId = requireSessionUserId(req)
+    const body = parseBody(patchModelAssignmentsSchema, req.body, '模型分配参数无效。')
+    res.json(buildSuccess(requestId, await patchModelAssignments(userId, body)))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
 import { actOnQueuedRequest, enqueueRequest, listQueuedRequests } from '../lib/agent/request-queue.js'
 
 router.get('/sessions/:sessionId/queue', async (req, res) => {
@@ -864,9 +882,10 @@ router.post('/runs', async (req: Request, res: Response): Promise<void> => {
       attachments: body.attachments ?? [],
       creativeFreedom: body.creativeFreedom ?? 'balanced',
       qualityMode: body.qualityMode ?? 'premium',
-      modelTier: body.modelTier ?? 'speed',
+      modelTier: body.modelTier,
       customModelId: body.customModelId,
       reasoningEffort: body.reasoningEffort,
+      modelSelectionExplicit: body.modelSelectionExplicit,
       pinnedSkillIds: body.pinnedSkillIds,
       pinnedSubagentId: body.pinnedSubagentId,
     }, { humanOrigin: 'http' })

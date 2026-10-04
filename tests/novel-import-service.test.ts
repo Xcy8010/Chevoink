@@ -5,7 +5,7 @@ import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const fixture = vi.hoisted(() => {
-  const names = ['novel', 'volume', 'chapter', 'coverAsset', 'readingProgress', 'agentRun', 'agentQueuedRequest', 'agentSession', 'agentMessage', 'agentGoal', 'agentGoalExecution', 'agentGoalRevision', 'agentArtifact', 'changeSet', 'aiModelConfig', 'novelImportIntent', 'novelImportJob', 'novelImportSource', 'novelImportManifest', 'novelImportApproval', 'novelImportCommit', 'novelImportBackup', 'novelImportGarbage', 'novelImportArtifact', 'novelImportEvent', 'projectMemoryEntry', 'memoryExtractionJob', 'storyEvent', 'storyEntity', 'foreshadowThread', 'entityRelation', 'storyCompilation', 'sceneTask', 'chapterBridge', 'chapterQualityReport', 'styleProfile', 'styleLearningJob']
+  const names = ['novel', 'volume', 'chapter', 'coverAsset', 'readingProgress', 'agentRun', 'agentQueuedRequest', 'agentSession', 'agentMessage', 'agentGoal', 'agentGoalExecution', 'agentGoalRevision', 'agentArtifact', 'changeSet', 'aiModelConfig', 'agentModelAssignment', 'novelImportIntent', 'novelImportJob', 'novelImportSource', 'novelImportManifest', 'novelImportApproval', 'novelImportCommit', 'novelImportBackup', 'novelImportGarbage', 'novelImportArtifact', 'novelImportEvent', 'projectMemoryEntry', 'memoryExtractionJob', 'storyEvent', 'storyEntity', 'foreshadowThread', 'entityRelation', 'storyCompilation', 'sceneTask', 'chapterBridge', 'chapterQualityReport', 'styleProfile', 'styleLearningJob']
   type Row = Record<string, unknown>
   const state: Record<string, Row[]> = Object.fromEntries(names.map(name => [name, []]))
   const matches = (row: Row, where: Row = {}): boolean => Object.entries(where).every(([key, value]) => {
@@ -83,6 +83,7 @@ vi.mock('../api/lib/novel-import-storage.js', async () => {
 })
 
 import { DataAccessError } from '../api/lib/prisma.js'
+import { encryptSecret } from '../api/lib/secret-box.js'
 import { Prisma } from '@prisma/client'
 import { analyzeNovelImport, assertNovelImportHuman, assertNovelImportRestoreBaseline, attachNovelImportSource, authenticateNovelImportHuman, cancelNovelImport, commitNovelImport, confirmNovelImport, confirmNovelImportIntent, confirmNovelImportSelectionIntent, editNovelImportPreview, getNovelImportPreview, getNovelImportRestorePreview, getNovelImportStatus, hashNovelImportPreview, listNovelImports, novelImportCapabilities, novelImportTransaction, preflightNovelImport, prepareNovelImport, previewNovelImportRestore, restoreNovelImport, selectNovelImportContent, uploadNovelImportSource, type NovelImportHuman } from '../api/lib/novel-import-service.js'
 import { novelImportCommitSchema, novelImportSourceSchema } from '../shared/contracts/novel-import.js'
@@ -249,10 +250,19 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     expect(fixture.state.novelImportJob).toHaveLength(0)
   })
   it('persists exactly the selected owned model without calling AI', async () => {
-    fixture.state.aiModelConfig.push({ id: 'chosen', ownerUserId: scope.userId, enabled: true }, { id: 'newer', ownerUserId: scope.userId, enabled: true })
+    fixture.state.aiModelConfig.push(...['chosen', 'newer'].map(id => ({ id, ownerUserId: scope.userId, enabled: true,
+      provider: 'openai', modelName: id, baseUrl: 'https://fixture.invalid/v1', apiKeyCiphertext: encryptSecret('test-only-unused'),
+      metadata: { reasoningEfforts: ['low', 'high', 'max'], defaultReasoningEffort: 'max' } })))
     const intent = await preflightNovelImport(scope)
     await prepareNovelImport(scope, intent.intentId, { kind: 'custom', customModelId: 'chosen' })
-    expect(fixture.state.novelImportJob[0].modelSelection).toEqual({ kind: 'custom', customModelId: 'chosen' })
+    expect(fixture.state.novelImportJob[0].modelSelection).toEqual({ kind: 'custom', customModelId: 'chosen', reasoningEffort: 'max' })
+  })
+  it('keeps unassigned imports on their legacy basic selection', async () => {
+    const intent = await preflightNovelImport(scope)
+    await prepareNovelImport(scope, intent.intentId)
+    expect(fixture.db.agentModelAssignment.findMany).toHaveBeenCalledWith({ where: { userId: scope.userId, scopeKey: { in: ['', scope.novelId] } } })
+    expect(fixture.state.novelImportJob[0].modelSelection).toEqual({ kind: 'basic' })
+    expect(fixture.db.aiModelConfig.findFirst).not.toHaveBeenCalled()
   })
   it('cancelled jobs still exhaust the finite rolling 24h creation budget', async () => {
     for (let n = 0; n < 10; n++) fixture.state.novelImportJob.push({ id: randomUUID(), ...scope, status: 'cancelled', createdAt: new Date() })

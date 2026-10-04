@@ -8,6 +8,8 @@ import { prepareOperationInTransaction, commitOperationEffectInTransaction } fro
 import { promisesFurtherAction } from './completion-guard.js'
 import { z } from 'zod'
 import { assertRunGoalFence } from './goal-fence.js'
+import { assertChildParentFence, assertPinnedChildCompletion, pauseChildGrants } from './runtime-child.js'
+import { readParentContentionScope } from './runtime-parent-contention.js'
 
 const liveStatuses = ['queued', 'running', 'awaiting_approval'] as const
 const maxEpoch = 9223372036854775807n
@@ -16,15 +18,22 @@ const maxEpoch = 9223372036854775807n
  * This is not another model call or a new semantic review policy. */
 export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expectedRevision: number; expectedHash: string }) {
   const lease = { ...token }, expected = { ...cursor }
+  const contentionScope = await readParentContentionScope(lease.userId, lease.runId, true)
   return runtimeTransaction(async tx => {
     await assertRunGoalFence(tx, lease.userId, lease.runId)
+    if (lease.parent) await assertRunGoalFence(tx, lease.userId, lease.parent.runId)
     const { run, root } = await lockRunRoot(tx, lease.userId, lease.runId)
+    const parent = await assertChildParentFence(tx, run.id, lease.parent)
+    if (parent && !lease.parent) return runtimeError('RUNTIME_PARENT_LEASE_LOST', '子任务终态缺少父任务执行代次。')
     const held = await tx.agentRunLease.findUnique({ where: { runId: run.id } })
     const now = await databaseNow(tx)
     if (root.id !== lease.taskRootId || root.authorizationMode !== 'legacy' || root.status !== 'active' || !['queued', 'running'].includes(run.status)
       || !held?.enabled || held.ownerId !== lease.ownerId || held.claimId !== lease.claimId || held.epoch !== lease.epoch
       || !held.expiresAt || held.expiresAt <= now) return runtimeError('RUNTIME_LEASE_LOST', '终态提交已失去原执行所有权。')
     const evidence = await collectCompletionEvidenceInTransaction(tx, lease, expected)
+    const childGrants = await tx.agentChildExecutionGrant.findMany({ where: { parentRootId: root.id }, include: { childRun: { include: { taskRoot: true } } } })
+    if (childGrants.some(grant => grant.status !== 'completed' || grant.childRun.status !== 'completed' || grant.childRun.taskRoot?.status !== 'completed')) return runtimeError('RUNTIME_CHILD_COMPLETION_REQUIRED', '子任务尚未获得真实完成终态，父任务不能宣称完成。')
+    await assertPinnedChildCompletion(tx, root.id)
     const facts = z.object({ blockers: z.array(z.unknown()), candidateHash: z.string() }).parse(evidence.snapshot)
     const { frame } = await readExecutionStateInTransaction(tx, root.id)
     const candidate = frame.state.messages.at(-1)
@@ -50,8 +59,10 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     await tx.agentRunLease.updateMany({ where: { run: { taskRootId: root.id } },
       data: { enabled: false, ownerId: null, claimId: null, expiresAt: null } })
     if (held.expiresAt <= await databaseNow(tx)) return runtimeError('RUNTIME_LEASE_LOST', '终态提交前原执行所有权已过期。')
+    await assertChildParentFence(tx, run.id, lease.parent)
+    await tx.agentChildExecutionGrant.updateMany({ where: { childRunId: run.id }, data: { status: 'completed' } })
     return { kind: 'completed' as const, frame: next }
-  })
+  }, { contentionScope, contentionBackoff: Boolean(lease.parent), deadline: contentionScope?.deadline })
 }
 
 /** Close the read/abort/admission race: queued legacy runs cannot migrate after a stop. */
@@ -79,6 +90,7 @@ export async function pauseDurableTaskForAttention(token: RunLeaseToken, cursor:
 
 async function pauseTask(userId: string, runId: string, attention?: { lease: RunLeaseToken; expectedRevision: number; expectedHash: string; reason: 'model_stalled' | 'needs_input' }) {
   const eventId = randomUUID()
+  const contentionScope = attention ? await readParentContentionScope(userId, runId, true) : undefined
   return runtimeTransaction(async tx => {
     const { run, root } = await lockRunRoot(tx, userId, runId)
     if (root.status === 'paused') {
@@ -99,6 +111,7 @@ async function pauseTask(userId: string, runId: string, attention?: { lease: Run
     }
     const runs = await tx.agentRun.findMany({ where: { taskRootId: root.id, status: { in: [...liveStatuses] } }, select: { id: true } })
     const runIds = runs.map(row => row.id)
+    const childRunIds = await pauseChildGrants(tx, root.id)
     // An exhausted epoch must not prevent stopping. It can never be acquired again.
     await tx.agentRunLease.updateMany({ where: { run: { taskRootId: root.id }, enabled: true, epoch: { lt: maxEpoch } }, data: { epoch: { increment: 1 } } })
     await tx.agentRunLease.updateMany({ where: { run: { taskRootId: root.id } }, data: { enabled: false, ownerId: null, claimId: null, expiresAt: null } })
@@ -109,8 +122,8 @@ async function pauseTask(userId: string, runId: string, attention?: { lease: Run
     await tx.agentExecutionOutbox.create({ data: { id: eventId, taskRootId: root.id, runId,
       eventKey: `pause:${eventId}`, type: 'run.paused', payload: attention ? { reason: attention.reason, runIds, sourceRevision: attention.expectedRevision, sourceHash: attention.expectedHash } : { reason: 'user_stop', runIds } } })
     if (expiry && expiry <= await databaseNow(tx)) return runtimeError('RUNTIME_LEASE_LOST', '暂停提交前原执行所有权已过期。')
-    return { stopped: true as const, runIds }
-  })
+    return { stopped: true as const, runIds: [...runIds, ...childRunIds] }
+  }, { contentionScope, contentionBackoff: Boolean(attention?.lease.parent), deadline: contentionScope?.deadline })
 }
 
 /** Startup maintenance for protocol zero only. Admission and this update lock the same run.

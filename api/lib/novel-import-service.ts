@@ -236,15 +236,27 @@ export async function confirmNovelImportSelectionIntent(human: NovelImportHuman,
     return preflightDto(await tx.novelImportIntent.update({ where: { id: intent.id }, data: { confirmationStep: 2 } }), t)
   })
 }
-export async function prepareNovelImport(scope: NovelImportScope, intentId: string, selection: NovelImportModelSelection = { kind: 'basic' }, replaceUnfinished = false) {
+export async function prepareNovelImport(scope: NovelImportScope, intentId: string, selection?: NovelImportModelSelection, replaceUnfinished = false) {
   if (replaceUnfinished) humanOnly(scope as NovelImportHuman)
-  enabled(); const modelSelection = novelImportModelSchema.parse(selection)
+  enabled(); const explicitSelection = selection === undefined ? undefined : novelImportModelSchema.parse(selection)
   const id = await novelImportTransaction(async tx => {
     const t = await target(tx, scope); rollout(t)
     // Parsing creates only private preview data. Final content authorization still
     // requires the completed intent in confirm/commit before any manuscript write.
     const intent = intentValid(await tx.novelImportIntent.findUnique({ where: { id: intentId } }), scope, t.hash, false)
     const prior = await tx.novelImportJob.findUnique({ where: { intentId } }); if (prior) return prior.id
+    // Preserve the import ownership denial before resolving model capabilities.
+    if (explicitSelection?.kind === 'custom' && !await tx.aiModelConfig.findFirst({ where: { id: explicitSelection.customModelId,
+      ownerUserId: scope.userId, enabled: true }, select: { id: true } })) fail('IMPORT_MODEL_UNAVAILABLE', '本次自定义模型不可用。', 403)
+    const { assignedTaskModel } = await import('./agent/model-assignment-context.js')
+    const { resolveAssignedModel } = await import('./agent/model-assignments.js')
+    const selected = explicitSelection?.kind === 'custom' ? await resolveAssignedModel(scope.userId, { modelTier: 'custom', customModelId: explicitSelection.customModelId, reasoningEffort: explicitSelection.reasoningEffort })
+      : explicitSelection?.kind === 'builtin' ? await resolveAssignedModel(scope.userId, { modelTier: explicitSelection.modelTier, reasoningEffort: explicitSelection.reasoningEffort })
+      : explicitSelection ? undefined : await assignedTaskModel(scope.userId, scope.novelId, 'import_analysis')
+    const modelSelection: NovelImportModelSelection = selected ? selected.selection.modelTier === 'custom'
+      ? { kind: 'custom', customModelId: selected.selection.customModelId!, reasoningEffort: selected.selection.reasoningEffort }
+      : { kind: 'builtin', modelTier: selected.selection.modelTier, reasoningEffort: selected.selection.reasoningEffort }
+      : explicitSelection ?? { kind: 'basic' }
     if (await tx.novelImportJob.count({ where: { userId: scope.userId, createdAt: { gte: new Date(Date.now() - 86400_000) } } }) >= NOVEL_IMPORT_DAILY_LIMITS.jobs) fail('IMPORT_DAILY_JOB_LIMIT', '24小时内最多创建10个导入任务，取消不会重置配额；请使用已有任务或24小时后重试。', 429)
     // Replacing previews is authorized only by a new human file selection. The
     // novel lock serializes this with commits; retries reuse the intent above.

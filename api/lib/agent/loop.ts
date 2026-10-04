@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { MAIN_RUN_FILTER } from './runtime-child.js'
 
 import { containsAgentProtocolInvocation, recoverAgentProtocolToolCalls, stripAgentProtocolArtifacts } from '../../../shared/agent-output.js'
 import type {
@@ -64,6 +65,7 @@ import {
   type RunCheckpointState,
 } from './checkpoint.js'
 import { autoNameSession } from './session-title.js'
+import { withModelAssignmentContext, updateModelAssignmentContext } from './model-assignment-context.js'
 import { buildTaskSpec, narrowLegacyResearchTask, narrowLegacyConversationTask } from './task-spec.js'
 import { buildSkillExecutionDigest, routeSkills, type SkillPhase } from './skills/index.js'
 import { resolveEnabledRuntimeSkills } from './skills/service.js'
@@ -121,6 +123,7 @@ export type ExecuteAgentRunParams = {
   /** 作者在输入框里手动指定本轮要用的技能 id。 */
   pinnedSkillIds?: string[]
   pinnedSubagentId?: string
+  modelAssignments?: import('../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments
 }
 
 const emptyUsage = (): AgentTokenUsage => ({ promptTokens: 0, completionTokens: 0, totalTokens: 0 })
@@ -634,6 +637,9 @@ async function finalizeLegacyRun(
 
 /** 启动（或续跑）一次 Agent Loop run：异步执行，调用方不等待 */
 export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<void> {
+  return withModelAssignmentContext({ userId: params.userId, novelId: params.novelId, frozen: params.modelAssignments }, () => executeAgentRunImpl(params))
+}
+async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void> {
   const runId = params.runId
   const agent: AgentDefinition = getAgentDefinition(params.agentType ?? 'orchestrator')
   const controller = new AbortController()
@@ -789,8 +795,8 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       // Historical runs keep their known consumption, without inventing earned slices.
       checkpointRestored = true
     }
-    const modelRuntime = await getModelTierRuntime(params.modelTier ?? 'speed', params.userId, params.customModelId, params.reasoningEffort)
-    const runtimeModelName = modelRuntime.modelName ?? agent.model
+    let modelRuntime = await getModelTierRuntime(params.modelTier ?? 'speed', params.userId, params.customModelId, params.reasoningEffort)
+    let runtimeModelName = modelRuntime.modelName ?? agent.model
     assertTaskAuthorizationRuntimeReady(storedRun.taskSpec, { userId: params.userId, sessionId: params.sessionId, novelId: params.novelId })
     await prisma.agentSession.update({
       where: { id: params.sessionId },
@@ -833,7 +839,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     const continuingTask = Boolean(params.resume || params.internalGoalContinuation) || (!ownedGoalExecution && isContinuationRequest(params.prompt))
     // Typed “continue” starts a new run but must retain the original task scope/constraints.
     const previousTask = !ownedGoalExecution && !params.resume && continuingTask && !storedRun.taskSpec
-      ? await prisma.agentRun.findFirst({ where: { sessionId: params.sessionId, userId: params.userId, novelId: params.novelId, id: { not: runId }, engine: 'loop' }, orderBy: { createdAt: 'desc' }, select: { id: true, taskSpec: true, taskRootId: true, runtimeProtocolVersion: true, usage: true, currentTurn: true, startedAt: true } })
+      ? await prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId: params.sessionId, userId: params.userId, novelId: params.novelId, id: { not: runId }, engine: 'loop' }, orderBy: { createdAt: 'desc' }, select: { id: true, taskSpec: true, taskRootId: true, runtimeProtocolVersion: true, usage: true, currentTurn: true, startedAt: true } })
       : null
     if (hasAuthorEnded(previousTask?.usage) || params.resume && hasAuthorEnded(storedRun.usage)) {
       const notice = '原任务已按作者要求结束，不能自动恢复剩余工作。如需继续创作，请发送明确的新任务；已有成果保留。'
@@ -850,6 +856,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       // resume button. Task goals and history summaries are deliberately short.
       const original = await prisma.agentMessage.findFirst({ where: {
         sessionId: params.sessionId, role: 'user', run: {
+          ...MAIN_RUN_FILTER,
           userId: params.userId, novelId: params.novelId,
           taskSpec: { path: ['id'], equals: parsedTaskSpec.data.id },
         },
@@ -863,7 +870,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       // Sum local counters once per run, never cumulative snapshot totals. Do not
       // include unrelated tasks merely because they share a novel or session.
       const priorRuns = await prisma.agentRun.findMany({
-        where: { sessionId: params.sessionId, userId: params.userId, novelId: params.novelId,
+        where: { ...MAIN_RUN_FILTER, sessionId: params.sessionId, userId: params.userId, novelId: params.novelId,
           id: { not: runId }, engine: 'loop', taskSpec: { path: ['id'], equals: parsedTaskSpec.data.id } },
         select: { id: true, status: true, usage: true, currentTurn: true, startedAt: true, finishedAt: true,
           events: { where: { type: { in: ['run.started', 'run.paused', 'run.finished'] } }, orderBy: { seq: 'asc' }, select: { type: true, createdAt: true } } },
@@ -890,7 +897,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     if (params.resume && inheritedTurns > 0 && parsedTaskSpec.success) {
       // Older checkpoints did not store inherited time. Recompute from owned
       // run intervals; never treat the missing field as a fresh time budget.
-      const preceding = await prisma.agentRun.findMany({ where: { userId: params.userId, sessionId: params.sessionId,
+      const preceding = await prisma.agentRun.findMany({ where: { ...MAIN_RUN_FILTER, userId: params.userId, sessionId: params.sessionId,
         novelId: params.novelId, id: { not: runId }, taskSpec: { path: ['id'], equals: parsedTaskSpec.data.id } },
         select: { startedAt: true, currentTurn: true, events: { where: { type: { in: ['run.started', 'run.paused', 'run.finished'] } },
           orderBy: { seq: 'asc' }, select: { type: true, createdAt: true } } } })
@@ -981,6 +988,7 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     // 首次对话且仍是默认标题时异步自动命名（仅一次，不阻塞循环）
     if (!params.resume && !ownedGoalExecution) {
       void autoNameSession({
+        signal: controller.signal,
         modelRuntime,
         sessionId: params.sessionId,
         userId: params.userId,
@@ -1219,6 +1227,12 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
       qualityMode: taskSpec.qualityMode,
       // 子 Agent 跟随主 run 的模型与额度计费：custom 档直接消耗用户自己的 token，内置档按倍率扣 credits
       modelRuntime,
+      modelAssignments: params.modelAssignments,
+      applyModelAssignments: value => {
+        params.modelAssignments = value
+        toolContext.modelAssignments = value
+        updateModelAssignmentContext(params.userId, params.novelId, value)
+      },
       emit: (event) => bus.emit(event),
       signal: controller.signal,
     }
@@ -1406,7 +1420,33 @@ export async function executeAgentRun(params: ExecuteAgentRunParams): Promise<vo
     const seenGoalConsents = new Set<string>()
     while (turn + inheritedTurns < maxTurns || await tryCheckpointResume('turns')) {
       if (controller.signal.aborted) throw new DOMException('run aborted', 'AbortError')
+      const configurationChanges = await prisma.agentConfigurationChange.findMany({ where: { runId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+      if (configurationChanges.length) {
+        const current = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
+        if (!['running', 'awaiting_approval'].includes(current.status)) throw new DOMException('run stopped', 'AbortError')
+        if (current.modelTier !== modelRuntime.tier || current.customModelId !== (params.customModelId ?? null) || current.reasoningEffort !== modelRuntime.reasoningEffort) {
+          modelRuntime = await getModelTierRuntime(current.modelTier as CreditModelTier, params.userId, current.customModelId,
+            current.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort)
+          params.customModelId = current.customModelId
+          runtimeModelName = modelRuntime.modelName ?? agent.model
+          toolContext.modelRuntime = modelRuntime
+        }
+        const saved = configurationChanges.map(change => change.response as { creativeFreedom?: CreativeFreedom;
+          modelAssignments?: import('../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments; configuration?: { creativeFreedom?: CreativeFreedom } })
+        const assignments = saved.find(change => change.modelAssignments)?.modelAssignments
+        if (assignments) toolContext.applyModelAssignments?.(assignments)
+        const mode = saved.map(change => (change.configuration ?? change).creativeFreedom).find(Boolean)
+        if (mode) {
+          taskSpec = { ...taskSpec, creativeFreedom: mode }
+          toolContext.creativeFreedom = mode
+        }
+      }
       if (!sessionPolicy?.spawnedFromSessionId && agent.type === 'orchestrator') {
+        const changes = await (await import('./configuration-journal.js')).consumeLegacyConfigurationConsent(params.userId, runId)
+        for (const change of changes) if (!seenGoalConsents.has(change.id)) {
+          messages.push({ role: 'user', content: change.prompt })
+          seenGoalConsents.add(change.id)
+        }
         const consent = await (await import('./goal-consent.js')).consumeLegacyGoalConsent({ userId: params.userId,
           sessionId: params.sessionId, novelId: params.novelId, runId })
         if (consent && !seenGoalConsents.has(consent.id)) {

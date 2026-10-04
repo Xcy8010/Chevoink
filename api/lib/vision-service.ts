@@ -2,6 +2,9 @@ import { env } from '../config/env.js'
 import { DataAccessError, prisma } from './prisma.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { getToolModelRuntime, type ToolModelRuntime } from './tool-model-config.js'
+import { assignedTaskModel } from './agent/model-assignment-context.js'
+import { buildProviderReasoningPayload, resolveTextOutputTokenParameter } from './ai-service.js'
+import type { getModelTierRuntime } from './credits.js'
 import { readBoundedPublicBody } from './public-http.js'
 import { currentGoalExecution, withoutGoalEffects } from './agent/goal-context.js'
 import { assertGoalProviderAdmission, reserveGoalUsage, syncGoalLegacyUsage } from './agent/goal-budget.js'
@@ -13,7 +16,8 @@ import { assertGoalProviderAdmission, reserveGoalUsage, syncGoalLegacyUsage } fr
  */
 
 class VisionRetryableError extends Error {}
-type VisionScope = { userId: string; runId: string; signal: AbortSignal }
+type VisionScope = { userId: string; runId: string; signal: AbortSignal; novelId?: string;
+  modelAssignments?: import('../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments }
 
 let inflight = 0
 const waiters: Array<() => void> = []
@@ -66,7 +70,8 @@ function isRetryable(error: unknown): boolean {
   return error instanceof VisionRetryableError
 }
 
-async function requestOnce(image: { buffer: Buffer; mime: string }, question: string, configured: ToolModelRuntime | null, scope: VisionScope): Promise<string> {
+async function requestOnce(image: { buffer: Buffer; mime: string }, question: string, configured: ToolModelRuntime | null, scope: VisionScope,
+  selected?: Awaited<ReturnType<typeof getModelTierRuntime>>): Promise<string> {
   // 一律 base64 内联：规避 localhost/内网图片对智谱不可达的问题
   const dataUrl = `data:${image.mime};base64,${image.buffer.toString('base64')}`
 
@@ -102,7 +107,9 @@ async function requestOnce(image: { buffer: Buffer; mime: string }, question: st
     },
     body: JSON.stringify({
       model: modelName,
-      ...(goal ? { max_tokens: 4096 } : {}),
+      ...(selected ? { [resolveTextOutputTokenParameter(selected.outputTokenParameter, { provider: selected.provider, model: modelName, providerBaseUrl: baseUrl }, true)]: 4096,
+        ...buildProviderReasoningPayload({ provider: selected.provider, model: modelName, providerBaseUrl: baseUrl, reasoningEffort: selected.reasoningEffort,
+          reasoningParameterMode: selected.reasoningParameterMode, thinkingEnabled: selected.thinkingEnabled }) } : goal ? { max_tokens: 4096 } : {}),
       messages: [
         {
           role: 'user',
@@ -175,7 +182,9 @@ export async function describeImageWithVision(
   question: string,
   scope: VisionScope,
 ): Promise<string> {
-  const configured = await getToolModelRuntime('tool:image-vision')
+  const assigned = await assignedTaskModel(scope.userId, scope.novelId, 'vision', scope.modelAssignments, Boolean(scope.runId))
+  const configured = assigned ? { provider: assigned.runtime.provider, modelName: assigned.runtime.modelName!, baseUrl: assigned.runtime.baseUrl ?? env.aiVisionBaseUrl,
+    apiKey: assigned.runtime.apiKey ?? env.aiVisionApiKey } : await getToolModelRuntime('tool:image-vision')
   if (!configured && !env.aiVisionApiKeyConfigured) {
     throw new DataAccessError(503, 'VISION_NOT_CONFIGURED', '视觉服务未配置（缺少 AI_VISION_API_KEY）。')
   }
@@ -185,7 +194,7 @@ export async function describeImageWithVision(
   try {
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await requestOnce(image, question, configured, scope)
+        return await requestOnce(image, question, configured, scope, assigned?.runtime)
       } catch (error) {
         if (!isRetryable(error) || attempt >= 1) {
           throw error

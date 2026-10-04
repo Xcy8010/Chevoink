@@ -24,7 +24,7 @@ describe('remote image bytes and model handoff', () => {
     const result = await viewImageTool.execute(ctx, { url: 'https://example.com/file' })
     expect(result.output).toContain('fixture description')
     expect(mocks.vision).toHaveBeenCalledWith({ buffer: bytes, mime }, expect.any(String), {
-      userId: ctx.userId, runId: ctx.runId, signal: ctx.signal,
+      userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, signal: ctx.signal, modelAssignments: undefined,
     })
   })
   it('does not send HTML disguised as a PNG to a paid model', async () => {

@@ -11,6 +11,7 @@ vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<typeof
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { buildStoryCompilerDigest, commitChapterBridge, compilationRunScope, prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { hasCommittedTaskChapter } from '../../api/lib/agent/humanity-quality.js'
 import { chapterBridgeCommitTool, chapterBridgeGetTool, continuityValidateTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 
@@ -117,10 +118,10 @@ describe('story compiler task identity', () => {
       ? { manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 0 } }
       : where.status ? { id: 'new-run' }
         : { runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: currentTask })
-    db.storyCompilation.findFirst.mockResolvedValue({ id: 'original-compiler', runId: 'original-run', chapterId: 'old31', status: 'active',
-      chapter: { id: 'old31', revision: 3, content: '已保存正文', title: '原章节' }, sceneTasks: [],
-      bridge: { id: 'bridge', fromChapterId: null, recentOpenings: [], recentEndings: [] },
-      validation: { independentCheck: 'complete', checkedRevision: 3, errorCount: 0 } })
+    const chapter = { id: 'old31', revision: 3, content: '已保存正文', title: '原章节', orderIndex: 31 }
+    const bridge = { id: 'bridge', fromChapterId: null, recentOpenings: [], recentEndings: [] }
+    db.storyCompilation.findFirst.mockResolvedValue({ id: 'original-compiler', runId: 'original-run', chapterId: 'old31', status: 'active', chapter, sceneTasks: [], bridge,
+      validation: { independentCheck: 'complete', checkedRevision: 3, errorCount: 0, coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks: [], source: null }) } })
     const save = vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'proposal', action: 'created', status: 'candidate' })
     try {
       await commitChapterBridge({ userId: 'u', novelId: 'n', runId: 'new-run', compilationId: 'original-compiler', chapterSummary: '原章节摘要',

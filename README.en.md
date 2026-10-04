@@ -143,6 +143,12 @@ The deterministic evaluation suite freezes 24 Chinese web-fiction scenarios acro
 
 Long tasks can resume within budget and progress checks, retaining the original request and target. Hard limits, unverifiable results and failed quality gates stop execution explicitly; automatic completion of an entire book is not guaranteed.
 
+### Model assignments
+
+Studio settings → Model assignments lets you choose built-in or custom models and reasoning effort for writing, continuity checks, quality checks, import analysis, and other work. Global settings apply to all novels; Current novel overrides individual choices for one work. Unassigned work keeps its existing defaults. Model options show their multiplier or BYOK status, and calls follow the selected model's billing policy.
+
+You can also ask Agent to change creative mode, switch the current model, or assign a model to a type of work. A switch applies on the next turn after the tool completes, retaining the current task and context. An explicitly selected model with no effort specified uses that model's configured default strength.
+
 ## Quick Navigation
 
 | What you want | Where to go |
@@ -200,7 +206,7 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 - Every user gets a unique referral URL. Only a brand-new account can redeem it on first registration: the inviter receives 300 Credits and the invitee receives 120 Credits; each invitee can redeem exactly once.
 - Studio warns at 20%, 10%, and 5% remaining. Exhaustion safely stops the task; [`/account/usage`](/account/usage) shows the plan, balances, and itemized ledger.
 - Cache-discount V2: `min(C_v1, ceil(1000 × m × ((P − H + 0.25H)/10000 + O/1000)) / 1000)` Credits. H is confirmed cached input; ordinary input/output rates are unchanged and each charge is capped at the frozen V1 price. Active cards and pre-dispatch snapshots govern; old requests are not repriced and unknown usage awaits reconciliation. Selectable multipliers on 2026-09-08: Speed 1.1, Standard 1.0, Performance 3.0, Ultimate 3.5. See [engineering](./docs/ENGINEERING.en.md).
-- Models expose supported reasoning efforts only; default high. BYOK text has no platform text charge; keys are encrypted and never returned. Other platform tool fees remain separate.
+- Models expose supported reasoning efforts only and use their configured default strength. BYOK text has no platform text charge; keys are encrypted and never returned. Other platform tool fees remain separate.
 
 ## Feature Overview
 
@@ -218,7 +224,7 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 | Frontend | React 18 · Vite 6 · TypeScript · TailwindCSS · React Query 5 · Zustand 5 · React Router 7 |
 | Backend | Express 4 · Prisma 6 · PostgreSQL · Zod |
 | AI | DeepSeek text generation · Zhipu GLM-4.1V image understanding · OpenAI-compatible image generation · Edge TTS speech synthesis · Bocha web search (multi-engine fallback) |
-| Agent | Agent 3.0 Runtime (`api/lib/agent`): unified Loop, 105 governed tools, Skill OS 3.0, Story Compiler, layered memory, quality gate, embedded subagents, long-task auto-resume with runaway protection, and durable SSE events |
+| Agent | Agent 3.0 Runtime (`api/lib/agent`): unified Loop, 116 governed tools, Skill OS 3.0, Story Compiler, layered memory, quality gate, embedded subagents, long-task auto-resume with runaway protection, and durable SSE events |
 | Testing | Vitest + Supertest + Testing Library (unit, PostgreSQL integration, real DOM interaction, and frozen Agent evals; 2026-09-08: 161 files / 1,885 tests passed, with coverage gates) |
 | Deployment | PM2 + nginx (production) · GitHub Actions CI (type check / lint / unit / integration tests on push) · Android Capacitor shell project (separate directory) |
 

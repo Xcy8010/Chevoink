@@ -39,6 +39,7 @@ export type ToolContext = {
   durableRead?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableImport?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableTask?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
+  durableConfiguration?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableMemory?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableMetadata?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableCompiler?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor;
@@ -56,6 +57,8 @@ export type ToolContext = {
   qualityMode: StoryCompilerMode
   /** 主 run 解析好的模型运行时：子 Agent 跟随主 run 的模型与额度计费（未注入时工具自行回退） */
   modelRuntime?: Awaited<ReturnType<typeof getModelTierRuntime>>
+  modelAssignments?: import('../../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments
+  applyModelAssignments?: (value: import('../../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments) => void
   /** Durable admission's frozen model identity for auxiliary adapters. */
   modelSelection?: { tier: CreditModelTier; customModelId: string | null; reasoningEffort: ModelReasoningEffort;
     provider: string; modelName: string | null; routeRevision: string }

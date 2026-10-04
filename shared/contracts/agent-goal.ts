@@ -29,7 +29,7 @@ export const actOnAgentGoalSchema = z.object({
   requestId, expectedStateVersion: version, action: z.enum(['pause', 'resume', 'cancel', 'confirm_completion']),
   budgetChange: agentGoalLimitsSchema.optional(),
   completion: z.object({ progressHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
-  model: startAgentLoopRunSchema.pick({ modelTier: true, customModelId: true, reasoningEffort: true }).optional(),
+  model: startAgentLoopRunSchema.pick({ modelTier: true, customModelId: true, reasoningEffort: true, modelSelectionExplicit: true }).optional(),
 }).strict().refine(value => value.action === 'resume' || (!value.budgetChange && !value.model), '仅继续目标时可以调整限制或模型。')
   .refine(value => value.action === 'confirm_completion' ? Boolean(value.completion) : !value.completion, '确认完成必须绑定当前成果。')
 export type CreateAgentGoalRequest = z.infer<typeof createAgentGoalSchema>

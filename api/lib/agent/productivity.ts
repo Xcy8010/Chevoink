@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 
 import type {
   AgentEvalComparisonView,
@@ -55,11 +55,45 @@ function subtaskView(item: { id: string; novelId: string; parentSessionId: strin
   }
 }
 
-/** 内嵌调用统计：每个定义的累计调用次数与最近调用时间 */
-async function loadSubtaskStats(ids: string[]): Promise<Map<string, { runCount: number; lastRunAt: Date | null }>> {
+/** Only the frozen named admission identifies a durable definition call. */
+function canonicalSubtaskCalls(userId: string, novelId: string, ids: string[]) {
+  return Prisma.sql`
+    FROM agent_child_execution_grants g
+    JOIN agent_subtasks d ON d.id = g.snapshot->>'definitionId'
+    JOIN agent_task_roots parent ON parent.id = g.parent_root_id
+    JOIN agent_runs admission ON admission.id = g.admission_run_id AND admission.task_root_id = parent.id
+    JOIN agent_runs child ON child.id = g.child_run_id
+    JOIN agent_task_roots root ON root.id = child.task_root_id AND root.id = g.snapshot->'taskSpec'->>'id'
+    JOIN novels novel ON novel.id = d.novel_id AND novel.author_id = d.user_id
+    WHERE d.id IN (${Prisma.join(ids)}) AND d.user_id = ${userId} AND d.novel_id = ${novelId}
+      AND g.kind = 'inline' AND g.snapshot->>'parentRootId' = parent.id
+      AND g.snapshot->>'parentOperationId' = g.parent_operation_id
+      AND g.snapshot->>'admissionRunId' = admission.id
+      AND parent.user_id = d.user_id AND parent.novel_id = d.novel_id AND parent.protocol_version = 1
+      AND admission.user_id = d.user_id AND admission.novel_id = d.novel_id
+      AND child.user_id = d.user_id AND child.novel_id = d.novel_id AND child.runtime_protocol_version = 1
+      AND root.user_id = d.user_id AND root.novel_id = d.novel_id AND root.protocol_version = 1
+      AND root.session_id = child.session_id
+  `
+}
+
+/** Legacy and canonical calls each contribute once, without loading contexts. */
+async function loadSubtaskStats(userId: string, novelId: string, ids: string[]): Promise<Map<string, { runCount: number; lastRunAt: Date | null }>> {
   if (!ids.length) return new Map()
-  const grouped = await prisma.agentSubtaskRun.groupBy({ by: ['subtaskId'], where: { subtaskId: { in: ids } }, _count: { _all: true }, _max: { createdAt: true } })
-  return new Map(grouped.map((row) => [row.subtaskId, { runCount: row._count._all, lastRunAt: row._max.createdAt }]))
+  const [grouped, canonical] = await Promise.all([
+    prisma.agentSubtaskRun.groupBy({ by: ['subtaskId'], where: { userId, novelId, subtaskId: { in: ids } }, _count: { _all: true }, _max: { createdAt: true } }),
+    prisma.$queryRaw<{ subtaskId: string; runCount: bigint; lastRunAt: Date }[]>(Prisma.sql`
+      SELECT d.id AS "subtaskId", COUNT(*) AS "runCount", MAX(g.created_at) AS "lastRunAt"
+      ${canonicalSubtaskCalls(userId, novelId, ids)} GROUP BY d.id
+    `),
+  ])
+  const stats = new Map(grouped.map(row => [row.subtaskId, { runCount: row._count._all, lastRunAt: row._max.createdAt }]))
+  for (const row of canonical) {
+    const prior = stats.get(row.subtaskId)
+    stats.set(row.subtaskId, { runCount: (prior?.runCount ?? 0) + Number(row.runCount),
+      lastRunAt: prior?.lastRunAt && prior.lastRunAt > row.lastRunAt ? prior.lastRunAt : row.lastRunAt })
+  }
+  return stats
 }
 
 function scheduleView(item: { id: string; novelId: string; sessionId: string; name: string; prompt: string; cadenceMinutes: number; nextRunAt: Date; lastRunId: string | null; status: string; createdAt: Date; updatedAt: Date }): AgentScheduleView {
@@ -149,7 +183,7 @@ export async function mergeStoryBranch(userId: string, branchId: string) {
 export async function listAgentSubtasks(userId: string, novelId: string) {
   await requireNovel(userId, novelId)
   const items = await prisma.agentSubtask.findMany({ where: { userId, novelId }, orderBy: { createdAt: 'desc' }, take: 100 })
-  const stats = await loadSubtaskStats(items.map((item) => item.id))
+  const stats = await loadSubtaskStats(userId, novelId, items.map((item) => item.id))
   return { items: items.map((item) => subtaskView(item, stats.get(item.id) ?? { runCount: 0, lastRunAt: null })) }
 }
 
@@ -160,7 +194,7 @@ export async function createAgentSubtask(userId: string, input: { novelId: strin
     if (parent.novelId !== input.novelId) throw new DataAccessError(400, 'SESSION_NOVEL_MISMATCH', '任务与作品不匹配。')
   }
   const name = input.name.trim().slice(0, 160)
-  // 只落定义（模板）：执行由主 run 通过 subagent_run 内嵌发起，不再新建会话与独立 run
+  // 只落定义；原生 subagent_run 创建持久内嵌执行，不另开任务窗口。
   const record = await prisma.agentSubtask.create({ data: { userId, novelId: input.novelId, parentSessionId: input.parentSessionId ?? null, name, role: input.role, triggerCondition: input.triggerCondition.trim(), callableBy: 'main_and_subagents', prompt: input.prompt.trim(), tokenBudget: input.tokenBudget ?? 16_000, status: 'ready', enabled: true } })
   return { item: subtaskView(record, { runCount: 0, lastRunAt: null }) }
 }
@@ -183,7 +217,7 @@ export async function updateAgentSubtask(userId: string, subtaskId: string, inpu
   })
   // 停用时兼容旧架构：旧数据可能仍挂着独立子 run，一并停止
   if (input.enabled === false && item.childRunId) await stopLoopRun(userId, item.childRunId).catch(() => {})
-  const stats = await loadSubtaskStats([item.id])
+  const stats = await loadSubtaskStats(userId, item.novelId, [item.id])
   return { item: subtaskView(updated, stats.get(item.id) ?? { runCount: 0, lastRunAt: null }) }
 }
 
@@ -229,8 +263,16 @@ export async function getAgentSubtaskLogs(userId: string, subtaskId: string): Pr
   const item = await prisma.agentSubtask.findFirst({ where: { id: subtaskId, userId } })
   if (!item) throw new DataAccessError(404, 'SUBTASK_NOT_FOUND', '子 Agent 不存在。')
   const entries: AgentSubtaskLogEntry[] = []
-  // 新架构：内嵌调用记录（最近 20 次）
-  const runs = await prisma.agentSubtaskRun.findMany({ where: { subtaskId: item.id }, orderBy: { createdAt: 'desc' }, take: 20 })
+  await requireNovel(userId, item.novelId)
+  const [runs, canonical] = await Promise.all([
+    prisma.agentSubtaskRun.findMany({ where: { subtaskId: item.id, userId, novelId: item.novelId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 20 }),
+    prisma.$queryRaw<{ id: string; createdAt: Date; grantStatus: string; runStatus: string; rootStatus: string; detail: string }[]>(Prisma.sql`
+      SELECT g.id, g.created_at AS "createdAt", g.status AS "grantStatus", child.status::text AS "runStatus", root.status AS "rootStatus",
+        LEFT(COALESCE(child.error_message, child.output_summary, g.snapshot->>'prompt', ''), 180) AS detail
+      ${canonicalSubtaskCalls(userId, item.novelId, [item.id])}
+      ORDER BY g.created_at DESC, g.id DESC LIMIT 20
+    `),
+  ])
   for (const run of runs) {
     const running = run.status === 'running'
     const ok = run.status === 'succeeded'
@@ -242,9 +284,22 @@ export async function getAgentSubtaskLogs(userId: string, subtaskId: string): Pr
       tone: ok ? 'success' : running ? 'neutral' : 'warning',
     })
   }
-  // 旧架构兑底：历史独立 child run 的事件流
-  if (item.childRunId) {
-    const events = await prisma.agentRunEvent.findMany({ where: { runId: item.childRunId }, orderBy: { seq: 'asc' }, take: 300 })
+  for (const call of canonical) {
+    const ok = call.grantStatus === 'completed' && call.runStatus === 'completed' && call.rootStatus === 'completed'
+    const unknown = call.grantStatus === 'reconciliation' || call.rootStatus === 'reconciliation'
+    const paused = call.grantStatus === 'paused_parent' || call.runStatus === 'paused' || call.rootStatus === 'paused'
+    const failed = call.grantStatus === 'failed' || call.runStatus === 'failed'
+    const cancelled = call.grantStatus === 'cancelled' || call.runStatus === 'cancelled' || call.rootStatus === 'cancelled'
+    const running = ['admitted', 'running'].includes(call.grantStatus) && ['queued', 'running'].includes(call.runStatus) && call.rootStatus === 'active'
+    entries.push({ id: call.id, time: call.createdAt.toISOString(),
+      title: unknown ? '内嵌调用待核对' : paused ? '内嵌调用已暂停' : failed ? '内嵌调用失败' : cancelled ? '内嵌调用已取消' : ok ? '内嵌调用完成' : running ? '正在内嵌执行' : '内嵌调用未完成',
+      detail: shortText(call.detail, '本次调用已结束。'), tone: failed ? 'danger' : ok ? 'success' : running ? 'neutral' : 'warning' })
+  }
+  entries.sort((left, right) => right.time.localeCompare(left.time) || right.id.localeCompare(left.id))
+  entries.splice(20)
+  // 没有逐次调用记录时，保留旧独立 child run 的历史事件流。
+  if (!entries.length && item.childRunId) {
+    const events = await prisma.agentRunEvent.findMany({ where: { runId: item.childRunId, run: { userId, novelId: item.novelId } }, orderBy: { seq: 'asc' }, take: 300 })
     entries.push(...events.filter((event) => !['text.delta', 'reasoning.delta', 'tool.delta', 'step.finish', 'message.start'].includes(event.type)).map(eventLog))
   }
   if (entries.length === 0) entries.push({ id: `${item.id}-created`, time: item.createdAt.toISOString(), title: '已创建子 Agent', detail: `触发条件：${item.triggerCondition}`, tone: 'neutral' })
@@ -257,7 +312,7 @@ export async function cancelAgentSubtask(userId: string, subtaskId: string) {
   // 停用语义：定义保留但不再出现在主 Agent 目录；旧架构的独立子 run 一并停止
   if (item.childRunId) await stopLoopRun(userId, item.childRunId).catch(() => {})
   const updated = await prisma.agentSubtask.update({ where: { id: item.id }, data: { enabled: false, status: 'cancelled', cancelledAt: new Date() } })
-  const stats = await loadSubtaskStats([item.id])
+  const stats = await loadSubtaskStats(userId, item.novelId, [item.id])
   return { item: subtaskView(updated, stats.get(item.id) ?? { runCount: 0, lastRunAt: null }) }
 }
 

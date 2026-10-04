@@ -4,6 +4,9 @@ import type { Response } from 'express'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { startAgentLoopRunSchema, taskSpecSchema } from '../../../shared/contracts/index.js'
+import { admissionModelOverride } from './model-assignment-admission.js'
+import { MAIN_RUN_FILTER, prepareChildGrantDeletion } from './runtime-child.js'
+import { dispatchDurableChild } from './runtime-child-tools.js'
 
 import type { AgentRun as AgentRunRecord, Prisma } from '@prisma/client'
 
@@ -67,6 +70,9 @@ import { withUserRunLock } from './run-lock.js'
 import { admitGoalRun, bindGoalRun, type GoalRunAdmission } from './goal-run-admission.js'
 import { assertGoalFence, readGoalExecution } from './goal-fence.js'
 import { withHumanAdmission } from './goal-activation-authority.js'
+import { freezeModelAssignments, resolveAssignedModel } from './model-assignments.js'
+import { frozenModelAssignmentsSchema, agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
+import { buildTaskSpec } from './task-spec.js'
 
 /**
  * Agent Loop 新链路的路由服务层（plan/13 §4.9）。
@@ -96,6 +102,7 @@ const persistedStartSchema = startAgentLoopRunSchema.extend({
   prompt: z.string().trim().min(1).max(24_000),
   agentProfile: z.enum(['orchestrator', 'research', 'continuity', 'quality', 'lore']).optional(),
   tokenBudget: z.number().int().positive().optional(),
+  modelAssignments: frozenModelAssignmentsSchema.optional(),
 })
 
 function readAdmittedStart(run: AgentRunRecord): StartAgentLoopRunRequest | undefined {
@@ -119,7 +126,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const { taskSpecSchema } = await import('../../../shared/contracts/task-spec-contracts.js')
   const { applySessionToolPolicy, getAgentDefinition, getToolsForAgent } = await import('./agents.js')
   const { resolveAgent2FeatureFlags } = await import('../agent2-feature-flags.js')
-  const { assembleContext } = await import('./context.js')
+  const { assembleContext, insertSubagentCatalog } = await import('./context.js')
   const { snapshotToolAuthority, intersectToolAuthority } = await import('./tool-authority.js')
   const { toOpenAITools } = await import('./tools/registry.js')
   const { executionContextReadTool } = await import('./tools/task-context-tools.js')
@@ -146,8 +153,13 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
     run.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort)
   if (runtime.tier !== run.modelTier || run.modelTier === 'custom' && !run.customModelId) throw new DataAccessError(409, 'RUNTIME_MODEL_ADAPTER_REQUIRED', '原模型配置缺少可核验的模型身份。')
   const agent = getAgentDefinition(input.agentProfile ?? 'orchestrator')
-  // The gated durable runtime has no inline-subagent adapter yet; never silently discard an explicit selection.
-  if (input.pinnedSubagentId) throw new DataAccessError(409, 'RUNTIME_SUBAGENT_ADAPTER_REQUIRED', '当前持久执行协议暂未接入手动子 Agent，请使用普通任务执行。')
+  if (input.pinnedSubagentId) {
+    await (await import('./subagent-selection.js')).requireSelectedSubagent(userId, run.novelId, input.pinnedSubagentId)
+    // Enable only after the child's real database matrix and independent review.
+    if (!(await import('./runtime-child-tools.js')).DURABLE_CHILD_EXECUTION_ENABLED) {
+      throw new DataAccessError(409, 'RUNTIME_SUBAGENT_ADAPTER_REQUIRED', '当前持久执行协议暂未接入手动子 Agent，请使用普通任务执行。')
+    }
+  }
   const session = await prisma.agentSession.findFirstOrThrow({ where: { id: run.sessionId, userId } })
   const scoped = getToolsForAgent(agent, input.mode, resolveAgent2FeatureFlags(userId), { goalOwned: Boolean(goalBinding) })
     .filter(tool => !session.spawnedFromSessionId || !ORCHESTRATION_TOOL_NAMES.has(tool.name))
@@ -176,11 +188,17 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const assembled = await assembleContext({ agent, mode: input.mode, userId, sessionId: run.sessionId, runId, novelId: run.novelId, chapterId: run.chapterId,
     prompt: input.prompt, selection: input.selection, attachments: input.attachments, visionEnabled: runtime.visionEnabled, taskSpec: spec,
     modelTier: runtime.tier, modelName: runtime.modelName, contextWindowTokens: runtime.contextWindowTokens, pinnedSkillIds: input.pinnedSkillIds })
+  if (agent.type === 'orchestrator') {
+    const catalog = await (await import('./productivity.js')).renderSubagentCatalog(userId, run.novelId, input.pinnedSubagentId)
+    insertSubagentCatalog(assembled.messages, catalog, 'system')
+  }
   await initializeDurableTask({ userId, runId, sourceMessageId: original.id, tokenBudget: input.tokenBudget })
   const lease = await acquireRunLease({ userId, runId, ownerId: durableProcessOwner, claimId: randomUUID() })
   try {
     return await initializeExecutionState(lease, { configuration: { version: 1, mode: input.mode, agentType: agent.type,
       creativeFreedom: input.creativeFreedom ?? 'balanced', qualityMode: input.qualityMode ?? 'premium',
+      ...(input.modelAssignments ? { modelAssignments: input.modelAssignments } : {}),
+      ...(input.pinnedSubagentId ? { pinnedSubagentId: input.pinnedSubagentId } : {}),
       model: { tier: runtime.tier, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel,
         customModelId: runtime.tier === 'custom' ? run.customModelId : null,
         maxOutputTokens: env.aiTextMaxOutputTokens, contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
@@ -319,6 +337,15 @@ export async function startLoopRunLocked(
 
   if (steering) await assertManagedAttachmentsAccess(steering.attachments, userId)
 
+  const modelAssignments = input.modelAssignments ?? await freezeModelAssignments(userId, input.novelId)
+  const purposeSpec = buildTaskSpec({ runId: 'model-purpose', novelId: input.novelId, chapterId: input.chapterId, prompt: input.prompt, selection: input.selection })
+  const writingPurpose = ['write', 'revise'].includes(purposeSpec.intent) && !['proposal_only', 'conversation_only'].includes(purposeSpec.writingPacing ?? '')
+  const assigned = admissionModelOverride(input, modelAssignments, writingPurpose)
+  if (assigned) {
+    const selected = await resolveAssignedModel(userId, agentModelSelectionSchema.parse(assigned))
+    input = { ...input, ...selected.selection }
+  }
+  input = { ...input, ...(modelAssignments ? { modelAssignments } : {}) }
   const modelTier = input.modelTier ?? 'speed'
   if (input.pinnedSubagentId) {
     if (input.agentProfile && input.agentProfile !== 'orchestrator') throw new DataAccessError(400, 'SUBAGENT_NESTING_DENIED', '只有主 Agent 可以调用子 Agent。')
@@ -408,10 +435,10 @@ export async function startLoopRunLocked(
       throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '章节已归档或不属于当前稿件。')
     }
     const live = ['queued', 'running', 'awaiting_approval'] as const
-    if (await tx.agentRun.count({ where: { sessionId: session.id, status: { in: [...live] } } })) {
+    if (await tx.agentRun.count({ where: { ...MAIN_RUN_FILTER, sessionId: session.id, status: { in: [...live] } } })) {
       throw new DataAccessError(409, 'RUN_IN_PROGRESS', '当前会话已有任务在执行，请先停止或等待完成。')
     }
-    if (await tx.agentRun.count({ where: { userId, status: { in: [...live] } } }) >= concurrencyLimit) {
+    if (await tx.agentRun.count({ where: { ...MAIN_RUN_FILTER, userId, status: { in: [...live] } } }) >= concurrencyLimit) {
       throw new DataAccessError(409, 'RUN_LIMIT', `同时进行的任务数已达上限（${concurrencyLimit}），请稍后再试。`)
     }
     if (queuedRequest) {
@@ -497,6 +524,7 @@ export async function startLoopRunLocked(
     tokenBudget: input.tokenBudget,
     pinnedSkillIds: input.pinnedSkillIds ?? [],
     pinnedSubagentId: input.pinnedSubagentId,
+    modelAssignments: input.modelAssignments,
     internalGoalContinuation: Boolean(options.goal && options.goal.trigger !== 'author'),
     goalSteering: steering,
   })
@@ -512,7 +540,7 @@ export async function startLoopRunLocked(
 
 async function findOwnedLoopRun(userId: string, runId: string) {
   const run = await prisma.agentRun.findFirst({
-    where: { id: runId, userId },
+    where: { ...MAIN_RUN_FILTER, id: runId, userId },
   })
 
   if (!run) {
@@ -766,22 +794,27 @@ export async function recoverOrphanLoopRuns(): Promise<void> {
  */
 const STALE_LOOP_RUN_QUIET_MS = 5 * 60_000
 let staleSweepRunning = false
+let staleSweepCursor: string | undefined
 
 export async function recoverStaleLoopRuns(): Promise<void> {
   if (staleSweepRunning) return
   staleSweepRunning = true
   try {
     const cutoff = new Date(Date.now() - STALE_LOOP_RUN_QUIET_MS)
+    let recovered = 0
+    // A bounded page cursor prevents older registered executors or a backlog
+    // from permanently hiding later orphans behind the first fifty rows.
+    for (let page = 0; page < 20; page++) {
     const stale = await prisma.agentRun.findMany({
       where: {
         engine: 'loop', runtimeProtocolVersion: 0, taskRootId: null,
         status: { in: ['queued', 'running', 'awaiting_approval'] },
         updatedAt: { lt: cutoff },
+        ...(staleSweepCursor ? { id: { gt: staleSweepCursor } } : {}),
       },
-      orderBy: { updatedAt: 'asc' }, take: 50,
+      orderBy: { id: 'asc' }, take: 50,
       select: { id: true, userId: true },
     })
-    let recovered = 0
     for (const run of stale) {
       if (getActiveRun(run.id)) continue
       try {
@@ -791,6 +824,9 @@ export async function recoverStaleLoopRuns(): Promise<void> {
         console.error('[agent-loop] 陈旧任务单条收敛失败，等待下一次扫描', { runId: run.id,
           reason: error instanceof Error ? error.message : String(error) })
       }
+    }
+    if (stale.length < 50) { staleSweepCursor = undefined; break }
+    staleSweepCursor = stale[stale.length - 1].id
     }
     if (recovered > 0) {
       console.log(`[agent-loop] 陈旧任务收敛：${recovered} 个无执行器的进行中任务已标记为中断`)
@@ -838,19 +874,20 @@ export async function recoverDurableLoopRuns() {
         run: { engine: 'loop', runtimeProtocolVersion: 1, status: { in: ['queued', 'running'] },
           taskRoot: { is: { status: 'active', authorizationMode: 'legacy', executionState: { isNot: null } } } } },
       orderBy: [{ updatedAt: 'asc' }, { runId: 'asc' }], take: 32,
-      select: { run: { select: { id: true, userId: true, sessionId: true } } },
+      select: { run: { select: { id: true, userId: true, sessionId: true, incomingChildGrant: { select: { kind: true } } } } },
     })
   })
   // In B0, waiting tasks remain registered with a heartbeat. A concurrent scan
   // may observe an old row, but cannot steal an active owner or resume a stop.
   return Promise.all(candidates.map(async ({ run }) => {
-    if (getActiveRun(run.id) || hasActiveRunInSession(run.sessionId)) return { runId: run.id, status: 'skipped' as const }
+    if (getActiveRun(run.id) || run.incomingChildGrant?.kind !== 'inline' && hasActiveRunInSession(run.sessionId)) return { runId: run.id, status: 'skipped' as const }
     try {
-      await executePersistedLoopRun(run.userId, run.id)
+      if (run.incomingChildGrant) await dispatchDurableChild(run.userId, run.id)
+      else await executePersistedLoopRun(run.userId, run.id)
       return { runId: run.id, status: 'dispatched' as const }
     } catch (error) {
       const code = error instanceof DataAccessError ? error.code : 'RECOVERY_FAILED'
-      if (!['RUN_IN_PROGRESS', 'RUN_LIMIT', 'RUNTIME_LEASE_BUSY', 'RUNTIME_LEASE_REVOKED', 'RUNTIME_NOT_ACTIVE'].includes(code)) {
+      if (!['RUN_IN_PROGRESS', 'RUN_LIMIT', 'RUNTIME_LEASE_BUSY', 'RUNTIME_LEASE_REVOKED', 'RUNTIME_NOT_ACTIVE', 'RUNTIME_PARENT_LEASE_LOST'].includes(code)) {
         console.error('[agent-loop] 持久任务恢复未完成', { runId: run.id, code })
       }
       return { runId: run.id, status: 'not_dispatched' as const, code }
@@ -938,7 +975,7 @@ async function continueLoopRunLocked(
   await getModelTierRuntime(nextTier, userId, nextCustomModelId, nextReasoningEffort)
 
   // A stale tab must not revive an old task after the author has started a new one.
-  const latest = await prisma.agentRun.findFirst({ where: { sessionId: run.sessionId }, orderBy: { createdAt: 'desc' }, select: { id: true } })
+  const latest = await prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId: run.sessionId }, orderBy: { createdAt: 'desc' }, select: { id: true } })
   if (latest?.id !== run.id) {
     throw new DataAccessError(409, 'STALE_RESUME_TARGET', '当前会话已开始新任务，不能从旧入口续跑。请刷新后继续最新任务。')
   }
@@ -983,7 +1020,7 @@ async function continueLoopRunLocked(
   }
   // B0 still serializes service admissions with withUserRunLock. Include saved
   // queued/recovering work in the limit, not just controllers in this process.
-  if (await prisma.agentRun.count({ where: { userId, status: { in: ['queued', 'running', 'awaiting_approval'] } } }) >= env.agentUserMaxConcurrent) {
+  if (await prisma.agentRun.count({ where: { ...MAIN_RUN_FILTER, userId, status: { in: ['queued', 'running', 'awaiting_approval'] } } }) >= env.agentUserMaxConcurrent) {
     throw new DataAccessError(409, 'RUN_LIMIT', '同时进行的任务数已达上限，请稍后再试。')
   }
   // Persist a model change only after the exact target/input/time checks pass.
@@ -1012,6 +1049,7 @@ async function continueLoopRunLocked(
     qualityMode: queuedInput?.qualityMode,
     pinnedSkillIds: queuedInput?.pinnedSkillIds,
     pinnedSubagentId: queuedInput?.pinnedSubagentId,
+    modelAssignments: queuedInput?.modelAssignments,
     agentType: queuedInput?.agentProfile ?? 'orchestrator',
     tokenBudget: queuedInput?.tokenBudget,
     resume: true,
@@ -1578,7 +1616,7 @@ export async function listAgentSessionsData(userId: string, novelId?: string, op
         { novel: { title: { contains: query, mode: 'insensitive' } } },
         { novel: { displayTitle: { contains: query, mode: 'insensitive' } } },
         // 对话正文以 run 摘要保存；把它纳入全局搜索，而不把整段消息 JSON 拉到前端。
-        { runs: { some: { OR: [
+        { runs: { some: { ...MAIN_RUN_FILTER, OR: [
           { inputSummary: { contains: query, mode: 'insensitive' } },
           { outputSummary: { contains: query, mode: 'insensitive' } },
         ] } } },
@@ -1660,6 +1698,7 @@ async function deleteAgentSessionLocked(userId: string, sessionId: string) {
     const runIds = runs.map((run) => run.id)
 
     if (runIds.length > 0) {
+      await prepareChildGrantDeletion(tx, userId, runIds)
       await tx.projectMemoryEntry.deleteMany({
         where: {
           runId: { in: runIds },
@@ -1738,7 +1777,7 @@ export async function forkAgentSessionData(
   let cutoff: Date | null = null
   if (fromMessageId) {
     const anchor = await prisma.agentMessage.findFirst({
-      where: { id: fromMessageId, sessionId: session.id },
+      where: { id: fromMessageId, sessionId: session.id, run: MAIN_RUN_FILTER },
       select: { createdAt: true },
     })
     if (!anchor) throw new DataAccessError(404, 'AGENT_MESSAGE_NOT_FOUND', '这条对话已不存在，无法从它创建分支。')
@@ -1754,7 +1793,7 @@ export async function forkAgentSessionData(
   const forkedAt = new Date()
 
   const sourceRuns = await prisma.agentRun.findMany({
-    where: { sessionId: session.id, ...(cutoff ? { createdAt: { lte: cutoff } } : {}) },
+    where: { ...MAIN_RUN_FILTER, sessionId: session.id, ...(cutoff ? { createdAt: { lte: cutoff } } : {}) },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: FORK_RUN_LIMIT,
   })
@@ -1844,6 +1883,7 @@ export async function listAgentSessionHistoryData(userId: string, sessionId: str
 
   const runs = await prisma.agentRun.findMany({
     where: {
+      ...MAIN_RUN_FILTER,
       sessionId,
     },
     orderBy: [{ createdAt: 'asc' }],
@@ -1916,6 +1956,7 @@ export async function listSessionRunStatuses(userId: string, sessionIds: string[
 
   const runs = await prisma.agentRun.findMany({
     where: {
+      ...MAIN_RUN_FILTER,
       sessionId: { in: ownedIds },
       createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
     },

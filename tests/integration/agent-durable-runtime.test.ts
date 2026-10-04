@@ -62,6 +62,7 @@ import * as aiService from '../../api/lib/ai-service.js'
 import { executeDurableCompiler } from '../../api/lib/agent/tools/durable-compiler.js'
 import { callDurableAuxiliary, auxiliaryRouteForRuntime, resolveDurableAuxiliaryRuntime } from '../../api/lib/agent/runtime-auxiliary-call.js'
 import { applyContinuityPatches } from '../../api/lib/agent/tools/durable-continuity.js'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { persistHumanityQualityReport, applyQualityRepair, getQualityReport, buildHumanityQualityContext } from '../../api/lib/agent/humanity-quality.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import * as writingExperiments from '../../api/lib/agent/writing-experiments.js'
@@ -1359,7 +1360,10 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
         return
       }
       const repairs = ['repair', 'repair-rollback', 'no-op', 'empty', 'concurrent', 'outer-transaction', 'outer-rollback'].includes(scenario)
-      if (scenario === 'ambiguous') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '原文原文' } })
+      if (scenario === 'ambiguous') {
+        await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '原文原文' } })
+        await validateStoryContinuity({ ...f, compilationId, findings: [], expectedChapterRevision: 1, independentCheck: 'complete' })
+      }
       const input = { ...f, compilationId, chapterId: f.chapterId, chapterRevision: 1, mode: 'balanced' as const, deterministicMetrics: {}, deterministicFindings: [],
         criticComplete: scenario !== 'unavailable', criticFindings: repairs || scenario === 'unlocated' || scenario === 'ambiguous'
           ? [{ signal: 'emotion_grounding' as const, severity: 'warning' as const, quote: scenario === 'unlocated' ? '不在正文里' : '原文', explanation: '缺少具体动作', suggestion: '局部调整', confidence: 0.9 }] : [] }
@@ -1411,13 +1415,23 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
       const terminal = { userId: f.userId, novelId: f.novelId, compilationId, chapterSummary: '摘要', exitState: state, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '脚印', requireQuality: true, qualityReportId: report.id }
       if (scenario === 'legacy-report' || scenario === 'hash-mismatch') {
         if (scenario === 'legacy-report') await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { deterministicMetrics: {} } })
-        else await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '内容变化但旧版本号未更新' } })
+        else {
+          await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '内容变化但旧版本号未更新' } })
+          // Isolate the quality hash gate: continuity has checked the changed body, while quality still covers the old body.
+          await validateStoryContinuity({ ...f, compilationId, findings: [], expectedChapterRevision: 1, independentCheck: 'complete' })
+          expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({
+            coverage: { contentHash: runtimeJson({ content: '内容变化但旧版本号未更新' }).hash }, independentCheck: 'complete' })
+        }
         await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('active')
         return
       }
       if (['unavailable', 'unlocated', 'ambiguous'].includes(scenario)) {
         expect(report.status).toBe('failed')
+        if (scenario === 'ambiguous') expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({
+          coverage: { contentHash: runtimeJson({ content: '原文原文' }).hash }, independentCheck: 'complete' })
         await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('active')
         return
       }
       if (scenario === 'complete') {
@@ -1615,8 +1629,10 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('严谨创作
       await saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进', entryState: state, goal: '找线索', obstacle: '门锁', choice: '绕路', cost: '时间', turn: '发现脚印', exitState: state,
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
       if (family === 'continuity') {
+        const current = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId }, include: { chapter: true, bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
+        const coverage = compilerContinuityCoverage({ chapter: current.chapter!, bridge: current.bridge, sceneTasks: current.sceneTasks, source: null })
         await validateStoryContinuity({ ...f, compilationId, findings: ['body', 'object', 'knowledge'].map(signal => ({ signal: signal as 'body' | 'object' | 'knowledge', severity: 'warning', evidence: '原文承接风险', suggestion: '局部澄清' })),
-          expectedChapterRevision: 1, independentCheck: 'complete', coverage: { version: 1, contentHash: runtimeJson({ content: '原文' }).hash, charCount: 2, sourceHash: null } })
+          expectedChapterRevision: 1, independentCheck: 'complete', coverage })
       } else {
         const report = await persistHumanityQualityReport({ ...f, compilationId, chapterId: f.chapterId, chapterRevision: 1, mode: 'premium', deterministicMetrics: {}, deterministicFindings: [], criticComplete: true,
           criticFindings: [{ signal: 'emotion_grounding', severity: 'advisory', quote: '原文', explanation: '缺少动作', suggestion: '局部改动', confidence: 0.9 }] })
@@ -1784,7 +1800,7 @@ describe.runIf(available)('既有章节独立检查', () => {
 })
 
 describe.runIf(available)('durable continuity actual tool chain', () => {
-  it.each(['success', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied'] as const)('%s preserves paid results and atomic business effects', async scenario => {
+  it.each(['success', 'chapter-only', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     await fixture(async f => {
       let lease = await claim(f)
@@ -1801,8 +1817,9 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       await saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进场景', entryState: state, goal: '寻找线索', obstacle: '门已上锁', choice: '绕路', cost: '耗费时间', turn: '发现脚印', exitState: state,
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
       const tools = [chapterBridgeGetTool, continuityValidateTool]
-      const calls = [{ id: 'bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) }, { id: 'check', name: 'continuity_validate', arguments: JSON.stringify({ compilationId }) }]
-      if (scenario === 'success') calls.push({ id: 'cached', name: 'continuity_validate', arguments: JSON.stringify({ compilationId }) })
+      const checkArgs = scenario === 'chapter-only' ? { chapterId: f.chapterId } : { compilationId }
+      const calls = [{ id: 'bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) }, { id: 'check', name: 'continuity_validate', arguments: JSON.stringify(checkArgs) }]
+      if (scenario === 'success' || scenario === 'chapter-only') calls.push({ id: 'cached', name: 'continuity_validate', arguments: JSON.stringify(checkArgs) })
       if (scenario === 'missing') calls.shift()
       await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
@@ -1876,7 +1893,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       const result = await step()
       const failed = ['format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('连续性检查') } })
-      if (scenario === 'success') expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
+      if (scenario === 'success' || scenario === 'chapter-only') expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
       const expectedRequests = scenario === 'missing' ? 0 : scenario === 'fused-repair' ? 1 : scenario === 'format-retry' ? 3 : repairing ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
@@ -1891,8 +1908,8 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).targetRevision).toBe(2)
       }
       const events = await publishDurableEvents(f.userId, lease.runId)
-      expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'continuity_validate')).toMatchObject(scenario === 'success' ? [{ ok: true }, { ok: true }] : [{ ok: !failed }])
-    })
+      expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'continuity_validate')).toMatchObject(scenario === 'success' || scenario === 'chapter-only' ? [{ ok: true }, { ok: true }] : [{ ok: !failed }])
+    }, undefined, scenario === 'chapter-only' ? '完成当前章节' : '修改本章')
   })
   it('applies only unique nonoverlapping anchors from original content', () => {
     expect(applyContinuityPatches('原文尾部', [{ oldText: '原文', newText: '新文' }, { oldText: '新文', newText: '注入文本' }, { oldText: '文尾', newText: '重叠' }, { oldText: '尾部', newText: '结尾' }])).toEqual({ after: '新文结尾', applied: 2 })

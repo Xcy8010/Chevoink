@@ -101,7 +101,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     return { kind: 'rejected' as const, code: error.code, message: error.message }
   })
   if (!recoveredWork && work.kind === 'check' && (!work.cached || work.repair) && !work.route) {
-    const resolved = await resolveDurableAuxiliaryRuntime({ userId: ctx.userId, modelRuntime: ctx.modelRuntime, modelSelection: ctx.modelSelection })
+    const resolved = await resolveDurableAuxiliaryRuntime({ userId: ctx.userId, modelRuntime: ctx.modelRuntime, modelSelection: ctx.modelSelection, modelAssignments: ctx.modelAssignments, task: 'quality' })
     const price = await resolveDurableTokenPrice(lease, `${cap.operationKey}:quality-price`, resolved.selection.tier, resolved.runtime.multiplierBps)
     work = { ...work, route: auxiliaryRouteForRuntime(resolved.runtime, resolved.selection, REVIEW_MAX_OUTPUT_TOKENS), price }
   }
@@ -200,7 +200,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
       const note = (bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : '')
         + (remaining ? `仍有 ${remaining} 项未应用（无安全补丁、范围重叠、数量上限或本次未获修订授权），保留待审，不冒充已修复，不为清零建议循环改写。` : '')
       const toolResult: ToolResult = { ...(report.status === 'failed' ? { outcome: 'failed' as const } : {}), summary: repaired ? `质量检查 · 自动修订 ${repaired.repairedFindingIds.length} 处` : frozen.cached ? '复用当前质量报告' : '人类感质量检查',
-        output: `质量报告 ${report.id} · ${report.status} · r${report.chapterRevision}。${report.status === 'failed' ? '独立检查未完整完成（格式不完整或全部引用无法逐字定位），不能提交章节桥；可重试一次完整检查，禁止改写正文来凑通过。' : `${repaired ? '安全修订已原子写入；需对新版本重新检查连续性，不能沿用旧版验证。' : selected.length ? '已尝试集中处理警告与建议，但未得到可安全应用的实际改动；同一报告不循环重试。' : frozen.cached ? '复用原报告，不重复请求模型或修订。' : '报告已保存；没有可验证补丁的意见保留待审，不冒充已修复。'}${note}`}`,
+        output: `质量报告 ${report.id} · ${report.status} · r${report.chapterRevision}。${report.status === 'failed' ? '独立检查未完整完成（格式不完整或全部引用无法逐字定位），不能提交章节桥；可重试一次完整检查，禁止改写正文来凑通过。' : `${repaired ? `安全修订已原子写入；${frozen.compiler ? `调用 continuity_validate，传 compilationId=${frozen.compiler.id}，只读复核当前版本；不要为消除警告继续改写。` : '需对新版本只读重新检查连续性，不能沿用旧版验证。'}` : selected.length ? '已尝试集中处理警告与建议，但未得到可安全应用的实际改动；同一报告不循环重试。' : frozen.cached ? '复用原报告，不重复请求模型或修订。' : '报告已保存；没有可验证补丁的意见保留待审，不冒充已修复。'}${note}`}`,
         observedState: { kind: 'chapter', id: frozen.chapter.id, revision: report.chapterRevision },
         display: repaired ? { kind: 'chapterDiff', chapterId: frozen.chapter.id, chapterTitle: frozen.chapter.title, before: repaired.before, after: repaired.after, appliedDirectly: true, revision: report.chapterRevision } : reportDisplay(report),
         ...(repaired ? { snapshot: { target: 'chapter' as const, targetId: frozen.chapter.id, field: 'content', previousValue: repaired.before } } : {}) }

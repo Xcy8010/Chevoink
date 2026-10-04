@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { env } from '../../api/config/env.js'
 import { prisma } from '../../api/lib/prisma.js'
@@ -6,7 +6,8 @@ import { handleTestDatabaseUnavailable } from '../support/database-availability.
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { buildStoryCompilerDigest, commitChapterBridge, prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import { getLatestQualityReport, hasCommittedTaskChapter, persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
-import { chapterBridgeCommitTool, chapterBridgeGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { chapterBridgeCommitTool, chapterBridgeGetTool, continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import * as review from '../../api/lib/agent/review-completion.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -132,6 +133,34 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       expect(afterScenes.map(scene => ({ id: scene.id, purpose: scene.purpose, entryState: scene.entryState, exitState: scene.exitState })))
         .toEqual(beforeScenes.map(scene => ({ id: scene.id, purpose: scene.purpose, entryState: scene.entryState, exitState: scene.exitState })))
       expect(afterScenes.every(scene => scene.status === 'completed')).toBe(true)
+    })
+  })
+  it('chapter-only post-quality CHECK persists the exact resumed compiler revision, reuses without another critic and commits warnings without a rewrite loop', async () => {
+    vi.spyOn(flags, 'isAgent2FeatureEnabled').mockImplementation(name => name === 'humanityQuality')
+    await fixture(async f => {
+      const report = await check(f)
+      const changed = await prisma.chapter.update({ where: { id: f.chapter.id }, data: { content: '他绕过锁门，在墙根发现一串刚留下的脚印。', revision: { increment: 1 } } })
+      await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { status: 'repaired', chapterRevision: changed.revision, repairRound: 1,
+        deterministicMetrics: { independentCheck: 'complete', repairedContentHash: createHash('sha256').update(changed.content).digest('hex'), sourceRevision: f.chapter.revision } } })
+      await prisma.chapterBridge.update({ where: { compilationId: f.compilationId }, data: { targetRevision: changed.revision } })
+      await prisma.storyCompilation.update({ where: { id: f.compilationId }, data: { stage: 'repair' } })
+      const ctx = { ...f.ctx, creativeFreedom: 'balanced' as const }
+      expect(await chapterBridgeCommitTool.execute(ctx, {})).toMatchObject({ outcome: 'failed', summary: '修订后需要重新复核连续性' })
+      const critic = vi.spyOn(review, 'generateReviewCompletion').mockResolvedValue(JSON.stringify({ findings: [
+        { signal: 'body', severity: 'warning', evidence: '脚印仍待解释', suggestion: '保留待审' },
+        { signal: 'hook', severity: 'warning', evidence: '锁门线索未揭晓', suggestion: '保留待审' },
+      ] }))
+      expect(await continuityValidateTool.execute(ctx, { chapterId: changed.id })).toMatchObject({ display: { compilationId: f.compilationId, errorCount: 0, warningCount: 2 } })
+      const checked = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId } })
+      expect(checked).toMatchObject({ runId: f.originalId, stage: 'check', validation: { checkedRevision: changed.revision, independentCheck: 'complete',
+        coverage: { contentHash: runtimeJson({ content: changed.content }).hash, reviewHash: expect.stringMatching(/^[a-f0-9]{64}$/) } } })
+      expect(await continuityValidateTool.execute(ctx, { chapterId: changed.id })).toMatchObject({ summary: '复用连续性检查 · 0 错误 2 警告' })
+      expect(critic).toHaveBeenCalledOnce()
+      expect(critic.mock.calls[0][1]).toContain('本次只读复核')
+      expect(await prisma.agentArtifact.count({ where: { runId: ctx.runId, artifactType: 'continuityReview' } })).toBe(0)
+      expect(await chapterBridgeCommitTool.execute(ctx, {})).toMatchObject({ summary: '提交章节桥与故事终态', display: { compilationId: f.compilationId } })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: changed.id } })).toEqual(changed)
+      expect(await prisma.chapterQualityReport.count({ where: { chapterId: changed.id } })).toBe(1)
     })
   })
 

@@ -48,7 +48,7 @@ it('normalizes prompt inputs and preserves the cover entry point after success',
   api.prompt.mockResolvedValue({ prompt: 'Generated', negativePrompt: 'Exclude', visualKeywords: ['blue'] })
   const { result, state } = fixture()
   await act(async () => { await result.current.coverPromptMutation.mutateAsync() })
-  expect(api.prompt).toHaveBeenCalledWith({ novelTitle: 'Title', summary: 'Summary', genre: 'fantasy', protagonist: undefined, stylePreference: undefined })
+  expect(api.prompt).toHaveBeenCalledWith({ novelId: 'novel', novelTitle: 'Title', summary: 'Summary', genre: 'fantasy', protagonist: undefined, stylePreference: undefined })
   expect(state.setCoverKeywords).toHaveBeenCalledWith(['blue'])
   expect(state.setActiveToolPanel).toHaveBeenCalledWith('cover')
   expect(state.setMobileView).toHaveBeenCalledWith('cover')

@@ -14,6 +14,7 @@ import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { getActiveRunIdBySession, hasActiveRunInSession } from './active-runs.js'
 import { publishDurableEvents } from './runtime-event-projection.js'
+import { MAIN_RUN_FILTER, prepareChildGrantDeletion } from './runtime-child.js'
 
 const historyRunState = { select: { runtimeProtocolVersion: true, status: true, finishedAt: true, taskRoot: { select: { status: true } },
   goalExecution: { select: { goalId: true, trigger: true } },
@@ -104,7 +105,7 @@ async function getSessionRunState(sessionId: string): Promise<{ activeRunId: str
     return { activeRunId: local, runGoalId: localRun?.goalExecution?.goalId ?? null, resumeRunId: null }
   }
   const run = await prisma.agentRun.findFirst({
-    where: { sessionId },
+    where: { sessionId, ...MAIN_RUN_FILTER },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     select: { id: true, status: true, usage: true, runtimeProtocolVersion: true, taskRoot: { select: { status: true } }, goalExecution: { select: { goalId: true } } },
   })
@@ -118,7 +119,7 @@ async function getSessionRunState(sessionId: string): Promise<{ activeRunId: str
 /** 读取当前逻辑任务的权威清单，避免会话旧消息和衍生副本覆盖真实状态。 */
 export async function loadCurrentTodoSnapshot(userId: string, sessionId: string): Promise<AgentTodoSnapshot | null> {
   return prisma.$transaction(async tx => {
-    const run = await tx.agentRun.findFirst({ where: { userId, sessionId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    const run = await tx.agentRun.findFirst({ where: { userId, sessionId, ...MAIN_RUN_FILTER }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       select: { id: true, taskSpec: true, taskRootId: true, runtimeProtocolVersion: true, usage: true } })
     if (!run) return null
     const spec = run.taskSpec
@@ -185,6 +186,7 @@ export async function listLoopSessionMessages(
     const runs = await prisma.agentRun.findMany({
       where: {
         sessionId,
+        ...MAIN_RUN_FILTER,
         ...(options.beforeRunStartedAt ? { createdAt: { lt: new Date(options.beforeRunStartedAt) } } : {}),
       },
       orderBy: { createdAt: 'desc' },
@@ -200,7 +202,7 @@ export async function listLoopSessionMessages(
           // A resumed durable run shares the original task's message identities.
           // Keep that logical task whole even when its original run is outside
           // this page; otherwise a fresh reload can lose the prompt/tool cards.
-          where: { sessionId, ...(pageRootIds.length ? { OR: [{ runId: { in: pageRunIds } }, { run: { taskRootId: { in: pageRootIds } } }] }
+          where: { sessionId, run: MAIN_RUN_FILTER, ...(pageRootIds.length ? { OR: [{ runId: { in: pageRunIds } }, { run: { taskRootId: { in: pageRootIds } } }] }
             : { runId: { in: pageRunIds } }) },
           orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
           include: { run: historyRunState },
@@ -234,12 +236,12 @@ export async function listLoopSessionMessages(
   }
 
   // 全量模式（删除/回退后的界面重拉等低频操作）：保留大窗口，避免已加载内容变少
-  const durableRuns = await prisma.agentRun.findMany({ where: { sessionId, runtimeProtocolVersion: 1, taskRootId: { not: null } },
+  const durableRuns = await prisma.agentRun.findMany({ where: { sessionId, ...MAIN_RUN_FILTER, runtimeProtocolVersion: 1, taskRootId: { not: null } },
     orderBy: { createdAt: 'desc' }, distinct: ['taskRootId'], take: 2000,
     select: { id: true, runtimeProtocolVersion: true, taskRootId: true } })
   await synchronizeDurableHistory(userId, durableRuns)
   const newestRecords = await prisma.agentMessage.findMany({
-    where: { sessionId },
+    where: { sessionId, run: MAIN_RUN_FILTER },
     // 必须先取最新窗口再恢复为时间正序。旧实现按 asc + take 会永久截掉
     // 长会话末尾的工具操作与最终总结，刷新后看起来就像“上一轮消失”。
     // 窗口提到 2000：多章长会话（每轮几十个工具消息）轻松超过 500，
@@ -255,13 +257,13 @@ export async function listLoopSessionMessages(
   const boundary = records[0]
   if (boundary?.runId) {
     const runEarliest = await prisma.agentMessage.findFirst({
-      where: { sessionId, runId: boundary.runId },
+      where: { sessionId, runId: boundary.runId, run: MAIN_RUN_FILTER },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       select: { id: true },
     })
     if (runEarliest && runEarliest.id !== boundary.id) {
       const remainder = await prisma.agentMessage.findMany({
-        where: { sessionId, runId: boundary.runId },
+        where: { sessionId, runId: boundary.runId, run: MAIN_RUN_FILTER },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         include: { run: historyRunState },
       })
@@ -304,7 +306,7 @@ async function findOwnedSessionMessage(userId: string, sessionId: string, messag
   }
 
   const message = await prisma.agentMessage.findFirst({
-    where: { id: messageId, sessionId },
+    where: { id: messageId, sessionId, run: MAIN_RUN_FILTER },
   })
 
   if (!message) {
@@ -327,6 +329,7 @@ export async function deleteLoopSessionMessage(
   const { message } = await findOwnedSessionMessage(userId, sessionId, messageId)
 
   await prisma.$transaction(async (tx) => {
+    await prepareChildGrantDeletion(tx, userId, [message.runId])
     await tx.projectMemoryEntry.deleteMany({ where: { runId: message.runId } })
     await tx.agentArtifact.deleteMany({ where: { runId: message.runId } })
     await tx.agentRun.delete({ where: { id: message.runId } }).catch(() => {})
@@ -495,6 +498,7 @@ export async function rollbackLoopSessionFromMessage(
   const result = await prisma.$transaction(async (tx) => {
     await lockNovelActiveScope(tx, session.novelId)
     for (const runId of runIds) await assertAgentManuscriptCurrent(tx, { userId, novelId: session.novelId, runId })
+    await prepareChildGrantDeletion(tx, userId, runIds)
     // Validate the entire rollback before deleting history or touching content.
     // Old run snapshots are not authority to modify import-retained chapters.
     // 已发布章节进入保护清单：读者端不能因回退断链，创作区正文也不能被回退清空。

@@ -10,6 +10,7 @@ import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { readExecutionFrame } from './runtime-state.js'
 import type { AgentRun } from '@prisma/client'
+import { MAIN_RUN_FILTER } from './runtime-child.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 export const goalConsentSchema = z.object({ version: z.literal(1), sourceRunId: z.string(), sourceRootId: z.string(),
@@ -50,7 +51,7 @@ export async function readGoalConsentSourceRun(tx: GoalTx, run: AgentRun) {
 export async function bindCurrentTaskGoalConsent(tx: GoalTx, userId: string, input: StartAgentLoopRunRequest) {
   if (!isCurrentTaskGoalConsent(input.prompt) || input.attachments?.length) return null
   const session = await lockGoalSession(tx, userId, input.sessionId)
-  const source = await tx.agentRun.findFirst({ where: { userId, sessionId: session.id, novelId: input.novelId, engine: 'loop' },
+  const source = await tx.agentRun.findFirst({ where: { userId, sessionId: session.id, novelId: input.novelId, engine: 'loop', ...MAIN_RUN_FILTER },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
   if (!source || session.spawnedFromSessionId || source.agentType !== 'writingOrchestrator'
     || !['queued', 'running', 'awaiting_approval'].includes(source.status)) throw new DataAccessError(409, 'GOAL_SOURCE_REQUIRED', '当前没有可关联的进行中任务，请说明要完成的任务。')

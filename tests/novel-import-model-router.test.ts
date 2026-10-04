@@ -11,6 +11,12 @@ const runtime = { tier: 'custom', provider: 'compatible', modelName: 'author-sel
 beforeEach(() => { resolve.mockReset(); resolve.mockResolvedValue(runtime) })
 
 describe('import model routing', () => {
+  it('uses a new assigned built-in tier and exact native effort without reverting to basic', async () => {
+    resolve.mockResolvedValueOnce({ ...runtime, tier: 'ultimate', reasoningEffort: 'high', multiplierBps: 25000 })
+    const result = await resolveImportModelRoute('owner', { kind: 'builtin', modelTier: 'ultimate', reasoningEffort: 'high' })
+    expect(resolve).toHaveBeenCalledExactlyOnceWith('ultimate', 'owner', undefined, 'high')
+    expect(result.route).toMatchObject({ kind: 'builtin', reasoningEffort: 'high', customModelId: null })
+  })
   it('uses the exact composer BYOK selection and returns no credentials in its display route', async () => {
     const result = await resolveImportModelRoute('owner', { kind: 'custom', customModelId: 'selected-not-recent' })
     expect(resolve).toHaveBeenCalledExactlyOnceWith('custom', 'owner', 'selected-not-recent', 'low')

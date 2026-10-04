@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto'
+import { setTimeout as contentionDelay } from 'node:timers/promises'
 import { z } from 'zod'
 import { Prisma } from '@prisma/client'
 import { DataAccessError, prisma } from '../prisma.js'
+import { parentContentionGate, type ParentContentionScope } from './runtime-parent-contention.js'
 
 export const DURABLE_RUNTIME_VERSION = 1
 export type RuntimeTx = Prisma.TransactionClient
@@ -37,10 +39,23 @@ export function runtimeJson(value: unknown): { value: Prisma.InputJsonValue; has
 }
 
 /** The callback is database-only: it may retry. Never put a provider/network call here. */
-export async function runtimeTransaction<T>(work: (tx: RuntimeTx) => Promise<T>): Promise<T> {
+export async function runtimeTransaction<T>(work: (tx: RuntimeTx) => Promise<T>, options: {
+  contentionBackoff?: boolean; contentionScope?: ParentContentionScope; signal?: AbortSignal; deadline?: number
+} = {}): Promise<T> {
+  options = { ...options, ...(options.contentionScope ? { contentionScope: { ...options.contentionScope } } : {}) }
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await prisma.$transaction(work, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 5000, timeout: 10000 })
+      // Permit wait and connection acquisition share the original 5s allowance.
+      // No Serializable snapshot exists while queued. Each retry releases its
+      // permit after rollback, before the unchanged contention delay below.
+      const deadline = Math.min(Date.now() + 5000, options.deadline ?? Infinity)
+      const permit = options.contentionScope ? await parentContentionGate.acquire(options.contentionScope, { deadline, signal: options.signal }) : undefined
+      try {
+        if (permit && options.signal?.aborted) runtimeError('RUNTIME_CONTENTION_ABORTED', '数据库等待已取消，尚未执行。')
+        const maxWait = permit ? Math.floor(deadline - Date.now()) : 5000
+        if (maxWait <= 0) runtimeError('RUNTIME_CONTENTION_TIMEOUT', '数据库等待已超时，尚未执行。')
+        return await prisma.$transaction(work, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait, timeout: 10000 })
+      } finally { permit?.release() }
     } catch (error) {
       // Raw SELECT ... FOR UPDATE can surface PostgreSQL serialization/deadlock
       // failures as P2010, not P2034. Retry the entire DB-only transaction with a
@@ -48,7 +63,13 @@ export async function runtimeTransaction<T>(work: (tx: RuntimeTx) => Promise<T>)
       const conflict = error instanceof Prisma.PrismaClientKnownRequestError
         && (['P2034', 'P2002'].includes(error.code)
           || (error.code === 'P2010' && ['40001', '40P01'].includes(String(error.meta?.code))))
-      if (conflict && attempt < 2) continue
+      if (conflict && attempt < 2) {
+        // SAME three DB-only attempts and fresh snapshots. Child workers can
+        // desynchronize bounded SSI contention; never retry a paid HTTP call.
+        // Maximum combined delay: 150 + 300 = 450ms.
+        if (options.contentionBackoff) await contentionDelay(attempt === 0 ? 50 + Math.floor(Math.random() * 101) : 100 + Math.floor(Math.random() * 201))
+        continue
+      }
       throw error
     }
   }
@@ -62,6 +83,14 @@ export async function databaseNow(tx: RuntimeTx): Promise<Date> {
 
 export async function lockOwnedRun(tx: RuntimeTx, userId: string, runId: string) {
   runtimeId(userId); runtimeId(runId)
+  // Read identity first, then take parent locks before the child. All common
+  // effect/lease/control paths share this order, including paused recovery.
+  const delegated = await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: runId } })
+  if (delegated) {
+    if (await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: delegated.currentParentRunId } })) return runtimeError('RUNTIME_CHILD_RECURSION_DENIED', '不支持嵌套子任务执行。')
+    const parent = await lockRunRoot(tx, userId, delegated.currentParentRunId)
+    if (parent.root.id !== delegated.parentRootId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '子任务父级范围不匹配。')
+  }
   await tx.$queryRaw`SELECT id FROM agent_runs WHERE id = ${runId} AND user_id = ${userId} FOR UPDATE`
   const run = await tx.agentRun.findFirst({ where: { id: runId, userId } })
   if (!run) return runtimeError('RUNTIME_SCOPE_MISMATCH', '任务不存在或不属于当前用户。')

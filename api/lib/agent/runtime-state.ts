@@ -4,6 +4,8 @@ import { lockRunRoot, runtimeError, runtimeJson, runtimeTransaction, type Runtim
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readTaskBudgetInTransaction, taskTurnLimit } from './runtime-budget.js'
 import { withObjectType } from './tool-schema.js'
+import { frozenModelAssignmentsSchema } from '../../../shared/contracts/agent-model-assignments.js'
+import { readParentContentionScope } from './runtime-parent-contention.js'
 
 const id = z.string().min(1).max(64)
 const count = z.number().int().nonnegative().max(2147483647)
@@ -28,6 +30,8 @@ const configurationSchema = z.object({ version: z.literal(1), mode: z.enum(['pla
   tools: z.array(z.object({ type: z.literal('function'), function: z.object({ name: z.string().min(1), description: z.string(), parameters: z.record(z.string(), z.unknown()) }).strict() }).strict()),
   toolAuthority: z.array(z.object({ name: z.string().min(1), permission: z.enum(['allow', 'ask', 'deny']), alwaysConfirm: z.boolean(), dangerous: z.boolean() }).strict()),
   protectedChapterIds: z.array(id), pinnedSkillVersions: z.array(z.object({ id, version: z.string().min(1) }).strict()),
+  modelAssignments: frozenModelAssignmentsSchema.optional(),
+  pinnedSubagentId: id.optional(),
 }).strict().refine(value => new Set(value.tools.map(tool => tool.function.name)).size === value.tools.length
   && new Set(value.toolAuthority.map(tool => tool.name)).size === value.toolAuthority.length
   && value.tools.every(tool => value.toolAuthority.some(grant => grant.name === tool.function.name)))
@@ -180,5 +184,6 @@ function executionStateWrite(token: RunLeaseToken, input: { expectedRevision: nu
 
 /** Read-only recovery works while paused; it does not grant a lease or re-enable the task. */
 export async function loadExecutionState(userId: string, runId: string) {
-  return runtimeTransaction(async tx => { const { root } = await lockRunRoot(tx, userId, runId); return readState(tx, root.id) })
+  const contentionScope = await readParentContentionScope(userId, runId)
+  return runtimeTransaction(async tx => { const { root } = await lockRunRoot(tx, userId, runId); return readState(tx, root.id) }, { contentionScope })
 }

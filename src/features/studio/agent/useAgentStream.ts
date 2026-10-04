@@ -15,6 +15,7 @@ import { isRunActive, useAgentStore } from './agentStore'
 const EVENT_TYPES = [
   'goal.snapshot',
   'run.started',
+  'run.configuration',
   'message.start',
   'execution.progress',
   'text.delta',

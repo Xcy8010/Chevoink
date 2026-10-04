@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client'
 import { prisma } from '../prisma.js'
+import { MAIN_RUN_FILTER } from './runtime-child.js'
 
 /** A conversation contains many unrelated tasks. Only explicit continuation retains TaskSpec.id. */
 export async function getTaskRunIds(sessionId: string, runId: string, db: Prisma.TransactionClient = prisma): Promise<string[]> {
@@ -9,7 +10,7 @@ export async function getTaskRunIds(sessionId: string, runId: string, db: Prisma
   // Legacy records without identity fail closed: never infer ownership from session membership.
   if (!taskId) return [runId]
   const runs = await db.agentRun.findMany({
-    where: { sessionId, engine: 'loop', taskSpec: { path: ['id'], equals: taskId } },
+    where: { sessionId, engine: 'loop', taskSpec: { path: ['id'], equals: taskId }, ...MAIN_RUN_FILTER },
     select: { id: true },
   })
   return [...new Set([runId, ...runs.map(item => item.id)])]

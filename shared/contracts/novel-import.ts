@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import { BUILT_IN_MODEL_TIERS } from './credits.js'
+import { modelReasoningEffortSchema } from './agent-model-assignments.js'
 
 export const NOVEL_IMPORT_LIMITS = { sourceBytes: 50 * 1024 * 1024, characters: 5_000_000, chapters: 2000, volumes: 200, chapterCharacters: 100_000 } as const
 export interface NovelImportCapabilities { enabled: boolean; overwriteEnabled: boolean; overwriteVerified: boolean; restoreEnabled: boolean; retainsEmptyVolumes: true; sourceBytes: number; aiEnabled: boolean; formats: { extension: string; enabled: boolean; reason?: string }[]; limitations: string[] }
@@ -13,7 +15,9 @@ export const novelImportVolumeSchema = z.object({
   chapters: z.array(z.object({ title: z.string().trim().min(1).max(128), content: z.string().max(NOVEL_IMPORT_LIMITS.characters), source: novelImportSourceSchema })).max(NOVEL_IMPORT_LIMITS.chapters),
 }).strict()
 export const novelImportMetadataSchema = z.object({ title: z.string().trim().min(1).max(128).optional(), summary: z.string().max(20_000).optional(), tags: z.array(z.string().max(64)).max(20).optional(), coverArtifactId: z.string().min(1).max(255).optional() }).strict()
-export const novelImportModelSchema = z.discriminatedUnion('kind', [z.object({ kind: z.literal('basic') }).strict(), z.object({ kind: z.literal('custom'), customModelId: z.string().min(1).max(64) }).strict()])
+export const novelImportModelSchema = z.discriminatedUnion('kind', [z.object({ kind: z.literal('basic') }).strict(),
+  z.object({ kind: z.literal('builtin'), modelTier: z.enum(BUILT_IN_MODEL_TIERS), reasoningEffort: modelReasoningEffortSchema.optional() }).strict(),
+  z.object({ kind: z.literal('custom'), customModelId: z.string().min(1).max(64), reasoningEffort: modelReasoningEffortSchema.optional() }).strict()])
 export const novelImportCreateSchema = z.object({ intentId: z.string().uuid(), modelSelection: novelImportModelSchema.optional(), replaceUnfinished: z.boolean().optional() }).strict()
 export const novelImportManifestEditSchema = z.object({ expectedManifestRevision: z.number().int().positive(), volumes: z.array(novelImportVolumeSchema).min(1).max(NOVEL_IMPORT_LIMITS.volumes), metadataSelection: novelImportMetadataSchema.optional() }).strict()
 export const novelImportConfirmSchema = z.object({ manifestRevision: z.number().int().positive(), manifestHash: z.string().regex(/^[a-f0-9]{64}$/), targetHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()

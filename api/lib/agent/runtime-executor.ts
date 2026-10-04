@@ -22,6 +22,9 @@ import { estimateChatMessagesTokens, estimateToolDefinitionTokens, resolveDurabl
 import { readDurableImportBoundary, waitForDurableImport } from './runtime-import.js'
 import { modelRouteRevision } from './runtime-model-cursor.js'
 import { consumeDurableGoalConsent } from './goal-consent.js'
+import { consumeDurableConfigurationConsent } from './configuration-journal.js'
+import { awaitDurableChildren, wakeDurableChildren } from './runtime-child-tools.js'
+import { verifyChildGrant } from './runtime-child.js'
 
 const reasoning = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const durableModelTier = z.enum([...SERVER_MODEL_TIERS, 'custom'] as [string, ...string[]])
@@ -237,11 +240,15 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   if (importBoundary) return importBoundary
   // Goal continuations carry the author's real steering message in AgentMessage;
   // append it to the immutable execution frame only once, at an idle boundary.
-  await consumeDurableSteering(lease)
-  await consumeDurableGoalConsent(lease)
+  if (!lease.parent) {
+    await consumeDurableSteering(lease)
+    await consumeDurableGoalConsent(lease)
+    await consumeDurableConfigurationConsent(lease)
+  }
   // A resumed goal may have an explicitly selected model. Update only the
   // frozen route while retaining the original root, frame history and budget.
-  await refreshDurableGoalModel(lease)
+  if (!lease.parent) await refreshDurableGoalModel(lease)
+  await wakeDurableChildren(lease)
   const prepared = await withRunLease(lease, async tx => {
     const state = await readExecutionStateInTransaction(tx, lease.taskRootId)
     if (state.frame.state.phase !== 'awaiting_operation') return null
@@ -302,7 +309,8 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     return runtimeError('RUNTIME_CONTEXT_LIMIT', '原请求、工具定义或不可再归档内容超过模型输入预算；已保留完整原文，不截掉要求或盲目重试模型。')
   }
   const operationKey = `exec:${frame.state.nextOperationSequence}`
-  const price = await resolveDurableTokenPrice(lease, operationKey, tier.data, runtime.multiplierBps)
+  const child = await withRunLease(lease, tx => tx.agentChildExecutionGrant.findUnique({ where: { childRunId: lease.runId } }))
+  const price = child ? verifyChildGrant(child).price : await resolveDurableTokenPrice(lease, operationKey, tier.data, runtime.multiplierBps)
   if (price.modelTier !== tier.data) return runtimeError('RUNTIME_PRICE_INVALID', '冻结价目与当前模型身份不一致。')
   signal.throwIfAborted()
   const result = await chatWithTools({ messages: frame.state.messages, tools: configuration.tools,
@@ -384,6 +392,11 @@ export async function runReviewedDurableExecution(token: RunLeaseToken, signal: 
       continue
     }
     if (step.kind !== 'completion_review') return step
+    const children = await withLeaseHeartbeat(lease, signal, ownedSignal => awaitDurableChildren(lease, ownedSignal))
+    if (children.some(child => child.status !== 'completed' || child.childRun.status !== 'completed')) {
+      await pauseDurableTaskForAttention(lease, { expectedRevision: step.frame.revision, expectedHash: step.frame.snapshotHash }, 'needs_input')
+      return { kind: 'needs_attention' as const, reason: '子任务仍未完成或结果待核对，父任务已暂停并保留原进度。', frame: step.frame }
+    }
     const obligation = await advanceDurableCompletionObligations(lease, { expectedRevision: step.frame.revision, expectedHash: step.frame.snapshotHash })
     if (obligation?.kind === 'continued') continue
     if (obligation?.kind === 'reconciliation_required') {

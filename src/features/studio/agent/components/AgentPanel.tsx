@@ -33,12 +33,11 @@ import type {
   AgentSession,
   AgentStreamEvent,
   CreativeFreedom,
-  CreditModelTier,
   EntityId,
-  ModelReasoningEffort,
   StoryCompilerMode,
 } from '../../../../../shared/contracts/index.js'
 import { fetchCreditSummary, fetchCustomModels, fetchReferral } from '@/features/account/credits-api'
+import type { NovelImportModelSelection } from '../../../../../shared/contracts/novel-import.js'
 import { formatCreditAmount } from '@/features/account/credit-format'
 import CreditQuotaDialog from '@/features/account/CreditQuotaDialog'
 import InviteCreditsDialog from '@/features/account/InviteCreditsDialog'
@@ -78,6 +77,7 @@ import { buildGoalResumeModel } from '../goal-command'
 import { formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMessages, skillPhaseLabel } from '../lib/panel-helpers'
 import { useProcessingHint } from '../useProcessingHint'
 import { useAgentStream } from '../useAgentStream'
+import { resolveComposerModelEffort, useAgentModelPreference } from '../useAgentModelPreference'
 import { useAgentGoalStream } from '../useAgentGoalStream'
 import { projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
 import { useMessageScroll } from './use-message-scroll'
@@ -164,7 +164,7 @@ type AgentPanelProps = {
   onOpenStudioSettings?: (section: 'general' | 'models' | 'operations' | 'archives') => void
   /** 打开技能区：输入框「+」菜单里发现需要新建/导入/启用技能时直达。 */
   onOpenSkills?: () => void
-  onImportModelSelection?: (novelId: string, selection: { kind: 'basic' } | { kind: 'custom'; customModelId: string } | null) => void
+  onImportModelSelection?: (novelId: string, selection: NovelImportModelSelection | null) => void
 }
 
 /** 无缓存首次拉取时图标流光的保底展示时长（一个完整扫光周期），避免快请求下只闪一下 */
@@ -266,7 +266,12 @@ export function AgentPanel({
       // EventSource 会继续按 Last-Event-ID 重连；状态查询失败不能把任务误判为中止。
     })
   }, [sessionId])
-  const { connect, disconnect } = useAgentStream(onStreamEvent, reconcileActiveStreamError)
+  const configurationHandler = useRef<(event: Extract<AgentStreamEvent, { type: 'run.configuration' }>) => void>(() => {})
+  const handleStreamEvent = useCallback((event: AgentStreamEvent) => {
+    if (event.type === 'run.configuration') configurationHandler.current(event)
+    onStreamEvent?.(event)
+  }, [onStreamEvent])
+  const { connect, disconnect } = useAgentStream(handleStreamEvent, reconcileActiveStreamError)
   const goalSnapshotHandler = useCallback((streamSessionId: string, snapshot: AgentGoalSnapshot | null, sequence: number) => {
     if (viewSession.current === streamSessionId) setGoalSnapshot(snapshot, streamSessionId, sequence)
   }, [setGoalSnapshot])
@@ -409,26 +414,11 @@ export function AgentPanel({
     return saved === 'stable' || saved === 'bold' ? saved : 'balanced'
   })
   const qualityMode: StoryCompilerMode = 'premium'
-  const [modelTier, setModelTier] = useState<CreditModelTier>(() => {
-    if (typeof window === 'undefined') return 'speed'
-    const saved = window.localStorage.getItem('chevoink:agent-model-tier')
-    return saved === 'lite' || saved === 'standard' || saved === 'performance' || saved === 'ultimate' || saved === 'custom' ? saved : 'speed'
-  })
-  const [customModelId, setCustomModelId] = useState<string | null>(() => typeof window === 'undefined' ? null : window.localStorage.getItem('chevoink:agent-custom-model-id'))
-  useEffect(() => {
-    onImportModelSelection?.(novelId, modelTier === 'custom'
-      ? customModelId ? { kind: 'custom', customModelId } : null
-      : { kind: 'basic' })
-  }, [novelId, modelTier, customModelId, onImportModelSelection])
-  const [reasoningSelections, setReasoningSelections] = useState<Record<string, ModelReasoningEffort>>(() => {
-    if (typeof window === 'undefined') return {}
-    try {
-      const parsed = JSON.parse(window.localStorage.getItem('chevoink:agent-reasoning-efforts') ?? '{}')
-      return parsed && typeof parsed === 'object' ? parsed : {}
-    } catch {
-      return {}
-    }
-  })
+  const modelPreference = useAgentModelPreference(novelId, sessionId)
+  const { modelTier, customModelId, reasoningSelections, inheritMain, explicit: modelSelectionExplicit, setFallbackTier } = modelPreference
+  configurationHandler.current = event => {
+    if (modelPreference.applyConfiguration(event)) setCreativeFreedom(event.creativeFreedom)
+  }
   /** 用户气泡附件图片的大图预览 */
   const [attachmentPreview, setAttachmentPreview] = useState<{ url: string; name: string } | null>(null)
   const [quotaDialogOpen, setQuotaDialogOpen] = useState(false)
@@ -540,27 +530,23 @@ export function AgentPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [creativeFreedom])
 
-  useEffect(() => {
-    window.localStorage.setItem('chevoink:agent-model-tier', modelTier)
-  }, [modelTier])
-
-  useEffect(() => {
-    if (customModelId) window.localStorage.setItem('chevoink:agent-custom-model-id', customModelId)
-    else window.localStorage.removeItem('chevoink:agent-custom-model-id')
-  }, [customModelId])
-
-  useEffect(() => {
-    window.localStorage.setItem('chevoink:agent-reasoning-efforts', JSON.stringify(reasoningSelections))
-  }, [reasoningSelections])
-
   const selectedModelCapability = modelTier === 'custom'
     ? customModelsQuery.data?.models.find((model) => model.id === customModelId)
     : creditSummaryQuery.data?.models.find((model) => model.tier === modelTier)
   const selectedModelKey = modelTier === 'custom' ? `custom:${customModelId ?? ''}` : `tier:${modelTier}`
   const savedReasoningEffort = reasoningSelections[selectedModelKey]
-  const selectedReasoningEffort = savedReasoningEffort && selectedModelCapability?.reasoningEfforts.includes(savedReasoningEffort)
-    ? savedReasoningEffort
-    : selectedModelCapability?.defaultReasoningEffort ?? 'high'
+  const selectedReasoningEffort = resolveComposerModelEffort(modelPreference.preferredEffort, modelSelectionExplicit || inheritMain,
+    savedReasoningEffort, selectedModelCapability)
+  const importAssignment = modelPreference.importAssignment
+  useEffect(() => {
+    const selected = !modelSelectionExplicit ? importAssignment : undefined
+    const importTier = selected?.modelTier ?? modelTier
+    const importCustomId = selected?.customModelId ?? customModelId
+    const effort = selected?.reasoningEffort ?? (modelSelectionExplicit ? selectedReasoningEffort : undefined)
+    onImportModelSelection?.(novelId, importTier === 'custom'
+      ? importCustomId ? { kind: 'custom', customModelId: importCustomId, ...(effort ? { reasoningEffort: effort } : {}) } : null
+      : (selected || modelSelectionExplicit) && importTier !== 'basic' ? { kind: 'builtin', modelTier: importTier, reasoningEffort: effort } : { kind: 'basic' })
+  }, [novelId, modelTier, customModelId, modelSelectionExplicit, selectedReasoningEffort, importAssignment, onImportModelSelection])
   // Continue uses the same public model semantics as an ordinary run:
   // internal `basic` falls back to the normal speed tier, while a stale BYOK
   // id is omitted when the author has selected a built-in model.
@@ -679,9 +665,12 @@ export function AgentPanel({
           attachments: attachments.length > 0 ? attachments : undefined,
           creativeFreedom: freedom,
           qualityMode: selectedQualityMode,
-          modelTier: modelTier === 'basic' ? undefined : modelTier,
-          customModelId: modelTier === 'custom' ? customModelId ?? undefined : undefined,
-          reasoningEffort: selectedReasoningEffort,
+          ...(!inheritMain ? {
+            modelTier: modelTier === 'basic' ? undefined : modelTier,
+            customModelId: modelTier === 'custom' ? customModelId ?? undefined : undefined,
+            reasoningEffort: selectedReasoningEffort,
+            ...(modelSelectionExplicit ? { modelSelectionExplicit: true as const } : {}),
+          } : {}),
           pinnedSkillIds: pinnedSkillIds.length > 0 ? pinnedSkillIds : undefined,
           pinnedSubagentId,
         },
@@ -701,7 +690,7 @@ export function AgentPanel({
     } finally {
       setGoalBusy(false)
     }
-  }, [customModelId, goal, modelTier, novelId, onGoalSessionCreated, openGoalEditor, selectedReasoningEffort, sessionId, setGoalMode, setGoalSnapshot])
+  }, [customModelId, goal, inheritMain, modelSelectionExplicit, modelTier, novelId, onGoalSessionCreated, openGoalEditor, selectedReasoningEffort, sessionId, setGoalMode, setGoalSnapshot])
 
   const handleGoalSave = useCallback(async (objective: string, base?: GoalEditBase) => {
     if (!goal || !sessionId || !base || base.id !== goal.id || base.sessionId !== sessionId) return
@@ -780,14 +769,14 @@ export function AgentPanel({
 
   useEffect(() => {
     const options = creditSummaryQuery.data?.models
-    if (modelTier !== 'custom' && options && !options.some((item) => item.tier === modelTier && item.available)) setModelTier('speed')
-  }, [creditSummaryQuery.data?.models, modelTier])
+    if (!inheritMain && !modelSelectionExplicit && modelTier !== 'custom' && options && !options.some((item) => item.tier === modelTier && item.available)) setFallbackTier('speed')
+  }, [creditSummaryQuery.data?.models, inheritMain, modelSelectionExplicit, modelTier, setFallbackTier])
 
   useEffect(() => {
     if (modelTier !== 'custom') return
     const selected = customModelsQuery.data?.models.find((model) => model.id === customModelId && model.enabled)
-    if (customModelsQuery.data && !selected) setModelTier('speed')
-  }, [customModelId, customModelsQuery.data, modelTier])
+    if (!inheritMain && !modelSelectionExplicit && customModelsQuery.data && !selected) setFallbackTier('speed')
+  }, [customModelId, customModelsQuery.data, inheritMain, modelSelectionExplicit, modelTier, setFallbackTier])
 
   useEffect(() => {
     if (errorCode === 'credits_exhausted' || errorCode === 'credits_globally_paused' || errorCode === 'credits_account_suspended') {
@@ -1008,9 +997,12 @@ export function AgentPanel({
             attachments: attachments.length > 0 ? attachments : undefined,
             creativeFreedom: freedom,
             qualityMode: selectedQualityMode,
-            modelTier,
-            customModelId: modelTier === 'custom' ? customModelId ?? undefined : undefined,
-            reasoningEffort: selectedReasoningEffort,
+            ...(!inheritMain ? {
+              modelTier,
+              customModelId: modelTier === 'custom' ? customModelId ?? undefined : undefined,
+              reasoningEffort: selectedReasoningEffort,
+              ...(modelSelectionExplicit ? { modelSelectionExplicit: true as const } : {}),
+            } : {}),
             // 作者在「+」菜单里点选的技能：本轮绕过评分门槛必定装载
             pinnedSkillIds: pinnedSkillIds.length > 0 ? pinnedSkillIds : undefined,
             pinnedSubagentId,
@@ -1073,7 +1065,7 @@ export function AgentPanel({
         throw error
       }
     },
-    [sessionId, voiceScopeKey, novelId, chapterId, selection, ensureSession, connect, onNewSession, modelTier, customModelId, selectedReasoningEffort, refetchCredits, queueQuery, pinnedToBottomRef],
+    [sessionId, voiceScopeKey, novelId, chapterId, selection, ensureSession, connect, onNewSession, inheritMain, modelSelectionExplicit, modelTier, customModelId, selectedReasoningEffort, refetchCredits, queueQuery, pinnedToBottomRef],
   )
 
 
@@ -1840,7 +1832,7 @@ export function AgentPanel({
           voiceDisabled={voiceDisabled || sessionResolving}
           running={active}
           onContinue={canContinue ? goalView.runBelongsToGoal && !goalView.terminal ? handleGoalResume : handleContinue : undefined}
-          disabled={conversationLoading}
+          disabled={conversationLoading || modelPreference.loading}
           onSend={(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId) => handleSend(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId)}
           creativeFreedom={creativeFreedom}
           onCreativeFreedomChange={setCreativeFreedom}
@@ -1853,12 +1845,12 @@ export function AgentPanel({
             { tier: 'performance', label: '性能', multiplier: 1.8, available: false, selectedByDefault: false, reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false },
             { tier: 'ultimate', label: '极致', multiplier: 4.8, available: false, selectedByDefault: false, reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false },
           ]}
-          onModelTierChange={setModelTier}
+          onModelTierChange={modelPreference.selectModelTier}
           customModels={customModelsQuery.data?.models ?? []}
           customModelId={customModelId}
-          onCustomModelChange={setCustomModelId}
-          reasoningSelections={reasoningSelections}
-          onReasoningEffortChange={(modelKey, effort) => setReasoningSelections((value) => ({ ...value, [modelKey]: effort }))}
+          onCustomModelChange={modelPreference.selectCustomModel}
+          reasoningSelections={{ ...reasoningSelections, [selectedModelKey]: selectedReasoningEffort }}
+          onReasoningEffortChange={modelPreference.selectReasoningEffort}
           referenceOptions={referenceOptions}
           skills={pinnableSkills}
           onOpenSkillManager={onOpenSkills}

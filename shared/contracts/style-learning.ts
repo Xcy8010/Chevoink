@@ -14,7 +14,8 @@ export const styleModelSelectionSchema = z.object({
 }).refine(value => value.modelTier !== 'custom' || Boolean(value.customModelId), '请选择自定义模型')
 export const startStyleLearningSchema = z.object({
   requestId: z.string().uuid(), profileId: z.string().min(1).max(64),
-  model: styleModelSelectionSchema, consent: z.literal(true),
+  model: z.object({ ...styleModelSelectionSchema.shape, reasoningEffort: styleModelSelectionSchema.shape.reasoningEffort.optional() })
+    .refine(value => value.modelTier !== 'custom' || Boolean(value.customModelId), '请选择自定义模型').optional(), consent: z.literal(true),
 })
 export const changeStyleLearningSchema = z.object({
   revision: z.number().int().nonnegative(),

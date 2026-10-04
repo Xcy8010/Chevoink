@@ -11,6 +11,9 @@ export type ActiveRun = {
   bus?: RunEventBus
   sessionId: string
   userId: string
+  /** Same-session delegated execution is discovered for stop/recovery, but is
+   * never presented as the session's main run or its interactive admission. */
+  internalChild?: boolean
 }
 
 const activeRuns = new Map<string, ActiveRun>()
@@ -30,7 +33,7 @@ export function getActiveRun(runId: string): ActiveRun | undefined {
 export function countActiveRunsByUser(userId: string): number {
   let count = 0
   for (const run of activeRuns.values()) {
-    if (run.userId === userId) {
+    if (run.userId === userId && !run.internalChild) {
       count += 1
     }
   }
@@ -39,7 +42,7 @@ export function countActiveRunsByUser(userId: string): number {
 
 export function hasActiveRunInSession(sessionId: string): boolean {
   for (const run of activeRuns.values()) {
-    if (run.sessionId === sessionId) {
+    if (run.sessionId === sessionId && !run.internalChild) {
       return true
     }
   }
@@ -49,7 +52,7 @@ export function hasActiveRunInSession(sessionId: string): boolean {
 /** 查询会话内进行中的 run id：前端刷新后恢复直播/停止入口用 */
 export function getActiveRunIdBySession(sessionId: string): string | null {
   for (const [runId, run] of activeRuns) {
-    if (run.sessionId === sessionId) {
+    if (run.sessionId === sessionId && !run.internalChild) {
       return runId
     }
   }

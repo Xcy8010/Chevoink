@@ -2,17 +2,23 @@ import { prisma } from '../prisma.js'
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
-import { currentGoalExecution, withoutGoalEffects, type GoalExecutionContext } from './goal-context.js'
+import { currentGoalExecution, currentGoalTransaction, withoutGoalEffects, type GoalExecutionContext } from './goal-context.js'
 import { assertGoalFence } from './goal-fence.js'
 import { changeGoal, goalError } from './goal-store.js'
 import { databaseNow, runtimeTransaction, runtimeJson } from './runtime-common.js'
 import { fallbackUsageEvidenceSchema } from '../billing/reservation-policy.js'
+import { readParentContentionScope } from './runtime-parent-contention.js'
 
 /** Reserve before dispatch, once per provider attempt (including routed failures and auxiliary calls). */
 export async function reserveGoalUsage(sourceKey: string, estimatedTokens: number, context = currentGoalExecution()) {
   if (!context) return
   if (!Number.isSafeInteger(estimatedTokens) || estimatedTokens < 0) return goalError('GOAL_USAGE_INVALID', '目标用量估算无效。')
-  await withoutGoalEffects(() => runtimeTransaction(tx => reserveGoalUsageInTransaction(tx, sourceKey, estimatedTokens, context)))
+  // Standalone usage used native independent commits even through ambient
+  // goal transaction context. Reusing that TX could undo paid evidence when
+  // its caller rolls back; queueing it could wait on its own outer permit.
+  if (currentGoalTransaction()) return goalError('GOAL_USAGE_TRANSACTION_REQUIRED', '当前目标用量事务边界无效，原有用量回执保留。')
+  const contentionScope = await withoutGoalEffects(() => readParentContentionScope(context.userId, context.runId, true))
+  await withoutGoalEffects(() => runtimeTransaction(tx => reserveGoalUsageInTransaction(tx, sourceKey, estimatedTokens, context), { contentionScope, deadline: contentionScope?.deadline }))
 }
 
 /** Durable dispatch commits its budget reservation and single-dispatch marker together. */
@@ -52,6 +58,8 @@ export async function observeGoalUsage(sourceKey: string, observation: GoalUsage
   for (const value of [observation.inputTokens, observation.outputTokens, observation.creditsMilli]) {
     if (value !== null && (!Number.isSafeInteger(value) || value < 0)) return goalError('GOAL_USAGE_INVALID', '模型用量记录无效。')
   }
+  if (currentGoalTransaction()) return goalError('GOAL_USAGE_TRANSACTION_REQUIRED', '当前目标用量事务边界无效，原有用量回执保留。')
+  const contentionScope = await withoutGoalEffects(() => readParentContentionScope(known.goal.userId, known.runId))
   await withoutGoalEffects(() => runtimeTransaction(async tx => {
     await lockNovelActiveScope(tx, known.goal.novelId)
     await tx.$queryRaw`SELECT id FROM agent_goals WHERE id = ${known.goalId} FOR UPDATE`
@@ -76,7 +84,7 @@ export async function observeGoalUsage(sourceKey: string, observation: GoalUsage
       tokensReserved: { decrement: release }, creditsUsedMicros: { increment: creditsMicros - current.creditsMicros },
     } })
     await changeGoal(tx, goal, {}, 'usage.updated')
-  }))
+  }, { contentionScope }))
 }
 
 export async function syncGoalLegacyUsage(usageId: string) {

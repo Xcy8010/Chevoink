@@ -10,6 +10,8 @@ import { isAgent2FeatureEnabled, requireAgent2Feature } from '../agent2-feature-
 import { chunkStyleSamples, mergeStyleRules, parseStyleAnalysis, privateSamplesSchema, renderLearnedStyle, STYLE_ANALYSIS_PROMPT } from './style-learning-analysis.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { activeChapterScope } from '../data/internal.js'
+import { assignedTaskModel } from './model-assignment-context.js'
+import { resolveAssignedModel } from './model-assignments.js'
 
 const reportsSchema = z.array(z.object({ chunk: z.number().int(), rules: z.array(styleRuleSchema) }))
 const json = (value: unknown) => JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue
@@ -54,13 +56,23 @@ export async function previewStyleSamples(userId: string, novelId: string, profi
 export async function startStyleLearning(userId: string, novelId: string, raw: StartStyleLearning) {
   const input = startStyleLearningSchema.parse(raw)
   await assertAccess(userId, novelId, true)
-  const runtime = await getModelTierRuntime(input.model.modelTier, userId, input.model.customModelId, input.model.reasoningEffort)
+  const old = await prisma.styleLearningJob.findUnique({ where: { requestId: input.requestId }, include: { profile: true } })
+  if (old && !input.model) {
+    if (old.profile.userId !== userId || old.profile.novelId !== novelId || old.profileId !== input.profileId) throw conflict()
+    return view(old)
+  }
+  const selected = input.model ? await resolveAssignedModel(userId, { modelTier: input.model.modelTier,
+    ...(input.model.modelTier === 'custom' ? { customModelId: input.model.customModelId! } : {}), reasoningEffort: input.model.reasoningEffort })
+    : await assignedTaskModel(userId, novelId, 'style_learning')
+  if (!selected) throw new DataAccessError(400, 'STYLE_MODEL_REQUIRED', '请选择分析模型。')
+  const selection = styleModelSelectionSchema.parse({ ...selected.selection, customModelId: selected.selection.customModelId ?? null })
+  const runtime = selected.runtime
   if (!runtime.apiKey || !runtime.modelName || !runtime.baseUrl) throw new DataAccessError(409, 'MODEL_UNAVAILABLE', '所选模型尚未配置完成。')
   return prisma.$transaction(async tx => {
     await lockNovel(tx, userId, novelId)
     const prior = await tx.styleLearningJob.findUnique({ where: { requestId: input.requestId }, include: { profile: true } })
     if (prior) {
-      if (prior.profile.userId !== userId || prior.profile.novelId !== novelId || prior.profileId !== input.profileId || !isDeepStrictEqual(prior.selection, json(input.model))) throw conflict()
+      if (prior.profile.userId !== userId || prior.profile.novelId !== novelId || prior.profileId !== input.profileId || !isDeepStrictEqual(prior.selection, json(selection))) throw conflict()
       return view(prior)
     }
     const profile = await tx.styleProfile.findFirst({ where: { id: input.profileId, ...owned(userId, novelId) }, include: { document: true } })
@@ -76,7 +88,7 @@ export async function startStyleLearning(userId: string, novelId: string, raw: S
     const chars = samples.data.reduce((total, sample) => total + sample.content.length, 0)
     if (chars > 120_000) throw new DataAccessError(400, 'STYLE_SAMPLE_TOO_LARGE', '样章合计不能超过12万字符。')
     if (runtime.contextWindowTokens && runtime.contextWindowTokens < 16_000) throw new DataAccessError(409, 'STYLE_CONTEXT_TOO_SMALL', '学习需要至少16K上下文，请选择合适模型。')
-    return view(await tx.styleLearningJob.create({ data: { requestId: input.requestId, profileId: profile.id, selection: json(input.model), modelIdentity: json(identity(runtime)), chunks: json(chunkStyleSamples(samples.data)) } }))
+    return view(await tx.styleLearningJob.create({ data: { requestId: input.requestId, profileId: profile.id, selection: json(selection), modelIdentity: json(identity(runtime)), chunks: json(chunkStyleSamples(samples.data)) } }))
   })
 }
 export async function changeStyleLearning(userId: string, novelId: string, id: string, raw: ChangeStyleLearning) {
@@ -152,7 +164,7 @@ export async function processStyleChunk(initial: StyleLearningJob) {
       const stillActive = await prisma.styleLearningJob.findFirst({ where: { id: job.id, status: 'processing', profile: owned(profile.userId!, profile.novelId!) }, select: { id: true } })
       if (!stillActive) return
       providerStarted = true
-      const response = await generateTextCompletion(STYLE_ANALYSIS_PROMPT, JSON.stringify({ sample: sample.content }), { userId: profile.userId!, novelId: profile.novelId!, action: 'style_learning', targetType: 'style_learning', targetId: `${job.id}:${job.processed}`, modelRuntime: runtime, signal: AbortSignal.timeout(10 * 60_000), temperature: 0.2 })
+      const response = await generateTextCompletion(STYLE_ANALYSIS_PROMPT, JSON.stringify({ sample: sample.content }), { userId: profile.userId!, novelId: profile.novelId!, action: 'style_learning', targetType: 'style_learning', targetId: `${job.id}:${job.processed}`, modelRuntime: runtime, explicitModelSelection: true, signal: AbortSignal.timeout(10 * 60_000), temperature: 0.2 })
       // Pause may change revision, but never admits another processing attempt. Status fences stale results.
       const saved = await prisma.styleLearningJob.updateMany({ where: { id: job.id, status: 'processing', claimToken: job.claimToken }, data: { response, status: 'analyzing', leaseUntil: null, revision: { increment: 1 } } })
       if (!saved.count) return

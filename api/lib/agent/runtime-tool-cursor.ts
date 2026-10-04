@@ -132,7 +132,7 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
 export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: ToolExecutionCursor, input: {
   key: string; action: string; callId: string; targetId: string; operationInput: Prisma.InputJsonValue; effectiveArgs: unknown;
   requireApproval?: boolean;
-  effectDomain?: 'chapter' | 'plan' | 'read' | 'structure' | 'task' | 'compiler' | 'memory' | 'metadata' | 'import';
+  effectDomain?: 'chapter' | 'plan' | 'read' | 'structure' | 'task' | 'compiler' | 'memory' | 'metadata' | 'import' | 'configuration';
   normalize: (parsed: unknown) => unknown
 }, transaction?: import('./runtime-common.js').RuntimeTx) {
   token = { ...token }; cursor = { ...cursor }
@@ -146,7 +146,9 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     if (input.action === 'novel_import' && input.effectDomain !== 'import') runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '导入不能通过只读或旧写入适配器执行。')
     if (input.effectDomain === 'import' && (input.action !== 'novel_import' || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '导入能力仅允许原任务的专用导入流程。')
     const plan = input.effectDomain === 'plan'
-    const read = input.effectDomain === 'read'
+    const configuration = input.effectDomain === 'configuration'
+    if (configuration && (!['agent_configure', 'model_assign'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '配置能力只能更新当前任务的执行选项。')
+    const read = input.effectDomain === 'read' || configuration
     const metadata = input.effectDomain === 'metadata'
     if (metadata && (!['cover_apply', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品设置能力不能用于其他动作。')
     const memory = input.effectDomain === 'memory'
@@ -169,6 +171,22 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     catch { return runtimeError('RUNTIME_INPUT_INVALID', '原始工具参数不能安全归一化，未执行。') }
     const normalizedArgsHash = runtimeJson(normalized).hash
     if (normalizedArgsHash !== runtimeJson(input.effectiveArgs).hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '实际工具参数与原调用的归一化结果不同。')
+    if (token.parent) {
+      const parentRoot = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.parent.taskRootId } })
+      const parentSpec = taskSpecSchema.parse(parentRoot.specSnapshot)
+      const tool = (await import('./tools/registry.js')).getToolByName(input.action)
+      // Original offsets are immutable. A delegated helper cannot infer shifted
+      // ranges, replace a chapter, rename it or indirectly auto-repair outside
+      // the selection. Preserve context and return a report for the parent.
+      if (parentSpec.scope.selection && tool && !tool.readOnly) return runtimeError('RUNTIME_CHILD_SELECTION_READ_ONLY', '选区子任务只能读取并报告，不能扩大到整章或猜测新的选区范围。')
+      const finite = parentSpec.scope.chapterIds?.length && !parentSpec.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')
+      if (finite && tool && !tool.readOnly) {
+        const effective = normalized as Record<string, unknown>
+        const ids = [typeof effective.chapterId === 'string' ? effective.chapterId : null,
+          ...(input.effectDomain === 'chapter' ? [input.targetId] : [])].filter((id): id is string => Boolean(id))
+        if (!ids.length || ids.some(id => !parentSpec.scope.chapterIds!.includes(id))) return runtimeError('RUNTIME_CHILD_TARGET_NOT_AUTHORIZED', '子任务写入目标不在原父任务允许的章节范围内。')
+      }
+    }
     if (input.requireApproval || grant!.permission === 'ask' || grant!.alwaysConfirm) await assertToolApproval(tx, token, frame.snapshotHash, input.callId, input.action, call!.arguments, normalizedArgsHash)
     const base = input.operationInput
     if (!base || typeof base !== 'object' || Array.isArray(base)) return runtimeError('RUNTIME_INPUT_INVALID', '工具操作需要对象输入。')

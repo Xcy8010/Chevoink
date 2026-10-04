@@ -293,6 +293,8 @@ export type AgentStreamEventBody =
       skippedReason?: string
     }
   | { type: 'message.start'; messageId: string; role: 'assistant' }
+  | { type: 'run.configuration'; modelTier: import('./credits.js').CreditModelTier; customModelId: string | null;
+      reasoningEffort: import('./credits.js').ModelReasoningEffort; creativeFreedom: CreativeFreedom; modelSelectionExplicit: boolean }
   | { type: 'execution.progress'; revision: number; stage: 'model' | 'tool' | 'checkpoint' | 'finalizing' }
   | { type: 'text.delta'; messageId: string; delta: string }
   | { type: 'text.final'; messageId: string; text: string; asReasoning: boolean }
@@ -461,6 +463,7 @@ export interface StartAgentLoopRunRequest {
   qualityMode?: import('./story-compiler-contracts.js').StoryCompilerMode
   /** 内置模型档位；用户侧永不接触真实供应商 model id。 */
   modelTier?: import('./credits.js').CreditModelTier
+  modelSelectionExplicit?: true
   /** 自定义模型配置 id；仅 modelTier=custom 时生效，后端校验归属。 */
   customModelId?: EntityId
   /** 用户为当前模型选择的推理强度；后端按该模型允许档位校验，不信任客户端。 */
@@ -473,6 +476,8 @@ export interface StartAgentLoopRunRequest {
   agentProfile?: 'orchestrator' | 'research' | 'continuity' | 'quality' | 'lore'
   /** 单次子任务硬预算；服务端还会与全局预算取较小值。 */
   tokenBudget?: number
+  /** Server-frozen preferences; never accepted from the public request schema. */
+  modelAssignments?: import('./agent-model-assignments.js').FrozenModelAssignments
 }
 
 export type CreativeFreedom = 'stable' | 'balanced' | 'bold'

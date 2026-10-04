@@ -34,6 +34,7 @@ vi.mock('../../api/lib/prisma.js', () => {
   agentRun: { update: mocks.update, findUniqueOrThrow: mocks.owner, findFirst: mocks.previous, findMany: mocks.priorRuns },
   agentSession: { update: vi.fn(async () => ({})), findUnique: vi.fn(async () => null) },
   agentMessage: { upsert: mocks.persist, findUnique: vi.fn(async () => null), findFirst: mocks.original },
+  agentConfigurationChange: { findMany: vi.fn(async () => []) },
   agentSkillRun: { upsert: mocks.skillReceipt },
   $transaction: vi.fn(async (work: (tx: Record<string, unknown>) => Promise<unknown>) => work(db)),
   }

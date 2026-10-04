@@ -7,7 +7,8 @@ import { assertManagedAttachmentsAccess } from '../agent-attachment-storage.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { stopAgentRun } from './active-runs.js'
-import { databaseNow, runtimeJson, runtimeTransaction } from './runtime-common.js'
+import { databaseNow, lockOwnedRun, runtimeJson, runtimeTransaction } from './runtime-common.js'
+import { MAIN_RUN_FILTER, pauseChildGrants } from './runtime-child.js'
 import { assertGoalVersion, changeGoal, closeGoalActivity, goalError, goalSnapshot, lockGoalSession, lockOwnedGoal,
   writeGoalEvent, type GoalTx } from './goal-store.js'
 import { inspectGoalEvidence } from './goal-evidence.js'
@@ -54,7 +55,7 @@ export async function createAgentGoal(userId: string, target: { sessionId: strin
     if (await tx.agentGoal.findFirst({ where: { sessionId, status: { notIn: ['completed', 'cancelled'] } } })) {
       return goalError('GOAL_CONFLICT', '当前任务窗口已有未结束的目标。')
     }
-    if (await tx.agentRun.count({ where: { sessionId, status: { in: ['queued', 'running', 'awaiting_approval'] } } })) {
+    if (await tx.agentRun.count({ where: { sessionId, status: { in: ['queued', 'running', 'awaiting_approval'] }, ...MAIN_RUN_FILTER } })) {
       return goalError('RUN_IN_PROGRESS', '请先等待当前任务结束，或停止后再发送目标。')
     }
     if (await tx.agentQueuedRequest.count({ where: { sessionId, status: { in: ['pending', 'held'] } } })) {
@@ -77,7 +78,7 @@ export async function createAgentGoal(userId: string, target: { sessionId: strin
 }
 
 /** Isolation is durable before abort is signalled. Accounting/receipts may still reconcile afterwards. */
-export async function revokeGoalExecutions(tx: GoalTx, goal: AgentGoal, now: Date): Promise<string[]> {
+export async function revokeGoalExecutions(tx: GoalTx, goal: AgentGoal, now: Date, cancel = false): Promise<string[]> {
   const executions = await tx.agentGoalExecution.findMany({ where: { goalId: goal.id }, select: { runId: true } })
   const runIds = executions.map(row => row.runId)
   const activation = await readGoalActivationReceipt(tx, goal)
@@ -93,7 +94,22 @@ export async function revokeGoalExecutions(tx: GoalTx, goal: AgentGoal, now: Dat
     }
   }
   if (!runIds.length) return []
-  if (activation) for (const runId of [...runIds].sort()) await tx.$queryRaw`SELECT id FROM agent_runs WHERE id = ${runId} FOR UPDATE`
+  const candidates = await tx.agentRun.findMany({ where: { id: { in: runIds } }, select: { id: true, taskRootId: true, incomingChildGrant: { select: { parentRootId: true } } }, orderBy: { id: 'asc' } })
+  // Parents first, regardless of random run IDs. The common lock helper also
+  // orders delegated legacy-visible spawned candidates behind their parent.
+  const parentRoots = new Set<string>()
+  for (const run of candidates.filter(item => !item.incomingChildGrant)) {
+    await lockOwnedRun(tx, goal.userId, run.id)
+    if (run.taskRootId) {
+      await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${run.taskRootId} FOR UPDATE`
+      parentRoots.add(run.taskRootId)
+    }
+  }
+  for (const rootId of parentRoots) {
+    const children = await pauseChildGrants(tx, rootId, cancel)
+    for (const childId of children) if (!runIds.includes(childId)) runIds.push(childId)
+  }
+  for (const run of candidates.filter(item => item.incomingChildGrant)) await lockOwnedRun(tx, goal.userId, run.id)
   const runs = await tx.agentRun.findMany({ where: { id: { in: runIds } }, select: { taskRootId: true } })
   const roots = runs.flatMap(run => run.taskRootId ? [run.taskRootId] : [])
   if (activation) for (const rootId of [...new Set(roots)].sort()) {
@@ -226,8 +242,8 @@ export async function actOnAgentGoal(userId: string, sessionId: string, goalId: 
       return { snapshot: await receipt(tx, userId, body.requestId, hash, snapshot), runIds: [] }
     }
     await closeGoalActivity(tx, goal, now)
-    const runIds = await revokeGoalExecutions(tx, goal, now)
     const cancel = body.action === 'cancel'
+    const runIds = await revokeGoalExecutions(tx, goal, now, cancel)
     const snapshot = (await changeGoal(tx, goal, { status: cancel ? 'cancelled' : 'paused', phase: 'idle', epoch: { increment: 1 },
       activeSince: null, nextEligibleAt: null, reasonCode: cancel ? 'AUTHOR_CANCELLED' : 'AUTHOR_PAUSED',
       ...(goal.pendingRevision ? { resumeStatus: cancel ? 'cancelled' : 'paused' } : {}),

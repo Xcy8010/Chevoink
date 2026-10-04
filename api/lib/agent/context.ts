@@ -387,12 +387,12 @@ const WORKSPACE_SNAPSHOT_PROTOCOL = `服务端工作区快照协议：
 - 当前作者明确修改长期偏好时，以当前要求为准，并在任务允许时通过相应工具更新长期指令，不能让旧快照压过作者当前决定。`
 
 /** 子 Agent 目录是作品级动态指引，放在尾部而不是改写 system，保住跨作品/跨 Run 的固定前缀。 */
-export function insertSubagentCatalog(messages: ChatMessage[], catalog: string): void {
+export function insertSubagentCatalog(messages: ChatMessage[], catalog: string, role: 'user' | 'system' = 'user'): void {
   const content = catalog.trim()
   if (!content) return
   // assembleContext 最后两条固定为 taskSpec 与当前用户意图；目录紧邻任务契约之前。
   messages.splice(Math.max(1, messages.length - 2), 0, {
-    role: 'user',
+    role,
     content: `[服务端子 Agent 目录]\n${content}`,
   })
 }

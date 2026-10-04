@@ -1,4 +1,5 @@
 export * from './models.js'
+export * from './agent-model-assignments.js'
 export * from './fanqie-tags.js'
 export * from './recommendation.js'
 export * from './agent-attachments.js'

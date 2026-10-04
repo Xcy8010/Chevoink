@@ -5,7 +5,8 @@ import { calculateV1ChargeMilli, calculateV2ChargeMilli, BillingCacheUsageRequir
 import { tokenPriceSchema as priceSchema, type TokenPrice } from '../billing/token-price.js'
 import { runtimeError, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 import { lockOwnedAttempt, prepareOperation, prepareOperationInTransaction } from './runtime-operations.js'
-import type { RunLeaseToken } from './runtime-lease.js'
+import { withRunLeaseInTransaction, type RunLeaseToken } from './runtime-lease.js'
+import { readAttemptContentionScope } from './runtime-parent-contention.js'
 
 export type DurableTokenPrice = TokenPrice
 
@@ -32,14 +33,30 @@ export async function preparePricedProviderOperation(token: RunLeaseToken, input
 }
 
 /**
- * Evidence first, money second. No lease required: settlement cannot execute model/tool work.
+ * Evidence first, money second. Delegated child debits require their current
+ * parent and child leases; late evidence remains stored for reconciliation.
  * Only confirmed successful, fully measured calls enter this first settlement path. Other
  * outcomes remain pending for explicit policy/reconciliation, never silently zero-priced.
  */
-export async function settleProviderOperation(input: { userId: string; attemptId: string; requestHash: string }) {
+export async function settleProviderOperation(input: { userId: string; attemptId: string; requestHash: string; lease?: RunLeaseToken }) {
   const captured = { ...input }
+  const contentionScope = await readAttemptContentionScope(captured.userId, captured.attemptId, Boolean(captured.lease))
   return runtimeTransaction(async tx => {
+    // Goal/manuscript -> parent -> child locks precede the attempt lock. Known
+    // saved results may be reconciled by an explicitly adopted current owner;
+    // historical attempt ownership remains unchanged and is not a live grant.
+    const source = await tx.agentProviderAttempt.findFirst({ where: { id: captured.attemptId, operation: { taskRoot: { userId: captured.userId } } }, select: { runId: true } })
+    const incoming = source ? await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: source.runId } }) : null
+    if (incoming && captured.lease) await withRunLeaseInTransaction(tx, captured.lease, async () => undefined)
     const attempt = await lockOwnedAttempt(tx, captured.userId, captured.attemptId, captured.requestHash)
+    const delegated = await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: attempt.runId } })
+    if (delegated) {
+      if (!captured.lease || captured.lease.runId !== attempt.runId
+        || captured.lease.userId !== captured.userId || captured.lease.taskRootId !== attempt.operation.taskRootId) {
+        return { status: 'pending' as const, reason: 'child_lease_not_confirmed' as const }
+      }
+      await withRunLeaseInTransaction(tx, captured.lease, async () => undefined)
+    }
     const operation = attempt.operation
     if (!operation.inputSnapshot || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) {
       runtimeError('RUNTIME_RECEIPT_INVALID', '操作计费快照缺失或损坏。')
@@ -104,6 +121,7 @@ export async function settleProviderOperation(input: { userId: string; attemptId
       await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: operation.taskRootId, operationId: operation.id,
         runId: attempt.runId, eventKey, type: 'credit.settled', payload } })
     }
+    if (delegated && captured.lease) await withRunLeaseInTransaction(tx, captured.lease, async () => undefined)
     return { status: 'settled' as const, amountMilli, shortfallMilli: amountMilli - charge.chargedMilli, ...charge }
-  })
+  }, { contentionScope, contentionBackoff: Boolean(contentionScope?.isChild), deadline: contentionScope?.deadline })
 }

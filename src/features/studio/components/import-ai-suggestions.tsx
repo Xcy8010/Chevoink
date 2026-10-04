@@ -56,6 +56,6 @@ function SuggestionSession({ novelId, jobId, selection, content, disabled, onApp
         const next = await client.request(novelId, jobId, selection, quote.fingerprint)
         if (alive()) { setResult(next); setUnknown(next.status === 'pending') }
       })
-    }}>同意费用并请求建议</button></>}><div className="space-y-3 text-sm"><p>实际模型：{quote.modelName ?? '模型名称不可用，请核对配置'} · {quote.kind === 'custom' ? '本任务固定自定义模型' : '内置基础模型'} · 思考档位：{quote.reasoningEffort}</p><p>本次上限：输入 {quote.maxInputTokens} Token，输出 {quote.maxOutputTokens} Token。</p><p>{quote.notice}</p><p>这是用量上限，不是现金报价；供应商费用可能另计。模型配置变化须重新确认。</p></div></ImportDialogShell>}
+    }}>同意费用并请求建议</button></>}><div className="space-y-3 text-sm"><p>实际模型：{quote.modelName ?? '模型名称不可用，请核对配置'} · {quote.kind === 'custom' ? '本任务固定自定义模型' : quote.kind === 'builtin' ? '本任务固定内置模型' : '内置基础模型'} · 思考档位：{quote.reasoningEffort}</p><p>本次上限：输入 {quote.maxInputTokens} Token，输出 {quote.maxOutputTokens} Token。</p><p>{quote.notice}</p><p>这是用量上限，不是现金报价；供应商费用可能另计。模型配置变化须重新确认。</p></div></ImportDialogShell>}
   </section>
 }

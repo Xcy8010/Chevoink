@@ -1,8 +1,8 @@
 import { z } from 'zod'
-import { runtimeError, runtimeJson } from './runtime-common.js'
+import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { durableChatResultSchema } from './runtime-common.js'
-import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionState, type executionSnapshotSchema } from './runtime-state.js'
+import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionState, saveExecutionStateInTransaction, type executionSnapshotSchema } from './runtime-state.js'
 import { argumentNormalizationSchema, toolRejectionSchema } from './runtime-tool-cursor.js'
 import { readToolApprovalOutcome } from './runtime-approval.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
@@ -20,7 +20,9 @@ export const failedToolResultSchema = z.object({ outcome: z.literal('failed'), e
 
 /** Reduce a specific saved pending frame, never the latest conversational summary.
  * A retry names the same revision/hash/operation, even after the head has moved.
- * Receipt reads and CAS use separate transactions: no nested lease/root locks.
+ * Children validate and append under one parent/child lease transaction. Main
+ * runs retain separate receipt-read and CAS transactions. Neither path nests
+ * lease/root transactions or performs provider calls or settlement here.
  * This is context recovery, not completion proof, authorization, or billing. */
 export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
   expectedRevision: number; expectedHash: string; operationId: string
@@ -28,7 +30,7 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
   const lease = { ...token }, cursor = { ...input }
   if (!Number.isSafeInteger(cursor.expectedRevision) || cursor.expectedRevision < 0
     || !/^[a-f0-9]{64}$/.test(cursor.expectedHash)) runtimeError('RUNTIME_STATE_INVALID', '回执归约位置无效。')
-  const snapshot = await withRunLease(lease, async tx => {
+  const reduce = async (tx: RuntimeTx) => {
     const current = await readExecutionStateInTransaction(tx, lease.taskRootId)
     const frame = await readExecutionFrame(tx, lease.taskRootId, cursor.expectedRevision)
     if (frame.snapshotHash !== cursor.expectedHash || frame.state.phase !== 'awaiting_operation'
@@ -112,6 +114,9 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
         : formatDurableToolObservation(operation.action, output) }
     } else return runtimeError('RUNTIME_STATE_CONFLICT', '内部操作不能伪装成模型工具回复。')
     return { ...frame.state, phase: 'idle' as const, pendingOperationId: null, messages: [...frame.state.messages, appended] }
-  })
+  }
+  if (lease.parent) return withRunLease(lease, async tx => saveExecutionStateInTransaction(tx, lease,
+    { expectedRevision: cursor.expectedRevision, expectedHash: cursor.expectedHash, snapshot: await reduce(tx) }))
+  const snapshot = await withRunLease(lease, reduce)
   return saveExecutionState(lease, { expectedRevision: cursor.expectedRevision, expectedHash: cursor.expectedHash, snapshot })
 }

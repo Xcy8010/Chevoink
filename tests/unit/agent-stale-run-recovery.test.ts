@@ -30,6 +30,14 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks())
 
 describe('stale protocol-zero run watchdog', () => {
+  it('pages past a full older batch instead of starving later stale runs', async () => {
+    const first = Array.from({ length: 50 }, (_, index) => ({ id: `older-${String(index).padStart(2, '0')}`, userId: 'author' }))
+    mocks.findMany.mockResolvedValueOnce(first).mockResolvedValueOnce([{ id: 'zombie-later', userId: 'author' }])
+    await recoverStaleLoopRuns()
+    expect(mocks.findMany).toHaveBeenCalledTimes(2)
+    expect(mocks.findMany.mock.calls[1][0]).toMatchObject({ where: { id: { gt: 'older-49' } }, orderBy: { id: 'asc' } })
+    expect(mocks.recoverLegacy).toHaveBeenCalledWith('author', 'zombie-later')
+  })
   it('converges an executor-less stale run selected by the quiet-window filter', async () => {
     mocks.findMany.mockResolvedValue([{ id: 'zombie', userId: 'author' }])
     await recoverStaleLoopRuns()

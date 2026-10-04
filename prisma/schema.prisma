@@ -339,6 +339,7 @@ enum PrivacyLevel {
 }
 
 model User {
+  modelAssignments AgentModelAssignment[]
   novelImportJobs NovelImportJob[]
   novelImportIntents NovelImportIntent[]
   id                         String                  @id @default(cuid()) @db.VarChar(64)
@@ -466,6 +467,7 @@ model SmsVerificationCode {
 }
 
 model Novel {
+  modelAssignments AgentModelAssignment[]
   manuscriptRevision Int @default(0) @map("manuscript_revision")
   importJobs NovelImportJob[]
   importIntents NovelImportIntent[]
@@ -1664,6 +1666,10 @@ model AgentEvalComparison {
 }
 
 model AgentRun {
+  incomingChildGrant AgentChildExecutionGrant? @relation("ChildExecutionRun")
+  admittedChildGrants AgentChildExecutionGrant[] @relation("ChildAdmissionRun")
+  currentChildGrants AgentChildExecutionGrant[] @relation("ChildCurrentParent")
+  configurationChanges AgentConfigurationChange[]
   goalExecution     AgentGoalExecution?
   manuscriptRevision Int @default(0) @map("manuscript_revision")
   id                 String                 @id @default(cuid()) @db.VarChar(64)
@@ -1725,6 +1731,7 @@ model AgentRun {
 
 /// B0 expansion: original scope is immutable; session/novel IDs survive history pruning.
 model AgentTaskRoot {
+  childExecutionGrants AgentChildExecutionGrant[]
   id                 String   @id @db.VarChar(64)
   userId             String   @map("user_id") @db.VarChar(64)
   sessionId          String   @map("session_id") @db.VarChar(64)
@@ -1774,6 +1781,36 @@ model AgentExecutionState {
   @@map("agent_execution_states")
 }
 
+/// Sparse user preferences. Empty scopeKey is global; otherwise it equals the owned novel id.
+model AgentModelAssignment {
+  id String @id @default(cuid()) @db.VarChar(64)
+  userId String @map("user_id") @db.VarChar(64)
+  scopeKey String @map("scope_key") @db.VarChar(64)
+  novelId String? @map("novel_id") @db.VarChar(64)
+  revision Int @default(1)
+  assignments Json
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel Novel? @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scopeKey])
+  @@index([novelId])
+  @@map("agent_model_assignments")
+}
+
+model AgentConfigurationChange {
+  id String @id @default(cuid()) @db.VarChar(64)
+  runId String @map("run_id") @db.VarChar(64)
+  callId String @map("call_id") @db.VarChar(160)
+  requestHash String @map("request_hash") @db.VarChar(64)
+  response Json
+  createdAt DateTime @default(now()) @map("created_at")
+  run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  @@unique([runId, callId])
+  @@map("agent_configuration_changes")
+}
+
 model AgentExecutionFrame {
   taskRootId String @map("task_root_id") @db.VarChar(64)
   revision Int
@@ -1819,6 +1856,7 @@ model AgentRunLease {
 }
 
 model AgentOperation {
+  childExecutionGrants AgentChildExecutionGrant[]
   id                 String   @id @db.VarChar(64)
   taskRootId         String   @map("task_root_id") @db.VarChar(64)
   operationKey       String   @map("operation_key") @db.VarChar(160)
@@ -1843,6 +1881,35 @@ model AgentOperation {
   @@unique([id, taskRootId])
   @@index([taskRootId, status, createdAt])
   @@map("agent_operations")
+}
+
+/// A server-issued delegation. ChildRunId is the sole canonical execution identity.
+model AgentChildExecutionGrant {
+  id String @id @db.VarChar(64)
+  parentRootId String @map("parent_root_id") @db.VarChar(64)
+  parentOperationId String @map("parent_operation_id") @db.VarChar(64)
+  childIndex Int @map("child_index")
+  admissionRunId String @map("admission_run_id") @db.VarChar(64)
+  admissionEpoch BigInt @map("admission_epoch")
+  currentParentRunId String @map("current_parent_run_id") @db.VarChar(64)
+  generation BigInt
+  childRunId String @unique @map("child_run_id") @db.VarChar(64)
+  kind String @db.VarChar(16)
+  tokenCeiling Int @map("token_ceiling")
+  snapshot Json
+  snapshotHash String @map("snapshot_hash") @db.VarChar(64)
+  status String @default("admitted") @db.VarChar(24)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  parentRoot AgentTaskRoot @relation(fields: [parentRootId], references: [id], onDelete: Cascade)
+  parentOperation AgentOperation @relation(fields: [parentOperationId, parentRootId], references: [id, taskRootId], onDelete: NoAction, onUpdate: NoAction)
+  admissionRun AgentRun @relation("ChildAdmissionRun", fields: [admissionRunId], references: [id], onDelete: NoAction)
+  currentParentRun AgentRun @relation("ChildCurrentParent", fields: [currentParentRunId], references: [id], onDelete: NoAction)
+  childRun AgentRun @relation("ChildExecutionRun", fields: [childRunId], references: [id], onDelete: NoAction)
+  @@unique([parentOperationId, childIndex])
+  @@index([parentRootId, status])
+  @@index([currentParentRunId, generation])
+  @@map("agent_child_execution_grants")
 }
 
 model AgentProviderAttempt {

@@ -12,6 +12,7 @@ import type { AuxiliaryModelStep } from './runtime-auxiliary-model.js'
 import type { DurableTokenPrice } from './runtime-settlement.js'
 import type { ToolContext } from './tools/types.js'
 import { estimateChatMessagesTokens, resolveDurableInputLimit } from './context-budget.js'
+import { assignedTaskModel } from './model-assignment-context.js'
 
 const auxiliaryTierSchema = z.enum([...SERVER_MODEL_TIERS, 'custom'] as [string, ...string[]])
 const reasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
@@ -21,6 +22,7 @@ export const auxiliaryRouteSchema = z.object({
   tier: auxiliaryTierSchema.optional(),
   customModelId: z.string().min(1).nullable().optional(),
   reasoningEffort: reasoningEffortSchema.optional(),
+  honorReasoningEffort: z.literal(true).optional(),
   provider: z.string(), model: z.string(), baseUrl: z.string(), maxOutputTokens: z.number().int().positive(),
 }).strict().superRefine((value, ctx) => {
   if (value.tier === 'custom' && !value.customModelId) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['customModelId'], message: '自定义辅助模型缺少模型身份。' })
@@ -40,7 +42,12 @@ export async function resolveDurableAuxiliaryRuntime(input: {
   userId: string
   modelRuntime?: ToolContext['modelRuntime']
   modelSelection?: DurableAuxiliaryModelSelection
+  modelAssignments?: import('../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments
+  task?: 'continuity' | 'quality'
 }) {
+  const assigned = input.task ? await assignedTaskModel(input.userId, null, input.task, input.modelAssignments, true) : undefined
+  if (assigned) return { runtime: { ...assigned.runtime, honorAssignedReasoning: true as const }, selection: { tier: assigned.selection.modelTier,
+    customModelId: assigned.selection.customModelId ?? null, reasoningEffort: assigned.runtime.reasoningEffort } }
   const inherited = auxiliaryTextModel(input.modelRuntime)
   if (inherited) {
     const selection = input.modelSelection ?? { tier: inherited.tier, customModelId: null, reasoningEffort: inherited.reasoningEffort }
@@ -54,11 +61,12 @@ export async function resolveDurableAuxiliaryRuntime(input: {
   return { runtime, selection: { tier: 'speed' as const, customModelId: null, reasoningEffort: runtime.reasoningEffort } }
 }
 
-export function auxiliaryRouteForRuntime(runtime: NonNullable<ToolContext['modelRuntime']>, selection: DurableAuxiliaryModelSelection, maxOutputTokens: number) {
+export function auxiliaryRouteForRuntime(runtime: NonNullable<ToolContext['modelRuntime']> & { honorAssignedReasoning?: true }, selection: DurableAuxiliaryModelSelection, maxOutputTokens: number) {
   return auxiliaryRouteSchema.parse({
     tier: selection.tier,
     customModelId: selection.tier === 'custom' ? selection.customModelId : null,
     reasoningEffort: runtime.reasoningEffort,
+    ...(runtime.honorAssignedReasoning ? { honorReasoningEffort: true as const } : {}),
     provider: runtime.provider,
     model: runtime.modelName ?? env.aiTextModel,
     baseUrl: runtime.baseUrl ?? env.aiTextBaseUrl,
@@ -108,7 +116,7 @@ export async function callDurableAuxiliary(input: {
   }
   return chatWithTools({ messages: [{ role: 'system', content: system }, { role: 'user', content }], tools: [], provider: input.route.provider, model: input.route.model,
     providerBaseUrl: input.route.baseUrl, providerApiKey: runtime.apiKey, reasoningEffort: runtime.reasoningEffort, temperature, maxOutputTokens: input.route.maxOutputTokens, signal: input.signal,
-    boundedReview: true, thinkingEnabled: runtime.thinkingEnabled, reasoningParameterMode: runtime.reasoningParameterMode,
+    boundedReview: !input.route.honorReasoningEffort, thinkingEnabled: runtime.thinkingEnabled, reasoningParameterMode: runtime.reasoningParameterMode,
     outputTokenParameter: resolveTextOutputTokenParameter(runtime.outputTokenParameter, { provider: input.route.provider, providerBaseUrl: input.route.baseUrl, model: input.route.model }, true),
     durableExecution: execution, usageLog: { userId: lease.userId, agentRunId: lease.runId, action: step, modelTier: routeTier, multiplierBps: input.price.multiplierBps } })
 }

@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({ findModel: vi.fn(), create: vi.fn(), charge: vi.fn(), access: vi.fn(), update: vi.fn(), updateMany: vi.fn(), runtime: vi.fn(), imageCharge: vi.fn(), owner: vi.fn() }))
-vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.access, consumeTokenCredits: mocks.charge, reserveTokenCredits: vi.fn(), consumeCredits: mocks.imageCharge, getModelTierRuntime: mocks.runtime }))
+vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.access, consumeTokenCredits: mocks.charge, reserveTokenCredits: vi.fn(), consumeCredits: mocks.imageCharge, getModelTierRuntime: mocks.runtime,
+  resolveCustomReasoningEffort: (effort: string, supported: string[]) => supported.includes(effort) ? effort : supported[0] }))
 vi.mock('../../api/lib/data-access.js', () => ({ ensureNovelOwner: mocks.owner, createCoverAssetsData: vi.fn() }))
-vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { aiModelConfig: { findFirst: mocks.findModel }, aiUsageLog: { create: mocks.create, findUnique: vi.fn(async () => null), update: mocks.update, updateMany: mocks.updateMany } } }))
+vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { agentModelAssignment: { findMany: vi.fn(async () => []) }, aiModelConfig: { findFirst: mocks.findModel }, aiUsageLog: { create: mocks.create, findUnique: vi.fn(async () => null), update: mocks.update, updateMany: mocks.updateMany } } }))
 vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: (value: string) => value, encryptSecret: (value: string) => value }))
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
-  resolveTokenPrice: async () => ({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 }) }))
+  resolveTokenPrice: async (modelTier: string, multiplierBps: number) => ({ version: 'credits-v1-exact', modelTier, multiplierBps }) }))
 import { chatWithTools, generateTextCompletion, generateCoverImageData } from '../../api/lib/ai-service.js'
 import { env } from '../../api/config/env.js'
+import { TEXT_ACTION_TASKS, withModelAssignmentContext } from '../../api/lib/agent/model-assignment-context.js'
 
 beforeEach(() => {
   mocks.findModel.mockReset().mockResolvedValue(null)
@@ -30,6 +32,25 @@ async function invoke(usages: Array<Record<string, unknown>>) {
 }
 
 describe('explicit zero provider usage is not missing usage', () => {
+  it.each(Object.entries(TEXT_ACTION_TASKS))('routes actual auxiliary %s body through frozen purpose %s and honors effort', async (action, task) => {
+    mocks.runtime.mockImplementation(async (tier, _user, _custom, effort) => ({ tier, provider: 'openai', modelName: 'selected-model',
+      baseUrl: 'https://selected.example/v1', apiKey: 'fixture-not-a-key', reasoningEffort: effort ?? 'high', reasoningEfforts: ['low', 'medium', 'high'],
+      multiplierBps: tier === 'custom' ? 0 : 25000, visionEnabled: true, contextWindowTokens: 128000 }))
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(JSON.stringify({ choices: [{ message: { content: '完整结果' }, finish_reason: 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 20 } })))
+    vi.stubGlobal('fetch', fetcher)
+    await withModelAssignmentContext({ userId: 'test', novelId: 'novel', frozen: { version: 1, globalRevision: 1, novelRevision: 0,
+      assignments: { [task]: { modelTier: 'ultimate', reasoningEffort: 'high' } } } }, () => generateTextCompletion('isolated-system', '完整正文及上下文', {
+      userId: 'test', novelId: 'novel', action, boundedReview: true, multiplierBps: 0,
+      modelRuntime: { tier: 'custom', provider: 'openai', modelName: 'old-main', apiKey: 'fixture-not-a-key', baseUrl: 'https://old.example/v1',
+        reasoningEffort: 'low', reasoningEfforts: ['low'], multiplierBps: 0, visionEnabled: false, contextWindowTokens: 128000 },
+    }))
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(fetcher.mock.calls[0][0]).toBe('https://selected.example/v1/chat/completions')
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'selected-model', reasoning_effort: 'high',
+      messages: [{ role: 'system', content: 'isolated-system' }, { role: 'user', content: '完整正文及上下文' }] })
+    expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ modelTier: 'ultimate', multiplierBps: 25000,
+      billingSnapshot: { version: 'credits-v1-exact', modelTier: 'ultimate', multiplierBps: 25000 } }) }))
+  })
   it.each(['speed', 'custom'] as const)('sends non-thinking critic requests for %s without changing the selected model or main-turn effort', async tier => {
     const runtime = { tier, provider: 'deepseek', modelName: 'deepseek-flash', apiKey: 'fixture-not-a-key', baseUrl: 'https://fixture.test/v1',
       reasoningEffort: 'high' as const, reasoningEfforts: ['low', 'high'] as const, thinkingEnabled: true, reasoningParameterMode: 'native' as const,

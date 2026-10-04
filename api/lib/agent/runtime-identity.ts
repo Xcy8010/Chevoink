@@ -25,6 +25,7 @@ export async function initializeDurableTask(input: { userId: string; runId: stri
     const goalBinding = await tx.agentGoalExecution.findUnique({ where: { runId: input.runId } })
     if (goalBinding) await (await import('./goal-fence.js')).assertRunGoalFence(tx, input.userId, input.runId)
     const run = await lockOwnedRun(tx, input.userId, input.runId)
+    if (await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: run.id } })) return runtimeError('RUNTIME_CHILD_SOURCE_REQUIRED', '子任务只能由原父任务授权初始化，不能作为作者新任务重建。')
     if (run.runtimeProtocolVersion === 0 && run.status !== 'queued') runtimeError('RUNTIME_NOT_ACTIVE', '只能在旧执行器启动之前建立持久任务。')
     const { spec, frozen } = frozenSpec(run.taskSpec)
     if (spec.scope.novelId !== run.novelId || (run.taskRootId && run.taskRootId !== spec.id)
@@ -59,6 +60,7 @@ export async function attachRunToDurableTask(input: { userId: string; runId: str
   runtimeId(input.taskRootId)
   return runtimeTransaction(async tx => {
     const run = await lockOwnedRun(tx, input.userId, input.runId)
+    if (await tx.agentChildExecutionGrant.findFirst({ where: { OR: [{ childRunId: run.id }, { childRun: { taskRootId: input.taskRootId } }] } })) return runtimeError('RUNTIME_CHILD_SOURCE_REQUIRED', '不能通过作者继续入口接管子任务授权。')
     if (run.runtimeProtocolVersion === 0 && run.status !== 'queued') runtimeError('RUNTIME_NOT_ACTIVE', '只能在旧执行器启动之前绑定持久任务。')
     const { spec, frozen } = frozenSpec(run.taskSpec)
     await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${input.taskRootId} FOR UPDATE`

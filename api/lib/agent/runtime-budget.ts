@@ -80,9 +80,31 @@ export async function readTaskBudgetInTransaction(tx: RuntimeTx, taskRootId: str
     if (rows.length < 500) break
     cursor = rows[rows.length - 1].id
   }
+  let reservedChildTokens = 0n
+  const children = await tx.agentChildExecutionGrant.findMany({ where: { parentRootId: taskRootId }, include: { childRun: { include: { taskRoot: true } } } })
+  for (const grant of children) {
+    const { verifyChildGrant } = await import('./runtime-child.js')
+    verifyChildGrant(grant)
+    const childRootId = grant.childRun.taskRootId
+    if (!childRootId || grant.childRun.runtimeProtocolVersion !== 1) return runtimeError('RUNTIME_RECEIPT_INVALID', '子任务预算缺少原执行身份。')
+    if (await tx.agentChildExecutionGrant.count({ where: { parentRootId: childRootId } })) return runtimeError('RUNTIME_CHILD_RECURSION_DENIED', '子任务不能派生其他任务。')
+    // Child roots cannot recursively delegate. Reading their ordinary receipts
+    // through the same checker also validates budget policy and usage hashes.
+    const child = await readTaskBudgetInTransaction(tx, childRootId)
+    if (child.budget.tokenLimit !== grant.tokenCeiling || child.policy.tokenCeiling !== grant.tokenCeiling || child.policy.maxCheckpoints !== 0) return runtimeError('RUNTIME_BUDGET_INVALID', '子任务预算不能扩大原授权额度。')
+    totals.used += child.usedTokens
+    const completed = grant.childRun.status === 'completed' && grant.childRun.taskRoot?.status === 'completed'
+    const released = grant.status === 'completed' && completed && child.unresolvedAttempts === 0n
+    if (!released) reservedChildTokens += BigInt(grant.tokenCeiling) > child.usedTokens ? BigInt(grant.tokenCeiling) - child.usedTokens : 0n
+    // A live grant already reserves its entire ceiling. Only genuinely unknown
+    // child outcomes block parent providers; in-flight measured requests do not
+    // prevent the parent from issuing task_wait under its unreserved budget.
+    if (await tx.agentProviderAttempt.count({ where: { operation: { taskRootId: childRootId }, status: 'unknown' } })) totals.unresolved += 1n
+    if (!['queued', 'running'].includes(grant.childRun.status) && !released && child.unresolvedAttempts > 0n) totals.unresolved += child.unresolvedAttempts
+  }
   const now = await databaseNow(tx)
   const wallClockMs = budget.checkpointCount > 0 ? policy.longWallClockMs : policy.wallClockMs
-  return { budget, policy, usedTokens: totals.used, unresolvedAttempts: totals.unresolved, attempts: totals.attempts,
+  return { budget, policy, usedTokens: totals.used, reservedChildTokens, unresolvedAttempts: totals.unresolved, attempts: totals.attempts,
     deadlineExceeded: now.getTime() - budget.taskRoot.createdAt.getTime() >= wallClockMs }
 }
 
@@ -93,8 +115,14 @@ export async function readTaskBudget(token: RunLeaseToken) {
 
 export async function assertProviderBudget(tx: RuntimeTx, taskRootId: string): Promise<void> {
   const state = await readTaskBudgetInTransaction(tx, taskRootId)
+  const incoming = await tx.agentChildExecutionGrant.findFirst({ where: { childRun: { taskRootId } } })
+  if (incoming) {
+    const aggregate = await readTaskBudgetInTransaction(tx, incoming.parentRootId)
+    if (aggregate.deadlineExceeded) runtimeError('RUNTIME_WALL_CLOCK_EXHAUSTED', '父任务已到原任务墙钟上限。')
+    if (aggregate.usedTokens >= BigInt(aggregate.budget.tokenLimit) || aggregate.usedTokens >= BigInt(aggregate.policy.tokenCeiling)) runtimeError('RUNTIME_TOKEN_CEILING', '父任务已达到累计Token硬顶。')
+  }
   if (state.deadlineExceeded) runtimeError('RUNTIME_WALL_CLOCK_EXHAUSTED', '已到原任务墙钟上限，恢复不会重置开始时间。')
   if (state.unresolvedAttempts > 0n) runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原任务仍有未确认的调用或用量，不能继续扩大供应商支出。')
   if (state.usedTokens >= BigInt(state.policy.tokenCeiling)) runtimeError('RUNTIME_TOKEN_CEILING', '已达到原任务累计Token硬顶。')
-  if (state.usedTokens >= BigInt(state.budget.tokenLimit)) runtimeError('RUNTIME_CHECKPOINT_REQUIRED', '已达到原任务预算片，需要通过持久检查点后再继续。')
+  if (state.usedTokens + state.reservedChildTokens >= BigInt(state.budget.tokenLimit)) runtimeError('RUNTIME_CHECKPOINT_REQUIRED', '已达到原任务可用预算片，需要等待子任务交付或通过持久检查点后再继续。')
 }

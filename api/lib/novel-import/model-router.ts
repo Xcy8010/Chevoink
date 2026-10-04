@@ -2,15 +2,14 @@ import { createHash } from 'node:crypto'
 import { getModelTierRuntime } from '../credits.js'
 import { DataAccessError } from '../prisma.js'
 import type { ModelReasoningEffort } from '../../../shared/contracts/index.js'
+import type { NovelImportModelSelection } from '../../../shared/contracts/novel-import.js'
 
 /** The selection is supplied by the current composer, never inferred from the
  * most recently edited BYOK configuration. Provider secrets remain server-only. */
-export type ImportModelSelection =
-  | { kind: 'basic' }
-  | { kind: 'custom'; customModelId: string; reasoningEffort?: ModelReasoningEffort }
+export type ImportModelSelection = NovelImportModelSelection
 
 export type ImportModelRoute = {
-  kind: 'basic' | 'custom'
+  kind: 'basic' | 'builtin' | 'custom'
   customModelId: string | null
   modelName: string | null
   provider: string
@@ -27,10 +26,10 @@ export async function resolveImportModelRoute(userId: string, selection: ImportM
   if (selection.kind === 'custom' && !selection.customModelId.trim()) {
     throw new DataAccessError(400, 'CUSTOM_MODEL_REQUIRED', '请选择本次导入使用的自定义模型。')
   }
-  const requestedEffort = selection.kind === 'custom' ? selection.reasoningEffort ?? 'low' : 'low'
+  const requestedEffort = selection.kind === 'basic' ? 'low' : selection.reasoningEffort ?? (selection.kind === 'custom' ? 'low' : 'medium')
   // getModelTierRuntime enforces ownership, enabled state and supported efforts.
   // Do not catch its failure and retry against another paid provider.
-  const runtime = await getModelTierRuntime(selection.kind === 'custom' ? 'custom' : 'basic',
+  const runtime = await getModelTierRuntime(selection.kind === 'custom' ? 'custom' : selection.kind === 'builtin' ? selection.modelTier : 'basic',
     userId, selection.kind === 'custom' ? selection.customModelId : undefined, requestedEffort)
   const effort = runtime.reasoningEffort
   if ((selection.kind === 'basic' && effort !== requestedEffort) || !runtime.reasoningEfforts.includes(effort)) {

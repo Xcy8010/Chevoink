@@ -64,6 +64,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
   useEffect(() => {
     const openDocument = (event: Event) => {
       if (!scopeKey || (event as CustomEvent<{ scope?: string }>).detail?.scope !== scopeKey) return
+      if (!splitRef.current.viewerCollapsed && !splitRef.current.inspectorCollapsed) return
       update({ ...splitRef.current, viewerCollapsed: false, inspectorCollapsed: false })
     }
     window.addEventListener(WORK_OPEN_DOCUMENT, openDocument)

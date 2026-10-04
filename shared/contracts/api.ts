@@ -466,6 +466,7 @@ export type ChapterAssistResponse = ApiSuccess<{
 }>
 
 export type GenerateCoverPromptRequest = {
+  novelId?: string
   novelTitle: string
   summary: string
   genre: string

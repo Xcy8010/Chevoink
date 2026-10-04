@@ -13,6 +13,9 @@ import { countActiveRunsByUser, hasActiveRunInSession } from '../active-runs.js'
 import { coerceToolArgumentEnvelope } from './argument-coercion.js'
 import { defineTool, type ToolContext } from './types.js'
 import { getTaskRunIds } from '../task-lineage.js'
+import { agentModelSelectionSchema, type AgentModelSelection } from '../../../../shared/contracts/agent-model-assignments.js'
+import { assignedTaskModel } from '../model-assignment-context.js'
+import { admitAssignedModel } from '../model-assignments.js'
 
 /**
  * 跨任务并行协作工具（作者需求：a 窗口派生 b/c/d 分头写第 1/2/3 章 → a 等待 → a 审查 → a 补发提示词 → 再等 → 收尾）。
@@ -202,6 +205,12 @@ async function inheritModelConfig(runId: string): Promise<{
   }
 }
 
+async function childModelConfig(ctx: ToolContext, explicit?: AgentModelSelection) {
+  const assigned = explicit ? await admitAssignedModel(ctx.userId, explicit)
+    : await assignedTaskModel(ctx.userId, ctx.novelId, 'spawned_task', ctx.modelAssignments, true)
+  return assigned ? { ...assigned.selection, modelSelectionExplicit: true as const } : inheritModelConfig(ctx.runId)
+}
+
 type LatestRun = { runId: string; status: string; title: string }
 
 async function latestRunPerSession(userId: string, sessionIds: string[]): Promise<Map<string, LatestRun>> {
@@ -271,6 +280,7 @@ export const taskSpawnTool = defineTool({
       .array(
         z.object({
           title: z.string().trim().min(1).max(60).describe('任务窗口标题，如「第 12 章正文」'),
+          model: agentModelSelectionSchema.optional().describe('本窗口的模型和思考强度；省略继承当前默认。'),
           brief: z
             .string()
             .trim()
@@ -333,7 +343,6 @@ export const taskSpawnTool = defineTool({
     }
 
     const skipped = args.tasks.slice(allowed)
-    const modelConfig = await inheritModelConfig(ctx.runId)
     const { startLoopRun, forkAgentSessionData } = await import('../run-service.js')
 
     const spawned: Array<{ sessionId: string; runId: string; novelId: string; title: string; inherit: 'brief' | 'transcript' }> = []
@@ -342,6 +351,7 @@ export const taskSpawnTool = defineTool({
     for (const task of args.tasks.slice(0, allowed)) {
       const title = task.title.slice(0, 160)
       try {
+        const selectedModel = task.model ? await childModelConfig(ctx, task.model) : await childModelConfig(ctx)
         let sessionId: string
         if (args.inherit === 'transcript') {
           const forked = await forkAgentSessionData(ctx.userId, ctx.sessionId)
@@ -376,7 +386,8 @@ export const taskSpawnTool = defineTool({
             prompt: composeSpawnPrompt(task.brief, args.inherit),
             creativeFreedom: ctx.creativeFreedom,
             qualityMode: ctx.qualityMode,
-            ...modelConfig,
+            ...selectedModel,
+            modelAssignments: ctx.modelAssignments,
             agentProfile: 'orchestrator',
           },
           { concurrencyScope: 'orchestration' },
@@ -521,6 +532,7 @@ export const taskSendTool = defineTool({
     '把提示词投递到指定任务窗口的输入框并直接发送，等价于作者在那个窗口里手动输入回车（会在该窗口开启新一轮执行）。用于审查后把返工要求发回派生窗口。目标窗口若仍在执行，必须先 task_wait 等它结束；发送后需再次 task_wait 等新一轮结果。',
   parameters: z.object({
     sessionId: z.string().trim().min(1).describe('目标任务窗口 ID'),
+    model: agentModelSelectionSchema.optional().describe('本次返工任务模型和思考强度；省略继承当前默认。'),
     prompt: z.string().trim().min(1).describe('要发送的提示词：写清楚哪里不合格、按什么标准返工、验收口径'),
     mode: z.enum(['plan', 'build', 'review']).default('build'),
   }),
@@ -559,7 +571,7 @@ export const taskSendTool = defineTool({
       }
     }
 
-    const modelConfig = await inheritModelConfig(ctx.runId)
+    const modelConfig = await childModelConfig(ctx, args.model)
     const { startLoopRun } = await import('../run-service.js')
 
     try {
@@ -574,6 +586,7 @@ export const taskSendTool = defineTool({
           creativeFreedom: ctx.creativeFreedom,
           qualityMode: ctx.qualityMode,
           ...modelConfig,
+          modelAssignments: ctx.modelAssignments,
           agentProfile: 'orchestrator',
         },
         { concurrencyScope: 'orchestration' },

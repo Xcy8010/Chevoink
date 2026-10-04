@@ -54,14 +54,22 @@ import { goalEnableTool, goalReadTool, goalReportTool } from './tools/goal-tools
 import { prepareToolCursorOperation } from './runtime-tool-cursor.js'
 import { commitOperationEffect } from './runtime-operations.js'
 import type { CreditModelTier, ModelReasoningEffort } from '../../../shared/contracts/index.js'
+import { configureAgentTool, modelListTool } from './tools/configuration-tools.js'
+import { modelAssignmentTool } from './tools/model-assignment-tools.js'
+import { subAgentRunTool, subAgentDelegateTool } from './tools/subagent-tools.js'
+import { taskSpawnTool, taskWaitTool, taskSendTool } from './tools/task-orchestration-tools.js'
+import { CHILD_ACTIONS } from './runtime-child.js'
+import { executeDurableChildTool } from './runtime-child-tools.js'
 
 const HISTORY_READ_ACTIONS = ['account_credits', 'account_credit_history', 'account_novels', 'task_context_list', 'task_context_read', 'session_history_search', 'session_message_read'] as const
-const DOMAIN_READ_ACTIONS = ['craft_search', 'style_leakage_check', 'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get'] as const
+const DOMAIN_READ_ACTIONS = ['model_list', 'craft_search', 'style_leakage_check', 'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get'] as const
 
 function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
   return { ...tool, execute: (ctx, args) => tool.execute(ctx, tool.parameters.parse(args)) }
 }
 const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
+  checkedAdapter(subAgentRunTool), checkedAdapter(subAgentDelegateTool), checkedAdapter(taskSpawnTool), checkedAdapter(taskWaitTool), checkedAdapter(taskSendTool),
+  checkedAdapter(configureAgentTool), checkedAdapter(modelListTool), checkedAdapter(modelAssignmentTool),
   checkedAdapter(coverApplyTool),
   checkedAdapter(goalEnableTool), checkedAdapter(goalReadTool), checkedAdapter(goalReportTool),
   checkedAdapter(novelImportTool),
@@ -149,8 +157,12 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       modelSelection: { tier: current.configuration.model.tier as CreditModelTier,
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
         provider: current.configuration.model.provider, modelName: current.configuration.model.modelName, routeRevision: current.configuration.model.routeRevision } }
+    ctx.modelAssignments = current.configuration.modelAssignments
+    ctx.inlineChild = Boolean(lease.parent)
     const capability = { lease, cursor, operationKey: `exec:${frame.state.nextOperationSequence}` }
-    if (call.name === 'goal_enable') ctx.durableGoalActivation = capability
+    if (call.name === 'agent_configure' || call.name === 'model_assign') ctx.durableConfiguration = capability
+    else if (CHILD_ACTIONS.some(action => action === call.name) || call.name === 'task_wait') { /* Trusted child adapter below; no legacy ToolContext capability. */ }
+    else if (call.name === 'goal_enable') ctx.durableGoalActivation = capability
     else if (goalTool) ctx.durableRead = capability
     else if (['execution_context_read', 'chapter_read', 'plan_read', 'novel_get_context', 'chapter_list_summaries', 'memory_search', 'volume_list', 'structure_outline', ...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].includes(call.name)) ctx.durableRead = capability
     else if (call.name === 'ask_user') { /* Persistent question step below; no legacy waiter. */ }
@@ -188,7 +200,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   if ('recover' in selected) {
     // Results can arrive after the worker dies between recording and reduction.
     // Recover the original bill/result without reconstructing or redispatching HTTP.
-    const billing = 'settlement' in selected && selected.settlement ? await settleProviderOperation(selected.settlement) : undefined
+    const billing = 'settlement' in selected && selected.settlement ? await settleProviderOperation({ ...selected.settlement, lease }) : undefined
     signal.throwIfAborted()
     return { kind: 'recovered' as const, frame: await reduceExecutionReceipt(lease, selected.recover!), ...(billing ? { billing } : {}) }
   }
@@ -221,7 +233,9 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     // Actual adapter checks the saved decision again at effect admission.
   }
   const historyAction = [...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].find(name => name === selected.tool.name)
+  if (CHILD_ACTIONS.some(action => action === selected.tool.name) || selected.tool.name === 'task_wait') return executeDurableChildTool(lease, selected.cursor, selected.ctx, selected.tool, selected.args)
   if (selected.tool.name === 'ask_user') return executeDurableQuestion(lease, selected.cursor, selected.ctx, selected.tool, selected.args)
+  if (selected.tool.name === 'agent_configure' || selected.tool.name === 'model_assign') return { kind: 'tool' as const, result: await selected.tool.execute(selected.ctx, selected.args) }
   if (selected.tool.name === 'novel_import') return executeDurableImport(selected.ctx, selected.tool, selected.args)
   if (selected.tool.name === 'goal_enable') return { kind: 'tool' as const, result: await selected.tool.execute(selected.ctx, selected.args) }
   if (selected.tool.name === 'goal_read' || selected.tool.name === 'goal_report') return executeDurableGoalTool(selected.ctx, selected.tool, selected.args)

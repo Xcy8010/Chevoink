@@ -9,6 +9,9 @@ export type AgentToolGovernance = {
  * 新工具只有登记分类、风险和确定性后置条件后，才允许进入 allTools 注册表。
  */
 export const AGENT_TOOL_GOVERNANCE = {
+  model_list: { category: 'read', risk: 'low', postconditions: ['owned_models_only', 'no_credentials', 'no_provider_call'] },
+  model_assign: { category: 'workflow', risk: 'medium', postconditions: ['authentic_human_source', 'owned_scope', 'cas_revision', 'operation_prices_unchanged'] },
+  agent_configure: { category: 'workflow', risk: 'medium', postconditions: ['authentic_human_source', 'same_task_context', 'next_turn_only', 'operation_prices_unchanged'] },
   account_credits: { category: 'read', risk: 'low', postconditions: ['current_user_only', 'balance_reservations_reported'] },
   account_credit_history: { category: 'read', risk: 'low', postconditions: ['current_user_only', 'bounded_pagination'] },
   account_novels: { category: 'read', risk: 'low', postconditions: ['current_user_only', 'metadata_only'] },

@@ -16,6 +16,7 @@ import { getTtsVoicesPayload, synthesizeTtsBatchData } from '../lib/tts-service.
 const router = Router()
 
 const coverPromptSchema = z.object({
+  novelId: z.string().min(1).max(64).optional(),
   novelTitle: z.string().min(1),
   summary: z.string().min(1),
   genre: z.string().min(1),
@@ -71,6 +72,7 @@ router.post('/cover-prompt', async (req: Request, res: Response): Promise<void> 
     const body = parseBody(coverPromptSchema, req.body, '请提供作品标题、简介和题材。')
 
     const payload = await generateCoverPromptData(userId, {
+      novelId: body.novelId,
       novelTitle: body.novelTitle.trim(),
       summary: body.summary.trim(),
       genre: body.genre.trim(),

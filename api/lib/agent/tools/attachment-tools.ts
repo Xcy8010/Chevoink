@@ -170,7 +170,7 @@ export const viewImageTool = defineTool({
         { buffer, mime },
         args.focus?.trim() ||
           '请详细描述这张图片的内容：主体、场景、文字（如有，逐字列出）、构图与风格，供网文写作与封面校验参考。',
-        { userId: ctx.userId, runId: ctx.runId, signal: ctx.signal },
+        { userId: ctx.userId, runId: ctx.runId, signal: ctx.signal, novelId: ctx.novelId, modelAssignments: ctx.modelAssignments },
       )
 
       return {

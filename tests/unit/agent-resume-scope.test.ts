@@ -20,7 +20,8 @@ beforeEach(() => {
 describe('P0 continuation task identity', () => {
   it('queries only identical persisted TaskSpec ids, not the entire conversation', async () => {
     expect(await getTaskRunIds('s', 'continue19')).toEqual(['continue19', 'run19'])
-    expect(db.runs).toHaveBeenCalledWith({ where: { sessionId: 's', engine: 'loop', taskSpec: { path: ['id'], equals: 'task19' } }, select: { id: true } })
+    expect(db.runs).toHaveBeenCalledWith({ where: { sessionId: 's', engine: 'loop', taskSpec: { path: ['id'], equals: 'task19' },
+      incomingChildGrant: { isNot: { kind: 'inline' } } }, select: { id: true } })
   })
   it('legacy tasks without identity cannot inherit arbitrary historical windows', async () => {
     db.run.mockResolvedValue({ taskSpec: null })

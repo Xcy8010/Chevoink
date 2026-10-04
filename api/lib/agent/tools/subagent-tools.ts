@@ -4,6 +4,9 @@ import type { AgentMessagePart, AgentSubtaskRole } from '../../../../shared/cont
 import { getModelTierRuntime } from '../../credits.js'
 import { prisma } from '../../prisma.js'
 import { defineTool, type ToolContext } from './types.js'
+import { agentModelSelectionSchema, type AgentModelSelection } from '../../../../shared/contracts/agent-model-assignments.js'
+import { assignedTaskModel } from '../model-assignment-context.js'
+import { admitAssignedModel } from '../model-assignments.js'
 
 /**
  * 子 Agent 调用工具（codex/Zcode 模式）：
@@ -18,11 +21,13 @@ const SUBAGENT_DEFAULT_TOKEN_BUDGET = 16_000
 const roleEnum = z.enum(['research', 'continuity', 'quality', 'lore'])
 
 const subagentRunSchema = z.object({
+  model: agentModelSelectionSchema.optional().describe('本次子 Agent 模型与思考强度；不指定时继承当前默认，指定模型但省略强度时使用所选模型配置的默认思考强度。'),
   subagentId: z.string().trim().min(1).max(80).describe('要调用的子 Agent 定义 id（见系统提示中的子 Agent 目录）'),
   task: z.string().trim().min(1).max(12_000).describe('交给子 Agent 的具体任务目标与必要上下文，需自包含（子 Agent 看不到本轮对话历史）'),
 })
 
 const subagentDelegateSchema = z.object({
+  model: agentModelSelectionSchema.optional().describe('本次子 Agent 模型与思考强度；省略则继承当前默认。'),
   name: z.string().trim().min(1).max(160).describe('子 Agent 名称（同名同作品会复用已有定义）'),
   role: roleEnum.describe('专业角色：research 调研 / continuity 一致性 / quality 质量 / lore 设定'),
   triggerCondition: z.string().trim().min(1).max(1_000).describe('什么情况下应该调用这个子 Agent（会写入定义，供后续主控参考）'),
@@ -40,9 +45,14 @@ async function executeSubagentDefinition(
   ctx: ToolContext,
   definition: SubagentDefinition,
   task: string,
+  model?: AgentModelSelection,
 ): Promise<{ output: string; summary: string; extraParts: AgentMessagePart[] | undefined; ok: boolean; durationMs: number; report: string; steps: number }> {
   const { runSubagentInline, checkSubagentConcurrency } = await import('../subagent-runner.js')
   const startedAt = Date.now()
+  ctx.signal.throwIfAborted()
+  const selected = model ? await admitAssignedModel(ctx.userId, model)
+    : await assignedTaskModel(ctx.userId, ctx.novelId, 'subagent', ctx.modelAssignments, true)
+  const modelRuntime = selected?.runtime ?? ctx.modelRuntime ?? await getModelTierRuntime('speed', ctx.userId, null, 'high')
 
   // 并发闸：超过全局上限时拒绝本次调用（错误即观察，让主 Agent 稍后重试）
   if (!(await checkSubagentConcurrency(ctx.userId))) {
@@ -73,7 +83,6 @@ async function executeSubagentDefinition(
   try {
     // 模型与计费跟随主 run：主 run 用什么模型（含自定义模型），子 Agent 就用什么模型；
     // 内置档按倍率扣 credits，custom 档消耗用户自己的模型 token。主 run 未注入时回退内置极速档。
-    const modelRuntime = ctx.modelRuntime ?? await getModelTierRuntime('speed', ctx.userId, null, 'high')
     const sessionPolicy = await prisma.agentSession.findUnique({ where: { id: ctx.sessionId }, select: { toolPolicy: true, sandboxMode: true } })
     const result = await runSubagentInline({
       // 归属标记：所属 subagent_run 工具调用的 callId，前端据此把内部工具卡片分组进子 Agent 容器
@@ -182,7 +191,7 @@ export const subAgentRunTool = defineTool({
     if (!subtask.enabled) {
       return { output: `子 Agent「${subtask.name}」已停用。请在创作区子 Agent 管理面板启用后再调用，或改用 subagent_delegate 即时委派。`, summary: '子 Agent 已停用' }
     }
-    const result = await executeSubagentDefinition(ctx, subtask, args.task)
+    const result = await executeSubagentDefinition(ctx, subtask, args.task, args.model)
     return {
       output: result.output,
       summary: result.summary,
@@ -231,7 +240,7 @@ export const subAgentDelegateTool = defineTool({
     if (!definition.enabled) {
       return { output: `子 Agent「${definition.name}」已存在但处于停用状态，本次未执行。请在管理面板启用后再试。`, summary: '子 Agent 已停用' }
     }
-    const result = await executeSubagentDefinition(ctx, definition, args.task)
+    const result = await executeSubagentDefinition(ctx, definition, args.task, args.model)
     const prefix = created ? `已创建子 Agent「${definition.name}」并完成执行。` : `复用已有子 Agent「${definition.name}」完成执行。`
     return {
       output: `${prefix}${result.output}`,

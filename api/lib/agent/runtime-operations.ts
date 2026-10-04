@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
-import { databaseNow, runtimeError, runtimeId, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
+import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
-import { assertProviderBudget } from './runtime-budget.js'
+import { assertProviderBudget, readTaskBudgetInTransaction } from './runtime-budget.js'
+import { estimateChatMessagesTokens } from './context-budget.js'
 import { assertPendingProviderState } from './runtime-state.js'
+import { readAttemptContentionScope } from './runtime-parent-contention.js'
 
 async function outbox(tx: RuntimeTx, input: { taskRootId: string; operationId: string; runId: string; eventKey: string; type: string; payload: Prisma.InputJsonValue }) {
   return tx.agentExecutionOutbox.create({ data: { id: randomUUID(), ...input } })
@@ -191,6 +193,24 @@ export async function markProviderDispatched(token: RunLeaseToken, attemptId: st
     if (attempt.runId !== token.runId || attempt.ownerEpoch !== token.epoch) runtimeError('RUNTIME_LEASE_LOST', '供应商尝试未归属当前执行者。')
     if (operation.parentOperationId) await assertCurrentToolPolicy(tx, token, await ownedOperation(tx, token, operation.parentOperationId))
     await assertProviderBudget(tx, token.taskRootId)
+    if (token.parent) {
+      const grant = await tx.agentChildExecutionGrant.findUniqueOrThrow({ where: { childRunId: token.runId } })
+      const frozen = (await import('./runtime-child.js')).verifyChildGrant(grant)
+      if (frozen.kind === 'inline') {
+        if (!frozen.definitionId) return runtimeError('RUNTIME_CHILD_DEFINITION_REQUIRED', '原子 Agent 缺少准入定义身份。')
+        await tx.$queryRaw`SELECT id FROM agent_subtasks WHERE id = ${frozen.definitionId} FOR SHARE`
+        const run = await tx.agentRun.findUniqueOrThrow({ where: { id: token.runId }, select: { novelId: true } })
+        if (!await tx.agentSubtask.findFirst({ where: { id: frozen.definitionId, userId: token.userId, novelId: run.novelId, enabled: true } })) return runtimeError('RUNTIME_CHILD_DEFINITION_REQUIRED', '原子 Agent 已停用或不属于原作者作品，尚未派发。')
+      }
+      const request = attempt.requestSnapshot as { request?: { body?: { max_tokens?: unknown; max_completion_tokens?: unknown } } }
+      const output = request.request?.body?.max_completion_tokens ?? request.request?.body?.max_tokens
+      if (typeof output !== 'number' || !Number.isSafeInteger(output) || output < 1) return runtimeError('RUNTIME_CHILD_REQUEST_BUDGET_REQUIRED', '子任务模型请求缺少可验证的输出上限。')
+      const budget = await readTaskBudgetInTransaction(tx, token.taskRootId)
+      // Conservative request estimator, not exact provider tokens. The whole
+      // child ceiling remains reserved by the parent while usage is unknown.
+      const estimatedInput = estimateChatMessagesTokens([{ role: 'user', content: JSON.stringify(attempt.requestSnapshot) }])
+      if (budget.usedTokens + BigInt(estimatedInput) + BigInt(output) > BigInt(budget.budget.tokenLimit)) return runtimeError('RUNTIME_CHILD_BUDGET_EXHAUSTED', '子任务剩余额度不足以预留本次完整请求，尚未派发供应商。')
+    }
     await assertPendingProviderState(tx, token.taskRootId, attempt.operationId)
     const context = await (await import('./goal-fence.js')).readGoalExecution(token.userId, token.runId, tx)
     if (context) {
@@ -218,6 +238,7 @@ export async function markProviderNotDispatched(input: {
 }) {
   const captured = { ...input }
   runtimeId(captured.userId); runtimeId(captured.attemptId); runtimeId(captured.code, 96)
+  const contentionScope = await readAttemptContentionScope(captured.userId, captured.attemptId)
   return runtimeTransaction(async tx => {
     const initial = await tx.agentProviderAttempt.findFirst({
       where: { id: captured.attemptId, operation: { taskRoot: { userId: captured.userId } } },
@@ -239,7 +260,7 @@ export async function markProviderNotDispatched(input: {
         attemptId: attempt.id, requestHash: attempt.requestHash, code: captured.code, resultHash: result.hash,
       } })
     return updated
-  })
+  }, { contentionScope, contentionBackoff: Boolean(contentionScope?.isChild) })
 }
 
 /** Internal transaction primitive; callers must retain the root lock through all dependent writes. */
@@ -247,6 +268,11 @@ export async function lockOwnedAttempt(tx: RuntimeTx, userId: string, attemptId:
   const initial = await tx.agentProviderAttempt.findFirst({ where: { id: attemptId, operation: { taskRoot: { userId } } }, include: { operation: true } })
   if (!initial) return runtimeError('RUNTIME_SCOPE_MISMATCH', '供应商尝试不存在或无权访问。')
   // Same root lock order as effects. Late evidence needs no lease, but grants no execution rights.
+  const grant = await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: initial.runId } })
+  if (grant) {
+    await lockRunRoot(tx, userId, grant.currentParentRunId)
+    await lockRunRoot(tx, userId, grant.childRunId)
+  }
   await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${initial.operation.taskRootId} FOR UPDATE`
   const attempt = await tx.agentProviderAttempt.findUniqueOrThrow({ where: { id: attemptId }, include: { operation: true } })
   if (attempt.requestHash !== requestHash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '供应商回执不匹配原请求。')
@@ -255,13 +281,14 @@ export async function lockOwnedAttempt(tx: RuntimeTx, userId: string, attemptId:
   return attempt
 }
 
-/** Persist paid evidence even after cancellation/lease loss; never run tools or charge here. */
 export async function recordProviderResult(input: {
   userId: string; attemptId: string; requestHash: string; outcome: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; result: Prisma.InputJsonValue
 }) {
   const captured = { ...input }
   if (!['succeeded', 'failed', 'cancelled', 'unknown'].includes(captured.outcome)) runtimeError('RUNTIME_INPUT_INVALID', '供应商结果状态无效。')
   const result = runtimeJson({ outcome: captured.outcome, result: captured.result })
+  const contentionScope = await readAttemptContentionScope(captured.userId, captured.attemptId)
+  const contentionBackoff = Boolean(contentionScope?.isChild)
   return runtimeTransaction(async tx => {
     const attempt = await lockOwnedAttempt(tx, captured.userId, captured.attemptId, captured.requestHash)
     if ((attempt.resultHash !== null || attempt.result !== null)
@@ -278,7 +305,7 @@ export async function recordProviderResult(input: {
     await outbox(tx, { taskRootId: attempt.operation.taskRootId, operationId: attempt.operationId, runId: attempt.runId,
       eventKey: `result:${attempt.id}:${result.hash}`, type: 'provider.result.recorded', payload: { attemptId: attempt.id, status: captured.outcome, resultHash: result.hash } })
     return updated
-  })
+  }, { contentionBackoff, contentionScope })
 }
 
 export type ProviderUsageObservation = {
@@ -302,6 +329,8 @@ export async function recordProviderUsage(input: { userId: string; attemptId: st
   if (!Number.isInteger(captured.revision) || captured.revision < 1 || captured.revision > 2147483647) runtimeError('RUNTIME_USAGE_INVALID', '用量版本无效。')
   validateUsage(captured.usage)
   const snapshot = runtimeJson(captured.usage)
+  const contentionScope = await readAttemptContentionScope(captured.userId, captured.attemptId)
+  const contentionBackoff = Boolean(contentionScope?.isChild)
   return runtimeTransaction(async tx => {
     const attempt = await lockOwnedAttempt(tx, captured.userId, captured.attemptId, captured.requestHash)
     const old = await tx.agentProviderUsageReceipt.findUnique({ where: { attemptId: attempt.id } })
@@ -329,7 +358,7 @@ export async function recordProviderUsage(input: { userId: string; attemptId: st
     await outbox(tx, { taskRootId: attempt.operation.taskRootId, operationId: attempt.operationId, runId: attempt.runId,
       eventKey: `usage:${attempt.id}:${captured.revision}`, type: 'provider.usage.recorded', payload: { attemptId: attempt.id, revision: captured.revision, ...captured.usage } })
     return receipt
-  })
+  }, { contentionBackoff, contentionScope })
 }
 
 /** Stamp derivative ownership in the SAME transaction that creates its source

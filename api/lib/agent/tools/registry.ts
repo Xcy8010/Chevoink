@@ -1,4 +1,6 @@
 import { toOpenAIParameters } from '../tool-schema.js'
+import { configureAgentTool, modelListTool } from './configuration-tools.js'
+import { modelAssignmentTool } from './model-assignment-tools.js'
 
 import type { AgentExecutionMode } from '../../../../shared/contracts/index.js'
 import type { OpenAIToolDefinition } from '../../ai-service.js'
@@ -115,6 +117,7 @@ import {
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- 注册表需要擦除各工具的 Args 泛型 */
 export const allTools: AgentTool<any>[] = [
+  modelListTool, configureAgentTool, modelAssignmentTool,
   // 读
   novelGetContextTool,
   chapterReadTool,

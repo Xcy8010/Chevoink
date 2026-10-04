@@ -16,6 +16,7 @@ import { prisma, DataAccessError } from './prisma.js'
 import { env } from '../config/env.js'
 import { ModelRouteRejected, routeRejectionMayRetry, withModelRoutePool } from './model-route-pool.js'
 import { getToolModelRuntime } from './tool-model-config.js'
+import { assignedTaskModel, TEXT_ACTION_TASKS } from './agent/model-assignment-context.js'
 import type {
   ChapterAssistRequest,
   GenerateCoverImageRequest,
@@ -49,7 +50,9 @@ type TextCompletionOptions = {
   targetId?: string | null
   temperature?: number
   /** 思考强度按调用覆盖：简单分类/打标类任务用 low 提速，默认走 env 全局值 */
-  reasoningEffort?: 'low' | 'high' | 'max'
+  reasoningEffort?: import('../../shared/contracts/credits.js').ModelReasoningEffort
+  /** A separately confirmed selection, e.g. a frozen style-learning job. */
+  explicitModelSelection?: boolean
   modelTier?: CreditModelTier
   /** Server-resolved runtime only; never accept provider credentials from tool arguments. */
   modelRuntime?: Awaited<ReturnType<typeof getModelTierRuntime>>
@@ -1050,6 +1053,9 @@ export async function generateTextCompletion(
 async function generateGoalTextCompletion(systemPrompt: string, userPrompt: string, options: TextCompletionOptions) {
   options = { ...options }
   options.signal?.throwIfAborted()
+  const task = TEXT_ACTION_TASKS[options.action]
+  const assigned = task && !options.explicitModelSelection ? await assignedTaskModel(options.userId, options.novelId, task) : undefined
+  if (assigned) options = { ...options, modelRuntime: assigned.runtime, reasoningEffort: assigned.runtime.reasoningEffort, multiplierBps: undefined, boundedReview: false }
   const sourceRuntime = options.modelRuntime ?? await getModelTierRuntime(options.modelTier ?? 'speed', options.userId)
   const modelRuntime = sourceRuntime.tier === 'custom' ? sourceRuntime : { ...sourceRuntime, multiplierBps: effectiveModelMultiplier({
     multiplierBps: sourceRuntime.multiplierBps, metadata: { freePromotion: sourceRuntime.freePromotion },
@@ -1321,6 +1327,8 @@ export async function chapterAssistData(userId: string, input: ChapterAssistRequ
 }
 
 export async function generateCoverPromptData(userId: string, input: GenerateCoverPromptRequest) {
+  if (input.novelId && !await prisma.novel.findFirst({ where: { id: input.novelId, authorId: userId }, select: { id: true } }))
+    throw new DataAccessError(404, 'NOT_FOUND', '作品不存在或无权访问。')
   const systemPrompt = '你是一名小说封面提示词设计师，请输出适合图像模型的中文封面提示词。平台规定书封必须带作品名：提示词必须要求画面包含书名标题文字，严禁输出「无文字/没有文字/no text」类负向约束。'
   const userPrompt = [
     `作品名：${input.novelTitle}`,
@@ -1338,6 +1346,7 @@ export async function generateCoverPromptData(userId: string, input: GenerateCov
   const prompt = await generateTextCompletion(systemPrompt, userPrompt, {
     userId,
     action: 'generateCoverPrompt',
+    novelId: input.novelId,
     targetType: 'coverPrompt',
   })
 

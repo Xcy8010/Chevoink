@@ -39,6 +39,7 @@ export function useCoverActions({
       }
 
       return generateCoverPrompt({
+        novelId: activeNovelId,
         novelTitle: coverForm.novelTitle.trim(),
         summary: coverForm.summary.trim(),
         genre: coverForm.genre.trim(),
