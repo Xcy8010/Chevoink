@@ -41,7 +41,7 @@ async function createFixture(): Promise<Fixture> {
     const created = await createAgentGoal(user.id, { sessionId: session.id }, {
       requestId: randomUUID(), objective: '验证目标记忆绑定', options: { mode: 'build' },
       limits: { tokenLimit: 5_000, activeTimeLimitMs: 3_600_000 },
-    })
+    }, { authenticatedHttp: true })
     const runId = randomUUID()
     await prisma.agentRun.create({ data: { id: runId, userId: user.id, novelId: novel.id, sessionId: session.id,
       status: 'queued', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'legacy' } })

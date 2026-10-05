@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { env } from '../../config/env.js'
+import { COMPATIBILITY_TOKEN_LIMIT } from './execution-control.js'
 import { prisma } from '../prisma.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { databaseNow, runtimeError, runtimeJson } from './runtime-common.js'
@@ -220,16 +221,8 @@ export async function executeDurableChildTool(parent: RunLeaseToken, cursor: Too
           : { ...(await import('./task-spec.js')).buildTaskSpec({ runId: randomUUID(), novelId: ctx.novelId, chapterId: ctx.chapterId, prompt,
             creativeFreedom: source.configuration.creativeFreedom, qualityMode: source.configuration.qualityMode }), scope: parentSpec.scope, hardConstraints: parentSpec.hardConstraints }
         const budget = await readTaskBudgetInTransaction(tx, parent.taskRootId)
-        if (budget.unresolvedAttempts > 0n || budget.deadlineExceeded) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原任务存在未知支出或已到期限，不能分配新子任务额度。')
-        const available = BigInt(budget.budget.tokenLimit) - budget.usedTokens - budget.reservedChildTokens
-        // Separate windows retain the legacy default, bounded by the original
-        // aggregate allocation. The resulting numeric ceiling is frozen once;
-        // inline helpers keep their historical 16K ceiling. Leave one share
-        // for the parent to review/join, never expand the original aggregate.
-        const tokenCeiling = kind === 'inline' ? Math.min(16000, budget.policy.initialTokens)
-          : Math.min(env.agentRunTokenBudget, Number(available / BigInt(entries.length - index + 1)))
-        if (tokenCeiling < 500) return runtimeError('RUNTIME_CHILD_BUDGET_EXHAUSTED', '父任务剩余额度不足以预留本批完整子任务及主控审查。')
-        if (budget.policy.version !== 2) return runtimeError('RUNTIME_TURN_POLICY_REQUIRED', '原父任务缺少冻结轮次合同，不能用当前默认补造。')
+        if (budget.unresolvedAttempts > 0n) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原任务存在未知支出，不能分配新子任务。')
+        const tokenCeiling = COMPATIBILITY_TOKEN_LIMIT
         const modelName = selection.runtime.modelName ?? env.aiTextModel
         const inheritedConfiguration = Object.fromEntries(Object.entries(source.configuration).filter(([key]) => key !== 'pinnedSubagentId')) as ChildConfiguration
         const configuration: ChildConfiguration = { ...inheritedConfiguration, mode, agentType: role,
@@ -246,7 +239,7 @@ export async function executeDurableChildTool(parent: RunLeaseToken, cursor: Too
         }
         const grant = await admitChildExecutionInTransaction(tx, parent, { parentOperationId: prepared.operation.id, childIndex: index, kind, role,
           name: definition?.name ?? selection.entry.title, prompt, spec: task, configuration, price: selection.price, tokenCeiling,
-          turnCeiling: kind === 'inline' ? Math.min(budget.policy.initialTurns, 24) : budget.policy.initialTurns, roleTools: getAgentDefinition(role).tools,
+          turnCeiling: 1, roleTools: getAgentDefinition(role).tools,
           ...(tool.name === 'task_send' ? { targetSessionId: String(args.sessionId) } : {}),
           ...(definition ? { definitionId: definition.id } : {}),
           // Rework admission appends this current parent block after the

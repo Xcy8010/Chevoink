@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client'
 import { DataAccessError, prisma } from '../prisma.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { assertRunGoalFence } from './goal-fence.js'
+import { assertWritingStructureAuthority } from './writing-scope.js'
 
 type WriteScope = { userId: string; novelId: string; runId: string; transaction?: Prisma.TransactionClient }
 
@@ -35,6 +36,7 @@ async function assertManuscriptRevision(tx: Prisma.TransactionClient, scope: Wri
 export async function withAgentManuscriptWrite<T>(scope: WriteScope, write: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
   const apply = async (tx: Prisma.TransactionClient) => {
     await assertAgentManuscriptCurrent(tx, scope)
+    await assertWritingStructureAuthority(tx, scope)
     return write(tx)
   }
   return scope.transaction ? apply(scope.transaction) : prisma.$transaction(apply)

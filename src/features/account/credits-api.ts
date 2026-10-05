@@ -46,3 +46,7 @@ export function updateCustomModel(modelId: string, input: Partial<SaveCustomMode
 export function deleteCustomModel(modelId: string): Promise<{ ok: true }> {
   return requestJson(`/api/credits/models/${modelId}`, { method: 'DELETE' })
 }
+
+export function fetchPublicCreditPolicy(): Promise<import('../../../shared/contracts').PublicCreditPolicy> {
+  return requestJson('/api/credits/public-policy')
+}

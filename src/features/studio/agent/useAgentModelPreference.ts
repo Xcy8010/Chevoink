@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { requestJson } from '@/app/api-client'
+import { selectableModelTierSchema } from '../../../../shared/contracts/model-tier.js'
 import type { AgentStreamEvent, CreditModelTier, ModelReasoningEffort } from '../../../../shared/contracts/index.js'
 import type { ModelAssignmentsPayload } from '../../../../shared/contracts/agent-model-assignments.js'
 import { useAgentStore } from './agentStore'
@@ -18,7 +19,8 @@ export function resolveComposerModelEffort(preferred: ModelReasoningEffort | und
 export function useAgentModelPreference(novelId: string, sessionId: string | null) {
   const [fallbackTier, setFallbackTier] = useState<CreditModelTier>(() => {
     const saved = typeof window === 'undefined' ? null : window.localStorage.getItem('chevoink:agent-model-tier')
-    return saved === 'lite' || saved === 'standard' || saved === 'performance' || saved === 'ultimate' || saved === 'custom' ? saved : 'speed'
+    const parsed = selectableModelTierSchema.safeParse(saved)
+    return parsed.success ? parsed.data : 'speed'
   })
   const [fallbackCustomId, setFallbackCustomId] = useState<string | null>(() => typeof window === 'undefined' ? null : window.localStorage.getItem('chevoink:agent-custom-model-id'))
   const [reasoningSelections, setReasoningSelections] = useState<Record<string, ModelReasoningEffort>>(() => {

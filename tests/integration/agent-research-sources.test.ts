@@ -1,3 +1,5 @@
+import { researchReportSaveTool } from '../../api/lib/agent/tools/search-tools.js'
+import { observeSemanticTransition, nextStagnantBatch } from '../../api/lib/agent/semantic-progress.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
@@ -14,6 +16,61 @@ const available = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handle
 afterAll(async () => { await prisma.$disconnect() })
 
 describe.skipIf(!available)('J4 private versioned research sources', () => {
+  it('six actual ordered report section writes keep legacy progress alive, while noop and A/B cycles do not', async () => {
+    const user = await prisma.user.create({ data: { nickname: 'semantic-report-fixture', passwordHash: 'test-only' } })
+    try {
+      const novel = await prisma.novel.create({ data: { authorId: user.id, title: '研究报告', slug: randomUUID(), summary: '' } })
+      const session = await prisma.agentSession.create({ data: { userId: user.id, novelId: novel.id, title: '研究' } })
+      const runId = randomUUID(), spec = buildTaskSpec({ runId, novelId: novel.id, prompt: '拆解这本小说' })
+      expect(spec.intent).toBe('research_analysis')
+      await prisma.agentRun.create({ data: { id: runId, userId: user.id, novelId: novel.id, sessionId: session.id, mode: 'act', engine: 'loop',
+        action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', taskSpec: JSON.parse(JSON.stringify(spec)) } })
+      const ctx = { userId: user.id, novelId: novel.id, sessionId: session.id, runId, chapterId: null, callId: 'report', mode: 'build' as const,
+        creativeFreedom: 'balanced' as const, qualityMode: 'balanced' as const, signal: new AbortController().signal, emit: () => {} }
+      const seen = new Set<string>()
+      let revision = 0, stagnant = 0, target = ''
+      const save = async (section: { id: string; order: number; content: string; citations: [] }, progressed: boolean) => {
+        const result = await researchReportSaveTool.execute(ctx, { reportId: 'main', title: '原任务报告', expectedRevision: revision, section })
+        revision = JSON.parse(result.output).revision
+        const transition = result.semanticTransition!
+        if (!target) target = transition.targetId
+        expect(transition.targetId).toBe(target)
+        const actual = observeSemanticTransition(seen, target, transition.beforeHash, transition.afterHash)
+        expect(actual).toBe(progressed)
+        stagnant = nextStagnantBatch(stagnant, actual)
+        return result
+      }
+      for (let index = 0; index < 6; index++) {
+        await save({ id: `section-${index}`, order: index, content: `真实分析成果${index}`, citations: [] }, true)
+        expect(stagnant).toBe(0)
+      }
+      const original = { id: 'section-5', order: 5, content: '真实分析成果5', citations: [] as [] }
+      await save(original, false)
+      expect(revision).toBe(6)
+      await save({ ...original, content: '新事实B' }, true)
+      await save(original, false)
+      await save({ ...original, content: '新事实B' }, false)
+      expect(stagnant).toBe(2)
+      const report = await readResearchReport(ctx, {})
+      expect(report.sections).toHaveLength(6)
+      expect(report.content).toContain('真实分析成果0')
+      expect(report.content).toContain('新事实B')
+      await expect(saveResearchReportSection(ctx, { reportId: 'main', title: '原任务报告', expectedRevision: 0,
+        section: { ...original, content: '旧版本越权覆盖' } })).rejects.toMatchObject({ code: 'RESEARCH_REPORT_CONFLICT' })
+      await prisma.agentRun.update({ where: { id: runId }, data: { status: 'cancelled' } })
+      await expect(saveResearchReportSection(ctx, { reportId: 'main', title: '原任务报告', expectedRevision: revision,
+        section: { ...original, content: '取消后写入' } })).rejects.toMatchObject({ code: 'RESEARCH_RUN_NOT_ACTIVE' })
+      expect((await readResearchReport(ctx, {})).content).toBe(report.content)
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: user.id } })).toBe(0)
+    } finally {
+      await prisma.agentArtifact.deleteMany({ where: { run: { userId: user.id } } })
+      await prisma.agentRun.deleteMany({ where: { userId: user.id } })
+      await prisma.agentSession.deleteMany({ where: { userId: user.id } })
+      await prisma.novel.deleteMany({ where: { authorId: user.id } })
+      await prisma.user.delete({ where: { id: user.id } })
+    }
+  })
+
   it('freezes small research budgets, stops consecutive failures across resume, and isolates the next task', async () => {
     const user = await prisma.user.create({ data: { nickname: 'budget-fixture', passwordHash: 'test-only' } })
     try {

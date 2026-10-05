@@ -669,3 +669,23 @@ export const DOC_GROUPS = DOCS.reduce<string[]>((groups, doc) => {
   if (!groups.includes(doc.group)) groups.push(doc.group)
   return groups
 }, [])
+
+/** Current policy claims are conditional; historical release notes stay intact. */
+export function getAccountDocs(publicBetaEnabled: boolean | undefined): DocEntry[] {
+  if (publicBetaEnabled === true) return DOCS
+  return DOCS.map(doc => {
+    if (doc.key === 'changelog') return doc
+    return { ...doc, summary: doc.key === 'plan' ? '免费版套餐权益与后续套餐规划。' : doc.summary,
+      sections: doc.sections.filter(section => !(doc.key === 'credits' && section.id === 'reset')).map(section => ({ ...section,
+        heading: section.heading === '公测版套餐' ? '免费版套餐' : section.heading,
+        paragraphs: section.paragraphs?.map(paragraph => paragraph
+          .replace('注册成功后自动开通公测版套餐，立即获得每日公测额度，无需付费与绑卡。', '注册成功后自动开通免费版套餐，无需付费与绑卡。')
+          .replace('Credits 是公测期间调用平台能力的统一计量', 'Credits 是调用平台能力的统一计量')
+          .replace('公测版是公测期间唯一套餐，注册即自动开通，¥0 / 月：包含每日公测额度、', '免费版注册即自动开通，¥0 / 月：包含')
+          .replace('公测结束后将推出', '后续计划推出')
+          .replace('公测用户享有优惠续订通道', '参与过公测的用户享有优惠续订通道')
+          .replace('可以等待每日 15:00 的额度重置，或邀请好友获得长期有效的奖励额度。', '可以邀请好友获得长期有效的奖励额度。')),
+        bullets: section.bullets?.map(bullet => bullet === '每日额度用完后，奖励额度自动接续抵扣。' ? '奖励额度可用于平台调用。' : bullet),
+      })) }
+  })
+}

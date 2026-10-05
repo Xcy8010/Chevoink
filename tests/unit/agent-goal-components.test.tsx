@@ -152,7 +152,8 @@ it('shows usage, evidence and revision history in goal details', () => {
     completion: { progressHash: 'a'.repeat(64), canConfirm: false, needsAuthorVerification: false, blockers: [] },
   }
   render(<GoalEditorDialog open goal={goal} detail={detail} busy={false} onClose={vi.fn()} onSave={vi.fn()} />)
-  expect(screen.getByText('1200/50000')).toBeTruthy()
+  expect(screen.getByText('1200')).toBeTruthy()
+  expect(screen.queryByText('1200/50000')).toBeNull()
   expect(screen.getByText('0.003')).toBeTruthy()
   expect(screen.getByText('版本历史')).toBeTruthy()
   expect(screen.getByText('前三章已完成')).toBeTruthy()
@@ -191,6 +192,18 @@ it('formats credit micros exactly and keeps implementation reason codes out of t
   expect(formatCreditsMicros('3000')).toBe('0.003')
   expect(formatGoalReason('GOAL_SCOPE_DECISION_REQUIRED')).toBe('请明确目标范围')
   expect(formatGoalReason('GOAL_UNKNOWN')).toBe('等待处理')
+})
+
+it('shows a Token ratio only for an effective verified user cap', () => {
+  const detail: AgentGoalDetail = { goal: { ...goal, executionControl: { version: 3, controlPolicy: 'until_completion', origin: 'user',
+    limits: { tokens: '9000', turns: null, activeTimeMs: null } } }, revisions: [], evidence: [], nextRevisionCursor: null, nextEvidenceCursor: null,
+  completion: { progressHash: 'a'.repeat(64), canConfirm: false, needsAuthorVerification: false, blockers: [] } }
+  const view = render(<GoalEditorDialog open goal={goal} detail={detail} busy={false} onClose={vi.fn()} onSave={vi.fn()} />)
+  expect(screen.getByText('1200/9000')).toBeTruthy()
+  view.rerender(<GoalEditorDialog open goal={goal} detail={{ ...detail, goal: { ...goal, executionControl: { version: 3, controlPolicy: 'until_completion',
+    origin: 'system_default', limits: { tokens: null, turns: null, activeTimeMs: null } } } }} busy={false} onClose={vi.fn()} onSave={vi.fn()} />)
+  expect(screen.getByText('1200')).toBeTruthy()
+  expect(screen.queryByText('1200/9000')).toBeNull()
 })
 
 it('shows author confirmation only for a confirmable completion review', () => {

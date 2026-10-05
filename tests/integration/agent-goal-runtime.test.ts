@@ -77,7 +77,7 @@ async function fixture(tokenLimit = 5_000): Promise<Fixture> {
     const chapter = await prisma.chapter.create({ data: { authorId: user.id, novelId: novel.id, volumeId: volume.id,
       title: '原始章节', content: '原始正文', orderIndex: 1, orderInVolume: 1, wordCount: 4 } })
     const created = await createAgentGoal(user.id, { sessionId: session.id }, { requestId: randomUUID(), objective: '完成持久目标测试',
-      options: { mode: 'build' }, limits: { tokenLimit, activeTimeLimitMs: 3_600_000 } })
+      options: { mode: 'build' }, limits: { tokenLimit, activeTimeLimitMs: 3_600_000 } }, { authenticatedHttp: true })
     const goal = await prisma.agentGoal.findUniqueOrThrow({ where: { id: created.id } })
     const parent = await createGoalRun({ userId: user.id, novelId: novel.id, sessionId: session.id, goalId: goal.id }, 'goal_auto', 1)
     await prisma.agentGoal.update({ where: { id: goal.id }, data: { currentRunId: parent.runId, continuationIndex: 1, phase: 'executing', activeSince: new Date() } })

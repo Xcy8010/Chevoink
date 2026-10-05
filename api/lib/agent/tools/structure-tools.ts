@@ -1,3 +1,6 @@
+import type { Prisma } from '@prisma/client'
+import { readSemanticStructureHash } from '../semantic-progress.js'
+import type { ToolContext } from './types.js'
 import { z } from 'zod'
 
 import { DataAccessError } from '../../prisma.js'
@@ -17,6 +20,15 @@ import { executeDurableRead } from './durable-read.js'
 import { executeDurableCreate } from './durable-create.js'
 import { getStructureRevisionHash } from '../../data/volume.js'
 import { withAgentManuscriptWrite } from '../manuscript-scope.js'
+
+async function withStructureProgress<T>(ctx: ToolContext, work: (tx: Prisma.TransactionClient) => Promise<T>) {
+  return withAgentManuscriptWrite(ctx, async tx => {
+    const beforeHash = await readSemanticStructureHash(tx, ctx.novelId)
+    const value = await work(tx)
+    const afterHash = await readSemanticStructureHash(tx, ctx.novelId)
+    return { value, semanticTransition: { targetId: ctx.novelId, beforeHash, afterHash } }
+  })
+}
 
 const STRUCTURE_PERMISSION = { plan: 'deny', build: 'allow', review: 'deny' } as const
 const READ_PERMISSION = { plan: 'allow', build: 'allow', review: 'allow' } as const
@@ -77,10 +89,11 @@ export const volumeCreateTool = defineTool({
       const effective = volumeCreateTool.parameters.parse(normalize(args))
       return executeDurableCreate(captured, effective, normalize, tx => volumeCreateTool.execute({ ...captured, durableCreate: undefined, transaction: tx }, effective), 'volume_create')
     }
-    const volume = await withAgentManuscriptWrite(ctx, tx => createVolumeData(ctx.userId, ctx.novelId, args, tx))
+    const { value: volume, semanticTransition } = await withStructureProgress(ctx, tx => createVolumeData(ctx.userId, ctx.novelId, args, tx))
     return {
       output: `已创建第 ${volume.orderIndex} 卷《${volume.title}》，volumeId=${volume.id}。`,
       summary: `新建卷《${volume.title}》`,
+      semanticTransition,
       observedState: { kind: 'volume', id: volume.id, revision: volume.revision },
     }
   },
@@ -99,9 +112,9 @@ export const volumeUpdateTool = defineTool({
   permission: STRUCTURE_PERMISSION,
   readOnly: false,
   async execute(ctx, { volumeId, ...input }) {
-    const volume = await withAgentManuscriptWrite(ctx, tx => updateVolumeData(ctx.userId, ctx.novelId, volumeId, input, tx))
+    const { value: volume, semanticTransition } = await withStructureProgress(ctx, tx => updateVolumeData(ctx.userId, ctx.novelId, volumeId, input, tx))
     return volume
-      ? { output: `已更新卷《${volume.title}》。`, summary: `更新卷《${volume.title}》` }
+      ? { semanticTransition, output: `已更新卷《${volume.title}》。`, summary: `更新卷《${volume.title}》` }
       : { output: '目标卷不存在或不属于当前作品。', outcome: 'failed' as const }
   },
 })
@@ -118,9 +131,9 @@ export const volumeMoveTool = defineTool({
   permission: STRUCTURE_PERMISSION,
   readOnly: false,
   async execute(ctx, { volumeId, ...input }) {
-    const volume = await withAgentManuscriptWrite(ctx, tx => moveVolumeData(ctx.userId, ctx.novelId, volumeId, input, tx))
+    const { value: volume, semanticTransition } = await withStructureProgress(ctx, tx => moveVolumeData(ctx.userId, ctx.novelId, volumeId, input, tx))
     return volume
-      ? { output: `已把《${volume.title}》移动到第 ${volume.orderIndex} 卷，全书章序已同步。`, summary: `移动卷《${volume.title}》` }
+      ? { semanticTransition, output: `已把《${volume.title}》移动到第 ${volume.orderIndex} 卷，全书章序已同步。`, summary: `移动卷《${volume.title}》` }
       : { output: '目标卷不存在或不属于当前作品。', outcome: 'failed' as const }
   },
 })
@@ -133,8 +146,8 @@ export const volumeDeleteTool = defineTool({
   permission: STRUCTURE_PERMISSION,
   readOnly: false,
   async execute(ctx, args) {
-    const deleted = await withAgentManuscriptWrite(ctx, tx => deleteVolumeData(ctx.userId, ctx.novelId, args.volumeId, tx))
-    return deleted ? { output: '空卷已删除，卷序已自动压缩。', summary: '删除空卷' } : { output: '目标卷不存在。', outcome: 'failed' as const }
+    const { value: deleted, semanticTransition } = await withStructureProgress(ctx, tx => deleteVolumeData(ctx.userId, ctx.novelId, args.volumeId, tx))
+    return deleted ? { semanticTransition, output: '空卷已删除，卷序已自动压缩。', summary: '删除空卷' } : { output: '目标卷不存在。', outcome: 'failed' as const }
   },
 })
 
@@ -155,9 +168,10 @@ function defineChapterMoveTool(name: 'chapter_move' | 'chapter_move_to_volume', 
     readOnly: false,
     async execute(ctx, { chapterId, ...input }) {
       assertProtectedChapterUntouched(ctx, chapterId)
-      const chapter = await withAgentManuscriptWrite(ctx, tx => moveChapterData(ctx.userId, ctx.novelId, chapterId, input, tx))
+      const { value: chapter, semanticTransition } = await withStructureProgress(ctx, tx => moveChapterData(ctx.userId, ctx.novelId, chapterId, input, tx))
       return chapter
         ? {
+            semanticTransition,
             output: `已移动《${chapter.title}》：全书第 ${chapter.orderIndex} 章，卷内第 ${chapter.orderInVolume} 章。`,
             summary: `移动章节《${chapter.title}》`,
             observedState: { kind: 'chapter' as const, id: chapter.id, revision: chapter.revision },
@@ -185,9 +199,9 @@ export const chapterSplitTool = defineTool({
   readOnly: false,
   async execute(ctx, { chapterId, ...input }) {
     assertProtectedChapterUntouched(ctx, chapterId)
-    const result = await withAgentManuscriptWrite(ctx, tx => splitChapterData(ctx.userId, ctx.novelId, chapterId, input, tx))
+    const { value: result, semanticTransition } = await withStructureProgress(ctx, tx => splitChapterData(ctx.userId, ctx.novelId, chapterId, input, tx))
     return result
-      ? { output: `已将《${result.first.title}》拆分，并创建相邻章节《${result.second.title}》（chapterId=${result.second.id}）。`, summary: `拆分《${result.first.title}》`, affectedChapterIds: [result.first.id, result.second.id] }
+      ? { semanticTransition, output: `已将《${result.first.title}》拆分，并创建相邻章节《${result.second.title}》（chapterId=${result.second.id}）。`, summary: `拆分《${result.first.title}》`, affectedChapterIds: [result.first.id, result.second.id] }
       : { output: '目标章节不存在或不属于当前作品。', outcome: 'failed' as const }
   },
 })
@@ -207,9 +221,10 @@ export const chapterMergeTool = defineTool({
   readOnly: false,
   async execute(ctx, { targetChapterId, ...input }) {
     assertProtectedChapterUntouched(ctx, targetChapterId, input.sourceChapterId)
-    const chapter = await withAgentManuscriptWrite(ctx, tx => mergeChaptersData(ctx.userId, ctx.novelId, targetChapterId, input, tx))
+    const { value: chapter, semanticTransition } = await withStructureProgress(ctx, tx => mergeChaptersData(ctx.userId, ctx.novelId, targetChapterId, input, tx))
     return chapter
       ? {
+          semanticTransition,
           output: `章节已合并到《${chapter.title}》，来源章节已删除，当前正文 ${chapter.wordCount} 字。`,
           summary: `合并到《${chapter.title}》`,
           affectedChapterIds: [chapter.id],

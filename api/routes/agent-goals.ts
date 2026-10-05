@@ -25,7 +25,7 @@ router.get('/sessions/:sessionId/goal', async (req, res) => {
 router.post('/sessions/:sessionId/goals', async (req, res) => {
   const requestId = createRequestId()
   try { res.json(buildSuccess(requestId, await createAgentGoal(requireSessionUserId(req), { sessionId: String(req.params.sessionId) },
-    parseBody(createAgentGoalSchema, req.body, '目标参数无效。')))) }
+    parseBody(createAgentGoalSchema, req.body, '目标参数无效。'), { authenticatedHttp: true }))) }
   catch (error) { sendRouteError(res, requestId, error) }
 })
 // New local window: session + goal + initial scheduling intent commit atomically.
@@ -35,7 +35,7 @@ router.post('/goals', async (req, res) => {
     const userId = requireSessionUserId(req)
     const body = parseBody(createAgentGoalSchema.extend({ novelId: z.string().min(1).max(64) }), req.body, '目标参数无效。')
     const { novelId, ...input } = body
-    res.json(buildSuccess(requestId, await createAgentGoal(userId, { novelId }, input)))
+    res.json(buildSuccess(requestId, await createAgentGoal(userId, { novelId }, input, { authenticatedHttp: true })))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 router.patch('/sessions/:sessionId/goals/:goalId', async (req, res) => {
@@ -47,7 +47,7 @@ router.patch('/sessions/:sessionId/goals/:goalId', async (req, res) => {
 router.post('/sessions/:sessionId/goals/:goalId/actions', async (req, res) => {
   const requestId = createRequestId()
   try { res.json(buildSuccess(requestId, await actOnAgentGoal(requireSessionUserId(req), String(req.params.sessionId), String(req.params.goalId),
-    parseBody(actOnAgentGoalSchema, req.body, '目标操作无效。')))) }
+    parseBody(actOnAgentGoalSchema, req.body, '目标操作无效。'), { authenticatedHttp: true }))) }
   catch (error) { sendRouteError(res, requestId, error) }
 })
 router.get('/sessions/:sessionId/goals/:goalId', async (req, res) => {

@@ -11,14 +11,29 @@ const ctx: ToolContext = { userId: 'author', novelId: 'novel', runId: 'run', ses
 let prompt = ''
 let altered = false
 let spawned = false
+let modelLabel = '模型'
+let choices: Array<{ id: string; ownerUserId: string | null; tier: string | null; displayName: string; modelName: string }> = []
 const tx = { agentRun: { findFirst: async () => ({ id: 'run', userId: 'author', sessionId: 'session', novelId: 'novel', taskRootId: null,
   startRequest: withHumanAdmission({ prompt, mode: 'build', novelId: altered ? 'foreign' : 'novel', sessionId: 'session' }) }) },
   agentSession: { findFirst: async () => ({ spawnedFromSessionId: spawned ? 'other' : null }) },
   agentMessage: { findFirst: async () => ({ id: 'human', parts: [{ type: 'text', text: prompt }] }) },
   agentQueuedRequest: { findMany: async () => [] },
-  aiModelConfig: { findFirst: async () => ({ displayName: '模型', modelName: 'provider-model' }) } } as unknown as Prisma.TransactionClient
-beforeEach(() => { altered = false; spawned = false; liveControls.rows = [] })
+  aiModelConfig: { findFirst: async () => ({ displayName: modelLabel, modelName: 'provider-model' }), findMany: async () => choices } } as unknown as Prisma.TransactionClient
+beforeEach(() => { altered = false; spawned = false; liveControls.rows = []; modelLabel = '模型'; choices = [] })
 describe('native configuration provenance and exact requested tuple', () => {
+  it('authorizes a dynamic product name and its default effort, but refuses names shared with legacy aliases or another model', async () => {
+    const tier = 'builtin_0123456789abcdef'
+    modelLabel = '动态模型'
+    prompt = '请切换到 动态模型'
+    await expect(assertConfigurationAuthority(tx, ctx, { model: { modelTier: tier }, effectiveReasoningEffort: 'max' })).resolves.toBeDefined()
+    choices = [{ id: 'other', ownerUserId: 'author', tier: null, displayName: '动态模型', modelName: 'other-provider' }]
+    await expect(assertConfigurationAuthority(tx, ctx, { model: { modelTier: tier } })).rejects.toMatchObject({ code: 'CONFIGURATION_AUTHOR_REQUIRED' })
+    modelLabel = '极速'; prompt = '请切换到 极速'
+    choices = [{ id: 'speed', ownerUserId: null, tier: 'speed', displayName: '已改名极速', modelName: 'speed-provider' }]
+    await expect(assertConfigurationAuthority(tx, ctx, { model: { modelTier: tier } })).rejects.toMatchObject({ code: 'CONFIGURATION_AUTHOR_REQUIRED' })
+    prompt = '请切换到 builtin_0123456789abcdef'
+    await expect(assertConfigurationAuthority(tx, ctx, { model: { modelTier: tier } })).resolves.toBeDefined()
+  })
   it('accepts a direct human choice without extra confirmation', async () => {
     prompt = '请切换到 ultimate，思考强度高'
     await expect(assertConfigurationAuthority(tx, ctx, { model: { modelTier: 'ultimate', reasoningEffort: 'high' } })).resolves.toMatchObject({ sourceMessageId: 'human' })

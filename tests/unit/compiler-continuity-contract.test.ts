@@ -4,6 +4,7 @@ import { compilerContinuityCoverage, compilerContinuityCoverageMatches } from '.
 import { commitChapterBridge, isWritingTaskContinuityCompiler, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import * as manuscript from '../../api/lib/agent/manuscript-scope.js'
+import * as memory from '../../api/lib/agent/story-memory.js'
 
 afterEach(() => vi.restoreAllMocks())
 const input = () => ({ chapter: { id: 'c', title: '本章', revision: 2, content: '修订后的完整正文', orderIndex: 2 },
@@ -30,20 +31,32 @@ describe('compiler continuity report dependencies', () => {
     expect(compilerContinuityCoverageMatches({ ...coverage, reviewHash: undefined }, coverage)).toBe(false)
     expect(compilerContinuityCoverageMatches({ ...coverage, protocolVersion: undefined }, coverage)).toBe(false)
   })
-  it.each(['missing', 'old-protocol', 'wrong-hash'] as const)('new commit rejects %s coverage before any terminal effect', async scenario => {
+  it.each(['missing', 'old-protocol', 'wrong-hash'] as const)('current terminal commits while %s optional coverage remains unknown', async scenario => {
     const current = input(), bridge = { ...current.bridge, fromChapterId: null }
     const coverage = compilerContinuityCoverage({ ...current, bridge, source: null })
     const terminalWrite = vi.fn()
-    const db = { $queryRaw: vi.fn().mockResolvedValue([{ id: 'n' }]),
+    const proposal = vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory' } as never)
+    const db = { $queryRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = strings.join('?')
+      if (sql === 'SELECT id FROM novels WHERE id = ? FOR UPDATE' && values[0] === 'n') return [{ id: 'n' }]
+      if (sql === 'SELECT id FROM story_compilations WHERE id = ? AND user_id = ? AND novel_id = ? FOR UPDATE'
+        && values[0] === 'comp' && values[1] === 'u' && values[2] === 'n') return [{ id: 'comp' }]
+      if (sql === 'SELECT id FROM chapters WHERE id = ? FOR UPDATE' && values[0] === 'c') return [{ id: 'c' }]
+      throw new Error(`Unexpected fixture lock: ${sql}`)
+    }),
       storyCompilation: { findFirst: vi.fn().mockResolvedValue({ id: 'comp', chapter: current.chapter, bridge, sceneTasks: current.sceneTasks,
         validation: { independentCheck: 'complete', checkedRevision: 2, errorCount: 0,
           ...(scenario === 'missing' ? {} : { coverage: { ...coverage, ...(scenario === 'old-protocol' ? { protocolVersion: 1 } : { reviewHash: '0'.repeat(64) }) } }) } }), update: terminalWrite },
       chapter: { findFirst: vi.fn().mockResolvedValue(current.chapter) }, chapterBridge: { update: terminalWrite }, sceneTask: { updateMany: terminalWrite },
+      chapterQualityReport: { findFirst: vi.fn().mockResolvedValue(null) },
     } as unknown as Prisma.TransactionClient
     await expect(commitChapterBridge({ userId: 'u', novelId: 'n', compilationId: 'comp', chapterSummary: '章节摘要',
       exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
-      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '转折' }, db)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
-    expect(terminalWrite).not.toHaveBeenCalled()
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '转折' }, db)).resolves.toMatchObject({ compilationId: 'comp', chapterId: 'c', chapterRevision: 2 })
+    expect(terminalWrite).toHaveBeenCalledTimes(3)
+    expect(terminalWrite).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'comp' }, data: expect.objectContaining({ stage: 'commit', status: 'completed' }) }))
+    expect(proposal).toHaveBeenCalledWith(expect.objectContaining({ memoryType: 'chapterSummary', content: '章节摘要' }), db)
+    for (const [call] of terminalWrite.mock.calls) expect(call.data).not.toHaveProperty('validation')
   })
   it.each(['current', 'stale-body', 'stale-scenes', 'cancelled'] as const)('%s persists only a current compiler CHECK without touching manuscript', async scenario => {
     const frozen = input(), current = structuredClone(frozen)

@@ -44,6 +44,10 @@ export interface AgentGoalSnapshot {
   currentRunId: string | null; reasonCode: string | null
   tokenLimit: string; tokensUsed: string; tokensReserved: string; creditsUsedMicros: string
   activeTimeMs: string; activeTimeLimitMs: string; activeSince: string | null
+  /** Absent only in immutable historical events/receipts. Storage limits are not effective caps. */
+  executionControl?: { version: 3; controlPolicy: 'until_completion'; origin: 'system_default' | 'unknown_legacy' | 'user';
+    limits: { tokens: string | null; turns: number | null; activeTimeMs: string | null } }
+  executionControlReceiptHash?: string
   serverTime: string; createdAt: string; updatedAt: string; finishedAt: string | null
 }
 export interface AgentGoalEventPayload {

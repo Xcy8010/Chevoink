@@ -4,10 +4,11 @@ import type { AgentChildExecutionGrant, Prisma } from '@prisma/client'
 import { databaseNow, lockRunRoot, runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { withRunLease, withRunLeaseInTransaction, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionStateInTransaction, executionSnapshotSchema } from './runtime-state.js'
-import { readTaskBudgetInTransaction } from './runtime-budget.js'
+import { createTaskBudgetPolicy, readTaskBudgetInTransaction } from './runtime-budget.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { tokenPriceSchema } from '../billing/token-price.js'
 import { env } from '../../config/env.js'
+import { COMPATIBILITY_TOKEN_LIMIT } from './execution-control.js'
 
 export const MAIN_RUN_FILTER = { incomingChildGrant: { isNot: { kind: 'inline' } } } satisfies Prisma.AgentRunWhereInput
 export const CHILD_ACTIONS = ['subagent_run', 'subagent_delegate', 'task_spawn', 'task_send'] as const
@@ -321,28 +322,32 @@ export async function admitChildExecutionInTransaction(tx: RuntimeTx, parent: Ru
   // create a foreign chapter, novel, selection, or phased authorization.
   if (spec.authorization || runtimeJson(spec.scope).hash !== runtimeJson(parentSpec.scope).hash
     || runtimeJson(spec.hardConstraints).hash !== runtimeJson(parentSpec.hardConstraints).hash) return runtimeError('RUNTIME_SCOPE_MISMATCH', '子任务不能扩大原任务范围或硬约束。')
+  const existing = await tx.agentChildExecutionGrant.findUnique({ where: { parentOperationId_childIndex: { parentOperationId: operation.id, childIndex: input.childIndex } } })
+  const existingSnapshot = existing ? verifyChildGrant(existing) : null
+  // Numerical ceilings in old grants were server defaults, not author limits.
+  // Replay retains them exactly; new rows use positive storage-only values.
+  const compatibilityTokenLimit = existingSnapshot?.tokenCeiling ?? COMPATIBILITY_TOKEN_LIMIT
+  const compatibilityTurns = existingSnapshot?.turnCeiling ?? 1
   let frozen = runtimeJson(grantSnapshotSchema.parse({ version: 1, parentRootId: root.id, parentOperationId: operation.id,
     childIndex: input.childIndex, admissionRunId: run.id, admissionEpoch: String(parent.epoch), kind: input.kind,
     role: input.role, name: input.name, prompt: input.prompt, taskSpec: spec, configuration, price: input.price,
     ...(input.targetSessionId ? { targetSessionId: input.targetSessionId } : {}),
     ...(input.definitionId ? { definitionId: input.definitionId } : {}),
-    tokenCeiling: input.tokenCeiling, turnCeiling: input.turnCeiling, parentConfigurationHash: current.head.configurationHash,
+    tokenCeiling: compatibilityTokenLimit, turnCeiling: compatibilityTurns, parentConfigurationHash: current.head.configurationHash,
     parentFrameRevision: source.revision, parentFrameHash: source.snapshotHash }))
-  const existing = await tx.agentChildExecutionGrant.findUnique({ where: { parentOperationId_childIndex: { parentOperationId: operation.id, childIndex: input.childIndex } } })
   if (existing) {
     const old = verifyChildGrant(existing)
     // Compare the requested task/configuration and ceilings, not the new lease's
     // generation or freshly allocated child spec id.
     const { admissionEpoch: _epoch, admissionRunId: _run, taskSpec: oldSpec, reworkSource: _source, ...oldRequest } = old
     const { admissionEpoch: _newEpoch, admissionRunId: _newRun, taskSpec: newSpec, ...newRequest } = grantSnapshotSchema.parse(frozen.value)
-    const withoutIdentity = (value: z.infer<typeof taskSpecSchema>) => { const { id: _id, createdAt: _date, runId: _runId, ...rest } = value; return rest }
+    const withoutIdentity = (value: z.infer<typeof taskSpecSchema>) => { const { id: _id, createdAt: _date, runId: _runId, controlPolicy: _controlPolicy, ...rest } = value; return rest }
     if (runtimeJson({ ...oldRequest, taskSpec: withoutIdentity(oldSpec) }).hash !== runtimeJson({ ...newRequest, taskSpec: withoutIdentity(newSpec) }).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '同一次派生调用已绑定其他子任务输入。')
     await withRunLeaseInTransaction(tx, parent, async () => undefined)
     return existing
   }
   const budget = await readTaskBudgetInTransaction(tx, root.id)
-  if (budget.unresolvedAttempts > 0n || budget.deadlineExceeded) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原任务仍有未知支出或已到期限，不能派生新任务。')
-  if (budget.usedTokens + budget.reservedChildTokens + BigInt(input.tokenCeiling) > BigInt(budget.budget.tokenLimit)) return runtimeError('RUNTIME_CHILD_BUDGET_EXHAUSTED', '父任务可用预算不足以预留子任务额度。')
+  if (budget.unresolvedAttempts > 0n) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原任务仍有未知支出，不能派生新任务。')
   // A per-user admission lock also prevents unrelated parent roots from racing
   // the same durable child concurrency ceiling.
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-child-admission:${run.userId}`}, 0))::text`
@@ -378,11 +383,10 @@ export async function admitChildExecutionInTransaction(tx: RuntimeTx, parent: Ru
   const request = runtimeJson([{ type: 'text', text: input.prompt }])
   const specSnapshot = runtimeJson(JSON.parse(JSON.stringify(spec)))
   const inputHash = runtimeJson({ spec: specSnapshot.value, request: request.value }).hash
-  const policy = runtimeJson({ ...budget.policy, initialTokens: input.tokenCeiling, tokenCeiling: input.tokenCeiling,
-    maxCheckpoints: 0, maxCompactions: 0, ...(budget.policy.version === 2 ? { initialTurns: input.turnCeiling } : {}) })
+  const policy = createTaskBudgetPolicy()
   await tx.agentTaskRoot.create({ data: { id: childRootId, userId: run.userId, sessionId: session.id, novelId: run.novelId,
     sourceMessageId: root.sourceMessageId, specSnapshot: specSnapshot.value, requestSnapshot: request.value, inputHash,
-    budget: { create: { policy: policy.value, policyHash: policy.hash, tokenLimit: input.tokenCeiling } } } })
+    budget: { create: { policy: policy.value, policyHash: policy.hash, tokenLimit: compatibilityTokenLimit } } } })
   await tx.agentRun.create({ data: { id: childRunId, userId: run.userId, sessionId: session.id, novelId: run.novelId, chapterId: run.chapterId,
     mode: configuration.mode === 'build' ? 'act' : configuration.mode, agentType: run.agentType, action: run.action,
     engine: 'loop', runtimeProtocolVersion: 1, taskRootId: childRootId, taskSpec: specSnapshot.value,
@@ -399,11 +403,11 @@ export async function admitChildExecutionInTransaction(tx: RuntimeTx, parent: Ru
     eventKey: `state:${childRootId}:0`, type: 'execution.state.saved', payload: { revision: 0, snapshotHash: snapshot.hash, previousHash: null } } })
   const grant = await tx.agentChildExecutionGrant.create({ data: { id: randomUUID(), parentRootId: root.id, parentOperationId: operation.id,
     childIndex: input.childIndex, admissionRunId: run.id, admissionEpoch: parent.epoch, currentParentRunId: run.id,
-    generation: parent.epoch, childRunId, kind: input.kind, tokenCeiling: input.tokenCeiling, snapshot: frozen.value, snapshotHash: frozen.hash } })
+    generation: parent.epoch, childRunId, kind: input.kind, tokenCeiling: compatibilityTokenLimit, snapshot: frozen.value, snapshotHash: frozen.hash } })
   await bindChildGoal(tx, parent, grant)
   await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId: run.id, operationId: operation.id,
     eventKey: `child-admitted:${grant.id}`, type: 'child.admitted', payload: { version: 1, grantId: grant.id, childRunId, sessionId: session.id,
-      kind: input.kind, index: input.childIndex, snapshotHash: frozen.hash, tokenCeiling: input.tokenCeiling } } })
+      kind: input.kind, index: input.childIndex, snapshotHash: frozen.hash, tokenCeiling: compatibilityTokenLimit } } })
   await readExecutionStateInTransaction(tx, childRootId)
   await withRunLeaseInTransaction(tx, parent, async () => undefined)
   return grant

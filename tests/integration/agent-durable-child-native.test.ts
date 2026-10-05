@@ -76,8 +76,9 @@ async function execution(f: Parameters<Parameters<typeof fixture>[0]>[0], tool: 
   const runId = randomUUID(), callId = randomUUID(), prompt = '只读审阅并提交报告'
   const goal = goalBound ? await (async () => {
     env.agentGoalEnabled = true
-    return createAgentGoal(f.userId, { sessionId: f.sessionId }, { requestId: randomUUID(), objective: prompt, options: { mode: 'review' }, limits: { tokenLimit: 64000, activeTimeLimitMs: 3600000 } })
+    return createAgentGoal(f.userId, { sessionId: f.sessionId }, { requestId: randomUUID(), objective: prompt, options: { mode: 'review' } })
   })() : null
+  if (goal) expect(goal.executionControl.limits).toEqual({ tokens: null, turns: null, activeTimeMs: null })
   const spec = { ...buildTaskSpec({ runId, novelId: f.novelId, prompt }), intent: 'review' as const, postconditions: [],
     expectedOutputs: [{ kind: 'validation_report' as const, required: true, description: '报告' }] }
   await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, engine: 'loop', mode: 'review', status: 'queued',
@@ -298,18 +299,18 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
     expect(await prisma.agentRun.count({ where: { sessionId: fork.session.id, incomingChildGrant: { isNot: null } } })).toBe(0)
   }), 30000)
 
-  it('allocates separate-window original-budget shares atomically and preserves them on explicit resume', async () => fixture(async f => {
+  it('preserves separate-window until-completion grant identities and historical bookkeeping on explicit resume', async () => fixture(async f => {
     const exec = await execution(f, taskSpawnTool, { tasks: [{ title: '窗口一', brief: '只读审阅原始作品设定并提交完整报告，保持原有正文不变。' },
       { title: '窗口二', brief: '只读核对原始作品设定并提交完整报告，保持原有正文不变。' }], mode: 'review', inherit: 'transcript' }, false, false, false, 2000000)
     const fetcher = vi.fn(async () => { throw new Error('allocation-held-unknown') })
     vi.stubGlobal('fetch', fetcher)
     await executeDurableToolStep(exec.lease, new AbortController().signal)
     const grants = await prisma.agentChildExecutionGrant.findMany({ where: { parentRootId: exec.root.id }, orderBy: { childIndex: 'asc' } })
-    expect(grants.map(grant => grant.tokenCeiling)).toEqual([666666, 666667])
-    expect(grants.map(grant => verifyChildGrant(grant).turnCeiling)).toEqual([env.agentMaxTurns, env.agentMaxTurns])
+    expect(grants.map(grant => grant.tokenCeiling)).toEqual([500, 500])
+    expect(grants.map(grant => verifyChildGrant(grant).turnCeiling)).toEqual([1, 1])
     await Promise.allSettled(grants.map(grant => dispatchDurableChild(f.userId, grant.childRunId)))
     const budget = await readTaskBudget(exec.lease)
-    expect(budget.reservedChildTokens).toBe(1333333n)
+    expect(budget.reservedChildTokens).toBe(1000n)
     await pauseDurableTask(f.userId, exec.runId)
     const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: exec.root.id, type: 'run.paused' }, orderBy: { createdAt: 'desc' } })
     const resumed = await resumeDurableTask({ userId: f.userId, runId: exec.runId, pauseEventId: pause.id })
@@ -319,29 +320,32 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
     expect((await readTaskBudget(parent)).reservedChildTokens).toBe(budget.reservedChildTokens)
   }), 30000)
 
-  it('keeps full oversized inline context and returns a persisted no-dispatch budget failure', async () => fixture(async f => {
+  it('keeps full inline context beyond the old 16k task cap within its finite model window', async () => fixture(async f => {
     const fetcher = mockProvider()
     const exec = await execution(f, subAgentRunTool, { subagentId: f.definitionId, task: '只读审阅并报告' }, false, true)
     await saveExecutionState(exec.lease, { expectedRevision: exec.initial.frame.revision, expectedHash: exec.initial.frame.snapshotHash,
       snapshot: { ...exec.initial.frame.state, messages: [{ role: 'system', content: 'KEEP_CONTEXT'.repeat(10000) }, ...exec.initial.frame.state.messages.slice(1)] } })
     const result = await executeDurableToolStep(exec.lease, new AbortController().signal)
     expect(result.kind).toBe('tool')
-    expect('result' in result && result.result.output).toContain('供应商尚未派发')
-    expect(fetcher).not.toHaveBeenCalled()
+    expect('result' in result && result.result.output).toContain('已完成只读审阅')
+    expect(fetcher).toHaveBeenCalledTimes(1)
     const grant = await prisma.agentChildExecutionGrant.findFirstOrThrow({ where: { parentRootId: exec.root.id } })
-    expect(grant.tokenCeiling).toBe(16000)
+    expect(grant.tokenCeiling).toBe(500)
     const child = await loadExecutionState(f.userId, grant.childRunId)
     expect(child.frame.state.messages[0]).toMatchObject({ content: 'KEEP_CONTEXT'.repeat(10000) })
-    expect((await prisma.agentProviderAttempt.findFirstOrThrow({ where: { runId: grant.childRunId } })).dispatchedAt).toBeNull()
-    await expect(prisma.$transaction(tx => assertPinnedChildCompletion(tx, exec.root.id))).rejects.toMatchObject({ code: 'RUNTIME_PINNED_CHILD_REQUIRED' })
+    expect((await prisma.agentProviderAttempt.findFirstOrThrow({ where: { runId: grant.childRunId } })).dispatchedAt).not.toBeNull()
+    const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
+    expect(body.messages[0].content).toContain('KEEP_CONTEXT'.repeat(10000))
+    expect(body.max_completion_tokens ?? body.max_tokens).toBe(100)
+    await expect(prisma.$transaction(tx => assertPinnedChildCompletion(tx, exec.root.id))).resolves.toBeUndefined()
   }), 30000)
 
-  it('caps a new separate window at the legacy default when the parent explicitly has a larger allowance', async () => fixture(async f => {
+  it('uses storage-only child values rather than the legacy default when internal parent metadata is larger', async () => fixture(async f => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('legacy-cap-held-unknown') }))
     const exec = await execution(f, taskSpawnTool, { tasks: [{ title: '独立窗口', brief: '只读审阅原始作品设定并提交完整报告，保持原有正文不变。' }], mode: 'review', inherit: 'transcript' }, false, false, false, 5000000)
     await executeDurableToolStep(exec.lease, new AbortController().signal)
     const grant = await prisma.agentChildExecutionGrant.findFirstOrThrow({ where: { parentRootId: exec.root.id } })
-    expect(grant.tokenCeiling).toBe(Math.min(env.agentRunTokenBudget, 2500000))
+    expect(grant.tokenCeiling).toBe(500)
     await dispatchDurableChild(f.userId, grant.childRunId).catch(() => {})
     const originalDefault = env.agentRunTokenBudget
     try {

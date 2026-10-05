@@ -28,6 +28,14 @@ describe('goal evidence progress fuse', () => {
     expect(resolved).toMatchObject({ blockCount: 1, blocked: false })
     expect(changed).toMatchObject({ blockCount: 1, blocked: false })
   })
+  it('counts recurring A↔B observations as no progress even when blocker wording changes', () => {
+    const a = nextGoalProgress({ progressHash: null, blockFingerprint: null, blockCount: 0 }, 'A', ['MISSING'])
+    const b = nextGoalProgress(a, 'B', ['MISSING'], ['A'])
+    const aAgain = nextGoalProgress(b, 'A', ['MISSING:new-report-id'], ['A', 'B'])
+    const bAgain = nextGoalProgress(aAgain, 'B', ['MISSING:another-report-id'], ['A', 'B'])
+    expect(aAgain.blockCount).toBe(2)
+    expect(bAgain).toMatchObject({ blockCount: 3, blocked: true })
+  })
 })
 
 describe('objective evidence boundaries', () => {
@@ -59,11 +67,36 @@ describe('objective evidence boundaries', () => {
     } as unknown as Prisma.TransactionClient
     const goal = { id: 'goal', userId: 'user', novelId: 'novel', currentRevision: 1, currentRunId: 'run' } as AgentGoal
     const before = await inspectGoalEvidence(tx, goal)
-    compilations = [compilation, { ...compilation, id: 'compile-2' }]
+    compilations = [compilation, { ...compilation, id: 'compile-2', stage: 'another-stage', chapter: { ...chapter, revision: 9 } }]
     const after = await inspectGoalEvidence(tx, goal)
     expect(after.progressHash).toBe(before.progressHash)
     expect(after.blockers).toEqual(before.blockers)
     expect(after.blockers).toContainEqual({ code: 'CHAPTER_NOT_COMMITTED', id: 'chapter:chapter' })
+  })
+  it('uses required report content instead of new report IDs/titles, and ignores optional reports', async () => {
+    let artifacts = [{ id: 'report-1', title: '初次报告', content: '真正的研究报告正文', artifactType: 'researchReport', metadata: {} }]
+    const tx = {
+      agentGoalExecution: { findMany: async () => [{ runId: 'run', trigger: 'author', run: { status: 'completed', taskRootId: null,
+        taskSpec: { ...buildTaskSpec({ novelId: 'novel', runId: 'run', prompt: '研究报告' }), intent: 'research_analysis' } } }] },
+      agentGoalRevision: { findUniqueOrThrow: async () => ({ objective: '研究报告' }) },
+      storyCompilation: { findMany: async () => [] }, agentArtifact: { findMany: async () => artifacts },
+      novelImportJob: { findMany: async () => [] }, novel: { findUniqueOrThrow: async () => ({ coverAssetId: null }) },
+      agentGoalEvidence: { findUnique: async () => null }, agentOperation: { findMany: async () => [] }, agentGoalUsage: { count: async () => 0 },
+    } as unknown as Prisma.TransactionClient
+    const goal = { id: 'goal', userId: 'user', novelId: 'novel', currentRevision: 1, currentRunId: 'run' } as AgentGoal
+    const first = await inspectGoalEvidence(tx, goal)
+    artifacts = [...artifacts, { ...artifacts[0], id: 'report-2', title: '再次报告' }]
+    expect((await inspectGoalEvidence(tx, goal)).progressHash).toBe(first.progressHash)
+    artifacts = [{ ...artifacts[0], content: '新的研究内容' }]
+    expect((await inspectGoalEvidence(tx, goal)).progressHash).not.toBe(first.progressHash)
+    const optionalTx = { ...tx,
+      agentGoalRevision: { findUniqueOrThrow: async () => ({ objective: '写三章' }) },
+      agentGoalExecution: { findMany: async () => [{ runId: 'run', trigger: 'author', run: { status: 'completed', taskRootId: null,
+        taskSpec: buildTaskSpec({ novelId: 'novel', runId: 'run', prompt: '写三章' }) } }] },
+    } as unknown as Prisma.TransactionClient
+    const optional = await inspectGoalEvidence(optionalTx, goal)
+    artifacts = [{ ...artifacts[0], id: 'report-3', content: '完全不同的可选报告' }]
+    expect((await inspectGoalEvidence(optionalTx, goal)).progressHash).toBe(optional.progressHash)
   })
 
   it.each([

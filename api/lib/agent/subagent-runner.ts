@@ -1,3 +1,5 @@
+import { untilCompletionControl } from './execution-control.js'
+import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, semanticReadIdentity, nextStagnantBatch } from './semantic-progress.js'
 import type { AgentExecutionMode, AgentMessagePart, AgentStreamEventBody, AgentTokenUsage } from '../../../shared/contracts/index.js'
 import { recoverAgentProtocolToolCalls, stripAgentProtocolArtifacts } from '../../../shared/agent-output.js'
 import { chatWithTools, type ChatMessage } from '../ai-service.js'
@@ -29,12 +31,8 @@ import {
  * - 每次调用落一条 agent_subtask_runs，供管理面板查看调用历史与统计
  */
 
-const SUBAGENT_MAX_TURNS = Math.min(env.agentMaxTurns, 24)
 /** 全局并发上限：所有用户同时内嵌执行的子 Agent 数（主 Agent 本身也可以并行跑多个 run） */
 const SUBAGENT_CONCURRENCY_LIMIT = 8
-/** 单个子 Agent 的固定 token 上限（防死循环兑底）：不再暴露给模型/用户配置，避免无限轮询烧 token */
-const SUBAGENT_TOKEN_CEILING = 16_000
-
 export type SubagentInlineParams = {
   /** 归属标记：所属 subagent_run 工具调用的 callId */
   subagentCallId: string
@@ -153,9 +151,10 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
   }
   const usage: AgentTokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
   const extraParts: AgentMessagePart[] = []
-  // 防死循环兑底：单个子 Agent 的 token 消耗固定钳在 ceiling 内（轮次上限 + 并发闸之外再加一道总量闸），
-  // 超过后强制无工具总结收尾，避免反复调用工具持续消耗用户 credits/自定义模型 token
-  const budget = Math.min(env.agentRunTokenBudget, SUBAGENT_TOKEN_CEILING)
+  const executionControl = untilCompletionControl()
+  const progress = new Set<string>()
+  let stagnantBatches = 0
+  let completed = false
   let turns = 0
   let toolCallCount = 0
   let report = ''
@@ -168,7 +167,8 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
   emitProgress(0, `「${params.name}」已接收任务，开始工作`)
 
   try {
-    while (turns < SUBAGENT_MAX_TURNS) {
+    while (executionControl.controlPolicy === 'until_completion') {
+      params.toolContextBase.signal.throwIfAborted()
       turns += 1
       emitProgress(turns, `「${params.name}」第 ${turns} 轮：分析任务并选择工具`)
       if (!prepareContextForRequest()) {
@@ -224,11 +224,13 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
       if (effectiveToolCalls.length === 0) {
         // 无工具调用的轮次即最终报告
         report = stripAgentProtocolArtifacts(result.content).trim()
+        completed = Boolean(report)
         break
       }
 
       emitProgress(turns, `「${params.name}」执行中：${effectiveToolCalls.length} 个工具调用`)
 
+      let batchProgress = false
       for (const call of effectiveToolCalls) {
         if (params.toolContextBase.signal.aborted) {
           throw new DOMException('subagent aborted', 'AbortError')
@@ -245,58 +247,29 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         toolCallCount += 1
         extraParts.push(outcome.part)
         if (outcome.part.status === 'denied') denied = true
+        const wrote = observeLegacyContentProgress(progress, outcome.part)
+        const verified = outcome.part.status === 'success' && !!outcome.requiredResult && observeRequiredResult(progress, `chapter:${outcome.requiredResult.targetId}`, outcome.requiredResult.contentHash)
+        const readKey = outcome.part.status === 'success' ? semanticReadIdentity(call.name, outcome.observation) : null
+        const read = !!readKey && !progress.has(readKey)
+        if (readKey) progress.add(readKey)
+        const transition = outcome.part.status === 'success' ? outcome.semanticTransition : undefined
+        const structure = !!transition && observeSemanticTransition(progress, `structure:${transition.targetId}`, transition.beforeHash, transition.afterHash)
+        batchProgress = wrote || verified || read || structure || batchProgress
         messages.push({ role: 'tool', toolCallId: call.id, content: outcome.observation })
       }
 
-      if (usage.totalTokens >= budget) {
-        // 预算用尽：带着已有上下文做一次无工具总结，避免静默截断
-        emitProgress(turns, `「${params.name}」预算已用尽，正在总结`)
-        if (!prepareContextForRequest([])) {
-          report = '子 Agent 已达到 token 预算与上下文安全上限；已执行的工具结果均已保存，请主 Agent 核验后继续。'
-          break
-        }
-        const wrapUp = await chatWithTools({
-          freePromotion: params.modelRuntime.freePromotion,
-          messages,
-          tools: [],
-          model: params.modelRuntime.modelName ?? definition.model,
-          providerBaseUrl: params.modelRuntime.baseUrl,
-          providerApiKey: params.modelRuntime.apiKey,
-          provider: params.modelRuntime.provider,
-          reasoningEffort: params.modelRuntime.reasoningEffort,
-          reasoningParameterMode: params.modelRuntime.reasoningParameterMode,
-          thinkingEnabled: params.modelRuntime.thinkingEnabled,
-          outputTokenParameter: params.modelRuntime.outputTokenParameter,
-          temperature: 0.6,
-          signal: params.toolContextBase.signal,
-          usageLog: {
-            userId: params.userId,
-            action: 'agentSubagentTurn',
-            novelId: params.novelId,
-            chapterId: params.chapterId,
-            targetType: 'agentSubtaskRun',
-            targetId: params.subtaskRunId,
-            agentRunId: params.parentRunId,
-            turn: null,
-            modelTier: params.modelRuntime.tier,
-            multiplierBps: params.modelRuntime.multiplierBps,
-          },
-        })
-        addUsage(usage, wrapUp.usage)
-        report = stripAgentProtocolArtifacts(wrapUp.content).trim()
-        messages.push({ role: 'assistant', content: report || null })
+      stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress)
+      if (stagnantBatches >= 4) {
+        report = '子 Agent 连续多轮未推进内容或必需成果，已停止重复执行；任务尚未完成，已保存内容保留。'
         break
       }
     }
 
-    if (turns >= SUBAGENT_MAX_TURNS && !report) {
-      report = `子 Agent 已达最大轮次上限（${SUBAGENT_MAX_TURNS} 轮），未能产出最终报告。已执行的 ${toolCallCount} 次工具调用的结果保留在工作区，可由主 Agent 直接核验。`
-    }
     if (!report) report = '子 Agent 未产出文本报告。'
 
-    emitProgress(turns + 1, `「${params.name}」执行完成，报告已交给主 Agent 审查`)
+    emitProgress(turns + 1, `「${params.name}」${completed ? '工作报告已交给主 Agent 审查' : '尚未完成，已保存进度交给主 Agent 核验'}`)
 
-    return { ok: !denied, denied, report, turns, toolCallCount, usage, extraParts }
+    return { ok: completed && !denied, denied, report, turns, toolCallCount, usage, extraParts }
   } catch (error) {
     // 用户停止（父 run 暂停）原样上抛，由父 run 统一收尾；其余错误转为失败报告（错误即观察）
     if (error instanceof Error && (error.name === 'AbortError' || /abort/i.test(error.message))) throw error

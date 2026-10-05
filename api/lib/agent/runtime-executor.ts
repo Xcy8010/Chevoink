@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
-import { SERVER_MODEL_TIERS } from '../../../shared/contracts/credits.js'
+import { creditModelTierSchema } from '../../../shared/contracts/credits.js'
 import { env } from '../../config/env.js'
 import { chatWithTools, type ChatMessage } from '../ai-service.js'
 import { readManagedImageDataUrl } from '../agent-attachment-storage.js'
@@ -14,9 +14,10 @@ import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionState
 import { executeDurableToolStep } from './runtime-tool-step.js'
 import { assertProviderBudget } from './runtime-budget.js'
 import { advanceDurableCheckpoint, advanceDurableContext } from './runtime-checkpoint-step.js'
-import { advanceDurableContinuation, advanceDurableCompletionObligations } from './runtime-continuation.js'
+import { advanceDurableContinuation, advanceDurableCompletionObligations, advanceDurableToolStagnation } from './runtime-continuation.js'
 import { pauseDurableTaskForAttention, finalizeDurableTask } from './runtime-lifecycle.js'
 import { collectDurableCompletionEvidence } from './runtime-completion-evidence.js'
+import { advanceDurableWritingDelivery } from './runtime-writing-delivery.js'
 import { advanceDurableMemory } from './runtime-memory.js'
 import { estimateChatMessagesTokens, estimateToolDefinitionTokens, resolveDurableInputLimit } from './context-budget.js'
 import { readDurableImportBoundary, waitForDurableImport } from './runtime-import.js'
@@ -27,7 +28,7 @@ import { awaitDurableChildren, wakeDurableChildren } from './runtime-child-tools
 import { verifyChildGrant } from './runtime-child.js'
 
 const reasoning = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
-const durableModelTier = z.enum([...SERVER_MODEL_TIERS, 'custom'] as [string, ...string[]])
+const durableModelTier = creditModelTierSchema
 
 const steeringPart = z.discriminatedUnion('type', [
   z.object({ type: z.literal('text'), text: z.string() }).strict(),
@@ -263,10 +264,14 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     return { state: { ...state, frame: source } }
   })
   if (!prepared) {
+    const writingDelivery = await advanceDurableWritingDelivery(lease)
+    if (writingDelivery) return { kind: 'context' as const, frame: writingDelivery }
     const memory = await advanceDurableMemory(lease)
     if (memory) return memory
     const tool = await executeDurableToolStep(lease, signal)
     if (tool.kind !== 'idle') return tool
+    const stagnation = await advanceDurableToolStagnation(lease)
+    if (stagnation) return stagnation
     const context = await advanceDurableContext(lease)
     if (context) return { kind: 'context' as const, frame: context }
     const checkpoint = await advanceDurableCheckpoint(lease)

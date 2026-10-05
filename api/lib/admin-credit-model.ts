@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
@@ -6,7 +6,8 @@ import { effectiveModelMultiplier, readModelPromotion, modelPromotionSchema } fr
 
 import type { AdminCreditsManagementPayload, AdminModelManagementPayload } from '../../shared/contracts/index.js'
 import type { ModelReasoningEffort } from '../../shared/contracts/index.js'
-import { BUILT_IN_MODEL_TIERS } from '../../shared/contracts/index.js'
+import { isBuiltInModelTier, isServerModelTier } from '../../shared/contracts/index.js'
+import { creditTransaction, lockCreditPolicy } from './credit-policy.js'
 import { buildNewCreditAccountData, ensureCreditAccount, getCreditWindow, parseModelCapabilities } from './credits.js'
 import { getActiveRun, stopAgentRun, stopActiveRunsByUser, stopAllActiveRuns } from './agent/active-runs.js'
 import { env } from '../config/env.js'
@@ -88,17 +89,18 @@ async function executeCreditReset(adminId: string, requestKey: string, scope: st
   throw new DataAccessError(409, 'CREDIT_CONCURRENCY_CONFLICT', '额度更新冲突，请重试。')
 }
 
-async function ensureAllPublicBetaAccounts(setting: { dailyAllowanceMilli: number; resetHourUtc8: number; globallyPaused: boolean }) {
+async function ensureAllPublicBetaAccounts(tx: Prisma.TransactionClient) {
+  const setting = await lockCreditPolicy(tx)
   const now = new Date()
   const window = getCreditWindow(now, setting.resetHourUtc8)
-  const users = await prisma.user.findMany({ select: { id: true } })
+  const users = await tx.user.findMany({ select: { id: true } })
   if (users.length > 0) {
-    await prisma.creditAccount.createMany({
+    await tx.creditAccount.createMany({
       data: users.map((user) => buildNewCreditAccountData(user.id, setting, window, now)),
       skipDuplicates: true,
     })
   }
-  await prisma.creditAccount.updateMany({
+  if (setting.publicBetaEnabled) await tx.creditAccount.updateMany({
     where: { periodEndsAt: { lte: now } },
     data: {
       dailyAllowanceMilli: setting.dailyAllowanceMilli,
@@ -107,18 +109,13 @@ async function ensureAllPublicBetaAccounts(setting: { dailyAllowanceMilli: numbe
       periodEndsAt: window.endsAt,
     },
   })
+  return setting
 }
 
 export async function getAdminCreditsManagement(): Promise<AdminCreditsManagementPayload> {
-  const setting = await prisma.creditSystemSetting.upsert({
-    where: { id: 'global' },
-    create: { id: 'global', dailyAllowanceMilli: 450_000, resetHourUtc8: 15 },
-    update: {},
-  })
-  // 公测上线前已存在的用户没有 CreditAccount；管理页必须覆盖“所有用户”，
-  // 同时在读取前兑现已到期的 UTC+8 15:00 重置，避免显示昨日旧用量。
-  await ensureAllPublicBetaAccounts(setting)
-  const accounts = await prisma.creditAccount.findMany({
+  return creditTransaction(async tx => {
+  const setting = await ensureAllPublicBetaAccounts(tx)
+  const accounts = await tx.creditAccount.findMany({
     include: { user: { select: { id: true, nickname: true, avatarUrl: true } } },
     orderBy: [{ dailyUsedMilli: 'desc' }, { updatedAt: 'desc' }],
   })
@@ -127,7 +124,7 @@ export async function getAdminCreditsManagement(): Promise<AdminCreditsManagemen
     const totalRemaining = dailyRemaining + Math.max(0, account.bonusBalanceMilli)
     return {
       user: account.user,
-      planLabel: '公测版' as const,
+      planLabel: setting.publicBetaEnabled ? '公测版' as const : '免费版' as const,
       dailyAllowance: account.dailyAllowanceMilli / MILLI,
       dailyUsed: account.dailyUsedMilli / MILLI,
       dailyRemaining: dailyRemaining / MILLI,
@@ -141,6 +138,8 @@ export async function getAdminCreditsManagement(): Promise<AdminCreditsManagemen
   return {
     summary: {
       globallyPaused: setting.globallyPaused,
+      publicBetaEnabled: setting.publicBetaEnabled,
+      publicBetaRevision: setting.publicBetaRevision,
       users: users.length,
       dailyAllowance: users.reduce((sum, item) => sum + item.dailyAllowance, 0),
       dailyUsed: users.reduce((sum, item) => sum + item.dailyUsed, 0),
@@ -149,6 +148,7 @@ export async function getAdminCreditsManagement(): Promise<AdminCreditsManagemen
     },
     users,
   }
+  })
 }
 
 export async function resetAdminUserCredits(userId: string, adminId: string, requestKey: string = randomUUID()): Promise<{ stoppedRuns: number }> {
@@ -198,8 +198,8 @@ export async function setAdminUsersSuspended(userIds: string[], paused: boolean)
 }
 
 export async function resetAllAdminCredits(adminId: string, requestKey: string = randomUUID()): Promise<{ users: number; stoppedRuns: number }> {
-  const setting = await prisma.creditSystemSetting.upsert({ where: { id: 'global' }, create: { id: 'global', dailyAllowanceMilli: 450_000, resetHourUtc8: 15 }, update: {} })
-  await ensureAllPublicBetaAccounts(setting)
+  await prisma.creditSystemSetting.upsert({ where: { id: 'global' }, create: { id: 'global', dailyAllowanceMilli: 450_000, resetHourUtc8: 15 }, update: {} })
+  await creditTransaction(tx => ensureAllPublicBetaAccounts(tx))
   const result = await executeCreditReset(adminId, requestKey, 'all', async (tx) => {
     // Capture the amounts in the same serializable snapshot as the reset and
     // ledger. A pre-transaction read can miss a concurrent paid call and leave
@@ -271,7 +271,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
     prisma.aiModelConfig.findMany({ where: { ownerUserId: null } }),
     prisma.aiUsageLog.groupBy({ by: ['modelTier'], where: { ...usageWhere, modelTier: { not: null } }, _sum: { requestTokens: true, responseTokens: true }, _count: { _all: true } }),
     prisma.aiUsageLog.findMany({ where: { ...usageWhere, createdAt: { gte: new Date(Date.now() - 13 * 86_400_000) } }, select: { createdAt: true, requestTokens: true, responseTokens: true } }),
-    getActiveTokenPrices([...BUILT_IN_MODEL_TIERS]),
+    prisma.aiModelConfig.findMany({ where: { ownerUserId: null, tier: { not: null } }, select: { tier: true } }).then(rows => getActiveTokenPrices(rows.flatMap(row => isBuiltInModelTier(row.tier) ? [row.tier] : []))),
   ])
   const usageMap = new Map(usage.map((item) => [item.modelTier, item]))
   const trendMap = new Map<string, { requests: number; totalTokens: number }>()
@@ -283,14 +283,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
     trendMap.set(date, row)
   }
   return {
-    models: models.sort((left, right) => {
-      const order = (tier: string | null) => {
-        if (!tier) return BUILT_IN_MODEL_TIERS.length
-        const index = BUILT_IN_MODEL_TIERS.indexOf(tier as typeof BUILT_IN_MODEL_TIERS[number])
-        return index >= 0 ? index : BUILT_IN_MODEL_TIERS.length
-      }
-      return order(left.tier) - order(right.tier)
-    }).map((model) => {
+    models: models.sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id)).map((model) => {
       const row = usageMap.get(model.tier)
       const capabilities = parseModelCapabilities(model.metadata, model.provider)
       const metadata = model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata as Record<string, unknown> : {}
@@ -302,7 +295,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
       return {
         routes: presentModelRoutes(model.metadata),
         pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
-        id: model.id, tier: model.tier, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
+        id: model.id, tier: model.tier, sortOrder: model.sortOrder, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
         modelName: fallback?.modelName ?? model.modelName, baseUrl: fallback?.baseUrl ?? model.baseUrl, multiplier: effectiveModelMultiplier(model) / 10_000,
         freePromotion: readModelPromotion(model.metadata),
         enabled: model.enabled || Boolean(fallback), selectable: model.selectable, isDefault: model.isDefault,
@@ -346,15 +339,14 @@ function assertProviderReasoningEfforts(provider: string, reasoningEfforts: Mode
   }
 }
 
-export async function updateAdminModel(modelId: string, input: UpdateAdminModelInput): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: string, input: UpdateAdminModelInput): Promise<void> {
     const model = await tx.aiModelConfig.findFirstOrThrow({ where: { id: modelId, ownerUserId: null } })
     const freePromotion = input.freePromotion === undefined ? (input.multiplier === undefined ? readModelPromotion(model.metadata) : null) : input.freePromotion
     if (freePromotion) {
       const parsed = modelPromotionSchema.safeParse(freePromotion)
       if (!parsed.success || (input.multiplier ?? model.multiplierBps / 10000) !== 0
         || (input.freePromotion !== undefined && Date.parse(freePromotion.endsAt) <= Date.now())
-        || !['lite', 'speed', 'standard', 'performance', 'ultimate', 'basic'].includes(model.tier ?? '')) {
+        || !isServerModelTier(model.tier)) {
         throw new DataAccessError(400, 'MODEL_PROMOTION_INVALID', '限时免费须使用 0 倍率、未来截止时间及有效的到期倍率。')
       }
     }
@@ -363,7 +355,7 @@ export async function updateAdminModel(modelId: string, input: UpdateAdminModelI
     const defaultReasoningEffort = input.defaultReasoningEffort ?? currentCapabilities.defaultReasoningEffort
     const routes = saveModelRoutes(input.routes ?? presentModelRoutes(model.metadata).map(({ apiKeyConfigured: _configured, ...route }) => route), model.metadata, reasoningEfforts,
       { contextWindowTokens: input.contextWindowTokens ?? currentCapabilities.contextWindowTokens, visionEnabled: input.visionEnabled ?? currentCapabilities.visionEnabled })
-    if (routes.length && !['lite', 'speed', 'standard', 'performance', 'ultimate', 'basic'].includes(model.tier ?? '')) throw new DataAccessError(400, 'MODEL_ROUTES_INVALID', '仅文本内置模型支持供应商线路。')
+    if (routes.length && !isServerModelTier(model.tier)) throw new DataAccessError(400, 'MODEL_ROUTES_INVALID', '仅文本内置模型支持供应商线路。')
     assertProviderReasoningEfforts(input.provider ?? model.provider, reasoningEfforts)
     if (!reasoningEfforts.includes(defaultReasoningEffort)) throw new DataAccessError(400, 'VALIDATION_ERROR', '默认推理强度必须包含在模型支持档位中。')
     const nextModelName = input.modelName?.trim() || model.modelName
@@ -400,5 +392,45 @@ export async function updateAdminModel(modelId: string, input: UpdateAdminModelI
         },
       },
     })
+}
+
+export async function updateAdminModel(adminId: string, modelId: string, input: UpdateAdminModelInput): Promise<void> {
+  await creditTransaction(async tx => {
+    await lockCatalog(tx, adminId)
+    await updateAdminModelWithTx(tx, modelId, input)
+  })
+}
+
+async function lockCatalog(tx: Prisma.TransactionClient, adminId: string) {
+  const actor = await tx.user.findUnique({ where: { id: adminId }, select: { role: true, isSuperAdmin: true, bannedAt: true } })
+  if (!actor || actor.role !== 'admin' || !actor.isSuperAdmin || actor.bannedAt) throw new DataAccessError(403, 'SUPER_ADMIN_REQUIRED', '该操作仅限超级管理员。')
+  await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext('platform-model-catalog'))`
+  return (await tx.aiModelConfig.findMany({ where: { ownerUserId: null, tier: { not: null } }, orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] }))
+    .filter(row => isBuiltInModelTier(row.tier))
+}
+function assertCatalogOrder(actual: string[], expected: string[]) {
+  if (actual.length !== expected.length || actual.some((id, index) => id !== expected[index])) throw new DataAccessError(409, 'MODEL_CATALOG_CONFLICT', '模型列表已变化，请刷新后重试。')
+}
+export async function createAdminModel(adminId: string, input: UpdateAdminModelInput, expectedOrder: string[]) {
+  return creditTransaction(async tx => {
+    const rows = await lockCatalog(tx, adminId)
+    assertCatalogOrder(rows.map(row => row.id), expectedOrder)
+    const tier = `builtin_${randomBytes(8).toString('hex')}`
+    const model = await tx.aiModelConfig.create({ data: { key: tier, tier, provider: input.provider ?? 'openai', displayName: input.displayName ?? '新模型',
+      modelName: 'unconfigured', enabled: false, selectable: false, isDefault: false, sortOrder: Math.max(-1, ...rows.map(row => row.sortOrder)) + 1 } })
+    await updateAdminModelWithTx(tx, model.id, input)
+    await tx.adminAuditLog.create({ data: { adminId, action: 'models.create', targetType: 'aiModelConfig', targetId: model.id, detail: { tier, displayName: input.displayName ?? model.displayName } } })
+    return { id: model.id, tier }
+  })
+}
+export async function reorderAdminModels(adminId: string, order: string[], expectedOrder: string[]) {
+  return creditTransaction(async tx => {
+    const rows = await lockCatalog(tx, adminId)
+    const actual = rows.map(row => row.id)
+    assertCatalogOrder(actual, expectedOrder)
+    if (order.length !== actual.length || new Set(order).size !== actual.length || order.some(id => !actual.includes(id))) throw new DataAccessError(400, 'MODEL_ORDER_INVALID', '请提交完整且无重复的模型顺序。')
+    for (const [sortOrder, id] of order.entries()) await tx.aiModelConfig.update({ where: { id }, data: { sortOrder } })
+    await tx.adminAuditLog.create({ data: { adminId, action: 'models.reorder', targetType: 'aiModelConfig', detail: { previousOrder: actual, order } } })
+    return { ok: true as const }
   })
 }

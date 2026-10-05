@@ -57,8 +57,11 @@ async function createFixture() {
     const task = buildTaskSpec({ runId: originalId, novelId: novel.id, chapterId: chapter.id, prompt: '完成当前章节' })
     const runData = { userId: user.id, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, mode: 'act' as const,
       manuscriptRevision: novel.manuscriptRevision,
-      action: 'workspaceAgent', agentType: 'writingOrchestrator' as const, engine: 'loop' as const, taskSpec: JSON.parse(JSON.stringify(task)) }
-    await prisma.agentRun.create({ data: { ...runData, id: originalId, status: 'paused' } })
+      action: 'workspaceAgent', agentType: 'writingOrchestrator' as const, engine: 'loop' as const, startRequest: { prompt: '完成当前章节' }, taskSpec: JSON.parse(JSON.stringify(task)) }
+    await prisma.agentRun.create({ data: { ...runData, id: originalId, status: 'running' } })
+    const prepared = await prepareStoryCompilation({ userId: user.id, novelId: novel.id, runId: originalId,
+      chapterId: chapter.id, mode: 'balanced', intentSummary: '完成当前章节' })
+    await prisma.agentRun.update({ where: { id: originalId }, data: { status: 'paused' } })
     // Reproduce the persisted production defect: goal admission copied the whole
     // contract, retaining the original attempt id on a new execution.
     await prisma.agentRun.create({ data: { ...runData, id: resumedId, status: 'running' } })
@@ -74,8 +77,6 @@ async function createFixture() {
     ] })
     const ctx: ToolContext = { userId: user.id, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, runId: resumedId,
       callId: 'resume-commit', mode: 'build', creativeFreedom: 'stable', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
-    const prepared = await prepareStoryCompilation({ userId: user.id, novelId: novel.id, runId: originalId,
-      chapterId: chapter.id, mode: 'balanced', intentSummary: '完成当前章节' })
     // Prove the actual resumed execution is writable before the test reaches any
     // quality/commit assertions: feature, owner/scope, active goal/run, revision,
     // epoch and manuscript generation must satisfy the production guards.
@@ -118,13 +119,13 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       expect(digest).toContain(report.id)
       expect(digest).toContain(`当前正文 r${f.chapter.revision}`)
       const first = await chapterBridgeCommitTool.execute(f.ctx, {})
-      expect(first).toMatchObject({ summary: '提交章节桥与故事终态', display: { compilationId: f.compilationId } })
+      expect(first).toMatchObject({ summary: '提交章节桥与当前故事终态', display: { compilationId: f.compilationId } })
       const memoryCount = await prisma.projectMemoryEntry.count({ where: { novelId: f.ctx.novelId } })
       expect(memoryCount).toBeGreaterThan(0)
       expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.ctx.novelId, runId: f.ctx.runId } })).toBe(memoryCount)
       expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.originalId } })).status).toBe('paused')
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId } })).runId).toBe(f.originalId)
-      expect(await chapterBridgeCommitTool.execute(f.ctx, {})).toMatchObject({ summary: '章节终态已提交', display: { compilationId: f.compilationId } })
+      expect(await chapterBridgeCommitTool.execute(f.ctx, {})).toMatchObject({ summary: '提交章节桥与当前故事终态', display: { compilationId: f.compilationId } })
       expect(await prisma.storyCompilation.count({ where: { novelId: f.ctx.novelId } })).toBe(1)
       expect(await prisma.chapterQualityReport.count({ where: { novelId: f.ctx.novelId } })).toBe(1)
       expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.ctx.novelId } })).toBe(memoryCount)
@@ -145,7 +146,8 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       await prisma.chapterBridge.update({ where: { compilationId: f.compilationId }, data: { targetRevision: changed.revision } })
       await prisma.storyCompilation.update({ where: { id: f.compilationId }, data: { stage: 'repair' } })
       const ctx = { ...f.ctx, creativeFreedom: 'balanced' as const }
-      expect(await chapterBridgeCommitTool.execute(ctx, {})).toMatchObject({ outcome: 'failed', summary: '修订后需要重新复核连续性' })
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId } })).validation).toMatchObject({ checkedRevision: f.chapter.revision })
+      expect(changed.revision).not.toBe(f.chapter.revision)
       const critic = vi.spyOn(review, 'generateReviewCompletion').mockResolvedValue(JSON.stringify({ findings: [
         { signal: 'body', severity: 'warning', evidence: '脚印仍待解释', suggestion: '保留待审' },
         { signal: 'hook', severity: 'warning', evidence: '锁门线索未揭晓', suggestion: '保留待审' },
@@ -158,7 +160,7 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       expect(critic).toHaveBeenCalledOnce()
       expect(critic.mock.calls[0][1]).toContain('本次只读复核')
       expect(await prisma.agentArtifact.count({ where: { runId: ctx.runId, artifactType: 'continuityReview' } })).toBe(0)
-      expect(await chapterBridgeCommitTool.execute(ctx, {})).toMatchObject({ summary: '提交章节桥与故事终态', display: { compilationId: f.compilationId } })
+      expect(await chapterBridgeCommitTool.execute(ctx, {})).toMatchObject({ summary: '提交章节桥与当前故事终态', display: { compilationId: f.compilationId } })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: changed.id } })).toEqual(changed)
       expect(await prisma.chapterQualityReport.count({ where: { chapterId: changed.id } })).toBe(1)
     })
@@ -170,7 +172,10 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       const report = await check(f)
       const otherSession = await prisma.agentSession.create({ data: { userId: f.ctx.userId, novelId: f.ctx.novelId, title: '其他任务' } })
       const otherRun = await prisma.agentRun.create({ data: { userId: f.ctx.userId, novelId: f.ctx.novelId, sessionId: otherSession.id,
-        mode: 'act', status: 'running', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop' } })
+        chapterId: f.chapter.id, mode: 'act', status: 'running', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop',
+        startRequest: { prompt: '完成当前章节的独立任务' } } })
+      await prisma.agentRun.update({ where: { id: otherRun.id }, data: { taskSpec: JSON.parse(JSON.stringify(
+        buildTaskSpec({ runId: otherRun.id, novelId: f.ctx.novelId, chapterId: f.chapter.id, prompt: '完成当前章节的独立任务' }))) } })
       const other = await prepareStoryCompilation({ ...f.ctx, runId: otherRun.id, chapterId: f.chapter.id, mode: 'balanced', intentSummary: '其他独立任务' })
       await persistHumanityQualityReport({ ...f.ctx, runId: otherRun.id, compilationId: other.compilation.id, chapterRevision: f.chapter.revision,
         mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
@@ -178,7 +183,7 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       expect(await chapterBridgeCommitTool.execute(f.ctx, { compilationId: other.compilation.id })).toMatchObject({ outcome: 'failed' })
       expect(await chapterBridgeCommitTool.execute(f.ctx, { compilationId: f.chapter.id })).toMatchObject({ outcome: 'failed' })
       await expect(chapterBridgeCommitTool.execute({ ...f.ctx, novelId: 'wrong-novel' }, {})).rejects.toMatchObject({ code: 'QUALITY_RUN_SCOPE_INVALID' })
-      expect(await chapterBridgeCommitTool.execute(f.ctx, {})).toMatchObject({ summary: '提交章节桥与故事终态', display: { compilationId: f.compilationId } })
+      expect(await chapterBridgeCommitTool.execute(f.ctx, {})).toMatchObject({ summary: '提交章节桥与当前故事终态', display: { compilationId: f.compilationId } })
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: other.compilation.id } })).status).toBe('active')
     })
   })
@@ -191,7 +196,7 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       await check(f, next.compilation.id)
       expect(await chapterBridgeCommitTool.execute(f.ctx, { compilationId: next.compilation.id })).toMatchObject({ display: { compilationId: next.compilation.id } })
       await prisma.storyCompilation.update({ where: { id: f.compilationId }, data: { status: 'active' } })
-      expect(await chapterBridgeCommitTool.execute(f.ctx, {})).toMatchObject({ summary: '章节终态已提交', display: { compilationId: next.compilation.id } })
+      expect(await chapterBridgeCommitTool.execute(f.ctx, {})).toMatchObject({ summary: '提交章节桥与当前故事终态', display: { compilationId: next.compilation.id } })
       expect(await chapterBridgeCommitTool.execute(f.ctx, { compilationId: f.compilationId })).toMatchObject({ outcome: 'failed', summary: '章节编译已被后续准备替代' })
       expect(await buildStoryCompilerDigest(f.ctx.userId, f.ctx.novelId, f.chapter.id, f.ctx.runId)).toContain(`本任务编译：${next.compilation.id}`)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: next.compilation.id } })).status).toBe('completed')
@@ -216,12 +221,16 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
     })
   })
 
-  it('rejects stale version receipts on resume and preserves the author revision without re-preparing', async () => {
+  it('rejects a stale captured terminal revision on resume and preserves the author revision without re-preparing', async () => {
     vi.spyOn(flags, 'isAgent2FeatureEnabled').mockReturnValue(true)
     await fixture(async f => {
       await check(f)
       const authorRevision = await prisma.chapter.update({ where: { id: f.chapter.id }, data: { content: '作者修改后的正文', revision: { increment: 1 } } })
-      expect(await chapterBridgeCommitTool.execute(f.ctx, {})).toMatchObject({ outcome: 'failed', summary: '等待单次质量检查' })
+      await expect(commitChapterBridge({ ...f.ctx, compilationId: f.compilationId, expectedChapterRevision: f.chapter.revision,
+        expectedContentHash: createHash('sha256').update(f.chapter.content).digest('hex'), chapterSummary: '旧版本摘要',
+        exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+        lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '转折' }))
+        .rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapter.id } })).toEqual(authorRevision)
       expect(await prisma.storyCompilation.count({ where: { novelId: f.ctx.novelId } })).toBe(1)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId } })).status).toBe('active')
@@ -242,7 +251,7 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
         await prisma.agentRun.create({ data: { id: committingRunId, userId: f.ctx.userId, novelId: f.ctx.novelId, sessionId: otherSession.id,
           chapterId: f.chapter.id, manuscriptRevision: f.manuscriptRevision,
           mode: 'act', status: 'running', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop',
-          taskSpec: JSON.parse(JSON.stringify(otherTask)) } })
+          taskSpec: JSON.parse(JSON.stringify(otherTask)), startRequest: { prompt: '另一个任务' } } })
       }
       const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId }, include: { bridge: true, sceneTasks: true } })
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }

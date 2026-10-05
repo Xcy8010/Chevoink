@@ -222,6 +222,28 @@ describe.skipIf(!dbAvailable)('agent goal HTTP routes (isolated test DB)', () =>
     expect(await prisma.agentGoalCommand.count({ where: { userId: fixture.owner.userId, requestId: body.requestId } })).toBe(1)
   })
 
+  it('binds explicit HTTP limits and partial changes to full author receipts without changing the objective revision', async () => {
+    const fixture = await createFixture()
+    const body = { ...goalInput(), limits: { tokenLimit: 1000, activeTimeLimitMs: 60_000 } }
+    const created = await request(app).post(`/api/agent/sessions/${fixture.owner.sessionId}/goals`)
+      .set('Cookie', cookie(fixture.owner.userId)).send(body)
+    expect(created.status).toBe(200)
+    expect(created.body.data.executionControl).toMatchObject({ origin: 'user', limits: { tokens: '1000', activeTimeMs: '60000' } })
+    const goal = created.body.data as AgentGoalSnapshot
+    const endpoint = `/api/agent/sessions/${fixture.owner.sessionId}/goals/${goal.id}/actions`
+    const paused = await request(app).post(endpoint).set('Cookie', cookie(fixture.owner.userId))
+      .send({ requestId: randomUUID(), expectedStateVersion: goal.stateVersion, action: 'pause' })
+    expect(paused.status).toBe(200)
+    const changed = await request(app).post(endpoint).set('Cookie', cookie(fixture.owner.userId))
+      .send({ requestId: randomUUID(), expectedStateVersion: paused.body.data.stateVersion, action: 'resume', budgetChange: { tokenLimit: 2000 } })
+    expect(changed.status).toBe(200)
+    expect(changed.body.data).toMatchObject({ revision: 1, executionControl: { origin: 'user', limits: { tokens: '2000', activeTimeMs: '60000' } } })
+    const read = await request(app).get(`/api/agent/sessions/${fixture.owner.sessionId}/goal`).set('Cookie', cookie(fixture.owner.userId))
+    expect(read.status).toBe(200)
+    expect(read.body.data.executionControl).toEqual(changed.body.data.executionControl)
+    expect(await prisma.agentGoalRevision.count({ where: { goalId: goal.id } })).toBe(1)
+  })
+
   it('creates a new local session and goal atomically without dispatching a run', async () => {
     const fixture = await createFixture()
     const sessionsBefore = await prisma.agentSession.count({ where: { novelId: fixture.owner.novelId } })

@@ -143,6 +143,7 @@ export function buildTaskSpec(input: {
     id: randomUUID(),
     runId: input.runId,
     intent,
+    controlPolicy: 'until_completion',
     ...(writingPacing ? { writingPacing } : {}),
     researchBudget: /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt) ? 'extended' : 'standard',
     scope: { novelId: input.novelId, chapterIds, selection },
@@ -193,6 +194,6 @@ export function renderTaskSpec(spec: TaskSpec): string {
     ? '贴合既有走向，只修明确错误。'
     : spec.creativeFreedom === 'bold'
       ? '优先探索新可能；检查建议仅提示，不自动改写。'
-      : '在本任务获准写作的范围内，连续性错误与警告、人类感质量警告与建议都要落实有证据且可安全定位的局部修订，不能以“只是警告/建议”为由跳过。两类工具各做一次集中修订，保留作者声音，不反复润色；重叠、超限、无法安全修改或作者拒绝的项明确保留待审，不冒充已修复。质量修改后仅复核连续性，两项均绑定当前版本后才提交，不来回重做两类检查。独立只读审阅及受保护正文不因严谨模式获得写权限。'
+      : '只在原始请求获准范围内创作。连续性与质量检查可选且只读；警告和审美建议保留待审，不自动改正文。真实当前版本的事实错误按原请求明确修复授权处理或交作者决定。完成真实章节终态后按请求格式交付，不追加封面问题或续章。'
   return `[系统] 本轮任务契约（taskSpecId=${spec.id}）：\n意图：${spec.intent}\n目标：${spec.goals.join('；')}\n创作模式：${freedomLabel}（${freedomRule}）；质量模式：${spec.qualityMode}\n硬约束：\n${hard}\n预期交付：${spec.expectedOutputs.map((item) => item.description).join('；')}\n完成前必须验证：${spec.postconditions.map((item) => item.description).join('；') || '按用户目标核验结果'}。`
 }

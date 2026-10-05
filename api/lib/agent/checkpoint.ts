@@ -1,7 +1,8 @@
+import { COMPATIBILITY_TOKEN_LIMIT } from './execution-control.js'
 import { z } from 'zod'
 
 /**
- * plan/18 P4 检查点式自动续跑：纯函数判定 + 预算 clamp。
+ * 历史检查点证据兼容。新任务按完成条件执行。
  *
  * 预算/轮次耗尽不直接终止，而是做「检查点评估」；全部用确定性信号判定，
  * 满足则同 run 内压缩上下文 + 刷新预算片/轮次片继续跑；不满足走既有 wrap-up 收尾。
@@ -47,10 +48,10 @@ export const CHECKPOINT_TURN_SLICE = 50
 export const CHECKPOINT_MANUAL_RESUME_HARD_MAX = 10
 
 /** Internal metadata inside the existing run usage JSON, not a new UI/API field. */
-export const runCheckpointSchema = z.object({
-  version: z.literal(1), runStartedAt: z.number().int().positive(),
-  resumeCount: z.number().int().min(0).max(CHECKPOINT_MAX_RESUMES),
-  compactionCount: z.number().int().min(0).max(CHECKPOINT_MAX_COMPACTIONS),
+const runCheckpointFields = {
+  runStartedAt: z.number().int().positive(),
+  resumeCount: z.number().int().nonnegative(),
+  compactionCount: z.number().int().nonnegative(),
   maxTurns: z.number().int().positive(), tokenBudget: z.number().int().positive(),
   writeProgress: z.number().int().nonnegative(), writeBaseline: z.number().int().nonnegative(),
   readProgress: z.number().int().nonnegative(), readBaseline: z.number().int().nonnegative(),
@@ -62,7 +63,14 @@ export const runCheckpointSchema = z.object({
   inheritedExecutionMs: z.number().int().nonnegative().optional(),
   // 作者显式续跑在自动硬顶之上再授予的预算片次数；老记录缺省 0（无手动续跑）。
   manualResumeCount: z.number().int().min(0).max(CHECKPOINT_MANUAL_RESUME_HARD_MAX).default(0),
-}).strict().refine(value => value.writeBaseline <= value.writeProgress && value.readBaseline <= value.readProgress)
+}
+export const runCheckpointSchema = z.discriminatedUnion('version', [
+  z.object({ ...runCheckpointFields, version: z.literal(1),
+    resumeCount: z.number().int().min(0).max(CHECKPOINT_MAX_RESUMES),
+    compactionCount: z.number().int().min(0).max(CHECKPOINT_MAX_COMPACTIONS) }).strict(),
+  z.object({ ...runCheckpointFields, version: z.literal(2), controlPolicy: z.literal('until_completion'),
+    origin: z.enum(['system_default', 'unknown_legacy']), activeExecutionMs: z.number().int().nonnegative(), stagnantBatches: z.number().int().nonnegative().default(0) }).strict(),
+]).refine(value => value.writeBaseline <= value.writeProgress && value.readBaseline <= value.readProgress)
 export type RunCheckpointState = z.infer<typeof runCheckpointSchema>
 
 /** Count execution intervals, not the gaps between terminal and restart events.
@@ -112,59 +120,21 @@ export function recoverLegacyRunUsage(currentTurn: number, receipts: Array<{
   return { promptTokens, completionTokens, totalTokens }
 }
 
+/** Historical callers may assess progress, but saved caps are not effective policy. */
 export function evaluateCheckpoint(input: CheckpointEvaluation): { ok: boolean; reason: string } {
-  if (input.usedTokens !== undefined && input.tokenCeiling !== undefined && input.usedTokens >= input.tokenCeiling) return { ok: false, reason: '已达总 token 硬顶' }
-  const maxResumes = input.maxResumes ?? CHECKPOINT_MAX_RESUMES
-  const maxCompactions = input.maxCompactions ?? CHECKPOINT_MAX_COMPACTIONS
-  // 任务完成由执行循环决定；兼容未传 taskPending 的旧调用方。
   if (!(input.taskPending ?? input.todoLeft > 0)) return { ok: false, reason: '任务已结束，无需续跑' }
-  // 新读取证据也可推进研究/检查任务，但重复观察、待办改名不能购买预算片。
-  if (input.writeProgress <= input.writeBaseline && (input.readProgress ?? 0) <= (input.readBaseline ?? 0)) {
-    return { ok: false, reason: '本区间无新的有效进展' }
-  }
-  // 条件 c：续跑链与 compaction 次数硬上限
-  if (input.resumeCount >= maxResumes) return { ok: false, reason: `续跑次数已达上限 ${maxResumes}` }
-  if (input.compactionCount >= maxCompactions) return { ok: false, reason: `压缩次数已达上限 ${maxCompactions}` }
-  // 条件 d：墙钟总帽（长任务模式）未超
-  if (input.elapsedMs > input.longWallClockLimitMs) return { ok: false, reason: '已达长任务墙钟总帽' }
+  if (input.writeProgress <= input.writeBaseline && (input.readProgress ?? 0) <= (input.readBaseline ?? 0)) return { ok: false, reason: '本区间无新的有效进展' }
   return { ok: true, reason: '' }
 }
 
-/**
- * run 预算解析：默认档不变（env 200 万）；作者显式上调时允许，但服务端 clamp 到硬顶（500 万），
- * 下调不限（最低 500 防空转误杀）。取代原「只能下调」的 min() 语义。
- */
-export function resolveRunTokenBudget(paramBudget: number | undefined | null, defaultBudget: number, ceiling: number): number {
-  const requested = paramBudget ?? defaultBudget
-  return Math.min(ceiling, Math.max(500, requested))
+/** Storage compatibility only. Internal inputs cannot establish human stoploss. */
+export function resolveRunTokenBudget(_paramBudget: number | undefined | null, _defaultBudget: number, _ceiling: number): number {
+  return COMPATIBILITY_TOKEN_LIMIT
 }
 
-/**
- * 手动续跑预算片：自动检查点续跑在总 token 硬顶上严格停下（evaluateCheckpoint），
- * 但「继续执行」是设计中的显式人工入口（plan/18）——命中预算/轮次边界时，
- * 作者显式续跑可在硬顶之上再授予有限数量的预算片，避免任务被硬顶永久死锁
- * （额度耗尽换免费/自定义模型、供应商故障烧穿预算等场景都曾卡死任务）。
- * 片数上限持久化在 checkpoint 里，脚本化连点不能无限放大成本；
- * 未命中边界返回 null（正常续跑，不消耗手动名额）。
- */
-export function resolveManualResumeGrant(input: {
-  taskTokens: number
-  runTokenBudget: number
-  turnsUsed: number
-  maxTurns: number
-  manualResumeCount: number
-  maxManualResumes: number
+/** Manual resume neither resets usage nor grants a new cumulative allowance. */
+export function resolveManualResumeGrant(_input: {
+  taskTokens: number; runTokenBudget: number; turnsUsed: number; maxTurns: number; manualResumeCount: number; maxManualResumes: number
 }): { granted: false; reason: string } | { granted: true; tokenBudget: number; maxTurns: number; manualResumeCount: number } | null {
-  const atTokenWall = input.taskTokens >= input.runTokenBudget
-  const atTurnWall = input.turnsUsed >= input.maxTurns
-  if (!atTokenWall && !atTurnWall) return null
-  if (input.manualResumeCount >= input.maxManualResumes) {
-    return { granted: false, reason: `手动续跑机会已用完（${input.manualResumeCount}/${input.maxManualResumes}）` }
-  }
-  return {
-    granted: true,
-    tokenBudget: Math.max(input.runTokenBudget, input.taskTokens + CHECKPOINT_BUDGET_SLICE),
-    maxTurns: input.maxTurns + CHECKPOINT_TURN_SLICE,
-    manualResumeCount: input.manualResumeCount + 1,
-  }
+  return null
 }

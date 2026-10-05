@@ -1,3 +1,5 @@
+import { assertWritingTarget } from './writing-scope.js'
+import { assertOriginalRepairAuthority } from './original-request.js'
 import { createHash } from 'node:crypto'
 
 import type {
@@ -530,6 +532,10 @@ export async function applyQualityRepair(input: {
   const apply = async (tx: Prisma.TransactionClient) => {
     await lockNovelActiveScope(tx, input.novelId)
     if (input.runId) await assertAgentManuscriptCurrent(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId })
+    if (input.runId) {
+      await assertOriginalRepairAuthority(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId })
+      await assertWritingTarget(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId }, { chapterId: report.chapterId })
+    }
     const scope = await qualityCompilationScope(tx, input.userId, input.novelId, input.runId)
     if (report.compilationId) await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${report.compilationId} FOR UPDATE`
     await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${report.chapter.id} FOR UPDATE`

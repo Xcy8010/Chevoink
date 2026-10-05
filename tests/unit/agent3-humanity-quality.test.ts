@@ -134,7 +134,7 @@ describe('质量检查工具与编号配对失败回执', () => {
   })
 })
 
-describe('严谨创作自动落实质量建议', () => {
+describe('质量检查默认只保存真实报告', () => {
   afterEach(() => vi.restoreAllMocks())
   const digest = (content: string) => createHash('sha256').update(content).digest('hex')
   function fixture(cached: boolean, behavior = 'apply') {
@@ -174,13 +174,17 @@ describe('严谨创作自动落实质量建议', () => {
       creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
     return { ctx, report, critic, reserve, model, write }
   }
-  it.each([false, true])('0关注8建议全部进入一次安全修订，缓存=%s', async cached => {
+  it.each([false, true])('eight advisory findings preserve prose and never dispatch a repair, cached=%s', async cached => {
     const f = fixture(cached)
-    expect(await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })).toMatchObject({ summary: '人类感质量检查 · 自动修订 8 处' })
+    const before = JSON.stringify(f.report)
+    const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(result.output).toContain('正文未改动')
+    expect(result.display?.kind).toBe('qualityReport')
     expect(f.critic).toHaveBeenCalledTimes(cached ? 0 : 1)
-    expect(f.model).toHaveBeenCalledOnce()
-    expect(f.write.mock.calls[0][0].replacements).toHaveLength(8)
-    expect(f.report.findings.every(item => item.disposition === 'repaired')).toBe(true)
+    expect(f.model).not.toHaveBeenCalled()
+    expect(f.reserve).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+    expect(JSON.stringify(f.report)).toBe(before)
   })
   it.each(['stable', 'bold', 'protected', 'review', 'attempted', 'repaired', 'rejected', 'cancelled'] as const)('%s 不生成越权或重复修订', async scenario => {
     const f = fixture(true)
@@ -199,9 +203,9 @@ describe('严谨创作自动落实质量建议', () => {
   it.each(['no-op', 'duplicate', 'stale'])('%s 不伪报已修改，缓存不再派发', async behavior => {
     const f = fixture(true, behavior)
     const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
-    expect(result.summary).toContain('修订未应用')
-    if (behavior === 'stale') expect(result.outcome).toBe('failed')
-    else expect(f.write).not.toHaveBeenCalled()
+    expect(result.output).toContain('正文未改动')
+    expect(f.write).not.toHaveBeenCalled()
+    expect(f.reserve).not.toHaveBeenCalled()
     const calls = f.model.mock.calls.length
     await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(f.model).toHaveBeenCalledTimes(calls)
@@ -255,7 +259,7 @@ describe('Agent 3.0 人类感质量契约与确定性检查', () => {
     expect(result.findings.every((finding) => finding.end - finding.start <= 360 && source.slice(finding.start, finding.end) === finding.evidence)).toBe(true)
   })
 
-  it('只向主 Agent 暴露单次自动质量门，旧选择/修订工具保留治理但不再暴露', () => {
+  it('只向主 Agent 暴露可选只读质量检查，旧选择/修订工具保留治理但不再暴露', () => {
     const names = new Set(allTools.map((tool) => tool.name))
     for (const name of ['quality_analyze', 'quality_report_get', 'quality_finding_feedback', 'character_voice_get', 'character_voice_save', 'experience_anchor_get', 'experience_anchor_save']) {
       expect(names.has(name), `${name} 未注册`).toBe(true)

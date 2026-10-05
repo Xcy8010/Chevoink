@@ -1,3 +1,4 @@
+import { assertOriginalRepairAuthority } from '../original-request.js'
 import { auxiliaryTextModel } from '../auxiliary-text-model.js'
 import { z } from 'zod'
 
@@ -25,7 +26,6 @@ import {
   persistHumanityQualityReport,
   recordQualityFindingFeedback,
   resolveQualityChapterTarget,
-  reserveQualityAutoRepair,
   renderQualityLearning,
   renderVoiceAndAnchorContext,
   saveCharacterVoiceProfile,
@@ -34,22 +34,12 @@ import {
 } from '../humanity-quality.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
-import { qualityReportMatchesContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
+import { qualityReportMatchesContent } from '../quality-report-contract.js'
 import { coerceCriticFindings, correctQualityEvidence, qualityEvidenceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
 
 const READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const WRITE = { plan: 'deny', build: 'allow', review: 'allow' } as const
 const CONTENT_WRITE = { plan: 'deny', build: 'allow', review: 'deny' } as const
-
-/** 自动修订的可预期拦截：保留报告；过期证据或范围冲突仍返回失败，不能冒充已修复。 */
-const REPAIR_BLOCK_CODES = new Set([
-  'QUALITY_REPAIR_LIMIT',
-  'QUALITY_REPORT_STALE',
-  'QUALITY_EVIDENCE_STALE',
-  'QUALITY_PATCH_OVERLAP',
-  'QUALITY_FINDING_SCOPE_INVALID',
-  'QUALITY_REPAIR_NO_CHANGE',
-])
 
 const repairEnvelopeSchema = z.object({
   patches: z.array(z.object({ findingId: z.string().min(1), replacement: z.string().max(2_000) })).min(1).max(12),
@@ -121,37 +111,10 @@ severity 只能是 advisory 或 warning；审美意见绝不报 error。找不�
 type QualityReport = Awaited<ReturnType<typeof getQualityReport>>
 
 async function finishQualityReview(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false): Promise<ToolResult> {
+  ctx.signal.throwIfAborted()
   const warningCount = report.findings.filter(finding => finding.severity === 'warning').length
   const advisoryCount = report.findings.filter(finding => finding.severity === 'advisory').length
-  const automatic = ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(report.chapterId)
-  const selected = automatic && qualityAutoRepairPending(report) ? selectAutomaticQualityFindings(report.findings) : []
-  if (selected.length) {
-    ctx.signal.throwIfAborted()
-    try {
-      if (await reserveQualityAutoRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id })) {
-        const repaired = await applySelectedQualityRepairs(ctx, report, selected)
-        if (repaired) {
-          const remaining = repaired.report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
-          return {
-            output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。质量报告已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 只读复核当前版本。${bindingSuffix}`,
-            summary: `人类感质量检查 · 自动修订 ${repaired.patchCount} 处`, display: reportDisplay(repaired.report),
-            snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },
-          }
-        }
-        return { output: `质量检查已完成：${warningCount} 个需关注问题、${advisoryCount} 个建议；已尝试集中修订，但未获得可安全验证且实际改变正文的补丁，正文未修改，意见保留待审。同一报告不循环重试。${bindingSuffix}`,
-          summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
-      }
-    } catch (error) {
-      ctx.signal.throwIfAborted()
-      if (!(error instanceof DataAccessError) || !REPAIR_BLOCK_CODES.has(error.code)) throw error
-      const stale = !['QUALITY_REPAIR_LIMIT', 'QUALITY_REPAIR_NO_CHANGE'].includes(error.code)
-      return { ...(stale ? { outcome: 'failed' as const } : {}),
-        output: `质量报告已保留，自动修订未应用：${error.message}。${stale ? '当前证据或版本不可用于本次修订，不能据此宣称已修复或直接提交；请核对当前正文与报告。' : '剩余意见保留待审，不重复自动改写。'}${bindingSuffix}`,
-        summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
-    }
-  }
-  const reason = !automatic ? '当前模式不自动修订或章节受保护，正文未改动'
-    : report.findings.length ? '自动修订已尝试、报告不属于当前修订任务或没有待处理的安全候选；剩余意见仍保留待审' : '未发现有证据的问题'
+  const reason = '本次只保存检查意见，正文未改动；修订须由原始请求明确授权'
   return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；检查通过不等于所有建议已修复。${bindingSuffix}`,
     summary: cached ? '复用当前质量报告' : `人类感质量检查 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
 }
@@ -199,13 +162,13 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
 export const qualityAnalyzeTool = defineTool({
   name: 'quality_analyze',
   title: '人类感质量检查',
-  description: 'Humanity Quality Gate 的 CHECK 步骤。用于评估整章或完整长场景的人类感质量：当作者明确要求判断「有没有 AI 味 / 像不像 AI 写的」「文风是否自然、像真人」「要不要通篇精修润色」，或在整章写完要求深度审阅、或 Story Compiler 进入 CHECK 时，都必须调用本工具，而不是自己只读正文下结论。服务端先运行确定性统计，再启动与 Writer 隔离的 Critic；每条模型意见必须逐字定位正文才能保存。严谨创作会在同一次调用内有界自动修订，平衡延续与大胆探索只展示报告。标题、元数据、局部错字、单句润色、纯剧情/设定/写作建议等普通问答禁止触发。不得把科幻术语、华丽文风、口语或无悬念结尾按词表误判。',
+  description: 'Humanity Quality Gate 的 CHECK 步骤。用于评估整章或完整长场景的人类感质量：当作者明确要求判断「有没有 AI 味 / 像不像 AI 写的」「文风是否自然、像真人」「要不要通篇精修润色」，或在整章写完要求深度审阅、或 Story Compiler 进入 CHECK 时，可调用本工具，而不是自己只读正文下结论。服务端先运行确定性统计，再启动与 Writer 隔离的 Critic；每条模型意见必须逐字定位正文才能保存。本工具始终只保存报告，不改写正文；修订需要原始请求明确授权。标题、元数据、局部错字、单句润色、纯剧情/设定/写作建议等普通问答禁止触发。不得把科幻术语、华丽文风、口语或无悬念结尾按词表误判。',
   parameters: z.object({
     chapterId: z.string().min(1).optional().describe('目标章节编号，从 chapter_read 或作品目录取得；独立检查既有章只需本参数，不用准备章节'),
     compilationId: z.string().min(1).optional().describe('当前写作流水线的编译编号；独立审阅省略，不要把它当 chapterId'),
   }),
-  permission: CONTENT_WRITE,
-  readOnly: false,
+  permission: READ,
+  readOnly: true,
   coerceArgs(raw) {
     const unwrapped = coerceToolArgumentEnvelope(raw)
     if (!unwrapped || typeof unwrapped !== 'object' || Array.isArray(unwrapped)) return unwrapped
@@ -380,9 +343,10 @@ export const qualityFindingsSelectTool = defineTool({
 
 export const qualityRevisionApplyTool = defineTool({
   name: 'quality_revision_apply', title: '应用局部质量修订',
-  description: '兼容旧任务的内部工具；新任务由 quality_analyze 在同一次调用内完成。主 Agent 禁止主动调用，且改后不得重复质量检查。',
+  description: '仅原始请求明确授权修订时，对已选意见应用一次有证据的局部修订；检查本身不授予改文权限。',
   parameters: z.object({ reportId: z.string().min(1) }), permission: CONTENT_WRITE, readOnly: false,
   async execute(ctx, args) {
+    await prisma.$transaction(tx => assertOriginalRepairAuthority(tx, ctx))
     const report = await getQualityReport(ctx.userId, ctx.novelId, args.reportId)
     if (ctx.protectedChapterIds?.has(report.chapterId)) return { output: '作者要求保持前文不变，该章节被保护，禁止质量修订。' }
     const selected = report.findings.filter((finding) => finding.disposition === 'selected')
@@ -390,7 +354,7 @@ export const qualityRevisionApplyTool = defineTool({
     const repaired = await applySelectedQualityRepairs(ctx, report, selected)
     if (!repaired) return { output: '局部修订器本次未返回可验证补丁，正文保持不变，可稍后重试。', summary: '局部质量修订 · 正文未改动', display: reportDisplay(report) }
     return {
-      output: `已原子应用 ${repaired.patchCount} 个局部修订并绑定 r${repaired.result.updated.revision}，无需再次质量检查；正文已变化，提交章节终态前必须调用 continuity_validate 只读复核当前版本。`,
+      output: `已原子应用 ${repaired.patchCount} 个局部修订并绑定 r${repaired.result.updated.revision}，正文已变化；历史检查仍只证明原版本，可直接刷新当前正文终态，不强制重新检查。`,
       summary: `局部质量修订 · ${repaired.patchCount} 处`,
       display: { kind: 'chapterDiff', chapterId: repaired.result.updated.id, chapterTitle: repaired.result.updated.title, before: repaired.result.before, after: repaired.result.after, appliedDirectly: true, revision: repaired.result.updated.revision },
       snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },

@@ -7,11 +7,11 @@ const m = vi.hoisted(() => ({
     $queryRaw: vi.fn(), $transaction: vi.fn(),
     chapter: { findFirst: vi.fn(), findMany: vi.fn(), count: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
     novel: { findFirst: vi.fn(), update: vi.fn() },
-    agentRun: { findFirst: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn() },
+    agentRun: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn() },
     // These fixtures cover legacy/import writes. A null goal execution keeps
     // the new fence on its ordinary path without changing import assertions.
     agentGoalExecution: { findUnique: vi.fn() },
-    agentChildExecutionGrant: { findMany: vi.fn() },
+    agentChildExecutionGrant: { findUnique: vi.fn(), findMany: vi.fn() },
     agentSession: { findFirst: vi.fn() }, agentMessage: { findFirst: vi.fn(), findMany: vi.fn() },
     agentArtifact: { deleteMany: vi.fn(), count: vi.fn() },
     changeSet: { findFirst: vi.fn(), update: vi.fn() }, changeSetPatch: { updateMany: vi.fn() },
@@ -42,6 +42,7 @@ import { applyChangeSetData, rollbackChangeSetData } from '../../api/lib/data/ch
 import { mergeStoryBranch } from '../../api/lib/agent/productivity.js'
 import { previewLoopSessionRollback, rollbackLoopSessionFromMessage } from '../../api/lib/agent/session-messages.js'
 import { applyMemoryExtractionJob, resolveMemoryReview, getMemoryGraph } from '../../api/lib/agent/story-memory.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 
 const tx = m.db as unknown as Prisma.TransactionClient
 const scope = { userId: 'u', novelId: 'n', runId: 'r' }
@@ -55,8 +56,21 @@ const changeset = (status: string) => ({ id: 'set', novelId: 'n', userId: 'u', s
 beforeEach(() => {
   vi.resetAllMocks()
   m.db.$transaction.mockImplementation(work => work(tx))
-  m.db.$queryRaw.mockResolvedValue([{ id: 'n' }])
-  m.db.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 2, novel: { authorId: 'u', manuscriptRevision: 2 } })
+  m.db.$queryRaw.mockImplementation(async (strings, ...values) => {
+    const sql = strings.join('?')
+    if (sql === 'SELECT id FROM novels WHERE id = ? FOR UPDATE' && ['n', "n'; DROP TABLE novels;--"].includes(values[0])) return [{ id: values[0] }]
+    if (sql === 'SELECT id FROM chapters WHERE id = ? FOR UPDATE' && ['c', 'c-new', 'c-draft'].includes(values[0])) return [{ id: values[0] }]
+    if (sql === 'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))::text' && values[0] === 'memory:n') return []
+    throw new Error(`Unexpected fixture lock: ${sql}`)
+  })
+  const prompt = '修订当前章节正文。'
+  const task = buildTaskSpec({ runId: 'r', novelId: 'n', chapterId: 'c', prompt })
+  const run = { id: 'r', userId: 'u', novelId: 'n', sessionId: 's', chapterId: 'c', taskSpec: task, startRequest: { prompt },
+    manuscriptRevision: 2, novel: { authorId: 'u', manuscriptRevision: 2 } }
+  m.db.agentRun.findFirst.mockResolvedValue(run)
+  m.db.agentRun.findFirstOrThrow.mockResolvedValue(run)
+  m.db.agentChildExecutionGrant.findUnique.mockResolvedValue(null)
+  m.db.agentSession.findFirst.mockResolvedValue({ id: 's', userId: 'u', novelId: 'n', spawnedFromRunId: null, spawnedFromSessionId: null })
   m.db.agentGoalExecution.findUnique.mockResolvedValue(null)
   m.db.agentChildExecutionGrant.findMany.mockResolvedValue([])
   m.db.chapter.findFirst.mockResolvedValue(chapter)
@@ -85,6 +99,13 @@ describe('import manuscript epoch', () => {
     expect(m.db.agentRun.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'r', userId: 'u', novelId: 'n' } }))
   })
   it('retains caller transaction and holds the lock across version check and mutation', async () => {
+    // This generic structure effect needs explicit author authority; a chapter
+    // revision task does not permit target-less creates or structure changes.
+    const prompt = '规划并调整本作品的卷章结构，保留章节正文。'
+    const task = buildTaskSpec({ runId: 'r', novelId: 'n', prompt })
+    m.db.agentRun.findFirst.mockResolvedValue({ id: 'r', userId: 'u', novelId: 'n', sessionId: 's', chapterId: null,
+      taskSpec: task, startRequest: { prompt }, manuscriptRevision: 2, novel: { authorId: 'u', manuscriptRevision: 2 } })
+    m.db.agentRun.findFirstOrThrow.mockResolvedValue({ id: 'r', userId: 'u', novelId: 'n', sessionId: 's', chapterId: null, taskSpec: task, startRequest: { prompt } })
     const create = vi.fn().mockResolvedValue('written')
     await expect(withAgentManuscriptWrite({ ...scope, transaction: tx }, create)).resolves.toBe('written')
     expect(create).toHaveBeenCalledWith(tx)

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { BUILT_IN_MODEL_TIERS } from './credits.js'
+import { selectableModelTierSchema } from './model-tier.js'
 
 export const MODEL_ASSIGNMENT_TASKS = [
   { key: 'main', label: '主 Agent', kind: 'text' },
@@ -23,7 +23,7 @@ export type ModelAssignmentTask = typeof MODEL_ASSIGNMENT_TASKS[number]['key']
 export const modelAssignmentTaskSchema = z.enum(MODEL_ASSIGNMENT_TASKS.map(item => item.key) as [ModelAssignmentTask, ...ModelAssignmentTask[]])
 export const modelReasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 export const agentModelSelectionSchema = z.object({
-  modelTier: z.enum([...BUILT_IN_MODEL_TIERS, 'custom']),
+  modelTier: selectableModelTierSchema,
   customModelId: z.string().trim().min(1).max(64).optional(),
   reasoningEffort: modelReasoningEffortSchema.optional(),
 }).strict().superRefine((value, ctx) => {

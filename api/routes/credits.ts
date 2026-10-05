@@ -1,3 +1,4 @@
+import { getPublicCreditPolicy } from '../lib/credit-policy.js'
 import { randomUUID } from 'node:crypto'
 
 import { Router, type Request, type Response } from 'express'
@@ -46,6 +47,12 @@ async function validateModel(userId: string, res: Response, input: Parameters<ty
     validatingUsers.delete(userId)
   }
 }
+
+router.get('/public-policy', async (_req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { res.json(buildSuccess(requestId, await getPublicCreditPolicy())) }
+  catch (error) { sendRouteError(res, requestId, error) }
+})
 
 router.get('/summary', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()

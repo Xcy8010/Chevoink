@@ -10,7 +10,7 @@ import { handleTestDatabaseUnavailable } from '../support/database-availability.
 const dbAvailable = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 afterAll(() => prisma.$disconnect())
 
-async function fixture(work: (context: GoalExecutionContext) => Promise<void>) {
+async function fixture(work: (context: GoalExecutionContext) => Promise<void>, explicitLimits = false) {
   const previous = env.agentGoalEnabled
   env.agentGoalEnabled = true
   const user = await prisma.user.create({ data: { nickname: `goal-fee-${randomUUID()}`, passwordHash: 'fixture-only' } })
@@ -20,7 +20,8 @@ async function fixture(work: (context: GoalExecutionContext) => Promise<void>) {
       periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
     const novel = await prisma.novel.create({ data: { authorId: user.id, title: '固定费用合成测试', slug: randomUUID(), summary: '' } })
     const session = await prisma.agentSession.create({ data: { userId: user.id, novelId: novel.id, title: '固定费用测试' } })
-    const goal = await createAgentGoal(user.id, { sessionId: session.id }, { requestId: randomUUID(), objective: '调研封面', options: { mode: 'build' } })
+    const goal = await createAgentGoal(user.id, { sessionId: session.id }, { requestId: randomUUID(), objective: '调研封面', options: { mode: 'build' },
+      ...(explicitLimits ? { limits: { tokenLimit: 1000, activeTimeLimitMs: 60_000 } } : {}) }, { authenticatedHttp: true })
     const run = await prisma.agentRun.create({ data: { userId: user.id, novelId: novel.id, sessionId: session.id,
       mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', status: 'running', inputSummary: 'fixture' } })
     await prisma.agentGoalExecution.create({ data: { goalId: goal.id, goalRevision: 1, epoch: 1n,
@@ -85,6 +86,6 @@ describe.skipIf(!dbAvailable)('goal fixed-fee ledger integration', () => {
         .rejects.toMatchObject({ code: 'GOAL_BUDGET_EXHAUSTED' })
       expect(await prisma.creditLedgerEntry.count({ where: { userId: context.userId } })).toBe(0)
       expect(await prisma.agentGoalUsage.count({ where: { goalId: context.goalId } })).toBe(0)
-    })
+    }, true)
   })
 })

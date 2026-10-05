@@ -1,3 +1,4 @@
+import { freezeWritingScope } from './writing-scope.js'
 import { readAuthorEnded } from './author-ended.js'
 import { hasAuthorEnded } from './completion-guard.js'
 import type { Response } from 'express'
@@ -44,7 +45,7 @@ import { resumeDurableTask } from './runtime-resume.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { activeChapterScope } from '../data/internal.js'
 import { assertAgentManuscriptCurrent, assertAgentManuscriptRevisionCurrent } from './manuscript-scope.js'
-import { recoverRunElapsedMs, savedRunUsageSchema } from './checkpoint.js'
+import { recoverRunElapsedMs } from './checkpoint.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { assertCreditAccess, getModelTierRuntime } from '../credits.js'
 import { getRunEventBus, loadPersistedEvents, prepareRunEventResume } from './events.js'
@@ -182,6 +183,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
       const chapters = await tx.chapter.findMany({ where: { ...activeChapterScope(run.novelId), authorId: userId }, select: { id: true } })
       task = { ...task, scope: { ...task.scope, chapterIds: chapters.map(chapter => chapter.id) } }
     }
+    task = await freezeWritingScope(tx, { userId, novelId: run.novelId, runId }, task, input.prompt)
     await tx.agentRun.update({ where: { id: runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(task))).value } })
     return task
   })
@@ -1012,11 +1014,7 @@ async function continueLoopRunLocked(
     const elapsed = recoverRunElapsedMs(run.startedAt.getTime(), Date.now(),
       boundaries.map(event => ({ type: event.type, at: event.createdAt.getTime() })))
     if (elapsed === null) throw new DataAccessError(409, 'RUN_TIME_UNCONFIRMED', '原任务执行时间记录不一致，未启动续跑。')
-    const saved = savedRunUsageSchema.safeParse(run.usage)
-    const minutes = saved.success && (saved.data.checkpoint?.resumeCount ?? 0) > 0
-      ? env.agentRunWallClockLongMinutes : env.agentRunWallClockMinutes
-    if (elapsed + (saved.success ? saved.data.checkpoint?.inheritedExecutionMs ?? 0 : 0) > minutes * 60_000) throw new DataAccessError(409, 'RUN_TIME_EXHAUSTED',
-      `任务累计执行时长已达${minutes}分钟上限（已排除有记录的暂停等待时间）。未发起模型请求；已保存成果保留，重复继续不会增加预算。`)
+
   }
   // B0 still serializes service admissions with withUserRunLock. Include saved
   // queued/recovering work in the limit, not just controllers in this process.

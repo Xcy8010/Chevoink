@@ -11,7 +11,7 @@ import FeedbackDialog from '@/features/feedback/components/FeedbackDialog'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
 import { FEEDBACK_QQ_GROUP_URL, type FeedbackKind } from '../../../shared/contracts'
-import { fetchReferral } from './credits-api'
+import { fetchReferral, fetchPublicCreditPolicy } from './credits-api'
 import InviteCreditsDialog from './InviteCreditsDialog'
 
 export type AccountNavId = 'profile' | 'usage' | 'posts' | 'billing'
@@ -86,6 +86,9 @@ const menuItemClass =
 
 export default function AccountLayout({ active, withSidebar = true, children }: Props) {
   const toast = useToast()
+  const policy = useQuery({ queryKey: ['credits', 'public-policy'], queryFn: fetchPublicCreditPolicy, staleTime: 20_000, refetchInterval: 60_000 })
+  const planLabel = policy.data?.planLabel ?? '—'
+  const navCards = NAV_CARDS.map(card => card.id === 'pricing' ? { ...card, items: card.items.map((item, index) => index === 0 ? { ...item, title: `${planLabel} · ¥0 / 月`, desc: policy.data?.publicBetaEnabled ? '注册即开通，含每日额度与完整 Agent 能力' : '完整 Agent 能力' } : item) } : card)
   const user = useShellStore((state) => state.sessionUser)
   const setGuest = useShellStore((state) => state.setGuest)
   const navigate = useNavigate()
@@ -159,7 +162,7 @@ export default function AccountLayout({ active, withSidebar = true, children }: 
             <span className="text-base font-semibold tracking-tight">Chevoink</span>
           </Link>
           <nav className="hidden items-center md:flex">
-            {NAV_CARDS.map((card) => (
+            {navCards.map((card) => (
               <div key={card.id} className="group relative">
                 <button
                   type="button"
@@ -185,7 +188,7 @@ export default function AccountLayout({ active, withSidebar = true, children }: 
                 <div className="rounded-[10px] bg-[#f4f4f2] px-3 py-2.5 dark:bg-[var(--surface-muted)]">
                   <p className="flex items-center gap-2 text-sm font-semibold">
                     <span className="truncate">{user?.nickname ?? '创作者'}</span>
-                    <span className="shrink-0 rounded-full bg-emerald-600/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">公测版</span>
+                    <span className="shrink-0 rounded-full bg-emerald-600/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">{planLabel}</span>
                   </p>
                   <p className="mt-0.5 truncate text-xs text-[var(--text-tertiary)]">{user?.email ?? user?.phone ?? '启创墨域账户'}</p>
                 </div>
@@ -252,7 +255,7 @@ export default function AccountLayout({ active, withSidebar = true, children }: 
                       <div className="min-w-0">
                         <p className="flex items-center gap-2 text-[15px] font-semibold">
                           <span className="truncate">{user?.nickname ?? '创作者'}</span>
-                          <span className="shrink-0 rounded-full bg-emerald-600/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">公测版</span>
+                          <span className="shrink-0 rounded-full bg-emerald-600/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">{planLabel}</span>
                         </p>
                         <p className="mt-0.5 truncate text-[13px] text-[var(--text-tertiary)]">{user?.email ?? user?.phone ?? '启创墨域账户'}</p>
                       </div>

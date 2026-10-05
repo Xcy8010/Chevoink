@@ -9,6 +9,7 @@ import { goalError, goalSnapshot, lockGoalSession, writeGoalEvent, type GoalTx }
 import { lockOwnedRun, runtimeJson, runtimeTransaction } from './runtime-common.js'
 import type { ToolContext, ToolResult } from './tools/types.js'
 import { readCurrentTaskGoalConsent, readGoalConsentSourceRun } from './goal-consent.js'
+import { COMPATIBILITY_TOKEN_LIMIT, serializeExecutionControl, untilCompletionControl } from './execution-control.js'
 
 export const GOAL_ACTIVATION_PENDING = 'GOAL_ACTIVATION_PENDING'
 export const activationAuthoritySchema = z.array(z.tuple([z.string(), z.object({ permission: z.enum(['allow', 'ask', 'deny']),
@@ -98,9 +99,9 @@ export async function registerGoalActivationInTransaction(tx: GoalTx, ctx: ToolC
   const goal = await tx.agentGoal.create({ data: { userId: ctx.userId, novelId: ctx.novelId, sessionId: ctx.sessionId,
     status: 'active', phase: 'reconciling', currentRunId: ctx.runId, activeSince: null, nextEligibleAt: null,
     reasonCode: GOAL_ACTIVATION_PENDING, executionOptions: runtimeJson(source.options).value,
-    revisions: { create: { revision: 1, objective: source.objective, request: runtimeJson(source.options).value,
+    revisions: { create: { revision: 1, objective: source.objective, request: runtimeJson({ ...source.options, executionControl: serializeExecutionControl(untilCompletionControl()) }).value,
       authorityHash: receipt.hash, sourceActionId: requestId } },
-    budget: { create: { tokenLimit: tokenCap, platformTokenCap: tokenCap, activeTimeLimitMs: timeCap, platformTimeCapMs: timeCap } },
+    budget: { create: { tokenLimit: BigInt(COMPATIBILITY_TOKEN_LIMIT), platformTokenCap: tokenCap, activeTimeLimitMs: 1n, platformTimeCapMs: timeCap } },
     evidence: { create: [{ revision: 1, criterionId: 'author-objective', kind: 'objective', description: source.objective, receipt: {} },
       { revision: 1, criterionId: 'activation-source', kind: 'activation-source', description: '作者授权当前任务启用目标模式，等待原执行结算。', status: 'verified', receipt: receipt.value }] } } })
   const snapshot = await writeGoalEvent(tx, goal, 'goal.activation_pending')

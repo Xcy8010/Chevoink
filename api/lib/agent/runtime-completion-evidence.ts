@@ -1,7 +1,7 @@
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { countReportChineseCharacters } from '../../../shared/agent-output.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
-import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
+import { withManuscriptRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionStateInTransaction } from './runtime-state.js'
 import { readTaskBudgetInTransaction } from './runtime-budget.js'
 import { collectDurableToolEvidence } from './runtime-evidence.js'
@@ -9,13 +9,14 @@ import { readDurableTodoItems } from './tools/durable-todo.js'
 import { evaluateTaskPostconditions } from './runtime-postconditions.js'
 import { collectDurableDeliverables } from './runtime-deliverables.js'
 import { collectDurableMemoryWork } from './runtime-memory.js'
+import { readCompletedWritingDelivery } from './writing-scope.js'
 
 /** Review input, NOT a completion certificate. The goal/output/postcondition
  * obligations remain explicit and unverified until their domain checks run.
  * Same-book legacy tasks never enter this root's completion obligations. */
 export async function collectDurableCompletionEvidence(token: RunLeaseToken, cursor: { expectedRevision: number; expectedHash: string }) {
   const lease = { ...token }, expected = { ...cursor }
-  return withRunLease(lease, tx => collectCompletionEvidenceInTransaction(tx, lease, expected))
+  return withManuscriptRunLease(lease, tx => collectCompletionEvidenceInTransaction(tx, lease, expected))
 }
 
 /** Caller owns the current lease transaction; unresolved operations are never
@@ -33,6 +34,7 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
     const memoryWork = await collectDurableMemoryWork(tx, root, evidence.effects)
     const postconditionChecks = await evaluateTaskPostconditions(tx, root)
     const todos = await readDurableTodoItems(tx, root.id, frame.revision)
+    const writingDelivery = await readCompletedWritingDelivery(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId })
     const budget = await readTaskBudgetInTransaction(tx, root.id)
     const compilations = await tx.storyCompilation.findMany({ where: { userId: lease.userId, novelId: root.novelId, run: { taskRootId: root.id } },
       select: { id: true, chapterId: true, status: true, stage: true, bridge: { select: { targetRevision: true, committedAt: true } }, chapter: { select: { revision: true } } }, orderBy: { id: 'asc' } })
@@ -48,8 +50,8 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       ...memoryWork.filter(item => !item.completed).map(item => ({ code: 'unresolved_memory_job', reference: item.job.id })),
       ...deliverables.filter(item => item.status === 'missing' || item.status === 'changed').map(item => ({ code: `deliverable_${item.status}`, reference: item.id })),
       ...postconditionChecks.filter(item => item.severity === 'error' && item.status !== 'passed').map(item => ({ code: `postcondition_${item.status}`, reference: item.code })),
-      ...todos.filter(item => item.status === 'pending' || item.status === 'in_progress').map(item => ({ code: 'unfinished_todo', reference: runtimeJson({ content: item.content }).hash })),
-      ...compilations.filter(item => item.status === 'active' || item.status === 'completed' && (!item.bridge?.committedAt || item.chapter?.revision !== item.bridge.targetRevision)).map(item => ({ code: 'uncommitted_compilation', reference: item.id })),
+      ...todos.filter(item => !writingDelivery && (item.status === 'pending' || item.status === 'in_progress')).map(item => ({ code: 'unfinished_todo', reference: runtimeJson({ content: item.content }).hash })),
+      ...compilations.filter(item => !writingDelivery && (item.status === 'active' || item.status === 'completed' && (!item.bridge?.committedAt || item.chapter?.revision !== item.bridge.targetRevision))).map(item => ({ code: 'uncommitted_compilation', reference: item.id })),
       ...pendingOperations.map(item => ({ code: 'unresolved_operation', reference: item.id })),
       ...subtasks.filter(item => !['completed', 'cancelled'].includes(item.status)).map(item => ({ code: 'unresolved_subtask', reference: item.id })),
       ...(budget.unresolvedAttempts > 0n ? [{ code: 'unresolved_usage', reference: root.id }] : []),

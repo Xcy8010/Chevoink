@@ -8,6 +8,8 @@ import { changeGoal, goalError } from './goal-store.js'
 import { databaseNow, runtimeTransaction, runtimeJson } from './runtime-common.js'
 import { fallbackUsageEvidenceSchema } from '../billing/reservation-policy.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
+import { readGoalExecutionControl } from './goal-execution-control.js'
+import { executionLimitReached } from './execution-control.js'
 
 /** Reserve before dispatch, once per provider attempt (including routed failures and auxiliary calls). */
 export async function reserveGoalUsage(sourceKey: string, estimatedTokens: number, context = currentGoalExecution()) {
@@ -39,7 +41,9 @@ export async function reserveGoalUsageInTransaction(tx: Prisma.TransactionClient
     const now = await databaseNow(tx)
     const elapsed = goal.activeSince ? BigInt(Math.max(0, now.getTime() - goal.activeSince.getTime())) : 0n
     const reserved = BigInt(estimatedTokens)
-    if (budget.tokensUsed + budget.tokensReserved + reserved > budget.tokenLimit || budget.activeTimeMs + elapsed >= budget.activeTimeLimitMs) {
+    const control = await readGoalExecutionControl(tx, context.goalId)
+    if (executionLimitReached(control, { tokens: budget.tokensUsed, activeTimeMs: budget.activeTimeMs + elapsed })
+      || control.limits.tokens !== null && budget.tokensUsed + budget.tokensReserved + reserved > control.limits.tokens) {
       return goalError('GOAL_BUDGET_EXHAUSTED', '目标已达到执行预算，已保存的内容保留。')
     }
     await tx.agentGoalUsage.create({ data: { sourceKey, goalId: context.goalId, runId: context.runId, reservedTokens: reserved } })

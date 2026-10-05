@@ -5,12 +5,13 @@ const m = vi.hoisted(() => ({
   db: { chapter: { findFirst: vi.fn(), updateMany: vi.fn() }, $transaction: vi.fn() },
   tx: {
     $queryRaw: vi.fn(),
-    agentRun: { findFirst: vi.fn() },
+    agentRun: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), update: vi.fn() },
+    agentSession: { findFirst: vi.fn() }, agentChildExecutionGrant: { findUnique: vi.fn() },
     // Legacy runs have no AgentGoalExecution; keep the new goal fence on its
     // ordinary no-goal branch while preserving all manuscript assertions.
     agentGoalExecution: { findUnique: vi.fn() },
-    chapter: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), updateMany: vi.fn(), create: vi.fn(), count: vi.fn() },
-    volume: { findFirst: vi.fn() }, agentTaskRoot: { findUniqueOrThrow: vi.fn() },
+    chapter: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), create: vi.fn(), count: vi.fn() },
+    volume: { findFirst: vi.fn(), findMany: vi.fn() }, agentTaskRoot: { findUniqueOrThrow: vi.fn() },
   },
   stats: vi.fn(), memory: vi.fn(), compiler: vi.fn(), flags: vi.fn(), craft: vi.fn(), placement: vi.fn(), place: vi.fn(),
   prepare: vi.fn(), prepareCursor: vi.fn(), commit: vi.fn(), failure: vi.fn(), reduce: vi.fn(),
@@ -40,9 +41,26 @@ import { clearRunBaselines, getChapterBaseline, recordChapterBaseline, recordCre
 import { chapterAppendTool, chapterCreateTool, chapterEditRangeTool, chapterRenameTool, chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { executeDurableChapter, executeDurableChapterRename } from '../../api/lib/agent/tools/durable-chapter.js'
 import type { AgentTool, ToolContext, ToolResult } from '../../api/lib/agent/tools/types.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 
 const tx = m.tx as unknown as Prisma.TransactionClient
 const row = { id: 'c', novelId: 'n', authorId: 'u', volumeId: 'v', title: 'Title', content: 'Before', revision: 4, wordCount: 6, orderIndex: 1, orderInVolume: 1, status: 'published', visibility: 'public', publishedContent: 'Snapshot', publishedRevision: 2, archivedAt: null }
+let ownedRun: Record<string, unknown>
+function authorScope(createAt?: number) {
+  const prompt = createAt ? `写第${createAt}章，创建该目标章节。` : '修订当前章节的标题和正文。'
+  const task = buildTaskSpec({ runId: 'r', novelId: 'n', chapterId: 'c', prompt })
+  task.scope.writing = { version: 1, kind: 'bounded', titleAndBodyOnly: false, repairAuthorized: !createAt,
+    targets: [{ orderIndex: createAt ?? 1, chapterId: createAt ? null : 'c' }] }
+  ownedRun = { id: 'r', userId: 'u', novelId: 'n', sessionId: 's', chapterId: 'c', taskSpec: task,
+    startRequest: { prompt }, status: 'running', manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 0 }, writingBindings: null }
+  m.tx.agentRun.findFirst.mockImplementation(async ({ where }) => where.id === 'r' && where.userId === 'u' && where.novelId === 'n' ? ownedRun : null)
+  m.tx.agentRun.findFirstOrThrow.mockImplementation(async ({ where }) => {
+    if (where.id !== undefined && where.id !== 'r' || where.userId !== 'u' || where.novelId !== 'n'
+      || where.taskSpec && where.taskSpec.equals !== task.id) throw new Error('Missing owned original run')
+    return ownedRun
+  })
+  m.tx.agentRun.update.mockImplementation(async ({ data }) => Object.assign(ownedRun, data))
+}
 const ctx = (overrides: Partial<ToolContext> = {}): ToolContext => ({ userId: 'u', novelId: 'n', chapterId: 'c', runId: 'r', sessionId: 's', callId: 'call', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {}, ...overrides })
 const durable = (action: string, cursor = true) => ctx({
   toolAuthority: new Map([[action, { permission: 'allow', alwaysConfirm: false, dangerous: false }]]),
@@ -61,8 +79,18 @@ const contentArgs = (action: typeof actions[number], unchanged = false) => actio
 
 beforeEach(() => {
   vi.resetAllMocks()
-  m.tx.$queryRaw.mockResolvedValue([{ id: 'n' }])
-  m.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 0 } })
+  m.tx.$queryRaw.mockImplementation(async (strings, ...values) => {
+    const sql = strings.join('?')
+    if (sql === 'SELECT id FROM novels WHERE id = ? FOR UPDATE' && values[0] === 'n') return [{ id: 'n' }]
+    if (sql === 'SELECT id FROM agent_runs WHERE id = ? AND user_id = ? AND novel_id = ? FOR UPDATE'
+      && values[0] === 'r' && values[1] === 'u' && values[2] === 'n') return [{ id: 'r' }]
+    throw new Error(`Unexpected fixture lock: ${sql}`)
+  })
+  authorScope()
+  m.tx.agentSession.findFirst.mockResolvedValue({ id: 's', userId: 'u', novelId: 'n', spawnedFromRunId: null, spawnedFromSessionId: null })
+  m.tx.agentChildExecutionGrant.findUnique.mockResolvedValue(null)
+  m.tx.chapter.findMany.mockResolvedValue([row])
+  m.tx.volume.findMany.mockResolvedValue([{ id: 'v', title: 'Volume', novelId: 'n', orderIndex: 1, archivedAt: null }])
   m.tx.agentGoalExecution.findUnique.mockResolvedValue(null)
   clearRunBaselines('r')
   m.db.$transaction.mockImplementation(work => work(tx))
@@ -171,6 +199,7 @@ describe('legacy Agent chapter archive guards', () => {
   })
 
   it('rejects an archived volume ordinal before creating anything', async () => {
+    authorScope(2)
     m.tx.volume.findFirst.mockResolvedValue(null)
     await expect(chapterCreateTool.execute(ctx(), { title: 'New', volumeOrder: 1 })).rejects.toMatchObject({ code: 'VOLUME_NOT_FOUND' })
     expect(m.tx.volume.findFirst).toHaveBeenCalledWith({ where: { novelId: 'n', archivedAt: null, orderIndex: 1 } })
@@ -178,6 +207,7 @@ describe('legacy Agent chapter archive guards', () => {
   })
 
   it('scopes global placement, last chapter, count and created-row hydration', async () => {
+    authorScope(1)
     m.placement.mockResolvedValue({ volume: { id: 'v' }, count: 1, position: 0 })
     m.tx.chapter.create.mockResolvedValue(row)
     m.tx.chapter.findFirstOrThrow.mockResolvedValue({ ...row, volume: { title: 'Volume', orderIndex: 1 } })

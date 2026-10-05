@@ -1,0 +1,90 @@
+import { expect, it } from 'vitest'
+import { nextStagnantBatch, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, persistedContentHash, semanticReadIdentity } from '../../api/lib/agent/semantic-progress.js'
+
+it('keeps progressing beyond old task caps while recognizing content cycles and no-ops', () => {
+  const seen = new Set<string>()
+  let previous = persistedContentHash('原文'), stagnant = 0
+  for (let index = 0; index < 150; index++) {
+    const next = persistedContentHash(`正文推进${index}`)
+    stagnant = nextStagnantBatch(stagnant, observeSemanticTransition(seen, 'chapter:owned', previous, next))
+    expect(stagnant).toBe(0)
+    previous = next
+  }
+  expect(observeSemanticTransition(seen, 'chapter:owned', previous, persistedContentHash('原文'))).toBe(false)
+  expect(observeSemanticTransition(seen, 'chapter:owned', previous, previous)).toBe(false)
+  expect(observeSemanticTransition(seen, 'chapter:other-authorized', previous, persistedContentHash('原文'))).toBe(true)
+})
+
+it('counts first verified current terminal separately from unchanged body or audit-only stage changes', () => {
+  const seen = new Set<string>(), hash = persistedContentHash('完整正文')
+  expect(observeSemanticTransition(seen, 'chapter:c', hash, hash)).toBe(false)
+  expect(observeRequiredResult(seen, 'terminal:chapter:c', hash)).toBe(true)
+  expect(observeRequiredResult(seen, 'terminal:chapter:c', hash)).toBe(false)
+  expect(observeRequiredResult(seen, 'terminal:chapter:c', persistedContentHash('最新正文'))).toBe(true)
+})
+
+it('fresh workflow reports and read receipt IDs do not count as substantive work', () => {
+  for (const action of ['quality_report_get', 'continuity_validate', 'chapter_bridge_get', 'todo_write', 'ask_user', 'task_get', 'task_wait']) {
+    expect(semanticReadIdentity(action, '{"id":"new","revision":999,"stage":"check"}')).toBeNull()
+  }
+  expect(semanticReadIdentity('plan_read', '《大纲》（planId=old，contentHash=abc，正文）：\n计划正文'))
+    .toBe(semanticReadIdentity('plan_read', '《大纲》（planId=new，contentHash=abc，正文）：\n计划正文'))
+  const header = '网页「https://example.invalid」正文：\nsourceId=正文中原样保留\n来源编号 sourceId='
+  expect(semanticReadIdentity('web_read', `${header}old；contentRef=one、revision=1`))
+    .toBe(semanticReadIdentity('web_read', `${header}new；contentRef=two、revision=2`))
+  expect(semanticReadIdentity('chapter_read', '正文A')).not.toBe(semanticReadIdentity('chapter_read', '正文B'))
+})
+
+it('parks repeated failures without counting a healthy child wait as another stagnant batch', () => {
+  let count = 0
+  for (let index = 0; index < 4; index++) count = nextStagnantBatch(count, false)
+  expect(count).toBe(4)
+  expect(nextStagnantBatch(count, false, true)).toBe(4)
+  expect(nextStagnantBatch(count, true)).toBe(0)
+})
+
+it('recreated plan IDs, revision-only report cards and A/B revisions do not refresh legacy progress', () => {
+  const seen = new Set<string>()
+  const card = (display: Parameters<typeof observeLegacyContentProgress>[1]['display']) => ({
+    type: 'tool-call' as const, callId: 'real-tool', toolName: 'plan_save', title: '保存', status: 'success' as const, args: {}, display,
+  })
+  expect(observeLegacyContentProgress(seen, card({ kind: 'planFile', planId: 'first', title: '计划', content: '内容A' }))).toBe(true)
+  expect(observeLegacyContentProgress(seen, card({ kind: 'planFile', planId: 'second', title: '计划', content: '内容A' }))).toBe(false)
+  expect(observeLegacyContentProgress(seen, card({ kind: 'planDiff', planId: 'second', title: '计划', before: '内容A', after: '内容B' }))).toBe(true)
+  expect(observeLegacyContentProgress(seen, card({ kind: 'planDiff', planId: 'second', title: '计划', before: '内容B', after: '内容A' }))).toBe(false)
+})
+
+it('canonical research reads preserve genuine new facts while deduplicating audit IDs and revision-only views', () => {
+  const search = (id: string, revision: number, body: string) => `全书检索命中 1 处，索引状态 ready。本次返回结果已保存为 artifactId=${id}，以下包含本次全部返回结果。\n- 卷 / 章 [content@0, chapterId=c, revision=${revision}] …【${body}】…`
+  expect(semanticReadIdentity('project_search', search('one', 1, '真正文'))).toBe(semanticReadIdentity('project_search', search('two', 2, '真正文')))
+  expect(semanticReadIdentity('project_search', search('one', 1, '真正文'))).not.toBe(semanticReadIdentity('project_search', search('two', 2, '新正文')))
+  const dossier = (id: string, version: number, fact: string) => JSON.stringify({ id, version, status: 'ready', updatedAt: 'audit', readerPromise: '原始研究目标', factCards: [{ claim: fact }] })
+  expect(semanticReadIdentity('research_dossier_get', dossier('one', 1, '真实事实'))).toBe(semanticReadIdentity('research_dossier_get', dossier('two', 2, '真实事实')))
+  expect(semanticReadIdentity('research_dossier_get', dossier('one', 1, '真实事实'))).not.toBe(semanticReadIdentity('research_dossier_get', dossier('two', 2, '新事实')))
+})
+
+
+it('does not treat empty lookup advice, null charters or audit-only retrieval traces as progress', () => {
+  const empty: Record<string, string> = {
+    research_dossier_get: '当前作品尚无研究档案。只在明确需要时建立。', first_three_prototype_get: '当前作品尚无前三章试制。',
+    style_profile_get: '当前作品尚无已确认的作者 Style DNA。', memory_review_list: '记忆审核箱为空。',
+    character_voice_get: '没有匹配的 Voice DNA。', experience_anchor_get: '没有确认经历锚点；不得编造。',
+    directive_list: '当前作品没有 active 指令。', story_charter_get: JSON.stringify({ charter: null, readerPromises: [] }),
+    retrieval_trace_read: '检索查询：{"scene":"实际查询"}\n选择结果：[]\n记录时间：审计时间',
+  }
+  for (const [action, output] of Object.entries(empty)) expect(semanticReadIdentity(action, output), action).toBeNull()
+  expect(semanticReadIdentity('structure_validate', '真实目录：卷一，章节位置1')).not.toBeNull()
+  const output = '全书检索命中 1 处。本次返回结果已保存为 artifactId=one，全部结果。\n- 卷 / 章 [content@0, chapterId=c, revision=1] 正文 [content@1, chapterId=c, revision=999]'
+  expect(semanticReadIdentity('project_search', output)).not.toBe(semanticReadIdentity('project_search', output.replace('revision=999', 'revision=998')))
+})
+
+
+it('summary locating revisions and report receipt revisions cannot manufacture fresh material', () => {
+  const summary = (revision: number, body: string) => `全书检索命中 1 处。\n- 卷 / 章 [summary@0, chapterId=c, revision=${revision}] ${body}`
+  expect(semanticReadIdentity('project_search', summary(1, '原摘要 revision=999'))).toBe(semanticReadIdentity('project_search', summary(2, '原摘要 revision=999')))
+  expect(semanticReadIdentity('project_search', summary(1, '原摘要 revision=999'))).not.toBe(semanticReadIdentity('project_search', summary(2, '原摘要 revision=998')))
+  const report = (artifactId: string, revision: number, content: string) => JSON.stringify({ reportId: 'main', artifactId, revision,
+    sections: [{ id: 'intro', order: 0 }], content, offset: 0, totalChars: content.length, nextOffset: null })
+  expect(semanticReadIdentity('research_report_read', report('old', 1, '正文 revision=1'))).toBe(semanticReadIdentity('research_report_read', report('new', 9, '正文 revision=1')))
+  expect(semanticReadIdentity('research_report_read', report('old', 1, '正文 revision=1'))).not.toBe(semanticReadIdentity('research_report_read', report('new', 9, '新正文 revision=1')))
+})

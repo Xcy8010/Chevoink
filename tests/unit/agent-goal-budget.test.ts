@@ -40,10 +40,12 @@ const mocks = vi.hoisted(() => {
     changeGoal: vi.fn(),
     databaseNow: vi.fn(),
     runtimeTransaction: vi.fn(),
+    readGoalExecutionControl: vi.fn(),
   }
 })
 
 vi.mock('../../api/lib/prisma.js', () => ({ prisma: mocks.prisma }))
+vi.mock('../../api/lib/agent/goal-execution-control.js', () => ({ readGoalExecutionControl: mocks.readGoalExecutionControl }))
 vi.mock('../../api/lib/data/novel-write-lock.js', () => ({
   lockNovelActiveScope: mocks.lockNovelActiveScope,
 }))
@@ -129,6 +131,8 @@ function configureDurableSync(attempt: Record<string, unknown>) {
 describe('goal budget accounting', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.readGoalExecutionControl.mockResolvedValue({ version: 3, controlPolicy: 'until_completion', origin: 'user',
+      limits: { tokens: 100n, turns: null, activeTimeMs: 60_000n } })
     configureReserve()
   })
 

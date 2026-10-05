@@ -1,13 +1,17 @@
+import { assertProviderBudget } from './runtime-budget.js'
+import { verifyChildGrant } from './runtime-child.js'
+import { nextStagnantBatch } from './semantic-progress.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { promisesFurtherAction } from './completion-guard.js'
 import { durableChatResultSchema } from './runtime-common.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
-import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
+import { withManuscriptRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { readDurableTodoItems } from './tools/durable-todo.js'
 import { collectDurableToolEvidence } from './runtime-evidence.js'
 import { collectCompletionEvidenceInTransaction } from './runtime-completion-evidence.js'
+import { readCompletedWritingDelivery } from './writing-scope.js'
 
 const resultSchema = z.object({ outcome: z.literal('succeeded'), result: durableChatResultSchema }).strict()
 const continuationSchema = z.object({ version: z.literal(1), sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(),
@@ -25,10 +29,12 @@ function continuationMessage(payload: z.infer<typeof continuationSchema>): strin
  * request or rebuild intent from a previous task's todos. Completion is separate. */
 export async function advanceDurableContinuation(token: RunLeaseToken) {
   const lease = { ...token }
-  return withRunLease(lease, async tx => {
+  return withManuscriptRunLease(lease, async tx => {
     const current = await readExecutionStateInTransaction(tx, lease.taskRootId)
     const frame = current.frame, last = frame.state.messages.at(-1)
     if (frame.state.phase !== 'idle' || last?.role !== 'assistant' || last.toolCalls?.length || frame.revision === 0) return null
+    const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
+    if (await readCompletedWritingDelivery(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId })) return null
     const pending = await readExecutionFrame(tx, lease.taskRootId, frame.revision - 1)
     if (pending.state.phase !== 'awaiting_operation') return null
     const operation = await tx.agentOperation.findFirst({ where: { id: pending.state.pendingOperationId!, taskRootId: lease.taskRootId, kind: 'provider', status: 'succeeded' } })
@@ -51,7 +57,7 @@ export async function advanceDurableContinuation(token: RunLeaseToken) {
  * provider/usage/subtask state is a reconciliation boundary, never a retry hint. */
 export async function advanceDurableCompletionObligations(token: RunLeaseToken, cursor: { expectedRevision: number; expectedHash: string }) {
   const lease = { ...token }, expected = { ...cursor }
-  return withRunLease(lease, async tx => {
+  return withManuscriptRunLease(lease, async tx => {
     const evidence = await collectCompletionEvidenceInTransaction(tx, lease, expected)
     const { blockers } = z.object({ blockers: z.array(z.object({ code: z.string(), reference: z.string() }).strict()) }).parse(evidence.snapshot)
     if (!blockers.length) return null
@@ -90,4 +96,66 @@ async function appendContinuation(tx: RuntimeTx, lease: RunLeaseToken,
     const next = await saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
       snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'system', content: continuationMessage(payload) }] } })
     return { kind: 'continued' as const, frame: next }
+}
+
+const stagnationSchema = z.object({ version: z.literal(1), sourceRevision: z.number().int().nonnegative(),
+  sourceHash: z.string().regex(/^[a-f0-9]{64}$/), progressSequence: z.string().regex(/^(0|[1-9][0-9]*)$/),
+  stagnantBatches: z.number().int().nonnegative(), healthyChildWaiting: z.boolean() }).strict()
+
+/** Check each fully observed tool batch, including failed/report-only batches.
+ * Saved frames and raw receipts remain immutable; the decision has its own outbox proof. */
+export async function advanceDurableToolStagnation(token: RunLeaseToken) {
+  const lease = { ...token }
+  return withManuscriptRunLease(lease, async tx => {
+    const { frame } = await readExecutionStateInTransaction(tx, lease.taskRootId)
+    if (frame.state.phase !== 'idle' || frame.state.messages.at(-1)?.role !== 'tool') return null
+    let assistantIndex = frame.state.messages.length - 1
+    while (assistantIndex >= 0 && frame.state.messages[assistantIndex].role === 'tool') assistantIndex--
+    const assistant = frame.state.messages[assistantIndex]
+    if (assistant?.role !== 'assistant' || !assistant.toolCalls?.length) return null
+    const observed = frame.state.messages.slice(assistantIndex + 1)
+    if (!assistant.toolCalls.every(call => observed.some(message => message.role === 'tool' && message.toolCallId === call.id))) return null
+    await assertProviderBudget(tx, lease.taskRootId)
+    const { progressSequence } = await collectDurableToolEvidence(tx, lease.taskRootId, frame.revision)
+    const previous = await tx.agentExecutionOutbox.findFirst({ where: { taskRootId: lease.taskRootId, type: 'execution.stagnation' }, orderBy: { sequence: 'desc' } })
+    if (!previous && frame.state.stagnation) return runtimeError('RUNTIME_RECEIPT_INVALID', '执行帧的停滞证明缺少原判定事件。')
+    let prior: z.infer<typeof stagnationSchema> | null = null
+    if (previous) {
+      const parsed = stagnationSchema.safeParse(previous.payload)
+      if (!parsed.success || previous.eventKey !== `stagnation:${lease.taskRootId}:${parsed.data.sourceRevision}`) return runtimeError('RUNTIME_RECEIPT_INVALID', '原停滞判定回执损坏。')
+      prior = parsed.data
+      const source = await readExecutionFrame(tx, lease.taskRootId, prior.sourceRevision)
+      if (source.snapshotHash !== prior.sourceHash || source.state.messages.at(-1)?.role !== 'tool' || prior.sourceRevision > frame.revision) return runtimeError('RUNTIME_RECEIPT_INVALID', '原停滞判定与执行位置不一致。')
+      const applied = await readExecutionFrame(tx, lease.taskRootId, prior.sourceRevision + 1)
+      const { stagnation: appliedProof, ...appliedState } = applied.state
+      const { stagnation: _sourceProof, ...sourceState } = source.state
+      if (appliedProof?.sourceRevision !== prior.sourceRevision || appliedProof.payloadHash !== runtimeJson(prior).hash
+        || runtimeJson(appliedState).hash !== runtimeJson(sourceState).hash || applied.previousHash !== source.snapshotHash
+        || frame.state.stagnation?.sourceRevision !== prior.sourceRevision || frame.state.stagnation.payloadHash !== appliedProof.payloadHash) {
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '停滞计数缺少紧邻原批次的不可变执行帧证明。')
+      }
+      // Compaction/proof ticks do not execute another native operation. Only a
+      // genuinely new fully observed tool batch can consume another recovery.
+      if (frame.state.nextOperationSequence === source.state.nextOperationSequence && frame.state.turn === source.state.turn) return prior.stagnantBatches >= 4
+        ? { kind: 'needs_attention' as const, reason: '连续多轮没有推进原任务的内容或必需成果，任务尚未完成，已停止重复执行。', frame } : null
+    }
+    let healthyChildWaiting = false
+    if (assistant.toolCalls.some(call => ['task_wait', 'task_get', 'task_list'].includes(call.name))) {
+      const children = await tx.agentChildExecutionGrant.findMany({ where: { parentRootId: lease.taskRootId, status: { in: ['admitted', 'running'] } }, include: { childRun: true } })
+      for (const child of children) {
+        verifyChildGrant(child)
+        if (child.currentParentRunId !== lease.runId || child.childRun.userId !== lease.userId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '等待的子任务不属于当前父任务。')
+        if (['queued', 'running', 'awaiting_approval'].includes(child.childRun.status)) healthyChildWaiting = true
+      }
+    }
+    const stagnantBatches = nextStagnantBatch(prior?.stagnantBatches ?? 0, progressSequence !== (prior?.progressSequence ?? '0'), healthyChildWaiting)
+    const payload = { version: 1 as const, sourceRevision: frame.revision, sourceHash: frame.snapshotHash, progressSequence, stagnantBatches, healthyChildWaiting }
+    await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: lease.taskRootId, runId: lease.runId,
+      eventKey: `stagnation:${lease.taskRootId}:${frame.revision}`, type: 'execution.stagnation', payload: runtimeJson(payload).value } })
+    const proof = runtimeJson(payload)
+    const next = await saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+      snapshot: { ...frame.state, stagnation: { sourceRevision: frame.revision, payloadHash: proof.hash } } })
+    return stagnantBatches >= 4 ? { kind: 'needs_attention' as const,
+      reason: '连续多轮没有推进原任务的内容或必需成果，任务尚未完成，已停止重复执行。', frame: next } : null
+  })
 }

@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => {
     agentRun: { findUnique: vi.fn() },
     agentGoalBudget: { findUniqueOrThrow: vi.fn() },
     agentGoalUsage: { count: vi.fn() },
-    agentGoalEvidence: { findUnique: vi.fn(), create: vi.fn(), upsert: vi.fn() },
+    agentGoalEvidence: { findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(), upsert: vi.fn() },
     agentQueuedRequest: { count: vi.fn() },
     agentGoalRevision: { findUniqueOrThrow: vi.fn() },
   }
@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => {
     stopAgentRun: vi.fn(),
     actOnAgentGoal: vi.fn(),
     revokeGoalExecutions: vi.fn(),
+    readGoalExecutionControl: vi.fn(),
   }
 })
 
@@ -46,6 +47,7 @@ vi.mock('../../api/lib/agent/runtime-common.js', () => ({
 }))
 vi.mock('../../api/lib/agent/run-service.js', () => ({ startLoopRun: mocks.startLoopRun }))
 vi.mock('../../api/lib/agent/goal-budget.js', () => ({ reconcileGoalUsage: mocks.reconcileGoalUsage }))
+vi.mock('../../api/lib/agent/goal-execution-control.js', () => ({ readGoalExecutionControl: mocks.readGoalExecutionControl }))
 
 let realNextGoalProgress: typeof import('../../api/lib/agent/goal-evidence.js').nextGoalProgress
 vi.mock('../../api/lib/agent/goal-evidence.js', async (importOriginal) => {
@@ -69,6 +71,7 @@ function goal(overrides: Record<string, unknown> = {}) {
 }
 
 function configure(candidate = goal()) {
+  mocks.readGoalExecutionControl.mockResolvedValue({ version: 3, controlPolicy: 'until_completion', origin: 'system_default', limits: { tokens: null, turns: null, activeTimeMs: null } })
   mocks.runtimeTransaction.mockImplementation(async (work: (tx: typeof mocks.tx) => unknown) => work(mocks.tx))
   mocks.lockOwnedGoal.mockResolvedValue(candidate)
   mocks.databaseNow.mockResolvedValue(now)
@@ -78,6 +81,7 @@ function configure(candidate = goal()) {
   mocks.tx.agentQueuedRequest.count.mockResolvedValue(0)
   mocks.tx.agentRun.findUnique.mockResolvedValue({ id: 'run-1', status: 'completed', taskRootId: null })
   mocks.tx.agentGoalEvidence.findUnique.mockResolvedValue(null)
+  mocks.tx.agentGoalEvidence.findFirst.mockResolvedValue(null)
   mocks.tx.agentGoalEvidence.create.mockResolvedValue(undefined)
   mocks.tx.agentGoalRevision.findUniqueOrThrow.mockResolvedValue({ revision: 1, objective: '写三章' })
   mocks.inspectGoalEvidence.mockResolvedValue({ progressHash: 'progress-1', blockers: [], needsScopeDecision: false,
@@ -219,6 +223,7 @@ describe('goal supervisor acceptance boundaries', () => {
 
   it('revokes every child execution before marking an exhausted goal budget-limited', async () => {
     configure(goal({ activeSince: new Date(now.getTime() - 10_000) }))
+    mocks.readGoalExecutionControl.mockResolvedValue({ version: 3, controlPolicy: 'until_completion', origin: 'user', limits: { tokens: 100n, turns: null, activeTimeMs: null } })
     mocks.tx.agentGoalBudget.findUniqueOrThrow.mockResolvedValue({
       tokensUsed: 100n, tokenLimit: 100n, activeTimeMs: 0n, activeTimeLimitMs: 3_600_000n,
     })

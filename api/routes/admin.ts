@@ -1,3 +1,4 @@
+import { setPublicBetaEnabled } from '../lib/credit-policy.js'
 import { Router, type Request, type Response } from 'express'
 import { modelRoutesInputSchema } from '../../shared/contracts/model-routes.js'
 import { modelPromotionSchema } from '../../shared/model-promotion.js'
@@ -100,6 +101,8 @@ import {
   setAdminUsersSuspended,
   setCreditsGloballyPaused,
   updateAdminModel,
+  createAdminModel,
+  reorderAdminModels,
 } from '../lib/admin-credit-model.js'
 
 const router = Router()
@@ -1186,13 +1189,47 @@ router.get('/models', async (req: Request, res: Response): Promise<void> => {
   }
 })
 
+router.post('/models', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try {
+    const admin = await requireAdmin(req)
+    requireSuperAdmin(admin)
+    const body = parseBody(adminModelUpdateSchema.extend({ provider: z.string().trim().min(1).max(40), displayName: z.string().trim().min(1).max(80), modelName: z.string().trim().min(1).max(160),
+      expectedOrder: z.array(z.string().min(1).max(64)).max(500) }).strict(), req.body, '模型配置格式不正确。')
+    const { expectedOrder, ...input } = body
+    res.json(buildSuccess(requestId, await createAdminModel(admin.id, input, expectedOrder)))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
+router.post('/models/reorder', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try {
+    const admin = await requireAdmin(req)
+    requireSuperAdmin(admin)
+    const body = parseBody(z.object({ order: z.array(z.string().min(1).max(64)).max(500), expectedOrder: z.array(z.string().min(1).max(64)).max(500) }).strict(), req.body, '模型顺序格式不正确。')
+    res.json(buildSuccess(requestId, await reorderAdminModels(admin.id, body.order, body.expectedOrder)))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
+router.post('/credits/public-beta', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try {
+    const admin = await requireAdmin(req)
+    requireSuperAdmin(admin)
+    const body = parseBody(adminDangerActionSchema.extend({ enabled: z.boolean(), expectedRevision: z.number().int().nonnegative() }).strict(), req.body, '请完成人机验证并输入确认词。')
+    verifyAuthCaptchaChallenge(body.captchaId.trim(), body.captchaAnswer.trim())
+    if (body.confirmation.trim() !== (body.enabled ? 'RESUME_BETA' : 'STOP_BETA')) throw new DataAccessError(400, 'CONFIRMATION_MISMATCH', '确认词不正确。')
+    res.json(buildSuccess(requestId, await setPublicBetaEnabled(admin.id, body.enabled, body.expectedRevision, getRequestIp(req))))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
 router.patch('/models/:modelId', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
   try {
     const admin = await requireAdmin(req)
     requireSuperAdmin(admin)
     const body = parseBody(adminModelUpdateSchema, req.body, '模型配置格式不正确。')
-    await updateAdminModel(req.params.modelId, body)
+    await updateAdminModel(admin.id, req.params.modelId, body)
     await recordAdminAuditLog({ adminId: admin.id, action: 'models.update', targetType: 'aiModelConfig', targetId: req.params.modelId, detail: { ...body, routes: body.routes?.map(({ apiKey, ...route }) => ({ ...route, ...(apiKey ? { apiKey: '[REPLACED]' } : {}) })), apiKey: body.apiKey ? '[REPLACED]' : undefined }, ip: getRequestIp(req) })
     res.status(200).json(buildSuccess(requestId, { ok: true }))
   } catch (error) {

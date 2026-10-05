@@ -1,3 +1,4 @@
+import { selectableModelTierSchema } from './model-tier.js'
 import { z } from 'zod'
 import {
   MAX_AGENT_FILE_BYTES_PDF,
@@ -143,7 +144,7 @@ export const startAgentLoopRunSchema = z.object({
   attachments: agentAttachmentsSchema.optional(),
   creativeFreedom: z.enum(['stable', 'balanced', 'bold']).optional(),
   qualityMode: z.enum(['balanced', 'premium']).optional(),
-  modelTier: z.enum(['lite', 'speed', 'standard', 'performance', 'ultimate', 'custom']).optional(),
+  modelTier: selectableModelTierSchema.optional(),
   customModelId: z.string().trim().min(1).max(64).optional(),
   reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
   /** 作者手动指定的技能；上限 3 个，避免一次性把上下文填满。 */
@@ -153,7 +154,7 @@ export const startAgentLoopRunSchema = z.object({
 
 /** POST /api/agent/runs/:runId/continue（可选：续跑跟随作者当前的模型选择；缺省沿用原任务档位） */
 export const continueAgentLoopRunSchema = z.object({
-  modelTier: z.enum(['lite', 'speed', 'standard', 'performance', 'ultimate', 'custom']).optional(),
+  modelTier: selectableModelTierSchema.optional(),
   customModelId: z.string().trim().min(1).max(64).nullable().optional(),
   reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
 })

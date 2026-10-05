@@ -802,7 +802,7 @@ export function AgentPanel({
 
   useEffect(() => {
     const summary = creditSummaryQuery.data
-    if (!summary || summary.dailyAllowance <= 0 || summary.totalRemaining <= 0) return
+    if (!summary || !summary.publicBetaEnabled || summary.dailyAllowance <= 0 || summary.totalRemaining <= 0) return
     const remainingPercent = (summary.totalRemaining / summary.dailyAllowance) * 100
     const threshold: 5 | 10 | 20 | null = remainingPercent <= 5 ? 5 : remainingPercent <= 10 ? 10 : remainingPercent <= 20 ? 20 : null
     if (!threshold) {
@@ -1806,6 +1806,7 @@ export function AgentPanel({
       <CreditQuotaDialog
         open={quotaDialogOpen}
         resetsAt={creditSummaryQuery.data?.resetsAt}
+        publicBetaEnabled={creditSummaryQuery.data?.publicBetaEnabled}
         globallyPaused={errorCode === 'credits_globally_paused' || Boolean(creditSummaryQuery.data?.globallyPaused && creditSummaryQuery.data?.suspended)}
         onInvite={() => void openInviteDialog()}
         onClose={() => setQuotaDialogOpen(false)}

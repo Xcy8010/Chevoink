@@ -65,6 +65,33 @@ describe.skipIf(!dbAvailable)('R01 real PostgreSQL journal commit and resume', (
     expect(await prisma.agentRunEvent.count({ where: { runId } })).toBe(1)
   })
 
+  it.each(['commit', 'journal-rollback'] as const)('%s keeps server-projected message and ordered terminal journal in the same transaction', async scenario => {
+    const runId = await newRun(), messageId = randomUUID()
+    const bus = createRunEventBus(runId), listener = vi.fn()
+    bus.subscribe(listener)
+    if (scenario === 'journal-rollback') await prisma.agentRunEvent.create({ data: { runId, seq: 2, type: 'fixture.conflict', payload: {} } })
+    const write = bus.commitTerminal({ type: 'run.finished', status: 'succeeded', usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, artifacts: [], outputSummary: '章标题' }, async tx => {
+      await tx.agentMessage.create({ data: { id: messageId, runId, sessionId, role: 'assistant', parts: [{ type: 'text', text: '章标题\n\n当前正文' }] } })
+      await tx.agentRun.update({ where: { id: runId }, data: { status: 'completed' } })
+    }, [{ type: 'message.start', messageId, role: 'assistant' }, { type: 'text.final', messageId, text: '章标题\n\n当前正文', asReasoning: false }])
+    if (scenario === 'journal-rollback') {
+      await expect(write).rejects.toThrow()
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('paused')
+      expect(await prisma.agentMessage.count({ where: { id: messageId } })).toBe(0)
+      expect(await prisma.agentRunEvent.count({ where: { runId, type: { in: ['message.start', 'text.final', 'run.finished'] } } })).toBe(0)
+      expect(listener).not.toHaveBeenCalled()
+    } else {
+      const final = await write
+      expect(listener).not.toHaveBeenCalled()
+      expect((await loadPersistedEvents(runId)).map(event => [event.seq, event.type])).toEqual([[1, 'message.start'], [2, 'text.final'], [3, 'run.finished']])
+      expect((await prisma.agentMessage.findUniqueOrThrow({ where: { id: messageId } })).parts).toEqual([{ type: 'text', text: '章标题\n\n当前正文' }])
+      final.publish()
+      final.publish()
+      expect(listener.mock.calls.map(([event]) => event.type)).toEqual(['message.start', 'text.final', 'run.finished'])
+    }
+    await disposeRunEventBus(runId)
+  })
+
   it('returns real completion timestamps in full and paged history without changing send times', async () => {
     const runId = await newRun()
     const createdAt = new Date('2026-09-09T10:00:00Z'), finishedAt = new Date('2026-09-09T10:05:00Z')

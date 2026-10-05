@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowLeft, LoaderCircle, RefreshCcw, ShieldAlert, X } from 'lucide-react'
 import { createPortal } from 'react-dom'
 
@@ -27,16 +27,21 @@ export default function AdminDangerActionDialog({ open, title, description, conf
   const [loadingCaptcha, setLoadingCaptcha] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const captchaGeneration = useRef(0)
+  const discardCaptcha = useCallback(() => { captchaGeneration.current++ }, [])
 
   async function refreshCaptcha() {
+    const generation = ++captchaGeneration.current
     setLoadingCaptcha(true)
     try {
-      setCaptcha(await getAdminCaptcha())
+      const result = await getAdminCaptcha()
+      if (generation !== captchaGeneration.current) return
+      setCaptcha(result)
       setCaptchaAnswer('')
     } catch {
-      setCaptcha(null)
+      if (generation === captchaGeneration.current) setCaptcha(null)
     } finally {
-      setLoadingCaptcha(false)
+      if (generation === captchaGeneration.current) setLoadingCaptcha(false)
     }
   }
 
@@ -67,7 +72,8 @@ export default function AdminDangerActionDialog({ open, title, description, conf
     setConfirmAnswer('')
     setErrorMessage(null)
     void refreshCaptcha()
-  }, [open])
+    return discardCaptcha
+  }, [open, discardCaptcha])
 
   if (!open) return null
   return createPortal(
@@ -76,7 +82,7 @@ export default function AdminDangerActionDialog({ open, title, description, conf
         <div className="flex items-start gap-3">
           <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-rose-600" />
           <div className="min-w-0 flex-1"><h2 className="font-semibold">{title}</h2><p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">{description}</p></div>
-          <button type="button" onClick={onClose} disabled={submitting} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-tertiary)] hover:bg-[var(--surface-muted)]"><X className="h-4 w-4" /></button>
+          <button type="button" aria-label="关闭确认" onClick={onClose} disabled={submitting} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-tertiary)] hover:bg-[var(--surface-muted)]"><X className="h-4 w-4" /></button>
         </div>
 
         <div className="mt-5 border-t border-[var(--border-subtle)] pt-5">
@@ -88,7 +94,7 @@ export default function AdminDangerActionDialog({ open, title, description, conf
                 <div className="flex h-14 min-w-36 flex-1 items-center justify-center overflow-hidden rounded-lg border border-[var(--border-subtle)] bg-white">
                   {captcha ? <img src={captcha.imageBase64} alt="人机验证码" className="h-full max-w-full object-contain" /> : <LoaderCircle className="h-4 w-4 animate-spin text-slate-400" />}
                 </div>
-                <button type="button" onClick={() => void refreshCaptcha()} disabled={loadingCaptcha} className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-[var(--border-strong)]"><RefreshCcw className={`h-4 w-4 ${loadingCaptcha ? 'animate-spin' : ''}`} /></button>
+                <button type="button" aria-label="刷新验证码" onClick={() => void refreshCaptcha()} disabled={loadingCaptcha} className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-[var(--border-strong)]"><RefreshCcw className={`h-4 w-4 ${loadingCaptcha ? 'animate-spin' : ''}`} /></button>
               </div>
               <TextInput className="mt-3" value={captchaAnswer} onChange={(event) => setCaptchaAnswer(event.target.value)} placeholder="输入图中字符" autoComplete="off" />
               <div className="mt-5 flex justify-end"><Button variant="primary" disabled={!captcha || !captchaAnswer.trim()} onClick={() => setStep(2)}>下一步</Button></div>

@@ -10,6 +10,7 @@ import { z } from 'zod'
 import { assertRunGoalFence } from './goal-fence.js'
 import { assertChildParentFence, assertPinnedChildCompletion, pauseChildGrants } from './runtime-child.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 
 const liveStatuses = ['queued', 'running', 'awaiting_approval'] as const
 const maxEpoch = 9223372036854775807n
@@ -20,6 +21,11 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
   const lease = { ...token }, expected = { ...cursor }
   const contentionScope = await readParentContentionScope(lease.userId, lease.runId, true)
   return runtimeTransaction(async tx => {
+    const identity = await tx.agentRun.findFirst({ where: { id: lease.runId, userId: lease.userId, taskRootId: lease.taskRootId }, select: { novelId: true } })
+    if (!identity) return runtimeError('RUNTIME_SCOPE_MISMATCH', '终态作品身份无法核实。')
+    await lockNovelActiveScope(tx, identity.novelId)
+    const { lockWritingRunLineage } = await import('./writing-scope.js')
+    await lockWritingRunLineage(tx, { userId: lease.userId, novelId: identity.novelId, runId: lease.runId })
     await assertRunGoalFence(tx, lease.userId, lease.runId)
     if (lease.parent) await assertRunGoalFence(tx, lease.userId, lease.parent.runId)
     const { run, root } = await lockRunRoot(tx, lease.userId, lease.runId)

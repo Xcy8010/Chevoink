@@ -6,7 +6,7 @@ import type { chatWithTools as chatType } from '../../api/lib/ai-service.js'
 
 const mocks = vi.hoisted(() => ({
   chat: vi.fn(), emit: vi.fn(), persist: vi.fn(async () => ({})), dispose: vi.fn(async () => {}),
-  update: vi.fn<(input: { data: Record<string, unknown> }) => Promise<{ taskSpec: TaskSpec | null; usage?: unknown; currentTurn?: number; startedAt?: Date; events?: Array<{ type: string; createdAt: Date }> }>>(async () => ({ taskSpec: null })), owner: vi.fn(async () => ({ userId: 'user' })), previous: vi.fn(async () => null),
+  update: vi.fn<(input: { data: Record<string, unknown> }) => Promise<{ taskSpec: TaskSpec | null; usage?: unknown; currentTurn?: number; startedAt?: Date; events?: Array<{ type: string; createdAt: Date }> }>>(async () => ({ taskSpec: null })), owner: vi.fn(async () => ({ userId: 'user' })), previous: vi.fn<(input?: { where?: Record<string, unknown> }) => Promise<unknown>>(async () => null),
   committedChapter: vi.fn(async () => false),
   todos: vi.fn(async (): Promise<AgentTodoItem[]> => []),
   priorRuns: vi.fn(),
@@ -15,6 +15,10 @@ const mocks = vi.hoisted(() => ({
   tools: [] as AgentTool[],
   hiddenTools: [] as AgentTool[],
   skillReceipt: vi.fn(async () => ({})), skillLoads: vi.fn(async (...args: unknown[]) => { void args }),
+  db: {} as Record<string, unknown>, runs: new Map<string, Record<string, unknown>>(),
+  chapters: [] as Array<{ id: string; authorId: string; novelId: string; orderIndex: number; orderInVolume: number; volumeId: string; volume: { orderIndex: number; novelId: string; archivedAt: null }; title: string; content: string; revision: number; archivedAt: null }>,
+  admissionPrompt: '', sourcePrompt: null as string | null,
+  currentOriginal: null as { prompt: string; taskSpec: TaskSpec } | null,
 }))
 
 // These cases exercise an ordinary (non-goal-owned) loop.  Keep the goal
@@ -27,17 +31,106 @@ vi.mock('../../api/lib/agent/goal-fence.js', () => ({
 }))
 vi.mock('../../api/lib/ai-service.js', () => ({ chatWithTools: mocks.chat }))
 vi.mock('../../api/lib/prisma.js', () => {
+  type Query = { where?: Record<string, unknown>; data?: Record<string, unknown>; orderBy?: unknown }
+  const matches = (row: Record<string, unknown>, where: Record<string, unknown> = {}) => Object.entries(where).every(([key, value]) => {
+    if (value === undefined) return true
+    if (key === 'incomingChildGrant') return value === null
+    if (key === 'taskSpec') {
+      const clause = value as { equals: string }
+      return (row.taskSpec as TaskSpec | null)?.id === clause.equals
+    }
+    if (key === 'volume') return matches(row.volume as Record<string, unknown>, value as Record<string, unknown>)
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const clause = value as { in?: unknown[]; not?: unknown }
+      if (clause.in) return clause.in.includes(row[key])
+      if (Object.hasOwn(clause, 'not')) return row[key] !== clause.not
+      throw new Error(`Unsupported fixture predicate: ${key}`)
+    }
+    return row[key] === value
+  })
+  const ownedRun = (input: Query) => [...mocks.runs.values()]
+    .sort((a, b) => input.orderBy
+      ? (a.createdAt as Date).getTime() - (b.createdAt as Date).getTime() || String(a.id).localeCompare(String(b.id)) : 0)
+    .find(row => matches(row, input.where)) ?? null
+  const findRun = async (input: Query) => {
+    if (input.where?.id && typeof input.where.id === 'object' && Object.hasOwn(input.where.id, 'not')) {
+      const previous = await mocks.previous(input) as Record<string, unknown> | null
+      if (previous) {
+        const id = String(previous.id ?? 'original')
+        const row = { ...mocks.runs.get('run'), ...previous, id, writingBindings: null,
+          createdAt: previous.createdAt ?? new Date(0), startRequest: mocks.sourcePrompt ? { prompt: mocks.sourcePrompt } : null }
+        mocks.runs.set(id, row)
+        return row
+      }
+      return null
+    }
+    return ownedRun(input)
+  }
   const db: Record<string, unknown> = {
   DataAccessError: class extends Error {
     constructor(readonly status: number, readonly code: string, message: string) { super(message) }
   },
-  agentRun: { update: mocks.update, findUniqueOrThrow: mocks.owner, findFirst: mocks.previous, findMany: mocks.priorRuns },
-  agentSession: { update: vi.fn(async () => ({})), findUnique: vi.fn(async () => null) },
-  agentMessage: { upsert: mocks.persist, findUnique: vi.fn(async () => null), findFirst: mocks.original },
+  agentRun: {
+    update: async (input: Query & { data: Record<string, unknown> }) => {
+      const result = await mocks.update(input)
+      const id = String(input.where?.id ?? 'run')
+      const row = { ...mocks.runs.get(id), ...input.data, ...result }
+      mocks.runs.set(id, row)
+      return row
+    },
+    findUniqueOrThrow: async (input: Query) => {
+      const row = ownedRun(input)
+      if (!row) throw new Error('Missing owned run')
+      return { ...row, ...await mocks.owner() }
+    },
+    findFirst: findRun,
+    findFirstOrThrow: async (input: Query) => {
+      const row = await findRun(input)
+      if (!row) throw new Error('Missing original owned task')
+      return row
+    },
+    findMany: async (input: Query) => {
+      if (input.where?.session) return [] // No spawned sessions in this ordinary-run fixture.
+      if (input.where?.id && typeof input.where.id === 'object' && Object.hasOwn(input.where.id, 'not')) {
+        const prior = await mocks.priorRuns(input) as Array<Record<string, unknown>>
+        for (const [index, row] of prior.entries()) {
+          const id = String(row.id)
+          mocks.runs.set(id, { ...mocks.runs.get('run'), ...mocks.runs.get(id), ...row, id,
+            createdAt: row.createdAt ?? new Date(index), startRequest: mocks.sourcePrompt ? { prompt: mocks.sourcePrompt } : null })
+        }
+        return prior
+      }
+      return [...mocks.runs.values()].filter(row => matches(row, input.where))
+    }, count: vi.fn(async () => 0),
+  },
+  novel: { findFirst: vi.fn(async (input: Query) => matches({ id: 'novel', authorId: 'user', manuscriptRevision: 1 }, input.where) ? { id: 'novel', authorId: 'user', manuscriptRevision: 1 } : null) },
+  chapter: {
+    findMany: vi.fn(async (input: Query) => mocks.chapters.filter(row => matches(row, input.where))),
+    findFirst: vi.fn(async (input: Query) => mocks.chapters.find(row => matches(row, input.where)) ?? null),
+  },
+  volume: { findFirst: vi.fn(async (input: Query) => matches({ id: 'volume', novelId: 'novel', archivedAt: null, orderIndex: 1 }, input.where) ? { id: 'volume' } : null) },
+  agentChildExecutionGrant: { findUnique: vi.fn(async () => null), findMany: vi.fn(async () => []) },
+  storyCompilation: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
+  chapterQualityReport: { findFirst: vi.fn(async () => null) },
+  agentSession: { update: vi.fn(async () => ({})), findUnique: vi.fn(async () => null),
+    findFirst: vi.fn(async (input: Query) => matches({ id: 'session', userId: 'user', novelId: 'novel' }, input.where) ? { spawnedFromRunId: null, spawnedFromSessionId: null } : null) },
+  agentMessage: { upsert: mocks.persist, create: mocks.persist, findUnique: vi.fn(async () => null), findFirst: mocks.original, findMany: vi.fn(async () => []) },
   agentConfigurationChange: { findMany: vi.fn(async () => []) },
   agentSkillRun: { upsert: mocks.skillReceipt },
+  aiUsageLog: { findMany: vi.fn(async () => []) },
+  $queryRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = strings.join('?').replace(/\s+/gu, ' ').trim()
+    if (sql === 'SELECT id FROM novels WHERE id = ? FOR UPDATE') return values[0] === 'novel' ? [{ id: 'novel' }] : []
+    if (sql === 'SELECT id FROM agent_runs WHERE id = ? AND user_id = ? AND novel_id = ? FOR UPDATE') {
+      const row = mocks.runs.get(String(values[0]))
+      return row?.userId === values[1] && row.novelId === values[2] ? [{ id: row.id }] : []
+    }
+    if (sql === 'SELECT id FROM chapters WHERE id = ? FOR SHARE') return mocks.chapters.filter(row => row.id === values[0]).map(({ id }) => ({ id }))
+    throw new Error(`Unsupported fixture lock: ${sql}`)
+  }),
   $transaction: vi.fn(async (work: (tx: Record<string, unknown>) => Promise<unknown>) => work(db)),
   }
+  mocks.db = db
   return {
   DataAccessError: db.DataAccessError,
   prisma: db,
@@ -61,8 +154,8 @@ vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChap
 vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportForDelivery: mocks.report }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
 vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: () => ({ emit: mocks.emit, emitTransient: mocks.emit,
-  commitTerminal: async (body: AgentStreamEventBody, work: (tx: { agentRun: { findUniqueOrThrow: typeof mocks.owner; update: typeof mocks.update } }) => Promise<unknown>) => ({
-    result: await work({ agentRun: { findUniqueOrThrow: mocks.owner, update: mocks.update } }), publish: () => mocks.emit(body),
+  commitTerminal: async (body: AgentStreamEventBody, work: (tx: Record<string, unknown>) => Promise<unknown>) => ({
+    result: await work(mocks.db), publish: () => mocks.emit(body),
   }),
 }), disposeRunEventBus: mocks.dispose }))
 vi.mock('../../api/lib/agent/permissions.js', () => ({ cancelAllQuestions: vi.fn(), grantAlwaysAllow: vi.fn(), hasAlwaysAllow: () => false, rejectAllApprovals: vi.fn(), waitForApproval: vi.fn() }))
@@ -71,12 +164,31 @@ vi.mock('../../api/lib/agent/task-lineage.js', () => ({ getTaskRunIds: async () 
 vi.mock('../../api/lib/agent/tools/task-orchestration-tools.js', () => ({ ORCHESTRATION_TOOL_NAMES: new Set(), assertOrchestrationResumeGuard: vi.fn(), buildOrchestrationResumeNote: vi.fn() }))
 vi.mock('../../api/lib/agent/session-title.js', () => ({ autoNameSession: vi.fn() }))
 
-const { executeAgentRun, handleToolCall } = await import('../../api/lib/agent/loop.js')
+const { executeAgentRun: executeRealAgentRun, handleToolCall } = await import('../../api/lib/agent/loop.js')
 const { runSubagentInline } = await import('../../api/lib/agent/subagent-runner.js')
 const { env } = await import('../../api/config/env.js')
 const { buildTaskSpec } = await import('../../api/lib/agent/task-spec.js')
 const { DataAccessError } = await import('../../api/lib/prisma.js')
 const { assembleContext } = await import('../../api/lib/agent/context.js')
+
+function seedAdmission(prompt: string, chapterId: string | null = null) {
+  mocks.admissionPrompt = prompt
+  mocks.runs.set('run', { id: 'run', userId: 'user', novelId: 'novel', sessionId: 'session', chapterId,
+    taskSpec: null, taskRootId: null, runtimeProtocolVersion: 0, engine: 'loop', status: 'queued', currentTurn: 0,
+    usage: null, startedAt: null, createdAt: new Date(), writingBindings: null, manuscriptRevision: 1,
+    startRequest: { prompt }, novel: { authorId: 'user', manuscriptRevision: 1 } })
+}
+async function executeAgentRun(params: Parameters<typeof executeRealAgentRun>[0]) {
+  // Seed the authenticated admission, rather than invent scope in a mocked guard.
+  seedAdmission(params.prompt, params.chapterId)
+  if (mocks.currentOriginal) {
+    Object.assign(mocks.runs.get('run')!, { startRequest: { prompt: mocks.currentOriginal.prompt }, taskSpec: mocks.currentOriginal.taskSpec })
+  }
+  return executeRealAgentRun(params)
+}
+function admitCurrentOriginal(prompt: string) {
+  mocks.currentOriginal = { prompt, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt }) }
+}
 type Response = Awaited<ReturnType<typeof chatType>>
 const response = (content = '已完成。', toolCalls: Response['toolCalls'] = [], tokens = 10): Response => ({ content, toolCalls, reasoning: '', finishReason: toolCalls.length ? 'tool_calls' : 'stop', usage: { promptTokens: tokens, completionTokens: 0, totalTokens: tokens, promptCacheHitTokens: null, promptCacheMissTokens: null } })
 const call = (id: string, name = 'chapter_read', args = '{}') => ({ id, name, arguments: args })
@@ -85,7 +197,7 @@ function tool(name: string, execute: () => Promise<ToolResult>, readOnly = true)
   return { name, title: name, description: '', readOnly, parameters: z.any(), permission: { plan: 'allow', build: 'allow', review: 'allow' }, execute: vi.fn(execute) }
 }
 async function run(prompt = '检查当前章节', tokenBudget?: number) {
-  await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: null, mode: 'build', prompt, tokenBudget })
+  await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, tokenBudget })
   expect(events().filter(event => event.type === 'error')).toEqual([])
 }
 function queue(...responses: Response[]) {
@@ -101,7 +213,18 @@ beforeEach(() => {
   mocks.report.mockReset()
   mocks.report.mockResolvedValue({ chineseCharacters: 0, content: '' })
   mocks.original.mockReset()
-  mocks.original.mockResolvedValue({ parts: [{ type: 'text', text: '核对原任务的剩余工作。' }] })
+  mocks.original.mockImplementation(async () => ({ parts: [{ type: 'text', text: mocks.sourcePrompt ?? mocks.admissionPrompt }] }))
+  mocks.update.mockReset()
+  mocks.update.mockImplementation(async () => ({} as { taskSpec: TaskSpec | null }))
+  mocks.owner.mockReset()
+  mocks.owner.mockResolvedValue({ userId: 'user' })
+  mocks.sourcePrompt = null
+  mocks.currentOriginal = null
+  mocks.runs.clear()
+  mocks.chapters = Array.from({ length: 19 }, (_, index) => ({ id: index === 0 ? 'c' : `chapter-${index + 1}`,
+    authorId: 'user', novelId: 'novel', orderIndex: index + 1, orderInVolume: index + 1, volumeId: 'volume', volume: { orderIndex: 1, novelId: 'novel', archivedAt: null },
+    title: `第${index + 1}章`, content: '当前章节正文', revision: 1, archivedAt: null }))
+  seedAdmission('检查当前章节', 'c')
   mocks.todos.mockResolvedValue([])
   mocks.committedChapter.mockResolvedValue(false)
   mocks.previous.mockResolvedValue(null)
@@ -123,7 +246,14 @@ describe('phase skills in the real execution loop', () => {
   it('restores cached phases across chapters and after the active hint is compacted away', async () => {
     const { routeSkills } = await import('../../api/lib/agent/skills/index.js')
     vi.mocked(assembleContext).mockResolvedValueOnce({ messages: [], skillRoute: routeSkills({ mode: 'build', intent: 'write', prompt: '续写正文', freedom: 'balanced' }) })
-    mocks.tools = ['story_compiler_prepare', 'scene_task_build', 'chapter_write'].map(name => tool(name, async () => ({ output: '已完成阶段' })))
+    mocks.tools = ['story_compiler_prepare', 'scene_task_build', 'chapter_write'].map(name => tool(name, async () => {
+      if (name !== 'chapter_write') return { output: '已完成阶段' }
+      const chapter = mocks.chapters[0], before = chapter.content
+      chapter.content += '\n新写入的场景正文。'
+      chapter.revision++
+      return { output: '已保存正文', display: { kind: 'chapterDiff', chapterId: chapter.id, chapterTitle: chapter.title,
+        before, after: chapter.content, appliedDirectly: true, revision: chapter.revision } }
+    }))
     const stages: Array<{ name: string; expected: string | null }> = [
       { name: 'story_compiler_prepare', expected: null },
       { name: 'scene_task_build', expected: '/ scene /' },
@@ -211,10 +341,9 @@ describe('original task context on resume', () => {
     await run()
     expect(critic.execute).toHaveBeenCalledTimes(1)
     expect(commit.execute).not.toHaveBeenCalled()
-    expect(mocks.chat).toHaveBeenCalledTimes(2)
-    const wrap = mocks.chat.mock.calls[1][0] as Parameters<typeof chatType>[0]
-    expect(wrap.tools).toEqual([])
-    for (const id of ['commit', 'repeat']) expect(wrap.messages).toContainEqual(expect.objectContaining({ role: 'tool', toolCallId: id, content: expect.stringContaining('未执行') }))
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    const submitted = mocks.chat.mock.calls[0][0] as Parameters<typeof chatType>[0]
+    for (const id of ['commit', 'repeat']) expect(submitted.messages).toContainEqual(expect.objectContaining({ role: 'tool', toolCallId: id, content: expect.stringContaining('未执行') }))
     expect(events().filter(event => event.type === 'tool.result')).toEqual([expect.objectContaining({ callId: 'check', ok: false, summary: '模型输出达到上限，检查未完成' })])
     expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'failed' }))
   })
@@ -350,8 +479,8 @@ describe('original task context on resume', () => {
 
 describe('persisted legacy checkpoint budgets', () => {
   const resume = () => executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel',
-    chapterId: null, mode: 'build', prompt: '继续原任务', resume: true })
-  it('preserves the full previously granted slice after a provider response overshot the automatic ceiling', async () => {
+    chapterId: 'c', mode: 'build', prompt: '检查当前章节', resume: true })
+  it('preserves historical raw slice values without treating them as effective limits', async () => {
     const started = Date.now() - 1000
     const tokenBudget = env.agentRunTokenBudgetCeiling + 2_006_003
     const checkpoint = { version: 1, runStartedAt: started, resumeCount: 2, compactionCount: 2,
@@ -362,7 +491,9 @@ describe('persisted legacy checkpoint budgets', () => {
     queue(response('已完成。'))
     await resume()
     const terminal = mocks.update.mock.calls.find(([input]) => input.data.status === 'completed')?.[0]
-    expect(terminal?.data.usage).toMatchObject({ checkpoint: { tokenBudget, manualResumeCount: 1 } })
+    expect(terminal?.data.usage).toMatchObject({ totalTokens: tokenBudget - 2990,
+      checkpoint: { controlPolicy: 'until_completion', origin: 'unknown_legacy', tokenBudget, manualResumeCount: 1 } })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
   it('resumes actual work after a paused gap without resetting token consumption', async () => {
     const now = Date.now(), started = now - (env.agentRunWallClockMinutes + 10) * 60_000
@@ -377,14 +508,15 @@ describe('persisted legacy checkpoint budgets', () => {
       usage: expect.objectContaining({ totalTokens: 130 }) }))
   })
 
-  it('does not pay for another wrap-up when actual execution time is exhausted', async () => {
+  it('continues after a historical cumulative execution-time threshold and retains usage', async () => {
     mocks.update.mockResolvedValueOnce({ taskSpec: null, currentTurn: 1,
       startedAt: new Date(Date.now() - (env.agentRunWallClockMinutes + 1) * 60_000),
       usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 } })
+    queue(response('已完成检查。'))
     await resume()
-    expect(mocks.chat).not.toHaveBeenCalled()
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'failed',
-      usage: expect.objectContaining({ totalTokens: 120 }) }))
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded',
+      usage: expect.objectContaining({ totalTokens: 130 }) }))
   })
 
   it('retains cumulative usage, earned slices, progress and the original clock on resume', async () => {
@@ -399,7 +531,8 @@ describe('persisted legacy checkpoint budgets', () => {
     expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished',
       usage: expect.objectContaining({ promptTokens: 110, completionTokens: 20, totalTokens: 130 }) }))
     const terminal = mocks.update.mock.calls.find(([input]) => input.data.status === 'completed')?.[0]
-    expect(terminal?.data).toMatchObject({ currentTurn: 3, usage: { checkpoint } })
+    expect(terminal?.data).toMatchObject({ currentTurn: 3, usage: { checkpoint: { ...checkpoint,
+      version: 2, controlPolicy: 'until_completion', origin: 'unknown_legacy' } } })
     expect(mocks.update.mock.calls[0]?.[0].data).not.toHaveProperty('startedAt')
   })
 
@@ -412,7 +545,7 @@ describe('persisted legacy checkpoint budgets', () => {
     expect(events()).toContainEqual(expect.objectContaining({ type: 'error', code: 'run_checkpoint_unconfirmed' }))
   })
 
-  it('grants a bounded manual slice to a ceiling-exhausted chain on explicit resume', async () => {
+  it('resumes an exhausted historical chain without granting another slice', async () => {
     const started = Date.now() - 60_000
     const ceiling = env.agentRunTokenBudgetCeiling
     const checkpoint = { version: 1, runStartedAt: started, resumeCount: 2, compactionCount: 2,
@@ -425,13 +558,14 @@ describe('persisted legacy checkpoint budgets', () => {
     await resume()
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded' }))
-    expect(events().some(event => event.type === 'text.final' && event.text.includes('手动续跑 1/2'))).toBe(true)
+    expect(events().some(event => event.type === 'text.final' && event.text.includes('手动续跑'))).toBe(false)
     const terminal = mocks.update.mock.calls.find(([input]) => input.data.status === 'completed')?.[0]
-    expect(terminal?.data.usage).toMatchObject({ checkpoint: {
-      manualResumeCount: 1, tokenBudget: ceiling + 6_003 + 2_000_000, maxTurns: env.agentMaxTurns + 150 } })
+    expect(terminal?.data.usage).toMatchObject({ totalTokens: 1_285_745, checkpoint: {
+      controlPolicy: 'until_completion', manualResumeCount: 0, tokenBudget: ceiling,
+      inheritedTokens: checkpoint.inheritedTokens, inheritedTurns: 56, maxTurns: checkpoint.maxTurns } })
   })
 
-  it('stops an explicit resume before any provider request once manual grants are used up', async () => {
+  it('retains used-up historical manual grants while completing the author task', async () => {
     const ceiling = env.agentRunTokenBudgetCeiling
     const checkpoint = { version: 1, runStartedAt: Date.now(), resumeCount: 4, compactionCount: 4,
       maxTurns: env.agentMaxTurns + 300, tokenBudget: ceiling + 4_000_000,
@@ -439,13 +573,17 @@ describe('persisted legacy checkpoint budgets', () => {
       inheritedTokens: ceiling + 4_000_000 - 1_000_000, inheritedTurns: 70, manualResumeCount: 2 }
     mocks.update.mockResolvedValueOnce({ taskSpec: null, ...{ currentTurn: 3, startedAt: new Date(),
       usage: { promptTokens: 1_000_000, completionTokens: 0, totalTokens: 1_000_000, checkpoint } } })
+    queue(response('已完成检查。'))
     await resume()
-    expect(mocks.chat).not.toHaveBeenCalled()
-    expect(events().some(event => event.type === 'text.final' && event.text.includes('手动续跑机会已用完'))).toBe(true)
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'failed' }))
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    const terminal = mocks.update.mock.calls.find(([input]) => input.data.status === 'completed')?.[0]
+    expect(terminal?.data.usage).toMatchObject({ totalTokens: 1_000_010, checkpoint: {
+      controlPolicy: 'until_completion', manualResumeCount: 2, tokenBudget: checkpoint.tokenBudget,
+      resumeCount: 4, compactionCount: 4, maxTurns: checkpoint.maxTurns } })
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded' }))
   })
 
-  it('grants a bounded manual slice to a checkpoint-less exhausted historical run instead of a paid wrap-up', async () => {
+  it('continues a checkpoint-less historical run with cumulative accounting and no new slice', async () => {
     const ceiling = env.agentRunTokenBudgetCeiling
     mocks.update.mockResolvedValueOnce({ taskSpec: null, ...{ currentTurn: 2, startedAt: new Date(),
       usage: { promptTokens: ceiling, completionTokens: 0, totalTokens: ceiling } } })
@@ -454,8 +592,8 @@ describe('persisted legacy checkpoint budgets', () => {
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded' }))
     const terminal = mocks.update.mock.calls.find(([input]) => input.data.status === 'completed')?.[0]
-    expect(terminal?.data.usage).toMatchObject({ checkpoint: {
-      manualResumeCount: 1, tokenBudget: ceiling + 2_000_000, maxTurns: env.agentMaxTurns + 50 } })
+    expect(terminal?.data.usage).toMatchObject({ totalTokens: ceiling + 10, checkpoint: {
+      controlPolicy: 'until_completion', manualResumeCount: 0, tokenBudget: 500, maxTurns: 1 } })
   })
 
   it('keeps confirmed stream usage when stopped before a complete model response', async () => {
@@ -536,6 +674,7 @@ describe('tool execution authority (real dispatch, mocked global registry)', () 
   })
 
   it('does not regain a hidden writing tool during a real continuation loop', async () => {
+    admitCurrentOriginal('检查当前章节，不要改写正文。')
     const hidden = tool('chapter_write', async () => ({ output: '不应执行' }), false)
     mocks.hiddenTools = [hidden]
     queue(response('', [call('hidden-resume', hidden.name)]), response('当前任务无写入授权，未修改正文。'))
@@ -675,7 +814,7 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     queue(...['bad1', 'bad2', 'bad3'].map(id => response('', [call(id, 'chapter_read', args)])), response('参数仍无效，已保存进度。'))
     await run()
     expect(mocks.tools[0].execute).not.toHaveBeenCalled()
-    expect(mocks.chat).toHaveBeenCalledTimes(4)
+    expect(mocks.chat).toHaveBeenCalledTimes(3)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
   })
   it('never executes a provider-truncated tool even when its JSON can be repaired', async () => {
@@ -720,30 +859,52 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(events().filter(event => event.type === 'tool.result')).toHaveLength(3)
   })
 
-  it('invalidates continuity after a quality report actually rewrites text, then commits', async () => {
+  it('invalidates continuity after an explicitly authorized quality revision changes persisted text, then commits', async () => {
     let revision = 1, checkedRevision = 0, committed = false
     mocks.tools = [
       tool('continuity_validate', async () => { checkedRevision = revision; return { output: `r${revision}通过` } }, false),
-      tool('quality_analyze', async () => {
+      tool('quality_revision_apply', async () => {
+        await (await import('../../api/lib/agent/original-request.js')).assertOriginalRepairAuthority(
+          mocks.db as never, { userId: 'user', novelId: 'novel', runId: 'run' })
+        const before = mocks.chapters[0].content
         revision++
-        return { output: '质量修订完成', display: { kind: 'qualityReport', reportId: 'q', chapterId: 'c', chapterRevision: revision,
-          status: 'repaired', repairRound: 1, findings: [] },
-          snapshot: { target: 'chapter', targetId: 'c', field: 'content', previousValue: '旧正文' } }
+        mocks.chapters[0].content = '已修订正文'
+        mocks.chapters[0].revision = revision
+        return { output: '质量修订完成', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '第一章',
+          before, after: mocks.chapters[0].content, appliedDirectly: true, revision },
+          snapshot: { target: 'chapter', targetId: 'c', field: 'content', previousValue: before } }
       }, false),
       tool('chapter_bridge_commit', async () => {
         committed = checkedRevision === revision
         return committed ? { output: '已提交' } : { outcome: 'failed', output: '旧版本不能提交' }
       }, false),
     ]
-    queue(response('', [call('first', 'continuity_validate')]), response('', [call('quality', 'quality_analyze')]),
+    queue(response('', [call('first', 'continuity_validate')]), response('', [call('quality', 'quality_revision_apply')]),
       response('', [call('verify', 'continuity_validate')]), response('', [call('commit', 'chapter_bridge_commit')]), response())
-    await run('完成本章质量检查并提交章节终态')
+    await run('完成本章质量检查，修复质量问题并提交章节终态')
+    expect(mocks.chapters[0].content).toBe('已修订正文')
     expect(mocks.tools[0].execute).toHaveBeenCalledTimes(2)
     expect(committed).toBe(true)
     expect(events().filter(event => event.type === 'tool.result' && !event.ok)).toHaveLength(0)
   })
 
+  it('preserves the persisted body when the author requests only quality checks', async () => {
+    const before = mocks.chapters[0].content
+    mocks.tools = [tool('quality_analyze', async () => ({ output: '检查完成，正文保留。', display: {
+      kind: 'qualityReport', reportId: 'readonly-quality', chapterId: 'c', chapterRevision: 1,
+      status: 'passed', repairRound: 0, findings: [],
+    } }))]
+    queue(response('', [call('readonly-quality', 'quality_analyze')]), response('质量检查完成。'))
+    await run('只检查当前章节质量，不要改写正文。')
+    expect(mocks.chapters[0].content).toBe(before)
+    expect(mocks.chapters[0].revision).toBe(1)
+    expect(events().filter(event => event.type === 'tool.result')).toEqual([
+      expect.objectContaining({ ok: true, display: expect.objectContaining({ repairRound: 0 }) }),
+    ])
+  })
+
   it('typed continue restores pending todos and never reports success on repeated empty steps', async () => {
+    admitCurrentOriginal('检查当前章节并完成整改。')
     mocks.todos.mockResolvedValue([{ content: '完成第七章整改', status: 'pending' }])
     queue(...Array.from({ length: 5 }, () => response('现在写入正文。')))
     await run('请继续完成之前的任务。')
@@ -779,6 +940,7 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
   })
 
   it('resets consecutive no-progress reminders after actual advancement, supporting more than four milestones', async () => {
+    admitCurrentOriginal('核对各章的人物与情节证据。')
     mocks.todos.mockResolvedValue([{ content: '整改全书', status: 'pending' }])
     mocks.tools.push(tool('todo_write', async () => ({ output: '已完成', display: { kind: 'todoList', items: [{ content: '整改全书', status: 'completed' }] } }), false))
     let chapter = 0
@@ -790,12 +952,14 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
 
-  it('no-tool retries cannot bypass token budget or spend on a wrap-up call after exhaustion', async () => {
+  it('bounds no-tool retries by unfinished work without stopping at an internal token value', async () => {
+    admitCurrentOriginal('检查当前章节并完成整改。')
     mocks.todos.mockResolvedValue([{ content: '整改', status: 'pending' }])
-    queue(response('现在写入正文。', [], 600))
+    queue(...Array.from({ length: 5 }, () => response('现在写入正文。', [], 600)))
     await run('继续', 500)
-    expect(mocks.chat).toHaveBeenCalledTimes(1)
+    expect(mocks.chat).toHaveBeenCalledTimes(5)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(events().at(-1)).toMatchObject({ usage: { totalTokens: 3000 } })
   })
 
   it('a genuinely new request does not inherit unfinished work', async () => {
@@ -810,6 +974,7 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     const taskSpec = buildTaskSpec({ runId: 'original', novelId: 'novel', chapterId: null, prompt: '整改前七章的人物动机' })
     const previous = { id: 'original', taskSpec, usage: { promptTokens: 100, completionTokens: 0, totalTokens: 100 },
       status: 'paused', currentTurn: 1, startedAt: new Date() }
+    mocks.sourcePrompt = '整改前七章的人物动机'
     mocks.previous.mockResolvedValue(previous as never)
     mocks.priorRuns.mockResolvedValue([previous])
     mocks.todos.mockResolvedValue([{ content: '整改前七章', status: 'completed' }])
@@ -842,16 +1007,21 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
       checkpoint: { version: 1, runStartedAt: Date.now(), resumeCount: 0, compactionCount: 0,
         maxTurns: env.agentMaxTurns, tokenBudget: 500, writeProgress: 0, writeBaseline: 0, readProgress: 0,
         readBaseline: 0, progressSignatures: [], inheritedTokens: 300, inheritedTurns: 1, manualResumeCount: 2 } } }
+    mocks.sourcePrompt = '检查章节'
     mocks.previous.mockResolvedValue(second as never)
     mocks.priorRuns.mockResolvedValue([first, second])
+    queue(response('检查完成。'))
     await run('继续')
-    expect(mocks.chat).not.toHaveBeenCalled()
-    const terminal = mocks.update.mock.calls.find(([input]) => input.data.status === 'failed')?.[0]
-    expect(terminal?.data.usage).toMatchObject({ totalTokens: 0,
-      checkpoint: { inheritedTokens: 500, inheritedTurns: 2, tokenBudget: 500 } })
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    const terminal = mocks.update.mock.calls.find(([input]) => input.data.status === 'completed')?.[0]
+    expect(terminal?.data.usage).toMatchObject({ totalTokens: 10,
+      checkpoint: { controlPolicy: 'until_completion', inheritedTokens: 500, inheritedTurns: 2, tokenBudget: 500, manualResumeCount: 2 } })
   })
 
   it('does not stop a batch that contains duplicates followed by new productive work', async () => {
+    let reads = 0
+    mocks.chapters[1].content = '第二章的独立人物与情节证据。'
+    mocks.tools[0] = tool('chapter_read', async () => ({ output: mocks.chapters[reads++].content }))
     queue(response('', [call('a')]), response('', [...Array.from({ length: 4 }, (_, i) => call(`dup${i}`)), call('fresh', 'chapter_read', '{"chapter":2}')]), response())
     await run()
     expect(mocks.tools[0].execute).toHaveBeenCalledTimes(2)
@@ -860,6 +1030,7 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
   })
 
   it('permits identical todo arguments to advance an atomically accepted partial completion', async () => {
+    admitCurrentOriginal('完成当前章节的一、二两项检查。')
     let completed = 0
     const items: AgentTodoItem[] = [{ content: '一', status: 'in_progress' }, { content: '二', status: 'pending' }]
     mocks.todos.mockResolvedValue(items)
@@ -870,58 +1041,70 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
 
-  it('auto-renews a productive checkpoint by two million tokens but stops at the run hard ceiling', async () => {
+  it('completes productive work beyond internal cumulative values without a technical checkpoint', async () => {
     const original = env.agentRunTokenBudgetCeiling
     env.agentRunTokenBudgetCeiling = 1200
     try {
       mocks.todos.mockResolvedValue([{ content: '整改', status: 'pending' }])
-      mocks.tools = [tool('chapter_write', async () => ({ output: '已保存', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '章', before: '旧', after: '新', appliedDirectly: true } }), false)]
-      queue(response('', [call('write', 'chapter_write')], 600), response('现在修订下一章。', [], 600))
-      await run('继续', 500)
+      mocks.tools = [tool('chapter_write', async () => {
+        const chapter = mocks.chapters[0], before = chapter.content
+        chapter.content = '本章已修订并保存的新正文。'
+        chapter.revision++
+        return { output: '已保存', display: { kind: 'chapterDiff', chapterId: chapter.id, chapterTitle: chapter.title,
+          before, after: chapter.content, appliedDirectly: true, revision: chapter.revision } }
+      }, false)]
+      queue(response('', [call('write', 'chapter_write')], 600), response('本章修订完成。', [], 600))
+      await run('修订当前章节正文', 500)
       expect(mocks.chat).toHaveBeenCalledTimes(2)
-      expect(events().filter(event => event.type === 'text.final' && event.text.includes('已到检查点'))).toHaveLength(1)
-      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+      expect(events().filter(event => event.type === 'text.final' && event.text.includes('已到检查点'))).toHaveLength(0)
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', usage: { totalTokens: 1200 } })
+      expect(mocks.chapters[0]).toMatchObject({ content: '本章已修订并保存的新正文。', revision: 2 })
+      const terminal = mocks.update.mock.calls.find(([input]) => input.data.status === 'completed')?.[0]
+      expect(terminal?.data.usage).toMatchObject({ checkpoint: { controlPolicy: 'until_completion', tokenBudget: 500, manualResumeCount: 0 } })
     } finally { env.agentRunTokenBudgetCeiling = original }
   })
 
   it.each([
     { toolName: 'chapter_read', prompt: '读取章节并完成检查' },
     { toolName: 'research_report_read', prompt: '分析这本小说' },
-  ])('29 R08: a productive $toolName crosses a checkpoint without inventing todos', async ({ toolName, prompt }) => {
-    mocks.tools = [tool(toolName, async () => ({ output: '已保存的正文片段，包含可核验的材料。' }))]
+  ])('29 R08: a productive $toolName completes beyond the internal value without inventing todos', async ({ toolName, prompt }) => {
+    mocks.tools = [tool(toolName, async () => ({ output: toolName === 'research_report_read'
+      ? JSON.stringify({ content: '已保存的正文片段，包含可核验的材料。', sections: [] }) : '已保存的正文片段，包含可核验的材料。' }))]
     queue(response('', [call('read', toolName)], 600), response('检查完成，结果如下。'))
     await run(prompt, 500)
     expect(mocks.chat).toHaveBeenCalledTimes(2)
-    expect(events().filter(event => event.type === 'text.final' && event.text.includes('已到检查点'))).toHaveLength(1)
+    expect(events().filter(event => event.type === 'text.final' && event.text.includes('已到检查点'))).toHaveLength(0)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     expect(mocks.todos).not.toHaveBeenCalled()
   })
 
-  it('29 R08: marking a checklist item complete alone cannot purchase a checkpoint', async () => {
+  it('29 R08: repeated checklist completion cannot replace the required chapter or reset no-progress', async () => {
     mocks.todos.mockResolvedValue([{ content: '整改正文', status: 'pending' }])
     mocks.tools = [tool('todo_write', async () => ({ output: '清单已完成',
       display: { kind: 'todoList', items: [{ content: '整改正文', status: 'completed' }] } }), false)]
-    queue(response('', [call('todo', 'todo_write')], 600))
-    await run('继续', 500)
-    expect(mocks.chat).toHaveBeenCalledTimes(1)
+    queue(...Array.from({ length: 4 }, (_, index) => response('', [call(`todo-${index}`, 'todo_write', JSON.stringify({ index }))], 600)))
+    await run('写下一章', 500)
+    expect(mocks.chat).toHaveBeenCalledTimes(4)
+    expect(mocks.tools[0].execute).toHaveBeenCalledTimes(4)
     expect(events().filter(event => event.type === 'text.final' && event.text.includes('已到检查点'))).toHaveLength(0)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
   })
 
-  it('29 R08: changed read arguments returning identical evidence cannot buy another slice', async () => {
-    queue(response('', [call('read1', 'chapter_read', '{"start":0}')], 600),
-      response('', [call('read2', 'chapter_read', '{"start":1}')], 2_000_000))
+  it('29 R08: changed read arguments returning identical evidence remain bounded by no-progress', async () => {
+    queue(...Array.from({ length: 5 }, (_, start) => response('', [call(`read-${start}`, 'chapter_read', JSON.stringify({ start }))], 600)))
     await run('读取并检查章节', 500)
-    expect(mocks.chat).toHaveBeenCalledTimes(2)
-    expect(events().filter(event => event.type === 'text.final' && event.text.includes('已到检查点'))).toHaveLength(1)
+    expect(mocks.chat).toHaveBeenCalledTimes(5)
+    expect(mocks.tools[0].execute).toHaveBeenCalledTimes(5)
+    expect(events().filter(event => event.type === 'text.final' && event.text.includes('已到检查点'))).toHaveLength(0)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
   })
 
-  it('29 R08: failed reads do not renew a checkpoint', async () => {
+  it('29 R08: failed reads stop at the no-progress boundary without a paid wrap-up', async () => {
     mocks.tools = [tool('chapter_read', async () => ({ outcome: 'failed', output: '正文读取失败' }))]
-    queue(response('', [call('read')], 600))
+    queue(...Array.from({ length: 4 }, (_, start) => response('', [call(`failed-${start}`, 'chapter_read', JSON.stringify({ start }))], 600)))
     await run('读取并检查章节', 500)
-    expect(mocks.chat).toHaveBeenCalledTimes(1)
+    expect(mocks.chat).toHaveBeenCalledTimes(4)
+    expect(mocks.tools[0].execute).toHaveBeenCalledTimes(4)
     expect(events().filter(event => event.type === 'text.final' && event.text.includes('已到检查点'))).toHaveLength(0)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
   })

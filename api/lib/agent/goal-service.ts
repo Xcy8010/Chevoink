@@ -12,7 +12,8 @@ import { MAIN_RUN_FILTER, pauseChildGrants } from './runtime-child.js'
 import { assertGoalVersion, changeGoal, closeGoalActivity, goalError, goalSnapshot, lockGoalSession, lockOwnedGoal,
   writeGoalEvent, type GoalTx } from './goal-store.js'
 import { inspectGoalEvidence } from './goal-evidence.js'
-import { goalResumeBudget } from './goal-resume-budget.js'
+import { COMPATIBILITY_TOKEN_LIMIT, executionLimitReached, serializeExecutionControl, untilCompletionControl, verifiedUserExecutionControl } from './execution-control.js'
+import { readGoalExecutionControl } from './goal-execution-control.js'
 import { reconcileGoalUsage } from './goal-budget.js'
 import { readGoalActivationReceipt } from './goal-activation.js'
 
@@ -33,9 +34,11 @@ async function receipt(tx: GoalTx, userId: string, requestId: string, hash: stri
 }
 
 /** Persist the queue intent with the goal. No network/model call occurs in admission. */
-export async function createAgentGoal(userId: string, target: { sessionId: string } | { novelId: string }, input: CreateAgentGoalRequest) {
+export async function createAgentGoal(userId: string, target: { sessionId: string } | { novelId: string }, input: CreateAgentGoalRequest,
+  authorSource?: { authenticatedHttp: true }) {
   requireGoalEnabled()
   const body = createAgentGoalSchema.parse(input)
+  if (body.limits && Object.keys(body.limits).length && !authorSource?.authenticatedHttp) return goalError('GOAL_LIMIT_AUTHORITY_REQUIRED', '执行限制需要作者明确设置。')
   await assertManagedAttachmentsAccess(body.options.attachments, userId)
   const hash = runtimeJson({ operation: 'create', target, body }).hash
   return runtimeTransaction(async tx => {
@@ -64,16 +67,20 @@ export async function createAgentGoal(userId: string, target: { sessionId: strin
     const now = await databaseNow(tx)
     const platformTokenCap = BigInt(Math.floor(env.agentRunTokenBudgetCeiling))
     const platformTimeCapMs = BigInt(Math.floor(env.agentRunWallClockLongMinutes * 60_000))
-    const tokenLimit = BigInt(body.limits?.tokenLimit ?? platformTokenCap)
-    const activeTimeLimitMs = BigInt(body.limits?.activeTimeLimitMs ?? platformTimeCapMs)
+    const control = body.limits && Object.keys(body.limits).length ? verifiedUserExecutionControl({ tokens: body.limits.tokenLimit === undefined ? null : BigInt(body.limits.tokenLimit),
+      turns: null, activeTimeMs: body.limits.activeTimeLimitMs === undefined ? null : BigInt(body.limits.activeTimeLimitMs) }) : untilCompletionControl()
+    const request = runtimeJson({ ...body.options, executionControl: serializeExecutionControl(control), ...(control.origin === 'user'
+      ? { executionControlProof: { version: 1, revision: 1, envelope: { operation: 'create', target, body } } } : {}) }).value
+    const tokenLimit = BigInt(body.limits?.tokenLimit ?? COMPATIBILITY_TOKEN_LIMIT)
+    const activeTimeLimitMs = BigInt(body.limits?.activeTimeLimitMs ?? 1)
     if (tokenLimit > platformTokenCap || activeTimeLimitMs > platformTimeCapMs) return goalError('GOAL_BUDGET_REQUIRED', '目标限制不能超过平台上限。')
     const goal = await tx.agentGoal.create({ data: { userId, novelId: session.novelId, sessionId, executionOptions: runtimeJson(body.options).value,
-      nextEligibleAt: now, revisions: { create: { revision: 1, objective: body.objective, request: runtimeJson(body.options).value,
-        authorityHash: runtimeJson({ objective: body.objective, options: body.options, novelId: session.novelId, userId }).hash, sourceActionId: body.requestId } },
+      nextEligibleAt: now, revisions: { create: { revision: 1, objective: body.objective, request,
+        authorityHash: runtimeJson({ objective: body.objective, request, novelId: session.novelId, userId }).hash, sourceActionId: body.requestId } },
       budget: { create: { tokenLimit, platformTokenCap, activeTimeLimitMs, platformTimeCapMs } },
       evidence: { create: { revision: 1, criterionId: 'author-objective', description: body.objective, kind: 'objective', receipt: {} } },
     } })
-    return receipt(tx, userId, body.requestId, hash, await writeGoalEvent(tx, goal, 'goal.created'))
+    return receipt(tx, userId, body.requestId, hash, await writeGoalEvent(tx, goal, 'goal.created', control))
   })
 }
 
@@ -143,8 +150,14 @@ export async function updateAgentGoal(userId: string, sessionId: string, goalId:
     if (terminal(goal) || goal.pendingRevision) return goalError('GOAL_CONFLICT', '当前目标不能修改。')
     const revision = goal.currentRevision + 1
     const now = await databaseNow(tx)
-    await tx.agentGoalRevision.create({ data: { goalId, revision, objective: body.objective, request: goal.executionOptions as Prisma.InputJsonValue,
-      authorityHash: runtimeJson({ objective: body.objective, request: goal.executionOptions, novelId: goal.novelId, userId }).hash, sourceActionId: body.requestId } })
+    await readGoalExecutionControl(tx, goal.id)
+    const current = await tx.agentGoalRevision.findUniqueOrThrow({ where: { goalId_revision: { goalId, revision: goal.currentRevision } } })
+    const currentRequest = current.request as Record<string, Prisma.JsonValue>
+    const request = runtimeJson({ ...goal.executionOptions as object,
+      executionControl: currentRequest.executionControl ?? serializeExecutionControl(untilCompletionControl('unknown_legacy')),
+      ...(currentRequest.executionControlProof ? { executionControlProof: currentRequest.executionControlProof } : {}) }).value
+    await tx.agentGoalRevision.create({ data: { goalId, revision, objective: body.objective, request,
+      authorityHash: runtimeJson({ objective: body.objective, request, novelId: goal.novelId, userId }).hash, sourceActionId: body.requestId } })
     await closeGoalActivity(tx, goal, now)
     const runIds = await revokeGoalExecutions(tx, goal, now)
     const changed = await changeGoal(tx, goal, { status: 'updating', resumeStatus: goal.status,
@@ -155,8 +168,10 @@ export async function updateAgentGoal(userId: string, sessionId: string, goalId:
   return result.snapshot
 }
 
-export async function actOnAgentGoal(userId: string, sessionId: string, goalId: string, input: ActOnAgentGoalRequest) {
+export async function actOnAgentGoal(userId: string, sessionId: string, goalId: string, input: ActOnAgentGoalRequest,
+  authorSource?: { authenticatedHttp: true }) {
   const body = actOnAgentGoalSchema.parse(input)
+  if (body.budgetChange && Object.keys(body.budgetChange).length && !authorSource?.authenticatedHttp) return goalError('GOAL_LIMIT_AUTHORITY_REQUIRED', '执行限制需要作者明确设置。')
   if (body.action === 'resume') requireGoalEnabled()
   const hash = runtimeJson({ operation: 'action', sessionId, goalId, body }).hash
   // Authenticate and validate the author's version before reconciling. Usage
@@ -209,7 +224,7 @@ export async function actOnAgentGoal(userId: string, sessionId: string, goalId: 
       }
       const activation = await readGoalActivationReceipt(tx, goal)
       if (activation && goal.currentRevision === 1) {
-        if (body.model || body.budgetChange) return goalError('GOAL_ACTIVATION_SCOPE_IMMUTABLE', '继续原任务不能替换模型、权限或增加预算。')
+        if (body.model || body.budgetChange && Object.keys(body.budgetChange).length) return goalError('GOAL_ACTIVATION_SCOPE_IMMUTABLE', '继续原任务不能替换模型、权限或增加预算。')
         const source = await tx.agentRun.findFirst({ where: { id: goal.currentRunId ?? activation.receipt.sourceRunId, userId, sessionId, novelId: goal.novelId } })
         if (!source || ['queued', 'running', 'awaiting_approval'].includes(source.status)) return goalError('GOAL_RECONCILIATION_REQUIRED', '原任务尚未收尾，请稍后继续。')
         if (await tx.agentGoalUsage.count({ where: { goalId, status: { in: ['reserved', 'unknown'] } } })) return goalError('GOAL_RECONCILIATION_REQUIRED', '原任务用量仍待核对，请稍后继续。')
@@ -225,20 +240,35 @@ export async function actOnAgentGoal(userId: string, sessionId: string, goalId: 
         return goalError('GOAL_RECONCILIATION_REQUIRED', '尚有执行结果待核对，请稍后继续。')
       }
       const budget = await tx.agentGoalBudget.findUniqueOrThrow({ where: { goalId } })
-      const nextBudget = goalResumeBudget(budget, goal.status === 'budget_limited', {
-        tokens: BigInt(Math.floor(env.agentRunTokenBudgetCeiling)),
-        timeMs: BigInt(Math.floor(env.agentRunWallClockLongMinutes * 60_000)),
-      }, body.budgetChange)
-      if (nextBudget.tokenLimit > nextBudget.platformTokenCap || nextBudget.activeTimeLimitMs > nextBudget.platformTimeCapMs
-        || nextBudget.tokenLimit < budget.tokenLimit || nextBudget.activeTimeLimitMs < budget.activeTimeLimitMs
-        || nextBudget.tokenLimit <= budget.tokensUsed + budget.tokensReserved || nextBudget.activeTimeLimitMs <= budget.activeTimeMs) {
+      let control = await readGoalExecutionControl(tx, goal.id)
+      const previousControlHash = runtimeJson(serializeExecutionControl(control)).hash
+      const limitChange = body.budgetChange && Object.keys(body.budgetChange).length > 0
+      if (limitChange) control = verifiedUserExecutionControl({ ...control.limits,
+        ...(body.budgetChange?.tokenLimit === undefined ? {} : { tokens: BigInt(body.budgetChange.tokenLimit) }),
+        ...(body.budgetChange?.activeTimeLimitMs === undefined ? {} : { activeTimeMs: BigInt(body.budgetChange.activeTimeLimitMs) }) })
+      if (control.limits.tokens !== null && control.limits.tokens > budget.platformTokenCap
+        || control.limits.activeTimeMs !== null && control.limits.activeTimeMs > budget.platformTimeCapMs
+        || executionLimitReached(control, { tokens: budget.tokensUsed + budget.tokensReserved, activeTimeMs: budget.activeTimeMs })) {
         return goalError('GOAL_BUDGET_REQUIRED', '当前执行预算不可用，请稍后继续。')
       }
-      await tx.agentGoalBudget.update({ where: { goalId }, data: nextBudget })
+      let policyPointer: { criterionId: string; receiptHash: string } | undefined
+      if (limitChange) {
+        const current = await tx.agentGoalRevision.findUniqueOrThrow({ where: { goalId_revision: { goalId, revision: goal.currentRevision } } })
+        const proof = runtimeJson({ version: 1, revision: goal.currentRevision, authorityHash: current.authorityHash, sourceActionId: current.sourceActionId,
+          requestHash: runtimeJson(current.request).hash, envelope: { operation: 'action', sessionId, goalId, body }, stateVersion: goal.stateVersion + 1,
+          previous: (goal.executionOptions as Record<string, Prisma.JsonValue>).goalExecutionControl ?? null, previousControlHash,
+          executionControl: serializeExecutionControl(control) })
+        policyPointer = { criterionId: `execution-control:${body.requestId}`, receiptHash: proof.hash }
+        await tx.agentGoalEvidence.create({ data: { goalId, revision: goal.currentRevision, criterionId: policyPointer.criterionId,
+          kind: 'execution-control', description: current.objective, status: 'verified', verifiedAt: now, receipt: proof.value } })
+        await tx.agentGoalBudget.update({ where: { goalId }, data: {
+          ...(body.budgetChange?.tokenLimit === undefined ? {} : { tokenLimit: BigInt(body.budgetChange.tokenLimit) }),
+          ...(body.budgetChange?.activeTimeLimitMs === undefined ? {} : { activeTimeLimitMs: BigInt(body.budgetChange.activeTimeLimitMs) }) } })
+      }
       // Execution options are separately versioned; never rewrite an immutable objective revision.
-      const options = body.model ? { ...(goal.executionOptions as Record<string, Prisma.JsonValue>), ...body.model } : goal.executionOptions
+      const options = { ...goal.executionOptions as object, ...body.model, ...(policyPointer ? { goalExecutionControl: policyPointer } : {}) }
       const snapshot = (await changeGoal(tx, goal, { status: 'active', phase: 'queued', epoch: { increment: 1 }, executionOptions: options as Prisma.InputJsonValue,
-        nextEligibleAt: now, reasonCode: null, blockCount: 0, blockFingerprint: null }, 'state.changed')).snapshot
+        nextEligibleAt: now, reasonCode: null, blockCount: 0, blockFingerprint: null }, 'state.changed', limitChange ? control : undefined)).snapshot
       return { snapshot: await receipt(tx, userId, body.requestId, hash, snapshot), runIds: [] }
     }
     await closeGoalActivity(tx, goal, now)

@@ -138,7 +138,7 @@ export default function AccountUsagePage() {
           <header>
             <p className="text-xs text-[var(--text-tertiary)]">{summary.planLabel}</p>
             <h1 className="mt-2 text-3xl font-semibold tracking-[-.03em]">用量明细</h1>
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-[var(--text-secondary)]">每日额度在 UTC+8 15:00 重置；邀请奖励独立累计，不随每日重置清零。</p>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-[var(--text-secondary)]">{summary.publicBetaEnabled ? '每日额度在 UTC+8 15:00 重置；邀请奖励独立累计，不随每日重置清零。' : '邀请奖励独立累计，长期有效。'}</p>
           </header>
           {summary.models.some(model => model.pricing) && <section className="mt-6 rounded-[16px] border border-[var(--border-subtle)] p-5" aria-label="当前分项费率">
             <h2 className="text-sm font-semibold">当前分项费率</h2>
@@ -157,18 +157,18 @@ export default function AccountUsagePage() {
             <article className="rounded-[16px] border border-[#e9e9e6] bg-white p-5 sm:p-6 dark:border-[var(--border-subtle)] dark:bg-[var(--surface-default)]">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <h2 className="text-base font-semibold">每日公测额度</h2>
+                  <h2 className="text-base font-semibold">{summary.publicBetaEnabled ? '每日公测额度' : '基础额度'}</h2>
                   <p className="mt-1 text-xs text-[var(--text-secondary)]">用于内置模型与 Agent 工具</p>
                 </div>
                 <span className="text-sm text-[var(--text-secondary)]">剩余 <strong className="text-[var(--text-primary)]">{formatCreditAmount(dailyRemaining)}</strong></span>
               </div>
               <p className="mt-7 text-xl font-semibold tabular-nums">
-                {formatCreditAmount(summary.dailyUsed)} <span className="text-sm font-normal text-[var(--text-secondary)]">/ {formatCreditAmount(summary.dailyAllowance)} · 已使用 {summary.usedPercent}%</span>
+                {formatCreditAmount(summary.dailyUsed)} <span className="text-sm font-normal text-[var(--text-secondary)]">/ {formatCreditAmount(summary.dailyAllowance)}{summary.publicBetaEnabled ? ` · 已使用 ${summary.usedPercent}%` : ''}</span>
               </p>
-              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[#f0f0ee] dark:bg-[var(--border-subtle)]">
+              {summary.publicBetaEnabled ? <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[#f0f0ee] dark:bg-[var(--border-subtle)]">
                 <div className="h-full rounded-full bg-[#171b24] transition-[width] duration-500 dark:bg-white" style={{ width: `${Math.min(100, Math.max(0, summary.usedPercent))}%` }} />
-              </div>
-              <p className="mt-4 inline-flex items-center gap-1.5 text-xs text-[var(--text-tertiary)]"><CalendarDays className="h-3.5 w-3.5" />下次重置 {resetLabel}</p>
+              </div> : null}
+              {summary.publicBetaEnabled ? <p className="mt-4 inline-flex items-center gap-1.5 text-xs text-[var(--text-tertiary)]"><CalendarDays className="h-3.5 w-3.5" />下次重置 {resetLabel}</p> : null}
             </article>
             <article className="rounded-[16px] border border-[#e9e9e6] bg-white p-5 sm:p-6 dark:border-[var(--border-subtle)] dark:bg-[var(--surface-default)]">
               <div className="flex items-start justify-between gap-4">
@@ -183,7 +183,7 @@ export default function AccountUsagePage() {
               <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[#f0f0ee] dark:bg-[var(--border-subtle)]">
                 <div className="h-full w-full rounded-full bg-emerald-500/75" />
               </div>
-              <p className="mt-4 text-xs text-[var(--text-tertiary)]">奖励额度会在每日额度用完后继续抵扣。</p>
+              <p className="mt-4 text-xs text-[var(--text-tertiary)]">{summary.publicBetaEnabled ? '奖励额度会在每日额度用完后继续抵扣。' : '奖励额度长期有效。'}</p>
             </article>
           </section>
           <section className="mt-5 flex flex-col justify-between gap-5 rounded-[16px] border border-[#e9e9e6] bg-white p-5 sm:flex-row sm:items-center sm:p-6 dark:border-[var(--border-subtle)] dark:bg-[var(--surface-default)]">

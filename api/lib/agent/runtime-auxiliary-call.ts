@@ -1,12 +1,12 @@
 import { z } from 'zod'
-import { SERVER_MODEL_TIERS } from '../../../shared/contracts/credits.js'
+import { creditModelTierSchema } from '../../../shared/contracts/credits.js'
 import type { CreditModelTier, ModelReasoningEffort } from '../../../shared/contracts/credits.js'
 import { env } from '../../config/env.js'
 import { chatWithTools, resolveTextOutputTokenParameter, type ChatCompletionResult } from '../ai-service.js'
 import { getModelTierRuntime } from '../credits.js'
 import { auxiliaryTextModel } from './auxiliary-text-model.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
-import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
+import { withManuscriptRunLease, withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { beginDurableChat } from './runtime-provider.js'
 import type { AuxiliaryModelStep } from './runtime-auxiliary-model.js'
 import type { DurableTokenPrice } from './runtime-settlement.js'
@@ -14,7 +14,7 @@ import type { ToolContext } from './tools/types.js'
 import { estimateChatMessagesTokens, resolveDurableInputLimit } from './context-budget.js'
 import { assignedTaskModel } from './model-assignment-context.js'
 
-const auxiliaryTierSchema = z.enum([...SERVER_MODEL_TIERS, 'custom'] as [string, ...string[]])
+const auxiliaryTierSchema = creditModelTierSchema
 const reasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
 export const auxiliaryRouteSchema = z.object({
@@ -101,7 +101,7 @@ export async function callDurableAuxiliary(input: {
     if (!replay.replay) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原请求尚无完整结果。')
     return replay.replay
   }
-  await withRunLease(lease, input.assertCurrent)
+  await withManuscriptRunLease(lease, input.assertCurrent)
   const routeTier = (input.route.tier ?? 'speed') as CreditModelTier
   const routeCustomModelId = input.route.customModelId ?? null
   const routeReasoningEffort = (input.route.reasoningEffort ?? 'low') as ModelReasoningEffort

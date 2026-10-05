@@ -59,7 +59,7 @@ function evidenceOutput(snapshot: unknown, inspection: Awaited<ReturnType<typeof
 export const goalReadTool = defineTool({
   name: 'goal_read',
   title: '读取目标进度',
-  description: '读取当前目标的权威状态、预算、当前版本和已核验领域回执。只相信服务端事实：模型文本、待办清单和本工具参数都不能证明目标完成。发现待核对用量、未提交产出或需要作者决定时，按返回的 blockers 处理。',
+  description: '读取当前目标的权威状态、有效 executionControl 限制、当前版本和已核验领域回执。executionControl.limits 的 null 不构成累计任务上限；旧 tokenLimit/timeLimit 只作历史或兼容记账，不作为模型自行停止的依据。只相信服务端事实：模型文本、待办清单和本工具参数都不能证明目标完成。发现待核对用量、未提交产出或需要作者决定时，按返回的 blockers 处理。',
   parameters: z.object({}).strict(),
   permission: READ_PERMISSION,
   readOnly: true,

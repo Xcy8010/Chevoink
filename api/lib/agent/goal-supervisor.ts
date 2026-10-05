@@ -12,6 +12,8 @@ import { reconcileGoalUsage } from './goal-budget.js'
 import { runtimeJson } from './runtime-common.js'
 import { hasAuthorEnded } from './completion-guard.js'
 import { reconcileGoalActivation } from './goal-activation-supervisor.js'
+import { readGoalExecutionControl } from './goal-execution-control.js'
+import { executionLimitReached } from './execution-control.js'
 
 /** Database is the scheduler: polling only wakes persisted, eligible goals; it never polls a model. */
 export async function superviseAgentGoal(userId: string, sessionId: string, goalId: string) {
@@ -49,7 +51,7 @@ export async function superviseAgentGoal(userId: string, sessionId: string, goal
     }
     const budget = await tx.agentGoalBudget.findUniqueOrThrow({ where: { goalId } })
     const inFlight = goal.activeSince ? BigInt(Math.max(0, now.getTime() - goal.activeSince.getTime())) : 0n
-    if (budget.tokensUsed >= budget.tokenLimit || budget.activeTimeMs + inFlight >= budget.activeTimeLimitMs) {
+    if (executionLimitReached(await readGoalExecutionControl(tx, goal.id), { tokens: budget.tokensUsed, activeTimeMs: budget.activeTimeMs + inFlight })) {
       await closeGoalActivity(tx, goal, now)
       revokedRunIds = await revokeGoalExecutions(tx, goal, now)
       await changeGoal(tx, goal, { status: 'budget_limited', phase: 'idle', activeSince: null, nextEligibleAt: null, epoch: { increment: 1 }, reasonCode: 'GOAL_BUDGET_EXHAUSTED' })
@@ -133,8 +135,10 @@ export async function superviseAgentGoal(userId: string, sessionId: string, goal
       const reviewed = await tx.agentGoalEvidence.findUnique({ where: { goalId_revision_criterionId: {
         goalId, revision: goal.currentRevision, criterionId,
       } } })
+      const seen = !reviewed && await tx.agentGoalEvidence.findFirst({ where: { goalId, revision: goal.currentRevision, kind: 'execution-review',
+        receipt: { path: ['progressHash'], equals: inspection.progressHash } }, select: { id: true } })
       const progress = reviewed ? { progressHash: goal.progressHash, blockFingerprint: goal.blockFingerprint,
-        blockCount: goal.blockCount, blocked: false } : nextGoalProgress(goal, inspection.progressHash, inspection.blockers.map(item => `${item.code}:${item.id}`))
+        blockCount: goal.blockCount, blocked: false } : nextGoalProgress(goal, inspection.progressHash, inspection.blockers.map(item => `${item.code}:${item.id}`), seen ? [inspection.progressHash] : [])
       if (!reviewed) await tx.agentGoalEvidence.create({ data: { goalId, revision: goal.currentRevision, criterionId,
         kind: 'execution-review', description: '已核对本轮执行的真实进度。', status: 'verified', verifiedAt: now,
         receipt: runtimeJson({ runId: run?.id ?? null, progressHash: inspection.progressHash,

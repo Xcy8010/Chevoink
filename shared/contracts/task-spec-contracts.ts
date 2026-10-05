@@ -17,6 +17,11 @@ export const taskScopeSchema = z.object({
   novelId: z.string().min(1),
   volumeIds: z.array(z.string().min(1)).optional(),
   chapterIds: z.array(z.string().min(1)).optional(),
+  /** Admission-time ceiling from the complete original request. Never widened by tools. */
+  writing: z.object({ version: z.literal(1), kind: z.enum(['bounded', 'unbounded', 'needs_input']),
+    targets: z.array(z.object({ orderIndex: z.number().int().positive(), chapterId: z.string().min(1).nullable(),
+      volumeId: z.string().min(1).optional(), positionInVolume: z.number().int().positive().optional() })),
+    titleAndBodyOnly: z.boolean(), repairAuthorized: z.boolean() }).optional(),
   selection: z
     .object({
       chapterId: z.string().min(1),
@@ -62,6 +67,8 @@ export const taskSpecSchema = z.object({
   id: z.string().min(1),
   runId: z.string().min(1).optional(),
   intent: taskIntentSchema,
+  /** New server policy; absence preserves legacy metadata without a default cap. */
+  controlPolicy: z.literal('until_completion').optional(),
   /** Frozen from the original request, never selected by a search tool. */
   researchBudget: z.enum(['standard', 'extended']).optional(),
   /** Server-frozen creative scope; a broad book request is a proposal, not permission to serialize indefinitely. */

@@ -1,3 +1,5 @@
+import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, semanticReadIdentity, nextStagnantBatch } from './semantic-progress.js'
+import { freezeWritingScope, readCompletedWritingDelivery, assertCompletedWritingDelivery } from './writing-scope.js'
 import { randomUUID } from 'node:crypto'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
 
@@ -48,22 +50,16 @@ import type { AgentTool, ToolContext } from './tools/types.js'
 import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestrationResumeNote } from './tools/task-orchestration-tools.js'
 import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-text.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
-import { createEmptyResponseGuard, createProtocolRecoveryGuard, hasDurableProgress, hasReadProgress, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
+import { createEmptyResponseGuard, createProtocolRecoveryGuard, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { toolFailureRecovery } from './tool-failure-recovery.js'
 import { createRepeatDetector } from './repeat-detect.js'
 import {
-  CHECKPOINT_BUDGET_SLICE,
-  CHECKPOINT_MANUAL_RESUME_HARD_MAX,
-  CHECKPOINT_MAX_RESUMES,
-  CHECKPOINT_TURN_SLICE,
-  evaluateCheckpoint,
-  resolveManualResumeGrant,
-  resolveRunTokenBudget,
   savedRunUsageSchema,
   recoverLegacyRunUsage,
   recoverRunElapsedMs,
   type RunCheckpointState,
 } from './checkpoint.js'
+import { COMPATIBILITY_TOKEN_LIMIT, untilCompletionControl } from './execution-control.js'
 import { autoNameSession } from './session-title.js'
 import { withModelAssignmentContext, updateModelAssignmentContext } from './model-assignment-context.js'
 import { buildTaskSpec, narrowLegacyResearchTask, narrowLegacyConversationTask } from './task-spec.js'
@@ -86,7 +82,7 @@ import {
  * while 循环：LLM → tool_calls → 执行 → tool 消息回填 → 再 LLM，直到 finishReason !== 'tool_calls'。
  * - 错误即观察：工具失败不中断 run，错误信息回填给模型自愈
  * - 审批暂停-恢复：'ask' 工具挂起循环等待前端批复，超时视为拒绝
- * - maxTurns + token 预算双保险防失控计费
+ * - 完成条件与无进展保护，单次请求保持上下文与输出上限
  * 进行中 run 的登记表（activeRuns Map 及查询/停止函数）已拆至 active-runs.ts。
  */
 
@@ -230,6 +226,8 @@ type ToolCallOutcome = {
   recoveryCode?: string
   argumentFailure?: boolean
   observation: string
+  requiredResult?: { targetId: string; contentHash: string }
+  semanticTransition?: { targetId: string; beforeHash: string; afterHash: string }
   part: Extract<AgentMessagePart, { type: 'tool-call' }>
   /** 附属分部：子 Agent 内嵌执行产生的内部工具调用卡片，随父消息一并落库与直播 */
   extraParts?: AgentMessagePart[]
@@ -484,6 +482,8 @@ export async function handleToolCall(
 
     return {
       observation: wrapToolOutput(tool.name, result.output),
+      requiredResult: result.requiredResult,
+      semanticTransition: result.semanticTransition,
       part: {
         ...basePart,
         args: validated.data,
@@ -551,6 +551,7 @@ async function finalizeLegacyRun(
   allowContextSideEffects = true,
   checkpoint?: RunCheckpointState,
   authorEnded?: { fulfilled: boolean; todoItems?: AgentTodoItem[] },
+  writingDelivery?: { messageId: string; subject: { userId: string; novelId: string; runId: string }; expected: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; signal: AbortSignal },
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
@@ -560,6 +561,12 @@ async function finalizeLegacyRun(
     : { type: 'run.finished' as const, status, usage, artifacts: [], outputSummary, ...(authorEnded ? { authorEnded } : {}) }
   let goalFenced = false
   const committed = await bus.commitTerminal(terminalBody, async tx => {
+    if (writingDelivery) {
+      await assertCompletedWritingDelivery(tx, writingDelivery.subject, writingDelivery.expected)
+      writingDelivery.signal.throwIfAborted()
+      await tx.agentMessage.create({ data: { id: writingDelivery.messageId, runId, sessionId: (await tx.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { sessionId: true } })).sessionId,
+        role: 'assistant', parts: [{ type: 'text', text: writingDelivery.expected.text }] } })
+    }
     const owner = await tx.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { userId: true } })
     await (await import('./goal-fence.js')).assertRunGoalFence(tx, owner.userId, runId)
     return tx.agentRun.update({
@@ -574,8 +581,10 @@ async function finalizeLegacyRun(
       },
       select: { userId: true, sessionId: true, novelId: true, taskSpec: true },
     })
-  })
+  }, writingDelivery ? [{ type: 'message.start', messageId: writingDelivery.messageId, role: 'assistant' },
+    { type: 'text.final', messageId: writingDelivery.messageId, text: writingDelivery.expected.text, asReasoning: false }] : [])
     .catch((error) => {
+      if (writingDelivery && (isAbortError(error) || error instanceof DataAccessError && error.code === 'WRITING_DELIVERY_STALE')) throw error
       if (error instanceof DataAccessError && error.code === 'GOAL_EXECUTION_FENCED') {
         goalFenced = true
         return null
@@ -657,7 +666,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   let executionStartedAt = Date.now()
   let priorExecutionMs = 0
   let inheritedExecutionMs = 0
-  const executionElapsedMs = () => priorExecutionMs + Math.max(0, Date.now() - executionStartedAt)
   const recoverExecution = (record: { startedAt?: Date | null; currentTurn?: number;
     events?: Array<{ type: string; createdAt: Date }> }, stoppedAt: number) => {
     if (!record.startedAt) {
@@ -674,6 +682,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const admission = new ToolAdmissionGuard()
   const progressSignatures = new Set<string>()
   let blockedRepeat = 0
+  let stagnantBatches = 0
   const argumentFailures = new Map<string, number>()
   const toolProviderFailures = new Map<string, number>()
   const recoveryFailures = new Map<string, number>()
@@ -685,7 +694,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   // P4 检查点自动续跑状态
   let resumeCount = 0
   let compactionCount = 0
-  // 手动续跑（作者显式点击「继续」）在自动硬顶之上再授予的预算片计数；持久化在 checkpoint 里
+  // 保留旧检查点中的手动续跑计数，仅用于历史记账；不会授予或限制累计任务预算。
   let manualResumeCount = 0
   let writeProgressCount = 0
   let checkpointWriteBaseline = 0
@@ -693,11 +702,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   let checkpointReadBaseline = 0
   let inheritedTokens = 0
   let inheritedTurns = 0
-  const taskTokens = () => usage.totalTokens + inheritedTokens
-  let maxTurns = env.agentMaxTurns
-  let runTokenBudget = resolveRunTokenBudget(params.tokenBudget, env.agentRunTokenBudget, env.agentRunTokenBudgetCeiling)
-  // 手动续跑名额：自动续跑在总硬顶上严格停止，作者显式「继续」可在硬顶之上再授予有限片。
-  const manualResumeMax = Math.min(env.agentRunManualResumeMax, CHECKPOINT_MANUAL_RESUME_HARD_MAX)
+  let maxTurns = 1 // Storage compatibility only; never used to stop execution.
+  let runTokenBudget = COMPATIBILITY_TOKEN_LIMIT // Storage compatibility only.
   let checkpointRestored = !params.resume
   const restoreSavedUsage = async (stored: { usage: unknown; currentTurn: number }, id: string) => {
     if (stored.usage !== null) return savedRunUsageSchema.safeParse(stored.usage)
@@ -707,8 +713,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     })
     return savedRunUsageSchema.safeParse(recoverLegacyRunUsage(stored.currentTurn, receipts))
   }
+  let checkpointOrigin: 'system_default' | 'unknown_legacy' = 'system_default'
   const checkpointSnapshot = (): RunCheckpointState => ({
-    version: 1, runStartedAt, resumeCount, compactionCount, maxTurns, tokenBudget: runTokenBudget,
+    version: 2, controlPolicy: 'until_completion', origin: checkpointOrigin, stagnantBatches,
+    activeExecutionMs: priorExecutionMs + Math.max(0, Date.now() - executionStartedAt), runStartedAt, resumeCount, compactionCount, maxTurns, tokenBudget: runTokenBudget,
     writeProgress: writeProgressCount, writeBaseline: checkpointWriteBaseline,
     readProgress: readProgressCount, readBaseline: checkpointReadBaseline,
     progressSignatures: [...progressSignatures],
@@ -727,13 +735,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     resumeCount = checkpoint.resumeCount
     compactionCount = checkpoint.compactionCount
     manualResumeCount = checkpoint.manualResumeCount
-    maxTurns = Math.min(checkpoint.maxTurns, env.agentMaxTurns + (resumeCount + manualResumeCount) * CHECKPOINT_TURN_SLICE)
-    // 手动续跑获得的片在自动硬顶之上，恢复时不会超过已经授予过的总额度。
-    // The granted slice starts at actual consumption (which may overshoot the
-    // automatic ceiling by one response). Preserve that persisted grant exactly;
-    // clamping to ceiling + slices silently removes part of an approved slice.
-    runTokenBudget = manualResumeCount > 0 ? checkpoint.tokenBudget
-      : Math.min(checkpoint.tokenBudget, env.agentRunTokenBudgetCeiling)
+    checkpointOrigin = checkpoint.version === 2 ? checkpoint.origin : 'unknown_legacy'
+    stagnantBatches = checkpoint.version === 2 ? checkpoint.stagnantBatches : 0
+    // Preserve historical stored values and counts; the effective policy is separate.
+    maxTurns = checkpoint.maxTurns
+    runTokenBudget = checkpoint.tokenBudget
     writeProgressCount = checkpoint.writeProgress
     checkpointWriteBaseline = checkpoint.writeBaseline
     readProgressCount = checkpoint.readProgress
@@ -905,34 +911,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       priorExecutionMs += Math.max(0, elapsed - inheritedExecutionMs)
       inheritedExecutionMs = Math.max(elapsed, inheritedExecutionMs)
     }
-    const initialTimeLimitMs = (resumeCount > 0 ? env.agentRunWallClockLongMinutes : env.agentRunWallClockMinutes) * 60_000
-    if (executionElapsedMs() > initialTimeLimitMs) {
-      const reason = `任务累计执行时长已达上限（${Math.round(initialTimeLimitMs / 60_000)} 分钟，已排除有记录的暂停等待时间）。已保存内容保留；重复点击继续不会增加时间预算。`
-      await finalizeRun(runId, bus, 'failed', usage, turn, reason, reason, false)
-      return
-    }
-    // 手动续跑（作者显式点击「继续」或输入继续指令）：自动检查点续跑受总 token 硬顶约束，
-    // 但显式人工入口允许在硬顶之上再授予有限数量的预算片（plan/18「继续执行」手动入口），
-    // 避免任务被自动硬顶永久死锁；片数上限持久化在 checkpoint 里，连点不能无限放大成本。
-    if ((params.resume || previousTask) && !params.activationResume) {
-      const grant = resolveManualResumeGrant({
-        taskTokens: taskTokens(), runTokenBudget,
-        turnsUsed: turn + inheritedTurns, maxTurns,
-        manualResumeCount, maxManualResumes: manualResumeMax,
-      })
-      if (grant && !grant.granted) {
-        const reason = `${grant.reason}。本任务累计消耗 ${taskTokens()} tokens（自动续跑总上限 ${env.agentRunTokenBudgetCeiling}）。已保存内容保留，未完成工作不会标记完成；请新建任务继续剩余工作。`
-        await announceStopReason(reason)
-        await finalizeRun(runId, bus, 'failed', usage, turn, reason, reason, false)
-        return
-      }
-      if (grant?.granted) {
-        manualResumeCount = grant.manualResumeCount
-        runTokenBudget = grant.tokenBudget
-        maxTurns = grant.maxTurns
-        await announceStopReason(`手动续跑 ${manualResumeCount}/${manualResumeMax} · 累计消耗 ${(taskTokens() / 10_000).toFixed(0)} 万 tokens · 已授予新预算片（200 万） · 继续执行中`)
-      }
-    }
     let taskSpec: TaskSpec = parsedTaskSpec.success
       ? { ...parsedTaskSpec.data, runId }
       : buildTaskSpec({
@@ -962,6 +940,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       taskSpecChanged = true
     }
+    if (!parsedTaskSpec.success) taskSpec = await prisma.$transaction(tx => freezeWritingScope(tx,
+      { userId: params.userId, novelId: params.novelId, runId }, taskSpec, contextPrompt))
     if (taskSpecChanged) {
       // Scope and inherited budget must become durable together, including if
       // execution is stopped before its first provider response.
@@ -1278,148 +1258,41 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       forceWrapUpReason = '信道重复输出同一段内容已终止（复读熔断）。'
     }
 
-    /** 统一收尾（plan/18）：预算耗尽/墙钟/空转/熔断都走这里——先让模型无工具总结进展，再按待办剩余定终态 */
+    /** Park unresolved work truthfully without buying another formatting call. */
     const wrapUpAndFinish = async (reasonText: string): Promise<void> => {
-      const wrapMessageId = randomUUID()
-      bus.emit({ type: 'message.start', messageId: wrapMessageId, role: 'assistant' })
-      const wrapStreamer = createVisibleTextStreamer()
-      messages.push({
-        role: 'user',
-        content: `[系统] ${reasonText}请立即停止调用工具，用一段话总结目前的进展与剩余工作。`,
-      })
-      const wrapBudget = prepareContextForRequest([], 'wrap-up')
-      if (!wrapBudget.fits || taskTokens() >= runTokenBudget) {
-        const fallbackText = `${reasonText}系统已停止继续请求，未把剩余工作标为完成。已完成的写入均已保存；可点击「继续执行」恢复剩余工作。`
-        bus.emit({ type: 'text.delta', messageId: wrapMessageId, delta: fallbackText })
-        bus.emit({ type: 'text.final', messageId: wrapMessageId, text: fallbackText, asReasoning: false })
-        await persistMessage(wrapMessageId, runId, params.sessionId, 'assistant', [{ type: 'text', text: fallbackText }])
-        await finalizeRun(runId, bus, 'failed', usage, turn, fallbackText.slice(0, 300), fallbackText)
-        return
-      }
-      const observeWrapUsage = trackRequestUsage(usage)
-      const wrapUp = await chatWithTools({
-        freePromotion: modelRuntime.freePromotion,
-        onUsage: observeWrapUsage,
-        messages,
-        tools: [],
-        model: runtimeModelName,
-        providerBaseUrl: modelRuntime.baseUrl,
-        providerApiKey: modelRuntime.apiKey,
-        provider: modelRuntime.provider,
-        reasoningEffort: modelRuntime.reasoningEffort,
-        reasoningParameterMode: modelRuntime.reasoningParameterMode,
-        thinkingEnabled: modelRuntime.thinkingEnabled,
-        outputTokenParameter: modelRuntime.outputTokenParameter,
-        temperature: taskSpec.creativeFreedom === 'stable' ? 0.45 : taskSpec.creativeFreedom === 'bold' ? 0.85 : 0.65,
-        onChunk: (chunk) => {
-          if (chunk.type === 'text-delta') {
-            const wrapUpIncrement = wrapStreamer.push(chunk.delta)
-            if (wrapUpIncrement) bus.emit({ type: 'text.delta', messageId: wrapMessageId, delta: wrapUpIncrement })
-          }
-        },
-        signal: controller.signal,
-        usageLog: {
-          userId: params.userId,
-          action: 'agentLoopWrapUp',
-          novelId: params.novelId,
-          chapterId: params.chapterId,
-          targetType: 'agentRun',
-          targetId: runId,
-          agentRunId: runId,
-          turn: null,
-          modelTier: modelRuntime.tier,
-          multiplierBps: modelRuntime.multiplierBps,
-        },
-      })
-      observeWrapUsage(wrapUp.usage)
-      const cleanWrapUp = humanizeAgentVisibleText(stripAgentProtocolArtifacts(wrapUp.content))
-      // 无论是否有干净文本都发 text.final：前端据此停掉收尾正文尾部的流式光标
-      bus.emit({ type: 'text.final', messageId: wrapMessageId, text: cleanWrapUp, asReasoning: false })
-      if (cleanWrapUp) {
-        await persistMessage(wrapMessageId, runId, params.sessionId, 'assistant', [
-          { type: 'text', text: cleanWrapUp },
-        ])
-      }
-      // 待办未完成时以 failed 收尾：前端据此展示「继续执行」按钮，一键接着跑完剩余待办
-      const todoLeft = todoItems.filter((item) => item.status === 'pending' || item.status === 'in_progress').length
-      if (todoLeft > 0) {
-        await finalizeRun(
-          runId,
-          bus,
-          'failed',
-          usage,
-          turn,
-          cleanWrapUp.slice(0, 300),
-          `${reasonText}待办还剩 ${todoLeft} 项未完成。点击「继续执行」让 Agent 接着跑完。`,
-        )
-        return
-      }
-      await finalizeRun(runId, bus, 'failed', usage, turn, cleanWrapUp.slice(0, 300), reasonText)
+      const text = `${reasonText}已保存的内容保留，本次工作尚未完成。`
+      const messageId = randomUUID()
+      bus.emit({ type: 'message.start', messageId, role: 'assistant' })
+      bus.emit({ type: 'text.final', messageId, text, asReasoning: false })
+      await persistMessage(messageId, runId, params.sessionId, 'assistant', [{ type: 'text', text }])
+      await finalizeRun(runId, bus, 'failed', usage, turn, text.slice(0, 300), reasonText, false)
     }
 
-    /** 29 R08：未结束且有新写入/读取证据时才刷新预算片；保留次数、时间和总量硬顶。 */
-    let checkpointDeniedReason = ''
-    const checkpointStopMessage = () => {
-      const base = `自动检查点未续跑：${checkpointDeniedReason || '运行预算边界未满足'}。任务累计消耗 ${taskTokens()} tokens（自动续跑总上限 ${env.agentRunTokenBudgetCeiling}）；已自动续跑 ${resumeCount} 次、手动续跑 ${manualResumeCount}/${manualResumeMax} 次。已保存内容保留，未完成工作不会标记完成。`
-      if (checkpointDeniedReason === '已达长任务墙钟总帽') return `${base}任务累计执行时长已达上限，重复点击继续不会增加时间预算。`
-      const remainingManual = Math.max(0, manualResumeMax - manualResumeCount)
-      return remainingManual > 0
-        ? `${base}点击「继续执行」可手动再授予一片 200 万 tokens 预算（本任务还剩 ${remainingManual} 次手动续跑机会）。`
-        : `${base}本任务的自动与手动续跑机会均已用尽，请新建任务继续剩余工作。`
-    }
-    const tryCheckpointResume = async (trigger: 'budget' | 'turns'): Promise<boolean> => {
-      const checkpoint = evaluateCheckpoint({
-        todoLeft: todoItems.filter((item) => item.status === 'pending' || item.status === 'in_progress').length,
-        // Every accepted terminal response returns before reaching this boundary.
-        // A missing/completed checklist is not proof that pending tool work is done.
-        taskPending: true,
-        writeProgress: writeProgressCount,
-        writeBaseline: checkpointWriteBaseline,
-        readProgress: readProgressCount,
-        readBaseline: checkpointReadBaseline,
-        resumeCount,
-        compactionCount,
-        elapsedMs: executionElapsedMs(),
-        longWallClockLimitMs: env.agentRunWallClockLongMinutes * 60_000,
-        usedTokens: taskTokens(),
-        tokenCeiling: env.agentRunTokenBudgetCeiling,
-      })
-      if (!checkpoint.ok) {
-        checkpointDeniedReason = checkpoint.reason
-        console.warn('[agent-checkpoint-denied]', JSON.stringify({ runId, trigger, reason: checkpoint.reason,
-          usedTokens: taskTokens(), sliceLimit: runTokenBudget, tokenCeiling: env.agentRunTokenBudgetCeiling,
-          resumeCount, compactionCount, writeProgressCount, checkpointWriteBaseline, readProgressCount, checkpointReadBaseline }))
-        return false
+    const finishPersistedWritingIfComplete = async (beforeFinish?: () => Promise<void>) => {
+      const delivery = await prisma.$transaction(tx => readCompletedWritingDelivery(tx,
+        { userId: params.userId, novelId: params.novelId, runId }))
+      if (!delivery) return false
+      controller.signal.throwIfAborted()
+      await beforeFinish?.()
+      const deliveryId = randomUUID()
+      try {
+        await finalizeRun(runId, bus, 'succeeded', usage, turn, delivery.text.slice(0, 300), undefined, false, undefined, undefined,
+          { messageId: deliveryId, subject: { userId: params.userId, novelId: params.novelId, runId }, expected: delivery, signal: controller.signal })
+      } catch (error) {
+        if (error instanceof DataAccessError && error.code === 'WRITING_DELIVERY_STALE') return false
+        throw error
       }
-      resumeCount += 1
-      compactionCount += 1
-      checkpointWriteBaseline = writeProgressCount
-      checkpointReadBaseline = readProgressCount
-      runTokenBudget = Math.min(env.agentRunTokenBudgetCeiling, runTokenBudget + CHECKPOINT_BUDGET_SLICE)
-      maxTurns += CHECKPOINT_TURN_SLICE
-      await persistCheckpoint()
-      // compaction：先压缩久远工具参数与输出；下一轮发送前再按真实 token 预算判断是否需要折叠完整工具轮。
-      compactEarlyToolPayloads(messages, CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS)
-      const todoLeft = todoItems.filter((item) => item.status === 'pending' || item.status === 'in_progress').length
-      const notice = `已到检查点 ${resumeCount}/${CHECKPOINT_MAX_RESUMES}（${trigger === 'budget' ? '预算片用尽' : '轮次片用尽'}） · 累计消耗 ${(taskTokens() / 10_000).toFixed(0)} 万 tokens · 剩余待办 ${todoLeft} 项 · 自动续跑中`
-      // 检查点可见性：落库+直播的系统行，刷新后仍在（产品化参照 codex 的自动 compaction 提示）
-      const noticeId = randomUUID()
-      bus.emit({ type: 'message.start', messageId: noticeId, role: 'assistant' })
-      bus.emit({ type: 'text.delta', messageId: noticeId, delta: notice })
-      // 检查点行一次性写完：立即定稿，避免续跑期间光标在系统行尾部常闪
-      bus.emit({ type: 'text.final', messageId: noticeId, text: notice, asReasoning: false })
-      await persistMessage(noticeId, runId, params.sessionId, 'assistant', [{ type: 'text', text: notice }])
-      messages.push({
-        role: 'user',
-        content: `[系统] ${notice}。上下文已压缩，按本任务目标、已保存产出与本任务已有待办核对进展，继续剩余工作。没有清单时不要为收尾补建清单；不要复述已完成工作、不要重新规划、不要询问作者是否继续。`,
-      })
+      lastAssistantText = delivery.text
       return true
     }
 
-    // 轮次片耗尽时在 while 条件里做检查点续跑（成功则 maxTurns 已刷新、继续循环），不可续跑才落入下方收尾
+    // Cumulative usage is accounting. Completion, cancellation and stagnation stop the loop.
     const seenGoalConsents = new Set<string>()
-    while (turn + inheritedTurns < maxTurns || await tryCheckpointResume('turns')) {
+    if (taskSpec.controlPolicy !== 'until_completion') checkpointOrigin = 'unknown_legacy'
+    const executionControl = untilCompletionControl(checkpointOrigin)
+    while (executionControl.controlPolicy === 'until_completion') {
       if (controller.signal.aborted) throw new DOMException('run aborted', 'AbortError')
+      if (await finishPersistedWritingIfComplete()) return
       const configurationChanges = await prisma.agentConfigurationChange.findMany({ where: { runId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
       if (configurationChanges.length) {
         const current = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
@@ -1454,25 +1327,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           seenGoalConsents.add(consent.id)
         }
       }
-      // Every request path, including no-tool/protocol retries, passes this budget gate.
-      if (taskTokens() >= runTokenBudget && !(await tryCheckpointResume('budget'))) {
-        const reason = checkpointStopMessage()
-        await announceStopReason(reason)
-        await finalizeRun(runId, bus, 'failed', usage, turn, reason, reason, false)
-        return
-      }
       turn += 1
-
-      // P2 墙钟双条件：总帽（发生过自动续跑后切长任务帽，默认 60→180 分钟）+ 空转帽（默认 10 分钟）。
-      // 空转判定只看轮边界：流式增量与工具完成都会刷新 lastActivityAt，模型/工具执行中不会误杀
-      const wallClockLimitMs = (resumeCount > 0 ? env.agentRunWallClockLongMinutes : env.agentRunWallClockMinutes) * 60_000
-      if (executionElapsedMs() > wallClockLimitMs) {
-        // A hard limit cannot be fixed by asking the model to summarize again.
-        // Keep the original budget and terminate without another paid request.
-        const reason = `任务累计执行时长已达上限（${Math.round(wallClockLimitMs / 60_000)} 分钟，已排除有记录的暂停等待时间）。已保存内容保留；重复点击继续不会增加时间预算。`
-        await finalizeRun(runId, bus, 'failed', usage, turn, reason, reason, false)
-        return
-      }
+      // Per-request deadlines and idle detection remain independent of cumulative usage.
       if (Date.now() - lastActivityAt > env.agentRunIdleMinutes * 60_000) {
         await wrapUpAndFinish(`任务已空转超过 ${env.agentRunIdleMinutes} 分钟没有任何进展输出。`)
         return
@@ -1751,7 +1607,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
 
       let structureCircuitTripped = false
+      let batchProgress = false
       for (const call of effectiveToolCalls) {
+        if (await finishPersistedWritingIfComplete(async () => {
+          for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') parts.splice(index, 1)
+          await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
+          bus.emit({ type: 'text.final', messageId, text: '', asReasoning: false })
+          liveTurn = null
+        })) return
         if (controller.signal.aborted) {
           throw new DOMException('run aborted', 'AbortError')
         }
@@ -1804,24 +1667,24 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         lastActivityAt = Date.now()
         // 滑窗更新：只记成功执行；失败不碰窗口（同签名重试不会被误杀）
         if (outcome.part.status === 'success') {
-          const durableProgress = hasDurableProgress(outcome.part, todoItems)
-          const display = outcome.part.display
-          const stateChanged = STATE_SENSITIVE_VALIDATORS.has(call.name) || display?.kind === 'chapterDiff' || display?.kind === 'planDiff'
-            ? durableProgress
-            : Boolean(tool && !tool.readOnly && !STATE_SENSITIVE_VALIDATORS.has(call.name) && !REPEATABLE_TOOLS.has(call.name) && call.name !== 'todo_write')
-          admission.record(admissionKey, outcome.observation, stateChanged)
-          const readProgress = Boolean(tool?.readOnly) && hasReadProgress(outcome.part)
-          const progressKey = toolSignature(call.name, outcome.observation)
-          if (!progressSignatures.has(progressKey)) {
-            progressSignatures.add(progressKey)
-            if (durableProgress || readProgress) todoReminders = 0
-            if (durableProgress || readProgress) recoveryFailures.clear()
-            // Checklist bookkeeping may reset a reminder, but is not new work
-            // evidence and cannot renew the paid execution budget.
-            if (durableProgress && display?.kind !== 'todoList') writeProgressCount += 1
+          const contentProgress = observeLegacyContentProgress(progressSignatures, outcome.part)
+          const transition = outcome.semanticTransition
+          const structureProgress = Boolean(transition && observeSemanticTransition(progressSignatures, `structure:${transition.targetId}`, transition.beforeHash, transition.afterHash))
+          const durableProgress = contentProgress || structureProgress
+          const requiredProgress = Boolean(outcome.requiredResult && observeRequiredResult(progressSignatures,
+            `chapter:${outcome.requiredResult.targetId}`, outcome.requiredResult.contentHash))
+          const readKey = semanticReadIdentity(call.name, outcome.observation)
+          const readProgress = Boolean(readKey && !progressSignatures.has(readKey))
+          if (readKey) progressSignatures.add(readKey)
+          admission.record(admissionKey, outcome.observation, durableProgress || requiredProgress)
+          if (durableProgress || requiredProgress || readProgress) {
+            batchProgress = true
+            todoReminders = 0
+            recoveryFailures.clear()
+            blockedRepeat = 0
+            if (durableProgress || requiredProgress) writeProgressCount += 1
             if (readProgress) readProgressCount += 1
           }
-          blockedRepeat = 0
         }
         if (call.name === 'plan_save' && outcome.part.status === 'success') {
           planSavePerformed = true
@@ -1889,6 +1752,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         return
       }
 
+      const waitingForChild = effectiveToolCalls.some(call => ['task_wait', 'task_get', 'task_list'].includes(call.name))
+        && await prisma.agentRun.count({ where: { userId: params.userId, novelId: params.novelId, OR: [{ session: { spawnedFromRunId: runId } }, { incomingChildGrant: { currentParentRunId: runId } }],
+          status: { in: ['queued', 'running', 'awaiting_approval'] } } }) > 0
+      stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, waitingForChild)
+      if (stagnantBatches >= 4) forceWrapUpReason = '连续多轮没有推进原任务的内容或必需成果，任务尚未完成，已停止重复执行。'
       if (blockedRepeat >= 4) forceWrapUpReason = '连续重复调用已拦截，且未产生新的工具进展（防空转循环）。'
       if (structureCircuitTripped) {
         const failureText = '卷章结构操作已连续失败 3 次，安全熔断已停止后续写入，避免重复建章、错卷和序号进一步漂移。请检查任务状态中的变更后重新发起。'
@@ -1909,20 +1777,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         return
       }
 
-      if (taskTokens() >= runTokenBudget) {
-        // 预算片耗尽先检查任务进展，不能用是否建过待办来决定自动续跑。
-        if (await tryCheckpointResume('budget')) continue
-        const reason = checkpointStopMessage()
-        await announceStopReason(reason)
-        await finalizeRun(runId, bus, 'failed', usage, turn, reason, reason, false)
-        return
-      }
     }
 
-    // 轮次上限（检查点续跑也不可用）：优雅收尾而非硬报错；停止原因落库为可见消息
-    const turnLimitReason = checkpointStopMessage()
-    await announceStopReason(turnLimitReason)
-    await finalizeRun(runId, bus, 'failed', usage, turn, lastAssistantText.slice(0, 300), turnLimitReason)
   } catch (error) {
     await (await import('./goal-service.js')).noteGoalResourceFailure(params.userId, runId, error).catch(() => {
       console.error('[agent-goal] 资源限制状态待恢复', { runId })

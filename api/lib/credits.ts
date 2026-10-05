@@ -1,10 +1,10 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 
-import { Prisma, type CreditLedgerEntry } from '@prisma/client'
+import { Prisma, type CreditLedgerEntry, type CreditAccount, type CreditSystemSetting } from '@prisma/client'
 import { z } from 'zod'
 import { effectiveModelMultiplier, readModelPromotion } from '../../shared/model-promotion.js'
 
-import { BUILT_IN_MODEL_TIERS, SERVER_MODEL_TIERS, taskSpecSchema } from '../../shared/contracts/index.js'
+import { isBuiltInModelTier, isServerModelTier, taskSpecSchema } from '../../shared/contracts/index.js'
 import type {
   CreditAccountSummary,
   CreditActivityPayload,
@@ -16,6 +16,7 @@ import type {
   ModelReasoningEffort,
   ReferralPayload,
 } from '../../shared/contracts/index.js'
+import { lockCreditPolicy, creditTransaction } from './credit-policy.js'
 import { DataAccessError, prisma } from './prisma.js'
 import { decryptSecret } from './secret-box.js'
 import { assertCreditInteger, BillingInputError, calculateV1ChargeMilli, calculateV2UserChargeMilli } from './billing/pricing.js'
@@ -35,7 +36,6 @@ export const WEB_SEARCH_CALL_MILLI = 2 * CREDIT_MILLI
 const UTC8_OFFSET_MS = 8 * 60 * 60 * 1000
 const DAY_MS = 24 * 60 * 60 * 1000
 const DEFAULT_RESET_HOUR_UTC8 = 15
-const GLOBAL_SETTING_ID = 'global'
 
 const MODEL_FALLBACKS: CreditModelOption[] = [
   { tier: 'lite', label: '轻量', multiplier: 0, available: false, selectedByDefault: false, reasoningEfforts: ['low', 'high', 'max'], defaultReasoningEffort: 'high', visionEnabled: false },
@@ -47,7 +47,7 @@ const MODEL_FALLBACKS: CreditModelOption[] = [
 
 const MODEL_REASONING_EFFORTS = new Set<ModelReasoningEffort>(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
-const CREDIT_ACTIVITY_MODEL_LABELS: Record<CreditModelTier, string> = {
+const CREDIT_ACTIVITY_MODEL_LABELS: Partial<Record<CreditModelTier, string>> = {
   lite: '轻量',
   speed: '极速',
   standard: '标准',
@@ -61,8 +61,8 @@ const CREDIT_ACTIVITY_MODEL_LABELS: Record<CreditModelTier, string> = {
 export function getCreditActivityModelLabel(providerType: 'text' | 'image', modelTier: string | null): string {
   if (providerType === 'image') return '生图'
   return modelTier && modelTier in CREDIT_ACTIVITY_MODEL_LABELS
-    ? CREDIT_ACTIVITY_MODEL_LABELS[modelTier as CreditModelTier]
-    : '历史模型'
+    ? CREDIT_ACTIVITY_MODEL_LABELS[modelTier as CreditModelTier] ?? '内置模型'
+    : isBuiltInModelTier(modelTier) ? '内置模型' : '历史模型'
 }
 
 export type ModelCapabilities = {
@@ -143,23 +143,6 @@ function makeReferralCode(seed?: string): string {
   return source.replace(/[-_]/g, '').toUpperCase().slice(0, 12)
 }
 
-async function getGlobalSetting(db: CreditDb) {
-  // Hot-path admission/settlement reads must not initialize the singleton on
-  // every request. Do not cache: administrative pause/limits stay current.
-  const existing = await db.creditSystemSetting.findUnique({ where: { id: GLOBAL_SETTING_ID } })
-  if (existing) return existing
-  return db.creditSystemSetting.upsert({
-    where: { id: GLOBAL_SETTING_ID },
-    create: {
-      id: GLOBAL_SETTING_ID,
-      globallyPaused: false,
-      dailyAllowanceMilli: PUBLIC_BETA_DAILY_MILLI,
-      resetHourUtc8: DEFAULT_RESET_HOUR_UTC8,
-    },
-    update: {},
-  })
-}
-
 /**
  * 新账户默认值的唯一入口：全局暂停期间新账户必须继承暂停状态。
  * 所有建账点（注册事务、懒加载 ensure、管理端批量建账）都必须经过这里，
@@ -182,15 +165,16 @@ export function buildNewCreditAccountData(
   }
 }
 
-async function ensureAccountWithDb(db: CreditDb, userId: string, now = new Date()) {
-  const setting = await getGlobalSetting(db)
+async function ensureAccountWithDb(db: CreditDb, userId: string, now = new Date()): Promise<{ account: CreditAccount; setting: CreditSystemSetting }> {
+  if (db === prisma) return creditTransaction(tx => ensureAccountWithDb(tx, userId, now))
+  const setting = await lockCreditPolicy(db)
   const window = getCreditWindow(now, setting.resetHourUtc8)
   await db.creditAccount.upsert({
     where: { userId },
     create: buildNewCreditAccountData(userId, setting, window, now),
     update: {},
   })
-  await db.creditAccount.updateMany({
+  if (setting.publicBetaEnabled) await db.creditAccount.updateMany({
     where: { userId, periodEndsAt: { lte: now } },
     data: {
       dailyAllowanceMilli: setting.dailyAllowanceMilli,
@@ -210,15 +194,16 @@ export async function ensureCreditAccount(userId: string, now = new Date()) {
 async function listPublicModelOptions(): Promise<CreditModelOption[]> {
   const configs = await prisma.aiModelConfig.findMany({
     where: { ownerUserId: null, tier: { not: null } },
+    orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
     select: { tier: true, provider: true, displayName: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, multiplierBps: true, enabled: true, selectable: true, isDefault: true, metadata: true },
   })
-  const activePrices = await getActiveTokenPrices([...BUILT_IN_MODEL_TIERS])
+  const activePrices = await getActiveTokenPrices(configs.flatMap(item => isBuiltInModelTier(item.tier) ? [item.tier] : []))
   if (configs.length === 0) return MODEL_FALLBACKS.map(item => {
     const price = item.multiplier === 0 ? undefined : activePrices.get(item.tier)
     return { ...item, pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null }
   })
   return configs.flatMap((item) => {
-    if (!item.tier || !['lite', 'speed', 'standard', 'performance', 'ultimate'].includes(item.tier)) return []
+    if (!item.tier || !isBuiltInModelTier(item.tier)) return []
     const capabilities = parseModelCapabilities(item.metadata, item.provider)
     // 0 倍率档对用户公示为免费：不列分项费率，历史费率卡不参与免费档结算。
     const multiplierBps = effectiveModelMultiplier(item)
@@ -233,12 +218,6 @@ async function listPublicModelOptions(): Promise<CreditModelOption[]> {
       selectedByDefault: item.isDefault,
       ...capabilities,
     }]
-  }).sort((left, right) => {
-    const order = (tier: CreditModelTier) => {
-      const index = BUILT_IN_MODEL_TIERS.indexOf(tier as typeof BUILT_IN_MODEL_TIERS[number])
-      return index >= 0 ? index : BUILT_IN_MODEL_TIERS.length
-    }
-    return order(left.tier) - order(right.tier)
   })
 }
 
@@ -283,7 +262,7 @@ export function calculateCreditActivityStreaks(activityDates: string[], todayKey
 
 async function toCreditSummary(
   account: Awaited<ReturnType<typeof ensureAccountWithDb>>['account'],
-  setting: Awaited<ReturnType<typeof getGlobalSetting>>,
+  setting: Awaited<ReturnType<typeof lockCreditPolicy>>,
   db: Prisma.TransactionClient = prisma,
 ): Promise<CreditAccountSummary> {
   const dailyRemainingMilli = Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli)
@@ -293,8 +272,10 @@ async function toCreditSummary(
     ? Math.min(100, Math.round((account.dailyUsedMilli / account.dailyAllowanceMilli) * 1000) / 10)
     : 100
   return {
-    plan: 'public_beta',
-    planLabel: '公测版',
+    plan: setting.publicBetaEnabled ? 'public_beta' : 'free',
+    planLabel: setting.publicBetaEnabled ? '公测版' : '免费版',
+    publicBetaEnabled: setting.publicBetaEnabled,
+    publicBetaRevision: setting.publicBetaRevision,
     dailyAllowance: milliToCredits(account.dailyAllowanceMilli),
     dailyUsed: milliToCredits(account.dailyUsedMilli),
     dailyRemaining: milliToCredits(dailyRemainingMilli),
@@ -313,6 +294,7 @@ async function toCreditSummary(
 }
 
 export async function getCreditSummary(userId: string, db: Prisma.TransactionClient = prisma): Promise<CreditAccountSummary> {
+  if (db === prisma) return creditTransaction(tx => getCreditSummary(userId, tx))
   const { account, setting } = await ensureAccountWithDb(db, userId, new Date())
   return toCreditSummary(account, setting, db)
 }
@@ -330,6 +312,9 @@ export async function getCreditUsage(userId: string, take = 100): Promise<Credit
 }
 
 async function presentCreditLedgerEntries(db: Prisma.TransactionClient, entries: CreditLedgerEntry[]): Promise<CreditLedgerItem[]> {
+  const dynamicTiers = [...new Set(entries.flatMap(entry => entry.modelTier?.startsWith('builtin_') && isBuiltInModelTier(entry.modelTier) ? [entry.modelTier] : []))]
+  const names = dynamicTiers.length ? await db.aiModelConfig.findMany({ where: { ownerUserId: null, enabled: true, tier: { in: dynamicTiers } }, select: { tier: true, displayName: true } }) : []
+  const modelLabels = new Map(names.map(model => [model.tier, model.displayName]))
   // Exact usage linkage, shared by account and task views; never expose metadata.
   const originalKey = (entry: CreditLedgerEntry) => entry.kind === 'refund' ? entry.idempotencyKey.replace(/^refund:/, '') : entry.idempotencyKey
   const usageLogIds = entries
@@ -363,6 +348,7 @@ async function presentCreditLedgerEntries(db: Prisma.TransactionClient, entries:
     referenceId: entry.referenceId,
     taskRunId: candidateRun && runOwners.get(candidateRun) === entry.userId ? candidateRun : null,
     modelTier: entry.modelTier as CreditModelTier | null,
+    ...(modelLabels.has(entry.modelTier) ? { modelLabel: modelLabels.get(entry.modelTier) } : {}),
     multiplier: entry.multiplierBps / 10000,
     requestTokens: entry.requestTokens,
     responseTokens: entry.responseTokens,
@@ -508,7 +494,9 @@ export async function getCreditActivity(userId: string, now = new Date()): Promi
   const imageSpentMilli = Math.max(0, -(imageSpend._sum.deltaMilli ?? 0))
   const modelUsageByLabel = new Map<string, { label: string; calls: number; creditsSpentMilli: number; tokens: number }>()
   for (const group of modelGroups) {
-    const label = getCreditActivityModelLabel(group.providerType, group.modelTier)
+    const label = group.providerType === 'text' && group.modelTier?.startsWith('builtin_')
+      ? account.models.find(model => model.tier === group.modelTier)?.label ?? '内置模型'
+      : getCreditActivityModelLabel(group.providerType, group.modelTier)
     const current = modelUsageByLabel.get(label) ?? { label, calls: 0, creditsSpentMilli: 0, tokens: 0 }
     current.calls += group._count._all
     current.creditsSpentMilli += group.providerType === 'image' ? 0 : group._sum.creditChargeMilli ?? 0
@@ -578,7 +566,7 @@ export async function reserveTokenCredits(userId: string, usageId: string, input
         if (unknown >= 3) throw new DataAccessError(429, 'CREDITS_PROVIDER_UNSTABLE', '此模型近期多次未返回用量，暂缓新调用；可切换其他模型或使用自定义模型，30分钟窗口过后可重试。')
         const held = tokenReservationMilli(price, inputEstimate, maxOutput, balance, available)
         await tx.aiUsageLog.update({ where: { id: usageId }, data: { reservedCreditMilli: held,
-          reservationExpiresAt: new Date(Math.min(Date.now() + RESERVATION_TTL_MS, account.periodEndsAt.getTime())) } })
+          reservationExpiresAt: new Date(setting.publicBetaEnabled ? Math.min(Date.now() + RESERVATION_TTL_MS, account.periodEndsAt.getTime()) : Date.now() + RESERVATION_TTL_MS) } })
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2034' || error.code === 'P2002') && attempt < 2) continue
@@ -591,6 +579,7 @@ export async function assertCreditAccess(userId: string, tier: CreditModelTier =
   // Credits suspension controls platform-funded calls. BYOK ownership and model
   // availability are checked by getModelTierRuntime; account bans remain in auth.
   if (tier === 'custom') return
+  if (!isServerModelTier(tier) || (tier === 'basic' && requireSelectable)) throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '该模型档位尚未开放。')
   const { account, setting } = await ensureCreditAccount(userId)
   if (account.suspendedAt) {
     throw new DataAccessError(423, setting.globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED', setting.globallyPaused ? '公测模型服务已由管理员暂停，请稍后再试。' : '当前账户的模型使用权限已暂停。')
@@ -654,8 +643,9 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
     const reasoningEffort = resolveCustomReasoningEffort(requestedReasoningEffort ?? capabilities.defaultReasoningEffort, capabilities.reasoningEfforts)
     return { tier, multiplierBps: 0, provider: custom.provider, modelName: custom.modelName, baseUrl: custom.baseUrl, apiKey: decryptSecret(custom.apiKeyCiphertext), reasoningEffort, ...capabilities }
   }
+  if (!isServerModelTier(tier)) throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '该模型档位尚未开放。')
   const config = await prisma.aiModelConfig.findFirst({
-    where: { ownerUserId: null, tier, enabled: true },
+    where: { ownerUserId: null, tier, enabled: true, ...(tier.startsWith('builtin_') ? { selectable: true } : {}) },
     select: { tier: true, provider: true, modelName: true, multiplierBps: true, baseUrl: true, apiKeyCiphertext: true, metadata: true },
   })
   if (!config) {
@@ -921,7 +911,7 @@ export async function reconcileTokenSettlements(limit = 25) {
   for (const usage of pending) {
     try {
       const tier = usage.modelTier ?? 'speed'
-      if (!(SERVER_MODEL_TIERS as readonly string[]).includes(tier)) throw new Error('Unsupported model tier')
+      if (!isServerModelTier(tier)) throw new Error('Unsupported model tier')
       await consumeTokenCredits({ userId: usage.userId, usageLogId: usage.id,
         requestTokens: usage.requestTokens ?? 0, responseTokens: usage.responseTokens ?? 0,
         modelTier: tier as CreditModelTier, multiplierBps: usage.multiplierBps, referenceId: usage.targetId ?? usage.id })
@@ -956,10 +946,10 @@ export async function refundCreditCharge(userId: string, originalIdempotencyKey:
           return
         }
         if (!original || original.deltaMilli >= 0) return
-        const { account } = await ensureAccountWithDb(tx, userId)
+        const { account, setting } = await ensureAccountWithDb(tx, userId)
         const dailyRefund = Math.max(0, -original.dailyDeltaMilli)
         const originalBelongsToCurrentWindow = original.createdAt >= account.periodStartedAt
-          && original.createdAt < account.periodEndsAt
+          && (!setting.publicBetaEnabled || original.createdAt < account.periodEndsAt)
         // Old-window refunds go to bonus; never decrement an already-reset daily counter.
         const currentWindowDailyRefund = originalBelongsToCurrentWindow
           ? Math.min(account.dailyUsedMilli, dailyRefund)
@@ -1095,7 +1085,7 @@ export async function initializeNewUserCredits(
   userId: string,
   referralCode?: string | null,
 ): Promise<void> {
-  const setting = await getGlobalSetting(tx)
+  const setting = await lockCreditPolicy(tx)
   const now = new Date()
   const window = getCreditWindow(now, setting.resetHourUtc8)
   // 注册即建账：暂停期间注册的新用户必须继承全局暂停，否则将绕过计费门禁。

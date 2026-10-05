@@ -1,3 +1,4 @@
+import { isBuiltInModelTier } from '../../../shared/contracts/model-tier.js'
 import type { Prisma } from '@prisma/client'
 import { MODEL_ASSIGNMENT_TASKS, type AgentModelSelection, type ModelAssignmentTask } from '../../../shared/contracts/agent-model-assignments.js'
 import type { CreativeFreedom } from '../../../shared/contracts/agent-events.js'
@@ -69,11 +70,17 @@ export async function assertConfigurationAuthority(tx: Prisma.TransactionClient,
     ...journals.map(item => ({ prompt: item.prompt, messageId: item.consent.messageId, messageHash: item.consent.messageHash,
       pending: !item.consent.consumed || !item.currentEpoch }))]
   let modelNames: string[] | undefined
+  let ambiguousNames: string[][] = []
   if (input.model) {
     const record = await tx.aiModelConfig.findFirst({ where: input.model.modelTier === 'custom'
       ? { id: input.model.customModelId, ownerUserId: ctx.userId, enabled: true }
       : { tier: input.model.modelTier, ownerUserId: null, enabled: true } })
-    modelNames = [...(tierNames[input.model.modelTier] ?? []), record?.displayName ?? '', record?.modelName ?? '']
+    modelNames = [input.model.modelTier, ...(tierNames[input.model.modelTier] ?? []), record?.displayName ?? '', record?.modelName ?? '']
+    const choices = await tx.aiModelConfig.findMany({ where: { enabled: true, OR: [{ ownerUserId: ctx.userId }, { ownerUserId: null, selectable: true, tier: { not: null } }] },
+      select: { id: true, ownerUserId: true, tier: true, displayName: true, modelName: true } })
+    ambiguousNames = choices.filter(choice => choice.ownerUserId === ctx.userId || isBuiltInModelTier(choice.tier))
+      .filter(choice => input.model?.modelTier === 'custom' ? choice.id !== input.model.customModelId : choice.ownerUserId !== null || choice.tier !== input.model?.modelTier)
+      .map(choice => [...(choice.ownerUserId ? ['custom'] : [choice.tier ?? '', ...(tierNames[choice.tier ?? ''] ?? [])]), choice.displayName, choice.modelName])
   }
   const directives = candidates.flatMap(candidate => configurationDirectives(candidate.prompt).map(directive => ({ ...candidate, ...directive,
     revoked: directive.revoked || 'pending' in candidate && candidate.pending })))
@@ -88,7 +95,7 @@ export async function assertConfigurationAuthority(tx: Prisma.TransactionClient,
   const latestEffort = latest('effort')
   const modelEffort = latestModel && (!latestEffort || directives.indexOf(latestModel) > directives.indexOf(latestEffort)) ? latestModel : latestEffort
   const effort = input.effortOnly ? modelEffort : undefined
-  if (input.model && (!model || model.revoked || !selectsModel(model.command, modelNames!)
+  if (input.model && (!model || model.revoked || !selectsModel(model.command, modelNames!) || ambiguousNames.some(names => selectsModel(model.command, names))
     || input.model.reasoningEffort && (!modelEffort || modelEffort.revoked || !mentionsEffort(modelEffort.command, input.model.reasoningEffort)))) return deny()
   if (input.model && input.model.reasoningEffort === undefined && input.effectiveReasoningEffort
     && (!modelEffort || modelEffort.revoked || (modelEffort !== model || effortDirective(modelEffort.command))

@@ -394,6 +394,8 @@ export type AdminTokenManagementPayload = {
 export type AdminCreditsManagementPayload = {
   summary: {
     globallyPaused: boolean
+    publicBetaEnabled: boolean
+    publicBetaRevision: number
     users: number
     dailyAllowance: number
     dailyUsed: number
@@ -402,7 +404,7 @@ export type AdminCreditsManagementPayload = {
   }
   users: Array<{
     user: AdminBriefUser
-    planLabel: '公测版'
+    planLabel: '公测版' | '免费版'
     dailyAllowance: number
     dailyUsed: number
     dailyRemaining: number
@@ -421,6 +423,7 @@ export type AdminModelManagementPayload = {
     id: string
     pricing?: import('./credits.js').CreditLedgerItem['pricing']
     tier: string | null
+    sortOrder: number
     modelKind: 'text' | 'image_generation' | 'vision' | 'web_search'
     provider: string
     displayName: string

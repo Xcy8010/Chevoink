@@ -10,6 +10,9 @@ import { reduceExecutionReceipt } from './runtime-reducer.js'
 import { normalizeToolInput } from './tools/input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './tools/types.js'
 import { assertGoalRevisionFence, readGoalExecution } from './goal-fence.js'
+import { assertQuestionWritingScope } from './writing-scope.js'
+import { DataAccessError } from '../prisma.js'
+import { recordToolFailure } from './runtime-operations.js'
 
 export const durableQuestionSchema = z.object({ version: z.literal(1), operationId: z.string(), callId: z.string(),
   question: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string().optional() })), expiresAt: z.string().datetime() }).strict()
@@ -22,6 +25,15 @@ export async function executeDurableQuestion(lease: RunLeaseToken, cursor: ToolE
   const prepared = await prepareToolCursorOperation(lease, cursor, { key: `exec:${source.state.nextOperationSequence}`,
     action: 'ask_user', callId: ctx.callId, targetId: lease.taskRootId, effectDomain: 'read', normalize, effectiveArgs: effective,
     operationInput: runtimeJson({ callId: ctx.callId, args: effective }).value })
+  try {
+    await withRunLease(lease, tx => assertQuestionWritingScope(tx, ctx, effective.question, effective.options))
+  } catch (error) {
+    if (!(error instanceof DataAccessError) || error.code !== 'AUTHOR_CHAPTER_SCOPE') throw error
+    await recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash,
+      code: error.code, output: error.message, summary: '问题超出原任务范围' })
+    await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
+    return { kind: 'tool' as const, result: { output: error.message, summary: '问题超出原任务范围', outcome: 'failed' as const } }
+  }
   const waiting = await withRunLease(lease, async tx => {
     // Answer admission and timeout completion serialize on this same root lock.
     // Never carry a timeout decision into a later effect transaction: a valid

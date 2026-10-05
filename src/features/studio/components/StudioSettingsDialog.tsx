@@ -504,7 +504,7 @@ function ProfilePanel() {
         <h2 className="mt-4 text-xl font-semibold tracking-[-.02em]">{sessionUser.nickname}</h2>
         <p className="mt-1 text-xs text-[var(--text-tertiary)]">{sessionUser.email || sessionUser.phone || 'Chevoink 创作者'}</p>
         <p className="mt-3 inline-flex items-center gap-2 rounded-full border border-[var(--border-subtle)] px-3 py-1 text-[11px] text-[var(--text-secondary)]">
-          {account?.planLabel ?? '公测版'}
+          {account?.planLabel ?? '—'}
           <span aria-hidden className="h-3 w-px bg-[var(--border-strong)]" />
           剩余 {account ? formatCreditAmount(account.totalRemaining) : '—'} Credits
         </p>

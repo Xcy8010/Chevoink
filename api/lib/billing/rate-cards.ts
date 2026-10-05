@@ -83,6 +83,8 @@ export async function transitionRateCard(actorId: string, input: { id: string; e
     const allowed: Record<string, string[]> = { draft: ['shadow', 'retired'], shadow: ['approved', 'retired'], approved: ['active', 'retired'], active: ['retired'], retired: [] }
     if (card.revision !== expected || !allowed[card.status]?.includes(next)) throw new DataAccessError(409, 'CREDIT_RATE_CARD_CONFLICT', '费率状态已变化或跳过必需评审。')
     if (next === 'active') {
+      const config = await tx.aiModelConfig.findFirst({ where: { ownerUserId: null, tier: card.modelTier, enabled: true, ...(card.modelTier === 'basic' ? {} : { selectable: true }) } })
+      if (!config || config.modelName === 'unconfigured' || (card.modelTier !== 'speed' && (!config.baseUrl || !config.apiKeyCiphertext))) throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '该模型档位尚未开放。')
       const previous = await tx.creditRateCard.findFirst({ where: { modelTier: card.modelTier, status: 'active' } })
       if (previous) {
         await tx.creditRateCard.update({ where: { id: previous.id }, data: { status: 'retired', revision: { increment: 1 } } })

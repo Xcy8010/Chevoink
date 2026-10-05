@@ -54,9 +54,21 @@ export async function saveResearchReportSection(scope: Scope, input: {
     if (previous && state!.sections.map(section => section.content).join('\n\n') !== previous.content) {
       throw new DataAccessError(409, 'RESEARCH_REPORT_INVALID', '报告内容与区块版本不一致，未覆盖原报告。')
     }
+    // Only the actual ordered report and its cited source material count.
+    // Artifact IDs/revision counters are retained for audit/CAS, not progress.
+    const reportHash = async (title: string, sections: z.infer<typeof reportSectionSchema>[]) => hash(JSON.stringify({ title,
+      sections: await Promise.all(sections.map(async section => ({ order: section.order, content: section.content,
+        citations: await Promise.all(section.citations.map(async citation => {
+          const saved = await tx.agentResearchContent.findUnique({ where: { id: citation.contentRef }, include: { source: true } })
+          if (!saved) return denied()
+          return { url: saved.source.canonicalUrl, revision: citation.revision, start: citation.start, end: citation.end, excerptHash: citation.excerptHash }
+        })) }))) }))
+    const beforeHash = await reportHash(previous?.title ?? '', state?.sections ?? [])
+    const targetId = `research-report:${scope.userId}:${scope.sessionId}:${taskKey}:${parsed.reportId}`
     const priorSection = state?.sections.find(section => section.id === parsed.section.id)
     if (previous && previous.title === parsed.title && JSON.stringify(priorSection) === JSON.stringify(parsed.section)) {
-      return { artifactId: id, revision: state!.revision, chineseCharacters: countReportChineseCharacters(previous.content), replayed: true }
+      return { artifactId: id, revision: state!.revision, chineseCharacters: countReportChineseCharacters(previous.content), replayed: true,
+        semanticTransition: { targetId, beforeHash, afterHash: beforeHash } }
     }
     if ((state?.revision ?? 0) !== parsed.expectedRevision) throw new DataAccessError(409, 'RESEARCH_REPORT_CONFLICT', '报告已更新，请读取当前版本后仅修订目标区块。')
     for (const citation of parsed.section.citations) {
@@ -80,7 +92,8 @@ export async function saveResearchReportSection(scope: Scope, input: {
     const metadata = { kind: 'researchReport', taskKey, revision, sections }
     if (previous) await tx.agentArtifact.update({ where: { id }, data: { title: parsed.title, content, metadata } })
     else await tx.agentArtifact.create({ data: { id, runId: scope.runId, artifactType: 'researchReport', title: parsed.title, content, metadata } })
-    return { artifactId: id, revision, chineseCharacters: countReportChineseCharacters(content), replayed: false }
+    return { artifactId: id, revision, chineseCharacters: countReportChineseCharacters(content), replayed: false,
+      semanticTransition: { targetId, beforeHash, afterHash: await reportHash(parsed.title, sections) } }
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
 }
 

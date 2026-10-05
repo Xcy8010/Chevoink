@@ -1,13 +1,14 @@
+import { isBuiltInModelTier } from '../../../../shared/contracts/model-tier'
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { BrainCircuit, Eye, Globe2, ImagePlus, KeyRound, Pencil, ScanSearch, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, Plus, BrainCircuit, Eye, Globe2, ImagePlus, KeyRound, Pencil, ScanSearch, X } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
 import TextInput from '@/components/ui/TextInput'
 import type { ModelReasoningEffort } from '../../../../shared/contracts'
 import { AdminCard, AdminPageHeader, AdminPanelState } from '../AdminLayout'
 import { formatTokens } from '../admin-shared'
-import { getAdminModelManagement, updateAdminModel } from '../api'
+import { createAdminModel, reorderAdminModels, getAdminModelManagement, updateAdminModel } from '../api'
 import { ModelRoutesEditor } from '../components/ModelRoutesEditor'
 import type { ModelRouteInput } from '../../../../shared/contracts/model-routes'
 
@@ -51,13 +52,17 @@ export default function AdminModelsPage() {
   }, [form.provider, form.reasoningEfforts])
 
   const mutation = useMutation({
-    mutationFn: () => {
-      if (!editing) return Promise.resolve({ ok: true as const })
+    mutationFn: async () => {
+      if (!editing) return { ok: true as const }
       const limitedFree = Number(form.multiplier) === 0 && form.limitedFree
       const expires = Date.parse(form.freeUntil)
       if (limitedFree && (!Number.isFinite(expires) || expires <= Date.now())) throw new Error('请选择未来的截止时间')
-      return updateAdminModel(editing.id, { ...form, baseUrl: form.baseUrl || null, apiKey: form.apiKey || undefined, multiplier: Number(form.multiplier), contextWindowTokens: editing.modelKind === 'text' ? Number(form.contextWindowTokens) : undefined,
-        freePromotion: limitedFree ? { endsAt: new Date(expires).toISOString(), afterMultiplier: Number(form.afterMultiplier) } : null })
+      const { limitedFree: _limited, freeUntil: _until, afterMultiplier: _after, ...fields } = form
+      const payload = { ...fields, baseUrl: form.baseUrl || null, apiKey: form.apiKey || undefined, multiplier: Number(form.multiplier), contextWindowTokens: editing.modelKind === 'text' ? Number(form.contextWindowTokens) : undefined,
+        freePromotion: limitedFree ? { endsAt: new Date(expires).toISOString(), afterMultiplier: Number(form.afterMultiplier) } : null }
+      if (editing.id) await updateAdminModel(editing.id, payload)
+      else await createAdminModel({ ...payload, expectedOrder: catalog.map(model => model.id) })
+      return { ok: true as const }
     },
     onSuccess: async () => {
       setEditing(null)
@@ -65,6 +70,25 @@ export default function AdminModelsPage() {
       await queryClient.invalidateQueries({ queryKey: ['credits', 'summary'] })
     },
   })
+  const catalog = (query.data?.models ?? []).filter(model => isBuiltInModelTier(model.tier))
+  const reorder = useMutation({ mutationFn: ({ order, expected }: { order: string[]; expected: string[] }) => reorderAdminModels(order, expected),
+    onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ['admin', 'models'] }); await queryClient.invalidateQueries({ queryKey: ['credits', 'summary'] }) },
+    onError: async () => { await queryClient.invalidateQueries({ queryKey: ['admin', 'models'] }) } })
+  function moveModel(id: string, direction: number) {
+    const expected = catalog.map(model => model.id)
+    const order = [...expected]
+    const index = order.indexOf(id)
+    const target = index + direction
+    if (index < 0 || target < 0 || target >= order.length) return
+    ;[order[index], order[target]] = [order[target], order[index]]
+    reorder.mutate({ order, expected })
+  }
+  function addModel() {
+    mutation.reset()
+    setEditing({ id: '', tier: null, modelKind: 'text', sortOrder: 0, provider: 'openai', displayName: '', modelName: '', baseUrl: null, multiplier: 1,
+      enabled: true, selectable: true, isDefault: false, apiKeyConfigured: false, requestCount: 0, requestTokens: 0, responseTokens: 0,
+      reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false, contextWindowTokens: 128000, configurationReady: false, updatedAt: '' })
+  }
   const maxTrend = useMemo(() => Math.max(1, ...(query.data?.trend.map((item) => item.totalTokens) ?? [1])), [query.data?.trend])
   const trendPoints = useMemo(() => {
     const items = query.data?.trend ?? []
@@ -96,6 +120,8 @@ export default function AdminModelsPage() {
 
   return <div>
     <AdminPageHeader title="模型管理" description="配置内置模型、推理能力、视觉能力和 Credits 倍率；API Key 加密存储，只能替换，不能查看。" />
+    <div className="mb-4 flex justify-end"><Button disabled={mutation.isPending || reorder.isPending} onClick={addModel}><Plus className="h-4 w-4" />添加内置模型</Button></div>
+    {reorder.isError ? <p role="alert" className="mb-3 text-xs text-rose-600">{reorder.error instanceof Error ? reorder.error.message : '排序失败'}</p> : null}
     <AdminPanelState state={query.isLoading ? 'loading' : query.isError ? 'error' : 'ready'}>
       {query.data ? <div className="space-y-4">
         <AdminCard>
@@ -108,7 +134,7 @@ export default function AdminModelsPage() {
         </AdminCard>
 
         <div className="grid gap-3 lg:grid-cols-2">{query.data.models.map((model) => { const kind = kindPresentation(model); const KindIcon = kind.icon; return <AdminCard key={model.id}>
-          <div className="flex items-start justify-between gap-4"><div><div className="flex flex-wrap items-center gap-2"><h2 className="font-semibold">{model.displayName}</h2><span className="inline-flex items-center gap-1 rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]"><KindIcon className="h-3 w-3" />{kind.label}</span><span className="text-xs text-[var(--text-tertiary)]">{model.multiplier.toFixed(1)}x</span>{model.isDefault ? <span className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px]">默认</span> : null}<span className={`rounded-full px-2 py-0.5 text-[10px] ${model.configurationReady ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{model.configurationReady ? '配置完整' : '待配置'}</span></div><p className="mt-1 text-xs text-[var(--text-secondary)]">{model.provider} · {model.modelName}</p></div><Button size="sm" onClick={() => setEditing(model)}><Pencil className="h-3.5 w-3.5" />编辑</Button></div>
+          <div className="flex items-start justify-between gap-4"><div><div className="flex flex-wrap items-center gap-2"><h2 className="font-semibold">{model.displayName}</h2><span className="inline-flex items-center gap-1 rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]"><KindIcon className="h-3 w-3" />{kind.label}</span><span className="text-xs text-[var(--text-tertiary)]">{model.multiplier.toFixed(1)}x</span>{model.isDefault ? <span className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px]">默认</span> : null}<span className={`rounded-full px-2 py-0.5 text-[10px] ${model.configurationReady ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{model.configurationReady ? '配置完整' : '待配置'}</span></div><p className="mt-1 text-xs text-[var(--text-secondary)]">{model.provider} · {model.modelName}</p></div><div className="flex shrink-0 gap-1">{isBuiltInModelTier(model.tier) ? <><Button size="sm" className="min-h-11 min-w-11" aria-label={`上移 ${model.displayName}`} disabled={reorder.isPending || mutation.isPending || catalog[0]?.id === model.id} onClick={() => moveModel(model.id, -1)}><ArrowUp className="h-3.5 w-3.5" /></Button><Button size="sm" className="min-h-11 min-w-11" aria-label={`下移 ${model.displayName}`} disabled={reorder.isPending || mutation.isPending || catalog.at(-1)?.id === model.id} onClick={() => moveModel(model.id, 1)}><ArrowDown className="h-3.5 w-3.5" /></Button></> : null}<Button size="sm" disabled={mutation.isPending} onClick={() => { mutation.reset(); setEditing(model) }}><Pencil className="h-3.5 w-3.5" />编辑</Button></div></div>
           <div className="mt-4 grid grid-cols-3 gap-3 border-t border-[var(--border-subtle)] pt-4 text-xs"><div><p className="text-[var(--text-tertiary)]">请求</p><p className="mt-1 font-medium">{model.requestCount.toLocaleString('zh-CN')}</p></div><div><p className="text-[var(--text-tertiary)]">输入</p><p className="mt-1 font-medium">{formatTokens(model.requestTokens)}</p></div><div><p className="text-[var(--text-tertiary)]">输出</p><p className="mt-1 font-medium">{formatTokens(model.responseTokens)}</p></div></div>
           <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-[var(--text-secondary)]"><span>{model.enabled ? '服务已启用' : '服务已停用'}</span>{model.modelKind === 'text' ? <><span>{model.selectable ? '用户可选择' : '用户不可选'}</span><span className="inline-flex items-center gap-1"><BrainCircuit className="h-3.5 w-3.5" />{model.reasoningEfforts.join(' / ')}</span><span>{model.contextWindowTokens ? `${Math.round(model.contextWindowTokens / 1000)}K 上下文` : '默认上下文'}</span></> : <span>由 Agent 工具调用</span>}{model.visionEnabled ? <span className="inline-flex items-center gap-1"><Eye className="h-3.5 w-3.5" />图片输入</span> : null}<span className="ml-auto inline-flex items-center gap-1"><KeyRound className="h-3.5 w-3.5" />{model.apiKeyConfigured ? '密钥已配置' : model.tier === 'speed' ? '沿用环境密钥' : '未配置密钥'}</span></div>
         </AdminCard> })}</div>
@@ -125,7 +151,7 @@ export default function AdminModelsPage() {
     </AdminCard> : null}
 
     {editing ? <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/35 px-4 backdrop-blur-[2px]"><section className="max-h-[90dvh] w-full max-w-xl overflow-y-auto rounded-[18px] border border-[var(--border-strong)] bg-[var(--surface-default)] p-5 shadow-[0_24px_70px_rgba(15,23,42,0.2)]">
-      <div className="flex items-center justify-between"><div><h2 className="font-semibold">编辑 {editing.displayName}</h2><p className="mt-1 text-xs text-[var(--text-secondary)]">真实模型 ID 仅在管理端显示；未完成服务配置的高阶档位无法开放。</p></div><button type="button" onClick={() => setEditing(null)} className="inline-flex h-8 w-8 items-center justify-center rounded-full hover:bg-[var(--surface-muted)]"><X className="h-4 w-4" /></button></div>
+      <div className="flex items-center justify-between"><div><h2 className="font-semibold">{editing.id ? `编辑 ${editing.displayName}` : '添加内置模型'}</h2><p className="mt-1 text-xs text-[var(--text-secondary)]">真实模型 ID 仅在管理端显示；未完成服务配置的高阶档位无法开放。</p></div><button type="button" disabled={mutation.isPending} onClick={() => setEditing(null)} className="inline-flex h-8 w-8 items-center justify-center rounded-full hover:bg-[var(--surface-muted)]"><X className="h-4 w-4" /></button></div>
       <div className="mt-5 grid gap-4 sm:grid-cols-2"><label className="text-xs">显示名称<TextInput className="mt-1.5" name={`model-display-${editing.id}`} autoComplete="off" value={form.displayName} onChange={(e) => setForm((v) => ({ ...v, displayName: e.target.value }))} /></label><label className="text-xs">供应商<TextInput className="mt-1.5" name={`model-provider-${editing.id}`} autoComplete="off" value={form.provider} onChange={(e) => setForm((v) => ({ ...v, provider: e.target.value }))} /></label><label className="text-xs">模型 ID<TextInput className="mt-1.5" name={`model-id-${editing.id}`} autoComplete="off" value={form.modelName} onChange={(e) => setForm((v) => ({ ...v, modelName: e.target.value }))} /></label><label className="text-xs">Credits 倍率<TextInput className="mt-1.5" name={`model-multiplier-${editing.id}`} autoComplete="off" type="number" min="0" step="0.1" value={form.multiplier} onChange={(e) => setForm((v) => ({ ...v, multiplier: e.target.value }))} /></label>{editingTextModel ? <label className="text-xs sm:col-span-2">上下文窗口（Tokens）<TextInput className="mt-1.5" name={`model-context-window-${editing.id}`} autoComplete="off" type="number" min="16000" max="4000000" step="1000" value={form.contextWindowTokens} onChange={(e) => setForm((v) => ({ ...v, contextWindowTokens: e.target.value }))} /><span className="mt-1.5 block text-[11px] leading-5 text-[var(--text-secondary)]">按供应商文档填写；Agent 自动压缩与输出预留将采用此值。</span></label> : null}<label className="text-xs sm:col-span-2">Base URL<TextInput className="mt-1.5" name={`model-endpoint-${editing.id}`} autoComplete="off" inputMode="url" data-lpignore="true" data-1p-ignore="true" value={form.baseUrl} onChange={(e) => setForm((v) => ({ ...v, baseUrl: e.target.value }))} placeholder="https://api.example.com/v1" /></label><label className="text-xs sm:col-span-2">替换 API Key<TextInput className="mt-1.5" name={`model-secret-${editing.id}`} type="password" autoComplete="new-password" data-lpignore="true" data-1p-ignore="true" value={form.apiKey} onChange={(e) => setForm((v) => ({ ...v, apiKey: e.target.value }))} placeholder={editing.apiKeyConfigured ? '已配置；留空保持不变，输入新值即替换' : '必须填写后才能开放该档位'} /></label></div>
       {editingTextModel ? <div className="mt-5 border-y border-[var(--border-subtle)] py-4"><div className="flex items-center gap-2 text-sm font-medium"><BrainCircuit className="h-4 w-4" />推理强度</div><div className="mt-3 flex flex-wrap gap-2">{availableReasoningOptions.map((effort) => <label key={effort} className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] px-2.5 py-1.5 text-xs"><input type="checkbox" checked={form.reasoningEfforts.includes(effort)} onChange={(event) => toggleReasoningEffort(effort, event.target.checked)} />{effort}</label>)}</div><label className="mt-4 block text-xs">默认强度<select value={form.defaultReasoningEffort} onChange={(event) => setForm((value) => ({ ...value, defaultReasoningEffort: event.target.value as ModelReasoningEffort }))} className="mt-1.5 h-10 w-full rounded-full border border-[var(--border-strong)] bg-[var(--surface-default)] px-4 text-sm">{form.reasoningEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label><label className="mt-4 flex items-center gap-2 text-sm"><input type="checkbox" checked={form.visionEnabled} onChange={(event) => setForm((value) => ({ ...value, visionEnabled: event.target.checked }))} /><Eye className="h-4 w-4" />支持 OpenAI 兼容图片输入</label></div> : null}
       <div className="mt-5 flex flex-wrap gap-4 text-sm"><label className="flex items-center gap-2"><input type="checkbox" checked={form.enabled} onChange={(e) => setForm((v) => ({ ...v, enabled: e.target.checked }))} />启用服务</label>{editingTextModel ? <><label className="flex items-center gap-2"><input type="checkbox" checked={form.selectable} onChange={(e) => setForm((v) => ({ ...v, selectable: e.target.checked }))} />允许用户选择</label><label className="flex items-center gap-2"><input type="checkbox" checked={form.isDefault} onChange={(e) => setForm((v) => ({ ...v, isDefault: e.target.checked }))} />设为默认</label></> : null}</div>
@@ -138,7 +164,7 @@ export default function AdminModelsPage() {
         </div> : null}
       </div> : null}
       {mutation.isError ? <p className="mt-3 text-xs text-rose-600">{mutation.error instanceof Error ? mutation.error.message : '保存失败'}</p> : null}
-      <div className="mt-5 flex justify-end gap-2"><Button variant="ghost" onClick={() => setEditing(null)}>取消</Button><Button variant="primary" disabled={mutation.isPending} onClick={() => mutation.mutate()}>保存配置</Button></div>
+      <div className="mt-5 flex justify-end gap-2"><Button variant="ghost" disabled={mutation.isPending} onClick={() => setEditing(null)}>取消</Button><Button variant="primary" disabled={mutation.isPending} onClick={() => mutation.mutate()}>保存配置</Button></div>
     </section></div> : null}
   </div>
 }

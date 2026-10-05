@@ -9,6 +9,8 @@ import { runtimeJson } from './runtime-common.js'
 import { hasAuthorEnded } from './completion-guard.js'
 import { z } from 'zod'
 import { readExecutionFrame } from './runtime-state.js'
+import { readGoalExecutionControl } from './goal-execution-control.js'
+import { executionLimitReached } from './execution-control.js'
 
 async function hasDurableCompletionReceipt(tx: GoalTx, rootId: string, runId: string) {
   const event = await tx.agentExecutionOutbox.findFirst({ where: { taskRootId: rootId, runId, type: 'execution.completion.decided' }, orderBy: { sequence: 'desc' } })
@@ -162,7 +164,7 @@ export async function reconcileGoalActivation(tx: GoalTx, goal: AgentGoal, now: 
     }
   }
   const budget = await tx.agentGoalBudget.findUniqueOrThrow({ where: { goalId: goal.id } })
-  const limited = budget.tokensUsed >= budget.tokenLimit || budget.activeTimeMs >= budget.activeTimeLimitMs
+  const limited = Boolean(executionLimitReached(await readGoalExecutionControl(tx, goal.id), { tokens: budget.tokensUsed, activeTimeMs: budget.activeTimeMs }))
   if (resume && !limited && ['paused', 'failed'].includes(latest.status)) {
     // The consumed human grant is durable. Dispatch retries reuse the same
     // goal epoch and source cursor; they cannot invent a second attempt.

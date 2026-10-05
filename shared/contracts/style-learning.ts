@@ -1,3 +1,4 @@
+import { selectableModelTierSchema } from './model-tier.js'
 import { z } from 'zod'
 
 export const STYLE_DIMENSIONS = ['叙述视角', '语言与句式', '对白', '场景与格式', '节奏与冲突', '悬念与转折', '人物塑造'] as const
@@ -8,7 +9,7 @@ export const styleRuleSchema = z.object({
 })
 export const styleAnalysisSchema = z.object({ rules: z.array(styleRuleSchema).max(14) })
 export const styleModelSelectionSchema = z.object({
-  modelTier: z.enum(['lite', 'speed', 'standard', 'performance', 'ultimate', 'custom']),
+  modelTier: selectableModelTierSchema,
   customModelId: z.string().min(1).max(64).nullable().default(null),
   reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
 }).refine(value => value.modelTier !== 'custom' || Boolean(value.customModelId), '请选择自定义模型')

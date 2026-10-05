@@ -5,6 +5,8 @@ import { currentGoalExecution } from './goal-context.js'
 import { assertGoalFence } from './goal-fence.js'
 import { changeGoal, goalError } from './goal-store.js'
 import { databaseNow } from './runtime-common.js'
+import { readGoalExecutionControl } from './goal-execution-control.js'
+import { executionLimitReached } from './execution-control.js'
 
 const bindingSchema = z.object({ goalId: z.string(), runId: z.string() }).strict()
 export const isGoalFixedCharge = (sourceType: string) => sourceType === 'image_generation' || sourceType === 'web_search'
@@ -20,7 +22,7 @@ export async function admitGoalFixedCharge(tx: Prisma.TransactionClient, userId:
   const budget = await tx.agentGoalBudget.findUniqueOrThrow({ where: { goalId: context.goalId } })
   const now = await databaseNow(tx)
   const elapsed = goal.activeSince ? BigInt(Math.max(0, now.getTime() - goal.activeSince.getTime())) : 0n
-  if (budget.tokensUsed >= budget.tokenLimit || budget.activeTimeMs + elapsed >= budget.activeTimeLimitMs) {
+  if (executionLimitReached(await readGoalExecutionControl(tx, goal.id), { tokens: budget.tokensUsed, activeTimeMs: budget.activeTimeMs + elapsed })) {
     return goalError('GOAL_BUDGET_EXHAUSTED', '目标已达到执行预算，未发起新的收费操作。')
   }
   return { goalId: context.goalId, runId: context.runId }

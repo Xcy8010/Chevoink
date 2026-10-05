@@ -1,3 +1,4 @@
+import { persistedContentHash } from '../semantic-progress.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { auxiliaryTextModel } from '../auxiliary-text-model.js'
@@ -10,17 +11,12 @@ import {
   storyCharterInputSchema,
   storyStateSchema,
 } from '../../../../shared/contracts/index.js'
-import { generateTextCompletion } from '../../ai-service.js'
 import { generateReviewCompletion, REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { activeChapterScope } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
-import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
-import { getLatestQualityReport, qualityCompilationScope, resolveQualityChapterTarget } from '../humanity-quality.js'
-import { recordChapterBaseline } from '../baseline.js'
-import { qualityAutoRepairPending, qualityReportMatchesContent } from '../quality-report-contract.js'
+import { qualityCompilationScope, resolveQualityChapterTarget } from '../humanity-quality.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches } from '../compiler-continuity-contract.js'
-import { enqueueChapterMemoryExtraction, processMemoryExtractionJob } from '../story-memory.js'
 import {
   commitChapterBridge,
   getStoryCharterBundle,
@@ -32,14 +28,10 @@ import {
   upsertStoryCharter,
   updateReaderPromise,
   validateStoryContinuity,
-  reserveContinuityRepair,
   reserveContinuityCheck,
-  continuityRepairRounds,
-  MAX_CONTINUITY_AUTO_REPAIRS,
   MAX_CONTINUITY_CHECKS,
 } from '../story-compiler.js'
 import { defineTool, type ToolContext } from './types.js'
-import { recalcNovelStats } from './novel-tools.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
 import { storyCharterHash } from './durable-metadata.js'
 
@@ -102,70 +94,6 @@ export function parseContinuityPatches(content: string, before: string) {
       || ranges.some((other, j) => i !== j && ranges[i].start < other.end && ranges[i].end > other.start))) return null
     return patches.filter(patch => patch.oldText !== patch.newText)
   } catch { return null }
-}
-
-async function applyRigorousContinuityRepairs(
-  ctx: ToolContext,
-  chapter: { id: string; title: string; revision: number; content: string; orderIndex: number },
-  findings: Array<{ signal: string; severity: string; evidence: string; suggestion: string }>,
-  compilationId: string,
-  proposedPatches?: z.infer<typeof continuityRepairEnvelopeSchema>['patches'] | null,
-) {
-  findings = findings.filter(item => item.severity === 'error' || item.severity === 'warning')
-  if (!findings.length) return null
-  ctx.signal.throwIfAborted()
-  if (!await reserveContinuityRepair(ctx.userId, ctx.novelId, compilationId)) return null
-  let parsed: z.infer<typeof continuityRepairEnvelopeSchema> | null = proposedPatches?.length ? { patches: proposedPatches } : null
-  for (let attempt = 0; attempt < 2 && !parsed; attempt += 1) {
-    let response = ''
-    try {
-      response = await generateTextCompletion(
-        '你是中文网文连续性修订编辑。逐项处理清单内有证据的连续性错误与警告，不因严重程度为warning而跳过；仅做安全的事实纠正或必要衔接澄清，不处理纯审美润色。保留作者原有词汇、句式、节奏、叙述视角和人物声口；禁止同义替换、扩写、润色或重写相邻段落。集中输出最小必要补丁，不改变章节目标和已成立事实。oldText 必须从正文逐字复制、连续且唯一；找不到可安全定位的项不要编造。严格只输出 JSON：{"patches":[{"oldText":"正文逐字片段","newText":"替换文本"}]}。',
-        `章节：《${chapter.title}》@r${chapter.revision}\n问题：\n${findings.map((item, index) => `${index + 1}. [${item.severity}/${item.signal}] ${item.evidence}；建议：${item.suggestion}`).join('\n')}\n\n正文：\n${chapter.content}`,
-        { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: ctx.signal, userId: ctx.userId, novelId: ctx.novelId, chapterId: chapter.id, action: attempt === 0 ? 'agent3RigorousContinuityRepair' : 'agent3RigorousContinuityRepairRetry', targetType: 'chapter', targetId: chapter.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
-      )
-    } catch (error) {
-      ctx.signal.throwIfAborted()
-      if (error instanceof DataAccessError) throw error
-      // 修订器不可用时保留检查结果与原正文，不让可选自动修订拖垮整个 CHECK。
-      continue
-    }
-    const start = response.indexOf('{')
-    const end = response.lastIndexOf('}')
-    if (start < 0 || end <= start) continue
-    try { parsed = continuityRepairEnvelopeSchema.parse(JSON.parse(response.slice(start, end + 1))) } catch { /* 只重试一次格式错误 */ }
-  }
-  if (!parsed) return null
-  let after = chapter.content
-  let applied = 0
-  // Resolve against the original text, then apply backwards to avoid cascading anchors.
-  const safePatches = parseContinuityPatches(JSON.stringify(parsed), chapter.content)
-  if (!safePatches) return null
-  for (const patch of safePatches.sort((a, b) => chapter.content.indexOf(b.oldText) - chapter.content.indexOf(a.oldText))) {
-    const first = chapter.content.indexOf(patch.oldText)
-    after = `${after.slice(0, first)}${patch.newText}${after.slice(first + patch.oldText.length)}`
-    applied += 1
-  }
-  if (applied === 0 || after === chapter.content) return null
-  ctx.signal.throwIfAborted()
-  const { updated, memoryJobId } = await prisma.$transaction(async tx => {
-    await assertAgentManuscriptCurrent(tx, ctx)
-    await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilationId} AND user_id = ${ctx.userId} AND novel_id = ${ctx.novelId} FOR UPDATE`
-    const changed = await tx.chapter.updateMany({ where: { id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision, content: chapter.content },
-      data: { content: after, wordCount: after.length, revision: { increment: 1 } } })
-    if (changed.count !== 1) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '修订期间正文已变化，未覆盖新内容。请读取当前正文后重新检查。')
-    const compilation = await tx.storyCompilation.updateMany({ where: { id: compilationId, userId: ctx.userId, novelId: ctx.novelId, status: 'active' }, data: { stage: 'repair' } })
-    if (compilation.count !== 1) throw new DataAccessError(409, 'COMPILATION_STAGE_CONFLICT', '章节编译状态已变化，本次修订已回滚。')
-    const updated = await tx.chapter.findUniqueOrThrow({ where: { id: chapter.id }, select: { id: true, title: true, revision: true, orderIndex: true } })
-    await recalcNovelStats(ctx.novelId, tx)
-    const memoryJobId = isAgent2FeatureEnabled('memory2', ctx.userId)
-      ? await enqueueChapterMemoryExtraction({ novelId: ctx.novelId, chapterId: updated.id, chapterRevision: updated.revision, before: chapter.content, after }, tx) : null
-    ctx.signal.throwIfAborted()
-    return { updated, memoryJobId }
-  })
-  recordChapterBaseline(ctx.runId, updated.id, updated.revision)
-  if (memoryJobId) queueMicrotask(() => void processMemoryExtractionJob(memoryJobId).catch(() => {}))
-  return { updated, before: chapter.content, after, applied }
 }
 
 export const storyCharterGetTool = defineTool({
@@ -596,7 +524,7 @@ export const continuityValidateTool = defineTool({
   name: 'continuity_validate',
   title: '检查章节连续性',
   description:
-    '检查章节连续性。独立审阅既有章：先读取目标章节，再传真实 chapterId，无需 story_compiler_prepare、scene_task_build 或提交章节桥；只保存检查报告，不改正文。原始写作任务已有本任务编译时，chapterId 会绑定该编译 CHECK；明确传 compilationId 最可靠。写作流水线 CHECK 保留场景与版本校验、一次有界事实修订及质量后只读复核。chapterId 与 compilationId 是不同对象，禁止混用；不得由主写 Agent 自报 findings。',
+    '检查章节连续性。独立审阅既有章：先读取目标章节，再传真实 chapterId，无需 story_compiler_prepare、scene_task_build 或提交章节桥；只保存检查报告，不改正文。原始写作任务已有本任务编译时，chapterId 会绑定该编译 CHECK；明确传 compilationId 最可靠。写作检查保留场景与版本校验，只保存发现，不自动修订正文。检查可选，缺少检查不等于已通过。chapterId 与 compilationId 是不同对象，禁止混用；不得由主写 Agent 自报 findings。',
   parameters: z.object({
     chapterId: z.string().min(1).optional().describe('既有章节的真实编号，从 chapter_read 或作品目录取得；不能填编译编号'),
     compilationId: z.string().min(1).optional().describe('仅检查当前写作流水线时传；独立审阅既有章节省略'),
@@ -613,8 +541,8 @@ export const continuityValidateTool = defineTool({
       focus: firstDefined(record, ['focus', 'scope', 'attention']),
     }
   },
-  permission: BUILD_WRITE,
-  readOnly: false,
+  permission: ALL_READ,
+  readOnly: true,
   async execute(ctx, args) {
     const compilation = await prisma.storyCompilation.findFirst({
       where: {
@@ -650,11 +578,6 @@ export const continuityValidateTool = defineTool({
       chapter: value.chapter, bridge: value.bridge, sceneTasks: value.sceneTasks,
     })
     const frozenReviewInput = reviewInput(compilation)
-    const quality = await getLatestQualityReport(ctx.userId, ctx.novelId, chapter.id, prisma, compilation.id)
-    // After quality has repaired this revision, continuity must verify without
-    // rewriting it again and invalidating quality in an endless ping-pong.
-    const verificationOnly = quality?.compilationId === compilation.id && quality.repairRound > 0
-      && qualityReportMatchesContent(quality, chapter.revision, chapter.content)
     const bridge = compilation.bridge
     const sourceChapter = bridge.fromChapterId ? await prisma.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { id: true, revision: true, content: true } }) : null
     const coverage = compilerContinuityCoverage({ chapter, bridge, sceneTasks: compilation.sceneTasks, source: sourceChapter, focus: args.focus })
@@ -670,22 +593,11 @@ export const continuityValidateTool = defineTool({
       const findings = cachedValidation.findings ?? []
       const errorCount = cachedValidation.errorCount ?? findings.filter((item) => item.severity === 'error').length
       const warningCount = cachedValidation.warningCount ?? findings.filter((item) => item.severity === 'warning').length
-      if (!verificationOnly && ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && findings.length > 0 && !ctx.protectedChapterIds?.has(chapter.id)) {
-        const repaired = await applyRigorousContinuityRepairs(ctx, chapter, findings, compilation.id)
-        if (repaired) {
-          return {
-            output: `严谨创作模式复用连续性报告并落实修订：已原子应用 ${repaired.applied} 处可逐字定位的修改。正文已进入 r${repaired.updated.revision}，请只重新调用一次 continuity_validate，传 compilationId=${compilation.id}，只读复核新 revision；不要为消除警告继续改写。`,
-            summary: `连续性检查 · 自动修订 ${repaired.applied} 处`,
-            display: { kind: 'chapterDiff', chapterId: repaired.updated.id, chapterTitle: repaired.updated.title, before: repaired.before, after: repaired.after, appliedDirectly: true, revision: repaired.updated.revision },
-            snapshot: { target: 'chapter', targetId: repaired.updated.id, field: 'content', previousValue: repaired.before },
-          }
-        }
-      }
       ctx.signal.throwIfAborted()
       await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, findings,
         expectedChapterRevision: chapter.revision, independentCheck: 'complete', coverage, focus: args.focus, signal: ctx.signal })
       return {
-        output: `当前 r${chapter.revision} 已完成连续性检查，直接复用结果：${errorCount} 个错误、${warningCount} 个警告；${errorCount ? (verificationOnly ? '最终复核仍有错误，不能提交；保留证据并报告阻塞，不再自动循环修订。' : '仍有错误，不能提交，修订后重新检查。') : '连续性检查通过；警告是否应用以修订回执为准，未应用项保留待审。当前版本质量检查也完成后才可提交。'}`,
+        output: `当前 r${chapter.revision} 已完成连续性检查，直接复用结果：${errorCount} 个错误、${warningCount} 个警告；${errorCount ? '当前正文仍有已核验事实错误，保留证据并交作者决定或按明确授权修订。' : '连续性检查已完成；警告保留待审，不自动改正文。'}`,
         summary: `复用连续性检查 · ${errorCount} 错误 ${warningCount} 警告`,
         display: { kind: 'storyCompiler', compilationId: compilation.id, phase: errorCount > 0 ? 'repair' : 'check', title: '连续性检查', detail: `${errorCount} 错误 · ${warningCount} 警告 · 已复用`, items: findings.map((item) => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`), errorCount, warningCount },
       }
@@ -703,8 +615,7 @@ export const continuityValidateTool = defineTool({
         display: { kind: 'storyCompiler', compilationId: compilation.id, phase: 'repair', title: '连续性检查', detail: `已停止自动复查 · 已尝试 ${MAX_CONTINUITY_CHECKS} 次`, items: latest.map((item) => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`), errorCount: latestErrors, warningCount: latestWarnings },
       }
     }
-    const allowRepair = !verificationOnly && ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(chapter.id)
-      && continuityRepairRounds(compilation.validation) < MAX_CONTINUITY_AUTO_REPAIRS
+    const allowRepair = false
     const criticInput = [
         `章节：${chapter.title}`,
         `前章未完成动作：${bridge.lastUnfinishedAction || '无'}`,
@@ -749,26 +660,14 @@ export const continuityValidateTool = defineTool({
       runId: ctx.runId, expectedChapterRevision: chapter.revision, independentCheck: criticFallback ? 'unavailable' : 'complete', coverage, focus: args.focus, signal: ctx.signal })
     if (criticFallback) return {
       outcome: 'failed' as const,
-      output: `独立连续性复核未完成，本次不能判定通过。确定性检查发现 ${result.errorCount} 个错误、${result.warningCount} 个警告，但不能替代独立复核；保留当前正文，恢复复核后再提交章节桥。`,
+      output: `独立连续性复核未完成，本次不能判定通过。确定性检查发现 ${result.errorCount} 个错误、${result.warningCount} 个警告，但不能替代独立复核；保留当前正文，报告保留为未完成，不作为通过凭证。`,
       summary: '独立连续性复核未完成',
     }
     const phase = result.errorCount > 0 ? 'repair' : 'check'
-    if (!verificationOnly && ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && result.findings.length > 0 && !ctx.protectedChapterIds?.has(chapter.id)) {
-      const repaired = await applyRigorousContinuityRepairs(ctx, chapter, independentFindings, compilation.id,
-        allowRepair ? parseContinuityPatches(criticResponses[0], chapter.content) : null)
-      if (repaired) {
-        return {
-          output: `已针对本轮 ${result.errorCount} 个错误与 ${result.warningCount} 个警告集中应用 ${repaired.applied} 处最小修订；无法安全应用的项保留待审，不代表全部消除，不改写作者文风。正文进入 r${repaired.updated.revision}，下一次 continuity_validate 传 compilationId=${compilation.id}，仅只读复核，不再自动改写；不要为消除警告继续手动修订。`,
-          summary: `连续性检查 · 自动修订 ${repaired.applied} 处`,
-          display: { kind: 'chapterDiff', chapterId: repaired.updated.id, chapterTitle: repaired.updated.title, before: repaired.before, after: repaired.after, appliedDirectly: true, revision: repaired.updated.revision },
-          snapshot: { target: 'chapter', targetId: repaired.updated.id, field: 'content', previousValue: repaired.before },
-        }
-      }
-    }
     return {
-      output: (allowRepair && independentFindings.length ? '已尝试集中处理有证据的错误与警告，本次未获得可安全应用的实际改动；未应用项保留待审，不宣称已修复。\n' : '') + (continuityRepairRounds(compilation.validation) >= MAX_CONTINUITY_AUTO_REPAIRS ? '自动修订已完成一次，本次仅复核，不再自动改写。不要重复调用检查来追求零警告；有错误时保留正文并明确报告未解决证据，禁止带错提交。\n' : '') + (result.errorCount > 0
-        ? `CHECK 发现 ${result.errorCount} 个错误、${result.warningCount} 个警告。${verificationOnly ? '质量修订后的最终复核仍有错误，保留证据并报告阻塞，不再循环自动改写或带错提交。' : '只修有证据的失败项，完成后必须重新调用 continuity_validate；禁止带错提交桥。'}\n${result.findings.map((item, index) => `${index + 1}. [${item.severity}/${item.signal}] ${item.evidence}；最小修法：${item.suggestion}`).join('\n')}`
-        : `CHECK 通过：0 个错误、${result.warningCount} 个警告。这仅证明当前正文连续性通过，不代表质量检查已完成。若当前 revision 尚无有效质量报告，下一步调用 quality_analyze；若质量修订改变正文，须再只读复核 continuity_validate。两项均绑定当前 revision 后才调用 chapter_bridge_commit，禁止为追求零警告重复修订。${result.warningCount ? `\n${result.findings.map((item, index) => `${index + 1}. [警告/${item.signal}] ${item.evidence}`).join('\n')}` : ''}`),
+      output: (result.errorCount > 0
+        ? `CHECK 发现 ${result.errorCount} 个错误、${result.warningCount} 个警告。${'只报告已核验事实错误，保留当前正文并交作者决定或按原请求明确授权修订。'}\n${result.findings.map((item, index) => `${index + 1}. [${item.severity}/${item.signal}] ${item.evidence}；最小修法：${item.suggestion}`).join('\n')}`
+        : `当前正文连续性检查完成：0 个错误、${result.warningCount} 个警告。正文未改动，警告保留待审；质量检查可选，禁止为追求零警告重复修订。${result.warningCount ? `\n${result.findings.map((item, index) => `${index + 1}. [警告/${item.signal}] ${item.evidence}`).join('\n')}` : ''}`),
       summary: `连续性检查${criticFallback ? '（确定性兜底）' : ''} · ${result.errorCount} 错误 ${result.warningCount} 警告`,
       display: {
         kind: 'storyCompiler', compilationId: compilation.id, phase, title: '连续性检查',
@@ -784,7 +683,7 @@ export const chapterBridgeCommitTool = defineTool({
   name: 'chapter_bridge_commit',
   title: '提交章节终态',
   description:
-    'Story Compiler 的 COMMIT 步骤。仅在当前 revision 连续性检查与单次质量检查完成后调用。所有参数都可省略：服务端会从当前 run/chapter 的活跃编译、最后一个 Scene Task 和章节状态安全补全，模型不得为补参数重复读取正文。重复调用会幂等返回。',
+    'Story Compiler 的 COMMIT 步骤。用于提交当前已保存正文的终态；连续性与质量检查是可选的，不把缺少或旧检查视为通过。所有参数都可省略：服务端会从当前 run/chapter 的活跃编译、最后一个 Scene Task 和章节状态安全补全，模型不得为补参数重复读取正文。重复调用会幂等返回。',
   parameters: z.object({
     compilationId: z.string().min(1).optional(),
     chapterSummary: z.string().min(1).max(2000).optional(),
@@ -831,37 +730,6 @@ export const chapterBridgeCommitTool = defineTool({
       chapterId: compilation.chapterId, createdAt: { gt: compilation.createdAt } }, select: { id: true } })) {
       return { outcome: 'failed' as const, output: '该章节已有本任务后续准备的编译身份，旧编译不能覆盖它。请读取当前任务章节桥，保留已保存的正文、场景与检查记录。', summary: '章节编译已被后续准备替代' }
     }
-    if (compilation.status === 'completed') {
-      if (compilation.bridge.targetRevision !== compilation.chapter.revision) return { outcome: 'failed' as const,
-        output: '已提交的章节桥对应旧正文版本，当前正文已变化；请为当前任务重新准备并检查，不能把旧提交当作当前版本完成。', summary: '章节桥版本已过期' }
-      return { output: `章节 ${compilation.chapter.id}@r${compilation.chapter.revision} 的终态已经提交，无需重复执行。`, summary: '章节终态已提交', display: { kind: 'storyCompiler', compilationId: compilation.id, phase: 'commit', title: '章节终态已提交', detail: `r${compilation.chapter.revision}`, items: [] } }
-    }
-    const requireQuality = !!ctx.durableCompiler || isAgent2FeatureEnabled('humanityQuality', ctx.userId)
-    let qualityReportId: string | undefined
-    if (requireQuality) {
-      if (compilation.chapterId) {
-        const report = await getLatestQualityReport(ctx.userId, ctx.novelId, compilation.chapterId, db, compilation.id)
-        if (!report || report.chapterRevision !== compilation.chapter.revision || ['analyzing', 'stale', 'failed'].includes(report.status)) {
-          return { outcome: 'failed' as const, output: '当前章节最新 revision 尚未完成单次人类感质量检查。只调用一次 quality_analyze；该工具会自动完成有证据的局部修订，禁止手动选择或反复检查。', summary: '等待单次质量检查' }
-        }
-        qualityReportId = report.id
-        if (ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(compilation.chapterId) && qualityAutoRepairPending(report)) {
-          return { outcome: 'failed' as const, output: '严谨创作的质量警告与建议尚未执行集中修订。请调用 quality_analyze 复用报告并完成一次安全修订，不能把检查通过等同于建议已处理。', summary: '等待质量建议处理' }
-        }
-        if (report.findings.some((finding) => finding.severity === 'error' && finding.disposition !== 'repaired')) {
-          return { outcome: 'failed' as const, output: '质量报告仍有明确错误未修复，禁止提交章节桥。请先处理 error finding 并重新检查。', summary: '质量错误阻止提交' }
-        }
-        const validation = compilation.validation as { checkedRevision?: number; errorCount?: number; findings?: unknown[]; [key: string]: unknown } | null
-        if (ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(compilation.chapterId) && report.repairRound === 0
-          && validation?.findings?.length && continuityRepairRounds(validation) === 0) {
-          return { outcome: 'failed' as const, output: '严谨创作的连续性错误与警告尚未执行集中修订。请调用 continuity_validate 完成一次安全修订并复核；无法安全应用的项保留待审。', summary: '等待连续性警告处理' }
-        }
-        // A quality repair changes the text; it cannot certify continuity of the new revision.
-        if (validation?.checkedRevision !== compilation.chapter.revision) {
-          return { outcome: 'failed' as const, output: `质量修订后正文版本已变化，请调用 continuity_validate，传 compilationId=${compilation.id}（chapterId=${compilation.chapterId}），只读复核当前 r${compilation.chapter.revision}；独立章节报告不能替代本编译 CHECK。不能沿用旧版连续性报告，不要为消除警告反复改写正文。`, summary: '修订后需要重新复核连续性' }
-        }
-      }
-    }
     const firstTask = compilation.sceneTasks[0]
     const lastTask = compilation.sceneTasks.at(-1)
     // 终态状态逐层容错补全：模型传参/历史落库形状异常时降级到编译态推导，再降级到空状态，绝不让 COMMIT 因参数形状执行失败
@@ -884,10 +752,11 @@ export const chapterBridgeCommitTool = defineTool({
       endingStructure: args.endingStructure?.trim() || `以${lastTask?.turn || lastExit.action || '当前状态变化'}收束`,
     }
     try {
-      const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...terminal, requireQuality, qualityReportId }, ctx.transaction)
+      const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...terminal, expectedChapterRevision: compilation.chapter.revision, expectedContentHash: createHash('sha256').update(compilation.chapter.content).digest('hex') }, ctx.transaction)
       return {
-        output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge 与 Scene Task 终态已提交。故事记忆仅提交候选，作者确认前不参与事实召回。${result.skippedMemoryCount ? `其中 ${result.skippedMemoryCount} 项记忆因作者已删除而跳过，未重建；不影响章节终态提交。` : ''}下一章可承接本次章节桥终态。`,
-        summary: '提交章节桥与故事终态',
+        output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge 与 Scene Task 终态已提交。故事记忆仅提交候选，作者确认前不参与事实召回。${result.skippedMemoryCount ? `其中 ${result.skippedMemoryCount} 项记忆因作者已删除而跳过，未重建；不影响章节终态提交。` : ''}本任务仅在原请求范围内交付。`,
+        requiredResult: { targetId: result.chapterId, contentHash: persistedContentHash(compilation.chapter.content) },
+        summary: '提交章节桥与当前故事终态',
         display: {
           kind: 'storyCompiler', compilationId: result.compilationId, phase: 'commit', title: '章节终态已提交',
           detail: `r${result.chapterRevision}`, items: [terminal.chapterSummary, terminal.lastUnfinishedAction ? `未完成动作：${terminal.lastUnfinishedAction}` : '未留未完成动作', `结尾结构：${terminal.endingStructure}`],
@@ -901,7 +770,7 @@ export const chapterBridgeCommitTool = defineTool({
       ) {
         return {
           outcome: 'failed' as const,
-          output: `${error.message}本次未提交：${error.code === 'QUALITY_CHECK_REQUIRED' ? '请对当前正文执行 quality_analyze；若修订改变正文，还需重新复核连续性。' : error.code === 'COMPILATION_NOT_FOUND' ? '请读取当前任务章节桥并核对编译身份。' : '请先对当前 revision 调用 continuity_validate（有错误先修错再重检）。'}满足前置后再调用 chapter_bridge_commit。`,
+          output: `${error.message}本次未提交：${error.code === 'COMPILATION_NOT_FOUND' ? '请核对当前任务编译身份。' : '保留已核验的当前事实错误，按原请求明确修复授权处理或交作者决定。'}`,
           summary: '提交前置未满足 · 按引导继续',
         }
       }

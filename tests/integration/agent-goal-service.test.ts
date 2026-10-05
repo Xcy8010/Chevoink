@@ -143,8 +143,9 @@ describe.skipIf(!dbAvailable)('agent goal service (isolated test DB)', () => {
     const resumed = await actOnAgentGoal(fixture.userId, fixture.sessionId, created.id, request)
     expect(resumed).toMatchObject({ status: 'active', phase: 'queued', tokensUsed: created.tokenLimit,
       activeTimeMs: created.activeTimeLimitMs, creditsUsedMicros: '5000' })
-    expect(BigInt(resumed.tokenLimit)).toBe(BigInt(created.tokenLimit) * 2n)
-    expect(BigInt(resumed.activeTimeLimitMs)).toBe(BigInt(created.activeTimeLimitMs) * 2n)
+    expect(resumed.tokenLimit).toBe(created.tokenLimit)
+    expect(resumed.activeTimeLimitMs).toBe(created.activeTimeLimitMs)
+    expect(resumed.executionControl?.limits).toEqual({ tokens: null, turns: null, activeTimeMs: null })
     expect(await actOnAgentGoal(fixture.userId, fixture.sessionId, created.id, request)).toEqual(resumed)
     const stored = await prisma.agentGoal.findUniqueOrThrow({ where: { id: created.id } })
     expect(stored.executionOptions).toMatchObject(request.model)
@@ -155,7 +156,7 @@ describe.skipIf(!dbAvailable)('agent goal service (isolated test DB)', () => {
     const fixture = await createFixture()
     const created = await createAgentGoal(fixture.userId, { sessionId: fixture.sessionId }, {
       ...createInput(), limits: { tokenLimit: 1000, activeTimeLimitMs: 60_000 },
-    })
+    }, { authenticatedHttp: true })
     await prisma.agentGoalBudget.update({ where: { goalId: created.id }, data: {
       tokensUsed: 123n, tokensReserved: 7n, creditsUsedMicros: 5000n, activeTimeMs: 2000n,
     } })
@@ -165,7 +166,7 @@ describe.skipIf(!dbAvailable)('agent goal service (isolated test DB)', () => {
     const resumed = await actOnAgentGoal(fixture.userId, fixture.sessionId, created.id, {
       requestId: randomUUID(), expectedStateVersion: paused.stateVersion, action: 'resume',
       budgetChange: { tokenLimit: 2000, activeTimeLimitMs: 120_000 },
-    })
+    }, { authenticatedHttp: true })
 
     expect(resumed).toMatchObject({ status: 'active', phase: 'queued', tokensUsed: '123', tokensReserved: '7', creditsUsedMicros: '5000', activeTimeMs: '2000', tokenLimit: '2000', activeTimeLimitMs: '120000' })
   })

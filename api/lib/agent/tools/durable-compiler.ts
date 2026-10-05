@@ -10,7 +10,8 @@ import type { AgentTool, ToolContext, ToolResult } from './types.js'
 
 const actions = new Set(['story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'chapter_bridge_commit'])
 const failures = new Set(['TOOL_COMPILER_REQUIRED', 'TOOL_COMPILER_STALE', 'COMPILATION_NOT_FOUND', 'COMPILATION_STAGE_CONFLICT',
-  'SCENE_TASK_COUNT_INVALID', 'NOVEL_NOT_FOUND', 'CHAPTER_NOT_FOUND', 'TARGET_CHAPTER_GAP'])
+  'SCENE_TASK_COUNT_INVALID', 'NOVEL_NOT_FOUND', 'CHAPTER_NOT_FOUND', 'TARGET_CHAPTER_GAP', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT',
+  'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'CONTINUITY_INPUT_STALE', 'CONTINUITY_ERRORS_REMAIN', 'QUALITY_CHECK_REQUIRED'])
 
 /** These tools are DB-only. Model critics/repairs must use separately
  * receipted provider operations, never this retryable transaction adapter. */

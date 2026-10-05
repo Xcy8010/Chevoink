@@ -1,4 +1,6 @@
-import { randomUUID } from 'node:crypto'
+import { encryptSecret } from '../../api/lib/secret-box.js'
+import type { DynamicBuiltInModelTier } from '../../shared/contracts/model-tier.js'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import request from 'supertest'
 import app from '../../api/app.js'
@@ -44,11 +46,13 @@ describe.runIf(available)('versioned V2 rate-card lifecycle', () => {
   it('requires review, atomically replaces one active version, preserves old price, and rejects mutation', async () => {
     const admin = await prisma.user.create({ data: { nickname: 'rate-card-fixture', passwordHash: 'test-only', role: 'admin', isSuperAdmin: true } })
     const ids = [randomUUID(), randomUUID()]
+    const tier = ('builtin_' + randomBytes(8).toString('hex')) as DynamicBuiltInModelTier
+    const model = await prisma.aiModelConfig.create({ data: { key: tier, tier, provider: 'fixture', displayName: '费率配置', modelName: 'rate-fixture', baseUrl: 'https://fixture.invalid/v1', apiKeyCiphertext: encryptSecret('isolated-never-used'), enabled: true, selectable: true } })
     // Test tier must not already have a configured active price; never retire someone else's fixture.
-    const prices = ids.map(rateCardId => ({ version: 'credits-v2-itemized' as const, modelTier: 'ultimate' as const, multiplierBps: 10000,
+    const prices = ids.map(rateCardId => ({ version: 'credits-v2-itemized' as const, modelTier: tier, multiplierBps: 10000,
       rateCardId, rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } }))
     try {
-      expect(await getActiveTokenPrice('ultimate')).toBeNull()
+      expect(await getActiveTokenPrice(tier)).toBeNull()
       const cookie = `chevoink_session=${buildSessionTokens(admin.id, 0).accessToken}`
       expect((await request(app).get('/api/admin/model-rate-cards')).status).toBe(401)
       const created = await request(app).post('/api/admin/model-rate-cards').set('Cookie', cookie).send(prices[0])
@@ -67,9 +71,12 @@ describe.runIf(available)('versioned V2 rate-card lifecycle', () => {
         await transitionRateCard(admin.id, { id: card.id, expectedRevision: 1, status: 'approved', evidence: { note: 'synthetic fixture attestation, not production evidence', reportHash: 'a'.repeat(64), shadowDays: 7,
           totalFeeDeviationPercent: 0, userTaskP95AbsoluteDeviationPercent: 0, cashCostIncreasePercent: 0, allGroupsReviewed: true, qualityPassed: true } })
         const activation = { id: card.id, expectedRevision: 2, status: 'active', evidence: { note: 'activate fixture', publicNoticeRef: 'fixture-public-notice' } }
+        await prisma.aiModelConfig.update({ where: { id: model.id }, data: { enabled: false } })
+        await expect(transitionRateCard(admin.id, activation)).rejects.toMatchObject({ code: 'MODEL_TIER_UNAVAILABLE' })
+        await prisma.aiModelConfig.update({ where: { id: model.id }, data: { enabled: true } })
         const results = await Promise.all([transitionRateCard(admin.id, activation), transitionRateCard(admin.id, activation)])
         expect(results[0]).toEqual(results[1])
-        expect(await getActiveTokenPrice('ultimate')).toEqual(price)
+        expect(await getActiveTokenPrice(tier)).toEqual(price)
       }
       expect(await prisma.creditRateCard.count({ where: { id: { in: ids }, status: 'active' } })).toBe(1)
       expect(await prisma.creditRateCard.findUnique({ where: { id: ids[0] } })).toMatchObject({ status: 'retired', price: prices[0] })
@@ -81,6 +88,7 @@ describe.runIf(available)('versioned V2 rate-card lifecycle', () => {
     } finally {
       await prisma.creditRateCardEvent.deleteMany({ where: { rateCardId: { in: ids } } })
       await prisma.creditRateCard.deleteMany({ where: { id: { in: ids }, createdBy: admin.id } })
+      await prisma.aiModelConfig.delete({ where: { id: model.id } })
       await prisma.user.delete({ where: { id: admin.id } })
     }
   }, 30000)

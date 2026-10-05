@@ -1,3 +1,5 @@
+import { readSemanticStructureHash } from '../semantic-progress.js'
+import { assertWritingTarget, bindWritingChapter, readWritingScope } from '../writing-scope.js'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 
@@ -78,6 +80,7 @@ async function updateOwnedChapterAtRevision(
 ) {
   const apply = async (tx: Prisma.TransactionClient) => {
     await assertAgentManuscriptCurrent(tx, ctx)
+    await assertWritingTarget(tx, ctx, { chapterId: chapter.id })
     const result = await tx.chapter.updateMany({
       where: {
         id: chapter.id,
@@ -217,6 +220,7 @@ export const chapterCreateTool = defineTool({
     if (alreadyCreatedId) {
       const existing = await findOwnedChapter(ctx, alreadyCreatedId)
       if (existing) {
+        await prisma.$transaction(tx => assertWritingTarget(tx, ctx, { chapterId: existing.id }))
         return {
           output: `本轮已经成功创建过《${existing.title}》，chapterId=${existing.id}。为防重复章节，本次未再次创建；请直接复用该 chapterId 写入或修订正文。`,
           summary: `复用已创建章节《${existing.title}》`,
@@ -228,16 +232,32 @@ export const chapterCreateTool = defineTool({
       return buildChapterNotFound(ctx, alreadyCreatedId)
     }
 
+    let semanticTransition: ToolResult['semanticTransition']
     const create = async (tx: Prisma.TransactionClient) => {
       await assertAgentManuscriptCurrent(tx, ctx)
+      const beforeHash = await readSemanticStructureHash(tx, ctx.novelId)
+      const frozen = await readWritingScope(tx, ctx)
+      const bounded = frozen.writing?.kind === 'bounded' ? frozen.writing : null
+      const requested = args.position ?? (args.positionInVolume !== undefined ? bounded?.targets.find(item => item.positionInVolume === args.positionInVolume)?.orderIndex : undefined)
+      const slot = bounded?.targets.find(item => requested === undefined || item.orderIndex === requested)
+      if (bounded) {
+        await assertWritingTarget(tx, ctx, { orderIndex: requested ?? slot?.orderIndex })
+        const boundId = slot?.chapterId ?? frozen.bindings?.targets.find(item => item.orderIndex === slot?.orderIndex)?.chapterId
+        if (boundId) {
+          const existing = await tx.chapter.findFirst({ where: { id: boundId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) }, include: { volume: { select: { title: true, orderIndex: true } } } })
+          if (!existing) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原目标章节已归档或消失，不能创建替代身份。')
+          return { ...existing, scopeReused: true }
+        }
+      } else await assertWritingTarget(tx, ctx, { orderIndex: args.position })
       const volumeByOrder = args.volumeOrder !== undefined
         ? await tx.volume.findFirst({ where: { novelId: ctx.novelId, ...activeVolumeWhere, orderIndex: args.volumeOrder } })
         : null
       if (args.volumeOrder !== undefined && !volumeByOrder) {
         throw new DataAccessError(400, 'VOLUME_NOT_FOUND', `第 ${args.volumeOrder} 卷不存在，请先用 volume_list 或 novel_get_context 核对卷结构。`)
       }
-      const globalTarget = args.position
-        ? await tx.chapter.findFirst({ where: { ...activeChapterScope(ctx.novelId), orderIndex: args.position } })
+      const effectivePosition = slot?.orderIndex ?? args.position
+      const globalTarget = effectivePosition
+        ? await tx.chapter.findFirst({ where: { ...activeChapterScope(ctx.novelId), orderIndex: effectivePosition } })
         : null
       const lastExisting = await tx.chapter.findFirst({
         where: activeChapterScope(ctx.novelId),
@@ -248,11 +268,11 @@ export const chapterCreateTool = defineTool({
         tx,
         ctx.novelId,
         resolveAgentChapterVolumeId({
-          requestedVolumeId: args.volumeId ?? volumeByOrder?.id,
+          requestedVolumeId: slot?.volumeId ?? args.volumeId ?? volumeByOrder?.id,
           globalTargetVolumeId: globalTarget?.volumeId,
           lastExistingVolumeId: lastExisting?.volumeId,
         }),
-        args.positionInVolume ?? globalTarget?.orderInVolume,
+        slot?.positionInVolume ?? args.positionInVolume ?? globalTarget?.orderInVolume,
       )
       const chapterCount = await tx.chapter.count({ where: activeChapterScope(ctx.novelId) })
       const created = await tx.chapter.create({
@@ -270,10 +290,13 @@ export const chapterCreateTool = defineTool({
         },
       })
       await placeCreatedChapter(tx, ctx.novelId, created, placement.volume.id, placement.position)
-      return tx.chapter.findFirstOrThrow({
+      if (slot) await bindWritingChapter(tx, ctx, slot.orderIndex, created.id)
+      const result = await tx.chapter.findFirstOrThrow({
         where: { id: created.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId },
         include: { volume: { select: { title: true, orderIndex: true } } },
       })
+      semanticTransition = { targetId: ctx.novelId, beforeHash, afterHash: await readSemanticStructureHash(tx, ctx.novelId) }
+      return { ...result, scopeReused: false }
     }
     const chapter = ctx.transaction ? await create(ctx.transaction) : await prisma.$transaction(create)
     await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
@@ -281,12 +304,12 @@ export const chapterCreateTool = defineTool({
       recordChapterBaseline(ctx.runId, chapter.id, chapter.revision)
       recordCreatedChapter(ctx.runId, chapter.title, chapter.id)
     }
-    if (content && isAgent2FeatureEnabled('memory2', ctx.userId)) {
+    if (!chapter.scopeReused && content && isAgent2FeatureEnabled('memory2', ctx.userId)) {
       await enqueueChapterMemoryExtraction({
         novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: chapter.revision, before: '', after: content,
       }, ctx.transaction)
     }
-    if (content && isAgent2FeatureEnabled('storyCompiler', ctx.userId)) {
+    if (!chapter.scopeReused && content && isAgent2FeatureEnabled('storyCompiler', ctx.userId)) {
       await recordStoryCompilerWrite({
         userId: ctx.userId,
         novelId: ctx.novelId,
@@ -298,22 +321,23 @@ export const chapterCreateTool = defineTool({
     }
 
     return {
-      output: `已原子创建全书第 ${chapter.orderIndex} 章《${chapter.title}》，位于第 ${chapter.volume.orderIndex} 卷《${chapter.volume.title}》卷内第 ${chapter.orderInVolume} 章，chapterId=${chapter.id}${args.position || args.positionInVolume ? '，后续章节顺序已自动校正' : ''}${content ? `，写入 ${content.length} 字` : '（暂无正文）'}。创建已成功，后续必须复用该 chapterId，禁止重建同名章。`,
+      output: `${chapter.scopeReused ? '复用原请求已绑定的' : '已原子创建'}全书第 ${chapter.orderIndex} 章《${chapter.title}》，位于第 ${chapter.volume.orderIndex} 卷《${chapter.volume.title}》卷内第 ${chapter.orderInVolume} 章，chapterId=${chapter.id}${args.position || args.positionInVolume ? '，后续章节顺序已自动校正' : ''}${chapter.content ? `，当前正文 ${chapter.content.length} 字` : '（暂无正文）'}。创建已成功，后续必须复用该 chapterId，禁止重建同名章。`,
+      ...(semanticTransition ? { semanticTransition } : {}),
       observedState: { kind: 'chapter', id: chapter.id, revision: chapter.revision },
       summary: `新建第 ${chapter.orderIndex} 章《${chapter.title}》 · ${chapter.volume.title}`,
       // 带正文创建时返回 chapterDiff（空基线→全绿新增），前端才能挂上绿增红减的审查条；空章节仍用 chapterRef
-      display: content
+      display: chapter.scopeReused || chapter.content
         ? {
             kind: 'chapterDiff',
             chapterId: chapter.id,
             chapterTitle: chapter.title,
-            before: '',
-            after: content,
+            before: chapter.scopeReused ? chapter.content : '',
+            after: chapter.content,
             appliedDirectly: true,
             revision: chapter.revision,
           }
-        : { kind: 'chapterRef', chapterId: chapter.id, title: chapter.title, wordCount: 0 },
-      ...(content
+        : { kind: 'chapterRef', chapterId: chapter.id, title: chapter.title, wordCount: chapter.wordCount },
+      ...(!chapter.scopeReused && content
         ? { snapshot: { target: 'chapter' as const, targetId: chapter.id, field: 'content', previousValue: '' } }
         : {}),
     }

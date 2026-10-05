@@ -972,6 +972,10 @@ export async function getAdminTokenManagementData(period: AdminTokenPeriod = 'to
   const webSearchCalls = [...toolCounts.values()].reduce((total, item) => total + item.webSearchCalls, 0)
   const imageCalls = [...toolCounts.values()].reduce((total, item) => total + item.imageCalls, 0)
   const modelLabels: Record<string, string> = { lite: '轻量', speed: '极速', standard: '标准', performance: '性能', ultimate: '极致', custom: '自定义' }
+  const dynamicTiers = [...new Set(modelGroups.flatMap(item => item.modelTier?.startsWith('builtin_') ? [item.modelTier] : []))]
+  if (dynamicTiers.length) for (const model of await prisma.aiModelConfig.findMany({ where: { ownerUserId: null, enabled: true, tier: { in: dynamicTiers } }, select: { tier: true, displayName: true } })) {
+    if (model.tier) modelLabels[model.tier] = model.displayName
+  }
   const trendMap = new Map<string, { requestTokens: number; responseTokens: number }>()
   for (const item of rawTrend) {
     const date = new Date(item.createdAt.getTime() + 8 * 3_600_000).toISOString().slice(0, 10)

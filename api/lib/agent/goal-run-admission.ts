@@ -3,6 +3,8 @@ import { currentGoalExecution, type GoalExecutionContext } from './goal-context.
 import { assertGoalRevisionFence } from './goal-fence.js'
 import { changeGoal, goalError } from './goal-store.js'
 import { databaseNow } from './runtime-common.js'
+import { readGoalExecutionControl } from './goal-execution-control.js'
+import { executionLimitReached } from './execution-control.js'
 
 export interface GoalRunAdmission {
   goalId: string; revision: number; epoch: bigint; continuationIndex: number
@@ -28,7 +30,9 @@ export async function admitGoalRun(tx: Prisma.TransactionClient, userId: string,
   const revision = await tx.agentGoalRevision.findUniqueOrThrow({ where: { goalId_revision: { goalId: goal.id, revision: admission.revision } } })
   if (admission.trigger !== 'subagent' && prompt !== revision.objective) return goalError('GOAL_SCOPE_MISMATCH', '执行请求与目标版本不一致。')
   const budget = await tx.agentGoalBudget.findUniqueOrThrow({ where: { goalId: goal.id } })
-  if (budget.tokensUsed + budget.tokensReserved >= budget.tokenLimit || budget.activeTimeMs >= budget.activeTimeLimitMs) {
+  const now = await databaseNow(tx)
+  const elapsed = goal.activeSince ? BigInt(Math.max(0, now.getTime() - goal.activeSince.getTime())) : 0n
+  if (executionLimitReached(await readGoalExecutionControl(tx, goal.id), { tokens: budget.tokensUsed + budget.tokensReserved, activeTimeMs: budget.activeTimeMs + elapsed })) {
     return goalError('GOAL_BUDGET_EXHAUSTED', '目标已达到预算上限。')
   }
   if (await tx.agentGoalUsage.count({ where: { goalId: goal.id, status: 'unknown' } })) return goalError('GOAL_RECONCILIATION_REQUIRED', '模型用量尚待核实。')

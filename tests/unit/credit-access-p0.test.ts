@@ -1,23 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({ pending: vi.fn(), model: vi.fn(), account: vi.fn(), setting: vi.fn(), initialize: vi.fn() }))
-vi.mock('../../api/lib/prisma.js', () => ({
-  DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } },
-  prisma: {
-    creditSystemSetting: { findUnique: mocks.setting, upsert: mocks.initialize },
+vi.mock('../../api/lib/prisma.js', () => {
+  const tx = {
+    $queryRaw: vi.fn(async () => [{ id: 'global' }]),
+    creditSystemSetting: { findUniqueOrThrow: mocks.setting, upsert: mocks.initialize },
     creditAccount: { upsert: vi.fn(), updateMany: vi.fn(), findUniqueOrThrow: mocks.account },
-    aiUsageLog: { aggregate: mocks.pending },
-    aiModelConfig: { findFirst: mocks.model },
-  },
-}))
+    aiUsageLog: { aggregate: mocks.pending }, aiModelConfig: { findFirst: mocks.model },
+  }
+  return { DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } },
+    prisma: { ...tx, $transaction: (work: (connection: typeof tx) => unknown) => work(tx) } }
+})
 vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: () => 'fixture-key' }))
+import { prisma } from '../../api/lib/prisma.js'
 import { assertCreditAccess, getAuxiliaryModelRuntime } from '../../api/lib/credits.js'
 
 const start = new Date('2026-09-09T07:00:00Z')
 beforeEach(() => {
   vi.clearAllMocks()
-  mocks.setting.mockResolvedValue({ dailyAllowanceMilli: 450000, globallyPaused: false, resetHourUtc8: 15 })
-  mocks.initialize.mockResolvedValue({ dailyAllowanceMilli: 450000, globallyPaused: false, resetHourUtc8: 15 })
+  mocks.setting.mockResolvedValue({ dailyAllowanceMilli: 450000, globallyPaused: false, publicBetaEnabled: true, resetHourUtc8: 15 })
+  mocks.initialize.mockResolvedValue({ dailyAllowanceMilli: 450000, globallyPaused: false, publicBetaEnabled: true, resetHourUtc8: 15 })
   mocks.account.mockResolvedValue({ dailyAllowanceMilli: 450000, dailyUsedMilli: 0, bonusBalanceMilli: 0, periodStartedAt: start, suspendedAt: null })
   mocks.pending.mockResolvedValue({ _sum: { reservedCreditMilli: 0 } })
   mocks.model.mockResolvedValue({ tier: 'speed', modelName: 'fixture', baseUrl: 'https://fixture.example/v1', apiKeyCiphertext: 'fixture' })
@@ -30,7 +32,7 @@ describe('P0 credit admission and auxiliary model ownership', () => {
     expect(mocks.initialize).not.toHaveBeenCalled()
   })
   it('retains initialization for a missing singleton', async () => {
-    mocks.setting.mockResolvedValueOnce(null)
+    vi.mocked(prisma.$queryRaw).mockResolvedValueOnce([])
     await assertCreditAccess('owner', 'speed')
     expect(mocks.initialize).toHaveBeenCalledTimes(1)
   })

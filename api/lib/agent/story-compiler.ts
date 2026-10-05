@@ -1,3 +1,4 @@
+import { assertWritingTarget, readWritingScope, lockWritingRunLineage } from './writing-scope.js'
 import { createHash } from 'node:crypto'
 
 import type { Prisma, StoryCompilationStage, StoryCharter, ReaderPromise, SceneTask } from '@prisma/client'
@@ -229,8 +230,14 @@ export async function prepareStoryCompilation(input: {
   const nextChapter = !!task && requiresNextChapterDelivery(task.goals)
   const continuing = nextChapter && !input.chapterId && input.targetOrderIndex === undefined
     ? await db.storyCompilation.findFirst({ where: { userId: input.userId, novelId: input.novelId, ...scope, status: 'active' }, orderBy: { updatedAt: 'desc' }, select: { chapterId: true, targetOrderIndex: true } }) : null
-  const target = await resolveTarget(input.userId, input.novelId, input.chapterId ?? continuing?.chapterId ?? (!nextChapter ? input.fallbackChapterId : undefined), input.targetOrderIndex ?? continuing?.targetOrderIndex, db)
-  if (nextChapter && target.chapter && !await db.storyCompilation.findFirst({ where: { userId: input.userId, novelId: input.novelId, ...scope, chapterId: target.chapter.id }, select: { id: true } })) {
+  const writing = await readWritingScope(db, input)
+  const slot = writing.writing?.kind === 'bounded' ? writing.writing.targets.find(item => input.chapterId ? item.chapterId === input.chapterId
+    || writing.bindings?.targets.some(binding => binding.orderIndex === item.orderIndex && binding.chapterId === input.chapterId)
+    : input.targetOrderIndex === undefined || item.orderIndex === input.targetOrderIndex) : null
+  const boundId = slot?.chapterId ?? writing.bindings?.targets.find(item => item.orderIndex === slot?.orderIndex)?.chapterId
+  const target = await resolveTarget(input.userId, input.novelId, input.chapterId ?? boundId ?? continuing?.chapterId ?? (!nextChapter && !slot ? input.fallbackChapterId : undefined), input.targetOrderIndex ?? slot?.orderIndex ?? continuing?.targetOrderIndex, db)
+  await assertWritingTarget(db, input, target.chapter ? { chapterId: target.chapter.id } : { orderIndex: target.targetOrderIndex })
+  if (nextChapter && !writing.writing && target.chapter && !await db.storyCompilation.findFirst({ where: { userId: input.userId, novelId: input.novelId, ...scope, chapterId: target.chapter.id }, select: { id: true } })) {
     throw new DataAccessError(409, 'STORY_TASK_TARGET_MISMATCH', '当前任务要求写下一章，不能接管历史任务的旧章检查或重写。请省略已有chapterId，以新的目标序号准备下一章；历史正文仅作承接参考。')
   }
   const [bundle, previousChapter, recentChapters] = await Promise.all([
@@ -620,6 +627,8 @@ export async function commitChapterBridge(input: {
   delayedHookReason: string
   openingStructure: string
   endingStructure: string
+  expectedChapterRevision?: number
+  expectedContentHash?: string
   requireQuality?: boolean
   qualityReportId?: string
 }, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number }> {
@@ -628,6 +637,7 @@ export async function commitChapterBridge(input: {
   await lockNovelActiveScope(db, input.novelId)
   let scope: Prisma.StoryCompilationWhereInput = {}
   if (input.runId) {
+    await lockWritingRunLineage(db, { userId: input.userId, novelId: input.novelId, runId: input.runId })
     await assertAgentManuscriptCurrent(db, { userId: input.userId, novelId: input.novelId, runId: input.runId })
     await db.$queryRaw`SELECT id FROM agent_runs WHERE id = ${input.runId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
     if (!await db.agentRun.findFirst({ where: { id: input.runId, userId: input.userId, novelId: input.novelId,
@@ -638,45 +648,51 @@ export async function commitChapterBridge(input: {
   }
   await db.$queryRaw`SELECT id FROM story_compilations WHERE id = ${input.compilationId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
   const compilation = await db.storyCompilation.findFirst({
-    where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: 'active', ...scope },
+    where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] }, ...scope },
     include: { bridge: true, sceneTasks: true, chapter: true },
   })
   if (!compilation?.chapter || !compilation.bridge) {
     throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '写作编译任务不存在、未写入章节或不属于当前作品。')
   }
+  if (input.runId) await assertWritingTarget(db, { userId: input.userId, novelId: input.novelId, runId: input.runId }, { chapterId: compilation.chapter.id })
   await db.$queryRaw`SELECT id FROM chapters WHERE id = ${compilation.chapter.id} FOR UPDATE`
   const chapter = await db.chapter.findFirst({ where: { id: compilation.chapter.id, authorId: input.userId, ...activeChapterScope(input.novelId) }, select: { revision: true, content: true } })
   if (!chapter) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '目标章节已归档，不能提交旧章节桥。')
+  if (!chapter.content.trim() || chapter.revision !== compilation.chapter.revision || chapter.content !== compilation.chapter.content) {
+    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '当前正文为空或已变化，终态未提交。')
+  }
+  if (input.expectedChapterRevision !== undefined && chapter.revision !== input.expectedChapterRevision
+    || input.expectedContentHash !== undefined && createHash('sha256').update(chapter.content).digest('hex') !== input.expectedContentHash) {
+    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文在终态推导后变化，未提交旧版本终态。')
+  }
+  const source = compilation.bridge.fromChapterId ? await (async () => {
+    await db.$queryRaw`SELECT id FROM chapters WHERE id = ${compilation.bridge!.fromChapterId} FOR SHARE`
+    return db.chapter.findFirst({ where: { id: compilation.bridge!.fromChapterId!, ...activeChapterScope(input.novelId) }, select: { id: true, revision: true, content: true } })
+  })() : null
+  if (compilation.bridge.fromChapterId && (!source || source.revision !== compilation.bridge.sourceRevision)) {
+    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '桥接来源章节已变化，不能沿用旧来源提交终态。')
+  }
   const validation = compilation.validation as { checkedRevision?: number; errorCount?: number; independentCheck?: string; coverage?: unknown; reviewFocus?: string } | null
-  if (chapter.revision !== compilation.chapter.revision || chapter.content !== compilation.chapter.content || validation?.independentCheck !== 'complete') {
-    throw new DataAccessError(409, 'CONTINUITY_CHECK_REQUIRED', '当前章节尚未完成独立连续性复核，不能把确定性兜底或旧报告当作通过。')
+  const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge,
+    sceneTasks: [...compilation.sceneTasks].sort((a, b) => a.ordinal - b.ordinal), source, focus: validation?.reviewFocus })
+  // Optional absent, failed or stale reports remain unknown. Only validated
+  // current-version factual errors can prevent terminal delivery.
+  const currentContinuity = validation?.independentCheck === 'complete' && validation.checkedRevision === chapter.revision
+    && compilerContinuityCoverageMatches(validation.coverage, coverage)
+  if (currentContinuity && (validation.errorCount ?? 0) > 0) {
+    throw new DataAccessError(409, 'CONTINUITY_ERRORS_REMAIN', '当前正文存在已核验的事实错误，请修正或交作者决定。')
   }
-  if (!validation || validation.checkedRevision !== compilation.chapter.revision) {
-    throw new DataAccessError(409, 'CONTINUITY_CHECK_REQUIRED', '必须先对当前章节最新 revision 执行 continuity_validate。')
+  const report = await db.chapterQualityReport.findFirst({ where: { userId: input.userId, novelId: input.novelId, compilationId: compilation.id,
+    chapterId: compilation.chapter.id, chapterRevision: chapter.revision }, include: { findings: true }, orderBy: { createdAt: 'desc' } })
+  if (report && qualityReportMatchesContent(report, chapter.revision, chapter.content)
+    && report.findings.some(finding => finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected')) {
+    throw new DataAccessError(409, 'QUALITY_CHECK_REQUIRED', '当前正文存在已核验的事实错误，请修正或交作者决定。')
   }
-  if ((validation.errorCount ?? 0) > 0) {
-    throw new DataAccessError(409, 'CONTINUITY_ERRORS_REMAIN', `仍有 ${validation.errorCount} 个连续性错误，修复并重新检查后才能提交章节桥。`)
-  }
-  {
-    const source = compilation.bridge.fromChapterId ? await db.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId, ...activeChapterScope(input.novelId) },
-      select: { id: true, revision: true, content: true } }) : null
-    const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge,
-      sceneTasks: [...compilation.sceneTasks].sort((a, b) => a.ordinal - b.ordinal), source, focus: validation.reviewFocus })
-    if (!compilerContinuityCoverageMatches(validation.coverage, coverage)) throw new DataAccessError(409, 'CONTINUITY_CHECK_REQUIRED', '连续性报告缺少当前协议覆盖，或正文、来源、场景已变化，请复核当前编译后再提交。')
-  }
-  if (input.requireQuality) {
-    const report = input.qualityReportId ? await db.chapterQualityReport.findFirst({ where: { id: input.qualityReportId, userId: input.userId, novelId: input.novelId,
-      chapterId: compilation.chapter.id, chapterRevision: chapter.revision }, include: { findings: true } }) : null
-    if (!report || !qualityReportMatchesContent(report, chapter.revision, chapter.content)
-      || report.compilationId && report.compilationId !== compilation.id
-      || report.findings.some(finding => finding.severity === 'error' && finding.disposition !== 'repaired')) {
-      throw new DataAccessError(409, 'QUALITY_CHECK_REQUIRED', '当前正文没有完整且匹配的独立质量检查，不能使用失败、旧版或其他编译的报告提交。')
-    }
-  }
-  if (compilation.bridge.fromChapterId) {
-    await db.$queryRaw`SELECT id FROM chapters WHERE id = ${compilation.bridge.fromChapterId} FOR SHARE`
-    const source = await db.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId, ...activeChapterScope(input.novelId) }, select: { revision: true } })
-    if (!source || source.revision !== compilation.bridge.sourceRevision) throw new DataAccessError(409, 'CONTINUITY_CHECK_REQUIRED', '桥接来源章节已变化，请重新准备并检查，不沿用旧桥提交。')
+  const terminalContext = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext as Record<string, Prisma.JsonValue> : {}
+  const terminalContentHash = runtimeJson({ content: chapter.content }).hash
+  const sameTerminal = compilation.status === 'completed' && !!compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision
+  if (sameTerminal && terminalContext.terminalContentHash === terminalContentHash) {
+    return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0 }
   }
   const now = new Date()
   await Promise.all([
@@ -703,9 +719,10 @@ export async function commitChapterBridge(input: {
     db.sceneTask.updateMany({ where: { compilationId: compilation.id }, data: { status: 'completed' } }),
     db.storyCompilation.update({
       where: { id: compilation.id },
-      data: { stage: 'commit', status: 'completed', completedAt: now },
+      data: { stage: 'commit', status: 'completed', completedAt: now, preparedContext: { ...terminalContext, terminalContentHash } },
     }),
   ])
+  if (sameTerminal) return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0 }
   // Optional memory proposals must respect author tombstones without rolling
   // back an independently validated chapter. All other errors still roll back.
   let skippedMemoryCount = 0

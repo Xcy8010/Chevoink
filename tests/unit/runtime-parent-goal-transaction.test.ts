@@ -32,13 +32,26 @@ describe('explicit goal accounting transaction boundaries', () => {
   })
   it('uses only the caller-owned transaction for explicit dispatch reservation', async () => {
     const create = vi.fn(), update = vi.fn()
-    const tx = { agentGoalUsage: { findUnique: async () => null, count: async () => 0, create },
-      agentGoalBudget: { findUniqueOrThrow: async () => ({ tokensUsed: 0n, tokensReserved: 0n, tokenLimit: 100n, activeTimeMs: 0n, activeTimeLimitMs: 10000n }), update },
-      agentGoal: { findUniqueOrThrow: async () => ({ activeSince: null }) } } as unknown as Prisma.TransactionClient
+    const usage = vi.fn(async () => null), count = vi.fn(async () => 0)
+    const budget = vi.fn(async () => ({ tokensUsed: 0n, tokensReserved: 0n, tokenLimit: 100n, activeTimeMs: 0n, activeTimeLimitMs: 10000n }))
+    const goal = vi.fn(async () => ({ id: 'goal', userId: 'author', novelId: 'novel', sessionId: 'session',
+      currentRevision: 1, stateVersion: 1, executionOptions: {}, activeSince: null }))
+    const revision = vi.fn(async () => ({ goalId: 'goal', revision: 1, request: {} }))
+    const evidence = vi.fn(async () => [])
+    const tx = { agentGoalUsage: { findUnique: usage, count, create },
+      agentGoalBudget: { findUniqueOrThrow: budget, update }, agentGoal: { findUniqueOrThrow: goal },
+      agentGoalRevision: { findUniqueOrThrow: revision }, agentGoalEvidence: { findMany: evidence } } as unknown as Prisma.TransactionClient
     await withGoalTransaction(tx, () => reserveGoalUsageInTransaction(tx, 'dispatch', 10, context))
     expect(mocks.fence).toHaveBeenCalledWith(tx, context)
     expect(create).toHaveBeenCalledWith({ data: { sourceKey: 'dispatch', goalId: 'goal', runId: 'child', reservedTokens: 10n } })
     expect(update).toHaveBeenCalledOnce()
+    expect(usage).toHaveBeenCalledWith({ where: { sourceKey: 'dispatch' } })
+    expect(count).toHaveBeenCalledWith({ where: { goalId: 'goal', status: 'unknown' } })
+    expect(budget).toHaveBeenCalledWith({ where: { goalId: 'goal' } })
+    expect(goal).toHaveBeenCalledWith({ where: { id: 'goal' } })
+    expect(revision).toHaveBeenCalledWith({ where: { goalId_revision: { goalId: 'goal', revision: 1 } } })
+    expect(evidence).toHaveBeenCalledWith({ where: { goalId: 'goal', kind: 'execution-control' }, select: { receipt: true, criterionId: true } })
+    expect(mocks.known).not.toHaveBeenCalled()
     expect(mocks.scope).not.toHaveBeenCalled()
     expect(mocks.transaction).not.toHaveBeenCalled()
   })

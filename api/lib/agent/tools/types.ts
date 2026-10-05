@@ -84,6 +84,10 @@ export type ToolResult = {
   failureCode?: string
   /** 回填给模型的观察结果：简洁、面向下一步决策 */
   output: string
+  /** Server-verified required artifact, never a model/report claim. */
+  requiredResult?: { targetId: string; contentHash: string }
+  /** Trusted committed artifact/configuration transition; never an audit revision alone. */
+  semanticTransition?: { targetId: string; beforeHash: string; afterHash: string }
   /** 给前端渲染的结构化数据（diff、封面图、计划等） */
   display?: AgentToolDisplayPayload
   /** 写操作自动记录的回滚快照 */

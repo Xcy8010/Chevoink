@@ -382,6 +382,7 @@ export async function applyChangeSetData(
   userId: string,
   changeSetId: string,
   input: ApplyChangeSetRequest,
+  assertTargets?: (tx: Prisma.TransactionClient, novelId: string, chapterIds: string[]) => Promise<void>,
 ): Promise<ChangeSet | null> {
   const existing = await loadOwnedChangeSet(userId, changeSetId)
   if (!existing) return null
@@ -399,6 +400,7 @@ export async function applyChangeSetData(
   try {
     await prisma.$transaction(async (tx) => {
       await lockNovelActiveScope(tx, existing.novelId)
+      await assertTargets?.(tx, existing.novelId, [...new Set(selected.map(patch => patch.targetId))])
       // Re-read under the import lock: an outside-lock preview may have raced
       // an archive+restore cycle and must not erase its permanent invalidation.
       const current = await tx.changeSet.findFirst({ where: { id: changeSetId, userId }, select: { validations: true } })
@@ -510,7 +512,8 @@ export async function applyChangeSetData(
   return toChangeSet((await loadOwnedChangeSet(userId, changeSetId))!)
 }
 
-export async function rollbackChangeSetData(userId: string, changeSetId: string): Promise<ChangeSet | null> {
+export async function rollbackChangeSetData(userId: string, changeSetId: string,
+  assertTargets?: (tx: Prisma.TransactionClient, novelId: string, chapterIds: string[]) => Promise<void>): Promise<ChangeSet | null> {
   const existing = await loadOwnedChangeSet(userId, changeSetId)
   if (!existing) return null
   if (existing.status === 'rolled_back') return toChangeSet(existing)
@@ -522,6 +525,7 @@ export async function rollbackChangeSetData(userId: string, changeSetId: string)
   try {
     await prisma.$transaction(async (tx) => {
       await lockNovelActiveScope(tx, existing.novelId)
+      await assertTargets?.(tx, existing.novelId, [...new Set(selected.map(patch => patch.targetId))])
       const byChapter = new Map<string, PrismaChangeSetPatch[]>()
       for (const patch of selected) {
         const bucket = byChapter.get(patch.targetId) ?? []

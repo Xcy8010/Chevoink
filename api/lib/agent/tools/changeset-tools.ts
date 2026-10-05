@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
+import { assertWritingTarget } from '../writing-scope.js'
 import {
   applyChangeSetData,
   getStructureReportData,
@@ -181,7 +183,11 @@ export const changeSetApplyTool = defineTool({
   dangerous: true,
   alwaysConfirm: true,
   async execute(ctx, { changeSetId, selectedPatchIds }) {
-    const changeSet = await applyChangeSetData(ctx.userId, changeSetId, { selectedPatchIds })
+    const changeSet = await applyChangeSetData(ctx.userId, changeSetId, { selectedPatchIds }, async (tx, novelId, ids) => {
+      if (novelId !== ctx.novelId) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '变更集不属于当前授权作品。')
+      await assertAgentManuscriptCurrent(tx, ctx)
+      for (const chapterId of ids) await assertWritingTarget(tx, ctx, { chapterId })
+    })
     if (!changeSet) return { output: '变更集不存在或不属于当前作者。' }
     return {
       output: `ChangeSet ${changeSet.id} 已原子应用，${changeSet.patches.filter((patch) => patch.selected).length} 个补丁全部通过版本与哈希校验。可用 changeset_rollback 整体回滚。`,
@@ -201,7 +207,11 @@ export const changeSetRollbackTool = defineTool({
   dangerous: true,
   alwaysConfirm: true,
   async execute(ctx, args) {
-    const changeSet = await rollbackChangeSetData(ctx.userId, args.changeSetId)
+    const changeSet = await rollbackChangeSetData(ctx.userId, args.changeSetId, async (tx, novelId, ids) => {
+      if (novelId !== ctx.novelId) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '变更集不属于当前授权作品。')
+      await assertAgentManuscriptCurrent(tx, ctx)
+      for (const chapterId of ids) await assertWritingTarget(tx, ctx, { chapterId })
+    })
     if (!changeSet) return { output: '变更集不存在或不属于当前作者。' }
     return {
       output: `ChangeSet ${changeSet.id} 已整体回滚，所有目标章节恢复到应用前内容。`,

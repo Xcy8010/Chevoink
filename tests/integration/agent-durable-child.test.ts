@@ -46,9 +46,9 @@ afterEach(async () => {
 const route = { provider: 'fixture', model: 'fixture', endpoint: 'https://provider.invalid/v1/chat/completions', reasoningEffort: 'high' }
 const price = { version: 'credits-v1-exact' as const, modelTier: 'speed' as const, multiplierBps: 10000 }
 
-async function fixture(work: (f: Awaited<ReturnType<typeof prepareFixture>>) => Promise<void>, spawned = false, budget = 5000, target?: 'finite' | 'selection') {
+async function fixture(work: (f: Awaited<ReturnType<typeof prepareFixture>>) => Promise<void>, spawned = false, budget = 5000, target?: 'finite' | 'selection', outputLimit = 100) {
   const user = await prisma.user.create({ data: { nickname: 'durable-child-fixture', passwordHash: 'test-only-unusable' } })
-  try { await work(await prepareFixture(user.id, spawned, budget, target)) }
+  try { await work(await prepareFixture(user.id, spawned, budget, target, outputLimit)) }
   finally {
     await prisma.agentChildExecutionGrant.deleteMany({ where: { childRun: { userId: user.id } } })
     await prisma.agentArtifact.deleteMany({ where: { run: { userId: user.id } } })
@@ -61,7 +61,7 @@ async function fixture(work: (f: Awaited<ReturnType<typeof prepareFixture>>) => 
   }
 }
 
-async function prepareFixture(userId: string, spawned: boolean, tokenBudget: number, target?: 'finite' | 'selection') {
+async function prepareFixture(userId: string, spawned: boolean, tokenBudget: number, target?: 'finite' | 'selection', outputLimit = 100) {
   const novel = await prisma.novel.create({ data: { authorId: userId, title: '子任务测试', slug: randomUUID(), summary: '' } })
   const session = await prisma.agentSession.create({ data: { userId, novelId: novel.id, title: '父任务', toolPolicy: { network: 'allow', contentWrite: 'allow' } } })
   const runId = randomUUID()
@@ -72,12 +72,13 @@ async function prepareFixture(userId: string, spawned: boolean, tokenBudget: num
     return Promise.all([1, 2].map(order => prisma.chapter.create({ data: { authorId: userId, novelId: novel.id, volumeId: volume.id,
       title: `第${order}章`, content: '前缀选区后缀', orderIndex: order, orderInVolume: order, wordCount: 6 } })))
   })() : []
-  const spec = { ...buildTaskSpec({ runId, novelId: novel.id, prompt: '只读审阅并汇报' }), intent: 'review' as const, postconditions: [],
+  const prompt = target === 'finite' ? '修改本章并汇报' : '只读审阅并汇报'
+  const spec = { ...buildTaskSpec({ runId, novelId: novel.id, ...(target ? { chapterId: chapters[0].id } : {}), prompt }), intent: target === 'finite' ? 'revise' as const : 'review' as const, postconditions: [],
     ...(target ? { scope: { novelId: novel.id, chapterIds: [chapters[0].id], ...(target === 'selection' ? { selection: { chapterId: chapters[0].id, text: '选区', start: 2, end: 4 } } : {}) } } : {}),
     expectedOutputs: [{ kind: 'validation_report' as const, required: true, description: '报告' }] }
   await prisma.agentRun.create({ data: { id: runId, userId, novelId: novel.id, sessionId: session.id, mode: 'review', status: 'queued',
     engine: 'loop', action: 'workspaceAgent', agentType: 'writingOrchestrator', taskSpec: JSON.parse(JSON.stringify(spec)) } })
-  const message = await prisma.agentMessage.create({ data: { runId, sessionId: session.id, role: 'user', parts: [{ type: 'text', text: '只读审阅并汇报' }] } })
+  const message = await prisma.agentMessage.create({ data: { runId, sessionId: session.id, role: 'user', parts: [{ type: 'text', text: prompt }] } })
   const root = await initializeDurableTask({ userId, runId, sourceMessageId: message.id, tokenBudget })
   const lease = await acquireRunLease({ userId, runId, ownerId: 'parent-worker', claimId: randomUUID() })
   const tool = spawned ? taskSpawnTool : subAgentRunTool
@@ -86,7 +87,7 @@ async function prepareFixture(userId: string, spawned: boolean, tokenBudget: num
   const tools = target ? [tool, chapterReadTool, chapterWriteTool, chapterEditRangeTool, qualityAnalyzeTool, continuityValidateTool] : [tool, chapterReadTool]
   const configuration = { version: 1 as const, mode: target ? 'build' as const : 'review' as const, agentType: 'orchestrator', creativeFreedom: 'balanced' as const, qualityMode: 'premium' as const,
     model: { tier: 'speed', provider: route.provider, modelName: route.model, customModelId: null, reasoningEffort: route.reasoningEffort,
-      routeRevision: modelRouteRevision(route), maxOutputTokens: 100 },
+      routeRevision: modelRouteRevision(route), maxOutputTokens: outputLimit },
     tools: tools.map(item => ({ type: 'function' as const, function: { name: item.name, description: item.description, parameters: toOpenAIParameters(item.parameters) } })),
     toolAuthority: tools.map(item => ({ name: item.name, permission: 'allow' as const, alwaysConfirm: false, dangerous: false })),
     protectedChapterIds: [], pinnedSkillVersions: [] }
@@ -272,16 +273,16 @@ describe.runIf(available)('canonical durable child grants', () => {
       expect(child.frame.state.messages.at(-1)).toMatchObject({ role: 'user', content: '报告' })
       expect(child.configuration.tools.map(item => item.function.name)).toEqual(['chapter_read'])
       await expect(prisma.agentChildExecutionGrant.update({ where: { id: grants[0].id }, data: { tokenCeiling: 2000 } })).rejects.toThrow(/immutable child execution admission cannot change/)
-      expect((await prisma.agentChildExecutionGrant.findUniqueOrThrow({ where: { id: grants[0].id } })).tokenCeiling).toBe(1000)
+      expect((await prisma.agentChildExecutionGrant.findUniqueOrThrow({ where: { id: grants[0].id } })).tokenCeiling).toBe(500)
     })
   })
 
-  it('atomically reserves concurrent children and rejects over-allocation under one parent limit', async () => {
+  it('atomically admits distinct children without treating internal storage allowances as a parent cap', async () => {
     await fixture(async f => {
       const results = await Promise.allSettled([admitChildExecution(f.lease, f.input), admitChildExecution(f.lease, { ...f.input, childIndex: 1, spec: { ...f.input.spec, id: randomUUID() } })])
-      expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
-      expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { code: 'RUNTIME_CHILD_BUDGET_EXHAUSTED' } })
-      expect(await readTaskBudget(f.lease)).toMatchObject({ usedTokens: 0n, reservedChildTokens: 1000n })
+      expect(results.every(result => result.status === 'fulfilled')).toBe(true)
+      expect(await prisma.agentChildExecutionGrant.count({ where: { parentRootId: f.rootId } })).toBe(2)
+      expect(await readTaskBudget(f.lease)).toMatchObject({ usedTokens: 0n, reservedChildTokens: 1000n, control: { limits: { tokens: null, turns: null, activeTimeMs: null } } })
     }, true, 1500)
   })
 
@@ -334,7 +335,7 @@ describe.runIf(available)('canonical durable child grants', () => {
       const newChild = await acquireRunLease({ userId: f.userId, runId: grant.childRunId, ownerId: 'new-child', claimId: randomUUID() })
       expect(newChild.taskRootId).toBe(child.taskRootId)
       expect(await markProviderDispatched(newChild, call.attempt.id)).toMatchObject({ dispatchGranted: false })
-      expect(await readTaskBudget(adoptedParent)).toMatchObject({ reservedChildTokens: 1000n, unresolvedAttempts: 1n })
+      expect(await readTaskBudget(adoptedParent)).toMatchObject({ reservedChildTokens: 500n, unresolvedAttempts: 1n })
       expect(await prisma.agentProviderAttempt.count({ where: { operationId: call.operation.id } })).toBe(1)
     })
   })
@@ -350,7 +351,7 @@ describe.runIf(available)('canonical durable child grants', () => {
       const settled = await Promise.all([settleProviderOperation({ ...call.identity, lease: child }), settleProviderOperation({ ...call.identity, lease: child })])
       expect(settled.every(result => result.status === 'settled')).toBe(true)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(1)
-      expect(await readTaskBudget(f.lease)).toMatchObject({ usedTokens: 15n, reservedChildTokens: 985n })
+      expect(await readTaskBudget(f.lease)).toMatchObject({ usedTokens: 15n, reservedChildTokens: 485n })
       const frame = await reduceExecutionReceipt(child, { expectedRevision: call.pending.revision, expectedHash: call.pending.snapshotHash, operationId: call.operation.id })
       await finalizeDurableTask(child, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash })
       expect(await readTaskBudget(f.lease)).toMatchObject({ usedTokens: 15n, reservedChildTokens: 0n })
@@ -385,17 +386,23 @@ describe.runIf(available)('canonical durable child grants', () => {
     })
   })
 
-  it('rejects an oversized frozen child request before the dispatch marker', async () => fixture(async f => {
+  it.each(['finite-output', 'missing-output'] as const)('%s preserves finite per-request output admission independently of child storage', async kind => fixture(async f => {
     const grant = await admitChildExecution(f.lease, f.input)
     const child = await acquireRunLease({ userId: f.userId, runId: grant.childRunId, ownerId: 'child', claimId: randomUUID() })
     const state = await loadExecutionState(f.userId, child.runId)
-    const request = { body: { model: 'fixture', messages: [{ role: 'user', content: '完整原请求' }], max_tokens: 5000 } }
+    const request = { body: { model: 'fixture', messages: [{ role: 'user', content: '完整原请求' }], ...(kind === 'finite-output' ? { max_tokens: 5000 } : {}) } }
     const prepared = await prepareModelCursorOperation(child, { expectedRevision: 0, expectedHash: state.frame.snapshotHash }, { key: 'exec:0', action: 'workspaceAgent', request, price })
     const attempt = await prepareProviderAttempt(child, { operationId: prepared.operation.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request })
-    await expect(markProviderDispatched(child, attempt.id)).rejects.toMatchObject({ code: 'RUNTIME_CHILD_BUDGET_EXHAUSTED' })
-    expect((await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).dispatchedAt).toBeNull()
-    expect(await readTaskBudget(f.lease)).toMatchObject({ reservedChildTokens: 1000n })
-  }))
+    if (kind === 'missing-output') {
+      await expect(markProviderDispatched(child, attempt.id)).rejects.toMatchObject({ code: 'RUNTIME_CHILD_REQUEST_BUDGET_REQUIRED' })
+      expect((await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).dispatchedAt).toBeNull()
+    } else {
+      expect(state.configuration.model.maxOutputTokens).toBe(5000)
+      expect(await markProviderDispatched(child, attempt.id)).toMatchObject({ dispatchGranted: true })
+      expect(await markProviderDispatched(child, attempt.id)).toMatchObject({ dispatchGranted: false })
+    }
+    expect(await readTaskBudget(f.lease)).toMatchObject({ reservedChildTokens: 500n })
+  }, false, 5000, undefined, 5000))
 
   it.each(['finite', 'selection'] as const)('enforces child target ceilings even after an owned chapter read (%s)', async target => fixture(async f => {
     const grant = await admitChildExecution(f.lease, { ...f.input, roleTools: '*' })
@@ -413,20 +420,34 @@ describe.runIf(available)('canonical durable child grants', () => {
         { name: 'chapter_edit_range', args: { chapterId, start: 4, end: 6, newText: '修改后缀' } }]
     const indirect = [qualityAnalyzeTool, continuityValidateTool].flatMap(tool => [
       { name: tool.name, args: { chapterId }, tool }, { name: tool.name, args: { compilationId: 'saved-compilation' }, tool }])
-    for (const [index, call] of [...calls, ...indirect].entries()) {
+    for (const [index, call] of calls.entries()) {
       state = await loadExecutionState(f.userId, child.runId)
       const frame = await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash, snapshot: { ...state.frame.state,
         messages: [...state.frame.state.messages.slice(0, index > 0 ? -1 : undefined), { role: 'assistant', content: null,
           toolCalls: [{ id: `write-target-${index}`, name: call.name, arguments: JSON.stringify(call.args) }] }] } })
-      const execute = 'tool' in call ? prepareToolCursorOperation(child, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }, {
-        key: `exec:${frame.state.nextOperationSequence}`, action: call.name, callId: `write-target-${index}`, targetId: child.taskRootId,
-        // A nominal read capability cannot hide a tool which can auto-repair.
-        effectDomain: 'read', effectiveArgs: call.args, operationInput: { callId: `write-target-${index}`, args: call.args }, normalize: raw => call.tool.parameters.parse(raw) })
-        : executeDurableToolStep(child, new AbortController().signal)
+      const execute = executeDurableToolStep(child, new AbortController().signal)
       await expect(execute).rejects.toMatchObject({ code: target === 'finite' ? 'RUNTIME_CHILD_TARGET_NOT_AUTHORIZED' : 'RUNTIME_CHILD_SELECTION_READ_ONLY' })
       expect((await loadExecutionState(f.userId, child.runId)).frame.snapshotHash).toBe(frame.snapshotHash)
     }
+    // Critics are now body-read-only by default. Their admission is allowed;
+    // none can turn a read baseline into author permission to edit this target.
+    for (const [index, call] of indirect.entries()) {
+      state = await loadExecutionState(f.userId, child.runId)
+      const args = call.tool.parameters.parse(call.args)
+      const frame = await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
+        snapshot: { ...state.frame.state, messages: [...state.frame.state.messages.slice(0, index === 0 ? -1 : undefined),
+          { role: 'assistant', content: null, toolCalls: [{ id: `readonly-${index}`, name: call.name, arguments: JSON.stringify(call.args) }] }] } })
+      const prepared = await prepareToolCursorOperation(child, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }, {
+        key: `exec:${frame.state.nextOperationSequence}`, action: call.name, callId: `readonly-${index}`, targetId: child.taskRootId,
+        effectDomain: 'read', effectiveArgs: args, operationInput: { callId: `readonly-${index}`, args }, normalize: raw => call.tool.parameters.parse(raw) })
+      expect(prepared.operation.status).toBe('prepared')
+      // Stop at the admission boundary; no paid critic or fabricated check pass.
+      await recordToolFailure(child, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash,
+        code: 'FIXTURE_READONLY_ADMISSION', output: '只读准入已核对，未运行检查。', summary: '未运行检查' })
+      await reduceExecutionReceipt(child, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
+    }
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).content).toBe('前缀选区后缀')
+    expect(await prisma.agentProviderAttempt.count({ where: { runId: child.runId } })).toBe(0)
   }, false, 5000, target))
 
   it('admits an explicit chapter mutation inside the frozen finite target ceiling', async () => fixture(async f => {
@@ -488,7 +509,9 @@ describe.runIf(available)('canonical durable child grants', () => {
       const nextParent = await acquireRunLease({ userId: f.userId, runId: resumed.run.id, ownerId: 'resumed', claimId: randomUUID() })
       const adopted = await prisma.agentChildExecutionGrant.findUniqueOrThrow({ where: { id: grant.id } })
       expect(adopted).toMatchObject({ childRunId: grant.childRunId, admissionRunId: f.runId, admissionEpoch: grant.admissionEpoch,
-        currentParentRunId: resumed.run.id, generation: nextParent.epoch, status: 'admitted', tokenCeiling: 1000 })
+        currentParentRunId: resumed.run.id, generation: nextParent.epoch, status: 'admitted', tokenCeiling: grant.tokenCeiling })
+      expect(adopted.snapshotHash).toBe(grant.snapshotHash)
+      expect(adopted.snapshot).toEqual(grant.snapshot)
       expect(await acquireRunLease({ userId: f.userId, runId: grant.childRunId, ownerId: 'resumed-child', claimId: randomUUID() })).toMatchObject({ parent: { runId: resumed.run.id, epoch: nextParent.epoch } })
     })
   })

@@ -1,4 +1,5 @@
-import { randomInt, randomUUID } from 'node:crypto'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { createHash, randomInt, randomUUID } from 'node:crypto'
 import { saveStoryMemory, deleteStoryMemoryEntry } from '../../api/lib/agent/story-memory.js'
 
 import request from 'supertest'
@@ -11,6 +12,8 @@ import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { chapterBridgeGetTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { resolveQualityChapterTarget } from '../../api/lib/agent/humanity-quality.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { freezeWritingScope, readCompletedWritingDelivery, assertCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
+import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import {
   commitChapterBridge,
@@ -70,13 +73,18 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       data: { sessionId: session.id, userId, novelId, chapterId: chapter2Id, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', engine: 'loop' },
     })
     runId = run.id
+    const prompt = '授权自主创作全书，并修改已有章节。'
+    await prisma.agentRun.update({ where: { id: runId }, data: { startRequest: { prompt },
+      taskSpec: buildTaskSpec({ runId, novelId, chapterId: chapter2Id, prompt, mode: 'build' }) } })
   })
 
   it('keeps a fresh next-chapter contract separate from old and already-contaminated compilations', async () => {
     const { sessionId } = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { sessionId: true } })
     const freshId = randomUUID()
-    const task = buildTaskSpec({ runId: freshId, novelId, chapterId: chapter1Id, prompt: '写下一章', mode: 'build' })
-    await prisma.agentRun.create({ data: { id: freshId, sessionId, userId, novelId, chapterId: chapter1Id, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', engine: 'loop', runtimeProtocolVersion: 0, taskSpec: task } })
+    let task = buildTaskSpec({ runId: freshId, novelId, chapterId: null, prompt: '写下一章', mode: 'build' })
+    await prisma.agentRun.create({ data: { id: freshId, sessionId, userId, novelId, chapterId: null, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', engine: 'loop', runtimeProtocolVersion: 0, startRequest: { prompt: '写下一章' }, taskSpec: task } })
+    task = await prisma.$transaction(tx => freezeWritingScope(tx, { userId, novelId, runId: freshId }, task, '写下一章'))
+    await prisma.agentRun.update({ where: { id: freshId }, data: { taskSpec: task } })
     const old = await prepareStoryCompilation({ userId, novelId, runId, chapterId: chapter1Id, mode: 'balanced', intentSummary: '检查原章节' })
     const original = await prisma.chapter.findUniqueOrThrow({ where: { id: chapter1Id } })
     const ctx: ToolContext = { userId, novelId, runId: freshId, chapterId: chapter1Id, sessionId, callId: 'next', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', emit: () => {}, signal: new AbortController().signal }
@@ -89,7 +97,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     for (const target of [{ chapterId: chapter1Id }, { fallbackChapterId: chapter1Id }, { compilationId: old.compilation.id }]) {
       await expect(resolveQualityChapterTarget({ userId, novelId, runId: freshId, ...target })).rejects.toMatchObject({ code: 'QUALITY_TASK_TARGET_REQUIRED' })
     }
-    await expect(prepareStoryCompilation({ userId, novelId, runId: freshId, chapterId: chapter1Id, mode: 'balanced', intentSummary: '恢复旧章' })).rejects.toMatchObject({ code: 'STORY_TASK_TARGET_MISMATCH' })
+    await expect(prepareStoryCompilation({ userId, novelId, runId: freshId, chapterId: chapter1Id, mode: 'balanced', intentSummary: '恢复旧章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
     await storyCompilerPrepareTool.execute(ctx, { intentSummary: '写下一章' })
     const fresh = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: freshId, chapterId: null } })
     expect(fresh.targetOrderIndex).toBe(4)
@@ -97,7 +105,8 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter1Id } })).toEqual(original)
     // A real new chapter created during this contract remains available from a
     // typed continuation in the same session, without adopting unrelated tasks.
-    const ownChapter = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId, orderIndex: 4, orderInVolume: 4, title: '第四章 新目标', content: '', wordCount: 0, status: 'draft', visibility: 'private', revision: 1 } })
+    const created = await chapterCreateTool.execute(ctx, { title: '第四章 新目标', position: 4 })
+    const ownChapter = await prisma.chapter.findUniqueOrThrow({ where: { id: (created.display as { chapterId: string }).chapterId } })
     await prisma.storyCompilation.update({ where: { id: fresh.id }, data: { chapterId: ownChapter.id } })
     const continuationId = randomUUID()
     await prisma.agentRun.create({ data: { id: continuationId, sessionId, userId, novelId, chapterId: chapter1Id, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', engine: 'loop', runtimeProtocolVersion: 0, taskSpec: { ...task, runId: continuationId } } })
@@ -236,8 +245,9 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     expect(committed.sceneTasks[0].status).toBe('completed')
 
     const nextRun = await prisma.agentRun.create({
-      data: { sessionId: (await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).sessionId, userId, novelId, chapterId: chapter3Id, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', engine: 'loop' },
+      data: { sessionId: (await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).sessionId, userId, novelId, chapterId: chapter3Id, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', engine: 'loop', startRequest: { prompt: '修改第三章' } },
     })
+    await prisma.agentRun.update({ where: { id: nextRun.id }, data: { taskSpec: buildTaskSpec({ runId: nextRun.id, novelId, chapterId: chapter3Id, prompt: '修改第三章', mode: 'build' }) } })
     const next = await prepareStoryCompilation({ userId, novelId, runId: nextRun.id, chapterId: chapter3Id, mode: 'balanced', intentSummary: '续写第三章。' })
     expect(next.bridge.lastUnfinishedAction).toContain('尚未抵达一层')
     expect(next.bridge.knowledgeState).toContain('林舟知道顾棠见过同类钥匙')
@@ -266,10 +276,64 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       userId, novelId, compilationId: compilation.id, chapterSummary: '测试',
       exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
       lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '悬念',
-    })).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
+    })).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
 
     const repaired = await prisma.chapter.update({ where: { id: chapter3Id }, data: { content: { set: '根据最新章尾，两人停在楼梯转角，头顶多出一声脚步。' }, revision: { increment: 1 } } })
     await recordStoryCompilerWrite({ userId, novelId, runId, chapterId: repaired.id, chapterOrderIndex: 3, chapterRevision: repaired.revision })
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).stage).toBe('repair')
   })
+  it('commits unchecked current text, reuses the same terminal, and refreshes a corrected revision without rebuilding', async () => {
+    const sessionId = (await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).sessionId
+    const chapter = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId, orderIndex: 4, orderInVolume: 4,
+      title: '第四章 停在门前', content: '她握住门把手，停在询问价格之前。', wordCount: 17, status: 'draft', visibility: 'private' } })
+    const run = await prisma.agentRun.create({ data: { sessionId, userId, novelId, chapterId: chapter.id, mode: 'act', action: 'workspaceAgent',
+      agentType: 'writingOrchestrator', status: 'running', engine: 'loop', startRequest: { prompt: '完成第四章，只要标题和正文。' } } })
+    const spec = await prisma.$transaction(tx => freezeWritingScope(tx, { userId, novelId, runId: run.id },
+      buildTaskSpec({ runId: run.id, novelId, chapterId: chapter.id, prompt: '完成第四章，只要标题和正文。', mode: 'build' }), '完成第四章，只要标题和正文。'))
+    await prisma.agentRun.update({ where: { id: run.id }, data: { taskSpec: spec } })
+    try {
+      const { compilation } = await prepareStoryCompilation({ userId, novelId, runId: run.id, chapterId: chapter.id, mode: 'balanced', intentSummary: '完成第四章，只要标题和正文。' })
+      const terminal = { userId, novelId, runId: run.id, compilationId: compilation.id, chapterSummary: '停在询问之前。',
+        exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+        lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停在提问之前' }
+      const first = await commitChapterBridge({ ...terminal, expectedChapterRevision: chapter.revision,
+        expectedContentHash: createHash('sha256').update(chapter.content).digest('hex') })
+      expect(first.chapterRevision).toBe(chapter.revision)
+      const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
+      expect(saved.validation).toBeNull()
+      expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toMatchObject({
+        text: `${chapter.title}\n\n${chapter.content}`, chapters: [{ id: chapter.id, revision: chapter.revision }] })
+      expect(await prisma.chapterQualityReport.count({ where: { compilationId: compilation.id } })).toBe(0)
+      const repeated = await commitChapterBridge(terminal)
+      expect(repeated).toEqual(first)
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).bridge?.committedAt).toEqual(saved.bridge?.committedAt)
+      const captured = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))
+      const memoryCount = await prisma.projectMemoryEntry.count({ where: { sourceChapterId: chapter.id } })
+      await prisma.chapter.update({ where: { id: chapter.id }, data: { content: '同版本号下作者改变了正文。' } })
+      expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
+      await expect(prisma.$transaction(tx => assertCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }, captured!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+      await commitChapterBridge(terminal)
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext).toMatchObject({ terminalContentHash: runtimeJson({ content: '同版本号下作者改变了正文。' }).hash })
+      expect(await prisma.projectMemoryEntry.count({ where: { sourceChapterId: chapter.id } })).toBe(memoryCount)
+      await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { preparedContext: {} } })
+      expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
+      await commitChapterBridge(terminal)
+      expect(await prisma.projectMemoryEntry.count({ where: { sourceChapterId: chapter.id } })).toBe(memoryCount)
+      const corrected = await prisma.chapter.update({ where: { id: chapter.id }, data: { content: '她松开门把手，依然没有询问价格。', revision: { increment: 1 } } })
+      await expect(commitChapterBridge({ ...terminal, expectedChapterRevision: chapter.revision })).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
+      const refreshed = await commitChapterBridge({ ...terminal, expectedChapterRevision: corrected.revision,
+        expectedContentHash: createHash('sha256').update(corrected.content).digest('hex') })
+      expect(refreshed.chapterRevision).toBe(corrected.revision)
+      expect(await prisma.storyCompilation.count({ where: { runId: run.id } })).toBe(1)
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).validation).toBeNull()
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(corrected.content)
+      await prisma.agentRun.update({ where: { id: run.id }, data: { status: 'paused' } })
+      await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })
+    } finally {
+      await prisma.projectMemoryEntry.deleteMany({ where: { sourceChapterId: chapter.id } })
+      await prisma.agentRun.delete({ where: { id: run.id } })
+      await prisma.chapter.delete({ where: { id: chapter.id } })
+    }
+  })
+
 })

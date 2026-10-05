@@ -1,3 +1,4 @@
+import { assertWritingTarget } from '../writing-scope.js'
 import { z } from 'zod'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from '../craft-library.js'
@@ -32,6 +33,7 @@ export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentT
   const receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()
     await assertAgentManuscriptCurrent(tx, ctx)
+    await assertWritingTarget(tx, ctx, { chapterId: args.chapterId })
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId || args.chapterId !== capability.chapterId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '章节改名范围与原任务不符。')
     const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
@@ -52,7 +54,7 @@ export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentT
         observedState: { kind: 'chapter', id: chapter.id, revision },
         snapshot: { target: 'chapter', targetId: chapter.id, field: 'title', previousValue: chapter.title } } }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || !['CHAPTER_REVISION_CONFLICT', 'CHAPTER_RENAME_INVALID'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || !['CHAPTER_REVISION_CONFLICT', 'CHAPTER_RENAME_INVALID', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: '章节未改名' })
   })
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
@@ -113,6 +115,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   const receipt = await commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()
     await assertAgentManuscriptCurrent(tx, ctx)
+    await assertWritingTarget(tx, ctx, { chapterId: args.chapterId })
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) runtimeError('RUNTIME_SCOPE_MISMATCH', '正文操作不属于原任务范围。')
     const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
@@ -150,7 +153,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
       snapshot: { target: 'chapter', targetId: chapter.id, field: 'content', previousValue: before } }, memoryJobId,
       progress: { kind: 'content_revision', targetId: chapter.id, beforeHash: runtimeJson({ content: before }).hash, afterHash: runtimeJson({ content: after }).hash } }
   }).catch(async error => {
-    if (!prepared || !(error instanceof DataAccessError) || !['CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT'].includes(error.code)) throw error
+    if (!prepared || !(error instanceof DataAccessError) || !['CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code: error.code,
       summary: '正文变更未执行', output: error.message })
   })

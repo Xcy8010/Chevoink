@@ -60,8 +60,9 @@ export async function resumeDurableTask(input: { userId: string; runId: string; 
     const spec = taskSpecSchema.safeParse(state.originalSpec)
     if (!spec.success || spec.data.id !== root.id || spec.data.scope.novelId !== root.novelId) return runtimeError('RUNTIME_RECEIPT_INVALID', '原任务合同缺失或范围不一致。')
     const budget = await readTaskBudgetInTransaction(tx, root.id)
+    const turnLimit = taskTurnLimit(budget.policy, budget.budget.checkpointCount)
     if (state.frame.state.checkpointIndex !== budget.budget.checkpointCount
-      || state.frame.state.turn > taskTurnLimit(budget.policy, budget.budget.checkpointCount)) runtimeError('RUNTIME_STATE_CONFLICT', '原执行位置与预算合同不一致。')
+      || turnLimit !== null && state.frame.state.turn > turnLimit) runtimeError('RUNTIME_STATE_CONFLICT', '原执行位置与预算回执不一致。')
     const eventKey = `resume:${pause.id}`
     const existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey } })
     const latestRun = await tx.agentRun.findFirst({ where: { sessionId: root.sessionId, ...MAIN_RUN_FILTER }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true } })

@@ -11,6 +11,8 @@ import { applyMemoryExtractionJob, saveStoryMemory } from '../../api/lib/agent/s
 import { mergeStoryBranch } from '../../api/lib/agent/productivity.js'
 import { continueLoopRun } from '../../api/lib/agent/run-service.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 
 // Root test preflight validates the exact isolated database and least-privilege
 // role before this module loads. This suite never starts HTTP/model/native work.
@@ -112,7 +114,11 @@ describe.skipIf(!available)('import write fences: real isolated PostgreSQL', () 
         expect(await prisma.chapter.count({ where: { novelId: f.novel.id } })).toBe(1)
       }
       const fresh = await prisma.agentRun.create({ data: { userId: f.user.id, novelId: f.novel.id, sessionId: f.session.id,
-        mode: 'act', action: 'planChapter', agentType: 'storyPlanner', status: 'paused', manuscriptRevision: 2 } })
+        mode: 'act', action: 'planChapter', agentType: 'storyPlanner', status: 'running', manuscriptRevision: 2,
+        startRequest: { prompt: '写第二章。' } } })
+      const task = await prisma.$transaction(tx => freezeWritingScope(tx, { userId: f.user.id, novelId: f.novel.id, runId: fresh.id },
+        buildTaskSpec({ runId: fresh.id, novelId: f.novel.id, prompt: '写第二章。' }), '写第二章。'))
+      await prisma.agentRun.update({ where: { id: fresh.id }, data: { taskSpec: JSON.parse(JSON.stringify(task)) } })
       await prisma.$transaction(tx => assertAgentManuscriptCurrent(tx, { userId: f.user.id, novelId: f.novel.id, runId: fresh.id }))
       const result = await chapterCreateTool.execute({ ...context, runId: fresh.id }, { title: 'Authorized next' })
       expect(result.outcome).toBeUndefined()

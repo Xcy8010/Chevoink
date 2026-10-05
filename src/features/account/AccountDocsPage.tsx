@@ -1,26 +1,30 @@
+import { useQuery } from '@tanstack/react-query'
+import { fetchPublicCreditPolicy } from './credits-api'
 import { useMemo, useState } from 'react'
 import { Search } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 
 import { cn } from '@/lib/utils'
 import AccountLayout from './AccountLayout'
-import { DOCS, DOC_GROUPS } from './docs-content'
+import { getAccountDocs, DOC_GROUPS } from './docs-content'
 
 export default function AccountDocsPage() {
+  const policy = useQuery({ queryKey: ['credits', 'public-policy'], queryFn: fetchPublicCreditPolicy, staleTime: 20_000, refetchInterval: 60_000 })
+  const docs = useMemo(() => getAccountDocs(policy.data?.publicBetaEnabled), [policy.data?.publicBetaEnabled])
   const [searchParams, setSearchParams] = useSearchParams()
   const [keyword, setKeyword] = useState('')
-  const activeDoc = DOCS.find((doc) => doc.key === searchParams.get('doc')) ?? DOCS[0]
+  const activeDoc = docs.find((doc) => doc.key === searchParams.get('doc')) ?? docs[0]
 
   const filteredDocs = useMemo(() => {
     const kw = keyword.trim().toLowerCase()
-    if (!kw) return DOCS
-    return DOCS.filter(
+    if (!kw) return docs
+    return docs.filter(
       (doc) =>
         doc.title.toLowerCase().includes(kw) ||
         doc.summary.toLowerCase().includes(kw) ||
         doc.sections.some((section) => section.heading.toLowerCase().includes(kw)),
     )
-  }, [keyword])
+  }, [keyword, docs])
 
   function selectDoc(key: string) {
     setSearchParams({ doc: key })
@@ -29,6 +33,8 @@ export default function AccountDocsPage() {
   function jumpTo(sectionId: string) {
     document.getElementById(`doc-${sectionId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
+
+  if (policy.isLoading || policy.isError) return <AccountLayout withSidebar={false}><p className="px-5 py-9 text-sm text-[var(--text-secondary)]">{policy.isError ? '暂时无法读取文档。' : '加载中…'}</p></AccountLayout>
 
   return (
     <AccountLayout withSidebar={false}>
@@ -84,7 +90,7 @@ export default function AccountDocsPage() {
                 className="h-9 w-full rounded-[10px] border border-[#e4e4e1] bg-white px-3 text-sm outline-none md:hidden dark:border-[var(--border-subtle)] dark:bg-[var(--surface-default)]"
                 aria-label="选择文档"
               >
-                {DOCS.map((doc) => (
+                {docs.map((doc) => (
                   <option key={doc.key} value={doc.key}>{doc.group} · {doc.title}</option>
                 ))}
               </select>

@@ -1281,6 +1281,8 @@ model ReferralRedemption {
 model CreditSystemSetting {
   id                  String   @id @db.VarChar(32)
   globallyPaused      Boolean  @default(false) @map("globally_paused")
+  publicBetaEnabled   Boolean  @default(true) @map("public_beta_enabled")
+  publicBetaRevision  Int      @default(0) @map("public_beta_revision")
   dailyAllowanceMilli Int      @default(450000) @map("daily_allowance_milli")
   resetHourUtc8       Int      @default(15) @map("reset_hour_utc8")
   updatedAt           DateTime @updatedAt @map("updated_at")
@@ -1333,6 +1335,7 @@ model AiModelConfig {
   enabled          Boolean  @default(true)
   selectable       Boolean  @default(true)
   isDefault        Boolean  @default(false) @map("is_default")
+  sortOrder        Int      @default(1000) @map("sort_order")
   metadata         Json?
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
@@ -1689,6 +1692,7 @@ model AgentRun {
   currentTurn        Int                    @default(0) @map("current_turn")
   usage              Json?
   taskSpec           Json?                  @map("task_spec")
+  writingBindings    Json?                  @map("writing_bindings")
   taskRootId         String?                @map("task_root_id") @db.VarChar(64)
   runtimeProtocolVersion Int                @default(0) @map("runtime_protocol_version")
   modelTier          String                 @default("speed") @map("model_tier") @db.VarChar(24)

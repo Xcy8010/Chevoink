@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
-import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
-import { assertProviderBudget, readTaskBudgetInTransaction } from './runtime-budget.js'
-import { estimateChatMessagesTokens } from './context-budget.js'
+import { withManuscriptRunLease, withRunLease, type RunLeaseToken } from './runtime-lease.js'
+import { STRUCTURE_MUTATIONS } from './runtime-common.js'
+import { prisma } from '../prisma.js'
+import { assertProviderBudget } from './runtime-budget.js'
 import { assertPendingProviderState } from './runtime-state.js'
 import { readAttemptContentionScope } from './runtime-parent-contention.js'
 
@@ -93,7 +94,13 @@ function prepareOperationWrite(token: RunLeaseToken, input: PrepareOperationInpu
 export async function commitOperationEffect(token: RunLeaseToken, operationId: string, inputHash: string,
   work: (tx: RuntimeTx) => Promise<Prisma.InputJsonValue>) {
   token = { ...token }
-  return withRunLease(token, tx => commitOperationEffectInTransaction(tx, token, operationId, inputHash, work))
+  // Only manuscript adapters acquire the novel lock before the root lease.
+  // This lookup selects lock order, not effect authority; the same TX rechecks
+  // the operation snapshot, current tool policy, owner, and lease.
+  const operation = await prisma.agentOperation.findFirst({ where: { id: operationId, taskRootId: token.taskRootId }, select: { action: true } })
+  const manuscript = operation && [...STRUCTURE_MUTATIONS, 'chapter_create', 'chapter_rename', 'chapter_write', 'chapter_append', 'chapter_edit_range',
+    'story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'chapter_bridge_commit', 'quality_analyze', 'continuity_validate', 'changeset_apply', 'changeset_rollback'].includes(operation.action)
+  return (manuscript ? withManuscriptRunLease : withRunLease)(token, tx => commitOperationEffectInTransaction(tx, token, operationId, inputHash, work))
 }
 
 /** Caller holds the same root/lease transaction for admission and effects. */
@@ -205,11 +212,7 @@ export async function markProviderDispatched(token: RunLeaseToken, attemptId: st
       const request = attempt.requestSnapshot as { request?: { body?: { max_tokens?: unknown; max_completion_tokens?: unknown } } }
       const output = request.request?.body?.max_completion_tokens ?? request.request?.body?.max_tokens
       if (typeof output !== 'number' || !Number.isSafeInteger(output) || output < 1) return runtimeError('RUNTIME_CHILD_REQUEST_BUDGET_REQUIRED', '子任务模型请求缺少可验证的输出上限。')
-      const budget = await readTaskBudgetInTransaction(tx, token.taskRootId)
-      // Conservative request estimator, not exact provider tokens. The whole
-      // child ceiling remains reserved by the parent while usage is unknown.
-      const estimatedInput = estimateChatMessagesTokens([{ role: 'user', content: JSON.stringify(attempt.requestSnapshot) }])
-      if (budget.usedTokens + BigInt(estimatedInput) + BigInt(output) > BigInt(budget.budget.tokenLimit)) return runtimeError('RUNTIME_CHILD_BUDGET_EXHAUSTED', '子任务剩余额度不足以预留本次完整请求，尚未派发供应商。')
+
     }
     await assertPendingProviderState(tx, token.taskRootId, attempt.operationId)
     const context = await (await import('./goal-fence.js')).readGoalExecution(token.userId, token.runId, tx)

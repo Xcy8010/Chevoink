@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import { env } from '../../../config/env.js'
 import { prisma } from '../../prisma.js'
+import { assertQuestionWritingScope } from '../writing-scope.js'
 import { consumeQuestionBudget, waitForQuestionAnswer } from '../permissions.js'
 import { defineTool } from './types.js'
 
@@ -74,6 +75,7 @@ export const askUserTool = defineTool({
   permission: { plan: 'allow', build: 'allow', review: 'allow' },
   readOnly: true,
   async execute(ctx, args) {
+    await prisma.$transaction(tx => assertQuestionWritingScope(tx, ctx, args.question, args.options))
     // 提问预算：超出额度直接回填，不再挂起，防止反复追问
     if (!consumeQuestionBudget(ctx.runId)) {
       return {

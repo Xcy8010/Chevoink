@@ -85,7 +85,7 @@ export function GoalEditorDialog({ open, goal, initialObjective, busy, error, de
                   <>
                     <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
                       <div><dt className="text-[var(--text-tertiary)]">状态</dt><dd className="mt-0.5 font-medium text-[var(--text-primary)]">{agentGoalPresentation(detail.goal).label}</dd></div>
-                      <div><dt className="text-[var(--text-tertiary)]">Token</dt><dd className="mt-0.5 tabular-nums text-[var(--text-primary)]">{detail.goal.tokensUsed}/{detail.goal.tokenLimit}</dd></div>
+                      <div><dt className="text-[var(--text-tertiary)]">Token</dt><dd className="mt-0.5 tabular-nums text-[var(--text-primary)]">{detail.goal.tokensUsed}{detail.goal.executionControl?.limits.tokens != null ? `/${detail.goal.executionControl.limits.tokens}` : ''}</dd></div>
                       <div><dt className="text-[var(--text-tertiary)]">Credits</dt><dd className="mt-0.5 tabular-nums text-[var(--text-primary)]">{formatCreditsMicros(detail.goal.creditsUsedMicros)}</dd></div>
                       <div><dt className="text-[var(--text-tertiary)]">原因</dt><dd className="mt-0.5 text-[var(--text-primary)]">{formatGoalReason(detail.goal.reasonCode)}</dd></div>
                     </dl>

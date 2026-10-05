@@ -73,7 +73,7 @@ export async function executeDurableStructure(ctx: ToolContext, tool: AgentTool,
     const afterHash = await getStructureRevisionHash(tx, ctx.novelId)
     return runtimeJson({ toolResult: { ...result, observedStructure: { kind: 'structure', id: ctx.novelId, hash: afterHash } },
       contentBefore, contentAfter, memoryJobIds,
-      progress: { kind: 'structure_revision', targetId: ctx.novelId, beforeHash: expectedHash, afterHash } }).value
+      progress: { kind: 'structure_revision', targetId: ctx.novelId, beforeHash: result.semanticTransition?.beforeHash, afterHash: result.semanticTransition?.afterHash } }).value
   }).catch(async error => {
     if (!(error instanceof DataAccessError) || !['STRUCTURE_TARGET_NOT_FOUND', 'STRUCTURE_REVISION_CONFLICT', 'VOLUME_REVISION_CONFLICT', 'CHAPTER_REVISION_CONFLICT',
       'AUTHOR_SCOPE_PROTECTED', 'LAST_VOLUME_REQUIRED', 'VOLUME_NOT_EMPTY', 'VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'INVALID_SPLIT_OFFSET', 'INVALID_MERGE_TARGET'].includes(error.code)) throw error

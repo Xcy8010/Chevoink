@@ -128,7 +128,7 @@ describe('plan/18 P1：信道重复检测器', () => {
   })
 })
 
-describe('plan/18 P4：检查点评估', () => {
+describe('historical checkpoint progress without effective default caps', () => {
   const baseInput = {
     todoLeft: 3,
     writeProgress: 5,
@@ -156,21 +156,21 @@ describe('plan/18 P4：检查点评估', () => {
     const readOnly = { ...baseInput, taskPending: true, todoLeft: 0, writeProgress: 0, writeBaseline: 0, readProgress: 2, readBaseline: 1 }
     expect(evaluateCheckpoint(readOnly).ok).toBe(true)
     expect(evaluateCheckpoint({ ...readOnly, readBaseline: 2 }).ok).toBe(false)
-    expect(evaluateCheckpoint({ ...readOnly, usedTokens: 500, tokenCeiling: 500 }).ok).toBe(false)
-    expect(evaluateCheckpoint({ ...readOnly, resumeCount: CHECKPOINT_MAX_RESUMES }).ok).toBe(false)
+    expect(evaluateCheckpoint({ ...readOnly, usedTokens: 500, tokenCeiling: 500 }).ok).toBe(true)
+    expect(evaluateCheckpoint({ ...readOnly, resumeCount: CHECKPOINT_MAX_RESUMES }).ok).toBe(true)
   })
 
   it('条件 b（compaction 防 loop）：区间无新写类进展不续跑', () => {
     expect(evaluateCheckpoint({ ...baseInput, writeProgress: 2, writeBaseline: 2 }).ok).toBe(false)
   })
 
-  it('条件 c：续跑与压缩次数达上限不续跑', () => {
-    expect(evaluateCheckpoint({ ...baseInput, resumeCount: CHECKPOINT_MAX_RESUMES }).ok).toBe(false)
-    expect(evaluateCheckpoint({ ...baseInput, compactionCount: CHECKPOINT_MAX_COMPACTIONS }).ok).toBe(false)
+  it('stored resume and compaction ceilings do not stop meaningful work', () => {
+    expect(evaluateCheckpoint({ ...baseInput, resumeCount: CHECKPOINT_MAX_RESUMES }).ok).toBe(true)
+    expect(evaluateCheckpoint({ ...baseInput, compactionCount: CHECKPOINT_MAX_COMPACTIONS }).ok).toBe(true)
   })
 
-  it('条件 d：墙钟长任务总帽已超不续跑', () => {
-    expect(evaluateCheckpoint({ ...baseInput, elapsedMs: 181 * 60_000 }).ok).toBe(false)
+  it('stored elapsed ceiling does not stop meaningful work', () => {
+    expect(evaluateCheckpoint({ ...baseInput, elapsedMs: 181 * 60_000 }).ok).toBe(true)
   })
 
   it('切片常量：预算片 200 万、轮次片 50', () => {
@@ -178,8 +178,8 @@ describe('plan/18 P4：检查点评估', () => {
     expect(CHECKPOINT_TURN_SLICE).toBe(50)
   })
 
-  it('达到累计硬顶时即使有进展也不能重复获得检查点', () => {
-    expect(evaluateCheckpoint({ ...baseInput, usedTokens: 5_000_000, tokenCeiling: 5_000_000 }).ok).toBe(false)
+  it('stored cumulative ceiling does not stop meaningful work', () => {
+    expect(evaluateCheckpoint({ ...baseInput, usedTokens: 5_000_000, tokenCeiling: 5_000_000 }).ok).toBe(true)
   })
 
   it('手动续跑：未命中预算/轮次边界不消耗名额', () => {
@@ -187,16 +187,16 @@ describe('plan/18 P4：检查点评估', () => {
       manualResumeCount: 0, maxManualResumes: 2 })).toBeNull()
   })
 
-  it('手动续跑：命中累计硬顶时授予一片 200 万，越过硬顶', () => {
+  it('resume preserves usage without allocating another slice', () => {
     expect(resolveManualResumeGrant({ taskTokens: 5_006_003, runTokenBudget: 5_000_000, turnsUsed: 75, maxTurns: 300,
       manualResumeCount: 0, maxManualResumes: 2 }))
-      .toEqual({ granted: true, tokenBudget: 7_006_003, maxTurns: 350, manualResumeCount: 1 })
+      .toBeNull()
   })
 
-  it('手动续跑：轮次墙同样受名额约束，名额用尽明确拒绝', () => {
+  it('resume does not enforce old default renewal counters', () => {
     expect(resolveManualResumeGrant({ taskTokens: 100, runTokenBudget: 500, turnsUsed: 300, maxTurns: 300,
       manualResumeCount: 2, maxManualResumes: 2 }))
-      .toEqual({ granted: false, reason: '手动续跑机会已用完（2/2）' })
+      .toBeNull()
   })
 })
 
@@ -224,22 +224,22 @@ describe('same-state admission and continuation', () => {
   })
 })
 
-describe('plan/18：tokenBudget clamp（预算切片化双轨）', () => {
+describe('internal token budget compatibility is storage-only', () => {
   const DEFAULT_BUDGET = 2_000_000
   const CEILING = 5_000_000
 
-  it('未显式指定：用默认 200 万', () => {
-    expect(resolveRunTokenBudget(undefined, DEFAULT_BUDGET, CEILING)).toBe(DEFAULT_BUDGET)
-    expect(resolveRunTokenBudget(null, DEFAULT_BUDGET, CEILING)).toBe(DEFAULT_BUDGET)
+  it('missing internal input uses positive storage compatibility', () => {
+    expect(resolveRunTokenBudget(undefined, DEFAULT_BUDGET, CEILING)).toBe(500)
+    expect(resolveRunTokenBudget(null, DEFAULT_BUDGET, CEILING)).toBe(500)
   })
 
-  it('显式上调：允许，但 clamp 到硬顶 500 万', () => {
-    expect(resolveRunTokenBudget(3_500_000, DEFAULT_BUDGET, CEILING)).toBe(3_500_000)
-    expect(resolveRunTokenBudget(99_999_999, DEFAULT_BUDGET, CEILING)).toBe(CEILING)
+  it('internal values cannot create human opt-in limits', () => {
+    expect(resolveRunTokenBudget(3_500_000, DEFAULT_BUDGET, CEILING)).toBe(500)
+    expect(resolveRunTokenBudget(99_999_999, DEFAULT_BUDGET, CEILING)).toBe(500)
   })
 
-  it('显式下调：允许，最低 500 防空转误杀', () => {
-    expect(resolveRunTokenBudget(800_000, DEFAULT_BUDGET, CEILING)).toBe(800_000)
+  it('small internal values are not effective limits', () => {
+    expect(resolveRunTokenBudget(800_000, DEFAULT_BUDGET, CEILING)).toBe(500)
     expect(resolveRunTokenBudget(1, DEFAULT_BUDGET, CEILING)).toBe(500)
   })
 })

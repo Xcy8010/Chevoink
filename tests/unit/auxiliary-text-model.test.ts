@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { Prisma } from '@prisma/client'
 const mocks = vi.hoisted(() => ({ complete: vi.fn(), persist: vi.fn(), report: vi.fn() }))
 vi.mock('../../api/lib/ai-service.js', () => ({ generateTextCompletion: mocks.complete }))
 vi.mock('../../api/lib/agent/humanity-quality.js', async original => ({
@@ -11,9 +12,11 @@ vi.mock('../../api/lib/agent/humanity-quality.js', async original => ({
   reserveQualityAutoRepair: vi.fn(async () => true),
 }))
 import { auxiliaryTextModel } from '../../api/lib/agent/auxiliary-text-model.js'
-import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
+import { qualityAnalyzeTool, qualityRevisionApplyTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
-import { DataAccessError } from '../../api/lib/prisma.js'
+import { DataAccessError, prisma } from '../../api/lib/prisma.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+afterEach(() => vi.restoreAllMocks())
 
 function runtime(tier: 'lite' | 'custom' | 'speed', multiplierBps = 0): NonNullable<ToolContext['modelRuntime']> {
   return { tier, multiplierBps, provider: 'fixture', modelName: 'selected-model', baseUrl: 'https://selected.invalid', apiKey: 'fixture-only',
@@ -59,21 +62,30 @@ describe('auxiliary text model inheritance', () => {
     expect(mocks.complete).toHaveBeenCalledOnce()
     expect(mocks.persist).not.toHaveBeenCalled()
   })
-  it.each(['lite', 'custom'] as const)('keeps %s through automatic repair and its bounded format retry', async tier => {
+  it.each(['lite', 'custom'] as const)('keeps %s through explicitly authorized repair and its bounded format retry', async tier => {
     const selected = runtime(tier)
+    const prompt = '修复当前章节中作者已选择的质量意见。'
+    const run = { id: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', taskRootId: null,
+      startRequest: { prompt }, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'chapter', prompt }) }
+    const tx = { agentRun: { findFirst: vi.fn(async () => run), findFirstOrThrow: vi.fn(async () => run) },
+      agentSession: { findFirst: vi.fn(async () => ({ spawnedFromRunId: null, spawnedFromSessionId: null })) },
+      agentChildExecutionGrant: { findUnique: vi.fn(async () => null) } } as unknown as Prisma.TransactionClient
+    vi.spyOn(prisma, '$transaction').mockImplementation(async work => (work as (tx: Prisma.TransactionClient) => Promise<unknown>)(tx))
     mocks.report.mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 1, repairRound: 0, status: 'needs_repair', deterministicMetrics: { independentCheck: 'complete' }, findings: [
-      { id: 'finding', signal: 'emotion_grounding', severity: 'warning', disposition: 'pending', startOffset: 0, endOffset: 6,
+      { id: 'finding', signal: 'emotion_grounding', severity: 'warning', disposition: 'selected', startOffset: 0, endOffset: 6,
         evidenceExcerpt: '她关上了门。', explanation: '提示', suggestion: '待审' },
     ] })
     mocks.complete.mockImplementation(async (_system, _content, options) => {
       if (options.modelRuntime !== selected) throw new DataAccessError(402, 'CREDITS_EXHAUSTED', 'platform credits exhausted')
       return options.action === 'agent3HumanityCritic' ? '{"findings":[]}' : 'invalid repair JSON'
     })
-    const result = await qualityAnalyzeTool.execute({ ...context(selected), creativeFreedom: 'balanced' }, {})
+    const checked = await qualityAnalyzeTool.execute({ ...context(selected), creativeFreedom: 'balanced' }, {})
+    expect(mocks.complete.mock.calls.map(call => call[2].action)).toEqual(['agent3HumanityCritic'])
+    expect(checked.snapshot).toBeUndefined()
+    const result = await qualityRevisionApplyTool.execute(context(selected), { reportId: 'report' })
     expect(mocks.complete.mock.calls.map(call => call[2].action)).toEqual(['agent3HumanityCritic', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry'])
     for (const call of mocks.complete.mock.calls) expect(call[2].modelRuntime).toBe(selected)
-    expect(result.output).toContain('正文未修改')
-    expect(result.output).toContain('同一报告不循环重试')
+    expect(result.output).toContain('正文保持不变')
     expect(result.snapshot).toBeUndefined()
   })
 })

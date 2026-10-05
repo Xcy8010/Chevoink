@@ -39,6 +39,7 @@ const configurationSchema = z.object({ version: z.literal(1), mode: z.enum(['pla
 export const executionSnapshotSchema = z.object({ version: z.literal(1), turn: count, nextOperationSequence: count,
   checkpointIndex: count, phase: z.enum(['idle', 'awaiting_operation', 'completed']), pendingOperationId: id.nullable(),
   messages: z.array(message).min(1), successfulToolSignatures: z.array(z.string()),
+  stagnation: z.object({ sourceRevision: count, payloadHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
 }).strict().refine(value => (value.phase === 'awaiting_operation') === (value.pendingOperationId !== null) && value.turn <= value.nextOperationSequence)
 
 function parseSnapshot(input: unknown) {
@@ -84,7 +85,8 @@ const readState = readExecutionStateInTransaction
 export async function assertPendingProviderState(tx: RuntimeTx, taskRootId: string, operationId: string) {
   if (!(await tx.agentExecutionState.findUnique({ where: { taskRootId }, select: { taskRootId: true } }))) return
   const current = await readState(tx, taskRootId), budget = await readTaskBudgetInTransaction(tx, taskRootId)
-  if (current.frame.state.phase !== 'awaiting_operation' || current.frame.state.turn > taskTurnLimit(budget.policy, budget.budget.checkpointCount)
+  const turnLimit = taskTurnLimit(budget.policy, budget.budget.checkpointCount)
+  if (current.frame.state.phase !== 'awaiting_operation' || turnLimit !== null && current.frame.state.turn > turnLimit
     || current.frame.state.checkpointIndex !== budget.budget.checkpointCount) runtimeError('RUNTIME_STATE_CONFLICT', '模型派发不符合已保存的执行位置或轮次合同。')
   let cursor: string | null = operationId
   for (let depth = 0; cursor && depth < 64; depth++) {
@@ -155,9 +157,11 @@ function executionStateWrite(token: RunLeaseToken, input: { expectedRevision: nu
       || after.nextOperationSequence < before.nextOperationSequence || after.nextOperationSequence > before.nextOperationSequence + 1
       || after.checkpointIndex < before.checkpointIndex || after.checkpointIndex > before.checkpointIndex + 1) runtimeError('RUNTIME_STATE_CONFLICT', '执行位置不能倒退、跳号或从已完成状态继续。')
     if (before.successfulToolSignatures.some(value => !after.successfulToolSignatures.includes(value))) runtimeError('RUNTIME_STATE_CONFLICT', '恢复不能清空已成功操作的重复保护。')
+    if (before.stagnation && !after.stagnation) return runtimeError('RUNTIME_RECEIPT_INVALID', '不能丢弃已保存的停滞判定证明。')
     const budget = await readTaskBudgetInTransaction(tx, lease.taskRootId)
     if (after.checkpointIndex !== budget.budget.checkpointCount) runtimeError('RUNTIME_STATE_CONFLICT', '快照检查点必须对应已提交预算回执。')
-    if (after.turn > taskTurnLimit(budget.policy, budget.budget.checkpointCount)) runtimeError('RUNTIME_TURN_CHECKPOINT_REQUIRED', '原轮次片已用尽，需要真实进展检查点后再继续。')
+    const turnLimit = taskTurnLimit(budget.policy, budget.budget.checkpointCount)
+    if (turnLimit !== null && after.turn > turnLimit) runtimeError('RUNTIME_TURN_CHECKPOINT_REQUIRED', '已达到当前有效轮次限制。')
     if (after.pendingOperationId) {
       const operation = await tx.agentOperation.findUnique({ where: { id: after.pendingOperationId } })
       if (!operation || operation.taskRootId !== lease.taskRootId) runtimeError('RUNTIME_SCOPE_MISMATCH', '待执行操作不属于原任务。')

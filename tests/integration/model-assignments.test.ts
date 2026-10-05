@@ -1,4 +1,10 @@
-import { randomUUID } from 'node:crypto'
+import { observeSemanticTransition, nextStagnantBatch } from '../../api/lib/agent/semantic-progress.js'
+import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
+import { advanceDurableToolStagnation } from '../../api/lib/agent/runtime-continuation.js'
+import { withRunLease } from '../../api/lib/agent/runtime-lease.js'
+import { loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { MODEL_ASSIGNMENT_TASKS } from '../../shared/contracts/agent-model-assignments.js'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { prisma } from '../../api/lib/prisma.js'
@@ -25,6 +31,9 @@ import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { preflightNovelImport, prepareNovelImport } from '../../api/lib/novel-import-service.js'
+import { ensureCreditAccount } from '../../api/lib/credits.js'
+import { setPublicBetaEnabled } from '../../api/lib/credit-policy.js'
+import type { DynamicBuiltInModelTier } from '../../shared/contracts/model-tier.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(async () => { await prisma.$disconnect() })
@@ -71,6 +80,109 @@ async function execution(f: { userId: string; novelId: string; sessionId: string
 }
 
 describe.runIf(available)('model assignments and native configuration real isolated PG', () => {
+  it.each(['legacy', 'durable'] as const)('%s counts five real role assignments and deduplicates stored noops', async protocol => fixture(async f => {
+    const roles = MODEL_ASSIGNMENT_TASKS.filter(task => ['quality', 'continuity', 'research_synthesis', 'style_learning', 'memory_graph'].includes(task.key))
+    const prompt = roles.map(task => `${task.label}用 模型B`).join('；')
+    const args = (index: number) => ({ task: roles[index % roles.length].key, model: { modelTier: 'custom' as const, customModelId: f.modelB }, scope: 'novel' as const, expectedRevision: index })
+    const durable = protocol === 'durable' ? await execution(f, prompt, modelAssignmentTool, args(0)) : null
+    const runId = durable?.runId ?? randomUUID()
+    if (!durable) {
+      const spec = buildTaskSpec({ runId, novelId: f.novelId, prompt })
+      await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
+        engine: 'loop', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running',
+        taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value, startRequest: withHumanAdmission({ sessionId: f.sessionId, novelId: f.novelId, prompt, mode: 'build', modelTier: 'custom', customModelId: f.modelA }) } })
+      await prisma.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+    }
+    const seen = new Set<string>()
+    let stagnant = 0, previousProgress = '0'
+    for (let index = 0; index < 6; index++) {
+      let result
+      if (durable) {
+        if (index) {
+          const { frame } = await loadExecutionState(f.userId, runId)
+          await saveExecutionState(durable.lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, snapshot: { ...frame.state,
+            messages: [...frame.state.messages, { role: 'assistant', content: null, toolCalls: [{ id: `assign-${index}`, name: 'model_assign', arguments: JSON.stringify(args(index)) }] }] } })
+        }
+        const step = await executeDurableToolStep(durable.lease, new AbortController().signal)
+        expect(step.kind).toBe('tool')
+        if (step.kind !== 'tool') throw new Error('Expected actual assignment')
+        result = step.result
+        const { frame } = await loadExecutionState(f.userId, runId)
+        const evidence = await withRunLease(durable.lease, tx => collectDurableToolEvidence(tx, durable.root.id, frame.revision))
+        if (index < 5) expect(evidence.progressSequence).not.toBe(previousProgress)
+        else expect(evidence.progressSequence).toBe(previousProgress)
+        previousProgress = evidence.progressSequence
+        expect(await advanceDurableToolStagnation(durable.lease)).toBeNull()
+        expect(await advanceDurableToolStagnation(durable.lease)).toBeNull()
+      } else {
+        const ctx: ToolContext = { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, runId, chapterId: null, callId: `assign-${index}`,
+          mode: 'build', creativeFreedom: 'stable', qualityMode: 'balanced', signal: new AbortController().signal, emit: vi.fn() }
+        result = await modelAssignmentTool.execute(ctx, args(index))
+      }
+      expect(result.outcome).not.toBe('failed')
+      const transition = result.semanticTransition!
+      expect(transition.targetId).toBe(`model-assignment:${f.userId}:${f.novelId}:${args(index).task}`)
+      const progressed = observeSemanticTransition(seen, transition.targetId, transition.beforeHash, transition.afterHash)
+      expect(progressed).toBe(index < 5)
+      stagnant = nextStagnantBatch(stagnant, progressed)
+      expect(stagnant).toBe(index < 5 ? 0 : 1)
+    }
+    const stored = await getModelAssignments(f.userId, f.novelId)
+    expect(stored.novel?.revision).toBe(6)
+    expect(Object.keys(stored.novel!.assignments)).toHaveLength(5)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+  }), 30000)
+
+  it('global role progress reflects the stored global selection even when a novel override masks it', async () => fixture(async f => {
+    await patchModelAssignments(f.userId, { scope: 'novel', novelId: f.novelId, expectedRevision: 0, assignments: { quality: { modelTier: 'custom', customModelId: f.modelA } } })
+    const prefs = await freezeModelAssignments(f.userId, f.novelId)
+    const exec = await execution(f, '全局质量检查用 模型B', modelAssignmentTool, { task: 'quality', model: { modelTier: 'custom', customModelId: f.modelB }, scope: 'global', expectedRevision: 0 }, prefs)
+    const step = await executeDurableToolStep(exec.lease, new AbortController().signal)
+    if (step.kind !== 'tool') throw new Error('Expected assignment')
+    expect(step.result.semanticTransition).toEqual({ targetId: `model-assignment:${f.userId}::quality`, beforeHash: runtimeJson({ selection: null }).hash,
+      afterHash: runtimeJson({ selection: { modelTier: 'custom', customModelId: f.modelB, reasoningEffort: 'high' } }).hash })
+    const state = await prisma.$transaction(tx => readExecutionStateInTransaction(tx, exec.root.id))
+    expect(state.configuration.modelAssignments?.assignments.quality?.customModelId).toBe(f.modelA)
+    expect((await getModelAssignments(f.userId)).global.assignments.quality?.customModelId).toBe(f.modelB)
+  }))
+
+  it('routes a new built-in by its author-selected name through native assignment/configuration, frozen pricing and execution while beta is stopped', async () => fixture(async f => {
+    const id = randomUUID(), adminId = randomUUID(), tier = ('builtin_' + randomBytes(8).toString('hex')) as DynamicBuiltInModelTier
+    const oldSetting = await prisma.creditSystemSetting.findUnique({ where: { id: 'global' } })
+    await prisma.user.create({ data: { id: adminId, nickname: 'dynamic-beta-fixture', passwordHash: 'test-only', role: 'admin', isSuperAdmin: true } })
+    await prisma.aiModelConfig.create({ data: { id, key: tier, tier, provider: 'openai', displayName: '动态模型', modelName: 'fixture-dynamic',
+      baseUrl: 'https://fixture.invalid/v1', apiKeyCiphertext: encryptSecret('isolated-never-used'), multiplierBps: 12500,
+      metadata: { reasoningEfforts: ['low', 'high', 'max'], defaultReasoningEffort: 'max', contextWindowTokens: 128000 } } })
+    try {
+      await ensureCreditAccount(f.userId)
+      const assign = await execution(f, '全局质量检查用 动态模型', modelAssignmentTool, { task: 'quality', model: { modelTier: tier }, scope: 'global', expectedRevision: 0 })
+      await executeDurableToolStep(assign.lease, new AbortController().signal)
+      expect((await getModelAssignments(f.userId)).effective.quality?.selection).toMatchObject({ modelTier: tier, reasoningEffort: 'max' })
+      const exec = await execution(f, '请切换到 动态模型', configureAgentTool, { model: { modelTier: tier } })
+      const prior = await preparePricedProviderOperation(exec.lease, { key: 'already-priced', action: 'workspaceAgent', request: { model: 'old' }, price: { version: 'credits-v1-exact', modelTier: 'custom', multiplierBps: 0 } })
+      const budgets = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: exec.root.id } })
+      await prisma.creditSystemSetting.update({ where: { id: 'global' }, data: { publicBetaEnabled: true, publicBetaRevision: 0 } })
+      await setPublicBetaEnabled(adminId, false, 0)
+      expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: exec.root.id } })).toEqual(budgets)
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: exec.runId } })).status).toBe('running')
+      await executeDurableToolStep(exec.lease, new AbortController().signal)
+      const state = await prisma.$transaction(tx => readExecutionStateInTransaction(tx, exec.root.id))
+      expect(state.configuration.model).toMatchObject({ tier, modelName: 'fixture-dynamic', reasoningEffort: 'max' })
+      const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response('data: {"choices":[{"delta":{"content":"任务已完成"},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":10,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":50}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
+      vi.stubGlobal('fetch', fetcher)
+      expect((await executeDurableStep(exec.lease, new AbortController().signal)).kind).toBe('model')
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'fixture-dynamic', reasoning_effort: 'max' })
+      expect((await prisma.agentOperation.findUniqueOrThrow({ where: { id: prior.id } })).inputHash).toBe(prior.inputHash)
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, modelTier: tier, deltaMilli: { lt: 0 } } })).toBe(1)
+      expect(JSON.stringify(state.configuration)).not.toContain('isolated-never-used')
+    } finally {
+      await prisma.aiModelConfig.delete({ where: { id } })
+      await prisma.adminAuditLog.deleteMany({ where: { adminId } })
+      await prisma.user.delete({ where: { id: adminId } })
+      if (oldSetting) await prisma.creditSystemSetting.update({ where: { id: 'global' }, data: oldSetting })
+    }
+  }))
   it('preserves import custom ownership403, captures the configured default and leaves unassigned imports basic without HTTP or charges', async () => fixture(async f => {
     vi.stubEnv('NOVEL_IMPORT_ENABLED', 'true')
     const foreignUserId = randomUUID(), foreignModelId = randomUUID()

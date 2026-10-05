@@ -31,6 +31,7 @@ export default function StudioMoreMenu(props: Props) {
   const creditQuery = useQuery({ queryKey: ['credits', 'summary'], queryFn: fetchCreditSummary, staleTime: 20_000, refetchInterval: 60_000 })
   const referralQuery = useQuery({ queryKey: ['credits', 'referral'], queryFn: fetchReferral, staleTime: 60_000, enabled: inviteOpen })
   const summary = creditQuery.data
+  const betaEnabled = summary?.publicBetaEnabled === true
   const remainingPercent = summary?.dailyAllowance ? Math.max(0, Math.min(100, Math.round(summary.totalRemaining / summary.dailyAllowance * 100))) : 100
 
   useEffect(() => {
@@ -78,10 +79,10 @@ export default function StudioMoreMenu(props: Props) {
         )}
       ><MoreHorizontal className="h-4 w-4" /></button>
       {open ? <div className="absolute right-0 top-[calc(100%+7px)] z-[70] w-[268px] overflow-hidden rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[0_20px_55px_rgba(15,23,42,.22)] motion-safe:origin-top-right motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(.2,.8,.2,1)]">
-        <div className="mb-1 flex items-center gap-2 rounded-[10px] bg-emerald-600 px-3 py-2.5 text-[11px] text-white shadow-[0_5px_16px_rgba(5,150,105,.18)]">
+        {betaEnabled ? <div className="mb-1 flex items-center gap-2 rounded-[10px] bg-emerald-600 px-3 py-2.5 text-[11px] text-white shadow-[0_5px_16px_rgba(5,150,105,.18)]">
           <Gift className="h-3.5 w-3.5" />
           <span className="font-medium">公测期间，每日送 450 Credits！</span>
-        </div>
+        </div> : null}
         <button type="button" onClick={() => setUsageExpanded((value) => !value)} className={cn(item, 'font-medium')}>
           <Gauge className="h-3.5 w-3.5" />
           <span className="flex-1">剩余用量</span>
@@ -94,12 +95,12 @@ export default function StudioMoreMenu(props: Props) {
               {(summary?.reserved ?? 0) > 0 && <p className="text-[10px] text-[var(--text-tertiary)]">另有 {formatCreditAmount(summary?.reserved ?? 0)} Credits 待结算预留</p>}
               <p className="mt-0.5 text-base font-semibold tabular-nums">{summary ? formatCreditAmount(summary.totalRemaining) : '—'} <span className="text-[10px] font-normal">Credits</span></p>
             </div>
-            <span className="text-[10px] text-[var(--text-tertiary)]">{remainingPercent}%</span>
+            {betaEnabled ? <span className="text-[10px] text-[var(--text-tertiary)]">{remainingPercent}%</span> : null}
           </div>
-          <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--border-subtle)]"><div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${remainingPercent}%` }} /></div>
+          {betaEnabled ? <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--border-subtle)]"><div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${remainingPercent}%` }} /></div> : null}
           <div className="mt-2 flex justify-between text-[10px] text-[var(--text-tertiary)]">
-            <span>每日 {formatCreditAmount(summary?.dailyAllowance ?? 450)} Credits</span>
-            <span>{formatCreditResetLabel(summary?.resetsAt)}</span>
+            <span>{betaEnabled ? '每日' : '基础额度'} {summary ? formatCreditAmount(summary.dailyAllowance) : '—'} Credits</span>
+            {betaEnabled ? <span>{formatCreditResetLabel(summary?.resetsAt)}</span> : null}
           </div>
           {/* 新窗口打开账户页，创作区界面原样保留，看完直接切回来 */}
           <button type="button" onClick={() => window.open('/account/usage', '_blank', 'noopener,noreferrer')} className="mt-2 text-[10px] font-medium hover:underline">查看详细记录 →</button>

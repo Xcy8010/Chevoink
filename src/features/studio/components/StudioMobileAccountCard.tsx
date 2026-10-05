@@ -22,6 +22,7 @@ export default function StudioMobileAccountCard() {
   const creditQuery = useQuery({ queryKey: ['credits', 'summary'], queryFn: fetchCreditSummary, staleTime: 20_000 })
   const referralQuery = useQuery({ queryKey: ['credits', 'referral'], queryFn: fetchReferral, staleTime: 60_000, enabled: inviteOpen })
   const summary = creditQuery.data
+  const betaEnabled = summary?.publicBetaEnabled === true
   const remainingPercent = summary?.dailyAllowance ? Math.max(0, Math.min(100, Math.round(summary.totalRemaining / summary.dailyAllowance * 100))) : 100
   const exhausted = summary ? summary.totalRemaining <= 0 : false
 
@@ -49,7 +50,7 @@ export default function StudioMobileAccountCard() {
           <p className="mt-0.5 truncate text-[11px] text-[var(--text-tertiary)]">
             {exhausted
               ? '额度已耗尽，邀请好友领取 300 Credits！'
-              : `剩余 ${summary ? formatCreditAmount(summary.totalRemaining) : '—'} Credits · ${remainingPercent}%`}
+              : `剩余 ${summary ? formatCreditAmount(summary.totalRemaining) : '—'} Credits${betaEnabled ? ` · ${remainingPercent}%` : ''}`}
           </p>
         </div>
         <button
@@ -58,11 +59,11 @@ export default function StudioMobileAccountCard() {
           className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full bg-emerald-600 px-4 text-[13px] font-medium text-white transition-opacity active:opacity-85"
         ><Gift className="h-4 w-4" />邀请</button>
       </div>
-      <div className="mt-2.5 h-1.5 overflow-hidden rounded-full bg-[var(--border-subtle)]">
+      {betaEnabled ? <div className="mt-2.5 h-1.5 overflow-hidden rounded-full bg-[var(--border-subtle)]">
         <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${remainingPercent}%` }} />
-      </div>
+      </div> : null}
       <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-[var(--text-tertiary)]">
-        <span className="truncate">每日 {formatCreditAmount(summary?.dailyAllowance ?? 450)} Credits · {formatCreditResetLabel(summary?.resetsAt)}</span>
+        <span className="truncate">{betaEnabled ? '每日' : '基础额度'} {summary ? formatCreditAmount(summary.dailyAllowance) : '—'} Credits{betaEnabled ? ` · ${formatCreditResetLabel(summary?.resetsAt)}` : ''}</span>
         {/* 新窗口打开账户页，保留创作区当前状态方便回来继续写 */}
         <button type="button" onClick={() => window.open('/account/usage', '_blank', 'noopener,noreferrer')} className="-mr-1 inline-flex min-h-[32px] shrink-0 items-center px-1 font-medium text-[var(--text-secondary)]">用量明细 →</button>
       </div>

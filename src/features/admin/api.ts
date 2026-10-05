@@ -426,3 +426,13 @@ export function listAdminConversations(input: {
 export function getAdminConversationMessages(conversationId: string): Promise<{ messages: AdminMessageRow[] }> {
   return requestJson(`/api/admin/conversations/${conversationId}/messages`)
 }
+
+export function createAdminModel(payload: Parameters<typeof updateAdminModel>[1] & { expectedOrder: string[] }): Promise<{ id: string; tier: string }> {
+  return requestJson('/api/admin/models', { method: 'POST', body: JSON.stringify(payload) })
+}
+export function reorderAdminModels(order: string[], expectedOrder: string[]): Promise<{ ok: true }> {
+  return requestJson('/api/admin/models/reorder', { method: 'POST', body: JSON.stringify({ order, expectedOrder }) })
+}
+export function setAdminPublicBeta(payload: { enabled: boolean; expectedRevision: number; captchaId: string; captchaAnswer: string; confirmation: string }): Promise<{ publicBetaEnabled: boolean; publicBetaRevision: number }> {
+  return requestJson('/api/admin/credits/public-beta', { method: 'POST', body: JSON.stringify(payload) })
+}

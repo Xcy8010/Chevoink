@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { DataAccessError } from '../../prisma.js'
 import { activeChapterScope, activeVolumeWhere } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
+import { assertWritingTarget } from '../writing-scope.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
@@ -50,6 +51,7 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
         ? await tx.chapter.findFirst({ where: { id: observed.data.id, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) } })
         : await tx.volume.findFirst({ where: { id: observed.data.id, novelId: ctx.novelId, ...activeVolumeWhere } }))
       if (!active) return runtimeError('AUTHOR_SCOPE_PROTECTED', '原创建结果已归档或不存在，不能复用旧回执或在新稿中自动重建。')
+      if (observed.success && observed.data.kind === 'chapter') await assertWritingTarget(tx, ctx, { chapterId: observed.data.id })
       return runtimeJson({ toolResult: { ...result.toolResult, summary: `复用本任务已创建${action === 'chapter_create' ? '章节' : '卷'}《${args.title.trim()}》` } }).value
     }
     const protectedIds = (await readExecutionStateInTransaction(tx, lease.taskRootId)).configuration.protectedChapterIds
@@ -74,7 +76,7 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
     return runtimeJson({ toolResult: result, memoryJobId: memoryJob?.id ?? null, ...(target.content ? { progress: { kind: 'content_revision', targetId: target.id,
       beforeHash: runtimeJson({ content: '' }).hash, afterHash: runtimeJson({ content: target.content }).hash } } : {}) }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || !['VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'AUTHOR_SCOPE_PROTECTED'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || !['VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'AUTHOR_SCOPE_PROTECTED', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: action === 'chapter_create' ? '章节创建未执行' : '卷创建未执行' })
   })
   const failed = failedToolResultSchema.safeParse(receipt.result)

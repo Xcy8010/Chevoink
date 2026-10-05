@@ -27,7 +27,8 @@ export const researchReportSaveTool = defineTool({
   execute: async (ctx, args) => {
     ctx.signal.throwIfAborted()
     const saved = await saveResearchReportSection(ctx, args)
-    return { output: JSON.stringify(saved), summary: `报告区块已保存 · ${saved.chineseCharacters} 个汉字 · r${saved.revision}` }
+    const { semanticTransition, ...response } = saved
+    return { output: JSON.stringify(response), summary: `报告区块已保存 · ${saved.chineseCharacters} 个汉字 · r${saved.revision}`, semanticTransition }
   },
 })
 

@@ -23,7 +23,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
   return runtimeTransaction(async tx => {
     const { root } = await lockRunRoot(tx, userId, runId)
     const sources = await tx.agentExecutionOutbox.findMany({ where: { taskRootId: root.id,
-      OR: [{ type: { in: ['child.admitted', 'approval.requested', 'approval.resolved', 'execution.state.saved', 'question.requested', 'import.requested', 'import.commit_requested', 'goal.activation_registered', 'configuration.changed'] } },
+      OR: [{ type: { in: ['child.admitted', 'approval.requested', 'approval.resolved', 'execution.state.saved', 'writing.delivery.projected', 'question.requested', 'import.requested', 'import.commit_requested', 'goal.activation_registered', 'configuration.changed'] } },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'completed' } },
         { type: 'run.paused', payload: { path: ['runIds'], array_contains: [runId] } }],
       projections: { none: { runId } } }, orderBy: { sequence: 'asc' }, take: limit })
@@ -32,7 +32,20 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
     const events: AgentStreamEvent[] = []
     for (const source of sources) {
       let bodies: import('../../../shared/contracts/index.js').AgentStreamEventBody[]
-      if (source.type === 'child.admitted') {
+      if (source.type === 'writing.delivery.projected') {
+        const payload = z.object({ sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(), revision: z.number().int().positive(), snapshotHash: z.string(),
+          proof: z.object({ version: z.literal(1), chapters: z.array(z.object({ id: z.string(), revision: z.number().int().positive(), contentHash: z.string() })), text: z.string() }), proofHash: z.string() }).parse(source.payload)
+        const before = await readExecutionFrame(tx, root.id, payload.sourceRevision)
+        const frame = await readExecutionFrame(tx, root.id, payload.revision)
+        const candidate = frame.state.messages.at(-1)
+        if (source.eventKey !== `writing-delivery:${root.id}:${payload.revision}` || payload.revision !== payload.sourceRevision + 1
+          || before.snapshotHash !== payload.sourceHash || frame.snapshotHash !== payload.snapshotHash
+          || runtimeJson(payload.proof).hash !== payload.proofHash || candidate?.role !== 'assistant' || candidate.toolCalls?.length
+          || candidate.content !== payload.proof.text || frame.state.messages.length !== before.state.messages.length + 1
+          || runtimeJson(frame.state.messages.slice(0, -1)).hash !== runtimeJson(before.state.messages).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '正文交付投影与原章节版本证据不一致。')
+        const messageId = `wd-${runtimeJson({ rootId: root.id, revision: payload.revision }).hash.slice(0, 48)}`
+        bodies = [{ type: 'message.start', messageId, role: 'assistant' }, { type: 'text.final', messageId, text: payload.proof.text, asReasoning: false }]
+      } else if (source.type === 'child.admitted') {
         const payload = z.object({ version: z.literal(1), grantId: z.string(), childRunId: z.string(), sessionId: z.string(), kind: z.enum(['inline', 'spawned']),
           index: z.number().int().nonnegative(), snapshotHash: z.string(), tokenCeiling: z.number().int().positive() }).strict().parse(source.payload)
         const grant = await tx.agentChildExecutionGrant.findUnique({ where: { id: payload.grantId }, include: { childRun: true, parentOperation: true } })

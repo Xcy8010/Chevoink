@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 const db = vi.hoisted(() => ({
-  novel: { findFirst: vi.fn() }, agentRun: { findFirst: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn() },
+  novel: { findFirst: vi.fn() }, agentRun: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), findUniqueOrThrow: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn() },
+  agentSession: { findFirst: vi.fn() }, agentChildExecutionGrant: { findUnique: vi.fn() }, agentMessage: { findFirst: vi.fn() }, chapterQualityReport: { findFirst: vi.fn() },
   storyCompilation: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() },
   chapterBridge: { findFirst: vi.fn(), update: vi.fn() }, sceneTask: { updateMany: vi.fn() }, agentGoalExecution: { findUnique: vi.fn() },
   storyCharter: { findFirst: vi.fn() }, readerPromise: { findMany: vi.fn() }, projectMemoryEntry: { findMany: vi.fn() }, $transaction: vi.fn(), $queryRaw: vi.fn(),
 }))
 vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<typeof import('../../api/lib/prisma.js')>(), prisma: db }))
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { buildStoryCompilerDigest, commitChapterBridge, compilationRunScope, prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
@@ -16,14 +18,21 @@ import { hasCommittedTaskChapter } from '../../api/lib/agent/humanity-quality.js
 import { chapterBridgeCommitTool, chapterBridgeGetTool, continuityValidateTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 
 const ctx = { userId: 'u', novelId: 'n', runId: 'new-run', sessionId: 'session', chapterId: 'old31', callId: 'call', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: vi.fn() } as ToolContext
-const spec = (prompt: string) => buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, chapterId: ctx.chapterId, prompt, mode: 'build' })
+const spec = (prompt: string) => {
+  const result = buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, chapterId: ctx.chapterId, prompt, mode: 'build' })
+  return { ...result, scope: { ...result.scope, writing: { version: 1 as const, kind: 'bounded' as const,
+    targets: [{ orderIndex: prompt.includes('下一章') ? 32 : 31, chapterId: prompt.includes('下一章') ? null : 'old31' }], titleAndBodyOnly: false, repairAuthorized: prompt.includes('修改') } } }
+}
 beforeEach(() => {
   vi.resetAllMocks()
   db.$transaction.mockImplementation(fn => fn(db)); db.$queryRaw.mockResolvedValue([{ id: 'n' }])
   db.novel.findFirst.mockResolvedValue({ id: 'n', chapterCount: 31 })
   db.agentGoalExecution.findUnique.mockResolvedValue(null)
-  db.agentRun.findFirst.mockResolvedValue({ createdAt: new Date('2026-09-20T03:22:41Z'), runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: spec('写下一章') })
-  db.chapter.findFirst.mockImplementation(async ({ where }) => where.id ? { id: where.id, title: '原章节', orderIndex: where.id === 'old31' ? 31 : 32, revision: 3, content: '已保存正文' } : where.orderIndex?.lt ? null : { orderIndex: 31 })
+  db.agentSession.findFirst.mockResolvedValue(null); db.agentChildExecutionGrant.findUnique.mockResolvedValue(null); db.agentMessage.findFirst.mockResolvedValue(null); db.chapterQualityReport.findFirst.mockResolvedValue(null)
+  db.agentRun.findFirst.mockResolvedValue({ id: 'new-run', userId: 'u', novelId: 'n', status: 'running', startRequest: { prompt: '写下一章' }, createdAt: new Date('2026-09-20T03:22:41Z'), runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: spec('写下一章') })
+  db.agentRun.findFirstOrThrow.mockImplementation(query => db.agentRun.findFirst(query))
+  db.agentRun.findUniqueOrThrow.mockImplementation(query => db.agentRun.findFirst(query))
+  db.chapter.findFirst.mockImplementation(async ({ where }) => where.id ? { id: where.id, title: '原章节', orderIndex: where.id === 'old31' ? 31 : 32, revision: 3, content: '已保存正文' } : where.orderIndex?.lt || where.orderIndex === 32 ? null : { id: 'old31', orderIndex: 31 })
   db.chapter.findMany.mockResolvedValue([]); db.storyCompilation.findFirst.mockResolvedValue(null); db.storyCompilation.findMany.mockResolvedValue([])
   db.storyCompilation.updateMany.mockResolvedValue({ count: 0 })
   db.storyCompilation.create.mockImplementation(async ({ data }) => ({ id: 'created', ...data, bridge: data.bridge.create }))
@@ -70,12 +79,18 @@ describe('story compiler task identity', () => {
     expect(db.storyCompilation.findFirst).not.toHaveBeenCalled()
   })
   it('acknowledges a newer committed compiler instead of choosing the older active compiler', async () => {
-    db.storyCompilation.findMany.mockResolvedValue([
-      { id: 'new-completed', status: 'completed', chapter: { id: 'own32', revision: 4 }, bridge: { targetRevision: 4 } },
-      { id: 'old-active', status: 'active', chapter: { id: 'own32', revision: 4 }, bridge: { targetRevision: 3 } },
-    ])
+    const task = spec('写下一章')
+    const ownedRun = { id: 'new-run', userId: 'u', novelId: 'n', status: 'running', manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 0 },
+      runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', startRequest: { prompt: '写下一章' }, taskSpec: task,
+      writingBindings: { version: 1, taskId: task.id, targets: [{ orderIndex: 32, chapterId: 'own32' }] } }
+    db.agentRun.findFirst.mockResolvedValue(ownedRun)
+    const terminal = { id: 'new-completed', chapterId: 'own32', status: 'completed', stage: 'commit', sceneTasks: [], preparedContext: { terminalContentHash: runtimeJson({ content: '已保存正文' }).hash },
+      chapter: { id: 'own32', title: '原章节', content: '已保存正文', revision: 3, orderIndex: 32 },
+      bridge: { targetRevision: 3, committedAt: new Date(), fromChapterId: null, recentOpenings: [], recentEndings: [] } }
+    db.storyCompilation.findMany.mockResolvedValue([terminal, { ...terminal, id: 'old-active', status: 'active' }])
+    db.storyCompilation.findFirst.mockResolvedValue(terminal)
     const result = await chapterBridgeCommitTool.execute(ctx, {})
-    expect(result.summary).toBe('章节终态已提交')
+    expect(result.summary).toBe('提交章节桥与当前故事终态')
     expect(result.display).toMatchObject({ compilationId: 'new-completed' })
     expect(db.storyCompilation.findMany.mock.calls[0][0].orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
     expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
@@ -140,15 +155,17 @@ describe('story compiler task identity', () => {
     expect(db.storyCompilation.create.mock.calls[0][0].data.chapterId).toBeUndefined()
   })
   it('rejects an explicit old chapter target from the next-chapter task without writes', async () => {
-    await expect(prepareStoryCompilation({ userId: 'u', novelId: 'n', runId: 'new-run', chapterId: 'old31', mode: 'balanced', intentSummary: '恢复旧章' })).rejects.toMatchObject({ code: 'STORY_TASK_TARGET_MISMATCH' })
+    await expect(prepareStoryCompilation({ userId: 'u', novelId: 'n', runId: 'new-run', chapterId: 'old31', mode: 'balanced', intentSummary: '恢复旧章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
     expect(db.storyCompilation.create).not.toHaveBeenCalled()
     expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
   })
   it('keeps explicit author revision requests and same-contract continuation legal', async () => {
-    db.agentRun.findFirst.mockResolvedValue({ createdAt: new Date('2026-09-20T03:22:41Z'), runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: spec('修改当前章节') })
+    db.agentRun.findFirst.mockResolvedValue({ id: 'new-run', userId: 'u', novelId: 'n', status: 'running', startRequest: { prompt: '修改当前章节' }, createdAt: new Date('2026-09-20T03:22:41Z'), runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: spec('修改当前章节') })
     await storyCompilerPrepareTool.execute(ctx, { intentSummary: '修改当前章节' })
     expect(db.storyCompilation.create.mock.calls[0][0].data).toMatchObject({ chapterId: 'old31', targetOrderIndex: 31 })
-    db.agentRun.findFirst.mockResolvedValue({ createdAt: new Date('2026-09-20T03:22:41Z'), runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: spec('写下一章') })
+    const nextSpec = spec('写下一章')
+    db.agentRun.findFirst.mockResolvedValue({ id: 'new-run', userId: 'u', novelId: 'n', status: 'running', startRequest: { prompt: '写下一章' }, createdAt: new Date('2026-09-20T03:22:41Z'), runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: nextSpec,
+      writingBindings: { version: 1, taskId: nextSpec.id, targets: [{ orderIndex: 32, chapterId: 'own32' }] } })
     db.storyCompilation.findFirst.mockResolvedValue({ id: 'own', chapterId: 'own32', targetOrderIndex: 32 })
     await storyCompilerPrepareTool.execute(ctx, { intentSummary: '完成本任务' })
     expect(db.storyCompilation.create.mock.calls[1][0].data).toMatchObject({ chapterId: 'own32', targetOrderIndex: 32 })

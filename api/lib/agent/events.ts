@@ -106,16 +106,17 @@ export class RunEventBus {
   /** State and terminal journal entry share one transaction. Publication stays
    * with the caller so existing post-run housekeeping retains its ordering. */
   async commitTerminal<T>(body: Extract<AgentStreamEventBody, { type: 'run.finished' | 'run.paused' }>,
-    work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<{ result: T; publish: () => void }> {
+    work: (tx: Prisma.TransactionClient) => Promise<T>,
+    preceding: Array<Extract<AgentStreamEventBody, { type: 'message.start' | 'text.final' }>> = []): Promise<{ result: T; publish: () => void }> {
     if (this.closed || this.committingTerminal) throw new Error(`事件总线已关闭：${this.runId}`)
     this.committingTerminal = true
     try {
       await this.flush()
-      if (this.seq >= 2147483647) throw new Error('事件序号已达上限，不能回绕')
-      const event: AgentStreamEvent = { ...structuredClone(body), runId: this.runId, seq: ++this.seq, ts: new Date().toISOString() }
+      if (this.seq + preceding.length >= 2147483647) throw new Error('事件序号已达上限，不能回绕')
+      const events: AgentStreamEvent[] = [...preceding, body].map(item => ({ ...structuredClone(item), runId: this.runId, seq: ++this.seq, ts: new Date().toISOString() }))
       const transaction = prisma.$transaction(async tx => {
         const value = await work(tx)
-        await tx.agentRunEvent.create({ data: { runId: this.runId, seq: event.seq, type: event.type, payload: event as object } })
+        for (const event of events) await tx.agentRunEvent.create({ data: { runId: this.runId, seq: event.seq, type: event.type, payload: event as object } })
         return value
       })
       this.terminalWrite = transaction
@@ -127,8 +128,8 @@ export class RunEventBus {
         this.committingTerminal = false
         this.closed = true
         this.previews.clear()
-        this.history.push(event)
-        for (const listener of this.listeners) {
+        this.history.push(...events)
+        for (const event of events) for (const listener of this.listeners) {
           try { listener(event) } catch { /* A disconnected listener cannot undo the commit. */ }
         }
       } }

@@ -20,6 +20,7 @@ import { normalizeBeatCandidates } from '../../api/lib/agent/story-compiler.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
+import { qualityRevisionApplyTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 
 describe('严谨创作落实连续性警告', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -52,16 +53,15 @@ describe('严谨创作落实连续性警告', () => {
     const ctx: ToolContext = { userId: 'u', novelId: 'n', runId: 'r', sessionId: 's', callId: 'check', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
     return { ctx, chapter, compilation, validation, qualityReport, reserve, critic, repair, write, findCompilation }
   }
-  it.each([false, true])('0错误3警告执行一次集中修订，缓存=%s', async cached => {
+  it.each([false, true])('0错误3警告仅保存检查意见并复用，不自动修订，缓存=%s', async cached => {
     const f = fixture(cached)
-    expect(await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })).toMatchObject({ summary: '连续性检查 · 自动修订 1 处' })
+    expect(await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })).toMatchObject({ display: { errorCount: 0, warningCount: 3 } })
     expect(f.critic).toHaveBeenCalledTimes(cached ? 0 : 1)
-    expect(f.repair).toHaveBeenCalledOnce()
-    expect(f.repair.mock.calls[0][1]).toContain('[warning/body]')
-    expect(f.write).toHaveBeenCalledOnce()
-    expect(f.write.mock.calls[0][0].data.content).toBe('新文')
+    expect(f.repair).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+    expect(f.chapter).toMatchObject({ content: '原文', revision: 1 })
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
-    expect(f.repair).toHaveBeenCalledOnce()
+    expect(f.repair).not.toHaveBeenCalled()
   })
   it('chapter-only CHECK uses the verified writing compiler and persists exact coverage, including a reused post-quality report', async () => {
     const f = fixture(true)
@@ -138,17 +138,51 @@ describe('严谨创作落实连续性警告', () => {
     const action = continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     if (scenario === 'cancelled') await expect(action).rejects.toBeDefined()
     else await action
-    expect(f.write).toHaveBeenCalledTimes(scenario === 'checked-quality' ? 1 : 0)
-    expect(f.repair).toHaveBeenCalledTimes(['checked-quality', 'unsafe'].includes(scenario) ? 1 : 0)
+    expect(f.write).not.toHaveBeenCalled()
+    expect(f.repair).not.toHaveBeenCalled()
+    expect(f.chapter).toMatchObject({ content: '原文', revision: 1 })
   })
-  it.each(['quality', 'continuity'] as const)('提交前不能跳过尚未尝试的 %s 修订', async family => {
+  it.each(['quality', 'continuity'] as const)('未修订的可选 %s 警告不强制增加正文工作', async family => {
     const f = fixture(true)
     vi.mocked(flags.isAgent2FeatureEnabled).mockReturnValue(true)
     f.qualityReport.mockResolvedValue({ id: 'q', chapterRevision: 1, repairRound: 0, status: 'passed', deterministicMetrics: { independentCheck: 'complete' },
       findings: family === 'quality' ? [{ severity: 'advisory', startOffset: 0, endOffset: 2 }] : [] } as unknown as Awaited<ReturnType<typeof quality.getLatestQualityReport>>)
-    const commit = vi.spyOn(compiler, 'commitChapterBridge')
-    expect(await chapterBridgeCommitTool.execute(f.ctx, { compilationId: 'comp' })).toMatchObject({ outcome: 'failed', summary: family === 'quality' ? '等待质量建议处理' : '等待连续性警告处理' })
-    expect(commit).not.toHaveBeenCalled()
+    const commit = vi.spyOn(compiler, 'commitChapterBridge').mockResolvedValue({ compilationId: 'comp', chapterId: 'c', chapterRevision: 1, skippedMemoryCount: 0 })
+    expect(await chapterBridgeCommitTool.execute(f.ctx, { compilationId: 'comp' })).toMatchObject({ summary: '提交章节桥与当前故事终态' })
+    expect(commit).toHaveBeenCalledOnce()
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it.each(['protected', 'cancelled', 'stale-revision', 'repair-limit', 'duplicate-patch', 'no-author-grant'] as const)('显式质量修订保留 %s 边界及正文', async scenario => {
+    const f = fixture(false)
+    const prompt = scenario === 'no-author-grant' ? '只检查当前章节，不要改写正文。' : '修复当前章节中已选择的质量问题。'
+    const run = { id: 'r', userId: 'u', novelId: 'n', sessionId: 's', taskRootId: null, startRequest: { prompt },
+      taskSpec: buildTaskSpec({ runId: 'r', novelId: 'n', chapterId: 'c', prompt }) }
+    const sourceTx = { agentRun: { findFirst: vi.fn(async () => run), findFirstOrThrow: vi.fn(async () => run) },
+      agentSession: { findFirst: vi.fn(async () => ({ spawnedFromRunId: null, spawnedFromSessionId: null })) },
+      agentChildExecutionGrant: { findUnique: vi.fn(async () => null) } } as unknown as Prisma.TransactionClient
+    vi.mocked(prisma.$transaction).mockImplementation(async work => Array.isArray(work)
+      ? Promise.all(work) : (work as (tx: Prisma.TransactionClient) => Promise<unknown>)(sourceTx))
+    const chapter = { ...f.chapter, revision: scenario === 'stale-revision' ? 2 : 1 }
+    const report = { id: 'q', chapterId: 'c', chapterRevision: 1, chapter, repairRound: scenario === 'repair-limit' ? 1 : 0,
+      findings: [{ id: 'finding', signal: 'emotion_grounding', disposition: 'selected', severity: 'warning', startOffset: 0, endOffset: 2,
+        evidenceHash: createHash('sha256').update('原文').digest('hex'), evidenceExcerpt: '原文', explanation: '说明', suggestion: '局部修订' }] }
+    vi.spyOn(prisma.chapterQualityReport, 'findFirst').mockImplementation(async args => args?.where?.id === 'q'
+      && args.where.userId === 'u' && args.where.novelId === 'n' ? report as never : null)
+    vi.spyOn(prisma.qualityFinding, 'updateMany').mockResolvedValue({ count: 1 })
+    f.repair.mockResolvedValue(JSON.stringify({ patches: scenario === 'duplicate-patch'
+      ? [{ findingId: 'finding', replacement: '新文' }, { findingId: 'finding', replacement: '另一新文' }]
+      : [{ findingId: 'finding', replacement: '新文' }] }))
+    if (scenario === 'protected') f.ctx.protectedChapterIds = new Set(['c'])
+    if (scenario === 'cancelled') f.ctx.signal = AbortSignal.abort()
+    const work = qualityRevisionApplyTool.execute(f.ctx, { reportId: 'q' })
+    if (scenario === 'cancelled') await expect(work).rejects.toBeDefined()
+    else if (scenario === 'stale-revision') await expect(work).rejects.toMatchObject({ code: 'QUALITY_REPORT_STALE' })
+    else if (scenario === 'repair-limit') await expect(work).rejects.toMatchObject({ code: 'QUALITY_REPAIR_LIMIT' })
+    else if (scenario === 'no-author-grant') await expect(work).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+    else await work
+    expect(f.write).not.toHaveBeenCalled()
+    expect(chapter.content).toBe('原文')
+    expect(f.repair).toHaveBeenCalledTimes(scenario === 'duplicate-patch' ? 2 : ['protected', 'no-author-grant'].includes(scenario) ? 0 : 1)
   })
 })
 
@@ -173,11 +207,11 @@ describe('Agent 3.0 Story Compiler 契约', () => {
     expect(result.success).toBe(false)
     if (!result.success) expect(result.error.issues[0].message).toContain('原生 tasks 数组')
   })
-  it('严谨规则落实警告与建议但不授权只读或保护章写入', () => {
+  it('严谨规则保留可选只读检查及原始修复授权边界', () => {
     const text = renderTaskSpec(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '写下一章', creativeFreedom: 'balanced' }))
-    expect(text).toContain('连续性错误与警告、人类感质量警告与建议都要落实')
-    expect(text).toContain('各做一次集中修订')
-    expect(text).toContain('独立只读审阅及受保护正文不因严谨模式获得写权限')
+    expect(text).toContain('连续性与质量检查可选且只读')
+    expect(text).toContain('警告和审美建议保留待审，不自动改正文')
+    expect(text).toContain('真实当前版本的事实错误按原请求明确修复授权处理或交作者决定')
     expect(continuityReviewTail(null, 1, true)).toContain('错误与警告')
     expect(continuityReviewTail(null, 1, false)).toContain('不改写正文')
   })

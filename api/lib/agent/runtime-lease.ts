@@ -2,6 +2,7 @@ import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeTransaction, 
 import { assertRunGoalFence } from './goal-fence.js'
 import { adoptChildGrants, assertChildParentFence, type ChildParentFence } from './runtime-child.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 
 export type RunLeaseToken = { userId: string; runId: string; taskRootId: string; ownerId: string; claimId: string; epoch: bigint; parent?: ChildParentFence }
 const MAX_EPOCH = 9_223_372_036_854_775_807n
@@ -62,6 +63,21 @@ export async function withRunLease<T>(token: RunLeaseToken, work: (tx: RuntimeTx
   const captured = { ...token }
   const contentionScope = await readParentContentionScope(captured.userId, captured.runId, true)
   return runtimeTransaction(tx => withRunLeaseInTransaction(tx, captured, work), { contentionBackoff: Boolean(captured.parent), contentionScope, deadline: contentionScope?.deadline })
+}
+
+/** Manuscript adapters order domain locks before parent/run/root locks. The
+ * preliminary owned identity is read again by the lease fence in this TX. */
+export async function withManuscriptRunLease<T>(token: RunLeaseToken, work: (tx: RuntimeTx) => Promise<T>): Promise<T> {
+  const captured = { ...token }
+  const contentionScope = await readParentContentionScope(captured.userId, captured.runId, true)
+  return runtimeTransaction(async tx => {
+    const run = await tx.agentRun.findFirst({ where: { id: captured.runId, userId: captured.userId, taskRootId: captured.taskRootId }, select: { novelId: true } })
+    if (!run) return runtimeError('RUNTIME_SCOPE_MISMATCH', '作品执行身份无法核实。')
+    await lockNovelActiveScope(tx, run.novelId)
+    const { lockWritingRunLineage } = await import('./writing-scope.js')
+    await lockWritingRunLineage(tx, { userId: captured.userId, novelId: run.novelId, runId: captured.runId })
+    return withRunLeaseInTransaction(tx, captured, work)
+  }, { contentionBackoff: Boolean(captured.parent), contentionScope, deadline: contentionScope?.deadline })
 }
 
 /** Allows a dedicated adapter to acquire user/manuscript/session/goal first.

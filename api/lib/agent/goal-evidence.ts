@@ -137,17 +137,21 @@ export async function inspectGoalEvidence(tx: GoalEvidenceTx, goal: AgentGoal) {
   ]
   const hasResearch = reports.some(report => report.chineseCharacters >= requirements.minimumResearchCharacters)
   const authorReviewOutput = executions.filter(row => row.trigger !== 'subagent' && row.run.outputSummary?.trim())
-    .map(row => ({ runId: row.runId, hash: runtimeJson({ content: row.run.outputSummary }).hash }))
+    .map(row => ({ hash: runtimeJson({ content: row.run.outputSummary }).hash }))
   const hasDeliverable = (requirements.chapter && chapters.length >= requirements.requiredChapterCount)
     || (requirements.plan && plans.length > 0) || (requirements.research && hasResearch)
     || (requirements.importJob && imports.some(job => job.status === 'succeeded' && Boolean(job.commit))) || (requirements.cover && Boolean(facts.coverAssetId))
     || (!requirements.chapter && !requirements.plan && !requirements.research && !requirements.importJob && !requirements.cover && authorReviewOutput.length > 0)
-  const chapterProgress = [...new Map(compilations.flatMap(row => row.chapter ? [[row.chapter.id, { id: row.chapter.id, revision: row.chapter.revision,
-    hash: runtimeJson({ content: row.chapter.content }).hash, stage: row.stage, committed: completedCompilationIds.has(row.id) }] as const] : [])).values()]
+  const chapterProgress = [...new Map(compilations.flatMap(row => row.chapter ? [[row.chapter.id, { id: row.chapter.id,
+    hash: runtimeJson({ content: row.chapter.content }).hash, committed: chapters.some(chapter => chapter.id === row.chapter!.id) }] as const] : [])).values()]
     .sort((left, right) => left.id.localeCompare(right.id))
-  const progress = { requirements, chapters: chapterProgress,
-    plans: facts.plans, reports: facts.reports, imports: facts.imports.filter(row => row.commitId !== null), coverAssetId: facts.coverAssetId,
-    ...(!requirements.chapter && !requirements.plan && !requirements.research && !requirements.importJob && !requirements.cover ? { authorReviewOutput } : {}) }
+  const hashes = (values: Array<{ contentHash: string }>) => [...new Set(values.map(value => value.contentHash))].sort()
+  const progress = { requirements, chapters: requirements.chapter ? chapterProgress : [],
+    plans: requirements.plan ? hashes(facts.plans) : [], reports: requirements.research ? hashes(facts.reports) : [],
+    imports: requirements.importJob ? facts.imports.filter(row => row.commitId !== null).map(row => ({ id: row.id, committed: true })) : [],
+    coverAssetId: requirements.cover ? facts.coverAssetId : null,
+    ...(!requirements.chapter && !requirements.plan && !requirements.research && !requirements.importJob && !requirements.cover
+      ? { authorReviewOutput: [...new Set(authorReviewOutput.map(output => output.hash))].sort() } : {}) }
   return { objective: revision.objective, facts, requirements, progressHash: runtimeJson(progress).hash,
     needsScopeDecision, hasDeliverable, blockers,
     childrenExecuting: activeChildren.some(row => row.run.status === 'queued' || row.run.status === 'running') }
@@ -155,10 +159,11 @@ export async function inspectGoalEvidence(tx: GoalEvidenceTx, goal: AgentGoal) {
 
 /** Count the same persisted blocker across rounds, not localized model explanations. */
 export function nextGoalProgress(previous: { progressHash: string | null; blockFingerprint: string | null; blockCount: number },
-  progressHash: string, blockerCodes: string[]) {
+  progressHash: string, blockerCodes: string[], seenProgressHashes: string[] = []) {
   const fingerprint = runtimeJson([...new Set(blockerCodes.length ? blockerCodes : ['NO_VERIFIED_PROGRESS'])].sort()).hash
   // Hashes contain persisted domain output, not model narration/todo wording.
   // Three rounds with the same blocker AND no actual progress trip the fuse.
-  const count = previous.blockFingerprint === fingerprint && previous.progressHash === progressHash ? previous.blockCount + 1 : 1
+  const repeated = previous.progressHash === progressHash || seenProgressHashes.includes(progressHash)
+  const count = repeated ? previous.blockCount + 1 : 1
   return { progressHash, blockFingerprint: fingerprint, blockCount: count, blocked: count >= 3 }
 }

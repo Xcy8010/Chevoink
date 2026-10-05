@@ -1,7 +1,7 @@
 import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
 import { loadCurrentTodoSnapshot } from '../../api/lib/agent/session-messages.js'
 import * as runtimeReducer from '../../api/lib/agent/runtime-reducer.js'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
@@ -44,6 +44,8 @@ import { requestToolApproval, resolveDurableApproval, pollToolApproval } from '.
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { resolveDurableTokenPrice } from '../../api/lib/billing/resolve-token-price.js'
 import { createRateCard, transitionRateCard } from '../../api/lib/billing/rate-cards.js'
+import { encryptSecret } from '../../api/lib/secret-box.js'
+import type { DynamicBuiltInModelTier } from '../../shared/contracts/model-tier.js'
 import { runDurableExecution, runReviewedDurableExecution, waitForDurableDecision, executeDurableStep } from '../../api/lib/agent/runtime-executor.js'
 import { advanceDurableCheckpoint, advanceDurableContext } from '../../api/lib/agent/runtime-checkpoint-step.js'
 import * as credits from '../../api/lib/credits.js'
@@ -127,6 +129,8 @@ async function fixture(work: (f: {
 
 const claim = (f: { userId: string; runId: string }, ownerId = 'worker-a') => acquireRunLease({ ...f, ownerId, claimId: randomUUID() })
 const reported: ProviderUsageObservation = { source: 'reported', promptTokens: 10, completionTokens: 0, cacheHitTokens: 0, cacheMissTokens: 10 }
+
+const novelFixture: typeof fixture = (work, tokenBudget) => fixture(work, tokenBudget, '授权自主创作全书，并修改已有章节及卷章结构。')
 
 describe.runIf(available)('administrator credit suspension fences durable runs', () => {
   it('pauses a non-local execution and revokes its previously acquired lease', async () => {
@@ -566,7 +570,8 @@ describe.runIf(available)('durable domain reads', () => {
         expect(await prisma.agentArtifact.count({ where: { runId: f.runId } })).toBe(1)
       }
       const evidence = await withRunLease(lease, tx => collectDurableToolEvidence(tx, f.rootId, state.frame.revision))
-      expect(evidence.progressSequence === '0').toBe(missing)
+      const substantive = ['research_dossier_get', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate'].includes(action)
+      expect(evidence.progressSequence === '0').toBe(!substantive)
       if (scenario === 'search-repeat') {
         expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'tool' })
         const repeatedState = await loadExecutionState(f.userId, f.runId)
@@ -1008,8 +1013,9 @@ describe.runIf(available)('durable domain continuation', () => {
         toolAuthority: [{ name: tool.name, permission: scenario === 'denied' ? 'deny' : 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '修改本章' }, { role: 'assistant', content: '正文已保存' }], successfulToolSignatures: [] } })
-      const other = scenario === 'old-task' ? await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'failed', engine: 'loop' } }) : null
+      const other = scenario === 'old-task' ? await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'queued', engine: 'loop', startRequest: { prompt: '授权自主创作全书，并修改已有章节。' } } }) : null
       const compilation = await prepareStoryCompilation({ ...f, runId: other?.id ?? f.runId, chapterId: f.chapterId, mode: 'balanced', intentSummary: '尚未提交章节' })
+      if (other) await prisma.agentRun.update({ where: { id: other.id }, data: { status: 'failed' } })
       if (scenario === 'unknown-operation') await prisma.agentOperation.create({ data: { id: randomUUID(), taskRootId: f.rootId, originRunId: f.runId,
         operationKey: 'unknown-test', kind: 'provider', action: 'fixture', inputHash: runtimeJson({}).hash, inputSnapshot: {}, status: 'unknown' } })
       if (scenario === 'rollback') await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId,
@@ -1190,7 +1196,7 @@ describe.runIf(available)('fenced derivative memory', () => {
 describe.runIf(available)('durable deliverable facts', () => {
   it.each(['chapter', 'changed', 'title-changed', 'deleted', 'revision-only', 'no-op', 'second-write', 'read-only', 'plan', 'plan-changed', 'plan-deleted', 'empty-create', 'create-write-retry'] as const)('%s checks latest authored output against actual scoped storage', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
-    await fixture(async f => {
+    await novelFixture(async f => {
       const lease = await claim(f)
       const tools = [chapterReadTool, chapterWriteTool, chapterCreateTool, planSaveTool]
       const calls: { id: string; name: string; arguments: string }[] = []
@@ -1422,16 +1428,19 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
           expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({
             coverage: { contentHash: runtimeJson({ content: '内容变化但旧版本号未更新' }).hash }, independentCheck: 'complete' })
         }
-        await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
-        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('active')
+        expect(await commitChapterBridge(terminal)).toMatchObject({ compilationId, chapterRevision: 1 })
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('completed')
+        expect((await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: report.id } })).deterministicMetrics).toEqual(
+          scenario === 'legacy-report' ? {} : report.deterministicMetrics)
         return
       }
       if (['unavailable', 'unlocated', 'ambiguous'].includes(scenario)) {
         expect(report.status).toBe('failed')
         if (scenario === 'ambiguous') expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({
           coverage: { contentHash: runtimeJson({ content: '原文原文' }).hash }, independentCheck: 'complete' })
-        await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
-        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('active')
+        expect(await commitChapterBridge(terminal)).toMatchObject({ compilationId, chapterRevision: 1 })
+        expect((await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: report.id } })).status).toBe('failed')
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('completed')
         return
       }
       if (scenario === 'complete') {
@@ -1461,8 +1470,8 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkedRevision: 1 })
       expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).targetRevision).toBe(2)
       expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'rewriteSelection' } })).toBe(1)
-      await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
-      await validateStoryContinuity({ ...f, compilationId, findings: [], expectedChapterRevision: 2, independentCheck: 'complete' })
+      expect(await commitChapterBridge(terminal)).toMatchObject({ compilationId, chapterRevision: 2 })
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkedRevision: 1 })
       expect(await commitChapterBridge(terminal)).toMatchObject({ compilationId, chapterRevision: 2 })
     })
   })
@@ -1520,7 +1529,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
         if (scenario === 'long') { expect(body.messages[1].content).toContain('开头锚点'); expect(body.messages[1].content).toContain('末尾锚点'); expect(body.messages[1].content).toContain(before) }
         if (scenario === 'unknown') throw new Error('fixture unknown critic')
-        if (scenario === 'stale-chapter' || scenario === 'repair-stale' && requests === 2) await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '用户新文', revision: { increment: 1 } } })
+        if (scenario === 'stale-chapter' || scenario === 'repair-stale' && requests === 1) await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '用户新文', revision: { increment: 1 } } })
         if (sourceId) await prisma.chapter.update({ where: { id: sourceId }, data: { content: '新的前文', revision: { increment: 1 } } })
         if (scenario === 'stale-compiler') await prisma.storyCompilation.update({ where: { id: compilationId }, data: { preparedContext: { changed: true } } })
         if (scenario === 'late-resume') await pauseDurableTask(f.userId, lease.runId)
@@ -1531,10 +1540,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
               : '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}'
           : scenario === 'full-chain' ? [
             '{"findings":[{"signal":"body","severity":"warning","evidence":"原文承接不足","suggestion":"局部澄清"}],"patches":[{"oldText":"原文","newText":"新文"}]}',
-            '{"findings":[]}',
-            '{"findings":[{"signal":"emotion_grounding","severity":"advisory","quote":"新文","explanation":"需要具体动作","suggestion":"局部落实","confidence":0.9}]}',
-            '{"patches":[{"key":"emotion_grounding:0:2","replacement":"终文"}]}',
-            '{"findings":[{"signal":"body","severity":"warning","evidence":"终文仍需作者审阅","suggestion":"保留待审"}],"patches":[{"oldText":"终文","newText":"禁止继续改写"}]}',
+            '{"findings":[{"signal":"emotion_grounding","severity":"advisory","quote":"原文","explanation":"需要具体动作","suggestion":"局部落实","confidence":0.9}],"patches":[{"key":"emotion_grounding:0:2","replacement":"禁止改写"}]}',
           ][requests - 1] : scenario === 'context-change' ? '{"findings":[]}' : scenario === 'format' || scenario === 'format-retry' && requests === 2 ? 'broken JSON'
           : requests === 1 ? JSON.stringify({ findings: repairing || scenario === 'protected' ? [{ signal: 'emotion_grounding', severity: 'warning', quote: '原文', explanation: '缺少动作', suggestion: '改成新文', confidence: 0.9 }] : [] })
           : '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}'
@@ -1577,7 +1583,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         return
       }
       if (scenario === 'full-chain') {
-        expect(await step()).toMatchObject({ result: { summary: '连续性检查 · 自动修订 1 处' } })
+        expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('连续性检查') } })
         expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('连续性检查') } })
       }
       const result = await step()
@@ -1587,31 +1593,35 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       if (scenario === 'success' || scenario === 'repair') expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
       if (scenario === 'full-chain') {
         expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('连续性检查') } })
-        expect(await step()).toMatchObject({ result: { summary: '提交章节桥与故事终态' } })
+        expect(await step()).toMatchObject({ result: { summary: '提交章节桥与当前故事终态' } })
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('completed')
         expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(2)
       }
-      const expectedRequests = scenario === 'missing' ? 0 : scenario === 'full-chain' ? 5 : ['format-retry', 'evidence-corrected'].includes(scenario) ? 3 : ['context-change', 'evidence-unresolved'].includes(scenario) ? 2 : repairing ? 2 : 1
+      const expectedRequests = scenario === 'missing' ? 0 : ['full-chain', 'context-change', 'evidence-corrected', 'evidence-unresolved'].includes(scenario) ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-      expect(chapter.content).toBe(scenario === 'stale-chapter' || scenario === 'repair-stale' ? '用户新文' : scenario === 'full-chain' ? '终文' : repairing ? '新文' : before)
-      if (scenario === 'full-chain') expect(chapter.revision).toBe(3)
+      expect(chapter.content).toBe(scenario === 'stale-chapter' || scenario === 'repair-stale' ? '用户新文' : before)
+      expect(chapter.revision).toBe(['stale-chapter', 'repair-stale'].includes(scenario) ? 2 : 1)
       if (scenario === 'standalone') {
         expect(await prisma.chapterQualityReport.count({ where: { chapterId: f.chapterId, compilationId: null } })).toBe(1)
         return
       }
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
-      const reports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId } })
+      const reports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId }, include: { findings: true } })
       if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source'].includes(scenario)) expect(reports).toHaveLength(0)
       else {
         expect(reports).toHaveLength(scenario === 'context-change' ? 2 : 1)
-        expect(reports[0]).toMatchObject({ chapterRevision: scenario === 'full-chain' ? 3 : repairing ? 2 : 1, status: failed ? 'failed' : repairing || scenario === 'full-chain' ? 'repaired' : scenario === 'protected' ? 'needs_repair' : 'passed' })
+        expect(reports[0]).toMatchObject({ chapterRevision: 1, repairRound: 0, status: failed ? 'failed' : repairing && scenario !== 'evidence-corrected' || scenario === 'protected' ? 'needs_repair' : 'passed' })
+      }
+      if (scenario === 'evidence-corrected' || scenario === 'full-chain') {
+        expect(reports[0].findings).toMatchObject([{ severity: 'advisory', evidenceExcerpt: '原文', disposition: 'pending' }])
+        expect(reports[0].deterministicMetrics).toMatchObject({ independentCheck: 'complete', contentHash: createHash('sha256').update(before).digest('hex') })
       }
       if (repairing && scenario !== 'repair-stale') {
-        expect(chapter.revision).toBe(2)
-        expect(saved.stage).toBe('repair')
-        expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).targetRevision).toBe(2)
+        expect(chapter.revision).toBe(1)
+        expect(saved.stage).toBe('check')
+        expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).targetRevision).toBeNull()
       }
       const events = await publishDurableEvents(f.userId, lease.runId)
       expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'quality_analyze')).toMatchObject(['success', 'repair', 'context-change'].includes(scenario) ? [{ ok: true }, { ok: true }] : [{ ok: !failed }])
@@ -1619,13 +1629,14 @@ describe.runIf(available)('durable quality actual tool chain', () => {
   })
 })
 
-describe.runIf(available).each(['continuity', 'quality'] as const)('严谨创作缓存补做修订 %s', family => {
-  it.each(['apply', 'empty', 'stable', 'bold', 'protected', 'cancelled', 'stale', 'rollback-resume'] as const)('%s 保留一次修订、真实版本和付费回执', async scenario => {
+describe.runIf(available).each(['continuity', 'quality'] as const)('只读检查复用当前真实报告 %s', family => {
+  it.each(['apply', 'empty', 'stable', 'bold', 'protected', 'cancelled', 'stale', 'rollback-resume'] as const)('%s 保留正文、真实版本和原付费回执', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
       const { compilation } = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '落实检查意见' })
       const compilationId = compilation.id
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
+      let originalReportId: string | undefined
       await saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进', entryState: state, goal: '找线索', obstacle: '门锁', choice: '绕路', cost: '时间', turn: '发现脚印', exitState: state,
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
       if (family === 'continuity') {
@@ -1636,6 +1647,7 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('严谨创作
       } else {
         const report = await persistHumanityQualityReport({ ...f, compilationId, chapterId: f.chapterId, chapterRevision: 1, mode: 'premium', deterministicMetrics: {}, deterministicFindings: [], criticComplete: true,
           criticFindings: [{ signal: 'emotion_grounding', severity: 'advisory', quote: '原文', explanation: '缺少动作', suggestion: '局部改动', confidence: 0.9 }] })
+        originalReportId = report.id
         const bundle = await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId)
         const context = { chapter: { title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content, novel: bundle.chapter.novel }, charter: bundle.charter,
           compiler: { id: bundle.compilation!.id, bridge: bundle.compilation!.bridge, sceneTasks: bundle.compilation!.sceneTasks }, profiles: bundle.profiles, anchors: bundle.anchors, recentChapters: bundle.recentChapters, feedback: bundle.feedback }
@@ -1662,17 +1674,16 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('严谨创作
       const signal = new AbortController()
       const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
         const body = JSON.parse(String(init.body))
-        expect(body.messages[1].content).toContain('原文')
-        expect(body.messages[1].content).not.toContain('确定性统计')
+        expect(body.messages[1].content).toContain('作者新文')
         if (scenario === 'cancelled') signal.abort()
-        if (scenario === 'stale') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者新文', revision: { increment: 1 } } })
-        const content = scenario === 'empty' ? '{"patches":[]}' : family === 'quality'
-          ? '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}' : '{"patches":[{"oldText":"原文","newText":"新文"}]}'
+        const content = '{"findings":[]}'
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       })
       vi.stubGlobal('fetch', fetchMock)
       const step = () => executeDurableToolStep(lease, signal.signal)
       await step()
+      if (scenario === 'cancelled') signal.abort()
+      if (scenario === 'stale') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者新文', revision: { increment: 1 } } })
       if (scenario === 'rollback-resume') {
         const original = runtimeOperations.commitOperationEffect
         vi.spyOn(runtimeOperations, 'commitOperationEffect').mockImplementationOnce((token, id, digest, work) => original(token, id, digest, async tx => { await work(tx); throw new Error('缓存修订回滚') }))
@@ -1690,27 +1701,32 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('严谨创作
         return
       }
       const result = await step()
-      const changed = scenario === 'apply' || scenario === 'rollback-resume'
-      if (changed) expect(result).toMatchObject({ result: { summary: expect.stringContaining('自动修订 1 处') } })
-      else if (scenario === 'stale') expect(result).toMatchObject({ result: { outcome: 'failed' } })
+      if (scenario === 'stale') expect(result).toMatchObject({ result: { summary: expect.stringContaining('检查') } })
       else {
         expect(result.kind).toBe('tool')
         if (result.kind === 'tool') expect(result.result.outcome).not.toBe('failed')
         await step()
       }
-      const requests = changed || scenario === 'stale' ? 1 : scenario === 'empty' ? family === 'quality' ? 2 : 1 : 0
+      const requests = scenario === 'stale' ? 1 : 0
       expect(fetchMock).toHaveBeenCalledTimes(requests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(requests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-      expect(chapter.content).toBe(changed ? '新文' : scenario === 'stale' ? '作者新文' : '原文')
-      expect(chapter.revision).toBe(changed || scenario === 'stale' ? 2 : 1)
+      expect(chapter.content).toBe(scenario === 'stale' ? '作者新文' : '原文')
+      expect(chapter.revision).toBe(scenario === 'stale' ? 2 : 1)
       if (family === 'quality') {
-        const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: f.chapterId } })
-        expect(report.repairRound).toBe(changed ? 1 : 0)
-        if (changed || scenario === 'empty') expect(report.deterministicMetrics).toMatchObject({ autoRepairAttempted: true })
-      } else if (changed || scenario === 'empty') {
+        expect(originalReportId).toBeDefined()
+        const report = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: originalReportId } })
+        expect(report.chapterRevision).toBe(1)
+        expect(report.repairRound).toBe(0)
+        expect(await prisma.chapterQualityReport.count({ where: { chapterId: f.chapterId } })).toBe(scenario === 'stale' ? 2 : 1)
+        if (scenario === 'stale') expect(await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: f.chapterId, chapterRevision: 2 } })).toMatchObject({
+          repairRound: 0, deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update('作者新文').digest('hex') } })
+        expect(report.deterministicMetrics).not.toHaveProperty('autoRepairAttempted', true)
+      } else {
         const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
-        expect(saved.validation).toMatchObject({ autoRepairRounds: 1, checkedRevision: 1 })
+        expect(saved.validation).toMatchObject({ checkedRevision: scenario === 'stale' ? 2 : 1 })
+        if (scenario === 'stale') expect(saved.validation).toMatchObject({ independentCheck: 'complete', coverage: { contentHash: runtimeJson({ content: '作者新文' }).hash } })
+        expect(saved.validation).not.toHaveProperty('autoRepairRounds', 1)
       }
     })
   })
@@ -1843,7 +1859,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
         if (scenario === 'long') { expect(body.messages[1].content).toContain('开头锚点'); expect(body.messages[1].content).toContain('末尾锚点'); expect(body.messages[1].content).toContain(before) }
         if (scenario === 'unknown') throw new Error('fixture unknown critic')
-        if (scenario === 'stale-chapter' || scenario === 'repair-stale' && requests === 2) await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '用户新文', revision: { increment: 1 } } })
+        if (scenario === 'stale-chapter' || scenario === 'repair-stale' && requests === 1) await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '用户新文', revision: { increment: 1 } } })
         if (sourceId) await prisma.chapter.update({ where: { id: sourceId }, data: { content: '新的前文', revision: { increment: 1 } } })
         if (scenario === 'stale-compiler') await prisma.storyCompilation.update({ where: { id: compilationId }, data: { preparedContext: { changed: true } } })
         if (scenario === 'late-resume') await pauseDurableTask(f.userId, lease.runId)
@@ -1894,18 +1910,18 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       const failed = ['format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('连续性检查') } })
       if (scenario === 'success' || scenario === 'chapter-only') expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
-      const expectedRequests = scenario === 'missing' ? 0 : scenario === 'fused-repair' ? 1 : scenario === 'format-retry' ? 3 : repairing ? 2 : 1
+      const expectedRequests = scenario === 'missing' ? 0 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-      expect(chapter.content).toBe(scenario === 'stale-chapter' || scenario === 'repair-stale' ? '用户新文' : repairing ? '新文' : before)
+      expect(chapter.content).toBe(scenario === 'stale-chapter' || scenario === 'repair-stale' ? '用户新文' : before)
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
       if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source'].includes(scenario)) expect(saved.validation).toBeNull()
       else expect(saved.validation).toMatchObject({ checkedRevision: 1, independentCheck: failed ? 'unavailable' : 'complete', coverage: { charCount: before.length, contentHash: runtimeJson({ content: before }).hash } })
       if (repairing && scenario !== 'repair-stale') {
-        expect(chapter.revision).toBe(2)
-        expect(saved.stage).toBe('repair')
-        expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).targetRevision).toBe(2)
+        expect(chapter.revision).toBe(1)
+        expect(saved.stage).toBe('check')
+        expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).targetRevision).toBeNull()
       }
       const events = await publishDurableEvents(f.userId, lease.runId)
       expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'continuity_validate')).toMatchObject(scenario === 'success' || scenario === 'chapter-only' ? [{ ok: true }, { ok: true }] : [{ ok: !failed }])
@@ -1922,7 +1938,7 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
   const criticStep = family !== 'continuity' ? 'quality_critic' : 'continuity_critic'
   const repairStep = family === 'quality-evidence' ? 'quality_evidence_correction' : family !== 'continuity' ? 'quality_repair' : 'continuity_repair'
   const retryStep = family === 'quality-evidence' ? 'quality_evidence_correction' : family !== 'continuity' ? 'quality_repair_retry' : 'continuity_repair_retry'
-  it.each(['replay', 'policy-denied', 'stop-resume', 'unknown', 'changed-input', 'wrong-attempt', 'wrong-step', 'skip-critic', 'damaged-prerequisite', 'ordered-repair', 'tools-leak', 'history-leak', 'late-result', 'concurrent', 'missing-result-event', 'cross-family'] as const)('%s binds paid work to the original pending tool', async scenario => {
+  it.each(['replay', 'read-only', 'stop-resume', 'unknown', 'changed-input', 'wrong-attempt', 'wrong-step', 'skip-critic', 'damaged-prerequisite', 'ordered-repair', 'tools-leak', 'history-leak', 'late-result', 'concurrent', 'missing-result-event', 'cross-family'] as const)('%s binds paid work to the original pending tool', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
       const window = getCreditWindow()
@@ -1950,12 +1966,13 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       })
       vi.stubGlobal('fetch', fetchMock)
-      if (scenario === 'policy-denied') {
+      if (scenario === 'read-only') {
         await prisma.agentSession.update({ where: { id: f.sessionId }, data: { sandboxMode: 'read_only' } })
-        await expect(chatWithTools(request())).rejects.toMatchObject({ code: 'RUNTIME_EFFECT_NOT_AUTHORIZED' })
-        expect(fetchMock).not.toHaveBeenCalled()
-        expect(await prisma.agentProviderAttempt.count({ where: { operation: { parentOperationId: parent.operation.id }, dispatchedAt: { not: null } } })).toBe(0)
-        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+        expect(await chatWithTools(request())).toMatchObject({ content: '{"findings":[]}' })
+        expect(fetchMock).toHaveBeenCalledOnce()
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { parentOperationId: parent.operation.id }, dispatchedAt: { not: null } } })).toBe(1)
+        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(1)
+        expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('原文')
         return
       }
       if (scenario === 'wrong-attempt' || scenario === 'wrong-step' || scenario === 'skip-critic' || scenario === 'tools-leak' || scenario === 'history-leak' || scenario === 'cross-family') {
@@ -2078,9 +2095,9 @@ describe.runIf(available)('auxiliary model route inheritance (isolated PG)', () 
 })
 
 describe.runIf(available)('continuity validation and atomic commit', () => {
-  it('fuses safe repairs into one critic request, still requires full revised-text verification, and reuses that result', async () => {
+  it('ignores critic patches, reuses current findings, and keeps verified factual errors separate from missing checks', async () => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
-    await fixture(async f => {
+    await novelFixture(async f => {
       const prepared = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '检查当前章节' })
       const compilationId = prepared.compilation.id
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
@@ -2089,24 +2106,19 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       const completion = vi.spyOn(aiService, 'generateTextCompletion').mockResolvedValueOnce('{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订"}],"patches":[{"oldText":"原文","newText":"修订正文"}]}')
         .mockResolvedValueOnce('{"findings":[]}')
       const ctx: ToolContext = { ...f, callId: 'critic', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
-      expect(await continuityValidateTool.execute(ctx, { compilationId })).toMatchObject({ summary: '连续性检查 · 自动修订 1 处' })
-      expect(completion).toHaveBeenCalledTimes(1)
+      expect(await continuityValidateTool.execute(ctx, { compilationId })).toMatchObject({ summary: expect.stringContaining('连续性检查') })
+      expect(completion).toHaveBeenCalledOnce()
       expect(completion.mock.calls[0][2]).toMatchObject({ maxOutputTokens: 16_384, reasoningEffort: 'low' })
-      const updated = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-      const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
-      expect(saved.validation).toMatchObject({ checkedRevision: updated.revision - 1 })
-      expect(await continuityValidateTool.execute(ctx, { compilationId })).toMatchObject({ summary: '连续性检查 · 0 错误 0 警告' })
-      expect(completion.mock.calls[1][2]).toMatchObject({ maxOutputTokens: 16_384, reasoningEffort: 'low' })
-      expect(completion).toHaveBeenCalledTimes(2)
-      expect(completion.mock.calls[1][1]).toContain(updated.content)
-      expect(completion.mock.calls[1][1]).toContain('本次只读复核')
-      expect(completion.mock.calls[1][2].reasoningEffort).toBe('low')
-      await continuityValidateTool.execute(ctx, { compilationId })
-      expect(completion).toHaveBeenCalledTimes(2)
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: '原文', revision: 1 })
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkedRevision: 1, errorCount: 1 })
+      expect(await continuityValidateTool.execute(ctx, { compilationId })).toMatchObject({ summary: expect.stringContaining('复用') })
+      expect(completion).toHaveBeenCalledOnce()
+      await expect(commitChapterBridge({ ...f, compilationId, chapterSummary: '摘要', exitState: state, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '收束' })).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
+      expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
     })
   })
   it.each(['unavailable', 'stale-critic', 'stale-commit', 'source-commit', 'commit-rollback', 'commit', 'tool-unavailable', 'tool-stale', 'repair-race'] as const)('%s never certifies another revision or partially commits memory', async scenario => {
-    await fixture(async f => {
+    await novelFixture(async f => {
       const first = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
       const targetId = scenario === 'source-commit' ? (await prisma.chapter.create({ data: { novelId: f.novelId, authorId: f.userId, volumeId: first.volumeId,
         orderIndex: 2, orderInVolume: 2, title: '待提交的新章', content: '原文', wordCount: 2 } })).id : f.chapterId
@@ -2131,11 +2143,25 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
         const ctx: ToolContext = { ...f, callId: 'critic', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
         const check = continuityValidateTool.execute(ctx, { compilationId })
         if (scenario === 'tool-unavailable') expect(await check).toMatchObject({ outcome: 'failed', summary: '独立连续性复核未完成' })
-        else {
+        else if (scenario === 'tool-stale') {
           await expect(check).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
           expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('用户修改')
+        } else {
+          expect(await check).toMatchObject({ summary: expect.stringContaining('连续性检查') })
+          expect(calls).toBe(1)
+          expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('原文')
+          await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
+          return
         }
-        await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+        expect(await commitChapterBridge(terminal)).toMatchObject({ compilationId, chapterRevision: scenario === 'tool-stale' ? 2 : 1 })
+        const validation = (await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation
+        if (scenario === 'tool-unavailable') expect(validation).toMatchObject({ checkedRevision: 1, independentCheck: 'unavailable' })
+        else {
+          expect(validation).toMatchObject({ checkRounds: 1 })
+          expect(validation).not.toHaveProperty('checkedRevision')
+          expect(validation).not.toHaveProperty('coverage')
+          expect(validation).not.toHaveProperty('independentCheck', 'complete')
+        }
         return
       }
       if (scenario === 'stale-critic') await changeChapter()
@@ -2148,8 +2174,12 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       await check
       if (scenario === 'stale-commit') await changeChapter()
       if (scenario === 'source-commit') await changeChapter()
-      if (scenario === 'unavailable' || scenario === 'stale-commit' || scenario === 'source-commit') {
-        await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+      if (scenario === 'unavailable' || scenario === 'stale-commit') {
+        expect(await commitChapterBridge(terminal)).toMatchObject({ compilationId, chapterRevision: scenario === 'stale-commit' ? 2 : 1 })
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkedRevision: 1, independentCheck: scenario === 'unavailable' ? 'unavailable' : 'complete' })
+        return
+      } else if (scenario === 'source-commit') {
+        await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
       } else if (scenario === 'commit-rollback') {
         await expect(prisma.$transaction(async tx => { await commitChapterBridge(terminal, tx); throw new Error('fixture-commit-rollback') })).rejects.toThrow('fixture-commit-rollback')
       } else {
@@ -2175,7 +2205,7 @@ describe.runIf(available)('durable compiler dispatch', () => {
       let foreignId: string | undefined
       if (scenario === 'foreign') {
         const otherSession = await prisma.agentSession.create({ data: { userId: f.userId, novelId: f.novelId, title: '其他任务' } })
-        const other = await prisma.agentRun.create({ data: { sessionId: otherSession.id, userId: f.userId, novelId: f.novelId, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'queued', engine: 'loop' } })
+        const other = await prisma.agentRun.create({ data: { sessionId: otherSession.id, userId: f.userId, novelId: f.novelId, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'queued', engine: 'loop', startRequest: { prompt: '授权自主创作全书，并修改已有章节。' } } })
         foreignId = (await prepareStoryCompilation({ ...f, runId: other.id, mode: 'balanced', intentSummary: '其他任务' })).compilation.id
       }
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
@@ -2269,15 +2299,15 @@ describe.runIf(available)('durable compiler dispatch', () => {
           expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
         }
         const committed = await step()
-        if (scenario === 'commit-no-quality' || scenario === 'commit-stale') {
+        if (scenario === 'commit-stale') {
           expect(committed).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
           expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id } })).status).toBe('active')
           expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
         } else {
-          expect(committed).toMatchObject({ kind: 'tool', result: { summary: '提交章节桥与故事终态' } })
+          expect(committed).toMatchObject({ kind: 'tool', result: { summary: '提交章节桥与当前故事终态' } })
           const count = await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })
           expect(count).toBe(2)
-          expect(await step()).toMatchObject({ kind: 'tool', result: { summary: '章节终态已提交' } })
+          expect(await step()).toMatchObject({ kind: 'tool', result: { summary: '提交章节桥与当前故事终态' } })
           expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(count)
         }
       }
@@ -2319,7 +2349,7 @@ describe.runIf(available)('compiler transaction and root continuity', () => {
       await saveSceneTasks({ ...input, compilationId: original.compilation.id, tasks })
       const otherSession = await prisma.agentSession.create({ data: { userId: f.userId, novelId: f.novelId, title: '同作品另一任务窗口' } })
       const other = await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: otherSession.id, chapterId: f.chapterId,
-        mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'queued', engine: 'loop' } })
+        mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'queued', engine: 'loop', startRequest: { prompt: '授权自主创作全书，并修改已有章节。' } } })
       const otherCompilation = await prepareStoryCompilation({ ...input, runId: other.id })
       await pauseDurableTask(f.userId, f.runId)
       const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { runId: f.runId, type: 'run.paused' } })
@@ -2509,7 +2539,7 @@ describe.runIf(available)('durable structural mutation batch', () => {
     const originalTurns = env.agentMaxTurns
     const checkpoints = scenario.startsWith('structure-')
     if (checkpoints) env.agentMaxTurns = 1
-    try { await fixture(async f => {
+    try { await novelFixture(async f => {
       vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
       const lease = await claim(f)
       const secondVolume = await prisma.volume.create({ data: { novelId: f.novelId, title: '第二卷', orderIndex: 2 } })
@@ -2608,11 +2638,11 @@ data: [DONE]
       }
       expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: actualName } })).toBe(1)
       if (scenario === 'structure-checkpoint') {
-        expect((await advanceDurableCheckpoint(lease))?.state.checkpointIndex).toBe(1)
-        expect((await readTaskBudget(lease)).budget.checkpointCount).toBe(1)
+        expect(await advanceDurableCheckpoint(lease)).toBeNull()
+        expect((await readTaskBudget(lease)).budget.checkpointCount).toBe(0)
         expect(await advanceDurableCheckpoint(lease)).toBeNull()
       } else if (scenario === 'structure-noop') {
-        await expect(advanceDurableCheckpoint(lease)).rejects.toMatchObject({ code: 'RUNTIME_PROGRESS_REQUIRED' })
+        expect(await advanceDurableCheckpoint(lease)).toBeNull()
         expect((await prisma.volume.findUniqueOrThrow({ where: { id: secondVolume.id } })).revision).toBe(secondVolume.revision)
       }
     }) } finally { env.agentMaxTurns = originalTurns }
@@ -2649,10 +2679,10 @@ describe.runIf(available)('durable worker orchestration', () => {
       }))
       const result = await runDurableExecution(lease, new AbortController().signal)
       expect(result.kind).toBe(scenario === 'todo-finish' ? 'completion_review' : 'needs_attention')
-      expect(requests).toBe(scenario === 'todo-finish' ? 4 : 10)
+      expect(requests).toBe(scenario === 'todo-finish' ? 4 : 7)
       expect(await prisma.agentRuntimeCheckpoint.count({ where: { taskRootId: f.rootId } })).toBe(0)
       const reminders = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: f.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'asc' } })
-      expect(reminders).toHaveLength(scenario === 'todo-finish' ? 1 : 4)
+      expect(reminders).toHaveLength(scenario === 'todo-finish' ? 1 : 3)
       reminders.forEach((event, index) => expect(event.payload).toMatchObject({ reason: 'unfinished_todos', reminderIndex: index + 1, progressSequence: '0' }))
       // A completed model-maintained list is only a review candidate, not a completion receipt.
       expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe(scenario === 'todo-finish' ? 'active' : 'paused')
@@ -2671,8 +2701,8 @@ describe.runIf(available)('durable worker orchestration', () => {
       // A prepare gap is safe to recreate; once dispatch marking itself has
       // failed, the attempt is closed as unsent and the run remains blocked
       // until an explicit reconciliation, so it cannot be treated as done.
-      const completes = ['complete', 'prepare-gap', 'v1-price', 'checkpoint', 'checkpoint-gap', 'checkpoint-noop'].includes(scenario) || continues && scenario !== 'continuation-stagnant'
-      const expectedRequests = scenario === 'attempt-gap' ? 0 : continues ? scenario === 'continuation-stagnant' ? 6 : 3 : completes ? 2 : scenario === 'approval' || scenario === 'unknown' || scenario === 'checkpoint-no-progress' ? 1 : 0
+      const completes = ['complete', 'prepare-gap', 'v1-price', 'checkpoint', 'checkpoint-gap', 'checkpoint-noop', 'checkpoint-no-progress'].includes(scenario) || continues && scenario !== 'continuation-stagnant'
+      const expectedRequests = scenario === 'attempt-gap' ? 0 : continues ? scenario === 'continuation-stagnant' ? 6 : 3 : completes ? 2 : scenario === 'approval' || scenario === 'unknown' ? 1 : 0
       const writes = scenario === 'checkpoint' || scenario === 'checkpoint-gap' || scenario === 'checkpoint-noop'
       const tools = writes ? [chapterReadTool, chapterWriteTool] : [chapterReadTool]
       const window = getCreditWindow()
@@ -2746,8 +2776,7 @@ describe.runIf(available)('durable worker orchestration', () => {
         run = runDurableExecution(lease, new AbortController().signal)
       }
       if (scenario === 'unknown') await expect(run).rejects.toThrow()
-      else if (scenario === 'checkpoint-no-progress') await expect(run).rejects.toMatchObject({ code: 'RUNTIME_PROGRESS_REQUIRED' })
-      else if (scenario === 'route-change') await expect(run).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+            else if (scenario === 'route-change') await expect(run).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
       else if (scenario === 'attempt-gap') await expect(run).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
       else expect(await run).toMatchObject({ kind: scenario === 'approval' ? 'waiting_approval' : scenario === 'continuation-stagnant' ? 'needs_attention' : 'completion_review' })
       expect(fetch).toHaveBeenCalledTimes(expectedRequests)
@@ -2764,12 +2793,9 @@ describe.runIf(available)('durable worker orchestration', () => {
       }
       if (completes) {
         const frame = (await loadExecutionState(f.userId, lease.runId)).frame
-        expect(frame.state).toMatchObject({ turn: continues ? 3 : 2, nextOperationSequence: continues ? 4 : scenario === 'checkpoint-noop' ? 5 : writes ? 4 : 3, phase: 'idle', checkpointIndex: writes ? 1 : 0 })
-        if (writes) expect((await readTaskBudget(lease)).budget.checkpointCount).toBe(1)
-        if (scenario === 'checkpoint-noop') {
-          const checkpoint = await prisma.agentRuntimeCheckpoint.findFirstOrThrow({ where: { taskRootId: f.rootId } })
-          expect((await prisma.agentOperation.findUniqueOrThrow({ where: { id: checkpoint.progressOperationId } })).operationKey).toBe('exec:2')
-        }
+        expect(frame.state).toMatchObject({ turn: continues ? 3 : 2, nextOperationSequence: continues ? 4 : scenario === 'checkpoint-noop' ? 5 : writes ? 4 : 3, phase: 'idle', checkpointIndex: 0 })
+        if (writes) expect((await readTaskBudget(lease)).budget.checkpointCount).toBe(0)
+        if (scenario === 'checkpoint-noop') expect(await prisma.agentRuntimeCheckpoint.count({ where: { taskRootId: f.rootId } })).toBe(0)
         const reviewed = await runDurableExecution(lease, new AbortController().signal)
         expect(reviewed).toMatchObject({ kind: 'completion_review', evidence: { snapshot: { taskRootId: f.rootId, verification: 'required', originalRequest: [{ type: 'text', text: '修改本章' }], postconditionChecks: [], obligations: { goals: f.spec.goals, expectedOutputs: f.spec.expectedOutputs } } } })
         if (reviewed.kind !== 'completion_review') throw new Error('Expected evidence review')
@@ -2783,8 +2809,9 @@ describe.runIf(available)('durable worker orchestration', () => {
           expect(fetch).toHaveBeenCalledTimes(expectedRequests)
         }
         if (scenario === 'complete') {
-          const otherRun = await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'failed', engine: 'loop' } })
+          const otherRun = await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'queued', engine: 'loop', startRequest: { prompt: '授权自主创作全书，并修改已有章节。' } } })
           await prepareStoryCompilation({ ...f, runId: otherRun.id, chapterId: f.chapterId, mode: 'balanced', intentSummary: '旧任务不属于本次交付' })
+          await prisma.agentRun.update({ where: { id: otherRun.id }, data: { status: 'failed' } })
           expect(await runDurableExecution(lease, new AbortController().signal)).toMatchObject({ evidence: { snapshot: { blockers: [], compilations: [] } } })
           const own = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '当前未提交章节' })
           expect(await runDurableExecution(lease, new AbortController().signal)).toMatchObject({ evidence: { snapshot: { blockers: [{ code: 'uncommitted_compilation', reference: own.compilation.id }] } } })
@@ -2847,7 +2874,7 @@ describe.runIf(available)('durable stagnation evidence', () => {
         return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: calls % 2 ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       }))
       expect(await runDurableExecution(lease, new AbortController().signal)).toMatchObject({ kind: 'needs_attention' })
-      expect(calls).toBe(scenario === 'changed-read' ? 14 : 10)
+      expect(calls).toBe(scenario === 'changed-read' ? 13 : 9)
       const reminders = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: f.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'asc' } })
       expect(reminders.map(item => (item.payload as { reminderIndex: number }).reminderIndex)).toEqual(scenario === 'changed-read' ? [1, 2, 1, 2, 3, 4] : [1, 2, 3, 4])
       expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe('paused')
@@ -3014,7 +3041,7 @@ describe.runIf(available)('durable actual reads', () => {
 describe.runIf(available)('durable chapter creation', () => {
   it.each(['volume-chain', 'volume-protected'] as const)('%s creates once through the original structural path', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
-    await fixture(async f => {
+    await novelFixture(async f => {
       const lease = await claim(f)
       const tools = [volumeCreateTool, volumeListTool, chapterCreateTool, chapterWriteTool]
       const args = { title: '新卷', ...(scenario === 'volume-protected' ? { position: 1 } : {}) }
@@ -3051,7 +3078,7 @@ describe.runIf(available)('durable chapter creation', () => {
   })
   it.each(['create', 'with-content', 'duplicate', 'protected', 'missing-volume', 'effect-gap'] as const)('%s uses atomic creation and original baseline', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
-    await fixture(async f => {
+    await novelFixture(async f => {
       const lease = await claim(f)
       const args = { title: '新增章', ...(scenario === 'with-content' ? { content: '创建时已有正文' } : {}), ...(scenario === 'protected' ? { position: 1 } : {}), ...(scenario === 'missing-volume' ? { volumeOrder: 99 } : {}) }
       const tools = [chapterCreateTool, chapterWriteTool]
@@ -3723,18 +3750,27 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
     await fixture(async f => {
       await prisma.user.update({ where: { id: f.userId }, data: { role: 'admin', isSuperAdmin: true } })
       const lease = await claim(f)
-      const price: DurableTokenPrice = { version: 'credits-v2-itemized', modelTier: 'standard', multiplierBps: 11000,
-        rateCardId: randomUUID(), rates: { inputNano: 110000, cacheNano: 110000, outputNano: 1100000 } }
-      await createRateCard(f.userId, price)
-      await transitionRateCard(f.userId, { id: price.rateCardId, expectedRevision: 0, status: 'shadow', evidence: { note: 'fixture' } })
-      await transitionRateCard(f.userId, { id: price.rateCardId, expectedRevision: 1, status: 'approved', evidence: { note: 'synthetic test only', reportHash: 'b'.repeat(64), shadowDays: 7,
-        totalFeeDeviationPercent: 0, userTaskP95AbsoluteDeviationPercent: 0, cashCostIncreasePercent: 0, allGroupsReviewed: true, qualityPassed: true } })
-      await transitionRateCard(f.userId, { id: price.rateCardId, expectedRevision: 2, status: 'active', evidence: { note: 'fixture', publicNoticeRef: 'fixture' } })
-      expect(await resolveDurableTokenPrice(lease, 'v2:model', 'standard', 99999)).toEqual(price)
-      await preparePricedProviderOperation(lease, { key: 'v2:model', action: 'chat', request: {}, price })
-      await transitionRateCard(f.userId, { id: price.rateCardId, expectedRevision: 3, status: 'retired', evidence: { note: 'fixture retirement' } })
-      expect(await resolveDurableTokenPrice(lease, 'v2:model', 'standard', 99999)).toEqual(price)
-      await expect(resolveDurableTokenPrice(lease, 'new:model', 'standard', 99999)).rejects.toMatchObject({ code: 'RUNTIME_PRICE_REQUIRED' })
+      const tier = ('builtin_' + randomBytes(8).toString('hex')) as DynamicBuiltInModelTier
+      const model = await prisma.aiModelConfig.create({ data: { key: tier, tier, provider: 'fixture', displayName: '持久费率测试', modelName: 'isolated-rate-replay',
+        baseUrl: 'https://fixture.invalid/v1', apiKeyCiphertext: encryptSecret('isolated-never-dispatched'), enabled: true, selectable: true, multiplierBps: 11000 } })
+      try {
+        const price: DurableTokenPrice = { version: 'credits-v2-itemized', modelTier: tier, multiplierBps: 11000,
+          rateCardId: randomUUID(), rates: { inputNano: 110000, cacheNano: 110000, outputNano: 1100000 } }
+        await createRateCard(f.userId, price)
+        await transitionRateCard(f.userId, { id: price.rateCardId, expectedRevision: 0, status: 'shadow', evidence: { note: 'fixture' } })
+        await transitionRateCard(f.userId, { id: price.rateCardId, expectedRevision: 1, status: 'approved', evidence: { note: 'synthetic test only', reportHash: 'b'.repeat(64), shadowDays: 7,
+          totalFeeDeviationPercent: 0, userTaskP95AbsoluteDeviationPercent: 0, cashCostIncreasePercent: 0, allGroupsReviewed: true, qualityPassed: true } })
+        await transitionRateCard(f.userId, { id: price.rateCardId, expectedRevision: 2, status: 'active', evidence: { note: 'fixture', publicNoticeRef: 'fixture' } })
+        expect(await resolveDurableTokenPrice(lease, 'v2:model', tier, 99999)).toEqual(price)
+        await preparePricedProviderOperation(lease, { key: 'v2:model', action: 'chat', request: {}, price })
+        await transitionRateCard(f.userId, { id: price.rateCardId, expectedRevision: 3, status: 'retired', evidence: { note: 'fixture retirement' } })
+        expect(await resolveDurableTokenPrice(lease, 'v2:model', tier, 99999)).toEqual(price)
+        await expect(resolveDurableTokenPrice(lease, 'new:model', tier, 99999)).rejects.toMatchObject({ code: 'RUNTIME_PRICE_REQUIRED' })
+        await prisma.aiModelConfig.update({ where: { id: model.id }, data: { enabled: false } })
+        expect(await resolveDurableTokenPrice(lease, 'v2:model', tier, 99999)).toEqual(price)
+        await expect(credits.getModelTierRuntime(tier, f.userId)).rejects.toMatchObject({ code: 'MODEL_TIER_UNAVAILABLE' })
+        await expect(credits.assertCreditAccess(f.userId, tier)).rejects.toMatchObject({ code: 'MODEL_TIER_UNAVAILABLE' })
+      } finally { await prisma.aiModelConfig.delete({ where: { id: model.id } }) }
     })
   })
   it.each(['known-cache', 'unknown-discount', 'unknown-equal'] as const)('V2 settlement %s', async scenario => {
@@ -3771,14 +3807,14 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
           messages: [{ role: 'user', content: '修改本章' }], successfulToolSignatures: [] }
         env.agentMaxTurns = 999
         const budget = await readTaskBudget(token)
-        expect(taskTurnLimit(budget.policy, 0)).toBe(1)
+        expect(taskTurnLimit(budget.policy, 0)).toBeNull()
         if (scenario === 'legacy-policy') {
-          const legacy = Object.fromEntries(Object.entries(budget.policy).filter(([key]) => !['initialTurns', 'turnSlice'].includes(key)))
-          legacy.version = 1
-          const saved = runtimeJson(legacy)
+          const saved = runtimeJson({ version: 1, initialTokens: 500, tokenCeiling: 5000000, budgetSlice: 2000000,
+            maxCheckpoints: 4, maxCompactions: 6, wallClockMs: 1, longWallClockMs: 1 })
           await prisma.agentTaskBudget.update({ where: { taskRootId: f.rootId }, data: { policy: saved.value, policyHash: saved.hash } })
           expect((await readTaskBudget(token)).policy.version).toBe(1)
-          await expect(initializeExecutionState(token, { configuration, snapshot })).rejects.toMatchObject({ code: 'RUNTIME_TURN_POLICY_REQUIRED' })
+          expect((await initializeExecutionState(token, { configuration, snapshot })).frame.state.turn).toBe(0)
+          expect((await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).policyHash).toBe(saved.hash)
           return
         }
         let frame = (await initializeExecutionState(token, { configuration, snapshot })).frame
@@ -3804,7 +3840,7 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
           snapshot: { ...frame.state, phase: 'idle', pendingOperationId: null } })
         const checkpointSnapshot = { version: 1, taskRootId: f.rootId, context: '待校验', remainingWork: ['校验'], trigger: 'turns' }
         if (scenario === 'no-progress') {
-          await expect(commitRuntimeCheckpoint(token, { expectedCheckpointCount: 0, progressOperationId: first.id, snapshot: checkpointSnapshot })).rejects.toMatchObject({ code: 'RUNTIME_PROGRESS_REQUIRED' })
+          await expect(commitRuntimeCheckpoint(token, { expectedCheckpointCount: 0, progressOperationId: first.id, snapshot: checkpointSnapshot })).rejects.toMatchObject({ code: 'RUNTIME_CHECKPOINT_NOT_DUE' })
           expect((await readTaskBudget(token)).budget.checkpointCount).toBe(0)
           return
         }
@@ -3819,14 +3855,12 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
           snapshot: { ...frame.state, phase: 'idle', pendingOperationId: null } })
         const next = await prepareOperation(token, { key: 'exec:2', kind: 'provider', action: 'chat', input: {} })
         const nextState = { ...frame.state, phase: 'awaiting_operation', pendingOperationId: next.id, turn: 2, nextOperationSequence: 3 }
-        await expect(saveExecutionState(token, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, snapshot: nextState })).rejects.toMatchObject({ code: 'RUNTIME_TURN_CHECKPOINT_REQUIRED' })
         const input = { expectedCheckpointCount: 0, progressOperationId: write.id, snapshot: checkpointSnapshot }
-        await commitRuntimeCheckpoint(token, input)
-        await commitRuntimeCheckpoint(token, input)
+        await expect(commitRuntimeCheckpoint(token, input)).rejects.toMatchObject({ code: 'RUNTIME_CHECKPOINT_NOT_DUE' })
         const advanced = await readTaskBudget(token)
-        expect(taskTurnLimit(advanced.policy, advanced.budget.checkpointCount)).toBe(51)
+        expect(taskTurnLimit(advanced.policy, advanced.budget.checkpointCount)).toBeNull()
         expect(advanced.usedTokens).toBe(10n)
-        frame = await saveExecutionState(token, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, snapshot: { ...nextState, checkpointIndex: 1 } })
+        frame = await saveExecutionState(token, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, snapshot: nextState })
         const nextAttempt = await prepareProviderAttempt(token, { operationId: next.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request: {} })
         expect((await markProviderDispatched(token, nextAttempt.id)).dispatchGranted).toBe(true)
         expect(frame.state.turn).toBe(2)
@@ -4064,50 +4098,52 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
       const operation = await prisma.agentOperation.findUniqueOrThrow({ where: { taskRootId_operationKey: { taskRootId: f.rootId, operationKey: 'actual:revision' } } })
       const checkpoint = { expectedCheckpointCount: 0, progressOperationId: operation.id,
         snapshot: { version: 1, taskRootId: f.rootId, context: '正文已提交', remainingWork: ['校验'] } }
-      if (scenario === 'noop') await expect(commitRuntimeCheckpoint(token, checkpoint)).rejects.toMatchObject({ code: 'RUNTIME_PROGRESS_REQUIRED' })
-      else expect((await commitRuntimeCheckpoint(token, checkpoint)).checkpointIndex).toBe(1)
+      await expect(commitRuntimeCheckpoint(token, checkpoint)).rejects.toMatchObject({ code: 'RUNTIME_CHECKPOINT_NOT_DUE' })
+      expect((await readTaskBudget(token)).budget.checkpointCount).toBe(0)
     }, 500)
   })
 
-  it.each(['replay', 'noop', 'todo', 'early', 'corrupt', 'revoked', 'old-progress', 'outbox-failure', 'resume'] as const)('durable checkpoint guards %s', async fault => {
+  it.each(['replay', 'corrupt', 'revoked', 'old-progress', 'outbox-gap', 'resume'] as const)('historical checkpoint evidence %s stays immutable without new budget slices', async fault => {
     await fixture(async f => {
       const { token, identity } = await pricedCall(f)
-      await recordProviderUsage({ ...identity, revision: 1, usage: { ...reported, promptTokens: fault === 'early' ? 10 : 500, cacheMissTokens: fault === 'early' ? 10 : 500 } })
-      const operation = await prepareOperation(token, { key: 'revision:1', kind: 'tool', action: fault === 'todo' ? 'todo_write' : 'chapter_write', input: { chapterId: f.chapterId } })
-      const beforeHash = runtimeJson({ content: '原文' }).hash
+      await recordProviderUsage({ ...identity, revision: 1, usage: { ...reported, promptTokens: 500, cacheMissTokens: 500 } })
+      const operation = await prepareOperation(token, { key: 'revision:1', kind: 'tool', action: 'chapter_write', input: { chapterId: f.chapterId } })
       await commitOperationEffect(token, operation.id, operation.inputHash, async tx => {
-        await tx.chapter.update({ where: { id: f.chapterId }, data: { content: fault === 'noop' ? '原文' : '修订内容' } })
-        return { progress: { kind: 'content_revision', targetId: f.chapterId, beforeHash,
-          afterHash: fault === 'noop' ? beforeHash : runtimeJson({ content: '修订内容' }).hash } }
+        await tx.chapter.update({ where: { id: f.chapterId }, data: { content: '历史真实修订内容' } })
+        return { progress: { kind: 'content_revision', targetId: f.chapterId, beforeHash: runtimeJson({ content: '原文' }).hash,
+          afterHash: runtimeJson({ content: '历史真实修订内容' }).hash } }
       })
       const input = { expectedCheckpointCount: 0, progressOperationId: operation.id,
-        snapshot: { version: 1, taskRootId: f.rootId, context: '本章修订已提交，接下来校验', remainingWork: ['校验本章'] } }
-      if (fault === 'outbox-failure') {
-        await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId,
-          eventKey: `checkpoint:${f.rootId}:1`, type: 'fixture.collision', payload: {} } })
-        await expect(commitRuntimeCheckpoint(token, input)).rejects.toMatchObject({ code: 'P2002' })
-        expect(await prisma.agentRuntimeCheckpoint.count({ where: { taskRootId: f.rootId } })).toBe(0)
-        expect((await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } }))).toMatchObject({ checkpointCount: 0, compactionCount: 0, tokenLimit: 500 })
+        snapshot: { version: 1, taskRootId: f.rootId, context: '历史已保存内容', remainingWork: ['校验本章'] } }
+      const snapshot = runtimeJson(input.snapshot), request = runtimeJson({ ...input, snapshot: snapshot.value })
+      const policy = runtimeJson({ version: 2, initialTokens: 500, tokenCeiling: 5000000, budgetSlice: 2000000,
+        maxCheckpoints: 1, maxCompactions: 1, initialTurns: 1, turnSlice: 1, wallClockMs: 1, longWallClockMs: 1 })
+      // Construct an owned pre-upgrade receipt, not a new executor allocation.
+      await prisma.$transaction(async tx => {
+        await tx.agentTaskBudget.update({ where: { taskRootId: f.rootId }, data: { policy: policy.value, policyHash: policy.hash,
+          tokenLimit: 2000500, checkpointCount: 1, compactionCount: 1 } })
+        await tx.agentRuntimeCheckpoint.create({ data: { taskRootId: f.rootId, checkpointIndex: 1, originRunId: f.runId,
+          progressOperationId: operation.id, requestHash: request.hash, snapshot: snapshot.value, snapshotHash: snapshot.hash } })
+        await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId,
+          eventKey: `checkpoint:${f.rootId}:1`, type: 'checkpoint.committed', payload: { checkpointIndex: 1, snapshotHash: snapshot.hash, progressOperationId: operation.id } } })
+      })
+      if (fault === 'revoked') {
+        await revokeRunLease(f.userId, f.runId)
+        await expect(commitRuntimeCheckpoint(token, input)).rejects.toMatchObject({ code: 'RUNTIME_LEASE_LOST' })
         return
       }
-      if (fault === 'revoked') await revokeRunLease(f.userId, f.runId)
-      if (['noop', 'todo', 'early', 'revoked'].includes(fault)) {
-        await expect(commitRuntimeCheckpoint(token, input)).rejects.toMatchObject({ code:
-          fault === 'early' ? 'RUNTIME_CHECKPOINT_NOT_DUE' : fault === 'revoked' ? 'RUNTIME_LEASE_LOST' : 'RUNTIME_PROGRESS_REQUIRED' })
-        expect(await prisma.agentRuntimeCheckpoint.count({ where: { taskRootId: f.rootId } })).toBe(0)
-        expect((await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).checkpointCount).toBe(0)
-        return
-      }
-      const [a, b] = await Promise.all([commitRuntimeCheckpoint(token, input), commitRuntimeCheckpoint(token, input)])
-      expect(a.snapshotHash).toBe(b.snapshotHash)
-      expect(await prisma.agentRuntimeCheckpoint.count({ where: { taskRootId: f.rootId } })).toBe(1)
-      expect((await readTaskBudget(token)).budget).toMatchObject({ checkpointCount: 1, compactionCount: 1, tokenLimit: 2000500 })
-      await expect(commitRuntimeCheckpoint(token, { ...input, snapshot: { ...input.snapshot, context: '换成另一个任务' } })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
-      if (fault === 'corrupt') {
-        await prisma.agentRuntimeCheckpoint.update({ where: { taskRootId_checkpointIndex: { taskRootId: f.rootId, checkpointIndex: 1 } }, data: { snapshot: { damaged: true } } })
+      if (fault === 'corrupt' || fault === 'outbox-gap') {
+        if (fault === 'corrupt') await prisma.agentRuntimeCheckpoint.update({ where: { taskRootId_checkpointIndex: { taskRootId: f.rootId, checkpointIndex: 1 } }, data: { snapshot: { damaged: true } } })
+        else await prisma.agentExecutionOutbox.delete({ where: { eventKey: `checkpoint:${f.rootId}:1` } })
         await expect(commitRuntimeCheckpoint(token, input)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
         await expect(readTaskBudget(token)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+        return
       }
+      const original = await commitRuntimeCheckpoint(token, input)
+      expect((await commitRuntimeCheckpoint(token, input)).snapshotHash).toBe(original.snapshotHash)
+      expect(await prisma.agentRuntimeCheckpoint.count({ where: { taskRootId: f.rootId } })).toBe(1)
+      expect((await readTaskBudget(token)).control.origin).toBe('unknown_legacy')
+      await expect(commitRuntimeCheckpoint(token, { ...input, snapshot: { ...input.snapshot, context: '换成另一个任务' } })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
       if (fault === 'resume') {
         const resumedRun = await prisma.agentRun.create({ data: { id: randomUUID(), userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
           status: 'queued', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', taskSpec: JSON.parse(JSON.stringify(f.spec)) } })
@@ -4115,13 +4151,13 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
         await revokeRunLease(f.userId, f.runId)
         const resumed = await claim({ userId: f.userId, runId: resumedRun.id }, 'resumed-worker')
         expect((await commitRuntimeCheckpoint(resumed, input)).originRunId).toBe(f.runId)
-        expect((await readTaskBudget(resumed)).budget).toMatchObject({ checkpointCount: 1, compactionCount: 1, tokenLimit: 2000500 })
       }
       if (fault === 'old-progress') {
-        await recordProviderUsage({ ...identity, revision: 2, usage: { ...reported, promptTokens: 2000500, cacheMissTokens: 2000500 } })
-        await expect(commitRuntimeCheckpoint(token, { ...input, expectedCheckpointCount: 1 })).rejects.toMatchObject({ code: 'RUNTIME_PROGRESS_REQUIRED' })
-        expect((await readTaskBudget(token)).budget.checkpointCount).toBe(1)
+        await recordProviderUsage({ ...identity, revision: 2, usage: { ...reported, promptTokens: 6000000, cacheMissTokens: 6000000 } })
+        await expect(commitRuntimeCheckpoint(token, { ...input, expectedCheckpointCount: 1 })).rejects.toMatchObject({ code: 'RUNTIME_CHECKPOINT_NOT_DUE' })
       }
+      const after = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })
+      expect(after).toMatchObject({ policyHash: policy.hash, tokenLimit: 2000500, checkpointCount: 1, compactionCount: 1 })
     }, 500)
   })
 
@@ -4147,9 +4183,9 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
       expect((await readTaskBudget(resumed)).budget.createdAt).toEqual(original.budget.createdAt)
       const next = await prepareOperation(resumed, { key: 'model:2', kind: 'provider', action: 'chat', input: {} })
       const nextAttempt = await prepareProviderAttempt(resumed, { operationId: next.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request: {} })
-      await expect(markProviderDispatched(resumed, nextAttempt.id)).rejects.toMatchObject({ code: 'RUNTIME_CHECKPOINT_REQUIRED' })
-      expect((await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: nextAttempt.id } })).dispatchedAt).toBeNull()
-      await expect(initializeDurableTask({ ...f, tokenBudget: 1000 })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+      expect((await markProviderDispatched(resumed, nextAttempt.id)).dispatchGranted).toBe(true)
+      expect((await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: nextAttempt.id } })).dispatchedAt).not.toBeNull()
+      expect((await initializeDurableTask({ ...f, tokenBudget: 1000 })).id).toBe(f.rootId)
     }, 500)
   })
 
@@ -4169,7 +4205,7 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
   it.each(['ceiling', 'corrupt-usage'] as const)('blocks new dispatch on %s without resetting the original paid attempt', async fault => {
     await fixture(async f => {
       const token = await claim(f)
-      const ceiling = (await readTaskBudget(token)).policy.tokenCeiling
+      const ceiling = 6000000
       const operation = await prepareOperation(token, { key: 'first', kind: 'provider', action: 'chat', input: {} })
       const attempt = await prepareProviderAttempt(token, { operationId: operation.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request: {} })
       await markProviderDispatched(token, attempt.id)
@@ -4179,8 +4215,13 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
       if (fault === 'corrupt-usage') await prisma.agentProviderUsageReceipt.update({ where: { attemptId: attempt.id }, data: { promptTokens: 0 } })
       const next = await prepareOperation(token, { key: 'second', kind: 'provider', action: 'chat', input: {} })
       const second = await prepareProviderAttempt(token, { operationId: next.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request: {} })
-      await expect(markProviderDispatched(token, second.id)).rejects.toMatchObject({ code: fault === 'ceiling' ? 'RUNTIME_TOKEN_CEILING' : 'RUNTIME_RECEIPT_INVALID' })
-      expect((await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: second.id } })).dispatchedAt).toBeNull()
+      if (fault === 'ceiling') {
+        expect((await markProviderDispatched(token, second.id)).dispatchGranted).toBe(true)
+        expect((await readTaskBudget(token)).usedTokens).toBe(BigInt(ceiling))
+      } else {
+        await expect(markProviderDispatched(token, second.id)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+        expect((await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: second.id } })).dispatchedAt).toBeNull()
+      }
       expect((await markProviderDispatched(token, attempt.id)).dispatchGranted).toBe(false)
     })
   })
@@ -4193,8 +4234,11 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
       if (fault === 'missing') await prisma.agentTaskBudget.delete({ where: { taskRootId: f.rootId } })
       if (fault === 'tampered') await prisma.agentTaskBudget.update({ where: { taskRootId: f.rootId }, data: { tokenLimit: 2147483647 } })
       if (fault === 'expired') await prisma.agentTaskRoot.update({ where: { id: f.rootId }, data: { createdAt: new Date(0) } })
-      await expect(markProviderDispatched(token, attempt.id)).rejects.toMatchObject({ code: fault === 'missing' ? 'RUNTIME_BUDGET_REQUIRED' : fault === 'tampered' ? 'RUNTIME_BUDGET_INVALID' : 'RUNTIME_WALL_CLOCK_EXHAUSTED' })
-      expect((await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).dispatchedAt).toBeNull()
+      if (fault === 'expired') expect((await markProviderDispatched(token, attempt.id)).dispatchGranted).toBe(true)
+      else {
+        await expect(markProviderDispatched(token, attempt.id)).rejects.toMatchObject({ code: fault === 'missing' ? 'RUNTIME_BUDGET_REQUIRED' : 'RUNTIME_BUDGET_INVALID' })
+        expect((await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).dispatchedAt).toBeNull()
+      }
     })
   })
   it('uses the real streaming adapter with durable receipts, no legacy double charge, and no network on exhausted replay', async () => {

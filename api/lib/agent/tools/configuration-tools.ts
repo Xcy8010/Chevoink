@@ -1,9 +1,9 @@
+import { selectableModelTierSchema, isBuiltInModelTier } from '../../../../shared/contracts/model-tier.js'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { agentModelSelectionSchema, modelReasoningEffortSchema, type AgentModelSelection } from '../../../../shared/contracts/agent-model-assignments.js'
 import { parseModelCapabilities } from '../../credits.js'
-import { BUILT_IN_MODEL_TIERS } from '../../../../shared/contracts/credits.js'
 import { prisma, DataAccessError } from '../../prisma.js'
 import { env } from '../../../config/env.js'
 import { admitAssignedModel, getModelAssignments } from '../model-assignments.js'
@@ -20,7 +20,7 @@ export const configureAgentSchema = z.object({ model: agentModelSelectionSchema.
   creativeFreedom: z.enum(['stable', 'balanced', 'bold']).optional() }).strict().refine(value => !!value.model || !!value.reasoningEffort || !!value.creativeFreedom)
   .refine(value => !value.model?.reasoningEffort || !value.reasoningEffort || value.model.reasoningEffort === value.reasoningEffort, '不能指定冲突的思考强度。')
 type ConfigureArgs = z.infer<typeof configureAgentSchema>
-export const configurationResponseSchema = z.object({ modelTier: z.enum(['lite', 'speed', 'standard', 'performance', 'ultimate', 'custom']), customModelId: z.string().nullable(), reasoningEffort: modelReasoningEffortSchema,
+export const configurationResponseSchema = z.object({ modelTier: selectableModelTierSchema, customModelId: z.string().nullable(), reasoningEffort: modelReasoningEffortSchema,
   creativeFreedom: z.enum(['stable', 'balanced', 'bold']), modelSelectionExplicit: z.boolean() }).strict()
 const responseSchema = configurationResponseSchema
 
@@ -28,9 +28,10 @@ export const modelListTool = defineTool({ name: 'model_list', title: '查看可�
   description: '读取作者可用的内置与自定义模型名称、档位、图片能力和支持的思考强度，以核对作者明确要求。只返回元信息，不调用模型，不返回密钥。',
   parameters: z.object({}).strict(), permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: true,
   async execute(ctx) {
-    const rows = await (ctx.transaction ?? prisma).aiModelConfig.findMany({ where: { enabled: true, OR: [{ ownerUserId: ctx.userId }, { ownerUserId: null, selectable: true, tier: { in: [...BUILT_IN_MODEL_TIERS] } }] },
-      select: { id: true, tier: true, ownerUserId: true, displayName: true, modelName: true, provider: true, metadata: true } })
-    return { output: JSON.stringify({ models: rows.map(row => ({ modelTier: row.ownerUserId ? 'custom' : row.tier, ...(row.ownerUserId ? { customModelId: row.id } : {}),
+    const rows = await (ctx.transaction ?? prisma).aiModelConfig.findMany({ where: { enabled: true, OR: [{ ownerUserId: ctx.userId }, { ownerUserId: null, selectable: true, tier: { not: null } }] },
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+      select: { id: true, tier: true, ownerUserId: true, displayName: true, modelName: true, provider: true, metadata: true, baseUrl: true, apiKeyCiphertext: true } })
+    return { output: JSON.stringify({ models: rows.filter(row => (row.ownerUserId || isBuiltInModelTier(row.tier)) && row.modelName !== 'unconfigured' && (row.tier === 'speed' || Boolean(row.baseUrl && row.apiKeyCiphertext))).map(row => ({ modelTier: row.ownerUserId ? 'custom' : row.tier, ...(row.ownerUserId ? { customModelId: row.id } : {}),
       displayName: row.displayName, modelName: row.modelName, ...parseModelCapabilities(row.metadata, row.provider) })), assignments: await getModelAssignments(ctx.userId, ctx.novelId) }), summary: '已读取可用模型' }
   },
 })

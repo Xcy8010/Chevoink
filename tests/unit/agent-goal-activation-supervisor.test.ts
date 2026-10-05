@@ -9,6 +9,8 @@ vi.mock('../../api/lib/agent/goal-activation.js', async importOriginal => ({ ...
   readGoalActivationReceipt: mocks.activation, readActivationSource: mocks.source }))
 vi.mock('../../api/lib/agent/active-runs.js', () => ({ getActiveRun: mocks.active }))
 vi.mock('../../api/lib/agent/goal-evidence.js', () => ({ inspectGoalEvidence: mocks.inspect }))
+vi.mock('../../api/lib/agent/goal-execution-control.js', () => ({ readGoalExecutionControl: async () => ({ version: 3, controlPolicy: 'until_completion',
+  origin: 'unknown_legacy', limits: { tokens: null, turns: null, activeTimeMs: null } }) }))
 vi.mock('../../api/lib/agent/goal-store.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/goal-store.js')>(), changeGoal: mocks.change }))
 import { reconcileGoalActivation } from '../../api/lib/agent/goal-activation-supervisor.js'
 
@@ -89,13 +91,12 @@ describe('deferred activation reconciliation barriers', () => {
     expect(mocks.inspect).not.toHaveBeenCalled()
     expect(mocks.change.mock.calls.every(call => !('status' in call[2]))).toBe(true)
   })
-  it('requires the current durable human resume epoch and original remaining budget', async () => {
+  it('requires the current durable human resume epoch and ignores unverifiable historical caps', async () => {
     const f = fixture('paused')
     f.db.agentGoalEvidence.findUnique.mockResolvedValue({ status: 'verified', receipt: { epoch: '2', sourceRunId: 'source' } })
     expect(await reconcileGoalActivation(f.tx, f.goal, new Date())).toMatchObject({ kind: 'activation_continue', runId: 'source' })
     const limited = fixture('paused'); limited.budget.tokensUsed = 1000n
     limited.db.agentGoalEvidence.findUnique.mockResolvedValue({ status: 'verified', receipt: { epoch: '2', sourceRunId: 'source' } })
-    expect(await reconcileGoalActivation(limited.tx, limited.goal, new Date())).toBe(true)
-    expect(mocks.change).toHaveBeenLastCalledWith(limited.tx, expect.anything(), expect.objectContaining({ status: 'budget_limited' }), 'activation.waiting')
+    expect(await reconcileGoalActivation(limited.tx, limited.goal, new Date())).toMatchObject({ kind: 'activation_continue', runId: 'source' })
   })
 })
