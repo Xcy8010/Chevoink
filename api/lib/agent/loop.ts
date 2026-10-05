@@ -409,7 +409,7 @@ export async function handleToolCall(
       .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
       .join('；')
     // 附带当前章节 ID：缺 chapterId 是最高发的校验失败，直接喂给模型避免它盲猜或多耗一轮去查
-    const chapterHint = ctx.chapterId ? `作者当前正在编辑的章节 chapterId=${ctx.chapterId}。` : ''
+    const chapterHint = call.name !== 'chapter_create' && ctx.chapterId ? `作者当前正在编辑的章节 chapterId=${ctx.chapterId}。` : ''
     return fail('参数校验失败', `工具 ${call.name} 参数校验失败：${issues}。${chapterHint}本次调用完全没有执行，请补齐/修正参数后立即重新发起同一个工具调用，绝对禁止放弃重试或改在回复正文里完成该操作。`, 'failed')
   }
 
@@ -531,6 +531,9 @@ export async function handleToolCall(
       return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。${guidance}`, 'failed'), providerFailure: true, providerFailureCode: error.code }
     }
     console.warn('[agent-tool-failure]', { runId, tool: call.name, code: error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR', durationMs: Date.now() - startedAt })
+    if (error instanceof DataAccessError && ['RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) {
+      return fail('原任务状态或授权不匹配', `工具 ${call.name} 未执行（${error.code}）：${error.message} 停止后续写入并核对原任务状态和授权；不得调整参数重试、换工具绕过或自行恢复权限。`, 'failed')
+    }
     const recovery = error instanceof DataAccessError ? toolFailureRecovery(error.code) : undefined
     if (recovery && error instanceof DataAccessError) return {
       ...fail(recovery.label, `工具 ${call.name} 未完成（${error.code}）：${error.message} ${recovery.guidance}`, 'failed'),
@@ -1151,7 +1154,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }) : null
     const ceiling = params.toolAuthorityCeiling ?? (activationCeiling ? new Map(activationCeiling) : null)
     const tools = ceiling ? intersectToolAuthority(currentTools, params.mode, ceiling) : currentTools
-    const openAITools = toOpenAITools(tools)
+    const openAITools = toOpenAITools(tools, taskSpec.scope)
     const contextBudget = resolveAgentContextBudget(modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens, env.aiTextMaxOutputTokens)
 
     /**

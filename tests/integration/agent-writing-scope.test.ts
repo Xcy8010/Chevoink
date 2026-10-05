@@ -10,6 +10,8 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { acquireRunLease } from '../../api/lib/agent/runtime-lease.js'
 import { initializeExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { toOpenAITools } from '../../api/lib/agent/tools/registry.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { z } from 'zod'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -37,6 +39,74 @@ async function fixture(prompt: string, work: (ctx: ToolContext) => Promise<void>
   }
 }
 describe.skipIf(!available)('atomic original chapter scope', () => {
+  it.each(['narrowed-title', 'narrowed-position', 'legacy-generic', 'cross-target-schema', 'tampered-schema', 'contradictory-args', 'wrong-global', 'wrong-volume'] as const)(
+    'validates %s against the exact original durable target without widening scope', scenario => fixture('写第一章', async ctx => {
+      const prompt = '写第一章'
+      const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt }), prompt))
+      expect(spec.scope.writing?.targets).toEqual([{ orderIndex: 1, chapterId: null }])
+      await prisma.agentRun.update({ where: { id: ctx.runId }, data: { status: 'queued', taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
+      const sourceMessageId = randomUUID()
+      await prisma.agentMessage.create({ data: { id: sourceMessageId, sessionId: ctx.sessionId, runId: ctx.runId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+      const root = await initializeDurableTask({ userId: ctx.userId, runId: ctx.runId, sourceMessageId })
+      const lease = await acquireRunLease({ userId: ctx.userId, runId: ctx.runId, ownerId: 'synthetic-schema-worker', claimId: randomUUID() })
+      const scope = scenario === 'cross-target-schema' ? { ...spec.scope, writing: { ...spec.scope.writing!, targets: [{ orderIndex: 2, chapterId: null }] } } : spec.scope
+      const definitions = toOpenAITools([chapterCreateTool], scenario === 'legacy-generic' ? undefined : scope)
+      if (scenario === 'tampered-schema') {
+        const properties = definitions[0].function.parameters.properties as Record<string, unknown>
+        properties.position = { type: 'integer', minimum: 1, enum: [1, 2] }
+      }
+      const args = { title: '合成待创建章',
+        ...(scenario === 'narrowed-position' ? { position: 1 } : {}),
+        ...(scenario === 'contradictory-args' ? { position: 1, volumeOrder: 1, positionInVolume: 1 } : {}),
+        ...(scenario === 'wrong-global' ? { position: 2 } : {}),
+        ...(scenario === 'wrong-volume' ? { volumeOrder: 1, positionInVolume: 2 } : {}) }
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: definitions, toolAuthority: [{ name: chapterCreateTool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null, toolCalls: [
+            { id: 'synthetic-create', name: chapterCreateTool.name, arguments: JSON.stringify(args) },
+          ] }], successfulToolSignatures: [] } })
+      const before = await loadExecutionState(ctx.userId, ctx.runId)
+      const novel = await prisma.novel.findUniqueOrThrow({ where: { id: ctx.novelId } })
+      const invoke = () => executeDurableToolStep(lease, new AbortController().signal)
+      const rejectedSchema = scenario === 'cross-target-schema' || scenario === 'tampered-schema'
+      const rejectedArgs = ['contradictory-args', 'wrong-global', 'wrong-volume'].includes(scenario)
+      if (rejectedSchema) {
+        await expect(invoke()).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+        expect(await loadExecutionState(ctx.userId, ctx.runId)).toEqual(before)
+        expect(await prisma.agentOperation.count({ where: { taskRootId: root.id } })).toBe(0)
+      } else {
+        const result = await invoke()
+        expect(result.kind).toBe('tool')
+        if (result.kind !== 'tool') throw new Error('Expected chapter observation')
+        expect(result.result.outcome).toBe(rejectedArgs ? 'failed' : undefined)
+        if (scenario === 'wrong-global' || scenario === 'wrong-volume') {
+          expect(result.result.summary).toBe('章节目标或位置与原请求不符')
+          expect(result.result.output).toContain('不表示任务已结束')
+          expect(result.result.output).toContain('现有授权范围内')
+        }
+        if (scenario === 'contradictory-args') {
+          const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: root.id }, include: { effectReceipt: true } })
+          expect(operation.inputSnapshot).toMatchObject({ input: { rejection: { code: 'TOOL_SCHEMA_INVALID',
+            validation: { schemaHash: runtimeJson(definitions[0].function.parameters).hash } } } })
+          expect(operation.effectReceipt?.result).toMatchObject({ code: 'TOOL_SCHEMA_INVALID', effectApplied: false })
+          expect((await loadExecutionState(ctx.userId, ctx.runId)).frame.state).toMatchObject({ phase: 'idle', pendingOperationId: null })
+        }
+      }
+      expect((await loadExecutionState(ctx.userId, ctx.runId)).configuration).toEqual(before.configuration)
+      const unchangedRoot = await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: root.id } })
+      expect(unchangedRoot.inputHash).toBe(root.inputHash)
+      expect(unchangedRoot.specSnapshot).toEqual(root.specSnapshot)
+      if (rejectedSchema || rejectedArgs) {
+        expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(0)
+        expect(await prisma.novel.findUniqueOrThrow({ where: { id: ctx.novelId } })).toEqual(novel)
+        expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).writingBindings).toBeNull()
+        expect(getCreatedChapter(ctx.runId, args.title)).toBeNull()
+      } else {
+        expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId } })).toEqual([expect.objectContaining({ title: args.title, orderIndex: 1 })])
+      }
+    }))
   it.each(['写下一章', '参考当前章节，写下一章', '不要在当前章之后写下一章。请写下一章', '在当前这章之后写下一章', '在正在编辑的章节后写下一章'])(
     'freezes only positive original authority for an early editor anchor: %s', prompt => fixture(prompt, async ctx => {
       const volume = await prisma.volume.findFirstOrThrow({ where: { novelId: ctx.novelId } })

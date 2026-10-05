@@ -4,6 +4,7 @@ import { DataAccessError } from '../../prisma.js'
 import { activeChapterScope, activeVolumeWhere } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import { resolveWritingCreateTarget } from '../writing-scope.js'
+import { toolFailureRecovery } from '../tool-failure-recovery.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
@@ -88,7 +89,10 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
       beforeHash: runtimeJson({ content: '' }).hash, afterHash: runtimeJson({ content: target.content }).hash } } : {}) }).value
   }).catch(async error => {
     if (!(error instanceof DataAccessError) || !['VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'AUTHOR_SCOPE_PROTECTED', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH'].includes(error.code)) throw error
-    return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: action === 'chapter_create' ? '章节创建未执行' : '卷创建未执行' })
+    const recovery = error.code === 'AUTHOR_CHAPTER_SCOPE' ? toolFailureRecovery(error.code) : undefined
+    return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code,
+      output: recovery ? `${error.message} ${recovery.guidance}` : error.message,
+      summary: recovery?.label ?? (action === 'chapter_create' ? '章节创建未执行' : '卷创建未执行') })
   })
   const failed = failedToolResultSchema.safeParse(receipt.result)
   const result = z.object({ toolResult: z.object({ output: z.string() }).passthrough() }).parse(receipt.result)

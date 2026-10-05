@@ -1,8 +1,8 @@
-import { toOpenAIParameters } from '../tool-schema.js'
+import { toOpenAIToolPresentation } from '../tool-schema.js'
 import { configureAgentTool, modelListTool } from './configuration-tools.js'
 import { modelAssignmentTool } from './model-assignment-tools.js'
 
-import type { AgentExecutionMode } from '../../../../shared/contracts/index.js'
+import type { AgentExecutionMode, TaskSpec } from '../../../../shared/contracts/index.js'
 import type { OpenAIToolDefinition } from '../../ai-service.js'
 import { coverApplyTool, coverGenerateTool } from './cover-tools.js'
 import { accountCreditsTool, accountCreditHistoryTool, accountNovelsTool, sessionRenameTool } from './account-tools.js'
@@ -260,13 +260,12 @@ export function getToolsForMode(mode: AgentExecutionMode): AgentTool[] {
 }
 
 /** zod schema → OpenAI function calling 定义（zod v4 原生转换） */
-export function toOpenAITools(tools: AgentTool[]): OpenAIToolDefinition[] {
+export function toOpenAITools(tools: AgentTool[], scope?: TaskSpec['scope']): OpenAIToolDefinition[] {
   return tools.map((tool) => ({
     type: 'function',
     function: {
       name: tool.name,
-      description: tool.description,
-      parameters: toOpenAIParameters(tool.parameters),
-    },
+      ...toOpenAIToolPresentation(tool, scope),
+    }
   }))
 }

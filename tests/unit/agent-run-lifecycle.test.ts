@@ -6,6 +6,7 @@ import type { chatWithTools as chatType } from '../../api/lib/ai-service.js'
 
 const mocks = vi.hoisted(() => ({
   chat: vi.fn(), emit: vi.fn(), persist: vi.fn(async () => ({})), dispose: vi.fn(async () => {}),
+  openAITools: vi.fn(() => []),
   update: vi.fn<(input: { data: Record<string, unknown> }) => Promise<{ taskSpec: TaskSpec | null; usage?: unknown; currentTurn?: number; startedAt?: Date; events?: Array<{ type: string; createdAt: Date }> }>>(async () => ({ taskSpec: null })), owner: vi.fn(async () => ({ userId: 'user' })), previous: vi.fn<(input?: { where?: Record<string, unknown> }) => Promise<unknown>>(async () => null),
   committedChapter: vi.fn(async () => false),
   todos: vi.fn(async (): Promise<AgentTodoItem[]> => []),
@@ -142,7 +143,7 @@ vi.mock('../../api/lib/agent/agents.js', () => ({
   getToolsForAgent: () => mocks.tools,
   applySessionToolPolicy: (tools: AgentTool[]) => tools,
 }))
-vi.mock('../../api/lib/agent/tools/registry.js', () => ({ allTools: [], getToolByName: (name: string) => [...mocks.tools, ...mocks.hiddenTools].find(tool => tool.name === name), toOpenAITools: () => [] }))
+vi.mock('../../api/lib/agent/tools/registry.js', () => ({ allTools: [], getToolByName: (name: string) => [...mocks.tools, ...mocks.hiddenTools].find(tool => tool.name === name), toOpenAITools: mocks.openAITools }))
 vi.mock('../../api/lib/agent/active-runs.js', () => ({ registerActiveRun: vi.fn(), deregisterActiveRun: vi.fn() }))
 vi.mock('../../api/lib/agent/baseline.js', () => ({ clearRunBaselines: vi.fn() }))
 vi.mock('../../api/lib/agent/context.js', () => ({ assembleContext: vi.fn(async () => ({ messages: [] })), insertSubagentCatalog: vi.fn() }))
@@ -986,6 +987,62 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(mocks.priorRuns).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
       sessionId: 'session', userId: 'user', novelId: 'novel', taskSpec: { path: ['id'], equals: taskSpec.id },
     }) }))
+  })
+
+  it('passes the admission-frozen scope to model tool presentation without using the editor anchor', async () => {
+    queue(...Array.from({ length: 5 }, () => response('仍未写完，请核对任务。')))
+    await run('写下一章')
+    expect(mocks.openAITools).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ writing: expect.objectContaining({
+      kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }],
+    }) }))
+  })
+
+  it('returns specific failed feedback for chapter position mismatch without certifying completion', async () => {
+    const admitted = tool('chapter_create', async () => { throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '章节位置不在原任务中') }, false)
+    const result = await handleToolCall(call('mismatch', admitted.name), [admitted], context(), { emit: mocks.emit }, 'message', 'run')
+    expect(result).toMatchObject({ recoveryCode: 'AUTHOR_CHAPTER_SCOPE', part: { status: 'failed', summary: '章节目标或位置与原请求不符' } })
+    expect(result.observation).toContain('不表示任务已结束')
+    expect(result.observation).toContain('现有授权范围内')
+  })
+
+  it('does not suggest the old editor chapter for a rejected chapter_create input', async () => {
+    const admitted = { ...tool('chapter_create', async () => ({ output: 'must not execute' }), false), parameters: z.object({ title: z.string().min(1) }) }
+    const result = await handleToolCall(call('invalid-create', admitted.name), [admitted], { ...context(), chapterId: 'old-editor-chapter' }, { emit: mocks.emit }, 'message', 'run')
+    expect(result).toMatchObject({ part: { status: 'failed', summary: '参数校验失败' } })
+    expect(result.observation).toContain('本次调用完全没有执行')
+    expect(result.observation).not.toContain('old-editor-chapter')
+    expect(result.observation).not.toContain('当前正在编辑')
+    expect(admitted.execute).not.toHaveBeenCalled()
+  })
+
+  it('still stops after three chapter scope failures without dispatching a fourth call', async () => {
+    mocks.tools = [tool('chapter_create', async () => { throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '位置不符') }, false)]
+    queue(...['one', 'two', 'three', 'four'].map(id => response('', [call(id, 'chapter_create', JSON.stringify({ title: id }))])))
+    await run('新增一章')
+    expect(mocks.tools[0].execute).toHaveBeenCalledTimes(3)
+    expect(mocks.chat).toHaveBeenCalledTimes(3)
+    expect(events().filter(e => e.type === 'tool.result').every(e => e.type === 'tool.result' && e.summary === '章节目标或位置与原请求不符')).toBe(true)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+  })
+
+  it('keeps cancellation ahead of chapter mismatch correction feedback', async () => {
+    const controller = new AbortController()
+    const admitted = tool('chapter_create', async () => { controller.abort(); throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '位置不符') }, false)
+    const result = await handleToolCall(call('cancelled', admitted.name), [admitted], { ...context(), signal: controller.signal }, { emit: mocks.emit }, 'message', 'run')
+    expect(result).toMatchObject({ part: { status: 'failed', summary: '已中断' } })
+    expect(result.recoveryCode).toBeUndefined()
+    expect(result.observation).toContain('停止后续执行')
+  })
+
+  it.each(['RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'])('does not encourage correcting or retrying %s', async code => {
+    const admitted = tool('chapter_create', async () => { throw new DataAccessError(409, code, '原任务状态不匹配') }, false)
+    const result = await handleToolCall(call('lost-authority', admitted.name), [admitted], context(), { emit: mocks.emit }, 'message', 'run')
+    expect(result).toMatchObject({ part: { status: 'failed', summary: '原任务状态或授权不匹配' } })
+    expect(result.recoveryCode).toBeUndefined()
+    expect(result.observation).toContain('停止后续写入')
+    expect(result.observation).toContain('不得调整参数重试')
+    expect(result.observation).not.toContain('可以调整参数重试')
+    expect(result.observation).not.toContain('不表示任务已结束')
   })
 
   it('persists a copied legacy goal contract run binding even without a previousTask lookup', async () => {

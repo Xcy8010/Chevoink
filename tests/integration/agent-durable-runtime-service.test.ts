@@ -23,7 +23,9 @@ import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { initializeExecutionState,loadExecutionState,saveExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { entityResolveTool,impactAnalyzeTool,projectSearchTool,structureValidateTool } from '../../api/lib/agent/tools/changeset-tools.js'
-import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { chapterCreateTool,chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { toOpenAITools } from '../../api/lib/agent/tools/registry.js'
+import { taskSpecSchema } from '../../shared/contracts/task-spec-contracts.js'
 import { retrievalTraceReadTool,styleProfileGetTool } from '../../api/lib/agent/tools/craft-library-tools.js'
 import { directiveListTool } from '../../api/lib/agent/tools/directive-tools.js'
 import { characterVoiceGetTool,experienceAnchorGetTool,qualityReportGetTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
@@ -114,6 +116,41 @@ describe.runIf(available)('durable domain reads', () => {
 })
 
 describe.runIf(available)('durable service dispatch', () => {
+  it('freezes a fresh global chapter schema at service admission and executes it without rebuilding stored identity', async () => {
+    await fixture(async f => {
+      vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
+        baseUrl: 'https://provider.invalid/v1/', apiKey: 'not-real', reasoningEffort: 'high', reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: null })
+      vi.spyOn(agentDefinitions, 'getToolsForAgent').mockReturnValue([
+        { ...chapterCreateTool, execute: (ctx, args) => chapterCreateTool.execute(ctx, chapterCreateTool.parameters.parse(args)) },
+      ])
+      const prompt = '写下一章', runId = randomUUID()
+      const input = { sessionId: f.sessionId, novelId: f.novelId, chapterId: f.chapterId, mode: 'build' as const, prompt }
+      vi.spyOn(contextAssembler, 'assembleContext').mockResolvedValue({ messages: [{ role: 'user', content: prompt }], skillRoute: null })
+      await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: f.chapterId,
+        status: 'queued', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', startRequest: input } })
+      await prisma.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+      const originalRoot = await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })
+      const first = await initializePersistedLoopRun(f.userId, runId, input)
+      const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
+      const root = await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: run.taskRootId! } })
+      const spec = taskSpecSchema.parse(root.specSnapshot)
+      expect(spec.scope.writing?.targets).toEqual([{ orderIndex: 2, chapterId: null }])
+      expect(first.configuration.tools.find(tool => tool.function.name === chapterCreateTool.name)).toEqual(toOpenAITools([chapterCreateTool], spec.scope)[0])
+      expect(await initializePersistedLoopRun(f.userId, runId, input)).toEqual(first)
+      const lease = await claim({ userId: f.userId, runId })
+      await saveExecutionState(lease, { expectedRevision: first.frame.revision, expectedHash: first.frame.snapshotHash,
+        snapshot: { ...first.frame.state, messages: [...first.frame.state.messages, { role: 'assistant', content: null, toolCalls: [
+          { id: 'server-positioned-create', name: chapterCreateTool.name, arguments: JSON.stringify({ title: '合成下一章' }) },
+        ] }] } })
+      expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'tool', result: { display: { kind: 'chapterRef' } } })
+      expect(await prisma.chapter.findMany({ where: { novelId: f.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual([
+        expect.objectContaining({ id: f.chapterId, orderIndex: 1 }), expect.objectContaining({ title: '合成下一章', orderIndex: 2 }),
+      ])
+      expect((await loadExecutionState(f.userId, runId)).configuration).toEqual(first.configuration)
+      expect(await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: root.id } })).toEqual(root)
+      expect(await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: originalRoot.id } })).toEqual(originalRoot)
+    })
+  })
   it.each(['initialize', 'replay', 'wrong-input', 'read-only', 'saved-input', 'changed-selection'] as const)('%s bootstraps from admitted input without rebuilding an existing frame', async scenario => {
     await fixture(async f => {
       vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
@@ -483,4 +520,3 @@ describe.runIf(available)('durable novel metadata', () => {
     })
   })
 })
-

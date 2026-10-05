@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { toOpenAIParameters } from './tool-schema.js'
+import { originalToolParameterSchemas } from './tool-schema.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { env } from '../../config/env.js'
 import { requestToolApproval, pollToolApproval } from './runtime-approval.js'
@@ -140,15 +140,18 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     if (goalTool && !await readGoalExecution(lease.userId, lease.runId, tx)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '目标工具仅允许目标归属执行使用。')
     if (!grant || grant.permission === 'deny' || !definition || call.incomplete) return { reject: { cursor, callId: call.id } }
     if (!tool) return runtimeError('RUNTIME_TOOL_ADAPTER_REQUIRED', '此工具的持久适配尚未接入，不能执行旧效果路径。')
-    if (runtimeJson(toOpenAIParameters(tool.parameters)).hash !== runtimeJson(definition.function.parameters).hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '工具 schema 与原任务不一致。')
+    const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
+    const originalScope = taskSpecSchema.parse(root.specSnapshot).scope
+    const storedSchemaHash = runtimeJson(definition.function.parameters).hash
+    // Old generic snapshots stay immutable. A new narrowed schema is valid
+    // only when recomputed exactly from this root's original frozen contract.
+    if (!originalToolParameterSchemas(tool, originalScope).some(schema => runtimeJson(schema).hash === storedSchemaHash)) runtimeError('RUNTIME_IDENTITY_CONFLICT', '工具 schema 与原任务不一致。')
     let raw: unknown
     try { raw = call.arguments ? parseToolArgsTolerant(call.arguments, false) : {} }
     catch { return { reject: { cursor, callId: call.id } } }
     const validated = validateToolInput(tool, normalizeToolInput(tool, raw))
     if (!validated.success) return { reject: { cursor, callId: call.id, tool } }
     const args = Object.fromEntries(Object.entries(validated.data as Record<string, unknown>).filter(([, value]) => value !== undefined))
-    const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
-    const originalScope = taskSpecSchema.parse(root.specSnapshot).scope
     const originalChapterId = originalScope.selection?.chapterId ?? (originalScope.chapterIds?.length === 1 ? originalScope.chapterIds[0] : null)
     const ctx: ToolContext = { userId: lease.userId, runId: lease.runId, novelId: root.novelId, sessionId: root.sessionId,
       chapterId: originalChapterId, callId: call.id, mode: current.configuration.mode, creativeFreedom: current.configuration.creativeFreedom,

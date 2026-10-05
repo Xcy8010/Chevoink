@@ -8,6 +8,7 @@ import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { coerceToolArgumentEnvelope } from './tools/argument-coercion.js'
 import { normalizeToolInput, validateToolInput } from './tools/input-validation.js'
 import type { AgentTool } from './tools/types.js'
+import { originalToolParameterSchemas } from './tool-schema.js'
 import { assertToolApproval, readToolApprovalOutcome } from './runtime-approval.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
@@ -30,8 +31,7 @@ export const toolRejectionSchema = z.object({ version: z.literal(1), rawArgument
 export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExecutionCursor, callId: string, tool?: AgentTool) {
   token = { ...token }; cursor = { ...cursor }
   // Capture references before awaits; never resolve a different registry entry during replay.
-  const validator = tool ? { name: tool.name, parameters: tool.parameters, coerceArgs: tool.coerceArgs } : undefined
-  const schemaHash = validator ? runtimeJson(z.toJSONSchema(validator.parameters, { io: 'input' })).hash : undefined
+  const validator = tool ? { name: tool.name, description: tool.description, parameters: tool.parameters, coerceArgs: tool.coerceArgs } : undefined
   if (!Number.isSafeInteger(cursor.expectedRevision) || cursor.expectedRevision < 0) runtimeError('RUNTIME_STATE_INVALID', '工具拒绝位置无效。')
   return withRunLease(token, async tx => {
     const current = await readExecutionStateInTransaction(tx, token.taskRootId)
@@ -58,14 +58,16 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
       try { parsed = call.arguments ? parseToolArgsTolerant(call.arguments, false) : {} }
       catch { code = 'TOOL_ARGUMENTS_INVALID' }
       if (!code && validator) {
-        if (validator.name !== call.name || schemaHash !== runtimeJson(published.function.parameters).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '字段校验器不匹配原工具合同，不能以新schema拒绝旧调用。')
+        const scope = taskSpecSchema.parse(current.originalSpec).scope
+        const schemaHash = runtimeJson(published.function.parameters).hash
+        if (validator.name !== call.name || !originalToolParameterSchemas(validator, scope).some(schema => runtimeJson(schema).hash === schemaHash)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '字段校验器不匹配原工具合同，不能以新schema拒绝旧调用。')
         // An exception is an implementation fault, not proof of invalid user/model data.
         // Leave it for recovery instead of recording a deterministic schema rejection.
         const normalized = normalizeToolInput(validator, parsed)
         const validated = validateToolInput(validator, normalized)
         if (!validated.success) {
           code = 'TOOL_SCHEMA_INVALID'
-          validation = { version: 1, schemaHash: schemaHash! }
+          validation = { version: 1, schemaHash }
           // Return bounded field-level feedback, not the original argument
           // payload, so the next turn can fix the error without guessing.
           validationHint = validated.error.issues.slice(0, 8)
@@ -73,7 +75,6 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
             .join('；').slice(0, 1800)
         } else {
           const args = validated.data as Record<string, unknown>
-          const scope = taskSpecSchema.parse(current.originalSpec).scope
           const chapterId = typeof args.chapterId === 'string' && args.chapterId.trim() ? args.chapterId.trim()
             : scope.selection?.chapterId ?? (scope.chapterIds?.length === 1 ? scope.chapterIds[0] : null)
           const target = ['chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename'].includes(call.name)
