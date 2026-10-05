@@ -82,7 +82,7 @@ async function updateOwnedChapterAtRevision(
   const apply = async (tx: Prisma.TransactionClient) => {
     await assertAgentManuscriptCurrent(tx, ctx)
     await assertWritingTarget(tx, ctx, { chapterId: chapter.id })
-    if (data.content !== undefined) await assertChapterReviewRevision(tx, ctx, chapter)
+    const consumeReviewRevision = data.content !== undefined ? await assertChapterReviewRevision(tx, ctx, chapter) : undefined
     const result = await tx.chapter.updateMany({
       where: {
         id: chapter.id,
@@ -93,6 +93,7 @@ async function updateOwnedChapterAtRevision(
       data: { ...data, revision: { increment: 1 } },
     })
     if (result.count !== 1) return null
+    await consumeReviewRevision?.()
     // Keep the returned revision/body bound to our CAS while its row lock is
     // held, rather than observing a subsequent writer through the global client.
     const updated = await tx.chapter.findFirst({ where: {

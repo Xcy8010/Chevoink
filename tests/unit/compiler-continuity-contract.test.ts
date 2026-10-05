@@ -80,6 +80,17 @@ describe('compiler continuity report dependencies', () => {
     }
     expect(chapterWrite).not.toHaveBeenCalled()
   })
+  it('a fresh complete CHECK preserves the consumed new-draft correction marker and the check/paid repair counters', async () => {
+    const current = input()
+    const marker = { version: 1, taskId: 'task', chapterId: 'c', compilationId: 'comp', checkedRevision: 1 }
+    const update = vi.fn()
+    const db = { $queryRaw: vi.fn().mockResolvedValue([{ id: 'n' }]), storyCompilation: { findFirst: vi.fn().mockResolvedValue({ id: 'comp', ...current,
+      validation: { checkRounds: 2, autoRepairRounds: 1, newDraftRevision: marker } }), update },
+      chapter: { findFirst: vi.fn().mockImplementation(async ({ where }) => where.id === 'source' ? current.source : { id: 'c' }) },
+    } as unknown as Prisma.TransactionClient
+    await validateStoryContinuity({ userId: 'u', novelId: 'n', compilationId: 'comp', expectedChapterRevision: 2, independentCheck: 'complete', findings: [] }, db)
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ validation: expect.objectContaining({ newDraftRevision: marker, checkRounds: 2, autoRepairRounds: 1 }) }) }))
+  })
 })
 
 describe('chapter-only compiler admission from frozen writing authority', () => {

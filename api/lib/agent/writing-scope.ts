@@ -84,6 +84,41 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
 }
 
 const bindingSchema = z.object({ version: z.literal(1), taskId: z.string(), targets: z.array(z.object({ orderIndex: z.number().int().positive(), chapterId: z.string() }).strict()) }).strict()
+const newDraftRevisionSchema = z.object({ version: z.literal(1), taskId: z.string().min(1), chapterId: z.string().min(1),
+  compilationId: z.string().min(1), checkedRevision: z.number().int().positive() }).strict()
+
+/** Separate from paid repair reservations: consumed only by a successful body CAS. */
+export function readNewDraftRevision(validation: unknown) {
+  if (!validation || typeof validation !== 'object' || Array.isArray(validation) || !('newDraftRevision' in validation)) return null
+  const parsed = newDraftRevisionSchema.safeParse(validation.newDraftRevision)
+  if (!parsed.success) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '新稿整体修订凭证损坏，不能重置修订次数。')
+  return parsed.data
+}
+
+export function prohibitsNewDraftRevision(prompt: string | null): boolean {
+  return !!prompt?.split(/[。！？!?；;\n，,]+/u).some(clause =>
+    /(?:不要|无需|不用|不必|禁止|不得|不能|只读|不改|do not|don't|must not|read.only)/iu.test(clause)
+    && /(?:改|修复|修正|纠正|纠错|润色|重写|repair|revis|rewrit|polish|fix\b|edit|modify|chang)/iu.test(clause)
+    && (!/(?:前文|前章|已有|先前|previous|earlier|existing)/iu.test(clause)
+      || /(?:本章|新章|新稿|初稿|全文|全书|this chapter|new chapter|draft)/iu.test(clause)))
+}
+
+/** A canonical binding is minted atomically by chapter_create. Legacy inferred
+ * targets, timestamps, child briefs and current directory positions cannot mint
+ * this allowance: require the original frozen null slot and its exact binding. */
+export async function readNewDraftWritingAuthority(tx: Prisma.TransactionClient, subject: Subject, chapter: { id: string; orderIndex: number }) {
+  const original = await readOriginalTaskRequest(tx, subject)
+  const parsed = taskSpecSchema.safeParse(original.spec)
+  if (!parsed.success || parsed.data.intent !== 'write' || parsed.data.scope.novelId !== subject.novelId
+    || parsed.data.scope.selection || ['proposal_only', 'conversation_only'].includes(parsed.data.writingPacing ?? '')
+    || prohibitsNewDraftRevision(original.prompt) || parsed.data.hardConstraints.some(item => prohibitsNewDraftRevision(item.text))) return null
+  const writing = parsed.data.scope.writing
+  if (writing?.kind !== 'bounded') return null
+  const scope = await readWritingScope(tx, subject)
+  if (!writing.targets.some(target => target.chapterId === null && target.orderIndex === chapter.orderIndex
+    && scope.bindings?.targets.some(binding => binding.orderIndex === target.orderIndex && binding.chapterId === chapter.id))) return null
+  return { taskId: scope.taskId }
+}
 export async function readWritingScope(tx: Prisma.TransactionClient, subject: Subject) {
   const original = await readOriginalTaskRequest(tx, subject)
   const spec = taskSpecSchema.safeParse(original.spec)

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { readChapterReviewRevisionGuidance } from '../chapter-review-guard.js'
 import { DataAccessError } from '../../prisma.js'
 import { activeChapterScope } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
@@ -176,10 +177,11 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       if (nextCheckRounds !== report.checkRounds) await tx.storyCompilation.update({ where: { id: compiler.id }, data: {
         validation: runtimeJson({ ...report, checkRounds: nextCheckRounds }).value,
       } })
+      const repairGuidance = parsed.structured && report.errorCount > 0 ? await readChapterReviewRevisionGuidance(tx, ctx, frozen.chapter) : ''
       const toolResult: ToolResult = !parsed.structured
         ? { outcome: 'failed', summary: '独立连续性复核未完成', output: '检查未返回完整结构化结果，结论未知。正文未修改。' }
         : { summary: `连续性检查${frozen.cached ? '（复用）' : ''} · ${report.errorCount} 错误 ${report.warningCount} 警告`,
-          output: `检查意见已保存，正文未改动；修订须由原始请求明确授权。${frozen.cached ? '复用当前正文与来源的检查，不重复调用模型。' : ''}\n${report.findings.map(item => `[${item.severity}/${item.signal}] ${item.evidence}；${item.suggestion}`).join('\n')}`,
+          output: `检查意见已保存，正文未改动；${repairGuidance || '仅警告不授权改写正文，保留剩余意见交作者决定，不追求零警告。'}${frozen.cached ? '复用当前正文与来源的检查，不重复调用模型。' : ''}\n${report.findings.map(item => `[${item.severity}/${item.signal}] ${item.evidence}；${item.suggestion}`).join('\n')}`,
           display: { kind: 'storyCompiler', compilationId: compiler.id, phase: 'check', title: '连续性检查', detail: `${report.errorCount} 错误 · ${report.warningCount} 警告`, errorCount: report.errorCount, warningCount: report.warningCount, items: report.findings.map(item => item.evidence) } }
       const stateHash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, compiler.id)
       if (!stateHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查后的编译状态缺失。')

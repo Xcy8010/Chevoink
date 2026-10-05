@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 const db = vi.hoisted(() => ({
-  novel: { findFirst: vi.fn() }, agentRun: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), findUniqueOrThrow: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn() },
+  novel: { findFirst: vi.fn() }, agentRun: { findFirst: vi.fn(), findMany: vi.fn(), findFirstOrThrow: vi.fn(), findUniqueOrThrow: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn() },
   agentSession: { findFirst: vi.fn() }, agentChildExecutionGrant: { findUnique: vi.fn() }, agentMessage: { findFirst: vi.fn() }, chapterQualityReport: { findFirst: vi.fn() },
   storyCompilation: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() },
   chapterBridge: { findFirst: vi.fn(), update: vi.fn() }, sceneTask: { updateMany: vi.fn() }, agentGoalExecution: { findUnique: vi.fn() },
@@ -32,6 +32,7 @@ beforeEach(() => {
   db.agentSession.findFirst.mockResolvedValue(null); db.agentChildExecutionGrant.findUnique.mockResolvedValue(null); db.agentMessage.findFirst.mockResolvedValue(null); db.chapterQualityReport.findFirst.mockResolvedValue(null)
   db.agentRun.findFirst.mockResolvedValue({ id: 'new-run', userId: 'u', novelId: 'n', status: 'running', startRequest: { prompt: '写下一章' }, createdAt: new Date('2026-09-20T03:22:41Z'), runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: spec('写下一章') })
   db.agentRun.findFirstOrThrow.mockImplementation(query => db.agentRun.findFirst(query))
+  db.agentRun.findMany.mockResolvedValue([])
   db.agentRun.findUniqueOrThrow.mockImplementation(query => db.agentRun.findFirst(query))
   db.chapter.findFirst.mockImplementation(async ({ where }) => where.id ? { id: where.id, title: '原章节', orderIndex: where.id === 'old31' ? 31 : 32, revision: 3, content: '已保存正文' } : where.orderIndex?.lt || where.orderIndex === 32 ? null : { id: 'old31', orderIndex: 31 })
   db.chapter.findMany.mockResolvedValue([]); db.storyCompilation.findFirst.mockResolvedValue(null); db.storyCompilation.findMany.mockResolvedValue([])
@@ -190,6 +191,14 @@ describe('story compiler task identity', () => {
     expect(result.output).toContain('目标全书第 32 章')
     expect(db.storyCompilation.create.mock.calls[0][0].data).toMatchObject({ runId: 'new-run', targetOrderIndex: 32 })
     expect(db.storyCompilation.create.mock.calls[0][0].data.chapterId).toBeUndefined()
+  })
+  it('inherits the CAS-consumed new-draft marker and counters when repreparing across the original parent/child lineage', async () => {
+    const marker = { version: 1, taskId: 'task', chapterId: 'own32', compilationId: 'old-compiler', checkedRevision: 3 }
+    db.storyCompilation.findMany.mockResolvedValue([{ validation: { checkRounds: 2, autoRepairRounds: 0, newDraftRevision: marker } }])
+    db.agentRun.findMany.mockResolvedValue([{ id: 'new-run' }])
+    const result = await prepareStoryCompilation({ ...ctx, chapterId: undefined, mode: 'balanced', intentSummary: '写下一章' })
+    expect(result.compilation.validation).toEqual({ checkRounds: 2, newDraftRevision: marker })
+    expect(db.storyCompilation.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ runId: { in: ['new-run'] }, targetOrderIndex: 32 }) }))
   })
   it('rejects an explicit old chapter target from the next-chapter task without writes', async () => {
     await expect(prepareStoryCompilation({ userId: 'u', novelId: 'n', runId: 'new-run', chapterId: 'old31', mode: 'balanced', intentSummary: '恢复旧章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })

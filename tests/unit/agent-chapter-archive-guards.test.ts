@@ -122,6 +122,14 @@ function expectCas() {
 }
 
 describe('legacy Agent chapter archive guards', () => {
+  it.each([0, 1])('consumes a new-draft revision only after successful legacy CAS (count=%s)', async count => {
+    const consume = vi.fn().mockResolvedValue(undefined)
+    m.reviewGuard.mockResolvedValue(consume)
+    m.tx.chapter.updateMany.mockResolvedValue({ count })
+    await chapterWriteTool.execute(ctx(), { chapterId: 'c', content: 'After' })
+    expect(consume).toHaveBeenCalledTimes(count)
+    if (count) expect(m.tx.chapter.updateMany.mock.invocationCallOrder[0]).toBeLessThan(consume.mock.invocationCallOrder[0])
+  })
   it('an obsolete range anchor is a failed edit rather than a successful revision', async () => {
     const result = await chapterEditRangeTool.execute(ctx(), { chapterId: 'c', oldText: '不属于当前正文的旧证据', newText: '不应写入' })
     expect(result).toMatchObject({ outcome: 'failed', failureCode: 'CHAPTER_ANCHOR_CONFLICT' })
@@ -364,20 +372,26 @@ describe('durable Agent chapter archive guards', () => {
   })
 
   it.each(actions)('%s authoritative CAS rejects archive-after-read and leaves memory/compiler untouched', async action => {
+    const consume = vi.fn()
+    m.reviewGuard.mockResolvedValue(consume)
     m.tx.chapter.updateMany.mockResolvedValue({ count: 0 })
     expect(await executeDurableChapter(durable(action), action, contentArgs(action))).toMatchObject({ outcome: 'failed' })
     expectCas()
     expectNoEffects()
     expect(getChapterBaseline('r', 'c')).toBeNull()
+    expect(consume).not.toHaveBeenCalled()
   })
 
   it.each(actions)('%s successful CAS preserves publication and stays in the effect transaction', async action => {
+    const consume = vi.fn()
+    m.reviewGuard.mockResolvedValue(consume)
     expect((await executeDurableChapter(durable(action), action, contentArgs(action))).display).toMatchObject({ revision: 5 })
     expectCas()
     expect(m.stats).toHaveBeenCalledWith(tx, 'n')
     expect(m.memory.mock.calls[0][1]).toBe(tx)
     expect(m.compiler.mock.calls[0][1]).toBe(tx)
     expect(m.db.chapter.updateMany).not.toHaveBeenCalled()
+    expect(consume).toHaveBeenCalledTimes(1)
   })
 
   it('non-cursor durable writes throw conflict rather than manufacturing success', async () => {

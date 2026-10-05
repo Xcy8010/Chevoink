@@ -742,6 +742,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   let maxTurns = 1 // Storage compatibility only; never used to stop execution.
   let runTokenBudget = COMPATIBILITY_TOKEN_LIMIT // Storage compatibility only.
   let checkpointRestored = !params.resume
+  let reviewHandoffCount = 0
   const restoreSavedUsage = async (stored: { usage: unknown; currentTurn: number }, id: string) => {
     if (stored.usage !== null) return savedRunUsageSchema.safeParse(stored.usage)
     const receipts = await prisma.aiUsageLog.findMany({
@@ -758,6 +759,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     readProgress: readProgressCount, readBaseline: checkpointReadBaseline,
     progressSignatures: [...progressSignatures],
     inheritedTokens, inheritedTurns, inheritedExecutionMs, manualResumeCount,
+    ...(reviewHandoffCount > 0 ? { reviewHandoffCount } : {}),
   })
   const persistCheckpoint = () => prisma.agentRun.update({
     where: { id: runId, userId: params.userId, runtimeProtocolVersion: 0, taskRootId: null },
@@ -775,6 +777,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     resumeCount = checkpoint.resumeCount
     compactionCount = checkpoint.compactionCount
     manualResumeCount = checkpoint.manualResumeCount
+    reviewHandoffCount = Math.max(reviewHandoffCount, checkpoint.reviewHandoffCount ?? 0)
     checkpointOrigin = checkpoint.version === 2 ? checkpoint.origin : 'unknown_legacy'
     stagnantBatches = checkpoint.version === 2 ? checkpoint.stagnantBatches : 0
     // Preserve historical stored values and counts; the effective policy is separate.
@@ -1782,8 +1785,25 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       bus.emit({ type: 'step.finish', turn, usage: result.usage })
 
       if (reviewStopReason) {
-        await finalizeFailedWithNotice('自动检查或修订已停止，保留当前正文与报告。未继续反复改稿；检查上限或旧报告不代表新版正文有错，也不能宣称通过。')
-        return
+        // Only next-chapter delivery has the existing persisted completion
+        // guard used by this handoff. A requested review without a report
+        // remains incomplete; a polite stopped response cannot make it succeed.
+        if (taskSpec.intent !== 'write' || !requiresNextChapterDelivery(taskSpec.goals)) {
+          await finalizeFailedWithNotice(`请求的检查或修订尚未完成：${reviewStopReason} 已保存的正文与报告保留；未将工具拒绝当作检查通过或任务完成。`)
+          return
+        }
+        if (reviewHandoffCount >= 1) {
+          await finalizeFailedWithNotice(`本次工具未执行：${reviewStopReason} 已保存的正文与报告保留。安全收尾后仍遇到修订限制，任务尚未完成；未重置次数或绕过限制，也未判定检查通过。`)
+          return
+        }
+        // A refused optional edit is not evidence that the writing task failed.
+        // Stop the rest of this batch, preserve the denial and offer one durable
+        // handoff to finish already-authorized non-repair work. A second denial
+        // ends visibly, regardless of tool/arguments or intervening progress.
+        reviewHandoffCount = 1
+        await persistCheckpoint()
+        messages.push({ role: 'user', content: `[系统] 本次检查或改稿工具未执行，具体原因：${reviewStopReason}\n正文仍保留，工具拒绝不等于整项任务失败。禁止重试该改稿、换工具绕过或继续逐句修订；警告/旧意见不授予改稿权限。仅核对已保存进度，完成原请求内尚可执行的读取、场景状态与章节终态提交。只有实际提交成功才交付；当前完整报告仍有事实错误时如实说明未完成，不能冒充通过。此安全收尾机会仅一次，续跑不会恢复机会、权限、检查次数或预算。` })
+        continue
       }
 
       if (authorEndRequested) {

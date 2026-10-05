@@ -17,6 +17,8 @@ import { z } from 'zod'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { getCreatedChapter } from '../../api/lib/agent/baseline.js'
 import * as volumeData from '../../api/lib/data/volume.js'
+import { prepareStoryCompilation, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -39,6 +41,82 @@ async function fixture(prompt: string, work: (ctx: ToolContext) => Promise<void>
   }
 }
 describe.skipIf(!available)('atomic original chapter scope', () => {
+  async function newDraftReview(ctx: ToolContext, prompt = '写第一章') {
+    const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt }), prompt))
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(spec).value } })
+    const result = await chapterCreateTool.execute(ctx, { title: '合成事实检查章', content: '同一扇门已经锁上。随后他却说这扇门从未锁过。' })
+    const chapterId = result.observedState!.id
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })
+    const prepared = await prepareStoryCompilation({ ...ctx, chapterId, mode: 'balanced', intentSummary: prompt })
+    await prisma.chapterBridge.update({ where: { compilationId: prepared.compilation.id }, data: { targetRevision: chapter.revision } })
+    await prisma.sceneTask.create({ data: { userId: ctx.userId, novelId: ctx.novelId, compilationId: prepared.compilation.id, chapterId,
+      ordinal: 1, purpose: '确认门锁', entryState: {}, goal: '打开门', obstacle: '门锁', choice: '找钥匙', cost: '等待', turn: '找到钥匙', exitState: {}, styleBudget: {} } })
+    const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
+    const validation = { checkRounds: 1, autoRepairRounds: 0, independentCheck: 'complete', checkedChapterId: chapterId, checkedRevision: chapter.revision,
+      errorCount: 1, warningCount: 0, findings: [{ signal: 'object', severity: 'error', evidence: '同一门锁着却从未锁门', suggestion: '保留锁门事实' }],
+      coverage: compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: null }) }
+    await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { stage: 'check', validation: runtimeJson(validation).value } })
+    return { chapter, chapterId, compilation, spec, validation }
+  }
+  it('allows one original new-draft factual correction, preserves consumption through current CHECK and reprepare, and blocks other write tools', () => fixture('写第一章', async ctx => {
+    const f = await newDraftReview(ctx)
+    expect((await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '同一扇门已经锁上。他用钥匙打开门。' })).outcome).not.toBe('failed')
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })
+    expect(saved.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0,
+      newDraftRevision: { taskId: f.spec.id, chapterId: f.chapterId, checkedRevision: f.chapter.revision } })
+    // A complete report for the revised body still cannot mint another patch.
+    await prisma.chapterBridge.update({ where: { compilationId: f.compilation.id }, data: { targetRevision: chapter.revision } })
+    await validateStoryContinuity({ ...ctx, compilationId: f.compilation.id, expectedChapterRevision: chapter.revision, independentCheck: 'complete', findings: [
+      { signal: 'object', severity: 'error', evidence: '合成剩余事实冲突', suggestion: '交作者决定' },
+    ] })
+    const { chapterAppendTool, chapterEditRangeTool } = await import('../../api/lib/agent/tools/chapter-tools.js')
+    for (const execute of [
+      () => chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '不应再整体修改。' }),
+      () => chapterAppendTool.execute(ctx, { chapterId: f.chapterId, content: '不应追加。' }),
+      () => chapterEditRangeTool.execute(ctx, { chapterId: f.chapterId, oldText: '打开门', newText: '不应再次局部修改' }),
+    ]) await expect(execute()).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
+    const reprepared = await prepareStoryCompilation({ ...ctx, chapterId: f.chapterId, mode: 'balanced', intentSummary: '写第一章' })
+    expect(reprepared.compilation.validation).toMatchObject({ checkRounds: 1, newDraftRevision: { chapterId: f.chapterId } })
+    await expect(chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '重新准备也不能改。' })).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(runtimeJson(f.spec).value)
+  }))
+  it.each(['parent', 'child'] as const)('a %s correction consumes one shared canonical creation allowance across opposite execution lineage', writer => fixture('写第一章', async ctx => {
+    const f = await newDraftReview(ctx)
+    const session = await prisma.agentSession.create({ data: { userId: ctx.userId, novelId: ctx.novelId, title: 'synthetic-draft-child', spawnedFromRunId: ctx.runId, spawnedFromSessionId: ctx.sessionId } })
+    const child = await prisma.agentRun.create({ data: { userId: ctx.userId, novelId: ctx.novelId, sessionId: session.id, status: 'running', engine: 'loop', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', startRequest: { prompt: 'generated brief is not authority' } } })
+    const childCtx = { ...ctx, runId: child.id, sessionId: session.id, chapterId: f.chapterId }
+    // Review evidence and the first writer are deliberately opposite.
+    if (writer === 'parent') await prisma.storyCompilation.update({ where: { id: f.compilation.id }, data: { runId: child.id } })
+    const subject = writer === 'parent' ? ctx : childCtx
+    await chapterWriteTool.execute(subject, { chapterId: f.chapterId, content: '同一扇门已经锁上。他随后用钥匙开门。' })
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    await expect(chapterWriteTool.execute(writer === 'parent' ? childCtx : ctx, { chapterId: f.chapterId, content: '另一执行也不能再改。' })).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
+    const prepared = await prepareStoryCompilation({ ...ctx, chapterId: f.chapterId, mode: 'balanced', intentSummary: '写第一章' })
+    expect(prepared.compilation.validation).toMatchObject({ checkRounds: 1, newDraftRevision: { chapterId: f.chapterId } })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
+  }))
+  it('transaction rollback and a legacy CAS count of zero preserve the unconsumed original new-draft allowance', () => fixture('写第一章', async ctx => {
+    const f = await newDraftReview(ctx)
+    const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })
+    await expect(prisma.$transaction(async tx => {
+      await chapterWriteTool.execute({ ...ctx, transaction: tx }, { chapterId: f.chapterId, content: '同一扇门锁着。他用钥匙开门。' })
+      throw new Error('synthetic-rollback-after-successful-CAS')
+    })).rejects.toThrow('synthetic-rollback-after-successful-CAS')
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(f.chapter)
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).toEqual(before)
+    await prisma.$transaction(async tx => {
+      const cas = vi.spyOn(tx.chapter, 'updateMany').mockResolvedValueOnce({ count: 0 })
+      try {
+        const result = await chapterWriteTool.execute({ ...ctx, transaction: tx }, { chapterId: f.chapterId, content: '不应写入的冲突稿。' })
+        expect(result.output).toContain('冲突')
+      } finally { cas.mockRestore() }
+    })
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).toEqual(before)
+    await expect(chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '同一扇门锁着。他用钥匙开门。' })).resolves.toBeTruthy()
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation).toMatchObject({ newDraftRevision: { chapterId: f.chapterId } })
+  }))
   it('repreparing a compiler after an authorized revision cannot permit another patch from abandoned evidence', () => fixture('写第一章并检查修复正文', async ctx => {
     const prompt = '写第一章并检查修复正文'
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt }), prompt))

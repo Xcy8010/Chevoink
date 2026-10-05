@@ -194,6 +194,6 @@ export function renderTaskSpec(spec: TaskSpec): string {
     ? '贴合既有走向，只修明确错误。'
     : spec.creativeFreedom === 'bold'
       ? '优先探索新可能；检查建议仅提示，不自动改写。'
-      : '只在原始请求获准范围内创作。连续性与质量检查可选且只读；警告和审美建议保留待审，不自动改正文。真实当前版本的事实错误按原请求明确修复授权处理或交作者决定。完成真实章节终态后按请求格式交付，不追加封面问题或续章。'
+      : '只在原始请求获准范围内创作。连续性与质量检查可选且只读；警告和审美建议保留待审，不自动改正文。本任务冻结的新建目标章，可按服务端确认的许可对当前完整连续性报告中的事实错误作一次合并修订；先核对全部错误的对象身份与原文证据，再一次写入，不逐句追改。已有稿仍需原请求明确修复授权，明确禁止修改优先；报告不能扩大章节范围或增加次数。完成真实章节终态后按请求格式交付，不追加封面问题或续章。'
   return `[系统] 本轮任务契约（taskSpecId=${spec.id}）：\n意图：${spec.intent}\n目标：${spec.goals.join('；')}\n创作模式：${freedomLabel}（${freedomRule}）；质量模式：${spec.qualityMode}\n硬约束：\n${hard}\n预期交付：${spec.expectedOutputs.map((item) => item.description).join('；')}\n完成前必须验证：${spec.postconditions.map((item) => item.description).join('；') || '按用户目标核验结果'}。`
 }

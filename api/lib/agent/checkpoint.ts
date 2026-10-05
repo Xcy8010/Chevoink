@@ -56,6 +56,9 @@ const runCheckpointFields = {
   writeProgress: z.number().int().nonnegative(), writeBaseline: z.number().int().nonnegative(),
   readProgress: z.number().int().nonnegative(), readBaseline: z.number().int().nonnegative(),
   progressSignatures: z.array(z.string()),
+  // A review denial may hand control back for safe delivery once. Resuming
+  // the same task never restores this allowance or manuscript authority.
+  reviewHandoffCount: z.number().int().min(0).max(1).optional(),
   // Usage/currentTurn remain per-run for existing UI and accounting consumers.
   // Only the budget guard includes preceding runs of the same explicit task.
   inheritedTokens: z.number().int().nonnegative().default(0),

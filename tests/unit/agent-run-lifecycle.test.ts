@@ -751,7 +751,7 @@ describe('tool execution authority (real dispatch, mocked global registry)', () 
 })
 
 describe('Agent run admission and completion lifecycle (real loop, mocked provider/persistence)', () => {
-  it.each(['CONTINUITY_CHECK_LIMIT', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED'])('ends a %s review loop before a subsequent queued edit or another paid main turn', async failureCode => {
+  it.each(['CONTINUITY_CHECK_LIMIT', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED'])('keeps an explicitly requested review incomplete after a %s denial', async failureCode => {
     const checking = tool('continuity_validate', async () => ({ outcome: 'failed', failureCode, summary: '自动检查已停止', output: '保留正文，停止检查驱动的修改。' }))
     const editing = tool('chapter_edit_range', async () => ({ output: '不应执行' }), false)
     mocks.tools = [checking, editing]
@@ -761,7 +761,36 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(editing.execute).not.toHaveBeenCalled()
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: false, failureCode }))
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
-    expect(mocks.runs.get('run')?.errorMessage).toContain('保留当前正文与报告')
+    expect(mocks.runs.get('run')?.errorMessage).toContain('请求的检查或修订尚未完成')
+  })
+  it('stops a second review denial across different tools and arguments with its actual cause', async () => {
+    const checking = tool('continuity_validate', async () => ({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_LIMIT', summary: '检查次数耗尽', output: '实际检查次数耗尽' }))
+    const editing = tool('chapter_edit_range', async () => { throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原请求未授权修改已有章') }, false)
+    const later = tool('chapter_write', async () => ({ output: '不应执行' }), false)
+    mocks.tools = [checking, editing, later]
+    queue(response('', [call('check', checking.name)]), response('', [call('edit', editing.name, '{"chapterId":"another"}'), call('later', later.name)]))
+    await run('写下一章')
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(later.execute).not.toHaveBeenCalled()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(mocks.runs.get('run')?.errorMessage).toContain('原请求未授权修改已有章')
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewHandoffCount: 1 } })
+  })
+  it('can finish authorized chapter delivery after an optional edit is refused', async () => {
+    const before = mocks.chapters[0].content
+    let committed = false
+    const editing = tool('chapter_edit_range', async () => { throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '仅有警告，不自动改写') }, false)
+    const commit = tool('chapter_bridge_commit', async () => { committed = true; mocks.committedChapter.mockResolvedValue(true); return { output: '正文与终态已核验提交' } }, false)
+    mocks.tools = [editing, commit]
+    queue(response('', [call('optional-edit', editing.name), call('skipped-commit', commit.name)]),
+      response('', [call('actual-commit', commit.name)]), response('正文已保存，警告保留待审。'))
+    await run('写下一章')
+    expect(committed).toBe(true)
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(mocks.chapters[0].content).toBe(before)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    const handoffContext = mocks.chat.mock.calls[1][0].messages
+    expect(handoffContext).toContainEqual(expect.objectContaining({ role: 'tool', toolCallId: 'skipped-commit', content: expect.stringContaining('未执行') }))
   })
   it('does not pause or zero a run when resume admission loses its state fence', async () => {
     mocks.update.mockRejectedValueOnce(new DataAccessError(409, 'TASK_AUTHORIZATION_RUNTIME_UPGRADE_REQUIRED', '任务状态已变化'))
@@ -859,6 +888,25 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(events().filter(event => event.type === 'tool.result')).toEqual(expect.arrayContaining([
       expect.objectContaining({ callId: 'partial', ok: false }), expect.objectContaining({ callId: 'valid', ok: true }),
     ]))
+  })
+
+  it('does not restore a consumed review handoff when the same task resumes', async () => {
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default',
+      runStartedAt: Date.now() - 1000, activeExecutionMs: 100, stagnantBatches: 0,
+      resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 1, writeBaseline: 0, readProgress: 0, readBaseline: 0,
+      progressSignatures: [], reviewHandoffCount: 1 }
+    mocks.update.mockResolvedValueOnce({ taskSpec: null, currentTurn: 2, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, checkpoint } })
+    const checking = tool('continuity_validate', async () => ({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_LIMIT', summary: '检查次数耗尽', output: '原任务检查次数耗尽' }))
+    mocks.tools = [checking]
+    queue(response('', [call('resumed-check', checking.name)]))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel',
+      chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 130, checkpoint: { reviewHandoffCount: 1 } })
+    expect(mocks.runs.get('run')?.errorMessage).toContain('原任务检查次数耗尽')
   })
   it('guides a truncated plan into bounded section saves without executing the partial payload', async () => {
     const save = vi.fn(async () => ({ output: '已保存计划' }))

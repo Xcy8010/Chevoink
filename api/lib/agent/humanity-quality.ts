@@ -573,12 +573,13 @@ export async function applyQualityRepair(input: {
       || current.status !== report.status || current.status === 'stale' || JSON.stringify(current.deterministicMetrics) !== JSON.stringify(report.deterministicMetrics)
       || fingerprint(current) !== fingerprint(report)) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '质量报告、作者选择或正文已变化，未应用旧修订。')
     input.signal?.throwIfAborted()
-    if (input.runId) await assertChapterReviewRevision(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId }, report.chapter)
+    const consumeReviewRevision = input.runId ? await assertChapterReviewRevision(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId }, report.chapter) : undefined
     const write = await tx.chapter.updateMany({
       where: { id: report.chapter.id, ...activeChapterScope(input.novelId), authorId: input.userId, revision: report.chapterRevision, content: report.chapter.content },
       data: { content: after, wordCount: after.length, revision: { increment: 1 } },
     })
     if (write.count !== 1) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '章节在修订期间已变化，请重新检查。')
+    await consumeReviewRevision?.()
     await tx.qualityFinding.updateMany({ where: { reportId: report.id, id: { in: patches.map((patch) => patch.finding.id) } }, data: { disposition: 'repaired' } })
     const updatedChapter = await tx.chapter.findUniqueOrThrow({ where: { id: report.chapter.id } })
     const metrics = report.deterministicMetrics && typeof report.deterministicMetrics === 'object' && !Array.isArray(report.deterministicMetrics) ? report.deterministicMetrics : {}

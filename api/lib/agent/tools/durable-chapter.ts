@@ -137,10 +137,11 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     }
     const changed = before !== after
     if (changed) {
-      await assertChapterReviewRevision(tx, ctx, chapter)
+      const consumeReviewRevision = await assertChapterReviewRevision(tx, ctx, chapter)
       const updated = await tx.chapter.updateMany({ where: { id: chapter.id, authorId: ctx.userId, ...activeChapterScope(ctx.novelId), revision: expectedRevision },
         data: { content: after, wordCount: after.length, revision: { increment: 1 } } })
       if (updated.count !== 1) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，正文写入未执行。')
+      await consumeReviewRevision?.()
       await recalculateNovelStats(tx, ctx.novelId)
     }
     const revision = expectedRevision + (changed ? 1 : 0)

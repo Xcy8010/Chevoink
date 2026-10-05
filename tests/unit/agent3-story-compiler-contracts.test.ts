@@ -10,7 +10,7 @@ import * as ai from '../../api/lib/ai-service.js'
 import * as scope from '../../api/lib/agent/manuscript-scope.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as novelTools from '../../api/lib/agent/tools/novel-tools.js'
-import { continuityValidateTool, continuityReviewTail, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { continuityValidateTool, continuityReviewTail, continuityCriticSystem, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 import { sceneTaskInputSchema, storyStateSchema } from '../../shared/contracts/index.js'
@@ -225,8 +225,13 @@ describe('Agent 3.0 Story Compiler 契约', () => {
     const text = renderTaskSpec(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '写下一章', creativeFreedom: 'balanced' }))
     expect(text).toContain('连续性与质量检查可选且只读')
     expect(text).toContain('警告和审美建议保留待审，不自动改正文')
-    expect(text).toContain('真实当前版本的事实错误按原请求明确修复授权处理或交作者决定')
-    expect(continuityReviewTail(null, 1, true)).toContain('错误与警告')
+    expect(text).toContain('本任务冻结的新建目标章')
+    expect(text).toContain('一次合并修订')
+    expect(text).toContain('已有稿仍需原请求明确修复授权，明确禁止修改优先')
+    expect(continuityReviewTail(null, 1, true)).toContain('最小事实补丁')
+    expect(continuityReviewTail(null, 1, true)).toContain('警告保留待审')
+    expect(continuityCriticSystem).toContain('先核对对象身份')
+    expect(continuityCriticSystem).toContain('warning与审美意见保留待审')
     expect(continuityReviewTail(null, 1, false)).toContain('不改写正文')
   })
   it.each([null, '遗漏的场景', 7, []])('场景列表保留无效项供校验拒绝，不静默丢弃：%j', invalid => {
