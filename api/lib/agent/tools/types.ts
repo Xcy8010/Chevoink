@@ -68,6 +68,9 @@ export type ToolContext = {
 }
 
 export type ToolResult = {
+  /** Server-only successful create noop. Hashed/journaled with the observation;
+   * it cannot certify authored content or replace an earlier write receipt. */
+  chapterCreateReuse?: { version: 1; userId: string; novelId: string; chapterId: string; revision: number }
   savedMemoryId?: string
   observedMemories?: Array<{ kind: 'memory'; id: string; hash: string }>
   observedOutputPage?: { operationId: string; resultHash: string; offset: number; end: number; totalChars: number }

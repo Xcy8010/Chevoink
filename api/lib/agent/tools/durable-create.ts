@@ -58,6 +58,7 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
         ctx.signal.throwIfAborted()
         return runtimeJson({ toolResult: { output: `复用本任务已绑定章节《${active.title}》，chapterId=${active.id}。本次未创建、改名或写入章节。`,
           summary: `复用本任务已绑定章节《${active.title}》（未创建）`, observedState: { kind: 'chapter', id: active.id, revision: active.revision },
+          chapterCreateReuse: { version: 1, userId: ctx.userId, novelId: ctx.novelId, chapterId: active.id, revision: active.revision },
           display: { kind: 'chapterRef', chapterId: active.id, title: active.title, wordCount: 'wordCount' in active ? active.wordCount : 0 } } }).value
       }
       return runtimeJson({ toolResult: { ...result.toolResult, summary: `复用本任务已创建卷《${args.title.trim()}》` } }).value
@@ -80,7 +81,7 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
     const target = await tx.chapter.findFirst({ where: { id: observed.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
     if (!target || target.revision !== observed.revision) return runtimeError('RUNTIME_RECEIPT_INVALID', '创建结果没有对应的章节基线。')
     ctx.signal.throwIfAborted()
-    const memoryJob = await tx.memoryExtractionJob.findUnique({ where: { idempotencyKey: `${target.id}:${target.revision}` }, select: { id: true } })
+    const memoryJob = result.chapterCreateReuse ? null : await tx.memoryExtractionJob.findUnique({ where: { idempotencyKey: `${target.id}:${target.revision}` }, select: { id: true } })
     const createdBody = target.content && result.snapshot?.target === 'chapter' && result.snapshot.targetId === target.id
       && result.snapshot.field === 'content' && result.snapshot.previousValue === ''
     return runtimeJson({ toolResult: result, memoryJobId: memoryJob?.id ?? null, ...(createdBody ? { progress: { kind: 'content_revision', targetId: target.id,

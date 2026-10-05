@@ -225,7 +225,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
         expect(retry.result.semanticTransition).toBeUndefined()
       }
     }
-    expect(await prisma.agentEffectReceipt.findUniqueOrThrow({ where: { id: originalReceipt.id } })).toEqual(originalReceipt)
+    expect(await prisma.agentEffectReceipt.findUniqueOrThrow({ where: { operationId: originalReceipt.operationId } })).toEqual(originalReceipt)
     expect(await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: root.id } })).toEqual(root)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(unchangedChapter)
     expect(await prisma.novel.findUniqueOrThrow({ where: { id: ctx.novelId } })).toEqual(unchangedNovel)

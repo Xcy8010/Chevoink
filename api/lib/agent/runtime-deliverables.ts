@@ -6,6 +6,9 @@ import { STRUCTURE_MUTATIONS } from './runtime-common.js'
 type Effect = Awaited<ReturnType<typeof collectDurableToolEvidence>>['effects'][number]
 type Expected = { kind: 'chapter' | 'plan'; id: string; title: string; hash: string | null; revision: number | null; operationId: string; removed: boolean }
 const chapterDiff = z.object({ kind: z.literal('chapterDiff'), chapterId: z.string(), chapterTitle: z.string(), after: z.string(), revision: z.number().int().positive() })
+const chapterCreateReuse = z.object({ version: z.literal(1), userId: z.string().min(1), novelId: z.string().min(1), chapterId: z.string().min(1), revision: z.number().int().positive() }).strict()
+const reusedChapterRef = z.object({ kind: z.literal('chapterRef'), chapterId: z.string().min(1), title: z.string(), wordCount: z.number().int().nonnegative() }).strict()
+const reusedChapterObservation = z.object({ kind: z.literal('chapter'), id: z.string().min(1), revision: z.number().int().positive() }).strict()
 const planDisplay = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('planFile'), artifactId: z.string(), title: z.string(), content: z.string() }),
   z.object({ kind: z.literal('planDiff'), artifactId: z.string(), title: z.string(), after: z.string() }),
@@ -31,7 +34,22 @@ export async function collectDurableDeliverables(tx: RuntimeTx, root: { id: stri
     for (const effect of page) {
       const receipt = byId.get(effect.operationId)
       if (!receipt || receipt.resultHash !== effect.resultHash || runtimeJson(receipt.result).hash !== effect.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '交付物来源与已核验效果不一致。')
-      const envelope = z.object({ toolResult: z.object({ display: z.unknown().optional() }) }).parse(receipt.result)
+      const envelope = z.object({ toolResult: z.object({ display: z.unknown().optional(), observedState: z.unknown().optional(),
+        chapterCreateReuse: z.unknown().optional(), snapshot: z.unknown().optional(), semanticTransition: z.unknown().optional(), requiredResult: z.unknown().optional() }),
+        progress: z.unknown().optional() }).parse(receipt.result)
+      if (envelope.toolResult.chapterCreateReuse !== undefined) {
+        const reuse = chapterCreateReuse.safeParse(envelope.toolResult.chapterCreateReuse)
+        const ref = reusedChapterRef.safeParse(envelope.toolResult.display)
+        const observed = reusedChapterObservation.safeParse(envelope.toolResult.observedState)
+        if (effect.action !== 'chapter_create' || !reuse.success || !ref.success || !observed.success
+          || reuse.data.userId !== root.userId || reuse.data.novelId !== root.novelId || reuse.data.chapterId !== ref.data.chapterId
+          || reuse.data.chapterId !== observed.data.id || reuse.data.revision !== observed.data.revision
+          || envelope.progress !== undefined || envelope.toolResult.snapshot !== undefined || envelope.toolResult.semanticTransition !== undefined
+          || envelope.toolResult.requiredResult !== undefined) return runtimeError('RUNTIME_RECEIPT_INVALID', '章节复用证据与原主体、观察或无写入状态不一致。')
+        // A verified successful noop preserves prior authored evidence, including
+        // its body/hash/revision. A historical bound chapter adds no delivery.
+        continue
+      }
       if (effect.action === 'chapter_rename') {
         const { renamedChapter: item } = z.object({ renamedChapter: z.object({ id: z.string(), title: z.string(), content: z.string(), revision: z.number().int().positive() }) }).parse(receipt.result)
         put('chapter', item.id, item.title, item.content, item.revision, effect.operationId)

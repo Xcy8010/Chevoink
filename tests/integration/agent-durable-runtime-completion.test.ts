@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { describe,expect,it,vi } from 'vitest'
 import { z } from 'zod'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { advanceDurableCompletionObligations } from '../../api/lib/agent/runtime-continuation.js'
 import { collectDurableDeliverables } from '../../api/lib/agent/runtime-deliverables.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
@@ -288,6 +290,7 @@ describe.runIf(available)('durable deliverable facts', () => {
           messages: [{ role: 'user', content: '交付正文和计划' }, { role: 'assistant', content: null, toolCalls: calls }], successfulToolSignatures: [] } })
       for (const _ of calls) await executeDurableToolStep(lease, new AbortController().signal)
       if (scenario === 'create-write-retry') {
+        const originalCreate = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId, action: 'chapter_create' } } })
         const chapter = await prisma.chapter.findFirstOrThrow({ where: { novelId: f.novelId, title: '新章' } })
         const frame = (await loadExecutionState(f.userId, f.runId)).frame
         await saveExecutionState(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
@@ -296,7 +299,21 @@ describe.runIf(available)('durable deliverable facts', () => {
             { id: 'retry-create', name: 'chapter_create', arguments: JSON.stringify({ title: '新章', content: '新正文' }) },
           ] }] } })
         await executeDurableToolStep(lease, new AbortController().signal)
+        const finalWrite = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_write' } })
         await executeDurableToolStep(lease, new AbortController().signal)
+        const retry = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId, action: 'chapter_create' } }, orderBy: { createdAt: 'desc' } })
+        const writtenChapter = await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })
+        expect(retry.result).toMatchObject({ toolResult: { chapterCreateReuse: { version: 1, userId: f.userId, novelId: f.novelId,
+          chapterId: chapter.id, revision: writtenChapter.revision }, display: { kind: 'chapterRef', chapterId: chapter.id } } })
+        expect(retry.result).not.toHaveProperty('progress')
+        expect(await prisma.agentEffectReceipt.findUniqueOrThrow({ where: { operationId: originalCreate.operationId } })).toEqual(originalCreate)
+        const frameAfterRetry = (await loadExecutionState(f.userId, f.runId)).frame
+        const latest = await withRunLease(lease, async tx => {
+          const evidence = await collectDurableToolEvidence(tx, f.rootId, frameAfterRetry.revision)
+          return collectDurableDeliverables(tx, { id: f.rootId, userId: f.userId, novelId: f.novelId }, evidence.effects)
+        })
+        expect(latest).toEqual([expect.objectContaining({ sourceOperationId: finalWrite.id,
+          expectedHash: runtimeJson({ title: chapter.title, content: '实际最终正文' }).hash, characters: '实际最终正文'.length })])
       }
       if (scenario === 'changed') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '外部改动' } })
       if (scenario === 'title-changed') await prisma.chapter.update({ where: { id: f.chapterId }, data: { title: '外部改名' } })
@@ -319,6 +336,49 @@ describe.runIf(available)('durable deliverable facts', () => {
       if (scenario === 'revision-only') expect(result[0].currentRevision).not.toBe(result[0].expectedRevision)
       expect(storyMemory.processMemoryExtractionJob).not.toHaveBeenCalled()
       if (scenario === 'chapter') expect(await prisma.memoryExtractionJob.count({ where: { novelId: f.novelId, status: 'pending' } })).toBe(1)
+    })
+  })
+
+  it.each(['', '合成历史正文'])('fresh bounded creation reuse of %j never invents authored delivery or derivative memory work', async content => {
+    await fixture(async f => {
+      await prisma.chapter.update({ where: { id: f.chapterId }, data: { content, wordCount: content.length } })
+      const prompt = '写第一章', runId = randomUUID(), sourceMessageId = randomUUID()
+      let spec = buildTaskSpec({ runId, novelId: f.novelId, chapterId: f.chapterId, prompt })
+      await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: f.chapterId,
+        status: 'queued', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', startRequest: { prompt }, taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
+      await prisma.agentMessage.create({ data: { id: sourceMessageId, runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+      spec = await prisma.$transaction(tx => freezeWritingScope(tx, { userId: f.userId, novelId: f.novelId, runId }, spec, prompt))
+      await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
+      const root = await initializeDurableTask({ userId: f.userId, runId, sourceMessageId })
+      const lease = await claim({ userId: f.userId, runId })
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: [{ type: 'function', function: { name: chapterCreateTool.name, description: chapterCreateTool.description, parameters: z.toJSONSchema(chapterCreateTool.parameters, { io: 'input' }) } }],
+        toolAuthority: [{ name: chapterCreateTool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null, toolCalls: [
+            { id: 'historical-reuse', name: chapterCreateTool.name, arguments: JSON.stringify({ title: '不应改名', content: '不应覆盖', position: 1 }) },
+          ] }], successfulToolSignatures: [] } })
+      const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const novel = await prisma.novel.findUniqueOrThrow({ where: { id: f.novelId } })
+      expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'tool', result: {
+        chapterCreateReuse: { version: 1, userId: f.userId, novelId: f.novelId, chapterId: chapter.id, revision: chapter.revision }, display: { kind: 'chapterRef' },
+      } })
+      const frame = (await loadExecutionState(f.userId, runId)).frame
+      await withRunLease(lease, async tx => {
+        const evidence = await collectDurableToolEvidence(tx, root.id, frame.revision)
+        expect(evidence.progressSequence).toBe('0')
+        expect(await collectDurableDeliverables(tx, root, evidence.effects)).toEqual([])
+      })
+      const receipt = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: root.id, action: chapterCreateTool.name } } })
+      expect(receipt.result).not.toHaveProperty('progress')
+      expect(receipt.result).toMatchObject({ memoryJobId: null })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
+      expect(await prisma.novel.findUniqueOrThrow({ where: { id: f.novelId } })).toEqual(novel)
+      const unchangedRoot = await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: root.id } })
+      expect(unchangedRoot.inputHash).toBe(root.inputHash)
+      expect(unchangedRoot.specSnapshot).toEqual(root.specSnapshot)
+      expect(await prisma.memoryExtractionJob.count({ where: { novelId: f.novelId } })).toBe(0)
     })
   })
 })
@@ -368,4 +428,3 @@ describe.runIf(available)('durable domain postconditions', () => {
     }, undefined, '调整章节顺序')
   })
 })
-

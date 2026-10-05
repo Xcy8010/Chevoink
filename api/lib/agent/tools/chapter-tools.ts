@@ -315,6 +315,7 @@ export const chapterCreateTool = defineTool({
       output: `${chapter.scopeReused ? '复用原请求已绑定的' : '已原子创建'}全书第 ${chapter.orderIndex} 章《${chapter.title}》，位于第 ${chapter.volume.orderIndex} 卷《${chapter.volume.title}》卷内第 ${chapter.orderInVolume} 章，chapterId=${chapter.id}${!chapter.scopeReused && (args.position || args.positionInVolume) ? '，后续章节顺序已自动校正' : ''}${chapter.content ? `，当前正文 ${chapter.content.length} 字` : '（暂无正文）'}。${chapter.scopeReused ? '本次未创建、改名或写入章节。' : '创建已成功。'}后续必须复用该 chapterId，禁止重建同名章。`,
       ...(semanticTransition ? { semanticTransition } : {}),
       observedState: { kind: 'chapter', id: chapter.id, revision: chapter.revision },
+      ...(chapter.scopeReused ? { chapterCreateReuse: { version: 1 as const, userId: ctx.userId, novelId: ctx.novelId, chapterId: chapter.id, revision: chapter.revision } } : {}),
       summary: `${chapter.scopeReused ? '复用' : '新建'}第 ${chapter.orderIndex} 章《${chapter.title}》 · ${chapter.volume.title}${chapter.scopeReused ? '（未创建）' : ''}`,
       // 带正文创建时返回 chapterDiff（空基线→全绿新增），前端才能挂上绿增红减的审查条；空章节仍用 chapterRef
       display: !chapter.scopeReused && chapter.content
