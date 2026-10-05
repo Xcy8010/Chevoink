@@ -145,7 +145,9 @@ describe('质量检查默认只保存真实报告', () => {
       findings: Array.from({ length: 8 }, (_, index) => ({ id: `f${index}`, signal: 'emotion_grounding', severity: 'advisory', disposition: 'pending', authorFeedback: null,
         startOffset: index * 4, endOffset: index * 4 + 4, evidenceExcerpt: `证据${index}。`, explanation: '需要具体动作', suggestion: '局部补足' })) } as unknown as Awaited<ReturnType<typeof humanityQuality.getQualityReport>>
     vi.spyOn(humanityQuality, 'resolveQualityChapterTarget').mockResolvedValue('c')
-    vi.spyOn(humanityQuality, 'buildHumanityQualityContext').mockResolvedValue({ chapter, compilation: null, charter: null, recentChapters: [], profiles: [], anchors: [], feedback: [] } as unknown as Awaited<ReturnType<typeof humanityQuality.buildHumanityQualityContext>>)
+    const bundle = { chapter, compilation: null, charter: null, recentChapters: [], profiles: [], anchors: [], feedback: [], originalRequest: '本次写都市异能爽文第一章；主角周砚，29岁，设备维护员；1800字；停在买主报价前；只输出标题与正文。' } as unknown as Awaited<ReturnType<typeof humanityQuality.buildHumanityQualityContext>>
+    report.deterministicMetrics = { ...report.deterministicMetrics as Prisma.JsonObject, qualityContextHash: humanityQuality.qualityReviewContextHash(bundle) }
+    vi.spyOn(humanityQuality, 'buildHumanityQualityContext').mockResolvedValue(bundle)
     vi.spyOn(humanityQuality, 'getLatestQualityReport').mockResolvedValue(cached ? report : null)
     vi.spyOn(humanityQuality, 'getQualityReport').mockImplementation(async () => report)
     vi.spyOn(humanityQuality, 'analyzeDeterministicQuality').mockReturnValue({ metrics: {}, findings: [] })
@@ -172,8 +174,25 @@ describe('质量检查默认只保存真实报告', () => {
     })
     const ctx: ToolContext = { userId: 'u', novelId: 'n', chapterId: 'c', sessionId: 's', runId: 'r', callId: 'q', mode: 'build',
       creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
-    return { ctx, report, critic, reserve, model, write }
+    return { ctx, report, critic, reserve, model, write, bundle }
   }
+  it('sends the complete author constraints to the critic without adding a repair call', async () => {
+    const f = fixture(false)
+    await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(f.critic.mock.calls[0][1]).toContain(JSON.stringify(f.bundle.originalRequest))
+    expect(f.critic.mock.calls[0][1]).toContain('首章收益与情绪强度')
+    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it('does not reuse an otherwise valid report for a different original style request', async () => {
+    const f = fixture(true)
+    f.bundle.originalRequest = '这次改写成慢热现实故事，不要爽文，仍停在买主报价前。'
+    await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.critic.mock.calls[0][1]).toContain(JSON.stringify(f.bundle.originalRequest))
+    expect(f.critic.mock.calls[0][1]).not.toContain('首章收益与情绪强度')
+    expect(f.write).not.toHaveBeenCalled()
+  })
   it.each([false, true])('eight advisory findings preserve prose and never dispatch a repair, cached=%s', async cached => {
     const f = fixture(cached)
     const before = JSON.stringify(f.report)
@@ -231,10 +250,23 @@ describe('Agent 3.0 人类感质量契约与确定性检查', () => {
   })
 
   it('把包裹叙述过程的直角引号识别为符号误用，但不误伤人物短对白', () => {
-    const source = '「别动。」\n他翻开记录本，看见上面写着「军卡进山那段（牛斗里人挤着人，一路穿过哨卡，最后拐进一扇铁门）」。'
+    const source = '「别动。」\n灯光熄了。「货车进站那段（车厢里人挤着人，一路穿过检票口，最后拐进一扇铁门）」。'
     const findings = analyzeDeterministicQuality(source).findings.filter((finding) => finding.signal === 'punctuation_misuse')
     expect(findings).toHaveLength(1)
-    expect(findings[0].evidence).toContain('军卡进山那段')
+    expect(findings[0].evidence).toContain('货车进站那段')
+  })
+
+  it('allows structured readouts and written or spoken quotations without treating formatting as narrative repetition', () => {
+    const source = '「物品名称：旧望远镜（可进入校准模式）」\n「物品等级：旧望远镜（已通过外观检测）」\n「物品价值：旧望远镜（预估价值六万积分）」\n他读到「一路穿过旧站台，进入门内后检查那张写满字的纸（不要遗漏）」。'
+    const signals = analyzeDeterministicQuality(source).findings.map(finding => finding.signal)
+    expect(signals).not.toContain('punctuation_misuse')
+    expect(signals).not.toContain('sentence_homology')
+    expect(signals).not.toContain('explanation_echo')
+  })
+
+  it('still detects genuinely duplicated panel information', () => {
+    const row = '「物品名称：一支完整的旧望远镜（外观检测通过）」'
+    expect(analyzeDeterministicQuality([row, row, row].join('\n')).findings.map(finding => finding.signal)).toContain('explanation_echo')
   })
 
   it('不会仅因科幻术语、一次华丽句、口语断句或无悬念收束误报', () => {

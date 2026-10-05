@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import app from '../../api/app.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
+import { skillCatalog } from '../../api/lib/agent/skills/index.js'
 
 const dbAvailable = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 
@@ -37,8 +38,9 @@ describe.skipIf(!dbAvailable)('Agent 3.0 作品技能目录（需 DB）', () => 
     expect(response.status).toBe(200)
     expect(response.body.data.totalCount).toBeGreaterThanOrEqual(10)
     expect(response.body.data.enabledCount).toBe(response.body.data.totalCount)
-    expect(response.body.data.items[0]).toMatchObject({ source: 'builtin', enabled: true, activeVersion: '3.0.0' })
-    expect(response.body.data.items[0].versions).toHaveLength(1)
+    const current = response.body.data.items.find((item: { id: string }) => item.id === 'cn-webfiction-draft.v3')
+    expect(current).toMatchObject({ source: 'builtin', enabled: true, activeVersion: '3.0.1' })
+    expect(current.versions).toContainEqual(expect.objectContaining({ version: '3.0.1' }))
   })
 
   it('关闭技能后持久化到作品安装状态，非法版本不会污染当前版本', async () => {
@@ -63,7 +65,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 作品技能目录（需 DB）', () => 
         scopeId: novelId,
       } },
     })
-    expect(stored).toMatchObject({ enabled: false, lockedVersion: '3.0.0' })
+    expect(stored).toMatchObject({ enabled: false, lockedVersion: skillCatalog.find(skill => skill.id === 'cn-webfiction-draft.v3')!.version })
   })
 
   it('自定义技能必须审计、正负测试后发布，且发布后进入运行时并可回滚', async () => {

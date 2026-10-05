@@ -1,5 +1,5 @@
 import { assertWritingTarget } from './writing-scope.js'
-import { assertOriginalRepairAuthority } from './original-request.js'
+import { assertOriginalRepairAuthority, readOriginalTaskRequest } from './original-request.js'
 import { createHash } from 'node:crypto'
 
 import type {
@@ -29,7 +29,8 @@ import { enqueueChapterMemoryExtraction } from './story-memory.js'
 import { locateQuoteSpans } from './quality-evidence.js'
 import { qualityAutoRepairPending, qualityReportMatchesContent } from './quality-report-contract.js'
 
-export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v2'
+export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v3'
+export const LEGACY_HUMANITY_CRITIC_VERSION = 'humanity-critic.v2'
 export const MAX_QUALITY_REPAIR_ROUNDS = 1
 
 export type LocatedQualityFinding = {
@@ -68,7 +69,7 @@ function splitParagraphs(content: string): Paragraph[] {
 
 function splitSentences(content: string): Sentence[] {
   const sentences: Sentence[] = []
-  const matcher = /[^。！？!?…\n]+(?:[。！？!?…]+|$)/g
+  const matcher = /[^。！？!?…\n]+(?:[。！？!?…]+|(?=\n|$))/g
   let match: RegExpExecArray | null
   while ((match = matcher.exec(content))) {
     const raw = match[0]
@@ -86,6 +87,11 @@ function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b)
   const middle = Math.floor(sorted.length / 2)
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
+}
+
+/** World-internal display rows are data, not parallel narrative sentences. */
+function isDisplayRow(text: string): boolean {
+  return /^[「【[][^\n：:，,。！？（）()]{1,24}[：:][^\n]{1,160}[」】\]][。！!]?$/u.test(text.trim())
 }
 
 function chineseBigrams(value: string): Set<string> {
@@ -138,6 +144,7 @@ export function analyzeDeterministicQuality(content: string, recentChapterTexts:
   }
 
   for (let index = 1; index < sentences.length; index += 1) {
+    if (isDisplayRow(sentences[index - 1].text) && isDisplayRow(sentences[index].text) && sentences[index - 1].text !== sentences[index].text) continue
     const similarity = jaccard(chineseBigrams(sentences[index - 1].text), chineseBigrams(sentences[index].text))
     if (similarity >= 0.58 && Math.min(sentences[index - 1].text.length, sentences[index].text.length) >= 12) {
       findings.push(evidenceFinding({
@@ -151,6 +158,7 @@ export function analyzeDeterministicQuality(content: string, recentChapterTexts:
 
   for (let index = 0; index <= sentences.length - 3; index += 1) {
     const group = sentences.slice(index, index + 3)
+    if (group.every(item => isDisplayRow(item.text)) && new Set(group.map(item => item.text)).size === group.length) continue
     const openings = group.map((item) => item.text.replace(/^[“「『"'‘’\s]+/, '').slice(0, 3))
     const lengths = group.map((item) => item.text.length)
     const closeLengths = Math.max(...lengths) - Math.min(...lengths) <= Math.max(5, median(lengths) * 0.18)
@@ -184,13 +192,14 @@ export function analyzeDeterministicQuality(content: string, recentChapterTexts:
     seen.set(normalized, priorCount + 1)
   }
 
-  // 「」在本站正文里只承担人物话语或逐字引文标记。模型偶尔把它当成
-  // “圈重点”符号包住转场、画面或叙述过程；这类长片段可确定性定位，交给
-  // 局部修订器只去掉误用符号，不改正文事实与句子骨架。
+  // World-internal panels, written quotes and dialogue may contain motion or
+  // parentheses. Narrative emphasis outside those contexts remains reviewable.
   const cornerQuoteMatcher = /「([^」\n]{18,360})」/g
   let cornerQuote: RegExpExecArray | null
   while ((cornerQuote = cornerQuoteMatcher.exec(content))) {
     const inner = cornerQuote[1]
+    const prefix = content.slice(Math.max(0, cornerQuote.index - 40), cornerQuote.index)
+    if (isDisplayRow(cornerQuote[0]) || /(?:说|问|喊|答|念|写着|写道|记着|记载|显示|提示|面板|屏幕|读到|引文)[^。！？\n]{0,16}$/u.test(prefix)) continue
     const narrationCue = /[（）()]|(?:镜头|画面|转场|那段|过程|一路|拐进|挤着|穿过|进入|走到|来到|门内|屋里)/.test(inner)
     if (!narrationCue) continue
     findings.push(evidenceFinding({
@@ -314,7 +323,7 @@ export async function resolveQualityChapterTarget(
 export async function buildHumanityQualityContext(userId: string, novelId: string, chapterId: string, runId?: string, db: Prisma.TransactionClient = prisma) {
   const chapter = await getOwnedQualityChapter(userId, novelId, chapterId, db)
   const scope = await qualityCompilationScope(db, userId, novelId, runId)
-  const [charter, compilation, profiles, anchors, recentChapters, feedback, dataControl] = await Promise.all([
+  const [charter, compilation, profiles, anchors, recentChapters, feedback, dataControl, original] = await Promise.all([
     db.storyCharter.findUnique({ where: { novelId } }),
     db.storyCompilation.findFirst({
       where: { userId, novelId, chapterId, status: 'active', ...scope },
@@ -331,6 +340,7 @@ export async function buildHumanityQualityContext(userId: string, novelId: strin
       by: ['signal', 'authorFeedback'], where: { userId, novelId, authorFeedback: { not: null } }, _count: { _all: true }, orderBy: [{ signal: 'asc' }, { authorFeedback: 'asc' }],
     }),
     db.agentDataControl.findUnique({ where: { userId_novelId: { userId, novelId } }, select: { qualityTelemetryEnabled: true } }),
+    runId ? readOriginalTaskRequest(db, { userId, novelId, runId }) : Promise.resolve(null),
   ])
 
   const mentionedProfiles = profiles.filter((profile) => chapter.content.includes(profile.characterName)).slice(0, 6)
@@ -344,7 +354,16 @@ export async function buildHumanityQualityContext(userId: string, novelId: strin
     })
     .slice(0, 3)
 
-  return { chapter, charter, compilation, profiles: mentionedProfiles, anchors: relevantAnchors, recentChapters, feedback: dataControl?.qualityTelemetryEnabled === false ? [] : feedback }
+  return { chapter, charter, compilation, profiles: mentionedProfiles, anchors: relevantAnchors, recentChapters, feedback: dataControl?.qualityTelemetryEnabled === false ? [] : feedback,
+    originalRequest: original?.prompt ?? null }
+}
+
+export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>): string {
+  return hashText(JSON.stringify({
+    chapter: { title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content, novel: bundle.chapter.novel },
+    charter: bundle.charter, compiler: bundle.compilation ? { id: bundle.compilation.id, bridge: bundle.compilation.bridge, sceneTasks: bundle.compilation.sceneTasks } : null,
+    profiles: bundle.profiles, anchors: bundle.anchors, recentChapters: bundle.recentChapters, feedback: bundle.feedback, originalRequest: bundle.originalRequest ?? null,
+  }))
 }
 
 export function locateCriticFindings(content: string, findings: CriticQualityFinding[]): LocatedQualityFinding[] {
@@ -392,6 +411,9 @@ export async function persistHumanityQualityReport(input: {
   chapterRevision: number
   mode: StoryCompilerMode
   deterministicMetrics: Record<string, number | string[]>
+  qualityContextHash?: string
+  /** Recovered pre-upgrade paid work retains the critic rules it actually used. */
+  criticVersion?: typeof HUMANITY_CRITIC_VERSION | typeof LEGACY_HUMANITY_CRITIC_VERSION
   deterministicFindings: LocatedQualityFinding[]
   criticFindings: CriticQualityFinding[]
   /** Explicit successful independent response, never inferred from an empty array. */
@@ -422,9 +444,9 @@ export async function persistHumanityQualityReport(input: {
       userId: input.userId, novelId: input.novelId, runId: input.runId, compilationId: input.compilationId,
       chapterId: input.chapterId, chapterRevision: chapter.revision, mode: input.mode,
       status: !complete ? 'failed' : actionableCount > 0 ? 'needs_repair' : 'passed', repairRound: 0,
-      deterministicMetrics: { ...input.deterministicMetrics, independentCheck: complete ? 'complete' : 'unavailable', contentHash: hashText(chapter.content),
+      deterministicMetrics: { ...input.deterministicMetrics, ...(input.qualityContextHash ? { qualityContextHash: input.qualityContextHash } : {}), independentCheck: complete ? 'complete' : 'unavailable', contentHash: hashText(chapter.content),
         unlocatedFindings, omittedFindings, criticFindingCount, droppedFindings: input.criticDropped ?? 0 } as Prisma.InputJsonValue,
-      criticVersion: HUMANITY_CRITIC_VERSION, checkedAt: new Date(),
+      criticVersion: input.criticVersion ?? HUMANITY_CRITIC_VERSION, checkedAt: new Date(),
       findings: {
         create: findings.map((finding) => ({
           userId: input.userId, novelId: input.novelId, signal: finding.signal, source: finding.source,

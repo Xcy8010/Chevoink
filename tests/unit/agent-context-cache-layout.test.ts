@@ -289,6 +289,20 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(String(messages.at(-2)?.content)).toContain('本轮任务契约')
     expect(String(messages.at(-1)?.content)).toContain('把第三章开头改得更抓人')
   })
+
+  it('restores full request constraints and current genre near the intent, keeping a stable system across changed genre', async () => {
+    const prompt = '写都市异能爽文第一章。主角周砚，29岁，设备维护员；1800字；低谷只用一段，停在买主报价前；只输出标题与正文。'
+    const first = await assembleContext({ ...buildInput(), prompt, includeCurrentRunHistory: true })
+    const last = String(first.messages.at(-1)?.content)
+    expect(last).toContain(prompt)
+    expect(last).toContain('首章收益与情绪强度')
+    expect(last).toContain('只继续这项要求')
+    expect(String(first.messages[0].content)).not.toContain('首章收益与情绪强度')
+    const second = await assembleContext({ ...buildInput(), prompt: '原来是爽文，现在改成慢热悬疑，不要爽文。' })
+    expect(second.messages[0].content).toBe(first.messages[0].content)
+    expect(String(second.messages.at(-1)?.content)).toContain('慢热的积累')
+    expect(String(second.messages.at(-1)?.content)).not.toContain('首章收益与情绪强度')
+  })
   it('durable pinned guidance remains server context and preserves the original author message', async () => {
     const { messages } = await assembleContext(buildInput())
     const original = structuredClone(messages.at(-1))

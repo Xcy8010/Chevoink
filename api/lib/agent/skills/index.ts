@@ -116,14 +116,14 @@ export const skillCatalog: AgentSkill[] = [
     id: 'cn-long-outline.v3',
     name: '中文网文长篇规划',
     description: '按卷级承诺—兑现、冲突升级和人物代价组织长篇，而不是机械章节表。',
-    version: '3.0.0', owner: 'chevoink', license: 'Apache-2.0-adapted',
+    version: '3.0.1', owner: 'chevoink', license: 'Apache-2.0-adapted',
     attribution: '工作流思想参考 Novel Architect（Apache-2.0），实现与中文规则均为 Chevoink 重写。',
     status: 'active', intents: ['plan'], modes: ['plan'], phases: ['plan'], strength: 'soft',
     triggers: [{ pattern: /(大纲|长篇|分卷|卷纲|情节弧|规划|计划|主线|支线)/, reasonCode: 'LONG_OUTLINE', weight: 32 }],
     negativeTriggers: noNegativeTriggers,
     synopsis: '规划承诺、升级、选择、代价和兑现，章节数量由内容决定。',
     resources: {
-      plan: '用“读者承诺—阶段阻力—人物选择—实际代价—阶段兑现—遗留问题”组织每卷。先证明冲突引擎能够持续变化，再拆章节；不固定三幕、每卷章数、反转频率或爽点间隔。每个重要节点必须说明前因、状态变化和对后续的约束。',
+      plan: '按作者本次类型与情绪承诺，用“读者承诺—阶段阻力—人物选择—实际后果或收益—阶段兑现—遗留问题”组织每卷；可无额外代价，不强加损失。先证明冲突引擎能够持续变化，再拆章节；不固定三幕、每卷章数、反转频率或爽点间隔。每个重要节点说明前因、状态变化和后续约束，不扩大本次授权范围。',
     },
     tokenBudget: 520, priority: 92, conflicts: [], composesWith: ['cn-project-positioning.v3', 'cn-scene-task.v3'],
   },
@@ -131,14 +131,14 @@ export const skillCatalog: AgentSkill[] = [
     id: 'cn-scene-task.v3',
     name: '场景任务构建',
     description: '写前明确人物目标、具体阻力、选择、代价和场景终态。',
-    version: '3.0.0', owner: 'chevoink', license: 'Apache-2.0-adapted',
+    version: '3.0.1', owner: 'chevoink', license: 'Apache-2.0-adapted',
     attribution: 'PREPARE→WRITE→REVIEW 状态门思想参考 Novel Architect（Apache-2.0），未复制其提示词。',
     status: 'active', intents: ['write', 'plan'], modes: ['plan', 'build'], phases: ['scene', 'draft'], strength: 'soft',
     triggers: [{ pattern: /(写|续写|补写|场景|这一章|下一章|正文|冲突|交锋|追逐)/, reasonCode: 'SCENE_CAUSALITY', weight: 24 }],
     negativeTriggers: noNegativeTriggers,
     synopsis: '先证明场景会改变故事状态，再生成正文。',
     resources: {
-      scene: '写正文前在内部形成最小场景任务包：视角人物此刻想得到什么；谁或什么具体阻止；人物采取什么行动；必须做出什么选择；付出什么代价；信息、关系、资源、位置或目标至少哪一项发生变化；如何承接上一场终态。任务包只服务当前场景，不套固定节拍。',
+      scene: '写正文前在内部形成最小场景任务包：视角人物此刻想得到什么；谁或什么具体阻止；人物采取什么行动与选择；已有代价或实际后果（可以无额外损失、获得授权的收益）；信息、关系、资源、位置或目标哪项变化；如何承接上一场终态。先核对完整原请求的类型、情绪承诺、身份、篇幅和停笔位置；不为结构强加反派、成交或惩罚，不套固定节拍。',
       draft: '先在内部确认本章由哪些必要场景组成，每个场景都要有目标、阻力和状态变化；没有作用的场景合并或删除。正文不展示任务包，不把结构术语写进小说。',
     },
     tokenBudget: 460, priority: 100, conflicts: [], composesWith: ['cn-webfiction-draft.v3', 'cn-chapter-bridge.v3'],
@@ -147,13 +147,13 @@ export const skillCatalog: AgentSkill[] = [
     id: 'cn-webfiction-draft.v3',
     name: '中文网文自然正文',
     description: '以事件推进和人物行动为主体，控制无功能描写、解释复述与炫技式修辞。',
-    version: '3.0.0', owner: 'chevoink', license: 'internal', status: 'active',
+    version: '3.0.1', owner: 'chevoink', license: 'internal', status: 'active',
     intents: ['write'], modes: ['build'], phases: ['draft'], strength: 'soft',
     triggers: [{ pattern: /(写|续写|补写|扩写|正文|章节|下一章|这一章)/, reasonCode: 'WRITE_CHAPTER', weight: 36 }],
     negativeTriggers: noNegativeTriggers,
     synopsis: '保证首次 Draft 就具体、连贯、有事件，不把修复全部推给改稿阶段。',
     resources: {
-      draft: '以人物正在做的事和事件后果为正文骨架，描写只选择会影响判断、动作或情绪的细节。抽象情绪至少落到一个可观察反应、生活经验或关系后果，但不把每句都改成动作。避免无铺垫的华丽开篇、成串比喻、同义解释和段尾总结；允许直述、停顿、留白和不规则节奏。每个场景结束时确认发生了真实变化，但不强制反转、打脸或章末钩子。「」/“”只用于人物直接话语或逐字引文，禁止把叙述、画面、纸面文字、转场过程当重点圈进引号；作品名使用《》。',
+      draft: '先服从完整原请求的类型与情绪承诺、身份、剧情、篇幅、停笔与输出格式。以人物行动与后果为骨架，允许有依据的直述、内心野心、喜悦、强烈反应、排比和留白。低修辞预算只控制无功能修饰，不代表低情绪；爽文应有可理解的阶段收益与下一步期待，悬疑、言情、慢热、现实或喜剧按各自承诺展开。机会或觉醒本身可兑现，停在报价前就不写成交；不强制反派打脸。只处理无功能堆砌与重复解释；世界内面板、提示、纸面文字和直接引文允许清晰引号或结构化排版，不能把叙述过程当圈重点符号包裹；作品名使用《》。',
     },
     tokenBudget: 620, priority: 110, conflicts: [], composesWith: ['cn-scene-task.v3', 'cn-character-voice.v3', 'cn-emotion-grounding.v3'],
   },
@@ -183,13 +183,13 @@ export const skillCatalog: AgentSkill[] = [
     id: 'cn-emotion-grounding.v3',
     name: '情绪落地',
     description: '把情绪连接到欲望、触发、身体反应、选择和关系后果。',
-    version: '3.0.0', owner: 'chevoink', license: 'internal', status: 'active',
+    version: '3.0.1', owner: 'chevoink', license: 'internal', status: 'active',
     intents: ['write', 'revise', 'review'], modes: ['build', 'review'], phases: ['draft', 'critique', 'revision'], strength: 'soft',
     triggers: [{ pattern: /(情感|情绪|感动|心动|痛苦|害怕|恐惧|愤怒|悲伤|压抑|暧昧|代入)/, reasonCode: 'EMOTION_GROUNDING', weight: 30 }],
     negativeTriggers: noNegativeTriggers,
     synopsis: '让情绪有原因、有身体和关系代价，不靠正确标签制造感动。',
     resources: {
-      draft: '先确认情绪由哪件具体事件触发、人物试图压住或争取什么、身体和注意力如何变化、它迫使人物做了什么选择、关系因此留下什么后果。只写符合视角和人物习惯的证据；克制人物可以几乎不解释。',
+      draft: '先确认情绪的事件触发、人物欲望与反应或选择，按视角与人物习惯呈现。允许直接内心判断、兴奋、野心与有依据的强烈反应；压住表情以隐藏优势是策略，不等于内心无感。克制或外放按作者本次要求决定，不必写全情绪链。',
       critique: '寻找只有情绪标签却没有触发、欲望、行为或后果的段落；不要把克制、直述或留白误判为空洞。',
       revision: '只补足缺失的因果链环节，优先使用本角色已有经历和当前场景物件；禁止统一替换成颤抖、攥拳、眼眶发热等模板动作。',
     },
@@ -290,7 +290,7 @@ const legacySkillAliases: Record<string, string> = {
 function freedomGuidance(freedom: CreativeFreedom): string {
   if (freedom === 'stable') return '创作模式：平衡延续。优先承接已有文风、人物轨迹与段落节奏，只修明确错误，不主动清洗作者有意保留的不规则表达。'
   if (freedom === 'bold') return '创作模式：大胆探索。允许明显的场景、结构和表达创新，优先打开新可能；核心设定和不可逆剧情仍服从作者与故事事实，质量报告只提示不自动改写。'
-  return '创作模式：严谨创作。默认执行证据化连续性修订和人类感质量建议，降低机械句式与 AI 味，同时守住人物知识、因果、时空和世界事实。'
+  return '创作模式：严谨创作。守住人物知识、因果、时空和已确立世界规则，服从本次作者类型与情绪承诺；严谨不等于克制。连续性与人类感检查可选且默认只读，审美建议不自动改写；修订须由原始作者请求明确授权。'
 }
 
 export function inferSkillPhase(intent: TaskIntent): SkillPhase {

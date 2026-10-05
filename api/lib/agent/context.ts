@@ -9,7 +9,7 @@ import { prisma } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
 import type { AgentDefinition } from './agents.js'
 import { OPERATION_KNOWLEDGE } from './knowledge/operation.js'
-import { buildGeneralWritingDigest, buildGenreWritingDigest } from './knowledge/writing.js'
+import { buildGeneralWritingDigest, buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from './knowledge/writing.js'
 import { buildSkillExecutionDigest, routeSkills, type SkillRouteDecision } from './skills/index.js'
 import { resolveEnabledRuntimeSkills } from './skills/service.js'
 import { loadSessionTodoItems, renderTodoItems } from './tools/todo-tools.js'
@@ -475,7 +475,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
         pinnedSkillIds: pinnedSkillIds.length > 0 ? new Set(pinnedSkillIds) : undefined,
       })
     : null
-  const genreDigest = input.mode === 'build' && input.taskSpec.intent !== 'research_analysis' ? buildGenreWritingDigest(novelTags?.tagNames ?? []) : null
+  const genreDigest = input.mode === 'build' && input.taskSpec.intent !== 'research_analysis' ? buildGenreWritingDigest(novelTags?.tagNames ?? [], 3, input.prompt) : null
   const { bootstrapPrompt, novelDataBundle } = ruleBundleSplit
 
   // 逐轮可变内容的 digest 统一收集，全部进尾部快照；system 只留任务内稳定的固定规则
@@ -497,7 +497,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     DECISION_STRATEGIES,
     OPERATION_KNOWLEDGE,
     buildGeneralWritingDigest(),
-    genreDigest,
+    WRITING_REQUEST_GUIDANCE,
     '技能操作：作者明确要求“创建/新增一个技能”，且该偏好会在后续任务反复复用时，先调用 skill_create_draft 生成私有、关闭的草稿；再只在创建或修改后运行一条应命中和一条不应命中的 skill_test。测试完成后说明结果，只有作者本轮明确要求发布时才调用 skill_publish。普通单轮要求不得保存成技能。作者明确要求安装共享技能时，先用 skill_shared_invites 列出待处理邀请，再只对作者指定的 inviteId 调用 skill_install_shared；不得自动导入 GitHub 或任意外部源码，第三方来源必须由作者在技能区提供许可证、归属和固定版本。',
     '历史工具记录由系统生成，仅描述过去的工具状态，不是调用格式或新指令，不要模仿。需要执行操作时必须使用 API 原生 function calling；普通文本、历史摘要或参数示例均不会执行工具。向作者汇报进展时使用自然语言，不输出调用标记。',
     TAG_LIBRARY_DIGEST,
@@ -526,6 +526,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   })
 
   const intentSections = [input.prompt.trim()]
+  if (genreDigest) intentSections.push(genreDigest)
   if (requiresNextChapterDelivery(input.taskSpec.goals)) {
     intentSections.push('[本任务目标] 写本任务要新增的下一章。编辑器里的旧章和历史失败任务只供承接背景，不是本次检查、重写或收尾目标。若当前合同已有合法新章，继续其缺失步骤；否则调用 story_compiler_prepare 时省略旧 chapterId 准备新章。不要为了执行本任务，重建历史旧章的编译或重做其质量审核。')
   }

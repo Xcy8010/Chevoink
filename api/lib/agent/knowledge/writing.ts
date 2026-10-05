@@ -46,8 +46,28 @@ export const GENERAL_WRITING_CARDS: WritingKnowledgeCard[] = [
   },
 ]
 
-/** 题材文风卡：按作品 tagNames 匹配注入 top3 */
+/** 类型是阅读体验的软指导，当前作者请求优先于保存的作品标签。 */
 export const GENRE_WRITING_CARDS: Record<string, WritingKnowledgeCard[]> = {
+  爽文: [
+    {
+      topic: '爽文的阅读承诺与兑现',
+      content: '爽文以主角获得主动权、优势被验证、愿望得到兑现带来鲜明满足感。围绕读者欲望或处境压力→主角优势与机会→主动行动、博弈和具体阻力→读者看得懂的收益与情绪释放→更大的下一步期待组织情节；这是因果参考，不是固定节拍。连载既兑现本章的一部分承诺，又打开下一步，不能把全部收益推迟到章末钩子之后。同一核心优势应驱动变化的兑现循环：收益改变后续资源、地位和选择，打开更大的具体目标，不重置成长或重复空洞震惊；只展开本次授权范围。',
+      importance: 13,
+    },
+    {
+      topic: '首章收益与情绪强度',
+      content: '机会出现、能力觉醒、看见资源价值或确认翻身可能，本身就能成为首章兑现。允许有依据的野心、直接内心判断、清晰面板、喜悦和旁人反应。为隐藏优势而压住表情是策略，不等于内心毫无兴奋。若作者要求停在报价或交易之前，就在已授权的发现与期待中兑现，不补成交、不硬加反派打脸；不规定几章一次爽点。',
+      importance: 12,
+    },
+  ],
+  异能: [{
+    topic: '异能优势与规则',
+    content: '让读者理解能力能做什么、主角知道什么、如何验证并主动使用。能力带来的机会可以明确、令人兴奋；规则严谨是遵守已确立的边界和因果，不是每次觉醒或收益都额外索取代价。既有代价必须承接，未设定的惩罚不强加。面板、提示和数值是世界内信息，可用清晰结构呈现。',
+    importance: 11,
+  }],
+  慢热: [{ topic: '慢热的积累', content: '按作者要求让关系、线索或生活变化逐步积累；每场提供有意义的新理解或细微变化，允许舒缓、留白和自然收束，不强加爆发、升级或打脸。', importance: 12 }],
+  现实: [{ topic: '现实题材的经验与后果', content: '阅读体验来自具体处境、可信选择、关系与生活后果；人物可以成功、喜悦或失意，不默认必须逆袭，也不把克制当唯一真实。让细节服务人物当前关心的事。', importance: 12 }],
+  幽默: [{ topic: '喜剧的节奏与回响', content: '按作者要求让错位、人物欲望、对白节奏与可理解的反应产生笑点，允许夸张和刻意排比。笑点要有语境和后果，不能只靠无关段子；不强加文学克制或爽文打脸。', importance: 12 }],
   科幻: [
     {
       topic: '硬设定自洽',
@@ -56,7 +76,7 @@ export const GENRE_WRITING_CARDS: Record<string, WritingKnowledgeCard[]> = {
     },
     {
       topic: '术语密度控制',
-      content: '每个场景新造术语不超过 2 个，出场时用一句话在动作中带出含义，不停下来解释。已有术语复用优先于造新词。技术描写点到为止：读者需要知道「它能做什么、代价是什么」，不需要原理论文。',
+      content: '新术语按场景需要引入，让读者理解它如何影响判断和行动；不规定数量。已有术语优先复用，必要说明可以直接写清。科技奇观、探索或困境按作者的阅读承诺展开，不默认每项技术都必须换来损失。',
       importance: 9,
     },
     {
@@ -68,7 +88,7 @@ export const GENRE_WRITING_CARDS: Record<string, WritingKnowledgeCard[]> = {
   悬疑: [
     {
       topic: '信息释放节奏',
-      content: '每章至少释放一条新线索，同时抛出一个新疑问，保持「已知在增长、谜团也在增长」。关键线索必须在揭晓前至少埋两次（读者回看能找到），但埋设时用日常细节包装，不要加聚光灯。已埋的伏笔超过全书三分之一篇幅仍未推进的，要主动推进或回收，禁止断线。',
+      content: '悬疑的承诺是好奇、推理与不确定感。让调查、线索、推断或危险有实质变化，局部答案可以带来满足并打开更深问题；关键揭晓应有可回看的依据，但不规定每章线索数、埋设次数或回收比例。不要为爽感提前揭底或强行让主角碾压。',
       importance: 10,
     },
     {
@@ -85,24 +105,24 @@ export const GENRE_WRITING_CARDS: Record<string, WritingKnowledgeCard[]> = {
   玄幻: [
     {
       topic: '力量体系规则感',
-      content: '境界、功法、代价三件套定义清楚后全书恪守：越级战胜必须有提前埋设的代价或外因，禁止「怒火觉醒」式无成本爆种。每次突破都要有可感知的新能力边界，并同步更新敌我实力对比。',
+      content: '遵守已确立的境界、功法与能力边界；越级胜利要有可信的能力、策略或条件依据。觉醒与突破可以带来清晰收益，不必额外编造惩罚；已有代价不能遗忘。力量变化应让读者理解新的机会和敌我关系。',
       importance: 10,
     },
     {
       topic: '爽点节奏',
-      content: '压抑与释放成对出现：憋屈不超过三章必须给一次兑现，兑现的爽感与前期压抑深度成正比。打脸要打在具体的人和事上，不要泛泛「众人震惊」。每个大境界安排一次质变级的爽点（身份揭晓、神通初显）。',
+      content: '玄幻可承担冒险、成长、奇观、悬疑或爽感，先服从作者本次承诺。若要求爽感，优势与阶段收益应明确，反应要有具体对象与原因；不规定憋屈章数，不把所有玄幻都改成打脸模板。',
       importance: 9,
     },
     {
       topic: '战斗描写',
-      content: '战斗写攻防逻辑而不是光效轰鸣：每一招要有意图（试探/换伤/控场），胜负手提前埋设（地形、暗伤、底牌）。三招之内必须出现转折，超过五个回合的战斗要切一次内心或旁观视角换气。',
+      content: '战斗让读者看懂目标、攻防与胜负依据，光效和强烈情绪可以服务体验。胜负手承接已知条件，节奏随压力变化，不规定招数、回合或视角切换。',
       importance: 8,
     },
   ],
   都市: [
     {
       topic: '生活质感',
-      content: '都市文的真实感来自精确的生活细节：地铁换乘、房租数字、加班餐的品牌，宁可少而准不要多而泛。人物的经济状况决定他的选择半径，消费行为要与收入自洽。',
+      content: '都市只是环境，不等于日常琐碎或低情绪。生活、职场、财富与圈层细节按当前情节需要选择，人物行为符合其资源与已知信息；都市异能或爽文应让生活压力衬托机会与收益，不用房租和通勤细节淹没主线。',
       importance: 10,
     },
     {
@@ -114,12 +134,12 @@ export const GENRE_WRITING_CARDS: Record<string, WritingKnowledgeCard[]> = {
   言情: [
     {
       topic: '情感递进层次',
-      content: '感情线按「注意→在意→依赖→确认」四阶推进，每阶至少一个标志性事件，禁止跳档（前一章还是陌生人下一章就深情告白）。心动写生理反应与行为失常（多看了一眼、回错了消息），不写「她发现自己爱上了他」。',
+      content: '言情的承诺是心动、关系变化与情感回应。递进要有人物经历和选择依据，重逢、先婚后爱、快节奏或慢热按作者要求展开，不套固定四阶段；允许直接承认心动，也可以用行为与感受呈现。',
       importance: 10,
     },
     {
       topic: '张力与误会',
-      content: '拉扯的张力来自「彼此在意但各有不能说的理由」，理由必须成立（立场、身世、误会有实据）。误会不能靠「就是不问」硬撑超过三章，要有解开的推进感。虐点之后必须跟一个甜点回血。',
+      content: '关系张力来自成立的欲望、立场、顾虑和选择；误会要有可信依据与发展，不靠无理由拒绝交流拖延。甜、虐、平静相处按作者承诺决定，不强制虐后立刻甜，也不把关系推进改成力量碾压。',
       importance: 9,
     },
   ],
@@ -134,10 +154,30 @@ export function buildGeneralWritingDigest(limit = 2): string {
 }
 
 /** 按作品标签匹配题材文风卡：命中多个题材时按卡片重要性混排取 top */
-export function buildGenreWritingDigest(tagNames: string[], limit = 3): string | null {
+export const WRITING_REQUEST_GUIDANCE = '本次完整原始作者请求是创作与点评的首要依据：题材、情绪承诺、节奏、人物身份、剧情顺序、篇幅、精确停笔位置及输出格式均须保留。作品标签、旧文风、知识卡、Skill 和场景建议是次级背景，不能覆盖本次明确要求；否定某类型或本次改换风格时，不沿用旧标签的相反承诺。逻辑严谨指人物知识、因果、时空与已确立世界规则自洽，不等于审美克制或压低情绪。'
+
+const genreAliases: Record<string, string[]> = { 言情: ['言情', '爱情'], 慢热: ['慢热', '舒缓', '慢节奏'], 现实: ['现实', '写实'], 幽默: ['幽默', '喜剧', '搞笑'], 爽文: ['爽文', '爽感'] }
+
+/** Small soft-card recall only; the unabridged request remains the model's authority. */
+export function buildGenreWritingDigest(tagNames: string[], limit = 3, originalRequest = ''): string | null {
+  const clauses = originalRequest.split(/[。！？!?；;，,\n]+/u).map(clause => {
+    const change = clause.search(/现在|这次|本次|改成|改为|改写成/u)
+    return change >= 0 ? clause.slice(change) : /以前|原来|原先|之前|曾经/u.test(clause) ? '' : clause
+  })
+  const denied = new Set<string>()
+  const requested = new Set<string>()
+  for (const genre of Object.keys(GENRE_WRITING_CARDS)) {
+    for (const alias of genreAliases[genre] ?? [genre]) {
+      for (const clause of clauses) {
+        if (!clause.includes(alias)) continue
+        if (new RegExp(`(?:不要|不写|非|不是|不走|拒绝|禁止|不需要|别写|不用)[^。！？；，\\n]{0,12}${alias}`, 'u').test(clause)) denied.add(genre)
+        else requested.add(genre)
+      }
+    }
+  }
   const matched: WritingKnowledgeCard[] = []
   for (const [genre, cards] of Object.entries(GENRE_WRITING_CARDS)) {
-    if (tagNames.some((tag) => tag.includes(genre))) {
+    if (!denied.has(genre) && (requested.size ? requested.has(genre) : tagNames.some((tag) => (genreAliases[genre] ?? [genre]).some(alias => tag.includes(alias))))) {
       matched.push(...cards)
     }
   }
@@ -145,5 +185,5 @@ export function buildGenreWritingDigest(tagNames: string[], limit = 3): string |
     return null
   }
   const top = matched.sort((a, b) => b.importance - a.importance).slice(0, limit)
-  return `题材文风守则（按本作标签匹配）：\n${top.map((card) => `[${card.topic}] ${card.content}`).join('\n')}`
+  return `题材阅读体验参考（${requested.size ? '本次作者请求优先' : '作品标签次级参考'}，不是硬性模板）：\n${top.map((card) => `[${card.topic}] ${card.content}`).join('\n')}`
 }
