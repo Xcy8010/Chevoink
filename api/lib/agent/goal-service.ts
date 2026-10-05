@@ -16,6 +16,7 @@ import { COMPATIBILITY_TOKEN_LIMIT, executionLimitReached, serializeExecutionCon
 import { readGoalExecutionControl } from './goal-execution-control.js'
 import { reconcileGoalUsage } from './goal-budget.js'
 import { readGoalActivationReceipt } from './goal-activation.js'
+import { fallbackSessionTitle } from './session-title.js'
 
 export function requireGoalEnabled() {
   if (!env.agentGoalEnabled) goalError('GOAL_DISABLED', '目标模式暂未开放。', 503)
@@ -52,7 +53,7 @@ export async function createAgentGoal(userId: string, target: { sessionId: strin
       const novel = await tx.novel.findFirst({ where: { id: target.novelId, authorId: userId }, select: { id: true } })
       if (!novel) return goalError('NOT_FOUND', '作品不存在。', 404)
       await lockNovelActiveScope(tx, novel.id)
-      sessionId = (await tx.agentSession.create({ data: { userId, novelId: novel.id, title: Array.from(body.objective).slice(0, 60).join('') } })).id
+      sessionId = (await tx.agentSession.create({ data: { userId, novelId: novel.id, title: fallbackSessionTitle(body.objective) } })).id
     }
     const session = await lockGoalSession(tx, userId, sessionId)
     if (await tx.agentGoal.findFirst({ where: { sessionId, status: { notIn: ['completed', 'cancelled'] } } })) {

@@ -138,4 +138,17 @@ describe.skipIf(!dbAvailable)('queue database transactions (isolated test DB)', 
     await continueLoopRun(userId, runId)
     expect(execution).toHaveBeenLastCalledWith(expect.objectContaining({ prompt, creativeFreedom: 'bold', qualityMode: 'premium', pinnedSkillIds: ['skill-a'], resume: true }))
   })
+  it('names a new queued window by its task while preserving the full request and source name', async () => {
+    const prompt = '## 第一章 压酱油瓶的那枚铜钱\n林辰这天走过巷口。\n请修订第二章正文。'
+    const id = await enqueue(prompt)
+    const result = await actOnQueuedRequest(userId, sessionId, id, 'new', 0)
+    expect(result.session?.title).toBe('修订第二章正文')
+    expect((await prisma.agentSession.findUniqueOrThrow({ where: { id: sessionId } })).title).toBe('源会话')
+    const queued = await prisma.agentQueuedRequest.findUniqueOrThrow({ where: { id } })
+    expect(queued.payload).toMatchObject({ prompt, sessionId: result.session?.id })
+    await expect(actOnQueuedRequest(userId, sessionId, id, 'new', 0)).rejects.toMatchObject({ code: 'QUEUE_CHANGED' })
+    expect(await prisma.agentSession.count({ where: { userId } })).toBe(2)
+    expect(execution).not.toHaveBeenCalled()
+    expect(await prisma.aiUsageLog.count({ where: { userId } })).toBe(0)
+  })
 })

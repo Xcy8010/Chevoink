@@ -2,250 +2,66 @@ param(
   [string]$HostName = "124.223.188.123",
   [string]$UserName = "ubuntu",
   [string]$KeyPath = "$HOME\.ssh\chevoink_prod_sh_01.pem",
-  [string]$RemoteArchivePath = "/tmp/chevoink-deploy.tar.gz",
-  [string]$RemoteCurrentPath = "/opt/chevoink/app/current",
   [string]$PublicUrl = "https://chevoink.chevolink.com",
+  [Parameter(Mandatory = $true)][string]$ExpectedCurrentRevision,
+  [string]$CiRunId,
+  [string]$SourceAddress,
   [switch]$SkipLocalChecks
 )
 
 $ErrorActionPreference = "Stop"
-
-function Write-Step([string]$Message) {
-  Write-Host ""
-  Write-Host "==> $Message" -ForegroundColor Cyan
-}
-
-function Invoke-CheckedCommand {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$FilePath,
-    [Parameter(Mandatory = $true)]
-    [string[]]$ArgumentList,
-    [string]$WorkingDirectory
-  )
-
-  if ($WorkingDirectory) {
-    Push-Location $WorkingDirectory
-  }
-
-  try {
-    & $FilePath @ArgumentList
-    if ($LASTEXITCODE -ne 0) {
-      throw "Command failed: $FilePath $($ArgumentList -join ' ')"
-    }
-  }
-  finally {
-    if ($WorkingDirectory) {
-      Pop-Location
-    }
-  }
-}
-
-function Invoke-RetryCommand {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$FilePath,
-    [Parameter(Mandatory = $true)]
-    [string[]]$ArgumentList,
-    [int]$MaxAttempts = 6,
-    [int]$DelaySeconds = 2
-  )
-
-  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-    try {
-      & $FilePath @ArgumentList
-      if ($LASTEXITCODE -eq 0) {
-        return
-      }
-    }
-    catch {
-      if ($attempt -eq $MaxAttempts) {
-        throw
-      }
-    }
-
-    if ($attempt -lt $MaxAttempts) {
-      Start-Sleep -Seconds $DelaySeconds
-    }
-  }
-
-  throw "Command failed after $MaxAttempts attempts: $FilePath $($ArgumentList -join ' ')"
-}
-
-function Get-SshArgumentList {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$KeyPath
-  )
-
-  return @(
-    "-o", "BatchMode=yes",
-    "-o", "StrictHostKeyChecking=accept-new",
-    "-o", "ConnectTimeout=10",
-    "-o", "ConnectionAttempts=1",
-    "-i", $KeyPath
-  )
-}
-
-function Wait-ForSshReady {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$KeyPath,
-    [Parameter(Mandatory = $true)]
-    [string]$UserName,
-    [Parameter(Mandatory = $true)]
-    [string]$HostName
-  )
-
-  $sshArgs = Get-SshArgumentList -KeyPath $KeyPath
-  Invoke-RetryCommand -FilePath "ssh.exe" -ArgumentList @(
-    $sshArgs +
-    @(
-      "${UserName}@${HostName}",
-      "pwd"
-    )
-  ) -MaxAttempts 8 -DelaySeconds 3
-}
-
-function Upload-ArchiveToRemote {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$ArchivePath,
-    [Parameter(Mandatory = $true)]
-    [string]$RemoteArchivePath,
-    [Parameter(Mandatory = $true)]
-    [string]$KeyPath,
-    [Parameter(Mandatory = $true)]
-    [string]$UserName,
-    [Parameter(Mandatory = $true)]
-    [string]$HostName,
-    [Parameter(Mandatory = $true)]
-    [string]$ProjectRoot
-  )
-
-  $sshArgs = Get-SshArgumentList -KeyPath $KeyPath
-
-  try {
-    Invoke-RetryCommand -FilePath "scp.exe" -ArgumentList @(
-      $sshArgs +
-      @(
-        $ArchivePath,
-        "${UserName}@${HostName}:${RemoteArchivePath}"
-      )
-    ) -MaxAttempts 3 -DelaySeconds 3
-    return
-  }
-  catch {
-    Write-Host "scp upload failed, falling back to sftp..." -ForegroundColor Yellow
-  }
-
-  $batchFilePath = Join-Path $ProjectRoot ".deploy-production.sftp-batch.txt"
-
-  try {
-    @(
-      "put `"$ArchivePath`" $RemoteArchivePath",
-      "bye"
-    ) | Set-Content -Path $batchFilePath -Encoding ascii
-
-    Invoke-RetryCommand -FilePath "sftp.exe" -ArgumentList @(
-      $sshArgs +
-      @(
-        "-b", $batchFilePath,
-        "${UserName}@${HostName}"
-      )
-    ) -MaxAttempts 3 -DelaySeconds 3
-  }
-  finally {
-    if (Test-Path $batchFilePath) {
-      Remove-Item $batchFilePath -Force
-    }
-  }
-}
-
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$ArchivePath = Join-Path $ProjectRoot ".deploy-production.tar.gz"
-
-if (-not (Test-Path $KeyPath)) {
-  throw "SSH key not found: $KeyPath"
+function Invoke-Checked([string]$Program, [string[]]$Arguments) {
+  $result = & $Program @Arguments
+  if ($LASTEXITCODE -ne 0) { throw "$Program failed (exit $LASTEXITCODE). Inspect actual state before retrying." }
+  return $result
 }
 
+if ($HostName -ne '124.223.188.123' -or $UserName -ne 'ubuntu' -or $PublicUrl -ne 'https://chevoink.chevolink.com') {
+  throw 'This entrypoint is scoped to the configured Chevoink production target.'
+}
+if ($ExpectedCurrentRevision -notmatch '^[a-f0-9]{40}$') { throw 'An exact expected current SHA is required.' }
+if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) { throw 'SSH key is missing.' }
+if ($SourceAddress -and $SourceAddress -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw 'Invalid SSH source address.' }
+Push-Location $ProjectRoot
 try {
-  if (-not $SkipLocalChecks) {
-    Write-Step "Running local checks"
-    Invoke-CheckedCommand -FilePath "npm.cmd" -ArgumentList @("run", "check") -WorkingDirectory $ProjectRoot
-    Invoke-CheckedCommand -FilePath "npm.cmd" -ArgumentList @("run", "lint") -WorkingDirectory $ProjectRoot
-    Invoke-CheckedCommand -FilePath "npm.cmd" -ArgumentList @("run", "runtime:verify") -WorkingDirectory $ProjectRoot
-    Invoke-CheckedCommand -FilePath "npm.cmd" -ArgumentList @("test") -WorkingDirectory $ProjectRoot
-    Invoke-CheckedCommand -FilePath "npm.cmd" -ArgumentList @("audit", "--omit=dev", "--audit-level=high") -WorkingDirectory $ProjectRoot
-    Invoke-CheckedCommand -FilePath "npm.cmd" -ArgumentList @("run", "build") -WorkingDirectory $ProjectRoot
+  $revision = (Invoke-Checked git @('rev-parse', '--verify', 'HEAD')).Trim()
+  if ($revision -notmatch '^[a-f0-9]{40}$') { throw 'Cannot resolve candidate SHA.' }
+  Invoke-Checked git @('diff', '--quiet', 'HEAD', '--') | Out-Null
+  if (-not $CiRunId) {
+    $runs = (Invoke-Checked gh @('run', 'list', '--workflow', 'CI', '--commit', $revision, '--json', 'databaseId,status,conclusion', '--limit', '20')) -join "`n" | ConvertFrom-Json
+    $selected = @($runs | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'success' }) | Select-Object -First 1
+    if (-not $selected) { throw 'No completed successful CI for this exact SHA.' }
+    $CiRunId = [string]$selected.databaseId
   }
-
-  Write-Step "Packing release archive"
-  if (Test-Path $ArchivePath) {
-    Remove-Item $ArchivePath -Force
-  }
-
-  # Package exactly a committed revision, never local drafts, credentials or
-  # untracked audit repositories. CI and deployment must refer to the same SHA.
-  $ReleaseRevision = (& git -C $ProjectRoot rev-parse --verify HEAD).Trim()
-  if ($LASTEXITCODE -ne 0 -or $ReleaseRevision -notmatch '^[a-f0-9]{40}$') {
-    throw "Cannot resolve release revision"
-  }
-  Invoke-CheckedCommand -FilePath "git" -ArgumentList @("archive", "--format=tar.gz", "--output=$ArchivePath", $ReleaseRevision) -WorkingDirectory $ProjectRoot
-  Write-Host "Release revision: $ReleaseRevision"
-
-  Write-Step "Waiting for SSH to become ready"
-  Wait-ForSshReady -KeyPath $KeyPath -UserName $UserName -HostName $HostName
-
-  Write-Step "Uploading archive"
-  Upload-ArchiveToRemote `
-    -ArchivePath $ArchivePath `
-    -RemoteArchivePath $RemoteArchivePath `
-    -KeyPath $KeyPath `
-    -UserName $UserName `
-    -HostName $HostName `
-    -ProjectRoot $ProjectRoot
-
-  Write-Step "Deploying on remote server"
-  $RemoteCommand = @"
-set -e
-mkdir -p $RemoteCurrentPath
-# Overlay the release without deleting the live application's dependencies or runtime files.
-# Source-file removals must be handled explicitly, never by clearing the live directory.
-tar -xzf $RemoteArchivePath -C $RemoteCurrentPath
-cd $RemoteCurrentPath
-tr -d '\r' < deploy/deploy-production.sh | bash
-rm -f $RemoteArchivePath
-"@
-  $sshArgs = Get-SshArgumentList -KeyPath $KeyPath
-  Invoke-RetryCommand -FilePath "ssh.exe" -ArgumentList @(
-    $sshArgs +
-    @(
-      "${UserName}@${HostName}",
-      $RemoteCommand
-    )
-  ) -MaxAttempts 3 -DelaySeconds 3
-
-  Write-Step "Checking API health"
-  Invoke-RetryCommand -FilePath "ssh.exe" -ArgumentList @(
-    $sshArgs +
-    @(
-      "${UserName}@${HostName}",
-      "curl -fsS http://127.0.0.1:3001/api/health"
-    )
-  ) -MaxAttempts 10 -DelaySeconds 2
-
-  Write-Step "Checking public site"
-  Invoke-RetryCommand -FilePath "curl.exe" -ArgumentList @(
-    "-I",
-    $PublicUrl
-  ) -MaxAttempts 6 -DelaySeconds 2
-
-  Write-Host ""
-  Write-Host "Deployment finished successfully." -ForegroundColor Green
+  if ($CiRunId -notmatch '^\d+$') { throw 'Invalid CI run ID.' }
+  $ci = (Invoke-Checked gh @('run', 'view', $CiRunId, '--json', 'headSha,status,conclusion,workflowName,jobs')) -join "`n" | ConvertFrom-Json
+  $ciEvidencePath = Join-Path ([System.IO.Path]::GetTempPath()) ("chevoink-ci-" + [guid]::NewGuid().ToString('N') + '.json')
+  $ci | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $ciEvidencePath -Encoding utf8
+  Invoke-Checked node @('scripts/release-ci.mjs', $revision, $ciEvidencePath)
+  Write-Host "CI $CiRunId passed for $revision. Reusing those gates; no duplicate local full run."
+  $packageDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("chevoink-release-" + [guid]::NewGuid().ToString('N'))
+  $package = (Invoke-Checked node @('scripts/release-package.mjs', '--revision', $revision, '--baseline', $ExpectedCurrentRevision, '--out', $packageDirectory)) -join "`n" | ConvertFrom-Json
+  $remoteArchive = "/tmp/chevoink-$revision.tar.gz"
+  $remoteManifest = "/tmp/chevoink-$revision-baseline.json"
+  $sshArguments = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-o', 'ConnectionAttempts=1', '-i', $KeyPath)
+  if ($SourceAddress) { $sshArguments += @('-b', $SourceAddress) }
+  # Single upload/activation attempt. Interrupted mutations have an on-host
+  # journal; inspect actual state instead of replaying the whole deployment.
+  $scpArguments = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-o', 'ConnectionAttempts=1', '-i', $KeyPath)
+  if ($SourceAddress) { $scpArguments += @('-o', "BindAddress=$SourceAddress") }
+  $preflight = "set -eu; test -d /opt/chevoink/app/current; test ! -L /opt/chevoink/app/current; test ! -e '/opt/chevoink/app/release-$revision'; test ! -e '/opt/chevoink/app/.release-$revision.jsonl'; test ! -e '/opt/chevoink/app/previous-$ExpectedCurrentRevision-for-$revision'; test ! -e '$remoteArchive'; test ! -e '$remoteManifest'"
+  Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", $preflight)) | Out-Null
+  Invoke-Checked scp.exe ($scpArguments + @($package.archive, "${UserName}@${HostName}:$remoteArchive")) | Out-Null
+  Invoke-Checked scp.exe ($scpArguments + @($package.baselineManifest, "${UserName}@${HostName}:$remoteManifest")) | Out-Null
+  $remote = "set -eu; test `"`$(sha256sum '$remoteArchive' | cut -d' ' -f1)`" = '$($package.archiveSha256)'; mkdir -m 700 '/opt/chevoink/app/release-$revision'; tar -xzf '$remoteArchive' -C '/opt/chevoink/app/release-$revision'; cd '/opt/chevoink/app/release-$revision'; tr -d '\r' < deploy/deploy-production.sh | bash -s -- '$revision' '$($package.archiveSha256)' '$ExpectedCurrentRevision' '$remoteArchive' '$remoteManifest'"
+  Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", $remote))
+  $health = (Invoke-Checked curl.exe @('--fail', '--silent', '--show-error', '--max-time', '20', "$PublicUrl/api/health")) -join "`n" | ConvertFrom-Json
+  if (-not $health.success -or $health.data.appEnv -ne 'production') { throw 'Public production health check failed.' }
+  Invoke-Checked curl.exe @('--fail', '--silent', '--show-error', '--max-time', '20', '--output', (Join-Path $packageDirectory 'public-index.html'), $PublicUrl) | Out-Null
+  $publicIndexHash = (Get-FileHash -LiteralPath (Join-Path $packageDirectory 'public-index.html') -Algorithm SHA256).Hash.ToLowerInvariant()
+  $remoteIndexHash = ((Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", 'sha256sum /var/www/chevoink/current/index.html'))) -split '\s+')[0]
+  if ($publicIndexHash -ne $remoteIndexHash) { throw 'Public index differs from the deployed entry page.' }
+  Write-Host "Deployment verified: $revision; package/evidence retained at $packageDirectory"
 }
-finally {
-  if (Test-Path $ArchivePath) {
-    Remove-Item $ArchivePath -Force
-  }
-}
+finally { Pop-Location }

@@ -23,7 +23,7 @@ async function createFixture(): Promise<Fixture> {
 async function cleanupFixture(fixture: Fixture) {
   await prisma.agentGoalCommand.deleteMany({ where: { userId: fixture.userId } })
   await prisma.aiUsageLog.deleteMany({ where: { userId: fixture.userId } })
-  await prisma.agentSession.deleteMany({ where: { id: fixture.sessionId } })
+  await prisma.agentSession.deleteMany({ where: { userId: fixture.userId, novelId: fixture.novelId } })
   await prisma.novel.deleteMany({ where: { id: fixture.novelId } })
   await prisma.user.delete({ where: { id: fixture.userId } }).catch(() => undefined)
 }
@@ -66,6 +66,28 @@ describe.skipIf(!dbAvailable)('agent goal service (isolated test DB)', () => {
     await expect(createAgentGoal(other.userId, { novelId: owner.novelId }, createInput()))
       .rejects.toMatchObject({ code: 'NOT_FOUND' })
     await expect(readAgentGoal(other.userId, owner.sessionId)).rejects.toMatchObject({ code: 'NOT_FOUND' })
+  })
+
+  it('summarizes a new task title without copying Markdown or changing its original objective', async () => {
+    const fixture = await createFixture()
+    const objective = '## 第一章 压酱油瓶的那枚铜钱\n林辰这天走过巷口。\n请续写第二章，只要正文。'
+    const input = createInput(randomUUID(), objective)
+    const created = await createAgentGoal(fixture.userId, { novelId: fixture.novelId }, input)
+    const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: created.sessionId } })
+    expect(session).toMatchObject({ userId: fixture.userId, novelId: fixture.novelId, title: '续写第二章正文' })
+    expect(await prisma.agentGoalRevision.findUniqueOrThrow({ where: { goalId_revision: { goalId: created.id, revision: 1 } } })).toMatchObject({ objective })
+    const repeated = await createAgentGoal(fixture.userId, { novelId: fixture.novelId }, input)
+    expect(repeated).toEqual(created)
+    expect(await prisma.agentSession.count({ where: { userId: fixture.userId, novelId: fixture.novelId } })).toBe(2)
+    expect(await prisma.aiUsageLog.count({ where: { userId: fixture.userId } })).toBe(0)
+  })
+
+  it('leaves the human session title unchanged when creating a goal in that window', async () => {
+    const fixture = await createFixture()
+    const title = '作者自定第一章计划'
+    await prisma.agentSession.update({ where: { id: fixture.sessionId }, data: { title } })
+    await createAgentGoal(fixture.userId, { sessionId: fixture.sessionId }, createInput())
+    expect((await prisma.agentSession.findUniqueOrThrow({ where: { id: fixture.sessionId } })).title).toBe(title)
   })
 
   it('pauses and cancels, while a late pause preserves committed completion', async () => {

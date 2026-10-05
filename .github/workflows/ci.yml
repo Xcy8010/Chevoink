@@ -18,6 +18,34 @@ env:
   TEST_DATABASE_REQUIRED: 'true'
 
 jobs:
+  test-plan:
+    name: plan test shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 安装固定候选运行时
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: 安装依赖
+        run: npm ci
+      - name: 自动发现测试并生成均衡分片计划
+        id: plan
+        run: npx tsx scripts/ci-test-plan.ts plan
+      - name: 保存本次完整测试计划
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-plan-${{ github.sha }}
+          path: .ci-test-plan.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
   static:
     name: check / lint / build / audit
     runs-on: ubuntu-latest
@@ -73,13 +101,13 @@ jobs:
         run: npm audit --audit-level=high
 
   test-shard:
-    name: test shard ${{ matrix.shard }}/3
+    name: test shard ${{ matrix.shard }}/${{ matrix.count }}
+    needs: test-plan
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      matrix:
-        shard: [1, 2, 3]
+      matrix: ${{ fromJSON(needs.test-plan.outputs.matrix) }}
 
     # Each shard owns a fresh PostgreSQL service. File parallelism remains off
     # inside that database so existing transaction/worker invariants are unchanged.
@@ -138,14 +166,22 @@ jobs:
           cp tests/.env.test.example tests/.env.test
           # DATABASE_URL is inherited from the verified job environment.
 
+      - name: 下载本次完整测试计划
+        uses: actions/download-artifact@v4
+        with:
+          name: vitest-plan-${{ github.sha }}
+          path: .
+
       - name: 测试分片（隔离数据库，生成 blob 与覆盖率）
         # A partial shard cannot represent the global coverage score. The merge
         # job below is the only place that evaluates the unchanged CI thresholds.
         run: >-
           npx vitest run
-          --shard=${{ matrix.shard }}/3
+          --shard=${{ matrix.shard }}/${{ matrix.count }}
+          --config=./scripts/ci-vitest.config.ts
           --reporter=default
           --reporter=blob
+          --reporter=./scripts/ci-test-reporter.ts
           --coverage
           --coverage.thresholds.statements=0
           --coverage.thresholds.branches=0
@@ -158,14 +194,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vitest-blob-${{ github.sha }}-${{ matrix.shard }}
-          path: .vitest-reports/*.json
+          path: |
+            .vitest-reports/*.json
+            .ci-test-reports/*.json
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
   merge-coverage:
     name: merge coverage / test report
-    needs: test-shard
+    needs: [test-plan, test-shard]
     if: needs.test-shard.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -187,17 +225,17 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: vitest-blob-${{ github.sha }}-*
-          path: .vitest-reports
+          path: .
           merge-multiple: true
 
-      - name: 验证三个分片报告齐全
-        shell: bash
-        run: |
-          test -f .vitest-reports/blob-1-3.json
-          test -f .vitest-reports/blob-2-3.json
-          test -f .vitest-reports/blob-3-3.json
-          count=$(find .vitest-reports -maxdepth 1 -type f -name 'blob-*.json' | wc -l)
-          test "$count" -eq 3
+      - name: 下载本次完整测试计划
+        uses: actions/download-artifact@v4
+        with:
+          name: vitest-plan-${{ github.sha }}
+          path: .
+
+      - name: 验证分片数量、测试文件和执行回执齐全
+        run: npx tsx scripts/ci-test-plan.ts verify-reports
 
       - name: 合并测试结果并执行全局覆盖率门禁
         # vitest.config.ts supplies the unchanged CI thresholds (30/73/52/30).
@@ -209,7 +247,7 @@ jobs:
   ci:
     name: check / lint / test / build / audit
     if: always()
-    needs: [static, test-shard, merge-coverage]
+    needs: [static, test-plan, test-shard, merge-coverage]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -217,5 +255,6 @@ jobs:
         shell: bash
         run: |
           test "${{ needs.static.result }}" = success
+          test "${{ needs.test-plan.result }}" = success
           test "${{ needs.test-shard.result }}" = success
           test "${{ needs.merge-coverage.result }}" = success

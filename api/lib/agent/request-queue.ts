@@ -11,6 +11,7 @@ import { readHumanAdmission, withHumanAdmission } from './goal-activation-author
 import { bindCurrentTaskGoalConsent, goalConsentSchema } from './goal-consent.js'
 import { bindConfigurationConsent, configurationConsentSchema } from './configuration-journal.js'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
+import { fallbackSessionTitle } from './session-title.js'
 
 const editable = ['pending', 'held']
 const conflict = () => new DataAccessError(409, 'QUEUE_CHANGED', '待发需求已发送或被修改，请刷新后再操作。')
@@ -118,7 +119,7 @@ export async function actOnQueuedRequest(userId: string, sessionId: string, id: 
         return { session: result.session }
       }
       const session = await prisma.$transaction(async tx => {
-        const created = await tx.agentSession.create({ data: { userId, novelId: input.novelId, title: input.prompt.slice(0, 80) } })
+        const created = await tx.agentSession.create({ data: { userId, novelId: input.novelId, title: fallbackSessionTitle(input.prompt) } })
         await transfer(tx, created.id)
         return created
       })
