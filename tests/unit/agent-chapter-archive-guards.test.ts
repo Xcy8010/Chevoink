@@ -37,14 +37,14 @@ vi.mock('../../api/lib/agent/runtime-reducer.js', async () => {
 vi.mock('../../api/lib/agent/tools/durable-create.js', () => ({ executeDurableCreate: vi.fn() }))
 
 import { activeChapterScope } from '../../api/lib/data/internal.js'
-import { clearRunBaselines, getChapterBaseline, recordChapterBaseline, recordCreatedChapter } from '../../api/lib/agent/baseline.js'
+import { clearRunBaselines, getChapterBaseline, getCreatedChapter, recordChapterBaseline, recordCreatedChapter } from '../../api/lib/agent/baseline.js'
 import { chapterAppendTool, chapterCreateTool, chapterEditRangeTool, chapterRenameTool, chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { executeDurableChapter, executeDurableChapterRename } from '../../api/lib/agent/tools/durable-chapter.js'
 import type { AgentTool, ToolContext, ToolResult } from '../../api/lib/agent/tools/types.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 
 const tx = m.tx as unknown as Prisma.TransactionClient
-const row = { id: 'c', novelId: 'n', authorId: 'u', volumeId: 'v', title: 'Title', content: 'Before', revision: 4, wordCount: 6, orderIndex: 1, orderInVolume: 1, status: 'published', visibility: 'public', publishedContent: 'Snapshot', publishedRevision: 2, archivedAt: null }
+const row = { id: 'c', novelId: 'n', authorId: 'u', volumeId: 'v', volume: { title: 'Volume', orderIndex: 1 }, title: 'Title', content: 'Before', revision: 4, wordCount: 6, orderIndex: 1, orderInVolume: 1, status: 'published', visibility: 'public', publishedContent: 'Snapshot', publishedRevision: 2, archivedAt: null }
 let ownedRun: Record<string, unknown>
 function authorScope(createAt?: number) {
   const prompt = createAt ? `写第${createAt}章，创建该目标章节。` : '修订当前章节的标题和正文。'
@@ -188,6 +188,105 @@ describe('legacy Agent chapter archive guards', () => {
     expect(await chapterCreateTool.execute(ctx(), { title: 'Title' })).toMatchObject({ outcome: 'failed' })
     expect(m.tx.chapter.create).not.toHaveBeenCalled()
     expect(m.db.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('validates explicit placement even when the title cache already points to an owned chapter', async () => {
+    recordCreatedChapter('r', 'Title', 'c')
+    await expect(chapterCreateTool.execute(ctx(), { title: 'Title', position: 2 })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    expect(m.tx.chapter.create).not.toHaveBeenCalled()
+    expect(m.tx.agentRun.update).not.toHaveBeenCalled()
+    expect(getCreatedChapter('r', 'Title')).toBe('c')
+    expectNoEffects()
+  })
+
+  it.each([{ volumeOrder: 2, positionInVolume: 1 }, { volumeOrder: 1, positionInVolume: 2 }])('rejects an unmatched volume target without falling back to the first slot: %j', async args => {
+    m.tx.volume.findFirst.mockResolvedValue({ id: args.volumeOrder === 2 ? 'other-v' : 'v', novelId: 'n', orderIndex: args.volumeOrder, archivedAt: null })
+    await expect(chapterCreateTool.execute(ctx(), { title: 'Different', content: 'Must not write', ...args })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    expect(m.tx.chapter.create).not.toHaveBeenCalled()
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expect(m.tx.agentRun.update).not.toHaveBeenCalled()
+    expect(getCreatedChapter('r', 'Different')).toBeNull()
+    expectNoEffects()
+  })
+
+  it('keeps an actual created chapter retry idempotent after cache placement validation', async () => {
+    authorScope(1)
+    const created = { ...row, volume: { title: 'Volume', orderIndex: 1 } }
+    m.placement.mockResolvedValue({ volume: { id: 'v' }, count: 1, position: 0 })
+    m.tx.chapter.create.mockResolvedValue(row)
+    m.tx.chapter.findFirstOrThrow.mockResolvedValue(created)
+    const first = await chapterCreateTool.execute(ctx(), { title: 'Title', position: 1 })
+    expect(first.summary).toContain('新建')
+    expect(getCreatedChapter('r', 'Title')).toBe('c')
+    m.tx.chapter.findFirst.mockResolvedValue(created)
+    m.stats.mockClear()
+    m.memory.mockClear()
+    m.compiler.mockClear()
+    const retry = await chapterCreateTool.execute(ctx(), { title: 'Title', position: 1 })
+    expect(retry.summary).toContain('复用')
+    expect(retry.observedState?.id).toBe(first.observedState?.id)
+    expect(m.tx.chapter.create).toHaveBeenCalledTimes(1)
+    expectNoEffects()
+  })
+
+  it.each(['explicit-overflow', 'frozen-overflow', 'hydrated-mismatch'] as const)('rejects %s rather than binding a clamped volume insertion to another global slot', async scenario => {
+    authorScope(39)
+    const chapters = Array.from({ length: 38 }, (_, index) => ({ ...row, id: `c-${index + 1}`, orderIndex: index + 1,
+      volumeId: index < 16 ? 'v' : 'v2', orderInVolume: index < 16 ? index + 1 : index - 15, volume: { title: 'Volume', orderIndex: index < 16 ? 1 : 2 } }))
+    m.tx.chapter.findMany.mockResolvedValue(chapters)
+    m.tx.chapter.findFirst.mockImplementation(async ({ where }) => where.orderIndex === 39 ? null : { ...chapters.at(-1), volumeId: 'v2' })
+    m.tx.volume.findFirst.mockResolvedValue({ id: 'v', novelId: 'n', orderIndex: 1, archivedAt: null })
+    m.placement.mockResolvedValue({ volume: { id: 'v', orderIndex: 1 }, count: 16, position: 16 })
+    if (scenario === 'frozen-overflow') {
+      const task = ownedRun.taskSpec as ReturnType<typeof buildTaskSpec>
+      task.scope.writing!.targets[0] = { orderIndex: 39, chapterId: null, volumeId: 'v', positionInVolume: 39 }
+    }
+    if (scenario === 'hydrated-mismatch') {
+      m.placement.mockResolvedValue({ volume: { id: 'v2', orderIndex: 2 }, count: 22, position: 22 })
+      m.tx.chapter.create.mockResolvedValue({ ...row, id: 'created' })
+      m.tx.chapter.findFirstOrThrow.mockResolvedValue({ ...row, id: 'created', orderIndex: 17, orderInVolume: 17 })
+    }
+    await expect(chapterCreateTool.execute(ctx(), { title: 'Wrong binding', ...(scenario === 'explicit-overflow' ? { volumeOrder: 1, positionInVolume: 39 } : {}) }))
+      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    if (scenario !== 'hydrated-mismatch') expect(m.tx.chapter.create).not.toHaveBeenCalled()
+    expect(m.tx.agentRun.update).not.toHaveBeenCalled()
+    expect(getCreatedChapter('r', 'Wrong binding')).toBeNull()
+    expectNoEffects()
+  })
+
+  it.each(['volume', 'local'] as const)('keeps frozen %s placement when a bound chapter moved, while omitted placement still reuses its identity', async scenario => {
+    const task = ownedRun.taskSpec as ReturnType<typeof buildTaskSpec>
+    task.scope.writing!.targets[0] = { orderIndex: 2, chapterId: 'c', volumeId: 'v2', positionInVolume: 1 }
+    const moved = { ...row, volumeId: scenario === 'volume' ? 'v' : 'v2', orderInVolume: scenario === 'volume' ? 1 : 2 }
+    m.tx.chapter.findMany.mockResolvedValue([moved])
+    m.tx.chapter.findFirst.mockResolvedValue(moved)
+    m.tx.volume.findFirst.mockResolvedValue({ id: moved.volumeId, novelId: 'n', orderIndex: scenario === 'volume' ? 1 : 2, archivedAt: null })
+    await expect(chapterCreateTool.execute(ctx(), { title: 'Must not move', volumeOrder: scenario === 'volume' ? 1 : 2, positionInVolume: moved.orderInVolume }))
+      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expect(chapterCreateTool.execute(ctx(), { title: 'Must not move', volumeOrder: scenario === 'volume' ? 1 : 2 }))
+      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    const omitted = await chapterCreateTool.execute(ctx(), { title: 'Must not move' })
+    expect(omitted.summary).toContain('复用')
+    expect(omitted.display).toMatchObject({ kind: 'chapterRef', chapterId: 'c' })
+    expect(m.tx.chapter.create).not.toHaveBeenCalled()
+    expect(m.tx.agentRun.update).not.toHaveBeenCalled()
+    expect(getCreatedChapter('r', 'Must not move')).toBeNull()
+    expectNoEffects()
+  })
+
+  it('truthfully reuses an admitted historical chapter without recording it as newly created or changing stats/body', async () => {
+    m.tx.chapter.findFirst.mockResolvedValue({ ...row, volume: { title: 'Volume', orderIndex: 1 } })
+    const reused = await chapterCreateTool.execute(ctx(), { title: 'Different', content: 'Must not write', position: 1 })
+    expect(reused.summary).toContain('复用')
+    expect(reused.output).toContain('本次未创建、改名或写入章节')
+    expect(reused.display).toMatchObject({ kind: 'chapterRef', chapterId: 'c' })
+    expect(reused.snapshot).toBeUndefined()
+    expect(reused.semanticTransition).toBeUndefined()
+    expect(getCreatedChapter('r', row.title)).toBeNull()
+    expect(getCreatedChapter('r', 'Different')).toBeNull()
+    expect(m.tx.chapter.create).not.toHaveBeenCalled()
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expectNoEffects()
   })
 
   it('throws inside the transaction if post-CAS active hydration fails, instead of committing a reported failure', async () => {

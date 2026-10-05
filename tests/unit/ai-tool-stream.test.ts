@@ -21,6 +21,21 @@ function stream(text: string) {
 }
 const invoke = () => chatWithTools({ messages: [], tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
 describe('lossless tool argument transport', () => {
+  it.each(['none', 'high'] as const)('sends Ling %s thinking mode and preserves split native tool arguments', async reasoningEffort => {
+    const first = '{"tasks":[{"goal":"'
+    const second = '核对河防","beats":["察看旧堤"]}]}'
+    stream(`data: ${JSON.stringify(delta(first, true))}\r\n\r\ndata: ${JSON.stringify(delta(second))}\r\n\r\ndata: ${JSON.stringify(ending('tool_calls'))}\r\n\r\n`)
+    const tools = [{ type: 'function' as const, function: { name: 'scene_task_build', description: 'test', parameters: { type: 'object' } } }]
+    const result = await chatWithTools({ messages: [], tools, provider: 'Ant Ling', providerBaseUrl: 'https://api.ant-ling.com/v1',
+      model: 'Ling-3.0-flash', reasoningEffort, providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string)
+    expect(body.thinking).toEqual({ type: reasoningEffort === 'none' ? 'disabled' : 'enabled' })
+    expect(body).not.toHaveProperty('reasoning_effort')
+    expect(body.tools).toEqual(tools)
+    expect(result.toolCalls).toEqual([{ id: 'call', name: 'scene_task_build', arguments: first + second }])
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
   it.each(['native', 'omit'] as const)('preserves a separately verified thinking switch with %s effort protocol', async reasoningParameterMode => {
     stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
     await chatWithTools({ messages: [], tools: [], provider: 'deepseek', reasoningEffort: 'high',

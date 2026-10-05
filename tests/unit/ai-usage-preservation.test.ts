@@ -32,6 +32,24 @@ async function invoke(usages: Array<Record<string, unknown>>) {
 }
 
 describe('explicit zero provider usage is not missing usage', () => {
+  it.each(['none', 'high'] as const)('uses the configured Ling %s default for an auxiliary call without changing usage or the route', async reasoningEffort => {
+    const modelRuntime = { tier: 'speed' as const, provider: 'Ant Ling', modelName: 'Ling-3.0-flash',
+      baseUrl: 'https://api.ant-ling.com/v1', apiKey: 'fixture-not-a-key', reasoningEffort,
+      reasoningEfforts: ['none', 'high'] as Array<'none' | 'high'>, multiplierBps: 0, visionEnabled: false, contextWindowTokens: 128000 }
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{ message: { content: '合成结果' }, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 8 },
+    })))
+    vi.stubGlobal('fetch', fetcher)
+    await expect(generateTextCompletion('system', '合成输入', { userId: 'test', action: 'test', modelRuntime })).resolves.toBe('合成结果')
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(fetcher.mock.calls[0][0]).toBe('https://api.ant-ling.com/v1/chat/completions')
+    const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
+    expect(body).toMatchObject({ model: 'Ling-3.0-flash', thinking: { type: reasoningEffort === 'none' ? 'disabled' : 'enabled' } })
+    expect(body).not.toHaveProperty('reasoning_effort')
+    expect(modelRuntime.reasoningEffort).toBe(reasoningEffort)
+    expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ requestTokens: 20, responseTokens: 8 }))
+  })
+
   it.each(Object.entries(TEXT_ACTION_TASKS))('routes actual auxiliary %s body through frozen purpose %s and honors effort', async (action, task) => {
     mocks.runtime.mockImplementation(async (tier, _user, _custom, effort) => ({ tier, provider: 'openai', modelName: 'selected-model',
       baseUrl: 'https://selected.example/v1', apiKey: 'fixture-not-a-key', reasoningEffort: effort ?? 'high', reasoningEfforts: ['low', 'medium', 'high'],

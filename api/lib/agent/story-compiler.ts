@@ -773,7 +773,7 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
     scope ? prisma.storyCompilation.findFirst({
       where: { userId, novelId, ...scope, status: { in: ['active', 'completed'] } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      include: { sceneTasks: { orderBy: { ordinal: 'asc' } }, bridge: true, chapter: { select: { id: true, revision: true } },
+      include: { sceneTasks: { orderBy: { ordinal: 'asc' } }, bridge: true,
         qualityReports: { orderBy: { createdAt: 'desc' }, take: 1, select: { id: true, chapterRevision: true, status: true } } },
     }) : Promise.resolve(null),
     prisma.chapterBridge.findFirst({
@@ -783,14 +783,32 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
     }),
   ])
   if (!bundle.charter && !active && !latestBridge) return null
+  const chapter = active?.chapterId ? await prisma.chapter.findFirst({ where: { id: active.chapterId, authorId: userId, ...activeChapterScope(novelId) },
+    select: { id: true, revision: true, content: true } }) : null
+  const hasBody = !!chapter?.content.trim()
+  const terminalContext = active?.preparedContext && typeof active.preparedContext === 'object' && !Array.isArray(active.preparedContext) ? active.preparedContext : null
+  const committed = !!active && hasBody && active.status === 'completed' && active.stage === 'commit'
+    && !!active.bridge && active.bridge.toChapterId === chapter?.id && !!active.bridge.committedAt && active.bridge.targetRevision === chapter?.revision
+    && terminalContext?.terminalContentHash === runtimeJson({ content: chapter?.content }).hash
+  const resume = !active ? '' : committed
+    ? '本任务该章终态已提交且匹配当前正文 revision/hash；复用结果，不重复写入或提交。'
+    : active.sceneTasks.length === 0
+      ? ['prepare', 'beat'].includes(active.stage)
+        ? `保留此编译，不重复 PREPARE；尚无场景，下一步调用 scene_task_build，compilationId=${active.id}。尚不能宣称该章已写完或完成。`
+        : '本编译缺少场景记录，先核对已保存状态；不得宣称已写完或完成，也不得重建编译或重复正文写入。'
+      : !hasBody
+        ? `保留此编译和场景，不重复 PREPARE/BEAT；尚无合法非空正文，下一步${chapter ? '' : '按冻结目标 chapter_create 后'}调用 chapter_write 保存正文，不能宣称已写完或完成。`
+        : active.bridge?.targetRevision !== chapter?.revision
+          ? `保留此编译和场景，不重复 PREPARE/BEAT；当前正文与本编译绑定写入版本（${active.bridge?.targetRevision ?? '未记录'}）不一致。先核对正文和原请求，再补缺失步骤；终态未核验，不能宣称完成。`
+          : `保留此编译、场景和已保存正文，不重复 PREPARE/BEAT 或整章写入；终态尚未与当前正文 revision/hash 核验，下一步在原权限内调用 chapter_bridge_commit 提交当前版本，不能宣称完成。`
   const validation = active?.validation as { checkedRevision?: number; independentCheck?: string; errorCount?: number; warningCount?: number } | null
   const lines = [
     'Story Compiler 3.0 状态：',
     bundle.charter ? `创作宪章 r${bundle.charter.revision}：${clip(bundle.charter.oneLinePromise, 240)}` : '创作宪章：尚未建立（新书长纲前应先建立）',
     bundle.promises.length ? `待兑现读者承诺：${bundle.promises.slice(0, 5).map((item) => `${item.title}（${item.payoffHorizon}）`).join('；')}` : '待兑现读者承诺：无',
-    active ? `本任务编译：${active.id}，chapterId=${active.chapterId ?? '尚未创建'}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，状态 ${active.status}，Scene Task ${active.sceneTasks.length} 个。恢复时保留此编译和场景，不重复 PREPARE/BEAT。` : '本任务尚未建立编译；历史检查失败不构成恢复旧任务的授权。写下一章时以前文为参考，为新章建立本任务编译。',
-    active?.chapter ? `当前正文 r${active.chapter.revision}；连续性检查 revision=${validation?.checkedRevision ?? '未检查'}，状态=${validation?.independentCheck ?? '未完成'}，错误=${validation?.errorCount ?? '未知'}，警告=${validation?.warningCount ?? '未知'}；本编译质量报告 ${JSON.stringify(active.qualityReports?.[0] ?? null)}。缺失或旧版本报告不代表通过；流水线复核请传 compilationId=${active.id}，独立章节检查不能代替编译 CHECK。该状态仅描述此章节，其他目标仍须分别验收。` : '',
-    latestBridge?.toChapter ? `最近已提交桥：第 ${latestBridge.toChapter.orderIndex} 章《${latestBridge.toChapter.title}》r${latestBridge.toChapter.revision}；未完成动作：${latestBridge.lastUnfinishedAction || '无'}；开放钩子：${asStringArray(latestBridge.openLoops).slice(0, 4).join('、') || '无'}` : '',
+    active ? `本任务编译：${active.id}，chapterId=${active.chapterId ?? '尚未创建'}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，状态 ${active.status}，Scene Task ${active.sceneTasks.length} 个。${resume}` : '本任务尚未建立编译；历史检查失败不构成恢复旧任务的授权。写下一章时以前文为参考，为新章建立本任务编译。',
+    chapter ? `当前正文 r${chapter.revision}，${hasBody ? `非空 ${chapter.content.trim().length} 字（已保存不等于本任务完成）` : '正文为空，未写完'}；连续性检查 revision=${validation?.checkedRevision ?? '未检查'}，状态=${validation?.independentCheck ?? '未完成'}，错误=${validation?.errorCount ?? '未知'}，警告=${validation?.warningCount ?? '未知'}；本编译质量报告 ${JSON.stringify(active?.qualityReports?.[0] ?? null)}。缺失或旧版本报告不代表通过；流水线复核请传 compilationId=${active?.id}，独立章节检查不能代替编译 CHECK。该状态仅描述此章节，其他目标仍须分别验收。` : '',
+    latestBridge?.toChapter ? `最近已提交桥（仅作背景，不证明本任务完成）：第 ${latestBridge.toChapter.orderIndex} 章《${latestBridge.toChapter.title}》，提交 r${latestBridge.targetRevision ?? '未知'}，当前 r${latestBridge.toChapter.revision}；未完成动作：${latestBridge.lastUnfinishedAction || '无'}；开放钩子：${asStringArray(latestBridge.openLoops).slice(0, 4).join('、') || '无'}` : '',
   ].filter(Boolean)
   return lines.join('\n')
 }

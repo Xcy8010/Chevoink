@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client'
 import type { TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { DataAccessError } from '../prisma.js'
-import { activeChapterScope } from '../data/internal.js'
+import { activeChapterScope, activeVolumeWhere } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { hasOriginalRepairAuthority, readOriginalTaskRequest, originalTaskRunIds } from './original-request.js'
 import { runtimeJson } from './runtime-common.js'
@@ -26,13 +26,14 @@ export function chapterNumber(text: string): number | null {
 }
 
 /** Pure extraction uses the whole admission request; generated goals are not authority. */
-export function requestedWritingRange(prompt: string): { kind: 'first' | 'next' | 'range' | 'count' | 'unbounded'; start?: number; count?: number; volume?: number } | null {
+export function requestedWritingRange(prompt: string): { kind: 'first' | 'next' | 'range' | 'count' | 'unbounded'; start?: number; count?: number; volume?: number; anchor?: 'editor' } | null {
   const positive = prompt.split(/[。！？!?；;\n，,]+/u).filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|不写|do not|don't)/iu.test(clause)).join('，')
   const range = positive.match(new RegExp(`第?(${numeric})(?:章)?(?:至|到|[-–~～])第?(${numeric})章`, 'u'))
   if (range) { const start = chapterNumber(range[1]), end = chapterNumber(range[2]); if (start && end && end >= start && end - start < 1000) return { kind: 'range', start, count: end - start + 1 } }
   const volume = positive.match(new RegExp(`第(${numeric})卷.{0,4}第(${numeric})章`, 'u'))
   if (volume) { const v = chapterNumber(volume[1]), chapter = chapterNumber(volume[2]); if (v && chapter) return { kind: 'range', start: chapter, count: 1, volume: v } }
-  if (/(?:下[一1]章|next chapter)/iu.test(positive)) return { kind: 'next', count: 1 }
+  if (/(?:下[一1]章|next chapter)/iu.test(positive)) return { kind: 'next', count: 1,
+    ...(/(?:当前(?:这)?(?:章|章节)|正在编辑(?:的)?(?:这章|章节|章))(?:之|以)?后|after\s+(?:the\s+)?(?:current|currently edited)\s+chapter/iu.test(positive) ? { anchor: 'editor' as const } : {}) }
   const firstCount = positive.match(new RegExp(`前(${numeric})章`, 'u'))
   if (firstCount) { const count = chapterNumber(firstCount[1]); if (count && count <= 1000) return { kind: 'range', start: 1, count } }
   if (/(?:首章|第一章|第1章|first chapter)/iu.test(positive)) return { kind: 'first', start: 1, count: 1 }
@@ -52,18 +53,19 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     const parent = taskSpecSchema.parse(original.spec)
     return { ...spec, scope: parent.scope, hardConstraints: parent.hardConstraints }
   }
-  const range = requestedWritingRange(prompt)
+  const admissionPrompt = original.prompt ?? prompt
+  const range = requestedWritingRange(admissionPrompt)
   const chapters = await tx.chapter.findMany({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) },
     select: { id: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
   const run = await tx.agentRun.findFirstOrThrow({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId }, select: { chapterId: true } })
-  const base = { version: 1 as const, titleAndBodyOnly: /(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|only.{0,20}title.{0,12}(?:body|text)/iu.test(prompt), repairAuthorized: hasOriginalRepairAuthority(prompt) }
+  const base = { version: 1 as const, titleAndBodyOnly: /(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|only.{0,20}title.{0,12}(?:body|text)/iu.test(admissionPrompt), repairAuthorized: hasOriginalRepairAuthority(admissionPrompt) }
   let writing: Writing
   if (range?.kind === 'unbounded') writing = { ...base, kind: 'unbounded', targets: [] }
   else if (range) {
     const anchor = run.chapterId ? chapters.find(item => item.id === run.chapterId) : null
-    const start = range.start ?? (range.kind === 'next' && anchor ? anchor.orderIndex + 1 : (chapters.at(-1)?.orderIndex ?? 0) + 1)
+    const start = range.start ?? (range.anchor === 'editor' ? anchor ? anchor.orderIndex + 1 : null : (chapters.at(-1)?.orderIndex ?? 0) + 1)
     const targets: Writing['targets'] = []
-    for (let i = 0; i < (range.count ?? 1); i++) {
+    for (let i = 0; start !== null && i < (range.count ?? 1); i++) {
       const position = start + i
       if (range.volume) {
         const volume = await tx.volume.findFirst({ where: { novelId: subject.novelId, archivedAt: null, orderIndex: range.volume }, select: { id: true } })
@@ -154,6 +156,46 @@ export async function assertWritingTarget(tx: Prisma.TransactionClient, subject:
     : item.orderIndex === target.orderIndex)
   if (!allowed) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原始请求未授权该章节，不能通过工具、待办或子任务扩大范围。')
   return scope
+}
+
+/** Resolve explicit placement before any create or replay. An unmatched volume
+ * position is never equivalent to omitting the requested target. */
+export async function resolveWritingCreateTarget(tx: Prisma.TransactionClient, subject: Subject,
+  args: { position?: number; volumeId?: string; volumeOrder?: number; positionInVolume?: number }, existingChapterId?: string) {
+  await lockWritingRunLineage(tx, subject)
+  const scope = await readWritingScope(tx, subject)
+  const explicitVolume = args.volumeId !== undefined || args.volumeOrder !== undefined
+  const volume = explicitVolume ? await tx.volume.findFirst({ where: { novelId: subject.novelId, ...activeVolumeWhere,
+    ...(args.volumeId !== undefined ? { id: args.volumeId } : { orderIndex: args.volumeOrder }) } }) : null
+  if (explicitVolume && !volume) throw new DataAccessError(400, 'VOLUME_NOT_FOUND', '目标卷不存在或不属于当前作品。')
+  const chapters = await tx.chapter.findMany({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) },
+    select: { id: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
+  const existing = existingChapterId ? chapters.find(chapter => chapter.id === existingChapterId) : null
+  if (existingChapterId && !existing) throw new DataAccessError(409, 'AUTHOR_SCOPE_PROTECTED', '原创建结果已归档或不存在，不能创建替代身份。')
+  const matchesPlacement = (chapter: NonNullable<typeof existing>) => (args.position === undefined || args.position === chapter.orderIndex)
+    && (!volume || chapter.volumeId === volume.id)
+    && (args.positionInVolume === undefined || args.positionInVolume === chapter.orderInVolume)
+  if (existing && !matchesPlacement(existing)) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '显式创建位置与已绑定章节不一致，本次未创建或复用其他章节。')
+  const bounded = scope.writing?.kind === 'bounded' ? scope.writing : null
+  const slot = bounded?.targets.find(target => {
+    const boundId = target.chapterId ?? scope.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId
+    if (existingChapterId && boundId !== existingChapterId) return false
+    if (args.position !== undefined && target.orderIndex !== args.position) return false
+    const chapter = boundId ? chapters.find(item => item.id === boundId) : chapters.find(item => item.orderIndex === target.orderIndex)
+    if (boundId && chapter && !matchesPlacement(chapter)) return false
+    if (!volume) return true
+    if (target.volumeId && target.volumeId !== volume.id) return false
+    if (target.positionInVolume !== undefined && (args.positionInVolume !== undefined && args.positionInVolume !== target.positionInVolume
+      || chapter && chapter.orderInVolume !== target.positionInVolume)) return false
+    if (chapter) return matchesPlacement(chapter)
+    const count = chapters.filter(item => item.volumeId === volume.id).length
+    const position = args.positionInVolume ?? target.positionInVolume ?? count + 1
+    return position <= count + 1 && (target.positionInVolume === undefined || position === target.positionInVolume)
+      && target.orderIndex === chapters.filter(item => item.volume.orderIndex < volume.orderIndex).length + position
+  })
+  if (bounded && !slot) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '显式创建目标不匹配原始请求的冻结章节范围，本次未创建或复用其他章节。')
+  await assertWritingTarget(tx, subject, existing ? { chapterId: existing.id } : { orderIndex: slot?.orderIndex ?? args.position })
+  return { slot, volumeId: volume?.id, chapters }
 }
 
 /** Novel lock serializes all parent/child create attempts; the claim commits

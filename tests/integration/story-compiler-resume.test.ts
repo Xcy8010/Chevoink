@@ -107,6 +107,30 @@ async function check(f: Awaited<ReturnType<typeof createFixture>>, compilationId
 
 describe.skipIf(!available)('compiler recovery through historical goal continuation (isolated DB)', () => {
   beforeAll(() => { env.agentGoalEnabled = true })
+  it('recovers prepare/zero scenes and beat/saved scenes from persisted state without treating empty prose or assistant history as completion', async () => {
+    await fixture(async f => {
+      await prisma.chapter.update({ where: { id: f.chapter.id }, data: { content: '  \n', wordCount: 0 } })
+      const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId }, include: { bridge: true, sceneTasks: true } })
+      const prepared = await buildStoryCompilerDigest(f.ctx.userId, f.ctx.novelId, f.chapter.id, f.ctx.runId)
+      expect(prepared).toContain('阶段 prepare')
+      expect(prepared).toContain('Scene Task 0 个')
+      expect(prepared).toContain('下一步调用 scene_task_build')
+      expect(prepared).toContain('正文为空，未写完')
+      expect(prepared).not.toContain('不重复 PREPARE/BEAT')
+      expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId }, include: { bridge: true, sceneTasks: true } })).toEqual(before)
+      const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
+      await saveSceneTasks({ ...f.ctx, compilationId: f.compilationId, tasks: [{ purpose: '合成推进', entryState: state, goal: '找线索',
+        obstacle: '锁门', choice: '绕路', cost: '时间', turn: '发现脚印', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
+      const beat = await buildStoryCompilerDigest(f.ctx.userId, f.ctx.novelId, f.chapter.id, f.ctx.runId)
+      expect(beat).toContain('阶段 beat')
+      expect(beat).toContain('Scene Task 1 个')
+      expect(beat).toContain('不重复 PREPARE/BEAT')
+      expect(beat).toContain('调用 chapter_write 保存正文')
+      expect(beat).not.toContain('下一步调用 scene_task_build')
+      expect(beat).toContain('不能宣称已写完或完成')
+      expect(await prisma.storyCompilation.count({ where: { novelId: f.ctx.novelId } })).toBe(1)
+    })
+  })
   it('reads and commits the original compilation, scenes and version-bound report exactly once', async () => {
     vi.spyOn(flags, 'isAgent2FeatureEnabled').mockReturnValue(true)
     await fixture(async f => {
@@ -126,6 +150,7 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.originalId } })).status).toBe('paused')
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId } })).runId).toBe(f.originalId)
       expect(await chapterBridgeCommitTool.execute(f.ctx, {})).toMatchObject({ summary: '提交章节桥与当前故事终态', display: { compilationId: f.compilationId } })
+      expect(await buildStoryCompilerDigest(f.ctx.userId, f.ctx.novelId, f.chapter.id, f.ctx.runId)).toContain('终态已提交且匹配当前正文 revision/hash')
       expect(await prisma.storyCompilation.count({ where: { novelId: f.ctx.novelId } })).toBe(1)
       expect(await prisma.chapterQualityReport.count({ where: { novelId: f.ctx.novelId } })).toBe(1)
       expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.ctx.novelId } })).toBe(memoryCount)
@@ -134,6 +159,14 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       expect(afterScenes.map(scene => ({ id: scene.id, purpose: scene.purpose, entryState: scene.entryState, exitState: scene.exitState })))
         .toEqual(beforeScenes.map(scene => ({ id: scene.id, purpose: scene.purpose, entryState: scene.entryState, exitState: scene.exitState })))
       expect(afterScenes.every(scene => scene.status === 'completed')).toBe(true)
+      await prisma.chapter.update({ where: { id: f.chapter.id }, data: { content: '同版本正文变更的合成回归' } })
+      const stale = await buildStoryCompilerDigest(f.ctx.userId, f.ctx.novelId, f.chapter.id, f.ctx.runId)
+      expect(stale).not.toContain('终态已提交且匹配当前正文 revision/hash')
+      expect(stale).toContain('不能宣称完成')
+      await prisma.chapter.update({ where: { id: f.chapter.id }, data: { content: '  ', wordCount: 0 } })
+      const empty = await buildStoryCompilerDigest(f.ctx.userId, f.ctx.novelId, f.chapter.id, f.ctx.runId)
+      expect(empty).not.toContain('终态已提交且匹配当前正文 revision/hash')
+      expect(empty).toContain('尚无合法非空正文')
     })
   })
   it('chapter-only post-quality CHECK persists the exact resumed compiler revision, reuses without another critic and commits warnings without a rewrite loop', async () => {

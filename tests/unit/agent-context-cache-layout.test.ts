@@ -25,6 +25,7 @@ vi.mock('../../api/lib/agent2-feature-flags.js', () => ({
   isAgent2FeatureEnabled: vi.fn(() => false),
 }))
 vi.mock('../../api/lib/agent/style-learning.js', () => ({ getLearnedStyleDigest: vi.fn(async () => '') }))
+vi.mock('../../api/lib/agent/story-compiler.js', () => ({ buildStoryCompilerDigest: vi.fn(async () => null) }))
 vi.mock('../../api/lib/agent/writing-request-context.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../../api/lib/agent/writing-request-context.js')>()
   return { ...actual, readChapterWritingBackground: vi.fn(async () => []), readWritingPresentation: vi.fn(async () => null) }
@@ -61,6 +62,8 @@ const { searchStoryMemory } = await import('../../api/lib/agent/story-memory.js'
 const { assembleContext, insertSubagentCatalog } = await import('../../api/lib/agent/context.js')
 const { getLearnedStyleDigest } = await import('../../api/lib/agent/style-learning.js')
 const { readChapterWritingBackground, readWritingPresentation } = await import('../../api/lib/agent/writing-request-context.js')
+const { buildStoryCompilerDigest } = await import('../../api/lib/agent/story-compiler.js')
+const { isAgent2FeatureEnabled } = await import('../../api/lib/agent2-feature-flags.js')
 
 type AssembleInput = Parameters<typeof assembleContext>[0]
 
@@ -140,6 +143,7 @@ function buildInput(visionEnabled = false): AssembleInput {
 describe('assembleContext 缓存友好布局（阶段二：动态上下文后移）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(isAgent2FeatureEnabled).mockReturnValue(false)
     mockState()
   })
 
@@ -293,6 +297,20 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(String(messages.at(-3)?.content)).toContain('[服务端子 Agent 目录]')
     expect(String(messages.at(-2)?.content)).toContain('本轮任务契约')
     expect(String(messages.at(-1)?.content)).toContain('把第三章开头改得更抓人')
+  })
+
+  it('places the real saved compiler state last after the immutable request, despite historical assistant completion claims', async () => {
+    vi.mocked(isAgent2FeatureEnabled).mockImplementation(name => name === 'storyCompiler')
+    vi.mocked(buildStoryCompilerDigest).mockResolvedValueOnce('本任务编译：scope-compiler，阶段 prepare，Scene Task 0 个。下一步调用 scene_task_build；不能宣称完成。')
+    const input = { ...buildInput(), prompt: '写下一章', includeCurrentRunHistory: true }
+    const { messages } = await assembleContext(input)
+    const intent = String(messages.at(-1)?.content)
+    expect(intent.startsWith('写下一章\n\n')).toBe(true)
+    expect(intent).toContain('历史助手总结不证明阶段或完成')
+    expect(intent.endsWith('下一步调用 scene_task_build；不能宣称完成。')).toBe(true)
+    expect(buildStoryCompilerDigest).toHaveBeenCalledWith('user-1', 'novel-1', 'chapter-1', 'run-1')
+    expect(messages.filter(message => String(message.content).includes('scope-compiler'))).toHaveLength(1)
+    expect(String(messages[0].content)).not.toContain('scope-compiler')
   })
 
   it('carries exact same-chapter creative background, current override and latest display withdrawal in the final intent', async () => {

@@ -356,7 +356,6 @@ function buildWorkspaceSnapshot(sections: {
   memoryDigest: string | null
   planDigest: string | null
   coverDigest: string | null
-  storyCompilerDigest: string | null
   checkpointDigest: string | null
   directiveDigest: string | null
   chapterLine: string
@@ -368,7 +367,6 @@ function buildWorkspaceSnapshot(sections: {
     sections.memoryDigest ? `【记忆召回】\n${sections.memoryDigest}` : null,
     sections.planDigest ? `【计划文件夹】\n${sections.planDigest}` : null,
     sections.coverDigest ? `【封面候选】\n${sections.coverDigest}` : null,
-    sections.storyCompilerDigest ? `【Story Compiler】\n${sections.storyCompilerDigest}` : null,
     sections.checkpointDigest ? `【压缩检查点】\n${sections.checkpointDigest}` : null,
     sections.directiveDigest ? `【生效指令】\n${sections.directiveDigest}` : null,
     `【当前章节】\n${sections.chapterLine}`,
@@ -520,7 +518,6 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     memoryDigest,
     planDigest,
     coverDigest,
-    storyCompilerDigest,
     checkpointDigest,
     directiveDigest,
     chapterLine,
@@ -576,6 +573,8 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
         .join('\n')}`,
     )
   }
+
+  if (storyCompilerDigest) intentSections.push(`[本任务已保存编译状态；历史助手总结不证明阶段或完成]\n${storyCompilerDigest}`)
 
   const goalMessages = await (await import('./goal-runtime.js')).buildGoalContextMessages(input.userId, input.runId)
   return {

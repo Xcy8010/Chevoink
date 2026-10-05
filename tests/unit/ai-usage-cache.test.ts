@@ -62,6 +62,25 @@ describe('供应商 usage 缓存命中双格式解析', () => {
 })
 
 describe('供应商推理参数适配', () => {
+  it.each(['none', 'high'] as const)('Ant Ling 官方 Flash 将 %s 映射为思考开关', reasoningEffort => {
+    expect(buildProviderReasoningPayload({ provider: 'Ant Ling', providerBaseUrl: 'https://api.ant-ling.com/v1',
+      model: 'Ling-3.0-flash', reasoningEffort })).toEqual({
+      thinking: { type: reasoningEffort === 'none' ? 'disabled' : 'enabled' },
+    })
+  })
+  it('不把 Ling 私有参数推断到未知网关或其它模型，显式验证的协议优先', () => {
+    for (const route of [
+      { provider: 'Ant Ling', providerBaseUrl: 'https://proxy.example/v1', model: 'Ling-3.0-flash' },
+      { provider: 'Ant Ling', providerBaseUrl: 'https://api.ant-ling.com.example/v1', model: 'Ling-3.0-flash' },
+      { provider: 'openrouter', model: 'Ling-3.0-flash' },
+      { provider: 'Ant Ling', providerBaseUrl: 'https://api.ant-ling.com/v1', model: 'Ring-2.6-1T' },
+    ]) expect(buildProviderReasoningPayload({ ...route, reasoningEffort: 'high' })).toEqual({ reasoning_effort: 'high' })
+    expect(buildProviderReasoningPayload({ provider: 'Ant Ling', providerBaseUrl: 'https://api.ant-ling.com/v1',
+      model: 'Ling-3.0-flash', reasoningEffort: 'none', reasoningParameterMode: 'omit' })).toEqual({})
+    expect(buildProviderReasoningPayload({ provider: 'Ant Ling', model: 'Ling-3.0-flash', reasoningEffort: 'high' }))
+      .toEqual({ thinking: { type: 'enabled' } })
+  })
+
   it('GLM 4.5 使用 thinking，但不发送仅 GLM 5.2+ 支持的 reasoning_effort', () => {
     expect(buildProviderReasoningPayload({ provider: 'zhipu', model: 'glm-4.5', reasoningEffort: 'high' })).toEqual({
       thinking: { type: 'enabled' },

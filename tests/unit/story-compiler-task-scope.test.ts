@@ -16,6 +16,7 @@ import * as memory from '../../api/lib/agent/story-memory.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { hasCommittedTaskChapter } from '../../api/lib/agent/humanity-quality.js'
 import { chapterBridgeCommitTool, chapterBridgeGetTool, continuityValidateTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { activeChapterScope } from '../../api/lib/data/internal.js'
 
 const ctx = { userId: 'u', novelId: 'n', runId: 'new-run', sessionId: 'session', chapterId: 'old31', callId: 'call', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: vi.fn() } as ToolContext
 const spec = (prompt: string) => {
@@ -50,20 +51,56 @@ describe('story compiler task identity', () => {
   }
   it('recovers the exact interrupted legacy origin without recreating its compiler, scenes, or checks', async () => {
     const originalSpec = historicalResume()
+    const actualChapter = { id: 'own32', title: '本任务章节', orderIndex: 32, revision: 4, content: '已保存正文' }
+    const readChapter = db.chapter.findFirst.getMockImplementation()!
+    db.chapter.findFirst.mockImplementation(async query => query.where.id === actualChapter.id ? actualChapter : readChapter(query))
     db.storyCompilation.findFirst.mockResolvedValue({ id: 'original-compiler', chapterId: 'own32', targetOrderIndex: 32, stage: 'write', status: 'active',
-      sceneTasks: [{ ordinal: 1, purpose: '原场景', turn: '原转折' }], bridge: {}, chapter: { id: 'own32', revision: 4 },
+      sceneTasks: [{ ordinal: 1, purpose: '原场景', turn: '原转折' }], bridge: { targetRevision: 4 }, chapter: actualChapter,
       validation: { checkedRevision: 3, independentCheck: 'complete', findings: [] }, qualityReports: [{ id: 'original-quality', chapterRevision: 4, status: 'passed' }] })
     const digest = await buildStoryCompilerDigest('u', 'n', 'old31', 'new-run')
     expect(digest).toContain('original-compiler')
     expect(digest).toContain('当前正文 r4')
     expect(digest).toContain('original-quality')
     expect(digest).toContain('独立章节检查不能代替编译 CHECK')
+    expect(digest).toContain('revision=3')
+    expect(digest).toContain('缺失或旧版本报告不代表通过')
+    expect(db.chapter.findFirst).toHaveBeenCalledWith({ where: { id: actualChapter.id, authorId: 'u', ...activeChapterScope('n') }, select: { id: true, revision: true, content: true } })
     expect(db.storyCompilation.findFirst.mock.calls.at(-1)![0].where.run.taskSpec).toEqual({ path: ['id'], equals: originalSpec.id })
     expect(db.agentRun.findFirst.mock.calls.some(([query]) => query.where.id === 'original-run'
       && query.where.sessionId === 'session' && query.where.userId === 'u' && query.where.novelId === 'n'
       && query.where.status.in.join(',') === 'paused,failed')).toBe(true)
     expect(db.storyCompilation.create).not.toHaveBeenCalled()
     expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { stage: 'prepare', sceneCount: 0, content: null, revision: 3, next: '下一步调用 scene_task_build', avoid: '不重复 PREPARE/BEAT' },
+    { stage: 'beat', sceneCount: 1, content: '  \n', revision: 3, next: '调用 chapter_write 保存正文', avoid: '下一步调用 scene_task_build' },
+    { stage: 'write', sceneCount: 1, content: '已保存正文', revision: 4, next: '当前正文与本编译绑定写入版本', avoid: '终态已提交且匹配当前正文' },
+    { stage: 'write', sceneCount: 1, content: '已保存正文', revision: 3, next: '调用 chapter_bridge_commit', avoid: '终态已提交且匹配当前正文' },
+    { stage: 'commit', sceneCount: 1, content: '已保存正文', revision: 3, next: '终态已提交且匹配当前正文 revision/hash', avoid: '下一步调用 scene_task_build' },
+    { stage: 'commit', sceneCount: 1, content: '已保存正文', revision: 4, next: '不能宣称完成', avoid: '终态已提交且匹配当前正文' },
+    { stage: 'commit', sceneCount: 1, content: '同版本变更正文', revision: 3, next: '不能宣称完成', avoid: '终态已提交且匹配当前正文' },
+    { stage: 'commit', sceneCount: 1, content: '  ', revision: 3, next: '尚无合法非空正文', avoid: '终态已提交且匹配当前正文' },
+    { stage: 'write', sceneCount: 1, content: null, revision: 3, next: '尚无合法非空正文', avoid: '终态已提交且匹配当前正文' },
+  ])('derives recovery from actual $stage/$sceneCount scenes/body/revision without a persisted mutation', async scenario => {
+    const chapterId = scenario.stage === 'prepare' ? null : 'own32'
+    db.chapter.findFirst.mockResolvedValue(scenario.content === null ? null : { id: 'own32', revision: scenario.revision, content: scenario.content })
+    db.storyCompilation.findFirst.mockResolvedValue({ id: 'own-compiler', chapterId, targetOrderIndex: 32, stage: scenario.stage,
+      status: scenario.stage === 'commit' ? 'completed' : 'active', sceneTasks: Array.from({ length: scenario.sceneCount }, (_, ordinal) => ({ ordinal: ordinal + 1 })),
+      bridge: { toChapterId: 'own32', targetRevision: 3, committedAt: scenario.stage === 'commit' ? new Date() : null },
+      preparedContext: { terminalContentHash: runtimeJson({ content: '已保存正文' }).hash }, validation: { checkedRevision: 2, independentCheck: 'complete' },
+      qualityReports: [{ id: 'old-quality', chapterRevision: 2, status: 'passed' }] })
+    const digest = await buildStoryCompilerDigest('u', 'n', 'old31', 'new-run')
+    expect(digest).toContain(scenario.next)
+    expect(digest).not.toContain(scenario.avoid)
+    if (scenario.sceneCount > 0 && scenario.stage !== 'commit') expect(digest).toContain('不重复 PREPARE/BEAT')
+    if (scenario.content !== null) expect(digest).toContain('缺失或旧版本报告不代表通过')
+    expect(db.storyCompilation.create).not.toHaveBeenCalled()
+    expect(db.storyCompilation.update).not.toHaveBeenCalled()
+    expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
+    expect(db.chapterBridge.update).not.toHaveBeenCalled()
+    expect(db.sceneTask.updateMany).not.toHaveBeenCalled()
   })
   it('rejects a copied task id when the original full contract changed', async () => {
     const original = historicalResume()

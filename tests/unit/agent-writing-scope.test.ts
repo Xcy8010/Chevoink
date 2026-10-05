@@ -6,6 +6,9 @@ describe('original writing authority', () => {
   it.each([
     ['写第一章，只要标题和正文', { kind: 'first', start: 1, count: 1 }],
     ['写下一章', { kind: 'next', count: 1 }],
+    ['在当前这章之后写下一章', { kind: 'next', count: 1, anchor: 'editor' }],
+    ['在正在编辑的章节后写下一章', { kind: 'next', count: 1, anchor: 'editor' }],
+    ['Write the next chapter after the current chapter', { kind: 'next', count: 1, anchor: 'editor' }],
     ['写第3至5章', { kind: 'range', start: 3, count: 3 }],
     ['先写前两章', { kind: 'range', start: 1, count: 2 }],
     ['写三章', { kind: 'count', count: 3 }],
@@ -15,6 +18,8 @@ describe('original writing authority', () => {
     expect(requestedWritingRange('背景资料'.repeat(300) + '。请写第十九章')).toEqual({ kind: 'range', start: 19, count: 1 })
     expect(chapterNumber('一百二十三')).toBe(123)
     expect(requestedWritingRange('不要写下一章，只审阅现有正文')).toBeNull()
+    expect(requestedWritingRange('不要在当前章之后写下一章。请写下一章')).toEqual({ kind: 'next', count: 1 })
+    expect(requestedWritingRange('参考当前章节，写下一章')).toEqual({ kind: 'next', count: 1 })
   })
   it('does not treat writing or checking as permission to repair prose', () => {
     expect(hasOriginalRepairAuthority('写第一章，检查结尾但不要改写')).toBe(false)

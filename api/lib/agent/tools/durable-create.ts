@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { DataAccessError } from '../../prisma.js'
 import { activeChapterScope, activeVolumeWhere } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
-import { assertWritingTarget } from '../writing-scope.js'
+import { resolveWritingCreateTarget } from '../writing-scope.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
@@ -51,8 +51,16 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
         ? await tx.chapter.findFirst({ where: { id: observed.data.id, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) } })
         : await tx.volume.findFirst({ where: { id: observed.data.id, novelId: ctx.novelId, ...activeVolumeWhere } }))
       if (!active) return runtimeError('AUTHOR_SCOPE_PROTECTED', '原创建结果已归档或不存在，不能复用旧回执或在新稿中自动重建。')
-      if (observed.success && observed.data.kind === 'chapter') await assertWritingTarget(tx, ctx, { chapterId: observed.data.id })
-      return runtimeJson({ toolResult: { ...result.toolResult, summary: `复用本任务已创建${action === 'chapter_create' ? '章节' : '卷'}《${args.title.trim()}》` } }).value
+      if (observed.success && observed.data.kind === 'chapter') {
+        const placement = z.object({ position: z.number().int().positive().optional(), volumeId: z.string().optional(),
+          volumeOrder: z.number().int().positive().optional(), positionInVolume: z.number().int().positive().optional() }).parse(effectiveArgs)
+        await resolveWritingCreateTarget(tx, ctx, placement, observed.data.id)
+        ctx.signal.throwIfAborted()
+        return runtimeJson({ toolResult: { output: `复用本任务已绑定章节《${active.title}》，chapterId=${active.id}。本次未创建、改名或写入章节。`,
+          summary: `复用本任务已绑定章节《${active.title}》（未创建）`, observedState: { kind: 'chapter', id: active.id, revision: active.revision },
+          display: { kind: 'chapterRef', chapterId: active.id, title: active.title, wordCount: 'wordCount' in active ? active.wordCount : 0 } } }).value
+      }
+      return runtimeJson({ toolResult: { ...result.toolResult, summary: `复用本任务已创建卷《${args.title.trim()}》` } }).value
     }
     const protectedIds = (await readExecutionStateInTransaction(tx, lease.taskRootId)).configuration.protectedChapterIds
     const before = await tx.chapter.findMany({ where: { novelId: ctx.novelId, id: { in: protectedIds } }, orderBy: { id: 'asc' }, select: { id: true, volumeId: true, orderIndex: true, orderInVolume: true, volume: { select: { orderIndex: true } } } })
@@ -73,7 +81,9 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
     if (!target || target.revision !== observed.revision) return runtimeError('RUNTIME_RECEIPT_INVALID', '创建结果没有对应的章节基线。')
     ctx.signal.throwIfAborted()
     const memoryJob = await tx.memoryExtractionJob.findUnique({ where: { idempotencyKey: `${target.id}:${target.revision}` }, select: { id: true } })
-    return runtimeJson({ toolResult: result, memoryJobId: memoryJob?.id ?? null, ...(target.content ? { progress: { kind: 'content_revision', targetId: target.id,
+    const createdBody = target.content && result.snapshot?.target === 'chapter' && result.snapshot.targetId === target.id
+      && result.snapshot.field === 'content' && result.snapshot.previousValue === ''
+    return runtimeJson({ toolResult: result, memoryJobId: memoryJob?.id ?? null, ...(createdBody ? { progress: { kind: 'content_revision', targetId: target.id,
       beforeHash: runtimeJson({ content: '' }).hash, afterHash: runtimeJson({ content: target.content }).hash } } : {}) }).value
   }).catch(async error => {
     if (!(error instanceof DataAccessError) || !['VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'AUTHOR_SCOPE_PROTECTED', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH'].includes(error.code)) throw error

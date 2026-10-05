@@ -1,11 +1,11 @@
 import { readSemanticStructureHash } from '../semantic-progress.js'
-import { assertWritingTarget, bindWritingChapter, readWritingScope } from '../writing-scope.js'
+import { assertWritingTarget, bindWritingChapter, readWritingScope, resolveWritingCreateTarget } from '../writing-scope.js'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 
 import { DataAccessError, prisma } from '../../prisma.js'
 import { getChapterBaseline, getCreatedChapter, getLastTouchedChapter, recordChapterBaseline, recordCreatedChapter } from '../baseline.js'
-import { activeChapterScope, activeVolumeWhere, recalculateNovelStats } from '../../data/internal.js'
+import { activeChapterScope, recalculateNovelStats } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { placeCreatedChapter, resolveChapterPlacement } from '../../data/volume.js'
@@ -216,45 +216,24 @@ export const chapterCreateTool = defineTool({
       const effective = chapterCreateTool.parameters.parse(normalize(args))
       return executeDurableCreate(captured, effective, normalize, tx => chapterCreateTool.execute({ ...captured, durableCreate: undefined, transaction: tx }, effective))
     }
-    const alreadyCreatedId = ctx.transaction ? null : getCreatedChapter(ctx.runId, args.title)
-    if (alreadyCreatedId) {
-      const existing = await findOwnedChapter(ctx, alreadyCreatedId)
-      if (existing) {
-        await prisma.$transaction(tx => assertWritingTarget(tx, ctx, { chapterId: existing.id }))
-        return {
-          output: `本轮已经成功创建过《${existing.title}》，chapterId=${existing.id}。为防重复章节，本次未再次创建；请直接复用该 chapterId 写入或修订正文。`,
-          summary: `复用已创建章节《${existing.title}》`,
-          display: { kind: 'chapterRef', chapterId: existing.id, title: existing.title, wordCount: existing.wordCount },
-        }
-      }
-      // A lost/archived cached identity is not permission to recreate the old
-      // run's chapter in a replacement manuscript under a new ID.
-      return buildChapterNotFound(ctx, alreadyCreatedId)
-    }
-
+    const alreadyCreatedId = ctx.transaction ? undefined : getCreatedChapter(ctx.runId, args.title) ?? undefined
+    if (alreadyCreatedId && !await findOwnedChapter(ctx, alreadyCreatedId)) return buildChapterNotFound(ctx, alreadyCreatedId)
     let semanticTransition: ToolResult['semanticTransition']
     const create = async (tx: Prisma.TransactionClient) => {
+      ctx.signal.throwIfAborted()
       await assertAgentManuscriptCurrent(tx, ctx)
-      const beforeHash = await readSemanticStructureHash(tx, ctx.novelId)
+      const { slot, volumeId: requestedVolumeId, chapters } = await resolveWritingCreateTarget(tx, ctx, args, alreadyCreatedId)
       const frozen = await readWritingScope(tx, ctx)
-      const bounded = frozen.writing?.kind === 'bounded' ? frozen.writing : null
-      const requested = args.position ?? (args.positionInVolume !== undefined ? bounded?.targets.find(item => item.positionInVolume === args.positionInVolume)?.orderIndex : undefined)
-      const slot = bounded?.targets.find(item => requested === undefined || item.orderIndex === requested)
-      if (bounded) {
-        await assertWritingTarget(tx, ctx, { orderIndex: requested ?? slot?.orderIndex })
-        const boundId = slot?.chapterId ?? frozen.bindings?.targets.find(item => item.orderIndex === slot?.orderIndex)?.chapterId
+      {
+        const boundId = slot?.chapterId ?? frozen.bindings?.targets.find(item => item.orderIndex === slot?.orderIndex)?.chapterId ?? alreadyCreatedId
         if (boundId) {
           const existing = await tx.chapter.findFirst({ where: { id: boundId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) }, include: { volume: { select: { title: true, orderIndex: true } } } })
           if (!existing) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原目标章节已归档或消失，不能创建替代身份。')
+          ctx.signal.throwIfAborted()
           return { ...existing, scopeReused: true }
         }
-      } else await assertWritingTarget(tx, ctx, { orderIndex: args.position })
-      const volumeByOrder = args.volumeOrder !== undefined
-        ? await tx.volume.findFirst({ where: { novelId: ctx.novelId, ...activeVolumeWhere, orderIndex: args.volumeOrder } })
-        : null
-      if (args.volumeOrder !== undefined && !volumeByOrder) {
-        throw new DataAccessError(400, 'VOLUME_NOT_FOUND', `第 ${args.volumeOrder} 卷不存在，请先用 volume_list 或 novel_get_context 核对卷结构。`)
       }
+      const beforeHash = await readSemanticStructureHash(tx, ctx.novelId)
       const effectivePosition = slot?.orderIndex ?? args.position
       const globalTarget = effectivePosition
         ? await tx.chapter.findFirst({ where: { ...activeChapterScope(ctx.novelId), orderIndex: effectivePosition } })
@@ -268,13 +247,21 @@ export const chapterCreateTool = defineTool({
         tx,
         ctx.novelId,
         resolveAgentChapterVolumeId({
-          requestedVolumeId: slot?.volumeId ?? args.volumeId ?? volumeByOrder?.id,
+          requestedVolumeId: slot?.volumeId ?? requestedVolumeId,
           globalTargetVolumeId: globalTarget?.volumeId,
           lastExistingVolumeId: lastExisting?.volumeId,
         }),
         slot?.positionInVolume ?? args.positionInVolume ?? globalTarget?.orderInVolume,
       )
+      // The placement API clamps positions. Frozen slots must match the actual
+      // insertion, never the unclamped request that happened to name a slot.
+      const resolvedOrder = slot ? chapters.filter(item => item.volume.orderIndex < placement.volume.orderIndex).length + placement.position + 1 : null
+      if (slot && (resolvedOrder !== slot.orderIndex || slot.volumeId && placement.volume.id !== slot.volumeId
+        || slot.positionInVolume !== undefined && placement.position + 1 !== slot.positionInVolume)) {
+        throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '实际创建位置不匹配原始请求的冻结章节目标，本次未创建章节。')
+      }
       const chapterCount = await tx.chapter.count({ where: activeChapterScope(ctx.novelId) })
+      ctx.signal.throwIfAborted()
       const created = await tx.chapter.create({
         data: {
           novelId: ctx.novelId,
@@ -290,19 +277,23 @@ export const chapterCreateTool = defineTool({
         },
       })
       await placeCreatedChapter(tx, ctx.novelId, created, placement.volume.id, placement.position)
-      if (slot) await bindWritingChapter(tx, ctx, slot.orderIndex, created.id)
       const result = await tx.chapter.findFirstOrThrow({
         where: { id: created.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId },
         include: { volume: { select: { title: true, orderIndex: true } } },
       })
+      if (slot && (result.orderIndex !== slot.orderIndex || result.volumeId !== placement.volume.id || result.orderInVolume !== placement.position + 1
+        || slot.volumeId && result.volumeId !== slot.volumeId || slot.positionInVolume !== undefined && result.orderInVolume !== slot.positionInVolume)) {
+        throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '创建后的章节位置与冻结目标不一致，本次事务需要回滚。')
+      }
+      if (slot) await bindWritingChapter(tx, ctx, slot.orderIndex, result.id)
       semanticTransition = { targetId: ctx.novelId, beforeHash, afterHash: await readSemanticStructureHash(tx, ctx.novelId) }
       return { ...result, scopeReused: false }
     }
     const chapter = ctx.transaction ? await create(ctx.transaction) : await prisma.$transaction(create)
-    await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
+    if (!chapter.scopeReused) await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
     if (!ctx.transaction) {
       recordChapterBaseline(ctx.runId, chapter.id, chapter.revision)
-      recordCreatedChapter(ctx.runId, chapter.title, chapter.id)
+      if (!chapter.scopeReused) recordCreatedChapter(ctx.runId, chapter.title, chapter.id)
     }
     if (!chapter.scopeReused && content && isAgent2FeatureEnabled('memory2', ctx.userId)) {
       await enqueueChapterMemoryExtraction({
@@ -321,17 +312,17 @@ export const chapterCreateTool = defineTool({
     }
 
     return {
-      output: `${chapter.scopeReused ? '复用原请求已绑定的' : '已原子创建'}全书第 ${chapter.orderIndex} 章《${chapter.title}》，位于第 ${chapter.volume.orderIndex} 卷《${chapter.volume.title}》卷内第 ${chapter.orderInVolume} 章，chapterId=${chapter.id}${args.position || args.positionInVolume ? '，后续章节顺序已自动校正' : ''}${chapter.content ? `，当前正文 ${chapter.content.length} 字` : '（暂无正文）'}。创建已成功，后续必须复用该 chapterId，禁止重建同名章。`,
+      output: `${chapter.scopeReused ? '复用原请求已绑定的' : '已原子创建'}全书第 ${chapter.orderIndex} 章《${chapter.title}》，位于第 ${chapter.volume.orderIndex} 卷《${chapter.volume.title}》卷内第 ${chapter.orderInVolume} 章，chapterId=${chapter.id}${!chapter.scopeReused && (args.position || args.positionInVolume) ? '，后续章节顺序已自动校正' : ''}${chapter.content ? `，当前正文 ${chapter.content.length} 字` : '（暂无正文）'}。${chapter.scopeReused ? '本次未创建、改名或写入章节。' : '创建已成功。'}后续必须复用该 chapterId，禁止重建同名章。`,
       ...(semanticTransition ? { semanticTransition } : {}),
       observedState: { kind: 'chapter', id: chapter.id, revision: chapter.revision },
-      summary: `新建第 ${chapter.orderIndex} 章《${chapter.title}》 · ${chapter.volume.title}`,
+      summary: `${chapter.scopeReused ? '复用' : '新建'}第 ${chapter.orderIndex} 章《${chapter.title}》 · ${chapter.volume.title}${chapter.scopeReused ? '（未创建）' : ''}`,
       // 带正文创建时返回 chapterDiff（空基线→全绿新增），前端才能挂上绿增红减的审查条；空章节仍用 chapterRef
-      display: chapter.scopeReused || chapter.content
+      display: !chapter.scopeReused && chapter.content
         ? {
             kind: 'chapterDiff',
             chapterId: chapter.id,
             chapterTitle: chapter.title,
-            before: chapter.scopeReused ? chapter.content : '',
+            before: '',
             after: chapter.content,
             appliedDirectly: true,
             revision: chapter.revision,

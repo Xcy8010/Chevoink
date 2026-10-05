@@ -467,6 +467,17 @@ export function isMimoProvider(input: { provider?: string | null; providerBaseUr
   return hostname === 'xiaomimimo.com' || hostname.endsWith('.xiaomimimo.com')
 }
 
+/** Ling-3.0-flash has an on/off thinking switch on the official API.
+ * A matching model name alone does not establish a proxy's protocol. */
+function isAntLingFlashProvider(input: { provider?: string | null; providerBaseUrl?: string | null; model: string }): boolean {
+  if (input.model.trim().toLowerCase() !== 'ling-3.0-flash') return false
+  if (input.providerBaseUrl?.trim()) {
+    try { return new URL(input.providerBaseUrl).hostname.toLowerCase() === 'api.ant-ling.com' }
+    catch { return false }
+  }
+  return ['ant ling', 'ant-ling', 'antling'].includes(input.provider?.trim().toLowerCase() ?? '')
+}
+
 /**
  * 各 OpenAI-compatible 供应商的推理参数并不完全兼容。
  * GLM 缓存无需请求参数；这里只避免旧版 GLM 收到仅 5.2+ 支持的 reasoning_effort。
@@ -481,6 +492,9 @@ export function buildProviderReasoningPayload(input: ProviderReasoningInput): Re
   if (input.reasoningParameterMode) return {
     ...(input.thinkingEnabled ? { thinking: { type: 'enabled' } } : {}),
     ...(input.reasoningParameterMode === 'native' ? { reasoning_effort: input.reasoningEffort } : {}),
+  }
+  if (isAntLingFlashProvider(input)) {
+    return { thinking: { type: input.reasoningEffort === 'none' ? 'disabled' : 'enabled' } }
   }
   if (isDeepSeekProvider(input)) {
     return {
