@@ -85,7 +85,7 @@ const oldPolicy = (version: 1 | 2) => ({ version, initialTokens: 500, tokenCeili
   ...(version === 2 ? { initialTurns: 1, turnSlice: 1 } : {}) })
 
 describe.runIf(available)('real durable default execution control', () => {
-  it('short rewrite ordinary completion replaces final/history chat text with a bound saved confirmation and preserves the paid candidate', async () => {
+  it('short rewrite ordinary completion replaces final/history chat text with a bound saved confirmation and preserves the immutable candidate', async () => {
     await fixture(async f => {
       const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
       const prompt = '以后不要重复正文，只保存章节。'
@@ -104,8 +104,11 @@ describe.runIf(available)('real durable default execution control', () => {
       const candidate = `${chapter.title}\n\n${content}`
       await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
-        tools: [], toolAuthority: [], protectedChapterIds: [], pinnedSkillVersions: [] }, snapshot: { version: 1, turn: 1, nextOperationSequence: 0,
+        tools: [], toolAuthority: [], protectedChapterIds: [], pinnedSkillVersions: [] }, snapshot: { version: 1, turn: 0, nextOperationSequence: 0,
         checkpointIndex: 0, phase: 'idle', pendingOperationId: null, messages: [{ role: 'user', content: '重写第一章，突出捡漏爽文。' }, { role: 'assistant', content: candidate }], successfulToolSignatures: [] } })
+      const candidateMessageId = durableMessageId(f.rootId, 0)
+      await prisma.agentMessage.create({ data: { id: candidateMessageId, runId: f.runId, sessionId: f.sessionId,
+        role: 'assistant', parts: [{ type: 'text', text: candidate }] } })
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }))).toBeNull()
       expect(await prisma.$transaction(tx => readSavedWritingPresentation(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }))).toMatchObject({ text: '已保存《第一章 旧罗盘》。' })
       const before = await loadExecutionState(f.userId, f.runId)
@@ -116,7 +119,7 @@ describe.runIf(available)('real durable default execution control', () => {
       expect(after.frame.state.messages.at(-1)?.content).toBe(candidate)
       expect(await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId }, select: { requestSnapshot: true, specSnapshot: true, inputHash: true } })).toEqual(originalRoot)
       await publishDurableEvents(f.userId, f.runId)
-      const message = await prisma.agentMessage.findUniqueOrThrow({ where: { id: durableMessageId(f.rootId, 1) } })
+      const message = await prisma.agentMessage.findUniqueOrThrow({ where: { id: candidateMessageId } })
       expect(message.parts).toEqual([{ type: 'text', text: '已保存《第一章 旧罗盘》。' }])
       const finished = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId, type: 'run.finished' } })
       expect(finished.payload).toMatchObject({ outputSummary: '已保存《第一章 旧罗盘》。' })
