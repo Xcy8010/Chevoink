@@ -523,10 +523,14 @@ export async function handleToolCall(
       const label = error.code === 'AI_PROVIDER_TIMEOUT' ? '模型网关超时'
         : error.code === 'AI_PROVIDER_OUTPUT_LIMIT' ? '模型输出达到上限，检查未完成'
         : error.code === 'AI_PROVIDER_INCOMPLETE' ? '模型输出中断，检查未完成'
+        : error.code === 'AI_PROVIDER_EMPTY_RESPONSE' ? '模型未返回有效内容'
+        : error.code === 'AI_PROVIDER_TRANSPORT' ? '模型连接中断，结果未确认'
         : error.code === 'AI_PROVIDER_INVALID_RESPONSE' ? '模型响应格式异常' : '模型服务异常'
       console.warn('[agent-tool-provider]', { runId, tool: call.name, code: error.code, durationMs: Date.now() - startedAt })
       const guidance = error.code === 'AI_PROVIDER_OUTPUT_LIMIT'
         ? '输出预算已达上限，不要原样重复付费调用；保留进度并报告检查未完成，不能将截断报告当作通过。'
+        : ['AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_INCOMPLETE', 'AI_PROVIDER_TIMEOUT'].includes(error.code)
+          ? '原调用结果尚未确认，先核对原调用与已保存状态；保留进度并报告检查未完成，不要盲目重发未知付费请求。'
         : '最多重试一次，仍失败则保留进度并报告阻塞。'
       return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。${guidance}`, 'failed'), providerFailure: true, providerFailureCode: error.code }
     }
@@ -556,9 +560,14 @@ async function finalizeLegacyRun(
   checkpoint?: RunCheckpointState,
   authorEnded?: { fulfilled: boolean; todoItems?: AgentTodoItem[] },
   writingDelivery?: { messageId: string; subject: { userId: string; novelId: string; runId: string }; expected: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; signal: AbortSignal; parts?: AgentMessagePart[]; replaceCandidate?: boolean },
+  withFailureNotice = false,
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
+  // Only callers without an existing explanation request this server notice.
+  // It is published with the confirmed failure, never ahead of its transaction.
+  const failureNotice = status === 'failed' && withFailureNotice && errorMessage
+    ? { messageId: randomUUID(), text: errorMessage } : undefined
 
   const terminalBody = status === 'paused'
     ? { type: 'run.paused' as const, reason: 'user_stop' as const }
@@ -576,8 +585,12 @@ async function finalizeLegacyRun(
       await tx.agentMessage.upsert({ where: { id: writingDelivery.messageId }, create: { id: writingDelivery.messageId, runId, sessionId,
         role: 'assistant', parts: displayedParts }, update: { parts: displayedParts } })
     }
-    const owner = await tx.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { userId: true } })
+    const owner = await tx.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { userId: true, sessionId: true } })
     await (await import('./goal-fence.js')).assertRunGoalFence(tx, owner.userId, runId)
+    if (failureNotice) await tx.agentMessage.create({ data: {
+      id: failureNotice.messageId, runId, sessionId: owner.sessionId, role: 'assistant',
+      parts: [{ type: 'text', text: failureNotice.text }],
+    } })
     return tx.agentRun.update({
       where: { id: runId, runtimeProtocolVersion: 0, taskRootId: null },
       data: {
@@ -591,7 +604,10 @@ async function finalizeLegacyRun(
       select: { userId: true, sessionId: true, novelId: true, taskSpec: true },
     })
   }, writingDelivery ? [...(writingDelivery.replaceCandidate ? [] : [{ type: 'message.start' as const, messageId: writingDelivery.messageId, role: 'assistant' as const }]),
-    { type: 'text.final', messageId: writingDelivery.messageId, text: writingDelivery.expected.text, asReasoning: false }] : [])
+    { type: 'text.final', messageId: writingDelivery.messageId, text: writingDelivery.expected.text, asReasoning: false }] : failureNotice ? [
+    { type: 'message.start', messageId: failureNotice.messageId, role: 'assistant' },
+    { type: 'text.final', messageId: failureNotice.messageId, text: failureNotice.text, asReasoning: false },
+  ] : [])
     .catch((error) => {
       if (writingDelivery && (isAbortError(error) || error instanceof DataAccessError && error.code === 'WRITING_DELIVERY_STALE')) throw error
       if (error instanceof DataAccessError && error.code === 'GOAL_EXECUTION_FENCED') {
@@ -739,6 +755,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     args[8] = checkpointSnapshot()
     return finalizeLegacyRun(...args)
   }
+  const finalizeFailedWithNotice = (reason: string) => finalizeRun(
+    runId, bus, 'failed', usage, turn, '', reason, true, undefined, undefined, undefined, true,
+  )
   const restoreCheckpointLimits = (checkpoint: RunCheckpointState) => {
     runStartedAt = Math.min(runStartedAt, checkpoint.runStartedAt)
     resumeCount = checkpoint.resumeCount
@@ -1549,7 +1568,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const reason = result.finishReason === 'length'
             ? '模型连续两轮未返回正文或工具调用，本轮又达到单次输出上限；已停止重复消耗，任务未完成。已保存内容保留，请检查模型输出上限或选择合适的推理档位后再继续。'
             : '模型连续两轮未返回正文或工具调用，已停止重复消耗；任务未完成，已保存内容保留。请检查模型服务后再继续。'
-          await finalizeRun(runId, bus, 'failed', usage, turn, '', reason)
+          await finalizeFailedWithNotice(reason)
           return
         }
         requireNativeToolCall = true
@@ -1855,8 +1874,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
     const message = error instanceof DataAccessError ? error.message : '任务执行遇到内部异常，已停止后续操作；已保存内容保留，请核对状态后再继续。'
     console.error('[agent-loop] run 执行异常', runId, error)
-    bus.emit({ type: 'error', code: 'loop_crashed', message, recoverable: false })
     await flushLiveTurn()
-    await finalizeRun(runId, bus, 'failed', usage, turn, '', message)
+    await finalizeFailedWithNotice(message)
   }
 }

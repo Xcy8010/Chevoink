@@ -155,8 +155,9 @@ vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChap
 vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportForDelivery: mocks.report }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
 vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: () => ({ emit: mocks.emit, emitTransient: mocks.emit,
-  commitTerminal: async (body: AgentStreamEventBody, work: (tx: Record<string, unknown>) => Promise<unknown>) => ({
-    result: await work(mocks.db), publish: () => mocks.emit(body),
+  commitTerminal: async (body: AgentStreamEventBody, work: (tx: Record<string, unknown>) => Promise<unknown>,
+    preceding: Array<Extract<AgentStreamEventBody, { type: 'message.start' | 'text.final' }>> = []) => ({
+    result: await work(mocks.db), publish: () => { for (const event of [...preceding, body]) mocks.emit(event) },
   }),
 }), disposeRunEventBus: mocks.dispose }))
 vi.mock('../../api/lib/agent/permissions.js', () => ({ cancelAllQuestions: vi.fn(), grantAlwaysAllow: vi.fn(), hasAlwaysAllow: () => false, rejectAllApprovals: vi.fn(), waitForApproval: vi.fn() }))
@@ -334,6 +335,25 @@ describe('BYOK paid-tool isolation', () => {
 })
 
 describe('original task context on resume', () => {
+  it.each([
+    ['AI_PROVIDER_EMPTY_RESPONSE', '模型未返回有效内容', false],
+    ['AI_PROVIDER_TRANSPORT', '模型连接中断，结果未确认', true],
+    ['AI_PROVIDER_INCOMPLETE', '模型输出中断，检查未完成', true],
+    ['AI_PROVIDER_TIMEOUT', '模型网关超时', true],
+  ] as const)('keeps %s feedback truthful without replaying an unconfirmed paid result', async (code, label, unconfirmed) => {
+    const check = tool('continuity_validate', async () => { throw new DataAccessError(502, code, 'synthetic provider failure') })
+    const outcome = await handleToolCall(call('check', check.name), [check], context(), { emit: mocks.emit }, 'message', 'run')
+    expect(outcome).toMatchObject({ part: { status: 'failed', summary: label }, providerFailure: true, providerFailureCode: code })
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: false, failureCode: code, summary: label }))
+    if (unconfirmed) {
+      expect(outcome.observation).toContain('先核对原调用与已保存状态')
+      expect(outcome.observation).toContain('不要盲目重发未知付费请求')
+      expect(outcome.observation).not.toContain('最多重试一次')
+    }
+    expect(check.execute).toHaveBeenCalledOnce()
+    expect(mocks.chat).not.toHaveBeenCalled()
+  })
+
   it('stops on the first output-limit failure without retrying or executing a same-batch bridge commit', async () => {
     const critic = tool('continuity_validate', async () => { throw new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', 'output limit') })
     const commit = tool('chapter_bridge_commit', async () => ({ output: '不得执行的提交' }))
@@ -347,6 +367,8 @@ describe('original task context on resume', () => {
     for (const id of ['commit', 'repeat']) expect(submitted.messages).toContainEqual(expect.objectContaining({ role: 'tool', toolCallId: id, content: expect.stringContaining('未执行') }))
     expect(events().filter(event => event.type === 'tool.result')).toEqual([expect.objectContaining({ callId: 'check', ok: false, summary: '模型输出达到上限，检查未完成' })])
     expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'failed' }))
+    const stopText = String(mocks.runs.get('run')?.errorMessage)
+    expect(events().filter(event => event.type === 'text.final' && event.text.includes(stopText))).toHaveLength(1)
   })
   it.each(['quality_analyze', 'continuity_validate', 'creative_critique', 'cover_generate'])('stops repeated %s provider failures even when parameters change within a batch', async name => {
     const failing = tool(name, async () => { throw new DataAccessError(502, 'AI_PROVIDER_TIMEOUT', 'gateway timeout') })
@@ -922,6 +944,59 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
     expect(JSON.stringify(mocks.chat.mock.calls[1][0].messages)).not.toContain('无效思考')
     expect(mocks.update.mock.calls.some(([arg]) => String(arg.data.errorMessage).includes('连续两轮'))).toBe(true)
+    const reason = String(mocks.runs.get('run')?.errorMessage)
+    const notice = events().filter(event => event.type === 'text.final' && event.text === reason)
+    expect(notice).toHaveLength(1)
+    expect(notice[0]).toMatchObject({ asReasoning: false })
+    if (notice[0].type !== 'text.final') throw new Error('Missing failure explanation')
+    expect(events().slice(-3)).toEqual([
+      { type: 'message.start', messageId: notice[0].messageId, role: 'assistant' },
+      notice[0], expect.objectContaining({ type: 'run.finished', status: 'failed' }),
+    ])
+    expect(mocks.persist).toHaveBeenCalledWith({ data: {
+      id: notice[0].messageId, runId: 'run', sessionId: 'session', role: 'assistant', parts: [{ type: 'text', text: reason }],
+    } })
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'failed', currentTurn: 2, usage: { totalTokens: 20 } })
+  })
+
+  it.each(['internal', 'provider'] as const)('publishes a single persisted server explanation before the ordinary %s failure closes the stream', async kind => {
+    mocks.chat.mockRejectedValueOnce(kind === 'provider'
+      ? new DataAccessError(502, 'AI_PROVIDER_TRANSPORT', '模型连接中断，原调用结果未确认。')
+      : new Error('synthetic private implementation detail'))
+    await run()
+    const reason = String(mocks.runs.get('run')?.errorMessage)
+    expect(reason).toContain(kind === 'provider' ? '模型连接中断，原调用结果未确认。' : '任务执行遇到内部异常')
+    expect(reason).not.toContain('private implementation')
+    const finalEvents = events().slice(-3)
+    expect(finalEvents).toEqual([
+      expect.objectContaining({ type: 'message.start', role: 'assistant' }),
+      expect.objectContaining({ type: 'text.final', text: reason, asReasoning: false }),
+      expect.objectContaining({ type: 'run.finished', status: 'failed' }),
+    ])
+    if (finalEvents[1].type !== 'text.final') throw new Error('Missing failure explanation')
+    expect(finalEvents[0]).toMatchObject({ messageId: finalEvents[1].messageId })
+    expect(mocks.persist).toHaveBeenCalledWith({ data: {
+      id: finalEvents[1].messageId, runId: 'run', sessionId: 'session', role: 'assistant', parts: [{ type: 'text', text: reason }],
+    } })
+    expect(events().filter(event => event.type === 'text.final' && event.text === reason)).toHaveLength(1)
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(mocks.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('does not publish a failure explanation or retry finalization when the failed transaction is unconfirmed', async () => {
+    const original = mocks.update.getMockImplementation()!
+    mocks.update.mockImplementation(async input => {
+      if (input.data.status === 'failed') throw new Error('synthetic unconfirmed failure commit')
+      return original(input)
+    })
+    queue(response(''), response(''))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '检查当前章节' })
+    expect(events().filter(event => event.type === 'run.finished' || event.type === 'run.paused')).toHaveLength(0)
+    expect(events().filter(event => event.type === 'text.final' && event.text.includes('连续两轮'))).toHaveLength(0)
+    expect(events().at(-1)).toMatchObject({ type: 'error', code: 'run_status_unconfirmed' })
+    expect(mocks.update.mock.calls.filter(([input]) => input.data.status === 'failed')).toHaveLength(1)
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(mocks.dispose).toHaveBeenCalledOnce()
   })
 
   it('recovers an empty response through real tools and preserves explicit user-facing refusal', async () => {

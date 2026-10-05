@@ -10,7 +10,7 @@ import {
   qualityFindingDispositionSchema,
   qualityFindingFeedbackSchema,
 } from '../../shared/contracts/index.js'
-import { analyzeDeterministicQuality, calibrateCriticFindings, resolveQualityChapterTarget, hasCommittedTaskChapter } from '../../api/lib/agent/humanity-quality.js'
+import { analyzeDeterministicQuality, calibrateCriticFindings, resolveQualityChapterTarget, hasCommittedTaskChapter, prepareQualityFindings } from '../../api/lib/agent/humanity-quality.js'
 import { allTools } from '../../api/lib/agent/tools/registry.js'
 import { AGENT_TOOL_GOVERNANCE } from '../../api/lib/agent/tools/governance.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
@@ -252,6 +252,17 @@ describe('质量检查默认只保存真实报告', () => {
 })
 
 describe('Agent 3.0 人类感质量契约与确定性检查', () => {
+  it('校正未完成时保留可定位意见但不能把报告判为完整，合法空报告仍完整', () => {
+    const findings = [
+      { signal: 'emotion_grounding' as const, severity: 'advisory' as const, quote: '她关上了门。', explanation: '已定位', suggestion: '保留', confidence: 0.9 },
+      { signal: 'reader_pull' as const, severity: 'warning' as const, quote: '不存在的原文。', explanation: '待校正', suggestion: '复核', confidence: 0.8 },
+    ]
+    const incomplete = prepareQualityFindings('她关上了门。', [], findings, false)
+    expect(incomplete).toMatchObject({ complete: false, unlocatedFindings: 1 })
+    expect(incomplete.findings).toHaveLength(1)
+    expect(prepareQualityFindings('她关上了门。', [], [], true).complete).toBe(true)
+  })
+
   it('冻结十三类信号并把作者反馈与修订生命周期分离', () => {
     expect(humanityQualitySignalSchema.options).toHaveLength(13)
     expect(humanityQualitySignalSchema.options).toContain('punctuation_misuse')

@@ -56,6 +56,84 @@ describe('auxiliary text model inheritance', () => {
     expect(mocks.persist).toHaveBeenCalledWith(expect.objectContaining({ criticComplete: true,
       criticFindings: [expect.objectContaining({ quote: '她关上了门。' })] }))
   })
+  it.each([
+    new DataAccessError(502, 'AI_PROVIDER_TIMEOUT', 'critic correction timed out'),
+    new DataAccessError(502, 'AI_PROVIDER_EMPTY_RESPONSE', 'critic correction returned no content'),
+    new DataAccessError(402, 'CREDITS_EXHAUSTED', 'critic correction credits exhausted'),
+  ])('persists an incomplete report with the original findings before rethrowing correction failure %#', async failure => {
+    const findings = [
+      { signal: 'emotion_grounding', severity: 'advisory', quote: '她关上了门。', explanation: '已定位', suggestion: '保留', confidence: 0.9 },
+      { signal: 'reader_pull', severity: 'warning', quote: '不存在的原文。', explanation: '待校正', suggestion: '复核', confidence: 0.8 },
+    ]
+    mocks.report.mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 1, repairRound: 0, status: 'failed', findings: [] })
+    mocks.complete.mockImplementationOnce(async () => JSON.stringify({ findings }))
+      .mockImplementationOnce(async () => { throw failure })
+
+    await expect(qualityAnalyzeTool.execute(context(runtime('lite')), {})).rejects.toBe(failure)
+
+    expect(mocks.complete.mock.calls.map(call => call[2].action)).toEqual(['agent3HumanityCritic', 'agent3HumanityEvidenceCorrection'])
+    expect(mocks.persist).toHaveBeenCalledWith(expect.objectContaining({
+      criticComplete: false,
+      criticFindings: [
+        expect.objectContaining({ quote: '她关上了门。' }),
+        expect.objectContaining({ quote: '不存在的原文。' }),
+      ],
+      deterministicMetrics: expect.any(Object),
+      deterministicFindings: expect.any(Array),
+    }))
+    expect(mocks.report).toHaveBeenCalledOnce()
+  })
+  it('does not persist a quality report when the author signal aborts during evidence correction', async () => {
+    const controller = new AbortController()
+    mocks.complete.mockResolvedValueOnce(JSON.stringify({ findings: [
+      { signal: 'reader_pull', severity: 'warning', quote: '不存在的原文。', explanation: '待校正', suggestion: '复核', confidence: 0.8 },
+    ] })).mockImplementationOnce(async () => {
+      controller.abort()
+      throw new DataAccessError(502, 'AI_PROVIDER_EMPTY_RESPONSE', 'synthetic late provider error')
+    })
+    await expect(qualityAnalyzeTool.execute({ ...context(runtime('lite')), signal: controller.signal }, {}))
+      .rejects.toMatchObject({ name: 'AbortError' })
+    expect(mocks.complete).toHaveBeenCalledTimes(2)
+    expect(mocks.persist).not.toHaveBeenCalled()
+    expect(mocks.report).not.toHaveBeenCalled()
+  })
+  it('accepts a complete empty finding array without another model call or evidence correction', async () => {
+    mocks.complete.mockResolvedValueOnce('{"findings":[]}')
+    const result = await qualityAnalyzeTool.execute(context(runtime('lite')), {})
+    expect(result.outcome).toBeUndefined()
+    expect(mocks.complete).toHaveBeenCalledOnce()
+    expect(mocks.persist).toHaveBeenCalledWith(expect.objectContaining({ criticComplete: true, criticFindings: [] }))
+  })
+  it('retains the existing valid partial-correction policy and every unresolved judgment', async () => {
+    const findings = [
+      { signal: 'emotion_grounding', severity: 'advisory', quote: '她关上了门。', explanation: '已定位', suggestion: '保留', confidence: 0.9 },
+      { signal: 'reader_pull', severity: 'warning', quote: '不存在的原文。', explanation: '待校正', suggestion: '复核', confidence: 0.8 },
+    ]
+    mocks.complete.mockResolvedValueOnce(JSON.stringify({ findings }))
+      .mockResolvedValueOnce('{"corrections":[]}')
+    await qualityAnalyzeTool.execute(context(runtime('lite')), {})
+    expect(mocks.complete).toHaveBeenCalledTimes(2)
+    expect(mocks.persist).toHaveBeenCalledWith(expect.objectContaining({
+      criticComplete: true,
+      criticFindings: [expect.objectContaining({ quote: '她关上了门。' }), expect.objectContaining({ quote: '不存在的原文。' })],
+    }))
+  })
+  it('does not pass or discard findings when evidence correction returns an empty response', async () => {
+    mocks.report.mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 1, repairRound: 0, status: 'failed', findings: [] })
+    mocks.complete.mockImplementationOnce(async () => JSON.stringify({ findings: [
+      { signal: 'emotion_grounding', severity: 'advisory', quote: '她关上了门。', explanation: '已定位', suggestion: '保留', confidence: 0.9 },
+      { signal: 'reader_pull', severity: 'warning', quote: '不存在的原文。', explanation: '待校正', suggestion: '复核', confidence: 0.8 },
+    ] })).mockResolvedValueOnce('')
+
+    const result = await qualityAnalyzeTool.execute(context(runtime('lite')), {})
+
+    expect(result.outcome).toBe('failed')
+    expect(result.output).toContain('引用校正未能完成')
+    expect(mocks.persist).toHaveBeenCalledWith(expect.objectContaining({
+      criticComplete: false,
+      criticFindings: [expect.objectContaining({ quote: '她关上了门。' }), expect.objectContaining({ quote: '不存在的原文。' })],
+    }))
+  })
   it('does not turn failure of the free provider into a passing report or switch to paid fallback', async () => {
     mocks.complete.mockRejectedValue(new DataAccessError(502, 'AI_PROVIDER_INCOMPLETE', 'incomplete'))
     await expect(qualityAnalyzeTool.execute(context(runtime('lite')), {})).rejects.toMatchObject({ code: 'AI_PROVIDER_INCOMPLETE' })

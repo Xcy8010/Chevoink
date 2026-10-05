@@ -92,6 +92,49 @@ describe.skipIf(!dbAvailable)('R01 real PostgreSQL journal commit and resume', (
     await disposeRunEventBus(runId)
   })
 
+  it.each(['commit', 'journal-rollback', 'lost-acknowledgement'] as const)('%s keeps the failed reason, conversation explanation and ordered events atomic', async scenario => {
+    const runId = await newRun(), messageId = randomUUID()
+    const reason = '合成模型连续两轮未返回有效内容，任务未完成，已保存内容保留。'
+    const usage = { promptTokens: 20, completionTokens: 0, totalTokens: 20 }
+    const bus = createRunEventBus(runId), listener = vi.fn()
+    bus.subscribe(listener)
+    if (scenario === 'journal-rollback') await prisma.agentRunEvent.create({ data: { runId, seq: 2, type: 'fixture.conflict', payload: {} } })
+    if (scenario === 'lost-acknowledgement') vi.spyOn(prisma, '$transaction').mockImplementationOnce(work =>
+      realTransaction(work).then(() => { throw new Error('synthetic lost failure commit acknowledgement') }))
+    const write = bus.commitTerminal({ type: 'run.finished', status: 'failed', usage, artifacts: [], outputSummary: '' }, async tx => {
+      await tx.agentMessage.create({ data: { id: messageId, runId, sessionId, role: 'assistant', parts: [{ type: 'text', text: reason }] } })
+      return tx.agentRun.update({ where: { id: runId, runtimeProtocolVersion: 0, taskRootId: null },
+        data: { status: 'failed', errorMessage: reason, outputSummary: null, usage, currentTurn: 2, finishedAt: new Date() } })
+    }, [{ type: 'message.start', messageId, role: 'assistant' }, { type: 'text.final', messageId, text: reason, asReasoning: false }])
+    if (scenario === 'journal-rollback') {
+      await expect(write).rejects.toThrow()
+      expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).toMatchObject({ status: 'paused', errorMessage: null, currentTurn: 0 })
+      expect(await prisma.agentMessage.count({ where: { id: messageId } })).toBe(0)
+      expect(await prisma.agentRunEvent.count({ where: { runId, type: { in: ['message.start', 'text.final', 'run.finished'] } } })).toBe(0)
+      expect(listener).not.toHaveBeenCalled()
+    } else {
+      if (scenario === 'lost-acknowledgement') await expect(write).rejects.toThrow('commit acknowledgement')
+      else {
+        const final = await write
+        expect(listener).not.toHaveBeenCalled()
+        final.publish()
+        final.publish()
+        expect(listener.mock.calls.map(([event]) => event.type)).toEqual(['message.start', 'text.final', 'run.finished'])
+      }
+      expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).toMatchObject({ status: 'failed', errorMessage: reason, currentTurn: 2, usage })
+      expect((await loadPersistedEvents(runId)).map(event => [event.seq, event.type])).toEqual([[1, 'message.start'], [2, 'text.final'], [3, 'run.finished']])
+      for (const options of [{}, { runLimit: 20 }]) {
+        const history = await listLoopSessionMessages(userId, sessionId, options)
+        expect(history.messages.filter(message => message.id === messageId)).toEqual([
+          expect.objectContaining({ role: 'assistant', parts: [{ type: 'text', text: reason }] }),
+        ])
+      }
+      if (scenario === 'lost-acknowledgement') expect(listener).not.toHaveBeenCalled()
+    }
+    await disposeRunEventBus(runId)
+    if (scenario === 'lost-acknowledgement') expect(await prepareRunEventResume(runId)).toBe(3)
+  })
+
   it('returns real completion timestamps in full and paged history without changing send times', async () => {
     const runId = await newRun()
     const createdAt = new Date('2026-09-09T10:00:00Z'), finishedAt = new Date('2026-09-09T10:05:00Z')

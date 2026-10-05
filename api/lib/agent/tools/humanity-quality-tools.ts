@@ -233,12 +233,13 @@ export const qualityAnalyzeTool = defineTool({
     let criticFallback = false
     let droppedCriticFindings = 0
     let correctionError: unknown
+    let evidenceCorrectionIncomplete = false
     let attemptedEvidenceCorrection = false
     // Provider, credit and configuration failures retain their real error code.
-    // Only malformed critic content belongs to the report's incomplete state.
+    // Evidence-correction failures are first persisted as incomplete, then rethrown;
+    // they must never turn located findings into a passing report.
     // 审核使用独立有界输出预算；只对供应商明确截断做一次扩大预算恢复，总超时与取消信号不重置。
-    // 真实用户取消照常上抛；可修复的 provider/credit/config 失败(DataAccessError)保留错误码上抛；
-    // 仅“超时/意外异常”降级为确定性兜底，保证检查一定终止并交付报告，根治长时间挂起导致的“分析不出”。
+    // 真实用户取消照常上抛；初始 critic 的格式异常保留为不完整报告。
     let response = ''
     try {
       response = await generateReviewCompletion(
@@ -289,10 +290,14 @@ export const qualityAnalyzeTool = defineTool({
           // Save the original, incomplete findings below before exposing the
           // provider/credit error. A failed correction must not erase paid work.
           correctionError = error
+          evidenceCorrectionIncomplete = true
         }
         try {
           rawCriticFindings = correctQualityEvidence(bundle.chapter.content, rawCriticFindings, parseJsonObject(corrected))
-        } catch { /* Remain incomplete; never reinterpret malformed corrections as success. */ }
+        } catch {
+          evidenceCorrectionIncomplete = true
+          /* Remain incomplete; never reinterpret malformed corrections as success. */
+        }
       }
     }
     ctx.signal.throwIfAborted()
@@ -301,7 +306,8 @@ export const qualityAnalyzeTool = defineTool({
       userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
       compilationId: args.compilationId ?? bundle.compilation?.id,
       chapterId, chapterRevision: bundle.chapter.revision, mode: ctx.qualityMode,
-      deterministicMetrics: deterministic.metrics, qualityContextHash: contextHash, deterministicFindings: deterministic.findings, criticFindings, criticComplete: !criticFallback,
+      deterministicMetrics: deterministic.metrics, qualityContextHash: contextHash, deterministicFindings: deterministic.findings, criticFindings,
+      criticComplete: !criticFallback && !evidenceCorrectionIncomplete,
       criticDropped: droppedCriticFindings,
     })
     if (created.compilationId) {
@@ -315,7 +321,9 @@ export const qualityAnalyzeTool = defineTool({
     if (report.status === 'failed') return { outcome: 'failed' as const,
       output: criticFallback
         ? '质量模型返回的报告格式不完整，不能判定质量通过。确定性报告和正文已保留；不得重复改写正文来解决格式错误。'
-        : `质量模型返回的全部引用都无法在正文中逐字定位（可能审查了其他文本或引用严重变形），${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`,
+        : evidenceCorrectionIncomplete
+          ? `部分质量意见的引用无法在正文中逐字定位，${attemptedEvidenceCorrection ? '本次引用校正未能完成，' : ''}报告已保留但不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`
+          : `质量模型返回的全部引用都无法在正文中逐字定位（可能审查了其他文本或引用严重变形），${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`,
       summary: criticFallback ? '质量报告格式不完整' : '质量证据定位未完成', display: reportDisplay(report) }
     const reportMetrics: Record<string, unknown> = report.deterministicMetrics && typeof report.deterministicMetrics === 'object' && !Array.isArray(report.deterministicMetrics) ? report.deterministicMetrics : {}
     const unlocatedCount = typeof reportMetrics.unlocatedFindings === 'number' ? reportMetrics.unlocatedFindings : 0
