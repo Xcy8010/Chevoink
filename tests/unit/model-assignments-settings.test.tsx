@@ -15,10 +15,10 @@ const payload = (novel = true): ModelAssignmentsPayload => ({ version: 1,
   effective: { chapter_writing: { selection: { modelTier: 'custom', customModelId: 'custom-a', reasoningEffort: 'low' }, source: 'global' } },
 })
 let savedRows: Map<string, ModelAssignmentsPayload>
-function mount(novelId = 'novel-a') {
+function mount(novelId = 'novel-a', novelTitle = '作品 A') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
   const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>
-  return { ...render(<ModelAssignmentsSettings novelId={novelId} />, { wrapper }), client }
+  return { ...render(<ModelAssignmentsSettings novelId={novelId} novelTitle={novelTitle} />, { wrapper }), client }
 }
 beforeEach(() => {
   vi.clearAllMocks()
@@ -80,18 +80,33 @@ describe('model assignment settings', () => {
   })
   it('does not apply a late save from work A to work B', async () => {
     const view = mount()
+    expect(screen.getByRole('button', { name: '当前作品（作品 A）' }).title).toBe('当前作品（作品 A）')
     await waitFor(() => expect((screen.getByRole('combobox', { name: '主 Agent模型' }) as HTMLSelectElement).disabled).toBe(false))
     let resolveSave!: (value: ModelAssignmentsPayload) => void
     api.request.mockImplementation((path: string, init?: RequestInit) => init?.method === 'PATCH' ? new Promise<ModelAssignmentsPayload>(resolve => { resolveSave = resolve }) : Promise.resolve(payload(path.includes('novelId='))))
     fireEvent.change(screen.getByRole('combobox', { name: '主 Agent模型' }), { target: { value: 'speed' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(resolveSave).toBeTypeOf('function'))
-    view.rerender(<ModelAssignmentsSettings novelId="novel-b" />)
+    view.rerender(<ModelAssignmentsSettings novelId="novel-b" novelTitle="  作品 B  " />)
+    expect(screen.getByRole('button', { name: '当前作品（作品 B）' }).getAttribute('aria-pressed')).toBe('true')
     await waitFor(() => expect(api.request.mock.calls.some(call => call[0].includes('novelId=novel-b'))).toBe(true))
     await act(async () => resolveSave({ ...payload(), novel: { revision: 4, assignments: { main: { modelTier: 'speed', reasoningEffort: 'medium' } } } }))
     await waitFor(() => expect((screen.getByRole('combobox', { name: '主 Agent模型' }) as HTMLSelectElement).disabled).toBe(false))
     expect((screen.getByRole('combobox', { name: '主 Agent模型' }) as HTMLSelectElement).value).toBe('')
     expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+  it('keeps the scoped draft when switching global/work tabs and updating the work label', async () => {
+    const view = mount()
+    await waitFor(() => expect((screen.getByRole('combobox', { name: '主 Agent模型' }) as HTMLSelectElement).disabled).toBe(false))
+    fireEvent.change(screen.getByRole('combobox', { name: '主 Agent模型' }), { target: { value: 'speed' } })
+    fireEvent.click(screen.getByRole('button', { name: '全局' }))
+    view.rerender(<ModelAssignmentsSettings novelId="novel-a" novelTitle="   " />)
+    fireEvent.click(screen.getByRole('button', { name: '当前作品（未命名作品）' }))
+    expect((screen.getByRole('combobox', { name: '主 Agent模型' }) as HTMLSelectElement).value).toBe('speed')
+    view.rerender(<ModelAssignmentsSettings novelId="novel-a" novelTitle="新作品名称" />)
+    expect(screen.getByRole('button', { name: '当前作品（新作品名称）' }).title).toBe('当前作品（新作品名称）')
+    expect((screen.getByRole('combobox', { name: '主 Agent模型' }) as HTMLSelectElement).value).toBe('speed')
+    expect(api.request.mock.calls.filter(call => call[1]?.method === 'PATCH')).toHaveLength(0)
   })
   it('retains the draft after a revision conflict and requires another explicit save', async () => {
     mount()

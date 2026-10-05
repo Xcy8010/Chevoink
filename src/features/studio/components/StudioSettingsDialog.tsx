@@ -742,6 +742,7 @@ function ArchivesPanel({ novels }: { novels: Novel[] }) {
 }
 
 export default function StudioSettingsDialog(props: Props) {
+  const currentNovel = props.novels.find((novel) => novel.id === props.novelId)
   const { onClose, open } = props
   const [query, setQuery] = useState('')
   const meta = SECTION_META[props.section]
@@ -822,7 +823,7 @@ export default function StudioSettingsDialog(props: Props) {
               {props.section === 'profile' ? <ProfilePanel /> : null}
               {props.section === 'appearance' ? <AppearancePanel /> : null}
               {props.section === 'models' ? <CustomModelSettingsContent active /> : null}
-              {props.section === 'model-assignments' ? <ModelAssignmentsSettings novelId={props.novelId} /> : null}
+              {props.section === 'model-assignments' ? <ModelAssignmentsSettings novelId={props.novelId} novelTitle={currentNovel?.displayTitle?.trim() || currentNovel?.title?.trim() || '未命名作品'} /> : null}
               {props.section === 'language-packs' ? <VoicePackSettings /> : null}
               {props.section === 'writing' ? <WritingPanel {...props} /> : null}
               {props.section === 'archives' ? <ArchivesPanel novels={props.novels} /> : null}

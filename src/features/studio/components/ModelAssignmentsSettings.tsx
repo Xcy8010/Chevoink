@@ -13,7 +13,8 @@ const effortLabels: Record<ModelReasoningEffort, string> = { none: '关闭', min
 const fieldClass = 'min-w-0 w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 py-2 text-sm text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-50'
 function modelKey(selection: AgentModelSelection | null | undefined) { return selection ? selection.modelTier === 'custom' ? `custom:${selection.customModelId}` : selection.modelTier : '' }
 
-export default function ModelAssignmentsSettings({ novelId }: { novelId?: string }) {
+export default function ModelAssignmentsSettings({ novelId, novelTitle }: { novelId?: string; novelTitle?: string }) {
+  const novelScopeLabel = `当前作品（${novelTitle?.trim() || '未命名作品'}）`
   const [scope, setScope] = useState<'global' | 'novel'>(novelId ? 'novel' : 'global')
   const [drafts, setDrafts] = useState<Record<string, Draft>>({})
   const [saving, setSaving] = useState<string | null>(null)
@@ -83,8 +84,8 @@ export default function ModelAssignmentsSettings({ novelId }: { novelId?: string
     </div>
   }
   return <div className="space-y-5">
-    <div className="inline-flex gap-1 rounded-lg bg-[var(--surface-muted)] p-1" role="group" aria-label="模型设置作用域">
-      {(['global', 'novel'] as const).filter(item => item !== 'novel' || Boolean(novelId)).map(item => <button key={item} type="button" disabled={busy} aria-pressed={scope === item} onClick={() => setScope(item)} className={cn('rounded-md px-4 py-2 text-sm', scope === item ? 'bg-[var(--surface-default)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)]')}>{item === 'global' ? '全局' : '当前作品'}</button>)}
+    <div className="inline-flex max-w-full gap-1 rounded-lg bg-[var(--surface-muted)] p-1" role="group" aria-label="模型设置作用域">
+      {(['global', 'novel'] as const).filter(item => item !== 'novel' || Boolean(novelId)).map(item => <button key={item} type="button" disabled={busy} aria-pressed={scope === item} title={item === 'novel' ? novelScopeLabel : undefined} onClick={() => setScope(item)} className={cn('rounded-md px-4 py-2 text-sm', item === 'global' ? 'shrink-0' : 'min-w-0 truncate', scope === item ? 'bg-[var(--surface-default)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)]')}>{item === 'global' ? '全局' : novelScopeLabel}</button>)}
     </div>
     {error ? <p role="alert" className="text-sm text-rose-500">{error}</p> : null}
     {assignments.isPending ? <p role="status" className="text-sm text-[var(--text-secondary)]">加载中…</p> : null}

@@ -25,6 +25,7 @@ import { useWorkConversation } from '../../components/work-conversation-context'
 import { WorkConversationRestore } from '../../components/WorkConversationRestore'
 import { copyToClipboard } from '@/lib/clipboard'
 import { cn } from '@/lib/utils'
+import { useShellStore } from '@/store/useShellStore'
 import type {
   AgentAttachmentMeta,
   AgentGoalDetail,
@@ -79,6 +80,8 @@ import { useProcessingHint } from '../useProcessingHint'
 import { useAgentStream } from '../useAgentStream'
 import { resolveComposerModelEffort, useAgentModelPreference } from '../useAgentModelPreference'
 import { useAgentGoalStream } from '../useAgentGoalStream'
+import { useGoalBarVisibility } from '../useGoalBarVisibility'
+import { openGoalEntry } from '../goal-entry'
 import { projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
@@ -212,6 +215,7 @@ export function AgentPanel({
   composerInsetClassName,
 }: AgentPanelProps) {
   const workConversation = useWorkConversation()
+  const userId = useShellStore((state) => state.sessionUser?.id)
   const runId = useAgentStore((state) => state.runId)
   const runGoalId = useAgentStore((state) => state.runGoalId)
   const phase = useAgentStore((state) => state.phase)
@@ -462,6 +466,7 @@ export function AgentPanel({
     messages, pendingApproval, pendingQuestion, conversationLoading, collapsed: workConversation.collapsed,
   })
   const goalView = selectAgentGoalView({ goal, goalSessionId, sessionId, runId, resumeableRunId, phase, runGoalId })
+  const goalBar = useGoalBarVisibility(userId, sessionId, goalView.goal)
   const panelPhase = selectAgentPanelPhase(goalView, phase)
   const active = isRunActive(panelPhase)
   const activityRunActive = selectAgentActivityRunActive(goalView, phase)
@@ -751,13 +756,12 @@ export function AgentPanel({
     }
   }, [goal, goalDetail, sessionId, setGoalMode, setGoalSnapshot])
 
-  const handleGoalOpen = useCallback(() => {
-    if (goal) openGoalEditor()
-    else setGoalMode(true)
-  }, [goal, openGoalEditor, setGoalMode])
+  const handleGoalOpen = useCallback((source: 'menu' | 'command' = 'menu') => {
+    openGoalEntry(goal, !goalBar.visible, source, openGoalEditor, () => setGoalMode(true))
+  }, [goal, goalBar.visible, openGoalEditor, setGoalMode])
 
   const handleGoalCommand = useCallback(async (action: 'edit' | 'pause' | 'resume' | 'clear') => {
-    if (action === 'edit') { handleGoalOpen(); return }
+    if (action === 'edit') { handleGoalOpen('command'); return }
     if (action === 'clear' && !goal) { setGoalMode(false); return }
     if (action === 'resume') {
       if (!goal) { setGoalError('当前没有可继续的目标。'); return }
@@ -1816,7 +1820,7 @@ export function AgentPanel({
           else onSelectSession?.(result.session.id)
         }
       }} /> : null}
-      {goal ? <AgentGoalBar
+      {goal && goalBar.visible ? <AgentGoalBar
         goal={goal}
         busy={goalBusy}
         onEdit={() => openGoalEditor()}
@@ -1824,7 +1828,7 @@ export function AgentPanel({
         onResume={() => void handleGoalResume()}
         onCancel={() => void handleGoalAction('cancel')}
         onExpand={() => openGoalEditor()}
-        onDismiss={() => setGoalSnapshot(null, sessionId, 0, true)}
+        onDismiss={goalBar.dismiss}
       /> : null}
         <AgentComposer
           novelId={novelId}
