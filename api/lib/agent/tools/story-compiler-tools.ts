@@ -428,7 +428,7 @@ export const sceneTaskBuildTool = defineTool({
     }
     const tasks = await saveSceneTasks({ userId: ctx.userId, novelId: ctx.novelId, compilationId: compilation.id, tasks: args.tasks, alternatives: args.alternatives }, ctx.transaction)
     return {
-      output: `BEAT 完成，已为 compilationId=${compilation.id} 建立 ${tasks.length} 个 Scene Task；精品候选取舍已由服务端记录。现在按顺序写正文；每个场景必须让状态发生变化，写完后调用 continuity_validate。`,
+      output: `BEAT 完成，已为 compilationId=${compilation.id} 建立 ${tasks.length} 个 Scene Task；精品候选取舍已由服务端记录。现在按顺序完成连贯正文，再提交章节终态。连续性与质量检查可选；警告和建议保留待审，不为清零意见反复改稿。`,
       summary: `建立 ${tasks.length} 个场景任务`,
       display: {
         kind: 'storyCompiler', compilationId: compilation.id, phase: 'beat', title: '场景任务',
@@ -602,17 +602,15 @@ export const continuityValidateTool = defineTool({
         display: { kind: 'storyCompiler', compilationId: compilation.id, phase: errorCount > 0 ? 'repair' : 'check', title: '连续性检查', detail: `${errorCount} 错误 · ${warningCount} 警告 · 已复用`, items: findings.map((item) => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`), errorCount, warningCount },
       }
     }
-    // 连续未收敛的检查会持续驱动“改一句→重查→又报别处”的循环并磨损正文：到顶后停止自动复查，
-    // 只把最近一次证据留给作者定夺；作者显式指定 focus 的复核不受限。
-    if (!args.focus && !await reserveContinuityCheck(ctx.userId, ctx.novelId, compilation.id)) {
-      const latest = cachedValidation?.findings ?? []
-      const latestErrors = latest.filter((item) => item.severity === 'error').length
-      const latestWarnings = latest.filter((item) => item.severity === 'warning').length
+    // Current reports were reused above. Exhaustion is a control result, never
+    // another assessment of the current manuscript or permission to edit it.
+    if (!await reserveContinuityCheck(ctx.userId, ctx.novelId, compilation.id)) {
       return {
         outcome: 'failed' as const,
+        failureCode: 'CONTINUITY_CHECK_LIMIT',
         summary: `连续性检查已停止 · 已达 ${MAX_CONTINUITY_CHECKS} 次自动检查上限`,
-        output: `同一章节已尝试 ${MAX_CONTINUITY_CHECKS} 次自动检查，尚未取得通过结果；供应商调用失败也计入尝试，不代表正文有错。不要再修改正文或重复调用检查；如实报告最近的失败原因或以下未解决项：\n${latest.map((item, index) => `${index + 1}. [${item.severity === 'error' ? '错误' : '警告'}/${item.signal}] ${item.evidence}；最小修法：${item.suggestion}`).join('\n') || '（没有可用的完整检查报告，不能判定通过或正文有错）'}`,
-        display: { kind: 'storyCompiler', compilationId: compilation.id, phase: 'repair', title: '连续性检查', detail: `已停止自动复查 · 已尝试 ${MAX_CONTINUITY_CHECKS} 次`, items: latest.map((item) => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`), errorCount: latestErrors, warningCount: latestWarnings },
+        output: `同一章节已用完 ${MAX_CONTINUITY_CHECKS} 次自动检查。当前 r${chapter.revision} 没有可复用的完整连续性结论；${cachedValidation ? `最近报告属于 r${cachedValidation.checkedRevision}，其旧意见不能当作当前版本的新错误。` : '没有完整报告。'}本次未调用模型，不代表正文有错或修订失败。保留正文，停止自动改稿和重复检查，如实说明检查未完成；不能宣称通过。`,
+        display: { kind: 'storyCompiler', compilationId: compilation.id, phase: 'check', title: '连续性检查', detail: `自动复查已停止 · 当前 r${chapter.revision} 未复核`, items: [] },
       }
     }
     const allowRepair = false
@@ -754,7 +752,7 @@ export const chapterBridgeCommitTool = defineTool({
     try {
       const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...terminal, expectedChapterRevision: compilation.chapter.revision, expectedContentHash: createHash('sha256').update(compilation.chapter.content).digest('hex') }, ctx.transaction)
       return {
-        output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge 与 Scene Task 终态已提交。故事记忆仅提交候选，作者确认前不参与事实召回。${result.skippedMemoryCount ? `其中 ${result.skippedMemoryCount} 项记忆因作者已删除而跳过，未重建；不影响章节终态提交。` : ''}本任务仅在原请求范围内交付。`,
+        output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge 与 Scene Task 终态已提交。章节提交不代表连续性或质量检查通过；缺失、失败或旧版报告仍为未确认，关注意见仍保留待审。故事记忆仅提交候选，作者确认前不参与事实召回。${result.skippedMemoryCount ? `其中 ${result.skippedMemoryCount} 项记忆因作者已删除而跳过，未重建；不影响章节终态提交。` : ''}本任务仅在原请求范围内交付。`,
         requiredResult: { targetId: result.chapterId, contentHash: persistedContentHash(compilation.chapter.content) },
         summary: '提交章节桥与当前故事终态',
         display: {

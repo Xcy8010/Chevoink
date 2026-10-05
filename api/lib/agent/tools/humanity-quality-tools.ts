@@ -136,7 +136,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
   const warningCount = report.findings.filter(finding => finding.severity === 'warning').length
   const advisoryCount = report.findings.filter(finding => finding.severity === 'advisory').length
   const reason = '本次只保存检查意见，正文未改动；修订须由原始请求明确授权'
-  return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；检查通过不等于所有建议已修复。${bindingSuffix}`,
+  return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.status === 'passed' ? '当前报告无需关注项' : '不能宣称质量检查通过，剩余意见保留待审，不要求为清零意见改稿'}。${bindingSuffix}`,
     summary: cached ? '复用当前质量报告' : `人类感质量检查 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
 }
 

@@ -7,6 +7,7 @@ import { DataAccessError, prisma } from '../../prisma.js'
 import { getChapterBaseline, getCreatedChapter, getLastTouchedChapter, recordChapterBaseline, recordCreatedChapter } from '../baseline.js'
 import { activeChapterScope, recalculateNovelStats } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
+import { assertChapterReviewRevision } from '../chapter-review-guard.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { placeCreatedChapter, resolveChapterPlacement } from '../../data/volume.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
@@ -81,6 +82,7 @@ async function updateOwnedChapterAtRevision(
   const apply = async (tx: Prisma.TransactionClient) => {
     await assertAgentManuscriptCurrent(tx, ctx)
     await assertWritingTarget(tx, ctx, { chapterId: chapter.id })
+    if (data.content !== undefined) await assertChapterReviewRevision(tx, ctx, chapter)
     const result = await tx.chapter.updateMany({
       where: {
         id: chapter.id,
@@ -406,10 +408,10 @@ export const chapterEditRangeTool = defineTool({
     if (args.oldText) {
       const first = before.indexOf(args.oldText)
       if (first === -1) {
-        return { output: `oldText 未在正文中逐字匹配到（标点、换行须完全一致）。请先 chapter_read 逐字拷贝要替换的原文再传 oldText。` }
+        return { outcome: 'failed', failureCode: 'CHAPTER_ANCHOR_CONFLICT', summary: '正文片段未改写', output: `oldText 未在正文中逐字匹配到（标点、换行须完全一致），本次没有修改正文。请先 chapter_read 逐字拷贝当前原文，禁止依据旧检查意见盲改。` }
       }
       if (before.indexOf(args.oldText, first + args.oldText.length) !== -1) {
-        return { output: `oldText 在正文中出现多次，无法唯一定位。请向两侧多拷几句上下文使其在正文中唯一。` }
+        return { outcome: 'failed', failureCode: 'CHAPTER_ANCHOR_CONFLICT', summary: '正文片段未改写', output: `oldText 在正文中出现多次，无法唯一定位，本次没有修改正文。请向两侧多拷几句当前上下文使其在正文中唯一。` }
       }
       start = first
       end = first + args.oldText.length

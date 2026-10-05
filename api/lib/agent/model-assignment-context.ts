@@ -28,3 +28,12 @@ export const TEXT_ACTION_TASKS: Readonly<Record<string, ModelAssignmentTask>> = 
   agent3HumanityCritic: 'quality', agent3RigorousContinuityRepair: 'continuity', agent3RigorousContinuityRepairRetry: 'continuity',
   agent3ContinuityCritic: 'continuity', agent3ContinuityCriticSecondPass: 'continuity',
 }
+
+/** Only the known quality chain inherits its assignment during output recovery. */
+export function resolveTextActionTask(action: string): ModelAssignmentTask | undefined {
+  const direct = Object.prototype.hasOwnProperty.call(TEXT_ACTION_TASKS, action) ? TEXT_ACTION_TASKS[action] : undefined
+  if (direct) return direct
+  const suffix = 'OutputRecovery'
+  return action.endsWith(suffix) && TEXT_ACTION_TASKS[action.slice(0, -suffix.length)] === 'quality'
+    ? 'quality' : undefined
+}

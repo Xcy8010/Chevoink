@@ -16,7 +16,7 @@ import { prisma, DataAccessError } from './prisma.js'
 import { env } from '../config/env.js'
 import { ModelRouteRejected, routeRejectionMayRetry, withModelRoutePool } from './model-route-pool.js'
 import { getToolModelRuntime } from './tool-model-config.js'
-import { assignedTaskModel, TEXT_ACTION_TASKS } from './agent/model-assignment-context.js'
+import { assignedTaskModel, resolveTextActionTask } from './agent/model-assignment-context.js'
 import type {
   ChapterAssistRequest,
   GenerateCoverImageRequest,
@@ -518,6 +518,28 @@ export function buildProviderReasoningPayload(input: ProviderReasoningInput): Re
   return { reasoning_effort: input.reasoningEffort }
 }
 
+/** The quality chain must be non-thinking after assignment and route resolution.
+ * Verified protocols outrank names; an unknown proxy cannot borrow a model's switch. */
+function buildHumanityQualityReasoningPayload(input: ProviderReasoningInput & {
+  reasoningEfforts?: import('../../shared/contracts/index.js').ModelReasoningEffort[]
+}): Record<string, unknown> {
+  let hostname = ''
+  try { hostname = new URL(input.providerBaseUrl ?? '').hostname.toLowerCase() } catch { /* no protocol proof */ }
+  const switchSupported = isAntLingFlashProvider(input)
+    || hostname === 'api.deepseek.com' && !/reasoner|(?:^|[/_-])r1(?:$|[^a-z0-9])/i.test(input.model)
+    || hostname === 'api.xiaomimimo.com'
+    || (hostname === 'bigmodel.cn' || hostname.endsWith('.bigmodel.cn')) && supportsGlmThinking(input.model)
+  // "omit" and thinking=false only prove parameter rejection/plain text
+  // acceptance. They do not prove the gateway's default thinking is off.
+  if (input.reasoningParameterMode === 'native' && input.reasoningEfforts?.includes('none')) return {
+    reasoning_effort: 'none',
+    ...(input.thinkingEnabled === true && switchSupported ? { thinking: { type: 'disabled' } } : {}),
+  }
+  if (input.thinkingEnabled !== false && switchSupported) return { thinking: { type: 'disabled' } }
+  throw new DataAccessError(409, 'AI_QUALITY_NON_THINKING_UNSUPPORTED',
+    '所选人类感检查模型尚无法确认关闭思考，本次检查未发起，正文保留。请为人类感检查选择已验证可关闭思考或非思考的模型。')
+}
+
 /**
  * MiMo 不识别 max_tokens；仅在调用方显式给出输出预算（连续性/评审等有界调用）时
  * 切换到 max_completion_tokens，无预算的辅助调用保持既有回退行为以避免新的截断面。
@@ -579,6 +601,8 @@ export type ChatWithToolsParams = {
   providerApiKey?: string | null
   provider?: string
   reasoningEffort?: import('../../shared/contracts/index.js').ModelReasoningEffort
+  /** Validated runtime capability for isolated durable quality calls only. */
+  reasoningEfforts?: import('../../shared/contracts/index.js').ModelReasoningEffort[]
   thinkingEnabled?: boolean
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
   reasoningParameterMode?: 'native' | 'omit'
@@ -683,6 +707,7 @@ export async function chatWithTools(params: ChatWithToolsParams): Promise<ChatCo
 function snapshotDurableChatParams(params: ChatWithToolsParams): ChatWithToolsParams {
   if (!params.durableExecution) return params
   return { ...params, messages: JSON.parse(JSON.stringify(params.messages)), tools: JSON.parse(JSON.stringify(params.tools)),
+    ...(params.reasoningEfforts ? { reasoningEfforts: [...params.reasoningEfforts] } : {}),
     durableExecution: { ...params.durableExecution, lease: { ...params.durableExecution.lease },
       ...(params.durableExecution.price ? { price: structuredClone(params.durableExecution.price) } : {}),
       ...(params.durableExecution.cursor ? { cursor: { ...params.durableExecution.cursor } } : {}) } }
@@ -710,6 +735,10 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   const endpoint = `${(params.providerBaseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`
 
   const reasoningEffort = params.reasoningEffort ?? env.aiReasoningEffort
+  const isolatedQuality = params.tools.length === 0 && params.durableExecution?.auxiliaryStep === params.usageLog.action
+    && ['quality_critic', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'].includes(params.usageLog.action)
+  const qualityReasoning = isolatedQuality ? buildHumanityQualityReasoningPayload({ ...params, model,
+    providerBaseUrl: params.providerBaseUrl ?? env.aiTextBaseUrl, reasoningEffort: 'none' }) : undefined
   const body: Record<string, unknown> = {
     model,
     ...(params.reasoningParameterMode ? {} : { temperature: params.temperature ?? 0.6 }),
@@ -721,7 +750,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     messages: toProviderMessages(params.messages),
   }
 
-  Object.assign(body, buildProviderReasoningPayload({
+  Object.assign(body, qualityReasoning ?? buildProviderReasoningPayload({
     boundedReview: params.boundedReview,
     thinkingEnabled: params.thinkingEnabled,
     reasoningParameterMode: params.reasoningParameterMode,
@@ -1067,7 +1096,7 @@ export async function generateTextCompletion(
 async function generateGoalTextCompletion(systemPrompt: string, userPrompt: string, options: TextCompletionOptions) {
   options = { ...options }
   options.signal?.throwIfAborted()
-  const task = TEXT_ACTION_TASKS[options.action]
+  const task = resolveTextActionTask(options.action)
   const assigned = task && !options.explicitModelSelection ? await assignedTaskModel(options.userId, options.novelId, task) : undefined
   if (assigned) options = { ...options, modelRuntime: assigned.runtime, reasoningEffort: assigned.runtime.reasoningEffort, multiplierBps: undefined, boundedReview: false }
   const sourceRuntime = options.modelRuntime ?? await getModelTierRuntime(options.modelTier ?? 'speed', options.userId)
@@ -1076,10 +1105,16 @@ async function generateGoalTextCompletion(systemPrompt: string, userPrompt: stri
   }) }
   return withModelRoutePool({ messages: [], tools: [], model: modelRuntime.modelName ?? undefined,
     provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, providerApiKey: modelRuntime.apiKey,
-    signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route =>
-    generateTextCompletionImpl(systemPrompt, userPrompt, { ...options, signal: route.signal, modelRuntime: { ...modelRuntime,
+    signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route => {
+    const sameRoute = (route.provider ?? modelRuntime.provider) === modelRuntime.provider
+      && (route.model ?? modelRuntime.modelName ?? env.aiTextModel) === (modelRuntime.modelName ?? env.aiTextModel)
+      && (route.providerBaseUrl ?? modelRuntime.baseUrl ?? env.aiTextBaseUrl) === (modelRuntime.baseUrl ?? env.aiTextBaseUrl)
+      && (route.providerApiKey ?? modelRuntime.apiKey ?? env.aiTextApiKey) === (modelRuntime.apiKey ?? env.aiTextApiKey)
+    return generateTextCompletionImpl(systemPrompt, userPrompt, { ...options, signal: route.signal, modelRuntime: { ...modelRuntime,
+      ...(task === 'quality' && !sameRoute ? { reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: [] } : {}),
       provider: route.provider ?? modelRuntime.provider, modelName: route.model ?? modelRuntime.modelName,
-      baseUrl: route.providerBaseUrl ?? modelRuntime.baseUrl, apiKey: route.providerApiKey ?? modelRuntime.apiKey } }))
+      baseUrl: route.providerBaseUrl ?? modelRuntime.baseUrl, apiKey: route.providerApiKey ?? modelRuntime.apiKey } })
+  })
 }
 
 async function generateTextCompletionImpl(systemPrompt: string, userPrompt: string, options: TextCompletionOptions & { modelRuntime: Awaited<ReturnType<typeof getModelTierRuntime>> }) {
@@ -1087,6 +1122,9 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   const requestedReasoning = options.reasoningEffort ?? modelRuntime.reasoningEffort
   const completionReasoning = modelRuntime.reasoningEfforts && !modelRuntime.reasoningEfforts.includes(requestedReasoning)
     ? modelRuntime.reasoningEffort : requestedReasoning
+  const qualityReasoning = resolveTextActionTask(options.action) === 'quality'
+    ? buildHumanityQualityReasoningPayload({ ...modelRuntime, model: modelRuntime.modelName ?? env.aiTextModel,
+      providerBaseUrl: modelRuntime.baseUrl ?? env.aiTextBaseUrl, reasoningEffort: 'none' }) : undefined
   ensureTextProviderConfigured(modelRuntime.apiKey)
   await assertCreditAccess(options.userId, modelRuntime.tier, false)
 
@@ -1121,7 +1159,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
       [outputTokenParameter]: options.maxOutputTokens ?? env.aiTextMaxOutputTokens,
       stream: true,
       stream_options: { include_usage: true },
-      ...buildProviderReasoningPayload({
+      ...(qualityReasoning ?? buildProviderReasoningPayload({
         boundedReview: options.boundedReview,
         thinkingEnabled: modelRuntime.thinkingEnabled,
         reasoningParameterMode: modelRuntime.reasoningParameterMode,
@@ -1129,7 +1167,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
         providerBaseUrl: modelRuntime.baseUrl,
         model: modelRuntime.modelName ?? env.aiTextModel,
         reasoningEffort: completionReasoning,
-      }),
+      })),
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },

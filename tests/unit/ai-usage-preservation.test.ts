@@ -11,6 +11,7 @@ vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...
 import { chatWithTools, generateTextCompletion, generateCoverImageData } from '../../api/lib/ai-service.js'
 import { env } from '../../api/config/env.js'
 import { TEXT_ACTION_TASKS, withModelAssignmentContext } from '../../api/lib/agent/model-assignment-context.js'
+import { generateReviewCompletion } from '../../api/lib/agent/review-completion.js'
 
 beforeEach(() => {
   mocks.findModel.mockReset().mockResolvedValue(null)
@@ -30,6 +31,127 @@ async function invoke(usages: Array<Record<string, unknown>>) {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(`${frames}data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)))
   return chatWithTools({ messages: [{ role: 'user', content: 'test input' }], tools: [], providerApiKey: 'fixture-not-a-key', usageLog: { userId: 'test', action: 'test' } })
 }
+
+type TextRuntime = NonNullable<Parameters<typeof generateTextCompletion>[2]['modelRuntime']>
+function qualityRuntime(overrides: Partial<TextRuntime> = {}): TextRuntime {
+  return { tier: 'custom', provider: 'fixture', modelName: 'verified-model', baseUrl: 'https://verified.example/v1',
+    apiKey: 'fixture-not-a-key', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'], reasoningParameterMode: 'native',
+    thinkingEnabled: false, multiplierBps: 0, visionEnabled: false, contextWindowTokens: 128000, ...overrides }
+}
+const qualityResponse = (finish = 'stop') => new Response(JSON.stringify({ choices: [{ message: { content: '{"findings":[]}' }, finish_reason: finish }],
+  usage: { prompt_tokens: 100, completion_tokens: 20 } }))
+
+describe('fixed non-thinking humanity quality policy after actual model resolution', () => {
+  it.each([
+    { label: 'official Ling', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1', reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { thinking: { type: 'disabled' } } },
+    { label: 'official DeepSeek', runtime: { provider: 'deepseek', modelName: 'deepseek-v4-flash', baseUrl: 'https://api.deepseek.com/v1', reasoningEfforts: ['low', 'high'], reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { thinking: { type: 'disabled' } } },
+    { label: 'official MiMo', runtime: { provider: 'xiaomi', modelName: 'mimo-v2.6-flash', baseUrl: 'https://api.xiaomimimo.com/v1', reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { thinking: { type: 'disabled' } } },
+    { label: 'official GLM', runtime: { provider: 'zhipu', modelName: 'glm-4.6', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { thinking: { type: 'disabled' } } },
+    { label: 'validated native none', runtime: { thinkingEnabled: true }, payload: { reasoning_effort: 'none' } },
+    { label: 'official Ling with omit', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1', reasoningParameterMode: 'omit', thinkingEnabled: undefined }, payload: { thinking: { type: 'disabled' } } },
+  ] satisfies Array<{ label: string; runtime: Partial<TextRuntime>; payload: Record<string, unknown> }>)('uses $label without changing the configured main-turn default', async ({ runtime, payload }) => {
+    const modelRuntime = qualityRuntime(runtime)
+    const saved = structuredClone(modelRuntime)
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => qualityResponse())
+    vi.stubGlobal('fetch', fetcher)
+    await generateTextCompletion('规则', '合成完整正文', { userId: 'test', action: 'agent3HumanityCritic', modelRuntime, reasoningEffort: 'low', boundedReview: false })
+    const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
+    expect({ ...(body.thinking ? { thinking: body.thinking } : {}), ...(body.reasoning_effort ? { reasoning_effort: body.reasoning_effort } : {}) }).toEqual(payload)
+    expect(body.model).toBe(modelRuntime.modelName)
+    expect(modelRuntime).toEqual(saved)
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(mocks.charge).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { label: 'unknown native thinking-only', runtime: { reasoningEfforts: ['high'] } },
+    { label: 'unknown omit thinking switch', runtime: { reasoningParameterMode: 'omit', thinkingEnabled: true } },
+    { label: 'omit without non-thinking proof', runtime: { reasoningParameterMode: 'omit', thinkingEnabled: undefined, reasoningEfforts: ['high'] } },
+    { label: 'hostile proxy accepting text but defaulting to thinking', runtime: { reasoningParameterMode: 'omit', thinkingEnabled: false, reasoningEffort: 'none', reasoningEfforts: ['none'] } },
+    { label: 'only-none without disable proof', runtime: { reasoningParameterMode: undefined, reasoningEffort: 'none', reasoningEfforts: ['none'] } },
+    { label: 'official omit rejecting thinking switch', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1', reasoningParameterMode: 'omit', thinkingEnabled: false, reasoningEfforts: ['none'] } },
+    { label: 'unknown proxy bearing Ling name', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', reasoningParameterMode: undefined, thinkingEnabled: undefined } },
+    { label: 'unknown DeepSeek proxy', runtime: { provider: 'deepseek', modelName: 'deepseek-v4-flash', reasoningParameterMode: undefined, thinkingEnabled: undefined } },
+    { label: 'unknown incomplete capabilities', runtime: { reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: [] } },
+    { label: 'official thinking-only reasoner', runtime: { provider: 'deepseek', modelName: 'deepseek-reasoner', baseUrl: 'https://api.deepseek.com/v1', reasoningParameterMode: undefined, thinkingEnabled: true, reasoningEfforts: ['high'] } },
+    { label: 'verified rejection of thinking switch', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1', reasoningEfforts: ['high'] } },
+  ] satisfies Array<{ label: string; runtime: Partial<TextRuntime> }>)('rejects $label before usage preparation or paid dispatch', async ({ runtime }) => {
+    const fetcher = vi.fn()
+    vi.stubGlobal('fetch', fetcher)
+    await expect(generateTextCompletion('规则', '合成完整正文', { userId: 'test', action: 'agent3HumanityCritic',
+      modelRuntime: qualityRuntime(runtime), reasoningEffort: 'low' })).rejects.toMatchObject({ code: 'AI_QUALITY_NON_THINKING_UNSUPPORTED' })
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(mocks.create).not.toHaveBeenCalled()
+    expect(mocks.access).not.toHaveBeenCalled()
+    expect(mocks.charge).not.toHaveBeenCalled()
+  })
+
+  it('keeps the assigned quality model and fixed policy through the actual bounded output recovery', async () => {
+    const selected = qualityRuntime({ tier: 'ultimate', provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1',
+      reasoningParameterMode: undefined, thinkingEnabled: undefined, multiplierBps: 25000 })
+    mocks.runtime.mockResolvedValue(selected)
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => qualityResponse())
+      .mockImplementationOnce(async () => qualityResponse('length'))
+    vi.stubGlobal('fetch', fetcher)
+    const frozen = { version: 1 as const, globalRevision: 2, novelRevision: 0, assignments: { quality: { modelTier: 'ultimate' as const, reasoningEffort: 'high' as const } } }
+    const original = structuredClone(frozen)
+    await withModelAssignmentContext({ userId: 'test', novelId: 'novel', frozen }, () => generateReviewCompletion('固定审查规则', '合成完整原文首尾', {
+      userId: 'test', novelId: 'novel', action: 'agent3HumanityCritic', reasoningEffort: 'low', modelRuntime: qualityRuntime(),
+    }))
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    for (const [index, call] of fetcher.mock.calls.entries()) {
+      expect(call[0]).toBe('https://api.ant-ling.com/v1/chat/completions')
+      expect(JSON.parse(String(call[1]?.body))).toMatchObject({ model: 'Ling-3.0-flash', thinking: { type: 'disabled' },
+        max_tokens: index === 0 ? 16384 : 32768, messages: [{ role: 'system', content: '固定审查规则' }, { role: 'user', content: '合成完整原文首尾' }] })
+      expect(JSON.parse(String(call[1]?.body))).not.toHaveProperty('reasoning_effort')
+    }
+    expect(mocks.create.mock.calls.map(([arg]) => arg.data.action)).toEqual(['agent3HumanityCritic', 'agent3HumanityCriticOutputRecovery'])
+    expect(selected.reasoningEffort).toBe('high')
+    expect(frozen).toEqual(original)
+  })
+
+  it('preserves the configured main-writing high payload before and after a quality check', async () => {
+    const modelRuntime = qualityRuntime({ tier: 'speed', provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1',
+      reasoningParameterMode: undefined, thinkingEnabled: undefined })
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => qualityResponse())
+    vi.stubGlobal('fetch', fetcher)
+    for (const action of ['mainWriting', 'agent3HumanityCritic', 'mainWriting']) await generateTextCompletion('规则', '合成正文', { userId: 'test', action, modelRuntime })
+    const bodies = fetcher.mock.calls.map(call => JSON.parse(String(call[1]?.body)))
+    expect(bodies[0]).toEqual(bodies[2])
+    expect(bodies[0]).toMatchObject({ thinking: { type: 'enabled' } })
+    expect(bodies[1]).toMatchObject({ thinking: { type: 'disabled' } })
+    expect(modelRuntime.reasoningEffort).toBe('high')
+    expect(fetcher).toHaveBeenCalledTimes(3)
+  })
+
+  it.each(['standard', 'performance'] as const)('reevaluates the actual alternate %s route without borrowing source protocol', async tier => {
+    const unsupported = tier === 'performance'
+    const source = qualityRuntime({ tier, provider: 'fixture', modelName: `primary-${tier}`, baseUrl: `https://primary-${tier}.example/v1` })
+    mocks.runtime.mockResolvedValue(source)
+    mocks.findModel.mockResolvedValue({ id: `quality-${tier}`, tier, provider: source.provider, modelName: source.modelName, baseUrl: source.baseUrl,
+      apiKeyCiphertext: source.apiKey, metadata: { routes: [{ id: tier === 'standard' ? '00000000-0000-4000-8000-000000000041' : '00000000-0000-4000-8000-000000000042',
+        label: 'alternate', provider: 'deepseek', modelName: 'deepseek-v4-flash', baseUrl: unsupported ? 'https://unknown-quality-proxy.example/v1' : 'https://api.deepseek.com/v1',
+        apiKeyCiphertext: 'fixture-alternate', enabled: true }] } })
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => qualityResponse())
+      .mockImplementationOnce(async () => new Response('{"error":{"message":"busy"},"usage":{"prompt_tokens":0,"completion_tokens":0}}', { status: 503 }))
+    vi.stubGlobal('fetch', fetcher)
+    const result = generateTextCompletion('规则', '合成完整正文', { userId: 'test', action: 'agent3HumanityCritic', modelRuntime: source })
+    if (unsupported) {
+      await expect(result).rejects.toMatchObject({ code: 'AI_QUALITY_NON_THINKING_UNSUPPORTED' })
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(mocks.create).toHaveBeenCalledOnce()
+    } else {
+      await expect(result).resolves.toBe('{"findings":[]}')
+      expect(fetcher).toHaveBeenCalledTimes(2)
+      const body = JSON.parse(String(fetcher.mock.calls[1][1]?.body))
+      expect(body).toMatchObject({ model: 'deepseek-v4-flash', thinking: { type: 'disabled' } })
+      expect(body).not.toHaveProperty('reasoning_effort')
+    }
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ reasoning_effort: 'none' })
+    expect(source.reasoningParameterMode).toBe('native')
+    expect(source.reasoningEffort).toBe('high')
+  })
+})
 
 describe('explicit zero provider usage is not missing usage', () => {
   it.each(['none', 'high'] as const)('uses the configured Ling %s default for an auxiliary call without changing usage or the route', async reasoningEffort => {
@@ -52,7 +174,8 @@ describe('explicit zero provider usage is not missing usage', () => {
 
   it.each(Object.entries(TEXT_ACTION_TASKS))('routes actual auxiliary %s body through frozen purpose %s and honors effort', async (action, task) => {
     mocks.runtime.mockImplementation(async (tier, _user, _custom, effort) => ({ tier, provider: 'openai', modelName: 'selected-model',
-      baseUrl: 'https://selected.example/v1', apiKey: 'fixture-not-a-key', reasoningEffort: effort ?? 'high', reasoningEfforts: ['low', 'medium', 'high'],
+      baseUrl: 'https://selected.example/v1', apiKey: 'fixture-not-a-key', reasoningEffort: effort ?? 'high', reasoningEfforts: ['none', 'low', 'medium', 'high'],
+      reasoningParameterMode: 'native', thinkingEnabled: false,
       multiplierBps: tier === 'custom' ? 0 : 25000, visionEnabled: true, contextWindowTokens: 128000 }))
     const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(JSON.stringify({ choices: [{ message: { content: '完整结果' }, finish_reason: 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 20 } })))
     vi.stubGlobal('fetch', fetcher)
@@ -64,7 +187,7 @@ describe('explicit zero provider usage is not missing usage', () => {
     }))
     expect(fetcher).toHaveBeenCalledOnce()
     expect(fetcher.mock.calls[0][0]).toBe('https://selected.example/v1/chat/completions')
-    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'selected-model', reasoning_effort: 'high',
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'selected-model', reasoning_effort: task === 'quality' ? 'none' : 'high',
       messages: [{ role: 'system', content: 'isolated-system' }, { role: 'user', content: '完整正文及上下文' }] })
     expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ modelTier: 'ultimate', multiplierBps: 25000,
       billingSnapshot: { version: 'credits-v1-exact', modelTier: 'ultimate', multiplierBps: 25000 } }) }))

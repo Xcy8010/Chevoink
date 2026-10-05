@@ -33,6 +33,16 @@ beforeEach(() => {
 })
 
 describe('auxiliary text model inheritance', () => {
+  it('a needs-attention report cannot be described as quality passed or permission to clear every warning', async () => {
+    mocks.complete.mockResolvedValue('{"findings":[]}')
+    mocks.report.mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 4, repairRound: 0, status: 'needs_repair',
+      findings: [{ severity: 'warning', signal: 'emotion_grounding', quote: '她关上了门。', explanation: '待审意见', suggestion: '供作者参考' }] })
+    const result = await qualityAnalyzeTool.execute(context(runtime('custom')), {})
+    expect(result.output).toContain('绑定 r4，状态=needs_repair')
+    expect(result.output).toContain('不能宣称质量检查通过')
+    expect(result.output).toContain('不要求为清零意见改稿')
+    expect(result.output).toContain('修订须由原始请求明确授权')
+  })
   it.each(['lite', 'custom', 'speed'] as const)('preserves the full %s runtime when the selected model is free', tier => {
     const selected = runtime(tier)
     expect(auxiliaryTextModel(selected)).toBe(selected)

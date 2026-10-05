@@ -63,6 +63,20 @@ describe('严谨创作落实连续性警告', () => {
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     expect(f.repair).not.toHaveBeenCalled()
   })
+  it.each([undefined, '模型自行添加的范围'])('exhaustion does not return stale findings or allow a focus bypass: %s', async focus => {
+    const f = fixture(true)
+    f.chapter.revision = 2
+    f.validation.findings = [{ signal: 'object', severity: 'error', evidence: '仅属于旧版的矛盾', suggestion: '旧版最小修改建议' }]
+    vi.mocked(compiler.reserveContinuityCheck).mockResolvedValue(false)
+    const returned = await continuityValidateTool.execute(f.ctx, { compilationId: 'comp', focus })
+    expect(returned).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_LIMIT', display: { phase: 'check', items: [] } })
+    expect(returned.output).toContain('当前 r2')
+    expect(returned.output).toContain('最近报告属于 r1')
+    expect(returned.output).not.toContain('旧版最小修改建议')
+    expect(returned.output).not.toContain('仅属于旧版的矛盾')
+    expect(f.critic).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+  })
   it('chapter-only CHECK uses the verified writing compiler and persists exact coverage, including a reused post-quality report', async () => {
     const f = fixture(true)
     vi.spyOn(compiler, 'isWritingTaskContinuityCompiler').mockResolvedValue(true)

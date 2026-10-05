@@ -6,6 +6,8 @@ import { readTaskBudget } from '../../api/lib/agent/runtime-budget.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
+import { prepareAuxiliaryModelOperation } from '../../api/lib/agent/runtime-auxiliary-model.js'
+import { beginDurableChat } from '../../api/lib/agent/runtime-provider.js'
 import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { type DurableTokenPrice } from '../../api/lib/agent/runtime-settlement.js'
@@ -120,7 +122,11 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       const result = await step()
       const failed = ['format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('连续性检查') } })
-      if (scenario === 'success' || scenario === 'chapter-only') expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
+      if (scenario === 'success' || scenario === 'chapter-only') {
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkRounds: 1 })
+        expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkRounds: 1 })
+      }
       const expectedRequests = scenario === 'missing' ? 0 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
@@ -149,7 +155,7 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
   const criticStep = family !== 'continuity' ? 'quality_critic' : 'continuity_critic'
   const repairStep = family === 'quality-evidence' ? 'quality_evidence_correction' : family !== 'continuity' ? 'quality_repair' : 'continuity_repair'
   const retryStep = family === 'quality-evidence' ? 'quality_evidence_correction' : family !== 'continuity' ? 'quality_repair_retry' : 'continuity_repair_retry'
-  it.each(['replay', 'read-only', 'stop-resume', 'unknown', 'changed-input', 'wrong-attempt', 'wrong-step', 'skip-critic', 'damaged-prerequisite', 'ordered-repair', 'tools-leak', 'history-leak', 'late-result', 'concurrent', 'missing-result-event', 'cross-family'] as const)('%s binds paid work to the original pending tool', async scenario => {
+  it.each(['replay', 'read-only', 'stop-resume', 'unknown', 'changed-input', 'wrong-attempt', 'wrong-step', 'skip-critic', 'damaged-prerequisite', 'ordered-repair', 'tools-leak', 'history-leak', 'late-result', 'concurrent', 'missing-result-event', 'cross-family', 'prepared-policy-conflict', 'old-paid-replay', 'old-paid-unknown'] as const)('%s binds paid work to the original pending tool', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
       const window = getCreditWindow()
@@ -168,6 +174,7 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
       const request = (step: import('../../api/lib/agent/runtime-auxiliary-model.js').AuxiliaryModelStep = criticStep) => ({
         messages: [{ role: 'user' as const, content: '独立检查原文' }] as import('../../api/lib/ai-service.js').ChatMessage[], tools: [] as import('../../api/lib/ai-service.js').OpenAIToolDefinition[], model: 'fixture', provider: 'fixture',
         providerApiKey: 'fixture-not-real', providerBaseUrl: 'https://provider.invalid/v1',
+        reasoningParameterMode: 'native' as const, thinkingEnabled: false, reasoningEfforts: ['none', 'high'] as Array<'none' | 'high'>,
         durableExecution: { lease, operationKey: `aux:${parent.operation.id}:${step}`, parentOperationId: parent.operation.id, auxiliaryStep: step, attemptKey: '1', price },
         usageLog: { userId: f.userId, agentRunId: lease.runId, action: step, modelTier: 'speed' as const },
       })
@@ -177,6 +184,44 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       })
       vi.stubGlobal('fetch', fetchMock)
+      if (scenario === 'prepared-policy-conflict' || scenario === 'old-paid-replay' || scenario === 'old-paid-unknown') {
+        const original = request()
+        const savedRequest = { endpoint: 'https://provider.invalid/v1/chat/completions', body: {
+          model: 'fixture', messages: original.messages, thinking: { type: 'enabled' }, reasoning_effort: 'high', stream: true,
+        } }
+        const operationInput = { key: original.durableExecution.operationKey, action: criticStep, request: savedRequest, price,
+          parentOperationId: parent.operation.id, step: criticStep }
+        if (scenario === 'prepared-policy-conflict') {
+          const prepared = await prepareAuxiliaryModelOperation(lease, operationInput)
+          await expect(chatWithTools(original)).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+          expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: prepared.id } })).toEqual(prepared)
+          expect(await prisma.agentProviderAttempt.count({ where: { operationId: prepared.id } })).toBe(0)
+        } else {
+          const paid = await beginDurableChat({ execution: original.durableExecution, userId: f.userId, agentRunId: lease.runId,
+            action: criticStep, provider: 'fixture', model: 'fixture', request: savedRequest, price, admit: async () => {} })
+          if (scenario === 'old-paid-unknown') await paid.interrupted('transport_error')
+          else {
+            await paid.observe({ promptTokens: 10, completionTokens: 0, cacheHitTokens: null, cacheMissTokens: null, source: 'reported' })
+            await paid.finish({ content: '{"findings":[]}', reasoning: '', toolCalls: [], finishReason: 'stop',
+              usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } })
+          }
+          const before = await prisma.agentOperation.findUniqueOrThrow({ where: { taskRootId_operationKey: { taskRootId: f.rootId, operationKey: original.durableExecution.operationKey } } })
+          const runtime = vi.spyOn(credits, 'getModelTierRuntime').mockRejectedValue(new Error('Old paid request must not resolve current credentials'))
+          const checkCurrent = vi.fn(async () => {})
+          const replay = callDurableAuxiliary({ lease, parentOperationId: parent.operation.id, step: criticStep,
+            route: { provider: 'fixture', model: 'fixture', baseUrl: 'https://provider.invalid/v1', maxOutputTokens: 1024 }, price,
+            system: '当前合成规则', content: '当前合成正文', temperature: 0.15, signal: new AbortController().signal, assertCurrent: checkCurrent })
+          if (scenario === 'old-paid-unknown') await expect(replay).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+          else await expect(replay).resolves.toMatchObject({ content: '{"findings":[]}', billing: { status: 'settled', chargedMilli: 1 } })
+          expect(runtime).not.toHaveBeenCalled()
+          expect(checkCurrent).not.toHaveBeenCalled()
+          expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: before.id } })).toEqual(before)
+          expect(await prisma.agentProviderAttempt.count({ where: { operationId: before.id } })).toBe(1)
+        }
+        expect(fetchMock).not.toHaveBeenCalled()
+        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(scenario === 'old-paid-replay' ? 1 : 0)
+        return
+      }
       if (scenario === 'read-only') {
         await prisma.agentSession.update({ where: { id: f.sessionId }, data: { sandboxMode: 'read_only' } })
         expect(await chatWithTools(request())).toMatchObject({ content: '{"findings":[]}' })
@@ -406,4 +451,3 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
     })
   })
 })
-

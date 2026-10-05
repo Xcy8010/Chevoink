@@ -157,13 +157,13 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     expect(await reserveContinuityRepair(userId, novelId, rePrepared.compilation.id)).toBe(false)
   })
 
-  it('连续性检查额度：并发不超发、仍含错误时累计、0 错误检查清零并重新放行', async () => {
+  it('连续性检查额度：并发不超发，零错误报告也不能重置累计尝试', async () => {
     // 先补齐正文与场景任务，使确定性检查不产生干扰误差，额度语义只由 findings 决定。
     await prisma.chapter.update({ where: { id: chapter3Id }, data: { content: '林舟在雪原上发现第二把钥匙，齿纹与袖中那把并不相同。', wordCount: 27, revision: { increment: 1 } } })
     const input = { userId, novelId, runId, chapterId: chapter3Id, mode: 'balanced' as const, intentSummary: '检查连续性检查额度' }
     const prepared = await prepareStoryCompilation(input)
     await saveSceneTasks({ userId, novelId, compilationId: prepared.compilation.id, tasks: [{
-      purpose: '验证检查额度清零，不进入真实写作。', entryState: { action: '林舟在雪原上出发' },
+      purpose: '验证累计检查额度保留，不进入真实写作。', entryState: { action: '林舟在雪原上出发' },
       goal: '找到信号源', obstacle: '大雪封路', choice: '绕行或折返', cost: '多走半天', turn: '发现第二把钥匙',
       exitState: { action: '林舟收起钥匙' }, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' },
     }] })
@@ -176,8 +176,8 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     expect(continuityCheckRounds(afterError.validation)).toBe(MAX_CONTINUITY_CHECKS)
     await validateStoryContinuity({ userId, novelId, compilationId: prepared.compilation.id, findings: [], independentCheck: 'complete' })
     const afterPass = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id } })
-    expect(continuityCheckRounds(afterPass.validation)).toBe(0)
-    expect(await reserveContinuityCheck(userId, novelId, prepared.compilation.id)).toBe(true)
+    expect(continuityCheckRounds(afterPass.validation)).toBe(MAX_CONTINUITY_CHECKS)
+    expect(await reserveContinuityCheck(userId, novelId, prepared.compilation.id)).toBe(false)
   })
 
   it('建立作品宪章和读者承诺，并以不可逆哈希保存写作意图', async () => {

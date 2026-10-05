@@ -13,7 +13,7 @@ const m = vi.hoisted(() => ({
     chapter: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), create: vi.fn(), count: vi.fn() },
     volume: { findFirst: vi.fn(), findMany: vi.fn() }, agentTaskRoot: { findUniqueOrThrow: vi.fn() },
   },
-  stats: vi.fn(), memory: vi.fn(), compiler: vi.fn(), flags: vi.fn(), craft: vi.fn(), placement: vi.fn(), place: vi.fn(),
+  reviewGuard: vi.fn(), stats: vi.fn(), memory: vi.fn(), compiler: vi.fn(), flags: vi.fn(), craft: vi.fn(), placement: vi.fn(), place: vi.fn(),
   prepare: vi.fn(), prepareCursor: vi.fn(), commit: vi.fn(), failure: vi.fn(), reduce: vi.fn(),
 }))
 vi.mock('../../api/lib/prisma.js', () => ({
@@ -26,6 +26,7 @@ vi.mock('../../api/lib/data/internal.js', async original => ({
 vi.mock('../../api/lib/data/volume.js', () => ({ resolveChapterPlacement: m.placement, placeCreatedChapter: m.place }))
 vi.mock('../../api/lib/agent/story-memory.js', () => ({ enqueueChapterMemoryExtraction: m.memory }))
 vi.mock('../../api/lib/agent/story-compiler.js', () => ({ recordStoryCompilerWrite: m.compiler }))
+vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({ assertChapterReviewRevision: m.reviewGuard }))
 vi.mock('../../api/lib/agent/craft-library.js', () => ({ assertCraftOutputSafe: m.craft }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ isAgent2FeatureEnabled: m.flags }))
 vi.mock('../../api/lib/agent/runtime-operations.js', () => ({ prepareOperation: m.prepare, commitOperationEffect: m.commit, recordToolFailure: m.failure }))
@@ -121,6 +122,23 @@ function expectCas() {
 }
 
 describe('legacy Agent chapter archive guards', () => {
+  it('an obsolete range anchor is a failed edit rather than a successful revision', async () => {
+    const result = await chapterEditRangeTool.execute(ctx(), { chapterId: 'c', oldText: '不属于当前正文的旧证据', newText: '不应写入' })
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'CHAPTER_ANCHOR_CONFLICT' })
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
+  it.each(actions)('%s checks review admission in the same transaction before manuscript effects', async action => {
+    const { DataAccessError } = await import('../../api/lib/prisma.js')
+    m.reviewGuard.mockRejectedValue(new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '检查次数已用完'))
+    const execute = action === 'chapter_write' ? chapterWriteTool.execute(ctx(), { chapterId: 'c', content: 'After' })
+      : action === 'chapter_append' ? chapterAppendTool.execute(ctx(), { chapterId: 'c', content: 'After' })
+      : chapterEditRangeTool.execute(ctx(), { chapterId: 'c', oldText: 'Before', newText: 'After' })
+    await expect(execute).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
+    expect(m.reviewGuard).toHaveBeenCalledWith(tx, expect.objectContaining({ runId: 'r' }), expect.objectContaining({ id: 'c', revision: 4 }))
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
   it.each(legacy)('%s rejects the previous manuscript epoch even if chapter revision still matches', async (_name, execute) => {
     recordChapterBaseline('r', 'c', 4)
     m.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 1 } })
@@ -320,6 +338,15 @@ describe('legacy Agent chapter archive guards', () => {
 })
 
 describe('durable Agent chapter archive guards', () => {
+  it.each(actions)('%s journals exhausted-review denial before CAS without content, memory or progress effects', async action => {
+    const { DataAccessError } = await import('../../api/lib/prisma.js')
+    m.reviewGuard.mockRejectedValue(new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '检查次数已用完'))
+    const result = await executeDurableChapter(durable(action), action, contentArgs(action))
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'REVIEW_AUTOMATION_STOPPED' })
+    expect(m.failure).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'REVIEW_AUTOMATION_STOPPED', inputHash: 'hash' }))
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
   it.each(actions)('%s fences an old manuscript before reading/writing chapter effects', async action => {
     m.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 2 } })
     await expect(executeDurableChapter(durable(action), action, contentArgs(action))).rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })

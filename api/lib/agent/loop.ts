@@ -222,6 +222,7 @@ const REPEATABLE_TOOLS = new Set(['task_wait', 'task_get', 'task_list', 'ask_use
 const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
 
 type ToolCallOutcome = {
+  reviewStopReason?: string
   providerFailure?: boolean
   providerFailureCode?: string
   recoveryCode?: string
@@ -382,7 +383,9 @@ export async function handleToolCall(
       durationMs: Date.now() - startedAt,
       ...subagentMark,
     })
-    return { observation, part: { ...basePart, args: parsedArgs, status, summary } }
+    return { observation, part: { ...basePart, args: parsedArgs, status, summary },
+      ...(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(failureCode ?? '')
+        ? { reviewStopReason: observation } : {}) }
   }
 
   const permission = tool.permission[ctx.mode]
@@ -465,7 +468,10 @@ export async function handleToolCall(
     const goalContext = await readGoalExecution(ctx.userId, ctx.runId)
     const result = await withGoalExecutionContext(goalContext, () => withGoalEffects(() => tool.execute({ ...ctx, inlineChild: Boolean(subagent) }, validated.data)))
     failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
-    if (result.outcome === 'failed') return fail(result.summary ?? '执行未完成', wrapToolOutput(tool.name, result.output), 'failed')
+    if (result.outcome === 'failed') {
+      failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
+      return fail(result.summary ?? '执行未完成', wrapToolOutput(tool.name, result.output), 'failed')
+    }
     const durationMs = Date.now() - startedAt
     const summary = result.summary ?? `${tool.title}完成`
 
@@ -520,14 +526,17 @@ export async function handleToolCall(
     }
     // 错误即观察：不中断 run，把错误回填给模型自行重试或换路
     if (error instanceof DataAccessError && error.code.startsWith('AI_')) {
-      const label = error.code === 'AI_PROVIDER_TIMEOUT' ? '模型网关超时'
+      const label = error.code === 'AI_QUALITY_NON_THINKING_UNSUPPORTED' ? '此模型尚无法关闭检查思考'
+        : error.code === 'AI_PROVIDER_TIMEOUT' ? '模型网关超时'
         : error.code === 'AI_PROVIDER_OUTPUT_LIMIT' ? '模型输出达到上限，检查未完成'
         : error.code === 'AI_PROVIDER_INCOMPLETE' ? '模型输出中断，检查未完成'
         : error.code === 'AI_PROVIDER_EMPTY_RESPONSE' ? '模型未返回有效内容'
         : error.code === 'AI_PROVIDER_TRANSPORT' ? '模型连接中断，结果未确认'
         : error.code === 'AI_PROVIDER_INVALID_RESPONSE' ? '模型响应格式异常' : '模型服务异常'
       console.warn('[agent-tool-provider]', { runId, tool: call.name, code: error.code, durationMs: Date.now() - startedAt })
-      const guidance = error.code === 'AI_PROVIDER_OUTPUT_LIMIT'
+      const guidance = error.code === 'AI_QUALITY_NON_THINKING_UNSUPPORTED'
+        ? `${error.message} 本次未发送检查模型请求；不要重试同一配置或修改正文来绕过，检查仍未完成。`
+        : error.code === 'AI_PROVIDER_OUTPUT_LIMIT'
         ? '输出预算已达上限，不要原样重复付费调用；保留进度并报告检查未完成，不能将截断报告当作通过。'
         : ['AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_INCOMPLETE', 'AI_PROVIDER_TIMEOUT'].includes(error.code)
           ? '原调用结果尚未确认，先核对原调用与已保存状态；保留进度并报告检查未完成，不要盲目重发未知付费请求。'
@@ -535,6 +544,9 @@ export async function handleToolCall(
       return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。${guidance}`, 'failed'), providerFailure: true, providerFailureCode: error.code }
     }
     console.warn('[agent-tool-failure]', { runId, tool: call.name, code: error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR', durationMs: Date.now() - startedAt })
+    if (error instanceof DataAccessError && ['REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) {
+      return fail('自动修订已停止', error.message, 'failed')
+    }
     if (error instanceof DataAccessError && ['RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) {
       return fail('原任务状态或授权不匹配', `工具 ${call.name} 未执行（${error.code}）：${error.message} 停止后续写入并核对原任务状态和授权；不得调整参数重试、换工具绕过或自行恢复权限。`, 'failed')
     }
@@ -1647,6 +1659,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
 
       let structureCircuitTripped = false
+      let reviewStopReason: string | undefined
       let batchProgress = false
       for (const call of effectiveToolCalls) {
         if (await finishPersistedWritingIfComplete(async () => {
@@ -1682,6 +1695,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           continue
         }
         const outcome = await handleToolCall(call, tools, { ...toolContext, callId: call.id, messageId }, bus, messageId, runId)
+        reviewStopReason = outcome.reviewStopReason
         pendingSkillPhase = nextSkillPhase(call.name, outcome.part, taskSpec.intent, params.prompt) ?? pendingSkillPhase
         {
           if (outcome.part.status === 'success') toolProviderFailures.delete(call.name)
@@ -1751,7 +1765,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         // 子 Agent 内嵌执行产生的内部工具卡片随父消息一并直播与落库，刷新后仍可展开查看
         if (outcome.extraParts?.length) parts.push(...outcome.extraParts)
         messages.push({ role: 'tool', toolCallId: call.id, content: outcome.observation })
-        if (structureCircuitTripped || forceWrapUpReason || authorEndRequested) {
+        if (structureCircuitTripped || forceWrapUpReason || authorEndRequested || reviewStopReason) {
           break
         }
       }
@@ -1766,6 +1780,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
       await persistCheckpoint()
       bus.emit({ type: 'step.finish', turn, usage: result.usage })
+
+      if (reviewStopReason) {
+        await finalizeFailedWithNotice('自动检查或修订已停止，保留当前正文与报告。未继续反复改稿；检查上限或旧报告不代表新版正文有错，也不能宣称通过。')
+        return
+      }
 
       if (authorEndRequested) {
         // This control decision comes only from the actual authenticated answer,

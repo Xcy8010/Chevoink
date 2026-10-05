@@ -46,9 +46,8 @@ const clip = (value: string, max: number): string =>
 
 export const MAX_CONTINUITY_AUTO_REPAIRS = 1
 
-/** 连续未收敛检查的硬上限：同一次编译累计仍含 error 的检查达到该数后停止自动复查，
- * 只把最近证据交给作者，避免“改一句→重查→又报别处”的循环反复磨损正文；
- * 任一 0 error 的检查会把计数清零，作者显式指定 focus 的复核不受限。 */
+/** Automatic checks share a finite attempt budget for this chapter/task.
+ * Passing, editing, adding focus or resuming never replenishes it. */
 export const MAX_CONTINUITY_CHECKS = 3
 
 export function continuityRepairRounds(validation: unknown): number {
@@ -63,8 +62,7 @@ export function continuityCheckRounds(validation: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0
 }
 
-/** Reserve before dispatch, so a failed critic pass cannot restart an unbounded check loop;
- * a later 0-error report resets the counter in validateStoryContinuity. */
+/** Reserve before dispatch; failed checks also consume an attempt. */
 export async function reserveContinuityCheck(userId: string, novelId: string, compilationId: string): Promise<boolean> {
   return prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilationId} AND user_id = ${userId} AND novel_id = ${novelId} FOR UPDATE`
@@ -590,8 +588,7 @@ export async function validateStoryContinuity(input: {
     }
   }
   const findings = [...deterministic, ...input.findings]
-  // 仍含 error 则保留计数（legacy 路径已由 reserveContinuityCheck 预留 +1），全部通过则清零。
-  const nextCheckRounds = findings.some((item) => item.severity === 'error') ? continuityCheckRounds(compilation.validation) : 0
+  const nextCheckRounds = continuityCheckRounds(compilation.validation)
   const validation = {
     autoRepairRounds: continuityRepairRounds(compilation.validation),
     checkRounds: nextCheckRounds,

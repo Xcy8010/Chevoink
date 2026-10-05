@@ -751,6 +751,18 @@ describe('tool execution authority (real dispatch, mocked global registry)', () 
 })
 
 describe('Agent run admission and completion lifecycle (real loop, mocked provider/persistence)', () => {
+  it.each(['CONTINUITY_CHECK_LIMIT', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED'])('ends a %s review loop before a subsequent queued edit or another paid main turn', async failureCode => {
+    const checking = tool('continuity_validate', async () => ({ outcome: 'failed', failureCode, summary: '自动检查已停止', output: '保留正文，停止检查驱动的修改。' }))
+    const editing = tool('chapter_edit_range', async () => ({ output: '不应执行' }), false)
+    mocks.tools = [checking, editing]
+    queue(response('', [call('check', 'continuity_validate'), call('wrong-edit', 'chapter_edit_range')]))
+    await run('检查当前章节')
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(editing.execute).not.toHaveBeenCalled()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: false, failureCode }))
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(mocks.runs.get('run')?.errorMessage).toContain('保留当前正文与报告')
+  })
   it('does not pause or zero a run when resume admission loses its state fence', async () => {
     mocks.update.mockRejectedValueOnce(new DataAccessError(409, 'TASK_AUTHORIZATION_RUNTIME_UPGRADE_REQUIRED', '任务状态已变化'))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel',

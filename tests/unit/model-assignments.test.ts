@@ -9,7 +9,7 @@ vi.mock('../../api/lib/prisma.js', () => {
 vi.mock('../../api/lib/credits.js', () => ({ getModelTierRuntime: mocks.runtime, assertCreditAccess: mocks.credit,
   resolveCustomReasoningEffort: (effort: string, supported: string[]) => supported.includes(effort) ? effort : supported[0] }))
 import { freezeModelAssignments, getModelAssignments, patchModelAssignments, resolveAssignedModel } from '../../api/lib/agent/model-assignments.js'
-import { assignedTaskModel, withModelAssignmentContext } from '../../api/lib/agent/model-assignment-context.js'
+import { assignedTaskModel, resolveTextActionTask, withModelAssignmentContext } from '../../api/lib/agent/model-assignment-context.js'
 
 beforeEach(() => {
   vi.clearAllMocks(); mocks.novel.mockResolvedValue({ id: 'novel' }); mocks.findMany.mockResolvedValue([]); mocks.findUnique.mockResolvedValue(null)
@@ -17,6 +17,16 @@ beforeEach(() => {
   mocks.runtime.mockImplementation(async (tier, _user, _custom, effort) => ({ tier, reasoningEffort: effort ?? 'high', reasoningEfforts: ['low', 'medium', 'high'], visionEnabled: false }))
 })
 describe('owned sparse model assignments', () => {
+  it('maps only known quality output recovery actions to the original assignment', () => {
+    for (const action of ['agent3HumanityCritic', 'agent3HumanityQuality', 'agent3HumanityEvidenceCorrection', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry']) {
+      expect(resolveTextActionTask(action)).toBe('quality')
+      expect(resolveTextActionTask(`${action}OutputRecovery`)).toBe('quality')
+    }
+    for (const action of ['unknownOutputRecovery', 'agent3HumanityCriticOutputRecoveryOutputRecovery', 'agent3ContinuityCriticOutputRecovery', 'constructor']) {
+      expect(resolveTextActionTask(action)).toBeUndefined()
+    }
+    expect(resolveTextActionTask('agent3ContinuityCritic')).toBe('continuity')
+  })
   it('rejects unknown purposes, incompatible custom identity and scope framing', () => {
     expect(modelAssignmentsSchema.safeParse({ export: { modelTier: 'speed' } }).success).toBe(false)
     expect(agentModelSelectionSchema.safeParse({ modelTier: 'custom' }).success).toBe(false)

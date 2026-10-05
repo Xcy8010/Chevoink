@@ -96,11 +96,11 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       source, focus: typeof args.focus === 'string' ? args.focus : undefined })
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
     const reusable = cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
-    // 连续未收敛的检查到顶：不再启动新 critic（也不在 prepare 里改库，否则会立即失效冻结哈希），
-    // 只把最近证据留给作者，防止“改一句→重查→又报别处”的无限循环；计数结算在提交事务里完成。
-    if (!args.focus && !reusable && continuityCheckRounds(compilation.validation) >= MAX_CONTINUITY_CHECKS) return {
+    // 累计检查到顶后不再启动新 critic；prepare 不改库，以保留冻结哈希。
+    // 旧版报告不是新版错误，计数结算在提交事务里完成。
+    if (!reusable && continuityCheckRounds(compilation.validation) >= MAX_CONTINUITY_CHECKS) return {
       kind: 'rejected' as const, code: 'CONTINUITY_CHECK_BUDGET_EXCEEDED',
-      message: `同一章节连续性检查已连续 ${MAX_CONTINUITY_CHECKS} 次检出错误且未收敛，自动复查已停止，避免反复改写损伤正文。不要再修改正文或重复调用检查；如实向作者报告最近一次检查的未解决项，由作者决定如何收尾。`,
+      message: `同一章节已用完 ${MAX_CONTINUITY_CHECKS} 次自动检查，本次未调用模型，当前版本没有可复用的完整结论。检查上限不是新的正文错误；旧版意见不能证明当前修订失败。保留正文，停止自动改稿和重复检查，不能宣称检查通过。`,
     }
     const repair = false
     return { kind: 'check' as const, version: 1 as const, compiler: baseline, chapter: compilation.chapter, sourceId, coverage,
@@ -171,8 +171,8 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       await assertCurrent(tx, frozen)
       const report = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compiler.id, findings: parsed.findings,
         expectedChapterRevision: frozen.chapter.revision, independentCheck: parsed.structured ? 'complete' : 'unavailable', coverage: frozen.coverage, focus: typeof args.focus === 'string' ? args.focus : undefined, signal: ctx.signal }, tx)
-      // durable 在提交事务里结算检查额度：仍含 error 则累计 +1，全部通过则清零（与 legacy 预留语义一致）。
-      const nextCheckRounds = report.errorCount > 0 ? report.checkRounds + 1 : 0
+      // durable 在提交事务里累计已完成的检查，零错误也不恢复次数。
+      const nextCheckRounds = report.checkRounds + (frozen.cached ? 0 : 1)
       if (nextCheckRounds !== report.checkRounds) await tx.storyCompilation.update({ where: { id: compiler.id }, data: {
         validation: runtimeJson({ ...report, checkRounds: nextCheckRounds }).value,
       } })
@@ -197,7 +197,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     return failure(error.code, error.code.startsWith('CREDITS_') ? `${error.message} 本工具未完成，不要重复调用。` : error.message)
   })
   const failed = failedToolResultSchema.safeParse(receipt.result)
-  const result = failed.success ? { ...failed.data.toolResult, outcome: 'failed' as const } : z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough(), memoryJobId: z.string().nullable() }).parse(receipt.result)
+  const result = failed.success ? { ...failed.data.toolResult, failureCode: failed.data.code, outcome: 'failed' as const } : z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough(), memoryJobId: z.string().nullable() }).parse(receipt.result)
   // Leave derivative work durably queued until its fenced executor handles it.
   await reduceExecutionReceipt(lease, { expectedRevision: pending.revision, expectedHash: pending.snapshotHash, operationId: operation.id })
   return ('toolResult' in result ? result.toolResult : result) as ToolResult

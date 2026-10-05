@@ -1,4 +1,5 @@
 import { assertWritingTarget } from '../writing-scope.js'
+import { assertChapterReviewRevision } from '../chapter-review-guard.js'
 import { z } from 'zod'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from '../craft-library.js'
@@ -136,6 +137,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     }
     const changed = before !== after
     if (changed) {
+      await assertChapterReviewRevision(tx, ctx, chapter)
       const updated = await tx.chapter.updateMany({ where: { id: chapter.id, authorId: ctx.userId, ...activeChapterScope(ctx.novelId), revision: expectedRevision },
         data: { content: after, wordCount: after.length, revision: { increment: 1 } } })
       if (updated.count !== 1) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，正文写入未执行。')
@@ -153,14 +155,14 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
       snapshot: { target: 'chapter', targetId: chapter.id, field: 'content', previousValue: before } }, memoryJobId,
       progress: { kind: 'content_revision', targetId: chapter.id, beforeHash: runtimeJson({ content: before }).hash, afterHash: runtimeJson({ content: after }).hash } }
   }).catch(async error => {
-    if (!prepared || !(error instanceof DataAccessError) || !['CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) throw error
+    if (!prepared || !(error instanceof DataAccessError) || !['CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code: error.code,
       summary: '正文变更未执行', output: error.message })
   })
   const failed = failedToolResultSchema.safeParse(receipt.result)
   if (failed.success) {
     if (prepared) await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: operation.id })
-    return { ...failed.data.toolResult, outcome: 'failed' }
+    return { ...failed.data.toolResult, failureCode: failed.data.code, outcome: 'failed' }
   }
   const saved = resultSchema.safeParse(receipt.result)
   if (!saved.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '正文工具回执损坏。')

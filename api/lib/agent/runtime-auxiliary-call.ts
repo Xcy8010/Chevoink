@@ -56,7 +56,10 @@ export async function resolveDurableAuxiliaryRuntime(input: {
     }
     return { runtime: inherited, selection: { ...selection, reasoningEffort: inherited.reasoningEffort } }
   }
-  const runtime = await getModelTierRuntime('speed', input.userId, null, 'low')
+  // Quality's wire policy is applied after resolution; do not request an
+  // unsupported low setting from a model whose native default is high.
+  const runtime = input.task === 'quality' ? await getModelTierRuntime('speed', input.userId)
+    : await getModelTierRuntime('speed', input.userId, null, 'low')
   if (runtime.tier !== 'speed') return runtimeError('RUNTIME_IDENTITY_CONFLICT', '独立辅助模型档位不可替换。')
   return { runtime, selection: { tier: 'speed' as const, customModelId: null, reasoningEffort: runtime.reasoningEffort } }
 }
@@ -117,6 +120,7 @@ export async function callDurableAuxiliary(input: {
   return chatWithTools({ messages: [{ role: 'system', content: system }, { role: 'user', content }], tools: [], provider: input.route.provider, model: input.route.model,
     providerBaseUrl: input.route.baseUrl, providerApiKey: runtime.apiKey, reasoningEffort: runtime.reasoningEffort, temperature, maxOutputTokens: input.route.maxOutputTokens, signal: input.signal,
     boundedReview: !input.route.honorReasoningEffort, thinkingEnabled: runtime.thinkingEnabled, reasoningParameterMode: runtime.reasoningParameterMode,
+    reasoningEfforts: [...runtime.reasoningEfforts],
     outputTokenParameter: resolveTextOutputTokenParameter(runtime.outputTokenParameter, { provider: input.route.provider, providerBaseUrl: input.route.baseUrl, model: input.route.model }, true),
     durableExecution: execution, usageLog: { userId: lease.userId, agentRunId: lease.runId, action: step, modelTier: routeTier, multiplierBps: input.price.multiplierBps } })
 }
