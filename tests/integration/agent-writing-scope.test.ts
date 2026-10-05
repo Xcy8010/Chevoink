@@ -6,6 +6,8 @@ import { isTestDatabaseRequired } from '../support/database-availability.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { assertWritingTarget, freezeWritingScope, readWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { chapterCreateTool, chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
+import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { acquireRunLease } from '../../api/lib/agent/runtime-lease.js'
@@ -33,11 +35,17 @@ async function fixture(prompt: string, work: (ctx: ToolContext) => Promise<void>
   const ctx: ToolContext = { userId, novelId, sessionId, runId, chapterId: null, callId: 'scope-create', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', emit: () => {}, signal: new AbortController().signal }
   await work(ctx)
   } finally {
-    await prisma.agentRun.deleteMany({ where: { userId } })
-    await prisma.agentSession.deleteMany({ where: { userId } })
-    await prisma.chapter.deleteMany({ where: { authorId: userId } })
-    await prisma.novel.deleteMany({ where: { id: novelId, authorId: userId } })
-    await prisma.user.deleteMany({ where: { id: userId } })
+    await prisma.$transaction(async tx => {
+      // Serialize teardown with derived memory writes for this synthetic novel.
+      await lockNovelActiveScope(tx, novelId)
+      await tx.memoryExtractionJob.deleteMany({ where: { novelId, novel: { authorId: userId } } })
+      await tx.projectMemoryEntry.deleteMany({ where: { novelId, novel: { authorId: userId } } })
+      await tx.agentRun.deleteMany({ where: { userId } })
+      await tx.agentSession.deleteMany({ where: { userId } })
+      await tx.chapter.deleteMany({ where: { authorId: userId } })
+      await tx.novel.deleteMany({ where: { id: novelId, authorId: userId } })
+      await tx.user.deleteMany({ where: { id: userId } })
+    })
   }
 }
 describe.skipIf(!available)('atomic original chapter scope', () => {
@@ -90,9 +98,11 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     // Review evidence and the first writer are deliberately opposite.
     if (writer === 'parent') await prisma.storyCompilation.update({ where: { id: f.compilation.id }, data: { runId: child.id } })
     const subject = writer === 'parent' ? ctx : childCtx
-    await chapterWriteTool.execute(subject, { chapterId: f.chapterId, content: '同一扇门已经锁上。他随后用钥匙开门。' })
+    expect((await chapterWriteTool.execute(subject, { chapterId: f.chapterId, content: '同一扇门已经锁上。他随后用钥匙开门。' })).outcome).not.toBe('failed')
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    await expect(chapterWriteTool.execute(writer === 'parent' ? childCtx : ctx, { chapterId: f.chapterId, content: '另一执行也不能再改。' })).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
+    const opposite = writer === 'parent' ? childCtx : ctx
+    await chapterReadTool.execute(opposite, { chapterId: f.chapterId })
+    await expect(chapterWriteTool.execute(opposite, { chapterId: f.chapterId, content: '另一执行也不能再改。' })).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
     const prepared = await prepareStoryCompilation({ ...ctx, chapterId: f.chapterId, mode: 'balanced', intentSummary: '写第一章' })
     expect(prepared.compilation.validation).toMatchObject({ checkRounds: 1, newDraftRevision: { chapterId: f.chapterId } })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
