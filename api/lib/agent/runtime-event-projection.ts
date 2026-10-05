@@ -13,6 +13,7 @@ import { importCommitWaitingSchema, importWaitingUrl } from './runtime-import.js
 import { configurationResponseSchema } from './tools/configuration-tools.js'
 import { verifyChildGrant } from './runtime-child.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
+import { savedChapterPresentationSchema } from './writing-scope.js'
 
 /** Only this DB-locked allocator writes UI events for the durable protocol.
  * New source families retain their outbox rows until their projector is added;
@@ -111,7 +112,8 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         const receipt = await tx.agentEffectReceipt.findUnique({ where: { operationId: decision.reviewOperationId }, include: { operation: true } })
         const verdict = z.object({ verdict: z.object({ verdict: z.literal('complete') }) }).safeParse(receipt?.result)
         const proof = z.object({ version: z.literal(1), sourceRevision: z.number(), sourceHash: z.string(),
-          candidateHash: z.string(), evidenceHash: z.string(), evidence: z.object({ blockers: z.array(z.never()) }).passthrough() }).safeParse(receipt?.result)
+          candidateHash: z.string(), evidenceHash: z.string(), evidence: z.object({ blockers: z.array(z.never()) }).passthrough(),
+          chapterPresentation: savedChapterPresentationSchema.optional() }).safeParse(receipt?.result)
         const frame = await readExecutionFrame(tx, root.id, decision.revision)
         const before = await readExecutionFrame(tx, root.id, decision.sourceRevision)
         const candidate = before.state.messages.at(-1)
@@ -120,6 +122,12 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           && proof.data.sourceRevision === decision.sourceRevision && proof.data.sourceHash === decision.sourceHash
           && runtimeJson(proof.data.evidence).hash === proof.data.evidenceHash
           && proof.data.candidateHash === runtimeJson({ content: candidate.content, reasoning: candidate.reasoning ?? null }).hash
+          && (!proof.data.chapterPresentation || proof.data.chapterPresentation.targetRunId === source.runId)
+          && (!proof.data.chapterPresentation || (() => {
+            const admitted = z.object({ input: z.object({ chapterPresentation: savedChapterPresentationSchema }) }).safeParse(receipt.operation.inputSnapshot)
+            return admitted.success && runtimeJson(receipt.operation.inputSnapshot).hash === receipt.operation.inputHash
+              && runtimeJson(admitted.data.input.chapterPresentation).hash === runtimeJson(proof.data.chapterPresentation).hash
+          })())
         const legacyReview = receipt?.operation.action === 'completion_review' && verdict.success
         if (!receipt || (!validProof && !legacyReview) || receipt.operation.taskRootId !== root.id
           || source.operationId !== receipt.operationId || source.eventKey !== `decision:${receipt.operationId}`
@@ -132,8 +140,10 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         const roots = [root.id, ...children.flatMap(child => child.childRun.taskRootId ? [child.childRun.taskRootId] : [])]
         const usage = await tx.agentProviderUsageReceipt.aggregate({ where: { attempt: { operation: { taskRootId: { in: roots } } } }, _sum: { promptTokens: true, completionTokens: true } })
         const promptTokens = usage._sum.promptTokens ?? 0, completionTokens = usage._sum.completionTokens ?? 0
-        bodies = [{ type: 'run.finished', status: 'succeeded', usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
-          artifacts: [], outputSummary: candidate.content ?? '' }]
+        const presentation = validProof && proof.success ? proof.data.chapterPresentation : null
+        bodies = [...(presentation ? [{ type: 'text.final' as const, messageId: durableMessageId(root.id, before.state.turn), text: presentation.text, asReasoning: false }] : []),
+          { type: 'run.finished', status: 'succeeded', usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
+            artifacts: [], outputSummary: presentation?.text ?? candidate.content ?? '' }]
       } else if (source.type === 'run.paused') {
         const paused = durablePauseSchema.safeParse(source.payload)
         if (!paused.success || !paused.data.runIds.includes(runId) || source.eventKey !== `pause:${source.id}`) return runtimeError('RUNTIME_RECEIPT_INVALID', '暂停事件源损坏。')

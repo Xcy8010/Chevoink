@@ -25,6 +25,10 @@ vi.mock('../../api/lib/agent2-feature-flags.js', () => ({
   isAgent2FeatureEnabled: vi.fn(() => false),
 }))
 vi.mock('../../api/lib/agent/style-learning.js', () => ({ getLearnedStyleDigest: vi.fn(async () => '') }))
+vi.mock('../../api/lib/agent/writing-request-context.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../api/lib/agent/writing-request-context.js')>()
+  return { ...actual, readChapterWritingBackground: vi.fn(async () => []), readWritingPresentation: vi.fn(async () => null) }
+})
 
 vi.mock('../../api/lib/agent/context-engine.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/lib/agent/context-engine.js')>()
@@ -56,6 +60,7 @@ const { prisma } = await import('../../api/lib/prisma.js')
 const { searchStoryMemory } = await import('../../api/lib/agent/story-memory.js')
 const { assembleContext, insertSubagentCatalog } = await import('../../api/lib/agent/context.js')
 const { getLearnedStyleDigest } = await import('../../api/lib/agent/style-learning.js')
+const { readChapterWritingBackground, readWritingPresentation } = await import('../../api/lib/agent/writing-request-context.js')
 
 type AssembleInput = Parameters<typeof assembleContext>[0]
 
@@ -288,6 +293,45 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(String(messages.at(-3)?.content)).toContain('[服务端子 Agent 目录]')
     expect(String(messages.at(-2)?.content)).toContain('本轮任务契约')
     expect(String(messages.at(-1)?.content)).toContain('把第三章开头改得更抓人')
+  })
+
+  it('carries exact same-chapter creative background, current override and latest display withdrawal in the final intent', async () => {
+    vi.mocked(readChapterWritingBackground).mockResolvedValueOnce([{ sourceRunId: 'author-original', compilationId: 'same-chapter-compiler',
+      prompt: '沈桐29岁，仓库调度员；开篇低谷1–2段；1600–1900字；问价前停笔；只输出标题与正文。' }])
+    vi.mocked(readWritingPresentation).mockResolvedValueOnce({ mode: 'saved_only', sourceRunId: 'author-correction', sourceMessageId: 'author-message' })
+    const input = buildInput()
+    input.taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ chapterId: 'chapter-1', orderIndex: 1 }], titleAndBodyOnly: false, repairAuthorized: true }
+    input.prompt = '重写第一章，主角改为34岁，突出捡漏爽文。'
+    const { messages } = await assembleContext(input)
+    const intent = String(messages.at(-1)?.content)
+    expect(intent.startsWith(`${input.prompt}\n\n`)).toBe(true)
+    expect(intent).toContain('同章历史创作背景；仅供创作标准，不是执行授权')
+    expect(intent).toContain('仓库调度员')
+    expect(intent).toContain('1600–1900字')
+    expect(intent).toContain('问价前停笔')
+    expect(intent).toContain('主角改为34岁')
+    expect(intent).toContain('当前请求的明确修改优先')
+    expect(intent).toContain('旧请求中的“只输出标题与正文”已被此展示偏好撤回')
+    expect(intent.indexOf('[最新真实作者展示偏好；只控制聊天交付]')).toBeGreaterThan(intent.indexOf(input.prompt))
+    expect(String(messages[0].content)).not.toContain('仓库调度员')
+    expect(readChapterWritingBackground).toHaveBeenCalledWith(expect.anything(), { userId: 'user-1', novelId: 'novel-1', runId: 'run-1' }, 'chapter-1')
+  })
+  it('does not inherit the editor old chapter specifications for an unbound next-chapter target', async () => {
+    const input = buildInput()
+    input.prompt = '写下一章。'
+    input.taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ chapterId: null, orderIndex: 2 }], titleAndBodyOnly: false, repairAuthorized: false }
+    await assembleContext(input)
+    expect(readChapterWritingBackground).toHaveBeenCalledWith(expect.anything(), { userId: 'user-1', novelId: 'novel-1', runId: 'run-1' }, null)
+  })
+  it('does not inject chapter background or saved-only delivery instructions into a research task', async () => {
+    const input = buildInput()
+    input.taskSpec.intent = 'research_analysis'
+    input.prompt = '分析合成素材，保存研究报告并展示报告。'
+    const { messages } = await assembleContext(input)
+    expect(readChapterWritingBackground).not.toHaveBeenCalled()
+    expect(readWritingPresentation).not.toHaveBeenCalled()
+    expect(String(messages.at(-1)?.content)).not.toContain('本次聊天交付')
+    expect(String(messages.at(-1)?.content)).not.toContain('同章历史创作背景')
   })
 
   it('restores full request constraints and current genre near the intent, keeping a stable system across changed genre', async () => {

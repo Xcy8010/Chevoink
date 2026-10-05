@@ -35,7 +35,11 @@ describe('current author genre and reading experience', () => {
   it('keeps exact stopping, identity, length and output requirements above soft templates', () => {
     expect(WRITING_REQUEST_GUIDANCE).toContain('人物身份、剧情顺序、篇幅、精确停笔位置及输出格式')
     const digest = buildGenreWritingDigest([], 3, '写都市异能爽文，停在报价前')!
-    expect(digest).toContain('不补成交、不硬加反派打脸')
+    expect(digest).toContain('不补成交或现金到账')
+    expect(digest).toContain('不硬加反派、打脸或收益惩罚')
+    expect(digest).toContain('主角独享的优势')
+    expect(digest).toContain('主动抓住机会的决定')
+    expect(digest).toContain('低谷按作者限定快速交代')
     const route = routeSkills({ mode: 'build', intent: 'write', freedom: 'balanced', prompt: '写都市异能爽文第一章，主角兴奋，停在报价前' })
     const skills = buildSkillExecutionDigest(route, 'balanced')
     expect(skills).toContain('低修辞预算只控制无功能修饰，不代表低情绪')

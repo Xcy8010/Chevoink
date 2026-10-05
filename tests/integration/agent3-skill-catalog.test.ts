@@ -39,8 +39,28 @@ describe.skipIf(!dbAvailable)('Agent 3.0 作品技能目录（需 DB）', () => 
     expect(response.body.data.totalCount).toBeGreaterThanOrEqual(10)
     expect(response.body.data.enabledCount).toBe(response.body.data.totalCount)
     const current = response.body.data.items.find((item: { id: string }) => item.id === 'cn-webfiction-draft.v3')
-    expect(current).toMatchObject({ source: 'builtin', enabled: true, activeVersion: '3.0.1' })
-    expect(current.versions).toContainEqual(expect.objectContaining({ version: '3.0.1' }))
+    expect(current).toMatchObject({ source: 'builtin', enabled: true, activeVersion: '3.0.2' })
+    expect(current.versions).toContainEqual(expect.objectContaining({ version: '3.0.2' }))
+  })
+  it('keeps stored 3.0.1 assets immutable and selects current built-in 3.0.2 assets', async () => {
+    const { resolveEnabledRuntimeSkills, syncBuiltinSkillCatalog } = await import('../../api/lib/agent/skills/service.js')
+    await syncBuiltinSkillCatalog()
+    const skillId = 'cn-webfiction-draft.v3'
+    const old = await prisma.agentSkillVersion.upsert({ where: { skillId_version: { skillId, version: '3.0.1' } }, update: {},
+      create: { skillId, version: '3.0.1', instructions: { draft: '合成历史版本：先执行作者旧展示规格。' }, manifest: { id: skillId, version: '3.0.1' }, contentHash: 'a'.repeat(64), status: 'active' } })
+    await syncBuiltinSkillCatalog()
+    expect(await prisma.agentSkillVersion.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
+    const userId = (await prisma.novel.findUniqueOrThrow({ where: { id: novelId }, select: { authorId: true } })).authorId
+    const installation = await prisma.agentSkillInstallation.findUniqueOrThrow({ where: { skillId_userId_scope_scopeId: { skillId, userId, scope: 'novel', scopeId: novelId } } })
+    await prisma.agentSkillInstallation.update({ where: { id: installation.id }, data: { enabled: true, lockedVersion: '3.0.1' } })
+    try {
+      const current = (await resolveEnabledRuntimeSkills(userId, novelId)).find(skill => skill.id === skillId)!
+      expect(current.version).toBe('3.0.2')
+      expect(current.resources.draft).toContain('写入章节不等于聊天贴全文')
+      expect(await prisma.agentSkillVersion.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
+    } finally {
+      await prisma.agentSkillInstallation.update({ where: { id: installation.id }, data: { enabled: installation.enabled, lockedVersion: installation.lockedVersion } })
+    }
   })
 
   it('关闭技能后持久化到作品安装状态，非法版本不会污染当前版本', async () => {

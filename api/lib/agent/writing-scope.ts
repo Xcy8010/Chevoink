@@ -8,6 +8,7 @@ import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { hasOriginalRepairAuthority, readOriginalTaskRequest, originalTaskRunIds } from './original-request.js'
 import { runtimeJson } from './runtime-common.js'
 import { assertRunGoalFence } from './goal-fence.js'
+import { readWritingPresentation } from './writing-request-context.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 type Writing = NonNullable<TaskSpec['scope']['writing']>
@@ -187,8 +188,8 @@ export function questionExpandsWritingScope(question: string, options: Array<{ l
 
 /** Auto-delivery is limited to a chapter artifact request. Explicit additional
  * human-requested work keeps the ordinary completion checks in control. */
-export function allowsChapterOnlyCompletion(prompt: string | null): boolean {
-  if (!prompt || !requestedWritingRange(prompt) || !/(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|only.{0,20}title.{0,12}(?:body|text)/iu.test(prompt)) return false
+export function allowsChapterOnlyCompletion(prompt: string | null, requireExclusiveFormat = true): boolean {
+  if (!prompt || !requestedWritingRange(prompt) || (requireExclusiveFormat && !/(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|only.{0,20}title.{0,12}(?:body|text)/iu.test(prompt))) return false
   const positive = prompt.split(/[。！？!?；;\n，,]+/u).filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|do not|don't)/iu.test(clause))
   if (!positive.some(clause => /(?:写|完成|修改|润色|起草|write|draft|revise)/iu.test(clause))) return false
   // A second independent action makes the output contract non-exclusive; do
@@ -205,9 +206,36 @@ export async function assertQuestionWritingScope(tx: Prisma.TransactionClient, s
 /** Completion is a read of the authorized persisted artifact at its current
  * revision, never a model summary, generated todo, or an unrelated old bridge. */
 export async function readCompletedWritingDelivery(tx: Prisma.TransactionClient, subject: Subject) {
+  return readChapterDelivery(tx, subject, 'auto')
+}
+
+/** Presentation only, called AFTER the ordinary completion gate has passed.
+ * It never substitutes for completion evidence or makes a task finish early. */
+export async function readSavedWritingPresentation(tx: Prisma.TransactionClient, subject: Subject) {
+  return readChapterDelivery(tx, subject, 'completed_saved_only')
+}
+
+export const savedChapterPresentationSchema = z.object({ version: z.literal(1), targetRunId: z.string().min(1),
+  sourceRunId: z.string().min(1), sourceMessageId: z.string().min(1),
+  chapters: z.array(z.object({ id: z.string().min(1), title: z.string(), revision: z.number().int().positive(), contentHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1), text: z.string().min(1) }).strict()
+  .refine(value => value.text === `已保存${value.chapters.map(chapter => `《${chapter.title}》`).join('、')}。`)
+
+export function savedChapterPresentationProof(subject: Subject, delivery: NonNullable<Awaited<ReturnType<typeof readSavedWritingPresentation>>>) {
+  if (delivery.presentationKind !== 'completed_saved_only' || delivery.presentation?.mode !== 'saved_only') throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '章节展示证明缺少真实保存偏好。')
+  return savedChapterPresentationSchema.parse({ version: 1, targetRunId: subject.runId,
+    sourceRunId: delivery.presentation.sourceRunId, sourceMessageId: delivery.presentation.sourceMessageId,
+    chapters: delivery.chapters.map(({ id, title, revision, contentHash }) => ({ id, title, revision, contentHash })), text: delivery.text })
+}
+
+async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subject, presentationKind: 'auto' | 'completed_saved_only') {
   await lockNovelActiveScope(tx, subject.novelId)
   const scope = await readWritingScope(tx, subject)
-  if (scope.writing?.kind !== 'bounded' || !scope.writing.titleAndBodyOnly || !scope.writing.targets.length || !allowsChapterOnlyCompletion(scope.prompt)) return null
+  if (scope.writing?.kind !== 'bounded' || !scope.writing.targets.length
+    || (presentationKind === 'auto' && !scope.writing.titleAndBodyOnly)
+    || !allowsChapterOnlyCompletion(scope.prompt, presentationKind === 'auto')) return null
+  const targets = scope.writing.targets.map(target => ({ ...target, chapterId: target.chapterId ?? scope.bindings?.targets.find(item => item.orderIndex === target.orderIndex)?.chapterId }))
+  const presentation = await readWritingPresentation(tx, subject, targets)
+  if (presentationKind === 'completed_saved_only' && presentation?.mode !== 'saved_only') return null
   const runIds = await originalTaskRunIds(tx, subject, scope)
   const chapters = []
   const length = scope.prompt?.match(/(\d{2,6})\s*(?:[-–~～]|至|到)\s*(\d{2,6})\s*字/u)
@@ -238,9 +266,10 @@ export async function readCompletedWritingDelivery(tx: Prisma.TransactionClient,
     if (length && (chapter.content.trim().length < Number(length[1]) || chapter.content.trim().length > Number(length[2]))) return null
     chapters.push({ ...chapter, contentHash: runtimeJson({ content: chapter.content }).hash })
   }
-  return { chapters, titleAndBodyOnly: scope.writing.titleAndBodyOnly,
-    text: scope.writing.titleAndBodyOnly ? chapters.map(chapter => `${chapter.title}\n\n${chapter.content}`).join('\n\n')
-      : `已完成${chapters.map(chapter => `《${chapter.title}》`).join('、')}。` }
+  const showFullText = presentation ? presentation.mode === 'full_text' : scope.writing.titleAndBodyOnly
+  return { chapters, titleAndBodyOnly: scope.writing.titleAndBodyOnly, presentation, presentationKind,
+    text: showFullText ? chapters.map(chapter => `${chapter.title}\n\n${chapter.content}`).join('\n\n')
+      : `已保存${chapters.map(chapter => `《${chapter.title}》`).join('、')}。` }
 }
 
 /** Final persistence must revalidate the exact capture while holding the same
@@ -252,6 +281,6 @@ export async function assertCompletedWritingDelivery(tx: Prisma.TransactionClien
   const scope = await readWritingScope(tx, subject)
   if (scope.parentRunId && !await tx.agentRun.findFirst({ where: { id: scope.parentRunId, userId: subject.userId, novelId: subject.novelId, status: { in: ['running', 'queued', 'awaiting_approval'] } }, select: { id: true } })) throw new DataAccessError(409, 'WRITING_DELIVERY_STALE', '父任务已停止，子任务不再交付。')
   if (!await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId, status: { in: ['running', 'queued', 'awaiting_approval'] } }, select: { id: true } })) throw new DataAccessError(409, 'WRITING_DELIVERY_STALE', '任务或当前章节交付已变化。')
-  const current = await readCompletedWritingDelivery(tx, subject)
+  const current = await readChapterDelivery(tx, subject, expected.presentationKind)
   if (!current || runtimeJson(current).hash !== runtimeJson(expected).hash) throw new DataAccessError(409, 'WRITING_DELIVERY_STALE', '正文在交付前已变化，保留最新正文重新核对。')
 }

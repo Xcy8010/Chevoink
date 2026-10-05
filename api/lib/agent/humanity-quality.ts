@@ -1,5 +1,6 @@
 import { assertWritingTarget } from './writing-scope.js'
 import { assertOriginalRepairAuthority, readOriginalTaskRequest } from './original-request.js'
+import { readChapterWritingBackground } from './writing-request-context.js'
 import { createHash } from 'node:crypto'
 
 import type {
@@ -29,7 +30,8 @@ import { enqueueChapterMemoryExtraction } from './story-memory.js'
 import { locateQuoteSpans } from './quality-evidence.js'
 import { qualityAutoRepairPending, qualityReportMatchesContent } from './quality-report-contract.js'
 
-export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v3'
+export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v4'
+export const PREVIOUS_HUMANITY_CRITIC_VERSION = 'humanity-critic.v3'
 export const LEGACY_HUMANITY_CRITIC_VERSION = 'humanity-critic.v2'
 export const MAX_QUALITY_REPAIR_ROUNDS = 1
 
@@ -355,7 +357,8 @@ export async function buildHumanityQualityContext(userId: string, novelId: strin
     .slice(0, 3)
 
   return { chapter, charter, compilation, profiles: mentionedProfiles, anchors: relevantAnchors, recentChapters, feedback: dataControl?.qualityTelemetryEnabled === false ? [] : feedback,
-    originalRequest: original?.prompt ?? null }
+    originalRequest: original?.prompt ?? null,
+    chapterWritingBackground: runId ? await readChapterWritingBackground(db, { userId, novelId, runId }, chapterId) : [] }
 }
 
 export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>): string {
@@ -363,6 +366,7 @@ export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof build
     chapter: { title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content, novel: bundle.chapter.novel },
     charter: bundle.charter, compiler: bundle.compilation ? { id: bundle.compilation.id, bridge: bundle.compilation.bridge, sceneTasks: bundle.compilation.sceneTasks } : null,
     profiles: bundle.profiles, anchors: bundle.anchors, recentChapters: bundle.recentChapters, feedback: bundle.feedback, originalRequest: bundle.originalRequest ?? null,
+    chapterWritingBackground: bundle.chapterWritingBackground,
   }))
 }
 
@@ -413,7 +417,7 @@ export async function persistHumanityQualityReport(input: {
   deterministicMetrics: Record<string, number | string[]>
   qualityContextHash?: string
   /** Recovered pre-upgrade paid work retains the critic rules it actually used. */
-  criticVersion?: typeof HUMANITY_CRITIC_VERSION | typeof LEGACY_HUMANITY_CRITIC_VERSION
+  criticVersion?: typeof HUMANITY_CRITIC_VERSION | typeof PREVIOUS_HUMANITY_CRITIC_VERSION | typeof LEGACY_HUMANITY_CRITIC_VERSION
   deterministicFindings: LocatedQualityFinding[]
   criticFindings: CriticQualityFinding[]
   /** Explicit successful independent response, never inferred from an empty array. */

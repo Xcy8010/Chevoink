@@ -14,6 +14,7 @@ import { resolveQualityChapterTarget } from '../../api/lib/agent/humanity-qualit
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { freezeWritingScope, readCompletedWritingDelivery, assertCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
 import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { withHumanAdmission } from '../../api/lib/agent/goal-activation-authority.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import {
   commitChapterBridge,
@@ -291,6 +292,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, { userId, novelId, runId: run.id },
       buildTaskSpec({ runId: run.id, novelId, chapterId: chapter.id, prompt: '完成第四章，只要标题和正文。', mode: 'build' }), '完成第四章，只要标题和正文。'))
     await prisma.agentRun.update({ where: { id: run.id }, data: { taskSpec: spec } })
+    const displayRuns: string[] = []
     try {
       const { compilation } = await prepareStoryCompilation({ userId, novelId, runId: run.id, chapterId: chapter.id, mode: 'balanced', intentSummary: '完成第四章，只要标题和正文。' })
       const terminal = { userId, novelId, runId: run.id, compilationId: compilation.id, chapterSummary: '停在询问之前。',
@@ -304,6 +306,19 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toMatchObject({
         text: `${chapter.title}\n\n${chapter.content}`, chapters: [{ id: chapter.id, revision: chapter.revision }] })
       expect(await prisma.chapterQualityReport.count({ where: { compilationId: compilation.id } })).toBe(0)
+      const fullCapture = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))
+      const originalSaved = await prisma.agentRun.findUniqueOrThrow({ where: { id: run.id }, select: { startRequest: true, taskSpec: true } })
+      for (const [prompt, fullText] of [['不要重复正文，只保存章节。', false], ['现在请贴出全文。', true]] as const) {
+        const source = await prisma.agentRun.create({ data: { sessionId, userId, novelId, chapterId: chapter.id, mode: 'act', action: 'workspaceAgent',
+          agentType: 'writingOrchestrator', status: 'completed', engine: 'loop', taskSpec: spec,
+          startRequest: withHumanAdmission({ sessionId, novelId, chapterId: chapter.id, mode: 'build', prompt }) } })
+        displayRuns.push(source.id)
+        await prisma.agentMessage.create({ data: { runId: source.id, sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+        const delivery = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))
+        expect(delivery?.text).toBe(fullText ? `${chapter.title}\n\n${chapter.content}` : `已保存《${chapter.title}》。`)
+        if (!fullText) await expect(prisma.$transaction(tx => assertCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }, fullCapture!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+      }
+      expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: run.id }, select: { startRequest: true, taskSpec: true } })).toEqual(originalSaved)
       const repeated = await commitChapterBridge(terminal)
       expect(repeated).toEqual(first)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).bridge?.committedAt).toEqual(saved.bridge?.committedAt)
@@ -331,6 +346,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })
     } finally {
       await prisma.projectMemoryEntry.deleteMany({ where: { sourceChapterId: chapter.id } })
+      await prisma.agentRun.deleteMany({ where: { id: { in: displayRuns } } })
       await prisma.agentRun.delete({ where: { id: run.id } })
       await prisma.chapter.delete({ where: { id: chapter.id } })
     }

@@ -145,7 +145,7 @@ describe('质量检查默认只保存真实报告', () => {
       findings: Array.from({ length: 8 }, (_, index) => ({ id: `f${index}`, signal: 'emotion_grounding', severity: 'advisory', disposition: 'pending', authorFeedback: null,
         startOffset: index * 4, endOffset: index * 4 + 4, evidenceExcerpt: `证据${index}。`, explanation: '需要具体动作', suggestion: '局部补足' })) } as unknown as Awaited<ReturnType<typeof humanityQuality.getQualityReport>>
     vi.spyOn(humanityQuality, 'resolveQualityChapterTarget').mockResolvedValue('c')
-    const bundle = { chapter, compilation: null, charter: null, recentChapters: [], profiles: [], anchors: [], feedback: [], originalRequest: '本次写都市异能爽文第一章；主角周砚，29岁，设备维护员；1800字；停在买主报价前；只输出标题与正文。' } as unknown as Awaited<ReturnType<typeof humanityQuality.buildHumanityQualityContext>>
+    const bundle = { chapter, compilation: null, charter: null, recentChapters: [], profiles: [], anchors: [], feedback: [], originalRequest: '本次写都市异能爽文第一章；主角周砚，29岁，设备维护员；1800字；停在买主报价前；只输出标题与正文。', chapterWritingBackground: [] } as unknown as Awaited<ReturnType<typeof humanityQuality.buildHumanityQualityContext>>
     report.deterministicMetrics = { ...report.deterministicMetrics as Prisma.JsonObject, qualityContextHash: humanityQuality.qualityReviewContextHash(bundle) }
     vi.spyOn(humanityQuality, 'buildHumanityQualityContext').mockResolvedValue(bundle)
     vi.spyOn(humanityQuality, 'getLatestQualityReport').mockResolvedValue(cached ? report : null)
@@ -191,6 +191,17 @@ describe('质量检查默认只保存真实报告', () => {
     expect(f.critic).toHaveBeenCalledOnce()
     expect(f.critic.mock.calls[0][1]).toContain(JSON.stringify(f.bundle.originalRequest))
     expect(f.critic.mock.calls[0][1]).not.toContain('首章收益与情绪强度')
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it('sends historical same-chapter specifications and invalidates old cache when that reference changes, without repair', async () => {
+    const f = fixture(true)
+    f.bundle.chapterWritingBackground = [{ sourceRunId: 'old-author', compilationId: 'old-compiler',
+      prompt: '周砚29岁，设备维护员；低谷一段；1800字；问价前停笔。' }]
+    await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.critic.mock.calls[0][1]).toContain('低谷一段')
+    expect(f.critic.mock.calls[0][1]).toContain('问价前停笔')
+    expect(f.critic.mock.calls[0][1]).toContain('不是执行授权')
     expect(f.write).not.toHaveBeenCalled()
   })
   it.each([false, true])('eight advisory findings preserve prose and never dispatch a repair, cached=%s', async cached => {

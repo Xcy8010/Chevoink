@@ -372,6 +372,9 @@ export async function startLoopRunLocked(
   }
 
   const chapterId = input.chapterId?.trim() || null
+  const steeringMessageId = steering ? randomUUID() : null
+  const authorSteering = steering && options.humanOrigin === 'http' && options.goal && options.concurrencyScope !== 'orchestration'
+    ? { sourceEventId: options.goal.sourceEventId, sourceMessageId: steeringMessageId!, admission: withHumanAdmission(steering) } : null
 
   if (chapterId) {
     const chapter = await prisma.chapter.findFirst({
@@ -407,8 +410,8 @@ export async function startLoopRunLocked(
       status: 'queued',
       engine: 'loop',
       inputSummary: input.prompt.slice(0, 300),
-      startRequest: JSON.parse(JSON.stringify(options.humanOrigin === 'http' && !options.goal && options.concurrencyScope !== 'orchestration'
-        ? withHumanAdmission(input) : input)) as Prisma.InputJsonValue,
+      startRequest: JSON.parse(JSON.stringify({ ...(options.humanOrigin === 'http' && !options.goal && options.concurrencyScope !== 'orchestration'
+        ? withHumanAdmission(input) : input), ...(authorSteering ? { authorSteering } : {}) })) as Prisma.InputJsonValue,
       modelTier,
       customModelId: modelTier === 'custom' ? input.customModelId : null,
       reasoningEffort: modelRuntime.reasoningEffort,
@@ -465,7 +468,7 @@ export async function startLoopRunLocked(
     }
     await tx.agentMessage.create({ data: { id: admittedMessageId, runId: created.id, sessionId: session.id,
       role: options.goal && options.goal.trigger !== 'author' ? 'system' : 'user', parts: admittedParts } })
-    if (steering) await tx.agentMessage.create({ data: { runId: created.id, sessionId: session.id, role: 'user', parts: [
+    if (steering) await tx.agentMessage.create({ data: { id: steeringMessageId!, runId: created.id, sessionId: session.id, role: 'user', parts: [
       { type: 'text', text: steering.prompt }, ...(steering.attachments ?? []).map(item => ({
         type: 'attachment', kind: item.kind, name: item.name, url: item.url, size: item.size,
       })),

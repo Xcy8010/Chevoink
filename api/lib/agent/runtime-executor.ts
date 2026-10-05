@@ -26,6 +26,7 @@ import { consumeDurableGoalConsent } from './goal-consent.js'
 import { consumeDurableConfigurationConsent } from './configuration-journal.js'
 import { awaitDurableChildren, wakeDurableChildren } from './runtime-child-tools.js'
 import { verifyChildGrant } from './runtime-child.js'
+import { renderWritingPresentation, writingPresentationPreference } from './writing-request-context.js'
 
 const reasoning = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const durableModelTier = creditModelTierSchema
@@ -84,10 +85,13 @@ async function materializeDurableSteering(candidate: DurableSteeringCandidate, u
       nativeImages = resolved as string[]
     }
   }
-  const text = candidate.parts.map(part => part.type === 'text'
+  const sourceText = candidate.parts.map(part => part.type === 'text'
     ? part.text
     : part.kind === 'image' ? `[附件图片：${part.name}，地址：${part.url}]` : `[附件文件：${part.name}，地址：${part.url}]`).filter(Boolean).join('\n')
-  if (!text.trim()) return runtimeError('RUNTIME_SOURCE_REQUIRED', '作者补充消息为空，不能写入原执行帧。')
+  if (!sourceText.trim()) return runtimeError('RUNTIME_SOURCE_REQUIRED', '作者补充消息为空，不能写入原执行帧。')
+  const preference = writingPresentationPreference(candidate.parts.filter(part => part.type === 'text').map(part => part.text).join('\n'))
+  const summary = preference ? renderWritingPresentation({ mode: preference, sourceRunId: 'consumed-steering', sourceMessageId: candidate.messageId }) : null
+  const text = summary ? `${sourceText}\n\n${summary}` : sourceText
   const content: DurableSteeringContent = nativeImages.length
     ? [{ type: 'text', text }, ...nativeImages.map(url => ({ type: 'image_url' as const, image_url: { url, detail: 'auto' as const } }))]
     : text

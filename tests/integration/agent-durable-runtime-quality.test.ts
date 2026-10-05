@@ -10,6 +10,7 @@ import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projecti
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import * as toolCursor from '../../api/lib/agent/runtime-tool-cursor.js'
+import { qualityWorkContextProjection } from '../../api/lib/agent/tools/durable-quality.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { initializeExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
@@ -206,11 +207,12 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
 })
 
 describe.runIf(available)('durable quality actual tool chain', () => {
-  it.each(['success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale'] as const)('%s preserves paid results and atomic business effects', async scenario => {
+  it.each(['success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale', 'v2-quality-resume', 'v2-quality-stale'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const authorRequest = '改写当前章为都市异能爽文第一章。主角陆望，31岁，夜班设备维护员。1800字，低谷仅一段；觉醒后识别旧镜头的价值；停在买主报价前；只输出标题与正文。'
     const checkingOriginal = scenario === 'original-request' || scenario === 'original-request-resume'
-    const legacyWork = scenario === 'legacy-quality-resume' || scenario === 'legacy-quality-stale'
+    const oldWorkVersion = scenario === 'legacy-quality-resume' || scenario === 'legacy-quality-stale' ? 1 : scenario === 'v2-quality-resume' || scenario === 'v2-quality-stale' ? 2 : null
+    const legacyWork = oldWorkVersion !== null
     await fixture(async f => {
       let lease = await claim(f)
       const before = scenario === 'long' ? '开头锚点' + '长正文'.repeat(6000) + '末尾锚点' : '原文'
@@ -265,7 +267,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
           expect(body.messages[0].content).toContain('不能授权改文')
         }
         if (legacyWork) expect(body.messages[1].content).toBe('合成升级前冻结的完整正文与点评输入')
-        if (scenario === 'legacy-quality-stale') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '用户新文', revision: { increment: 1 } } })
+        if ((scenario === 'legacy-quality-stale' || scenario === 'v2-quality-stale')) await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '用户新文', revision: { increment: 1 } } })
         if (scenario === 'long') { expect(body.messages[1].content).toContain('开头锚点'); expect(body.messages[1].content).toContain('末尾锚点'); expect(body.messages[1].content).toContain(before) }
         if (scenario === 'unknown') throw new Error('fixture unknown critic')
         if (scenario === 'stale-chapter' || scenario === 'repair-stale' && requests === 1) await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '用户新文', revision: { increment: 1 } } })
@@ -294,8 +296,8 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         const originalPrepare = toolCursor.prepareToolCursorOperation
         vi.spyOn(toolCursor, 'prepareToolCursorOperation').mockImplementationOnce(async (token, cursor, input, tx) => {
           const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
-          const { originalRequest: _request, ...legacy } = await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId)
-          snapshot.work = { ...snapshot.work, version: 1, contextHash: runtimeJson(JSON.parse(JSON.stringify(legacy))).hash,
+          const legacy = qualityWorkContextProjection(await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId), oldWorkVersion!)
+          snapshot.work = { ...snapshot.work, version: oldWorkVersion, contextHash: runtimeJson(JSON.parse(JSON.stringify(legacy))).hash,
             criticInput: '合成升级前冻结的完整正文与点评输入', criticSystem: '合成升级前的只读点评规则；只输出 findings JSON。' }
           const prepared = await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
           admittedLegacy = { id: prepared.operation.id, inputHash: prepared.operation.inputHash, inputSnapshot: prepared.operation.inputSnapshot }
@@ -313,7 +315,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toBeNull()
         return
       }
-      if (scenario === 'rollback-resume' || scenario === 'original-request-resume' || scenario === 'legacy-quality-resume') {
+      if (scenario === 'rollback-resume' || scenario === 'original-request-resume' || scenario === 'legacy-quality-resume' || scenario === 'v2-quality-resume') {
         const original = runtimeOperations.commitOperationEffect
         vi.spyOn(runtimeOperations, 'commitOperationEffect').mockImplementationOnce((token, id, digest, work) => original(token, id, digest, async tx => { await work(tx); throw new Error('fixture quality rollback') }))
         await expect(step()).rejects.toThrow('fixture quality rollback')
@@ -323,7 +325,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         await pauseDurableTask(f.userId, lease.runId)
       }
       if (scenario === 'late-resume') await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_NOT_ACTIVE' })
-      if (scenario === 'late-resume' || scenario === 'rollback-resume' || scenario === 'original-request-resume' || scenario === 'legacy-quality-resume') {
+      if (scenario === 'late-resume' || scenario === 'rollback-resume' || scenario === 'original-request-resume' || scenario === 'legacy-quality-resume' || scenario === 'v2-quality-resume') {
         const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' } })
         const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: pause.id })
         lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'quality-resume')
@@ -341,7 +343,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('连续性检查') } })
       }
       const result = await step()
-      const failed = ['evidence-unresolved', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source', 'legacy-quality-stale'].includes(scenario)
+      const failed = ['evidence-unresolved', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('质量检查') } })
       if (scenario === 'context-change') { await prisma.novel.update({ where: { id: f.novelId }, data: { categoryName: '新的题材边界' } }); expect(await step()).toMatchObject({ result: { summary: '人类感质量检查' } }) }
       if (scenario === 'success' || scenario === 'repair') expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
@@ -355,19 +357,19 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-      expect(chapter.content).toBe(scenario === 'stale-chapter' || scenario === 'repair-stale' || scenario === 'legacy-quality-stale' ? '用户新文' : before)
-      expect(chapter.revision).toBe(['stale-chapter', 'repair-stale', 'legacy-quality-stale'].includes(scenario) ? 2 : 1)
+      expect(chapter.content).toBe(scenario === 'stale-chapter' || scenario === 'repair-stale' || (scenario === 'legacy-quality-stale' || scenario === 'v2-quality-stale') ? '用户新文' : before)
+      expect(chapter.revision).toBe(['stale-chapter', 'repair-stale', 'legacy-quality-stale', 'v2-quality-stale'].includes(scenario) ? 2 : 1)
       if (scenario === 'standalone') {
         expect(await prisma.chapterQualityReport.count({ where: { chapterId: f.chapterId, compilationId: null } })).toBe(1)
         return
       }
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
       const reports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId }, include: { findings: true } })
-      if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source', 'legacy-quality-stale'].includes(scenario)) expect(reports).toHaveLength(0)
+      if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale'].includes(scenario)) expect(reports).toHaveLength(0)
       else {
         expect(reports).toHaveLength(scenario === 'context-change' ? 2 : 1)
         expect(reports[0]).toMatchObject({ chapterRevision: 1, repairRound: 0, status: failed ? 'failed' : repairing && scenario !== 'evidence-corrected' || scenario === 'protected' ? 'needs_repair' : 'passed' })
-        expect(reports[0].criticVersion).toBe(legacyWork ? 'humanity-critic.v2' : 'humanity-critic.v3')
+        expect(reports[0].criticVersion).toBe(oldWorkVersion === 1 ? 'humanity-critic.v2' : oldWorkVersion === 2 ? 'humanity-critic.v3' : 'humanity-critic.v4')
       }
       if (admittedLegacy) {
         expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: admittedLegacy.id }, select: { id: true, inputHash: true, inputSnapshot: true } })).toEqual(admittedLegacy)

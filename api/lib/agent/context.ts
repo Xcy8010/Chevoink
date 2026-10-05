@@ -10,6 +10,7 @@ import { activeChapterScope } from '../data/internal.js'
 import type { AgentDefinition } from './agents.js'
 import { OPERATION_KNOWLEDGE } from './knowledge/operation.js'
 import { buildGeneralWritingDigest, buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from './knowledge/writing.js'
+import { readChapterWritingBackground, readWritingPresentation, renderChapterWritingBackground, renderWritingPresentation } from './writing-request-context.js'
 import { buildSkillExecutionDigest, routeSkills, type SkillRouteDecision } from './skills/index.js'
 import { resolveEnabledRuntimeSkills } from './skills/service.js'
 import { loadSessionTodoItems, renderTodoItems } from './tools/todo-tools.js'
@@ -525,7 +526,19 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     chapterLine,
   })
 
-  const intentSections = [input.prompt.trim()]
+  const writingTargets = input.taskSpec.scope.writing?.targets ?? []
+  const chapterWriting = ['write', 'revise'].includes(input.taskSpec.intent)
+    && !['conversation_only', 'proposal_only'].includes(input.taskSpec.writingPacing ?? '')
+    && (writingTargets.length > 0 || input.taskSpec.scope.chapterIds?.includes(input.chapterId ?? ''))
+  const writingChapterId = writingTargets.length === 1 ? writingTargets[0].chapterId ?? null : writingTargets.length > 1 ? null : input.chapterId
+  const subject = { userId: input.userId, novelId: input.novelId, runId: input.runId }
+  const [writingBackground, presentation] = await Promise.all([
+    chapterWriting ? readChapterWritingBackground(prisma, subject, writingChapterId) : Promise.resolve([]),
+    chapterWriting ? readWritingPresentation(prisma, subject, writingTargets.length ? writingTargets : chapter ? [{ chapterId: chapter.id, orderIndex: chapter.orderIndex }] : []) : Promise.resolve(null),
+  ])
+  // Durable admission verifies that this message starts with the immutable
+  // original request. Historical specifications are supplemental context.
+  const intentSections = [input.prompt.trim(), renderChapterWritingBackground(writingBackground)].filter((section): section is string => !!section)
   if (genreDigest) intentSections.push(genreDigest)
   if (requiresNextChapterDelivery(input.taskSpec.goals)) {
     intentSections.push('[本任务目标] 写本任务要新增的下一章。编辑器里的旧章和历史失败任务只供承接背景，不是本次检查、重写或收尾目标。若当前合同已有合法新章，继续其缺失步骤；否则调用 story_compiler_prepare 时省略旧 chapterId 准备新章。不要为了执行本任务，重建历史旧章的编译或重做其质量审核。')
@@ -533,6 +546,8 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   if (input.includeCurrentRunHistory) {
     intentSections.push('[系统恢复说明] 作者点击了当前任务的继续按钮，没有发送新请求。上文是本次中止任务的原始要求；只继续这项要求，结合当前任务已保存的回复、思考片段和工具回执，从未完成处恢复。作品记忆、计划、章节目录以及其他对话只作背景，不能据此接管其他任务或扩大创作范围。原始要求若只是问候或提问，就完成该问候或回答；已完成的写入不得重复执行。')
   }
+  const presentationSummary = chapterWriting ? renderWritingPresentation(presentation, !input.taskSpec.scope.writing?.titleAndBodyOnly) : null
+  if (presentationSummary) intentSections.push(presentationSummary)
 
   if (input.selection?.text?.trim()) {
     const range =

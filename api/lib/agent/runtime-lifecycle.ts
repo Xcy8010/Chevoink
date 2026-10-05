@@ -11,6 +11,7 @@ import { assertRunGoalFence } from './goal-fence.js'
 import { assertChildParentFence, assertPinnedChildCompletion, pauseChildGrants } from './runtime-child.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
+import { readSavedWritingPresentation, savedChapterPresentationProof } from './writing-scope.js'
 
 const liveStatuses = ['queued', 'running', 'awaiting_approval'] as const
 const maxEpoch = 9223372036854775807n
@@ -46,13 +47,20 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     if (facts.blockers.length || candidate?.role !== 'assistant' || !candidate.content?.trim() || promisesFurtherAction(candidate.content)) {
       return runtimeError('RUNTIME_COMPLETION_BLOCKED', '原任务仍有未完成事项，不能提交完成终态。')
     }
+    // Ordinary completion has already passed. Only serialize a verified saved
+    // chapter presentation; preserve the paid candidate and frame unchanged.
+    const subject = { userId: lease.userId, novelId: root.novelId, runId: run.id }
+    const savedPresentation = await readSavedWritingPresentation(tx, subject)
+    const chapterPresentation = savedPresentation && candidate.content !== savedPresentation.text ? savedChapterPresentationProof(subject, savedPresentation) : null
     const operation = await prepareOperationInTransaction(tx, lease, {
       key: `finalize:${frame.revision}`, kind: 'internal', action: 'completion_finalize',
-      input: runtimeJson({ sourceRevision: frame.revision, sourceHash: frame.snapshotHash, evidenceHash: evidence.snapshotHash }).value,
+      input: runtimeJson({ sourceRevision: frame.revision, sourceHash: frame.snapshotHash, evidenceHash: evidence.snapshotHash,
+        ...(chapterPresentation ? { chapterPresentation } : {}) }).value,
     })
     const receipt = await commitOperationEffectInTransaction(tx, lease, operation.id, operation.inputHash,
       async () => runtimeJson({ version: 1, sourceRevision: frame.revision, sourceHash: frame.snapshotHash,
-        candidateHash: facts.candidateHash, evidenceHash: evidence.snapshotHash, evidence: evidence.snapshot }).value)
+        candidateHash: facts.candidateHash, evidenceHash: evidence.snapshotHash, evidence: evidence.snapshot,
+        ...(chapterPresentation ? { chapterPresentation } : {}) }).value)
     const next = await saveExecutionStateInTransaction(tx, lease, { ...expected,
       snapshot: { ...frame.state, phase: 'completed' } })
     await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId: run.id, operationId: operation.id,

@@ -1,6 +1,7 @@
 import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, semanticReadIdentity, nextStagnantBatch } from './semantic-progress.js'
-import { freezeWritingScope, readCompletedWritingDelivery, assertCompletedWritingDelivery } from './writing-scope.js'
+import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
 import { randomUUID } from 'node:crypto'
+import type { Prisma } from '@prisma/client'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
 
 import { containsAgentProtocolInvocation, recoverAgentProtocolToolCalls, stripAgentProtocolArtifacts } from '../../../shared/agent-output.js'
@@ -551,7 +552,7 @@ async function finalizeLegacyRun(
   allowContextSideEffects = true,
   checkpoint?: RunCheckpointState,
   authorEnded?: { fulfilled: boolean; todoItems?: AgentTodoItem[] },
-  writingDelivery?: { messageId: string; subject: { userId: string; novelId: string; runId: string }; expected: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; signal: AbortSignal },
+  writingDelivery?: { messageId: string; subject: { userId: string; novelId: string; runId: string }; expected: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; signal: AbortSignal; parts?: AgentMessagePart[]; replaceCandidate?: boolean },
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
@@ -564,8 +565,13 @@ async function finalizeLegacyRun(
     if (writingDelivery) {
       await assertCompletedWritingDelivery(tx, writingDelivery.subject, writingDelivery.expected)
       writingDelivery.signal.throwIfAborted()
-      await tx.agentMessage.create({ data: { id: writingDelivery.messageId, runId, sessionId: (await tx.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { sessionId: true } })).sessionId,
-        role: 'assistant', parts: [{ type: 'text', text: writingDelivery.expected.text }] } })
+      const sessionId = (await tx.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { sessionId: true } })).sessionId
+      const existing = await tx.agentMessage.findUnique({ where: { id: writingDelivery.messageId } })
+      if (existing && (existing.runId !== runId || existing.sessionId !== sessionId || existing.role !== 'assistant')) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '交付消息不属于本任务。')
+      const parts = (writingDelivery.parts ?? (existing?.parts as unknown as AgentMessagePart[] | undefined) ?? []).filter(part => part.type !== 'text')
+      const displayedParts = JSON.parse(JSON.stringify([...parts, { type: 'text' as const, text: writingDelivery.expected.text }])) as Prisma.InputJsonValue
+      await tx.agentMessage.upsert({ where: { id: writingDelivery.messageId }, create: { id: writingDelivery.messageId, runId, sessionId,
+        role: 'assistant', parts: displayedParts }, update: { parts: displayedParts } })
     }
     const owner = await tx.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { userId: true } })
     await (await import('./goal-fence.js')).assertRunGoalFence(tx, owner.userId, runId)
@@ -581,7 +587,7 @@ async function finalizeLegacyRun(
       },
       select: { userId: true, sessionId: true, novelId: true, taskSpec: true },
     })
-  }, writingDelivery ? [{ type: 'message.start', messageId: writingDelivery.messageId, role: 'assistant' },
+  }, writingDelivery ? [...(writingDelivery.replaceCandidate ? [] : [{ type: 'message.start' as const, messageId: writingDelivery.messageId, role: 'assistant' as const }]),
     { type: 'text.final', messageId: writingDelivery.messageId, text: writingDelivery.expected.text, asReasoning: false }] : [])
     .catch((error) => {
       if (writingDelivery && (isAbortError(error) || error instanceof DataAccessError && error.code === 'WRITING_DELIVERY_STALE')) throw error
@@ -1269,21 +1275,27 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
 
     const finishPersistedWritingIfComplete = async (beforeFinish?: () => Promise<void>) => {
-      const delivery = await prisma.$transaction(tx => readCompletedWritingDelivery(tx,
+      let delivery = await prisma.$transaction(tx => readCompletedWritingDelivery(tx,
         { userId: params.userId, novelId: params.novelId, runId }))
       if (!delivery) return false
       controller.signal.throwIfAborted()
       await beforeFinish?.()
-      const deliveryId = randomUUID()
-      try {
-        await finalizeRun(runId, bus, 'succeeded', usage, turn, delivery.text.slice(0, 300), undefined, false, undefined, undefined,
-          { messageId: deliveryId, subject: { userId: params.userId, novelId: params.novelId, runId }, expected: delivery, signal: controller.signal })
-      } catch (error) {
-        if (error instanceof DataAccessError && error.code === 'WRITING_DELIVERY_STALE') return false
-        throw error
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          await finalizeRun(runId, bus, 'succeeded', usage, turn, delivery.text.slice(0, 300), undefined, false, undefined, undefined,
+            { messageId: randomUUID(), subject: { userId: params.userId, novelId: params.novelId, runId }, expected: delivery, signal: controller.signal })
+          lastAssistantText = delivery.text
+          return true
+        } catch (error) {
+          if (!(error instanceof DataAccessError) || error.code !== 'WRITING_DELIVERY_STALE' || attempt !== 0) throw error
+          // A display withdrawal can change the capture while the chapter is
+          // already complete. Re-read once without buying a formatting turn.
+          delivery = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId: params.userId, novelId: params.novelId, runId }))
+          if (!delivery) return false
+          controller.signal.throwIfAborted()
+        }
       }
-      lastAssistantText = delivery.text
-      return true
+      return false
     }
 
     // Cumulative usage is accounting. Completion, cancellation and stagnation stop the loop.
@@ -1584,6 +1596,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           continue
         }
 
+        const savedPresentation = !prematureFinish && !report?.content ? await prisma.$transaction(tx => readSavedWritingPresentation(tx,
+          { userId: params.userId, novelId: params.novelId, runId })) : null
         if (!prematureFinish && report?.content) {
           // Deliver the exact persisted report through the existing text UI;
           // a short model wrap-up cannot hide it or trigger paid regeneration.
@@ -1598,11 +1612,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           lastAssistantText = delivered
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
           bus.emit({ type: 'text.final', messageId, text: delivered, asReasoning: false })
+        } else if (savedPresentation) {
+          lastAssistantText = savedPresentation.text
         } else {
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
         }
         bus.emit({ type: 'step.finish', turn, usage: result.usage })
-        await finalizeRun(runId, bus, prematureFinish ? 'failed' : 'succeeded', usage, turn, lastAssistantText.slice(0, 300), prematureFinish ? '连续多轮没有推进剩余工作，已保存进度并安全停止；任务未完成。' : undefined)
+        await finalizeRun(runId, bus, prematureFinish ? 'failed' : 'succeeded', usage, turn, lastAssistantText.slice(0, 300), prematureFinish ? '连续多轮没有推进剩余工作，已保存进度并安全停止；任务未完成。' : undefined,
+          true, undefined, undefined, savedPresentation ? { messageId, subject: { userId: params.userId, novelId: params.novelId, runId }, expected: savedPresentation,
+            signal: controller.signal, parts, replaceCandidate: true } : undefined)
         return
       }
 

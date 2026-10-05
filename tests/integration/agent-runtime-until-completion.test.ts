@@ -27,7 +27,11 @@ import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
 import { advanceDurableToolStagnation } from '../../api/lib/agent/runtime-continuation.js'
-import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
+import { pauseDurableTask, finalizeDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
+import { withHumanAdmission } from '../../api/lib/agent/goal-activation-authority.js'
+import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation } from '../../api/lib/agent/writing-scope.js'
+import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
+import { durableMessageId } from '../../api/lib/agent/runtime-frame-events.js'
 
 const available = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 afterAll(async () => { await prisma.$disconnect() })
@@ -35,7 +39,7 @@ afterEach(() => vi.restoreAllMocks())
 async function fixture(work: (f: {
   userId: string; novelId: string; sessionId: string; chapterId: string; runId: string; sourceMessageId: string;
   spec: ReturnType<typeof buildTaskSpec>; rootId: string;
-}) => Promise<void>, tokenBudget?: number, prompt = '修改本章') {
+}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', freezeChapterScope = false) {
   const user = await prisma.user.create({ data: { nickname: 'until-completion-fixture', passwordHash: 'test-only-unusable' } })
   const userId = user.id
   try {
@@ -47,12 +51,16 @@ async function fixture(work: (f: {
     const volume = await prisma.volume.create({ data: { novelId: novel.id, title: '卷', orderIndex: 1 } })
     const chapter = await prisma.chapter.create({ data: { authorId: userId, novelId: novel.id, volumeId: volume.id, title: '原章', content: '原文', orderIndex: 1, orderInVolume: 1, wordCount: 2 } })
     const runId = randomUUID(), sourceMessageId = randomUUID()
-    const spec = buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt })
+    let spec = buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt })
     await prisma.agentRun.create({ data: {
       id: runId, userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, status: 'queued',
       mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', taskSpec: JSON.parse(JSON.stringify(spec)),
     } })
     await prisma.agentMessage.create({ data: { id: sourceMessageId, runId, sessionId: session.id, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+    if (freezeChapterScope) {
+      spec = await prisma.$transaction(tx => freezeWritingScope(tx, { userId, novelId: novel.id, runId }, spec, prompt))
+      await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } })
+    }
     const root = await initializeDurableTask({ userId, runId, sourceMessageId, tokenBudget })
     await work({ userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, runId, sourceMessageId, spec, rootId: root.id })
   } finally {
@@ -77,6 +85,45 @@ const oldPolicy = (version: 1 | 2) => ({ version, initialTokens: 500, tokenCeili
   ...(version === 2 ? { initialTurns: 1, turnSlice: 1 } : {}) })
 
 describe.runIf(available)('real durable default execution control', () => {
+  it('short rewrite ordinary completion replaces final/history chat text with a bound saved confirmation and preserves the paid candidate', async () => {
+    await fixture(async f => {
+      const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+      const prompt = '以后不要重复正文，只保存章节。'
+      const correction = await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: f.chapterId,
+        mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'completed', engine: 'loop', createdAt: new Date(run.createdAt.getTime() - 1000),
+        startRequest: withHumanAdmission({ novelId: f.novelId, sessionId: f.sessionId, chapterId: f.chapterId, mode: 'build', prompt }) } })
+      await prisma.agentMessage.create({ data: { runId: correction.id, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+      const content = '沈桐看见旧罗盘的价值，心头一热，决定抓住这个只有自己知道的机会。他尚未询问价格。'
+      const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { title: '第一章 旧罗盘', content, revision: { increment: 1 }, wordCount: content.length } })
+      await prisma.storyCompilation.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId, chapterId: f.chapterId, targetOrderIndex: 1,
+        mode: 'balanced', status: 'completed', stage: 'commit', sourcePromptHash: runtimeJson({ prompt: '重写第一章，突出捡漏爽文。' }).hash,
+        preparedContext: { terminalContentHash: runtimeJson({ content }).hash }, completedAt: new Date(),
+        bridge: { create: { userId: f.userId, novelId: f.novelId, targetOrderIndex: 1, toChapterId: f.chapterId, targetRevision: chapter.revision, committedAt: new Date(),
+          knowledgeState: [], bodyState: [], objectState: [], relationshipState: [], emotionAftermath: [], recentOpenings: [], recentEndings: [], openLoops: [] } } } })
+      const lease = await claim(f)
+      const candidate = `${chapter.title}\n\n${content}`
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: [], toolAuthority: [], protectedChapterIds: [], pinnedSkillVersions: [] }, snapshot: { version: 1, turn: 1, nextOperationSequence: 0,
+        checkpointIndex: 0, phase: 'idle', pendingOperationId: null, messages: [{ role: 'user', content: '重写第一章，突出捡漏爽文。' }, { role: 'assistant', content: candidate }], successfulToolSignatures: [] } })
+      expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }))).toBeNull()
+      expect(await prisma.$transaction(tx => readSavedWritingPresentation(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }))).toMatchObject({ text: '已保存《第一章 旧罗盘》。' })
+      const before = await loadExecutionState(f.userId, f.runId)
+      const originalRoot = await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId }, select: { requestSnapshot: true, specSnapshot: true, inputHash: true } })
+      expect(await finalizeDurableTask(lease, { expectedRevision: before.frame.revision, expectedHash: before.frame.snapshotHash })).toMatchObject({ kind: 'completed' })
+      const after = await loadExecutionState(f.userId, f.runId)
+      expect(after.frame.state.messages).toEqual(before.frame.state.messages)
+      expect(after.frame.state.messages.at(-1)?.content).toBe(candidate)
+      expect(await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId }, select: { requestSnapshot: true, specSnapshot: true, inputHash: true } })).toEqual(originalRoot)
+      await publishDurableEvents(f.userId, f.runId)
+      const message = await prisma.agentMessage.findUniqueOrThrow({ where: { id: durableMessageId(f.rootId, 1) } })
+      expect(message.parts).toEqual([{ type: 'text', text: '已保存《第一章 旧罗盘》。' }])
+      const finished = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId, type: 'run.finished' } })
+      expect(finished.payload).toMatchObject({ outputSummary: '已保存《第一章 旧罗盘》。' })
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(content)
+    }, undefined, '重写第一章，突出捡漏爽文。', true)
+  })
   it.each([1, 2, 3] as const)('version %s preserves raw policy/usage and dispatches beyond old token/time limits', async version => {
     await fixture(async f => {
       if (version !== 3) {
