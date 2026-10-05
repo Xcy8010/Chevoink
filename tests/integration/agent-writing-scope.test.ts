@@ -43,7 +43,7 @@ async function fixture(prompt: string, work: (ctx: ToolContext) => Promise<void>
 describe.skipIf(!available)('atomic original chapter scope', () => {
   async function newDraftReview(ctx: ToolContext, prompt = '写第一章') {
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt }), prompt))
-    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(spec).value } })
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
     const result = await chapterCreateTool.execute(ctx, { title: '合成事实检查章', content: '同一扇门已经锁上。随后他却说这扇门从未锁过。' })
     const chapterId = result.observedState!.id
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })
@@ -80,7 +80,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect(reprepared.compilation.validation).toMatchObject({ checkRounds: 1, newDraftRevision: { chapterId: f.chapterId } })
     await expect(chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '重新准备也不能改。' })).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
-    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(runtimeJson(f.spec).value)
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(runtimeJson(JSON.parse(JSON.stringify(f.spec))).value)
   }))
   it.each(['parent', 'child'] as const)('a %s correction consumes one shared canonical creation allowance across opposite execution lineage', writer => fixture('写第一章', async ctx => {
     const f = await newDraftReview(ctx)
@@ -120,7 +120,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
   it('repreparing a compiler after an authorized revision cannot permit another patch from abandoned evidence', () => fixture('写第一章并检查修复正文', async ctx => {
     const prompt = '写第一章并检查修复正文'
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt }), prompt))
-    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(spec).value } })
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
     const created = await chapterCreateTool.execute(ctx, { title: '合成整体修订章', content: '合成待修正原稿。' })
     const chapterId = created.observedState!.id
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })
@@ -141,7 +141,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
   ] as const)('inherits original continuity state from the opposite lineage when $writer writes after $rounds checks', ({ writer, rounds }) => fixture('写第一章', async ctx => {
     const prompt = '写第一章'
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt }), prompt))
-    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(spec).value } })
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
     const created = await chapterCreateTool.execute(ctx, { title: '合成父子范围章', content: '合成完整正文，不应碎改。' })
     const chapterId = created.observedState!.id
     const session = await prisma.agentSession.create({ data: { userId: ctx.userId, novelId: ctx.novelId, title: 'review-child', spawnedFromRunId: ctx.runId, spawnedFromSessionId: ctx.sessionId } })
@@ -159,7 +159,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
   it.each(['warning', 'stale-error', 'failed-check', 'exhausted'] as const)('blocks generic writes driven by %s without changing saved manuscript or review state', scenario => fixture('写第一章', async ctx => {
     const prompt = '写第一章'
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt }), prompt))
-    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(spec).value } })
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
     const result = await chapterCreateTool.execute(ctx, { title: '合成连贯章', content: '合成原文保持连贯。' })
     const id = result.observedState!.id
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id } })
