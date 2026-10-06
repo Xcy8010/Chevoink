@@ -358,7 +358,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       const expectedRequests = scenario === 'missing' ? 0
         : scenario === 'full-chain' ? 4
         : ['evidence-corrected', 'format-retry'].includes(scenario) ? 3
-        : ['context-change', 'evidence-unresolved', 'repair', 'rollback-resume', 'repair-stale'].includes(scenario) ? 2 : 1
+        : ['context-change', 'evidence-unresolved', 'repair', 'rollback-resume'].includes(scenario) ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })

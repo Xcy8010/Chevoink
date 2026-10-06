@@ -30,7 +30,7 @@ const isolatedRequest = z.object({ body: z.object({
 /** 缓存报告只能替代首个修订步骤的 Critic 前置；仍核验原任务、报告哈希和正文版本。 */
 async function hasFrozenRepairReport(tx: Prisma.TransactionClient, lease: RunLeaseToken, snapshot: unknown, step: AuxiliaryModelStep) {
   if (step !== 'quality_repair' && step !== 'continuity_repair') return false
-  const parsed = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.literal(1), repair: z.literal(true),
+  const parsed = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3)]), repair: z.literal(true),
     compiler: compilerObservationSchema.nullable(), chapter: z.object({ id: z.string(), revision: z.number(), content: z.string() }),
     cached: z.unknown(), coverage: z.unknown().optional() }) }) }).safeParse(snapshot)
   if (!parsed.success) return false

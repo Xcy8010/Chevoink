@@ -55,6 +55,8 @@ export type ToolContext = {
   mode: AgentExecutionMode
   creativeFreedom: CreativeFreedom
   qualityMode: StoryCompilerMode
+  /** 执行器解析的会话沙箱（冻结于 run 启动，绝不来自模型输入）；只读沙箱不允许工具内隐式改写正文。 */
+  sandboxMode?: 'read_only' | 'workspace' | 'full_access'
   /** 主 run 解析好的模型运行时：子 Agent 跟随主 run 的模型与额度计费（未注入时工具自行回退） */
   modelRuntime?: Awaited<ReturnType<typeof getModelTierRuntime>>
   modelAssignments?: import('../../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments

@@ -137,7 +137,9 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
   ctx.signal.throwIfAborted()
   const warningCount = report.findings.filter(finding => finding.severity === 'warning').length
   const advisoryCount = report.findings.filter(finding => finding.severity === 'advisory').length
+  // 自动修订写的是作者正文：只读沙箱与受限子任务不获授权，只保存检查意见（正文由各自的写入工具负责）。
   const automatic = ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(report.chapterId)
+    && !ctx.inlineChild && ctx.sandboxMode !== 'read_only'
   const selected = automatic && qualityAutoRepairPending(report) ? selectAutomaticQualityFindings(report.findings) : []
   if (selected.length) {
     ctx.signal.throwIfAborted()
@@ -225,8 +227,8 @@ export const qualityAnalyzeTool = defineTool({
     chapterId: z.string().min(1).optional().describe('目标章节编号，从 chapter_read 或作品目录取得；独立检查既有章只需本参数，不用准备章节'),
     compilationId: z.string().min(1).optional().describe('当前写作流水线的编译编号；独立审阅省略，不要把它当 chapterId'),
   }),
-  permission: CONTENT_WRITE,
-  readOnly: false,
+  permission: READ,
+  readOnly: true,
   coerceArgs(raw) {
     const unwrapped = coerceToolArgumentEnvelope(raw)
     if (!unwrapped || typeof unwrapped !== 'object' || Array.isArray(unwrapped)) return unwrapped
