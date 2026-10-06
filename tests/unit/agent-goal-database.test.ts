@@ -86,12 +86,14 @@ describe('withGoalDatabaseFences', () => {
     const database = fakeDatabase()
     const fenced = withGoalDatabaseFences(database.raw as unknown as PrismaClient)
     const transact = fenced.$transaction.bind(fenced)
-    const spy = vi.spyOn(fenced, '$transaction').mockImplementationOnce(work =>
+    // Vitest 4 returns the native vi.fn() double unchanged from vi.spyOn, so the
+    // outside instrumentation wrapper is installed explicitly around the captured method.
+    database.raw.$transaction = vi.fn((work: (tx: unknown) => Promise<unknown>) =>
       transact(work).then(() => { throw new Error('lost commit acknowledgement') }))
 
     await expect(fenced.$transaction(async () => 'committed')).rejects.toThrow('lost commit acknowledgement')
     expect(database.transaction).toHaveBeenCalledTimes(1)
-    spy.mockRestore()
+    database.raw.$transaction = database.transaction
     fenced.$transaction = transact
     await expect(fenced.$transaction(async () => 'restored')).resolves.toBe('restored')
     expect(database.transaction).toHaveBeenCalledTimes(2)

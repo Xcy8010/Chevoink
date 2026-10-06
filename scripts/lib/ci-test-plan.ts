@@ -4,10 +4,18 @@ export interface TestWeight { path: string; durationMs: number }
 export interface TestShard { index: number; estimatedMs: number; files: string[] }
 export interface TestPlan { version: 1; revision: string; count: number; shards: TestShard[] }
 
-interface CompletedTask { name: string; mode: string; result?: { state?: string }; tasks?: CompletedTask[] }
-export function assertTestsPassed(task: CompletedTask): void {
-  if (task.mode !== 'run' || task.result?.state !== 'pass') throw new Error(`CI requires every test to pass without skips: ${task.name}`)
-  task.tasks?.forEach(assertTestsPassed)
+// Structural subset of the Vitest 4 reporter tasks (TestModule/TestCase).
+// Keeping the gate duck-typed lets unit tests exercise it without real runner
+// objects while the reporter passes actual TestModule instances.
+interface RunTest { readonly fullName: string; readonly options: { readonly mode: string }; result(): { readonly state: string } }
+interface RunModule { readonly relativeModuleId: string; state(): string; readonly children: { allTests(): Iterable<RunTest> } }
+export function assertTestsPassed(testModule: RunModule): void {
+  if (testModule.state() === 'failed') throw new Error(`CI requires every test file to pass: ${testModule.relativeModuleId}`)
+  for (const test of testModule.children.allTests()) {
+    // Skipped, todo, .only-filtered and unfinished tests all invalidate the
+    // receipt so the merged report stays a full-suite gate.
+    if (test.options.mode !== 'run' || test.result().state !== 'passed') throw new Error(`CI requires every test to pass without skips: ${test.fullName}`)
+  }
 }
 
 export function testPath(root: string, file: string): string {

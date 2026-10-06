@@ -76,12 +76,23 @@ describe('CI test discovery and balanced assignment', () => {
 })
 
 describe('CI report completeness gate', () => {
-  it('accepts only completed passing trees, including nested test groups', () => {
-    const passed = { name: 'case', mode: 'run', result: { state: 'pass' } }
-    assertTestsPassed({ ...passed, tasks: [passed] })
-    for (const task of [{ ...passed, mode: 'skip' }, { ...passed, mode: 'todo' }, { ...passed, result: { state: 'fail' } }, { ...passed, result: undefined }]) {
-      expect(() => assertTestsPassed({ ...passed, tasks: [task] })).toThrow('without skips')
+  it('accepts only completed passing modules and rejects skipped, todo, focused or unfinished tests', () => {
+    const passed = { fullName: 'case', options: { mode: 'run' }, result: () => ({ state: 'passed' }) }
+    const module = (tests: Array<typeof passed>, state = 'passed') => ({
+      relativeModuleId: 'tests/unit/file-0.test.ts', state: () => state, children: { allTests: function* () { yield* tests } },
+    })
+    expect(() => assertTestsPassed(module([passed, passed]))).not.toThrow()
+    for (const tests of [
+      [{ ...passed, options: { mode: 'skip' } }],
+      [{ ...passed, options: { mode: 'todo' } }],
+      [{ ...passed, options: { mode: 'only' } }],
+      [{ ...passed, result: () => ({ state: 'failed' }) }],
+      [{ ...passed, result: () => ({ state: 'skipped' }) }],
+      [{ ...passed, result: () => ({ state: 'pending' }) }],
+    ]) {
+      expect(() => assertTestsPassed(module(tests))).toThrow('without skips')
     }
+    expect(() => assertTestsPassed(module([passed], 'failed'))).toThrow('every test file to pass')
   })
 
   it('requires precisely the planned blob names even as the count changes', () => {
