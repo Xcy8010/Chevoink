@@ -763,18 +763,21 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
     expect(mocks.runs.get('run')?.errorMessage).toContain('请求的检查或修订尚未完成')
   })
-  it('stops a second review denial across different tools and arguments with its actual cause', async () => {
+  it('guides bounded safe wrap-up across repeated review denials before ending with its actual cause', async () => {
     const checking = tool('continuity_validate', async () => ({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_LIMIT', summary: '检查次数耗尽', output: '实际检查次数耗尽' }))
     const editing = tool('chapter_edit_range', async () => { throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原请求未授权修改已有章') }, false)
     const later = tool('chapter_write', async () => ({ output: '不应执行' }), false)
     mocks.tools = [checking, editing, later]
-    queue(response('', [call('check', checking.name)]), response('', [call('edit', editing.name, '{"chapterId":"another"}'), call('later', later.name)]))
+    queue(response('', [call('check', checking.name)]),
+      response('', [call('edit', editing.name, '{"chapterId":"another"}'), call('later', later.name)]),
+      response('', [call('edit-3', editing.name, '{"chapterId":"third"}')]),
+      response('', [call('edit-4', editing.name, '{"chapterId":"fourth"}')]))
     await run('写下一章')
-    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(mocks.chat).toHaveBeenCalledTimes(4)
     expect(later.execute).not.toHaveBeenCalled()
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
     expect(mocks.runs.get('run')?.errorMessage).toContain('原请求未授权修改已有章')
-    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewHandoffCount: 1 } })
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewHandoffCount: 4 } })
   })
   it('can finish authorized chapter delivery after an optional edit is refused', async () => {
     const before = mocks.chapters[0].content
@@ -890,7 +893,7 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     ]))
   })
 
-  it('does not restore a consumed review handoff when the same task resumes', async () => {
+  it('keeps charging a restored review handoff budget until it visibly ends with its actual cause', async () => {
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default',
       runStartedAt: Date.now() - 1000, activeExecutionMs: 100, stagnantBatches: 0,
       resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
@@ -900,12 +903,14 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
       usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, checkpoint } })
     const checking = tool('continuity_validate', async () => ({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_LIMIT', summary: '检查次数耗尽', output: '原任务检查次数耗尽' }))
     mocks.tools = [checking]
-    queue(response('', [call('resumed-check', checking.name)]))
+    queue(response('', [call('resumed-check-1', checking.name, '{"chapterId":"a"}')]),
+      response('', [call('resumed-check-2', checking.name, '{"chapterId":"b"}')]),
+      response('', [call('resumed-check-3', checking.name, '{"chapterId":"c"}')]))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel',
       chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
-    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(mocks.chat).toHaveBeenCalledTimes(3)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
-    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 130, checkpoint: { reviewHandoffCount: 1 } })
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 150, checkpoint: { reviewHandoffCount: 4 } })
     expect(mocks.runs.get('run')?.errorMessage).toContain('原任务检查次数耗尽')
   })
   it('guides a truncated plan into bounded section saves without executing the partial payload', async () => {

@@ -2,7 +2,8 @@
  * source revisions, author deletion, or quality gates. */
 export function toolFailureRecovery(code: string): { label: string; guidance: string } | undefined {
   const entries: Record<string, { label: string; guidance: string }> = {
-    AUTHOR_CHAPTER_SCOPE: { label: '章节目标或位置与原请求不符', guidance: '本次操作未执行，目标或位置不符不表示任务已结束。先核对原始请求和当前作品目录，仅在现有授权范围内纠正目标或位置；全书位置与卷内位置不得混用，不要猜卷坐标、另建重复章或扩大范围。任务已暂停、结束或授权不匹配时不得继续。' },
+    AUTHOR_CHAPTER_SCOPE: { label: '章节目标或位置与原请求不符', guidance: '本次操作未执行，目标或位置不符不表示任务已结束。先核对原始请求和当前作品目录，仅在现有授权范围内纠正目标或位置；全书位置与卷内位置不得混用，不要猜卷坐标、另建重复章或扩大范围。重试、换工具、改参数、子任务或续跑都不能扩大授权；需要处理其他章节时，请作者在输入框重新发送一条写明目标章节的明确指令，系统将按新任务受理。任务已暂停、结束或授权不匹配时不得继续。' },
+    SCOPE_NEEDS_INPUT: { label: '原任务缺少可证明的章节目标', guidance: '原请求的目标章节无法证明，本次未写入任何章节。用 ask_user 如实说明并请作者明确要处理的章节；在作者给出明确指令前不要按当前界面位置、历史记录或猜测的章节自行写入。作者在输入框新发写明章节的指令后，系统按新任务受理。' },
     MEMORY_SOURCE_REQUIRED: { label: '记忆来源需要重新核对', guidance: '先用 chapter_read 读取来源章节，使用返回的真实 chapterId 和 revision，再提交逐字原文。不得猜测版本、删除来源字段或改成无来源候选来绕过校验。' },
     MEMORY_EVIDENCE_MISMATCH: { label: '记忆引用与原文不符', guidance: '重新读取来源正文，只引用实际存在的连续原文；摘要、改写和省略号拼接不是原文。找不到依据就保留未完成并向作者说明，不要修改正文来迁就记忆。' },
     MEMORY_DELETED: { label: '作者已删除此记忆', guidance: '不要重试、改名重建或恢复被删除卡片。保留删除状态，其他已授权工作可以继续；确需此记忆时请作者决定。' },

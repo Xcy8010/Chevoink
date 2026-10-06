@@ -13,6 +13,10 @@ import { readWritingPresentation } from './writing-request-context.js'
 type Subject = { userId: string; novelId: string; runId: string }
 type Writing = NonNullable<TaskSpec['scope']['writing']>
 const numeric = '[一二两三四五六七八九十百千0-9]+'
+/** Chapter separators in prose: hyphen, en/em dash, minus, tilde and fullwidth variants. */
+const rangeDash = '[-–—−~～〜－]'
+/** A spoken chapter count is small; longer digit runs glued to 章 are ordinals ("把189章写完"), not counts. */
+const shortCount = '\\d{1,2}|[一二两三四五六七八九十百千]+'
 export function chapterNumber(text: string): number | null {
   if (/^\d+$/u.test(text)) return Number(text) || null
   const digits: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
@@ -25,22 +29,28 @@ export function chapterNumber(text: string): number | null {
   return sum + pending || null
 }
 
-/** Pure extraction uses the whole admission request; generated goals are not authority. */
+/** Pure extraction uses the whole admission request; generated goals are not authority.
+ * Spacing around 第/章/至/dashes is prose, not semantics: "前 20 章" must parse
+ * exactly like "前20章"; otherwise the freeze silently retargets the run. */
 export function requestedWritingRange(prompt: string): { kind: 'first' | 'next' | 'range' | 'count' | 'unbounded'; start?: number; count?: number; volume?: number; anchor?: 'editor' } | null {
   const positive = prompt.split(/[。！？!?；;\n，,]+/u).filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|不写|do not|don't)/iu.test(clause)).join('，')
-  const range = positive.match(new RegExp(`第?(${numeric})(?:章)?(?:至|到|[-–~～])第?(${numeric})章`, 'u'))
+  const range = positive.match(new RegExp(`第?\\s*(${numeric})\\s*(?:章)?\\s*(?:至|到|${rangeDash})\\s*第?\\s*(${numeric})\\s*章`, 'u'))
   if (range) { const start = chapterNumber(range[1]), end = chapterNumber(range[2]); if (start && end && end >= start && end - start < 1000) return { kind: 'range', start, count: end - start + 1 } }
-  const volume = positive.match(new RegExp(`第(${numeric})卷.{0,4}第(${numeric})章`, 'u'))
+  const volume = positive.match(new RegExp(`第\\s*(${numeric})\\s*卷.{0,4}第\\s*(${numeric})\\s*章`, 'u'))
   if (volume) { const v = chapterNumber(volume[1]), chapter = chapterNumber(volume[2]); if (v && chapter) return { kind: 'range', start: chapter, count: 1, volume: v } }
-  if (/(?:下[一1]章|next chapter)/iu.test(positive)) return { kind: 'next', count: 1,
+  if (/(?:下\s*[一1]\s*章|next chapter)/iu.test(positive)) return { kind: 'next', count: 1,
     ...(/(?:当前(?:这)?(?:章|章节)|正在编辑(?:的)?(?:这章|章节|章))(?:之|以)?后|after\s+(?:the\s+)?(?:current|currently edited)\s+chapter/iu.test(positive) ? { anchor: 'editor' as const } : {}) }
-  const firstCount = positive.match(new RegExp(`前(${numeric})章`, 'u'))
+  const firstCount = positive.match(new RegExp(`前\\s*(${numeric})\\s*章`, 'u'))
   if (firstCount) { const count = chapterNumber(firstCount[1]); if (count && count <= 1000) return { kind: 'range', start: 1, count } }
-  if (/(?:首章|第一章|第1章|first chapter)/iu.test(positive)) return { kind: 'first', start: 1, count: 1 }
-  const ordinal = positive.match(new RegExp(`第(${numeric})章|chapter\\s*(\\d+)`, 'iu'))
+  if (/(?:首章|第\s*[一1]\s*章|first chapter)/iu.test(positive)) return { kind: 'first', start: 1, count: 1 }
+  const ordinal = positive.match(new RegExp(`第\\s*(${numeric})\\s*章|chapter\\s*(\\d+)`, 'iu'))
   if (ordinal) { const start = chapterNumber(ordinal[1] ?? ordinal[2]); if (start) return { kind: 'range', start, count: 1 } }
-  const countMatch = positive.match(new RegExp(`(?:写|创作|完成|起草).{0,6}(${numeric})章`, 'u'))
+  // (?<!\d) keeps "写189章" from parsing as a count of the trailing digits;
+  // long digit runs belong to the bare-ordinal branch below.
+  const countMatch = positive.match(new RegExp(`(?:写|创作|完成|起草).{0,6}(?<!\\d)(${shortCount})\\s*章`, 'u'))
   if (countMatch) { const count = chapterNumber(countMatch[1]); if (count && count <= 1000) return { kind: 'count', count } }
+  const bareOrdinal = positive.match(new RegExp(`(?<!\\d)(\\d{1,4})\\s*章\\s*(?:都|全部|全|一起)?\\s*(?:写完|写|完成|创作|优化|修改|润色|处理|续写|补齐|改|补)`, 'u'))
+  if (bareOrdinal) { const start = chapterNumber(bareOrdinal[1]); if (start) return { kind: 'range', start, count: 1 } }
   if (/(?:自动|自主|自行|全权).{0,16}(?:写完|完成全书|创作全书|逐章写)|(?:write|finish).{0,24}(?:autonomously|automatically)/iu.test(positive)) return { kind: 'unbounded' }
   return null
 }
@@ -55,6 +65,11 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   }
   const admissionPrompt = original.prompt ?? prompt
   const range = requestedWritingRange(admissionPrompt)
+  // A prompt that names chapters/volumes with numbers but fails to parse must not
+  // silently freeze onto the editor's current chapter: that rewrote the author's
+  // target ("前 20 章优化" froze to a single chapter). Surface needs_input instead.
+  const ambiguousRange = !range && /(?:第|前|后|余|剩|卷|章)/u.test(admissionPrompt)
+    && /[0-9一二两三四五六七八九十百千]/u.test(admissionPrompt)
   const chapters = await tx.chapter.findMany({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) },
     select: { id: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
   const run = await tx.agentRun.findFirstOrThrow({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId }, select: { chapterId: true } })
@@ -76,7 +91,7 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
       } else targets.push({ orderIndex: position, chapterId: chapters.find(item => item.orderIndex === position)?.id ?? null })
     }
     writing = { ...base, kind: targets.length ? 'bounded' : 'needs_input', targets }
-  } else if (run.chapterId) {
+  } else if (run.chapterId && !ambiguousRange) {
     const target = chapters.find(item => item.id === run.chapterId)
     writing = { ...base, kind: target ? 'bounded' : 'needs_input', targets: target ? [{ orderIndex: target.orderIndex, chapterId: target.id }] : [] }
   } else writing = { ...base, kind: 'needs_input', targets: [] }
@@ -253,14 +268,11 @@ export async function assertWritingStructureAuthority(tx: Prisma.TransactionClie
 export function questionExpandsWritingScope(question: string, options: Array<{ label: string; detail?: string }>, writing: Writing | undefined, original: string | null): boolean {
   if (!writing || writing.kind === 'unbounded') return false
   const texts = [question, ...options.flatMap(option => [option.label, option.detail ?? ''])]
-  return texts.some(text => {
-    if (/封面|cover/iu.test(text) && !(original ?? '').split(/[。！？!?；;\n，,]+/u).some(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|do not|don't)/iu.test(clause) && /封面|cover/iu.test(clause))) return true
-    if (!/(?:写|推进|创作|完成|write|draft)/iu.test(text)) return false
-    const request = requestedWritingRange(text)
-    if (!request) return false
-    if (request.kind === 'next' || request.kind === 'unbounded' || request.kind === 'count') return true
-    return !writing.targets.some(target => target.orderIndex === request.start) || (request.count ?? 1) > writing.targets.length
-  })
+  // Only cover wording still counts as a scope expansion here. Blocking chapter
+  // wording severed the model's only channel to the author and stranded runs;
+  // every actual write target remains enforced by assertWritingTarget.
+  return texts.some(text => /封面|cover/iu.test(text)
+    && !(original ?? '').split(/[。！？!?；;\n，,]+/u).some(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|do not|don't)/iu.test(clause) && /封面|cover/iu.test(clause)))
 }
 
 /** Auto-delivery is limited to a chapter artifact request. Explicit additional
@@ -277,7 +289,7 @@ export function allowsChapterOnlyCompletion(prompt: string | null, requireExclus
 
 export async function assertQuestionWritingScope(tx: Prisma.TransactionClient, subject: Subject, question: string, options: Array<{ label: string; detail?: string }>) {
   const scope = await readWritingScope(tx, subject)
-  if (questionExpandsWritingScope(question, options, scope.writing, scope.prompt)) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '该问题或选项扩大原任务范围；继续已授权章节，不诱导封面或续章。')
+  if (questionExpandsWritingScope(question, options, scope.writing, scope.prompt)) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '该问题或选项把原任务范围扩大到封面产物；继续已授权章节，不诱导封面。')
 }
 
 /** Completion is a read of the authorized persisted artifact at its current
@@ -315,7 +327,7 @@ async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subjec
   if (presentationKind === 'completed_saved_only' && presentation?.mode !== 'saved_only') return null
   const runIds = await originalTaskRunIds(tx, subject, scope)
   const chapters = []
-  const length = scope.prompt?.match(/(\d{2,6})\s*(?:[-–~～]|至|到)\s*(\d{2,6})\s*字/u)
+  const length = scope.prompt?.match(new RegExp(`(\\d{2,6})\\s*(?:${rangeDash}|至|到)\\s*(\\d{2,6})\\s*字`, 'u'))
   for (const target of scope.writing.targets) {
     const id = target.chapterId ?? scope.bindings?.targets.find(item => item.orderIndex === target.orderIndex)?.chapterId
     if (!id) return null

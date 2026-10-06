@@ -1620,7 +1620,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const chapterIncomplete = nextChapterRequired
           && !await (await import('./humanity-quality.js')).hasCommittedTaskChapter(prisma, params.userId, params.novelId, runId)
         const todoIncomplete = unfinishedTodos.length > 0 && !(nextChapterRequired && !chapterIncomplete && taskSpec.goals.length === 1)
-        const prematureFinish = chapterIncomplete || reportIncomplete || todoIncomplete || result.finishReason === 'length' || promisesFurtherAction(cleanContent) || (expectsPlanSave && !planSavePerformed)
+        const otherPremature = chapterIncomplete || reportIncomplete || todoIncomplete || result.finishReason === 'length' || promisesFurtherAction(cleanContent) || (expectsPlanSave && !planSavePerformed)
+        // A review denial already told the model to finish only authorized work
+        // and report the remainder honestly. Afterwards a silent wrap-up is not
+        // completion unless the requested next chapter is already committed.
+        const reviewBlockedWrapUp = reviewHandoffCount > 0 && !(nextChapterRequired && !chapterIncomplete)
+        const prematureFinish = otherPremature || reviewBlockedWrapUp
+        if (reviewBlockedWrapUp && !otherPremature) {
+          await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
+          bus.emit({ type: 'step.finish', turn, usage: result.usage })
+          await finalizeFailedWithNotice('本次修订已被安全检查停止，收尾不能当作任务完成；已保存的正文与报告保留，未判定检查通过。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
+          return
+        }
         if (prematureFinish && todoReminders < 4) {
           requireNativeToolCall = true
           todoReminders += 1
@@ -1655,7 +1666,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
         }
         bus.emit({ type: 'step.finish', turn, usage: result.usage })
-        await finalizeRun(runId, bus, prematureFinish ? 'failed' : 'succeeded', usage, turn, lastAssistantText.slice(0, 300), prematureFinish ? '连续多轮没有推进剩余工作，已保存进度并安全停止；任务未完成。' : undefined,
+        await finalizeRun(runId, bus, prematureFinish ? 'failed' : 'succeeded', usage, turn, lastAssistantText.slice(0, 300), prematureFinish
+          ? reviewBlockedWrapUp
+            ? '修订被安全检查停止后连续多轮没有推进；已保存的正文与报告保留，未判定检查通过。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。'
+            : '连续多轮没有推进剩余工作，已保存进度并安全停止；任务未完成。'
+          : undefined,
           true, undefined, undefined, savedPresentation ? { messageId, subject: { userId: params.userId, novelId: params.novelId, runId }, expected: savedPresentation,
             signal: controller.signal, parts, replaceCandidate: true } : undefined)
         return
@@ -1785,25 +1800,23 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       bus.emit({ type: 'step.finish', turn, usage: result.usage })
 
       if (reviewStopReason) {
-        // Only next-chapter delivery has the existing persisted completion
-        // guard used by this handoff. A requested review without a report
-        // remains incomplete; a polite stopped response cannot make it succeed.
-        if (taskSpec.intent !== 'write' || !requiresNextChapterDelivery(taskSpec.goals)) {
-          await finalizeFailedWithNotice(`请求的检查或修订尚未完成：${reviewStopReason} 已保存的正文与报告保留；未将工具拒绝当作检查通过或任务完成。`)
+        // A review denial is never reported as a passed review, but a single
+        // denial must not swallow a writing task either. An explicitly
+        // requested review without its report ends immediately; a writing task
+        // gets bounded safe-wrap-up steps to finish authorized work and then
+        // ends with an explicit exit the author can act on.
+        if (taskSpec.intent !== 'write') {
+          await finalizeFailedWithNotice(`请求的检查或修订尚未完成：${reviewStopReason} 已保存的正文与报告保留；未将工具拒绝当作检查通过或任务完成。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。`)
           return
         }
-        if (reviewHandoffCount >= 1) {
-          await finalizeFailedWithNotice(`本次工具未执行：${reviewStopReason} 已保存的正文与报告保留。安全收尾后仍遇到修订限制，任务尚未完成；未重置次数或绕过限制，也未判定检查通过。`)
-          return
-        }
-        // A refused optional edit is not evidence that the writing task failed.
-        // Stop the rest of this batch, preserve the denial and offer one durable
-        // handoff to finish already-authorized non-repair work. A second denial
-        // ends visibly, regardless of tool/arguments or intervening progress.
-        reviewHandoffCount = 1
+        reviewHandoffCount += 1
         await persistCheckpoint()
-        messages.push({ role: 'user', content: `[系统] 本次检查或改稿工具未执行，具体原因：${reviewStopReason}\n正文仍保留，工具拒绝不等于整项任务失败。禁止重试该改稿、换工具绕过或继续逐句修订；警告/旧意见不授予改稿权限。仅核对已保存进度，完成原请求内尚可执行的读取、场景状态与章节终态提交。只有实际提交成功才交付；当前完整报告仍有事实错误时如实说明未完成，不能冒充通过。此安全收尾机会仅一次，续跑不会恢复机会、权限、检查次数或预算。` })
-        continue
+        if (reviewHandoffCount <= 3) {
+          messages.push({ role: 'user', content: `[系统] 本次检查或改稿工具未执行（安全收尾第 ${reviewHandoffCount}/3 次），具体原因：${reviewStopReason}\n正文仍保留，工具拒绝不等于整项任务失败，也不能宣称检查通过。禁止重试该改稿、换工具绕过或继续逐句修订；警告/旧意见不授予改稿权限。仅核对已保存进度，完成原请求内尚可执行的读取、场景状态与章节终态提交。只有实际提交成功才交付；仍被次数边界挡住时如实汇报剩余意见与阻塞原因，不再重复尝试本类改稿。` })
+          continue
+        }
+        await finalizeFailedWithNotice(`本次工具未执行：${reviewStopReason} 已保存的正文与报告保留。连续安全收尾仍未完成授权范围内的任务；未重置次数或绕过限制，也未判定检查通过。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。`)
+        return
       }
 
       if (authorEndRequested) {

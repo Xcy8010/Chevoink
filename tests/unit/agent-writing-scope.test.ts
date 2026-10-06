@@ -13,6 +13,10 @@ describe('original writing authority', () => {
     ['先写前两章', { kind: 'range', start: 1, count: 2 }],
     ['写三章', { kind: 'count', count: 3 }],
     ['续写第二卷第三章', { kind: 'range', start: 3, count: 1, volume: 2 }],
+    ['前 20 章优化', { kind: 'range', start: 1, count: 20 }],
+    ['接着写第 189 章', { kind: 'range', start: 189, count: 1 }],
+    ['把189章写完', { kind: 'range', start: 189, count: 1 }],
+    ['写第146—188章', { kind: 'range', start: 146, count: 43 }],
   ])('extracts exact original range: %s', (prompt, expected) => expect(requestedWritingRange(prompt)).toEqual(expected))
   it('uses the full original prompt after the legacy goals truncation boundary', () => {
     expect(requestedWritingRange('背景资料'.repeat(300) + '。请写第十九章')).toEqual({ kind: 'range', start: 19, count: 1 })
@@ -39,5 +43,10 @@ describe('original writing authority', () => {
     expect(questionExpandsWritingScope('需要封面吗？', [{ label: '暂时不用', detail: '先继续推进第二章正文，封面后续再补' }], writing, '写第一章，只要标题和正文')).toBe(true)
     expect(questionExpandsWritingScope('需要封面吗？', [{ label: '生成封面' }], writing, '写第一章，不要封面')).toBe(true)
     expect(questionExpandsWritingScope('本章人物选择哪个行动？', [{ label: '留在门外' }, { label: '推门进入' }], writing, '写第一章')).toBe(false)
+  })
+  it('leaves chapter wording in author questions to the execution guard', () => {
+    const writing = { version: 1 as const, kind: 'bounded' as const, targets: [{ orderIndex: 1, chapterId: null }], titleAndBodyOnly: true, repairAuthorized: false }
+    expect(questionExpandsWritingScope('可以继续写第二章吗？', [{ label: '继续写第二章' }], writing, '写第一章')).toBe(false)
+    expect(questionExpandsWritingScope('需要封面吗？', [{ label: '生成封面' }], writing, '写第一章')).toBe(true)
   })
 })

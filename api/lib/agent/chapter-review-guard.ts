@@ -28,16 +28,16 @@ export async function assertChapterReviewRevision(
   }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
   const { readNewDraftRevision, readNewDraftWritingAuthority } = await import('./writing-scope.js')
   if (compilations.some(item => readNewDraftRevision(item.validation))) {
-    throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本任务新稿已完成一次检查后的合并事实修订。保留当前正文和剩余意见，交作者决定；复核、换工具、父子任务或重新准备不能增加修订次数，不能宣称剩余问题已通过。')
+    throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本任务新稿已完成一次检查后的合并事实修订。保留当前正文和剩余意见，交作者决定；复核、换工具、父子任务或重新准备不能增加修订次数，不能宣称剩余问题已通过。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
   }
   if (compilations.some(item => continuityCheckRounds(item.validation) >= MAX_CONTINUITY_CHECKS)) {
-    throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本章自动检查次数已用完，已停止后续自动改稿。检查上限不是正文错误；保留当前正文和原报告，不能靠改一句、换工具、添加检查范围或续跑恢复次数。')
+    throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本章自动检查次数已用完，已停止后续自动改稿。检查上限不是正文错误；保留当前正文和原报告，不能靠改一句、换工具、添加检查范围或续跑恢复次数。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
   }
   const reports = await tx.chapterQualityReport.findMany({ where: {
     userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, runId: { in: runIds },
   }, select: { chapterRevision: true, repairRound: true } })
   if (reports.some(report => report.repairRound >= 1)) {
-    throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本章已完成一次检查后的整体修订，已停止继续自动改稿。保留当前正文与剩余意见，不再通过通用写工具绕过修订次数边界。')
+    throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本章已完成一次检查后的整体修订，已停止继续自动改稿。保留当前正文与剩余意见，不再通过通用写工具绕过修订次数边界。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
   }
   const validations = compilations.flatMap(item => {
     const value = item.validation
@@ -81,12 +81,12 @@ export async function assertChapterReviewRevision(
         }
       }
     }
-    throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '本任务的原始作者请求未授权检查后改写正文。检查警告、建议、失败或旧意见都不授予改稿权限；保留连贯正文与报告，停止自动修订。')
+    throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '本任务的原始作者请求未授权检查后改写正文。检查警告、建议、失败或旧意见都不授予改稿权限；保留连贯正文与报告，停止自动修订。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
   }
   const revisions = [...reports.map(item => item.chapterRevision), ...validations.flatMap(value =>
     typeof value.checkedRevision === 'number' && Number.isSafeInteger(value.checkedRevision) ? [value.checkedRevision] : [])]
   if (revisions.length && Math.max(...revisions) < chapter.revision) {
-    throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '这份检查报告后的修订已保存，旧报告不能继续驱动新版正文改写。将同一轮修改合并为一个完整补丁；保留当前稿件，在既有检查次数内复核，不能逐句重复修订。')
+    throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '这份检查报告后的修订已保存，旧报告不能继续驱动新版正文改写。将同一轮修改合并为一个完整补丁；保留当前稿件，在既有检查次数内复核，不能逐句重复修订。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
   }
 }
 
