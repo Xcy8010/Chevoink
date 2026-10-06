@@ -2,6 +2,10 @@ name: Document import native acceptance
 
 on:
   workflow_dispatch:
+  # Weekly pin-drift sentinel: exact Debian pins must fail fast when the
+  # security suite rotates them (u6->u7 recurred once already, then u7->u8).
+  schedule:
+    - cron: '0 3 * * 1'
   pull_request:
     paths:
       - 'workers/document-import/**'
