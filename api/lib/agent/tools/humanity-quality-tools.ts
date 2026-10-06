@@ -27,6 +27,7 @@ import {
   persistHumanityQualityReport,
   recordQualityFindingFeedback,
   resolveQualityChapterTarget,
+  reserveQualityAutoRepair,
   renderQualityLearning,
   renderVoiceAndAnchorContext,
   saveCharacterVoiceProfile,
@@ -35,7 +36,8 @@ import {
 } from '../humanity-quality.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
-import { qualityReportMatchesContent } from '../quality-report-contract.js'
+import { REPAIR_BLOCK_CODES, REPAIR_CHANNEL_CODES, qualityReportMatchesContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
+import { probeChapterReviewRevision } from '../chapter-review-guard.js'
 import { coerceCriticFindings, correctQualityEvidence, qualityEvidenceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
 import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/writing.js'
 import { renderChapterWritingBackground } from '../writing-request-context.js'
@@ -135,7 +137,41 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
   ctx.signal.throwIfAborted()
   const warningCount = report.findings.filter(finding => finding.severity === 'warning').length
   const advisoryCount = report.findings.filter(finding => finding.severity === 'advisory').length
-  const reason = '本次只保存检查意见，正文未改动；修订须由原始请求明确授权'
+  const automatic = ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(report.chapterId)
+  const selected = automatic && qualityAutoRepairPending(report) ? selectAutomaticQualityFindings(report.findings) : []
+  if (selected.length) {
+    ctx.signal.throwIfAborted()
+    try {
+      // 付费前只读探测：同一次合并修订的准入由守卫统一判定（新稿质量通道或原始修复
+      // 授权），被拒时不预约、不调用修订模型，正文与报告保持原样。
+      const probe = await prisma.$transaction(tx => probeChapterReviewRevision(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },
+        { id: report.chapterId, revision: report.chapterRevision }, { requireQualityChannel: true }))
+      if (!probe.open) return { output: `质量报告 ${report.id}已保留，自动修订未应用：${probe.message}剩余意见保留待审，不重复自动改写。${bindingSuffix}`,
+        summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
+      if (await reserveQualityAutoRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id })) {
+        const repaired = await applySelectedQualityRepairs(ctx, report, selected)
+        if (repaired) {
+          const remaining = repaired.report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
+          return {
+            output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。质量报告已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 只读复核当前版本。${bindingSuffix}`,
+            summary: `人类感质量检查 · 自动修订 ${repaired.patchCount} 处`, display: reportDisplay(repaired.report),
+            snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },
+          }
+        }
+        return { output: `质量检查已完成：${warningCount} 个需关注问题、${advisoryCount} 个建议；已尝试集中修订，但未获得可安全验证且实际改变正文的补丁，正文未修改，意见保留待审。同一报告不循环重试。${bindingSuffix}`,
+          summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
+      }
+    } catch (error) {
+      ctx.signal.throwIfAborted()
+      if (!(error instanceof DataAccessError) || !REPAIR_BLOCK_CODES.has(error.code)) throw error
+      const stale = !REPAIR_CHANNEL_CODES.has(error.code)
+      return { ...(stale ? { outcome: 'failed' as const } : {}),
+        output: `质量报告已保留，自动修订未应用：${error.message}${stale ? '当前证据或版本不可用于本次修订，不能据此宣称已修复或直接提交；请核对当前正文与报告。' : '剩余意见保留待审，不重复自动改写。'}${bindingSuffix}`,
+        summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
+    }
+  }
+  const reason = !automatic ? '本次只保存检查意见，正文未改动；修订须由原始请求明确授权'
+    : report.findings.length ? '自动修订已尝试、报告不属于当前修订任务或没有待处理的安全候选；剩余意见仍保留待审' : '未发现有证据的问题'
   return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.status === 'passed' ? '当前报告无需关注项' : '不能宣称质量检查通过，剩余意见保留待审，不要求为清零意见改稿'}。${bindingSuffix}`,
     summary: cached ? '复用当前质量报告' : `人类感质量检查 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
 }
@@ -155,7 +191,8 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
       )
     } catch (error) {
       ctx.signal.throwIfAborted()
-      if (error instanceof DataAccessError) throw error
+      // 空响应是供应商的瞬时失败：交给第二轮只重试缺失项，不当成整次修订失败。
+      if (error instanceof DataAccessError && error.code !== 'AI_PROVIDER_EMPTY_RESPONSE') throw error
       // 修订器不可用时保留报告与正文，交回用户稍后重试，不把质量检查标成执行失败。
       continue
     }
@@ -183,13 +220,13 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
 export const qualityAnalyzeTool = defineTool({
   name: 'quality_analyze',
   title: '人类感质量检查',
-  description: 'Humanity Quality Gate 的 CHECK 步骤。用于评估整章或完整长场景的人类感质量：当作者明确要求判断「有没有 AI 味 / 像不像 AI 写的」「文风是否自然、像真人」「要不要通篇精修润色」，或在整章写完要求深度审阅、或 Story Compiler 进入 CHECK 时，可调用本工具，而不是自己只读正文下结论。服务端先运行确定性统计，再启动与 Writer 隔离的 Critic；每条模型意见必须逐字定位正文才能保存。本工具始终只保存报告，不改写正文；修订需要原始请求明确授权。标题、元数据、局部错字、单句润色、纯剧情/设定/写作建议等普通问答禁止触发。不得把科幻术语、华丽文风、口语或无悬念结尾按词表误判。',
+  description: 'Humanity Quality Gate 的 CHECK 步骤。用于评估整章或完整长场景的人类感质量：当作者明确要求判断「有没有 AI 味 / 像不像 AI 写的」「文风是否自然、像真人」「要不要通篇精修润色」，或在整章写完要求深度审阅、或 Story Compiler 进入 CHECK 时，都必须调用本工具，而不是自己只读正文下结论。服务端先运行确定性统计，再启动与 Writer 隔离的 Critic；每条模型意见必须逐字定位正文才能保存。严谨创作会在同一次调用内有界自动修订，平衡延续与大胆探索只展示报告。标题、元数据、局部错字、单句润色、纯剧情/设定/写作建议等普通问答禁止触发。不得把科幻术语、华丽文风、口语或无悬念结尾按词表误判。',
   parameters: z.object({
     chapterId: z.string().min(1).optional().describe('目标章节编号，从 chapter_read 或作品目录取得；独立检查既有章只需本参数，不用准备章节'),
     compilationId: z.string().min(1).optional().describe('当前写作流水线的编译编号；独立审阅省略，不要把它当 chapterId'),
   }),
-  permission: READ,
-  readOnly: true,
+  permission: CONTENT_WRITE,
+  readOnly: false,
   coerceArgs(raw) {
     const unwrapped = coerceToolArgumentEnvelope(raw)
     if (!unwrapped || typeof unwrapped !== 'object' || Array.isArray(unwrapped)) return unwrapped

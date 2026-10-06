@@ -5,15 +5,20 @@ import { continuityCheckRounds, continuityRepairRounds, MAX_CONTINUITY_CHECKS } 
 import { readOriginalTaskRequest, originalTaskRunIds, hasOriginalRepairAuthority } from './original-request.js'
 import { activeChapterScope } from '../data/internal.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches } from './compiler-continuity-contract.js'
+import { qualityReportMatchesContent, selectAutomaticQualityFindings } from './quality-report-contract.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 
 /** A review cannot enlarge the author's request. This guard runs in the same
  * manuscript transaction as CAS, for legacy, durable and quality repair writes.
- * It never promotes failed/stale reports into a current quality conclusion. */
+ * It never promotes failed/stale reports into a current quality conclusion.
+ * A fresh draft may spend one merged correction on either a current-version
+ * factual error or a complete current quality report; strict-mode quality
+ * repair declares itself so it never consumes the factual channel first. */
 export async function assertChapterReviewRevision(
   tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string },
   chapter: { id: string; revision: number },
+  options?: { requireQualityChannel?: boolean; pendingQuality?: { compilationId: string; candidates: number } },
 ) {
   await lockNovelActiveScope(tx, subject.novelId)
   const original = await readOriginalTaskRequest(tx, subject)
@@ -60,7 +65,13 @@ export async function assertChapterReviewRevision(
     const validation = value && typeof value === 'object' && !Array.isArray(value) ? value : null
     const findings = Array.isArray(validation?.findings) ? validation.findings.map(item => continuityFindingInputSchema.safeParse(item)) : null
     const errorCount = findings?.filter(item => item.success && item.data.severity === 'error').length ?? 0
-    if (authority && current && compilations.every(item => continuityRepairRounds(item.validation) === 0)
+    // A pending current-version factual error keeps the continuity channel open
+    // for one merged correction; quality repair declares itself so it cannot
+    // consume that channel before the facts are fixed.
+    const factualWindow = !!latest && latest.status === 'active' && !!latest.bridge && !latest.bridge.committedAt
+      && !!validation && validation.independentCheck === 'complete' && validation.checkedChapterId === current?.id
+      && validation.checkedRevision === current?.revision && errorCount > 0 && validation.errorCount === errorCount
+    if (!options?.requireQualityChannel && authority && current && compilations.every(item => continuityRepairRounds(item.validation) === 0)
       && latest?.status === 'active' && latest.stage === 'check' && latest.bridge && !latest.bridge.committedAt
       && latest.bridge.toChapterId === current.id && latest.bridge.targetRevision === current.revision
       && latest.sceneTasks.length >= 1 && latest.sceneTasks.length <= 4
@@ -81,12 +92,59 @@ export async function assertChapterReviewRevision(
         }
       }
     }
-    throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '本任务的原始作者请求未授权检查后改写正文。检查警告、建议、失败或旧意见都不授予改稿权限；保留连贯正文与报告，停止自动修订。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
+    if (authority && current && !factualWindow && compilations.every(item => continuityRepairRounds(item.validation) === 0)) {
+      // The same merged correction also admits strict-mode quality advice: a
+      // complete report bound to the active compilation may repair once, so
+      // authored advice is applied instead of handed back unread.
+      const qualityReports = await tx.chapterQualityReport.findMany({
+        where: { userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, runId: { in: runIds } },
+        include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      })
+      const quality = qualityReports.find(item => !!item.compilationId && item.repairRound === 0
+        && qualityReportMatchesContent(item, current.revision, current.content)
+        && selectAutomaticQualityFindings(item.findings).length > 0
+        && compilations.some(compilation => compilation.id === item.compilationId && compilation.status === 'active'
+          && compilation.bridge && !compilation.bridge.committedAt))
+      // A pre-payment probe runs before the pending report exists: it models the
+      // complete report the same caller is about to persist (same revision,
+      // same candidates). The write itself still requires the persisted report.
+      const bound = quality ? compilations.find(item => item.id === quality.compilationId)!
+        : options?.pendingQuality && options.pendingQuality.candidates > 0
+          ? compilations.find(item => item.id === options.pendingQuality!.compilationId && item.status === 'active'
+            && item.bridge && !item.bridge.committedAt)
+          : undefined
+      if (bound) {
+        return async () => {
+          await tx.storyCompilation.update({ where: { id: bound.id }, data: { validation: {
+            ...(bound.validation && typeof bound.validation === 'object' && !Array.isArray(bound.validation) ? bound.validation : {}),
+            newDraftRevision: { version: 1, taskId: authority.taskId, chapterId: current.id, compilationId: bound.id, checkedRevision: current.revision },
+          } as Prisma.InputJsonValue } })
+        }
+      }
+    }
+    throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '本任务的原始作者请求未授权检查后改写正文，当前也没有可授权一次合并修订的完整证据（新稿通道需要当前版本、绑定活跃编译的完整检查与可修订候选）。保留连贯正文与报告，停止自动修订。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
   }
   const revisions = [...reports.map(item => item.chapterRevision), ...validations.flatMap(value =>
     typeof value.checkedRevision === 'number' && Number.isSafeInteger(value.checkedRevision) ? [value.checkedRevision] : [])]
   if (revisions.length && Math.max(...revisions) < chapter.revision) {
     throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '这份检查报告后的修订已保存，旧报告不能继续驱动新版正文改写。将同一轮修改合并为一个完整补丁；保留当前稿件，在既有检查次数内复核，不能逐句重复修订。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
+  }
+}
+
+/** Shared read-only probe for commit gates and pre-payment tool checks: it runs
+ * the same admission checks and returns the rejection reason without ever
+ * consuming the correction. Quality repair callers pass requireQualityChannel
+ * so a pending factual error keeps its own channel; durable callers add
+ * pendingQuality to model the report they are about to persist. */
+export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
+  subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number },
+  options?: { requireQualityChannel?: boolean; pendingQuality?: { compilationId: string; candidates: number } }): Promise<{ open: true } | { open: false; message: string }> {
+  try {
+    await assertChapterReviewRevision(tx, subject, chapter, options)
+    return { open: true }
+  } catch (error) {
+    if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) return { open: false, message: error.message }
+    throw error
   }
 }
 
@@ -98,13 +156,7 @@ export async function assertChapterReviewRevision(
  * report. The CAS callback is deliberately dropped here. */
 export async function isChapterRevisionChannelOpen(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number }): Promise<boolean> {
-  try {
-    await assertChapterReviewRevision(tx, subject, chapter)
-    return true
-  } catch (error) {
-    if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) return false
-    throw error
-  }
+  return (await probeChapterReviewRevision(tx, subject, chapter)).open
 }
 
 /** Read-only tool feedback uses the same admission checks. The returned CAS

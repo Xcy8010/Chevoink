@@ -11,6 +11,12 @@ vi.mock('../../api/lib/agent/humanity-quality.js', async original => ({
   selectQualityFindings: vi.fn(async () => undefined),
   reserveQualityAutoRepair: vi.fn(async () => true),
 }))
+// 自动修订前的准入探测在真实事务里读守卫表；本组只验证模型运行时继承，按模块隔离守卫。
+const guard = vi.hoisted(() => ({ probe: vi.fn(async () => ({ open: true })) }))
+vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({
+  probeChapterReviewRevision: guard.probe, assertChapterReviewRevision: vi.fn(async () => undefined),
+  isChapterRevisionChannelOpen: vi.fn(async () => true), readChapterReviewRevisionGuidance: vi.fn(async () => ''),
+}))
 import { auxiliaryTextModel } from '../../api/lib/agent/auxiliary-text-model.js'
 import { qualityAnalyzeTool, qualityRevisionApplyTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
@@ -168,10 +174,12 @@ describe('auxiliary text model inheritance', () => {
       return options.action === 'agent3HumanityCritic' ? '{"findings":[]}' : 'invalid repair JSON'
     })
     const checked = await qualityAnalyzeTool.execute({ ...context(selected), creativeFreedom: 'balanced' }, {})
-    expect(mocks.complete.mock.calls.map(call => call[2].action)).toEqual(['agent3HumanityCritic'])
+    // 严谨模式在同一次调用内集中修订；清空意见后模型两次都返回非法 JSON，正文保持原样。
+    expect(mocks.complete.mock.calls.map(call => call[2].action)).toEqual(['agent3HumanityCritic', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry'])
+    expect(checked.summary).toContain('修订未应用')
     expect(checked.snapshot).toBeUndefined()
     const result = await qualityRevisionApplyTool.execute(context(selected), { reportId: 'report' })
-    expect(mocks.complete.mock.calls.map(call => call[2].action)).toEqual(['agent3HumanityCritic', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry'])
+    expect(mocks.complete.mock.calls.map(call => call[2].action)).toEqual(['agent3HumanityCritic', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry'])
     for (const call of mocks.complete.mock.calls) expect(call[2].modelRuntime).toBe(selected)
     expect(result.output).toContain('正文保持不变')
     expect(result.snapshot).toBeUndefined()

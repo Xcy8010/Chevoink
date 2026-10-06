@@ -2,6 +2,31 @@ import { createHash } from 'node:crypto'
 
 type RepairFinding = { severity: string; startOffset: number; endOffset: number; disposition?: string; authorFeedback?: string | null }
 
+/** 自动修订的可预期拦截：保留报告与正文；通道关闭类只提示、不判失败；
+ * 过期证据或范围冲突仍返回失败，不能冒充已修复。 */
+export const REPAIR_BLOCK_CODES = new Set([
+  'QUALITY_REPAIR_LIMIT',
+  'QUALITY_REPORT_STALE',
+  'QUALITY_EVIDENCE_STALE',
+  'QUALITY_PATCH_OVERLAP',
+  'QUALITY_FINDING_SCOPE_INVALID',
+  'QUALITY_REPAIR_NO_CHANGE',
+  'QUALITY_COMPILATION_SCOPE_INVALID',
+  'QUALITY_RUN_SCOPE_INVALID',
+  'REPAIR_NOT_AUTHORIZED',
+  'REVIEW_AUTOMATION_STOPPED',
+  'REVIEW_REPAIR_RECHECK_REQUIRED',
+])
+
+/** 通道关闭类不是证据失效：只提示原因，不把工具标成失败。 */
+export const REPAIR_CHANNEL_CODES = new Set([
+  'QUALITY_REPAIR_LIMIT',
+  'QUALITY_REPAIR_NO_CHANGE',
+  'REPAIR_NOT_AUTHORIZED',
+  'REVIEW_AUTOMATION_STOPPED',
+  'REVIEW_REPAIR_RECHECK_REQUIRED',
+])
+
 /** 严谨模式一次集中处理警告与建议；保留优先级、作者拒绝、重叠和数量保护。 */
 export function selectAutomaticQualityFindings<T extends RepairFinding>(findings: T[]): T[] {
   const selected: T[] = []

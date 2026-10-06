@@ -43,7 +43,7 @@ describe('current author genre and reading experience', () => {
     const route = routeSkills({ mode: 'build', intent: 'write', freedom: 'balanced', prompt: '写都市异能爽文第一章，主角兴奋，停在报价前' })
     const skills = buildSkillExecutionDigest(route, 'balanced')
     expect(skills).toContain('低修辞预算只控制无功能修饰，不代表低情绪')
-    expect(skills).toContain('检查可选且默认只读')
+    expect(skills).toContain('集中做一次有界自动修订')
     expect(skills).not.toContain('默认执行证据化连续性修订和人类感质量建议')
   })
 

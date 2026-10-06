@@ -279,10 +279,10 @@ describe.runIf(available)('durable quality actual tool chain', () => {
             ? JSON.stringify({ findings: [{ signal: 'emotion_grounding', severity: 'advisory', quote: '错误引用', explanation: '需要更具体动作', suggestion: '保留待审', confidence: 0.9 }] })
             : requests === 2 ? JSON.stringify({ corrections: [{ index: 0, quote: scenario === 'evidence-corrected' ? '原文' : '仍不存在' }] })
               : '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}'
-          : scenario === 'full-chain' ? [
+          : scenario === 'full-chain' ? ([
             '{"findings":[{"signal":"body","severity":"warning","evidence":"原文承接不足","suggestion":"局部澄清"}],"patches":[{"oldText":"原文","newText":"新文"}]}',
             '{"findings":[{"signal":"emotion_grounding","severity":"advisory","quote":"原文","explanation":"需要具体动作","suggestion":"局部落实","confidence":0.9}],"patches":[{"key":"emotion_grounding:0:2","replacement":"禁止改写"}]}',
-          ][requests - 1] : scenario === 'context-change' ? '{"findings":[]}' : scenario === 'format' || scenario === 'format-retry' && requests === 2 ? 'broken JSON'
+          ][requests - 1] ?? '{"patches":[]}') : scenario === 'context-change' ? '{"findings":[]}' : scenario === 'format' || scenario === 'format-retry' && requests === 2 ? 'broken JSON'
           : requests === 1 ? JSON.stringify({ findings: repairing || scenario === 'protected' ? [{ signal: 'emotion_grounding', severity: 'warning', quote: '原文', explanation: '缺少动作', suggestion: '改成新文', confidence: 0.9 }] : [] })
           : '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}'
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: scenario === 'truncated' ? 'length' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
@@ -344,6 +344,8 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       const result = await step()
       const failed = ['evidence-unresolved', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale'].includes(scenario)
+      const userEdited = ['stale-chapter', 'repair-stale', 'legacy-quality-stale', 'v2-quality-stale'].includes(scenario)
+      const repairedOnDisk = ['repair', 'evidence-corrected', 'format-retry', 'rollback-resume'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('质量检查') } })
       if (scenario === 'context-change') { await prisma.novel.update({ where: { id: f.novelId }, data: { categoryName: '新的题材边界' } }); expect(await step()).toMatchObject({ result: { summary: '人类感质量检查' } }) }
       if (scenario === 'success' || scenario === 'repair') expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
@@ -353,12 +355,15 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('completed')
         expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(2)
       }
-      const expectedRequests = scenario === 'missing' ? 0 : ['full-chain', 'context-change', 'evidence-corrected', 'evidence-unresolved'].includes(scenario) ? 2 : 1
+      const expectedRequests = scenario === 'missing' ? 0
+        : scenario === 'full-chain' ? 4
+        : ['evidence-corrected', 'format-retry'].includes(scenario) ? 3
+        : ['context-change', 'evidence-unresolved', 'repair', 'rollback-resume', 'repair-stale'].includes(scenario) ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-      expect(chapter.content).toBe(scenario === 'stale-chapter' || scenario === 'repair-stale' || (scenario === 'legacy-quality-stale' || scenario === 'v2-quality-stale') ? '用户新文' : before)
-      expect(chapter.revision).toBe(['stale-chapter', 'repair-stale', 'legacy-quality-stale', 'v2-quality-stale'].includes(scenario) ? 2 : 1)
+      expect(chapter.content).toBe(userEdited ? '用户新文' : repairedOnDisk ? '新文' : before)
+      expect(chapter.revision).toBe(userEdited || repairedOnDisk ? 2 : 1)
       if (scenario === 'standalone') {
         expect(await prisma.chapterQualityReport.count({ where: { chapterId: f.chapterId, compilationId: null } })).toBe(1)
         return
@@ -368,7 +373,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale'].includes(scenario)) expect(reports).toHaveLength(0)
       else {
         expect(reports).toHaveLength(scenario === 'context-change' ? 2 : 1)
-        expect(reports[0]).toMatchObject({ chapterRevision: 1, repairRound: 0, status: failed ? 'failed' : repairing && scenario !== 'evidence-corrected' || scenario === 'protected' ? 'needs_repair' : 'passed' })
+        expect(reports[0]).toMatchObject({ chapterRevision: repairedOnDisk ? 2 : 1, repairRound: repairedOnDisk ? 1 : 0, status: failed ? 'failed' : repairedOnDisk ? 'repaired' : scenario === 'protected' ? 'needs_repair' : 'passed' })
         expect(reports[0].criticVersion).toBe(oldWorkVersion === 1 ? 'humanity-critic.v2' : oldWorkVersion === 2 ? 'humanity-critic.v3' : 'humanity-critic.v4')
       }
       if (admittedLegacy) {
@@ -376,13 +381,12 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(fetchMock).toHaveBeenCalledOnce()
       }
       if (scenario === 'evidence-corrected' || scenario === 'full-chain') {
-        expect(reports[0].findings).toMatchObject([{ severity: 'advisory', evidenceExcerpt: '原文', disposition: 'pending' }])
+        expect(reports[0].findings).toMatchObject([{ severity: 'advisory', evidenceExcerpt: '原文', disposition: repairedOnDisk ? 'repaired' : 'pending' }])
         expect(reports[0].deterministicMetrics).toMatchObject({ independentCheck: 'complete', contentHash: createHash('sha256').update(before).digest('hex') })
       }
-      if (repairing && scenario !== 'repair-stale') {
-        expect(chapter.revision).toBe(1)
-        expect(saved.stage).toBe('check')
-        expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).targetRevision).toBeNull()
+      if (repairedOnDisk) {
+        expect(saved.stage).toBe('repair')
+        expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).targetRevision).toBe(2)
       }
       const events = await publishDurableEvents(f.userId, lease.runId)
       expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'quality_analyze')).toMatchObject(['success', 'repair', 'context-change'].includes(scenario) ? [{ ok: true }, { ok: true }] : [{ ok: !failed }])
@@ -390,7 +394,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
   })
 })
 
-describe.runIf(available).each(['continuity', 'quality'] as const)('只读检查复用当前真实报告 %s', family => {
+describe.runIf(available).each(['continuity', 'quality'] as const)('真实报告复用与严谨模式自动修订 %s', family => {
   it.each(['apply', 'empty', 'stable', 'bold', 'protected', 'cancelled', 'stale', 'rollback-resume'] as const)('%s 保留正文、真实版本和原付费回执', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
@@ -431,11 +435,15 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('只读检查
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'cached-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
       const signal = new AbortController()
+      const repaired = scenario === 'apply' || scenario === 'rollback-resume'
       const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
         const body = JSON.parse(String(init.body))
-        expect(body.messages[1].content).toContain('作者新文')
+        // 复查请求逐字携带作者新正文；修订请求逐字携带待修订的证据 key。
+        if (scenario === 'stale') expect(body.messages[1].content).toContain('作者新文')
+        else expect(body.messages[1].content).toContain('emotion_grounding:0:2')
         if (scenario === 'cancelled') signal.abort()
-        const content = '{"findings":[]}'
+        const content = scenario === 'stale' ? '{"findings":[]}'
+          : repaired ? '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}' : '{"patches":[]}'
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       })
       vi.stubGlobal('fetch', fetchMock)
@@ -466,21 +474,25 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('只读检查
         if (result.kind === 'tool') expect(result.result.outcome).not.toBe('failed')
         await step()
       }
-      const requests = scenario === 'stale' ? 1 : 0
+      // 严谨模式下质量通道在同一次检查内自动修订一次；回滚续跑重放不重复计费。
+      const repairedQuality = family === 'quality' && repaired
+      const requests = family === 'continuity' ? (scenario === 'stale' ? 1 : 0)
+        : scenario === 'empty' ? 2 : scenario === 'stale' || repaired ? 1 : 0
       expect(fetchMock).toHaveBeenCalledTimes(requests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(requests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-      expect(chapter.content).toBe(scenario === 'stale' ? '作者新文' : '原文')
-      expect(chapter.revision).toBe(scenario === 'stale' ? 2 : 1)
+      expect(chapter.content).toBe(scenario === 'stale' ? '作者新文' : repairedQuality ? '新文' : '原文')
+      expect(chapter.revision).toBe(scenario === 'stale' || repairedQuality ? 2 : 1)
       if (family === 'quality') {
         expect(originalReportId).toBeDefined()
         const report = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: originalReportId } })
-        expect(report.chapterRevision).toBe(1)
-        expect(report.repairRound).toBe(0)
+        expect(report.chapterRevision).toBe(repairedQuality ? 2 : 1)
+        expect(report.repairRound).toBe(repairedQuality ? 1 : 0)
         expect(await prisma.chapterQualityReport.count({ where: { chapterId: f.chapterId } })).toBe(scenario === 'stale' ? 2 : 1)
         if (scenario === 'stale') expect(await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: f.chapterId, chapterRevision: 2 } })).toMatchObject({
           repairRound: 0, deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update('作者新文').digest('hex') } })
-        expect(report.deterministicMetrics).not.toHaveProperty('autoRepairAttempted', true)
+        if (repairedQuality || scenario === 'empty') expect(report.deterministicMetrics).toMatchObject({ autoRepairAttempted: true })
+        else expect(report.deterministicMetrics).not.toHaveProperty('autoRepairAttempted', true)
       } else {
         const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
         expect(saved.validation).toMatchObject({ checkedRevision: scenario === 'stale' ? 2 : 1 })

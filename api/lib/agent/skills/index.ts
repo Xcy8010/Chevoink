@@ -290,7 +290,7 @@ const legacySkillAliases: Record<string, string> = {
 function freedomGuidance(freedom: CreativeFreedom): string {
   if (freedom === 'stable') return '创作模式：平衡延续。优先承接已有文风、人物轨迹与段落节奏，只修明确错误，不主动清洗作者有意保留的不规则表达。'
   if (freedom === 'bold') return '创作模式：大胆探索。允许明显的场景、结构和表达创新，优先打开新可能；核心设定和不可逆剧情仍服从作者与故事事实，质量报告只提示不自动改写。'
-  return '创作模式：严谨创作。守住人物知识、因果、时空和已确立世界规则，服从本次作者类型与情绪承诺；严谨不等于克制。连续性与人类感检查可选且默认只读，审美建议不自动改写；修订须由原始作者请求明确授权。'
+  return '创作模式：严谨创作。守住人物知识、因果、时空和已确立世界规则，服从本次作者类型与情绪承诺；严谨不等于克制。连续性与人类感检查可选；本任务新稿的人类感警告与建议会在检查内集中做一次有界自动修订（剩余意见保留待审，不追求清零）。既有章节与范围外修订仍须作者明确授权。'
 }
 
 export function inferSkillPhase(intent: TaskIntent): SkillPhase {

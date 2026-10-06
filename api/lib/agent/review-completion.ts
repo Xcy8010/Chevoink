@@ -5,9 +5,10 @@ import { env } from '../../config/env.js'
 export const REVIEW_MAX_OUTPUT_TOKENS = 16_384
 const RECOVERY_MAX_OUTPUT_TOKENS = 32_768
 
-/** Only a provider-confirmed output ceiling permits this separately billed,
- * bounded recovery. Unknown responses, transport errors and cancellation never
- * redispatch here. The caller still validates the complete report and revision. */
+/** Only a provider-confirmed failure (output ceiling or empty completion)
+ * permits this separately billed, bounded recovery. Unknown responses,
+ * transport errors and cancellation never redispatch here. The caller still
+ * validates the complete report and revision. */
 export async function generateReviewCompletion(
   system: string,
   content: string,
@@ -29,12 +30,16 @@ export async function generateReviewCompletion(
       return result
     } catch (error) {
       signal.throwIfAborted()
-      if (!(error instanceof DataAccessError) || error.code !== 'AI_PROVIDER_OUTPUT_LIMIT') throw error
+      if (!(error instanceof DataAccessError) || !['AI_PROVIDER_OUTPUT_LIMIT', 'AI_PROVIDER_EMPTY_RESPONSE'].includes(error.code)) throw error
       await beforeRecovery?.()
       signal.throwIfAborted()
       // Recovery shares the original deadline and model; it cannot buy more time.
+      // An empty completion is transient, not truncation: retry once on the same
+      // review budget instead of escalating it.
+      const empty = error.code === 'AI_PROVIDER_EMPTY_RESPONSE'
       const result = await generateTextCompletion(system, content, {
-        ...options, action: `${options.action}OutputRecovery`, maxOutputTokens: RECOVERY_MAX_OUTPUT_TOKENS, boundedReview: true,
+        ...options, action: `${options.action}${empty ? 'EmptyRecovery' : 'OutputRecovery'}`,
+        maxOutputTokens: empty ? REVIEW_MAX_OUTPUT_TOKENS : RECOVERY_MAX_OUTPUT_TOKENS, boundedReview: true,
       })
       signal.throwIfAborted()
       return result

@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as original from '../../api/lib/agent/original-request.js'
 import * as lock from '../../api/lib/data/novel-write-lock.js'
-import { assertChapterReviewRevision, isChapterRevisionChannelOpen } from '../../api/lib/agent/chapter-review-guard.js'
+import { assertChapterReviewRevision, isChapterRevisionChannelOpen, probeChapterReviewRevision } from '../../api/lib/agent/chapter-review-guard.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { readNewDraftWritingAuthority, prohibitsNewDraftRevision } from '../../api/lib/agent/writing-scope.js'
@@ -47,11 +48,11 @@ describe('review driven manuscript mutation admission', () => {
     const f = fixture('写下一章', null)
     f.subject.runId = direction === 'parent' ? 'original-run' : 'child-run'
     vi.mocked(original.originalTaskRunIds).mockResolvedValue(['original-run', 'child-run'])
-    vi.mocked(f.db.storyCompilation.findMany).mockImplementation(async args => {
+    vi.mocked(f.db.storyCompilation.findMany).mockImplementation((async (args: Prisma.StoryCompilationFindManyArgs) => {
       const ids = (args?.where?.runId as { in: string[] }).in
       const evidenceRun = direction === 'parent' ? 'child-run' : 'original-run'
       return ids.includes(evidenceRun) ? [{ validation: { checkedRevision: 4, checkRounds: 1, warningCount: 6 } }] as never : []
-    })
+    }) as never)
     await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
     expect(f.db.storyCompilation.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
       runId: { in: ['original-run', 'child-run'] }, userId: 'u', novelId: 'n', chapterId: 'c',
@@ -60,10 +61,10 @@ describe('review driven manuscript mutation admission', () => {
   it('repreparing cannot hide the old checked revision that already drove one patch', async () => {
     const f = fixture('检查并修复当前章', null)
     f.chapter.revision = 5
-    vi.mocked(f.db.storyCompilation.findMany).mockImplementation(async args => [
+    vi.mocked(f.db.storyCompilation.findMany).mockImplementation((async (args: Prisma.StoryCompilationFindManyArgs) => [
       ...(!args?.where?.status ? [{ validation: { checkedRevision: 4, checkRounds: 1 } }] : []),
       { validation: { checkRounds: 1 } },
-    ] as never)
+    ]) as never)
     await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REVIEW_REPAIR_RECHECK_REQUIRED' })
   })
 })
@@ -181,6 +182,43 @@ describe('one atomic factual correction in the original new draft', () => {
     if (scenario === 'committed-window') f.compilation.bridge.committedAt = new Date() as never
     if (scenario === 'later-failure') f.rows.unshift({ ...f.compilation, id: 'later', validation: { ...f.validation, independentCheck: 'unavailable' } })
     await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it('admits one strict-mode quality correction from a complete report bound to the active compilation', async () => {
+    const f = fixture()
+    f.validation.errorCount = 0; f.validation.findings = []
+    const quality = { id: 'q', compilationId: 'compiler', chapterRevision: f.chapter.revision, repairRound: 0, status: 'passed',
+      deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(f.chapter.content).digest('hex') },
+      findings: [{ id: 'q1', severity: 'warning', startOffset: 0, endOffset: 2, disposition: 'pending', authorFeedback: null }] }
+    vi.mocked(f.db.chapterQualityReport.findMany).mockImplementation((async (args: Prisma.ChapterQualityReportFindManyArgs) => (args?.include ? [quality] : []) as never) as never)
+    const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true })
+    expect(consume).toBeTypeOf('function')
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    await consume?.()
+    expect(f.compilation.validation).toMatchObject({ newDraftRevision: { taskId: f.spec.id, chapterId: 'new41', compilationId: 'compiler', checkedRevision: 3 } })
+    expect(f.db.chapterQualityReport.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ include: { findings: true } }))
+  })
+  it('probes a pending strict-mode report on an uncommitted compilation without consuming the correction', async () => {
+    const f = fixture()
+    f.validation.errorCount = 0; f.validation.findings = []
+    const pendingQuality = { compilationId: 'compiler', candidates: 2 }
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality })).resolves.toEqual({ open: true })
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality })).resolves.toEqual({ open: true })
+    f.compilation.bridge.committedAt = new Date() as never
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality })).resolves.toMatchObject({ open: false })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it('keeps the strict-mode channel closed without a complete bound report or with zero candidates', async () => {
+    const f = fixture()
+    f.validation.errorCount = 0; f.validation.findings = []
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true })).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality: { compilationId: 'compiler', candidates: 0 } })).resolves.toMatchObject({ open: false })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it('keeps a pending factual error in its own channel: strict-mode quality repair cannot consume it', async () => {
+    const f = fixture()
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true })).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toBeTypeOf('function')
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
 })

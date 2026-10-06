@@ -5,6 +5,13 @@ import * as aiService from '../../api/lib/ai-service.js'
 import * as review from '../../api/lib/agent/review-completion.js'
 import { selectAutomaticQualityFindings, qualityAutoRepairPending } from '../../api/lib/agent/quality-report-contract.js'
 
+// 自动修订的准入守卫在事务里读真实表；本组用例只验证工具语义，按模块隔离守卫。
+const guard = vi.hoisted(() => ({ probe: vi.fn(), assert: vi.fn(), channel: vi.fn(), guidance: vi.fn() }))
+vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({
+  probeChapterReviewRevision: guard.probe, assertChapterReviewRevision: guard.assert,
+  isChapterRevisionChannelOpen: guard.channel, readChapterReviewRevisionGuidance: guard.guidance,
+}))
+
 import {
   humanityQualitySignalSchema,
   qualityFindingDispositionSchema,
@@ -16,7 +23,7 @@ import { AGENT_TOOL_GOVERNANCE } from '../../api/lib/agent/tools/governance.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import * as humanityQuality from '../../api/lib/agent/humanity-quality.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
-import { DataAccessError } from '../../api/lib/prisma.js'
+import { DataAccessError, prisma } from '../../api/lib/prisma.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 describe('next chapter delivery evidence', () => {
@@ -134,10 +141,13 @@ describe('质量检查工具与编号配对失败回执', () => {
   })
 })
 
-describe('质量检查默认只保存真实报告', () => {
+describe('严谨创作自动落实质量建议', () => {
   afterEach(() => vi.restoreAllMocks())
   const digest = (content: string) => createHash('sha256').update(content).digest('hex')
   function fixture(cached: boolean, behavior = 'apply') {
+    guard.probe.mockReset().mockResolvedValue({ open: true })
+    // 付费前探测与写入守卫走同一准入；这里只验证工具语义，不连接真实事务。
+    vi.spyOn(prisma, '$transaction').mockImplementation(async work => (work as (tx: Prisma.TransactionClient) => Promise<unknown>)({} as Prisma.TransactionClient))
     const content = Array.from({ length: 8 }, (_, index) => `证据${index}。`).join('')
     const chapter = { id: 'c', title: '本章', revision: 1, content, novel: { tagNames: [] } }
     const report = { id: 'q', runId: 'r', compilationId: null, chapterId: 'c', chapterRevision: 1, status: 'passed', repairRound: 0,
@@ -178,6 +188,8 @@ describe('质量检查默认只保存真实报告', () => {
   }
   it('sends the complete author constraints to the critic without adding a repair call', async () => {
     const f = fixture(false)
+    // 只验证 Critic 输入装配时用稳定模式隔离自动修订路径。
+    f.ctx.creativeFreedom = 'stable'
     await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(f.critic.mock.calls[0][1]).toContain(JSON.stringify(f.bundle.originalRequest))
     expect(f.critic.mock.calls[0][1]).toContain('首章收益与情绪强度')
@@ -186,6 +198,7 @@ describe('质量检查默认只保存真实报告', () => {
   })
   it('does not reuse an otherwise valid report for a different original style request', async () => {
     const f = fixture(true)
+    f.ctx.creativeFreedom = 'stable'
     f.bundle.originalRequest = '这次改写成慢热现实故事，不要爽文，仍停在买主报价前。'
     await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(f.critic).toHaveBeenCalledOnce()
@@ -195,6 +208,7 @@ describe('质量检查默认只保存真实报告', () => {
   })
   it('sends historical same-chapter specifications and invalidates old cache when that reference changes, without repair', async () => {
     const f = fixture(true)
+    f.ctx.creativeFreedom = 'stable'
     f.bundle.chapterWritingBackground = [{ sourceRunId: 'old-author', compilationId: 'old-compiler',
       prompt: '周砚29岁，设备维护员；低谷一段；1800字；问价前停笔。' }]
     await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
@@ -204,17 +218,13 @@ describe('质量检查默认只保存真实报告', () => {
     expect(f.critic.mock.calls[0][1]).toContain('不是执行授权')
     expect(f.write).not.toHaveBeenCalled()
   })
-  it.each([false, true])('eight advisory findings preserve prose and never dispatch a repair, cached=%s', async cached => {
+  it.each([false, true])('0关注8建议全部进入一次安全修订，缓存=%s', async cached => {
     const f = fixture(cached)
-    const before = JSON.stringify(f.report)
-    const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
-    expect(result.output).toContain('正文未改动')
-    expect(result.display?.kind).toBe('qualityReport')
+    expect(await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })).toMatchObject({ summary: '人类感质量检查 · 自动修订 8 处' })
     expect(f.critic).toHaveBeenCalledTimes(cached ? 0 : 1)
-    expect(f.model).not.toHaveBeenCalled()
-    expect(f.reserve).not.toHaveBeenCalled()
-    expect(f.write).not.toHaveBeenCalled()
-    expect(JSON.stringify(f.report)).toBe(before)
+    expect(f.model).toHaveBeenCalledOnce()
+    expect(f.write.mock.calls[0][0].replacements).toHaveLength(8)
+    expect(f.report.findings.every(item => item.disposition === 'repaired')).toBe(true)
   })
   it.each(['stable', 'bold', 'protected', 'review', 'attempted', 'repaired', 'rejected', 'cancelled'] as const)('%s 不生成越权或重复修订', async scenario => {
     const f = fixture(true)
@@ -233,9 +243,9 @@ describe('质量检查默认只保存真实报告', () => {
   it.each(['no-op', 'duplicate', 'stale'])('%s 不伪报已修改，缓存不再派发', async behavior => {
     const f = fixture(true, behavior)
     const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
-    expect(result.output).toContain('正文未改动')
-    expect(f.write).not.toHaveBeenCalled()
-    expect(f.reserve).not.toHaveBeenCalled()
+    expect(result.summary).toContain('修订未应用')
+    if (behavior === 'stale') expect(result.outcome).toBe('failed')
+    else expect(f.write).not.toHaveBeenCalled()
     const calls = f.model.mock.calls.length
     await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(f.model).toHaveBeenCalledTimes(calls)
