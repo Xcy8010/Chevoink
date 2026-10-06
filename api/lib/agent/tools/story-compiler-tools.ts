@@ -754,13 +754,14 @@ export const chapterBridgeCommitTool = defineTool({
     }
     try {
       const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...terminal, expectedChapterRevision: compilation.chapter.revision, expectedContentHash: createHash('sha256').update(compilation.chapter.content).digest('hex') }, ctx.transaction)
+      const retained = result.retainedIssueCount ? `本次有 ${result.retainedIssueCount} 条已核验错误超出自动修订边界（修订次数已用尽或未获授权），已随检查报告保留交作者决定，不得宣称检查通过；作者可在输入框重新发送明确指令继续处理。` : ''
       return {
-        output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge 与 Scene Task 终态已提交。章节提交不代表连续性或质量检查通过；缺失、失败或旧版报告仍为未确认，关注意见仍保留待审。故事记忆仅提交候选，作者确认前不参与事实召回。${result.skippedMemoryCount ? `其中 ${result.skippedMemoryCount} 项记忆因作者已删除而跳过，未重建；不影响章节终态提交。` : ''}本任务仅在原请求范围内交付。`,
+        output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge 与 Scene Task 终态已提交。章节提交不代表连续性或质量检查通过；缺失、失败或旧版报告仍为未确认，关注意见仍保留待审。${retained}故事记忆仅提交候选，作者确认前不参与事实召回。${result.skippedMemoryCount ? `其中 ${result.skippedMemoryCount} 项记忆因作者已删除而跳过，未重建；不影响章节终态提交。` : ''}本任务仅在原请求范围内交付。`,
         requiredResult: { targetId: result.chapterId, contentHash: persistedContentHash(compilation.chapter.content) },
         summary: '提交章节桥与当前故事终态',
         display: {
           kind: 'storyCompiler', compilationId: result.compilationId, phase: 'commit', title: '章节终态已提交',
-          detail: `r${result.chapterRevision}`, items: [terminal.chapterSummary, terminal.lastUnfinishedAction ? `未完成动作：${terminal.lastUnfinishedAction}` : '未留未完成动作', `结尾结构：${terminal.endingStructure}`],
+          detail: `r${result.chapterRevision}`, items: [terminal.chapterSummary, terminal.lastUnfinishedAction ? `未完成动作：${terminal.lastUnfinishedAction}` : '未留未完成动作', `结尾结构：${terminal.endingStructure}`, ...(result.retainedIssueCount ? [`保留 ${result.retainedIssueCount} 条已核验意见交作者决定`] : [])],
         },
       }
     } catch (error) {

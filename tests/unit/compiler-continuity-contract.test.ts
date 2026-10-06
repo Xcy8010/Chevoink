@@ -6,7 +6,10 @@ import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import * as manuscript from '../../api/lib/agent/manuscript-scope.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 
-afterEach(() => vi.restoreAllMocks())
+const revisionChannel = vi.hoisted(() => vi.fn())
+vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({ isChapterRevisionChannelOpen: revisionChannel }))
+
+afterEach(() => { vi.restoreAllMocks(); revisionChannel.mockReset() })
 const input = () => ({ chapter: { id: 'c', title: '本章', revision: 2, content: '修订后的完整正文', orderIndex: 2 },
   bridge: { fromChapterId: 'source', sourceRevision: 1, location: '城门' }, sceneTasks: [{ ordinal: 1, goal: '寻找钥匙', turn: '发现门已锁' }],
   source: { id: 'source', revision: 1, content: '前章完整正文' } })
@@ -90,6 +93,46 @@ describe('compiler continuity report dependencies', () => {
     } as unknown as Prisma.TransactionClient
     await validateStoryContinuity({ userId: 'u', novelId: 'n', compilationId: 'comp', expectedChapterRevision: 2, independentCheck: 'complete', findings: [] }, db)
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ validation: expect.objectContaining({ newDraftRevision: marker, checkRounds: 2, autoRepairRounds: 1 }) }) }))
+  })
+})
+
+describe('terminal commit gate follows the revision channel', () => {
+  const fixture = () => {
+    const current = input(), bridge = { ...current.bridge, fromChapterId: null }
+    const coverage = compilerContinuityCoverage({ ...current, bridge, source: null })
+    const terminalWrite = vi.fn()
+    const db = { $queryRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = strings.join('?')
+      if (sql === 'SELECT id FROM novels WHERE id = ? FOR UPDATE' && values[0] === 'n') return [{ id: 'n' }]
+      if (sql === 'SELECT id FROM story_compilations WHERE id = ? AND user_id = ? AND novel_id = ? FOR UPDATE'
+        && values[0] === 'comp' && values[1] === 'u' && values[2] === 'n') return [{ id: 'comp' }]
+      if (sql === 'SELECT id FROM chapters WHERE id = ? FOR UPDATE' && values[0] === 'c') return [{ id: 'c' }]
+      throw new Error(`Unexpected fixture lock: ${sql}`)
+    }),
+      storyCompilation: { findFirst: vi.fn().mockResolvedValue({ id: 'comp', runId: 'run-1', chapter: current.chapter, bridge,
+        sceneTasks: current.sceneTasks, validation: { independentCheck: 'complete', checkedRevision: 2, errorCount: 2, coverage } }), update: terminalWrite },
+      chapter: { findFirst: vi.fn().mockResolvedValue(current.chapter) }, chapterBridge: { update: terminalWrite }, sceneTask: { updateMany: terminalWrite },
+      chapterQualityReport: { findFirst: vi.fn().mockResolvedValue(null) },
+    } as unknown as Prisma.TransactionClient
+    const commit = () => commitChapterBridge({ userId: 'u', novelId: 'n', compilationId: 'comp', chapterSummary: '章节摘要',
+      exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '转折' }, db)
+    return { db, terminalWrite, commit }
+  }
+  it('holds the commit while one merged correction is still reachable', async () => {
+    revisionChannel.mockResolvedValue(true)
+    vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory' } as never)
+    const f = fixture()
+    await expect(f.commit()).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
+    expect(revisionChannel).toHaveBeenCalledWith(f.db, { userId: 'u', novelId: 'n', runId: 'run-1' }, { id: 'c', revision: 2 })
+    expect(f.terminalWrite).not.toHaveBeenCalled()
+  })
+  it('delivers with the retained findings once the revision channel is closed', async () => {
+    revisionChannel.mockResolvedValue(false)
+    vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory' } as never)
+    const f = fixture()
+    await expect(f.commit()).resolves.toMatchObject({ compilationId: 'comp', chapterId: 'c', chapterRevision: 2, skippedMemoryCount: 0, retainedIssueCount: 2 })
+    expect(revisionChannel).toHaveBeenCalledOnce()
   })
 })
 

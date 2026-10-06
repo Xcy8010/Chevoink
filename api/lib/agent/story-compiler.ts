@@ -632,7 +632,7 @@ export async function commitChapterBridge(input: {
   expectedContentHash?: string
   requireQuality?: boolean
   qualityReportId?: string
-}, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number }> {
+}, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number; retainedIssueCount: number }> {
   if (!transaction) return prisma.$transaction(tx => commitChapterBridge(input, tx))
   const db = transaction
   await lockNovelActiveScope(db, input.novelId)
@@ -680,20 +680,35 @@ export async function commitChapterBridge(input: {
   // current-version factual errors can prevent terminal delivery.
   const currentContinuity = validation?.independentCheck === 'complete' && validation.checkedRevision === chapter.revision
     && compilerContinuityCoverageMatches(validation.coverage, coverage)
-  if (currentContinuity && (validation.errorCount ?? 0) > 0) {
-    throw new DataAccessError(409, 'CONTINUITY_ERRORS_REMAIN', '当前正文存在已核验的事实错误，请修正或交作者决定。')
-  }
+  const continuityErrorCount = currentContinuity ? (validation.errorCount ?? 0) : 0
   const report = await db.chapterQualityReport.findFirst({ where: { userId: input.userId, novelId: input.novelId, compilationId: compilation.id,
     chapterId: compilation.chapter.id, chapterRevision: chapter.revision }, include: { findings: true }, orderBy: { createdAt: 'desc' } })
-  if (report && qualityReportMatchesContent(report, chapter.revision, chapter.content)
-    && report.findings.some(finding => finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected')) {
-    throw new DataAccessError(409, 'QUALITY_CHECK_REQUIRED', '当前正文存在已核验的事实错误，请修正或交作者决定。')
+  const qualityErrorCount = report && qualityReportMatchesContent(report, chapter.revision, chapter.content)
+    ? report.findings.filter(finding => finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0
+  let retainedIssueCount = 0
+  if (continuityErrorCount > 0 || qualityErrorCount > 0) {
+    // The gate only holds while a merged correction is still reachable. Once the
+    // revision channel is closed (consumed/exhausted/unauthorized) no tool can
+    // repair the remaining findings anymore, so "fix or hand it to the author"
+    // resolves to delivering with the report instead of blocking forever.
+    const { isChapterRevisionChannelOpen } = await import('./chapter-review-guard.js')
+    // Without any execution identity the channel cannot be proven closed, so the
+    // gate keeps its hold (legacy behavior) instead of guessing a release.
+    const probeRunId = input.runId ?? compilation.runId
+    const channelOpen = !probeRunId || await isChapterRevisionChannelOpen(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId },
+      { id: compilation.chapter.id, revision: chapter.revision })
+    if (channelOpen) {
+      throw new DataAccessError(409, continuityErrorCount > 0 ? 'CONTINUITY_ERRORS_REMAIN' : 'QUALITY_CHECK_REQUIRED',
+        continuityErrorCount > 0 ? '当前正文存在已核验的事实错误，仍可自动合并修订一次：请先读取完整正文，一次修完全部安全的事实错误，再提交终态。'
+          : '当前正文存在已核验的质量错误，仍可自动修订一次：请先完成修订，再提交终态。')
+    }
+    retainedIssueCount = continuityErrorCount + qualityErrorCount
   }
   const terminalContext = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext as Record<string, Prisma.JsonValue> : {}
   const terminalContentHash = runtimeJson({ content: chapter.content }).hash
   const sameTerminal = compilation.status === 'completed' && !!compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision
   if (sameTerminal && terminalContext.terminalContentHash === terminalContentHash) {
-    return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0 }
+    return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount }
   }
   const now = new Date()
   await Promise.all([
@@ -723,7 +738,7 @@ export async function commitChapterBridge(input: {
       data: { stage: 'commit', status: 'completed', completedAt: now, preparedContext: { ...terminalContext, terminalContentHash } },
     }),
   ])
-  if (sameTerminal) return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0 }
+  if (sameTerminal) return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount }
   // Optional memory proposals must respect author tombstones without rolling
   // back an independently validated chapter. All other errors still roll back.
   let skippedMemoryCount = 0
@@ -764,7 +779,7 @@ export async function commitChapterBridge(input: {
       evidence: { sourceType: 'chapter', sourceId: compilation.chapter.id, revision: compilation.chapter.revision, confidence: 1 },
     }),
   ])
-  return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: compilation.chapter.revision, skippedMemoryCount }
+  return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: compilation.chapter.revision, skippedMemoryCount, retainedIssueCount }
 }
 
 export async function buildStoryCompilerDigest(userId: string, novelId: string, _chapterId: string | null, runId?: string) {

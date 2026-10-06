@@ -161,7 +161,7 @@ describe('严谨创作落实连续性警告', () => {
     vi.mocked(flags.isAgent2FeatureEnabled).mockReturnValue(true)
     f.qualityReport.mockResolvedValue({ id: 'q', chapterRevision: 1, repairRound: 0, status: 'passed', deterministicMetrics: { independentCheck: 'complete' },
       findings: family === 'quality' ? [{ severity: 'advisory', startOffset: 0, endOffset: 2 }] : [] } as unknown as Awaited<ReturnType<typeof quality.getLatestQualityReport>>)
-    const commit = vi.spyOn(compiler, 'commitChapterBridge').mockResolvedValue({ compilationId: 'comp', chapterId: 'c', chapterRevision: 1, skippedMemoryCount: 0 })
+    const commit = vi.spyOn(compiler, 'commitChapterBridge').mockResolvedValue({ compilationId: 'comp', chapterId: 'c', chapterRevision: 1, skippedMemoryCount: 0, retainedIssueCount: 0 })
     expect(await chapterBridgeCommitTool.execute(f.ctx, { compilationId: 'comp' })).toMatchObject({ summary: '提交章节桥与当前故事终态' })
     expect(commit).toHaveBeenCalledOnce()
     expect(f.write).not.toHaveBeenCalled()

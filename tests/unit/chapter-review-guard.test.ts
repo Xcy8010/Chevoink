@@ -2,7 +2,7 @@ import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as original from '../../api/lib/agent/original-request.js'
 import * as lock from '../../api/lib/data/novel-write-lock.js'
-import { assertChapterReviewRevision } from '../../api/lib/agent/chapter-review-guard.js'
+import { assertChapterReviewRevision, isChapterRevisionChannelOpen } from '../../api/lib/agent/chapter-review-guard.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { readNewDraftWritingAuthority, prohibitsNewDraftRevision } from '../../api/lib/agent/writing-scope.js'
@@ -158,5 +158,29 @@ describe('one atomic factual correction in the original new draft', () => {
     f.spec.hardConstraints.push({ id: 'keep-draft', kind: 'author_directive', text: '不要修改本章正文' })
     await expect(readNewDraftWritingAuthority(f.tx, f.subject, f.chapter)).resolves.toBeNull()
     expect(prohibitsNewDraftRevision('不要修改前文')).toBe(false)
+  })
+  it('reports an open channel without consuming the one merged correction', async () => {
+    const f = fixture()
+    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it('reports closed after the merged correction is consumed, without consuming anything itself', async () => {
+    const f = fixture()
+    await (await assertChapterReviewRevision(f.tx, f.subject, f.chapter))?.()
+    f.chapter.revision++
+    Object.assign(f.compilation.validation, { checkedRevision: 4, checkRounds: 2 })
+    expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(1)
+    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
+    expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(1)
+  })
+  it.each(['exhausted', 'unauthorized', 'committed-window', 'later-failure'] as const)('reports a closed channel while edits stay blocked: %s', async scenario => {
+    const f = fixture()
+    if (scenario === 'exhausted') Object.assign(f.validation, { checkRounds: 3 })
+    if (scenario === 'unauthorized') f.spec.intent = 'review'
+    if (scenario === 'committed-window') f.compilation.bridge.committedAt = new Date() as never
+    if (scenario === 'later-failure') f.rows.unshift({ ...f.compilation, id: 'later', validation: { ...f.validation, independentCheck: 'unavailable' } })
+    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
 })

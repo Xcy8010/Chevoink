@@ -90,6 +90,23 @@ export async function assertChapterReviewRevision(
   }
 }
 
+/** Commit gates probe the same admission checks read-only before blocking a
+ * terminal delivery: while a merged correction is still reachable the gate
+ * holds the commit; once the channel is closed (consumed, exhausted or never
+ * authorized) no tool can repair the remaining findings anymore, so the
+ * "fix or hand it to the author" promise resolves to delivering with the
+ * report. The CAS callback is deliberately dropped here. */
+export async function isChapterRevisionChannelOpen(tx: Prisma.TransactionClient,
+  subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number }): Promise<boolean> {
+  try {
+    await assertChapterReviewRevision(tx, subject, chapter)
+    return true
+  } catch (error) {
+    if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) return false
+    throw error
+  }
+}
+
 /** Read-only tool feedback uses the same admission checks. The returned CAS
  * callback is deliberately never called here; feedback cannot consume a turn. */
 export async function readChapterReviewRevisionGuidance(tx: Prisma.TransactionClient,
