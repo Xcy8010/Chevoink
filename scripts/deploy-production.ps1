@@ -10,6 +10,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Windows PowerShell 5.1 decodes external program output with the console code page;
+# gh emits UTF-8 (CJK job names) and ConvertFrom-Json breaks on the garbled bytes.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 function Invoke-Checked([string]$Program, [string[]]$Arguments) {
   $result = & $Program @Arguments
@@ -44,11 +48,13 @@ try {
   $package = (Invoke-Checked node @('scripts/release-package.mjs', '--revision', $revision, '--baseline', $ExpectedCurrentRevision, '--out', $packageDirectory)) -join "`n" | ConvertFrom-Json
   $remoteArchive = "/tmp/chevoink-$revision.tar.gz"
   $remoteManifest = "/tmp/chevoink-$revision-baseline.json"
-  $sshArguments = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-o', 'ConnectionAttempts=1', '-i', $KeyPath)
+  # Keepalive options fail stalled sessions fast: blocked data paths otherwise
+  # hang the single attempt forever and leave an ambiguous zombie connection.
+  $sshArguments = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-o', 'ConnectionAttempts=1', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=3', '-i', $KeyPath)
   if ($SourceAddress) { $sshArguments += @('-b', $SourceAddress) }
   # Single upload/activation attempt. Interrupted mutations have an on-host
   # journal; inspect actual state instead of replaying the whole deployment.
-  $scpArguments = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-o', 'ConnectionAttempts=1', '-i', $KeyPath)
+  $scpArguments = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-o', 'ConnectionAttempts=1', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=3', '-i', $KeyPath)
   if ($SourceAddress) { $scpArguments += @('-o', "BindAddress=$SourceAddress") }
   $preflight = "set -eu; test -d /opt/chevoink/app/current; test ! -L /opt/chevoink/app/current; test ! -e '/opt/chevoink/app/release-$revision'; test ! -e '/opt/chevoink/app/.release-$revision.jsonl'; test ! -e '/opt/chevoink/app/previous-$ExpectedCurrentRevision-for-$revision'; test ! -e '$remoteArchive'; test ! -e '$remoteManifest'"
   Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", $preflight)) | Out-Null
