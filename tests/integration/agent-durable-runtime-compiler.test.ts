@@ -18,6 +18,7 @@ import { loadCurrentTodoSnapshot } from '../../api/lib/agent/session-messages.js
 import { prepareStoryCompilation,recordStoryCompilerWrite,saveSceneTasks,validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { executeDurableCompiler } from '../../api/lib/agent/tools/durable-compiler.js'
 import { executeDurableRead } from '../../api/lib/agent/tools/durable-read.js'
@@ -40,7 +41,10 @@ describe.runIf(available)('durable compiler dispatch', () => {
       let foreignId: string | undefined
       if (scenario === 'foreign') {
         const otherSession = await prisma.agentSession.create({ data: { userId: f.userId, novelId: f.novelId, title: '其他任务' } })
-        const other = await prisma.agentRun.create({ data: { sessionId: otherSession.id, userId: f.userId, novelId: f.novelId, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'queued', engine: 'loop', startRequest: { prompt: '授权自主创作全书，并修改已有章节。' } } })
+        const prompt = '修改第一章'
+        const other = await prisma.agentRun.create({ data: { sessionId: otherSession.id, userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'queued', engine: 'loop', startRequest: { prompt } } })
+        const otherSpec = await prisma.$transaction(tx => freezeWritingScope(tx, { ...f, runId: other.id }, buildTaskSpec({ ...f, runId: other.id, prompt }), prompt))
+        await prisma.agentRun.update({ where: { id: other.id }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(otherSpec))).value } })
         foreignId = (await prepareStoryCompilation({ ...f, runId: other.id, mode: 'balanced', intentSummary: '其他任务' })).compilation.id
       }
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
@@ -134,10 +138,15 @@ describe.runIf(available)('durable compiler dispatch', () => {
           expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
         }
         const committed = await step()
-        if (scenario === 'commit-stale') {
+        if (scenario === 'commit-stale' || scenario === 'commit-no-quality') {
           expect(committed).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
           expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id } })).status).toBe('active')
           expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
+          if (scenario === 'commit-no-quality') {
+            expect(committed).toMatchObject({ result: { failureCode: 'QUALITY_CHECK_REQUIRED' } })
+            expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: id } })).committedAt).toBeNull()
+            expect(await prisma.chapterQualityReport.count({ where: { compilationId: id } })).toBe(0)
+          }
         } else {
           expect(committed).toMatchObject({ kind: 'tool', result: { summary: '提交章节桥与当前故事终态' } })
           const count = await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })
@@ -183,8 +192,11 @@ describe.runIf(available)('compiler transaction and root continuity', () => {
       }
       await saveSceneTasks({ ...input, compilationId: original.compilation.id, tasks })
       const otherSession = await prisma.agentSession.create({ data: { userId: f.userId, novelId: f.novelId, title: '同作品另一任务窗口' } })
+      const prompt = '修改第一章'
       const other = await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: otherSession.id, chapterId: f.chapterId,
-        mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'queued', engine: 'loop', startRequest: { prompt: '授权自主创作全书，并修改已有章节。' } } })
+        mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'queued', engine: 'loop', startRequest: { prompt } } })
+      const otherSpec = await prisma.$transaction(tx => freezeWritingScope(tx, { ...f, runId: other.id }, buildTaskSpec({ ...f, runId: other.id, prompt }), prompt))
+      await prisma.agentRun.update({ where: { id: other.id }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(otherSpec))).value } })
       const otherCompilation = await prepareStoryCompilation({ ...input, runId: other.id })
       await pauseDurableTask(f.userId, f.runId)
       const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { runId: f.runId, type: 'run.paused' } })
@@ -367,4 +379,3 @@ describe.runIf(available)('durable history observations', () => {
     })
   })
 })
-

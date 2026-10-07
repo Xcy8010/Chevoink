@@ -184,7 +184,8 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       () => chapterWriteTool.execute(ctx, { chapterId: id, content: '不应整体重写。' }),
       () => chapterAppendTool.execute(ctx, { chapterId: id, content: '不应追加修订。' }),
       () => chapterEditRangeTool.execute(ctx, { chapterId: id, oldText: '合成原文', newText: '不应碎片替换' }),
-    ]) await expect(execute()).rejects.toMatchObject({ code: scenario === 'exhausted' ? 'REVIEW_AUTOMATION_STOPPED' : 'REPAIR_NOT_AUTHORIZED' })
+    ]) await expect(execute()).rejects.toMatchObject({ code: scenario === 'exhausted' ? 'REVIEW_AUTOMATION_STOPPED'
+      : scenario === 'stale-error' ? 'REVIEW_REPAIR_RECHECK_REQUIRED' : 'REPAIR_NOT_AUTHORIZED' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id } })).toEqual(chapter)
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(compilation)
   }))

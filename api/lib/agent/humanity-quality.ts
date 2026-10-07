@@ -291,7 +291,7 @@ export async function resolveQualityChapterTarget(
     if (task && requiresNextChapterDelivery(task.goals)) {
       const scope = await qualityCompilationScope(db, input.userId, input.novelId, input.runId)
       const targets = await db.storyCompilation.findMany({
-        where: { userId: input.userId, novelId: input.novelId, status: 'active', ...scope,
+        where: { userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] }, ...scope,
           ...(input.chapterId ? { chapterId: input.chapterId } : {}), ...(input.compilationId ? { id: input.compilationId } : {}) },
         select: { chapterId: true }, take: 2,
       })
@@ -301,7 +301,7 @@ export async function resolveQualityChapterTarget(
   }
   if (input.chapterId) {
     if (input.compilationId) {
-      const compilation = await db.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: 'active',
+      const compilation = await db.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] },
         ...await qualityCompilationScope(db, input.userId, input.novelId, input.runId) }, select: { chapterId: true } })
       if (!compilation || compilation.chapterId !== input.chapterId) throw new DataAccessError(409, 'QUALITY_TARGET_AMBIGUOUS', 'chapterId 与 compilationId 不对应或编译不属于本任务；章节编号与编译编号不可混用。独立检查既有章只传 chapter_read 返回的 chapterId，无需准备编译。')
     }
@@ -313,7 +313,7 @@ export async function resolveQualityChapterTarget(
   }
   const scope = await qualityCompilationScope(db, input.userId, input.novelId, input.runId)
   const candidates = await db.storyCompilation.findMany({
-    where: { userId: input.userId, novelId: input.novelId, status: 'active', ...scope, ...(input.compilationId ? { id: input.compilationId } : {}) },
+    where: { userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] }, ...scope, ...(input.compilationId ? { id: input.compilationId } : {}) },
     select: { chapterId: true }, take: 2,
   })
   if (candidates.length === 1 && candidates[0].chapterId) return candidates[0].chapterId
@@ -329,7 +329,7 @@ export async function buildHumanityQualityContext(userId: string, novelId: strin
   const [charter, compilation, profiles, anchors, recentChapters, feedback, dataControl, original] = await Promise.all([
     db.storyCharter.findUnique({ where: { novelId } }),
     db.storyCompilation.findFirst({
-      where: { userId, novelId, chapterId, status: 'active', ...scope },
+      where: { userId, novelId, chapterId, status: runId ? { in: ['active', 'completed'] } : 'active', ...scope },
       include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } },
       orderBy: { updatedAt: 'desc' },
     }),

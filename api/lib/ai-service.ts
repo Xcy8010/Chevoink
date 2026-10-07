@@ -15,6 +15,7 @@ import { fetch as undiciFetch, Agent as UndiciAgent } from 'undici'
 import { prisma, DataAccessError } from './prisma.js'
 import { env } from '../config/env.js'
 import { ModelRouteRejected, routeRejectionMayRetry, withModelRoutePool } from './model-route-pool.js'
+import { isProviderQuotaError, providerQuotaError } from './provider-quota-error.js'
 import { getToolModelRuntime } from './tool-model-config.js'
 import { assignedTaskModel, resolveTextActionTask } from './agent/model-assignment-context.js'
 import type {
@@ -231,7 +232,6 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
     let frame
     try { frame = JSON.parse(data) }
     catch { throw new DataAccessError(502, 'AI_PROVIDER_INVALID_RESPONSE', '模型流式响应格式异常，未取得完整检查结果。') }
-    if (frame.error) throw new DataAccessError(502, 'AI_PROVIDER_ERROR', '模型服务返回错误。')
     if (frame.usage) {
       usage ??= {}
       for (const key of ['prompt_tokens', 'completion_tokens', 'total_tokens'] as const) {
@@ -246,6 +246,8 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
       const reasoningCount = frame.usage.completion_tokens_details?.reasoning_tokens
       if (typeof reasoningCount === 'number' && Number.isSafeInteger(reasoningCount) && reasoningCount >= 0 && reasoningCount <= 2147483647) reasoningTokens = reasoningCount
     }
+    if (frame.error) throw isProviderQuotaError(frame.error) ? providerQuotaError(custom)
+      : new DataAccessError(502, 'AI_PROVIDER_ERROR', '模型服务返回错误。')
     if (frame.choices?.[0]?.finish_reason === 'length') truncated = true
     if (frame.choices?.[0]?.finish_reason === 'stop') done = true
     const delta = frame.choices?.[0]?.delta
@@ -270,11 +272,11 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
     reader.releaseLock()
     await saveOutputEvidence(usageId, inputEstimate, reasoning + content)
     // A final usage frame received before interruption is stronger than estimates.
-    if (Number.isSafeInteger(usage?.prompt_tokens) && Number.isSafeInteger(usage?.completion_tokens)
-      && usage!.prompt_tokens! >= 0 && usage!.completion_tokens! >= 0 && usage!.prompt_tokens! <= 2147483647 && usage!.completion_tokens! <= 2147483647) {
+    if (usage?.prompt_tokens != null || usage?.completion_tokens != null) {
       const cache = extractCacheTokens(usage!)
       await prisma.aiUsageLog.updateMany({ where: { id: usageId, billingStatus: 'prepared' }, data: {
-        requestTokens: usage!.prompt_tokens, responseTokens: usage!.completion_tokens, usageSource: 'reported',
+        requestTokens: usage!.prompt_tokens ?? null, responseTokens: usage!.completion_tokens ?? null,
+        usageSource: usage!.prompt_tokens != null && usage!.completion_tokens != null ? 'reported' : 'unknown',
         promptCacheHitTokens: cache.hit, promptCacheMissTokens: cache.miss, billingStatus: custom ? 'exempt' : 'observed',
       } })
     }
@@ -286,7 +288,7 @@ type JsonProviderPayload = {
   localOutputEstimate?: number
   /** 供应商报告的思考 token（completion_tokens_details.reasoning_tokens）；仅用于观测。 */
   reasoningTokens?: number
-  error?: { message?: unknown }
+  error?: { message?: unknown; code?: unknown; type?: unknown }
   data?: unknown
   choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>
   usage?: {
@@ -309,6 +311,7 @@ async function parseJsonResponse(response: Response): Promise<JsonProviderPayloa
   try {
     return JSON.parse(text) as JsonProviderPayload
   } catch {
+    if (!response.ok && isProviderQuotaError(text)) return { error: { message: text.trim() } }
     if (!response.ok) return { error: { message: [408, 504].includes(response.status)
       ? `模型网关超时（HTTP ${response.status}），未取得完整结果。`
       : `模型网关返回 HTTP ${response.status}，未取得有效响应。` } }
@@ -525,6 +528,16 @@ function buildHumanityQualityReasoningPayload(input: ProviderReasoningInput & {
 }): Record<string, unknown> {
   let hostname = ''
   try { hostname = new URL(input.providerBaseUrl ?? '').hostname.toLowerCase() } catch { /* no protocol proof */ }
+  // Verified endpoint/model pairs; a proxy or a matching name is not proof.
+  // https://cloud.tencent.com/document/product/1823/132248
+  const tokenHubModels = new Set(['deepseek/deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro',
+    'deepseek-v4-flash-202605', 'deepseek-v4-pro-202606', 'deepseek-v4-flash-0731', 'deepseek-v4-pro-0813',
+    'deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-flash-0731',
+    'deepseek/deepseek-v4-pro-0813', 'deepseek/deepseek-v4-flash-vision-exp'])
+  const tokenHubDeepSeek = hostname === 'tokenhub.tencentmaas.com'
+    && tokenHubModels.has(input.model)
+    && new URL(input.providerBaseUrl!).protocol === 'https:'
+  if (tokenHubDeepSeek) return { thinking: { type: 'disabled' } }
   const switchSupported = isAntLingFlashProvider(input)
     || hostname === 'api.deepseek.com' && !/reasoner|(?:^|[/_-])r1(?:$|[^a-z0-9])/i.test(input.model)
     || hostname === 'api.xiaomimimo.com'
@@ -829,27 +842,34 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   }
 
   if (!response.ok || !response.body) {
-    await durable?.rejected(response.status)
     const payload = await parseJsonResponse(response)
+    const quotaRejected = isProviderQuotaError(payload.error ?? (!response.ok ? payload : undefined))
     const reportedPrompt = payload.usage?.prompt_tokens
     const reportedCompletion = payload.usage?.completion_tokens
-    if (prepared && (reportedPrompt != null || reportedCompletion != null)) {
-      for (const count of [reportedPrompt, reportedCompletion]) {
-        if (count != null && (!Number.isSafeInteger(count) || count < 0 || count > 2147483647)) {
-          throw new DataAccessError(502, 'AI_USAGE_INVALID', '供应商返回了无效用量，不能据此结算。')
-        }
+    for (const count of [reportedPrompt, reportedCompletion]) {
+      if (count != null && (!Number.isSafeInteger(count) || count < 0 || count > 2147483647)) {
+        await durable?.rejected(response.status, { quotaExceeded: quotaRejected })
+        throw new DataAccessError(502, 'AI_USAGE_INVALID', '供应商返回了无效用量，不能据此结算。')
       }
-      const cache = extractCacheTokens(payload.usage ?? {})
+    }
+    const cache = extractCacheTokens(payload.usage ?? {})
+    await durable?.rejected(response.status, quotaRejected ? { quotaExceeded: true, usage: {
+      source: reportedPrompt != null && reportedCompletion != null ? 'reported' : 'unknown',
+      promptTokens: reportedPrompt ?? null, completionTokens: reportedCompletion ?? null,
+      cacheHitTokens: cache.hit, cacheMissTokens: cache.miss,
+    } } : undefined)
+    if (prepared && (reportedPrompt != null || reportedCompletion != null)) {
       await recordUsage({ ...params.usageLog, preparedUsageId: prepared.id, providerType: 'text', modelName: model,
         providerName: params.provider ?? env.aiTextProvider, requestTokens: reportedPrompt ?? null, responseTokens: reportedCompletion ?? null,
         promptCacheHitTokens: cache.hit, promptCacheMissTokens: cache.miss, durationMs: Date.now() - startedAt,
         usageSource: reportedPrompt != null && reportedCompletion != null ? 'reported' : 'unknown' })
     }
-    if (prepared && [400, 401, 403, 404, 422, 429].includes(response.status) && reportedPrompt == null && reportedCompletion == null) {
+    if (prepared && !quotaRejected && [400, 401, 403, 404, 422, 429].includes(response.status) && reportedPrompt == null && reportedCompletion == null) {
       await prisma.aiUsageLog.updateMany({ where: { id: prepared.id, billingStatus: 'prepared' },
         data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } })
       await syncGoalLegacyUsage(prepared.id)
     } else await markUnobservedUsage(prepared?.id)
+    if (quotaRejected) throw providerQuotaError(tier === 'custom')
     if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)) throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
     throw new DataAccessError(
       502,
@@ -950,7 +970,8 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
         completionTokens: completionUsageObserved ? usage.completionTokens : null,
         totalTokens: parsed.usage.total_tokens ?? null })
     }
-    if (parsed.error) throw new Error('模型在流式生成中返回错误，未执行工具；请重试当前任务。')
+    if (parsed.error) throw isProviderQuotaError(parsed.error) ? providerQuotaError(tier === 'custom')
+      : new Error('模型在流式生成中返回错误，未执行工具；请重试当前任务。')
 
     const choice = parsed.choices?.[0]
     if (!choice) {
@@ -1182,7 +1203,8 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   })
 
   const content = payload.choices?.[0]?.message?.content
-  const validContent = response.ok && typeof content === 'string' && Boolean(content.trim())
+  const quotaRejected = isProviderQuotaError(payload.error ?? (!response.ok ? payload : undefined))
+  const validContent = response.ok && !quotaRejected && typeof content === 'string' && Boolean(content.trim())
   if (validContent && payload.localOutputEstimate === undefined) await saveOutputEvidence(prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), content as string)
   const reportedPrompt = payload.usage?.prompt_tokens
   const reportedCompletion = payload.usage?.completion_tokens
@@ -1215,6 +1237,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     multiplierBps: options.multiplierBps ?? modelRuntime.multiplierBps,
   })
 
+  if (quotaRejected) throw providerQuotaError(modelRuntime.tier === 'custom')
   if (!response.ok) {
     if ([400, 401, 403, 404, 422, 429].includes(response.status) && reportedPrompt == null && reportedCompletion == null) {
       await prisma.aiUsageLog.updateMany({ where: { id: prepared.id, billingStatus: 'prepared' },

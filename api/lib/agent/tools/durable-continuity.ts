@@ -82,7 +82,8 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     }
     if (!baseline) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_REQUIRED', message: '指定编译缺少本任务观察。独立审阅请省略 compilationId、传 chapter_read 返回的 chapterId，无需重建编译。' }
     if (args.compilationId && args.compilationId !== baseline.id) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_REQUIRED', message: 'compilationId 不属于本任务已观察的编译；独立检查仅传真实 chapterId。' }
-    const compilation = await tx.storyCompilation.findFirst({ where: { id: baseline.id, userId: ctx.userId, novelId: ctx.novelId, run: { taskRootId: lease.taskRootId }, status: 'active' },
+    const compilation = await tx.storyCompilation.findFirst({ where: { id: baseline.id, userId: ctx.userId, novelId: ctx.novelId, run: { taskRootId: lease.taskRootId }, status: { in: ['active', 'completed'] },
+      chapter: { authorId: ctx.userId, ...activeChapterScope(ctx.novelId) } },
       include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } } })
     if (!compilation?.chapter || !compilation.bridge) return { kind: 'rejected' as const, code: 'COMPILATION_NOT_WRITTEN', message: '本任务的编译尚无目标正文和章节桥，不能检查。' }
     if (await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, baseline.id) !== baseline.hash) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_STALE', message: '编译状态已变化，请先 chapter_bridge_get 读取当前章节桥，未执行检查。' }

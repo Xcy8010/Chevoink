@@ -20,7 +20,7 @@ import { taskSpecSchema } from '../../../shared/contracts/index.js'
 import { requiresNextChapterDelivery } from './completion-guard.js'
 import { runtimeJson } from './runtime-common.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
-import { compilerContinuityCoverage, compilerContinuityCoverageMatches, type CompilerContinuityCoverage } from './compiler-continuity-contract.js'
+import { compilerContinuityCoverage, compilerContinuityCoverageMatches, continuityStoryInput, type CompilerContinuityCoverage } from './compiler-continuity-contract.js'
 
 type PreparedBridge = {
   lastUnfinishedAction: string
@@ -66,7 +66,7 @@ export function continuityCheckRounds(validation: unknown): number {
 export async function reserveContinuityCheck(userId: string, novelId: string, compilationId: string): Promise<boolean> {
   return prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilationId} AND user_id = ${userId} AND novel_id = ${novelId} FOR UPDATE`
-    const compilation = await tx.storyCompilation.findFirst({ where: { id: compilationId, userId, novelId, status: 'active' } })
+    const compilation = await tx.storyCompilation.findFirst({ where: { id: compilationId, userId, novelId, status: { in: ['active', 'completed'] } } })
     if (!compilation || continuityCheckRounds(compilation.validation) >= MAX_CONTINUITY_CHECKS) return false
     const previous = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
     await tx.storyCompilation.update({ where: { id: compilationId }, data: {
@@ -460,7 +460,7 @@ export async function isWritingTaskContinuityCompiler(db: Prisma.TransactionClie
   if (task.scope.chapterIds?.length && !task.scope.chapterIds.includes(input.chapterId) && !requiresNextChapterDelivery(task.goals)) return false
   const scope = await compilationRunScope(db, input)
   const candidate = await db.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId, novelId: input.novelId,
-    chapterId: input.chapterId, status: 'active', ...scope }, select: { id: true } })
+    chapterId: input.chapterId, status: { in: ['active', 'completed'] }, ...scope }, select: { id: true } })
   return !!candidate && !!await db.chapter.findFirst({ where: { id: input.chapterId, authorId: input.userId, ...activeChapterScope(input.novelId) }, select: { id: true } })
 }
 
@@ -554,12 +554,16 @@ export async function validateStoryContinuity(input: {
     status: { in: ['queued', 'running', 'awaiting_approval'] } }, select: { id: true } })) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '连续性检查执行已暂停或结束，旧结果不能绑定编译。')
   await db.$queryRaw`SELECT id FROM story_compilations WHERE id = ${input.compilationId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
   const compilation = await db.storyCompilation.findFirst({
-    where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: 'active', ...scope },
+    where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] }, ...scope },
     include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
   })
   if (!compilation) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '写作编译任务不存在、已结束或不属于当前作品。')
   if (!compilation.chapter || !compilation.bridge) {
     throw new DataAccessError(409, 'COMPILATION_NOT_WRITTEN', '目标章节尚未完成写入，不能进入连续性检查。')
+  }
+  if (compilation.status === 'completed') {
+    if (!input.runId) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '已提交编译的只读复核需要当前原任务身份，不能接管旧章。')
+    await assertWritingTarget(db, { userId: input.userId, novelId: input.novelId, runId: input.runId }, { chapterId: compilation.chapter.id })
   }
   if (!await db.chapter.findFirst({ where: { id: compilation.chapter.id, authorId: input.userId, ...activeChapterScope(input.novelId) }, select: { id: true } })) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '目标章节已归档，旧检查不能作用于当前稿件。')
@@ -609,7 +613,7 @@ export async function validateStoryContinuity(input: {
   input.signal?.throwIfAborted()
   await db.storyCompilation.update({
     where: { id: compilation.id },
-    data: { stage: 'check', validation: validation as Prisma.InputJsonValue },
+    data: { stage: compilation.status === 'completed' ? 'commit' : 'check', validation: validation as Prisma.InputJsonValue },
   })
   input.signal?.throwIfAborted()
   return validation
@@ -673,18 +677,23 @@ export async function commitChapterBridge(input: {
   if (compilation.bridge.fromChapterId && (!source || source.revision !== compilation.bridge.sourceRevision)) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '桥接来源章节已变化，不能沿用旧来源提交终态。')
   }
-  const validation = compilation.validation as { checkedRevision?: number; errorCount?: number; independentCheck?: string; coverage?: unknown; reviewFocus?: string } | null
-  const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge,
-    sceneTasks: [...compilation.sceneTasks].sort((a, b) => a.ordinal - b.ordinal), source, focus: validation?.reviewFocus })
-  // Optional absent, failed or stale reports remain unknown. Only validated
-  // current-version factual errors can prevent terminal delivery.
-  const currentContinuity = validation?.independentCheck === 'complete' && validation.checkedRevision === chapter.revision
-    && compilerContinuityCoverageMatches(validation.coverage, coverage)
-  const continuityErrorCount = currentContinuity ? (validation.errorCount ?? 0) : 0
+  const orderedScenes = [...compilation.sceneTasks].sort((a, b) => a.ordinal - b.ordinal)
+  const probeRunId = input.runId ?? compilation.runId
+  const { readChapterReviewReadiness, readCurrentCompilerContinuity, terminalReviewStateHash } = await import('./chapter-review-guard.js')
+  const currentContinuityReview = readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, source)
+  const readiness = probeRunId ? await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id) : null
+  if (readiness && !readiness.ready) {
+    const required = readiness.requiredTools[0]!
+    throw new DataAccessError(409, required.name === 'continuity_validate' ? 'CONTINUITY_CHECK_REQUIRED' : 'QUALITY_CHECK_REQUIRED',
+      `当前 r${chapter.revision} 缺少完整且匹配的${required.name === 'continuity_validate' ? '连续性' : '质量'}检查（${required.name === 'continuity_validate' ? readiness.continuity : readiness.quality}）。保留正文；先调用 ${required.name}，compilationId=${compilation.id}，再重新核验交付，不能沿用旧报告或把失败当作通过。`)
+  }
+  // Manual/legacy tasks retain optional checks. Writing delivery requirements
+  // come exclusively from the authenticated original contract, never tool flags.
+  const continuityErrorCount = readiness?.continuityErrorCount ?? currentContinuityReview.assessment?.errorCount ?? 0
   const report = await db.chapterQualityReport.findFirst({ where: { userId: input.userId, novelId: input.novelId, compilationId: compilation.id,
     chapterId: compilation.chapter.id, chapterRevision: chapter.revision }, include: { findings: true }, orderBy: { createdAt: 'desc' } })
-  const qualityErrorCount = report && qualityReportMatchesContent(report, chapter.revision, chapter.content)
-    ? report.findings.filter(finding => finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0
+  const qualityErrorCount = readiness?.qualityErrorCount ?? (report && qualityReportMatchesContent(report, chapter.revision, chapter.content)
+    ? report.findings.filter(finding => finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0)
   let retainedIssueCount = 0
   if (continuityErrorCount > 0 || qualityErrorCount > 0) {
     // The gate only holds while a merged correction is still reachable. Once the
@@ -694,7 +703,6 @@ export async function commitChapterBridge(input: {
     const { isChapterRevisionChannelOpen } = await import('./chapter-review-guard.js')
     // Without any execution identity the channel cannot be proven closed, so the
     // gate keeps its hold (legacy behavior) instead of guessing a release.
-    const probeRunId = input.runId ?? compilation.runId
     const channelOpen = !probeRunId || await isChapterRevisionChannelOpen(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId },
       { id: compilation.chapter.id, revision: chapter.revision })
     if (channelOpen) {
@@ -711,10 +719,7 @@ export async function commitChapterBridge(input: {
     return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount }
   }
   const now = new Date()
-  await Promise.all([
-    db.chapterBridge.update({
-      where: { id: compilation.bridge.id },
-      data: {
+  const bridgeData = {
         targetRevision: compilation.chapter.revision,
         lastUnfinishedAction: input.lastUnfinishedAction,
         location: input.exitState.location ?? '',
@@ -730,12 +735,19 @@ export async function commitChapterBridge(input: {
         recentEndings: [...asStringArray(compilation.bridge.recentEndings), input.endingStructure].filter(Boolean).slice(-3),
         openLoops: input.exitState.openLoops,
         committedAt: now,
-      },
-    }),
+      }
+  const assessment = currentContinuityReview.assessment
+  const terminalReviewProof = assessment ? { version: 1,
+    checkedBridge: continuityStoryInput(currentContinuityReview.checkedBridge),
+    terminalStateHash: terminalReviewStateHash({ ...compilation.bridge, ...bridgeData }, orderedScenes),
+  } : undefined
+  await Promise.all([
+    db.chapterBridge.update({ where: { id: compilation.bridge.id }, data: bridgeData }),
     db.sceneTask.updateMany({ where: { compilationId: compilation.id }, data: { status: 'completed' } }),
     db.storyCompilation.update({
       where: { id: compilation.id },
-      data: { stage: 'commit', status: 'completed', completedAt: now, preparedContext: { ...terminalContext, terminalContentHash } },
+      data: { stage: 'commit', status: 'completed', completedAt: now, preparedContext: { ...terminalContext, terminalContentHash,
+        ...(terminalReviewProof ? { terminalReviewProof: terminalReviewProof as Prisma.InputJsonValue } : {}) } },
     }),
   ])
   if (sameTerminal) return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount }

@@ -7,7 +7,13 @@ import * as manuscript from '../../api/lib/agent/manuscript-scope.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 
 const revisionChannel = vi.hoisted(() => vi.fn())
-vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({ isChapterRevisionChannelOpen: revisionChannel }))
+vi.mock('../../api/lib/agent/chapter-review-guard.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/chapter-review-guard.js')>(),
+  isChapterRevisionChannelOpen: revisionChannel,
+  // This suite isolates the legacy/manual error gate. Writing requirements are
+  // exercised with real persisted reads in chapter-review-readiness.test.ts.
+  readChapterReviewReadiness: vi.fn().mockResolvedValue(null),
+}))
 
 afterEach(() => { vi.restoreAllMocks(); revisionChannel.mockReset() })
 const input = () => ({ chapter: { id: 'c', title: '本章', revision: 2, content: '修订后的完整正文', orderIndex: 2 },
@@ -110,7 +116,11 @@ describe('terminal commit gate follows the revision channel', () => {
       throw new Error(`Unexpected fixture lock: ${sql}`)
     }),
       storyCompilation: { findFirst: vi.fn().mockResolvedValue({ id: 'comp', runId: 'run-1', chapter: current.chapter, bridge,
-        sceneTasks: current.sceneTasks, validation: { independentCheck: 'complete', checkedRevision: 2, errorCount: 2, coverage } }), update: terminalWrite },
+        sceneTasks: current.sceneTasks, validation: { independentCheck: 'complete', checkedChapterId: current.chapter.id, checkedRevision: 2,
+          errorCount: 2, warningCount: 0, findings: [
+            { signal: 'object', severity: 'error', evidence: '合成门锁状态冲突', suggestion: '保留原门锁事实' },
+            { signal: 'knowledge', severity: 'error', evidence: '合成人物知情状态冲突', suggestion: '保留原知情范围' },
+          ], coverage } }), update: terminalWrite },
       chapter: { findFirst: vi.fn().mockResolvedValue(current.chapter) }, chapterBridge: { update: terminalWrite }, sceneTask: { updateMany: terminalWrite },
       chapterQualityReport: { findFirst: vi.fn().mockResolvedValue(null) },
     } as unknown as Prisma.TransactionClient
@@ -150,7 +160,7 @@ describe('chapter-only compiler admission from frozen writing authority', () => 
     const work = isWritingTaskContinuityCompiler(db, { userId: 'u', novelId: 'n', runId: 'r', compilationId: 'comp', chapterId: 'c' })
     if (scenario === 'changed-origin') await expect(work).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })
     else await expect(work).resolves.toBe(scenario === 'write')
-    if (scenario === 'write') expect(find).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: 'comp', chapterId: 'c', userId: 'u', novelId: 'n', status: 'active',
+    if (scenario === 'write') expect(find).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: 'comp', chapterId: 'c', userId: 'u', novelId: 'n', status: { in: ['active', 'completed'] },
       run: expect.objectContaining({ taskSpec: { path: ['id'], equals: task.id } }), AND: expect.any(Array) }) }))
   })
   it('rechecks the current run and manuscript fence before promoting a cached CHECK', async () => {

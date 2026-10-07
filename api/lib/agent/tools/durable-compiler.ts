@@ -11,7 +11,7 @@ import type { AgentTool, ToolContext, ToolResult } from './types.js'
 const actions = new Set(['story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'chapter_bridge_commit'])
 const failures = new Set(['TOOL_COMPILER_REQUIRED', 'TOOL_COMPILER_STALE', 'COMPILATION_NOT_FOUND', 'COMPILATION_STAGE_CONFLICT',
   'SCENE_TASK_COUNT_INVALID', 'NOVEL_NOT_FOUND', 'CHAPTER_NOT_FOUND', 'TARGET_CHAPTER_GAP', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT',
-  'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'CONTINUITY_INPUT_STALE', 'CONTINUITY_ERRORS_REMAIN', 'QUALITY_CHECK_REQUIRED'])
+  'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'CONTINUITY_INPUT_STALE', 'CONTINUITY_CHECK_REQUIRED', 'CONTINUITY_ERRORS_REMAIN', 'QUALITY_CHECK_REQUIRED'])
 
 /** These tools are DB-only. Model critics/repairs must use separately
  * receipted provider operations, never this retryable transaction adapter. */
@@ -41,7 +41,8 @@ export async function executeDurableCompiler(ctx: ToolContext, tool: AgentTool, 
       if (current !== baseline.hash) throw new DataAccessError(409, 'TOOL_COMPILER_STALE', `本次未执行。compilationId=${baseline.id} 的阶段或内容已变化，请先 chapter_bridge_get 重新读取后再决定，不覆盖新状态。`)
     }
     const result = await tool.execute({ ...ctx, durableCompiler: capability, transaction: tx }, args)
-    if (result.outcome === 'failed') throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', result.output)
+    if (result.outcome === 'failed') throw new DataAccessError(409,
+      result.failureCode && failures.has(result.failureCode) ? result.failureCode : 'COMPILATION_NOT_FOUND', result.output)
     const id = result.display?.kind === 'storyCompiler' ? result.display.compilationId : undefined
     const hash = id ? await compilerStateHash(tx, ctx.userId, ctx.novelId, root.id, id) : null
     if (!id || !hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '编译结果缺少原任务内的状态身份。')
@@ -53,5 +54,5 @@ export async function executeDurableCompiler(ctx: ToolContext, tool: AgentTool, 
   })
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
   const failed = failedToolResultSchema.safeParse(receipt.result)
-  return failed.success ? { ...failed.data.toolResult, outcome: 'failed' } : z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
+  return failed.success ? { ...failed.data.toolResult, failureCode: failed.data.code, outcome: 'failed' } : z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
 }

@@ -2,6 +2,11 @@
  * source revisions, author deletion, or quality gates. */
 export function toolFailureRecovery(code: string): { label: string; guidance: string } | undefined {
   const entries: Record<string, { label: string; guidance: string }> = {
+    REVIEW_REPAIR_RECHECK_REQUIRED: { label: '需要复核当前版本', guidance: '原稿已保存，旧报告不构成改稿证据。仅在原检查次数内复核当前版本，再合并一次尚未执行的授权修订；不要重置次数或重绑旧报告。' },
+    CHAPTER_ANCHOR_CONFLICT: { label: '正文片段需要重新定位', guidance: '仅对本次原目标调用 chapter_read，逐字使用当前版本中的唯一连续原文。不要猜测其他章节 ID、替换到其他章节或照旧报告强行写入。' },
+    TODO_CHANGE_REASON_REQUIRED: { label: '待办需要保留原项目身份', guidance: '读取当前清单，更新时保留原 id。确有新增的原授权工作请给出 changeReason，不重建整张清单或扩大章节范围。' },
+    CONTINUITY_CHECK_REQUIRED: { label: '当前版本尚未完成连续性检查', guidance: '先完成当前正文的 continuity_validate，保留现有编译和检查次数，不能把缺报告视为通过。' },
+    QUALITY_CHECK_REQUIRED: { label: '当前版本尚未完成人类感检查', guidance: '先完成当前正文的 quality_analyze，不能省略检查、引用旧版报告或宣称修订本身就是检查通过。' },
     AUTHOR_CHAPTER_SCOPE: { label: '章节目标或位置与原请求不符', guidance: '本次操作未执行，目标或位置不符不表示任务已结束。先核对原始请求和当前作品目录，仅在现有授权范围内纠正目标或位置；全书位置与卷内位置不得混用，不要猜卷坐标、另建重复章或扩大范围。重试、换工具、改参数、子任务或续跑都不能扩大授权；需要处理其他章节时，请作者在输入框重新发送一条写明目标章节的明确指令，系统将按新任务受理。任务已暂停、结束或授权不匹配时不得继续。' },
     SCOPE_NEEDS_INPUT: { label: '原任务缺少可证明的章节目标', guidance: '原请求的目标章节无法证明，本次未写入任何章节。用 ask_user 如实说明并请作者明确要处理的章节；在作者给出明确指令前不要按当前界面位置、历史记录或猜测的章节自行写入。作者在输入框新发写明章节的指令后，系统按新任务受理。' },
     MEMORY_SOURCE_REQUIRED: { label: '记忆来源需要重新核对', guidance: '先用 chapter_read 读取来源章节，使用返回的真实 chapterId 和 revision，再提交逐字原文。不得猜测版本、删除来源字段或改成无来源候选来绕过校验。' },

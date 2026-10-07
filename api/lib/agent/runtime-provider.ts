@@ -115,10 +115,19 @@ export async function beginDurableChat(input: {
       await recordProviderResult({ ...identity, outcome: 'unknown', result: { reason, ...(partial ?? {}) } })
       await observeGoalUsage(goalUsageKey, { inputTokens: null, outputTokens: null, creditsMilli: 0, status: 'unknown' })
     },
-    async rejected(httpStatus: number) {
-      await recordProviderResult({ ...identity, outcome: 'failed', result: { httpStatus } })
-      await observeGoalUsage(goalUsageKey, { inputTokens: null, outputTokens: null, creditsMilli: 0,
-        status: [400, 401, 403, 404, 422, 429].includes(httpStatus) ? 'rejected' : 'unknown' })
+    async rejected(httpStatus: number, rejection?: { quotaExceeded: boolean; usage?: ProviderUsageObservation }) {
+      if (rejection?.usage) {
+        await recordProviderUsage({ ...identity, revision: revision + 1, usage: rejection.usage })
+        revision += 1
+        previousUsageHash = runtimeJson(rejection.usage).hash
+      }
+      await recordProviderResult({ ...identity, outcome: 'failed', result: { httpStatus,
+        ...(rejection?.quotaExceeded ? { code: 'AI_PROVIDER_QUOTA_EXCEEDED' } : {}) } })
+      // Supplier quota rejection does not prove a zero charge. Keep reported
+      // counts, and hold unknown accounting for normal reconciliation.
+      await observeGoalUsage(goalUsageKey, { inputTokens: rejection?.usage?.promptTokens ?? null,
+        outputTokens: rejection?.usage?.completionTokens ?? null, creditsMilli: 0,
+        status: !rejection?.quotaExceeded && [400, 401, 403, 404, 422, 429].includes(httpStatus) ? 'rejected' : 'unknown' })
     },
   }
 }

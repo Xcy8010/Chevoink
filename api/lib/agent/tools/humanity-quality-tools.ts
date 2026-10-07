@@ -36,7 +36,7 @@ import {
 } from '../humanity-quality.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
-import { REPAIR_BLOCK_CODES, REPAIR_CHANNEL_CODES, qualityReportMatchesContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
+import { REPAIR_BLOCK_CODES, REPAIR_CHANNEL_CODES, qualityReportCheckedCurrentContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
 import { probeChapterReviewRevision } from '../chapter-review-guard.js'
 import { coerceCriticFindings, correctQualityEvidence, qualityEvidenceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
 import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/writing.js'
@@ -133,12 +133,12 @@ export function buildCriticInput(bundle: Awaited<ReturnType<typeof buildHumanity
   ].filter(Boolean).join('\n')
 }
 
-async function finishQualityReview(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false): Promise<ToolResult> {
+async function finishQualityReview(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false, allowRepair = true): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
   const warningCount = report.findings.filter(finding => finding.severity === 'warning').length
   const advisoryCount = report.findings.filter(finding => finding.severity === 'advisory').length
   // 自动修订写的是作者正文：只读沙箱与受限子任务不获授权，只保存检查意见（正文由各自的写入工具负责）。
-  const automatic = ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(report.chapterId)
+  const automatic = allowRepair && ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(report.chapterId)
     && !ctx.inlineChild && ctx.sandboxMode !== 'read_only'
   const selected = automatic && qualityAutoRepairPending(report) ? selectAutomaticQualityFindings(report.findings) : []
   if (selected.length) {
@@ -155,7 +155,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
         if (repaired) {
           const remaining = repaired.report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
           return {
-            output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。质量报告已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 只读复核当前版本。${bindingSuffix}`,
+            output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。修订回执已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 和 quality_analyze 只读复核当前版本，旧 critic 结论不证明修订后正文已检查。${bindingSuffix}`,
             summary: `人类感质量检查 · 自动修订 ${repaired.patchCount} 处`, display: reportDisplay(repaired.report),
             snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },
           }
@@ -262,9 +262,9 @@ export const qualityAnalyzeTool = defineTool({
     const contextHash = qualityReviewContextHash(bundle)
     const cacheMetrics = existing?.deterministicMetrics
     const matchingContext = !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics) && cacheMetrics.qualityContextHash === contextHash
-    if (existing && matchingContext && existing.compilationId === (bundle.compilation?.id ?? null) && existing.criticVersion === HUMANITY_CRITIC_VERSION && qualityReportMatchesContent(existing, bundle.chapter.revision, bundle.chapter.content)) {
+    if (existing && matchingContext && existing.compilationId === (bundle.compilation?.id ?? null) && existing.criticVersion === HUMANITY_CRITIC_VERSION && qualityReportCheckedCurrentContent(existing, bundle.chapter.revision, bundle.chapter.content)) {
       const hydrated = await getQualityReport(ctx.userId, ctx.novelId, existing.id)
-      return finishQualityReview(ctx, hydrated, '', true)
+      return finishQualityReview(ctx, hydrated, '', true, bundle.compilation?.status !== 'completed')
     }
     const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map((chapter) => chapter.content))
     const userPrompt = buildCriticInput(bundle, deterministic.metrics)
@@ -372,7 +372,7 @@ export const qualityAnalyzeTool = defineTool({
       droppedCount ? `${droppedCount} 条因字段不完整未纳入报告` : '',
     ].filter(Boolean).join('；')
     const bindingSuffix = bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : ''
-    return finishQualityReview(ctx, report, bindingSuffix)
+    return finishQualityReview(ctx, report, bindingSuffix, false, bundle.compilation?.status !== 'completed')
   },
 })
 
@@ -410,7 +410,7 @@ export const qualityRevisionApplyTool = defineTool({
     const repaired = await applySelectedQualityRepairs(ctx, report, selected)
     if (!repaired) return { output: '局部修订器本次未返回可验证补丁，正文保持不变，可稍后重试。', summary: '局部质量修订 · 正文未改动', display: reportDisplay(report) }
     return {
-      output: `已原子应用 ${repaired.patchCount} 个局部修订并绑定 r${repaired.result.updated.revision}，正文已变化；历史检查仍只证明原版本，可直接刷新当前正文终态，不强制重新检查。`,
+      output: `已原子应用 ${repaired.patchCount} 个局部修订并绑定 r${repaired.result.updated.revision}，正文已变化；历史检查只证明原版本。写作交付前需调用 continuity_validate 和 quality_analyze 只读复核当前版本，不能继续自动改写。`,
       summary: `局部质量修订 · ${repaired.patchCount} 处`,
       display: { kind: 'chapterDiff', chapterId: repaired.result.updated.id, chapterTitle: repaired.result.updated.title, before: repaired.result.before, after: repaired.result.after, appliedDirectly: true, revision: repaired.result.updated.revision },
       snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },

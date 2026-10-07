@@ -525,7 +525,7 @@ export const continuityValidateTool = defineTool({
   name: 'continuity_validate',
   title: '检查章节连续性',
   description:
-    '检查章节连续性。独立审阅既有章：先读取目标章节，再传真实 chapterId，无需 story_compiler_prepare、scene_task_build 或提交章节桥；只保存检查报告，不改正文。原始写作任务已有本任务编译时，chapterId 会绑定该编译 CHECK；明确传 compilationId 最可靠。写作检查保留场景与版本校验，只保存发现，不自动修订正文。检查可选，缺少检查不等于已通过。chapterId 与 compilationId 是不同对象，禁止混用；不得由主写 Agent 自报 findings。',
+    '检查章节连续性。独立审阅既有章：先读取目标章节，再传真实 chapterId，无需 story_compiler_prepare、scene_task_build 或提交章节桥；只保存检查报告，不改正文。原始写作任务已有本任务编译时，chapterId 会绑定该编译 CHECK；明确传 compilationId 最可靠。写作检查保留场景与版本校验，只保存发现，不自动修订正文。写作交付需完成当前版本检查；仅原始作者请求可明确跳过。缺少检查不等于已通过。chapterId 与 compilationId 是不同对象，禁止混用；不得由主写 Agent 自报 findings。',
   parameters: z.object({
     chapterId: z.string().min(1).optional().describe('既有章节的真实编号，从 chapter_read 或作品目录取得；不能填编译编号'),
     compilationId: z.string().min(1).optional().describe('仅检查当前写作流水线时传；独立审阅既有章节省略'),
@@ -549,8 +549,9 @@ export const continuityValidateTool = defineTool({
       where: {
         userId: ctx.userId,
         novelId: ctx.novelId,
-        status: 'active',
+        status: { in: ['active', 'completed'] },
         ...await qualityCompilationScope(prisma, ctx.userId, ctx.novelId, ctx.runId),
+        chapter: { authorId: ctx.userId, ...activeChapterScope(ctx.novelId) },
         ...(args.chapterId ? { chapterId: args.chapterId } : {}),
         ...(args.compilationId ? { id: args.compilationId } : {}),
       },
@@ -633,7 +634,9 @@ export const continuityValidateTool = defineTool({
       ].filter(Boolean).join('\n')
     const assertCurrent = async () => {
       const current = await prisma.storyCompilation.findFirst({
-        where: { id: compilation.id, userId: ctx.userId, novelId: ctx.novelId, status: 'active', ...await qualityCompilationScope(prisma, ctx.userId, ctx.novelId, ctx.runId) },
+        where: { id: compilation.id, userId: ctx.userId, novelId: ctx.novelId, status: compilation.status,
+          ...await qualityCompilationScope(prisma, ctx.userId, ctx.novelId, ctx.runId),
+          chapter: { authorId: ctx.userId, ...activeChapterScope(ctx.novelId) } },
         include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
       })
       const source = bridge.fromChapterId ? await prisma.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { revision: true } }) : null
@@ -684,7 +687,7 @@ export const chapterBridgeCommitTool = defineTool({
   name: 'chapter_bridge_commit',
   title: '提交章节终态',
   description:
-    'Story Compiler 的 COMMIT 步骤。用于提交当前已保存正文的终态；连续性与质量检查是可选的，不把缺少或旧检查视为通过。所有参数都可省略：服务端会从当前 run/chapter 的活跃编译、最后一个 Scene Task 和章节状态安全补全，模型不得为补参数重复读取正文。重复调用会幂等返回。',
+    'Story Compiler 的 COMMIT 步骤。用于提交当前已保存正文的终态；写作交付必须具有当前版本完整的连续性与质量检查，只有原始作者请求可明确跳过检查。缺少、失败或旧检查会返回下一步所需工具，不代表已完成。所有参数都可省略：服务端会从当前 run/chapter 的活跃编译、最后一个 Scene Task 和章节状态安全补全，模型不得为补参数重复读取正文。重复调用会幂等返回。',
   parameters: z.object({
     compilationId: z.string().min(1).optional(),
     chapterSummary: z.string().min(1).max(2000).optional(),
@@ -756,7 +759,7 @@ export const chapterBridgeCommitTool = defineTool({
       const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...terminal, expectedChapterRevision: compilation.chapter.revision, expectedContentHash: createHash('sha256').update(compilation.chapter.content).digest('hex') }, ctx.transaction)
       const retained = result.retainedIssueCount ? `本次有 ${result.retainedIssueCount} 条已核验错误超出自动修订边界（修订次数已用尽或未获授权），已随检查报告保留交作者决定，不得宣称检查通过；作者可在输入框重新发送明确指令继续处理。` : ''
       return {
-        output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge 与 Scene Task 终态已提交。章节提交不代表连续性或质量检查通过；缺失、失败或旧版报告仍为未确认，关注意见仍保留待审。${retained}故事记忆仅提交候选，作者确认前不参与事实召回。${result.skippedMemoryCount ? `其中 ${result.skippedMemoryCount} 项记忆因作者已删除而跳过，未重建；不影响章节终态提交。` : ''}本任务仅在原请求范围内交付。`,
+        output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge 与 Scene Task 终态已提交。已按原任务核验当前版本所需检查；检查完成不代表所有意见已消除，关注意见仍保留待审。${retained}故事记忆仅提交候选，作者确认前不参与事实召回。${result.skippedMemoryCount ? `其中 ${result.skippedMemoryCount} 项记忆因作者已删除而跳过，未重建；不影响章节终态提交。` : ''}本任务仅在原请求范围内交付。`,
         requiredResult: { targetId: result.chapterId, contentHash: persistedContentHash(compilation.chapter.content) },
         summary: '提交章节桥与当前故事终态',
         display: {

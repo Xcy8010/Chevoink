@@ -4,9 +4,108 @@ import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { continuityCheckRounds, continuityRepairRounds, MAX_CONTINUITY_CHECKS } from './story-compiler.js'
 import { readOriginalTaskRequest, originalTaskRunIds, hasOriginalRepairAuthority } from './original-request.js'
 import { activeChapterScope } from '../data/internal.js'
-import { compilerContinuityCoverage, compilerContinuityCoverageMatches } from './compiler-continuity-contract.js'
-import { qualityReportMatchesContent, selectAutomaticQualityFindings } from './quality-report-contract.js'
+import { compilerContinuityCoverage, compilerContinuityCoverageMatches, currentCompilerContinuityAssessment, completeCompilerContinuityAssessment, continuityStoryInput } from './compiler-continuity-contract.js'
+import { qualityReportCheckedCurrentContent, selectAutomaticQualityFindings } from './quality-report-contract.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
+import { runtimeJson } from './runtime-common.js'
+
+type ReviewStatus = 'complete' | 'missing' | 'stale' | 'incomplete'
+export type ChapterReviewReadiness = {
+  ready: boolean; checksRequired: boolean; compilationId: string; chapterId: string; revision: number
+  continuity: ReviewStatus; quality: ReviewStatus; continuityErrorCount: number; qualityErrorCount: number
+  qualityReportId: string | null; requiredTools: Array<{ name: 'continuity_validate' | 'quality_analyze'; args: { compilationId: string } }>
+}
+
+/** Only authenticated original human text may waive a delivery assessment. */
+export function originalChapterReviewRequirements(original: { prompt: string | null; spec: unknown }) {
+  const spec = original.spec && typeof original.spec === 'object' && !Array.isArray(original.spec) ? original.spec as Record<string, unknown> : null
+  const writing = ['write', 'revise'].includes(String(spec?.intent)) && !['conversation_only', 'proposal_only'].includes(String(spec?.writingPacing))
+    && ['balanced', 'premium'].includes(String(spec?.qualityMode))
+  const clauses = original.prompt?.split(/[。！？!?；;\n，,]+/u) ?? []
+  const waived = (kind: 'continuity' | 'quality') => clauses.some(clause =>
+    !/(?:不要|不得|不能|不许|勿|不可|禁止)\s*(?:再)?\s*(?:跳过|省略|略过|取消)|(?:do not|don't|never|must not)\s+(?:skip|omit|bypass)/iu.test(clause)
+    && !/(?:标题|章名|错别字|标点|单句|前文|前章|第[\d一二三四五六七八九十百千零〇两]+章)/u.test(clause)
+    && /(?:不要|无需|不用|不必|跳过|不做|不进行|skip|do not|don't).{0,12}(?:检查|审查|审阅|评估|check|review)/iu.test(clause)
+    && (/(?:不要|无需|不用|不必|跳过)(?:再|做|进行|任何|所有|全部|自动|额外|完整)*(?:检查|审查|审阅|评估)(?:了)?\s*$/u.test(clause)
+      || /(?:skip|do not|don't).{0,8}(?:all|any).{0,8}(?:checks|reviews)/iu.test(clause)
+      || (kind === 'quality' ? /质量|人类感|AI味|quality/iu : /连续性|连贯性|一致性|continuity/iu).test(clause)))
+  return { continuity: writing && !waived('continuity'), quality: writing && !waived('quality') }
+}
+
+/** Server COMMIT proof preserves the exact reviewed bridge; it never rewrites
+ * a critic's hash. Any subsequent story-state change invalidates this proof. */
+export function terminalReviewStateHash(bridge: unknown, sceneTasks: unknown[]) {
+  return runtimeJson({ bridge: continuityStoryInput(JSON.parse(JSON.stringify(bridge))), scenes: continuityStoryInput(JSON.parse(JSON.stringify(sceneTasks))) }).hash
+}
+
+/** Fresh current-state assessments take precedence over the original COMMIT
+ * proof. The proof only preserves an assessment of the reviewed precommit
+ * bridge; it must not hide a later read-only assessment of the terminal bridge. */
+export function readCurrentCompilerContinuity(compilation: {
+  status: string; stage: string; validation: unknown; preparedContext: unknown
+  bridge: { targetRevision: number | null; committedAt: Date | null }; sceneTasks: Array<{ ordinal: number }>
+}, chapter: { id: string; title?: string; revision: number; content: string; orderIndex: number }, source: unknown | null) {
+  const validation = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation)
+    ? compilation.validation as Record<string, unknown> : null
+  const scenes = [...compilation.sceneTasks].sort((a, b) => a.ordinal - b.ordinal)
+  const coverageFor = (bridge: unknown) => compilerContinuityCoverage({ chapter, bridge, sceneTasks: scenes, source,
+    focus: typeof validation?.reviewFocus === 'string' ? validation.reviewFocus : undefined })
+  const coverage = coverageFor(compilation.bridge)
+  const assessment = currentCompilerContinuityAssessment(validation, chapter, coverage)
+  if (assessment) return { assessment, coverage, checkedBridge: compilation.bridge }
+  const context = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext)
+    ? compilation.preparedContext as Record<string, unknown> : null
+  const proof = context?.terminalReviewProof && typeof context.terminalReviewProof === 'object' && !Array.isArray(context.terminalReviewProof)
+    ? context.terminalReviewProof as Record<string, unknown> : null
+  const proofCurrent = compilation.status === 'completed' && compilation.stage === 'commit' && compilation.bridge.targetRevision === chapter.revision
+    && !!compilation.bridge.committedAt && context?.terminalContentHash === runtimeJson({ content: chapter.content }).hash
+    && proof?.version === 1 && !!proof.checkedBridge && typeof proof.checkedBridge === 'object' && !Array.isArray(proof.checkedBridge)
+    && proof.terminalStateHash === terminalReviewStateHash(compilation.bridge, scenes)
+  const proofCoverage = proofCurrent ? coverageFor(proof!.checkedBridge) : null
+  const proofAssessment = proofCoverage ? currentCompilerContinuityAssessment(validation, chapter, proofCoverage) : null
+  return { assessment: proofAssessment, coverage: proofAssessment ? proofCoverage! : coverage,
+    checkedBridge: proofAssessment ? proof!.checkedBridge : compilation.bridge }
+}
+
+/** A pure persisted-state read: no paid calls, reservations, repairs or counters.
+ * Callers dispatch only the returned tools through the ordinary tool journal. */
+export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
+  subject: { userId: string; novelId: string; runId: string }, compilationId?: string): Promise<ChapterReviewReadiness | null> {
+  const original = await readOriginalTaskRequest(tx, subject)
+  const runIds = await originalTaskRunIds(tx, subject, original)
+  const compilation = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds },
+    ...(compilationId ? { id: compilationId } : {}), status: { in: ['active', 'completed'] } },
+    include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+  if (!compilation?.chapterId || !compilation.bridge) return null
+  const chapter = await tx.chapter.findFirst({ where: { id: compilation.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) },
+    select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
+  if (!chapter?.content.trim()) return null
+  const source = compilation.bridge.fromChapterId ? await tx.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId,
+    ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } }) : null
+  if (compilation.bridge.fromChapterId && source?.revision !== compilation.bridge.sourceRevision) {
+    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '章节桥来源版本已变化，保留原编译与正文，不能自动重建或沿用旧检查交付。')
+  }
+  const requirements = originalChapterReviewRequirements(original)
+  const validation = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : null
+  const { assessment } = readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, chapter, source)
+  const continuity: ReviewStatus = assessment ? 'complete' : !validation ? 'missing' : !completeCompilerContinuityAssessment(validation) ? 'incomplete' : 'stale'
+  // Latest assessment wins. A failed later attempt must not resurrect an older
+  // complete report, and repairedContentHash certifies no new critic call.
+  const report = await tx.chapterQualityReport.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, compilationId: compilation.id,
+    chapterId: chapter.id, runId: { in: runIds } }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+  const metrics = report?.deterministicMetrics && typeof report.deterministicMetrics === 'object' && !Array.isArray(report.deterministicMetrics) ? report.deterministicMetrics : null
+  const quality: ReviewStatus = report && qualityReportCheckedCurrentContent(report, chapter.revision, chapter.content) ? 'complete'
+    : !report ? 'missing' : ['failed', 'analyzing'].includes(report.status) || metrics?.independentCheck !== 'complete'
+      || typeof metrics.contentHash !== 'string' || !/^[a-f0-9]{64}$/.test(metrics.contentHash) ? 'incomplete' : 'stale'
+  const requiredTools: ChapterReviewReadiness['requiredTools'] = []
+  if (requirements.continuity && continuity !== 'complete') requiredTools.push({ name: 'continuity_validate', args: { compilationId: compilation.id } })
+  if (requirements.quality && quality !== 'complete') requiredTools.push({ name: 'quality_analyze', args: { compilationId: compilation.id } })
+  return { ready: !requiredTools.length, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id,
+    chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools,
+    continuityErrorCount: assessment?.errorCount ?? 0, qualityErrorCount: quality === 'complete' ? report!.findings.filter(finding =>
+      finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0,
+    qualityReportId: quality === 'complete' ? report!.id : null }
+}
 
 /** A review cannot enlarge the author's request. This guard runs in the same
  * manuscript transaction as CAS, for legacy, durable and quality repair writes.
@@ -35,9 +134,7 @@ export async function assertChapterReviewRevision(
   if (compilations.some(item => readNewDraftRevision(item.validation))) {
     throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本任务新稿已完成一次检查后的合并事实修订。保留当前正文和剩余意见，交作者决定；复核、换工具、父子任务或重新准备不能增加修订次数，不能宣称剩余问题已通过。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
   }
-  if (compilations.some(item => continuityCheckRounds(item.validation) >= MAX_CONTINUITY_CHECKS)) {
-    throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本章自动检查次数已用完，已停止后续自动改稿。检查上限不是正文错误；保留当前正文和原报告，不能靠改一句、换工具、添加检查范围或续跑恢复次数。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
-  }
+  const checksExhausted = compilations.some(item => continuityCheckRounds(item.validation) >= MAX_CONTINUITY_CHECKS)
   const reports = await tx.chapterQualityReport.findMany({ where: {
     userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, runId: { in: runIds },
   }, select: { chapterRevision: true, repairRound: true } })
@@ -72,7 +169,7 @@ export async function assertChapterReviewRevision(
       && !!validation && validation.independentCheck === 'complete' && validation.checkedChapterId === current?.id
       && validation.checkedRevision === current?.revision && errorCount > 0 && validation.errorCount === errorCount
     if (!options?.requireQualityChannel && authority && current && compilations.every(item => continuityRepairRounds(item.validation) === 0)
-      && latest?.status === 'active' && latest.stage === 'check' && latest.bridge && !latest.bridge.committedAt
+      && latest?.status === 'active' && ['check', 'repair'].includes(latest.stage) && latest.bridge && !latest.bridge.committedAt
       && latest.bridge.toChapterId === current.id && latest.bridge.targetRevision === current.revision
       && latest.sceneTasks.length >= 1 && latest.sceneTasks.length <= 4
       && validation?.independentCheck === 'complete' && validation.checkedChapterId === current.id
@@ -100,11 +197,14 @@ export async function assertChapterReviewRevision(
         where: { userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, runId: { in: runIds } },
         include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       })
-      const quality = qualityReports.find(item => !!item.compilationId && item.repairRound === 0
-        && qualityReportMatchesContent(item, current.revision, current.content)
-        && selectAutomaticQualityFindings(item.findings).length > 0
-        && compilations.some(compilation => compilation.id === item.compilationId && compilation.status === 'active'
-          && compilation.bridge && !compilation.bridge.committedAt))
+      // Do not search past the newest assessment of this logical task/target:
+      // a failed or still-running paid attempt cannot resurrect older advice.
+      const latestQuality = qualityReports[0]
+      const quality = latestQuality && !!latestQuality.compilationId && latestQuality.repairRound === 0
+        && qualityReportCheckedCurrentContent(latestQuality, current.revision, current.content)
+        && selectAutomaticQualityFindings(latestQuality.findings).length > 0
+        && compilations.some(compilation => compilation.id === latestQuality.compilationId && compilation.status === 'active'
+          && compilation.bridge && !compilation.bridge.committedAt) ? latestQuality : undefined
       // A pre-payment probe runs before the pending report exists: it models the
       // complete report the same caller is about to persist (same revision,
       // same candidates). The write itself still requires the persisted report.
@@ -122,8 +222,14 @@ export async function assertChapterReviewRevision(
         }
       }
     }
+    if (checksExhausted) throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本章自动检查次数已用完，保留正文和原报告，不增加检查或修订次数。')
+    if (authority && current && validation?.independentCheck === 'complete' && typeof validation.checkedRevision === 'number'
+      && validation.checkedRevision < current.revision) {
+      throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', `旧报告未检查当前 r${current.revision}，保留已保存正文，在原检查次数内调用 continuity_validate 复核后再合并一次尚未执行的修订；不得重绑旧报告或增加修订次数。`)
+    }
     throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '本任务的原始作者请求未授权检查后改写正文，当前也没有可授权一次合并修订的完整证据（新稿通道需要当前版本、绑定活跃编译的完整检查与可修订候选）。保留连贯正文与报告，停止自动修订。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
   }
+  if (checksExhausted) throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本章自动检查次数已用完，保留正文和原报告，不增加检查或修订次数。')
   const revisions = [...reports.map(item => item.chapterRevision), ...validations.flatMap(value =>
     typeof value.checkedRevision === 'number' && Number.isSafeInteger(value.checkedRevision) ? [value.checkedRevision] : [])]
   if (revisions.length && Math.max(...revisions) < chapter.revision) {
@@ -138,12 +244,12 @@ export async function assertChapterReviewRevision(
  * pendingQuality to model the report they are about to persist. */
 export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number },
-  options?: { requireQualityChannel?: boolean; pendingQuality?: { compilationId: string; candidates: number } }): Promise<{ open: true } | { open: false; message: string }> {
+  options?: { requireQualityChannel?: boolean; pendingQuality?: { compilationId: string; candidates: number } }): Promise<{ open: true } | { open: false; code: string; message: string }> {
   try {
     await assertChapterReviewRevision(tx, subject, chapter, options)
     return { open: true }
   } catch (error) {
-    if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) return { open: false, message: error.message }
+    if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) return { open: false, code: error.code, message: error.message }
     throw error
   }
 }

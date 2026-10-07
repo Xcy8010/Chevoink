@@ -58,3 +58,12 @@ export function qualityReportMatchesContent(report: { status: string; chapterRev
   return report.chapterRevision === revision && ['passed', 'needs_repair', 'repaired'].includes(report.status)
     && value.independentCheck === 'complete' && expected === createHash('sha256').update(content).digest('hex')
 }
+
+/** A repair receipt certifies a patch, not a critic assessment of its result. */
+export function qualityReportCheckedCurrentContent(report: { status: string; chapterRevision: number; deterministicMetrics: unknown }, revision: number, content: string): boolean {
+  const metrics = report.deterministicMetrics
+  return !!metrics && typeof metrics === 'object' && !Array.isArray(metrics)
+    && ['passed', 'needs_repair'].includes(report.status) && report.chapterRevision === revision
+    && (metrics as Record<string, unknown>).independentCheck === 'complete'
+    && (metrics as Record<string, unknown>).contentHash === createHash('sha256').update(content).digest('hex')
+}

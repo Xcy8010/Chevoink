@@ -68,7 +68,7 @@ describe('质量检查默认目标', () => {
     const { db, run, compilations } = database(['new-chapter'])
     expect(await resolveQualityChapterTarget(input, db)).toBe('new-chapter')
     expect(run).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'r', userId: 'u', novelId: 'n' } }))
-    expect(compilations).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', status: 'active', run: { userId: 'u', novelId: 'n', taskRootId: 'root' } }, take: 2 }))
+    expect(compilations).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', status: { in: ['active', 'completed'] }, run: { userId: 'u', novelId: 'n', taskRootId: 'root' } }, take: 2 }))
   })
   it('章节与编译编号配对校验，不能跨任务或混用对象身份', async () => {
     const { db } = database([])
@@ -105,7 +105,7 @@ describe('质量检查默认目标', () => {
   it('指定编译必须在当前运行作用域，不能失败后回退旧章节', async () => {
     const { db, compilations } = database([], null)
     await expect(resolveQualityChapterTarget({ ...input, compilationId: 'foreign' }, db)).rejects.toMatchObject({ code: 'QUALITY_TARGET_AMBIGUOUS' })
-    expect(compilations).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', status: 'active', run: { id: 'r', userId: 'u', novelId: 'n' }, id: 'foreign' } }))
+    expect(compilations).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', status: { in: ['active', 'completed'] }, run: { id: 'r', userId: 'u', novelId: 'n' }, id: 'foreign' } }))
   })
   it.each([[null], ['a', 'b']])('未绑定或多个活跃章节要求明确目标，不猜测', async (...chapters) => {
     const { db } = database(chapters)

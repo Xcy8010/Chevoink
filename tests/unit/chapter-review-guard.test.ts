@@ -145,7 +145,8 @@ describe('one atomic factual correction in the original new draft', () => {
       if (scenario === 'later-prepare') f.rows.unshift({ ...f.compilation, id: 'later', validation: { checkRounds: 1 } as never })
       if (scenario === 'no-body') f.chapter.content = ''
       if (scenario === 'paid-repair-reserved') f.validation.autoRepairRounds = 1
-      await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: scenario === 'foreign-binding' ? 'RUNTIME_RECEIPT_INVALID' : 'REPAIR_NOT_AUTHORIZED' })
+      await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: scenario === 'foreign-binding' ? 'RUNTIME_RECEIPT_INVALID'
+        : scenario === 'stale' ? 'REVIEW_REPAIR_RECHECK_REQUIRED' : 'REPAIR_NOT_AUTHORIZED' })
       expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     })
   it.each(['写下一章，不要修改正文', 'Write the next chapter. Do not edit the draft.', '写下一章。不要做任何改写',
@@ -166,6 +167,15 @@ describe('one atomic factual correction in the original new draft', () => {
     await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
+  it('a complete quality report cannot close an unspent factual correction by moving the compiler to repair', async () => {
+    const f = fixture()
+    f.compilation.stage = 'repair'
+    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter)
+    await consume?.()
+    expect(f.compilation.validation).toMatchObject({ newDraftRevision: { checkedRevision: 3 } })
+  })
   it('reports closed after the merged correction is consumed, without consuming anything itself', async () => {
     const f = fixture()
     await (await assertChapterReviewRevision(f.tx, f.subject, f.chapter))?.()
@@ -177,12 +187,22 @@ describe('one atomic factual correction in the original new draft', () => {
   })
   it.each(['exhausted', 'unauthorized', 'committed-window', 'later-failure'] as const)('reports a closed channel while edits stay blocked: %s', async scenario => {
     const f = fixture()
-    if (scenario === 'exhausted') Object.assign(f.validation, { checkRounds: 3 })
+    if (scenario === 'exhausted') Object.assign(f.validation, { checkRounds: 3, independentCheck: 'unavailable' })
     if (scenario === 'unauthorized') f.spec.intent = 'review'
     if (scenario === 'committed-window') f.compilation.bridge.committedAt = new Date() as never
     if (scenario === 'later-failure') f.rows.unshift({ ...f.compilation, id: 'later', validation: { ...f.validation, independentCheck: 'unavailable' } })
     await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it('admits the one unspent correction from the final complete check without replenishing checks', async () => {
+    const f = fixture()
+    Object.assign(f.validation, { checkRounds: 3 })
+    const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter)
+    expect(consume).toBeTypeOf('function')
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    await consume?.()
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 3, autoRepairRounds: 0, newDraftRevision: { checkedRevision: 3 } })
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
   })
   it('admits one strict-mode quality correction from a complete report bound to the active compilation', async () => {
     const f = fixture()
@@ -206,6 +226,23 @@ describe('one atomic factual correction in the original new draft', () => {
     await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality })).resolves.toEqual({ open: true })
     f.compilation.bridge.committedAt = new Date() as never
     await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality })).resolves.toMatchObject({ open: false })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it.each([
+    { status: 'failed', reprepare: false }, { status: 'analyzing', reprepare: false },
+    { status: 'failed', reprepare: true }, { status: 'analyzing', reprepare: true },
+  ])('latest $status quality assessment blocks older advice (reprepare=$reprepare)', async ({ status, reprepare }) => {
+    const f = fixture()
+    f.validation.errorCount = 0; f.validation.findings = []
+    const older = { id: 'older', compilationId: 'compiler', chapterRevision: f.chapter.revision, repairRound: 0, status: 'needs_repair',
+      deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(f.chapter.content).digest('hex') },
+      findings: [{ id: 'advice', severity: 'warning', startOffset: 0, endOffset: 2, disposition: 'pending', authorFeedback: null }] }
+    if (reprepare) f.rows.unshift({ ...f.compilation, id: 'later-compiler' })
+    const latest = { ...older, id: 'latest', compilationId: reprepare ? 'later-compiler' : older.compilationId, status, findings: [] }
+    vi.mocked(f.db.chapterQualityReport.findMany).mockImplementation((async (args: Prisma.ChapterQualityReportFindManyArgs) =>
+      (args?.include ? [latest, older] : []) as never) as never)
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toMatchObject({ open: false })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   it('keeps the strict-mode channel closed without a complete bound report or with zero candidates', async () => {

@@ -1,4 +1,5 @@
 import { runtimeJson } from './runtime-common.js'
+import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 
 // Bump when the critic's required coverage or interpretation changes.
 export const COMPILER_CONTINUITY_PROTOCOL = 2
@@ -38,4 +39,25 @@ export function compilerContinuityCoverageMatches(actual: unknown, expected: Com
 /** Recovering paid work must not dispatch a new repair under an older protocol. */
 export function hasCurrentCompilerContinuityProtocol(coverage: CompilerContinuityCoverage): boolean {
   return coverage.protocolVersion === COMPILER_CONTINUITY_PROTOCOL && typeof coverage.reviewHash === 'string' && /^[a-f0-9]{64}$/.test(coverage.reviewHash)
+}
+
+/** COMPLETE requires a valid findings envelope, not just a status string. */
+export function completeCompilerContinuityAssessment(validation: unknown): { errorCount: number; warningCount: number } | null {
+  if (!validation || typeof validation !== 'object' || Array.isArray(validation)) return null
+  const value = validation as Record<string, unknown>
+  if (value.independentCheck !== 'complete' || typeof value.checkedChapterId !== 'string' || !Number.isSafeInteger(value.checkedRevision)
+    || !Array.isArray(value.findings) || !value.coverage || typeof value.coverage !== 'object' || Array.isArray(value.coverage)
+    || typeof (value.coverage as Record<string, unknown>).reviewHash !== 'string') return null
+  const findings = value.findings.map(item => continuityFindingInputSchema.safeParse(item))
+  if (findings.some(item => !item.success)) return null
+  const errorCount = findings.filter(item => item.success && item.data.severity === 'error').length
+  const warningCount = findings.filter(item => item.success && item.data.severity === 'warning').length
+  return value.errorCount === errorCount && value.warningCount === warningCount ? { errorCount, warningCount } : null
+}
+
+export function currentCompilerContinuityAssessment(validation: unknown, chapter: { id: string; revision: number }, coverage: CompilerContinuityCoverage): { errorCount: number; warningCount: number } | null {
+  const assessment = completeCompilerContinuityAssessment(validation)
+  if (!assessment) return null
+  const value = validation as Record<string, unknown>
+  return value.checkedChapterId === chapter.id && value.checkedRevision === chapter.revision && compilerContinuityCoverageMatches(value.coverage, coverage) ? assessment : null
 }

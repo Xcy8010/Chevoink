@@ -85,8 +85,12 @@ export async function originalTaskRunIds(tx: Prisma.TransactionClient, subject: 
 
 export function hasOriginalRepairAuthority(prompt: string | null): boolean {
   if (!prompt) return false
-  return prompt.split(/[。！？!?；;\n，,]+/u).some(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|只读|不改|do not|don't)/iu.test(clause)
-    && /(?:修复|修正|纠正|纠错|改写|修改|润色|重写|整改|repair|revise|rewrite|polish|fix\b)/iu.test(clause))
+  return prompt.replace(/([零〇一二两三四五六七八九十百千0-9]+\s*(?:章)?)\s*[，,]\s*(?=第?\s*[零〇一二两三四五六七八九十百千0-9]+)/gu, '$1、')
+    .split(/[。！？!?；;\n，,]+/u).some(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|(?<!分)别|只读|不改|不修改|do not|don't|must not|read.only)/iu.test(clause)
+    && !/^\s*(?:请问|如何|怎么|怎样|能否解释|解释|what\b|why\b|how\b)/iu.test(clause)
+    && /(?:修复|修正|纠正|纠错|改写|修改|润色|重写|整改|优化|(?:开始|从|逐章|帮我|请你).{0,20}改(?:[，,。\s]|$|一下|正文|第|这|当前)|(?:^|请|帮我)改(?:第|这|当前|全书|一下)|(?:帮我|请你|直接)解决|解决.{0,12}(?:问题|错误)|repair|revise|rewrite|polish|fix\b)/iu.test(clause
+      .replace(/(?:提出|给出|提供|列出|说明|输出|讲解).{0,32}(?:建议|方案|思路|方法|报告)/gu, '')
+      .replace(/(?:修复|修正|纠正|纠错|改写|修改|润色|重写|整改|优化)(?:的)?(?:建议|方案|思路|方法|情况)/gu, '')))
 }
 
 export async function assertOriginalRepairAuthority(tx: Prisma.TransactionClient, subject: Subject) {

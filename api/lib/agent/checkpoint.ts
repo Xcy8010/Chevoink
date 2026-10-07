@@ -56,6 +56,12 @@ const runCheckpointFields = {
   writeProgress: z.number().int().nonnegative(), writeBaseline: z.number().int().nonnegative(),
   readProgress: z.number().int().nonnegative(), readBaseline: z.number().int().nonnegative(),
   progressSignatures: z.array(z.string()),
+  // Write before a legacy critic/repair chain starts. A process interruption or
+  // uncertain provider outcome cannot become permission to pay for it again.
+  reviewAttempts: z.array(z.string().min(1)).optional(),
+  pendingReviews: z.array(z.object({ compilationId: z.string().min(1).nullable(), chapterId: z.string().min(1),
+    revision: z.number().int().positive(), toolName: z.enum(['continuity_validate', 'quality_analyze']), callId: z.string().min(1),
+  }).strict()).optional(),
   // A review denial hands control back for bounded safe wrap-up attempts (the
   // loop guides at most 3 times, then ends the task with an explicit exit for
   // the author). Resuming never restores this budget or manuscript authority.
@@ -76,6 +82,7 @@ export const runCheckpointSchema = z.discriminatedUnion('version', [
     origin: z.enum(['system_default', 'unknown_legacy']), activeExecutionMs: z.number().int().nonnegative(), stagnantBatches: z.number().int().nonnegative().default(0) }).strict(),
 ]).refine(value => value.writeBaseline <= value.writeProgress && value.readBaseline <= value.readProgress)
 export type RunCheckpointState = z.infer<typeof runCheckpointSchema>
+export type PendingReviewCall = NonNullable<RunCheckpointState['pendingReviews']>[number]
 
 /** Count execution intervals, not the gaps between terminal and restart events.
  * Missing terminal events remain charged conservatively until the next known

@@ -19,7 +19,11 @@ export function classifyWritingPacing(prompt: string): TaskSpec['writingPacing']
   const explicitEffect = /(?:帮我|替我|为我|请你|然后|再)(?:直接)?(?:写|修改|改写|续写|创建|删除|保存|更新|润色|重写|生成)/u.test(positive)
   // Resolve informational questions before matching a book-sized object:
   // "如何写一本小说" asks for advice, not even a saved planning artifact.
-  if (greeting || (question && !explicitEffect)) return 'conversation_only'
+  const advisory = /^(?:(?:那|那么|你觉得|你看|请问)[，,\s]*)?(?:下一步|接下来)(?:我|我们)?(?:应该|该|可以|要)?(?:做什么|怎么做|怎么办|如何推进|干什么)[呢吗吧？?。.!！\s]*$/u.test(prompt.trim())
+  // Trust without an explicit action or a verified continuation referent is a
+  // conversational response. It cannot select the editor's chapter as scope.
+  const delegationOnly = /^(?:其他|其它|其余|剩下)(?:的|事情|事)?[，,\s]*(?:我)?(?:都|全)?(?:听你的|听你安排|交给你|由你决定|你决定)[吧。.!！\s]*$/u.test(prompt.trim())
+  if (greeting || advisory || delegationOnly || (question && !explicitEffect)) return 'conversation_only'
   // A classifier/quantity is optional ("写玄幻小说", "写本修仙小说").
   // Do not turn explicit continuation or revision into a new-book proposal.
   const broad = /(?<!续|改|重|扩|缩)(?:写|创作|创建|开|构思|策划).{0,40}(?:小说|故事)|(?:写|创作).{0,8}全书|(?:write|create).{0,30}(?:a|an|entire|whole).{0,24}(?:novel|book)/iu.test(positive)
@@ -95,7 +99,21 @@ function classifyIntent(prompt: string): TaskIntent {
   if (requestsResearch && !requestsWriting) return 'research_analysis'
   if (/(全书|所有章节|批量|统一).{0,16}(改名|替换|修改|变更)|全局改/.test(prompt)) return 'global_transform'
   if (/(卷|章节).{0,12}(移动|排序|顺序|拆分|合并|插入)|新增.*卷/.test(prompt)) return 'structure'
-  if (/(检查|审阅|评估|分析|找问题|一致性)/.test(prompt)) return 'review'
+  if (/(检查|审阅|评估|分析|找问题|一致性)|\b(?:check|review|assess|evaluate|analy[sz]e)\b/iu.test(prompt)) {
+    // Required checks are subordinate to an explicit chapter write/revision.
+    // "Do not skip checks" negates skipping, never the preceding writing ask.
+    const chapterEffects = clauses.flatMap(clause => clause.split(/(?:但是|但|不过|\bbut\b|并(?:且)?(?=不要|不得|不能|禁止)|\band\s+(?=do not|don't|must not))/iu)).map(clause => clause
+      .replace(/(?:不要|不得|不许|不能|禁止|别)(?:再)?(?:跳过|省略|略过).{0,12}(?:检查|审查|评估|校验|检测)/gu, '')
+      .replace(/(?:do not|don't|must not|never)\s+(?:skip|omit|bypass)\b.{0,32}\b(?:checks?|reviews?|validation)\b/giu, ''))
+      .filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|(?<!分)别|只读|不写|不改|do not|don't|must not|never|read.only)/iu.test(clause))
+      .map(clause => clause
+        .replace(/(?:提出|给出|提供|列出|说明|输出|讲解).{0,32}(?:建议|方案|思路|方法|报告)/gu, '')
+        .replace(/(?:改写|修改|修复|优化|润色)(?:的)?(?:建议|方案|思路|方法)/gu, ''))
+    const revisesChapter = chapterEffects.some(clause => /(?:改写|修改|修复|优化|润色|重写|扩写|缩写).{0,16}(?:章|正文)|(?:章|正文).{0,16}(?:改写|修改|修复|优化|润色|重写)|\b(?:revise|edit|repair|rewrite|polish|fix)\b(?:(?!\b(?:advice|report|suggestion)\b).){0,40}\b(?:chapter|prose)\b/iu.test(clause))
+    if (revisesChapter) return 'revise'
+    const writesChapter = chapterEffects.some(clause => /(?:写|续写|创作|起草).{0,16}(?:章节|章(?!节)|正文)(?!(?:的)?(?:(?:检查|审阅|质量|分析|评估).{0,8})?报告)|(?:完成|写完|补完|补齐).{0,8}(?:章节|章(?!节)|正文)(?!(?:的)?(?:质量|连续性|一致性|事实)?(?:检查|审查|评估|分析|校验|检测|报告))|\b(?:write|draft|finish|complete)\b(?:(?!\b(?:review|check|report|assessment|evaluation)\b).){0,40}\b(?:chapter|prose)\b(?!(?:['’]s)?\s+(?:quality\s+)?(?:review|check|report)\b)/iu.test(clause))
+    return writesChapter ? 'write' : 'review'
+  }
   if (/(规划|大纲|计划|设计剧情)/.test(prompt)) return 'plan'
   if (/(改写|润色|扩写|缩写|修改|调整)/.test(prompt)) return 'revise'
   return 'write'

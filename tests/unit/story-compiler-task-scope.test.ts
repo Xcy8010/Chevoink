@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 const db = vi.hoisted(() => ({
@@ -125,6 +126,10 @@ describe('story compiler task identity', () => {
     const terminal = { id: 'new-completed', chapterId: 'own32', status: 'completed', stage: 'commit', sceneTasks: [], preparedContext: { terminalContentHash: runtimeJson({ content: '已保存正文' }).hash },
       chapter: { id: 'own32', title: '原章节', content: '已保存正文', revision: 3, orderIndex: 32 },
       bridge: { targetRevision: 3, committedAt: new Date(), fromChapterId: null, recentOpenings: [], recentEndings: [] } }
+    Object.assign(terminal, { validation: { checkedChapterId: terminal.chapterId, checkedRevision: 3, independentCheck: 'complete', findings: [], errorCount: 0, warningCount: 0,
+      coverage: compilerContinuityCoverage({ chapter: terminal.chapter, bridge: terminal.bridge, sceneTasks: terminal.sceneTasks, source: null }) } })
+    db.chapterQualityReport.findFirst.mockResolvedValue({ id: 'q', chapterRevision: 3, status: 'passed', findings: [],
+      deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(terminal.chapter.content).digest('hex') } })
     db.storyCompilation.findMany.mockResolvedValue([terminal, { ...terminal, id: 'old-active', status: 'active' }])
     db.storyCompilation.findFirst.mockResolvedValue(terminal)
     const result = await chapterBridgeCommitTool.execute(ctx, {})
@@ -174,7 +179,10 @@ describe('story compiler task identity', () => {
     const chapter = { id: 'old31', revision: 3, content: '已保存正文', title: '原章节', orderIndex: 31 }
     const bridge = { id: 'bridge', fromChapterId: null, recentOpenings: [], recentEndings: [] }
     db.storyCompilation.findFirst.mockResolvedValue({ id: 'original-compiler', runId: 'original-run', chapterId: 'old31', status: 'active', chapter, sceneTasks: [], bridge,
-      validation: { independentCheck: 'complete', checkedRevision: 3, errorCount: 0, coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks: [], source: null }) } })
+      validation: { independentCheck: 'complete', checkedChapterId: chapter.id, checkedRevision: 3, findings: [], errorCount: 0, warningCount: 0,
+        coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks: [], source: null }) } })
+    db.chapterQualityReport.findFirst.mockResolvedValue({ id: 'q', chapterRevision: 3, status: 'passed', findings: [],
+      deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(chapter.content).digest('hex') } })
     const save = vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'proposal', action: 'created', status: 'candidate' })
     try {
       await commitChapterBridge({ userId: 'u', novelId: 'n', runId: 'new-run', compilationId: 'original-compiler', chapterSummary: '原章节摘要',

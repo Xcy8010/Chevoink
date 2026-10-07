@@ -53,12 +53,16 @@ import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-t
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { createEmptyResponseGuard, createProtocolRecoveryGuard, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { toolFailureRecovery } from './tool-failure-recovery.js'
+import { readChapterReviewReadiness, probeChapterReviewRevision } from './chapter-review-guard.js'
+import { nextReviewDispatch } from './review-dispatch.js'
+import { activeChapterScope } from '../data/internal.js'
 import { createRepeatDetector } from './repeat-detect.js'
 import {
   savedRunUsageSchema,
   recoverLegacyRunUsage,
   recoverRunElapsedMs,
   type RunCheckpointState,
+  type PendingReviewCall,
 } from './checkpoint.js'
 import { COMPATIBILITY_TOKEN_LIMIT, untilCompletionControl } from './execution-control.js'
 import { autoNameSession } from './session-title.js'
@@ -217,11 +221,25 @@ const STRUCTURE_FAILURE_LIMIT = 3
 const STATE_SENSITIVE_VALIDATORS = new Set(['continuity_validate', 'quality_analyze'])
 // Polling/question tools observe external activity; they are intentionally repeatable.
 const REPEATABLE_TOOLS = new Set(['task_wait', 'task_get', 'task_list', 'ask_user'])
+function reviewPreflightArgs(call: ToolCallRequest, tool?: AgentTool): Record<string, unknown> | null {
+  if (call.incomplete) return null
+  try {
+    let args = parseToolArgsTolerant(call.arguments, false)
+    if (tool) {
+      args = normalizeToolInput(tool, args)
+      const validated = validateToolInput(tool, args)
+      if (!validated.success) return null
+      args = validated.data
+    }
+    return args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : null
+  } catch { return null } // Ordinary handler reports malformed parameters.
+}
 
 /** 瘦身时保留最近 N 条工具输出不动：近期结果是当前决策的主要依据 */
 const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
 
 type ToolCallOutcome = {
+  failureCode?: string
   reviewStopReason?: string
   providerFailure?: boolean
   providerFailureCode?: string
@@ -383,8 +401,8 @@ export async function handleToolCall(
       durationMs: Date.now() - startedAt,
       ...subagentMark,
     })
-    return { observation, part: { ...basePart, args: parsedArgs, status, summary },
-      ...(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(failureCode ?? '')
+    return { observation, failureCode, part: { ...basePart, args: parsedArgs, status, summary },
+      ...(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED'].includes(failureCode ?? '')
         ? { reviewStopReason: observation } : {}) }
   }
 
@@ -470,7 +488,9 @@ export async function handleToolCall(
     failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
     if (result.outcome === 'failed') {
       failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
-      return fail(result.summary ?? '执行未完成', wrapToolOutput(tool.name, result.output), 'failed')
+      const recovery = toolFailureRecovery(failureCode)
+      return { ...fail(result.summary ?? recovery?.label ?? '执行未完成', wrapToolOutput(tool.name,
+        result.output + (recovery ? `\n${recovery.guidance}` : '')), 'failed'), ...(recovery ? { recoveryCode: failureCode } : {}) }
     }
     const durationMs = Date.now() - startedAt
     const summary = result.summary ?? `${tool.title}完成`
@@ -526,7 +546,8 @@ export async function handleToolCall(
     }
     // 错误即观察：不中断 run，把错误回填给模型自行重试或换路
     if (error instanceof DataAccessError && error.code.startsWith('AI_')) {
-      const label = error.code === 'AI_QUALITY_NON_THINKING_UNSUPPORTED' ? '此模型尚无法关闭检查思考'
+      const label = error.code === 'AI_PROVIDER_QUOTA_EXCEEDED' ? '供应商模型额度已耗尽'
+        : error.code === 'AI_QUALITY_NON_THINKING_UNSUPPORTED' ? '此模型尚无法关闭检查思考'
         : error.code === 'AI_PROVIDER_TIMEOUT' ? '模型网关超时'
         : error.code === 'AI_PROVIDER_OUTPUT_LIMIT' ? '模型输出达到上限，检查未完成'
         : error.code === 'AI_PROVIDER_INCOMPLETE' ? '模型输出中断，检查未完成'
@@ -534,7 +555,8 @@ export async function handleToolCall(
         : error.code === 'AI_PROVIDER_TRANSPORT' ? '模型连接中断，结果未确认'
         : error.code === 'AI_PROVIDER_INVALID_RESPONSE' ? '模型响应格式异常' : '模型服务异常'
       console.warn('[agent-tool-provider]', { runId, tool: call.name, code: error.code, durationMs: Date.now() - startedAt })
-      const guidance = error.code === 'AI_QUALITY_NON_THINKING_UNSUPPORTED'
+      const guidance = error.code === 'AI_PROVIDER_QUOTA_EXCEEDED' ? error.message
+        : error.code === 'AI_QUALITY_NON_THINKING_UNSUPPORTED'
         ? `${error.message} 本次未发送检查模型请求；不要重试同一配置或修改正文来绕过，检查仍未完成。`
         : error.code === 'AI_PROVIDER_OUTPUT_LIMIT'
         ? '输出预算已达上限，不要原样重复付费调用；保留进度并报告检查未完成，不能将截断报告当作通过。'
@@ -544,7 +566,7 @@ export async function handleToolCall(
       return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。${guidance}`, 'failed'), providerFailure: true, providerFailureCode: error.code }
     }
     console.warn('[agent-tool-failure]', { runId, tool: call.name, code: error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR', durationMs: Date.now() - startedAt })
-    if (error instanceof DataAccessError && ['REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) {
+    if (error instanceof DataAccessError && ['REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED'].includes(error.code)) {
       return fail('自动修订已停止', error.message, 'failed')
     }
     if (error instanceof DataAccessError && ['RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) {
@@ -723,6 +745,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const argumentFailures = new Map<string, number>()
   const toolProviderFailures = new Map<string, number>()
   const recoveryFailures = new Map<string, number>()
+  const automaticReviewAttempts = new Set<string>()
+  const pendingReviews = new Map<string, PendingReviewCall>()
+  const restoreReviewEvidence = (checkpoint: RunCheckpointState) => {
+    checkpoint.reviewAttempts?.forEach(key => automaticReviewAttempts.add(key))
+    checkpoint.pendingReviews?.forEach(call => pendingReviews.set(`${call.compilationId ?? call.chapterId}:${call.toolName}`, call))
+  }
   // 非空时本轮工具执行完立即走 wrap-up（P0 第 4 次同签名 / P1 干预模式二次命中）
   let forceWrapUpReason: string | null = null
   // P1 信道重复检测：正文+思考共用一个检测器，观察/干预由 env.agentRepeatGuardMode 决定
@@ -758,6 +786,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     writeProgress: writeProgressCount, writeBaseline: checkpointWriteBaseline,
     readProgress: readProgressCount, readBaseline: checkpointReadBaseline,
     progressSignatures: [...progressSignatures],
+    ...(automaticReviewAttempts.size ? { reviewAttempts: [...automaticReviewAttempts] } : {}),
+    ...(pendingReviews.size ? { pendingReviews: [...pendingReviews.values()] } : {}),
     inheritedTokens, inheritedTurns, inheritedExecutionMs, manualResumeCount,
     ...(reviewHandoffCount > 0 ? { reviewHandoffCount } : {}),
   })
@@ -773,6 +803,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     runId, bus, 'failed', usage, turn, '', reason, true, undefined, undefined, undefined, true,
   )
   const restoreCheckpointLimits = (checkpoint: RunCheckpointState) => {
+    restoreReviewEvidence(checkpoint)
     runStartedAt = Math.min(runStartedAt, checkpoint.runStartedAt)
     resumeCount = checkpoint.resumeCount
     compactionCount = checkpoint.compactionCount
@@ -933,6 +964,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           throw new DataAccessError(409, 'TASK_AUTHORIZATION_BUDGET_UNCONFIRMED', '原任务仍在执行或累计预算记录无法核实，未启动重复执行。')
         }
         inheritedTokens += saved.data.totalTokens
+        if (saved.data.checkpoint) restoreReviewEvidence(saved.data.checkpoint)
         inheritedTurns += prior.currentTurn
         const priorElapsed = recoverExecution(prior, executionStartedAt)
         priorExecutionMs += priorElapsed
@@ -992,6 +1024,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         taskSpec: taskSpec as unknown as object, usage: { ...usage, checkpoint: checkpointSnapshot() },
       } })
     } else await persistCheckpoint()
+    if (pendingReviews.size) {
+      throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED',
+        '上次独立检查或其修订链仍有未确认的请求。正文、进度与原预算保留；请先核对原调用回执，系统不会因继续任务而重发未知付费请求，也未判定检查通过。')
+    }
     if (!params.resume && taskSpec.intent !== 'research_analysis') {
       await withGoalExecutionContext(ownedGoalExecution, () => withGoalEffects(() => captureUserDirectives({
         userId: params.userId,
@@ -1504,22 +1540,39 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             arguments: call.arguments,
           }))
         : []
-      const effectiveToolCalls = result.toolCalls.length > 0 ? result.toolCalls : recoveredToolCalls
+      const effectiveToolCalls = result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
+      let automaticReviewTriggered = false
+      // A weak tool caller cannot skip the delivery assessments by returning
+      // prose. These calls use the same original tool ceiling and ordinary
+      // journal, approvals, billing and compiler counters as model calls.
+      if (effectiveToolCalls.length === 0 && ['write', 'revise'].includes(taskSpec.intent)
+        && params.mode === 'build' && !['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')
+        && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)
+        && !looksLikePseudoToolCall(result.content, toolNameList)) {
+        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: params.userId, novelId: params.novelId, runId }))
+        const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts)
+        if (next.kind === 'tool') {
+          automaticReviewTriggered = true
+          effectiveToolCalls.push({ id: `review_${messageId}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) })
+        }
+        else if (next.kind === 'blocked') forceWrapUpReason = next.reason
+      }
 
       messages.push({
         role: 'assistant',
-        content: recoveredToolCalls.length > 0 ? null : (result.content || null),
+        content: automaticReviewTriggered ? '正文已保存，正在完成当前版本的必要检查。' : recoveredToolCalls.length > 0 ? null : (result.content || null),
         reasoning: result.reasoning || undefined,
         toolCalls: effectiveToolCalls.length > 0 ? effectiveToolCalls : undefined,
       })
 
-      const cleanContent = humanizeAgentVisibleText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
+      const cleanContent = automaticReviewTriggered ? '正文已保存，正在完成当前版本的必要检查。'
+        : humanizeAgentVisibleText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；
       // 只有模型原生 reasoning 才进思考信道，执行旁白不再改道思考区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
-      if (result.content) bus.emit({ type: 'text.final', messageId, text: cleanContent, asReasoning: false })
+      if (result.content || automaticReviewTriggered) bus.emit({ type: 'text.final', messageId, text: cleanContent, asReasoning: false })
 
       const parts: AgentMessagePart[] = []
       if (liveTurn) liveTurn.parts = parts
@@ -1529,6 +1582,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       if (cleanContent) {
         parts.push({ type: 'text', text: cleanContent })
+      }
+      if (forceWrapUpReason && effectiveToolCalls.length === 0) {
+        await persistMessage(messageId, runId, params.sessionId, 'assistant', parts.filter(part => part.type !== 'text'))
+        bus.emit({ type: 'text.final', messageId, text: '', asReasoning: false })
+        liveTurn = null
+        await wrapUpAndFinish(forceWrapUpReason)
+        return
       }
 
       const invalidToolProtocol =
@@ -1680,7 +1740,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       let structureCircuitTripped = false
       let reviewStopReason: string | undefined
       let batchProgress = false
-      for (const call of effectiveToolCalls) {
+      for (let callIndex = 0; callIndex < effectiveToolCalls.length; callIndex += 1) {
+        let call = effectiveToolCalls[callIndex]
         if (await finishPersistedWritingIfComplete(async () => {
           for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') parts.splice(index, 1)
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
@@ -1689,6 +1750,55 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         })) return
         if (controller.signal.aborted) {
           throw new DOMException('run aborted', 'AbortError')
+        }
+        const preflightTool = tools.find(tool => tool.name === call.name)
+        const preflightArgs = reviewPreflightArgs(call, preflightTool)
+        if (preflightTool && preflightArgs && preflightTool.parameters.safeParse(preflightArgs).success
+          && ['chapter_bridge_commit', 'chapter_edit_range', 'chapter_write'].includes(call.name)) {
+          const parsed = preflightArgs
+          const compilationId = typeof parsed.compilationId === 'string' ? parsed.compilationId : undefined
+          const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
+            { userId: params.userId, novelId: params.novelId, runId }, compilationId))
+          let needsReview = call.name === 'chapter_bridge_commit' && readiness?.checksRequired
+          if (!needsReview && readiness?.continuity === 'stale' && ['chapter_edit_range', 'chapter_write'].includes(call.name)) {
+            const args = parsed
+            if (args?.chapterId === readiness.chapterId) {
+              const channel = await prisma.$transaction(tx => probeChapterReviewRevision(tx,
+                { userId: params.userId, novelId: params.novelId, runId }, { id: readiness.chapterId, revision: readiness.revision }))
+              needsReview = !channel.open && channel.code === 'REVIEW_REPAIR_RECHECK_REQUIRED'
+              if (needsReview) readiness.requiredTools = readiness.requiredTools.filter(tool => tool.name === 'continuity_validate')
+            }
+          }
+          if (needsReview) {
+            const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts)
+            if (next.kind === 'tool') {
+              const required = { id: `review_${messageId}_${callIndex}_${randomUUID()}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
+              effectiveToolCalls.splice(callIndex, 0, required)
+              call = required
+            } else if (next.kind === 'blocked') {
+              forceWrapUpReason = next.reason
+              break
+            }
+          }
+        }
+        let reviewDispatch: PendingReviewCall | undefined
+        if (STATE_SENSITIVE_VALIDATORS.has(call.name)) {
+          const validator = tools.find(tool => tool.name === call.name)
+          const args = reviewPreflightArgs(call, validator)
+          const compilationId = args?.compilationId
+          if (validator && args && validator.parameters.safeParse(args).success) {
+            const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
+              { userId: params.userId, novelId: params.novelId, runId }, typeof compilationId === 'string' ? compilationId : undefined))
+            if (readiness && (typeof args.chapterId !== 'string' || args.chapterId === readiness.chapterId)) reviewDispatch = { compilationId: readiness.compilationId, chapterId: readiness.chapterId,
+              revision: readiness.revision, toolName: call.name as PendingReviewCall['toolName'], callId: call.id }
+            else if (typeof compilationId !== 'string') {
+              const chapterId = typeof args.chapterId === 'string' ? args.chapterId : params.chapterId
+              const chapter = chapterId ? await prisma.chapter.findFirst({ where: { id: chapterId, authorId: params.userId,
+                ...activeChapterScope(params.novelId) }, select: { id: true, revision: true } }) : null
+              if (chapter) reviewDispatch = { compilationId: null, chapterId: chapter.id, revision: chapter.revision,
+                toolName: call.name as PendingReviewCall['toolName'], callId: call.id }
+            }
+          }
         }
         // Admit only fresh work. Cached calls never emit tool.call; repeated requests reuse
         // the previous observation. Four consecutive blocked calls trigger a bounded stop.
@@ -1713,15 +1823,38 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           })
           continue
         }
+        if (reviewDispatch) {
+          // Commit evidence BEFORE the handler can reserve/send a paid chain.
+          // A crash leaves it pending across same-run and typed continuations.
+          const attemptKey = `${reviewDispatch.compilationId}:${reviewDispatch.chapterId}:${reviewDispatch.revision}:${reviewDispatch.toolName}`
+          const pendingKey = `${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`
+          const alreadyAttempted = automaticReviewAttempts.has(attemptKey)
+          automaticReviewAttempts.add(attemptKey)
+          pendingReviews.set(pendingKey, reviewDispatch)
+          try { await persistCheckpoint() }
+          catch (error) {
+            // No handler has run, so this particular request was never sent.
+            pendingReviews.delete(pendingKey)
+            if (!alreadyAttempted) automaticReviewAttempts.delete(attemptKey)
+            throw error
+          }
+        }
         const outcome = await handleToolCall(call, tools, { ...toolContext, callId: call.id, messageId }, bus, messageId, runId)
-        reviewStopReason = outcome.reviewStopReason
+        if (reviewDispatch && (outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
+          'CONTINUITY_CHECK_BUDGET_EXCEEDED'].includes(outcome.failureCode ?? ''))) {
+          pendingReviews.delete(`${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`)
+          await persistCheckpoint()
+        }
+        reviewStopReason = outcome.reviewStopReason ?? (taskSpec.intent === 'review'
+          && outcome.recoveryCode === 'REVIEW_REPAIR_RECHECK_REQUIRED' ? outcome.observation : undefined)
         pendingSkillPhase = nextSkillPhase(call.name, outcome.part, taskSpec.intent, params.prompt) ?? pendingSkillPhase
         {
           if (outcome.part.status === 'success') toolProviderFailures.delete(call.name)
           else if (outcome.providerFailure) {
             const failures = (toolProviderFailures.get(call.name) ?? 0) + 1
             toolProviderFailures.set(call.name, failures)
-            if (outcome.providerFailureCode === 'AI_PROVIDER_OUTPUT_LIMIT') forceWrapUpReason = `${outcome.part.title}输出达到上限，检查未完成；已停止重复付费请求及后续提交。已保存内容与进度保留，不能将截断报告当作通过；需调整检查输出预算后再恢复。`
+            if (['AI_PROVIDER_QUOTA_EXCEEDED', 'AI_QUALITY_NON_THINKING_UNSUPPORTED', 'AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_INCOMPLETE', 'AI_PROVIDER_TIMEOUT'].includes(outcome.providerFailureCode ?? '')) forceWrapUpReason = outcome.observation
+            else if (outcome.providerFailureCode === 'AI_PROVIDER_OUTPUT_LIMIT') forceWrapUpReason = `${outcome.part.title}输出达到上限，检查未完成；已停止重复付费请求及后续提交。已保存内容与进度保留，不能将截断报告当作通过；需调整检查输出预算后再恢复。`
             else if (failures >= 2) forceWrapUpReason = `${outcome.part.title}连续两次模型响应失败，已停止重复请求。已保存内容与进度保留，该操作尚未完成；请稍后继续或检查模型服务。`
           }
         }
@@ -1922,6 +2055,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       bus.emit({ type: 'error', code: error.code.toLowerCase(), message, recoverable: false })
       await flushLiveTurn()
       await finalizeRun(runId, bus, 'failed', usage, turn, message, message)
+      return
+    }
+    if (error instanceof DataAccessError && ['AI_PROVIDER_QUOTA_EXCEEDED', 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED'].includes(error.code)) {
+      await flushLiveTurn()
+      // Supplier quota cannot be resolved by another billed summary or a
+      // transient-limit retry. Finalize once with the original usage intact.
+      await finalizeRun(runId, bus, 'failed', usage, turn, '', error.message, false, undefined, undefined, undefined, true)
       return
     }
 

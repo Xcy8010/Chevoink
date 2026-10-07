@@ -10,7 +10,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { chapterBridgeGetTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
-import { resolveQualityChapterTarget } from '../../api/lib/agent/humanity-quality.js'
+import { resolveQualityChapterTarget, persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { freezeWritingScope, readCompletedWritingDelivery, assertCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
 import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
@@ -288,7 +288,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     await recordStoryCompilerWrite({ userId, novelId, runId, chapterId: repaired.id, chapterOrderIndex: 3, chapterRevision: repaired.revision })
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).stage).toBe('repair')
   })
-  it('commits unchecked current text, reuses the same terminal, and refreshes a corrected revision without rebuilding', async () => {
+  it('blocks unchecked text, reuses the checked terminal, and rechecks a corrected revision on the same compiler', async () => {
     const sessionId = (await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).sessionId
     const chapter = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId, orderIndex: 4, orderInVolume: 4,
       title: '第四章 停在门前', content: '她握住门把手，停在询问价格之前。', wordCount: 17, status: 'draft', visibility: 'private' } })
@@ -303,14 +303,28 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       const terminal = { userId, novelId, runId: run.id, compilationId: compilation.id, chapterSummary: '停在询问之前。',
         exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
         lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停在提问之前' }
+      await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+      expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).status).toBe('active')
+      await saveSceneTasks({ userId, novelId, compilationId: compilation.id, tasks: [{ purpose: '推进门前选择', goal: '进门', obstacle: '不知价格',
+        choice: '握住门把手', cost: '暂缓询问', turn: '停住动作', entryState: terminal.exitState, exitState: terminal.exitState,
+        styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
+      const completeChecks = async () => {
+        const current = await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })
+        await validateStoryContinuity({ userId, novelId, runId: run.id, compilationId: compilation.id, findings: [], independentCheck: 'complete', expectedChapterRevision: current.revision })
+        await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+        await persistHumanityQualityReport({ userId, novelId, runId: run.id, compilationId: compilation.id, chapterId: chapter.id,
+          chapterRevision: current.revision, mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
+      }
+      await completeChecks()
       const first = await commitChapterBridge({ ...terminal, expectedChapterRevision: chapter.revision,
         expectedContentHash: createHash('sha256').update(chapter.content).digest('hex') })
       expect(first.chapterRevision).toBe(chapter.revision)
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
-      expect(saved.validation).toBeNull()
+      expect(saved.validation).toMatchObject({ checkedRevision: chapter.revision, independentCheck: 'complete', errorCount: 0 })
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toMatchObject({
         text: `${chapter.title}\n\n${chapter.content}`, chapters: [{ id: chapter.id, revision: chapter.revision }] })
-      expect(await prisma.chapterQualityReport.count({ where: { compilationId: compilation.id } })).toBe(0)
+      expect(await prisma.chapterQualityReport.count({ where: { compilationId: compilation.id } })).toBe(1)
       const fullCapture = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))
       const originalSaved = await prisma.agentRun.findUniqueOrThrow({ where: { id: run.id }, select: { startRequest: true, taskSpec: true } })
       for (const [prompt, fullText] of [['不要重复正文，只保存章节。', false], ['现在请贴出全文。', true]] as const) {
@@ -332,20 +346,25 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       await prisma.chapter.update({ where: { id: chapter.id }, data: { content: '同版本号下作者改变了正文。' } })
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
       await expect(prisma.$transaction(tx => assertCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }, captured!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+      await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+      await completeChecks()
       await commitChapterBridge(terminal)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext).toMatchObject({ terminalContentHash: runtimeJson({ content: '同版本号下作者改变了正文。' }).hash })
       expect(await prisma.projectMemoryEntry.count({ where: { sourceChapterId: chapter.id } })).toBe(memoryCount)
       await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { preparedContext: {} } })
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
+      await validateStoryContinuity({ userId, novelId, runId: run.id, compilationId: compilation.id, findings: [], independentCheck: 'complete' })
       await commitChapterBridge(terminal)
       expect(await prisma.projectMemoryEntry.count({ where: { sourceChapterId: chapter.id } })).toBe(memoryCount)
       const corrected = await prisma.chapter.update({ where: { id: chapter.id }, data: { content: '她松开门把手，依然没有询问价格。', revision: { increment: 1 } } })
       await expect(commitChapterBridge({ ...terminal, expectedChapterRevision: chapter.revision })).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
+      await completeChecks()
       const refreshed = await commitChapterBridge({ ...terminal, expectedChapterRevision: corrected.revision,
         expectedContentHash: createHash('sha256').update(corrected.content).digest('hex') })
       expect(refreshed.chapterRevision).toBe(corrected.revision)
       expect(await prisma.storyCompilation.count({ where: { runId: run.id } })).toBe(1)
-      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).validation).toBeNull()
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).validation)
+        .toMatchObject({ checkedRevision: corrected.revision, independentCheck: 'complete', errorCount: 0 })
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(corrected.content)
       await prisma.agentRun.update({ where: { id: run.id }, data: { status: 'paused' } })
       await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })

@@ -12,19 +12,19 @@ import { readWritingPresentation } from './writing-request-context.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 type Writing = NonNullable<TaskSpec['scope']['writing']>
-const numeric = '[一二两三四五六七八九十百千0-9]+'
+const numeric = '[零〇一二两三四五六七八九十百千0-9]+'
 /** Chapter separators in prose: hyphen, en/em dash, minus, tilde and fullwidth variants. */
 const rangeDash = '[-–—−~～〜－]'
 /** A spoken chapter count is small; longer digit runs glued to 章 are ordinals ("把189章写完"), not counts. */
 const shortCount = '\\d{1,2}|[一二两三四五六七八九十百千]+'
 export function chapterNumber(text: string): number | null {
-  if (/^\d+$/u.test(text)) return Number(text) || null
+  if (/^\d+$/u.test(text)) { const value = Number(text); return Number.isSafeInteger(value) && value > 0 ? value : null }
   const digits: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
   let sum = 0, pending = 0
   for (const char of text) {
     if (digits[char]) pending = digits[char]
     else if (char === '十' || char === '百' || char === '千') { sum += (pending || 1) * ({ 十: 10, 百: 100, 千: 1000 }[char]); pending = 0 }
-    else return null
+    else if (char !== '零' && char !== '〇') return null
   }
   return sum + pending || null
 }
@@ -32,12 +32,48 @@ export function chapterNumber(text: string): number | null {
 /** Pure extraction uses the whole admission request; generated goals are not authority.
  * Spacing around 第/章/至/dashes is prose, not semantics: "前 20 章" must parse
  * exactly like "前20章"; otherwise the freeze silently retargets the run. */
-export function requestedWritingRange(prompt: string): { kind: 'first' | 'next' | 'range' | 'count' | 'unbounded'; start?: number; count?: number; volume?: number; anchor?: 'editor' } | null {
-  const positive = prompt.split(/[。！？!?；;\n，,]+/u).filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|不写|do not|don't)/iu.test(clause)).join('，')
-  const range = positive.match(new RegExp(`第?\\s*(${numeric})\\s*(?:章)?\\s*(?:至|到|${rangeDash})\\s*第?\\s*(${numeric})\\s*章`, 'u'))
-  if (range) { const start = chapterNumber(range[1]), end = chapterNumber(range[2]); if (start && end && end >= start && end - start < 1000) return { kind: 'range', start, count: end - start + 1 } }
-  const volume = positive.match(new RegExp(`第\\s*(${numeric})\\s*卷.{0,4}第\\s*(${numeric})\\s*章`, 'u'))
-  if (volume) { const v = chapterNumber(volume[1]), chapter = chapterNumber(volume[2]); if (v && chapter) return { kind: 'range', start: chapter, count: 1, volume: v } }
+type RequestedWritingRange = { kind: 'first' | 'next' | 'range' | 'count' | 'unbounded' | 'list' | 'existing'; start?: number; count?: number; positions?: number[]; volume?: number; anchor?: 'editor' }
+const negativeScopeClause = /(?:不要|无需|不用|不必|禁止|不得|不能|(?<!分)别|不写|不改|不修改|do not|don't|must not)/iu
+function writingScopeClauses(prompt: string) {
+  return prompt.replace(new RegExp(`(${numeric}\\s*(?:章)?)\\s*[，,]\\s*(?=第?\\s*${numeric})`, 'gu'), '$1、').split(/[，,。！？!?；;\n]+/u)
+}
+export function requestedWritingRange(prompt: string): RequestedWritingRange | null {
+  // Commas between chapter numbers are list separators, not new clauses. Keep
+  // a negated list together so its later numbers cannot become positive scope.
+  const positive = writingScopeClauses(prompt).filter(clause => !negativeScopeClause.test(clause)).join('，')
+  const volumeMatch = positive.match(new RegExp(`第\\s*(${numeric})\\s*卷`, 'u'))
+  const volume = volumeMatch ? chapterNumber(volumeMatch[1]) : null
+  // Multiple volumes need a separately explicit mapping; a chapter ordinal is
+  // never a global ordinal when a volume was requested.
+  if (volumeMatch && (!volume || [...positive.matchAll(new RegExp(`第\\s*(${numeric})\\s*卷`, 'gu'))].length > 1)) return null
+  const chapterPrompt = volumeMatch ? positive.slice(positive.indexOf(volumeMatch[0]) + volumeMatch[0].length) : positive
+  const volumeScope = volume ? { volume } : {}
+  const throughLast = chapterPrompt.match(new RegExp(`(?:从|自)\\s*(?:首章|第\\s*(${numeric})\\s*章)[^。；\\n]{0,24}(?:到|至)(?:\\s*(?:目前|现有|当前))?\\s*(?:最后(?:一)?(?:章|章节)?|末章)`, 'u'))
+  const existing = Boolean(throughLast)
+    || /(?:全书|整本(?:书|小说)|所有(?:已有|现有)?章节|全部(?:已有|现有)?章节)/u.test(chapterPrompt) && !new RegExp(`第\\s*${numeric}\\s*(?:章|[、，,])`, 'u').test(chapterPrompt)
+    || Boolean(volume && !/章/u.test(chapterPrompt))
+  // Preserve an explicit serialization grant; an existing-manuscript repair
+  // interval still snapshots its rows even when the author says "自动".
+  if (existing && !throughLast && !volume && /(?:自动|自主|自行|全权).{0,16}(?:写完|完成全书|创作全书|逐章写)|(?:write|finish).{0,24}(?:autonomously|automatically)/iu.test(positive)) return { kind: 'unbounded' }
+  if (existing && /(?:改|优化|修复|修正|润色|审查|审阅|检查|评估|分析)/u.test(positive)) {
+    const start = throughLast?.[1] ? chapterNumber(throughLast[1]) : 1
+    return start ? { kind: 'existing', start, ...volumeScope } : null
+  }
+  // An open-ended chapter interval cannot fall through to its first ordinal.
+  if (existing) return null
+  const list = chapterPrompt.match(new RegExp(`第?\\s*${numeric}\\s*(?:章)?(?:\\s*(?:、|，|,|和|及|与)\\s*第?\\s*${numeric}\\s*(?:章)?)*\\s*(?:、|，|,|和|及|与)\\s*第?\\s*${numeric}\\s*章`, 'u'))
+  if (list && /章/u.test(list[0])) {
+    const positions = [...new Set([...list[0].matchAll(new RegExp(numeric, 'gu'))].map(item => chapterNumber(item[0])))]
+    if (positions.every((position): position is number => position !== null) && positions.length <= 1000) return { kind: 'list', positions, ...volumeScope }
+    return null
+  }
+  const range = chapterPrompt.match(new RegExp(`第?\\s*(${numeric})\\s*(?:章)?\\s*(?:至|到|${rangeDash})\\s*第?\\s*(${numeric})\\s*章`, 'u'))
+  if (range) { const start = chapterNumber(range[1]), end = chapterNumber(range[2]); return start && end && end >= start && end - start < 1000 ? { kind: 'range', start, count: end - start + 1, ...volumeScope } : null }
+  if (volume) {
+    const chapter = chapterPrompt.match(new RegExp(`第\\s*(${numeric})\\s*章`, 'u'))
+    const start = chapter ? chapterNumber(chapter[1]) : null
+    return start ? { kind: 'range', start, count: 1, volume } : null
+  }
   if (/(?:下\s*[一1]\s*章|next chapter)/iu.test(positive)) return { kind: 'next', count: 1,
     ...(/(?:当前(?:这)?(?:章|章节)|正在编辑(?:的)?(?:这章|章节|章))(?:之|以)?后|after\s+(?:the\s+)?(?:current|currently edited)\s+chapter/iu.test(positive) ? { anchor: 'editor' as const } : {}) }
   const firstCount = positive.match(new RegExp(`前\\s*(${numeric})\\s*章`, 'u'))
@@ -69,19 +105,25 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   // silently freeze onto the editor's current chapter: that rewrote the author's
   // target ("前 20 章优化" froze to a single chapter). Surface needs_input instead.
   const ambiguousRange = !range && /(?:第|前|后|余|剩|卷|章)/u.test(admissionPrompt)
-    && /[0-9一二两三四五六七八九十百千]/u.test(admissionPrompt)
+    && /[0-9零〇一二两三四五六七八九十百千]/u.test(admissionPrompt)
   const chapters = await tx.chapter.findMany({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) },
     select: { id: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
   const run = await tx.agentRun.findFirstOrThrow({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId }, select: { chapterId: true } })
   const base = { version: 1 as const, titleAndBodyOnly: /(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|only.{0,20}title.{0,12}(?:body|text)/iu.test(admissionPrompt), repairAuthorized: hasOriginalRepairAuthority(admissionPrompt) }
   let writing: Writing
   if (range?.kind === 'unbounded') writing = { ...base, kind: 'unbounded', targets: [] }
+  else if (range?.kind === 'existing') {
+    const existing = chapters.filter(item => (!range.volume || item.volume.orderIndex === range.volume)
+      && (range.volume ? item.orderInVolume : item.orderIndex) >= (range.start ?? 1))
+    writing = { ...base, kind: existing.length ? 'bounded' : 'needs_input', targets: existing.map(item => ({ orderIndex: item.orderIndex, chapterId: item.id,
+      ...(range.volume ? { volumeId: item.volumeId, positionInVolume: item.orderInVolume } : {}) })) }
+  }
   else if (range) {
     const anchor = run.chapterId ? chapters.find(item => item.id === run.chapterId) : null
     const start = range.start ?? (range.anchor === 'editor' ? anchor ? anchor.orderIndex + 1 : null : (chapters.at(-1)?.orderIndex ?? 0) + 1)
     const targets: Writing['targets'] = []
-    for (let i = 0; start !== null && i < (range.count ?? 1); i++) {
-      const position = start + i
+    const positions = range.kind === 'list' ? range.positions ?? [] : start === null ? [] : Array.from({ length: range.count ?? 1 }, (_, i) => start + i)
+    for (const position of positions) {
       if (range.volume) {
         const volume = await tx.volume.findFirst({ where: { novelId: subject.novelId, archivedAt: null, orderIndex: range.volume }, select: { id: true } })
         if (!volume) { targets.length = 0; break }
@@ -95,6 +137,28 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     const target = chapters.find(item => item.id === run.chapterId)
     writing = { ...base, kind: target ? 'bounded' : 'needs_input', targets: target ? [{ orderIndex: target.orderIndex, chapterId: target.id }] : [] }
   } else writing = { ...base, kind: 'needs_input', targets: [] }
+  if (writing.kind === 'bounded') {
+    // A broad positive interval cannot erase the author's explicit exceptions.
+    // Resolve them against this same admission snapshot, never later rows.
+    for (const clause of writingScopeClauses(admissionPrompt).filter(clause => negativeScopeClause.test(clause))) {
+      const exclusion = requestedWritingRange(clause.replace(/(?:不要|无需|不用|不必|禁止|不得|不能|别|do not|don't|must not)|不(?=写|改|修改)/giu, ''))
+      if (!exclusion) {
+        if (/(?:任何|所有|全部|已有)章节|全书|正文/u.test(clause) || /(?:第|章|卷)/u.test(clause) && new RegExp(numeric, 'u').test(clause)) writing.targets = []
+        continue
+      }
+      if (exclusion.kind !== 'existing' && exclusion.kind !== 'list' && exclusion.kind !== 'range' && exclusion.kind !== 'first') continue
+      writing.targets = writing.targets.filter(target => {
+        const chapter = chapters.find(item => item.id === target.chapterId)
+        if (exclusion.volume && ((chapter?.volume.orderIndex ?? (target.volumeId ? range?.volume : null)) !== exclusion.volume)) return true
+        const position = exclusion.volume ? chapter?.orderInVolume ?? target.positionInVolume : target.orderIndex
+        if (position == null) return true
+        return exclusion.kind === 'existing' ? position < (exclusion.start ?? 1)
+          : exclusion.kind === 'list' ? !exclusion.positions?.includes(position)
+          : position < (exclusion.start ?? 1) || position >= (exclusion.start ?? 1) + (exclusion.count ?? 1)
+      })
+    }
+    if (!writing.targets.length) writing.kind = 'needs_input'
+  }
   return { ...spec, scope: { ...spec.scope, writing } }
 }
 
@@ -141,6 +205,9 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
   const source = await tx.agentRun.findFirstOrThrow({ where: { id: original.sourceRunId, userId: subject.userId, novelId: subject.novelId } })
   if (!writing && original.prompt) {
     const range = requestedWritingRange(original.prompt)
+    // No historical directory snapshot proves a list or an existing-book
+    // interval. Resume cannot reconstruct it from the current editor or rows.
+    if (range?.kind === 'list' || range?.kind === 'existing') writing = { version: 1, kind: 'needs_input', targets: [], titleAndBodyOnly: false, repairAuthorized: hasOriginalRepairAuthority(original.prompt) }
     if (range?.kind === 'unbounded') writing = { version: 1, kind: 'unbounded', targets: [], titleAndBodyOnly: false, repairAuthorized: hasOriginalRepairAuthority(original.prompt) }
     // An old next request has no directory snapshot. Current positions cannot
     // mint a fresh create allowance. Restore only a uniquely proven binding.
@@ -345,13 +412,11 @@ async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subjec
       source = await tx.chapter.findFirst({ where: { id: terminal.bridge.fromChapterId, ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } })
       if (source?.revision !== terminal.bridge.sourceRevision) return null
     }
-    const { compilerContinuityCoverage, compilerContinuityCoverageMatches } = await import('./compiler-continuity-contract.js')
-    const validation = terminal.validation as { checkedRevision?: number; independentCheck?: string; errorCount?: number; coverage?: unknown; reviewFocus?: string } | null
-    if (validation?.independentCheck === 'complete' && validation.checkedRevision === chapter.revision && (validation.errorCount ?? 0) > 0
-      && compilerContinuityCoverageMatches(validation.coverage, compilerContinuityCoverage({ chapter, bridge: terminal.bridge, sceneTasks: terminal.sceneTasks.sort((a, b) => a.ordinal - b.ordinal), source, focus: validation.reviewFocus }))) return null
-    const report = await tx.chapterQualityReport.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, compilationId: terminal.id, chapterId: chapter.id, chapterRevision: chapter.revision }, include: { findings: true }, orderBy: { createdAt: 'desc' } })
-    if (report && (await import('./quality-report-contract.js')).qualityReportMatchesContent(report, chapter.revision, chapter.content)
-      && report.findings.some(finding => finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected')) return null
+    const { readChapterReviewReadiness, isChapterRevisionChannelOpen } = await import('./chapter-review-guard.js')
+    const readiness = await readChapterReviewReadiness(tx, subject, terminal.id)
+    if (!readiness?.ready) return null
+    if ((readiness.continuityErrorCount > 0 || readiness.qualityErrorCount > 0)
+      && await isChapterRevisionChannelOpen(tx, subject, chapter)) return null
     if (length && (chapter.content.trim().length < Number(length[1]) || chapter.content.trim().length > Number(length[2]))) return null
     chapters.push({ ...chapter, contentHash: runtimeJson({ content: chapter.content }).hash })
   }
