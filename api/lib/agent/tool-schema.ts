@@ -20,14 +20,19 @@ export function toOpenAIParameters(parameters: z.ZodType): Record<string, unknow
 export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
   const parameters = toOpenAIParameters(tool.parameters)
   const writing = scope?.writing
+  if (tool.name === 'story_compiler_prepare' && writing?.tailVolume) return {
+    description: `${tool.description} 本任务必须显式填写volumeDecision：根据当前卷目标和真实前章决定continue或new_volume，并说明理由；章数不决定切卷。`,
+    parameters: { ...parameters, required: [...new Set([...(parameters.required as string[] ?? []), 'volumeDecision'])] },
+  }
   const target = writing?.kind === 'bounded' && writing.targets.length === 1 ? writing.targets[0] : undefined
   const globalNewChapter = target?.chapterId === null && Number.isSafeInteger(target.orderIndex) && target.orderIndex > 0
     && target.volumeId === undefined && target.positionInVolume === undefined ? target.orderIndex : undefined
   if (tool.name !== 'chapter_create' || globalNewChapter === undefined) return { description: tool.description, parameters }
   const properties = parameters.properties as Record<string, unknown>
   return {
-    description: `在当前作品创建本任务冻结的全书第 ${globalNewChapter} 章。服务器按原任务合同定位，只填 title 标题即可，content 正文可选。若传 position，只能为 ${globalNewChapter}；不要猜测卷 ID、卷序号或卷内位置。创建成功后复用返回的 chapterId 写正文，不要重复建章。`,
+    description: `在当前作品创建本任务冻结的全书第 ${globalNewChapter} 章。服务器按原任务合同定位，只填 title 标题即可，content 正文可选。若传 position，只能为 ${globalNewChapter}；不要猜测卷 ID、卷序号或卷内位置。${writing?.tailVolume ? '每次续写先在PREPARE审视卷目标；真实收束且已保存new_volume决定时，可传同一newVolume创建尾卷与此章。缺证据留当前卷，不能按章数切卷。' : ''}创建成功后复用返回的 chapterId 写正文，不要重复建章。`,
     parameters: { type: 'object', properties: { title: properties.title, content: properties.content,
+      ...(writing?.tailVolume ? { newVolume: properties.newVolume } : {}),
       position: { ...(properties.position as Record<string, unknown>), enum: [globalNewChapter] } }, required: ['title'], additionalProperties: false },
   }
 }
@@ -35,5 +40,9 @@ export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'descrip
 /** Exact alternatives for immutable legacy or server-frozen presentations.
  * Callers must supply scope from the verified original task, never model input. */
 export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope: TaskSpec['scope']): Record<string, unknown>[] {
-  return [toOpenAIParameters(tool.parameters), toOpenAIToolPresentation(tool, scope).parameters]
+  const current = toOpenAIParameters(tool.parameters)
+  const additive = tool.name === 'chapter_create' ? 'newVolume' : tool.name === 'story_compiler_prepare' ? 'volumeDecision' : null
+  const legacy = additive && current.properties && typeof current.properties === 'object'
+    ? { ...current, properties: Object.fromEntries(Object.entries(current.properties).filter(([key]) => key !== additive)) } : null
+  return [current, toOpenAIToolPresentation(tool, scope).parameters, ...(legacy ? [legacy] : [])]
 }

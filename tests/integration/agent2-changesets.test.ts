@@ -40,7 +40,7 @@ describe.skipIf(!dbAvailable)('Agent 2.0 P2 全书检索与 ChangeSet（需 DB�
         .post(`/api/novels/${novelId}/chapters`)
         .set('Cookie', cookie)
         .send({
-          title: `第${index}章`,
+          title: `第${index}章 雨巷${index}`,
           content: `第${index}章开场，林默走进雨巷。${quoted}`,
           status: 'draft',
           visibility: 'private',

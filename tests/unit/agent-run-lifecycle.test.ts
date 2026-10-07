@@ -198,7 +198,7 @@ function seedAdmission(prompt: string, chapterId: string | null = null) {
   mocks.runs.set('run', { id: 'run', userId: 'user', novelId: 'novel', sessionId: 'session', chapterId,
     taskSpec: null, taskRootId: null, runtimeProtocolVersion: 0, engine: 'loop', status: 'queued', currentTurn: 0,
     usage: null, startedAt: null, createdAt: new Date(), writingBindings: null, manuscriptRevision: 1,
-    startRequest: { prompt }, novel: { authorId: 'user', manuscriptRevision: 1 } })
+    startRequest: { prompt }, novel: { authorId: 'user', manuscriptRevision: 1 }, session: { sandboxMode: 'default', spawnedFromRunId: null } })
 }
 async function executeAgentRun(params: Parameters<typeof executeRealAgentRun>[0]) {
   // Seed the authenticated admission, rather than invent scope in a mocked guard.
@@ -1297,6 +1297,73 @@ describe('tool execution authority (real dispatch, mocked global registry)', () 
 })
 
 describe('Agent run admission and completion lifecycle (real loop, mocked provider/persistence)', () => {
+  it.each([false, true])('allows one persisted legacy locator diagnostic read, never replenished on resume (already used=%s)', async used => {
+    const hash = 'a'.repeat(64)
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 4, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 3, writeBaseline: 0, readProgress: 4, readBaseline: 0,
+      progressSignatures: [`read-range:${JSON.stringify(['c', hash])}:0-10`],
+      ...(used ? { inputProtocolRecovery: { protocol: 2, key: 'b'.repeat(64) } } : {}),
+      toolRestrictions: ['chapter_edit_range', 'chapter_write', 'chapter_append'].map(action => ({ action, target: 'c', code: 'CHAPTER_ANCHOR_CONFLICT', reason: '旧定位失败审计' })) }
+    mocks.update.mockResolvedValueOnce({ taskSpec: null, currentTurn: 26, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, checkpoint } })
+    const read = tool('chapter_read', async () => {
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: 4, tokenBudget: 500,
+        inputProtocolRecovery: { protocol: 2, key: used ? 'b'.repeat(64) : expect.any(String) } } })
+      return { output: '已核对当前正文', observedChapterRange: { targetId: 'c', contentHash: hash, start: 0, end: 10 } }
+    })
+    const edit = tool('chapter_edit_range', async () => {
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: 5, readProgress: 4, writeProgress: 3, tokenBudget: 500 } })
+      return { output: '真实修改已保存', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '火墙', before: '旧句', after: '修订句', revision: 2, appliedDirectly: true } }
+    }, false)
+    const commit = tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '核验终态已提交' } }, false)
+    mocks.tools = [read, edit, commit]
+    queue(response('', [call('read', read.name, '{"chapterId":"c"}')]), response('', [call('correct', edit.name, '{"chapterId":"c","oldText":"旧句","newText":"修订句"}'), call('commit', commit.name)]), response('完成。'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    expect(read.execute).toHaveBeenCalledOnce()
+    expect(edit.execute).toHaveBeenCalledTimes(used ? 0 : 1)
+    expect(commit.execute).toHaveBeenCalledTimes(used ? 0 : 1)
+    expect(mocks.runs.get('run')).toMatchObject({ status: used ? 'paused' : 'completed', usage: { checkpoint: { tokenBudget: 500,
+      readProgress: 4, writeProgress: used ? 3 : 4, stagnantBatches: used ? 5 : 0,
+      inputProtocolRecovery: { protocol: 2, key: used ? 'b'.repeat(64) : expect.any(String) } } } })
+  })
+  it('narrows a saved legacy anchor family ban without resetting failed-batch or budget counters', async () => {
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 4, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 3, writeBaseline: 0, readProgress: 4, readBaseline: 0, progressSignatures: [],
+      toolRestrictions: ['chapter_edit_range', 'chapter_write', 'chapter_append'].map(action => ({ action, target: 'c', code: 'CHAPTER_ANCHOR_CONFLICT', reason: '旧定位失败审计' })) }
+    mocks.update.mockResolvedValueOnce({ taskSpec: null, currentTurn: 26, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, checkpoint } })
+    const edit = tool('chapter_edit_range', async () => ({ output: '真实正文变化', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '火墙',
+      before: '旧句。\n\n下一段。', after: '修订句。\n\n下一段。', revision: 2, appliedDirectly: true } }), false)
+    const commit = tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '已核验提交' } }, false)
+    mocks.tools = [edit, commit]
+    queue(response('', [call('correct', edit.name, '{"chapterId":"c","oldText":"旧句。下一段。","newText":"修订句。\\n\\n下一段。"}'), call('commit', commit.name)]), response('完成。'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    expect(edit.execute).toHaveBeenCalledOnce()
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', usage: { totalTokens: 140, checkpoint: { tokenBudget: 500,
+      activeExecutionMs: expect.any(Number), writeProgress: 4, readProgress: 4, toolRestrictions: checkpoint.toolRestrictions.map(item => ({ ...item, inputHash: expect.any(String) })) } } })
+    const beforeProvider = mocks.update.mock.calls.find(([input]) => input.data.usage?.checkpoint?.toolRestrictions?.some((item: {inputHash?: string}) => item.inputHash))?.[0]
+    expect(beforeProvider?.data.usage.checkpoint).toMatchObject({ stagnantBatches: 4, tokenBudget: 500, writeProgress: 3, readProgress: 4 })
+  })
+  it('can correct an anchor after three input failures without freezing other manuscript tools', async () => {
+    let attempts = 0
+    const edit = tool('chapter_edit_range', async () => ++attempts <= 3
+      ? { outcome: 'failed', failureCode: 'CHAPTER_ANCHOR_CONFLICT', summary: '第2处未匹配', output: '本批未写入，纠正锚点。' }
+      : { output: '正文已保存', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '火墙', before: '旧正文', after: '修订正文', appliedDirectly: true, revision: 2 } }, false)
+    const commit = tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '已验证并提交终态' } }, false)
+    mocks.tools = [edit, commit]
+    const badArgs = JSON.stringify({ chapterId: 'c', oldText: '不匹配', newText: '修订正文' })
+    queue(response('', [call('bad-1', edit.name, badArgs)]), response('', [call('bad-2', edit.name, badArgs)]),
+      response('', [call('bad-3', edit.name, badArgs)]), response('', [call('correct', edit.name, '{"chapterId":"c","oldText":"旧正文","newText":"修订正文"}'), call('commit', commit.name)]), response('已完成。'))
+    await run('写下一章')
+    expect(edit.execute).toHaveBeenCalledTimes(4)
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(mocks.runs.get('run')?.status).toBe('completed')
+    const restrictions = (mocks.runs.get('run')?.usage as { checkpoint: { toolRestrictions: Array<{action: string;inputHash?: string}> } }).checkpoint.toolRestrictions
+    expect(restrictions).toEqual([expect.objectContaining({ action: 'chapter_edit_range', inputHash: expect.any(String) })])
+  })
   it.each(['CONTINUITY_CHECK_LIMIT', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED'])('keeps a requested review incomplete without aborting independent work after %s', async failureCode => {
     const checking = tool('continuity_validate', async () => ({ outcome: 'failed', failureCode, summary: '自动检查已停止', output: '保留正文，检查未完成。' }))
     const reading = tool('chapter_read', async () => ({ output: '已核对当前正文' }))

@@ -247,8 +247,8 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId } })).validation).toMatchObject({ checkedRevision: f.chapter.revision })
       expect(changed.revision).not.toBe(f.chapter.revision)
       const critic = vi.spyOn(review, 'generateReviewCompletion').mockResolvedValue(JSON.stringify({ findings: [
-        { signal: 'body', severity: 'warning', evidence: '脚印仍待解释', suggestion: '保留待审' },
-        { signal: 'hook', severity: 'warning', evidence: '锁门线索未揭晓', suggestion: '保留待审' },
+        { signal: 'body', severity: 'warning', evidence: '脚印仍待解释', suggestion: '保留待审', sourceEvidence: [{ source: 'current', quote: '一串刚留下的脚印' }] },
+        { signal: 'hook', severity: 'warning', evidence: '锁门线索未揭晓', suggestion: '保留待审', sourceEvidence: [{ source: 'current', quote: '他绕过锁门' }] },
       ] }))
       expect(await continuityValidateTool.execute(ctx, { chapterId: changed.id })).toMatchObject({ display: { compilationId: f.compilationId, errorCount: 0, warningCount: 2 } })
       const checked = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId } })

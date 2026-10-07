@@ -10,6 +10,7 @@ import { defineTool, type ToolResult } from './types.js'
 import { executeDurableRead } from './durable-read.js'
 import { planTargetHash } from './durable-plan.js'
 import { novelMetadataHash } from './durable-metadata.js'
+import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
 
 const READ_PERMISSION = { plan: 'allow', build: 'allow', review: 'allow' } as const
 
@@ -106,14 +107,14 @@ export const novelGetContextTool = defineTool({
     const volumeLines = volumes.map((volume) => {
       const chapterLines = volume.chapters.map((chapter) => {
         const titleNumber = extractTitleChapterNumber(chapter.title)
-        const mismatched = titleNumber !== null && titleNumber !== chapter.orderInVolume
-        return `  - [${chapter.id}] 卷内第${chapter.orderInVolume}章（全书第${chapter.orderIndex}章）《${chapter.title}》 ${chapter.wordCount}字 ${chapter.status === 'published' ? '已发布' : '草稿'}${chapter.summary ? ' 有摘要' : ''}${chapter.id === ctx.chapterId ? '（当前章节）' : ''}${mismatched ? ` 【注意：标题自称第${titleNumber}章，但卷内实际排在第${chapter.orderInVolume}位】` : ''}`
+        const mismatched = titleNumber !== null && titleNumber !== chapter.orderInVolume && titleNumber !== chapter.orderIndex
+        return `  - [${chapter.id}] 卷内第${chapter.orderInVolume}章（全书第${chapter.orderIndex}章） · ${plainChapterTitle(chapter.title) || chapter.title} ${chapter.wordCount}字 ${chapter.status === 'published' ? '已发布' : '草稿'}${chapter.summary ? ' 有摘要' : ''}${chapter.id === ctx.chapterId ? '（当前章节）' : ''}${mismatched ? ` 【注意：旧标题章序第${titleNumber}章与当前全书及卷内位置均不一致，定位以真实ID和位置为准】` : ''}`
       })
       return `- 第${volume.orderIndex}卷《${volume.title}》 volumeId=${volume.id}${volume.summary ? ` 摘要：${clip(volume.summary, 120)}` : ''}\n${chapterLines.length ? chapterLines.join('\n') : '  （空卷）'}`
     })
     const hasMismatch = chapters.some((chapter) => {
       const titleNumber = extractTitleChapterNumber(chapter.title)
-      return titleNumber !== null && titleNumber !== chapter.orderInVolume
+      return titleNumber !== null && titleNumber !== chapter.orderInVolume && titleNumber !== chapter.orderIndex
     })
 
     const output = [
@@ -126,7 +127,7 @@ export const novelGetContextTool = defineTool({
         : '正式封面：暂无',
       volumes.length ? `卷章结构：\n${volumeLines.join('\n')}` : '卷章结构：暂无。',
       hasMismatch
-        ? '提醒：存在标题序号与卷内排位不一致的章节。作者要求写「第N章」时，先确认所属卷和目标章节；结构调整应使用 chapter_move / chapter_move_to_volume，完成后调用 structure_outline 校验。'
+        ? '提醒：存在旧标题章序与当前真实位置均不一致的章节。作者要求写「第N章」时，以真实ID、全书章序和卷内位置定位；旧标题编号不授予移章或调整结构的权限。'
         : '',
     ]
       .filter(Boolean)

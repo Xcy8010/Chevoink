@@ -7,6 +7,7 @@ import { requiresNextChapterDelivery } from './completion-guard.js'
 import type { ChatMessage } from '../ai-service.js'
 import { prisma } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
+import { plainChapterTitle } from '../../../shared/structure/chapter-title.js'
 import type { AgentDefinition } from './agents.js'
 import { OPERATION_KNOWLEDGE } from './knowledge/operation.js'
 import { buildGeneralWritingDigest, buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from './knowledge/writing.js'
@@ -519,7 +520,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     .join('\n\n')
 
   const chapterLine = chapter
-    ? `作者当前正在编辑：第${chapter.orderIndex}章《${chapter.title}》（chapterId=${chapter.id}，${chapter.wordCount} 字）。`
+    ? `作者当前正在编辑：第${chapter.orderIndex}章 · ${plainChapterTitle(chapter.title) || chapter.title}（chapterId=${chapter.id}，${chapter.wordCount} 字）。`
     : '作者当前未打开具体章节。'
 
   const workspaceSnapshot = buildWorkspaceSnapshot({

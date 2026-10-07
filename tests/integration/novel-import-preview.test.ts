@@ -153,7 +153,7 @@ describe.skipIf(!available)('import report, resources and lazy preview in isolat
     expect(chapters.map(c => c.content.length)).toEqual([70000, 70000, 70000])
   }, 60_000)
   it('failed members cannot be reviewed away, explicit exclusion commits a durable partial import', async () => {
-    const ready = await prepare(zipFiles({ '第一章.txt': '第一章\n合法原文', 'cover.jpg': 'not an image' }), 'book.zip')
+    const ready = await prepare(zipFiles({ '第一章 合法章.txt': '第一章 合法章\n合法原文', 'cover.jpg': 'not an image' }), 'book.zip')
     const evidence = await report(ready.base)
     const item = evidence.items.find(item => item.status === 'failed')!
     expect(item).toBeDefined()
@@ -168,7 +168,7 @@ describe.skipIf(!available)('import report, resources and lazy preview in isolat
   }, 60_000)
   it('stores safe images privately and rejects cross-owner, cross-job and non-image artifact access', async () => {
     const image = await sharp({ create: { width: 16, height: 16, channels: 3, background: '#fff' } }).png().toBuffer()
-    const ready = await prepare(zipFiles({ '第一章.txt': '第一章\n合法原文', 'cover.png': image }), 'book.zip')
+    const ready = await prepare(zipFiles({ '第一章 合法章.txt': '第一章 合法章\n合法原文', 'cover.png': image }), 'book.zip')
     const evidence = await report(ready.base)
     expect(evidence.artifacts).toHaveLength(1)
     expect(evidence.issues.some(issue => issue.code === 'IMPORT_IMAGE_STORAGE_REQUIRED')).toBe(false)

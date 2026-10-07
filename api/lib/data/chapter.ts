@@ -4,6 +4,7 @@
  * 本文件为 api/lib/data-access.ts 桶文件的重导出源，禁止绕过桶文件新增消费者。
  */
 import type { Prisma } from '@prisma/client'
+import { plainChapterTitle } from '../../../shared/structure/chapter-title.js'
 import type { Chapter, CreateChapterRequest, ReaderPayload, StudioPayload, UpdateChapterRequest, Visibility } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { CHAPTER_REVISION_CONFLICT_CODE, CHAPTER_REVISION_CONFLICT_MESSAGE, isChapterRevisionCurrent } from './chapter-revision.js'
@@ -182,7 +183,7 @@ export async function createChapterData(
       data: {
         novelId,
         authorId: userId,
-        title: ensureNonEmptyText(input.title, 'title'),
+        title: ensureNonEmptyText(plainChapterTitle(input.title), 'title'),
         summary: input.summary?.trim() || null,
         content: input.content,
         volumeId: placement.volume.id,
@@ -191,7 +192,7 @@ export async function createChapterData(
         wordCount: input.content.length,
         status: input.status,
         visibility: input.visibility ?? defaultVisibility,
-        publishedTitle: input.status === 'published' ? ensureNonEmptyText(input.title, 'title') : null,
+        publishedTitle: input.status === 'published' ? ensureNonEmptyText(plainChapterTitle(input.title), 'title') : null,
         publishedSummary: input.status === 'published' ? input.summary?.trim() || null : null,
         publishedContent: input.status === 'published' ? input.content : null,
         publishedWordCount: input.status === 'published' ? input.content.length : null,
@@ -248,7 +249,7 @@ export async function updateChapterData(
 
   const nextStatus = input.status ?? existing.status
   const publishingForFirstTime = nextStatus === 'published' && existing.status !== 'published'
-  const nextTitle = input.title === undefined ? existing.title : ensureNonEmptyText(input.title, 'title')
+  const nextTitle = input.title === undefined ? existing.title : ensureNonEmptyText(plainChapterTitle(input.title), 'title')
   const nextSummary = input.summary === undefined ? existing.summary : input.summary
   const nextContent = input.content ?? existing.content
   const nextRevision = existing.revision + 1

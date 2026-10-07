@@ -12,7 +12,7 @@ export const novelImportVolumeSchema = z.object({
   title: z.string().trim().min(1).max(128),
   // Preserve oversized individual chapters in previews so humans can split them.
   // The commit service independently enforces chapterCharacters without truncation.
-  chapters: z.array(z.object({ title: z.string().trim().min(1).max(128), content: z.string().max(NOVEL_IMPORT_LIMITS.characters), source: novelImportSourceSchema })).max(NOVEL_IMPORT_LIMITS.chapters),
+  chapters: z.array(z.object({ title: z.string().trim().min(1).max(128), sourceTitle: z.string().trim().min(1).max(128).nullable().optional(), content: z.string().max(NOVEL_IMPORT_LIMITS.characters), source: novelImportSourceSchema })).max(NOVEL_IMPORT_LIMITS.chapters),
 }).strict()
 export const novelImportMetadataSchema = z.object({ title: z.string().trim().min(1).max(128).optional(), summary: z.string().max(20_000).optional(), tags: z.array(z.string().max(64)).max(20).optional(), coverArtifactId: z.string().min(1).max(255).optional() }).strict()
 export const novelImportModelSchema = z.discriminatedUnion('kind', [z.object({ kind: z.literal('basic') }).strict(),

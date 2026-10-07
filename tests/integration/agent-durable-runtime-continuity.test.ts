@@ -80,10 +80,10 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         }
         if (scenario === 'stale-compiler') await prisma.storyCompilation.update({ where: { id: compilationId }, data: { preparedContext: { changed: true } } })
         if (scenario === 'late-resume') await pauseDurableTask(f.userId, lease.runId)
-        const content = scenario === 'fused-repair' ? '{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订"}],"patches":[{"oldText":"原文","newText":"新文"}]}'
+        const content = scenario === 'fused-repair' ? '{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订","sourceEvidence":[{"source":"current","quote":"原文"}]}],"patches":[{"oldText":"原文","newText":"新文"}]}'
           : scenario === 'format' || scenario === 'format-retry' && requests === 2 ? 'broken JSON'
-          : requests === 1 ? JSON.stringify({ findings: scenario === 'warnings' ? ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在承接风险', suggestion: '局部澄清' }))
-            : repairing || scenario === 'protected' ? [{ signal: 'body', severity: 'error', evidence: '原文有身体状态冲突', suggestion: '改成新文' }] : [] })
+          : requests === 1 ? JSON.stringify({ findings: scenario === 'warnings' ? ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在承接风险', suggestion: '局部澄清', sourceEvidence: [{ source: 'current', quote: '原文' }] }))
+            : repairing || scenario === 'protected' ? [{ signal: 'body', severity: 'error', evidence: '原文有身体状态冲突', suggestion: '改成新文', sourceEvidence: [{ source: 'current', quote: '原文' }] }] : [] })
           : '{"patches":[{"oldText":"原文","newText":"新文"}]}'
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: scenario === 'truncated' ? 'length' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       })
@@ -363,7 +363,7 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
       await saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进场景', entryState: state, goal: '寻找线索', obstacle: '门已上锁', choice: '绕路', cost: '耗费时间', turn: '发现脚印', exitState: state,
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
-      const completion = vi.spyOn(aiService, 'generateTextCompletion').mockResolvedValueOnce('{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订"}],"patches":[{"oldText":"原文","newText":"修订正文"}]}')
+      const completion = vi.spyOn(aiService, 'generateTextCompletion').mockResolvedValueOnce('{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订","sourceEvidence":[{"source":"current","quote":"原文"}]}],"patches":[{"oldText":"原文","newText":"修订正文"}]}')
         .mockResolvedValueOnce('{"findings":[]}')
       const ctx: ToolContext = { ...f, callId: 'critic', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
       expect(await continuityValidateTool.execute(ctx, { compilationId })).toMatchObject({ summary: expect.stringContaining('连续性检查') })
@@ -396,7 +396,7 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
           calls++
           if (scenario === 'tool-unavailable') return 'not JSON'
           if (scenario === 'tool-stale') { await changeChapter(); return '{"findings":[]}' }
-          if (calls === 1) return '{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订"}]}'
+          if (calls === 1) return '{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订","sourceEvidence":[{"source":"current","quote":"原文"}]}]}'
           await changeChapter()
           return '{"patches":[{"oldText":"原文","newText":"模型修改"}]}'
         })

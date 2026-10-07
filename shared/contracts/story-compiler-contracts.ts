@@ -66,6 +66,7 @@ export const continuityFindingInputSchema = z.object({
   severity: z.enum(['warning', 'error']),
   evidence: z.string().min(1).max(1000),
   suggestion: z.string().min(1).max(1000),
+  sourceEvidence: z.array(z.object({ source: z.enum(['previous', 'current']), quote: z.string().min(2).max(360) })).min(1).max(8).optional(),
 })
 
 export type StoryCompilerMode = z.infer<typeof storyCompilerModeSchema>

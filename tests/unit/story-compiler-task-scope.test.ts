@@ -3,13 +3,14 @@ import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 const db = vi.hoisted(() => ({
-  novel: { findFirst: vi.fn() }, agentRun: { findFirst: vi.fn(), findMany: vi.fn(), findFirstOrThrow: vi.fn(), findUniqueOrThrow: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn() },
+  novel: { findFirst: vi.fn() }, agentArtifact: { findMany: vi.fn() }, agentRun: { findFirst: vi.fn(), findMany: vi.fn(), findFirstOrThrow: vi.fn(), findUniqueOrThrow: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn(), count: vi.fn() },
   agentSession: { findFirst: vi.fn() }, agentChildExecutionGrant: { findUnique: vi.fn() }, agentMessage: { findFirst: vi.fn() }, chapterQualityReport: { findFirst: vi.fn() },
   storyCompilation: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() },
   chapterBridge: { findFirst: vi.fn(), update: vi.fn() }, sceneTask: { updateMany: vi.fn() }, agentGoalExecution: { findUnique: vi.fn() },
   storyCharter: { findFirst: vi.fn() }, readerPromise: { findMany: vi.fn() }, projectMemoryEntry: { findMany: vi.fn() }, $transaction: vi.fn(), $queryRaw: vi.fn(),
 }))
 vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<typeof import('../../api/lib/prisma.js')>(), prisma: db }))
+vi.mock('../../api/lib/agent/writing-volume.js', async original => ({ ...await original<typeof import('../../api/lib/agent/writing-volume.js')>(), readWritingVolumeContext: vi.fn(async () => null) }))
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { buildStoryCompilerDigest, commitChapterBridge, compilationRunScope, prepareStoryCompilation, readPersistedWritingWorkflowMilestones } from '../../api/lib/agent/story-compiler.js'
@@ -36,6 +37,12 @@ beforeEach(() => {
   db.agentRun.findMany.mockResolvedValue([])
   db.agentRun.findUniqueOrThrow.mockImplementation(query => db.agentRun.findFirst(query))
   db.chapter.findFirst.mockImplementation(async ({ where }) => where.id ? { id: where.id, title: '原章节', orderIndex: where.id === 'old31' ? 31 : 32, revision: 3, content: '已保存正文' } : where.orderIndex?.lt || where.orderIndex === 32 ? null : { id: 'old31', orderIndex: 31 })
+  const findChapter = db.chapter.findFirst.getMockImplementation()!
+  db.chapter.findFirst.mockImplementation(async query => {
+    const chapter = await findChapter(query)
+    return chapter ? { revision: 1, content: '', volumeId: 'v', volume: { title: '第一卷', summary: '边堡困局' }, ...chapter } : chapter
+  })
+  db.chapter.count.mockResolvedValue(31); db.agentArtifact.findMany.mockResolvedValue([])
   db.chapter.findMany.mockResolvedValue([]); db.storyCompilation.findFirst.mockResolvedValue(null); db.storyCompilation.findMany.mockResolvedValue([])
   db.storyCompilation.updateMany.mockResolvedValue({ count: 0 })
   db.storyCompilation.create.mockImplementation(async ({ data }) => ({ id: 'created', ...data, bridge: data.bridge.create }))

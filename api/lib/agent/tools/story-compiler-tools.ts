@@ -1,8 +1,10 @@
 import { persistedContentHash } from '../semantic-progress.js'
+import { unlocatedContinuityEvidence } from '../continuity-finding-authority.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { auxiliaryTextModel } from '../auxiliary-text-model.js'
 import { z } from 'zod'
+import { writingVolumeDecisionSchema } from '../../../../shared/contracts/writing-volume-contracts.js'
 
 import {
   continuityFindingInputSchema,
@@ -100,7 +102,8 @@ export function continuityReviewTail(validation: unknown, revision: number, allo
     `当前版本：r${revision}。${allowRepair ? '对同一对象有原文互斥事实证据、可安全定位的错误集中附带最小事实补丁；警告保留待审，不编造改动，无法安全修改的项交作者决定。' : '本次只读复核，不生成补丁、不改写正文。'}`,
     focus ? `作者额外关注：${focus}` : '',
     previous.success && previous.data.checkedRevision < revision
-      ? `旧版r${previous.data.checkedRevision}检查线索（不是当前版通过凭证）：${JSON.stringify(previous.data.findings)}。复检纪律：报告范围限于当前正文仍直接成立的事实互斥（含上轮遗留的未解决项）；表述含糊、交代不足、需要扩写或重述才更清晰的问题一律不报（由作者终审，不驱动自动改写）；已解决项与上轮表达类疑虑不再报告，禁止换表述重复上报同一问题；连带影响只核对被改语句的紧邻上下文。除确有互斥事实外，默认快速通过并输出 findings=[]。` : '',
+      ? `旧版r${previous.data.checkedRevision}曾有 ${previous.data.findings.length} 条意见，不能沿用其中旧引文。仅以本次提供的当前正文与前章原文重新定位互斥事实；已解决项不再报告，禁止换表述重复上报同一问题；未定位到当前原文的旧问题不能驱动修改，也不能证明当前版通过。` : '',
+    '每条 finding 附 sourceEvidence:[{source:"previous"或"current",quote:"对应正文的逐字连续短引"}]，两处互斥事实分别标注来源。不要将旧版报告、Scene Task 或桥接摘要的文字填作正文原文，不用省略号拼接。',
   ].filter(Boolean).join('\n')
 }
 
@@ -272,6 +275,7 @@ export const storyCompilerPrepareTool = defineTool({
     chapterId: z.string().min(1).optional(),
     targetOrderIndex: z.number().int().min(1).optional(),
     intentSummary: z.string().min(1).max(1000).describe('本轮写作意图的事实化摘要；服务端只保存其 SHA-256，不保存原提示词'),
+    volumeDecision: writingVolumeDecisionSchema.optional().describe('每次续写都审视当前卷目标：continue说明未收束原因；new_volume须真实前章收束引用+下一主困局，不能按章数分卷。旧已绑定目标不迁移'),
   }),
   permission: BUILD_WRITE,
   readOnly: false,
@@ -283,11 +287,13 @@ export const storyCompilerPrepareTool = defineTool({
       targetOrderIndex: args.targetOrderIndex,
       mode: ctx.qualityMode,
       intentSummary: args.intentSummary,
+      volumeDecision: args.volumeDecision,
     }, ctx.transaction)
     const bridge = prepared.bridge
     const workflowMilestone = prepared.preparedFirstForTarget ? { version: 1 as const, userId: ctx.userId, novelId: ctx.novelId,
       runId: ctx.runId, targetOrderIndex: prepared.compilation.targetOrderIndex, phase: 'prepare' as const } : undefined
     const items = [
+      `本章卷处理决定：${JSON.stringify((prepared.compilation.preparedContext as Record<string, unknown>).volumeDecision)}；当前卷与计划：${JSON.stringify((prepared.compilation.preparedContext as Record<string, unknown>).volumeContext)}。仅章数增加不能作为收束。若真实卷目标已完成，先重新PREPARE提交证据，再chapter_create传同一newVolume；没有权限或证据则延续当前卷。`,
       bridge.lastUnfinishedAction ? `未完成动作：${bridge.lastUnfinishedAction}` : '前章无明确未完成动作',
       bridge.location || bridge.storyTime ? `连续时空：${bridge.storyTime || '未标注'} · ${bridge.location || '未标注'}` : '时空状态待 Scene Task 明确',
       bridge.emotionAftermath.length ? `情绪余波：${bridge.emotionAftermath.join('；')}` : '情绪余波待 Scene Task 明确',
@@ -514,7 +520,7 @@ export async function buildStandaloneContinuityContext(ctx: Pick<ToolContext, 'u
   const charter = await db.storyCharter.findUnique({ where: { novelId: ctx.novelId } })
   const contextHash = createHash('sha256').update(JSON.stringify({ chapter, preceding, charter })).digest('hex')
   const criticInput = `独立连续性审阅；没有场景计划不构成错误，不要求补建编译或提交章节桥。仅审阅所给正文与前三章范围，不能声称验证未提供的全书。\n作品约定（不是已经发生的事实）：${JSON.stringify(charter)}\n前章正文：${JSON.stringify([...preceding].reverse())}\n目标章节 chapterId=${chapter.id}，《${chapter.title}》@r${chapter.revision}\n完整正文：\n${chapter.content}`
-  return { chapter, contextHash, criticInput }
+  return { chapter, contextHash, criticInput, precedingBodies: preceding.map(item => item.content).join('\n\n') }
 }
 
 function standaloneReviewKey(contextHash: string, focus?: string) {
@@ -529,7 +535,7 @@ export async function readStandaloneContinuityReport(ctx: ToolContext, contextHa
   return metadata.success ? { artifact, findings: metadata.data.findings } : null
 }
 
-export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string): Promise<import('./types.js').ToolResult> {
+export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string): Promise<import('./types.js').ToolResult> {
   ctx.signal.throwIfAborted()
   await assertAgentManuscriptCurrent(db, ctx)
   await db.$queryRaw`SELECT id FROM chapters WHERE id = ${context.chapter.id} FOR UPDATE`
@@ -539,13 +545,15 @@ export async function saveStandaloneContinuityReport(ctx: ToolContext, context: 
   if (!parsed.structured) return { outcome: 'failed', summary: '独立连续性复核未完成', output: '模型没有返回完整结构化报告，未判定通过；正文与章节桥均未修改。' }
   const cached = await readStandaloneContinuityReport(ctx, context.contextHash, focus, db)
   const findings = cached?.findings ?? parsed.findings
+  const unlocated = findings.some(item => unlocatedContinuityEvidence(item, { previous: current.precedingBodies, current: current.chapter.content }, true))
   const errors = findings.filter(item => item.severity === 'error').length
   const warnings = findings.length - errors
-  const output = `独立连续性检查《${context.chapter.title}》@r${context.chapter.revision}：${errors} 错误、${warnings} 警告。仅完成审阅，正文未修改，不需要补建编译或提交章节桥。\n${findings.map(item => `[${item.severity}/${item.signal}] ${item.evidence}；${item.suggestion}`).join('\n')}`
+  const output = `独立连续性检查《${context.chapter.title}》@r${context.chapter.revision}：${errors} 错误、${warnings} 警告。${unlocated ? '引用未在对应正文中定位，结论未确认，不能判定通过或据此改稿。' : '仅完成审阅，正文未修改，不需要补建编译或提交章节桥。'}\n${findings.map(item => `[${item.severity}/${item.signal}] ${item.evidence}；${item.suggestion}`).join('\n')}`
   const artifact = cached?.artifact ?? await db.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: `${context.chapter.title} · 连续性检查`, content: output,
-    summary: `${errors} 错误、${warnings} 警告`, metadata: { standaloneContinuity: true, standaloneKey: standaloneReviewKey(context.contextHash, focus), chapterId: context.chapter.id, revision: context.chapter.revision, contextHash: context.contextHash, findings } } })
+    summary: `${errors} 错误、${warnings} 警告`, metadata: { standaloneContinuity: true, independentCheck: unlocated ? 'unavailable' : 'complete', standaloneKey: standaloneReviewKey(context.contextHash, focus), chapterId: context.chapter.id, revision: context.chapter.revision, contextHash: context.contextHash, findings } } })
   ctx.signal.throwIfAborted()
-  return { summary: `独立连续性检查 · ${errors} 错误 ${warnings} 警告`, output: `artifactId=${artifact.id}\n${artifact.content}`, observedState: { kind: 'chapter', id: context.chapter.id, revision: context.chapter.revision } }
+  return { ...(unlocated ? { outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED' } : {}),
+    summary: unlocated ? '连续性引用待核对' : `独立连续性检查 · ${errors} 错误 ${warnings} 警告`, output: `artifactId=${artifact.id}\n${output}`, observedState: { kind: 'chapter', id: context.chapter.id, revision: context.chapter.revision } }
 }
 
 export const continuityValidateTool = defineTool({
@@ -623,8 +631,10 @@ export const continuityValidateTool = defineTool({
       const errorCount = cachedValidation.errorCount ?? findings.filter((item) => item.severity === 'error').length
       const warningCount = cachedValidation.warningCount ?? findings.filter((item) => item.severity === 'warning').length
       ctx.signal.throwIfAborted()
-      await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, findings,
+      const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, findings,
         expectedChapterRevision: chapter.revision, independentCheck: 'complete', coverage, focus: args.focus, signal: ctx.signal })
+      if (result.independentCheck !== 'complete') return { outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED',
+        summary: '缓存连续性证据未确认', output: '本次只读复核发现缓存引用缺失或不属于当前对应正文，已保留未确认报告；未调用模型、未增加检查次数，不能宣称检查通过或据此改稿。原任务内仍可纠正真实问题，按原预算取得有效复核。' }
       const repairGuidance = errorCount > 0 ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
       return {
         output: `当前 r${chapter.revision} 已完成连续性检查，直接复用结果：${errorCount} 个错误、${warningCount} 个警告；${errorCount ? repairGuidance : '连续性检查已完成；警告保留待审，不自动改正文。'}\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...cachedValidation, checkedChapterId: chapter.id })}；findingId 使用从0开始的编号。\n${findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${item.evidence}；${item.suggestion}`).join('\n')}`,
@@ -691,9 +701,10 @@ export const continuityValidateTool = defineTool({
       .filter((finding, index, all) => all.findIndex((item) => item.signal === finding.signal && item.evidence === finding.evidence) === index)
     const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, compilationId: compilation.id, findings: independentFindings,
       runId: ctx.runId, expectedChapterRevision: chapter.revision, independentCheck: criticFallback ? 'unavailable' : 'complete', coverage, focus: args.focus, signal: ctx.signal })
-    if (criticFallback) return {
+    if (criticFallback || result.independentCheck !== 'complete') return {
       outcome: 'failed' as const,
-      output: `独立连续性复核未完成，本次不能判定通过。确定性检查发现 ${result.errorCount} 个错误、${result.warningCount} 个警告，但不能替代独立复核；保留当前正文，报告保留为未完成，不作为通过凭证。`,
+      failureCode: criticFallback ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED',
+      output: `独立连续性复核未完成，本次不能判定通过。${criticFallback ? '报告格式不完整。' : '检查引用未在当前对应正文中定位，不能照旧引文改稿。'}保留当前正文和未确认报告；原写作权限内仍可修正有真实依据的问题，再按原检查预算复核。\n${result.findings.map(item => `${item.evidence}；${item.suggestion}`).join('\n')}`,
       summary: '独立连续性复核未完成',
     }
     const phase = result.errorCount > 0 ? 'repair' : 'check'

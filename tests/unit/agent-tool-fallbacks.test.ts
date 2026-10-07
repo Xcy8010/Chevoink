@@ -33,11 +33,11 @@ describe('Agent 工具协议与结构化输出兜底', () => {
   it('uses previous findings only as clues with a converging recheck contract', () => {
     const finding = { signal: 'body', severity: 'error', evidence: '左手受伤', suggestion: '保留伤势限制' }
     const tail = continuityReviewTail({ independentCheck: 'complete', checkedRevision: 3, findings: [finding] }, 4, false)
-    expect(tail).toContain('不是当前版通过凭证')
-    expect(tail).toContain('复检纪律')
-    expect(tail).toContain('默认快速通过')
+    expect(tail).toContain('不能沿用其中旧引文')
+    expect(tail).toContain('当前正文与前章原文')
+    expect(tail).toContain('sourceEvidence')
     expect(tail).toContain('只读复核')
-    expect(tail).toContain('左手受伤')
+    expect(tail).not.toContain('左手受伤')
     expect(continuityReviewTail({ independentCheck: 'unavailable', checkedRevision: 3, findings: [finding] }, 4, true)).not.toContain('左手受伤')
   })
   it('连续性评审提示词限定 error 判定并禁止换表述重报，表达类问题不升格', () => {

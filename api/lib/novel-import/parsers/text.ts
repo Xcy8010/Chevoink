@@ -5,7 +5,7 @@ import { emptyImport, NovelImportParseError, type ParsedNovelImport, type NovelI
 
 const NUMBER = '[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+'
 const VOLUME = new RegExp(`^第\\s*${NUMBER}\\s*[卷部篇](?:[ \\t\\u3000:：·、—-]+[^。！？!?；;]{0,100})?$`)
-const CHAPTER = new RegExp(`^第\\s*${NUMBER}\\s*[章回节](?:[ \\t\\u3000:：·、—-]+[^。！？!?；;]{0,100})?$`)
+const CHAPTER = new RegExp(`^第\\s*${NUMBER}\\s*[章回节](?:[ \\t\\u3000:：·、—-]+[^。！？!?；;]{0,100}|[《〈][^。！？!?；;]{0,100}[》〉])?$`)
 const SPECIAL = /^(?:序章|序言|前言|楔子|引子|尾声|终章|后记|番外)(?:[ \t\u3000:：·、—-]+[^。！？!?；;]{0,100})?$/
 
 export function headingKind(title: string): 'volume' | 'chapter' | undefined {

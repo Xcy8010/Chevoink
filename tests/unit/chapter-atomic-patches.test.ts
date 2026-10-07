@@ -31,4 +31,19 @@ describe('one immutable chapter patch batch', () => {
     expect(chapterEditArguments.safeParse({ patches: [{ oldText: '甲门锁着', newText: '' }], start: 0, end: 4, newText: '' }).success).toBe(false)
     expect(composeChapterEdit(before, { patches: [{ oldText: '甲门锁着', newText: '甲门锁着' }] }).after).toBe(before)
   })
+  it('locates a unique missing paragraph break while preserving all other characters and untouched prose', () => {
+    const body = '天未亮。纸条有缺角。\r\n\r\n堡内老卫站着。老段被押。'
+    const args = { patches: [{ oldText: '天未亮', newText: '天大亮后' },
+      { oldText: '纸条有缺角。堡内老卫站着。', newText: '纸条仍有缺角。\n\n堡内老卫坐下。' },
+      { oldText: '老段被押', newText: '老段仍被押' }] }
+    expect(composeChapterEdit(body, args).after).toBe('天大亮后。纸条仍有缺角。\n\n堡内老卫坐下。老段仍被押。')
+    expect(() => composeChapterEdit(body, args, 1)).toThrow(expect.objectContaining({ code: 'CHAPTER_ANCHOR_CONFLICT', message: expect.stringContaining('第 2 处') }))
+  })
+  it.each(['甲。\n乙。甲。\r\n乙。', '甲 。\n乙。', '甲。\n丙。'])('never guesses ambiguous, space or ordinary character differences in %s', body => {
+    expect(() => composeChapterEdit(body, { oldText: '甲。乙。', newText: '改文' })).toThrow(expect.objectContaining({ code: 'CHAPTER_ANCHOR_CONFLICT' }))
+  })
+  it('keeps normalized ranges subject to atomic overlap and rejects whitespace-only anchors', () => {
+    expect(() => composeChapterEdit('甲。\n\n乙。', { patches: [{ oldText: '甲。乙。', newText: '一' }, { oldText: '乙。', newText: '二' }] })).toThrow()
+    expect(() => composeChapterEdit('甲。', { oldText: '\n\n', newText: '空白定位' })).toThrow()
+  })
 })

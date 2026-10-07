@@ -1,4 +1,5 @@
 import type { Chapter, Prisma, Volume as PrismaVolume } from '@prisma/client'
+import { plainChapterTitle } from '../../../shared/structure/chapter-title.js'
 import { createHash } from 'node:crypto'
 
 import type {
@@ -16,6 +17,12 @@ import type {
 } from '../../../shared/contracts/index.js'
 import { buildStructureOrderRows } from '../../../shared/structure/ordering.js'
 import { DataAccessError, prisma } from '../prisma.js'
+
+function requireSplitTitle(value: string): string {
+  const title = plainChapterTitle(value)
+  if (!title) throw new DataAccessError(400, 'INVALID_TITLE', '章节标题去除章序后不能为空。')
+  return title
+}
 import { lockNovelActiveScope } from './novel-write-lock.js'
 import { CHAPTER_REVISION_CONFLICT_CODE, CHAPTER_REVISION_CONFLICT_MESSAGE } from './chapter-revision.js'
 import {
@@ -356,7 +363,7 @@ export async function splitChapterData(
       data: {
         novelId,
         authorId: userId,
-        title: input.newChapterTitle.trim(),
+        title: requireSplitTitle(input.newChapterTitle),
         content: secondContent,
         wordCount: secondContent.length,
         status: chapter.status,

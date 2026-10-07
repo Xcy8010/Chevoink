@@ -54,7 +54,7 @@ import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-t
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { createEmptyResponseGuard, createProtocolRecoveryGuard, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { toolFailureRecovery, toolRecoveryKey } from './tool-failure-recovery.js'
-import { findToolRestriction, isLocalToolFailure, toolRestrictionTarget, type ToolRestriction } from './tool-local-failure.js'
+import { findToolRestriction, isLocalToolFailure, isInputScopedFailure, restoreToolRestriction, toolFailureInputHash, toolRestrictionTarget, type ToolRestriction } from './tool-local-failure.js'
 import { readLimitedWritingDelivery, assertLimitedWritingDelivery, limitedReviewDependency, type LimitedWritingDelivery } from './writing-delivery-limitations.js'
 import { readChapterReviewReadiness, probeChapterReviewRevision } from './chapter-review-guard.js'
 import { nextMergedReviewReminder, nextReviewDispatch } from './review-dispatch.js'
@@ -767,15 +767,27 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const automaticReviewAttempts = new Set<string>()
   const pendingReviews = new Map<string, PendingReviewCall>()
   const toolRestrictions: ToolRestriction[] = []
+  let inputProtocolRecovery: RunCheckpointState['inputProtocolRecovery']
+  let compatibilityReadTargets: Set<string> | null = null
   const restrictTool = (action: string, args: unknown, code: string, reason: string) => {
     const target = toolRestrictionTarget(args, getLastTouchedChapter(runId) ?? params.chapterId)
+    const inputHash = isInputScopedFailure(code) ? toolFailureInputHash(action, args) : undefined
     const writers = ['chapter_edit_range', 'chapter_write', 'chapter_append']
-    for (const name of writers.includes(action) ? writers : [action]) {
-      if (!toolRestrictions.some(item => item.action === name && item.target === target)) toolRestrictions.push({ action: name, target, code, reason })
+    for (const name of !inputHash && writers.includes(action) ? writers : [action]) {
+      if (!toolRestrictions.some(item => item.action === name && item.target === target && item.inputHash === inputHash)) toolRestrictions.push({ action: name, target, code, reason, ...(inputHash ? { inputHash } : {}) })
     }
   }
   const restoreReviewEvidence = (checkpoint: RunCheckpointState) => {
-    for (const item of checkpoint.toolRestrictions ?? []) if (!toolRestrictions.some(prior => prior.action === item.action && prior.target === item.target)) toolRestrictions.push(item)
+    inputProtocolRecovery ??= checkpoint.inputProtocolRecovery
+    const oldAnchors = (checkpoint.toolRestrictions ?? []).filter(item => item.code === 'CHAPTER_ANCHOR_CONFLICT' && !item.inputHash && item.target)
+    if (params.resume && checkpoint.version === 2 && checkpoint.stagnantBatches >= 4 && !inputProtocolRecovery && oldAnchors.length) {
+      inputProtocolRecovery = { protocol: 2, key: toolFailureInputHash('legacy-anchor-input-recovery', oldAnchors) }
+      compatibilityReadTargets = new Set(oldAnchors.map(item => item.target!))
+    }
+    for (const saved of checkpoint.toolRestrictions ?? []) {
+      const item = restoreToolRestriction(saved)
+      if (!toolRestrictions.some(prior => prior.action === item.action && prior.target === item.target && prior.inputHash === item.inputHash)) toolRestrictions.push(item)
+    }
     checkpoint.reviewAttempts?.forEach(key => automaticReviewAttempts.add(key))
     checkpoint.pendingReviews?.forEach(call => pendingReviews.set(`${call.compilationId ?? call.chapterId}:${call.toolName}`, call))
   }
@@ -818,6 +830,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     ...(automaticReviewAttempts.size ? { reviewAttempts: [...automaticReviewAttempts] } : {}),
     ...(pendingReviews.size ? { pendingReviews: [...pendingReviews.values()] } : {}),
     ...(toolRestrictions.length ? { toolRestrictions } : {}),
+    ...(inputProtocolRecovery ? { inputProtocolRecovery } : {}),
     inheritedTokens, inheritedTurns, inheritedExecutionMs, manualResumeCount,
     ...(reviewHandoffCount > 0 ? { reviewHandoffCount } : {}),
   })
@@ -1840,6 +1853,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
       let reviewStopReason: string | undefined
       let batchProgress = false
+      let compatibilityReadObserved = false
       for (let callIndex = 0; callIndex < effectiveToolCalls.length; callIndex += 1) {
         let call = effectiveToolCalls[callIndex]
         if (await finishPersistedWritingIfComplete(async () => {
@@ -1913,7 +1927,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (restricted) {
           blockedRepeat += 1
           messages.push({ role: 'tool', toolCallId: call.id,
-            content: `[系统] 该目标的 ${call.name} 已因 ${restricted.code} 停止重复尝试，本次未执行、未产生新费用。原因：${restricted.reason}。继续其他已授权且不依赖此操作的工作；不要换工具绕过权限或把未完成项说成通过。` })
+            content: restricted.inputHash ? `[系统] ${call.name} 的这组失败参数已停止重复提交，本次未执行。${restricted.reason}。根据具体错误纠正参数后，仍可在原授权及当前版本内继续；参数纠正不等于完成，不得扩大目标或预算。`
+              : `[系统] 该目标的 ${call.name} 已因 ${restricted.code} 停止重复尝试，本次未执行、未产生新费用。原因：${restricted.reason}。继续其他已授权且不依赖此操作的工作；不要换工具绕过权限或把未完成项说成通过。` })
           continue
         }
         let reviewDispatch: PendingReviewCall | undefined
@@ -2028,6 +2043,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         lastActivityAt = Date.now()
         // 滑窗更新：只记成功执行；失败不碰窗口（同签名重试不会被误杀）
         if (outcome.part.status === 'success') {
+          const range = outcome.observedChapterRange
+          if (compatibilityReadTargets && call.name === 'chapter_read' && range && compatibilityReadTargets.has(range.targetId)
+            && /^[a-f0-9]{64}$/u.test(range.contentHash) && Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end)
+            && range.start >= 0 && range.end > range.start) compatibilityReadObserved = true
           const contentProgress = observeLegacyContentProgress(progressSignatures, outcome.part)
           const transition = outcome.semanticTransition
           const structureProgress = Boolean(transition && observeSemanticTransition(progressSignatures, `structure:${transition.targetId}`, transition.beforeHash, transition.afterHash))
@@ -2144,7 +2163,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         && await prisma.agentRun.count({ where: { userId: params.userId, novelId: params.novelId, OR: [{ session: { spawnedFromRunId: runId } }, { incomingChildGrant: { currentParentRunId: runId } }],
           status: { in: ['queued', 'running', 'awaiting_approval'] } } }) > 0
       stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, waitingForChild)
-      if (!forceWrapUpReason && (stagnantBatches >= 4 || blockedRepeat >= 4)) {
+      const compatibilityRead = compatibilityReadTargets !== null && compatibilityReadObserved
+      compatibilityReadTargets = null
+      if (compatibilityRead && !batchProgress) messages.push({ role: 'user', content: '[系统] 已核对旧定位失败目标的真实正文。输入协议兼容读取机会已持久记账，仅此一次；历史失败、检查次数和预算保留。下一步按当前正文纠正具体定位参数并执行原目标内修订，不要重复读取或照原失败参数重试。' })
+      if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead)) {
         forceWrapUpReason = '连续多轮没有推进原任务的内容或必需成果，已停止重复执行，进度保留。'
         forceWrapUpLocal = toolRestrictions.length > 0
       }

@@ -1,9 +1,30 @@
 import type { NovelImportPreview } from '../../../shared/contracts/novel-import.js'
 import { DataAccessError } from '../prisma.js'
 import { normalizeImportTitle } from './content-routing.js'
+import { chapterTitleOrdinal, plainChapterTitle } from '../../../shared/structure/chapter-title.js'
+
+/** Match original source identity first; a namesake plain title needs its ordinal. */
+function matchingChapters(old: ExistingChapter[], chapter: NovelImportPreview['volumes'][number]['chapters'][number]) {
+  if (chapter.sourceTitle === null) return []
+  const original = chapter.sourceTitle ?? chapter.title
+  const exact = old.filter(item => normalizeImportTitle(item.title) === normalizeImportTitle(original))
+  if (exact.length) return exact
+  const plain = old.filter(item => normalizeImportTitle(item.title) === normalizeImportTitle(plainChapterTitle(original)))
+  const ordinal = chapterTitleOrdinal(original)
+  if (ordinal === null) return plain
+  const positioned = plain.filter(item => item.orderIndex === ordinal || item.orderInVolume === ordinal)
+  // A numbered source never silently replaces a plain namesake at another slot.
+  return positioned.length ? positioned : []
+}
 
 type ExistingVolume = { id: string; title: string; orderIndex: number; revision?: number; summary?: string | null }
 type ExistingChapter = { id: string; title: string; volumeId: string; orderIndex: number; orderInVolume: number }
+export function normalizeNovelImportTitles(volumes: NovelImportPreview['volumes']): NovelImportPreview['volumes'] {
+  return volumes.map(volume => ({ ...volume, chapters: volume.chapters.map(chapter => {
+    const title = plainChapterTitle(chapter.title) || chapter.title
+    return { ...chapter, ...(chapter.sourceTitle !== undefined || title !== chapter.title ? { sourceTitle: chapter.sourceTitle === undefined ? chapter.title : chapter.sourceTitle } : {}), title }
+  }) }))
+}
 export type ImportChapterPosition = Pick<ExistingChapter, 'id' | 'volumeId' | 'orderIndex' | 'orderInVolume'>
 const ambiguous = (): never => { throw new DataAccessError(409, 'IMPORT_PLACEMENT_AMBIGUOUS', '卷章名称存在歧义，未改动作品；请调整来源卷名或重复章名后重新导入。') }
 const byOrder = (a: ExistingVolume, b: ExistingVolume) => a.orderIndex - b.orderIndex || a.id.localeCompare(b.id)
@@ -66,12 +87,14 @@ export function buildNovelImportPlacement(existingVolumes: ExistingVolume[], exi
     const old = layout.get(destination.id)!
     const replacements = new Map<string, ExistingChapter[]>(), additions: ExistingChapter[] = []
     const sourceCounts = new Map<string, number>()
-    for (const chapter of volume.chapters) { const key = normalizeImportTitle(chapter.title); sourceCounts.set(key, (sourceCounts.get(key) ?? 0) + 1) }
+    for (const chapter of volume.chapters) { const key = normalizeImportTitle(chapter.sourceTitle ?? chapter.title); sourceCounts.set(key, (sourceCounts.get(key) ?? 0) + 1) }
     let lastMatchedPosition = -1
     for (const chapter of volume.chapters) {
-      const key = normalizeImportTitle(chapter.title), matches = old.filter(existing => normalizeImportTitle(existing.title) === key)
+      const key = normalizeImportTitle(chapter.sourceTitle ?? chapter.title), matches = matchingChapters(old, chapter)
       if (matches.length > 1 || matches.length && sourceCounts.get(key)! > 1) ambiguous()
-      const row = { id: newId(), title: chapter.title, content: chapter.content, volumeId: destination.id, orderIndex: 0, orderInVolume: 0 }
+      const title = plainChapterTitle(chapter.title)
+      if (!title) throw new DataAccessError(400, 'IMPORT_TITLE_INVALID', '章节标题去除章序后不能为空，请在预览中补全章名。')
+      const row = { id: newId(), title, content: chapter.content, volumeId: destination.id, orderIndex: 0, orderInVolume: 0 }
       imported.push(row)
       if (matches.length) {
         const position = old.findIndex(existing => existing.id === matches[0].id)

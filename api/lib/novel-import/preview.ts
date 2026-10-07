@@ -3,6 +3,8 @@ import { NOVEL_IMPORT_LIMITS, type NovelImportPreview } from '../../../shared/co
 import type { NovelImportContentExclusion, NovelImportDocumentReport, NovelImportEvidencePreview, NovelImportReportDto, NovelImportReportItem, novelImportReviewSchema, novelImportStructureSchema, novelImportSelectionSchema } from '../../../shared/contracts/novel-import-preview.js'
 import { DataAccessError } from '../prisma.js'
 import { importBytesHash } from '../novel-import-storage.js'
+import { plainChapterTitle } from '../../../shared/structure/chapter-title.js'
+import { normalizeNovelImportTitles } from './placement.js'
 
 const reject = (code: string, message: string): never => { throw new DataAccessError(409, code, message) }
 /** 计划/创作记忆段落也算有效导入内容：仅导入设定或计划时不应被“至少一章正文”闸拒绝。 */
@@ -101,6 +103,7 @@ export function refreshPreviewWarnings(preview: NovelImportEvidencePreview): Nov
   assertPreviewCoverSelection(preview)
   const issues = resolutionState(preview).issues
   const warnings = issues.map(({ code, message, blocking, resolved }) => ({ code, message, blocking: blocking && !resolved }))
+  if (preview.volumes.some(volume => volume.chapters.some(chapter => !plainChapterTitle(chapter.title)))) warnings.push({ code: 'IMPORT_TITLE_INVALID', message: '章序去除后没有章名，请在目录中补全标题；正文和来源保持完整。', blocking: true })
   // Keep informational service notices, but never trust caller-provided blocking flags.
   warnings.push(...preview.warnings.filter(w => w.code === 'IMPORT_EMPTY_VOLUMES_RETAINED').map(w => ({ code: w.code, message: w.message, blocking: false })))
   if (preview.volumes.some(v => v.chapters.some(c => c.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters))) warnings.push({ code: 'IMPORT_CHAPTER_TOO_LONG', message: '单章超过10万字符，请在预览中拆分。', blocking: true })
@@ -234,7 +237,10 @@ export function applyStructureEdit(preview: NovelImportEvidencePreview, input: z
       return origin!.content.slice(segment.start, segment.end)
     }).join('')
     if (content.length > NOVEL_IMPORT_LIMITS.characters) reject('IMPORT_LIMIT_EXCEEDED', '正文超过上限。')
-    return { title: chapter.title, content, source: { memberPath: sourceKey! } }
+    const whole = chapter.segments.length === 1 ? chapter.segments[0] : null
+    const origin = whole ? preview.volumes[whole.volumeIndex]?.chapters[whole.chapterIndex] : null
+    const sourceTitle = whole && origin && whole.start === 0 && whole.end === origin.content.length ? origin.sourceTitle === undefined ? origin.title : origin.sourceTitle : null
+    return { title: chapter.title, sourceTitle, content, source: { memberPath: sourceKey! } }
   }) }))
   preview.volumes.forEach((volume, vi) => volume.chapters.forEach((chapter, ci) => {
     const parts = ranges.get(`${vi}:${ci}`) ?? []
@@ -243,7 +249,7 @@ export function applyStructureEdit(preview: NovelImportEvidencePreview, input: z
     for (const part of parts) { if (part[0] !== end) reject('IMPORT_CONTENT_NOT_CONSERVED', '结构编辑重复或遗漏了原文；请使用来源排除操作删除内容。'); end = part[1] }
     if (!parts.length || end !== chapter.content.length) reject('IMPORT_CONTENT_NOT_CONSERVED', '结构编辑遗漏原文；请使用来源排除操作删除内容。')
   }))
-  return refreshPreviewWarnings({ ...preview, volumes, metadataSelection: input.metadataSelection ?? preview.metadataSelection, decisions: (preview.decisions ?? []).filter(d => d.action === 'exclude') })
+  return refreshPreviewWarnings({ ...preview, volumes: normalizeNovelImportTitles(volumes), metadataSelection: input.metadataSelection ?? preview.metadataSelection, decisions: (preview.decisions ?? []).filter(d => d.action === 'exclude') })
 }
 
 /** Compatibility guard for the old full-body PATCH. New clients should use ranges. */
@@ -259,4 +265,16 @@ export function assertLegacyContentConserved(before: NovelImportPreview, volumes
     const replacement = next.get(source)
     if (!replacement || (parts.join('') !== replacement.join('') && JSON.stringify([...parts].sort()) !== JSON.stringify([...replacement].sort()))) reject('IMPORT_CONTENT_NOT_CONSERVED', '结构编辑必须逐字保留原文；拆分重排请使用范围编辑。')
   }
+}
+
+/** Client labels cannot mint or change source identities. Split/merged bodies add only. */
+export function retainLegacySourceIdentities(before: NovelImportPreview, volumes: NovelImportPreview['volumes']): NovelImportPreview['volumes'] {
+  const originals = before.volumes.flatMap(volume => volume.chapters)
+  return volumes.map(volume => ({ ...volume, chapters: volume.chapters.map(chapter => {
+    const matches = originals.filter(origin => chapterSource(origin.source) === chapterSource(chapter.source) && origin.content === chapter.content)
+    const origin = matches.length === 1 ? matches[0] : null
+    const sourceTitle = origin ? origin.sourceTitle === undefined ? origin.title : origin.sourceTitle : null
+    if (chapter.sourceTitle !== undefined && chapter.sourceTitle !== sourceTitle) reject('IMPORT_STRUCTURE_INVALID', '来源章序身份不能由编辑参数改写；请保留完整原章来源或使用范围编辑。')
+    return { ...chapter, sourceTitle }
+  }) }))
 }

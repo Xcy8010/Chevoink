@@ -43,7 +43,7 @@ describe.skipIf(!dbAvailable)('Agent 2.0 P1 卷章结构（需 DB）', () => {
     expect(studio.body.data.volumes).toHaveLength(1)
     firstVolumeId = studio.body.data.volumes[0].id as string
 
-    for (const [title, content] of [['第一章', '甲乙丙丁'], ['第二章', '戊己庚辛']] as const) {
+    for (const [title, content] of [['第一章 启程', '甲乙丙丁'], ['第二章 归来', '戊己庚辛']] as const) {
       const created = await request(app)
         .post(`/api/novels/${novelId}/chapters`)
         .set('Cookie', cookie)

@@ -19,6 +19,15 @@ import { executeDurableChapter } from './durable-chapter.js'
 import { executeDurableCreate } from './durable-create.js'
 import { chapterWriteArguments, chapterAppendArguments, chapterEditArguments } from './chapter-arguments.js'
 import { composeChapterEdit } from './chapter-patches.js'
+import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
+import { writingNewVolumeSchema } from '../../../../shared/contracts/writing-volume-contracts.js'
+import { assertPreparedWritingVolumeDecision, createWritingTailVolume } from '../writing-volume.js'
+
+function requireChapterTitle(value: string): string {
+  const title = plainChapterTitle(value)
+  if (!title) throw new DataAccessError(400, 'CHAPTER_RENAME_INVALID', '章节标题去除章序和外层书名号后不能为空。')
+  return title
+}
 
 /**
  * 章节写工具集（自 write-tools.ts 模块级拆分而来，工具定义逐字保留）：
@@ -35,23 +44,40 @@ async function findOwnedChapter(ctx: ToolContext, chapterId: string) {
 
 /** chapterId 兜底：模型写长正文时经常漏传 chapterId，与其打回重试（重发整章又贵又易错），
  * 不如服务端直接补：优先本 run 最近读/写过的章节，其次作者当前打开的章节 */
-function resolveChapterId(ctx: ToolContext, chapterId: string | undefined): string | null {
+async function resolveChapterId(ctx: ToolContext, chapterId: string | undefined): Promise<string | null> {
   const trimmed = chapterId?.trim()
   if (trimmed) {
     return trimmed
   }
-  return ctx.durableContent?.chapterId ?? getLastTouchedChapter(ctx.runId) ?? ctx.chapterId
+  if (ctx.durableContent?.chapterId) return ctx.durableContent.chapterId
+  const scope = await readWritingScope(ctx.transaction ?? prisma, ctx)
+  if (scope.writing?.kind === 'bounded') {
+    const targets = scope.writing.targets.map(target => target.chapterId
+      ?? scope.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId)
+    const touched = getLastTouchedChapter(ctx.runId)
+    return targets.length === 1 ? targets[0] ?? null : touched && targets.includes(touched) ? touched : null
+  }
+  if (scope.writing?.kind === 'needs_input') return null
+  return getLastTouchedChapter(ctx.runId) ?? ctx.chapterId
 }
 
 const MISSING_CHAPTER_HINT =
   '未传 chapterId 且当前没有正在编辑的章节。请先用 novel_get_context 查看章节列表拿到 chapterId，或用 chapter_create 新建章节。'
 
 /** 章节不存在时附带当前章节提示，帮模型一次性纠错而不是盲猜 */
-function buildChapterNotFound(ctx: ToolContext, chapterId: string): ToolResult {
-  const hint = ctx.chapterId && ctx.chapterId !== chapterId ? `作者当前打开的章节是 chapterId=${ctx.chapterId}。` : ''
+async function buildChapterNotFound(ctx: ToolContext, chapterId: string): Promise<ToolResult> {
+  let hint = ''
+  try {
+    const scope = await readWritingScope(ctx.transaction ?? prisma, ctx)
+    const ids = scope.writing?.kind === 'bounded' ? scope.writing.targets.map(target => target.chapterId
+      ?? scope.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId).filter((id): id is string => !!id) : []
+    if (ids.length) hint = `本任务已冻结或绑定的章节编号：${ids.slice(0, 10).join('、')}。显式错误编号未被自动替换，请逐字复制真实编号纠正。`
+  } catch { /* Diagnostics never manufacture a target when original scope cannot be read. */ }
   return {
     outcome: 'failed',
-    output: `章节 ${chapterId} 已归档、不存在或不属于当前作品。${hint}请用 novel_get_context 查看当前章节列表；不要按同序号替换旧章节 ID。`,
+    failureCode: 'CHAPTER_NOT_FOUND',
+    summary: '章节编号不存在或不匹配',
+    output: `章节 ${chapterId} 已归档、不存在或不属于当前作品。${hint}编辑器当前打开的旧章不决定本任务目标。必要时用 novel_get_context 核对真实章节列表；不要猜编号、重复建章或按同序号替换旧章节 ID。`,
   }
 }
 
@@ -211,8 +237,10 @@ export const chapterCreateTool = defineTool({
     volumeId: z.string().min(1).optional().describe('目标卷 ID；缺省时使用全书最后一个已有章节所在卷，而不是后方空卷'),
     volumeOrder: z.number().int().min(1).optional().describe('目标卷显示序号，例如“第二卷”传 2；与 volumeId 二选一'),
     positionInVolume: z.number().int().min(1).optional().describe('目标卷内位置；必须同时传 volumeId 或 volumeOrder'),
+    newVolume: writingNewVolumeSchema.optional().describe('仅原冻结任务允许的未创建末尾章：PREPARE已决定新阶段时，提交同一新尾卷及前章收束原文证据；缺证据留当前卷，不能按章数切卷'),
   }).superRefine((args, refinement) => {
     const hasExplicitVolume = Boolean(args.volumeId) || args.volumeOrder !== undefined
+    if (args.newVolume && (hasExplicitVolume || args.positionInVolume !== undefined)) refinement.addIssue({ code: 'custom', path: ['newVolume'], message: '新尾卷不能与固定卷或卷内位置混用' })
     if (args.volumeId && args.volumeOrder !== undefined) {
       refinement.addIssue({ code: 'custom', path: ['volumeOrder'], message: 'volumeId 与 volumeOrder 只能传一个' })
     }
@@ -257,6 +285,11 @@ export const chapterCreateTool = defineTool({
         }
       }
       const beforeHash = await readSemanticStructureHash(tx, ctx.novelId)
+      if (!args.newVolume && frozen.writing?.tailVolume) await assertPreparedWritingVolumeDecision(tx, ctx, slot?.orderIndex ?? args.position ?? 0)
+      if (args.newVolume && (ctx.inlineChild || ctx.sandboxMode === 'read_only' || ctx.protectedChapterIds?.size)) {
+        throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '子执行、只读或受保护任务不能为章节新建尾卷。')
+      }
+      const newVolume = args.newVolume ? await createWritingTailVolume(tx, ctx, slot?.orderIndex ?? args.position ?? 0, args.newVolume) : null
       const effectivePosition = slot?.orderIndex ?? args.position
       const globalTarget = effectivePosition
         ? await tx.chapter.findFirst({ where: { ...activeChapterScope(ctx.novelId), orderIndex: effectivePosition } })
@@ -270,7 +303,7 @@ export const chapterCreateTool = defineTool({
         tx,
         ctx.novelId,
         resolveAgentChapterVolumeId({
-          requestedVolumeId: slot?.volumeId ?? requestedVolumeId,
+          requestedVolumeId: newVolume?.id ?? slot?.volumeId ?? requestedVolumeId,
           globalTargetVolumeId: globalTarget?.volumeId,
           lastExistingVolumeId: lastExisting?.volumeId,
         }),
@@ -289,7 +322,7 @@ export const chapterCreateTool = defineTool({
         data: {
           novelId: ctx.novelId,
           authorId: ctx.userId,
-          title: args.title.trim(),
+          title: requireChapterTitle(args.title),
           content,
           volumeId: placement.volume.id,
           orderInVolume: -(placement.count + 1),
@@ -316,7 +349,7 @@ export const chapterCreateTool = defineTool({
     if (!chapter.scopeReused) await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
     if (!ctx.transaction) {
       recordChapterBaseline(ctx.runId, chapter.id, chapter.revision)
-      if (!chapter.scopeReused) recordCreatedChapter(ctx.runId, chapter.title, chapter.id)
+      if (!chapter.scopeReused) recordCreatedChapter(ctx.runId, args.title, chapter.id)
     }
     if (!chapter.scopeReused && content && isAgent2FeatureEnabled('memory2', ctx.userId)) {
       await enqueueChapterMemoryExtraction({
@@ -368,9 +401,9 @@ export const chapterWriteTool = defineTool({
   permission: WRITE_PERMISSION,
   readOnly: false,
   async execute(ctx, args) {
-    const chapterId = resolveChapterId(ctx, args.chapterId)
+    const chapterId = await resolveChapterId(ctx, args.chapterId)
     if (!chapterId) {
-      return { output: MISSING_CHAPTER_HINT }
+      return { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_write', { ...args, chapterId })
     return writeChapterContent(ctx, chapterId, () => args.content, '覆盖写入', args.content, 'replace', args.retainedFindings)
@@ -385,9 +418,9 @@ export const chapterAppendTool = defineTool({
   permission: WRITE_PERMISSION,
   readOnly: false,
   async execute(ctx, args) {
-    const chapterId = resolveChapterId(ctx, args.chapterId)
+    const chapterId = await resolveChapterId(ctx, args.chapterId)
     if (!chapterId) {
-      return { output: MISSING_CHAPTER_HINT }
+      return { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_append', { ...args, chapterId })
     return writeChapterContent(
@@ -410,9 +443,9 @@ export const chapterEditRangeTool = defineTool({
   permission: WRITE_PERMISSION,
   readOnly: false,
   async execute(ctx, args) {
-    const chapterId = resolveChapterId(ctx, args.chapterId)
+    const chapterId = await resolveChapterId(ctx, args.chapterId)
     if (!chapterId) {
-      return { output: MISSING_CHAPTER_HINT }
+      return { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_edit_range', { ...args, chapterId })
     const chapter = await findOwnedChapter(ctx, chapterId)
@@ -427,7 +460,7 @@ export const chapterEditRangeTool = defineTool({
     let edit: ReturnType<typeof composeChapterEdit>
     try { edit = composeChapterEdit(before, args) } catch (error) {
       if (!(error instanceof DataAccessError)) throw error
-      return { outcome: 'failed', failureCode: error.code, summary: '正文片段未改写', output: error.message }
+      return { outcome: 'failed', failureCode: error.code, summary: '正文片段需要纠正定位', output: `chapterId=${chapter.id}，当前 r${chapter.revision}。${error.message}` }
     }
 
     const baseline = getChapterBaseline(ctx.runId, chapter.id)
@@ -500,9 +533,9 @@ export const chapterRenameTool = defineTool({
   permission: WRITE_PERMISSION,
   readOnly: false,
   async execute(ctx, args) {
-    const chapterId = resolveChapterId(ctx, args.chapterId)
+    const chapterId = await resolveChapterId(ctx, args.chapterId)
     if (!chapterId) {
-      return { output: MISSING_CHAPTER_HINT }
+      return { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }
     }
     const chapter = await findOwnedChapter(ctx, chapterId)
 
@@ -517,7 +550,8 @@ export const chapterRenameTool = defineTool({
       return buildConflictResult(chapter.title)
     }
 
-    const updated = await updateOwnedChapterAtRevision(ctx, chapter, { title: args.title.trim() })
+    const title = requireChapterTitle(args.title)
+    const updated = await updateOwnedChapterAtRevision(ctx, chapter, { title })
     if (!updated) {
       return buildConflictResult(chapter.title)
     }
@@ -525,8 +559,8 @@ export const chapterRenameTool = defineTool({
     if (!ctx.transaction) recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
 
     return {
-      output: `已把章节《${previousTitle}》重命名为《${args.title.trim()}》。`,
-      summary: `章节改名《${args.title.trim()}》`,
+      output: `已把章节《${previousTitle}》重命名为《${title}》。`,
+      summary: `章节改名《${title}》`,
       snapshot: { target: 'chapter', targetId: chapter.id, field: 'title', previousValue: previousTitle },
     }
   },

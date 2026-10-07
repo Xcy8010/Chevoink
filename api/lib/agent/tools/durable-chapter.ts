@@ -1,6 +1,7 @@
 import { assertWritingTarget } from '../writing-scope.js'
 import { assertChapterManuscriptRevision } from '../chapter-review-guard.js'
 import { z } from 'zod'
+import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from '../craft-library.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
@@ -16,7 +17,7 @@ import { chapterPatchSchema, retainedFindingSchema } from './chapter-arguments.j
 import { composeChapterEdit } from './chapter-patches.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { reduceExecutionReceipt, failedToolResultSchema } from '../runtime-reducer.js'
-import { DataAccessError } from '../../prisma.js'
+import { DataAccessError, prisma } from '../../prisma.js'
 
 type Action = 'chapter_write' | 'chapter_append' | 'chapter_edit_range'
 
@@ -41,7 +42,7 @@ export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentT
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId || args.chapterId !== capability.chapterId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '章节改名范围与原任务不符。')
     const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
     if (!chapter || chapter.revision !== capability.expectedRevision) return runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，请重新读取当前章节后改名。')
-    const title = args.title.trim()
+    const title = plainChapterTitle(args.title)
     if (!title) return runtimeError('CHAPTER_RENAME_INVALID', '章节标题不能为空。')
     const revision = chapter.revision + (chapter.title === title ? 0 : 1)
     if (revision !== chapter.revision) {
@@ -99,7 +100,18 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     await assertCraftOutputSafe({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, chapterId: args.chapterId, content: candidate })
   }
   const effectiveArgs = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== undefined))
-  const operationInput = runtimeJson({ callId: ctx.callId, novelId: ctx.novelId, chapterId: args.chapterId, expectedRevision, args: effectiveArgs }).value
+  // Old operations keep exact-only semantics and their original hash. A fresh
+  // edit freezes the formatting locator version into its immutable input.
+  const prior = action === 'chapter_edit_range' ? await prisma.agentOperation.findUnique({
+    where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: capability.operationKey } }, select: { inputSnapshot: true },
+  }) : null
+  const priorInput = prior?.inputSnapshot && typeof prior.inputSnapshot === 'object' && !Array.isArray(prior.inputSnapshot)
+    ? prior.inputSnapshot.input : undefined
+  const priorProtocol = priorInput && typeof priorInput === 'object' && !Array.isArray(priorInput) ? priorInput.anchorProtocol : undefined
+  if (priorProtocol !== undefined && priorProtocol !== 2) return runtimeError('RUNTIME_RECEIPT_INVALID', '原片段定位协议损坏，不能改变冻结操作。')
+  const anchorProtocol = prior && priorProtocol === undefined ? 1 : 2
+  const operationInput = runtimeJson({ callId: ctx.callId, novelId: ctx.novelId, chapterId: args.chapterId, expectedRevision, args: effectiveArgs,
+    ...(action === 'chapter_edit_range' && anchorProtocol === 2 ? { anchorProtocol: 2 } : {}) }).value
   const prepared = capability.cursor ? await prepareToolCursorOperation(lease, capability.cursor, { key: capability.operationKey, action,
     requireApproval: grant!.permission === 'ask' || grant!.alwaysConfirm,
     callId: ctx.callId, targetId: args.chapterId, operationInput, effectiveArgs, normalize: raw => {
@@ -129,7 +141,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     let editRanges: ReturnType<typeof composeChapterEdit>['ranges'] | undefined
     if (action === 'chapter_append') after = before.trim() ? `${before.replace(/\s+$/, '')}\n\n${candidate}` : candidate
     if (action === 'chapter_edit_range') {
-      const edit = composeChapterEdit(before, args)
+      const edit = composeChapterEdit(before, args, anchorProtocol)
       after = edit.after
       editRanges = edit.ranges
     }

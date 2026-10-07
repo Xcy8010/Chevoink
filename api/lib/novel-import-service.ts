@@ -9,7 +9,7 @@ import { requireSessionUserId } from './auth-session.js'
 import { deleteUnreferencedImportBlob, discardImportBlob, importBytesHash, readImportBlob, storeImportJson, storeImportStream, validateImportFilename } from './novel-import-storage.js'
 import { NovelImportParseError } from './novel-import/parsers/types.js'
 import { getDocumentImportReadiness, parseConfiguredNovelImportDocument } from './novel-import/runtime.js'
-import { applyContentSelection, applySourceReview, applyStructureEdit, assertLegacyContentConserved, canonicalPreviewHash, hasImportContent, hasImportMetadataSelection, previewReportDto, refreshPreviewWarnings, reportHash, routedContentCount } from './novel-import/preview.js'
+import { applyContentSelection, applySourceReview, applyStructureEdit, assertLegacyContentConserved, canonicalPreviewHash, hasImportContent, hasImportMetadataSelection, previewReportDto, refreshPreviewWarnings, reportHash, routedContentCount, retainLegacySourceIdentities } from './novel-import/preview.js'
 import { hydrateStoredPreview, readPreviewArtifact, readStoredChapter, storePreviewImages, storePreviewParts, finalizeStoredImageReport, summarizePreview, verifyPreviewImages, type StoredPreview } from './novel-import/preview-storage.js'
 import { novelImportReviewSchema, novelImportSelectionSchema, novelImportStructureSchema, type NovelImportDocumentReport, type NovelImportEvidencePreview, type NovelImportChapterDto } from '../../shared/contracts/novel-import-preview.js'
 import { isManagedAttachmentOwnedBy, MANAGED_AGENT_ATTACHMENT_PREFIX, assertManagedAttachmentAccess, readAuthorizedAgentAttachment, resolveManagedAttachmentPath } from './agent-attachment-storage.js'
@@ -18,7 +18,8 @@ import { applyNovelImportChapterPositions, assertNovelImportMutationCount, hashN
 import { verifyNovelImportOrigin } from './novel-import-origin.js'
 import { assertNovelImportPreviewComplete } from './novel-import/preview.js'
 import { NOVEL_IMPORT_PARSE_DEADLINE_MS, startNovelImportParseLease } from './novel-import/parse-lease.js'
-import { buildNovelImportPlacement } from './novel-import/placement.js'
+import { buildNovelImportPlacement, normalizeNovelImportTitles } from './novel-import/placement.js'
+import { plainChapterTitle } from '../../shared/structure/chapter-title.js'
 import { saveStoryMemory } from './agent/story-memory.js'
 import { runtimeJson } from './agent/runtime-common.js'
 export { NOVEL_IMPORT_PARSE_DEADLINE_MS } from './novel-import/parse-lease.js'
@@ -357,6 +358,7 @@ const parsedVolumeSchema = novelImportVolumeSchema.extend({ chapters: z.array(no
 const parsedSchema = z.object({ volumes: z.array(parsedVolumeSchema).max(NOVEL_IMPORT_LIMITS.volumes), metadata: novelImportMetadataSchema, warnings: z.array(z.object({ code: z.string().max(128), message: z.string().max(4000), source: z.string().max(4096).optional(), blocking: z.boolean() })).max(5000), sourceChars: z.number().int().nonnegative().max(NOVEL_IMPORT_LIMITS.characters), parserVersion: z.string().min(1).max(128), plans: z.array(z.object({ title: z.string().trim().min(1).max(160), content: z.string().max(NOVEL_IMPORT_LIMITS.characters), source: novelImportSourceSchema.optional() }).strict()).max(200).optional(), memories: z.array(z.object({ memoryType: z.enum(['characterCard', 'worldbuilding', 'storyBible']), title: z.string().trim().min(1).max(160), content: z.string().max(NOVEL_IMPORT_LIMITS.characters), source: novelImportSourceSchema.optional() }).strict()).max(500).optional() })
 export function assertNovelImportContent(volumes: NovelImportPreview['volumes'], options: { allowOversizedChapters?: boolean; allowEmptyBody?: boolean } = {}) {
   const chapters = volumes.flatMap(v => v.chapters)
+  if (!options.allowOversizedChapters && chapters.some(chapter => !plainChapterTitle(chapter.title) || plainChapterTitle(chapter.title) !== chapter.title)) fail('IMPORT_TITLE_INVALID', '请在当前预览补全纯章节标题，再重新确认导入。')
   if (chapters.length > NOVEL_IMPORT_LIMITS.chapters || chapters.reduce((n, c) => n + c.content.length, 0) > NOVEL_IMPORT_LIMITS.characters) fail('IMPORT_LIMIT_EXCEEDED', '卷章或正文超过导入上限。', 413)
   if (!options.allowOversizedChapters && chapters.some(chapter => chapter.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters)) fail('IMPORT_CHAPTER_TOO_LONG', '单章超过10万字符，请在预览中拆分。')
   if (!options.allowEmptyBody && !chapters.some(c => c.content.trim())) fail('IMPORT_NO_BODY', '至少需要一章非空正文。')
@@ -494,7 +496,7 @@ async function runParse(scope: NovelImportScope, claim: { job: NovelImportJob; s
     const parsed = parsedSchema.parse({ ...result,
       plans: result.plans?.map(item => ({ ...item, ...(item.source ? { source: { memberPath: item.source } } : {}) })),
       memories: result.memories?.map(item => ({ ...item, ...(item.source ? { source: { memberPath: item.source } } : {}) })),
-      volumes: result.volumes.map(volume => ({ ...volume, chapters: volume.chapters.map(chapter => ({ ...chapter, source: { memberPath: chapter.source } })) })) })
+      volumes: normalizeNovelImportTitles(result.volumes.map(volume => ({ ...volume, chapters: volume.chapters.map(chapter => ({ ...chapter, source: { memberPath: chapter.source } })) }))) })
     if (parsed.volumes.some(v => v.chapters.some(c => c.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters))) parsed.warnings.push({ code: 'IMPORT_CHAPTER_TOO_LONG', message: '单章超过10万字符，请在预览中拆分。', blocking: true })
     const currentTarget = await target(prisma, scope, false)
     if (!currentTarget.chapters.length && currentTarget.volumes.length) parsed.warnings.push({ code: 'IMPORT_EMPTY_VOLUMES_RETAINED', message: `将保留现有 ${currentTarget.volumes.length} 个空卷；导入时优先复用能唯一匹配的卷，未匹配的来源另建新卷。`, blocking: false })
@@ -527,7 +529,7 @@ export async function editNovelImportPreview(human: NovelImportHuman, jobId: str
   assertNovelImportContent(edit.volumes, { allowOversizedChapters: true })
   assertLegacyContentConserved(old, edit.volumes)
   // Parser blocking warnings cannot be erased via body edits. Resolving missing source requires reparsing.
-  const body = refreshPreviewWarnings({ ...old, volumes: edit.volumes, metadataSelection: edit.metadataSelection ?? old.metadataSelection, manifestRevision: old.manifestRevision + 1, decisions: (old.decisions ?? []).filter(decision => decision.action === 'exclude') })
+  const body = refreshPreviewWarnings({ ...old, volumes: normalizeNovelImportTitles(retainLegacySourceIdentities(old, edit.volumes)), metadataSelection: edit.metadataSelection ?? old.metadataSelection, manifestRevision: old.manifestRevision + 1, decisions: (old.decisions ?? []).filter(decision => decision.action === 'exclude') })
   if (edit.volumes.some(v => v.chapters.some(c => c.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters))) body.warnings.push({ code: 'IMPORT_CHAPTER_TOO_LARGE', message: '单章仍超过10万字符，请继续拆分后确认导入。', blocking: true })
   const preview = { ...body, manifestHash: hashNovelImportPreview(body) }
   await persistPreview(human, jobId, job, preview)

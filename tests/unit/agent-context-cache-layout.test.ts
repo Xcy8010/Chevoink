@@ -281,7 +281,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(content).toContain('【生效指令】')
     expect(content).toContain('每天至少更新一章')
     expect(content).toContain('【当前章节】')
-    expect(content).toContain('作者当前正在编辑：第3章《静默轨道》（chapterId=chapter-1，1200 字）。')
+    expect(content).toContain('作者当前正在编辑：第3章 · 静默轨道（chapterId=chapter-1，1200 字）。')
 
     // 快照之后依次是待办与任务契约
     expect(String(messages[4].content)).toContain('[系统] 当前任务的待办清单')

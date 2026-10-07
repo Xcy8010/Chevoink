@@ -385,6 +385,7 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
   })
   it('ordinary writer winning the shared gate makes an already-approved import fail without archival', async () => {
     const ready = await approve()
+    expect(ready.preview.volumes[0].chapters.map((chapter: { title: string; sourceTitle?: string }) => [chapter.title, chapter.sourceTitle])).toEqual([['起点', '第一章 起点'], ['远行', '第二章 远行']])
     const beforeNovel = await prisma.novel.findUniqueOrThrow({ where: { id: novelId } })
     const beforeApproval = await prisma.novelImportApproval.findUniqueOrThrow({ where: { id: ready.input.approvalId } })
     let unlock!: () => void; let acquired!: () => void

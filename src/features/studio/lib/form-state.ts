@@ -4,6 +4,7 @@
  */
 import type { Chapter, Novel, UpdateNovelRequest } from '../../../../shared/contracts/index.js'
 import { FIXED_NOVEL_COVER_SIZE } from '../../../../shared/contracts/index.js'
+import { plainChapterTitle } from '../../../../shared/structure/chapter-title'
 import type { AgentRunState, ChapterDraftState, CoverFormState, NovelFormState, ProjectNotesState } from '../types'
 
 
@@ -92,7 +93,7 @@ export function buildCoverForm(novel: Novel, notes: ProjectNotesState): CoverFor
 export function buildChapterDraft(chapter: Chapter): ChapterDraftState {
   return {
     id: chapter.id,
-    title: chapter.title,
+    title: plainChapterTitle(chapter.title) || chapter.title,
     summary: chapter.summary ?? '',
     content: chapter.content,
     status: chapter.status,

@@ -7,6 +7,7 @@ import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { assertWritingTarget, freezeWritingScope, readWritingScope, readNewDraftRevision, readNewDraftWritingAuthority } from '../../api/lib/agent/writing-scope.js'
 import { chapterCreateTool, chapterWriteTool, chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
+import { continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
@@ -77,6 +78,55 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(chapter.content).digest('hex') } } })
     return { chapter, chapterId, compilation, spec, validation, quality, lease }
   }
+  it('recovers an opaque-ID typo and paragraph-format anchor while refusing stale critic evidence and preserving review counts', () => fixture('写第一章', async ctx => {
+    const body = '天未亮。纸条右上一角有缺角。\n\n堡内老卫站着。老段仍被押。'
+    const f = await newDraftReview(ctx, '写第一章', body)
+    const original = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const missing = await chapterWriteTool.execute(ctx, { chapterId: f.chapterId + '-typo', content: body })
+    expect(missing).toMatchObject({ outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND' })
+    expect(missing.output).toContain(f.chapterId)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(original)
+    const invalid = await chapterEditRangeTool.execute(ctx, { chapterId: f.chapterId, patches: [
+      { oldText: '天未亮', newText: '天大亮后' }, { oldText: '完全不存在的旧话', newText: '猜测' }] })
+    expect(invalid).toMatchObject({ outcome: 'failed', failureCode: 'CHAPTER_ANCHOR_CONFLICT' })
+    expect(invalid.output).toContain('第 2 处')
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(original)
+    await chapterEditRangeTool.execute(ctx, { chapterId: f.chapterId, patches: [
+      { oldText: '天未亮', newText: '天大亮后' },
+      { oldText: '纸条右上一角有缺角。堡内老卫站着。', newText: '纸条右上一角有缺角。\n\n堡内老卫坐下。' }] })
+    const revised = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    expect(revised).toMatchObject({ revision: original.revision + 1, content: '天大亮后。纸条右上一角有缺角。\n\n堡内老卫坐下。老段仍被押。' })
+    const comp = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id }, include: { bridge: true, sceneTasks: true } })
+    const coverage = compilerContinuityCoverage({ chapter: revised, bridge: comp.bridge, sceneTasks: comp.sceneTasks, source: null })
+    const badReport = await validateStoryContinuity({ ...ctx, compilationId: comp.id, expectedChapterRevision: revised.revision,
+      coverage, independentCheck: 'complete', findings: [{ signal: 'object', severity: 'error', evidence: '当前"纸条右下角有缺角"', suggestion: '改右上',
+        sourceEvidence: [{ source: 'current', quote: '纸条右下角有缺角' }] }] })
+    expect(badReport).toMatchObject({ independentCheck: 'unavailable', errorCount: 1, checkRounds: 1 })
+    // A previously accepted cache cannot mask a stale prose quotation with one
+    // valid structured quotation, or announce complete after local revalidation.
+    await prisma.storyCompilation.update({ where: { id: comp.id }, data: { validation: {
+      ...badReport, coverage, checkedChapterId: revised.id, checkedRevision: revised.revision, independentCheck: 'complete',
+      findings: [{ signal: 'object', severity: 'error', evidence: '当前"纸条右下角有缺角"', suggestion: '改右上',
+        sourceEvidence: [{ source: 'current', quote: '纸条右上一角有缺角' }] }],
+    } } })
+    const cached = await continuityValidateTool.execute(ctx, { compilationId: comp.id })
+    expect(cached).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED' })
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: comp.id } })).toMatchObject({ validation: {
+      independentCheck: 'unavailable', unlocatedEvidenceCount: 1, checkRounds: 1,
+    } })
+    expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, comp.id))).toMatchObject({ ready: false, continuity: 'incomplete' })
+    const input = { ...ctx, compilationId: comp.id, chapterSummary: '合成修订已保存', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '天大亮后', endingStructure: '老段仍被押' }
+    await expect(prisma.$transaction(tx => commitChapterBridge(input, tx))).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    // Supply a completed synthetic independent check and matching quality report;
+    // this fixture proves orchestration, not actual model review reliability.
+    await validateStoryContinuity({ ...ctx, compilationId: comp.id, expectedChapterRevision: revised.revision, coverage, independentCheck: 'complete', findings: [] })
+    await prisma.chapterQualityReport.create({ data: { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: comp.id,
+      chapterId: f.chapterId, chapterRevision: revised.revision, status: 'passed', deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(revised.content).digest('hex') } } })
+    await prisma.$transaction(tx => commitChapterBridge(input, tx))
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: comp.id } })).toMatchObject({ status: 'completed', validation: { checkRounds: 1 } })
+    expect(await prisma.agentProviderAttempt.count({ where: { runId: ctx.runId } })).toBe(0)
+  }))
   it.each(['legacy', 'durable'] as const)('%s permits range → range → write without paid checks per fragment and requires truthful final review', mode => fixture('写第一章', async ctx => {
     const f = await newDraftReview(ctx, '写第一章', '同一扇门已经锁上。随后他却说这扇门从未锁过。钥匙已经交出。随后他却说钥匙一直在手中。', mode === 'durable')
     const budget = f.lease ? await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.lease.taskRootId } }) : null
@@ -412,6 +462,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       expect(await prisma.$transaction(tx => freezeWritingScope(tx, ctx, spec, '写下一章'))).toEqual(spec)
       if (!editorAfter) {
         await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
+        await prepareStoryCompilation({ ...ctx, targetOrderIndex: 4, mode: 'balanced', intentSummary: prompt, volumeDecision: { kind: 'continue', reason: '当前主困局仍待推进，本章继续原卷' } })
         await chapterCreateTool.execute(ctx, { title: '合成第四章' })
         const after = await prisma.chapter.findMany({ where: { id: { in: chapters.map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })
         expect(after.map(({ id, title, content, revision, orderIndex, orderInVolume }) => ({ id, title, content, revision, orderIndex, orderInVolume })))
@@ -434,6 +485,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt }), prompt))
     expect(spec.scope.writing?.targets[0].orderIndex).toBe(39)
     await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
+    await prepareStoryCompilation({ ...ctx, targetOrderIndex: 39, mode: 'balanced', intentSummary: prompt, volumeDecision: { kind: 'continue', reason: '当前困局仍未收束，继续第二卷' } })
     const chapters = await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })
     const novel = await prisma.novel.findUniqueOrThrow({ where: { id: ctx.novelId } })
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
@@ -536,7 +588,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     await prisma.agentRun.update({ where: { id: ctx.runId }, data: { status: 'queued' } })
     await initializeDurableTask({ userId: ctx.userId, runId: ctx.runId, sourceMessageId })
     const lease = await acquireRunLease({ userId: ctx.userId, runId: ctx.runId, ownerId: 'scope-durable', claimId: randomUUID() })
-    const args = { title: '第一章', volumeOrder: 1, positionInVolume: 1 }
+    const args = { title: '第一章 门前', volumeOrder: 1, positionInVolume: 1 }
     await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
       model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
       tools: [{ type: 'function', function: { name: chapterCreateTool.name, description: chapterCreateTool.description, parameters: z.toJSONSchema(chapterCreateTool.parameters, { io: 'input' }) } }],
@@ -594,7 +646,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
   it('a child waiting behind parent cancellation cannot modify the claimed chapter', () => fixture('写第一章，只要标题和正文', async ctx => {
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt: '写第一章，只要标题和正文' }), '写第一章，只要标题和正文'))
     await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
-    const created = await chapterCreateTool.execute(ctx, { title: '第一章', position: 1 })
+    const created = await chapterCreateTool.execute(ctx, { title: '第一章 门前', position: 1 })
     const chapterId = created.observedState!.id
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })
     const session = await prisma.agentSession.create({ data: { userId: ctx.userId, novelId: ctx.novelId, title: 'scope-child', spawnedFromRunId: ctx.runId, spawnedFromSessionId: ctx.sessionId } })

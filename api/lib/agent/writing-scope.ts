@@ -107,8 +107,8 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   const ambiguousRange = !range && /(?:第|前|后|余|剩|卷|章)/u.test(admissionPrompt)
     && /[0-9零〇一二两三四五六七八九十百千]/u.test(admissionPrompt)
   const chapters = await tx.chapter.findMany({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) },
-    select: { id: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
-  const run = await tx.agentRun.findFirstOrThrow({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId }, select: { chapterId: true } })
+    select: { id: true, revision: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
+  const run = await tx.agentRun.findFirstOrThrow({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId }, select: { chapterId: true, session: { select: { sandboxMode: true, spawnedFromRunId: true } } } })
   const base = { version: 1 as const, titleAndBodyOnly: /(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|only.{0,20}title.{0,12}(?:body|text)/iu.test(admissionPrompt), repairAuthorized: hasOriginalRepairAuthority(admissionPrompt) }
   let writing: Writing
   if (range?.kind === 'unbounded') writing = { ...base, kind: 'unbounded', targets: [] }
@@ -158,6 +158,19 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
       })
     }
     if (!writing.targets.length) writing.kind = 'needs_input'
+  }
+  const last = chapters.at(-1)
+  if (spec.intent === 'write' && writing.kind === 'bounded' && writing.targets.length === 1
+    && !writing.titleAndBodyOnly && !spec.scope.selection && !spec.scope.volumeIds?.length
+    // buildTaskSpec carries the editor chapter as context, not as a protection grant.
+    && (!spec.scope.chapterIds?.length || spec.scope.chapterIds.length === 1 && spec.scope.chapterIds[0] === run.chapterId)
+    && !spec.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')
+    && run.session.sandboxMode !== 'read_only' && !run.session.spawnedFromRunId
+    && !spec.authorization && last && writing.targets[0].chapterId === null
+    && writing.targets[0].orderIndex === last.orderIndex + 1 && !writing.targets[0].volumeId
+    && writing.targets[0].positionInVolume === undefined && !range?.volume
+    && !/(?:只读|不(?:要|得|能|许|必)?(?:新建|建|改|调整|分)卷|(?:不要|不得|禁止|不能).{0,12}(?:结构|分卷)|read.only|do not.{0,20}(?:volume|structure))/iu.test(admissionPrompt + spec.hardConstraints.map(item => item.text).join('；'))) {
+    writing.tailVolume = { version: 1, targetOrderIndex: writing.targets[0].orderIndex, previousChapterId: last.id, previousRevision: last.revision }
   }
   return { ...spec, scope: { ...spec.scope, writing } }
 }

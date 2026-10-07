@@ -48,6 +48,6 @@ export interface NovelImportReportDto {
   contentExclusions?: NovelImportContentExclusion[]
 }
 export interface NovelImportPreviewSummary extends Omit<NovelImportEvidencePreview, 'volumes' | 'report'> {
-  volumes: Array<{ title: string; chapters: Array<{ title: string; source: NovelImportPreview['volumes'][number]['chapters'][number]['source']; volumeIndex: number; chapterIndex: number; contentHash: string; characters: number; nonEmpty: boolean }> }>
+  volumes: Array<{ title: string; chapters: Array<{ title: string; sourceTitle?: string | null; source: NovelImportPreview['volumes'][number]['chapters'][number]['source']; volumeIndex: number; chapterIndex: number; contentHash: string; characters: number; nonEmpty: boolean }> }>
 }
 export interface NovelImportChapterDto { manifestRevision: number; manifestHash: string; volumeIndex: number; chapterIndex: number; title: string; content: string; contentHash: string; characters: number; source: NovelImportPreview['volumes'][number]['chapters'][number]['source'] }

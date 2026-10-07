@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { NovelImportDocumentReport, NovelImportEvidencePreview } from '../../shared/contracts/novel-import-preview.js'
 import { novelImportReviewSchema, novelImportStructureSchema } from '../../shared/contracts/novel-import-preview.js'
-import { applySourceReview, applyStructureEdit, assertLegacyContentConserved, assertNovelImportPreviewComplete, assertPreviewCoverSelection, canonicalPreviewHash, previewReportDto, refreshPreviewWarnings, reportHash } from '../../api/lib/novel-import/preview.js'
+import { applySourceReview, applyStructureEdit, assertLegacyContentConserved, assertNovelImportPreviewComplete, assertPreviewCoverSelection, canonicalPreviewHash, previewReportDto, refreshPreviewWarnings, reportHash, retainLegacySourceIdentities } from '../../api/lib/novel-import/preview.js'
+import { buildNovelImportPlacement } from '../../api/lib/novel-import/placement.js'
 
 const hash = 'a'.repeat(64)
 function preview(options: { failed?: boolean; review?: boolean } = {}): NovelImportEvidencePreview {
@@ -21,6 +22,29 @@ function edit(p: NovelImportEvidencePreview, chapters: Array<{ title: string; se
 }
 const segment = (chapterIndex: number, start: number, end: number) => ({ volumeIndex: 0, chapterIndex, start, end })
 describe('durable import evidence and source-conserving editing', () => {
+  it('retains numbered source identity through whole chapter title edits and never replaces a split namesake', () => {
+    const p = preview()
+    p.volumes[0].chapters[0].title = '火墙'
+    p.volumes[0].chapters[0].sourceTitle = '第45章《火墙》'
+    const whole = applyStructureEdit(p, edit(p, p.volumes[0].chapters.map((c, i) => ({ title: c.title, segments: [segment(i, 0, c.content.length)] }))))
+    expect(whole.volumes[0].chapters[0].sourceTitle).toBe('第45章《火墙》')
+    const originals = [{ id: 'old45', title: '火墙', volumeId: 'v', orderIndex: 45, orderInVolume: 45 }, { id: 'old46', title: '火墙', volumeId: 'v', orderIndex: 46, orderInVolume: 46 }]
+    const place = (chapters: typeof p.volumes[0]['chapters']) => buildNovelImportPlacement([{ id: 'v', title: '正文', orderIndex: 1 }], originals, [{ title: '正文', chapters }], () => 'new')
+    expect(place([whole.volumes[0].chapters[0]]).archivedChapterIds).toEqual(['old45'])
+    const split = applyStructureEdit(p, edit(p, [{ title: '火墙', segments: [segment(0, 0, 2)] }, { title: '火墙下', segments: [segment(0, 2, p.volumes[0].chapters[0].content.length)] }, { title: '十', segments: [segment(1, 0, 3)] }]))
+    expect(split.volumes[0].chapters[0].sourceTitle).toBeNull()
+    expect(place(split.volumes[0].chapters.slice(0, 2)).archivedChapterIds).toEqual([])
+  })
+  it('reconstructs legacy source identity and refuses caller-forged ordinals', () => {
+    const p = preview()
+    p.volumes[0].chapters[0].sourceTitle = '第45章《火墙》'
+    const edited = structuredClone(p.volumes)
+    edited[0].chapters[0].title = '火墙改名'
+    delete edited[0].chapters[0].sourceTitle
+    expect(retainLegacySourceIdentities(p, edited)[0].chapters[0].sourceTitle).toBe('第45章《火墙》')
+    edited[0].chapters[0].sourceTitle = '第46章《火墙》'
+    expect(() => retainLegacySourceIdentities(p, edited)).toThrow(/身份不能/)
+  })
   it('accepts a complete immutable report and rejects missing reports', () => {
     expect(() => assertNovelImportPreviewComplete(preview())).not.toThrow()
     expect(() => assertNovelImportPreviewComplete({ ...preview(), report: undefined })).toThrow(/报告/)

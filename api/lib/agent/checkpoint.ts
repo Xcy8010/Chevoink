@@ -61,6 +61,9 @@ const runCheckpointFields = {
   // uncertain provider outcome cannot become permission to pay for it again.
   reviewAttempts: z.array(z.string().min(1)).optional(),
   toolRestrictions: z.array(toolRestrictionSchema).optional(),
+  // One persisted conversion identity, never replenished by resume. It allows
+  // one authenticated diagnostic read before correcting legacy locator input.
+  inputProtocolRecovery: z.object({ protocol: z.literal(2), key: z.string().regex(/^[a-f0-9]{64}$/u) }).strict().optional(),
   pendingReviews: z.array(z.object({ compilationId: z.string().min(1).nullable(), chapterId: z.string().min(1),
     revision: z.number().int().positive(), toolName: z.enum(['continuity_validate', 'quality_analyze']), callId: z.string().min(1),
   }).strict()).optional(),

@@ -7,6 +7,7 @@ import { shouldRetainAgentTaskWindow } from './lib/agent-session'
 import { useShellStore } from '@/store/useShellStore'
 import { BookOpen, BookOpenText, Brain, Bug, ChevronLeft, FileText, Flag, FolderDown, ImagePlus, Lightbulb, LogOut, MessageSquareText, MoreHorizontal, Network, PanelRightOpen, PenLine, RefreshCcw, Settings2, SlidersHorizontal, Trash2, Upload, Wrench } from 'lucide-react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { plainChapterTitle } from '../../../shared/structure/chapter-title'
 
 import BottomSheet from '@/components/ui/BottomSheet'
 import Button from '@/components/ui/Button'
@@ -1587,7 +1588,7 @@ export default function StudioWorkspace() {
     ...chapters.map((chapter) => ({
       id: `chapter:${chapter.id}`,
       kind: 'chapter' as const,
-      name: chapter.title.trim() ? `第 ${chapter.orderInVolume} 章 · ${chapter.title.trim()}` : `第 ${chapter.orderInVolume} 章`,
+      name: chapter.title.trim() ? `第 ${chapter.orderInVolume} 章 · ${plainChapterTitle(chapter.title) || chapter.title.trim()}` : `第 ${chapter.orderInVolume} 章`,
       text: '',
       startLine: 1,
       endLine: 1,

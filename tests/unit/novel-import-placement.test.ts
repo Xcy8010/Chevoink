@@ -10,6 +10,18 @@ const plan = (volumes: Parameters<typeof buildNovelImportPlacement>[0], chapters
 }
 
 describe('import volume placement', () => {
+  it('stores plain titles while numbered namesakes preserve both source identities on reimport', () => {
+    const originals = [chapter('a', 'v1', '火墙', 1, 1), chapter('b', 'v1', '火墙', 2, 2)]
+    const result = plan([volume('v1', '第一卷', 1)], originals, [source('第一卷', '第1章《火墙》', '第2章《火墙》')])
+    expect(result.archivedChapterIds).toEqual(['a', 'b'])
+    expect(result.chapters.map(item => [item.title, item.orderIndex])).toEqual([['火墙', 1], ['火墙', 2]])
+    expect(result.chapters[0].content).toBe('原文第1章《火墙》')
+  })
+  it('does not take another ordinal namesake and refuses empty plain titles', () => {
+    expect(plan([volume('v1', '第一卷', 1)], [chapter('a', 'v1', '火墙', 1)], [source('第一卷', '第2章 火墙')]).archivedChapterIds).toEqual([])
+    expect(plan([volume('v1', '第一卷', 1)], [chapter('a', 'v1', '火墙', 46, 46)], [source('第一卷', '《第45章《火墙》》')]).archivedChapterIds).toEqual([])
+    expect(() => plan([volume('v1', '第一卷', 1)], [], [source('第一卷', '第1章')])).toThrow(/章名/)
+  })
   it.each([1, 3])('reuses the sole empty default volume at revision %s, including after restore', revision => {
     const result = plan([{ ...volume('v1', '第一卷', 1), revision, summary: null }], [], [source('淬火', '甲', '乙', '丙', '丁')])
     expect(result.newVolumes).toEqual([])
@@ -55,7 +67,7 @@ describe('import volume placement', () => {
     expect(result.newVolumes).toEqual([expect.objectContaining({ title: '第二卷', orderIndex: 2 })])
   })
   it.each(['第一卷', '第1卷', '第0001卷·启程', '正文卷'])('reuses default first volume for %s and preserves source order', title => {
-    const result = plan([volume('v1', '第一卷', 1)], [], [source(title, '第一章', '第二章', '第三章', '第四章')])
+    const result = plan([volume('v1', '第一卷', 1)], [], [source(title, '第一章 甲', '第二章 乙', '第三章 丙', '第四章 丁')])
     expect(result.newVolumes).toEqual([])
     expect(result.chapters.map(c => [c.volumeId, c.orderIndex, c.orderInVolume])).toEqual([[ 'v1', 1, 1 ], [ 'v1', 2, 2 ], [ 'v1', 3, 3 ], [ 'v1', 4, 4 ]])
   })

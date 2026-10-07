@@ -1,5 +1,13 @@
 import type { ContinuityFindingInput } from '../../../shared/contracts/story-compiler-contracts.js'
 
+/** Locate attributed quotations in the actual supplied manuscripts. A report
+ * hash certifies its input version, never a critic's invented or stale quote. */
+export function unlocatedContinuityEvidence(finding: ContinuityFindingInput, bodies: { previous: string | null; current: string }, requireQuotes = false): boolean {
+  const quotes = [...(finding.sourceEvidence ?? []), ...[...finding.evidence.matchAll(/(前章(?:原文)?|当前(?:正文)?|本章|后章)\s*(?:[:：]\s*)?(?:"([^"]{2,360})"|“([^”]{2,360})”|「([^」]{2,360})」|『([^』]{2,360})』)/gu)]
+    .map(match => ({ source: match[1].startsWith('前章') ? 'previous' as const : 'current' as const, quote: match[2] ?? match[3] ?? match[4] ?? match[5] }))]
+  return (requireQuotes && !quotes.length) || quotes.some(item => !(bodies[item.source] ?? '').includes(item.quote))
+}
+
 /** Narrow classification of a critic's explicit plan-calibration finding.
  * Ambiguous evidence and author/saved-fact conflicts keep their original rank;
  * this is not a semantic proof that all model mistakes have been eliminated. */

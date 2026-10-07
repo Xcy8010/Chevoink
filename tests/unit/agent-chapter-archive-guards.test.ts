@@ -2,7 +2,7 @@ import type { Prisma } from '@prisma/client'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const m = vi.hoisted(() => ({
-  db: { chapter: { findFirst: vi.fn(), updateMany: vi.fn() }, $transaction: vi.fn() },
+  db: { chapter: { findFirst: vi.fn(), updateMany: vi.fn() }, agentOperation: { findUnique: vi.fn() }, $transaction: vi.fn() },
   tx: {
     $queryRaw: vi.fn(),
     agentRun: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), update: vi.fn() },
@@ -80,6 +80,7 @@ const contentArgs = (action: typeof actions[number], unchanged = false) => actio
 
 beforeEach(() => {
   vi.resetAllMocks()
+  Object.assign(m.db, { agentRun: m.tx.agentRun, agentSession: m.tx.agentSession, agentChildExecutionGrant: m.tx.agentChildExecutionGrant })
   m.tx.$queryRaw.mockImplementation(async (strings, ...values) => {
     const sql = strings.join('?')
     if (sql === 'SELECT id FROM novels WHERE id = ? FOR UPDATE' && values[0] === 'n') return [{ id: 'n' }]
@@ -187,7 +188,7 @@ describe('legacy Agent chapter archive guards', () => {
   })
   it.each(legacy)('%s rejects the previous manuscript epoch even if chapter revision still matches', async (_name, execute) => {
     recordChapterBaseline('r', 'c', 4)
-    m.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 1 } })
+    m.tx.agentRun.findFirst.mockResolvedValue({ ...ownedRun, manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 1 } })
     await expect(execute(ctx())).rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })
     expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
     expectNoEffects()
@@ -244,6 +245,14 @@ describe('legacy Agent chapter archive guards', () => {
     expect(result.display).toMatchObject({ revision: 5, appliedDirectly: true })
     expect(m.db.$transaction).toHaveBeenCalledTimes(1)
     expect(m.tx.chapter.findFirst).toHaveBeenCalledWith({ where: { id: 'c', ...activeChapterScope('n'), authorId: 'u', revision: 5 } })
+  })
+  it('keeps an omitted writer ID on the frozen target after reading background chapter content', async () => {
+    recordChapterBaseline('r', 'old-background', 2)
+    m.tx.chapter.findFirst.mockResolvedValue({ ...row, revision: 5 })
+    const result = await chapterWriteTool.execute(ctx({ chapterId: 'old-background' }), { content: 'After' })
+    expect(result.display).toMatchObject({ chapterId: 'c', after: 'After' })
+    expect(m.db.chapter.findFirst).toHaveBeenCalledWith({ where: { id: 'c', ...activeChapterScope('n'), authorId: 'u' } })
+    expect(m.tx.chapter.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: 'c', revision: 4 }) }))
   })
 
   it('does not recreate an archived ID cached by an old run', async () => {

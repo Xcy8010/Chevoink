@@ -64,7 +64,7 @@ export function finalizeStoredImageReport(report: NovelImportDocumentReport, art
 
 export function summarizePreview(preview: NovelImportEvidencePreview): NovelImportPreviewSummary {
   const { report: _report, volumes, ...summary } = preview
-  return { ...summary, volumes: volumes.map((volume, vi) => ({ title: volume.title, chapters: volume.chapters.map((chapter, ci) => ({ title: chapter.title, source: chapter.source, volumeIndex: vi, chapterIndex: ci, contentHash: importBytesHash(chapter.content), characters: chapter.content.length, nonEmpty: !!chapter.content.trim() })) })) }
+  return { ...summary, volumes: volumes.map((volume, vi) => ({ title: volume.title, chapters: volume.chapters.map((chapter, ci) => ({ title: chapter.title, ...(chapter.sourceTitle !== undefined ? { sourceTitle: chapter.sourceTitle } : {}), source: chapter.source, volumeIndex: vi, chapterIndex: ci, contentHash: importBytesHash(chapter.content), characters: chapter.content.length, nonEmpty: !!chapter.content.trim() })) })) }
 }
 export async function storePreviewParts(claim: Claim, preview: NovelImportEvidencePreview): Promise<StoredPreview> {
   if (!preview.report) fail('IMPORT_REPORT_UNAVAILABLE', '预览没有持久来源报告。')
@@ -105,7 +105,7 @@ export async function readStoredChapter(jobId: string, stored: StoredPreview, vi
   if (!chapter || !id) fail('IMPORT_CHAPTER_UNAVAILABLE', '当前预览中没有此章节。')
   const body: unknown = JSON.parse((await readPreviewArtifact(jobId, id!, 'chapter')).bytes.toString('utf8'))
   if (!body || typeof body !== 'object' || !('content' in body) || typeof body.content !== 'string' || importBytesHash(body.content) !== chapter!.contentHash || body.content.length !== chapter!.characters) fail('IMPORT_PREVIEW_CHANGED', '章节正文完整性校验失败。')
-  return { title: chapter!.title, source: chapter!.source, content: (body as { content: string }).content }
+  return { title: chapter!.title, ...(chapter!.sourceTitle !== undefined ? { sourceTitle: chapter!.sourceTitle } : {}), source: chapter!.source, content: (body as { content: string }).content }
 }
 export async function hydrateStoredPreview(jobId: string, stored: StoredPreview): Promise<NovelImportEvidencePreview> {
   const report: NovelImportDocumentReport = JSON.parse((await readPreviewArtifact(jobId, stored.reportArtifactId, 'report')).bytes.toString('utf8'))

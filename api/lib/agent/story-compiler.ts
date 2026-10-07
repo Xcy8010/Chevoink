@@ -1,5 +1,5 @@
 import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision, readNewDraftWritingAuthority } from './writing-scope.js'
-import { classifyContinuityFindingAuthority } from './continuity-finding-authority.js'
+import { classifyContinuityFindingAuthority, unlocatedContinuityEvidence } from './continuity-finding-authority.js'
 import { readOriginalTaskRequest, hasOriginalRepairAuthority } from './original-request.js'
 import { createHash } from 'node:crypto'
 
@@ -24,6 +24,8 @@ import { runtimeJson } from './runtime-common.js'
 import type { WritingWorkflowMilestone } from './semantic-progress.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches, continuityStoryInput, type CompilerContinuityCoverage } from './compiler-continuity-contract.js'
+import { readWritingVolumeContext, assertWritingVolumeBoundary } from './writing-volume.js'
+import { writingVolumeDecisionSchema, type WritingVolumeDecision } from '../../../shared/contracts/writing-volume-contracts.js'
 
 type PreparedBridge = {
   lastUnfinishedAction: string
@@ -221,6 +223,7 @@ export async function prepareStoryCompilation(input: {
   targetOrderIndex?: number
   mode: StoryCompilerMode
   intentSummary: string
+  volumeDecision?: WritingVolumeDecision
 }, transaction?: Prisma.TransactionClient): Promise<{ compilation: Prisma.StoryCompilationGetPayload<{ include: { bridge: true } }>; charter: StoryCharter | null; promises: ReaderPromise[]; bridge: PreparedBridge; preparedFirstForTarget: boolean }> {
   if (!transaction) return prisma.$transaction(tx => prepareStoryCompilation(input, tx))
   const db = transaction
@@ -261,6 +264,13 @@ export async function prepareStoryCompilation(input: {
         orderBy: { committedAt: 'desc' },
       })
     : null
+  const volumeContext = previousChapter ? await readWritingVolumeContext(db, input, target.targetOrderIndex) : null
+  if (writing.writing?.tailVolume && !input.volumeDecision) {
+    throw new DataAccessError(400, 'INVALID_ARGUMENTS', `请在PREPARE显式提交volumeDecision及理由，审视本卷目标是否收束；章数不能代替故事边界。当前卷上下文：${JSON.stringify(volumeContext)}`)
+  }
+  const volumeDecision = input.volumeDecision ? writingVolumeDecisionSchema.parse(input.volumeDecision)
+    : { kind: 'continue' as const, reason: target.chapter ? '原目标章已创建，保持其所在卷；本次审视不迁移既有章。' : '尚无本卷主困局已收束的真实原文依据，先延续当前卷；本章必须推进原目标，章数不能代替边界判断。' }
+  if (volumeDecision.kind === 'new_volume') await assertWritingVolumeBoundary(db, input, target.targetOrderIndex, volumeDecision.newVolume)
   const memory = await db.projectMemoryEntry.findMany({
     where: {
       novelId: input.novelId,
@@ -303,6 +313,7 @@ export async function prepareStoryCompilation(input: {
     data: { status: 'abandoned' },
   })
   const preparedContext = {
+    volumeContext, volumeDecision,
     charterRevision: bundle.charter?.revision ?? null,
     charterPromise: bundle.charter?.oneLinePromise ?? null,
     readerPromises: bundle.promises.map((item) => ({ id: item.id, title: item.title, promise: item.promise, payoffHorizon: item.payoffHorizon })),
@@ -678,10 +689,12 @@ export async function validateStoryContinuity(input: {
       deterministic.push({ signal: 'structure', severity: 'error', evidence: source ? `桥接来源《${source.title}》已从 r${compilation.bridge.sourceRevision} 变为 r${source.revision}。` : '桥接来源章节已不存在。', suggestion: '重新执行 story_compiler_prepare，基于最新前章生成桥接。' })
     }
   }
-  const authorRequest = input.coverage?.protocolVersion === 4 && input.runId ? await readOriginalTaskRequest(db, { ...input, runId: input.runId }) : null
+  const authorRequest = (input.coverage?.protocolVersion ?? 0) >= 4 && input.runId ? await readOriginalTaskRequest(db, { ...input, runId: input.runId }) : null
   const findings = [...deterministic, ...(authorRequest
     ? input.findings.map(finding => classifyContinuityFindingAuthority(finding, authorRequest.prompt,
       { previous: reviewSource?.content ?? null, current: compilation.chapter!.content })) : input.findings)]
+  const unlocated = input.findings.filter(finding => unlocatedContinuityEvidence(finding,
+    { previous: reviewSource?.content ?? null, current: compilation.chapter!.content }, (input.coverage?.protocolVersion ?? 0) >= 5))
   const nextCheckRounds = continuityCheckRounds(compilation.validation)
   const validation = {
     ...(compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation)
@@ -695,7 +708,8 @@ export async function validateStoryContinuity(input: {
     checkedChapterId: compilation.chapter.id,
     checkedRevision: compilation.chapter.revision,
     checkedAt: new Date().toISOString(),
-    independentCheck: input.independentCheck ?? 'unavailable' as const,
+    independentCheck: unlocated.length ? 'unavailable' as const : input.independentCheck ?? 'unavailable' as const,
+    unlocatedEvidenceCount: unlocated.length,
     coverage: currentCoverage,
     reviewFocus: input.focus ?? '',
     findings,
@@ -911,6 +925,7 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
     select: { id: true, revision: true, content: true } }) : null
   const hasBody = !!chapter?.content.trim()
   const terminalContext = active?.preparedContext && typeof active.preparedContext === 'object' && !Array.isArray(active.preparedContext) ? active.preparedContext : null
+  const volumeContext = runId && scope ? await readWritingVolumeContext(prisma, { userId, novelId, runId }, active?.targetOrderIndex ?? (await readWritingScope(prisma, { userId, novelId, runId })).writing?.targets[0]?.orderIndex ?? Number.MAX_SAFE_INTEGER) : null
   const committed = !!active && hasBody && active.status === 'completed' && active.stage === 'commit'
     && !!active.bridge && active.bridge.toChapterId === chapter?.id && !!active.bridge.committedAt && active.bridge.targetRevision === chapter?.revision
     && terminalContext?.terminalContentHash === runtimeJson({ content: chapter?.content }).hash
@@ -928,6 +943,7 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
   const validation = active?.validation as { checkedRevision?: number; independentCheck?: string; errorCount?: number; warningCount?: number } | null
   const lines = [
     'Story Compiler 3.0 状态：',
+    volumeContext ? `本章必须审视卷目标：当前《${volumeContext.volumeTitle}》，已写 ${volumeContext.chapterCount} 章（仅提醒，绝非切卷阈值）；卷目标：${volumeContext.summary || '未保存，须结合真实正文判断'}；${volumeContext.planStatus}。最新章 ${volumeContext.previousChapter.id} r${volumeContext.previousChapter.revision}，末尾：${volumeContext.previousChapter.ending}。已保存计划：${JSON.stringify(volumeContext.plans)}。PREPARE明确 volumeDecision：continue并解释未收束原因，或new_volume列已完成卷目标、前章精确收束引用和下一主困局。原目标已创建、旧任务无冻结新尾卷能力或缺真实收束证据时保留原卷；独立volume_create不能绕过此限制。` : '',
     bundle.charter ? `创作宪章 r${bundle.charter.revision}：${clip(bundle.charter.oneLinePromise, 240)}` : '创作宪章：尚未建立（新书长纲前应先建立）',
     bundle.promises.length ? `待兑现读者承诺：${bundle.promises.slice(0, 5).map((item) => `${item.title}（${item.payoffHorizon}）`).join('；')}` : '待兑现读者承诺：无',
     active ? `本任务编译：${active.id}，chapterId=${active.chapterId ?? '尚未创建'}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，状态 ${active.status}，Scene Task ${active.sceneTasks.length} 个。${resume}` : '本任务尚未建立编译；历史检查失败不构成恢复旧任务的授权。写下一章时以前文为参考，为新章建立本任务编译。',

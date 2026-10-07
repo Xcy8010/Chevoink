@@ -15,6 +15,7 @@ import {
 import { DataAccessError, prisma } from '../prisma.js'
 import { activeChapterScope, ensureNovelOwner, recalculateNovelStats } from './internal.js'
 import { lockNovelActiveScope } from './novel-write-lock.js'
+import { plainChapterTitle } from '../../../shared/structure/chapter-title.js'
 
 type ChangeSetRecord = PrismaChangeSet & { patches: PrismaChangeSetPatch[] }
 
@@ -292,7 +293,8 @@ export async function previewBulkReplaceData(
       excludedOccurrences += result.excluded
       replacedOccurrences += result.replaced
       if (result.replaced === 0) continue
-      if (field === 'title' && !result.after.trim()) {
+      const after = field === 'title' ? plainChapterTitle(result.after) : result.after
+      if (field === 'title' && !after) {
         throw new DataAccessError(400, 'INVALID_TITLE_REPLACEMENT', '替换会产生空章节标题，已停止生成预览。')
       }
       const anchorStart = Math.max(0, result.firstOffset - 36)
@@ -304,7 +306,7 @@ export async function previewBulkReplaceData(
         expectedRevision: chapter.revision,
         anchor: before.slice(anchorStart, result.firstOffset + input.query.length + 36),
         before,
-        after: result.after,
+        after,
         reason: `${input.reason}；本字段命中 ${result.replaced} 处`,
         selected: true,
       })
@@ -433,6 +435,9 @@ export async function applyChangeSetData(
         for (const patch of patches) {
           const current = fieldValue(chapter, patch.field)
           let next = patch.after
+          if (patch.field === 'title' && (!next || plainChapterTitle(next) !== next)) {
+            throw new DataAccessError(409, 'CHANGESET_TITLE_PREVIEW_REQUIRED', '旧标题预览包含章序、外层书名号或空标题，请重新预览后再应用。')
+          }
           let baselineRebased = false
           if (hashValue(current) !== patch.beforeHash) {
             if (hashValue(current) === hashValue(patch.after)) {
@@ -449,7 +454,8 @@ export async function applyChangeSetData(
               if (rebased.replaced === 0) {
                 throw new DataAccessError(409, 'CHANGESET_REBASE_CONFLICT', `章节《${chapter.title}》的 ${patch.field} 已修改，且原替换目标不再存在。`)
               }
-              next = rebased.after
+              next = patch.field === 'title' ? plainChapterTitle(rebased.after) : rebased.after
+              if (patch.field === 'title' && !next) throw new DataAccessError(409, 'INVALID_TITLE_REPLACEMENT', '重新计算的替换会产生空章节标题。')
               baselineRebased = true
               rebasedPatchCount += 1
             } else {

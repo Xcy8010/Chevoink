@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { storyCompilerModeSchema } from './story-compiler-contracts.js'
 import { taskAuthorizationSchema } from './task-authorization.js'
+import { writingTailVolumeCapabilitySchema } from './writing-volume-contracts.js'
 
 /** Agent 2.0 任务契约：把自然语言请求冻结为可验证、可恢复的运行时输入。 */
 export const taskIntentSchema = z.enum([
@@ -21,7 +22,7 @@ export const taskScopeSchema = z.object({
   writing: z.object({ version: z.literal(1), kind: z.enum(['bounded', 'unbounded', 'needs_input']),
     targets: z.array(z.object({ orderIndex: z.number().int().positive(), chapterId: z.string().min(1).nullable(),
       volumeId: z.string().min(1).optional(), positionInVolume: z.number().int().positive().optional() })),
-    titleAndBodyOnly: z.boolean(), repairAuthorized: z.boolean() }).optional(),
+    titleAndBodyOnly: z.boolean(), repairAuthorized: z.boolean(), tailVolume: writingTailVolumeCapabilitySchema.optional() }).optional(),
   selection: z
     .object({
       chapterId: z.string().min(1),

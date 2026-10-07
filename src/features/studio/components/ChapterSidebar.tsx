@@ -2,12 +2,13 @@ import { useEffect, useState, type DragEvent, type MouseEvent, type ReactNode } 
 import { ChevronDown, ChevronRight, FilePlus2, FileText, FolderPlus, FolderTree, GripVertical, NotebookPen, NotebookText, PencilLine, ScrollText, Settings2, Trash2 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { plainChapterTitle } from '../../../../shared/structure/chapter-title'
 import type { StudioPayload } from '../../../../shared/contracts/index.js'
 import type { WorkspacePlanFile } from '../types'
 import { COMPOSER_REFERENCE_MIME, serializeComposerReferenceTransfer } from '../agent/composer-content'
 
 function formatChapterTreeLabel(chapter: StudioPayload['chapters'][number]) {
-  const normalizedTitle = chapter.title.trim()
+  const normalizedTitle = plainChapterTitle(chapter.title) || chapter.title.trim()
 
   if (!normalizedTitle) {
     return `第 ${chapter.orderInVolume} 章`
