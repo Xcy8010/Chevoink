@@ -1,4 +1,25 @@
 import { expect, it } from 'vitest'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
+
+it('credits only finite first prerequisites for the current frozen writing target, without using compiler IDs', () => {
+  const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'old47', prompt: '写下一章' })
+  taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 48, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
+  const subject = { userId: 'user', novelId: 'novel', runId: 'run', taskSpec }
+  const receipt = { version: 1, userId: 'user', novelId: 'novel', runId: 'run', targetOrderIndex: 48, phase: 'prepare' }
+  const seen = new Set<string>()
+  expect(observeWritingWorkflowMilestone(seen, 'story_compiler_prepare', receipt, subject)).toBe(true)
+  const restored = new Set(seen)
+  expect(observeWritingWorkflowMilestone(restored, 'story_compiler_prepare', receipt, subject)).toBe(false)
+  expect(observeWritingWorkflowMilestone(restored, 'story_compiler_prepare', { ...receipt, compilationId: 'new-audit-id' }, subject)).toBe(false)
+  expect(observeWritingWorkflowMilestone(restored, 'scene_task_build', { ...receipt, phase: 'scenes' }, subject)).toBe(true)
+  expect(observeWritingWorkflowMilestone(restored, 'scene_task_build', { ...receipt, phase: 'scenes' }, subject)).toBe(false)
+  for (const invalid of [{ ...receipt, targetOrderIndex: 47 }, { ...receipt, runId: 'old-run' }, { ...receipt, userId: 'other' }, { ...receipt, novelId: 'other' }])
+    expect(observeWritingWorkflowMilestone(new Set(), 'story_compiler_prepare', invalid, subject)).toBe(false)
+  expect(observeWritingWorkflowMilestone(new Set(), 'chapter_bridge_commit', receipt, subject)).toBe(false)
+  expect(observeWritingWorkflowMilestone(new Set(), 'story_compiler_prepare', receipt,
+    { ...subject, taskSpec: { ...taskSpec, intent: 'review' } })).toBe(false)
+})
 import { nextStagnantBatch, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, persistedContentHash, semanticReadIdentity } from '../../api/lib/agent/semantic-progress.js'
 
 it('does not count the incident full-read then 50/10/20/100-character rereads as new progress', () => {

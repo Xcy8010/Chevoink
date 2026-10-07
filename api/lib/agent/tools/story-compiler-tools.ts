@@ -24,7 +24,7 @@ import {
   compilationRunScope,
   isWritingTaskContinuityCompiler,
   saveReaderPromise,
-  saveSceneTasks,
+  saveSceneTasksWithMilestone,
   upsertStoryCharter,
   updateReaderPromise,
   validateStoryContinuity,
@@ -36,6 +36,7 @@ import { readChapterReviewRevisionGuidance, continuityDecisionBinding } from '..
 import { readOriginalTaskRequest } from '../original-request.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
 import { storyCharterHash } from './durable-metadata.js'
+import { readWritingScope } from '../writing-scope.js'
 
 const ALL_READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const PLAN_BUILD_WRITE = { plan: 'allow', build: 'allow', review: 'deny' } as const
@@ -43,6 +44,23 @@ const BUILD_WRITE = { plan: 'deny', build: 'allow', review: 'deny' } as const
 
 const asStrings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+
+function compilationNextStep(compilation: { id: string; chapterId: string | null; targetOrderIndex: number; sceneTasks: unknown[]; chapter: { content: string } | null }) {
+  const next = !compilation.sceneTasks.length ? '下一步用该真实 compilationId 调用 scene_task_build，保留已保存的编译，不重复准备。'
+    : !compilation.chapterId ? `下一步调用 chapter_create 创建原授权第 ${compilation.targetOrderIndex} 章，再用返回的 chapterId 调用 chapter_write 保存正文。`
+      : !compilation.chapter?.content.trim() ? `下一步对 chapterId=${compilation.chapterId} 调用 chapter_write 保存正文。`
+        : '保留已保存正文、场景和检查，按当前版本所需检查继续；不能用旧报告宣称提交完成。'
+  return `本任务 compilationId=${compilation.id}，chapterId=${compilation.chapterId ?? '尚未创建'}，目标第 ${compilation.targetOrderIndex} 章。${next}`
+}
+
+async function missingCompilationGuidance(db: Prisma.TransactionClient, ctx: ToolContext, scope: Prisma.StoryCompilationWhereInput) {
+  const current = await db.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, ...scope, status: { in: ['active', 'completed'] } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { content: true } } } })
+  if (current) return compilationNextStep(current)
+  const original = await readWritingScope(db, ctx)
+  const targets = original.writing?.kind === 'bounded' ? original.writing.targets.map(item => item.orderIndex).join('、') : null
+  return `本任务尚未建立编译。仅在原完整章节写作授权内调用 story_compiler_prepare${targets ? `，原目标为第 ${targets} 章` : ''}；写下一章时省略编辑器旧 chapterId。不要恢复历史任务、猜测编号或把未产生的正文当成交付。`
+}
 
 // Thinking and final JSON share the provider's completion allowance. A full
 // chapter review needs room for both; keep a finite tool-specific ceiling rather
@@ -267,6 +285,8 @@ export const storyCompilerPrepareTool = defineTool({
       intentSummary: args.intentSummary,
     }, ctx.transaction)
     const bridge = prepared.bridge
+    const workflowMilestone = prepared.preparedFirstForTarget ? { version: 1 as const, userId: ctx.userId, novelId: ctx.novelId,
+      runId: ctx.runId, targetOrderIndex: prepared.compilation.targetOrderIndex, phase: 'prepare' as const } : undefined
     const items = [
       bridge.lastUnfinishedAction ? `未完成动作：${bridge.lastUnfinishedAction}` : '前章无明确未完成动作',
       bridge.location || bridge.storyTime ? `连续时空：${bridge.storyTime || '未标注'} · ${bridge.location || '未标注'}` : '时空状态待 Scene Task 明确',
@@ -277,6 +297,7 @@ export const storyCompilerPrepareTool = defineTool({
     return {
       output: `PREPARE 完成，compilationId=${prepared.compilation.id}，chapterId=${prepared.compilation.chapterId ?? '尚未创建（写入后取真实编号）'}，目标全书第 ${prepared.compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。${prepared.charter ? `已加载 Story Charter r${prepared.charter.revision}` : '当前无 Story Charter，旧作可继续，但新书长纲应先建立。'}下一步只调用一次 scene_task_build 生成 1–4 个 Scene Task，禁止直接跳到正文；精品候选取舍由服务端记录，不需要手工补 alternatives。\n${items.join('\n')}`,
       summary: `准备第 ${prepared.compilation.targetOrderIndex} 章写作`,
+      ...(workflowMilestone ? { workflowMilestone } : {}),
       display: {
         kind: 'storyCompiler', compilationId: prepared.compilation.id, phase: 'prepare', title: '准备章节写作',
         detail: `第 ${prepared.compilation.targetOrderIndex} 章 · ${ctx.qualityMode === 'premium' ? '精品' : '平衡'}`, items,
@@ -405,14 +426,15 @@ export const sceneTaskBuildTool = defineTool({
   async execute(ctx, args) {
     const db = ctx.transaction ?? prisma
     if (args.compilationId && ctx.durableCompiler?.baseline && args.compilationId !== ctx.durableCompiler.baseline.id) {
-      return { outcome: 'failed' as const, output: '指定编译编号与本任务读取的编译身份不一致，请先读取该明确编号。', summary: '场景编译身份不匹配' }
+      return { outcome: 'failed' as const, failureCode: 'COMPILATION_IDENTITY_MISMATCH', output: '指定编译编号与本任务读取的编译身份不一致。compilationId 不能使用章节或任务合同编号；请用 chapter_bridge_get 核对本任务真实身份，不替换显式编号执行。', summary: '场景编译身份不匹配' }
     }
+    const scope = await compilationRunScope(db, ctx)
     const candidates = await db.storyCompilation.findMany({
       where: {
         userId: ctx.userId,
         novelId: ctx.novelId,
         status: 'active',
-        ...await compilationRunScope(db, ctx),
+        ...scope,
         ...(ctx.durableCompiler ? { id: ctx.durableCompiler.baseline?.id ?? '__missing__' } : args.compilationId ? { id: args.compilationId } : {}),
       },
       include: { sceneTasks: { orderBy: { ordinal: 'asc' } } },
@@ -420,7 +442,7 @@ export const sceneTaskBuildTool = defineTool({
       take: 6,
     })
     const compilation = candidates[0]
-    if (!compilation) return { outcome: 'failed' as const, output: '没有找到当前任务的活跃章节编译状态；请只重新执行一次 story_compiler_prepare。', summary: '未找到场景编译状态' }
+    if (!compilation) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: `未找到本任务指定的活跃 compilationId，章节编号与编译编号不可混用。${await missingCompilationGuidance(db, ctx, scope)}`, summary: '未找到场景编译状态' }
     if (!['prepare', 'beat'].includes(compilation.stage) && compilation.sceneTasks.length > 0) {
       return {
         output: `compilationId=${compilation.id} 已建立 ${compilation.sceneTasks.length} 个 Scene Task 并进入 ${compilation.stage} 阶段，无需重复构建。`,
@@ -428,8 +450,11 @@ export const sceneTaskBuildTool = defineTool({
         display: { kind: 'storyCompiler', compilationId: compilation.id, phase: compilation.stage, title: '场景任务已建立', detail: `${compilation.sceneTasks.length} 个场景`, items: compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜转折：${task.turn}`) },
       }
     }
-    const tasks = await saveSceneTasks({ userId: ctx.userId, novelId: ctx.novelId, compilationId: compilation.id, tasks: args.tasks, alternatives: args.alternatives }, ctx.transaction)
+    const saved = await saveSceneTasksWithMilestone({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, tasks: args.tasks, alternatives: args.alternatives }, ctx.transaction)
+    const { tasks } = saved
     return {
+      ...(saved.scenesFirstForTarget ? { workflowMilestone: { version: 1 as const, userId: ctx.userId, novelId: ctx.novelId,
+        runId: ctx.runId, targetOrderIndex: saved.targetOrderIndex, phase: 'scenes' as const } } : {}),
       output: `BEAT 完成，已为 compilationId=${compilation.id} 建立 ${tasks.length} 个 Scene Task；精品候选取舍已由服务端记录。现在按顺序完成连贯正文，再提交章节终态。写作交付按原始作者请求完成当前版本连续性与质量检查，仅原始请求可明确跳过。相关安全事实与质量修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write，不硬性限制为一次调用或要求每次覆盖全部候选。每次依据当前正文精确定位，不把报告当作额外权限；全部修改后只读复核最终版本两类检查，最后提交终态。不能安全落实的意见保留，可用 retainedFindings 绑定当前报告并说明原因；留置不冒充修复，不为清零意见循环改稿。付费检查、自动修订和未知调用保持既有保护。`,
       summary: `建立 ${tasks.length} 个场景任务`,
       display: {
@@ -457,7 +482,8 @@ export const chapterBridgeGetTool = defineTool({
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { title: true, revision: true } } },
     })
-    if (!compilation?.bridge) return { outcome: 'failed' as const, output: '当前任务没有可读取的 Chapter Bridge。完整章节写作请先调用 story_compiler_prepare。' }
+    if (!compilation?.bridge) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND',
+      output: `当前任务没有可读取的指定 Chapter Bridge，compilationId 不能使用章节或任务合同编号。${compilation ? '编译缺少章节桥，身份异常需核对，不能重建绕过。' : await missingCompilationGuidance(db, ctx, scope)}`, summary: '未找到章节编译状态' }
     const bridge = compilation.bridge
     const items = [
       bridge.lastUnfinishedAction ? `未完成动作：${bridge.lastUnfinishedAction}` : '未完成动作：无',
@@ -715,7 +741,7 @@ export const chapterBridgeCommitTool = defineTool({
     const db = ctx.transaction ?? prisma
     const scope = await qualityCompilationScope(db, ctx.userId, ctx.novelId, ctx.runId)
     if (args.compilationId && ctx.durableCompiler?.baseline && args.compilationId !== ctx.durableCompiler.baseline.id) {
-      return { outcome: 'failed' as const, output: '指定编译编号与本任务读取的编译身份不一致。请用 chapter_bridge_get 读取该明确编号，不会替换为其他编译提交。', summary: '章节编译身份不匹配' }
+      return { outcome: 'failed' as const, failureCode: 'COMPILATION_IDENTITY_MISMATCH', output: '指定编译编号与本任务读取的编译身份不一致。compilationId 不能使用章节或任务合同编号；请用 chapter_bridge_get 核对本任务真实身份，不会替换显式编号提交。', summary: '章节编译身份不匹配' }
     }
     const targetId = ctx.durableCompiler?.baseline?.id ?? args.compilationId
     const candidates = await db.storyCompilation.findMany({
@@ -733,10 +759,14 @@ export const chapterBridgeCommitTool = defineTool({
       take: 2,
     })
     const compilation = candidates[0]
-    if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, output: '没有找到当前任务指定的章节编译状态。请用 chapter_bridge_get 核对本任务已保存的编译编号与阶段；恢复身份无法核实时停止，不重建场景或重写正文来绕过。', summary: '未找到章节编译状态' }
+    if (!compilation) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND',
+      output: `未找到当前任务指定的 compilationId，章节编号与编译编号不可混用，本次未提交。${await missingCompilationGuidance(db, ctx, scope)}`, summary: '未找到章节编译状态' }
+    if (!compilation.bridge) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: '当前编译缺少章节桥，身份异常需核对，不能重建绕过；本次未提交。', summary: '章节桥身份未核实' }
+    if (!compilation.chapter) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_WRITTEN',
+      output: `当前编译尚未保存章节正文，本次未提交。${compilationNextStep(compilation)}`, summary: '章节正文尚未保存' }
     if (compilation.status === 'active' && await db.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, ...scope,
       chapterId: compilation.chapterId, createdAt: { gt: compilation.createdAt } }, select: { id: true } })) {
-      return { outcome: 'failed' as const, output: '该章节已有本任务后续准备的编译身份，旧编译不能覆盖它。请读取当前任务章节桥，保留已保存的正文、场景与检查记录。', summary: '章节编译已被后续准备替代' }
+      return { outcome: 'failed' as const, failureCode: 'COMPILATION_STAGE_CONFLICT', output: '该章节已有本任务后续准备的编译身份，旧编译不能覆盖它。请读取当前任务章节桥，保留已保存的正文、场景与检查记录。', summary: '章节编译已被后续准备替代' }
     }
     const firstTask = compilation.sceneTasks[0]
     const lastTask = compilation.sceneTasks.at(-1)

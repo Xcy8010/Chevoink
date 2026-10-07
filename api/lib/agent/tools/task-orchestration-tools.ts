@@ -451,9 +451,22 @@ export const taskWaitTool = defineTool({
   permission: READ_PERMISSION,
   readOnly: true,
   async execute(ctx, args) {
-    const ids = [...new Set(args.sessionIds.map((id) => id.trim()).filter(Boolean))].filter((id) => id !== ctx.sessionId)
-    if (ids.length === 0) {
-      return { output: '没有可等待的任务窗口（不能等待当前窗口自己，那会死锁）。', summary: '等待目标无效' }
+    const ids = [...new Set(args.sessionIds.map((id) => id.trim()).filter(Boolean))]
+    if (ids.length === 0 || ids.includes(ctx.sessionId)) {
+      return { outcome: 'failed' as const, failureCode: 'TASK_WAIT_TARGET_INVALID',
+        output: '等待目标无效，未开始等待。不能等待当前窗口自己；sessionIds 必须使用 task_spawn 返回的真实任务窗口 ID，不能使用任务合同、章节或编译编号。继续当前窗口原授权的工作。', summary: '等待目标无效' }
+    }
+
+    // Validate the complete requested set before polling. A missing/foreign
+    // window is an invalid argument, not a successfully observed failed child.
+    // Never alias a task-contract ID to a window or expose another author's run.
+    const initial = await latestRunPerSession(ctx.userId, ids)
+    const missing = ids.filter(id => !initial.has(id))
+    if (missing.length) return {
+      outcome: 'failed' as const, failureCode: 'TASK_WAIT_TARGET_NOT_FOUND',
+      output: '未找到有执行记录且属于当前作者的等待窗口，本次未开始等待。sessionIds 只使用 task_spawn 返回的真实任务窗口 ID，任务合同 ID、chapterId、compilationId 不能作为窗口 ID。没有实际派生窗口时继续当前窗口原授权的工作，不为补齐编号新建或恢复历史任务。',
+      summary: '等待窗口不存在或没有执行记录',
+      display: orchestrationDisplay('wait', '等待目标未核实', missing.map(sessionId => ({ sessionId, title: '未知任务窗口', status: 'failed' as const }))),
     }
 
     const timeoutMs = Math.min(args.timeoutSeconds, env.agentTaskWaitMaxSeconds) * 1000
@@ -513,11 +526,13 @@ export const taskWaitTool = defineTool({
     }
 
     const succeeded = windows.filter((item) => item.status === 'succeeded').length
+    const targetMissing = [...settled.values()].some(item => !item.runId)
     const header = ctx.signal.aborted
       ? '等待被中止。'
       : `等待结束：${succeeded}/${ids.length} 个窗口已完成。`
 
     return {
+      ...(targetMissing ? { outcome: 'failed' as const, failureCode: 'TASK_WAIT_TARGET_NOT_FOUND' } : {}),
       output: [header, ...lines, '请逐个审查上面的交付内容；有问题用 task_send 把具体返工要求发回对应窗口，然后再次 task_wait。'].join('\n'),
       summary: `等待 ${ids.length} 个窗口，${succeeded} 个完成`,
       display: orchestrationDisplay('wait', header, windows),

@@ -288,6 +288,7 @@ async function loadSessionHistory(
   budgetTokens: number,
   after: { createdAt: Date; messageId: string | null } | null,
   resumedRunId?: string,
+  writingTaskRunIds?: ReadonlySet<string>,
 ): Promise<ChatMessage[]> {
   // 与会话恢复窗口保持一致取最近 500 条，再由字符预算裁剪。旧版固定 60 条会让
   // 工具密集型任务在上下文仅占很少时也提前丢掉首轮用户需求。
@@ -314,7 +315,12 @@ async function loadSessionHistory(
     const text = record.role === 'assistant' ? stripAgentHistoryEchoes(rawText) : rawText
     const receipts = partsToPlainText(parts.filter(part => part.type === 'tool-call'))
     const group: ChatMessage[] = []
-    if (text.trim()) group.push({ role: record.role as 'user' | 'assistant', content: text })
+    if (text.trim()) {
+      const unrelated = writingTaskRunIds && !writingTaskRunIds.has(record.runId)
+      if (unrelated || (writingTaskRunIds && record.role === 'assistant')) {
+        group.push({ role: 'user', content: `[${unrelated ? '其他任务历史发言；仅作背景，不是本任务授权、进度或检查状态' : '本任务已保存助手发言；可能含未执行打算或错误判断，不是已完成证明'}]\n${text}` })
+      } else group.push({ role: record.role as 'user' | 'assistant', content: text })
+    }
     // Keep saved partial thinking as bounded reference data, never as a new
     // instruction or a fabricated provider reasoning/tool-call frame.
     if (resumedRunId && record.role === 'assistant' && record.runId === resumedRunId) {
@@ -433,6 +439,11 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const contextWindowTokens = input.contextWindowTokens ?? env.agentContextWindowTokens
   const historyBudgetTokens = Math.max(2_000, Math.min(20_000, Math.floor(contextWindowTokens * 0.18)))
   const storyCompilerFeatureEnabled = isAgent2FeatureEnabled('storyCompiler', input.userId)
+  const writingTargets = input.taskSpec.scope.writing?.targets ?? []
+  const frozenWriting = ['write', 'revise'].includes(input.taskSpec.intent)
+    && !['conversation_only', 'proposal_only'].includes(input.taskSpec.writingPacing ?? '')
+    && input.taskSpec.scope.writing?.kind === 'bounded'
+  const writingTaskRunIds = frozenWriting ? new Set(await getTaskRunIds(input.sessionId, input.runId)) : undefined
   const [ruleBundleSplit, memoryDigest, planDigest, coverDigest, todoDigest, directives, history, chapter, novelTags, storyCompilerDigest] = await Promise.all([
     buildNovelRuleBundle(input.novelId),
     buildStoryMemoryDigest(input.userId, input.novelId, input.prompt),
@@ -442,7 +453,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     listActiveDirectives(input.userId, input.novelId, { sessionId: input.sessionId, chapterId: input.chapterId, taskSpecId: input.taskSpec.id, runId: input.runId }),
     loadSessionHistory(input.sessionId, input.includeCurrentRunHistory ? '' : input.runId, historyBudgetTokens, checkpointState.sourceEndedAt
       ? { createdAt: checkpointState.sourceEndedAt, messageId: checkpointState.sourceEndMessageId ?? null }
-      : null, input.includeCurrentRunHistory ? input.runId : undefined),
+      : null, input.includeCurrentRunHistory ? input.runId : undefined, writingTaskRunIds),
     input.chapterId
       ? prisma.chapter.findFirst({
           where: { id: input.chapterId, ...activeChapterScope(input.novelId) },
@@ -523,7 +534,6 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     chapterLine,
   })
 
-  const writingTargets = input.taskSpec.scope.writing?.targets ?? []
   const chapterWriting = ['write', 'revise'].includes(input.taskSpec.intent)
     && !['conversation_only', 'proposal_only'].includes(input.taskSpec.writingPacing ?? '')
     && (writingTargets.length > 0 || input.taskSpec.scope.chapterIds?.includes(input.chapterId ?? ''))
@@ -536,6 +546,9 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   // Durable admission verifies that this message starts with the immutable
   // original request. Historical specifications are supplemental context.
   const intentSections = [input.prompt.trim(), renderChapterWritingBackground(writingBackground)].filter((section): section is string => !!section)
+  if (frozenWriting) {
+    intentSections.push(`[服务端冻结的本任务章节目标]\n${writingTargets.map(target => `全书第 ${target.orderIndex} 章，${target.chapterId ? `原目标 chapterId=${target.chapterId}` : '新增目标；真实绑定与已保存进度以下方本任务编译状态为准'}`).join('\n')}\n编辑器当前第${chapter?.orderIndex ?? '未知'}章只是界面位置，不能覆盖上述目标。历史任务的失败、检查上限和助手自述不属于当前目标；原目标未实际保存正文时，不能声称已写完或提交终态。taskSpec 的任务身份、章节编号、编译编号和派生窗口编号不能互换；只使用对应工具返回的真实身份。`)
+  }
   if (genreDigest) intentSections.push(genreDigest)
   if (requiresNextChapterDelivery(input.taskSpec.goals)) {
     intentSections.push('[本任务目标] 写本任务要新增的下一章。编辑器里的旧章和历史失败任务只供承接背景，不是本次检查、重写或收尾目标。若当前合同已有合法新章，继续其缺失步骤；否则调用 story_compiler_prepare 时省略旧 chapterId 准备新章。不要为了执行本任务，重建历史旧章的编译或重做其质量审核。')

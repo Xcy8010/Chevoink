@@ -263,6 +263,68 @@ function context(): ToolContext {
 }
 
 describe('server assessment fallback in the real execution loop', () => {
+  it('keeps a bad wait as a failed observation while the next authorized call in the batch executes', async () => {
+    const wait = tool('task_wait', async () => ({ outcome: 'failed', failureCode: 'TASK_WAIT_TARGET_NOT_FOUND', output: '任务身份不是窗口编号；当前任务没有派生窗口' }))
+    const reader = tool('chapter_read', async () => ({ output: '当前目标的实际正文证据' }))
+    mocks.tools = [wait, reader]
+    queue(response('', [call('bad', wait.name, '{"sessionIds":["task-spec-id"]}'), call('next', reader.name)]), response('核对完成。'))
+    await run('核对当前正文')
+    expect(reader.execute).toHaveBeenCalledOnce()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', toolName: 'task_wait', ok: false, failureCode: 'TASK_WAIT_TARGET_NOT_FOUND' }))
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+
+  it('does not promote an inline child prerequisite receipt to parent workflow progress', async () => {
+    const prepare = tool('story_compiler_prepare', async () => ({ output: '准备已保存',
+      workflowMilestone: { version: 1, userId: 'user', novelId: 'novel', runId: 'run', targetOrderIndex: 20, phase: 'prepare' } }), false)
+    const outcome = await handleToolCall(call('child', prepare.name), [prepare], { ...context(), inlineChild: true }, { emit: mocks.emit } as never, 'message', 'run')
+    expect(outcome.part.status).toBe('success')
+    expect(outcome.workflowMilestone).toBeUndefined()
+    expect(outcome.requiredResult).toBeUndefined()
+  })
+  it('resumes a stagnant next-chapter task through first prerequisites and a saved body without resetting cumulative usage', async () => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 6, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 0, writeBaseline: 0, readProgress: 1, readBaseline: 0, progressSignatures: [] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 10, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 524000, completionTokens: 51, totalTokens: 524051, checkpoint } })
+    const milestone = (phase: 'prepare' | 'scenes') => ({ version: 1 as const, userId: 'user', novelId: 'novel', runId: 'run', targetOrderIndex: 20, phase })
+    let body = ''
+    const prepare = tool('story_compiler_prepare', async () => ({ output: '真实目标20准备已保存', workflowMilestone: milestone('prepare') }), false)
+    const scene = tool('scene_task_build', async () => ({ output: '真实场景已保存', workflowMilestone: milestone('scenes') }), false)
+    const write = tool('chapter_write', async () => { expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { writeProgress: 0, stagnantBatches: 0 } }); body = '第20章的实际正文'; return { output: '正文已保存',
+      display: { kind: 'chapterDiff', chapterId: 'new20', chapterTitle: '第20章', before: '', after: body, appliedDirectly: true } } }, false)
+    const commit = tool('chapter_bridge_commit', async () => { expect(body).toBe('第20章的实际正文'); mocks.committedChapter.mockResolvedValue(true); return { output: '终态已保存', requiredResult: { targetId: 'new20', contentHash: 'a'.repeat(64) } } }, false)
+    mocks.tools = [prepare, scene, write, commit]
+    queue(response('', [call('p', prepare.name)]), response('', [call('s', scene.name)]), response('', [call('w', write.name)]), response('', [call('c', commit.name)]), response('已保存。'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    expect(write.execute).toHaveBeenCalledOnce()
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 524101, checkpoint: { tokenBudget: 500, maxTurns: 1, readProgress: 1, writeProgress: 2, stagnantBatches: 0 } })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+
+  it('does not let a repeated preparation receipt or prose complete a chapter or erase persisted stagnation', async () => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const signature = `workflow:${JSON.stringify(['user', 'novel', taskSpec.id, 20, 'prepare'])}`
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 4, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 0, writeBaseline: 0, readProgress: 0, readBaseline: 0, progressSignatures: [signature] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 10, startedAt: new Date(checkpoint.runStartedAt), usage: { promptTokens: 100, completionTokens: 0, totalTokens: 100, checkpoint } })
+    const prepare = tool('story_compiler_prepare', async () => ({ output: '新编号/新摘要，同一目标',
+      workflowMilestone: { version: 1, userId: 'user', novelId: 'novel', runId: 'run', targetOrderIndex: 20, phase: 'prepare' } }), false)
+    mocks.tools = [prepare]
+    queue(response('本章已完成', [call('p', prepare.name)]))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 110, checkpoint: { writeProgress: 0, stagnantBatches: 5 } })
+  })
   const readiness = (continuity: ChapterReviewReadiness['continuity'], quality: ChapterReviewReadiness['quality'], revision = 3): ChapterReviewReadiness => ({
     ready: continuity === 'complete' && quality === 'complete', checksRequired: true,
     compilationId: 'comp', chapterId: 'c', revision, continuity, quality,

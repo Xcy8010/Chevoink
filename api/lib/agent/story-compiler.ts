@@ -220,7 +220,7 @@ export async function prepareStoryCompilation(input: {
   targetOrderIndex?: number
   mode: StoryCompilerMode
   intentSummary: string
-}, transaction?: Prisma.TransactionClient): Promise<{ compilation: Prisma.StoryCompilationGetPayload<{ include: { bridge: true } }>; charter: StoryCharter | null; promises: ReaderPromise[]; bridge: PreparedBridge }> {
+}, transaction?: Prisma.TransactionClient): Promise<{ compilation: Prisma.StoryCompilationGetPayload<{ include: { bridge: true } }>; charter: StoryCharter | null; promises: ReaderPromise[]; bridge: PreparedBridge; preparedFirstForTarget: boolean }> {
   if (!transaction) return prisma.$transaction(tx => prepareStoryCompilation(input, tx))
   const db = transaction
   await lockNovelActiveScope(db, input.novelId)
@@ -351,7 +351,7 @@ export async function prepareStoryCompilation(input: {
     },
     include: { bridge: true },
   })
-  return { compilation, charter: bundle.charter, promises: bundle.promises, bridge }
+  return { compilation, charter: bundle.charter, promises: bundle.promises, bridge, preparedFirstForTarget: priorRepairStates.length === 0 }
 }
 
 export async function saveSceneTasks(input: {
@@ -363,6 +363,7 @@ export async function saveSceneTasks(input: {
 }, transaction?: Prisma.TransactionClient): Promise<SceneTask[]> {
   if (!transaction) return prisma.$transaction(tx => saveSceneTasks(input, tx))
   const tx = transaction
+  await lockNovelActiveScope(tx, input.novelId)
   if (input.tasks.length < 1 || input.tasks.length > 4) {
     throw new DataAccessError(400, 'SCENE_TASK_COUNT_INVALID', '每章必须建立 1–4 个 Scene Task。')
   }
@@ -405,6 +406,25 @@ export async function saveSceneTasks(input: {
     },
   })
   return tx.sceneTask.findMany({ where: { compilationId: compilation.id }, orderBy: { ordinal: 'asc' } })
+}
+
+/** A bounded workflow observation, separate from authored-body progress. The
+ * novel lock serializes PREPARE and all scene writes; abandoned attempts and
+ * the original task's resumed runs keep the first-step opportunity consumed. */
+export async function saveSceneTasksWithMilestone(input: Parameters<typeof saveSceneTasks>[0] & { runId: string },
+  transaction?: Prisma.TransactionClient): Promise<{ tasks: SceneTask[]; scenesFirstForTarget: boolean; targetOrderIndex: number }> {
+  if (!transaction) return prisma.$transaction(tx => saveSceneTasksWithMilestone(input, tx))
+  await lockNovelActiveScope(transaction, input.novelId)
+  const scope = await compilationRunScope(transaction, input)
+  const compilation = await transaction.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId,
+    novelId: input.novelId, status: 'active', ...scope }, select: { targetOrderIndex: true } })
+  if (!compilation) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '场景编译不属于当前原任务，未保存场景。')
+  const original = await readWritingScope(transaction, input)
+  const runIds = await (await import('./original-request.js')).originalTaskRunIds(transaction, input, original)
+  const priorScene = await transaction.sceneTask.findFirst({ where: { userId: input.userId, novelId: input.novelId,
+    compilation: { userId: input.userId, novelId: input.novelId, runId: { in: runIds }, targetOrderIndex: compilation.targetOrderIndex } }, select: { id: true } })
+  const tasks = await saveSceneTasks(input, transaction)
+  return { tasks, scenesFirstForTarget: !priorScene && tasks.length > 0, targetOrderIndex: compilation.targetOrderIndex }
 }
 
 /** Only durable identity or a validated legacy task contract joins runs.
@@ -824,7 +844,7 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
       include: { toChapter: { select: { title: true, orderIndex: true, revision: true } } },
     }),
   ])
-  if (!bundle.charter && !active && !latestBridge) return null
+  if (!scope && !bundle.charter && !active && !latestBridge) return null
   const chapter = active?.chapterId ? await prisma.chapter.findFirst({ where: { id: active.chapterId, authorId: userId, ...activeChapterScope(novelId) },
     select: { id: true, revision: true, content: true } }) : null
   const hasBody = !!chapter?.content.trim()

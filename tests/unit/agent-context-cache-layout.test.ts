@@ -151,6 +151,28 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     vi.restoreAllMocks()
   })
 
+  it('separates an old chapter repair and false saved claims from the frozen next-chapter task on resume', async () => {
+    const input = buildInput()
+    input.prompt = '写下一章'
+    input.includeCurrentRunHistory = true
+    input.taskSpec = { ...input.taskSpec, intent: 'write', goals: ['写下一章'], scope: { novelId: 'novel-1', chapterIds: ['chapter-1'],
+      writing: { version: 1, kind: 'bounded', targets: [{ orderIndex: 48, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false } } }
+    vi.mocked(prisma.chapter.findFirst).mockResolvedValue({ ...baseChapter, orderIndex: 47 } as never)
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([
+      { id: 'current-false', runId: 'run-1', role: 'assistant', parts: [{ type: 'text', text: '章节已创建，连续性已达三次上限。' }] },
+      { id: 'old-repair', runId: 'old-run', role: 'assistant', parts: [{ type: 'text', text: '第47章修订并提交终态。' }] },
+    ] as never)
+    const { messages } = await assembleContext(input)
+    expect(messages.filter(message => message.role === 'assistant')).toHaveLength(0)
+    expect(messages.some(message => String(message.content).includes('其他任务历史发言；仅作背景'))).toBe(true)
+    expect(messages.some(message => String(message.content).includes('本任务已保存助手发言；可能含未执行打算或错误判断'))).toBe(true)
+    const intent = String(messages.at(-1)?.content)
+    expect(intent).toContain('全书第 48 章')
+    expect(intent).toContain('编辑器当前第47章只是界面位置')
+    expect(intent).toContain('历史任务的失败、检查上限和助手自述不属于当前目标')
+    expect(intent).toContain('章节编号、编译编号和派生窗口编号不能互换')
+  })
+
   it('restores only the interrupted run thinking and keeps a greeting as the final task intent', async () => {
     vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([
       { id: 'partial', runId: 'run-1', role: 'assistant', parts: [{ type: 'reasoning', text: '正在准备回答这次问候' }] },

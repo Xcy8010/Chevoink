@@ -13,6 +13,11 @@ export function toolRecoveryKey(action: string, code: string, args: unknown, fal
  * source revisions, author deletion, or quality gates. */
 export function toolFailureRecovery(code: string): { label: string; guidance: string } | undefined {
   const entries: Record<string, { label: string; guidance: string }> = {
+    TASK_WAIT_TARGET_NOT_FOUND: { label: '等待窗口不存在或不属于当前作者', guidance: '本次未获得该窗口交付。任务身份和章节编译编号不是派生窗口编号；仅使用本任务实际派生工具返回的窗口编号。没有派生窗口就直接执行当前原任务，不能等待虚构窗口或把失败当作完成。' },
+    TASK_WAIT_TARGET_INVALID: { label: '等待窗口身份无效', guidance: '不能等待当前窗口自身或把任务身份当作窗口身份。仅等待本任务实际派生且获授权的窗口；没有窗口时继续当前原任务的必要步骤。' },
+    COMPILATION_NOT_FOUND: { label: '未找到本任务章节编译', guidance: '章节编号不是编译编号。使用本任务真实编译编号；本任务尚未准备时按冻结目标准备，再构建场景并保存正文。不要恢复历史旧章、猜编号或重复创建已存在编译。' },
+    COMPILATION_IDENTITY_MISMATCH: { label: '章节编译身份不匹配', guidance: '本次操作未执行。显式编号不会被自动替换；核对本任务已保存的真实编译状态，使用返回的编译编号继续该目标的缺失步骤，不能借旧章或其他任务完成当前任务。' },
+    COMPILATION_NOT_WRITTEN: { label: '本任务章节正文尚未保存', guidance: '准备和场景计划不等于正文。保留当前编译与场景，按冻结目标创建或复用已绑定章节，然后写入非空正文，再完成当前版本的必要检查和终态提交。' },
     REVIEW_MERGED_REVISION_REQUIRED: { label: '修订依据需要核对', guidance: '本次修改被拒绝，未写入。按具体拒绝原因核对当前报告绑定和留置意见；quality findingId 必须使用报告返回的真实编号，不能用序号代替。普通正文编辑可在原授权范围内分步调用 chapter_edit_range 或 chapter_write，批量合并只是建议；不要只换工具或重复读取相同正文来重试同一拒绝，也不能把保存修订当作新版检查通过。' },
     REVIEW_REPAIR_RECHECK_REQUIRED: { label: '需要复核当前版本', guidance: '已保存正文保留，旧报告不能认证新版。普通编辑可在原授权范围内继续，提交前在既有检查次数内复核最终正文；检查次数用尽时如实说明当前版本尚未完成检查，不要重置次数、重绑旧报告或反复调用已耗尽的检查。' },
     CHAPTER_ANCHOR_CONFLICT: { label: '正文片段需要重新定位', guidance: '仅对本次原目标调用 chapter_read，逐字使用当前版本中的唯一连续原文。不要猜测其他章节 ID、替换到其他章节或照旧报告强行写入。' },

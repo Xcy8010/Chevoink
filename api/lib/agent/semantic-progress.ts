@@ -1,6 +1,32 @@
 import type { Prisma } from '@prisma/client'
 import { createHash } from 'node:crypto'
-import type { AgentMessagePart } from '../../../shared/contracts/index.js'
+import type { AgentMessagePart, TaskSpec } from '../../../shared/contracts/index.js'
+import { z } from 'zod'
+
+export const writingWorkflowMilestoneSchema = z.object({ version: z.literal(1), userId: z.string().min(1),
+  novelId: z.string().min(1), runId: z.string().min(1), targetOrderIndex: z.number().int().positive(),
+  phase: z.enum(['prepare', 'scenes']) }).strict()
+export type WritingWorkflowMilestone = z.infer<typeof writingWorkflowMilestoneSchema>
+
+/** A server-persisted first prerequisite buys room to execute the next step,
+ * never authored content or completion. Stable task/target/phase identity
+ * survives resumes; new compiler IDs, arguments and status labels buy nothing. */
+export function observeWritingWorkflowMilestone(seen: Set<string>, action: string, receipt: unknown,
+  subject: { userId: string; novelId: string; runId: string; taskSpec: TaskSpec }): boolean {
+  const parsed = writingWorkflowMilestoneSchema.safeParse(receipt)
+  if (!parsed.success) return false
+  const value = parsed.data, spec = subject.taskSpec
+  if (value.userId !== subject.userId || value.novelId !== subject.novelId || value.runId !== subject.runId
+    || spec.scope.novelId !== subject.novelId || !['write', 'revise'].includes(spec.intent)
+    || ['conversation_only', 'proposal_only'].includes(spec.writingPacing ?? '')
+    || spec.scope.writing?.kind !== 'bounded'
+    || !spec.scope.writing.targets.some(target => target.orderIndex === value.targetOrderIndex)
+    || action !== (value.phase === 'prepare' ? 'story_compiler_prepare' : 'scene_task_build')) return false
+  const key = `workflow:${JSON.stringify([subject.userId, subject.novelId, spec.id, value.targetOrderIndex, value.phase])}`
+  const fresh = !seen.has(key)
+  seen.add(key)
+  return fresh
+}
 
 export function persistedContentHash(content: string): string {
   return createHash('sha256').update(JSON.stringify({ content })).digest('hex')

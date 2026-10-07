@@ -1,4 +1,4 @@
-import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, nextStagnantBatch } from './semantic-progress.js'
+import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
 import { randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
@@ -241,6 +241,7 @@ function reviewPreflightArgs(call: ToolCallRequest, tool?: AgentTool): Record<st
 const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
 
 type ToolCallOutcome = {
+  workflowMilestone?: import('./semantic-progress.js').WritingWorkflowMilestone
   failureCode?: string
   reviewStopReason?: string
   providerFailure?: boolean
@@ -512,6 +513,7 @@ export async function handleToolCall(
 
     return {
       observation: wrapToolOutput(tool.name, result.output),
+      workflowMilestone: ctx.inlineChild ? undefined : result.workflowMilestone,
       requiredResult: result.requiredResult,
       semanticTransition: result.semanticTransition,
       observedChapterRange: result.observedChapterRange,
@@ -2014,8 +2016,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const requiredProgress = Boolean(outcome.requiredResult && observeRequiredResult(progressSignatures,
             `chapter:${outcome.requiredResult.targetId}`, outcome.requiredResult.contentHash))
           const readProgress = observeSemanticReadProgress(progressSignatures, call.name, outcome.observation, outcome.observedChapterRange)
+          const workflowProgress = observeWritingWorkflowMilestone(progressSignatures, call.name, outcome.workflowMilestone,
+            { userId: params.userId, novelId: params.novelId, runId, taskSpec })
           admission.record(admissionKey, outcome.observation, durableProgress || requiredProgress)
-          if (durableProgress || requiredProgress || readProgress) {
+          if (durableProgress || requiredProgress || readProgress || workflowProgress) {
             batchProgress = true
             todoReminders = 0
             if (durableProgress || requiredProgress) recoveryFailures.clear()

@@ -70,6 +70,8 @@ export type ToolContext = {
 }
 
 export type ToolResult = {
+  /** First persisted prerequisite for a frozen writing target. Not a body or completion receipt. */
+  workflowMilestone?: import('../semantic-progress.js').WritingWorkflowMilestone
   /** Server-observed body and returned range, never model-provided progress. */
   observedChapterRange?: import('../semantic-progress.js').ChapterReadEvidence
   /** Server-only successful create noop. Hashed/journaled with the observation;

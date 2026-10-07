@@ -145,7 +145,7 @@ describe('story compiler task identity', () => {
   })
   it('never substitutes a durable baseline for an explicitly different compilation id', async () => {
     expect(await chapterBridgeCommitTool.execute({ ...ctx, durableCompiler: { baseline: { id: 'own', hash: 'a'.repeat(64) } } } as ToolContext,
-      { compilationId: 'foreign' })).toMatchObject({ outcome: 'failed', summary: '章节编译身份不匹配' })
+      { compilationId: 'foreign' })).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_IDENTITY_MISMATCH', summary: '章节编译身份不匹配' })
     expect(db.storyCompilation.findMany).not.toHaveBeenCalled()
   })
   it('rejects explicit superseded active identity and leaves the newer chapter commit untouched', async () => {
@@ -200,12 +200,40 @@ describe('story compiler task identity', () => {
     expect(db.storyCompilation.create.mock.calls[0][0].data).toMatchObject({ runId: 'new-run', targetOrderIndex: 32 })
     expect(db.storyCompilation.create.mock.calls[0][0].data.chapterId).toBeUndefined()
   })
+  it('a chapter id passed as compilationId fails and names the original next-chapter preparation path', async () => {
+    const result = await chapterBridgeCommitTool.execute(ctx, { compilationId: 'old31' })
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_NOT_FOUND' })
+    expect(result.output).toContain('第 32 章')
+    expect(result.output).toContain('story_compiler_prepare')
+    expect(result.output).toContain('省略编辑器旧 chapterId')
+    expect(db.storyCompilation.findMany.mock.calls[0][0].where).toMatchObject({ id: 'old31', run: { userId: 'u', novelId: 'n', sessionId: 'session', taskSpec: { path: ['id'] } } })
+    expect(db.storyCompilation.create).not.toHaveBeenCalled(); expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
+  })
+  it.each([0, 1])('an existing unwritten next chapter with %s scenes directs the saved state forward without a new compiler', async scenes => {
+    const prepared = { id: 'real-compiler', chapterId: null, targetOrderIndex: 32, stage: 'prepare', bridge: {}, chapter: null,
+      sceneTasks: Array.from({ length: scenes }, (_, ordinal) => ({ ordinal })) }
+    db.storyCompilation.findMany.mockResolvedValue([prepared])
+    const result = await chapterBridgeCommitTool.execute(ctx, { compilationId: prepared.id })
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_NOT_WRITTEN' })
+    expect(result.output).toContain(scenes ? 'chapter_create' : 'scene_task_build')
+    expect(result.output).toContain('real-compiler')
+    expect(db.storyCompilation.create).not.toHaveBeenCalled(); expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
+  })
+  it('an invalid explicit compiler is not silently replaced by the real current one', async () => {
+    db.storyCompilation.findFirst.mockResolvedValue({ id: 'real-compiler', chapterId: null, targetOrderIndex: 32, stage: 'prepare', chapter: null, sceneTasks: [] })
+    const result = await chapterBridgeCommitTool.execute(ctx, { compilationId: 'old31' })
+    expect(result.failureCode).toBe('COMPILATION_NOT_FOUND')
+    expect(result.output).toContain('compilationId=real-compiler')
+    expect(result.output).toContain('scene_task_build')
+    expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
+  })
   it('inherits the CAS-consumed new-draft marker and counters when repreparing across the original parent/child lineage', async () => {
     const marker = { version: 1, taskId: 'task', chapterId: 'own32', compilationId: 'old-compiler', checkedRevision: 3 }
     db.storyCompilation.findMany.mockResolvedValue([{ validation: { checkRounds: 2, autoRepairRounds: 0, newDraftRevision: marker } }])
     db.agentRun.findMany.mockResolvedValue([{ id: 'new-run' }])
     const result = await prepareStoryCompilation({ ...ctx, chapterId: undefined, mode: 'balanced', intentSummary: '写下一章' })
     expect(result.compilation.validation).toEqual({ checkRounds: 2, newDraftRevision: marker })
+    expect(result.preparedFirstForTarget).toBe(false)
     expect(db.storyCompilation.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ runId: { in: ['new-run'] }, targetOrderIndex: 32 }) }))
   })
   it('rejects an explicit old chapter target from the next-chapter task without writes', async () => {
@@ -231,7 +259,8 @@ describe('story compiler task identity', () => {
     expect(db.storyCompilation.findFirst.mock.calls.at(-1)![0].where).toMatchObject(scope)
     const result = await chapterBridgeGetTool.execute(ctx, { compilationId: 'foreign-compilation' })
     expect(result.outcome).toBe('failed')
-    expect(db.storyCompilation.findFirst.mock.calls.at(-1)![0].where).toMatchObject({ ...scope, id: 'foreign-compilation' })
+    expect(db.storyCompilation.findFirst.mock.calls.some(([query]) => query.where.id === 'foreign-compilation'
+      && JSON.stringify(query.where.run) === JSON.stringify(scope.run))).toBe(true)
   })
   it('marks a missing cross-task continuity compilation as failed instead of showing tool success', async () => {
     expect(await continuityValidateTool.execute(ctx, { compilationId: 'foreign' })).toMatchObject({ outcome: 'failed', summary: '本任务连续性检查未执行' })
@@ -244,5 +273,10 @@ describe('story compiler task identity', () => {
     expect(digest).toContain('本任务尚未建立编译')
     expect(db.storyCompilation.findFirst).not.toHaveBeenCalled()
     expect(db.agentRun.findFirst).not.toHaveBeenCalled()
+  })
+  it('states that the current task has no compiler even without charter or historical bridge', async () => {
+    expect(await buildStoryCompilerDigest('u', 'n', 'old31', 'new-run')).toContain('本任务尚未建立编译')
+    expect(db.storyCompilation.create).not.toHaveBeenCalled()
+    expect(await buildStoryCompilerDigest('u', 'n', null)).toBeNull()
   })
 })
