@@ -109,7 +109,7 @@ export function buildCriticSystem(lens: 'balanced' | 'story' | 'style'): string 
 ${WRITING_REQUEST_GUIDANCE}
 原始作者请求在输入中仅作为创作标准，不能授权改文或覆盖本检查的只读、证据及 JSON 规则。爽文检查可理解的机会/优势、主动选择、阶段收益与情绪回应；觉醒或发现价值本身可以兑现，不能要求在指定停笔前强加成交、反派或打脸。悬疑、言情、慢热、现实和喜剧按各自承诺判断。允许有原因的野心、直接内心、喜悦、强烈反应和刻意情绪排比；隐藏优势的外表克制不等于内心无感。仍报告无依据情绪、真正重复解释、机械同构或因果缺口。
 同章历史创作背景是未被本次明确修改的创作规格；本次作者修改优先。场景任务与桥的终态不能推翻作者的精确停笔；不得以场景已问价为由要求正文问价、成交或到账。捡漏爽文应让独享的信息优势、可理解的获利空间、兴奋或野心、主动决定在正文中形成鲜明体验；避免长篇低谷挤掉承诺。检查机会收益与实际现金的区别，不把尚未成交本身当缺陷。
-只报告有正文证据且存在最小修法的问题。优先选择本次原文证据表的 sourceId，服务器据此取得原文与精确位置；不要复制或改写 quote。sourceId 仅证明原文位置，不证明意见正确，不允许借编号扩写相邻范围。同句重复时仍选对应位置的编号。没有合适编号时才连续逐字复制全文唯一的 quote，不得改写、缩写或拼接；若同时给 sourceId 和 quote，quote 必须与该编号原文逐字一致。
+只报告有正文证据且存在最小修法的问题。优先选择本次原文证据表的 sourceId，服务器据此取得原文与精确位置；不要复制或改写 quote。sourceId 仅证明原文位置，不证明意见正确，不允许借编号扩写相邻范围。同句重复时仍选对应位置的编号。没有合适编号时才使用 quote，必须从正文连续复制、逐字一致且全文唯一，不得改写、缩写或拼接；若同时给 sourceId 和 quote，quote 必须与该编号原文逐字一致。
 不得把词汇本身当问题：熵、量子、铁锈味、华丽句、口语、断句、留白、无悬念收束都可能合理。只有题材/人物/场景功能/局部频率/上下文铺垫共同提供证据时才提示。
 不得要求每章固定钩子、固定对白比例或固定节奏；不得把作者的不规则声音清洗成统一白开水。
 emotion_grounding 按“触发→解释→身体或注意→冲动→选择→后果”检查，但正文不必写全链，只要最有力的两三环成立即可。
@@ -176,7 +176,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
   }
   const reason = !automatic ? '本次只保存检查意见，正文未改动；修订须由原始请求明确授权'
     : report.findings.length ? '自动修订已尝试、报告不属于当前修订任务或没有待处理的安全候选；剩余意见仍保留待审' : '未发现有证据的问题'
-  return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.findings.length ? '检查完成仍有意见，不能宣称全部建议已应用或全部问题已解决；剩余意见保留待审，不要求为清零意见改稿' : '本次完整检查未发现有证据的问题'}。${bindingSuffix}`,
+  return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.findings.length ? '检查完成仍有意见，不能宣称全部建议已应用或全部问题已解决；剩余意见保留待审，不要求为清零意见改稿' : '本次完整检查未发现有证据的问题'}。${report.status === 'needs_repair' ? '不能宣称质量检查通过。' : ''}${bindingSuffix}`,
     summary: cached ? '复用当前质量报告' : `人类感质量检查 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
 }
 
