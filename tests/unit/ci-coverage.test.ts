@@ -37,10 +37,12 @@ describe('pinned Vitest 3 coverage collection compatibility', () => {
   it('includes ordinary business code while preserving the NUL/encoded/hidden/test exclusions', () => {
     const filter = new TestExclude({ cwd: root, extension: coverageConfigDefaults.extension, exclude: coverageConfigDefaults.exclude })
     const included = (file: string) => filter.shouldInstrument(file)
-    expect(config.test!.coverage!.all).toBe(true)
-    expect(config.test!.coverage!.experimentalAstAwareRemapping).toBe(false)
-    expect(config.test!.coverage!.include).toBeUndefined()
-    expect(config.test!.coverage!.exclude).toBeUndefined()
+    const coverage = config.test!.coverage!
+    if (coverage.provider !== 'v8') throw new Error('Expected the pinned V8 coverage provider')
+    expect(coverage.all).toBe(true)
+    expect(coverage.experimentalAstAwareRemapping).toBe(false)
+    expect(coverage.include).toBeUndefined()
+    expect(coverage.exclude).toBeUndefined()
     expect(coverageConfigDefaults.extension).toEqual(['.js', '.cjs', '.mjs', '.ts', '.mts', '.tsx', '.jsx', '.vue', '.svelte', '.marko', '.astro'])
     expect(included(`${root.replaceAll('\\', '/')}/src/App.tsx`)).toBe(true)
     // Complete Vitest 3.2.7 coverage.extension defaults, not a narrower JS/TS set.
@@ -88,6 +90,36 @@ describe('CI coverage blob evidence gate', () => {
     }
     for (const hits of [[1, null], [1, -0.5], [1, '-1'], [1, Infinity], [1, Number.NaN]]) expect(() => validateCoverageBlob(blob({ [path]: { ...file, branchMap: { 0: implicitElse }, b: { 0: hits } } }), root)).toThrow()
     for (const modified of [{ ...file, s: { 0: -1 } }, { ...file, f: { 0: -1 } }]) expect(() => validateCoverageBlob(blob({ [path]: modified }), root)).toThrow()
+  })
+  it('accepts signed end columns only for the complete official all/empty-report placeholder', () => {
+    const position = { start: { line: 1, column: 461 }, end: { line: 17, column: -317 } }
+    const empty = { ...file, all: true, s: { 0: 0 }, f: { 0: 0 }, b: { 0: [0] }, fnMap: { 0: { name: '(empty-report)', loc: position, decl: position } }, branchMap: { 0: { type: 'branch', loc: position, locations: [position] } } }
+    for (const hit of [0, 1]) {
+      const value = blob({ [path]: { ...empty, f: { 0: hit }, b: { 0: [hit] } } }), before = clone(value)
+      expect(validateCoverageBlob(value, root).totals).toEqual({ statements: 1, functions: 1, branches: 1, lines: 1 })
+      expect(value).toEqual(before)
+    }
+    for (const bad of [
+      { ...empty, all: false }, { ...empty, s: { 0: 1 } }, { ...empty, f: { 0: 2 }, b: { 0: [2] } }, { ...empty, b: { 0: [1] } },
+      { ...empty, fnMap: { 0: { ...empty.fnMap[0], name: 'ordinary' } } },
+      { ...empty, fnMap: { 0: { ...empty.fnMap[0], decl: loc } } },
+      { ...empty, branchMap: { 0: { ...empty.branchMap[0], type: 'if' } } },
+      { ...empty, branchMap: { 0: { ...empty.branchMap[0], locations: [loc] } } },
+      { ...empty, fnMap: { ...empty.fnMap, 1: empty.fnMap[0] }, f: { 0: 0, 1: 0 } },
+      { ...empty, branchMap: { ...empty.branchMap, 1: empty.branchMap[0] }, b: { 0: [0], 1: [0] } },
+    ]) expect(() => validateCoverageBlob(blob({ [path]: bad }), root)).toThrow()
+    for (const badPosition of [
+      ...[null, -0.5, '-317', Infinity, Number.NaN].map(column => ({ ...position, end: { ...position.end, column } })),
+      { ...position, start: { ...position.start, column: -1 } },
+      { ...position, start: { ...position.start, line: 0 } },
+      { ...position, end: { ...position.end, line: 1 } },
+      { ...position, start: { ...position.start, line: 18 } },
+    ]) {
+      const bad = { ...empty, fnMap: { 0: { ...empty.fnMap[0], loc: badPosition, decl: badPosition } }, branchMap: { 0: { ...empty.branchMap[0], loc: badPosition, locations: [badPosition] } } }
+      expect(() => validateCoverageBlob(blob({ [path]: bad }), root)).toThrow()
+    }
+    const statementNegative = { ...empty, statementMap: { 0: position } }
+    expect(() => validateCoverageBlob(blob({ [path]: statementNegative }), root)).toThrow()
   })
   it.each([undefined, null, {}, [], [['1', '2', '3', '4']], blob({}), blob({ bogus: {} }), blob(undefined, '4.1.11')])('rejects missing/empty/corrupt/version-mismatched coverage: %s', value => {
     expect(() => validateCoverageBlob(value, root)).toThrow()

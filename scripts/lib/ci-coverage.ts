@@ -18,12 +18,17 @@ function sourcePath(value: unknown, root: string) {
   const path = relative(resolve(root), value)
   if (path === '..' || path.startsWith('../') || path.startsWith('..\\') || isAbsolute(path) || !existsSync(value) || !statSync(value).isFile()) throw new Error('Coverage source is outside the current checkout or missing')
 }
-function location(value: unknown) {
+function location(value: unknown, syntheticEmptyReport = false) {
   const loc = record(value), start = record(loc.start), end = record(loc.end)
   const startLine = count(start.line), endLine = count(end.line)
   // ast-v8-to-istanbul remaps an end-of-line column to Infinity. The official
   // blob JSON serializes that endpoint as null; start positions stay concrete.
-  const startColumn = count(start.column), endColumn = end.column === null ? Infinity : count(end.column)
+  const startColumn = count(start.column)
+  let endColumn: number
+  if (syntheticEmptyReport) {
+    if (typeof end.column !== 'number' || !Number.isSafeInteger(end.column)) throw new Error('Invalid synthetic coverage endpoint')
+    endColumn = end.column
+  } else endColumn = end.column === null ? Infinity : count(end.column)
   if (!startLine || endLine < startLine || endLine === startLine && endColumn < startColumn) throw new Error('Invalid coverage location')
   return startLine
 }
@@ -80,13 +85,30 @@ export function validateCoverageBlob(value: unknown, root: string) {
     const statements = record(file.s), functions = record(file.f), branches = record(file.b)
     const statementMap = record(file.statementMap), functionMap = record(file.fnMap), branchMap = record(file.branchMap)
     sameKeys(statements, statementMap); sameKeys(functions, functionMap); sameKeys(branches, branchMap)
+    const fnIds = Object.keys(functions), branchIds = Object.keys(branches)
+    const fn = fnIds.length === 1 ? record(functionMap[fnIds[0]]) : undefined
+    const branch = branchIds.length === 1 ? record(branchMap[branchIds[0]]) : undefined
+    // The pinned legacy converter's coverage.all placeholder selects every
+    // original source line, then subtracts that last line's absolute offset
+    // from the transformed end offset. That synthetic end column can be < 0.
+    // Recognize only the official whole-file placeholder; no counters or raw
+    // positions are rewritten, and normal statement/function bounds stay strict.
+    const syntheticEmptyReport = file.all === true && fn?.name === '(empty-report)' && branch?.type === 'branch'
+      && Array.isArray(branch.locations) && branch.locations.length === 1
+      && Object.values(statements).every(hits => hits === 0)
+      && [0, 1].includes(functions[fnIds[0]] as number)
+      && Array.isArray(branches[branchIds[0]]) && (branches[branchIds[0]] as unknown[]).length === 1
+      && (branches[branchIds[0]] as unknown[])[0] === functions[fnIds[0]]
+      && JSON.stringify(fn.loc) === JSON.stringify(fn.decl)
+      && JSON.stringify(fn.loc) === JSON.stringify(branch.loc)
+      && JSON.stringify(fn.loc) === JSON.stringify(branch.locations[0])
     const lines = new Set<number>()
     for (const [id, hits] of Object.entries(statements)) { count(hits); lines.add(location(statementMap[id])); totals.statements++ }
-    for (const [id, hits] of Object.entries(functions)) { count(hits); location(record(functionMap[id]).loc); totals.functions++ }
+    for (const [id, hits] of Object.entries(functions)) { count(hits); location(record(functionMap[id]).loc, syntheticEmptyReport); totals.functions++ }
     for (const [id, hits] of Object.entries(branches)) {
       const branch = record(branchMap[id])
       if (!Array.isArray(hits) || !hits.length || !Array.isArray(branch.locations) || branch.locations.length !== hits.length) throw new Error('Invalid coverage branch counters')
-      location(branch.loc)
+      location(branch.loc, syntheticEmptyReport)
       // ast-v8-to-istanbul emits signed branch counts from V8 range subtraction.
       // Preserve the official numeric array; Istanbul covers branches iff > 0.
       if (hits.some(hit => typeof hit !== 'number' || !Number.isSafeInteger(hit))) throw new Error('Invalid coverage branch count')
@@ -95,7 +117,7 @@ export function validateCoverageBlob(value: unknown, root: string) {
         // Istanbul represents the implicit else of `if (...) return ...` with
         // empty endpoints. Its enclosing branch still has a real source loc.
         if (branch.type === 'if' && hits.length === 2 && index === 1 && !Object.keys(record(loc.start)).length && !Object.keys(record(loc.end)).length) return
-        location(loc)
+        location(loc, syntheticEmptyReport)
       })
       totals.branches += hits.length
     }
