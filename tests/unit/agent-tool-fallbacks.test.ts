@@ -43,7 +43,9 @@ describe('Agent 工具协议与结构化输出兜底', () => {
   it('连续性评审提示词限定 error 判定并禁止换表述重报，表达类问题不升格', () => {
     expect(continuityCriticSystem).toContain('判定纪律')
     expect(continuityCriticSystem).toContain('error 仅限同一对象同一维度')
-    expect(continuityCriticSystem).toContain('最多记 warning')
+    expect(continuityCriticSystem).toContain('确有证据风险的记 warning，纯表达推进不报')
+    expect(continuityCriticSystem).toContain('明确互斥事实即使无法安全修复也仍记 error')
+    expect(continuityCriticSystem).toContain('章节桥是待核摘要，不可单凭桥接摘要与正文的差异判错')
   })
   it('统一解包字符串 arguments 与命名参数列表', () => {
     expect(coerceToolArgumentEnvelope({ arguments: '{"title":"第六章规划","content":"完整正文"}' })).toEqual({ title: '第六章规划', content: '完整正文' })
