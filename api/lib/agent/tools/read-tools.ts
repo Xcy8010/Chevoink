@@ -197,6 +197,8 @@ export const chapterReadTool = defineTool({
       output,
       summary: `读取《${chapter.title}》 ${offset}-${offset + slice.length} 字`,
       observedState: { kind: 'chapter', id: chapter.id, revision: chapter.revision },
+      observedChapterRange: { targetId: chapter.id, contentHash: createHash('sha256').update(chapter.content).digest('hex'),
+        start: Math.min(offset, chapter.content.length), end: Math.min(offset + slice.length, chapter.content.length) },
     }
   },
 })

@@ -70,6 +70,8 @@ export type ToolContext = {
 }
 
 export type ToolResult = {
+  /** Server-observed body and returned range, never model-provided progress. */
+  observedChapterRange?: import('../semantic-progress.js').ChapterReadEvidence
   /** Server-only successful create noop. Hashed/journaled with the observation;
    * it cannot certify authored content or replace an earlier write receipt. */
   chapterCreateReuse?: { version: 1; userId: string; novelId: string; chapterId: string; revision: number }

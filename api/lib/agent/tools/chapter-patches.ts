@@ -7,7 +7,7 @@ export type ChapterPatch = { oldText: string; newText: string }
 export function composeChapterEdit(before: string, args: {
   patches?: ChapterPatch[]; oldText?: string; newText?: string; start?: number; end?: number
 }) {
-  const invalid = () => { throw new DataAccessError(409, 'CHAPTER_ANCHOR_CONFLICT', '替换参数无效、原文锚点不唯一或区间重叠，全部正文变更未执行。请重新读取当前正文后一次合并提交。') }
+  const invalid = () => { throw new DataAccessError(409, 'CHAPTER_ANCHOR_CONFLICT', '替换参数无效、原文锚点不唯一或区间重叠，全部正文变更未执行。请重新读取当前正文并重新定位本次修改；相关改动可合并提交。') }
   if (args.patches && ([args.oldText, args.newText, args.start, args.end].some(value => value !== undefined)
     || args.patches.length < 1 || args.patches.length > 8)) invalid()
   const patches = args.patches ?? [{ oldText: args.oldText, newText: args.newText, start: args.start, end: args.end }]

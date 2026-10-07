@@ -1,4 +1,4 @@
-import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, semanticReadIdentity, nextStagnantBatch } from './semantic-progress.js'
+import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
 import { randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
@@ -52,7 +52,7 @@ import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestr
 import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-text.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { createEmptyResponseGuard, createProtocolRecoveryGuard, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
-import { toolFailureRecovery } from './tool-failure-recovery.js'
+import { toolFailureRecovery, toolRecoveryKey } from './tool-failure-recovery.js'
 import { readChapterReviewReadiness, probeChapterReviewRevision } from './chapter-review-guard.js'
 import { nextMergedReviewReminder, nextReviewDispatch } from './review-dispatch.js'
 import { activeChapterScope } from '../data/internal.js'
@@ -248,6 +248,7 @@ type ToolCallOutcome = {
   observation: string
   requiredResult?: { targetId: string; contentHash: string }
   semanticTransition?: { targetId: string; beforeHash: string; afterHash: string }
+  observedChapterRange?: import('./semantic-progress.js').ChapterReadEvidence
   part: Extract<AgentMessagePart, { type: 'tool-call' }>
   /** 附属分部：子 Agent 内嵌执行产生的内部工具调用卡片，随父消息一并落库与直播 */
   extraParts?: AgentMessagePart[]
@@ -511,6 +512,7 @@ export async function handleToolCall(
       observation: wrapToolOutput(tool.name, result.output),
       requiredResult: result.requiredResult,
       semanticTransition: result.semanticTransition,
+      observedChapterRange: result.observedChapterRange,
       part: {
         ...basePart,
         args: validated.data,
@@ -1567,7 +1569,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             automaticReviewAttempts.add(key)
             await persistCheckpoint()
             automaticReviewTriggered = true
-            mergedReviewReminder = `[系统/只读状态] 当前 compilationId=${readiness.compilationId}、chapterId=${readiness.chapterId}、r${readiness.revision} 的检查已完成，但一次原授权合并修订尚未处理。读取当前完整正文和两类报告${readiness.qualityReportId ? `（质量报告 ${readiness.qualityReportId}）` : ''}；核对原文事实，合并安全的事实与审美修法，用一次 chapter_edit_range patches 应用，不能仅替换同义词后声称全部完成。不能安全修改的候选用 retainedFindings 绑定原意见并写明具体原因，可留置全部意见而不改文；不得增加修订轮数、付费重放或改变原请求范围。实际改文后只读复核当前版本，再提交终态。`
+            mergedReviewReminder = `[系统/只读状态] 当前 compilationId=${readiness.compilationId}、chapterId=${readiness.chapterId}、r${readiness.revision} 的检查已完成，仍有原授权范围内的意见待处理。核对当前正文和两类报告${readiness.qualityReportId ? `（质量报告 ${readiness.qualityReportId}）` : ''}；优先合并安全的事实与审美修改，也可分步调用 chapter_edit_range 或 chapter_write，不限一次调用。不能仅替换同义词后声称全部完成；不能安全修改的候选可用 retainedFindings 绑定原意见并写明具体原因，也可明确留置全部意见。普通编辑不增加付费自动修订或检查额度，不重放未知请求或改变原范围。完成实际修改后，在既有检查次数内复核最终版本，再提交终态。`
           }
         }
       }
@@ -1778,33 +1780,19 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const preflightTool = tools.find(tool => tool.name === call.name)
         const preflightArgs = reviewPreflightArgs(call, preflightTool)
         if (preflightTool && preflightArgs && preflightTool.parameters.safeParse(preflightArgs).success
-          && ['chapter_bridge_commit', 'chapter_edit_range', 'chapter_write', 'chapter_append'].includes(call.name)) {
+          && call.name === 'chapter_bridge_commit') {
           const parsed = preflightArgs
           const compilationId = typeof parsed.compilationId === 'string' ? parsed.compilationId : undefined
           const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
             { userId: params.userId, novelId: params.novelId, runId }, compilationId))
-          let needsReview = call.name === 'chapter_bridge_commit' && readiness?.checksRequired
-          if (!needsReview && readiness && !readiness.ready && ['chapter_edit_range', 'chapter_write', 'chapter_append'].includes(call.name)) {
-            const args = parsed
-            const target = typeof args.chapterId === 'string' && args.chapterId.trim() ? args.chapterId.trim() : getLastTouchedChapter(runId) ?? params.chapterId
-            if (target === readiness.chapterId) {
-              const channel = await prisma.$transaction(tx => probeChapterReviewRevision(tx,
-                { userId: params.userId, novelId: params.novelId, runId }, { id: readiness.chapterId, revision: readiness.revision }))
-              needsReview = !channel.open && channel.code === 'REVIEW_REPAIR_RECHECK_REQUIRED'
-                || channel.open && readiness.checksRequired && (readiness.continuity === 'complete' || readiness.quality === 'complete')
-            }
-          }
-          if (needsReview) {
+          // Ordinary edits retain their original writing authority. Check the
+          // final saved body at COMMIT, without discarding partial edits or
+          // spending a fresh paid assessment between each fragment.
+          if (readiness?.checksRequired) {
             const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts)
             if (next.kind === 'tool') {
               const required = { id: `review_${messageId}_${callIndex}_${randomUUID()}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
-              if (call.name === 'chapter_bridge_commit') effectiveToolCalls.splice(callIndex, 0, required)
-              else {
-                // The missing assessment can add findings. Discard unexecuted
-                // proposals and let the model build one merged correction from
-                // the saved reports; never execute its pre-check patch blindly.
-                effectiveToolCalls.splice(callIndex, effectiveToolCalls.length - callIndex, required)
-              }
+              effectiveToolCalls.splice(callIndex, 0, required)
               const note = '正在完成当前版本的必要检查，之后再核对修订与章节终态。'
               for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') parts.splice(index, 1)
               parts.push({ type: 'text', text: note })
@@ -1931,10 +1919,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           if (failures >= 3) forceWrapUpReason = `工具 ${call.name} 连续三次参数无效，已停止重复消耗；已成功保存的内容保留，该工具未完成。`
         }
         if (outcome.recoveryCode) {
-          const key = `${call.name}:${outcome.recoveryCode}:${signature}`
+          const key = toolRecoveryKey(call.name, outcome.recoveryCode, outcome.part.args, getLastTouchedChapter(runId) ?? params.chapterId)
           const failures = (recoveryFailures.get(key) ?? 0) + 1
           recoveryFailures.set(key, failures)
-          if (failures >= 3) forceWrapUpReason = `${outcome.part.title}反复遇到同一问题：${outcome.part.summary}。已停止相同参数重试，未绕过校验；请先核对目标和来源，已保存内容保留。`
+          if (failures >= 3) forceWrapUpReason = `${outcome.part.title}在同一目标上三次遇到同一问题：${outcome.part.summary}。更换参数、工具或重复读取没有解决该拒绝，已停止无进展重试；已保存内容保留，任务尚未完成。`
         }
         lastActivityAt = Date.now()
         // 滑窗更新：只记成功执行；失败不碰窗口（同签名重试不会被误杀）
@@ -1945,14 +1933,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const durableProgress = contentProgress || structureProgress
           const requiredProgress = Boolean(outcome.requiredResult && observeRequiredResult(progressSignatures,
             `chapter:${outcome.requiredResult.targetId}`, outcome.requiredResult.contentHash))
-          const readKey = semanticReadIdentity(call.name, outcome.observation)
-          const readProgress = Boolean(readKey && !progressSignatures.has(readKey))
-          if (readKey) progressSignatures.add(readKey)
+          const readProgress = observeSemanticReadProgress(progressSignatures, call.name, outcome.observation, outcome.observedChapterRange)
           admission.record(admissionKey, outcome.observation, durableProgress || requiredProgress)
           if (durableProgress || requiredProgress || readProgress) {
             batchProgress = true
             todoReminders = 0
-            recoveryFailures.clear()
+            if (durableProgress || requiredProgress) recoveryFailures.clear()
             blockedRepeat = 0
             if (durableProgress || requiredProgress) writeProgressCount += 1
             if (readProgress) readProgressCount += 1

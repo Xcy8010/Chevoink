@@ -1,9 +1,20 @@
+/** Retry identity follows the failed operation and target, not a reformulated
+ * manuscript or a different writer tool. Actual saved progress resets it. */
+export function toolRecoveryKey(action: string, code: string, args: unknown, fallbackChapterId?: string | null): string {
+  const value = args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {}
+  const manuscript = ['chapter_write', 'chapter_edit_range', 'chapter_append'].includes(action)
+  const target = ['chapterId', 'compilationId', 'memoryId', 'volumeId', 'taskId']
+    .map(key => value[key]).find(item => typeof item === 'string' && item.trim())
+    ?? (manuscript ? fallbackChapterId : null) ?? null
+  return JSON.stringify([manuscript ? 'chapter-manuscript' : action, code, typeof target === 'string' ? target.trim() : target])
+}
+
 /** Domain failures remain failures. Recovery must never relax ownership,
  * source revisions, author deletion, or quality gates. */
 export function toolFailureRecovery(code: string): { label: string; guidance: string } | undefined {
   const entries: Record<string, { label: string; guidance: string }> = {
-    REVIEW_MERGED_REVISION_REQUIRED: { label: '需要一次完整合并修订', guidance: '正文未变化，修订机会未消费。读取完整正文与全部当前报告，核对证据并合并全部安全修法，用一次 chapter_write 提交完整正文；不能逐条 chapter_edit_range 或追加片段，也不能宣称整体写入证明全部问题已修复。' },
-    REVIEW_REPAIR_RECHECK_REQUIRED: { label: '需要复核当前版本', guidance: '原稿已保存，旧报告不构成改稿证据。仅在原检查次数内复核当前版本，再合并一次尚未执行的授权修订；不要重置次数或重绑旧报告。' },
+    REVIEW_MERGED_REVISION_REQUIRED: { label: '修订依据需要核对', guidance: '本次修改被拒绝，未写入。按具体拒绝原因核对当前报告绑定和留置意见；quality findingId 必须使用报告返回的真实编号，不能用序号代替。普通正文编辑可在原授权范围内分步调用 chapter_edit_range 或 chapter_write，批量合并只是建议；不要只换工具或重复读取相同正文来重试同一拒绝，也不能把保存修订当作新版检查通过。' },
+    REVIEW_REPAIR_RECHECK_REQUIRED: { label: '需要复核当前版本', guidance: '已保存正文保留，旧报告不能认证新版。普通编辑可在原授权范围内继续，提交前在既有检查次数内复核最终正文；检查次数用尽时如实说明当前版本尚未完成检查，不要重置次数、重绑旧报告或反复调用已耗尽的检查。' },
     CHAPTER_ANCHOR_CONFLICT: { label: '正文片段需要重新定位', guidance: '仅对本次原目标调用 chapter_read，逐字使用当前版本中的唯一连续原文。不要猜测其他章节 ID、替换到其他章节或照旧报告强行写入。' },
     TODO_CHANGE_REASON_REQUIRED: { label: '待办需要保留原项目身份', guidance: '读取当前清单，更新时保留原 id。确有新增的原授权工作请给出 changeReason，不重建整张清单或扩大章节范围。' },
     CONTINUITY_CHECK_REQUIRED: { label: '当前版本尚未完成连续性检查', guidance: '先完成当前正文的 continuity_validate，保留现有编译和检查次数，不能把缺报告视为通过。' },

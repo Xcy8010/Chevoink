@@ -200,8 +200,10 @@ describe.runIf(available)('real durable default execution control', () => {
     })
   })
 
-  it('checks every fully observed batch and parks repeated same-state reads with durable replay proof', async () => {
+  it('parks unchanged full/subset chapter reads with durable replay proof', async () => {
     await fixture(async f => {
+      const body = '原文'.repeat(440) + '。'
+      await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: body, wordCount: body.length } })
       const token = await claim(f)
       const tool = chapterReadTool
       await initializeExecutionState(token, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
@@ -215,7 +217,7 @@ describe.runIf(available)('real durable default execution control', () => {
         const { frame } = await loadExecutionState(f.userId, f.runId)
         await saveExecutionState(token, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
           snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: null,
-            toolCalls: [{ id: `read-${index}`, name: tool.name, arguments: JSON.stringify({ chapterId: f.chapterId }) }] }] } })
+            toolCalls: [{ id: `read-${index}`, name: tool.name, arguments: JSON.stringify({ chapterId: f.chapterId, offset: 0, limit: [881, 50, 10, 20, 100][index] }) }] }] } })
         await executeDurableToolStep(token, new AbortController().signal)
         const current = await loadExecutionState(f.userId, f.runId)
         const evidence = await withRunLease(token, tx => collectDurableToolEvidence(tx, f.rootId, current.frame.revision))
@@ -226,7 +228,8 @@ describe.runIf(available)('real durable default execution control', () => {
         expect(await advanceDurableToolStagnation(token)).toEqual(decision)
       }
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.stagnation' } })).toBe(5)
-      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('原文')
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(body)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
       const last = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'execution.stagnation' }, orderBy: { sequence: 'desc' } })
       await prisma.agentExecutionOutbox.update({ where: { id: last.id }, data: { payload: runtimeJson({ ...(last.payload as object), stagnantBatches: 0 }).value } })
       await expect(advanceDurableToolStagnation(token)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })

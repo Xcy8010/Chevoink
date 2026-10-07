@@ -430,7 +430,7 @@ export const sceneTaskBuildTool = defineTool({
     }
     const tasks = await saveSceneTasks({ userId: ctx.userId, novelId: ctx.novelId, compilationId: compilation.id, tasks: args.tasks, alternatives: args.alternatives }, ctx.transaction)
     return {
-      output: `BEAT 完成，已为 compilationId=${compilation.id} 建立 ${tasks.length} 个 Scene Task；精品候选取舍已由服务端记录。现在按顺序完成连贯正文，再提交章节终态。写作交付按原始作者请求完成当前版本连续性与质量检查，仅原始请求可明确跳过。先完成两类报告，再将全部安全事实与质量修法合并为一次 chapter_edit_range 的 patches 精确批量替换（最多8处）或 chapter_write；无可核验改动的项须引用当前检查通过 retainedFindings 逐项说明安全留置原因；修订后只读复核当前版本两类检查，最后提交终态。连续性警告保留待审；不能安全落实的质量候选逐项留置，不为清零意见反复改稿。`,
+      output: `BEAT 完成，已为 compilationId=${compilation.id} 建立 ${tasks.length} 个 Scene Task；精品候选取舍已由服务端记录。现在按顺序完成连贯正文，再提交章节终态。写作交付按原始作者请求完成当前版本连续性与质量检查，仅原始请求可明确跳过。相关安全事实与质量修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write，不硬性限制为一次调用或要求每次覆盖全部候选。每次依据当前正文精确定位，不把报告当作额外权限；全部修改后只读复核最终版本两类检查，最后提交终态。不能安全落实的意见保留，可用 retainedFindings 绑定当前报告并说明原因；留置不冒充修复，不为清零意见循环改稿。付费检查、自动修订和未知调用保持既有保护。`,
       summary: `建立 ${tasks.length} 个场景任务`,
       display: {
         kind: 'storyCompiler', compilationId: compilation.id, phase: 'beat', title: '场景任务',

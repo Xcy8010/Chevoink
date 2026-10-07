@@ -1,5 +1,5 @@
 import { assertWritingTarget } from '../writing-scope.js'
-import { assertChapterReviewRevision } from '../chapter-review-guard.js'
+import { assertChapterManuscriptRevision } from '../chapter-review-guard.js'
 import { z } from 'zod'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from '../craft-library.js'
@@ -134,11 +134,11 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
       editRanges = edit.ranges
     }
     const changed = before !== after
-    if (!changed && args.retainedFindings?.length) await assertChapterReviewRevision(tx, ctx, chapter, {
+    if (!changed) await assertChapterManuscriptRevision(tx, ctx, chapter, {
       mutation: action === 'chapter_write' ? 'replace' : 'range', mergedBatch: !!args.patches, after, editRanges, retainedFindings: args.retainedFindings,
     })
     if (changed) {
-      const consumeReviewRevision = await assertChapterReviewRevision(tx, ctx, chapter, {
+      const consumeReviewRevision = await assertChapterManuscriptRevision(tx, ctx, chapter, {
         mutation: action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range',
         mergedBatch: !!args.patches,
         after, editRanges, retainedFindings: args.retainedFindings,

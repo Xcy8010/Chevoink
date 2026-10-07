@@ -7,7 +7,7 @@ import { DataAccessError, prisma } from '../../prisma.js'
 import { getChapterBaseline, getCreatedChapter, getLastTouchedChapter, recordChapterBaseline, recordCreatedChapter } from '../baseline.js'
 import { activeChapterScope, recalculateNovelStats } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
-import { assertChapterReviewRevision, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
+import { assertChapterManuscriptRevision, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { placeCreatedChapter, resolveChapterPlacement } from '../../data/volume.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
@@ -87,12 +87,12 @@ async function updateOwnedChapterAtRevision(
     await assertAgentManuscriptCurrent(tx, ctx)
     await assertWritingTarget(tx, ctx, { chapterId: chapter.id })
     if (typeof data.content === 'string' && data.content === chapter.content) {
-      if (review?.retainedFindings?.length) await assertChapterReviewRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review, after: data.content })
+      await assertChapterManuscriptRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review, after: data.content })
       // Authenticate the still-active revision inside the transaction even for
       // a no-op. It must spend neither a manuscript CAS nor a merged correction.
       return tx.chapter.findFirst({ where: { id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision } })
     }
-    const consumeReviewRevision = data.content !== undefined ? await assertChapterReviewRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review,
+    const consumeReviewRevision = data.content !== undefined ? await assertChapterManuscriptRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review,
       ...(typeof data.content === 'string' ? { after: data.content } : {}) }) : undefined
     const result = await tx.chapter.updateMany({
       where: {
@@ -405,7 +405,7 @@ export const chapterEditRangeTool = defineTool({
   name: 'chapter_edit_range',
   title: '改写章节片段',
   description:
-    '按当前原文精确替换章节片段。多项修订用一次 patches（最多8处），所有 oldText 必须从同一次 chapter_read 逐字复制、唯一且不重叠；任一无效则全部不写入。单片段可用 oldText/newText；仅作者选区提供坐标时用 start/end。批量与单片段参数互斥，一次批量只占一次原子写入与授权修订。',
+    '按当前原文精确替换章节片段。相关改动优先合并为 patches（每次最多8处），也可连续调用单片段替换；每次 oldText 必须来自当前正文、唯一且不重叠，任一无效则本批全部不写入。单片段用 oldText/newText；仅作者选区提供坐标时用 start/end。批量与单片段参数互斥，每批为一次原子写入，调用次数不作为正文修订权限。',
   parameters: chapterEditArguments,
   permission: WRITE_PERMISSION,
   readOnly: false,

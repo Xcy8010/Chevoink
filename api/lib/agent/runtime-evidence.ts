@@ -1,4 +1,4 @@
-import { observeSemanticTransition, observeRequiredResult, semanticReadIdentity } from './semantic-progress.js'
+import { observeSemanticTransition, observeRequiredResult, semanticReadIdentity, observeSemanticReadProgress } from './semantic-progress.js'
 import { z } from 'zod'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame } from './runtime-state.js'
@@ -7,7 +7,9 @@ import { hasReadFullToolOutput } from './runtime-observed-baseline.js'
 import { durableProgressSchema } from './runtime-checkpoint.js'
 
 const inputSchema = z.object({ input: z.object({ callId: z.string(), normalization: z.object({ sourceRevision: z.number().int().nonnegative() }) }) })
-const resultSchema = z.object({ toolResult: z.object({ output: z.string(), summary: z.string(), outcome: z.literal('failed').optional(), semanticTransition: z.object({ targetId: z.string().min(1), beforeHash: z.string().regex(/^[a-f0-9]{64}$/), afterHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(), requiredResult: z.object({ targetId: z.string().min(1), contentHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional() }).passthrough(), progress: z.unknown().optional() })
+const resultSchema = z.object({ toolResult: z.object({ output: z.string(), summary: z.string(), outcome: z.literal('failed').optional(), semanticTransition: z.object({ targetId: z.string().min(1), beforeHash: z.string().regex(/^[a-f0-9]{64}$/), afterHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(), requiredResult: z.object({ targetId: z.string().min(1), contentHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+  observedChapterRange: z.object({ targetId: z.string().min(1), contentHash: z.string().regex(/^[a-f0-9]{64}$/), start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }).strict().refine(value => value.end >= value.start).optional(),
+}).passthrough(), progress: z.unknown().optional() })
 /** Receipt metadata is evidence only after its exact observation entered the
  * saved context. Repeated reads, bookkeeping and failed outcomes are not new
  * progress and cannot reset the task's stagnation ceiling. */
@@ -51,7 +53,7 @@ export async function collectDurableToolEvidence(tx: RuntimeTx, taskRootId: stri
       if (identity) {
         if (message.content !== formatDurableToolObservation(operation.action, result.data.toolResult.output)
           && !await hasReadFullToolOutput(tx, taskRootId, revision, { operationId: operation.id, resultHash: receipt.resultHash, output: result.data.toolResult.output })) continue
-        if (!observations.has(identity)) { progressSequence = String(event.sequence); observations.add(identity) }
+        if (observeSemanticReadProgress(observations, operation.action, result.data.toolResult.output, result.data.toolResult.observedChapterRange)) progressSequence = String(event.sequence)
       }
     }
     if (events.length < 100) break

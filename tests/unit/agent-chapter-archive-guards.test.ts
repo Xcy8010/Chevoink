@@ -26,7 +26,7 @@ vi.mock('../../api/lib/data/internal.js', async original => ({
 vi.mock('../../api/lib/data/volume.js', () => ({ resolveChapterPlacement: m.placement, placeCreatedChapter: m.place }))
 vi.mock('../../api/lib/agent/story-memory.js', () => ({ enqueueChapterMemoryExtraction: m.memory }))
 vi.mock('../../api/lib/agent/story-compiler.js', () => ({ recordStoryCompilerWrite: m.compiler }))
-vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({ assertChapterReviewRevision: m.reviewGuard }))
+vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({ assertChapterManuscriptRevision: m.reviewGuard }))
 vi.mock('../../api/lib/agent/craft-library.js', () => ({ assertCraftOutputSafe: m.craft }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ isAgent2FeatureEnabled: m.flags }))
 vi.mock('../../api/lib/agent/runtime-operations.js', () => ({ prepareOperation: m.prepare, commitOperationEffect: m.commit, recordToolFailure: m.failure }))
@@ -180,7 +180,8 @@ describe('legacy Agent chapter archive guards', () => {
     expect(result.display).toMatchObject({ before: 'Before', after: 'Before', revision: 4 })
     expect(m.tx.chapter.findFirst).toHaveBeenCalledWith({ where: { id: 'c', ...activeChapterScope('n'), authorId: 'u', revision: 4 } })
     expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
-    expect(m.reviewGuard).not.toHaveBeenCalled()
+    expect(m.reviewGuard).toHaveBeenCalledWith(tx, expect.objectContaining({ runId: 'r' }), expect.objectContaining({ id: 'c', revision: 4 }),
+      expect.objectContaining({ after: row.content }))
     expect(consume).not.toHaveBeenCalled()
     expectNoEffects()
   })

@@ -3,10 +3,10 @@ import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as original from '../../api/lib/agent/original-request.js'
 import * as lock from '../../api/lib/data/novel-write-lock.js'
-import { assertChapterReviewRevision, isChapterRevisionChannelOpen, probeChapterReviewRevision, continuityDecisionBinding } from '../../api/lib/agent/chapter-review-guard.js'
+import { assertChapterManuscriptRevision, assertChapterReviewRevision, isChapterRevisionChannelOpen, probeChapterReviewRevision, continuityDecisionBinding } from '../../api/lib/agent/chapter-review-guard.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
-import { readNewDraftWritingAuthority, prohibitsNewDraftRevision } from '../../api/lib/agent/writing-scope.js'
+import { readNewDraftRevision, readNewDraftWritingAuthority, prohibitsNewDraftRevision } from '../../api/lib/agent/writing-scope.js'
 
 afterEach(() => vi.restoreAllMocks())
 describe('review driven manuscript mutation admission', () => {
@@ -105,6 +105,68 @@ describe('one atomic factual correction in the original new draft', () => {
     f.db.chapterQualityReport.findMany.mockResolvedValue([report] as never)
     return report
   }
+  it('separates repeated original manuscript authority from the bounded automatic decision and paid counters', async () => {
+    const f = fixture(), report = completeQuality(f, 2)
+    f.validation.checkRounds = 3
+    report.repairRound = 1
+    const before = structuredClone(report)
+    const consume = await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: '第一处改动，其他意见未处理。' })
+    await consume?.()
+    const receipt = readNewDraftRevision(f.compilation.validation)
+    for (const mutation of ['range', 'replace', 'append'] as const) {
+      await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation, after: '后续合法修改。' })).resolves.toBeUndefined()
+    }
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 3, autoRepairRounds: 0, newDraftRevision: receipt })
+    expect(report).toEqual(before)
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toMatchObject({ open: false, code: 'REVIEW_AUTOMATION_STOPPED' })
+  })
+  it.each(['malformed', 'foreign-task', 'foreign-chapter'] as const)('ordinary writes fail closed for %s historical receipt', async scenario => {
+    const f = fixture()
+    Object.assign(f.compilation.validation, { newDraftRevision: scenario === 'malformed' ? { version: 1 } : {
+      version: 1, taskId: scenario === 'foreign-task' ? 'another-task' : f.spec.id,
+      chapterId: scenario === 'foreign-chapter' ? 'another-chapter' : f.chapter.id, compilationId: 'old-compiler', checkedRevision: 2,
+    } })
+    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: f.chapter.content }))
+      .rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it('an ordinary no-op neither mints a correction nor pretends to process current candidates', async () => {
+    const f = fixture()
+    completeQuality(f, 2)
+    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: f.chapter.content })).resolves.toBeUndefined()
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+  })
+  it('explicit original existing-chapter repair permits repeated manuscript edits after paid repair without reopening it', async () => {
+    const f = fixture('检查并修复当前章'), report = completeQuality(f)
+    f.spec.scope.writing!.targets[0].chapterId = f.chapter.id
+    report.repairRound = 1
+    f.validation.checkRounds = 3
+    const before = structuredClone(f.compilation.validation)
+    for (const after of ['第一处改动。', '第二处改动。']) {
+      await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after })).resolves.toBeUndefined()
+    }
+    expect(f.compilation.validation).toEqual(before)
+    expect(report.repairRound).toBe(1)
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toMatchObject({ open: false, code: 'REVIEW_AUTOMATION_STOPPED' })
+  })
+  it.each(['no-change-request', 'hard-constraint', 'missing-canonical-binding'] as const)('ordinary manuscript admission preserves %s denial', async scenario => {
+    const f = fixture(scenario === 'no-change-request' ? '写下一章，不要修改本章正文' : '写下一章')
+    if (scenario === 'hard-constraint') f.spec.hardConstraints.push({ id: 'preserve', kind: 'author_directive', text: '不要修改本章正文' })
+    if (scenario === 'missing-canonical-binding') f.source.writingBindings = null as never
+    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '不应写入。' }))
+      .rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it.each(['forged-id', 'old-report', 'duplicate', 'blank-reason'] as const)('ordinary write validates supplied retained bindings: %s', async scenario => {
+    const f = fixture(), quality = completeQuality(f, 1)
+    Object.assign(quality.findings[0], { id: 'finding-id' })
+    const retained = { source: 'quality' as const, reportId: scenario === 'old-report' ? 'old-report' : quality.id,
+      findingId: scenario === 'forged-id' ? '0' : 'finding-id', reason: scenario === 'blank-reason' ? ' ' : '保留作者声口。' }
+    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: '只改事实。',
+      retainedFindings: scenario === 'duplicate' ? [retained, retained] : [retained] })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
   it.each(['read_only', 'deny', 'review'] as const)('closes automatic delivery reachability for authenticated %s execution restrictions', async restriction => {
     const f = fixture()
     completeQuality(f)

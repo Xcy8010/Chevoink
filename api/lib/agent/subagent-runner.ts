@@ -1,5 +1,5 @@
 import { untilCompletionControl } from './execution-control.js'
-import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, semanticReadIdentity, nextStagnantBatch } from './semantic-progress.js'
+import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, nextStagnantBatch } from './semantic-progress.js'
 import type { AgentExecutionMode, AgentMessagePart, AgentStreamEventBody, AgentTokenUsage } from '../../../shared/contracts/index.js'
 import { recoverAgentProtocolToolCalls, stripAgentProtocolArtifacts } from '../../../shared/agent-output.js'
 import { chatWithTools, type ChatMessage } from '../ai-service.js'
@@ -249,9 +249,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         if (outcome.part.status === 'denied') denied = true
         const wrote = observeLegacyContentProgress(progress, outcome.part)
         const verified = outcome.part.status === 'success' && !!outcome.requiredResult && observeRequiredResult(progress, `chapter:${outcome.requiredResult.targetId}`, outcome.requiredResult.contentHash)
-        const readKey = outcome.part.status === 'success' ? semanticReadIdentity(call.name, outcome.observation) : null
-        const read = !!readKey && !progress.has(readKey)
-        if (readKey) progress.add(readKey)
+        const read = outcome.part.status === 'success' && observeSemanticReadProgress(progress, call.name, outcome.observation, outcome.observedChapterRange)
         const transition = outcome.part.status === 'success' ? outcome.semanticTransition : undefined
         const structure = !!transition && observeSemanticTransition(progress, `structure:${transition.targetId}`, transition.beforeHash, transition.afterHash)
         batchProgress = wrote || verified || read || structure || batchProgress

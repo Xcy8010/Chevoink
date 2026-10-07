@@ -1,5 +1,30 @@
 import { expect, it } from 'vitest'
-import { nextStagnantBatch, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, persistedContentHash, semanticReadIdentity } from '../../api/lib/agent/semantic-progress.js'
+import { nextStagnantBatch, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, persistedContentHash, semanticReadIdentity } from '../../api/lib/agent/semantic-progress.js'
+
+it('does not count the incident full-read then 50/10/20/100-character rereads as new progress', () => {
+  const seen = new Set<string>(), contentHash = persistedContentHash('same saved manuscript')
+  const read = (start: number, end: number, targetId = 'chapter') => observeSemanticReadProgress(seen, 'chapter_read', `changed wrapper ${start}-${end}`, { targetId, contentHash, start, end })
+  expect(read(0, 881)).toBe(true)
+  for (const end of [50, 10, 20, 100, 881]) expect(read(0, end)).toBe(false)
+  expect(read(0, 50, 'other')).toBe(true)
+  expect(observeSemanticReadProgress(new Set(seen), 'chapter_read', 'restored with a new revision label', { targetId: 'chapter', contentHash, start: 20, end: 50 })).toBe(false)
+  expect(observeSemanticReadProgress(seen, 'chapter_read', 'new body', { targetId: 'chapter', contentHash: persistedContentHash('changed manuscript'), start: 0, end: 50 })).toBe(true)
+})
+
+it('counts genuinely new pages and merges overlapping coverage without counting empty or invalid reads', () => {
+  const seen = new Set<string>(), contentHash = persistedContentHash('body')
+  const read = (start: number, end: number) => observeSemanticReadProgress(seen, 'chapter_read', 'body', { targetId: 'chapter', contentHash, start, end })
+  expect(read(50, 100)).toBe(true)
+  expect(read(0, 60)).toBe(true)
+  expect(read(100, 150)).toBe(true)
+  expect(read(25, 125)).toBe(false)
+  expect(seen.size).toBe(1)
+  expect(read(150, 150)).toBe(false)
+  expect(read(-1, 15)).toBe(false)
+  expect(read(0, Number.NaN)).toBe(false)
+  expect(observeSemanticReadProgress(seen, 'chapter_read', 'legacy body')).toBe(true)
+  expect(observeSemanticReadProgress(seen, 'chapter_read', 'legacy body')).toBe(false)
+})
 
 it('keeps progressing beyond old task caps while recognizing content cycles and no-ops', () => {
   const seen = new Set<string>()

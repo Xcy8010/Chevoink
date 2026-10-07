@@ -721,8 +721,8 @@ export async function commitChapterBridge(input: {
       { id: compilation.chapter.id, revision: chapter.revision })
     if (channelOpen) {
       throw new DataAccessError(409, continuityErrorCount > 0 ? 'CONTINUITY_ERRORS_REMAIN' : 'QUALITY_CHECK_REQUIRED',
-        continuityErrorCount > 0 ? '当前正文存在已核验的事实错误，仍可自动合并修订一次：请先读取完整正文，一次修完全部安全的事实错误，再提交终态。'
-          : '当前完整质量报告还有尚未处理的安全候选（含审美建议），仍可合并修订一次：请读取全部当前报告，一次精确批量修订，或逐项写明具体安全留置原因，再提交终态。检查完成不表示建议已应用。')
+        continuityErrorCount > 0 ? '当前正文存在已核验的事实错误，尚有未处理的自动修订决定：核对当前正文与真实证据，可合并或连续精确修改；全部修改后复核最终版本，再提交终态。'
+          : '当前完整质量报告还有尚未处理的安全候选（含审美建议）：核对当前报告，可合并或连续精确修改，或说明具体安全留置原因，再提交终态。检查完成不表示建议已应用。')
     }
     retainedIssueCount = continuityErrorCount + (report?.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length ?? qualityErrorCount)
   }
@@ -850,7 +850,7 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
     bundle.promises.length ? `待兑现读者承诺：${bundle.promises.slice(0, 5).map((item) => `${item.title}（${item.payoffHorizon}）`).join('；')}` : '待兑现读者承诺：无',
     active ? `本任务编译：${active.id}，chapterId=${active.chapterId ?? '尚未创建'}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，状态 ${active.status}，Scene Task ${active.sceneTasks.length} 个。${resume}` : '本任务尚未建立编译；历史检查失败不构成恢复旧任务的授权。写下一章时以前文为参考，为新章建立本任务编译。',
     chapter ? `当前正文 r${chapter.revision}，${hasBody ? `非空 ${chapter.content.trim().length} 字（已保存不等于本任务完成）` : '正文为空，未写完'}；连续性检查 revision=${validation?.checkedRevision ?? '未检查'}，状态=${validation?.independentCheck ?? '未完成'}，错误=${validation?.errorCount ?? '未知'}，警告=${validation?.warningCount ?? '未知'}；本编译质量报告 ${JSON.stringify(active?.qualityReports?.[0] ?? null)}。缺失或旧版本报告不代表通过；流水线复核请传 compilationId=${active?.id}，独立章节检查不能代替编译 CHECK。该状态仅描述此章节，其他目标仍须分别验收。` : '',
-    active ? '初稿流程：原任务冻结为新建目标且已有原任务创建绑定的本章，可对最新完整且匹配当前版本的连续性报告中的事实错误作一次合并修订；先一次校对全部错误的对象身份与原文引证，仅修同一对象同一维度的互斥事实，不能照 suggestion 机械改剧情。所有确认的事实修法合并在一次 chapter_write 或一个覆盖相关段落的补丁中，不能只修第一条再逐句换工具追加。仅警告、旧报告或失败检查不授权改稿；已有章节和明确禁止修改的请求仍按原权限处理。一次修订后保留剩余意见交作者决定，不追求零警告、不宣称未解决错误已通过。' : '',
+    active ? '初稿流程：本任务冻结的新建目标章可在原写作权限内持续修订。先核对对象身份与原文证据，仅将同一对象同一维度的互斥事实视为冲突，不照 suggestion 机械改剧情。相关修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write；不硬性限定一次调用。每次使用当前正文与版本，不要求每次覆盖全部意见；全部修改后复核最终版本。已有章节与明确禁止修改的请求仍按原权限处理。付费自动修订、检查次数及未知调用保护不变，不为清零警告循环改写，剩余意见保留真实状态。' : '',
     latestBridge?.toChapter ? `最近已提交桥（仅作背景，不证明本任务完成）：第 ${latestBridge.toChapter.orderIndex} 章《${latestBridge.toChapter.title}》，提交 r${latestBridge.targetRevision ?? '未知'}，当前 r${latestBridge.toChapter.revision}；未完成动作：${latestBridge.lastUnfinishedAction || '无'}；开放钩子：${asStringArray(latestBridge.openLoops).slice(0, 4).join('、') || '无'}` : '',
   ].filter(Boolean)
   return lines.join('\n')

@@ -30,6 +30,42 @@ const contentReads = new Set(['chapter_read', 'plan_read', 'novel_get_context', 
   'project_search', 'entity_resolve', 'impact_analyze', 'directive_list', 'story_charter_get', 'character_voice_get', 'experience_anchor_get',
   'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'structure_validate'])
 
+export type ChapterReadEvidence = { targetId: string; contentHash: string; start: number; end: number }
+
+/** Track actual newly observed character ranges, not changing offset/limit labels.
+ * The server supplies the full body hash; revisions and rereading subsets cannot
+ * manufacture progress. The compact union survives checkpoint restoration. */
+export function observeSemanticReadProgress(seen: Set<string>, action: string, output: string, chapter?: ChapterReadEvidence): boolean {
+  if (action === 'chapter_read' && chapter) {
+    if (!chapter.targetId || !/^[a-f0-9]{64}$/.test(chapter.contentHash)
+      || !Number.isSafeInteger(chapter.start) || !Number.isSafeInteger(chapter.end)
+      || chapter.start < 0 || chapter.end <= chapter.start) return false
+    const prefix = `read-range:${JSON.stringify([chapter.targetId, chapter.contentHash])}:`
+    const prior = [...seen].filter(key => key.startsWith(prefix))
+    const ranges = prior.flatMap(key => {
+      const match = /^(\d+)-(\d+)$/.exec(key.slice(prefix.length))
+      return match ? [{ start: Number(match[1]), end: Number(match[2]) }] : []
+    })
+    const fresh = !ranges.some(range => range.start <= chapter.start && range.end >= chapter.end)
+    ranges.push({ start: chapter.start, end: chapter.end })
+    ranges.sort((a, b) => a.start - b.start || a.end - b.end)
+    const merged: Array<{ start: number; end: number }> = []
+    for (const range of ranges) {
+      const last = merged.at(-1)
+      if (last && range.start <= last.end) last.end = Math.max(last.end, range.end)
+      else merged.push({ ...range })
+    }
+    prior.forEach(key => seen.delete(key))
+    merged.forEach(range => seen.add(`${prefix}${range.start}-${range.end}`))
+    return fresh
+  }
+  const identity = semanticReadIdentity(action, output)
+  if (!identity) return false
+  const fresh = !seen.has(identity)
+  seen.add(identity)
+  return fresh
+}
+
 /** Exact tool-owned wrappers only. Preserve source/body text and raw receipts. */
 export function semanticReadIdentity(action: string, output: string): string | null {
   if (!contentReads.has(action)) return null
