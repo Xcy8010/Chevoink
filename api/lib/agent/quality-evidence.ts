@@ -25,6 +25,103 @@ export type QualityEvidenceIdentity = z.infer<typeof qualityEvidenceIdentitySche
 export type QualityEvidenceSources = z.infer<typeof qualityEvidenceSourcesSchema>
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
 
+type QualityJsonFailure = 'json_invalid' | 'incomplete_json' | 'envelope_invalid' | 'ambiguous_envelope' | 'duplicate_keys'
+class QualityJsonParseError extends Error {
+  constructor(readonly classification: QualityJsonFailure) { super(`质量回复无法确认完整 JSON：${classification}`) }
+}
+
+function assertUniqueJsonKeys(text: string) {
+  const containers: Array<{ kind: '{' | '['; keys: Set<string>; expectsKey: boolean }> = []
+  // JSON.parse has already validated syntax. Tokenization only detects the
+  // duplicate keys that JSON.parse would silently overwrite, including escapes.
+  for (const match of text.matchAll(/"(?:\\.|[^"\\])*"|[{}[\],:]|[^{}[\],:\s]+/gu)) {
+    const token = match[0], current = containers.at(-1)
+    if (token === '{' || token === '[') containers.push({ kind: token, keys: new Set(), expectsKey: token === '{' })
+    else if (token === '}' || token === ']') containers.pop()
+    else if (token === ',' && current?.kind === '{') current.expectsKey = true
+    else if (token.startsWith('"') && current?.kind === '{' && current.expectsKey) {
+      const key = JSON.parse(token) as string
+      if (current.keys.has(key)) throw new QualityJsonParseError('duplicate_keys')
+      current.keys.add(key); current.expectsKey = false
+    }
+  }
+}
+
+/** Mechanical extraction only: quoted braces and escaped quotes are data.
+ * Never splice separate objects, select one of conflicting reports, close a
+ * truncated container, or invent missing review fields. */
+export function parseQualityJsonObject(raw: string, envelope: 'findings' | 'corrections' | 'patches'): unknown {
+  const candidates: Record<string, unknown>[] = []
+  let sawJson = false
+  for (let start = 0; start < raw.length; start++) {
+    if (raw[start] !== '{' && raw[start] !== '[') continue
+    const stack = [raw[start]], opening = start
+    let quoted = false, escaped = false, end = start + 1
+    for (; end < raw.length && stack.length; end++) {
+      const char = raw[end]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+      } else if (char === '"') quoted = true
+      else if (char === '{' || char === '[') stack.push(char)
+      else if (char === '}' || char === ']') {
+        if (stack.at(-1) !== (char === '}' ? '{' : '[')) throw new QualityJsonParseError('json_invalid')
+        stack.pop()
+      }
+    }
+    if (stack.length) throw new QualityJsonParseError('incomplete_json')
+    const text = raw.slice(opening, end)
+    let value: unknown
+    try { value = JSON.parse(text); assertUniqueJsonKeys(text); sawJson = true } catch (error) {
+      if (error instanceof QualityJsonParseError) throw error
+      if (text.includes(`"${envelope}"`)) throw new QualityJsonParseError('json_invalid')
+      start = end - 1
+      continue
+    }
+    if (value && typeof value === 'object' && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, envelope)) candidates.push(value as Record<string, unknown>)
+    start = end - 1
+  }
+  if (candidates.length > 1) throw new QualityJsonParseError('ambiguous_envelope')
+  if (!candidates.length) throw new QualityJsonParseError(sawJson ? 'envelope_invalid' : 'json_invalid')
+  return candidates[0]
+}
+
+export type CriticResponseDiagnostic = {
+  version: 1; contentHash: string | null; characterCount: number;
+  callId?: string; operationId?: string;
+  classification: QualityJsonFailure | 'complete' | 'findings_invalid' | 'source_invalid' | 'provider_unavailable' | 'provider_incomplete';
+  findingCount: number; droppedFindings: number; invalidSources: number;
+}
+
+/** Audit hashes and counts, never the full private model response. A malformed
+ * source remains untrusted even when other authentic findings can be retained. */
+export function inspectCriticResponse(raw: string | null, sources?: QualityEvidenceSources, responseComplete = true) {
+  const diagnostic: CriticResponseDiagnostic = { version: 1, contentHash: raw === null ? null : sha256(raw), characterCount: raw?.length ?? 0,
+    classification: raw === null ? 'provider_unavailable' : responseComplete ? 'json_invalid' : 'provider_incomplete',
+    findingCount: 0, droppedFindings: 0, invalidSources: 0 }
+  let findings: CriticQualityFinding[] = []
+  if (raw !== null && responseComplete) {
+    try {
+      const object = parseQualityJsonObject(raw, 'findings')
+      const coerced = coerceCriticFindings(object, sources)
+      if (!coerced) diagnostic.classification = 'envelope_invalid'
+      else {
+        findings = coerced.findings
+        diagnostic.findingCount = (object as { findings: unknown[] }).findings.length
+        diagnostic.droppedFindings = coerced.dropped
+        diagnostic.invalidSources = coerced.invalidSources ?? 0
+        diagnostic.classification = diagnostic.invalidSources ? 'source_invalid'
+          : !findings.length && coerced.dropped > 0 ? 'findings_invalid' : 'complete'
+      }
+    } catch (error) {
+      if (!(error instanceof QualityJsonParseError)) throw error
+      diagnostic.classification = error.classification
+    }
+  }
+  return { findings, complete: diagnostic.classification === 'complete', diagnostic }
+}
+
 /** A deterministic UTF-16 source table; every character is retained, including
  * whitespace and repeated sentences. IDs bind the complete review identity,
  * manuscript hash, protocol and exact half-open offsets. */

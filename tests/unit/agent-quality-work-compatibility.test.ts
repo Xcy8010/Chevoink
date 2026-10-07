@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { buildHumanityQualityContext } from '../../api/lib/agent/humanity-quality.js'
 import { qualityReviewContextHash } from '../../api/lib/agent/humanity-quality.js'
-import { qualityWorkContextProjection, qualityWorkCriticVersion } from '../../api/lib/agent/tools/durable-quality.js'
+import { qualityWorkContextProjection, qualityWorkCriticVersion, qualityWorkParseObject } from '../../api/lib/agent/tools/durable-quality.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildCriticInput, buildCriticSystem } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 
@@ -12,6 +12,20 @@ const bundle = { chapter: { id: 'chapter', title: '旧物摊', content: '沈桐�
   chapterWritingBackground: [{ sourceRunId: 'original', compilationId: 'old-compiler', prompt: '沈桐29岁，仓库调度员；1600–1900字；开篇低谷1–2段；问价前停笔。' }] } as unknown as Bundle
 
 describe('frozen quality work across deployments', () => {
+  it('only newly frozen parserVersion enables deterministic extraction and duplicate-key rejection', () => {
+    const noisy = '{"metadata":"noise"}\n```json\n{"findings":[]}\n```'
+    expect(() => qualityWorkParseObject(noisy, 'findings')).toThrow()
+    expect(qualityWorkParseObject(noisy, 'findings', 1)).toEqual({ findings: [] })
+    const duplicate = '{"findings":[null],"findings":[]}'
+    expect(qualityWorkParseObject(duplicate, 'findings')).toEqual({ findings: [] })
+    expect(() => qualityWorkParseObject(duplicate, 'findings', 1)).toThrow('duplicate_keys')
+    for (const version of [1, 2, 3, 4] as const) {
+      const frozen = { version, criticInput: '真实升级前输入' }, hash = runtimeJson(frozen).hash
+      expect(qualityWorkParseObject('{"findings":[]}', 'findings')).toEqual({ findings: [] })
+      expect(runtimeJson(frozen).hash).toBe(hash)
+      expect(frozen).not.toHaveProperty('parserVersion')
+    }
+  })
   it('keeps v1 and v2 exact hash projections and real report versions while new work binds history', () => {
     const { chapterWritingBackground: _background, originalRequest: _request, ...v1 } = bundle
     const { chapterWritingBackground: _ignored, ...v2 } = bundle

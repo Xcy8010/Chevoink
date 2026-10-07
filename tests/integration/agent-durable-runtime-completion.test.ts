@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { describe,expect,it,vi } from 'vitest'
 import { z } from 'zod'
-import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { runtimeJson,formatDurableToolObservation } from '../../api/lib/agent/runtime-common.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { advanceDurableCompletionObligations } from '../../api/lib/agent/runtime-continuation.js'
@@ -29,6 +29,98 @@ import * as credits from '../../api/lib/credits.js'
 import { getStructureReportObservation } from '../../api/lib/data-access.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture,novelFixture } from '../support/agent-durable-runtime-fixture.js'
+import { admitChildExecution } from '../../api/lib/agent/runtime-child.js'
+import { prepareToolCursorOperation } from '../../api/lib/agent/runtime-tool-cursor.js'
+import { reduceExecutionReceipt } from '../../api/lib/agent/runtime-reducer.js'
+import { taskSpawnTool } from '../../api/lib/agent/tools/task-orchestration-tools.js'
+import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
+import { readCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
+import * as writingLimitations from '../../api/lib/agent/writing-delivery-limitations.js'
+import { taskSpecSchema } from '../../shared/contracts/task-spec-contracts.js'
+import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
+
+describe.runIf(available)('parent completion with an already verified limited child', () => {
+  it.each(['v1-limited', 'v2-limited', 'full-normal'] as const)('%s cannot substitute a limited child for missing parent delivery', async scenario => fixture(async f => {
+    const lease = await claim(f)
+    const tool = taskSpawnTool
+    const args = { tasks: [{ title: '本章写作', brief: '根据原始作者授权修改当前章节正文，保存实际内容并保留真实检查限制。' }], mode: 'build', inherit: 'brief' }
+    const configuration = { version: 1 as const, mode: 'build' as const, agentType: 'orchestrator', creativeFreedom: 'balanced' as const, qualityMode: 'premium' as const,
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+      tools: [tool].map(item => ({ type: 'function' as const, function: { name: item.name, description: item.description, parameters: z.toJSONSchema(item.parameters, { io: 'input' }) } })),
+      toolAuthority: [{ name: tool.name, permission: 'allow' as const, alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] }
+    const initial = await initializeExecutionState(lease, { configuration, snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+      messages: [{ role: 'user', content: '修改本章' }, { role: 'assistant', content: null, toolCalls: [{ id: 'delegate', name: tool.name, arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
+    const prepared = await prepareToolCursorOperation(lease, { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash }, {
+      key: 'exec:0', action: tool.name, callId: 'delegate', targetId: f.rootId, effectDomain: 'read', effectiveArgs: args,
+      normalize: value => tool.parameters.parse(value), operationInput: { callId: 'delegate', args } })
+    const grant = await admitChildExecution(lease, { parentOperationId: prepared.operation.id, childIndex: 0, kind: 'spawned', role: 'orchestrator',
+      name: '本章写作', prompt: '修改本章', spec: { ...f.spec, id: randomUUID(), runId: undefined }, configuration,
+      price: { version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 }, tokenCeiling: 1000, turnCeiling: 3, roleTools: [],
+      messages: [{ role: 'user', content: '修改本章' }, { role: 'assistant', content: '正文已交付，检查限制保留。' }] })
+    try {
+      await prisma.agentChildExecutionGrant.update({ where: { id: grant.id }, data: { status: 'completed' } })
+      const child = await prisma.agentRun.update({ where: { id: grant.childRunId }, data: { status: 'completed' } })
+      await prisma.agentTaskRoot.update({ where: { id: child.taskRootId! }, data: { status: 'completed' } })
+      const nativeResult = { output: `已派生 1 个持久任务窗口：\n- 本章写作｜任务 ID ${child.sessionId}\n请使用 task_wait 收取真实交付并逐个审查。`,
+        summary: '派生 1 个并行窗口', display: { kind: 'taskOrchestration', mode: 'spawn', detail: '任务已准入',
+          windows: [{ sessionId: child.sessionId, title: '本章写作', status: 'running' }] } }
+      await runtimeOperations.commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash,
+        async () => runtimeJson({ toolResult: nativeResult }).value)
+      const reduced = await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
+      expect(prepared.pending.revision).toBe(initial.frame.revision + 1)
+      expect(reduced.revision).toBe(initial.frame.revision + 2)
+      expect(reduced.state.messages.at(-1)).toEqual({ role: 'tool', toolCallId: 'delegate', content: formatDurableToolObservation(tool.name, nativeResult.output) })
+      await withRunLease(lease, async tx => {
+        expect((await collectDurableToolEvidence(tx, f.rootId, reduced.revision)).effects).toMatchObject([
+          { operationId: prepared.operation.id, action: 'task_spawn', outcome: 'succeeded', sourceRevision: initial.frame.revision, summary: nativeResult.summary },
+        ])
+      })
+      const frame = await saveExecutionState(lease, { expectedRevision: reduced.revision, expectedHash: reduced.snapshotHash,
+        snapshot: { ...reduced.state, messages: [...reduced.state.messages, { role: 'assistant', content: '本章正文交付完成。' }] } })
+      // This consumer test supplies the validator's trusted, schema-checked
+      // boundary output only. It never fabricates a terminal effect receipt;
+      // native paid-chain validation is covered separately by quality tests.
+      const proof = scenario === 'full-normal' ? null : writingLimitations.limitedWritingDeliverySchema.parse({ version: scenario === 'v1-limited' ? 1 : 2,
+        taskId: f.rootId, targetRunId: child.id, sourceRunId: f.runId, chapters: [{ id: f.chapterId, title: '原章', revision: 1, contentHash: 'a'.repeat(64),
+          compilationId: randomUUID(), compilerStateHash: 'b'.repeat(64), sourceChapterId: null, sourceRevision: null, sourceContentHash: null,
+          continuityCheckRounds: scenario === 'v1-limited' ? 3 : 0, continuityStatus: scenario === 'v1-limited' ? 'stale' : 'complete',
+          qualityReportId: randomUUID(), qualityReportHash: 'c'.repeat(64), retainedQualityIssueCount: 0,
+          ...(scenario === 'v2-limited' ? { qualityStatus: 'unavailable', qualityFailure: { version: 1, code: 'QUALITY_REPORT_INCOMPLETE', source: 'durable',
+            witnessIds: [randomUUID(), randomUUID(), randomUUID()], evidenceHash: 'd'.repeat(64) } } : {}) }],
+        text: '正文已保存，检查仍待复核。', outcome: { kind: 'delivered_with_limitations', summary: '正文已交付，待复核。' } })
+      const verified = vi.spyOn(writingLimitations, 'verifyRunLimitedWritingOutcome').mockResolvedValue(proof)
+      const subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
+      await prisma.$transaction(async tx => {
+        const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })
+        const original = await readOriginalTaskRequest(tx, subject)
+        expect(original).toMatchObject({ taskId: f.rootId, prompt: '修改本章' })
+        expect(await writingLimitations.permitsLimitedWritingContract(tx, { spec: taskSpecSchema.parse(root.specSnapshot), prompt: original.prompt, root })).toBe(true)
+        expect(await readCompletedWritingDelivery(tx, subject)).toBeNull()
+        expect(await writingLimitations.readLimitedWritingDelivery(tx, subject)).toBeNull()
+      })
+      // Observe, without replacing, the real parent admission implementation.
+      // No parent compilation/delivery exists, so only the child consumer
+      // reaches this permission check for the frozen message-parts request.
+      const permission = vi.spyOn(writingLimitations, 'permitsLimitedWritingContract')
+      const cursor = { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }
+      const evidence = await collectDurableCompletionEvidence(lease, cursor)
+      expect(verified).toHaveBeenCalled()
+      expect(permission).toHaveBeenCalledOnce()
+      expect(await permission.mock.results.at(-1)!.value).toBe(true)
+      expect(evidence.snapshot).toMatchObject({ blockers: scenario === 'full-normal' ? [] : [{ code: 'limited_child_delivery', reference: child.id }] })
+      const beforeFinishStatus = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).status
+      if (scenario === 'full-normal') expect(await finalizeDurableTask(lease, cursor)).toMatchObject({ kind: 'completed' })
+      else {
+        await expect(finalizeDurableTask(lease, cursor)).rejects.toMatchObject({ code: 'RUNTIME_COMPLETION_BLOCKED' })
+        expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).status).toBe(beforeFinishStatus)
+        expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.completion.decided' } })).toBe(0)
+      }
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    } finally {
+      await prisma.agentChildExecutionGrant.deleteMany({ where: { parentRootId: f.rootId } })
+    }
+  }))
+})
 
 describe.runIf(available)('durable explicit memory save', () => {
   it.each(['create', 'update', 'unread', 'stale', 'missing', 'rollback', 'stopped'] as const)('%s fences explicit card writes', async scenario => {

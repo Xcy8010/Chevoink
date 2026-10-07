@@ -12,10 +12,12 @@ import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { readWritingPresentation } from './writing-request-context.js'
 import { runtimeJson } from './runtime-common.js'
 import { runCheckpointSchema } from './checkpoint.js'
+import { qualityUnavailableProofSchema, readQualityUnavailableProof } from './quality-unavailable-proof.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
-export const limitedWritingDeliverySchema = z.object({
+export const limitedWritingOutcomeSchema = z.object({ kind: z.literal('delivered_with_limitations'), summary: z.string().min(1) }).strict()
+const limitedWritingDeliveryV1Schema = z.object({
   version: z.literal(1), taskId: z.string().min(1), targetRunId: z.string().min(1), sourceRunId: z.string().min(1),
   chapters: z.array(z.object({ id: z.string().min(1), title: z.string(), revision: z.number().int().positive(), contentHash: hash,
     compilationId: z.string().min(1), compilerStateHash: hash, sourceChapterId: z.string().nullable(), sourceRevision: z.number().int().positive().nullable(),
@@ -23,8 +25,16 @@ export const limitedWritingDeliverySchema = z.object({
     continuityStatus: z.enum(['missing', 'stale', 'incomplete']), qualityReportId: z.string().min(1), qualityReportHash: hash,
     retainedQualityIssueCount: z.number().int().nonnegative(),
   }).strict()).length(1),
-  text: z.string().min(1), outcome: z.object({ kind: z.literal('delivered_with_limitations'), summary: z.string().min(1) }).strict(),
+  text: z.string().min(1), outcome: limitedWritingOutcomeSchema,
 }).strict()
+const limitedWritingDeliveryV2Schema = limitedWritingDeliveryV1Schema.extend({
+  version: z.literal(2),
+  chapters: z.array(limitedWritingDeliveryV1Schema.shape.chapters.element.extend({
+    continuityCheckRounds: z.number().int().nonnegative(), continuityStatus: z.enum(['complete', 'missing', 'stale', 'incomplete']),
+    qualityStatus: z.literal('unavailable'), qualityFailure: qualityUnavailableProofSchema,
+  }).strict().refine(item => item.continuityStatus === 'complete' || item.continuityCheckRounds >= MAX_CONTINUITY_CHECKS)).length(1),
+}).strict()
+export const limitedWritingDeliverySchema = z.discriminatedUnion('version', [limitedWritingDeliveryV1Schema, limitedWritingDeliveryV2Schema])
 export type LimitedWritingDelivery = z.infer<typeof limitedWritingDeliverySchema>
 const requiresCompletedReview = (text: string) => /(?:检查|复核|审查|审阅|校验|质量|连续性|一致性|check|review|validat|quality|continuity).{0,30}(?:通过|合格|无误|完成后|才能|才可|再交付|pass|before|deliver)|(?:必须|务必|确保|一定|only|must).{0,25}(?:通过|合格|无误|复核|检查|pass|review|check)|(?:不得|不能|禁止|must not|never).{0,10}(?:跳过|省略|bypass|skip).{0,10}(?:复核|检查|review|check)/iu.test(text)
 
@@ -62,7 +72,7 @@ export async function permitsLimitedWritingContract(tx: Prisma.TransactionClient
   return checks.filter(item => item.severity === 'error').every(item => item.status === 'passed')
 }
 
-/** Read-only evidence of saved writing with ONE exhausted assessment. This
+/** Read-only evidence of saved writing with confirmed unavailable assessments. This
  * does not commit the bridge, complete scenes, certify a report, or spend a call.
  * Finalizers must re-read under their existing lease/CAS transaction. */
 export async function readLimitedWritingDelivery(tx: Prisma.TransactionClient, subject: Subject): Promise<LimitedWritingDelivery | null> {
@@ -113,17 +123,26 @@ export async function readLimitedWritingDelivery(tx: Prisma.TransactionClient, s
   if (!chapter?.content.trim() || chapter.orderIndex !== target.orderIndex) return null
   const compilation = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId,
     chapterId: id, runId: { in: runIds }, status: 'active' }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-  if (!compilation?.bridge || compilation.bridge.toChapterId !== id || compilation.bridge.targetRevision !== chapter.revision
-    || continuityCheckRounds(compilation.validation) < MAX_CONTINUITY_CHECKS) return null
+  if (!compilation?.bridge || compilation.bridge.toChapterId !== id || compilation.bridge.targetRevision !== chapter.revision) return null
   readNewDraftRevision(compilation.validation) // Malformed historical audit proof remains fail-closed.
   const sourceId = compilation.bridge.fromChapterId
   if (sourceId) await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${sourceId} FOR SHARE`
   const source = sourceId ? await tx.chapter.findFirst({ where: { id: sourceId, ...activeChapterScope(subject.novelId) } }) : null
   if (sourceId && (!source || source.revision !== compilation.bridge.sourceRevision)) return null
   const readiness = await readChapterReviewReadiness(tx, subject, compilation.id)
-  if (!readiness || readiness.ready || readiness.continuity === 'complete' || readiness.quality !== 'complete' || !readiness.qualityReportId
-    || readiness.requiredTools.length !== 1 || readiness.requiredTools[0].name !== 'continuity_validate') return null
-  if (await isChapterRevisionChannelOpen(tx, subject, chapter)) return null
+  if (!readiness || readiness.ready || (readiness.continuity !== 'complete' && !readiness.continuityExhausted)) return null
+  const quality = await tx.chapterQualityReport.findFirst({ where: { userId: subject.userId, novelId: subject.novelId,
+    compilationId: compilation.id, chapterId: id, runId: { in: runIds } }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+  if (!quality) return null
+  const qualityFailure = readiness.quality === 'complete' ? null
+    : await readQualityUnavailableProof(tx, subject, runIds, quality, chapter, root?.id ?? null)
+  if (readiness.quality !== 'complete' && !qualityFailure) return null
+  if (readiness.quality === 'complete' && (readiness.qualityReportId !== quality.id || readiness.continuity === 'complete')) return null
+  // Ordinary writing permission is not an obligation to keep automatically
+  // rewriting after a confirmed unusable quality assessment. A current factual
+  // error and every ordinary v1 remediation channel keep the original gate.
+  if (!(qualityFailure && readiness.continuity === 'complete' && readiness.continuityErrorCount === 0)
+    && await isChapterRevisionChannelOpen(tx, subject, chapter)) return null
   // Projection precedes domain continuation. Independent obligations must keep
   // control of the executor; exempt only this exact exhausted compilation.
   if (await tx.storyCompilation.count({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds },
@@ -147,18 +166,20 @@ export async function readLimitedWritingDelivery(tx: Prisma.TransactionClient, s
     if (deliverables.some(item => ['missing', 'changed'].includes(item.status)) || memory.some(item => !item.completed)
       || (await readTaskBudgetInTransaction(tx, root.id)).unresolvedAttempts > 0n) return null
   }
-  const quality = await tx.chapterQualityReport.findUniqueOrThrow({ where: { id: readiness.qualityReportId }, include: { findings: true } })
   const retainedQualityIssueCount = quality.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
   const length = scope.prompt?.match(/(\d{2,6})\s*[-–—−~～〜－至到]\s*(\d{2,6})\s*字/u)
   if (length && (chapter.content.trim().length < Number(length[1]) || chapter.content.trim().length > Number(length[2]))) return null
   const presentation = await readWritingPresentation(tx, subject, [{ ...target, chapterId: id }])
-  const summary = `《${chapter.title}》正文已保存（r${chapter.revision}）；连续性检查已达${MAX_CONTINUITY_CHECKS}次上限，当前版本尚未复核。${retainedQualityIssueCount ? `质量报告仍有${retainedQualityIssueCount}条未处理意见。` : ''}`
+  const summary = `《${chapter.title}》正文已保存（r${chapter.revision}）；${readiness.continuity === 'complete'
+    ? '连续性已检查，原报告与意见保留。' : `连续性检查已达${MAX_CONTINUITY_CHECKS}次上限，当前版本尚未复核。`}${qualityFailure
+    ? '质量检查响应已收到，但报告格式未能完成验证；质量尚未判定通过，待复核。' : ''}${retainedQualityIssueCount ? `质量报告仍有${retainedQualityIssueCount}条未处理意见。` : ''}`
   const full = presentation ? presentation.mode === 'full_text' : scope.writing.titleAndBodyOnly
-  return limitedWritingDeliverySchema.parse({ version: 1, taskId: scope.taskId, targetRunId: subject.runId, sourceRunId: scope.sourceRunId,
+  return limitedWritingDeliverySchema.parse({ version: qualityFailure ? 2 : 1, taskId: scope.taskId, targetRunId: subject.runId, sourceRunId: scope.sourceRunId,
     chapters: [{ id, title: chapter.title, revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash,
       compilationId: compilation.id, compilerStateHash: runtimeJson(JSON.parse(JSON.stringify(compilation))).hash,
       sourceChapterId: sourceId, sourceRevision: source?.revision ?? null, sourceContentHash: source ? runtimeJson({ content: source.content }).hash : null,
-      continuityCheckRounds: continuityCheckRounds(compilation.validation), continuityStatus: readiness.continuity, qualityReportId: readiness.qualityReportId,
+      continuityCheckRounds: continuityCheckRounds(compilation.validation), continuityStatus: readiness.continuity, qualityReportId: quality.id,
+      ...(qualityFailure ? { qualityStatus: 'unavailable', qualityFailure } : {}),
       qualityReportHash: runtimeJson(JSON.parse(JSON.stringify(quality))).hash, retainedQualityIssueCount }],
     text: `${full ? `${chapter.title}\n\n${chapter.content}\n\n` : ''}${summary}`, outcome: { kind: 'delivered_with_limitations', summary } })
 }
@@ -173,8 +194,8 @@ export async function assertLimitedWritingDelivery(tx: Prisma.TransactionClient,
 /** Todo text is not completion proof. Only explicit checks/commit dependencies
  * of this one chapter may remain pending; unrelated work still blocks. */
 export function limitedReviewDependency(content: string) {
-  if (!/连续性|continuity|章节终态|章节桥|chapter_bridge_commit/iu.test(content)) return false
-  return !content.replace(/连续性(?:检查|复核)?|章节(?:桥|终态)|终态提交|chapter_bridge_commit|continuity(?: check| review)?/giu, '')
+  if (!/连续性|continuity|质量|quality|人类感|章节终态|章节桥|chapter_bridge_commit/iu.test(content)) return false
+  return !content.replace(/连续性(?:检查|复核)?|(?:人类感)?质量(?:检查|复核)?|人类感检查|章节(?:桥|终态)|终态提交|chapter_bridge_commit|quality_analyze|(?:continuity|quality)(?: check| review)?/giu, '')
     .replace(/完成|执行|进行|复核|检查|提交|核对|当前版本|最终版本|当前|本章|并|及|与|and|final|current|complete|submit|[\s、，。:：]/giu, '').trim()
 }
 
@@ -232,10 +253,10 @@ export async function verifyRunLimitedWritingOutcome(tx: Prisma.TransactionClien
   const operation = await tx.agentOperation.findFirst({ where: { taskRootId: run.taskRootId, originRunId: run.id, action: 'completion_finalize', kind: 'internal', status: 'succeeded' },
     include: { effectReceipt: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
   const receipt = operation?.effectReceipt
-  const result = z.object({ limitedWritingDelivery: limitedWritingDeliverySchema, outcome: limitedWritingDeliverySchema.shape.outcome,
+  const result = z.object({ limitedWritingDelivery: limitedWritingDeliverySchema, outcome: limitedWritingOutcomeSchema,
     sourceRevision: z.number().int().nonnegative(), sourceHash: hash, candidateHash: hash, evidenceHash: hash,
     evidence: z.object({ blockers: z.array(z.never()), limitedWritingDelivery: limitedWritingDeliverySchema }).passthrough() }).safeParse(receipt?.result)
-  const admission = z.object({ input: z.object({ limitedWritingDelivery: limitedWritingDeliverySchema, outcome: limitedWritingDeliverySchema.shape.outcome }) }).safeParse(operation?.inputSnapshot)
+  const admission = z.object({ input: z.object({ limitedWritingDelivery: limitedWritingDeliverySchema, outcome: limitedWritingOutcomeSchema }) }).safeParse(operation?.inputSnapshot)
   const event = operation ? await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `decision:${operation.id}` } }) : null
   if (!operation || !receipt || !result.success || !admission.success || !event || event.operationId !== operation.id || event.runId !== run.id
     || event.type !== 'execution.completion.decided' || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash
@@ -245,7 +266,7 @@ export async function verifyRunLimitedWritingOutcome(tx: Prisma.TransactionClien
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '受限子任务缺少真实终态回执。')
   }
   const decision = z.object({ resultHash: hash, sourceRevision: z.number().int().nonnegative(), sourceHash: hash,
-    revision: z.number().int().positive(), snapshotHash: hash, outcome: limitedWritingDeliverySchema.shape.outcome }).parse(event.payload)
+    revision: z.number().int().positive(), snapshotHash: hash, outcome: limitedWritingOutcomeSchema }).parse(event.payload)
   const { readExecutionFrame, readExecutionStateInTransaction } = await import('./runtime-state.js')
   const source = await readExecutionFrame(tx, run.taskRootId, result.data.sourceRevision)
   const current = await readExecutionStateInTransaction(tx, run.taskRootId)

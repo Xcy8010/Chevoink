@@ -432,6 +432,52 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
     expect(events().some(event => event.type === 'run.finished' && event.status === 'failed')).toBe(false)
   })
+  it.each([{ exhausted: false, resume: false }, { exhausted: true, resume: false }, { exhausted: true, resume: true }])('finishes a verified format limitation without another paid turn: %j', async ({ exhausted, resume }) => {
+    let state = { ...readiness(exhausted ? 'stale' : 'complete', 'missing'), continuityExhausted: exhausted }
+    const proof: import('../../api/lib/agent/writing-delivery-limitations.js').LimitedWritingDelivery = {
+      version: 2, taskId: 'task', targetRunId: 'run', sourceRunId: 'run',
+      chapters: [{ id: 'c', title: '火墙', revision: 6, contentHash: 'a'.repeat(64), compilationId: 'comp', compilerStateHash: 'b'.repeat(64),
+        sourceChapterId: null, sourceRevision: null, sourceContentHash: null, continuityCheckRounds: exhausted ? 3 : 1,
+        continuityStatus: exhausted ? 'stale' : 'complete', qualityReportId: 'quality', qualityReportHash: 'c'.repeat(64),
+        retainedQualityIssueCount: 1, qualityStatus: 'unavailable', qualityFailure: { version: 1, code: 'QUALITY_REPORT_INCOMPLETE', source: 'legacy',
+          witnessIds: ['call-event', 'result-event', 'paid-usage'], evidenceHash: 'd'.repeat(64) } }],
+      text: '火墙正文已保存，质量报告格式未完成验证，待复核。', outcome: { kind: 'delivered_with_limitations', summary: '正文已交付·待复核' },
+    }
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const critic = tool('quality_analyze', async () => {
+      state = { ...readiness(exhausted ? 'stale' : 'complete', 'incomplete'), continuityExhausted: exhausted }
+      mocks.limitedDelivery.mockResolvedValue(proof)
+      return { outcome: 'failed', failureCode: 'QUALITY_REPORT_INCOMPLETE', output: '质量报告格式不完整' }
+    })
+    const commit = tool('chapter_bridge_commit', async () => ({ output: '不能提交' }), false)
+    const reader = tool('chapter_read', async () => ({ output: '独立核对已完成' }))
+    mocks.tools = [critic, commit, reader]
+    if (resume) {
+      const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+        activeExecutionMs: 100, stagnantBatches: 0, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+        writeProgress: 1, writeBaseline: 0, readProgress: 0, readBaseline: 0, progressSignatures: [], reviewHandoffCount: 1,
+        toolRestrictions: [{ action: 'quality_analyze', target: 'comp', code: 'QUALITY_REPORT_INCOMPLETE', reason: '已确认的报告格式故障' }] }
+      mocks.update.mockResolvedValueOnce({ taskSpec: null, currentTurn: 2, startedAt: new Date(checkpoint.runStartedAt),
+        usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, checkpoint } })
+      mocks.limitedDelivery.mockResolvedValue(proof)
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+      expect(critic.execute).not.toHaveBeenCalled()
+      expect(reader.execute).not.toHaveBeenCalled()
+      expect(mocks.chat).not.toHaveBeenCalled()
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 120 })
+    } else {
+      queue(response('', [call('quality', critic.name, '{"compilationId":"comp"}'),
+        call('commit', commit.name, '{"compilationId":"comp"}'), call('read', reader.name)]))
+      await run('写下一章')
+      expect(critic.execute).toHaveBeenCalledOnce()
+      expect(reader.execute).toHaveBeenCalledOnce()
+      expect(mocks.chat).toHaveBeenCalledOnce()
+    }
+    expect(commit.execute).not.toHaveBeenCalled()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outcome: proof.outcome })
+    expect(events().some(event => event.type === 'run.paused')).toBe(false)
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', usage: { deliveryProof: proof } })
+  })
   it('does not replay pending unknown work or bypass the original tool ceiling', async () => {
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'incomplete'))
     const critic = tool('quality_analyze', async () => ({ output: '不能重放' }))

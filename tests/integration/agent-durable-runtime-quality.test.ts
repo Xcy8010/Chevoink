@@ -16,7 +16,7 @@ import { qualityWorkContextProjection } from '../../api/lib/agent/tools/durable-
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { initializeExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
-import { commitChapterBridge,prepareStoryCompilation,recordStoryCompilerWrite,saveSceneTasks,validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { commitChapterBridge,prepareStoryCompilation,recordStoryCompilerWrite,reserveContinuityCheck,saveSceneTasks,validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
@@ -32,10 +32,102 @@ import { available,claim,fixture } from '../support/agent-durable-runtime-fixtur
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
-import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { chapterCreateTool,chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import * as reviewCompletion from '../../api/lib/agent/review-completion.js'
 import * as humanityQuality from '../../api/lib/agent/humanity-quality.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { advanceDurableMemory } from '../../api/lib/agent/runtime-memory.js'
+import { readLimitedWritingDelivery,assertLimitedWritingDelivery } from '../../api/lib/agent/writing-delivery-limitations.js'
+import { readQualityUnavailableProof } from '../../api/lib/agent/quality-unavailable-proof.js'
+
+describe.runIf(available)('native paid failed quality response and limited delivery proof', () => {
+  it.each(['continuity-complete', 'continuity-capped', 'response-outbox', 'settlement', 'usage-observation', 'charge-association', 'continuity-error'] as const)('%s requires the authentic saved body, response and settled payment chain', async scenario => fixture(async f => {
+    vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
+    const lease = await claim(f)
+    const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '修改本章' })
+    const compilationId = compilation.id
+    const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
+    await saveSceneTasks({ ...f, compilationId, tasks: [1, 2, 3].map(n => ({ purpose: `推进场景${n}`, entryState: state, goal: '登山', obstacle: '夜色',
+      choice: '交出钥匙', cost: '不能返回', turn: '上路', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } })) })
+    const complete = scenario === 'continuity-complete' || scenario === 'continuity-error'
+    if (!complete) {
+      for (let n = 0; n < 3; n++) expect(await reserveContinuityCheck(f.userId, f.novelId, compilationId)).toBe(true)
+      const current = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId }, include: { chapter: true, bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
+      await validateStoryContinuity({ ...f, compilationId, expectedChapterRevision: 1, independentCheck: 'complete', findings: [],
+        coverage: compilerContinuityCoverage({ chapter: current.chapter!, bridge: current.bridge, sceneTasks: current.sceneTasks, source: null }) })
+    }
+    const tools = [chapterReadTool, chapterWriteTool, chapterBridgeGetTool, qualityAnalyzeTool]
+    await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+      tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
+      toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null, successfulToolSignatures: [],
+        messages: [{ role: 'user', content: '修改本章' }, { role: 'assistant', content: null, toolCalls: [
+          { id: 'read-current', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
+          { id: 'save-body', name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content: '他把钥匙交给守门人，沿着山路向上走去。门已锁好，灯仍亮着。' }) },
+          { id: 'bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) },
+          { id: 'quality', name: 'quality_analyze', arguments: JSON.stringify({ compilationId }) },
+        ] }] } })
+    const step = () => executeDurableToolStep(lease, new AbortController().signal)
+    await step()
+    expect(await step()).toMatchObject({ kind: 'tool' })
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    expect(chapter.revision).toBe(2)
+    expect(await advanceDurableMemory(lease)).not.toBeNull()
+    if (complete) {
+      const current = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
+      await validateStoryContinuity({ ...f, compilationId, expectedChapterRevision: chapter.revision, independentCheck: 'complete',
+        findings: scenario === 'continuity-error' ? [{ signal: 'body', severity: 'error', evidence: '沿着山路向上走去', suggestion: '核对行动状态' }] : [],
+        coverage: compilerContinuityCoverage({ chapter, bridge: current.bridge, sceneTasks: current.sceneTasks, source: null }) })
+    }
+    const window = getCreditWindow()
+    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
+      baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })
+    vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
+      rateCardId: 'failed-quality-proof-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
+    const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
+      const body = JSON.parse(String(init.body))
+      expect(body.reasoning_effort).toBe('none')
+      expect(body.thinking?.type).not.toBe('enabled')
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: 'broken JSON' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } })}\n\ndata: [DONE]\n\n`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await step()
+    expect(await step()).toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'QUALITY_REPORT_INCOMPLETE' } })
+    const subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
+    const proof = await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))
+    if (scenario === 'continuity-error') {
+      const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: chapter.id }, include: { findings: true } })
+      // A current factual error keeps the repair obligation open even with an
+      // authentic paid format failure. Prove that its paid witness is intact.
+      expect(await prisma.$transaction(tx => readQualityUnavailableProof(tx, subject, [f.runId], report, chapter, f.rootId))).toMatchObject({ source: 'durable' })
+      expect(proof).toBeNull()
+    } else {
+      expect(proof).toMatchObject({ version: 2, chapters: [{ id: chapter.id, revision: 2, qualityStatus: 'unavailable',
+        continuityStatus: complete ? 'complete' : 'stale', qualityFailure: { source: 'durable', code: 'QUALITY_REPORT_INCOMPLETE' } }], outcome: { kind: 'delivered_with_limitations' } })
+      if (!proof) throw new Error('Expected authentic native limited delivery proof')
+      await prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, proof))
+    }
+    const critic = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_critic' }, include: { attempts: { include: { usageReceipt: true } } } })
+    const attempt = critic.attempts[0], usage = attempt.usageReceipt!
+    if (scenario === 'response-outbox') await prisma.agentExecutionOutbox.update({ where: { eventKey: `result:${attempt.id}:${attempt.resultHash}` }, data: { payload: { attemptId: attempt.id, status: 'succeeded', resultHash: 'f'.repeat(64) } } })
+    if (scenario === 'settlement') await prisma.agentProviderUsageReceipt.update({ where: { attemptId: attempt.id }, data: { settlementStatus: 'pending' } })
+    if (scenario === 'usage-observation') await prisma.agentProviderUsageReceipt.update({ where: { attemptId: attempt.id }, data: { observationHash: 'f'.repeat(64) } })
+    if (scenario === 'charge-association') await prisma.creditLedgerEntry.update({ where: { idempotencyKey: `operation:${critic.id}` }, data: { referenceId: randomUUID() } })
+    if (proof && !['continuity-complete', 'continuity-capped'].includes(scenario)) {
+      expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
+      await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, proof))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+    }
+    expect(usage).toMatchObject({ source: 'reported', settlementStatus: 'settled' })
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(1)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).toMatchObject({ status: 'active' })
+    expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).committedAt).toBeNull()
+    expect(await prisma.sceneTask.count({ where: { compilationId, status: 'completed' } })).toBe(0)
+  }))
+})
 
 describe.runIf(available)('new-draft quality-first prepayment admission', () => {
   it.each(['legacy', 'durable', 'ready-durable', 'waived-durable'] as const)('%s persists a known report and pays for repair only after original continuity requirements', async scenario => {
@@ -318,11 +410,11 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
 })
 
 describe.runIf(available)('durable quality actual tool chain', () => {
-  it.each(['source-id', 'invalid-source-id', 'success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale', 'v2-quality-resume', 'v2-quality-stale'] as const)('%s preserves paid results and atomic business effects', async scenario => {
+  it.each(['source-id', 'invalid-source-id', 'success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale', 'v2-quality-resume', 'v2-quality-stale', 'json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const authorRequest = '改写当前章为都市异能爽文第一章。主角陆望，31岁，夜班设备维护员。1800字，低谷仅一段；觉醒后识别旧镜头的价值；停在买主报价前；只输出标题与正文。'
     const checkingOriginal = scenario === 'original-request' || scenario === 'original-request-resume'
-    const oldWorkVersion = scenario === 'legacy-quality-resume' || scenario === 'legacy-quality-stale' ? 1 : scenario === 'v2-quality-resume' || scenario === 'v2-quality-stale' ? 2 : null
+    const oldWorkVersion = scenario === 'legacy-quality-resume' || scenario === 'legacy-quality-stale' ? 1 : scenario === 'v2-quality-resume' || scenario === 'v2-quality-stale' ? 2 : scenario === 'v4-parser-noise' ? 4 : null
     const legacyWork = oldWorkVersion !== null
     await fixture(async f => {
       let lease = await claim(f)
@@ -369,6 +461,10 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
         requests++
         const body = JSON.parse(String(init.body))
+        if (['json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise'].includes(scenario)) {
+          expect(body.reasoning_effort).toBe('none')
+          expect(body.thinking?.type).not.toBe('enabled')
+        }
         expect(body.max_tokens).toBe(16_384)
         expect(body.tools).toBeUndefined()
         expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
@@ -385,7 +481,10 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         if (sourceId) await prisma.chapter.update({ where: { id: sourceId }, data: { content: '新的前文', revision: { increment: 1 } } })
         if (scenario === 'stale-compiler') await prisma.storyCompilation.update({ where: { id: compilationId }, data: { preparedContext: { changed: true } } })
         if (scenario === 'late-resume') await pauseDurableTask(f.userId, lease.runId)
-        const content = scenario === 'source-id' || scenario === 'invalid-source-id' ? JSON.stringify({ findings: [{ sourceId: scenario === 'source-id' ? body.messages[1].content.match(/q[a-f0-9]{64}/)[0] : 'q' + '0'.repeat(64), signal: 'emotion_grounding', severity: 'advisory', explanation: '需要具体动作', suggestion: '保留人物声音' }] }) : scenario === 'evidence-corrected' || scenario === 'evidence-unresolved'
+        const content = scenario === 'json-noise' || scenario === 'v4-parser-noise' ? '{"note":"before"}\n```json\n{"findings":[]}\n```\n{"note":"after"}'
+          : scenario === 'duplicate-keys' ? '{"findings":[null],"findings":[]}'
+            : scenario === 'mixed-source' ? JSON.stringify({ findings: [body.messages[1].content.match(/q[a-f0-9]{64}/)[0], 'q' + '0'.repeat(64)].map(sourceId => ({ sourceId, signal: 'emotion_grounding', severity: 'advisory', explanation: '真实意见', suggestion: '保留待审' })) })
+              : scenario === 'source-id' || scenario === 'invalid-source-id' ? JSON.stringify({ findings: [{ sourceId: scenario === 'source-id' ? body.messages[1].content.match(/q[a-f0-9]{64}/)[0] : 'q' + '0'.repeat(64), signal: 'emotion_grounding', severity: 'advisory', explanation: '需要具体动作', suggestion: '保留人物声音' }] }) : scenario === 'evidence-corrected' || scenario === 'evidence-unresolved'
           ? requests === 1
             ? JSON.stringify({ findings: [{ signal: 'emotion_grounding', severity: 'advisory', quote: '错误引用', explanation: '需要更具体动作', suggestion: '保留待审', confidence: 0.9 }] })
             : requests === 2 ? JSON.stringify({ corrections: [{ index: 0, quote: scenario === 'evidence-corrected' ? '原文' : '仍不存在' }] })
@@ -410,6 +509,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
           const legacy = qualityWorkContextProjection(await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId), oldWorkVersion!)
           snapshot.work = { ...snapshot.work, version: oldWorkVersion, contextHash: runtimeJson(JSON.parse(JSON.stringify(legacy))).hash,
             criticInput: '合成升级前冻结的完整正文与点评输入', criticSystem: '合成升级前的只读点评规则；只输出 findings JSON。' }
+          delete snapshot.work.parserVersion
           const prepared = await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
           admittedLegacy = { id: prepared.operation.id, inputHash: prepared.operation.inputHash, inputSnapshot: prepared.operation.inputSnapshot }
           throw new Error('fixture pre-upgrade admission interrupted')
@@ -454,7 +554,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('连续性检查') } })
       }
       const result = await step()
-      const failed = ['invalid-source-id', 'evidence-unresolved', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale'].includes(scenario)
+      const failed = ['invalid-source-id', 'evidence-unresolved', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale', 'duplicate-keys', 'mixed-source', 'v4-parser-noise'].includes(scenario)
       const userEdited = ['stale-chapter', 'repair-stale', 'legacy-quality-stale', 'v2-quality-stale'].includes(scenario)
       const repairedOnDisk = ['repair', 'evidence-corrected', 'format-retry', 'rollback-resume'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('质量检查') } })
@@ -486,6 +586,19 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
       const reports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId }, include: { findings: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+      if (['json-noise', 'duplicate-keys', 'mixed-source'].includes(scenario)) {
+        const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
+        expect(operation.inputSnapshot).toMatchObject({ input: { work: { parserVersion: 1 } } })
+        expect(reports[0].deterministicMetrics).toMatchObject({ independentCheck: scenario === 'json-noise' ? 'complete' : 'unavailable',
+          criticResponse: { version: 1, operationId: operation.id,
+            classification: scenario === 'json-noise' ? 'complete' : scenario === 'duplicate-keys' ? 'duplicate_keys' : 'source_invalid' } })
+        if (scenario === 'mixed-source') expect(reports[0].findings.filter(item => item.source === 'critic')).toHaveLength(1)
+        expect(reports[0].deterministicMetrics).not.toHaveProperty('rawResponse')
+      }
+      if (scenario === 'v4-parser-noise') {
+        expect(reports[0]).toMatchObject({ status: 'failed', criticVersion: 'humanity-critic.v5' })
+        expect(reports[0].deterministicMetrics).not.toHaveProperty('criticResponse')
+      }
       if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale'].includes(scenario)) expect(reports).toHaveLength(0)
       else {
         expect(reports).toHaveLength(scenario === 'context-change' || scenario === 'repair' ? 2 : 1)

@@ -1454,6 +1454,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           seenGoalConsents.add(consent.id)
         }
       }
+      // Includes an explicitly resumed historical run. Reuse its confirmed
+      // response/report evidence before purchasing another reasoning turn.
+      if (toolRestrictions.some(item => item.action === 'quality_analyze' && item.code === 'QUALITY_REPORT_INCOMPLETE')
+        && await finishLimitedWritingIfAllowed()) return
       turn += 1
       // Per-request deadlines and idle detection remain independent of cumulative usage.
       if (Date.now() - lastActivityAt > env.agentRunIdleMinutes * 60_000) {
@@ -2060,6 +2064,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
       await persistCheckpoint()
       bus.emit({ type: 'step.finish', turn, usage: result.usage })
+
+      // Finish the current batch first. A confirmed format-only assessment
+      // limitation needs no paid model turn to rediscover the same blocked
+      // COMMIT; the server proof still checks all independent obligations.
+      if (!forceWrapUpReason && !authorEndRequested && !reviewStopReason
+        && toolRestrictions.some(item => item.action === 'quality_analyze' && item.code === 'QUALITY_REPORT_INCOMPLETE')
+        && await finishLimitedWritingIfAllowed()) return
 
       if (reviewStopReason) {
         // A review denial is never reported as a passed review, but a single

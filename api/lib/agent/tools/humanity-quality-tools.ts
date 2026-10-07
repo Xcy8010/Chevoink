@@ -39,7 +39,7 @@ import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
 import { REPAIR_BLOCK_CODES, REPAIR_CHANNEL_CODES, qualityReportCheckedCurrentContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
 import { probeChapterReviewRevision } from '../chapter-review-guard.js'
-import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, coerceCriticFindings, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
+import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, inspectCriticResponse, parseQualityJsonObject, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
 import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/writing.js'
 import { renderChapterWritingBackground } from '../writing-request-context.js'
 
@@ -58,14 +58,6 @@ const experienceAnchorToolSchema = experienceAnchorInputSchema
       refinement.addIssue({ code: 'custom', path: ['sourceChapterId'], message: '章节来源必须同时提供 sourceChapterId 和 sourceRevision' })
     }
   })
-
-function parseJsonObject(raw: string): unknown {
-  const stripped = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-  const start = stripped.indexOf('{')
-  const end = stripped.lastIndexOf('}')
-  if (start < 0 || end <= start) throw new Error('模型没有返回 JSON 对象。')
-  return JSON.parse(stripped.slice(start, end + 1))
-}
 
 function findingLabel(signal: string): string {
   return ({
@@ -201,7 +193,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
       continue
     }
     try {
-      const parsedAttempt = repairEnvelopeSchema.parse(parseJsonObject(response))
+      const parsedAttempt = repairEnvelopeSchema.parse(parseQualityJsonObject(response, 'patches'))
       for (const patch of parsedAttempt.patches) {
         const finding = selectedById.get(patch.findingId)
         if (finding && parsedAttempt.patches.filter(item => item.findingId === patch.findingId).length === 1
@@ -283,7 +275,7 @@ export const qualityAnalyzeTool = defineTool({
     // they must never turn located findings into a passing report.
     // 审核使用独立有界输出预算；只对供应商明确截断做一次扩大预算恢复，总超时与取消信号不重置。
     // 真实用户取消照常上抛；初始 critic 的格式异常保留为不完整报告。
-    let response = ''
+    let response: string | null = null
     try {
       response = await generateReviewCompletion(
         buildCriticSystem('balanced'), userPrompt,
@@ -300,21 +292,10 @@ export const qualityAnalyzeTool = defineTool({
       if (error instanceof DataAccessError) throw error
       criticFallback = true
     }
-    if (!criticFallback) {
-      try {
-        // 逐条容错：单项字段超界（如 confidence>1、quote>360）只降级该条，绝不因一处格式偏差把整份有效审查判成失败。
-        const coerced = coerceCriticFindings(parseJsonObject(response), sources)
-        // 全部条目都不可用（或连 findings 信封都没有）才算格式不完整；空数组是合法的“未发现问题”。
-        if (!coerced || (coerced.invalidSources ?? 0) > 0 || (coerced.findings.length === 0 && coerced.dropped > 0)) criticFallback = true
-        else {
-          rawCriticFindings = coerced.findings
-          droppedCriticFindings = coerced.dropped
-        }
-      } catch {
-        ctx.signal.throwIfAborted()
-        criticFallback = true
-      }
-    }
+    const inspected = inspectCriticResponse(response, sources)
+    rawCriticFindings = inspected.findings
+    droppedCriticFindings = inspected.diagnostic.droppedFindings
+    criticFallback ||= !inspected.complete
     if (!criticFallback) {
       const invalid = unlocatedQualityEvidence(bundle.chapter.content, rawCriticFindings, sources)
       if (invalid.length > 0) {
@@ -336,7 +317,7 @@ export const qualityAnalyzeTool = defineTool({
           evidenceCorrectionIncomplete = true
         }
         try {
-          rawCriticFindings = correctQualityEvidence(bundle.chapter.content, rawCriticFindings, parseJsonObject(corrected), sources)
+          rawCriticFindings = correctQualityEvidence(bundle.chapter.content, rawCriticFindings, parseQualityJsonObject(corrected, 'corrections'), sources)
         } catch {
           evidenceCorrectionIncomplete = true
           /* Remain incomplete; never reinterpret malformed corrections as success. */
@@ -352,6 +333,7 @@ export const qualityAnalyzeTool = defineTool({
       deterministicMetrics: deterministic.metrics, qualityContextHash: contextHash, deterministicFindings: deterministic.findings, criticFindings,
       criticComplete: !criticFallback && !evidenceCorrectionIncomplete,
       criticDropped: droppedCriticFindings,
+      criticResponseDiagnostic: { ...inspected.diagnostic, callId: ctx.callId },
       sources,
     })
     if (created.compilationId) {

@@ -24,6 +24,7 @@ import { todoWriteTool } from '../../api/lib/agent/tools/todo-tools.js'
 import { advanceDurableCompletionObligations } from '../../api/lib/agent/runtime-continuation.js'
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { readDurableTodoItems } from '../../api/lib/agent/tools/durable-todo.js'
+import { buildHumanityQualityContext, qualityReviewContextHash, HUMANITY_CRITIC_VERSION } from '../../api/lib/agent/humanity-quality.js'
 
 describe.runIf(available)('current saved writing with exhausted continuity review', () => {
   async function capped(f: Parameters<Parameters<typeof fixture>[0]>[0], finishMemory = true) {
@@ -33,7 +34,7 @@ describe.runIf(available)('current saved writing with exhausted continuity revie
     const state = { knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] }
     await saveSceneTasks({ ...f, compilationId: prepared.compilation.id, tasks: [1, 2, 3].map(n => ({ purpose: `真实准备场景${n}`, entryState: state,
       goal: '登上山路', obstacle: '夜色渐深', choice: '交出钥匙', cost: '放弃返回', turn: '独自登山', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } })) })
-    const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { bridge: true, sceneTasks: true } })
+    const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
     for (let n = 0; n < 3; n++) expect(await reserveContinuityCheck(f.userId, f.novelId, compilation.id)).toBe(true)
     await validateStoryContinuity({ ...f, compilationId: compilation.id, independentCheck: 'complete', expectedChapterRevision: original.revision,
       findings: [], coverage: compilerContinuityCoverage({ chapter: original, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: null }) })
@@ -56,6 +57,83 @@ describe.runIf(available)('current saved writing with exhausted continuity revie
     if (finishMemory) await advanceDurableMemory(lease)
     return { lease, compilationId: compilation.id, chapter, report }
   }
+  async function failedQuality(f: Parameters<Parameters<typeof fixture>[0]>[0], c: Awaited<ReturnType<typeof capped>>, completeContinuity = false) {
+    await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0, engine: 'loop', startRequest: { prompt: '修改本章' } } })
+    if (completeContinuity) {
+      const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: c.compilationId }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
+      await validateStoryContinuity({ ...f, compilationId: c.compilationId, expectedChapterRevision: c.chapter.revision, independentCheck: 'complete', findings: [],
+        coverage: compilerContinuityCoverage({ chapter: c.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: null }) })
+    }
+    const started = new Date(Date.now() + 10), created = new Date(started.getTime() + 10), finished = new Date(started.getTime() + 30)
+    const context = await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId)
+    const report = await prisma.chapterQualityReport.update({ where: { id: c.report.id }, data: { status: 'failed', criticVersion: HUMANITY_CRITIC_VERSION,
+      createdAt: created, deterministicMetrics: { independentCheck: 'unavailable', contentHash: createHash('sha256').update(c.chapter.content).digest('hex'),
+        qualityContextHash: qualityReviewContextHash(context) } } })
+    const callId = randomUUID()
+    const call = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5000, type: 'tool.call', createdAt: started,
+      payload: { toolName: 'quality_analyze', callId, args: { compilationId: c.compilationId } } } })
+    const result = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5001, type: 'tool.result', createdAt: finished,
+      payload: { toolName: 'quality_analyze', callId, ok: false, failureCode: 'QUALITY_REPORT_INCOMPLETE' } } })
+    const paid = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, targetType: 'chapter', targetId: f.chapterId,
+      providerType: 'text', providerMode: 'fixture', modelName: 'fixture', action: 'agent3HumanityCritic', requestTokens: 100, responseTokens: 50,
+      durationMs: 1, usageSource: 'reported', billingStatus: 'settled', createdAt: new Date(started.getTime() + 5) } })
+    return { report, call, result, paid, started, finished, callId }
+  }
+  it.each([false, true])('delivers current known-format failure with continuity complete=%s without replay or fake pass', async complete => fixture(async f => {
+    const model = vi.spyOn(ai, 'generateTextCompletion').mockRejectedValue(new Error('Paid replay forbidden'))
+    const c = await capped(f), evidence = await failedQuality(f, c, complete)
+    try {
+      const subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
+      const proof = await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))
+      expect(proof).toMatchObject({ version: 2, chapters: [{ qualityStatus: 'unavailable', qualityReportId: evidence.report.id,
+        continuityStatus: complete ? 'complete' : 'stale', qualityFailure: { source: 'legacy', witnessIds: [evidence.call.id, evidence.result.id, evidence.paid.id] } }] })
+      expect(proof!.text).toContain('质量尚未判定通过')
+      expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, subject))).toBeNull()
+      await prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, proof!))
+      expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: c.report.id } })).toMatchObject({ status: 'failed' })
+      expect(model).not.toHaveBeenCalled()
+    } finally { await prisma.aiUsageLog.delete({ where: { id: evidence.paid.id } }) }
+  }))
+  it.each(['missing-call', 'wrong-call', 'missing-result', 'wrong-code', 'usage-unknown', 'usage-pending', 'usage-duplicate', 'report-duplicate',
+    'interleaved', 'body-changed', 'context-changed', 'checks-left', 'independent-todo', 'evidence-changed', 'recovery-unknown', 'audit-provider', 'audit-foreign'] as const)('known-format %s cannot manufacture delivery', async scenario => fixture(async f => {
+    const c = await capped(f), evidence = await failedQuality(f, c)
+    const subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
+    const proof = await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))
+    expect(proof).not.toBeNull()
+    let duplicateUsage: string | undefined
+    if (scenario === 'missing-call') await prisma.agentRunEvent.delete({ where: { id: evidence.call.id } })
+    if (scenario === 'wrong-call') await prisma.agentRunEvent.update({ where: { id: evidence.call.id }, data: { payload: { toolName: 'quality_analyze', callId: evidence.callId, args: { chapterId: 'foreign' } } } })
+    if (scenario === 'missing-result') await prisma.agentRunEvent.delete({ where: { id: evidence.result.id } })
+    if (scenario === 'wrong-code') await prisma.agentRunEvent.update({ where: { id: evidence.result.id }, data: { payload: { toolName: 'quality_analyze', callId: evidence.callId, ok: false, failureCode: 'AI_PROVIDER_UNKNOWN' } } })
+    if (scenario === 'usage-unknown') await prisma.aiUsageLog.update({ where: { id: evidence.paid.id }, data: { usageSource: 'unknown', responseTokens: null } })
+    if (scenario === 'usage-pending') await prisma.aiUsageLog.update({ where: { id: evidence.paid.id }, data: { billingStatus: 'pending_usage' } })
+    if (scenario === 'usage-duplicate') duplicateUsage = (await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, targetType: 'chapter', targetId: f.chapterId,
+      providerType: 'text', providerMode: 'fixture', modelName: 'fixture', action: 'agent3HumanityCritic', requestTokens: 1, responseTokens: 1,
+      durationMs: 1, usageSource: 'reported', billingStatus: 'settled', createdAt: evidence.paid.createdAt } })).id
+    if (scenario === 'report-duplicate') await prisma.chapterQualityReport.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId, compilationId: c.compilationId,
+      chapterId: f.chapterId, chapterRevision: c.chapter.revision, status: 'failed', criticVersion: HUMANITY_CRITIC_VERSION, deterministicMetrics: evidence.report.deterministicMetrics!, createdAt: evidence.report.createdAt } })
+    if (scenario === 'interleaved') {
+      await prisma.agentRunEvent.update({ where: { id: evidence.result.id }, data: { seq: 5002 } })
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5001, type: 'tool.call', createdAt: evidence.report.createdAt,
+        payload: { toolName: 'chapter_edit_range', callId: 'interleaved', args: { chapterId: f.chapterId } } } })
+    }
+    if (scenario === 'body-changed') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者的新正文', revision: { increment: 1 } } })
+    if (scenario === 'context-changed') await prisma.chapter.update({ where: { id: f.chapterId }, data: { title: '作者更新的章节标题' } })
+    if (scenario === 'checks-left') await prisma.storyCompilation.update({ where: { id: c.compilationId }, data: { validation: { checkRounds: 2 } } })
+    if (scenario === 'independent-todo') await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'chapterPlan', title: '未完成正文', content: JSON.stringify([{ content: '保存封面', status: 'pending' }]), metadata: { todoList: true } } })
+    if (scenario === 'evidence-changed') await prisma.aiUsageLog.update({ where: { id: evidence.paid.id }, data: { responseTokens: 51 } })
+    if (scenario === 'recovery-unknown') duplicateUsage = (await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, targetType: 'chapter', targetId: f.chapterId,
+      providerType: 'text', providerMode: 'fixture', modelName: 'fixture', action: 'agent3HumanityCriticOutputRecovery', durationMs: 1,
+      usageSource: 'unknown', billingStatus: 'settled', createdAt: evidence.paid.createdAt } })).id
+    if (scenario === 'audit-provider' || scenario === 'audit-foreign') await prisma.chapterQualityReport.update({ where: { id: c.report.id }, data: {
+      deterministicMetrics: { ...evidence.report.deterministicMetrics as object, criticResponse: { version: 1, contentHash: 'a'.repeat(64), characterCount: 10,
+        classification: scenario === 'audit-provider' ? 'provider_unavailable' : 'json_invalid', callId: 'foreign-call' } } } })
+    try {
+      if (scenario === 'evidence-changed') expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).not.toEqual(proof)
+      else expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
+      await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, proof!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+    } finally { await prisma.aiUsageLog.deleteMany({ where: { id: { in: [evidence.paid.id, ...(duplicateUsage ? [duplicateUsage] : [])] } } }) }
+  }))
   it('delivers a bound limitation without committing a bridge, completing scenes, buying a model call, or changing checks', async () => fixture(async f => {
     const model = vi.spyOn(ai, 'generateTextCompletion').mockRejectedValue(new Error('No model dispatch permitted'))
     const c = await capped(f)

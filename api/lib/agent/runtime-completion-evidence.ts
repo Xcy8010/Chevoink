@@ -10,6 +10,7 @@ import { evaluateTaskPostconditions } from './runtime-postconditions.js'
 import { collectDurableDeliverables } from './runtime-deliverables.js'
 import { collectDurableMemoryWork } from './runtime-memory.js'
 import { readCompletedWritingDelivery } from './writing-scope.js'
+import { readOriginalTaskRequest } from './original-request.js'
 import { readLimitedWritingDelivery, limitedReviewDependency, verifyRunLimitedWritingOutcome, permitsLimitedWritingContract } from './writing-delivery-limitations.js'
 
 /** Review input, NOT a completion certificate. The goal/output/postcondition
@@ -44,13 +45,15 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
     const failedOperations = await tx.agentOperation.findMany({ where: { taskRootId: root.id, status: 'failed' }, select: { id: true, action: true }, orderBy: { id: 'asc' } })
     const subtasks = await tx.agentSubtaskRun.findMany({ where: { userId: lease.userId, novelId: root.novelId, parentRun: { taskRootId: root.id } }, select: { id: true, status: true }, orderBy: { id: 'asc' } })
     const children = await tx.agentChildExecutionGrant.findMany({ where: { parentRootId: root.id }, include: { childRun: true } })
-    const request = root.requestSnapshot && typeof root.requestSnapshot === 'object' && !Array.isArray(root.requestSnapshot) ? root.requestSnapshot : {}
-    const permitsLimitedChild = 'prompt' in request && typeof request.prompt === 'string'
-      && await permitsLimitedWritingContract(tx, { spec, prompt: request.prompt, root })
+    const original = children.length ? await readOriginalTaskRequest(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId }) : null
+    const permitsLimitedChild = original?.taskId === root.id
+      && await permitsLimitedWritingContract(tx, { spec, prompt: original.prompt, root })
     const limitedChildren = []
     for (const child of children) {
       const proof = await verifyRunLimitedWritingOutcome(tx, { userId: lease.userId, novelId: root.novelId, runId: child.childRunId })
-      if (proof && !permitsLimitedChild) limitedChildren.push(child)
+      // A permitted child limitation still requires the parent's own current
+      // delivery proof; otherwise ordinary completion would discard it.
+      if (proof && (!permitsLimitedChild || (!writingDelivery && !limitedWritingDelivery))) limitedChildren.push(child)
     }
     const reportLengthChecks = spec.expectedOutputs.filter(output => output.required && output.minimumChineseCharacters !== undefined)
       .map(output => ({ description: output.description, required: output.minimumChineseCharacters!,

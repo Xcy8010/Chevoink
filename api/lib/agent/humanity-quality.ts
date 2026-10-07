@@ -28,7 +28,7 @@ import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from './craft-library.js'
 import { recalcNovelStats } from './tools/novel-tools.js'
 import { enqueueChapterMemoryExtraction } from './story-memory.js'
-import { locateQualityFindingSpans, validateQualityEvidenceSources, type QualityEvidenceSources } from './quality-evidence.js'
+import { locateQualityFindingSpans, validateQualityEvidenceSources, type QualityEvidenceSources, type CriticResponseDiagnostic } from './quality-evidence.js'
 import { qualityAutoRepairPending, qualityReportMatchesContent, selectAutomaticQualityFindings } from './quality-report-contract.js'
 
 export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v5'
@@ -428,6 +428,7 @@ export async function persistHumanityQualityReport(input: {
   criticComplete?: boolean
   /** 逐条容错解析时被丢弃的 critic 条目数，仅作审计指标，不影响判定。 */
   criticDropped?: number
+  criticResponseDiagnostic?: CriticResponseDiagnostic
 }, transaction?: Prisma.TransactionClient): Promise<ChapterQualityReport & { findings: Array<{ id: string; signal: string; source: string; severity: string; startOffset: number; endOffset: number; evidenceExcerpt: string; explanation: string; suggestion: string; disposition: QualityFindingDisposition }> }> {
   if (!transaction) return prisma.$transaction(tx => persistHumanityQualityReport(input, tx))
   const tx = transaction
@@ -457,7 +458,8 @@ export async function persistHumanityQualityReport(input: {
       deterministicMetrics: { ...input.deterministicMetrics, ...(input.qualityContextHash ? { qualityContextHash: input.qualityContextHash } : {}), independentCheck: complete ? 'complete' : 'unavailable', contentHash: hashText(chapter.content),
         ...(input.sources ? { evidenceSourceProtocol: input.sources.protocol, evidenceSourceIdentity: input.sources.identity,
           evidenceSourceTableHash: hashText(JSON.stringify(input.sources)) } : {}),
-        unlocatedFindings, omittedFindings, criticFindingCount, droppedFindings: input.criticDropped ?? 0 } as Prisma.InputJsonValue,
+        unlocatedFindings, omittedFindings, criticFindingCount, droppedFindings: input.criticDropped ?? 0,
+        ...(input.criticResponseDiagnostic ? { criticResponse: input.criticResponseDiagnostic } : {}) } as Prisma.InputJsonValue,
       criticVersion: input.criticVersion ?? HUMANITY_CRITIC_VERSION, checkedAt: new Date(),
       findings: {
         create: findings.map((finding) => ({

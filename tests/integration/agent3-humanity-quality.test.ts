@@ -20,6 +20,7 @@ import {
 import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { buildQualityEvidenceSources, inspectCriticResponse } from '../../api/lib/agent/quality-evidence.js'
 
 const dbAvailable = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 
@@ -149,5 +150,21 @@ describe.skipIf(!dbAvailable)('Agent 3.0 人类感质量门（需 DB）', () => 
     expect(repaired.updated.revision).toBe(secondChapter.revision + 1)
     // 同一报告内第二轮自动修订仍硬熔断（单次检查单次修订，防空转循环）
     await expect(applyQualityRepair({ userId, novelId, reportId: second.id, replacements: [{ findingId: second.findings[0].id, replacement: '林舟把钥匙塞回袖口，转身去关窗。' }] })).rejects.toMatchObject({ code: 'QUALITY_REPAIR_LIMIT' })
+  })
+  it('persists failed critic audit and authentic partial evidence without changing the saved manuscript', async () => {
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })
+    const sources = buildQualityEvidenceSources({ userId, novelId, chapterId, chapterRevision: chapter.revision }, chapter.content)
+    const valid = { sourceId: sources.entries[0].id, signal: 'emotion_grounding', severity: 'advisory', explanation: '真实位置，待作者判断', suggestion: '保留人物声音' }
+    const raw = JSON.stringify({ findings: [valid, { ...valid, sourceId: 'foreign' }] })
+    const inspected = inspectCriticResponse(raw, sources)
+    const report = await persistHumanityQualityReport({ userId, novelId, runId, chapterId, chapterRevision: chapter.revision, mode: 'premium',
+      sources, deterministicMetrics: {}, deterministicFindings: [], criticFindings: inspected.findings, criticComplete: inspected.complete,
+      criticDropped: inspected.diagnostic.droppedFindings, criticResponseDiagnostic: { ...inspected.diagnostic, callId: 'native-legacy-critic' } })
+    expect(report).toMatchObject({ status: 'failed', repairRound: 0, deterministicMetrics: { independentCheck: 'unavailable',
+      droppedFindings: 1, criticFindingCount: 1, criticResponse: { version: 1, callId: 'native-legacy-critic', classification: 'source_invalid', findingCount: 2, invalidSources: 1 } } })
+    expect(report.findings).toHaveLength(1)
+    expect(report.findings[0].evidenceExcerpt).toBe(sources.entries[0].text)
+    expect(report.deterministicMetrics).not.toHaveProperty('rawResponse')
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).toEqual(chapter)
   })
 })

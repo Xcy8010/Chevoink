@@ -14,7 +14,7 @@ import { configurationResponseSchema } from './tools/configuration-tools.js'
 import { verifyChildGrant } from './runtime-child.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
 import { savedChapterPresentationSchema } from './writing-scope.js'
-import { limitedWritingDeliverySchema } from './writing-delivery-limitations.js'
+import { limitedWritingDeliverySchema, limitedWritingOutcomeSchema } from './writing-delivery-limitations.js'
 
 /** Only this DB-locked allocator writes UI events for the durable protocol.
  * New source families retain their outbox rows until their projector is added;
@@ -116,13 +116,13 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
       } else if (source.type === 'execution.completion.decided') {
         const decision = z.object({ version: z.literal(1), kind: z.literal('completed'), reviewOperationId: z.string(), resultHash: z.string(),
           sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(), revision: z.number().int().positive(), snapshotHash: z.string(),
-          outcome: limitedWritingDeliverySchema.shape.outcome.optional() }).parse(source.payload)
+          outcome: limitedWritingOutcomeSchema.optional() }).parse(source.payload)
         const receipt = await tx.agentEffectReceipt.findUnique({ where: { operationId: decision.reviewOperationId }, include: { operation: true } })
         const verdict = z.object({ verdict: z.object({ verdict: z.literal('complete') }) }).safeParse(receipt?.result)
         const proof = z.object({ version: z.literal(1), sourceRevision: z.number(), sourceHash: z.string(),
           candidateHash: z.string(), evidenceHash: z.string(), evidence: z.object({ blockers: z.array(z.never()) }).passthrough(),
           chapterPresentation: savedChapterPresentationSchema.optional(), limitedWritingDelivery: limitedWritingDeliverySchema.optional(),
-          outcome: limitedWritingDeliverySchema.shape.outcome.optional() }).safeParse(receipt?.result)
+          outcome: limitedWritingOutcomeSchema.optional() }).safeParse(receipt?.result)
         const frame = await readExecutionFrame(tx, root.id, decision.revision)
         const before = await readExecutionFrame(tx, root.id, decision.sourceRevision)
         const candidate = before.state.messages.at(-1)
@@ -140,9 +140,9 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           && (!proof.data.limitedWritingDelivery || (() => {
             const limited = proof.data.limitedWritingDelivery
             const admitted = z.object({ input: z.object({ limitedWritingDelivery: limitedWritingDeliverySchema,
-              outcome: limitedWritingDeliverySchema.shape.outcome }) }).safeParse(receipt.operation.inputSnapshot)
+              outcome: limitedWritingOutcomeSchema }) }).safeParse(receipt.operation.inputSnapshot)
             const checked = z.object({ limitedWritingDelivery: limitedWritingDeliverySchema }).safeParse(proof.data.evidence)
-            const decisionOutcome = z.object({ outcome: limitedWritingDeliverySchema.shape.outcome }).safeParse(source.payload)
+            const decisionOutcome = z.object({ outcome: limitedWritingOutcomeSchema }).safeParse(source.payload)
             return admitted.success && checked.success && decisionOutcome.success && limited.targetRunId === source.runId
               && limited.text === candidate.content && runtimeJson(receipt.operation.inputSnapshot).hash === receipt.operation.inputHash
               && runtimeJson(admitted.data.input.limitedWritingDelivery).hash === runtimeJson(limited).hash

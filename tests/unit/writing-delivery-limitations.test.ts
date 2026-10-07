@@ -9,10 +9,10 @@ describe('limited writing delivery contract', () => {
   it.each(['检查本章连续性', '写下一章，检查通过后才能交付', '写下一章，必须通过所有检查', '写下一章，并生成封面', '写下一章，同时给出完整分析报告', '全书审阅'])('does not waive independent or hard requirements: %s', prompt => {
     expect(allowsLimitedWritingDelivery(prompt)).toBe(false)
   })
-  it.each(['完成连续性检查及章节终态提交', '提交章节桥', 'continuity check and chapter_bridge_commit'])('recognizes only explicit review dependencies: %s', content => {
+  it.each(['完成连续性检查及章节终态提交', '完成质量检查及章节终态提交', '提交章节桥', 'continuity check and chapter_bridge_commit', 'quality check and chapter_bridge_commit'])('recognizes only explicit review dependencies: %s', content => {
     expect(limitedReviewDependency(content)).toBe(true)
   })
-  it.each(['完成正文写作并检查连续性', '检查第二章连续性', '提交封面及章节终态', '完成场景写作', '保存大纲', '分析连续性原因'])('keeps unrelated or uncertain work pending: %s', content => {
+  it.each(['完成正文写作并检查连续性', '检查第二章连续性', '检查第二章质量', '完成质量分析报告', '提交封面及章节终态', '完成场景写作', '保存大纲', '分析连续性原因'])('keeps unrelated or uncertain work pending: %s', content => {
     expect(limitedReviewDependency(content)).toBe(false)
   })
   it('does not interpret ordinary historical usage as a limited completion', () => {
