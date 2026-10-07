@@ -2,6 +2,7 @@ import { create } from 'zustand'
 
 import type {
   AgentAttachmentMeta,
+  AgentRunOutcome,
   AgentGoalSnapshot,
   AgentMessagePart,
   AgentSessionRunStatus,
@@ -206,6 +207,7 @@ type AgentStoreState = {
   phase: AgentRunPhase
   /** 可信作者结束信号；用于区分作者主动结束与真实执行失败，禁止误显示继续/红灯。 */
   authorEnded: AgentAuthorEnded | null
+  outcome: AgentRunOutcome | null
   agentTitle: string
   messages: AgentUIMessage[]
   pendingApproval: PendingApproval | null
@@ -275,6 +277,7 @@ type AgentStoreState = {
   noteResumeableRun: (runId: string | null) => void
   /** 刷新历史或终态事件提供作者结束事实，并优先采用其最终待办快照。 */
   setAuthorEnded: (value: AgentAuthorEnded | null) => void
+  setRunOutcome: (value: AgentRunOutcome | null) => void
   restoreMessages: (messages: AgentUIMessage[], sessionId?: string | null, snapshot?: AgentTodoSnapshot | null) => void
   reconcileTodoSnapshot: (snapshot: AgentTodoSnapshot, sessionId: string, runId: string, expectedVersion: number) => void
   /** 加载更早对话：把更早轮次前插合并（按 id 去重），不触碰进行中的 run */
@@ -531,6 +534,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   resumeableRunId: null,
   phase: 'idle',
   authorEnded: null,
+  outcome: null,
   agentTitle: '写作主控',
   messages: [],
   pendingApproval: null,
@@ -574,6 +578,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       runGoalId,
       phase: 'starting',
       authorEnded: null,
+      outcome: null,
       activeSessionId: sessionId,
       loadedSessionId: sessionId,
       pendingApproval: null,
@@ -634,6 +639,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       resumeableRunId: null,
       phase: 'starting',
       authorEnded: null,
+      outcome: null,
       activeSessionId: sessionId,
       loadedSessionId: sessionId,
       pendingApproval: null,
@@ -669,6 +675,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       runId: null,
       runGoalId: null,
       authorEnded: null,
+      outcome: null,
       resumeableRunId: null,
       activeSessionId: null,
       loadedSessionId: sessionId,
@@ -743,6 +750,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       resumeableRunId: null,
       phase: 'idle',
       authorEnded: null,
+      outcome: null,
       activeSessionId: null,
       loadedSessionId: null,
       goal: null,
@@ -773,6 +781,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   noteResumeableRun: (runId) =>
     set((state) => (state.resumeableRunId === runId ? {} : { resumeableRunId: runId })),
 
+  setRunOutcome: (value) => set({ outcome: value }),
+
   setAuthorEnded: (value) => set((state) => ({
     authorEnded: value,
     ...(value?.todoItems ? { todos: value.todoItems, todosVersion: state.todosVersion + 1 } : {}),
@@ -796,6 +806,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     set((state) => {
       const running = new Set(state.runningSessionIds)
       const signals = { ...state.sessionSignals }
+      let outcome = state.outcome
       let authorEnded = state.authorEnded
       let authorEndedTodos: AgentTodoItem[] | undefined
       let phase = state.phase
@@ -835,6 +846,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           changed = true
         }
         if (entry.status === 'running' || entry.status === 'queued' || entry.status === 'awaiting_approval') {
+          if (isActiveSession && outcome && runId !== entry.runId) { outcome = null; changed = true }
           const sameAuthorEndedRun = isActiveSession && Boolean(authorEnded) && runId === entry.runId
           if (isActiveSession && authorEnded && !sameAuthorEndedRun) {
             authorEnded = null
@@ -860,6 +872,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         // paused 为作者主动停止，只撤登记不提示
         const isCurrentTerminal = isActiveSession && state.runId === entry.runId && isRunActive(state.phase)
         if (isCurrentTerminal) {
+          outcome = entry.outcome ?? null
           // SSE 连接恰好在终态帧前断开时，服务端的已持久化 run-status 是唯一可信兜底。
           // 这里收敛本地运行态，不把最终回答或工具结果伪造成新的 SSE 事件。
           phase = entry.status === 'completed'
@@ -898,6 +911,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         runId,
         runGoalId,
         authorEnded,
+        outcome,
         pendingApproval,
         pendingQuestion,
         liveToolDrafts,
@@ -1320,6 +1334,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...base,
             phase: event.status,
             authorEnded: event.authorEnded ?? null,
+            outcome: event.outcome ?? null,
             usage: event.usage,
             outputSummary: event.outputSummary,
             pendingApproval: null,

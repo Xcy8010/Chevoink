@@ -1,5 +1,6 @@
 import { COMPATIBILITY_TOKEN_LIMIT } from './execution-control.js'
 import { z } from 'zod'
+import { toolRestrictionSchema } from './tool-local-failure.js'
 
 /**
  * 历史检查点证据兼容。新任务按完成条件执行。
@@ -59,6 +60,7 @@ const runCheckpointFields = {
   // Write before a legacy critic/repair chain starts. A process interruption or
   // uncertain provider outcome cannot become permission to pay for it again.
   reviewAttempts: z.array(z.string().min(1)).optional(),
+  toolRestrictions: z.array(toolRestrictionSchema).optional(),
   pendingReviews: z.array(z.object({ compilationId: z.string().min(1).nullable(), chapterId: z.string().min(1),
     revision: z.number().int().positive(), toolName: z.enum(['continuity_validate', 'quality_analyze']), callId: z.string().min(1),
   }).strict()).optional(),

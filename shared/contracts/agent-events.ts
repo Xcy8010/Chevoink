@@ -380,6 +380,7 @@ export type AgentStreamEventBody =
   | { type: 'run.paused'; reason: 'user_stop' | 'approval_timeout' | 'model_stalled' | 'needs_input' }
   | {
       type: 'run.finished'
+      outcome?: import('./models.js').AgentRunOutcome
       authorEnded?: { fulfilled: boolean; todoItems?: AgentTodoItem[] }
       status: 'succeeded' | 'failed' | 'cancelled'
       usage: AgentTokenUsage

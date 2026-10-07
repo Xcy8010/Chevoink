@@ -220,6 +220,7 @@ export function AgentPanel({
   const runGoalId = useAgentStore((state) => state.runGoalId)
   const phase = useAgentStore((state) => state.phase)
   const authorEnded = useAgentStore((state) => state.authorEnded)
+  const outcome = useAgentStore((state) => state.outcome)
   const resumeableRunId = useAgentStore((state) => state.resumeableRunId)
   const messages = useAgentStore((state) => state.messages)
   const { recentConversationText, blockInfoById, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
@@ -338,6 +339,7 @@ export function AgentPanel({
       } else {
         now.restoreMessages(payload.messages, sessionId, payload.todoSnapshot)
         now.setAuthorEnded(payload.authorEnded ?? null)
+        now.setRunOutcome(payload.outcome ?? null)
         now.noteResumeableRun(payload.resumeRunId ?? null)
       }
     }).catch(() => { /* Next queue poll retries; never erase existing history. */ })
@@ -947,6 +949,7 @@ export function AgentPanel({
         } else {
           useAgentStore.getState().restoreMessages(history, sessionId, payload.todoSnapshot)
           useAgentStore.getState().setAuthorEnded(payload.authorEnded ?? null)
+          useAgentStore.getState().setRunOutcome(payload.outcome ?? null)
           // 无活跃 run：若服务端派生出可续跑的 failed/paused run，刷新后仍保留「继续执行」按钮
           useAgentStore.getState().noteResumeableRun(payload.resumeRunId ?? null)
         }
@@ -1184,11 +1187,12 @@ export function AgentPanel({
       // 删除/回退后的重拉：不带分页参数走全量，避免已加载的更早轮次被页窗口截掉；
       // 同时清掉分页游标，防止顶部按钮残留过期状态
       const beforeRunId = useAgentStore.getState().runId
-      const { messages: history, authorEnded, todoSnapshot } = await fetchAgentSessionMessages(sessionId)
+      const { messages: history, authorEnded, outcome: restoredOutcome, todoSnapshot } = await fetchAgentSessionMessages(sessionId)
       if (viewSession.current !== sessionId || useAgentStore.getState().runId !== beforeRunId) return
       setOlderPagination(null)
       useAgentStore.getState().restoreMessages(history, sessionId, todoSnapshot)
       useAgentStore.getState().setAuthorEnded(authorEnded ?? null)
+      useAgentStore.getState().setRunOutcome(restoredOutcome ?? null)
     } catch {
       /* 拉取失败保留现有消息 */
     }
@@ -1385,7 +1389,7 @@ export function AgentPanel({
             </div> : null}
           </div>
         )}
-        {panelPhase !== 'idle' ? (
+        {panelPhase !== 'idle' || outcome ? (
           <span
             className={cn(
               'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium',
@@ -1397,7 +1401,7 @@ export function AgentPanel({
                   : 'bg-[var(--surface-muted)] text-[var(--text-secondary)]',
             )}
           >
-            {phaseLabel[panelPhase] ?? panelPhase}
+            {outcome?.kind === 'delivered_with_limitations' && !active ? '已交付·待复核' : phaseLabel[panelPhase] ?? panelPhase}
           </span>
         ) : null}
         <span className={cn('ml-auto shrink-0 text-[10px] tabular-nums text-[var(--text-secondary)]', mobileIntegratedHeader && 'hidden')}>

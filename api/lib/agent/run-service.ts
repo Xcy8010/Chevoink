@@ -1,5 +1,6 @@
 import { freezeWritingScope } from './writing-scope.js'
 import { readAuthorEnded } from './author-ended.js'
+import { readRunOutcome } from './run-outcome.js'
 import { hasAuthorEnded } from './completion-guard.js'
 import type { Response } from 'express'
 import { randomUUID } from 'node:crypto'
@@ -667,6 +668,7 @@ export async function streamLoopRun(
         usage: savedUsage.success ? savedUsage.data : { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         artifacts: [],
         outputSummary: latest?.outputSummary ?? '',
+        ...readRunOutcome(latest?.usage),
         ...readAuthorEnded(latest.usage),
       })
     }
@@ -1450,6 +1452,7 @@ function toAgentRun(record: {
     inputSummary: record.inputSummary ?? null,
     outputSummary: record.outputSummary ?? null,
     ...readAuthorEnded(record.usage),
+    ...readRunOutcome(record.usage),
     errorMessage: record.errorMessage ?? null,
     startedAt: toIso(record.startedAt),
     finishedAt: toIso(record.finishedAt),
@@ -1976,6 +1979,7 @@ export async function listSessionRunStatuses(userId: string, sessionIds: string[
       status: run.status as AgentRunStatus,
       finishedAt: run.finishedAt?.toISOString() ?? null,
       ...readAuthorEnded(run.usage),
+      ...readRunOutcome(run.usage),
     }
   }
   return { statuses }

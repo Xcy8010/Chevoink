@@ -502,6 +502,7 @@ export type ListAgentSessionsResponse = ApiSuccess<{
  * completed/failed/cancelled→终态（绿/红点，仅本页面会话内由事件层实时记录，此接口不回传历史终态）。 */
 export type AgentSessionRunStatus = {
   authorEnded?: { fulfilled: boolean; todoItems?: import('./agent-events.js').AgentTodoItem[] }
+  outcome?: import('./models.js').AgentRunOutcome
   runId: string
   /** 服务端确认最新 run 是否属于目标；普通 run 为 null。 */
   runGoalId: string | null

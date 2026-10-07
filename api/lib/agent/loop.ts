@@ -53,6 +53,8 @@ import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-t
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { createEmptyResponseGuard, createProtocolRecoveryGuard, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { toolFailureRecovery, toolRecoveryKey } from './tool-failure-recovery.js'
+import { findToolRestriction, isLocalToolFailure, toolRestrictionTarget, type ToolRestriction } from './tool-local-failure.js'
+import { readLimitedWritingDelivery, assertLimitedWritingDelivery, limitedReviewDependency, type LimitedWritingDelivery } from './writing-delivery-limitations.js'
 import { readChapterReviewReadiness, probeChapterReviewRevision } from './chapter-review-guard.js'
 import { nextMergedReviewReminder, nextReviewDispatch } from './review-dispatch.js'
 import { activeChapterScope } from '../data/internal.js'
@@ -597,6 +599,8 @@ async function finalizeLegacyRun(
   authorEnded?: { fulfilled: boolean; todoItems?: AgentTodoItem[] },
   writingDelivery?: { messageId: string; subject: { userId: string; novelId: string; runId: string }; expected: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; signal: AbortSignal; parts?: AgentMessagePart[]; replaceCandidate?: boolean },
   withFailureNotice = false,
+  limitedDelivery?: { subject: { userId: string; novelId: string; runId: string }; expected: LimitedWritingDelivery; signal: AbortSignal; messageId: string },
+  pauseReason: 'user_stop' | 'needs_input' = 'user_stop',
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
@@ -606,10 +610,17 @@ async function finalizeLegacyRun(
     ? { messageId: randomUUID(), text: errorMessage } : undefined
 
   const terminalBody = status === 'paused'
-    ? { type: 'run.paused' as const, reason: 'user_stop' as const }
-    : { type: 'run.finished' as const, status, usage, artifacts: [], outputSummary, ...(authorEnded ? { authorEnded } : {}) }
+    ? { type: 'run.paused' as const, reason: pauseReason }
+    : { type: 'run.finished' as const, status, usage, artifacts: [], outputSummary, ...(authorEnded ? { authorEnded } : {}), ...(limitedDelivery ? { outcome: limitedDelivery.expected.outcome } : {}) }
   let goalFenced = false
   const committed = await bus.commitTerminal(terminalBody, async tx => {
+    if (limitedDelivery) {
+      await assertLimitedWritingDelivery(tx, limitedDelivery.subject, limitedDelivery.expected)
+      limitedDelivery.signal.throwIfAborted()
+      const owner = await tx.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { sessionId: true } })
+      await tx.agentMessage.create({ data: { id: limitedDelivery.messageId, runId, sessionId: owner.sessionId, role: 'assistant',
+        parts: [{ type: 'text', text: limitedDelivery.expected.text }] } })
+    }
     if (writingDelivery) {
       await assertCompletedWritingDelivery(tx, writingDelivery.subject, writingDelivery.expected)
       writingDelivery.signal.throwIfAborted()
@@ -633,7 +644,7 @@ async function finalizeLegacyRun(
         status: dbStatus,
         outputSummary: outputSummary || null,
         errorMessage: errorMessage ?? null,
-        usage: { ...usage, ...(checkpoint ? { checkpoint } : {}), ...(authorEnded ? { authorEnded: { fulfilled: authorEnded.fulfilled, ...(authorEnded.todoItems ? { todoItems: authorEnded.todoItems.map(item => ({ ...item })) } : {}) } } : {}) },
+        usage: { ...usage, ...(checkpoint ? { checkpoint } : {}), ...(limitedDelivery ? { outcome: limitedDelivery.expected.outcome, deliveryProof: limitedDelivery.expected } : {}), ...(authorEnded ? { authorEnded: { fulfilled: authorEnded.fulfilled, ...(authorEnded.todoItems ? { todoItems: authorEnded.todoItems.map(item => ({ ...item })) } : {}) } } : {}) },
         currentTurn,
         finishedAt: status === 'paused' ? null : new Date(),
       },
@@ -643,9 +654,12 @@ async function finalizeLegacyRun(
     { type: 'text.final', messageId: writingDelivery.messageId, text: writingDelivery.expected.text, asReasoning: false }] : failureNotice ? [
     { type: 'message.start', messageId: failureNotice.messageId, role: 'assistant' },
     { type: 'text.final', messageId: failureNotice.messageId, text: failureNotice.text, asReasoning: false },
+  ] : limitedDelivery ? [
+    { type: 'message.start', messageId: limitedDelivery.messageId, role: 'assistant' },
+    { type: 'text.final', messageId: limitedDelivery.messageId, text: limitedDelivery.expected.text, asReasoning: false },
   ] : [])
     .catch((error) => {
-      if (writingDelivery && (isAbortError(error) || error instanceof DataAccessError && error.code === 'WRITING_DELIVERY_STALE')) throw error
+      if ((writingDelivery || limitedDelivery) && (isAbortError(error) || error instanceof DataAccessError && error.code === 'WRITING_DELIVERY_STALE')) throw error
       if (error instanceof DataAccessError && error.code === 'GOAL_EXECUTION_FENCED') {
         goalFenced = true
         return null
@@ -749,12 +763,22 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const recoveryFailures = new Map<string, number>()
   const automaticReviewAttempts = new Set<string>()
   const pendingReviews = new Map<string, PendingReviewCall>()
+  const toolRestrictions: ToolRestriction[] = []
+  const restrictTool = (action: string, args: unknown, code: string, reason: string) => {
+    const target = toolRestrictionTarget(args, getLastTouchedChapter(runId) ?? params.chapterId)
+    const writers = ['chapter_edit_range', 'chapter_write', 'chapter_append']
+    for (const name of writers.includes(action) ? writers : [action]) {
+      if (!toolRestrictions.some(item => item.action === name && item.target === target)) toolRestrictions.push({ action: name, target, code, reason })
+    }
+  }
   const restoreReviewEvidence = (checkpoint: RunCheckpointState) => {
+    for (const item of checkpoint.toolRestrictions ?? []) if (!toolRestrictions.some(prior => prior.action === item.action && prior.target === item.target)) toolRestrictions.push(item)
     checkpoint.reviewAttempts?.forEach(key => automaticReviewAttempts.add(key))
     checkpoint.pendingReviews?.forEach(call => pendingReviews.set(`${call.compilationId ?? call.chapterId}:${call.toolName}`, call))
   }
   // 非空时本轮工具执行完立即走 wrap-up（P0 第 4 次同签名 / P1 干预模式二次命中）
   let forceWrapUpReason: string | null = null
+  let forceWrapUpLocal = false
   // P1 信道重复检测：正文+思考共用一个检测器，观察/干预由 env.agentRepeatGuardMode 决定
   const repeatDetector = createRepeatDetector()
   let repeatReminderSent = false
@@ -790,6 +814,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     progressSignatures: [...progressSignatures],
     ...(automaticReviewAttempts.size ? { reviewAttempts: [...automaticReviewAttempts] } : {}),
     ...(pendingReviews.size ? { pendingReviews: [...pendingReviews.values()] } : {}),
+    ...(toolRestrictions.length ? { toolRestrictions } : {}),
     inheritedTokens, inheritedTurns, inheritedExecutionMs, manualResumeCount,
     ...(reviewHandoffCount > 0 ? { reviewHandoffCount } : {}),
   })
@@ -1340,14 +1365,28 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       forceWrapUpReason = '信道重复输出同一段内容已终止（复读熔断）。'
     }
 
-    /** Park unresolved work truthfully without buying another formatting call. */
+    const finishLimitedWritingIfAllowed = async (): Promise<boolean> => {
+      if (pendingReviews.size || todoItems.some(item => (item.status === 'pending' || item.status === 'in_progress') && !limitedReviewDependency(item.content))) return false
+      const subject = { userId: params.userId, novelId: params.novelId, runId }
+      const expected = await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))
+      if (!expected) return false
+      controller.signal.throwIfAborted()
+      await finalizeRun(runId, bus, 'succeeded', usage, turn, expected.outcome.summary, undefined, false,
+        undefined, undefined, undefined, false, { subject, expected, signal: controller.signal, messageId: randomUUID() })
+      return true
+    }
+
+    /** A local unavailable tool cannot manufacture whole-task failure. Work that
+     * cannot yet be delivered is parked honestly, with its original obligations. */
     const wrapUpAndFinish = async (reasonText: string): Promise<void> => {
+      if (forceWrapUpLocal && await finishLimitedWritingIfAllowed()) return
       const text = `${reasonText}已保存的内容保留，本次工作尚未完成。`
       const messageId = randomUUID()
       bus.emit({ type: 'message.start', messageId, role: 'assistant' })
       bus.emit({ type: 'text.final', messageId, text, asReasoning: false })
       await persistMessage(messageId, runId, params.sessionId, 'assistant', [{ type: 'text', text }])
-      await finalizeRun(runId, bus, 'failed', usage, turn, text.slice(0, 300), reasonText, false)
+      await finalizeRun(runId, bus, forceWrapUpLocal ? 'paused' : 'failed', usage, turn, text.slice(0, 300), reasonText, false,
+        undefined, undefined, undefined, false, undefined, forceWrapUpLocal ? 'needs_input' : 'user_stop')
     }
 
     const finishPersistedWritingIfComplete = async (beforeFinish?: () => Promise<void>) => {
@@ -1558,7 +1597,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           automaticReviewTriggered = true
           effectiveToolCalls.push({ id: `review_${messageId}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) })
         }
-        else if (next.kind === 'blocked') forceWrapUpReason = next.reason
+        else if (next.kind === 'blocked' || next.kind === 'limited') {
+          if (next.kind === 'limited' && await finishLimitedWritingIfAllowed()) return
+          forceWrapUpReason = next.reason
+          forceWrapUpLocal = next.kind === 'limited' || Boolean(readiness?.requiredTools.some(item => findToolRestriction(toolRestrictions, item.name, item.args, readiness.chapterId)))
+        }
         else if (readiness?.ready && toolContext.sandboxMode !== 'read_only'
           && !toolContext.inlineChild && !toolContext.protectedChapterIds?.has(readiness.chapterId)
           && (readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)) {
@@ -1706,6 +1749,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const nextChapterRequired = requiresNextChapterDelivery(taskSpec.goals)
         const chapterIncomplete = nextChapterRequired
           && !await (await import('./humanity-quality.js')).hasCommittedTaskChapter(prisma, params.userId, params.novelId, runId)
+        if (toolRestrictions.length && !(nextChapterRequired && !chapterIncomplete) && !report?.content) {
+          await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
+          bus.emit({ type: 'step.finish', turn, usage: result.usage })
+          forceWrapUpLocal = true
+          await wrapUpAndFinish(`部分工具暂不可继续：${toolRestrictions.map(item => item.reason).filter((item, index, all) => all.indexOf(item) === index).join('；')}。`)
+          return
+        }
         const todoIncomplete = unfinishedTodos.length > 0 && !(nextChapterRequired && !chapterIncomplete && taskSpec.goals.length === 1)
         const otherPremature = chapterIncomplete || reportIncomplete || todoIncomplete || result.finishReason === 'length' || promisesFurtherAction(cleanContent) || (expectsPlanSave && !planSavePerformed)
         // A review denial already told the model to finish only authorized work
@@ -1763,7 +1813,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         return
       }
 
-      let structureCircuitTripped = false
       let reviewStopReason: string | undefined
       let batchProgress = false
       for (let callIndex = 0; callIndex < effectiveToolCalls.length; callIndex += 1) {
@@ -1798,8 +1847,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               parts.push({ type: 'text', text: note })
               bus.emit({ type: 'text.final', messageId, text: note, asReasoning: false })
               call = required
-            } else if (next.kind === 'blocked') {
+            } else if (next.kind === 'blocked' || next.kind === 'limited') {
+              const local = next.kind === 'limited' || readiness.requiredTools.some(item => findToolRestriction(toolRestrictions, item.name, item.args, readiness.chapterId))
+              if (local) {
+                restrictTool(call.name, parsed, 'REVIEW_DEPENDENCY_UNAVAILABLE', next.reason)
+                messages.push({ role: 'tool', toolCallId: call.id, content: `[系统] ${next.reason} 此次未提交章节终态。继续本批其余可执行工作，不能声明检查通过。` })
+                continue
+              }
               forceWrapUpReason = next.reason
+              forceWrapUpLocal = false
               break
             } else if (readiness?.ready && call.name === 'chapter_bridge_commit'
               && toolContext.sandboxMode !== 'read_only' && !toolContext.inlineChild
@@ -1826,6 +1882,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               }
             }
           }
+        }
+        const restricted = findToolRestriction(toolRestrictions, call.name,
+          reviewPreflightArgs(call, tools.find(tool => tool.name === call.name)), getLastTouchedChapter(runId) ?? params.chapterId)
+        if (restricted) {
+          blockedRepeat += 1
+          messages.push({ role: 'tool', toolCallId: call.id,
+            content: `[系统] 该目标的 ${call.name} 已因 ${restricted.code} 停止重复尝试，本次未执行、未产生新费用。原因：${restricted.reason}。继续其他已授权且不依赖此操作的工作；不要换工具绕过权限或把未完成项说成通过。` })
+          continue
         }
         let reviewDispatch: PendingReviewCall | undefined
         if (STATE_SENSITIVE_VALIDATORS.has(call.name)) {
@@ -1899,12 +1963,24 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           pendingReviews.delete(`${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`)
           await persistCheckpoint()
         }
-        reviewStopReason = outcome.reviewStopReason ?? (taskSpec.intent === 'review'
+        const localFailure = isLocalToolFailure(outcome.failureCode ?? outcome.recoveryCode)
+        if (localFailure) {
+          const code = outcome.failureCode ?? outcome.recoveryCode!
+          restrictTool(call.name, outcome.part.args, code, outcome.observation)
+          // Both public selectors address the same server-resolved assessment.
+          // Retain both identities so switching chapterId/compilationId cannot
+          // lose the local failure or dispatch another paid attempt.
+          if (reviewDispatch) {
+            restrictTool(call.name, { chapterId: reviewDispatch.chapterId }, code, outcome.observation)
+            if (reviewDispatch.compilationId) restrictTool(call.name, { compilationId: reviewDispatch.compilationId }, code, outcome.observation)
+          }
+        }
+        reviewStopReason = localFailure ? undefined : outcome.reviewStopReason ?? (taskSpec.intent === 'review'
           && outcome.recoveryCode === 'REVIEW_REPAIR_RECHECK_REQUIRED' ? outcome.observation : undefined)
         pendingSkillPhase = nextSkillPhase(call.name, outcome.part, taskSpec.intent, params.prompt) ?? pendingSkillPhase
         {
           if (outcome.part.status === 'success') toolProviderFailures.delete(call.name)
-          else if (outcome.providerFailure) {
+          else if (outcome.providerFailure && !localFailure) {
             const failures = (toolProviderFailures.get(call.name) ?? 0) + 1
             toolProviderFailures.set(call.name, failures)
             if (['AI_PROVIDER_QUOTA_EXCEEDED', 'AI_QUALITY_NON_THINKING_UNSUPPORTED', 'AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_INCOMPLETE', 'AI_PROVIDER_TIMEOUT'].includes(outcome.providerFailureCode ?? '')) forceWrapUpReason = outcome.observation
@@ -1916,13 +1992,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         else if (outcome.argumentFailure || ['参数解析失败', '参数校验失败', '参数归一化失败'].includes(outcome.part.summary ?? '')) {
           const failures = (argumentFailures.get(call.name) ?? 0) + 1
           argumentFailures.set(call.name, failures)
-          if (failures >= 3) forceWrapUpReason = `工具 ${call.name} 连续三次参数无效，已停止重复消耗；已成功保存的内容保留，该工具未完成。`
+          if (failures >= 3) restrictTool(call.name, outcome.part.args, outcome.failureCode ?? 'INVALID_ARGUMENTS', '连续三次参数无效，该工具未完成；继续其他可执行工作。')
         }
         if (outcome.recoveryCode) {
           const key = toolRecoveryKey(call.name, outcome.recoveryCode, outcome.part.args, getLastTouchedChapter(runId) ?? params.chapterId)
           const failures = (recoveryFailures.get(key) ?? 0) + 1
           recoveryFailures.set(key, failures)
-          if (failures >= 3) forceWrapUpReason = `${outcome.part.title}在同一目标上三次遇到同一问题：${outcome.part.summary}。更换参数、工具或重复读取没有解决该拒绝，已停止无进展重试；已保存内容保留，任务尚未完成。`
+          if (failures >= 3) restrictTool(call.name, outcome.part.args, outcome.recoveryCode, `${outcome.part.title}在同一目标上三次遇到同一问题：${outcome.part.summary}。停止此工具链的无进展重试，继续其他可执行工作。`)
         }
         lastActivityAt = Date.now()
         // 滑窗更新：只记成功执行；失败不碰窗口（同签名重试不会被误杀）
@@ -1957,7 +2033,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           } else if (outcome.part.status === 'failed') {
             consecutiveStructureFailures += 1
             if (consecutiveStructureFailures >= STRUCTURE_FAILURE_LIMIT) {
-              structureCircuitTripped = true
+              restrictTool(call.name, outcome.part.args, outcome.failureCode ?? 'STRUCTURE_RETRY_LIMIT', '结构操作连续失败，已隔离该目标的操作以免重复创建或错位；其他原授权工作可继续。')
             }
           }
         }
@@ -1969,7 +2045,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         // 子 Agent 内嵌执行产生的内部工具卡片随父消息一并直播与落库，刷新后仍可展开查看
         if (outcome.extraParts?.length) parts.push(...outcome.extraParts)
         messages.push({ role: 'tool', toolCallId: call.id, content: outcome.observation })
-        if (structureCircuitTripped || forceWrapUpReason || authorEndRequested || reviewStopReason) {
+        if (forceWrapUpReason || authorEndRequested || reviewStopReason) {
           break
         }
       }
@@ -2034,17 +2110,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         && await prisma.agentRun.count({ where: { userId: params.userId, novelId: params.novelId, OR: [{ session: { spawnedFromRunId: runId } }, { incomingChildGrant: { currentParentRunId: runId } }],
           status: { in: ['queued', 'running', 'awaiting_approval'] } } }) > 0
       stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, waitingForChild)
-      if (stagnantBatches >= 4) forceWrapUpReason = '连续多轮没有推进原任务的内容或必需成果，任务尚未完成，已停止重复执行。'
-      if (blockedRepeat >= 4) forceWrapUpReason = '连续重复调用已拦截，且未产生新的工具进展（防空转循环）。'
-      if (structureCircuitTripped) {
-        const failureText = '卷章结构操作已连续失败 3 次，安全熔断已停止后续写入，避免重复建章、错卷和序号进一步漂移。请检查任务状态中的变更后重新发起。'
-        const failureMessageId = randomUUID()
-        bus.emit({ type: 'message.start', messageId: failureMessageId, role: 'assistant' })
-        bus.emit({ type: 'text.delta', messageId: failureMessageId, delta: failureText })
-        bus.emit({ type: 'text.final', messageId: failureMessageId, text: failureText, asReasoning: false })
-        await persistMessage(failureMessageId, runId, params.sessionId, 'assistant', [{ type: 'text', text: failureText }])
-        await finalizeRun(runId, bus, 'failed', usage, turn, failureText, failureText)
-        return
+      if (!forceWrapUpReason && (stagnantBatches >= 4 || blockedRepeat >= 4)) {
+        forceWrapUpReason = '连续多轮没有推进原任务的内容或必需成果，已停止重复执行，进度保留。'
+        forceWrapUpLocal = toolRestrictions.length > 0
       }
 
       // P0/P1 熔断收尾：结构熔断优先级更高（上方已 return），这里处理重复签名第 4 次/复读二次命中

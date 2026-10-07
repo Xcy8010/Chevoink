@@ -10,6 +10,7 @@ import { evaluateTaskPostconditions } from './runtime-postconditions.js'
 import { collectDurableDeliverables } from './runtime-deliverables.js'
 import { collectDurableMemoryWork } from './runtime-memory.js'
 import { readCompletedWritingDelivery } from './writing-scope.js'
+import { readLimitedWritingDelivery, limitedReviewDependency, verifyRunLimitedWritingOutcome, permitsLimitedWritingContract } from './writing-delivery-limitations.js'
 
 /** Review input, NOT a completion certificate. The goal/output/postcondition
  * obligations remain explicit and unverified until their domain checks run.
@@ -35,12 +36,22 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
     const postconditionChecks = await evaluateTaskPostconditions(tx, root)
     const todos = await readDurableTodoItems(tx, root.id, frame.revision)
     const writingDelivery = await readCompletedWritingDelivery(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId })
+    const limitedWritingDelivery = writingDelivery ? null : await readLimitedWritingDelivery(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId })
     const budget = await readTaskBudgetInTransaction(tx, root.id)
     const compilations = await tx.storyCompilation.findMany({ where: { userId: lease.userId, novelId: root.novelId, run: { taskRootId: root.id } },
       select: { id: true, chapterId: true, status: true, stage: true, bridge: { select: { targetRevision: true, committedAt: true } }, chapter: { select: { revision: true } } }, orderBy: { id: 'asc' } })
     const pendingOperations = await tx.agentOperation.findMany({ where: { taskRootId: root.id, status: { in: ['prepared', 'dispatched', 'unknown'] } }, select: { id: true, action: true, status: true }, orderBy: { id: 'asc' } })
     const failedOperations = await tx.agentOperation.findMany({ where: { taskRootId: root.id, status: 'failed' }, select: { id: true, action: true }, orderBy: { id: 'asc' } })
     const subtasks = await tx.agentSubtaskRun.findMany({ where: { userId: lease.userId, novelId: root.novelId, parentRun: { taskRootId: root.id } }, select: { id: true, status: true }, orderBy: { id: 'asc' } })
+    const children = await tx.agentChildExecutionGrant.findMany({ where: { parentRootId: root.id }, include: { childRun: true } })
+    const request = root.requestSnapshot && typeof root.requestSnapshot === 'object' && !Array.isArray(root.requestSnapshot) ? root.requestSnapshot : {}
+    const permitsLimitedChild = 'prompt' in request && typeof request.prompt === 'string'
+      && await permitsLimitedWritingContract(tx, { spec, prompt: request.prompt, root })
+    const limitedChildren = []
+    for (const child of children) {
+      const proof = await verifyRunLimitedWritingOutcome(tx, { userId: lease.userId, novelId: root.novelId, runId: child.childRunId })
+      if (proof && !permitsLimitedChild) limitedChildren.push(child)
+    }
     const reportLengthChecks = spec.expectedOutputs.filter(output => output.required && output.minimumChineseCharacters !== undefined)
       .map(output => ({ description: output.description, required: output.minimumChineseCharacters!,
         actual: output.kind === 'text' || output.kind === 'validation_report' ? countReportChineseCharacters(last.content ?? '') : null }))
@@ -50,10 +61,13 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       ...memoryWork.filter(item => !item.completed).map(item => ({ code: 'unresolved_memory_job', reference: item.job.id })),
       ...deliverables.filter(item => item.status === 'missing' || item.status === 'changed').map(item => ({ code: `deliverable_${item.status}`, reference: item.id })),
       ...postconditionChecks.filter(item => item.severity === 'error' && item.status !== 'passed').map(item => ({ code: `postcondition_${item.status}`, reference: item.code })),
-      ...todos.filter(item => !writingDelivery && (item.status === 'pending' || item.status === 'in_progress')).map(item => ({ code: 'unfinished_todo', reference: runtimeJson({ content: item.content }).hash })),
-      ...compilations.filter(item => !writingDelivery && (item.status === 'active' || item.status === 'completed' && (!item.bridge?.committedAt || item.chapter?.revision !== item.bridge.targetRevision))).map(item => ({ code: 'uncommitted_compilation', reference: item.id })),
+      ...todos.filter(item => !writingDelivery && !(limitedWritingDelivery && limitedReviewDependency(item.content))
+        && (item.status === 'pending' || item.status === 'in_progress')).map(item => ({ code: 'unfinished_todo', reference: runtimeJson({ content: item.content }).hash })),
+      ...compilations.filter(item => !writingDelivery && !limitedWritingDelivery?.chapters.some(chapter => chapter.compilationId === item.id)
+        && (item.status === 'active' || item.status === 'completed' && (!item.bridge?.committedAt || item.chapter?.revision !== item.bridge.targetRevision))).map(item => ({ code: 'uncommitted_compilation', reference: item.id })),
       ...pendingOperations.map(item => ({ code: 'unresolved_operation', reference: item.id })),
       ...subtasks.filter(item => !['completed', 'cancelled'].includes(item.status)).map(item => ({ code: 'unresolved_subtask', reference: item.id })),
+      ...limitedChildren.map(item => ({ code: 'limited_child_delivery', reference: item.childRunId })),
       ...(budget.unresolvedAttempts > 0n ? [{ code: 'unresolved_usage', reference: root.id }] : []),
     ]
     const snapshot = runtimeJson({ version: 1, taskRootId: root.id, inputHash: root.inputHash, sourceRevision: frame.revision, sourceHash: frame.snapshotHash,
@@ -61,6 +75,7 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       originalRequest: root.requestSnapshot,
       obligations: { goals: spec.goals, expectedOutputs: spec.expectedOutputs, postconditions: spec.postconditions, hardConstraints: spec.hardConstraints },
       verification: 'required', postconditionChecks, reportLengthChecks, deliverables, blockers, effects: evidence.effects, failedOperations, todos,
+      ...(limitedWritingDelivery ? { limitedWritingDelivery } : {}),
       memoryJobs: memoryWork.map(item => ({ id: item.job.id, sourceOperationId: item.source.operationId, chapterId: item.job.chapterId,
         chapterRevision: item.job.chapterRevision, verified: item.completed })),
       compilations: compilations.map(item => ({ id: item.id, chapterId: item.chapterId, status: item.status, stage: item.stage, currentRevision: item.chapter?.revision ?? null, committedRevision: item.bridge?.targetRevision ?? null })),

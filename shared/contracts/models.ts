@@ -31,6 +31,7 @@ export type AgentRunStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
+export type AgentRunOutcome = { kind: 'delivered_with_limitations'; summary: string }
 export type AgentType =
   | 'writingOrchestrator'
   | 'storyPlanner'
@@ -868,6 +869,7 @@ export interface AgentSession {
 }
 
 export interface AgentRun {
+  outcome?: AgentRunOutcome
   authorEnded?: { fulfilled: boolean; todoItems?: import('./agent-events.js').AgentTodoItem[] }
   id: EntityId
   sessionId: EntityId

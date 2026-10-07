@@ -107,11 +107,17 @@ export async function assertPinnedChildCompletion(tx: RuntimeTx, parentRootId: s
   if (!pin) return
   const grants = await tx.agentChildExecutionGrant.findMany({ where: { parentRootId, kind: 'inline', status: 'completed' },
     include: { parentOperation: true, childRun: { include: { taskRoot: true } } } })
+  const { verifyRunLimitedWritingOutcome } = await import('./writing-delivery-limitations.js')
+  const limited = new Set<string>()
+  for (const grant of grants) {
+    if (await verifyRunLimitedWritingOutcome(tx, { userId: grant.childRun.userId, novelId: grant.childRun.novelId, runId: grant.childRunId })) limited.add(grant.id)
+  }
   const matched = grants.some(grant => {
     const frozen = verifyChildGrant(grant)
     const operation = grant.parentOperation
     if (operation.action !== 'subagent_run' || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash
       || frozen.definitionId !== pin || grant.childRun.status !== 'completed' || grant.childRun.taskRoot?.status !== 'completed') return false
+    if (limited.has(grant.id)) return false
     const envelope = z.object({ input: z.object({ args: z.object({ subagentId: z.string() }) }) }).safeParse(operation.inputSnapshot)
     return envelope.success && envelope.data.input.args.subagentId === pin
   })

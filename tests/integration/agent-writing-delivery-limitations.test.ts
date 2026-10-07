@@ -1,0 +1,244 @@
+import { createHash, randomUUID } from 'node:crypto'
+import { describe, expect, it, vi } from 'vitest'
+import { z } from 'zod'
+import { prisma } from '../../api/lib/prisma.js'
+import { available, claim, fixture } from '../support/agent-durable-runtime-fixture.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { initializeExecutionState, loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { prepareStoryCompilation, reserveContinuityCheck, validateStoryContinuity, commitChapterBridge, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
+import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
+import { readLimitedWritingDelivery, assertLimitedWritingDelivery, verifyRunLimitedWritingOutcome } from '../../api/lib/agent/writing-delivery-limitations.js'
+import { readCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
+import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
+import { advanceDurableWritingDelivery } from '../../api/lib/agent/runtime-writing-delivery.js'
+import { advanceDurableContinuation } from '../../api/lib/agent/runtime-continuation.js'
+import { finalizeDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
+import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
+import * as ai from '../../api/lib/ai-service.js'
+import { advanceDurableMemory } from '../../api/lib/agent/runtime-memory.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { todoWriteTool } from '../../api/lib/agent/tools/todo-tools.js'
+import { advanceDurableCompletionObligations } from '../../api/lib/agent/runtime-continuation.js'
+import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { readDurableTodoItems } from '../../api/lib/agent/tools/durable-todo.js'
+
+describe.runIf(available)('current saved writing with exhausted continuity review', () => {
+  async function capped(f: Parameters<Parameters<typeof fixture>[0]>[0], finishMemory = true) {
+    const lease = await claim(f)
+    const original = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const prepared = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '修改本章正文' })
+    const state = { knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] }
+    await saveSceneTasks({ ...f, compilationId: prepared.compilation.id, tasks: [1, 2, 3].map(n => ({ purpose: `真实准备场景${n}`, entryState: state,
+      goal: '登上山路', obstacle: '夜色渐深', choice: '交出钥匙', cost: '放弃返回', turn: '独自登山', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } })) })
+    const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { bridge: true, sceneTasks: true } })
+    for (let n = 0; n < 3; n++) expect(await reserveContinuityCheck(f.userId, f.novelId, compilation.id)).toBe(true)
+    await validateStoryContinuity({ ...f, compilationId: compilation.id, independentCheck: 'complete', expectedChapterRevision: original.revision,
+      findings: [], coverage: compilerContinuityCoverage({ chapter: original, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: null }) })
+    const tools = [chapterReadTool, chapterWriteTool, todoWriteTool, chapterBridgeCommitTool]
+    await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+      tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
+      toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null, successfulToolSignatures: [],
+        messages: [{ role: 'user', content: '修改本章正文' }, { role: 'assistant', content: null, toolCalls: [
+          { id: 'read-current', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
+          { id: 'save-body', name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content: '他把钥匙交给守门人，然后沿着山路向上走去。门已锁好，灯仍亮着。' }) },
+        ] }] } })
+    await executeDurableToolStep(lease, new AbortController().signal)
+    await executeDurableToolStep(lease, new AbortController().signal)
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const report = await prisma.chapterQualityReport.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId,
+      compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision, status: 'passed',
+      deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(chapter.content).digest('hex') } } })
+    if (finishMemory) await advanceDurableMemory(lease)
+    return { lease, compilationId: compilation.id, chapter, report }
+  }
+  it('delivers a bound limitation without committing a bridge, completing scenes, buying a model call, or changing checks', async () => fixture(async f => {
+    const model = vi.spyOn(ai, 'generateTextCompletion').mockRejectedValue(new Error('No model dispatch permitted'))
+    const c = await capped(f)
+    const subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
+    expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, subject))).toBeNull()
+    const proof = await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))
+    expect(proof).toMatchObject({ taskId: f.rootId, targetRunId: f.runId, outcome: { kind: 'delivered_with_limitations' }, chapters: [{ revision: c.chapter.revision, continuityCheckRounds: 3, continuityStatus: 'stale' }] })
+    expect(proof!.text).toContain('当前版本尚未复核')
+    expect(await reserveContinuityCheck(f.userId, f.novelId, c.compilationId)).toBe(false)
+    await expect(commitChapterBridge({ ...f, compilationId: c.compilationId, chapterSummary: '不得提交未复核正文', exitState: { knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '', endingStructure: '' })).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })
+    await advanceDurableWritingDelivery(c.lease)
+    expect(await advanceDurableContinuation(c.lease)).toBeNull()
+    const current = await loadExecutionState(f.userId, f.runId)
+    const evidence = await collectDurableCompletionEvidence(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash })
+    expect(evidence.snapshot).toMatchObject({ blockers: [], limitedWritingDelivery: proof })
+    await finalizeDurableTask(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash })
+    const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+    expect(finished).toMatchObject({ status: 'completed', usage: { outcome: proof!.outcome, deliveryProof: proof } })
+    const events = await publishDurableEvents(f.userId, f.runId)
+    expect(JSON.stringify(events)).toContain('delivered_with_limitations')
+    expect(await prisma.$transaction(tx => verifyRunLimitedWritingOutcome(tx, subject))).toEqual(proof)
+    const compiler = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: c.compilationId }, include: { bridge: true, sceneTasks: true } })
+    expect(compiler.status).toBe('active')
+    expect(compiler.bridge!.committedAt).toBeNull()
+    expect(compiler.sceneTasks.map(scene => scene.status)).toEqual(['writing', 'writing', 'writing'])
+    expect(compiler.validation).toMatchObject({ checkRounds: 3, checkedRevision: c.chapter.revision - 1 })
+    expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).toEqual(budget)
+    expect(model).not.toHaveBeenCalled()
+  }))
+
+  it('lets an independent native todo reach continuation and the model before limited projection', async () => fixture(async f => {
+    const c = await capped(f)
+    const update = async (items: Array<{ id?: string; content: string; status: 'pending' | 'completed' }>) => {
+      const current = await loadExecutionState(f.userId, f.runId)
+      await saveExecutionState(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash,
+        snapshot: { ...current.frame.state, messages: [...current.frame.state.messages, { role: 'assistant', content: null,
+          toolCalls: [{ id: `todo-${current.frame.revision}`, name: 'todo_write', arguments: JSON.stringify({ items }) }] }] } })
+      await executeDurableToolStep(c.lease, new AbortController().signal)
+    }
+    await update([{ content: '核对本章正文已保存', status: 'pending' }, { content: '完成连续性检查及章节终态提交', status: 'pending' }])
+    let current = await loadExecutionState(f.userId, f.runId)
+    const todos = await prisma.$transaction(tx => readDurableTodoItems(tx, f.rootId, current.frame.revision))
+    expect(todos.map(item => item.status)).toEqual(['pending', 'pending'])
+    expect(await advanceDurableWritingDelivery(c.lease)).toBeNull()
+    await saveExecutionState(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash,
+      snapshot: { ...current.frame.state, messages: [...current.frame.state.messages, { role: 'assistant', content: '正文已保存，尚有核对待办。' }] } })
+    current = await loadExecutionState(f.userId, f.runId)
+    expect(await advanceDurableCompletionObligations(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash })).toMatchObject({ kind: 'continued' })
+    const continuation = await loadExecutionState(f.userId, f.runId)
+    expect(continuation.frame.state.messages.at(-1)?.role).toBe('system')
+    expect(await advanceDurableWritingDelivery(c.lease)).toBeNull()
+    expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(continuation.frame.snapshotHash)
+    await update(todos.map((item, index) => ({ ...item, status: index === 0 ? 'completed' : 'pending' })))
+    expect(await advanceDurableWritingDelivery(c.lease)).not.toBeNull()
+    current = await loadExecutionState(f.userId, f.runId)
+    expect((await collectDurableCompletionEvidence(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash })).snapshot).toMatchObject({ blockers: [] })
+  }))
+
+  it.each(['active', 'completed'] as const)('does not cover a second %s compilation with the exhausted target proof', async status => fixture(async f => {
+    const c = await capped(f)
+    const original = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: c.compilationId } })
+    const other = await prisma.storyCompilation.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId,
+      chapterId: f.chapterId, mode: original.mode, targetOrderIndex: original.targetOrderIndex,
+      sourcePromptHash: original.sourcePromptHash, preparedContext: {}, status, stage: 'prepare' } })
+    const current = await loadExecutionState(f.userId, f.runId)
+    expect(await advanceDurableWritingDelivery(c.lease)).toBeNull()
+    expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(current.frame.snapshotHash)
+    await prisma.storyCompilation.update({ where: { id: other.id }, data: { status: 'abandoned' } })
+    expect(await advanceDurableWritingDelivery(c.lease)).not.toBeNull()
+  }))
+
+  it('lets the actual native memory obligation finish before projecting saved writing', async () => fixture(async f => {
+    const c = await capped(f, false)
+    const before = await loadExecutionState(f.userId, f.runId)
+    expect(await advanceDurableWritingDelivery(c.lease)).toBeNull()
+    expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(before.frame.snapshotHash)
+    expect(await advanceDurableMemory(c.lease)).not.toBeNull()
+    expect(await advanceDurableWritingDelivery(c.lease)).not.toBeNull()
+  }))
+
+  it.each(['quality-stale', 'quality-changed', 'checks-left', 'malformed-receipt', 'unknown-operation', 'unknown-attempt', 'pending-usage', 'settled-unknown', 'author-race', 'source-race', 'wrong-proof', 'foreign-subject', 'paused', 'rollback'] as const)('%s preserves the admission and audit boundaries', async scenario => fixture(async f => {
+    const c = await capped(f), subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
+    if (scenario === 'source-race') {
+      const original = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const source = await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: original.volumeId, title: '来源章', content: '原来源', revision: 1, orderIndex: 2, orderInVolume: 2, wordCount: 3 } })
+      await prisma.chapterBridge.update({ where: { compilationId: c.compilationId }, data: { fromChapterId: source.id, sourceRevision: source.revision } })
+    }
+    const proof = await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))
+    expect(proof).not.toBeNull()
+    let usageId: string | undefined
+    if (scenario === 'quality-stale') await prisma.chapterQualityReport.update({ where: { id: c.report.id }, data: { chapterRevision: c.chapter.revision - 1 } })
+    if (scenario === 'quality-changed') await prisma.chapterQualityReport.update({ where: { id: c.report.id }, data: { deterministicMetrics: { ...c.report.deterministicMetrics as object, changedAudit: true } } })
+    if (scenario === 'checks-left') await prisma.storyCompilation.update({ where: { id: c.compilationId }, data: { validation: { checkRounds: 2 } } })
+    if (scenario === 'malformed-receipt') await prisma.storyCompilation.update({ where: { id: c.compilationId }, data: { validation: { checkRounds: 3, newDraftRevision: { version: 999 } } } })
+    if (scenario === 'author-race') await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: { increment: 1 }, content: '作者更新的正文，必须保留。' } })
+    if (scenario === 'source-race') await prisma.chapter.update({ where: { id: proof!.chapters[0].sourceChapterId! }, data: { revision: { increment: 1 }, content: '作者更新的来源。' } })
+    if (scenario === 'paused') await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused' } })
+    if (scenario === 'unknown-operation' || scenario === 'unknown-attempt') {
+      const operation = await prisma.agentOperation.create({ data: { id: randomUUID(), taskRootId: f.rootId, originRunId: f.runId, operationKey: 'unknown-review', kind: 'provider', action: 'fixture', inputHash: runtimeJson({}).hash, inputSnapshot: {}, status: scenario === 'unknown-operation' ? 'unknown' : 'failed' } })
+      if (scenario === 'unknown-attempt') await prisma.agentProviderAttempt.create({ data: { id: randomUUID(), operationId: operation.id, runId: f.runId, ownerEpoch: c.lease.epoch, attemptKey: 'unknown', provider: 'fixture', model: 'fixture', requestHash: runtimeJson({}).hash, requestSnapshot: {}, status: 'unknown' } })
+    }
+    if (scenario === 'pending-usage' || scenario === 'settled-unknown') usageId = (await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId,
+      targetType: 'agentRun', targetId: f.runId, providerType: 'text', providerMode: 'fixture', modelName: 'fixture', action: 'workspaceAgent', durationMs: 1, usageSource: 'unknown', billingStatus: scenario === 'settled-unknown' ? 'settled' : 'pending_usage' } })).id
+    try {
+      if (scenario === 'wrong-proof') await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, { ...proof!, targetRunId: 'foreign' }))).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+      else if (scenario === 'foreign-subject') await expect(prisma.$transaction(tx => readLimitedWritingDelivery(tx, { ...subject, userId: randomUUID() }))).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })
+      else if (scenario === 'malformed-receipt') await expect(prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+      else if (scenario === 'quality-changed') {
+        expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).not.toEqual(proof)
+        await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, proof!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+      }
+      else if (scenario === 'rollback') {
+        const before = await loadExecutionState(f.userId, f.runId)
+        await expect(prisma.$transaction(async tx => { await assertLimitedWritingDelivery(tx, subject, proof!); await tx.agentRun.update({ where: { id: f.runId }, data: { outputSummary: 'rollback' } }); throw new Error('fixture rollback') })).rejects.toThrow('fixture rollback')
+        expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(before.frame.snapshotHash)
+        expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).outputSummary).toBeNull()
+      } else if (scenario === 'settled-unknown') {
+        expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toEqual(proof)
+        expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usageId } })).toMatchObject({ usageSource: 'unknown', billingStatus: 'settled' })
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+      } else if (scenario === 'paused') await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, proof!))).rejects.toThrow()
+      else {
+        expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
+        await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, proof!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+      }
+    } finally { if (usageId) await prisma.aiUsageLog.delete({ where: { id: usageId } }) }
+  }))
+  it.each(['修改第一章正文，检查通过后才能交付', '修改第一章正文，并生成封面', '检查第一章连续性'] as const)('does not waive the original hard or independent requirement: %s', async prompt => fixture(async f => {
+    const c = await capped(f)
+    expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }))).toBeNull()
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: c.compilationId } })).status).toBe('active')
+  }, undefined, prompt))
+
+  it.each(['todo', 'dependency', 'malformed-todo', 'active-child', 'active-subtask', 'old-task-todo', 'hard-review', 'postcondition'] as const)('legacy %s remains scoped and cannot hide unfinished independent work', async scenario => fixture(async f => {
+    const runId = randomUUID(), prompt = '修改本章'
+    const spec = buildTaskSpec({ runId, novelId: f.novelId, chapterId: f.chapterId, prompt })
+    if (scenario === 'hard-review') spec.hardConstraints.push({ id: randomUUID(), kind: 'author_directive', text: '必须连续性复核通过才能交付' })
+    if (scenario === 'postcondition') spec.postconditions.push({ code: 'AUTHOR_ACCEPTANCE_VERIFIED', description: '必须有真实作者验收', severity: 'error' })
+    await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: f.chapterId,
+      engine: 'loop', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running',
+      startRequest: { prompt }, taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
+    const ctx = { userId: f.userId, novelId: f.novelId, runId, sessionId: f.sessionId, chapterId: f.chapterId,
+      callId: 'legacy-save', mode: 'build' as const, creativeFreedom: 'balanced' as const, qualityMode: 'premium' as const, emit: () => {}, signal: new AbortController().signal }
+    const prepared = await prepareStoryCompilation({ ...ctx, mode: 'premium', intentSummary: prompt })
+    const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { bridge: true, sceneTasks: true } })
+    const original = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    for (let n = 0; n < 3; n++) expect(await reserveContinuityCheck(f.userId, f.novelId, compilation.id)).toBe(true)
+    await validateStoryContinuity({ ...ctx, compilationId: compilation.id, independentCheck: 'complete', expectedChapterRevision: original.revision,
+      findings: [], coverage: compilerContinuityCoverage({ chapter: original, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: null }) })
+    await chapterReadTool.execute(ctx, { chapterId: f.chapterId })
+    await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '真实保存的当前正文。钥匙交给守门人，山路仍通向高处。' })
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    await prisma.chapterQualityReport.create({ data: { userId: f.userId, novelId: f.novelId, runId, compilationId: compilation.id,
+      chapterId: chapter.id, chapterRevision: chapter.revision, status: 'passed', deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(chapter.content).digest('hex') } } })
+    const subject = { userId: f.userId, novelId: f.novelId, runId }
+    const before = await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))
+    if (scenario === 'hard-review' || scenario === 'postcondition') {
+      expect(before).toBeNull()
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: chapter.content, revision: chapter.revision })
+      return
+    }
+    expect(before).not.toBeNull()
+    if (['todo', 'dependency', 'malformed-todo', 'old-task-todo'].includes(scenario)) {
+      await prisma.agentArtifact.create({ data: { runId: scenario === 'old-task-todo' ? f.runId : runId, artifactType: 'chapterPlan', title: '任务待办清单',
+        content: scenario === 'malformed-todo' ? 'broken-json' : JSON.stringify([{ id: 'real-task', content: scenario === 'dependency' ? '完成连续性检查及章节终态提交' : '完成原任务的场景正文核对', status: 'pending' }]),
+        metadata: { todoList: true, todoRunId: scenario === 'old-task-todo' ? f.runId : runId } } })
+    }
+    if (scenario === 'active-child') {
+      const session = await prisma.agentSession.create({ data: { userId: f.userId, novelId: f.novelId, title: '未完成派生任务', spawnedFromRunId: runId, spawnedFromSessionId: f.sessionId } })
+      await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: session.id, mode: 'review', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', engine: 'loop' } })
+    }
+    if (scenario === 'active-subtask') {
+      const definition = await prisma.agentSubtask.create({ data: { userId: f.userId, novelId: f.novelId, name: '未完成检查', role: 'research', prompt: '只读核对', triggerCondition: '真实子工作', status: 'ready' } })
+      await prisma.agentSubtaskRun.create({ data: { subtaskId: definition.id, parentRunId: runId, userId: f.userId, novelId: f.novelId, task: '尚未完成检查', status: 'running' } })
+    }
+    if (scenario === 'dependency' || scenario === 'old-task-todo') expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toEqual(before)
+    else if (scenario === 'malformed-todo') await expect(prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    else {
+      expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
+      await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, before!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+    }
+  }))
+})

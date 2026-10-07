@@ -35,6 +35,15 @@ describe('server review fallback', () => {
     expect(nextReviewDispatch(null, available, new Set()).kind).toBe('ready')
     expect(nextReviewDispatch(pending({ ready: true, requiredTools: [] }), available, new Set()).kind).toBe('ready')
   })
+  it('isolates exhausted continuity while still scheduling current quality, then requests limited delivery', () => {
+    const state = pending({ continuity: 'stale', continuityExhausted: true, requiredTools: [
+      { name: 'continuity_validate', args: { compilationId: 'compile' } },
+      { name: 'quality_analyze', args: { compilationId: 'compile' } },
+    ] })
+    expect(nextReviewDispatch(state, available, new Set())).toMatchObject({ kind: 'tool', tool: { name: 'quality_analyze' } })
+    expect(nextReviewDispatch({ ...state, quality: 'complete', requiredTools: state.requiredTools.slice(0, 1) }, available, new Set()).kind).toBe('limited')
+    expect(state.ready).toBe(false)
+  })
   it('prompts once for an unspent current-version aesthetic decision, without redispatching a paid check', () => {
     const state = pending({ ready: true, quality: 'complete', qualityCandidateCount: 2, requiredTools: [] })
     const writers = new Set(['chapter_edit_range'])

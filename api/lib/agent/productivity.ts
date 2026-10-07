@@ -14,6 +14,7 @@ import type {
 import { DataAccessError, prisma } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
+import { readRunOutcome } from './run-outcome.js'
 import { startLoopRun, stopLoopRun } from './run-service.js'
 
 async function requireNovel(userId: string, novelId: string) {
@@ -251,8 +252,8 @@ function eventLog(record: { id: string; type: string; payload: Prisma.JsonValue;
     'tool.call': { title: '调用工具', detail: shortText(payload.title, typeof payload.toolName === 'string' ? payload.toolName : '正在使用工作区工具。'), tone: 'neutral' },
     'tool.result': { title: payload.ok === false ? '工具执行未完成' : '工具执行完成', detail: shortText(payload.summary, '工具已返回结果。'), tone: payload.ok === false ? 'warning' : 'success' },
     'permission.ask': { title: '等待授权', detail: shortText(payload.title, '需要用户确认后继续。'), tone: 'warning' },
-    'run.paused': { title: '执行已暂停', detail: payload.reason === 'approval_timeout' ? '等待授权超时。' : '任务已由用户暂停。', tone: 'warning' },
-    'run.finished': { title: payload.status === 'succeeded' ? '任务已完成' : payload.status === 'cancelled' ? '任务已取消' : '任务执行失败', detail: shortText(payload.outputSummary, '本次执行已经结束。'), tone: payload.status === 'succeeded' ? 'success' : payload.status === 'cancelled' ? 'warning' : 'danger' },
+    'run.paused': { title: '执行已暂停', detail: payload.reason === 'approval_timeout' ? '等待授权超时。' : payload.reason === 'needs_input' ? '已保存进度，仍有待处理事项。' : '任务已由用户暂停。', tone: 'warning' },
+    'run.finished': readRunOutcome(payload).outcome ? { title: '正文已交付·待复核', detail: readRunOutcome(payload).outcome!.summary, tone: 'warning' } : { title: payload.status === 'succeeded' ? '任务已完成' : payload.status === 'cancelled' ? '任务已取消' : '任务执行失败', detail: shortText(payload.outputSummary, '本次执行已经结束。'), tone: payload.status === 'succeeded' ? 'success' : payload.status === 'cancelled' ? 'warning' : 'danger' },
     error: { title: '执行异常', detail: shortText(payload.message, '运行过程中发生异常。'), tone: 'danger' },
   }
   const translated = mapping[record.type] ?? { title: '执行进度', detail: '子 Agent 更新了运行状态。', tone: 'neutral' as const }

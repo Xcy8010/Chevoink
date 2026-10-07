@@ -14,6 +14,7 @@ import { configurationResponseSchema } from './tools/configuration-tools.js'
 import { verifyChildGrant } from './runtime-child.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
 import { savedChapterPresentationSchema } from './writing-scope.js'
+import { limitedWritingDeliverySchema } from './writing-delivery-limitations.js'
 
 /** Only this DB-locked allocator writes UI events for the durable protocol.
  * New source families retain their outbox rows until their projector is added;
@@ -35,15 +36,21 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
       let bodies: import('../../../shared/contracts/index.js').AgentStreamEventBody[]
       if (source.type === 'writing.delivery.projected') {
         const payload = z.object({ sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(), revision: z.number().int().positive(), snapshotHash: z.string(),
-          proof: z.object({ version: z.literal(1), chapters: z.array(z.object({ id: z.string(), revision: z.number().int().positive(), contentHash: z.string() })), text: z.string() }), proofHash: z.string() }).parse(source.payload)
+          proof: z.object({ version: z.literal(1), chapters: z.array(z.object({ id: z.string(), revision: z.number().int().positive(), contentHash: z.string() })), text: z.string(),
+            limitedWritingDelivery: limitedWritingDeliverySchema.optional() }), proofHash: z.string() }).parse(source.payload)
         const before = await readExecutionFrame(tx, root.id, payload.sourceRevision)
         const frame = await readExecutionFrame(tx, root.id, payload.revision)
         const candidate = frame.state.messages.at(-1)
+        const incoming = payload.proof.limitedWritingDelivery ? await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: source.runId ?? '' } }) : null
+        if (incoming) verifyChildGrant(incoming)
         if (source.eventKey !== `writing-delivery:${root.id}:${payload.revision}` || payload.revision !== payload.sourceRevision + 1
           || before.snapshotHash !== payload.sourceHash || frame.snapshotHash !== payload.snapshotHash
           || runtimeJson(payload.proof).hash !== payload.proofHash || candidate?.role !== 'assistant' || candidate.toolCalls?.length
           || candidate.content !== payload.proof.text || frame.state.messages.length !== before.state.messages.length + 1
-          || runtimeJson(frame.state.messages.slice(0, -1)).hash !== runtimeJson(before.state.messages).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '正文交付投影与原章节版本证据不一致。')
+          || runtimeJson(frame.state.messages.slice(0, -1)).hash !== runtimeJson(before.state.messages).hash
+          || payload.proof.limitedWritingDelivery && (payload.proof.limitedWritingDelivery.taskId !== (incoming?.parentRootId ?? root.id)
+            || payload.proof.limitedWritingDelivery.targetRunId !== source.runId || payload.proof.limitedWritingDelivery.text !== payload.proof.text
+            || runtimeJson(payload.proof.limitedWritingDelivery.chapters.map(({ id, revision, contentHash }) => ({ id, revision, contentHash }))).hash !== runtimeJson(payload.proof.chapters).hash)) return runtimeError('RUNTIME_RECEIPT_INVALID', '正文交付投影与原章节版本证据不一致。')
         const messageId = `wd-${runtimeJson({ rootId: root.id, revision: payload.revision }).hash.slice(0, 48)}`
         bodies = [{ type: 'message.start', messageId, role: 'assistant' }, { type: 'text.final', messageId, text: payload.proof.text, asReasoning: false }]
       } else if (source.type === 'child.admitted') {
@@ -108,12 +115,14 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           args: { question: question.question, options: question.options, requestId: source.id }, autoApproved: true }]
       } else if (source.type === 'execution.completion.decided') {
         const decision = z.object({ version: z.literal(1), kind: z.literal('completed'), reviewOperationId: z.string(), resultHash: z.string(),
-          sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(), revision: z.number().int().positive(), snapshotHash: z.string() }).parse(source.payload)
+          sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(), revision: z.number().int().positive(), snapshotHash: z.string(),
+          outcome: limitedWritingDeliverySchema.shape.outcome.optional() }).parse(source.payload)
         const receipt = await tx.agentEffectReceipt.findUnique({ where: { operationId: decision.reviewOperationId }, include: { operation: true } })
         const verdict = z.object({ verdict: z.object({ verdict: z.literal('complete') }) }).safeParse(receipt?.result)
         const proof = z.object({ version: z.literal(1), sourceRevision: z.number(), sourceHash: z.string(),
           candidateHash: z.string(), evidenceHash: z.string(), evidence: z.object({ blockers: z.array(z.never()) }).passthrough(),
-          chapterPresentation: savedChapterPresentationSchema.optional() }).safeParse(receipt?.result)
+          chapterPresentation: savedChapterPresentationSchema.optional(), limitedWritingDelivery: limitedWritingDeliverySchema.optional(),
+          outcome: limitedWritingDeliverySchema.shape.outcome.optional() }).safeParse(receipt?.result)
         const frame = await readExecutionFrame(tx, root.id, decision.revision)
         const before = await readExecutionFrame(tx, root.id, decision.sourceRevision)
         const candidate = before.state.messages.at(-1)
@@ -128,7 +137,23 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
             return admitted.success && runtimeJson(receipt.operation.inputSnapshot).hash === receipt.operation.inputHash
               && runtimeJson(admitted.data.input.chapterPresentation).hash === runtimeJson(proof.data.chapterPresentation).hash
           })())
-        const legacyReview = receipt?.operation.action === 'completion_review' && verdict.success
+          && (!proof.data.limitedWritingDelivery || (() => {
+            const limited = proof.data.limitedWritingDelivery
+            const admitted = z.object({ input: z.object({ limitedWritingDelivery: limitedWritingDeliverySchema,
+              outcome: limitedWritingDeliverySchema.shape.outcome }) }).safeParse(receipt.operation.inputSnapshot)
+            const checked = z.object({ limitedWritingDelivery: limitedWritingDeliverySchema }).safeParse(proof.data.evidence)
+            const decisionOutcome = z.object({ outcome: limitedWritingDeliverySchema.shape.outcome }).safeParse(source.payload)
+            return admitted.success && checked.success && decisionOutcome.success && limited.targetRunId === source.runId
+              && limited.text === candidate.content && runtimeJson(receipt.operation.inputSnapshot).hash === receipt.operation.inputHash
+              && runtimeJson(admitted.data.input.limitedWritingDelivery).hash === runtimeJson(limited).hash
+              && runtimeJson(checked.data.limitedWritingDelivery).hash === runtimeJson(limited).hash
+              && runtimeJson(admitted.data.input.outcome).hash === runtimeJson(limited.outcome).hash
+              && runtimeJson(decisionOutcome.data.outcome).hash === runtimeJson(limited.outcome).hash
+              && runtimeJson(proof.data.outcome ?? {}).hash === runtimeJson(limited.outcome).hash
+          })())
+          && (!!proof.data.outcome === !!proof.data.limitedWritingDelivery)
+          && (!!decision.outcome === !!proof.data.outcome)
+        const legacyReview = receipt?.operation.action === 'completion_review' && verdict.success && !decision.outcome
         if (!receipt || (!validProof && !legacyReview) || receipt.operation.taskRootId !== root.id
           || source.operationId !== receipt.operationId || source.eventKey !== `decision:${receipt.operationId}`
           || receipt.resultHash !== decision.resultHash || runtimeJson(receipt.result).hash !== decision.resultHash
@@ -143,6 +168,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         const presentation = validProof && proof.success ? proof.data.chapterPresentation : null
         bodies = [...(presentation ? [{ type: 'text.final' as const, messageId: durableMessageId(root.id, before.state.turn), text: presentation.text, asReasoning: false }] : []),
           { type: 'run.finished', status: 'succeeded', usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
+            ...(validProof && proof.success && proof.data.limitedWritingDelivery ? { outcome: proof.data.limitedWritingDelivery.outcome } : {}),
             artifacts: [], outputSummary: presentation?.text ?? candidate.content ?? '' }]
       } else if (source.type === 'run.paused') {
         const paused = durablePauseSchema.safeParse(source.payload)

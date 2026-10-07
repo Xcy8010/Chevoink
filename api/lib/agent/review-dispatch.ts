@@ -20,7 +20,10 @@ export function nextMergedReviewReminder(readiness: ChapterReviewReadiness | nul
 export function nextReviewDispatch(readiness: ChapterReviewReadiness | null,
   available: ReadonlySet<string>, attempted: ReadonlySet<string>) {
   if (!readiness || readiness.ready) return { kind: 'ready' as const }
-  const tool = readiness.requiredTools[0]
+  const reachable = readiness.requiredTools.filter(tool => !(tool.name === 'continuity_validate' && readiness.continuityExhausted))
+  const tool = reachable[0]
+  if (!tool && readiness.continuityExhausted) return { kind: 'limited' as const,
+    reason: '正文已保存；连续性自动检查次数已用完，最终版本尚未复核。继续其余可执行工作，交付时必须保留此限制。' }
   if (!tool) return { kind: 'blocked' as const, reason: '当前版本的必要检查尚未确认完成。正文已保存，不能提交为完成。' }
   const status = tool.name === 'continuity_validate' ? readiness.continuity : readiness.quality
   if (status === 'incomplete' || attempted.has(reviewDispatchKey(readiness, tool.name))) {

@@ -12,6 +12,7 @@ import { readDurableTodoItems } from './tools/durable-todo.js'
 import { collectDurableToolEvidence } from './runtime-evidence.js'
 import { collectCompletionEvidenceInTransaction } from './runtime-completion-evidence.js'
 import { readCompletedWritingDelivery } from './writing-scope.js'
+import { readLimitedWritingDelivery } from './writing-delivery-limitations.js'
 
 const resultSchema = z.object({ outcome: z.literal('succeeded'), result: durableChatResultSchema }).strict()
 const continuationSchema = z.object({ version: z.literal(1), sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(),
@@ -35,6 +36,7 @@ export async function advanceDurableContinuation(token: RunLeaseToken) {
     if (frame.state.phase !== 'idle' || last?.role !== 'assistant' || last.toolCalls?.length || frame.revision === 0) return null
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (await readCompletedWritingDelivery(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId })) return null
+    if (await readLimitedWritingDelivery(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId })) return null
     const pending = await readExecutionFrame(tx, lease.taskRootId, frame.revision - 1)
     if (pending.state.phase !== 'awaiting_operation') return null
     const operation = await tx.agentOperation.findFirst({ where: { id: pending.state.pendingOperationId!, taskRootId: lease.taskRootId, kind: 'provider', status: 'succeeded' } })

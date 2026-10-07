@@ -30,6 +30,7 @@ export type ChapterReviewReadiness = {
   ready: boolean; checksRequired: boolean; compilationId: string; chapterId: string; revision: number
   continuity: ReviewStatus; quality: ReviewStatus; continuityErrorCount: number; qualityErrorCount: number
   qualityCandidateCount?: number
+  continuityExhausted?: boolean
   qualityReportId: string | null; requiredTools: Array<{ name: 'continuity_validate' | 'quality_analyze'; args: { compilationId: string } }>
 }
 
@@ -119,6 +120,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   if (requirements.quality && quality !== 'complete') requiredTools.push({ name: 'quality_analyze', args: { compilationId: compilation.id } })
   return { ready: !requiredTools.length, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id,
     chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools,
+    continuityExhausted: continuity !== 'complete' && continuityCheckRounds(validation) >= MAX_CONTINUITY_CHECKS,
     continuityErrorCount: assessment?.errorCount ?? 0, qualityErrorCount: quality === 'complete' ? report!.findings.filter(finding =>
       finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0,
     qualityCandidateCount: quality === 'complete' ? selectAutomaticQualityFindings(report!.findings).length : 0,
