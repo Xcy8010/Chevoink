@@ -79,7 +79,7 @@ describe('CI report completeness gate', () => {
   it('accepts only completed passing modules and rejects skipped, todo, focused or unfinished tests', () => {
     const passed = { fullName: 'case', options: { mode: 'run' }, result: () => ({ state: 'passed' }) }
     const module = (tests: Array<typeof passed>, state = 'passed') => ({
-      relativeModuleId: 'tests/unit/file-0.test.ts', state: () => state, children: { allTests: function* () { yield* tests } },
+      moduleId: 'tests/unit/file-0.test.ts', state: () => state, children: { allTests: function* () { yield* tests } },
     })
     expect(() => assertTestsPassed(module([passed, passed]))).not.toThrow()
     for (const tests of [
@@ -93,6 +93,7 @@ describe('CI report completeness gate', () => {
       expect(() => assertTestsPassed(module(tests))).toThrow('without skips')
     }
     expect(() => assertTestsPassed(module([passed], 'failed'))).toThrow('every test file to pass')
+    for (const state of ['queued', 'pending', 'skipped']) expect(() => assertTestsPassed(module([], state))).toThrow('every test file to pass')
   })
 
   it('requires precisely the planned blob names even as the count changes', () => {

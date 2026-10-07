@@ -4,13 +4,13 @@ export interface TestWeight { path: string; durationMs: number }
 export interface TestShard { index: number; estimatedMs: number; files: string[] }
 export interface TestPlan { version: 1; revision: string; count: number; shards: TestShard[] }
 
-// Structural subset of the Vitest 4 reporter tasks (TestModule/TestCase).
+// Structural subset of the pinned Vitest 3.2.7 reporter tasks (TestModule/TestCase).
 // Keeping the gate duck-typed lets unit tests exercise it without real runner
 // objects while the reporter passes actual TestModule instances.
 interface RunTest { readonly fullName: string; readonly options: { readonly mode: string }; result(): { readonly state: string } }
-interface RunModule { readonly relativeModuleId: string; state(): string; readonly children: { allTests(): Iterable<RunTest> } }
+interface RunModule { readonly moduleId: string; state(): string; readonly children: { allTests(): Iterable<RunTest> } }
 export function assertTestsPassed(testModule: RunModule): void {
-  if (testModule.state() === 'failed') throw new Error(`CI requires every test file to pass: ${testModule.relativeModuleId}`)
+  if (testModule.state() !== 'passed') throw new Error(`CI requires every test file to pass: ${testModule.moduleId}`)
   for (const test of testModule.children.allTests()) {
     // Skipped, todo, .only-filtered and unfinished tests all invalidate the
     // receipt so the merged report stays a full-suite gate.

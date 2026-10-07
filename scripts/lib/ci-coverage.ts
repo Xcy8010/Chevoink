@@ -32,7 +32,8 @@ function sameKeys(left: Record<string, unknown>, right: Record<string, unknown>)
   if (keys.length !== Object.keys(right).length || keys.some(key => !/^(?:0|[1-9]\d*)$/u.test(key) || !Object.hasOwn(right, key))) throw new Error('Coverage counters and maps differ')
 }
 
-/** Vitest 4.1.11 blob.ts serializes a six-slot tuple using the flatted protocol.
+/** Vitest 3.2.7 blob.ts serializes [version, files, errors, modules, coverage,
+ * duration] as a six-slot tuple using the flatted protocol.
  * Decode only its acyclic coverage graph; other slots may contain test cycles.
  * Strings inside graph objects are table references; table strings are literals.
  * Reject corrupt references/cycles rather than interpreting arbitrary JSON keys. */
@@ -60,15 +61,15 @@ export function validateCoverageBlob(value: unknown, root: string) {
     if (entry === null || typeof entry === 'number' || typeof entry === 'boolean') return entry
     throw new Error('Invalid unreferenced Vitest blob graph object')
   }
-  if (reference(tuple[0]) !== '4.1.11') throw new Error('Vitest coverage blob version mismatch')
+  if (reference(tuple[0]) !== '3.2.7') throw new Error('Vitest coverage blob version mismatch')
   // Validate envelope references without traversing unrelated cyclic test graphs.
-  for (const slot of [1, 2, 5]) {
+  for (const slot of [1, 2, 3]) {
     const ref = tuple[slot]
     if (typeof ref !== 'string' || !/^[1-9]\d*$/u.test(ref) || Number(ref) >= table.length) throw new Error('Invalid Vitest blob envelope reference')
-    if (slot === 5 ? !table[Number(ref)] || typeof table[Number(ref)] !== 'object' || Array.isArray(table[Number(ref)]) : !Array.isArray(table[Number(ref)])) throw new Error('Invalid Vitest blob envelope')
+    if (!Array.isArray(table[Number(ref)])) throw new Error('Invalid Vitest blob envelope')
   }
-  if (typeof tuple[4] !== 'number' || !Number.isFinite(tuple[4]) || tuple[4] < 0) throw new Error('Invalid Vitest blob duration')
-  const coverage = record(reference(tuple[3]))
+  if (typeof tuple[5] !== 'number' || !Number.isFinite(tuple[5]) || tuple[5] < 0) throw new Error('Invalid Vitest blob duration')
+  const coverage = record(reference(tuple[4]))
   const paths = Object.keys(coverage)
   if (!paths.length) throw new Error('Empty coverage blob')
   const totals = { statements: 0, branches: 0, functions: 0, lines: 0 }
@@ -86,7 +87,9 @@ export function validateCoverageBlob(value: unknown, root: string) {
       const branch = record(branchMap[id])
       if (!Array.isArray(hits) || !hits.length || !Array.isArray(branch.locations) || branch.locations.length !== hits.length) throw new Error('Invalid coverage branch counters')
       location(branch.loc)
-      hits.forEach(count)
+      // ast-v8-to-istanbul emits signed branch counts from V8 range subtraction.
+      // Preserve the official numeric array; Istanbul covers branches iff > 0.
+      if (hits.some(hit => typeof hit !== 'number' || !Number.isSafeInteger(hit))) throw new Error('Invalid coverage branch count')
       branch.locations.forEach((value, index) => {
         const loc = record(value)
         // Istanbul represents the implicit else of `if (...) return ...` with
