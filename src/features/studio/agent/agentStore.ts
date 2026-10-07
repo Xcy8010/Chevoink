@@ -1124,6 +1124,24 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               : {}),
             messages: updateMessageParts(state.messages, event.messageId, (parts) => {
               const index = parts.findIndex((part) => part.type === 'tool-call' && part.callId === event.callId)
+              const previous = index >= 0 ? parts[index] : undefined
+              // Preview order is the model's proposal order. Server-inserted
+              // prerequisite checks may execute first; render actual calls
+              // before all remaining previews, matching the persisted journal.
+              if (!previous || previous.type === 'tool-call' && previous.preparing) {
+                const ordered = index >= 0 ? parts.filter((_, at) => at !== index) : [...parts]
+                const previewIndex = ordered.findIndex(part => part.type === 'tool-call' && part.preparing)
+                const started: AgentMessagePart = {
+                  ...(previous?.type === 'tool-call' ? previous : {}),
+                  type: 'tool-call', callId: event.callId, toolName: event.toolName, title: event.title,
+                  args: event.args ?? (previous?.type === 'tool-call' ? previous.args : null),
+                  status: 'running', preparing: false,
+                  ...(event.importWaiting ? { importWaiting: event.importWaiting } : {}),
+                  ...(event.subagentCallId ? { subagentCallId: event.subagentCallId } : {}),
+                }
+                ordered.splice(previewIndex < 0 ? ordered.length : previewIndex, 0, started)
+                return ordered
+              }
               if (index >= 0) {
                 return parts.map((part, at) =>
                   at === index && part.type === 'tool-call'

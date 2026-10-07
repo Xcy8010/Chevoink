@@ -108,7 +108,8 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     return { kind: 'check' as const, version: 1 as const, compiler: baseline, chapter: compilation.chapter, sourceId, coverage,
       criticSystem: continuityCriticSystem, repairSystem: repairPrompt,
       criticInput: [`章节：《${compilation.chapter.title}》`,
-        `章节桥：${JSON.stringify(continuityStoryInput(compilation.bridge))}`, `场景任务：${JSON.stringify(continuityStoryInput(compilation.sceneTasks))}`, `完整正文：\n${compilation.chapter.content}`,
+        `前章已保存原文（事实证据）：\n${source?.content || '无前章'}`,
+        `章节桥（待核对摘要，不能代替前章原文）：${JSON.stringify(continuityStoryInput(compilation.bridge))}`, `场景任务：${JSON.stringify(continuityStoryInput(compilation.sceneTasks))}`, `完整正文：\n${compilation.chapter.content}`,
         continuityReviewTail(compilation.validation, compilation.chapter.revision, repair, typeof args.focus === 'string' ? args.focus : undefined)].join('\n'),
       repair,
       cached: reusable ? cached.data.findings : null, route: null, price: null }

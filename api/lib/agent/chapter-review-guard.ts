@@ -10,6 +10,14 @@ import { continuityFindingInputSchema } from '../../../shared/contracts/story-co
 import { runtimeJson } from './runtime-common.js'
 
 type ReviewStatus = 'complete' | 'missing' | 'stale' | 'incomplete'
+export type ChapterReviewRevisionOptions = {
+  requireQualityChannel?: boolean
+  /** Pending quality has no persisted report yet; check required continuity
+   * before paying for a repair, without treating candidates as a report. */
+  requireCurrentContinuity?: boolean
+  mutation?: 'replace' | 'range' | 'append'
+  pendingQuality?: { compilationId: string; candidates: number }
+}
 export type ChapterReviewReadiness = {
   ready: boolean; checksRequired: boolean; compilationId: string; chapterId: string; revision: number
   continuity: ReviewStatus; quality: ReviewStatus; continuityErrorCount: number; qualityErrorCount: number
@@ -117,7 +125,7 @@ export async function assertChapterReviewRevision(
   tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string },
   chapter: { id: string; revision: number },
-  options?: { requireQualityChannel?: boolean; pendingQuality?: { compilationId: string; candidates: number } },
+  options?: ChapterReviewRevisionOptions,
 ) {
   await lockNovelActiveScope(tx, subject.novelId)
   const original = await readOriginalTaskRequest(tx, subject)
@@ -145,6 +153,20 @@ export async function assertChapterReviewRevision(
     const value = item.validation
     return value && typeof value === 'object' && !Array.isArray(value) ? [value] : []
   })
+  if (options?.requireCurrentContinuity && !options.mutation && !hasOriginalRepairAuthority(original.prompt)) {
+    const current = await tx.chapter.findFirst({ where: { id: chapter.id, revision: chapter.revision, authorId: subject.userId,
+      ...activeChapterScope(subject.novelId) }, select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
+    const authority = current?.content.trim() ? await readNewDraftWritingAuthority(tx, subject, current) : null
+    if (authority && current && originalChapterReviewRequirements(original).continuity) {
+      const bound = compilations.find(item => item.id === options.pendingQuality?.compilationId && item.status === 'active'
+        && item.bridge && !item.bridge.committedAt)
+      const source = bound?.bridge?.fromChapterId ? await tx.chapter.findFirst({ where: { id: bound.bridge.fromChapterId,
+        ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } }) : null
+      const complete = bound?.bridge && (!bound.bridge.fromChapterId || source?.revision === bound.bridge.sourceRevision)
+        && readCurrentCompilerContinuity({ ...bound, bridge: bound.bridge }, current, source).assessment
+      if (!complete) throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '质量报告照常保存；同一编译的当前正文尚未完成原要求连续性检查，不预约或付费自动修订。先在原检查次数内完成 continuity_validate，再根据全部当前报告合并一次尚未执行的授权修订。')
+    }
+  }
   const reviewed = reports.length > 0 || validations.some(value => continuityCheckRounds(value) > 0 || typeof value.checkedRevision === 'number')
   if (!reviewed) return
   if (!hasOriginalRepairAuthority(original.prompt)) {
@@ -160,6 +182,31 @@ export async function assertChapterReviewRevision(
     })
     const value = latest?.validation
     const validation = value && typeof value === 'object' && !Array.isArray(value) ? value : null
+    // A shape-free probe establishes reachability only. Actual manuscript CAS
+    // requires all original delivery checks on this compilation/current body;
+    // pending paid candidates can never certify a persisted assessment.
+    const qualityReports = await tx.chapterQualityReport.findMany({
+      where: { userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, runId: { in: runIds } },
+      include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    })
+    const latestQuality = qualityReports[0]
+    const assertMergedMutation = async (bound: typeof compilations[number]) => {
+      if (!options?.mutation || !current || !authority) return
+      const requirements = originalChapterReviewRequirements(original)
+      const source = bound.bridge?.fromChapterId ? await tx.chapter.findFirst({ where: { id: bound.bridge.fromChapterId,
+        ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } }) : null
+      const continuity = bound.bridge && (!bound.bridge.fromChapterId || source?.revision === bound.bridge.sourceRevision)
+        ? readCurrentCompilerContinuity({ ...bound, bridge: bound.bridge }, current, source).assessment : null
+      const qualityComplete = latestQuality?.compilationId === bound.id
+        && qualityReportCheckedCurrentContent(latestQuality, current.revision, current.content)
+      if ((requirements.continuity && !continuity) || (requirements.quality && !qualityComplete)) {
+        throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '一次合并修订前必须完成同一编译、当前正文的全部原要求检查。保留正文与未消费的修订，在原检查次数内补齐 continuity_validate 与 quality_analyze，再读取完整报告重新合并修订；不得沿用预先生成的改稿或重置次数。')
+      }
+      const candidates = (continuity?.errorCount ?? 0) + (qualityComplete ? selectAutomaticQualityFindings(latestQuality!.findings).length : 0)
+      if (options.mutation === 'append' || (options.mutation === 'range' && candidates > 1)) {
+        throw new DataAccessError(409, 'REVIEW_MERGED_REVISION_REQUIRED', '本章只有一次合并修订机会。先读取完整正文与全部当前报告，核对证据并合并全部安全修法，用一次 chapter_write 提交完整正文；不得只修第一条或追加片段。完整写入仅保证一次整体提交，不能据此宣称全部问题已修复。')
+      }
+    }
     const findings = Array.isArray(validation?.findings) ? validation.findings.map(item => continuityFindingInputSchema.safeParse(item)) : null
     const errorCount = findings?.filter(item => item.success && item.data.severity === 'error').length ?? 0
     // A pending current-version factual error keeps the continuity channel open
@@ -180,6 +227,7 @@ export async function assertChapterReviewRevision(
       const sourceCurrent = !latest.bridge.fromChapterId || source?.revision === latest.bridge.sourceRevision
       if (sourceCurrent && compilerContinuityCoverageMatches(validation.coverage, compilerContinuityCoverage({ chapter: current,
         bridge: latest.bridge, sceneTasks: latest.sceneTasks, source, focus: typeof validation.reviewFocus === 'string' ? validation.reviewFocus : undefined }))) {
+        await assertMergedMutation(latest)
         // This closure is server-created and bound to the same transaction.
         // Call ONLY after its body CAS succeeds; failed CAS must not consume it.
         return async () => {
@@ -193,27 +241,23 @@ export async function assertChapterReviewRevision(
       // The same merged correction also admits strict-mode quality advice: a
       // complete report bound to the active compilation may repair once, so
       // authored advice is applied instead of handed back unread.
-      const qualityReports = await tx.chapterQualityReport.findMany({
-        where: { userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, runId: { in: runIds } },
-        include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      })
       // Do not search past the newest assessment of this logical task/target:
       // a failed or still-running paid attempt cannot resurrect older advice.
-      const latestQuality = qualityReports[0]
       const quality = latestQuality && !!latestQuality.compilationId && latestQuality.repairRound === 0
         && qualityReportCheckedCurrentContent(latestQuality, current.revision, current.content)
         && selectAutomaticQualityFindings(latestQuality.findings).length > 0
         && compilations.some(compilation => compilation.id === latestQuality.compilationId && compilation.status === 'active'
           && compilation.bridge && !compilation.bridge.committedAt) ? latestQuality : undefined
-      // A pre-payment probe runs before the pending report exists: it models the
-      // complete report the same caller is about to persist (same revision,
-      // same candidates). The write itself still requires the persisted report.
+      // A pre-payment shape-free probe establishes reachability before the
+      // report exists. Pending candidates are never a persisted assessment and
+      // cannot authorize an actual mutation.
       const bound = quality ? compilations.find(item => item.id === quality.compilationId)!
-        : options?.pendingQuality && options.pendingQuality.candidates > 0
+        : !options?.mutation && options?.pendingQuality && options.pendingQuality.candidates > 0
           ? compilations.find(item => item.id === options.pendingQuality!.compilationId && item.status === 'active'
             && item.bridge && !item.bridge.committedAt)
           : undefined
       if (bound) {
+        await assertMergedMutation(bound)
         return async () => {
           await tx.storyCompilation.update({ where: { id: bound.id }, data: { validation: {
             ...(bound.validation && typeof bound.validation === 'object' && !Array.isArray(bound.validation) ? bound.validation : {}),
@@ -221,6 +265,10 @@ export async function assertChapterReviewRevision(
           } as Prisma.InputJsonValue } })
         }
       }
+    }
+    if (authority && current && options?.mutation && compilations.every(item => continuityRepairRounds(item.validation) === 0)
+      && latest?.status === 'active' && ['check', 'repair'].includes(latest.stage) && latest.bridge && !latest.bridge.committedAt) {
+      await assertMergedMutation(latest)
     }
     if (checksExhausted) throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本章自动检查次数已用完，保留正文和原报告，不增加检查或修订次数。')
     if (authority && current && validation?.independentCheck === 'complete' && typeof validation.checkedRevision === 'number'
@@ -241,15 +289,16 @@ export async function assertChapterReviewRevision(
  * the same admission checks and returns the rejection reason without ever
  * consuming the correction. Quality repair callers pass requireQualityChannel
  * so a pending factual error keeps its own channel; durable callers add
- * pendingQuality to model the report they are about to persist. */
+ * pendingQuality only to check pre-payment reachability. Actual mutations pass
+ * their shape and require the final persisted assessments. */
 export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number },
-  options?: { requireQualityChannel?: boolean; pendingQuality?: { compilationId: string; candidates: number } }): Promise<{ open: true } | { open: false; code: string; message: string }> {
+  options?: ChapterReviewRevisionOptions): Promise<{ open: true } | { open: false; code: string; message: string }> {
   try {
     await assertChapterReviewRevision(tx, subject, chapter, options)
     return { open: true }
   } catch (error) {
-    if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) return { open: false, code: error.code, message: error.message }
+    if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) return { open: false, code: error.code, message: error.message }
     throw error
   }
 }
@@ -272,7 +321,7 @@ export async function readChapterReviewRevisionGuidance(tx: Prisma.TransactionCl
   try {
     const consume = await assertChapterReviewRevision(tx, subject, chapter)
     return consume
-      ? '本章属于原写作任务新建目标，当前完整报告中的事实错误可作一次合并修订：先读取完整正文，一次校对全部错误的对象身份及原文引证，确认是同一对象同一维度的互斥事实；报告与 suggestion 不能代替原文事实，不机械照建议改剧情。将全部安全事实修法合并为一次 chapter_write 或一个覆盖相关段落的补丁，不能只修第一条再逐句追加。仅修事实，不追求零警告；一次修订后保留剩余意见交作者决定，复核或换工具不能增加次数。'
+      ? '本章属于原写作任务新建目标，只能作一次合并修订：先完成当前正文的全部原要求检查，读取完整正文与全部报告，一次校对错误的对象身份及原文引证，确认是同一对象同一维度的互斥事实；报告与 suggestion 不能代替原文事实，不机械照建议改剧情。多项候选必须将全部安全事实与质量修法合并为一次 chapter_write 完整写入，不能只修第一条再逐句追加。完整写入不证明全部问题已修复，不追求零警告；一次修订后保留剩余意见交作者决定，复核或换工具不能增加次数。'
       : '仅在原请求明确授权的修订范围内合并修改；保留剩余意见交作者决定，不为零警告反复改写。'
   } catch (error) {
     if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) {

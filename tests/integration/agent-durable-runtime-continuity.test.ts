@@ -29,14 +29,14 @@ import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture,novelFixture } from '../support/agent-durable-runtime-fixture.js'
 
 describe.runIf(available)('durable continuity actual tool chain', () => {
-  it.each(['success', 'chapter-only', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied'] as const)('%s preserves paid results and atomic business effects', async scenario => {
+  it.each(['success', 'chapter-only', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'source-text', 'approval-denied'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     await fixture(async f => {
       let lease = await claim(f)
       const before = scenario === 'long' ? '开头锚点' + '长正文'.repeat(6000) + '末尾锚点' : '原文'
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: before, wordCount: before.length } })
       let sourceId: string | undefined
-      if (scenario === 'stale-source') {
+      if (scenario === 'stale-source' || scenario === 'source-text') {
         const current = await prisma.chapter.update({ where: { id: f.chapterId }, data: { orderIndex: 2, orderInVolume: 2 } })
         sourceId = (await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: current.volumeId, title: '前章', content: '前文', wordCount: 2, orderIndex: 1, orderInVolume: 1 } })).id
       }
@@ -73,7 +73,11 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         if (scenario === 'long') { expect(body.messages[1].content).toContain('开头锚点'); expect(body.messages[1].content).toContain('末尾锚点'); expect(body.messages[1].content).toContain(before) }
         if (scenario === 'unknown') throw new Error('fixture unknown critic')
         if (scenario === 'stale-chapter' || scenario === 'repair-stale' && requests === 1) await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '用户新文', revision: { increment: 1 } } })
-        if (sourceId) await prisma.chapter.update({ where: { id: sourceId }, data: { content: '新的前文', revision: { increment: 1 } } })
+        if (sourceId) {
+          expect(body.messages[1].content).toContain('前章已保存原文（事实证据）：\n前文')
+          expect(body.messages[1].content).toContain('章节桥（待核对摘要，不能代替前章原文）')
+          if (scenario === 'stale-source') await prisma.chapter.update({ where: { id: sourceId }, data: { content: '新的前文', revision: { increment: 1 } } })
+        }
         if (scenario === 'stale-compiler') await prisma.storyCompilation.update({ where: { id: compilationId }, data: { preparedContext: { changed: true } } })
         if (scenario === 'late-resume') await pauseDurableTask(f.userId, lease.runId)
         const content = scenario === 'fused-repair' ? '{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订"}],"patches":[{"oldText":"原文","newText":"新文"}]}'

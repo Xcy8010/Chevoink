@@ -96,6 +96,98 @@ describe('one atomic factual correction in the original new draft', () => {
     const subject = { userId: 'u', novelId: 'n', runId: 'child-run' }
     return { tx, db, subject, chapter, request, spec, binding, source, validation, compilation, rows }
   }
+  function completeQuality(f: ReturnType<typeof fixture>, candidates = 0) {
+    const report = { id: 'q', compilationId: f.compilation.id, chapterRevision: f.chapter.revision, repairRound: 0, status: 'passed',
+      deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(f.chapter.content).digest('hex') },
+      findings: Array.from({ length: candidates }, (_, index) => ({ severity: 'warning', startOffset: index * 4, endOffset: index * 4 + 2,
+        disposition: 'pending', authorFeedback: null })) }
+    f.db.chapterQualityReport.findMany.mockResolvedValue([report] as never)
+    return report
+  }
+  it.each(['range', 'append'] as const)('denies %s before consumption for two current findings while the shape-free probe stays open', async mutation => {
+    const f = fixture()
+    f.validation.findings.push({ ...f.validation.findings[0], evidence: '第二个合成互斥事实' })
+    f.validation.errorCount = 2
+    completeQuality(f)
+    const before = structuredClone(f.compilation)
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
+    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    expect(f.compilation).toEqual(before)
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace' })
+    await consume?.()
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace' })).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
+  })
+  it('counts safe quality candidates alongside continuity errors, including warnings', async () => {
+    const f = fixture()
+    completeQuality(f, 1)
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'range' })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it('allows one range candidate, but an append cannot spend even that correction', async () => {
+    const f = fixture()
+    completeQuality(f)
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'append' })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'range' })).resolves.toBeTypeOf('function')
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it.each(['missing-quality', 'failed-quality', 'analyzing-quality', 'stale-quality', 'hash-quality', 'foreign-compilation',
+    'repaired-quality', 'incomplete-quality', 'malformed-continuity', 'coverage', 'count', 'source'] as const)(
+    'actual mutation requires complete current persisted checks: %s', async scenario => {
+      const f = fixture(), report = completeQuality(f)
+      if (scenario === 'missing-quality') f.db.chapterQualityReport.findMany.mockResolvedValue([])
+      if (scenario === 'failed-quality') report.status = 'failed'
+      if (scenario === 'analyzing-quality') report.status = 'analyzing'
+      if (scenario === 'stale-quality') report.chapterRevision--
+      if (scenario === 'hash-quality') report.deterministicMetrics.contentHash = '0'.repeat(64)
+      if (scenario === 'foreign-compilation') report.compilationId = 'other'
+      if (scenario === 'repaired-quality') report.status = 'repaired'
+      if (scenario === 'incomplete-quality') report.deterministicMetrics.independentCheck = 'unavailable'
+      if (scenario === 'malformed-continuity') f.validation.findings = [{ severity: 'error' }] as never
+      if (scenario === 'coverage') f.validation.coverage.reviewHash = '0'.repeat(64)
+      if (scenario === 'count') f.validation.warningCount = 1
+      if (scenario === 'source') Object.assign(f.compilation.bridge, { fromChapterId: 'source', sourceRevision: 1 })
+      await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace' })).rejects.toMatchObject({ code: 'REVIEW_REPAIR_RECHECK_REQUIRED' })
+      expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    })
+  it('pending candidates prove only prepayment reachability, never actual write admission', async () => {
+    const f = fixture()
+    f.validation.errorCount = 0; f.validation.findings = []
+    const pendingQuality = { compilationId: f.compilation.id, candidates: 2 }
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality })).resolves.toEqual({ open: true })
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', requireQualityChannel: true, pendingQuality }))
+      .rejects.toMatchObject({ code: 'REVIEW_REPAIR_RECHECK_REQUIRED' })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it.each(['unreviewed', 'failed', 'coverage', 'foreign-compilation'] as const)('pending quality prepayment blocks %s continuity before any report exists', async scenario => {
+    const f = fixture()
+    f.validation.errorCount = 0; f.validation.findings = []
+    if (scenario === 'unreviewed') f.compilation.validation = null as never
+    if (scenario === 'failed') f.validation.independentCheck = 'unavailable'
+    if (scenario === 'coverage') f.validation.coverage.reviewHash = '0'.repeat(64)
+    const pendingQuality = { compilationId: scenario === 'foreign-compilation' ? 'other' : f.compilation.id, candidates: 1 }
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, requireCurrentContinuity: true, pendingQuality }))
+      .resolves.toMatchObject({ open: false, code: 'REVIEW_REPAIR_RECHECK_REQUIRED' })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    expect(f.db.chapterQualityReport.findMany).toHaveReturned()
+  })
+  it.each(['current', 'waived', 'explicit-repair'] as const)('pending quality prepayment preserves %s admission without consuming anything', async scenario => {
+    const f = fixture(scenario === 'waived' ? '写下一章，不用连续性检查' : scenario === 'explicit-repair' ? '检查并修复当前章' : '写下一章')
+    f.validation.errorCount = 0; f.validation.findings = []
+    if (scenario !== 'current') f.compilation.validation = null as never
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, requireCurrentContinuity: true,
+      pendingQuality: { compilationId: f.compilation.id, candidates: 1 } })).resolves.toEqual({ open: true })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it('honors a quality-only original waiver without inventing a report requirement', async () => {
+    const f = fixture('写下一章，不用质量检查')
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace' })).resolves.toBeTypeOf('function')
+  })
+  it('leaves explicit existing repair authority independent of new-draft prechecks and mutation shape', async () => {
+    const f = fixture('检查并修复当前章')
+    f.spec.scope.writing!.targets[0].chapterId = f.chapter.id
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'append' })).resolves.toBeUndefined()
+  })
   it('admits one merged correction without changing original authority or counters, consumes after CAS and blocks a fresh recheck', async () => {
     const f = fixture(), frozenSpec = structuredClone(f.spec)
     const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter)

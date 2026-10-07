@@ -61,6 +61,21 @@ describe('Agent 写入审查生命周期', () => {
     expect(useAgentStore.getState().messages[0].parts).toEqual([])
   })
 
+  it('补入检查按实际执行顺序排在提前生成的终态预览前，重连不重复或重排已执行卡', () => {
+    const apply = useAgentStore.getState().applyEvent
+    const base = { runId: 'run-review', ts: new Date().toISOString() }
+    apply({ ...base, seq: 1, type: 'message.start', messageId: 'm', role: 'assistant' })
+    apply({ ...base, seq: 2, type: 'tool.delta', messageId: 'm', callId: 'commit', toolName: 'chapter_bridge_commit', title: '提交章节终态', argsChars: 30 })
+    apply({ ...base, seq: 3, type: 'tool.call', messageId: 'm', callId: 'check', toolName: 'continuity_validate', title: '检查章节连续性', args: {} })
+    expect(useAgentStore.getState().messages[0].parts.map(part => part.type === 'tool-call' && part.callId)).toEqual(['check', 'commit'])
+    apply({ ...base, seq: 4, type: 'tool.result', messageId: 'm', callId: 'check', toolName: 'continuity_validate', ok: true, summary: '检查完成', durationMs: 10 })
+    apply({ ...base, seq: 5, type: 'tool.call', messageId: 'm', callId: 'commit', toolName: 'chapter_bridge_commit', title: '提交章节终态', args: {} })
+    apply({ ...base, seq: 6, type: 'tool.call', messageId: 'm', callId: 'check', toolName: 'continuity_validate', title: '检查章节连续性', args: {} })
+    expect(useAgentStore.getState().messages[0].parts.map(part => part.type === 'tool-call' && [part.callId, part.status, part.preparing])).toEqual([
+      ['check', 'success', false], ['commit', 'running', false],
+    ])
+  })
+
   it('执行成功先保持已完成，作者采纳后才标记已接受', () => {
     const apply = useAgentStore.getState().applyEvent
     apply({ seq: 1, runId: 'run-review', ts: new Date().toISOString(), type: 'message.start', messageId: 'message-review', role: 'assistant' })

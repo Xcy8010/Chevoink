@@ -170,8 +170,8 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     const repairWanted = frozen.repair && (!frozen.cached ? evaluated.complete : !!frozen.route && !!cachedReport && qualityAutoRepairPending(cachedReport))
     const selected = repairWanted ? selectAutomaticQualityFindings<(typeof candidates)[number]>(candidates).map(item => ({ ...item,
       start: item.startOffset, end: item.endOffset, key: `${item.signal}:${item.startOffset}:${item.endOffset}` })) : []
-    // 付费前只读探测：待保存的报告尚未落库，用 pendingQuality 模拟它；被拒时不为
-    // 修订模型付费，报告照常保存、剩余意见待审（selected 非空会标记已尝试）。
+    // 待保存报告仅证明修订可达；同编译当前连续性必须先满足原要求才可付费修订。
+    // 拒绝时仍原子保存质量报告，不付费、不标记已尝试，不遗留未知检查结果。
     let canRepair = false
     let repairNote = ''
     if (selected.length) {
@@ -181,7 +181,8 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
       } else {
         const probe = await withRunLease(lease, tx => probeChapterReviewRevision(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },
           { id: frozen.chapter.id, revision: frozen.chapter.revision },
-          { requireQualityChannel: true, ...(frozen.compiler ? { pendingQuality: { compilationId: frozen.compiler.id, candidates: selected.length } } : {}) }))
+          { requireQualityChannel: true, requireCurrentContinuity: true,
+            ...(frozen.compiler ? { pendingQuality: { compilationId: frozen.compiler.id, candidates: selected.length } } : {}) }))
         canRepair = probe.open
         if (!probe.open) repairNote = probe.message
       }
@@ -233,7 +234,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
         bindingNote = [unlocatedCount ? `${unlocatedCount} 条模型意见因引用无法逐字定位未纳入报告` : '',
           droppedCount ? `${droppedCount} 条因字段不完整未纳入报告` : ''].filter(Boolean).join('；')
         await tx.chapterQualityReport.update({ where: { id: report.id }, data: { deterministicMetrics: { ...metrics,
-          ...(selected.length ? { autoRepairAttempted: true } : {}),
+          ...(canRepair && selected.length ? { autoRepairAttempted: true } : {}),
           ...(repaired ? { repairedQualityContextHash: qualityReviewContextHash(await buildHumanityQualityContext(ctx.userId, ctx.novelId, frozen.chapter.id, ctx.runId, tx)) }
             : { qualityContextHash: qualityReviewContextHash(await buildHumanityQualityContext(ctx.userId, ctx.novelId, frozen.chapter.id, ctx.runId, tx)) }) } } })
       }

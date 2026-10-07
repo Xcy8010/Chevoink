@@ -2,6 +2,7 @@
  * source revisions, author deletion, or quality gates. */
 export function toolFailureRecovery(code: string): { label: string; guidance: string } | undefined {
   const entries: Record<string, { label: string; guidance: string }> = {
+    REVIEW_MERGED_REVISION_REQUIRED: { label: '需要一次完整合并修订', guidance: '正文未变化，修订机会未消费。读取完整正文与全部当前报告，核对证据并合并全部安全修法，用一次 chapter_write 提交完整正文；不能逐条 chapter_edit_range 或追加片段，也不能宣称整体写入证明全部问题已修复。' },
     REVIEW_REPAIR_RECHECK_REQUIRED: { label: '需要复核当前版本', guidance: '原稿已保存，旧报告不构成改稿证据。仅在原检查次数内复核当前版本，再合并一次尚未执行的授权修订；不要重置次数或重绑旧报告。' },
     CHAPTER_ANCHOR_CONFLICT: { label: '正文片段需要重新定位', guidance: '仅对本次原目标调用 chapter_read，逐字使用当前版本中的唯一连续原文。不要猜测其他章节 ID、替换到其他章节或照旧报告强行写入。' },
     TODO_CHANGE_REASON_REQUIRED: { label: '待办需要保留原项目身份', guidance: '读取当前清单，更新时保留原 id。确有新增的原授权工作请给出 changeReason，不重建整张清单或扩大章节范围。' },

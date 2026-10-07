@@ -147,7 +147,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
       // 付费前只读探测：同一次合并修订的准入由守卫统一判定（新稿质量通道或原始修复
       // 授权），被拒时不预约、不调用修订模型，正文与报告保持原样。
       const probe = await prisma.$transaction(tx => probeChapterReviewRevision(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },
-        { id: report.chapterId, revision: report.chapterRevision }, { requireQualityChannel: true }))
+        { id: report.chapterId, revision: report.chapterRevision }, { requireQualityChannel: true, mutation: 'replace' }))
       if (!probe.open) return { output: `质量报告 ${report.id}已保留，自动修订未应用：${probe.message}剩余意见保留待审，不重复自动改写。${bindingSuffix}`,
         summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
       if (await reserveQualityAutoRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id })) {
@@ -167,7 +167,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
       ctx.signal.throwIfAborted()
       if (!(error instanceof DataAccessError) || !REPAIR_BLOCK_CODES.has(error.code)) throw error
       const stale = !REPAIR_CHANNEL_CODES.has(error.code)
-      return { ...(stale ? { outcome: 'failed' as const } : {}),
+      return { ...(stale ? { outcome: 'failed' as const, failureCode: error.code } : {}),
         output: `质量报告已保留，自动修订未应用：${error.message}${stale ? '当前证据或版本不可用于本次修订，不能据此宣称已修复或直接提交；请核对当前正文与报告。' : '剩余意见保留待审，不重复自动改写。'}${bindingSuffix}`,
         summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
     }

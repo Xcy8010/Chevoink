@@ -143,8 +143,21 @@ describe('legacy Agent chapter archive guards', () => {
       : action === 'chapter_append' ? chapterAppendTool.execute(ctx(), { chapterId: 'c', content: 'After' })
       : chapterEditRangeTool.execute(ctx(), { chapterId: 'c', oldText: 'Before', newText: 'After' })
     await expect(execute).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
-    expect(m.reviewGuard).toHaveBeenCalledWith(tx, expect.objectContaining({ runId: 'r' }), expect.objectContaining({ id: 'c', revision: 4 }))
+    expect(m.reviewGuard).toHaveBeenCalledWith(tx, expect.objectContaining({ runId: 'r' }), expect.objectContaining({ id: 'c', revision: 4 }),
+      { mutation: action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range' })
     expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
+  it.each(['write', 'range'] as const)('unchanged legacy %s authenticates the active revision without consuming or recording effects', async action => {
+    const consume = vi.fn()
+    m.reviewGuard.mockResolvedValue(consume)
+    const result = action === 'write' ? await chapterWriteTool.execute(ctx(), { chapterId: 'c', content: 'Before' })
+      : await chapterEditRangeTool.execute(ctx(), { chapterId: 'c', oldText: 'Before', newText: 'Before' })
+    expect(result.display).toMatchObject({ before: 'Before', after: 'Before', revision: 4 })
+    expect(m.tx.chapter.findFirst).toHaveBeenCalledWith({ where: { id: 'c', ...activeChapterScope('n'), authorId: 'u', revision: 4 } })
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expect(m.reviewGuard).not.toHaveBeenCalled()
+    expect(consume).not.toHaveBeenCalled()
     expectNoEffects()
   })
   it.each(legacy)('%s rejects the previous manuscript epoch even if chapter revision still matches', async (_name, execute) => {
@@ -346,6 +359,16 @@ describe('legacy Agent chapter archive guards', () => {
 })
 
 describe('durable Agent chapter archive guards', () => {
+  it.each(['REVIEW_MERGED_REVISION_REQUIRED', 'REVIEW_REPAIR_RECHECK_REQUIRED'] as const)('journals %s with no manuscript or correction effects', async code => {
+    const { DataAccessError } = await import('../../api/lib/prisma.js')
+    m.reviewGuard.mockRejectedValue(new DataAccessError(409, code, '合成修订拒绝'))
+    expect(await executeDurableChapter(durable('chapter_edit_range'), 'chapter_edit_range', contentArgs('chapter_edit_range')))
+      .toMatchObject({ outcome: 'failed', failureCode: code })
+    expect(m.reviewGuard).toHaveBeenCalledWith(tx, expect.anything(), expect.objectContaining({ id: 'c', revision: 4 }), { mutation: 'range' })
+    expect(m.failure).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code }))
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
   it.each(actions)('%s journals exhausted-review denial before CAS without content, memory or progress effects', async action => {
     const { DataAccessError } = await import('../../api/lib/prisma.js')
     m.reviewGuard.mockRejectedValue(new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '检查次数已用完'))

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import type { AgentStreamEventBody, AgentTodoItem, TaskSpec } from '../../shared/contracts/index.js'
+import type { AgentMessagePart, AgentStreamEventBody, AgentTodoItem, TaskSpec } from '../../shared/contracts/index.js'
 import type { AgentTool, ToolContext, ToolResult } from '../../api/lib/agent/tools/types.js'
 import type { chatWithTools as chatType } from '../../api/lib/ai-service.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
@@ -303,11 +303,38 @@ describe('server assessment fallback in the real execution loop', () => {
     const edit = tool('chapter_edit_range', async () => { expect(state.continuity).toBe('complete'); return { output: '合并修订已保存' } }, false)
     const commit = tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '提交完成' } }, false)
     mocks.tools = [rename, check, edit, commit]
-    queue(response('', [call('rename', rename.name), call('edit', edit.name, '{"chapterId":"c"}')]), response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('已保存。'))
+    queue(response('', [call('rename', rename.name), call('old-edit', edit.name, '{"chapterId":"c"}')]),
+      response('', [call('edit', edit.name, '{"chapterId":"c"}')]), response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('已保存。'))
     await run('写下一章')
     expect(check.execute).toHaveBeenCalledOnce()
     expect(edit.execute).toHaveBeenCalledOnce()
+    expect(events().some(event => event.type === 'tool.call' && event.callId === 'old-edit')).toBe(false)
     expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_rename', 'continuity_validate', 'chapter_edit_range', 'chapter_bridge_commit'])
+  })
+  it('finishes both prechecks before asking for a new merged correction, then rechecks the saved revision before commit', async () => {
+    let state = readiness('complete', 'missing')
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    mocks.reviewProbe.mockImplementation(async () => state.ready ? { open: true } : { open: false, code: 'REVIEW_REPAIR_RECHECK_REQUIRED', message: '尚缺当前检查' })
+    const check = tool('continuity_validate', async () => { state = readiness('complete', state.quality, state.revision); return { output: '连续性完成' } })
+    const quality = tool('quality_analyze', async () => { state = readiness(state.continuity, 'complete', state.revision); return { output: '质量报告已保存，含另一条建议' } })
+    const edit = tool('chapter_edit_range', async () => ({ output: '旧片段不能执行' }), false)
+    const write = tool('chapter_write', async () => { expect(state.ready).toBe(true); state = readiness('stale', 'stale', 4); return { output: '全部安全修订一次保存' } }, false)
+    const commit = tool('chapter_bridge_commit', async () => { expect(state.ready).toBe(true); mocks.committedChapter.mockResolvedValue(true); return { output: '终态保存' } }, false)
+    mocks.tools = [check, quality, edit, write, commit]
+    queue(response('开始修改第一条。', [call('old-part', edit.name, '{"chapterId":"c"}')]),
+      response('', [call('merged', write.name, '{"chapterId":"c"}')]),
+      response('检查已通过，提交终态。', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('已保存。'))
+    await run('写下一章')
+    expect(edit.execute).not.toHaveBeenCalled()
+    expect(write.execute).toHaveBeenCalledOnce()
+    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual([
+      'quality_analyze', 'chapter_write', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit',
+    ])
+    const saved = mocks.persist.mock.calls.flatMap(([input]) => (input as { create?: { parts?: AgentMessagePart[] } }).create?.parts ?? [])
+    expect(saved.filter(part => part.type === 'tool-call').map(part => part.type === 'tool-call' && part.toolName)).toEqual([
+      'quality_analyze', 'chapter_write', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit',
+    ])
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
   it('does not replay pending unknown work or bypass the original tool ceiling', async () => {
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'incomplete'))

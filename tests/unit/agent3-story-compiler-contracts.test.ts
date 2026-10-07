@@ -63,6 +63,15 @@ describe('严谨创作落实连续性警告', () => {
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     expect(f.repair).not.toHaveBeenCalled()
   })
+  it('连续性判断取得前章已保存原文，桥接摘要不单独充当事实证据', async () => {
+    const f = fixture(false)
+    Object.assign(f.compilation.bridge, { fromChapterId: 'source', sourceRevision: 2 })
+    vi.spyOn(prisma.chapter, 'findFirst').mockResolvedValue({ id: 'source', revision: 2, content: '合成前章：营火只为制造声势。他随后走向河边。' } as never)
+    await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
+    expect(f.critic.mock.calls[0][1]).toContain('前章已保存原文（事实证据）：\n合成前章：营火只为制造声势。他随后走向河边。')
+    expect(f.critic.mock.calls[0][1]).toContain('桥接摘要，需对照原文核实')
+    expect(f.write).not.toHaveBeenCalled()
+  })
   it.each([undefined, '模型自行添加的范围'])('exhaustion does not return stale findings or allow a focus bypass: %s', async focus => {
     const f = fixture(true)
     f.chapter.revision = 2
@@ -223,7 +232,8 @@ describe('Agent 3.0 Story Compiler 契约', () => {
   })
   it('严谨规则保留可选只读检查及原始修复授权边界', () => {
     const text = renderTaskSpec(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '写下一章', creativeFreedom: 'balanced' }))
-    expect(text).toContain('连续性与质量检查可选且只读')
+    expect(text).toContain('写作交付先完成当前版本连续性与质量检查')
+    expect(text).toContain('修订后只读复核当前版本两类检查，最后提交终态')
     expect(text).toContain('警告和审美建议保留待审，不自动改正文')
     expect(text).toContain('本任务冻结的新建目标章')
     expect(text).toContain('一次合并修订')
@@ -232,6 +242,10 @@ describe('Agent 3.0 Story Compiler 契约', () => {
     expect(continuityReviewTail(null, 1, true)).toContain('警告保留待审')
     expect(continuityCriticSystem).toContain('先核对对象身份')
     expect(continuityCriticSystem).toContain('warning与审美意见保留待审')
+    expect(continuityCriticSystem).toContain('章节桥是待核摘要')
+    expect(continuityCriticSystem).toContain('虚张不表示')
+    expect(continuityCriticSystem).toContain('同一时刻、同一对象、同一维度互斥')
+    expect(continuityCriticSystem).toContain('修法困难不改变事实判定')
     expect(continuityReviewTail(null, 1, false)).toContain('不改写正文')
   })
   it.each([null, '遗漏的场景', 7, []])('场景列表保留无效项供校验拒绝，不静默丢弃：%j', invalid => {

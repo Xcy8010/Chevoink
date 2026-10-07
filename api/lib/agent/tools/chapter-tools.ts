@@ -7,7 +7,7 @@ import { DataAccessError, prisma } from '../../prisma.js'
 import { getChapterBaseline, getCreatedChapter, getLastTouchedChapter, recordChapterBaseline, recordCreatedChapter } from '../baseline.js'
 import { activeChapterScope, recalculateNovelStats } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
-import { assertChapterReviewRevision } from '../chapter-review-guard.js'
+import { assertChapterReviewRevision, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { placeCreatedChapter, resolveChapterPlacement } from '../../data/volume.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
@@ -76,13 +76,19 @@ function assertChapterMutable(ctx: ToolContext, chapter: { id: string; title: st
 /** 把“读当前版本 → 写入”收敛为单条带 revision 条件的原子更新。 */
 async function updateOwnedChapterAtRevision(
   ctx: ToolContext,
-  chapter: { id: string; revision: number },
+  chapter: { id: string; revision: number; content?: string },
   data: Prisma.ChapterUpdateManyMutationInput,
+  mutation?: ChapterReviewRevisionOptions['mutation'],
 ) {
   const apply = async (tx: Prisma.TransactionClient) => {
     await assertAgentManuscriptCurrent(tx, ctx)
     await assertWritingTarget(tx, ctx, { chapterId: chapter.id })
-    const consumeReviewRevision = data.content !== undefined ? await assertChapterReviewRevision(tx, ctx, chapter) : undefined
+    if (typeof data.content === 'string' && data.content === chapter.content) {
+      // Authenticate the still-active revision inside the transaction even for
+      // a no-op. It must spend neither a manuscript CAS nor a merged correction.
+      return tx.chapter.findFirst({ where: { id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision } })
+    }
+    const consumeReviewRevision = data.content !== undefined ? await assertChapterReviewRevision(tx, ctx, chapter, { mutation }) : undefined
     const result = await tx.chapter.updateMany({
       where: {
         id: chapter.id,
@@ -111,6 +117,7 @@ async function writeChapterContent(
   buildNextContent: (current: string) => string,
   actionLabel: string,
   leakageCandidate: string,
+  mutation: 'replace' | 'append',
 ): Promise<ToolResult> {
   const chapter = await findOwnedChapter(ctx, chapterId)
 
@@ -136,10 +143,11 @@ async function writeChapterContent(
   const updated = await updateOwnedChapterAtRevision(ctx, chapter, {
     content: after,
     wordCount: after.length,
-  })
+  }, mutation)
   if (!updated) {
     return buildConflictResult(chapter.title)
   }
+  if (after === before) return unchangedChapterResult(chapter)
   await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
   if (!ctx.transaction) recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
   if (isAgent2FeatureEnabled('memory2', ctx.userId)) {
@@ -172,6 +180,12 @@ async function writeChapterContent(
     },
     snapshot: { target: 'chapter', targetId: chapter.id, field: 'content', previousValue: before },
   }
+}
+
+function unchangedChapterResult(chapter: { id: string; title: string; content: string; revision: number }): ToolResult {
+  return { output: `章节《${chapter.title}》正文未变化。`, summary: `未变化《${chapter.title}》 · ${chapter.content.length} 字`,
+    display: { kind: 'chapterDiff', chapterId: chapter.id, chapterTitle: chapter.title, before: chapter.content, after: chapter.content,
+      appliedDirectly: true, revision: chapter.revision } }
 }
 
 export const chapterCreateTool = defineTool({
@@ -353,7 +367,7 @@ export const chapterWriteTool = defineTool({
       return { output: MISSING_CHAPTER_HINT }
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_write', { ...args, chapterId })
-    return writeChapterContent(ctx, chapterId, () => args.content, '覆盖写入', args.content)
+    return writeChapterContent(ctx, chapterId, () => args.content, '覆盖写入', args.content, 'replace')
   },
 })
 
@@ -376,6 +390,7 @@ export const chapterAppendTool = defineTool({
       (current) => (current.trim() ? `${current.replace(/\s+$/, '')}\n\n${args.content}` : args.content),
       '追加',
       args.content,
+      'append',
     )
   },
 })
@@ -443,10 +458,11 @@ export const chapterEditRangeTool = defineTool({
     const updated = await updateOwnedChapterAtRevision(ctx, chapter, {
       content: after,
       wordCount: after.length,
-    })
+    }, 'range')
     if (!updated) {
       return buildConflictResult(chapter.title)
     }
+    if (after === before) return unchangedChapterResult(chapter)
     await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
     if (!ctx.transaction) recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
     if (isAgent2FeatureEnabled('memory2', ctx.userId)) {

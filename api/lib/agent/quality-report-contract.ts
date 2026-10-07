@@ -16,6 +16,7 @@ export const REPAIR_BLOCK_CODES = new Set([
   'REPAIR_NOT_AUTHORIZED',
   'REVIEW_AUTOMATION_STOPPED',
   'REVIEW_REPAIR_RECHECK_REQUIRED',
+  'REVIEW_MERGED_REVISION_REQUIRED',
 ])
 
 /** 通道关闭类不是证据失效：只提示原因，不把工具标成失败。 */
@@ -24,7 +25,6 @@ export const REPAIR_CHANNEL_CODES = new Set([
   'QUALITY_REPAIR_NO_CHANGE',
   'REPAIR_NOT_AUTHORIZED',
   'REVIEW_AUTOMATION_STOPPED',
-  'REVIEW_REPAIR_RECHECK_REQUIRED',
 ])
 
 /** 严谨模式一次集中处理警告与建议；保留优先级、作者拒绝、重叠和数量保护。 */

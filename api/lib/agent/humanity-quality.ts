@@ -574,7 +574,7 @@ export async function applyQualityRepair(input: {
       || current.status !== report.status || current.status === 'stale' || JSON.stringify(current.deterministicMetrics) !== JSON.stringify(report.deterministicMetrics)
       || fingerprint(current) !== fingerprint(report)) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '质量报告、作者选择或正文已变化，未应用旧修订。')
     input.signal?.throwIfAborted()
-    const consumeReviewRevision = input.runId ? await assertChapterReviewRevision(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId }, report.chapter, { requireQualityChannel: true }) : undefined
+    const consumeReviewRevision = input.runId ? await assertChapterReviewRevision(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId }, report.chapter, { requireQualityChannel: true, mutation: 'replace' }) : undefined
     const write = await tx.chapter.updateMany({
       where: { id: report.chapter.id, ...activeChapterScope(input.novelId), authorId: input.userId, revision: report.chapterRevision, content: report.chapter.content },
       data: { content: after, wordCount: after.length, revision: { increment: 1 } },

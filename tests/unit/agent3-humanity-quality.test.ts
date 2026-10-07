@@ -226,6 +226,20 @@ describe('严谨创作自动落实质量建议', () => {
     expect(f.write.mock.calls[0][0].replacements).toHaveLength(8)
     expect(f.report.findings.every(item => item.disposition === 'repaired')).toBe(true)
   })
+  it.each([false, true])('quality-first preserves a complete report without reserving or paying before current continuity, cached=%s', async cached => {
+    const f = fixture(cached), before = structuredClone(f.report)
+    guard.probe.mockResolvedValue({ open: false, code: 'REVIEW_REPAIR_RECHECK_REQUIRED', message: '同编译当前连续性尚未完成' })
+    const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(result).toMatchObject({ summary: '人类感质量检查 · 修订未应用', display: { reportId: 'q' } })
+    expect(result.outcome).toBeUndefined()
+    expect(guard.probe).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ runId: 'r' }),
+      { id: 'c', revision: 1 }, { requireQualityChannel: true, mutation: 'replace' })
+    expect(f.report).toEqual(before)
+    expect(f.reserve).not.toHaveBeenCalled()
+    expect(f.model).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+    expect(qualityAutoRepairPending(f.report)).toBe(true)
+  })
   it.each(['stable', 'bold', 'protected', 'review', 'attempted', 'repaired', 'rejected', 'cancelled'] as const)('%s 不生成越权或重复修订', async scenario => {
     const f = fixture(true)
     if (scenario === 'stable' || scenario === 'bold') f.ctx.creativeFreedom = scenario
@@ -244,7 +258,7 @@ describe('严谨创作自动落实质量建议', () => {
     const f = fixture(true, behavior)
     const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(result.summary).toContain('修订未应用')
-    if (behavior === 'stale') expect(result.outcome).toBe('failed')
+    if (behavior === 'stale') expect(result).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_REPORT_STALE' })
     else expect(f.write).not.toHaveBeenCalled()
     const calls = f.model.mock.calls.length
     await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })

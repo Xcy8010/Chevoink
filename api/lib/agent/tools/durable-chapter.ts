@@ -137,7 +137,9 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     }
     const changed = before !== after
     if (changed) {
-      const consumeReviewRevision = await assertChapterReviewRevision(tx, ctx, chapter)
+      const consumeReviewRevision = await assertChapterReviewRevision(tx, ctx, chapter, {
+        mutation: action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range',
+      })
       const updated = await tx.chapter.updateMany({ where: { id: chapter.id, authorId: ctx.userId, ...activeChapterScope(ctx.novelId), revision: expectedRevision },
         data: { content: after, wordCount: after.length, revision: { increment: 1 } } })
       if (updated.count !== 1) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，正文写入未执行。')
@@ -156,7 +158,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
       snapshot: { target: 'chapter', targetId: chapter.id, field: 'content', previousValue: before } }, memoryJobId,
       progress: { kind: 'content_revision', targetId: chapter.id, beforeHash: runtimeJson({ content: before }).hash, afterHash: runtimeJson({ content: after }).hash } }
   }).catch(async error => {
-    if (!prepared || !(error instanceof DataAccessError) || !['CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) throw error
+    if (!prepared || !(error instanceof DataAccessError) || !['CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code: error.code,
       summary: '正文变更未执行', output: error.message })
   })

@@ -26,7 +26,7 @@ import { getModelTierRuntime } from '../credits.js'
 import { readManagedImageDataUrl } from '../agent-attachment-storage.js'
 import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, type AgentDefinition } from './agents.js'
 import { deregisterActiveRun, registerActiveRun } from './active-runs.js'
-import { clearRunBaselines } from './baseline.js'
+import { clearRunBaselines, getLastTouchedChapter } from './baseline.js'
 import { assembleContext, insertSubagentCatalog } from './context.js'
 import { captureUserDirectives, compactSessionContext } from './context-engine.js'
 import { syncNovelMemoryProjection } from './story-memory.js'
@@ -1754,26 +1754,37 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const preflightTool = tools.find(tool => tool.name === call.name)
         const preflightArgs = reviewPreflightArgs(call, preflightTool)
         if (preflightTool && preflightArgs && preflightTool.parameters.safeParse(preflightArgs).success
-          && ['chapter_bridge_commit', 'chapter_edit_range', 'chapter_write'].includes(call.name)) {
+          && ['chapter_bridge_commit', 'chapter_edit_range', 'chapter_write', 'chapter_append'].includes(call.name)) {
           const parsed = preflightArgs
           const compilationId = typeof parsed.compilationId === 'string' ? parsed.compilationId : undefined
           const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
             { userId: params.userId, novelId: params.novelId, runId }, compilationId))
           let needsReview = call.name === 'chapter_bridge_commit' && readiness?.checksRequired
-          if (!needsReview && readiness?.continuity === 'stale' && ['chapter_edit_range', 'chapter_write'].includes(call.name)) {
+          if (!needsReview && readiness && !readiness.ready && ['chapter_edit_range', 'chapter_write', 'chapter_append'].includes(call.name)) {
             const args = parsed
-            if (args?.chapterId === readiness.chapterId) {
+            const target = typeof args.chapterId === 'string' && args.chapterId.trim() ? args.chapterId.trim() : getLastTouchedChapter(runId) ?? params.chapterId
+            if (target === readiness.chapterId) {
               const channel = await prisma.$transaction(tx => probeChapterReviewRevision(tx,
                 { userId: params.userId, novelId: params.novelId, runId }, { id: readiness.chapterId, revision: readiness.revision }))
               needsReview = !channel.open && channel.code === 'REVIEW_REPAIR_RECHECK_REQUIRED'
-              if (needsReview) readiness.requiredTools = readiness.requiredTools.filter(tool => tool.name === 'continuity_validate')
+                || channel.open && readiness.checksRequired && (readiness.continuity === 'complete' || readiness.quality === 'complete')
             }
           }
           if (needsReview) {
             const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts)
             if (next.kind === 'tool') {
               const required = { id: `review_${messageId}_${callIndex}_${randomUUID()}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
-              effectiveToolCalls.splice(callIndex, 0, required)
+              if (call.name === 'chapter_bridge_commit') effectiveToolCalls.splice(callIndex, 0, required)
+              else {
+                // The missing assessment can add findings. Discard unexecuted
+                // proposals and let the model build one merged correction from
+                // the saved reports; never execute its pre-check patch blindly.
+                effectiveToolCalls.splice(callIndex, effectiveToolCalls.length - callIndex, required)
+              }
+              const note = '正在完成当前版本的必要检查，之后再核对修订与章节终态。'
+              for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') parts.splice(index, 1)
+              parts.push({ type: 'text', text: note })
+              bus.emit({ type: 'text.final', messageId, text: note, asReasoning: false })
               call = required
             } else if (next.kind === 'blocked') {
               forceWrapUpReason = next.reason
@@ -1806,10 +1817,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const tool = tools.find(candidate => candidate.name === call.name)
         // Todo updates depend on their current snapshot; completion of newly-started
         // work must not be blocked by an identical call made against an older snapshot.
-        const admissionSignature = call.name === 'todo_write' ? toolSignature(signature, JSON.stringify(todoItems)) : signature
+        const admissionSignature = reviewDispatch
+          ? toolSignature(signature, JSON.stringify({ compilationId: reviewDispatch.compilationId, chapterId: reviewDispatch.chapterId, revision: reviewDispatch.revision }))
+          : call.name === 'todo_write' ? toolSignature(signature, JSON.stringify(todoItems)) : signature
         const admissionKey = admission.key(admissionSignature, Boolean(tool?.readOnly) || STATE_SENSITIVE_VALIDATORS.has(call.name))
         const previousObservation = REPEATABLE_TOOLS.has(call.name) ? undefined : admission.previous(admissionKey)
         if (previousObservation !== undefined) {
+          if (reviewDispatch) {
+            // A stale prerequisite must not insert the same cached call forever.
+            // Reuse is not a new current-version assessment; the next state read
+            // must either be ready or stop under the persisted attempt bound.
+            automaticReviewAttempts.add(`${reviewDispatch.compilationId}:${reviewDispatch.chapterId}:${reviewDispatch.revision}:${reviewDispatch.toolName}`)
+          }
           blockedRepeat += 1
           const blockSummary = '相同状态下该工具与完整参数已成功执行，复用结果，未重复执行'
           // 产品口径：熔断拦截属服务端防空转保护，不是作者需要看到的「失败工具」——
