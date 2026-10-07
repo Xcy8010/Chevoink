@@ -3,6 +3,8 @@ import type { Prisma } from '@prisma/client'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { createHash } from 'node:crypto'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import { probeChapterReviewRevision, readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 
 const mocks = vi.hoisted(() => ({ original: vi.fn(), preference: vi.fn(), lease: vi.fn(), state: vi.fn(), save: vi.fn() }))
 vi.mock('../../api/lib/agent/original-request.js', async importOriginal => ({
@@ -28,12 +30,20 @@ function fixture(prompt = '完成第一章，只输出标题与正文。', title
   spec.scope.writing = { version: 1, kind: 'bounded', targets: [{ chapterId: 'chapter', orderIndex: 1 }], titleAndBodyOnly, repairAuthorized: true }
   mocks.original.mockResolvedValue({ prompt, spec, taskId: spec.id, sourceRunId: 'run', parentRunId: null })
   const chapter = { id: 'chapter', title: '第一章 旧罗盘', content: '沈桐眼前浮起价值数字。他压住笑意，决定抓住这个独享的机会。', revision: 1, orderIndex: 1 }
-  const terminal = { id: 'compiler', status: 'completed', stage: 'commit', preparedContext: { terminalContentHash: runtimeJson({ content: chapter.content }).hash },
-    bridge: { toChapterId: 'chapter', fromChapterId: null, targetRevision: 1, committedAt: new Date(1) }, sceneTasks: [], validation: null }
+  const bridge = { id: 'bridge', toChapterId: chapter.id, fromChapterId: null, targetRevision: chapter.revision, committedAt: new Date(1) }
+  const sceneTasks = [{ id: 'scene', ordinal: 1, status: 'completed', goal: '辨识罗盘价值', turn: '决定抓住机会' }]
+  const terminal = { id: 'compiler', runId: subject.runId, chapterId: chapter.id, status: 'completed', stage: 'commit',
+    preparedContext: { terminalContentHash: runtimeJson({ content: chapter.content }).hash }, bridge, sceneTasks,
+    validation: { independentCheck: 'complete', checkedChapterId: chapter.id, checkedRevision: chapter.revision,
+      checkRounds: 1, autoRepairRounds: 0, errorCount: 0, warningCount: 0, findings: [] as Array<{ signal: string; severity: string; evidence: string; suggestion: string }>,
+      coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks, source: null }) } }
+  const quality = { id: 'quality', compilationId: terminal.id, runId: subject.runId, chapterId: chapter.id, chapterRevision: chapter.revision,
+    status: 'passed', repairRound: 0, deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(chapter.content).digest('hex') },
+    findings: [] as Array<{ id: string; signal: string; severity: string; disposition: string; authorFeedback: null }> }
   const db = { $queryRaw: vi.fn(async () => [{ id: 'novel' }]),
     agentRun: { findFirstOrThrow: vi.fn(async () => ({ writingBindings: null })) },
-    chapter: { findFirst: vi.fn(async () => chapter) }, storyCompilation: { findFirst: vi.fn(async () => terminal) },
-    chapterQualityReport: { findFirst: vi.fn(async () => null) },
+    chapter: { findFirst: vi.fn(async () => chapter) }, storyCompilation: { findFirst: vi.fn(async () => terminal), findMany: vi.fn(async () => [terminal]) },
+    chapterQualityReport: { findFirst: vi.fn(async () => quality), findMany: vi.fn(async () => [quality]) },
     agentTaskRoot: { findUniqueOrThrow: vi.fn(async () => ({ id: 'root', novelId: 'novel' })) },
     agentOperation: { count: vi.fn(async () => 0) }, agentProviderAttempt: { count: vi.fn(async () => 0) },
     agentExecutionOutbox: { create: vi.fn(async () => ({})) } }
@@ -41,7 +51,7 @@ function fixture(prompt = '完成第一章，只输出标题与正文。', title
   const state = { frame: { revision: 7, snapshotHash: 'a'.repeat(64), state: { phase: 'idle', messages: [{ role: 'user', content: prompt }] } } }
   mocks.state.mockResolvedValue(state)
   mocks.save.mockImplementation(async (_db, _token, input) => { state.frame = { revision: 8, snapshotHash: 'b'.repeat(64), state: input.snapshot }; return state.frame })
-  return { db: db as unknown as Prisma.TransactionClient, mocks: db, chapter, terminal, spec, state }
+  return { db: db as unknown as Prisma.TransactionClient, mocks: db, chapter, terminal, quality, spec, state }
 }
 beforeEach(() => { vi.clearAllMocks(); mocks.preference.mockResolvedValue(null) })
 
@@ -101,18 +111,47 @@ describe('saved artifact display withdrawal', () => {
     mocks.preference.mockResolvedValue({ mode: 'saved_only', sourceRunId: 'author', sourceMessageId: 'message' })
     expect(await readSavedWritingPresentation(f.db, subject)).toBeNull()
   })
-  it('still rejects stale content, invalid terminal and real quality errors after withdrawal', async () => {
+  it.each(['stale-content', 'invalid-terminal'] as const)('still rejects %s after withdrawal', async invalid => {
     const f = fixture()
     mocks.preference.mockResolvedValue({ mode: 'saved_only', sourceRunId: 'author', sourceMessageId: 'message' })
-    f.chapter.content = '作者新正文。'
+    if (invalid === 'stale-content') f.chapter.content = '作者新正文。'
+    else f.terminal.status = 'active'
     expect(await readCompletedWritingDelivery(f.db, subject)).toBeNull()
-    f.terminal.preparedContext.terminalContentHash = runtimeJson({ content: f.chapter.content }).hash
-    f.terminal.status = 'active'
+  })
+  it.each(['missing', 'failed'] as const)('current continuity cannot replace %s independent quality after withdrawal', async quality => {
+    const f = fixture()
+    mocks.preference.mockResolvedValue({ mode: 'saved_only', sourceRunId: 'author', sourceMessageId: 'message' })
+    if (quality === 'missing') f.mocks.chapterQualityReport.findFirst.mockResolvedValue(null as never)
+    else { f.quality.status = 'failed'; f.quality.deterministicMetrics.independentCheck = 'unavailable' }
+    expect(await readChapterReviewReadiness(f.db, subject)).toMatchObject({ ready: false, continuity: 'complete', quality: quality === 'missing' ? 'missing' : 'incomplete' })
     expect(await readCompletedWritingDelivery(f.db, subject)).toBeNull()
-    f.terminal.status = 'completed'
-    f.mocks.chapterQualityReport.findFirst.mockResolvedValue({ status: 'needs_repair', chapterRevision: 1,
-      deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(f.chapter.content).digest('hex') },
-      findings: [{ severity: 'error', disposition: 'pending', authorFeedback: null }] } as never)
+    expect(await readSavedWritingPresentation(f.db, subject)).toBeNull()
+  })
+  it('closed completed revision channel preserves current factual errors and quality advice in the saved confirmation', async () => {
+    const f = fixture(), chapter = structuredClone(f.chapter)
+    mocks.preference.mockResolvedValue({ mode: 'saved_only', sourceRunId: 'author', sourceMessageId: 'message' })
+    f.terminal.validation.errorCount = 1
+    f.terminal.validation.findings = [{ signal: 'object', severity: 'error', evidence: '罗盘同一状态仍需作者确认', suggestion: '交作者确认' }]
+    f.quality.status = 'needs_repair'
+    f.quality.findings = [{ id: 'retained', signal: 'object', severity: 'error', disposition: 'pending', authorFeedback: null }]
+    expect(await readChapterReviewReadiness(f.db, subject)).toMatchObject({ ready: true, continuity: 'complete', continuityErrorCount: 1, quality: 'complete', qualityErrorCount: 1 })
+    expect(await readCompletedWritingDelivery(f.db, subject)).toMatchObject({ text: '已保存《第一章 旧罗盘》。' })
+    expect(f.chapter).toEqual(chapter)
+    expect(f.terminal.validation.errorCount).toBe(1)
+    expect(f.quality.status).toBe('needs_repair')
+    expect(f.quality.findings[0].disposition).toBe('pending')
+    expect(mocks.save).not.toHaveBeenCalled()
+  })
+  it('current factual errors still block saved presentation while original revision authority keeps the correction channel open', async () => {
+    const f = fixture('重写第一章，只输出标题与正文。'), chapter = structuredClone(f.chapter)
+    mocks.preference.mockResolvedValue({ mode: 'saved_only', sourceRunId: 'author', sourceMessageId: 'message' })
+    f.terminal.validation.errorCount = 1
+    f.terminal.validation.findings = [{ signal: 'object', severity: 'error', evidence: '罗盘同一状态仍冲突', suggestion: '合并确认事实修订' }]
+    expect(await readChapterReviewReadiness(f.db, subject)).toMatchObject({ ready: true, continuity: 'complete', continuityErrorCount: 1 })
+    expect(await probeChapterReviewRevision(f.db, subject, f.chapter)).toEqual({ open: true })
     expect(await readCompletedWritingDelivery(f.db, subject)).toBeNull()
+    expect(await readSavedWritingPresentation(f.db, subject)).toBeNull()
+    expect(f.chapter).toEqual(chapter)
+    expect(mocks.save).not.toHaveBeenCalled()
   })
 })

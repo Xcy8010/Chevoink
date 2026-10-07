@@ -32,6 +32,9 @@ import { withHumanAdmission } from '../../api/lib/agent/goal-activation-authorit
 import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation } from '../../api/lib/agent/writing-scope.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { durableMessageId } from '../../api/lib/agent/runtime-frame-events.js'
+import { validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
+import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 
 const available = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 afterAll(async () => { await prisma.$disconnect() })
@@ -95,11 +98,25 @@ describe.runIf(available)('real durable default execution control', () => {
       await prisma.agentMessage.create({ data: { runId: correction.id, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
       const content = '沈桐看见旧罗盘的价值，心头一热，决定抓住这个只有自己知道的机会。他尚未询问价格。'
       const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { title: '第一章 旧罗盘', content, revision: { increment: 1 }, wordCount: content.length } })
-      await prisma.storyCompilation.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId, chapterId: f.chapterId, targetOrderIndex: 1,
+      const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
+      const compilation = await prisma.storyCompilation.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId, chapterId: f.chapterId, targetOrderIndex: 1,
         mode: 'balanced', status: 'completed', stage: 'commit', sourcePromptHash: runtimeJson({ prompt: '重写第一章，突出捡漏爽文。' }).hash,
         preparedContext: { terminalContentHash: runtimeJson({ content }).hash }, completedAt: new Date(),
+        sceneTasks: { create: { userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, ordinal: 1, status: 'completed',
+          purpose: '展现独享的鉴宝机会', entryState: state, goal: '辨识罗盘价值', obstacle: '尚不知卖价', choice: '决定把握机会',
+          cost: '需要继续询价', turn: '发现独享优势', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } } },
         bridge: { create: { userId: f.userId, novelId: f.novelId, targetOrderIndex: 1, toChapterId: f.chapterId, targetRevision: chapter.revision, committedAt: new Date(),
           knowledgeState: [], bodyState: [], objectState: [], relationshipState: [], emotionAftermath: [], recentOpenings: [], recentEndings: [], openLoops: [] } } } })
+      // A saved confirmation still requires the same current independent
+      // assessments as full prose delivery. Persist real revision-bound fixture
+      // responses through the production validators; no provider is dispatched.
+      await validateStoryContinuity({ userId: f.userId, novelId: f.novelId, runId: f.runId, compilationId: compilation.id,
+        expectedChapterRevision: chapter.revision, independentCheck: 'complete', findings: [] })
+      await persistHumanityQualityReport({ userId: f.userId, novelId: f.novelId, runId: f.runId, compilationId: compilation.id,
+        chapterId: chapter.id, chapterRevision: chapter.revision, mode: 'balanced', criticComplete: true,
+        criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
+      expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }, compilation.id)))
+        .toMatchObject({ ready: true, continuity: 'complete', quality: 'complete' })
       const lease = await claim(f)
       const candidate = `${chapter.title}\n\n${content}`
       await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
