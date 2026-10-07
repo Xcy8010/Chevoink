@@ -24,6 +24,9 @@ export const criticQualityFindingSchema = z.object({
   signal: humanityQualitySignalSchema,
   severity: z.enum(['advisory', 'warning']),
   quote: z.string().min(1).max(360),
+  // Only the review harness resolves these IDs against its frozen source table.
+  // Models never supply trusted manuscript offsets.
+  sourceId: z.string().min(1).max(96).optional(),
   explanation: z.string().min(1).max(1_000),
   suggestion: z.string().min(1).max(1_000),
   confidence: z.number().min(0).max(1).default(0.7),

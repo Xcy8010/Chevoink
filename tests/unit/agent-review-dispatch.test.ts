@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { nextReviewDispatch, reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
+import { nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 
 function pending(overrides: Partial<ChapterReviewReadiness> = {}): ChapterReviewReadiness {
@@ -34,5 +34,28 @@ describe('server review fallback', () => {
   it('does nothing when no applicable compiler exists or the required checks are ready', () => {
     expect(nextReviewDispatch(null, available, new Set()).kind).toBe('ready')
     expect(nextReviewDispatch(pending({ ready: true, requiredTools: [] }), available, new Set()).kind).toBe('ready')
+  })
+  it('prompts once for an unspent current-version aesthetic decision, without redispatching a paid check', () => {
+    const state = pending({ ready: true, quality: 'complete', qualityCandidateCount: 2, requiredTools: [] })
+    const writers = new Set(['chapter_edit_range'])
+    const key = nextMergedReviewReminder(state, writers, new Set(), true)!
+    expect(key).toBe('compile:chapter:4:merged')
+    expect(nextMergedReviewReminder(state, writers, new Set([key]), true)).toBeNull()
+    expect(nextMergedReviewReminder({ ...state, revision: 5 }, writers, new Set([key]), true)).toBe('compile:chapter:5:merged')
+    expect(nextReviewDispatch(state, available, new Set()).kind).toBe('ready')
+  })
+  it('never prompts for a closed channel, absent writer, missing checks or original waiver', () => {
+    const state = pending({ ready: true, quality: 'complete', qualityCandidateCount: 2, requiredTools: [] })
+    expect(nextMergedReviewReminder(state, new Set(['chapter_edit_range']), new Set(), false)).toBeNull()
+    expect(nextMergedReviewReminder(state, available, new Set(), true)).toBeNull()
+    expect(nextMergedReviewReminder(pending(), new Set(['chapter_edit_range']), new Set(), true)).toBeNull()
+    expect(nextMergedReviewReminder({ ...state, checksRequired: false }, new Set(['chapter_edit_range']), new Set(), true)).toBeNull()
+    expect(nextMergedReviewReminder(null, new Set(['chapter_edit_range']), new Set(), true)).toBeNull()
+  })
+  it('does not schedule an empty decision but admits a true factual candidate under the same key', () => {
+    const state = pending({ ready: true, quality: 'complete', requiredTools: [] })
+    const writers = new Set(['chapter_write'])
+    expect(nextMergedReviewReminder(state, writers, new Set(), true)).toBeNull()
+    expect(nextMergedReviewReminder({ ...state, continuityErrorCount: 1 }, writers, new Set(), true)).toBe('compile:chapter:4:merged')
   })
 })

@@ -12,6 +12,8 @@ import { activeChapterScope, recalculateNovelStats } from '../../data/internal.j
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import type { ToolContext, ToolResult, AgentTool } from './types.js'
 import { chapterWriteArguments, chapterAppendArguments, chapterEditArguments } from './chapter-arguments.js'
+import { chapterPatchSchema, retainedFindingSchema } from './chapter-arguments.js'
+import { composeChapterEdit } from './chapter-patches.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { reduceExecutionReceipt, failedToolResultSchema } from '../runtime-reducer.js'
 import { DataAccessError } from '../../prisma.js'
@@ -64,7 +66,7 @@ export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentT
   return z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
 }
 const argsSchema = z.object({ chapterId: z.string().min(1).max(64), content: z.string().min(1).optional(),
-  oldText: z.string().optional(), start: z.number().int().nonnegative().optional(), end: z.number().int().nonnegative().optional(), newText: z.string().optional() }).strict()
+  oldText: z.string().optional(), start: z.number().int().nonnegative().optional(), end: z.number().int().nonnegative().optional(), newText: z.string().optional(), patches: z.array(chapterPatchSchema).min(1).max(8).optional(), retainedFindings: z.array(retainedFindingSchema).max(40).optional() }).strict()
 const resultSchema = z.object({
   toolResult: z.object({ output: z.string(), summary: z.string(), display: z.object({ kind: z.literal('chapterDiff'), chapterId: z.string(),
     chapterTitle: z.string(), before: z.string(), after: z.string(), appliedDirectly: z.literal(true), revision: z.number().int().positive() }),
@@ -91,7 +93,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   if (args.chapterId !== capability.chapterId) runtimeError('RUNTIME_SCOPE_MISMATCH', '正文目标与冻结的执行授权不一致。')
   if (ctx.protectedChapterIds?.has(args.chapterId)) runtimeError('AUTHOR_SCOPE_PROTECTED', '作者要求保持不变的章节不能写入。')
   ctx.signal.throwIfAborted()
-  const candidate = action === 'chapter_edit_range' ? args.newText : args.content
+  const candidate = action === 'chapter_edit_range' ? args.patches?.map(patch => patch.newText).join('\n') ?? args.newText : args.content
   if (candidate === undefined) runtimeError('RUNTIME_INPUT_INVALID', '正文内容缺失。')
   if (isAgent2FeatureEnabled('craftLibrary', ctx.userId) && candidate.trim().length >= 80) {
     await assertCraftOutputSafe({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, chapterId: args.chapterId, content: candidate })
@@ -124,21 +126,22 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     if (chapter.revision !== expectedRevision) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已被修改，请重新读取后建立新操作，不能覆盖用户修改。')
     const before = chapter.content
     let after = candidate
+    let editRanges: ReturnType<typeof composeChapterEdit>['ranges'] | undefined
     if (action === 'chapter_append') after = before.trim() ? `${before.replace(/\s+$/, '')}\n\n${candidate}` : candidate
     if (action === 'chapter_edit_range') {
-      let start = args.start, end = args.end
-      if (args.oldText) {
-        start = before.indexOf(args.oldText)
-        if (start < 0 || before.indexOf(args.oldText, start + args.oldText.length) !== -1) runtimeError('CHAPTER_ANCHOR_CONFLICT', '原文锚点必须唯一匹配。')
-        end = start + args.oldText.length
-      }
-      if (start === undefined || end === undefined || end < start || start > before.length || end > before.length) return runtimeError('CHAPTER_ANCHOR_CONFLICT', '改写区间无效。')
-      after = before.slice(0, start) + candidate + before.slice(end)
+      const edit = composeChapterEdit(before, args)
+      after = edit.after
+      editRanges = edit.ranges
     }
     const changed = before !== after
+    if (!changed && args.retainedFindings?.length) await assertChapterReviewRevision(tx, ctx, chapter, {
+      mutation: action === 'chapter_write' ? 'replace' : 'range', mergedBatch: !!args.patches, after, editRanges, retainedFindings: args.retainedFindings,
+    })
     if (changed) {
       const consumeReviewRevision = await assertChapterReviewRevision(tx, ctx, chapter, {
         mutation: action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range',
+        mergedBatch: !!args.patches,
+        after, editRanges, retainedFindings: args.retainedFindings,
       })
       const updated = await tx.chapter.updateMany({ where: { id: chapter.id, authorId: ctx.userId, ...activeChapterScope(ctx.novelId), revision: expectedRevision },
         data: { content: after, wordCount: after.length, revision: { increment: 1 } } })

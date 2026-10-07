@@ -30,7 +30,8 @@ function fixture(prompt = '写下一章') {
   const report = { id: 'q3', chapterId: chapter.id, compilationId: compilation.id, chapterRevision: 3, status: 'passed', repairRound: 0,
     deterministicMetrics: { independentCheck: 'complete', contentHash: sha(chapter.content) }, findings: [] }
   const db = { $queryRaw: vi.fn().mockResolvedValue([]),
-    agentRun: { findFirstOrThrow: vi.fn().mockResolvedValue({ writingBindings: { version: 1, taskId: task.id, targets: [{ orderIndex: 44, chapterId: chapter.id }] } }) },
+    agentRun: { findFirstOrThrow: vi.fn().mockResolvedValue({ writingBindings: { version: 1, taskId: task.id, targets: [{ orderIndex: 44, chapterId: chapter.id }] } }),
+      findFirst: vi.fn().mockResolvedValue({ mode: 'act', taskRootId: null, session: { userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: null } }) },
     chapter: { findFirst: vi.fn().mockResolvedValue(chapter), update: vi.fn() },
     storyCompilation: { findFirst: vi.fn().mockResolvedValue(compilation), findMany: vi.fn().mockResolvedValue([compilation]),
       update: vi.fn(async ({ data }) => Object.assign(compilation, data)) },

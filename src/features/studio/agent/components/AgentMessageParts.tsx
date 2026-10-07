@@ -163,9 +163,9 @@ function DiffCard({
         )}
         <span className="pointer-events-none relative z-10 flex shrink-0 items-center gap-2 text-[11px] text-[var(--text-secondary)]">
           <span className={cn(addedChars >= 0 ? 'text-emerald-600' : 'text-rose-500')}>
-            {addedChars >= 0 ? `+${addedChars}` : addedChars} 字
+            {addedChars === 0 ? display.before === display.after ? '正文未变化' : '等长修改' : `${addedChars >= 0 ? '+' : ''}${addedChars} 字`}
           </span>
-          {display.appliedDirectly ? <span>已写入</span> : null}
+          {display.appliedDirectly && display.before !== display.after ? <span>已写入</span> : null}
           <span className="relative inline-flex h-4 w-4 items-center justify-center">
             <FileText className={cn('h-3.5 w-3.5 transition-opacity', !expanded && 'group-hover:opacity-0')} />
             <ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} />
@@ -266,6 +266,7 @@ function QualityReportCard({ display }: { display: Extract<AgentToolDisplayPaylo
   const detailsId = useId()
   const repaired = display.findings.filter((finding) => finding.disposition === 'repaired').length
   const warnings = display.findings.filter((finding) => (finding.severity === 'warning' || finding.severity === 'error') && finding.disposition !== 'repaired').length
+  const suggestions = display.findings.filter(finding => finding.severity === 'advisory' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length
 
   return (
     <div className="border-t border-[var(--border-subtle)]">
@@ -276,7 +277,8 @@ function QualityReportCard({ display }: { display: Extract<AgentToolDisplayPaylo
         </span>
         <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-secondary)]">质量报告 · r{display.chapterRevision} · {display.findings.length} 条证据</span>
         <span className={cn('shrink-0 text-[11px]', warnings > 0 ? 'text-amber-500' : 'text-emerald-600')}>
-          {warnings > 0 ? `${warnings} 条需关注` : repaired > 0 ? `已自动修复 ${repaired} 处` : '通过'}
+          {display.status === 'failed' || display.status === 'analyzing' ? '检查未完成' : display.status === 'stale' ? '旧版报告'
+            : warnings > 0 ? `${warnings} 条需关注` : suggestions > 0 ? `检查完成 · ${suggestions} 条建议` : repaired > 0 ? `已应用 ${repaired} 处` : '检查完成'}
         </span>
       </button>
       {expanded ? (

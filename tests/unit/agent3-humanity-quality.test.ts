@@ -23,8 +23,29 @@ import { AGENT_TOOL_GOVERNANCE } from '../../api/lib/agent/tools/governance.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import * as humanityQuality from '../../api/lib/agent/humanity-quality.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
+import { buildQualityEvidenceSources, coerceCriticFindings } from '../../api/lib/agent/quality-evidence.js'
 import { DataAccessError, prisma } from '../../api/lib/prisma.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
+
+describe('frozen source IDs through quality report preparation', () => {
+  it('locates a repeated sentence at the selected exact source offset', () => {
+    const content = '他关了门。他关了门。'
+    const sources = buildQualityEvidenceSources({ userId: 'u', novelId: 'n', chapterId: 'c', chapterRevision: 7 }, content)
+    const parsed = coerceCriticFindings({ findings: [{ sourceId: sources.entries[1].id, signal: 'explanation_echo', severity: 'advisory',
+      explanation: '同一动作机械重复', suggestion: '删去重复动作' }] }, sources)!
+    const prepared = prepareQualityFindings(content, [], parsed.findings, true, sources)
+    expect(prepared.complete).toBe(true)
+    expect(prepared.findings).toMatchObject([{ start: 5, end: 10, evidence: '他关了门。' }])
+  })
+  it('cannot turn a mixture of located and invalid source IDs into a complete persisted conclusion', () => {
+    const content = '他关了门。他关了门。'
+    const sources = buildQualityEvidenceSources({ userId: 'u', novelId: 'n', chapterId: 'c', chapterRevision: 7 }, content)
+    const finding = { sourceId: sources.entries[1].id, quote: sources.entries[1].text, signal: 'explanation_echo' as const,
+      severity: 'advisory' as const, explanation: '机械重复', suggestion: '删去重复', confidence: 0.8 }
+    expect(prepareQualityFindings(content, [], [finding, { ...finding, sourceId: 'foreign' }], true, sources).complete).toBe(false)
+    expect(prepareQualityFindings(content, [], [finding], true).complete).toBe(false)
+  })
+})
 
 describe('next chapter delivery evidence', () => {
   const row = { status: 'completed', stage: 'commit', chapterId: 'c', chapter: { id: 'c', novelId: 'n', wordCount: 3000, revision: 4,

@@ -9,6 +9,7 @@ import { durableChatResultSchema } from './runtime-common.js'
 import { preparePricedProviderOperationInTransaction, type DurableTokenPrice } from './runtime-settlement.js'
 import { compilerStateHash, compilerObservationSchema } from './runtime-compiler-observation.js'
 import { qualityAutoRepairPending, qualityReportMatchesContent } from './quality-report-contract.js'
+import { qualityEvidenceSourcesSchema, validateQualityEvidenceSources } from './quality-evidence.js'
 
 const steps = {
   continuity_critic: { parent: 'continuity_validate', previous: null },
@@ -28,16 +29,18 @@ const isolatedRequest = z.object({ body: z.object({
 }) })
 
 /** 缓存报告只能替代首个修订步骤的 Critic 前置；仍核验原任务、报告哈希和正文版本。 */
-async function hasFrozenRepairReport(tx: Prisma.TransactionClient, lease: RunLeaseToken, snapshot: unknown, step: AuxiliaryModelStep) {
+export async function hasFrozenRepairReport(tx: Prisma.TransactionClient, lease: RunLeaseToken, snapshot: unknown, step: AuxiliaryModelStep) {
   if (step !== 'quality_repair' && step !== 'continuity_repair') return false
-  const parsed = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3)]), repair: z.literal(true),
+  const parsed = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]), repair: z.literal(true),
     compiler: compilerObservationSchema.nullable(), chapter: z.object({ id: z.string(), revision: z.number(), content: z.string() }),
-    cached: z.unknown(), coverage: z.unknown().optional() }) }) }).safeParse(snapshot)
+    cached: z.unknown(), coverage: z.unknown().optional(), sources: qualityEvidenceSourcesSchema.optional() }) }) }).safeParse(snapshot)
   if (!parsed.success) return false
   const work = parsed.data.input.work
   const run = await tx.agentRun.findFirst({ where: { id: lease.runId, userId: lease.userId, taskRootId: lease.taskRootId }, select: { novelId: true } })
   if (!run) return false
   const novelId = run.novelId
+  if (work.version === 4 && (step !== 'quality_repair' || !validateQualityEvidenceSources(work.sources,
+    { userId: lease.userId, novelId, chapterId: work.chapter.id, chapterRevision: work.chapter.revision }, work.chapter.content))) return false
   if (work.compiler && await compilerStateHash(tx, lease.userId, novelId, lease.taskRootId, work.compiler.id) !== work.compiler.hash) return false
   if (step === 'quality_repair') {
     const cached = z.object({ id: z.string(), hash: z.string() }).safeParse(work.cached)

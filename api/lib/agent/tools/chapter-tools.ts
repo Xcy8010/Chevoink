@@ -18,6 +18,7 @@ import { assertCraftOutputSafe } from '../craft-library.js'
 import { executeDurableChapter } from './durable-chapter.js'
 import { executeDurableCreate } from './durable-create.js'
 import { chapterWriteArguments, chapterAppendArguments, chapterEditArguments } from './chapter-arguments.js'
+import { composeChapterEdit } from './chapter-patches.js'
 
 /**
  * 章节写工具集（自 write-tools.ts 模块级拆分而来，工具定义逐字保留）：
@@ -79,16 +80,20 @@ async function updateOwnedChapterAtRevision(
   chapter: { id: string; revision: number; content?: string },
   data: Prisma.ChapterUpdateManyMutationInput,
   mutation?: ChapterReviewRevisionOptions['mutation'],
+  mergedBatch = false,
+  review?: Pick<ChapterReviewRevisionOptions, 'retainedFindings' | 'editRanges'>,
 ) {
   const apply = async (tx: Prisma.TransactionClient) => {
     await assertAgentManuscriptCurrent(tx, ctx)
     await assertWritingTarget(tx, ctx, { chapterId: chapter.id })
     if (typeof data.content === 'string' && data.content === chapter.content) {
+      if (review?.retainedFindings?.length) await assertChapterReviewRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review, after: data.content })
       // Authenticate the still-active revision inside the transaction even for
       // a no-op. It must spend neither a manuscript CAS nor a merged correction.
       return tx.chapter.findFirst({ where: { id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision } })
     }
-    const consumeReviewRevision = data.content !== undefined ? await assertChapterReviewRevision(tx, ctx, chapter, { mutation }) : undefined
+    const consumeReviewRevision = data.content !== undefined ? await assertChapterReviewRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review,
+      ...(typeof data.content === 'string' ? { after: data.content } : {}) }) : undefined
     const result = await tx.chapter.updateMany({
       where: {
         id: chapter.id,
@@ -118,6 +123,7 @@ async function writeChapterContent(
   actionLabel: string,
   leakageCandidate: string,
   mutation: 'replace' | 'append',
+  retainedFindings?: ChapterReviewRevisionOptions['retainedFindings'],
 ): Promise<ToolResult> {
   const chapter = await findOwnedChapter(ctx, chapterId)
 
@@ -143,7 +149,7 @@ async function writeChapterContent(
   const updated = await updateOwnedChapterAtRevision(ctx, chapter, {
     content: after,
     wordCount: after.length,
-  }, mutation)
+  }, mutation, false, { retainedFindings })
   if (!updated) {
     return buildConflictResult(chapter.title)
   }
@@ -367,7 +373,7 @@ export const chapterWriteTool = defineTool({
       return { output: MISSING_CHAPTER_HINT }
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_write', { ...args, chapterId })
-    return writeChapterContent(ctx, chapterId, () => args.content, '覆盖写入', args.content, 'replace')
+    return writeChapterContent(ctx, chapterId, () => args.content, '覆盖写入', args.content, 'replace', args.retainedFindings)
   },
 })
 
@@ -399,7 +405,7 @@ export const chapterEditRangeTool = defineTool({
   name: 'chapter_edit_range',
   title: '改写章节片段',
   description:
-    '按原文锚点或字符区间替换章节正文的一个片段（选区级改写/润色），避免整章覆盖。推荐传 oldText（逐字拷贝要替换的原文片段，系统自动定位并计算下标，严禁自己数字数算下标）；start/end 字符下标（含头不含尾）仅在作者选区提供精确坐标时使用。',
+    '按当前原文精确替换章节片段。多项修订用一次 patches（最多8处），所有 oldText 必须从同一次 chapter_read 逐字复制、唯一且不重叠；任一无效则全部不写入。单片段可用 oldText/newText；仅作者选区提供坐标时用 start/end。批量与单片段参数互斥，一次批量只占一次原子写入与授权修订。',
   parameters: chapterEditArguments,
   permission: WRITE_PERMISSION,
   readOnly: false,
@@ -418,28 +424,10 @@ export const chapterEditRangeTool = defineTool({
 
     const before = chapter.content
 
-    // 定位优先级：oldText 锚点（系统算下标，模型免数数）> 选区精确坐标 start/end
-    let start: number
-    let end: number
-    if (args.oldText) {
-      const first = before.indexOf(args.oldText)
-      if (first === -1) {
-        return { outcome: 'failed', failureCode: 'CHAPTER_ANCHOR_CONFLICT', summary: '正文片段未改写', output: `oldText 未在正文中逐字匹配到（标点、换行须完全一致），本次没有修改正文。请先 chapter_read 逐字拷贝当前原文，禁止依据旧检查意见盲改。` }
-      }
-      if (before.indexOf(args.oldText, first + args.oldText.length) !== -1) {
-        return { outcome: 'failed', failureCode: 'CHAPTER_ANCHOR_CONFLICT', summary: '正文片段未改写', output: `oldText 在正文中出现多次，无法唯一定位，本次没有修改正文。请向两侧多拷几句当前上下文使其在正文中唯一。` }
-      }
-      start = first
-      end = first + args.oldText.length
-    } else if (args.start !== undefined && args.end !== undefined) {
-      start = args.start
-      end = args.end
-    } else {
-      return { output: `请提供 oldText（逐字拷贝原文片段定位，推荐）或 start/end 字符下标。` }
-    }
-
-    if (end < start || start > before.length) {
-      return { output: `区间 [${start}, ${end}) 无效：章节正文总长 ${before.length} 字。请先 chapter_read 确认定位。` }
+    let edit: ReturnType<typeof composeChapterEdit>
+    try { edit = composeChapterEdit(before, args) } catch (error) {
+      if (!(error instanceof DataAccessError)) throw error
+      return { outcome: 'failed', failureCode: error.code, summary: '正文片段未改写', output: error.message }
     }
 
     const baseline = getChapterBaseline(ctx.runId, chapter.id)
@@ -447,18 +435,19 @@ export const chapterEditRangeTool = defineTool({
       return buildConflictResult(chapter.title)
     }
 
-    const after = before.slice(0, start) + args.newText + before.slice(end)
+    const after = edit.after
+    const candidate = edit.ranges.map(range => range.newText).join('\n')
 
-    if (isAgent2FeatureEnabled('craftLibrary', ctx.userId) && args.newText.trim().length >= 80) {
+    if (isAgent2FeatureEnabled('craftLibrary', ctx.userId) && candidate.trim().length >= 80) {
       await assertCraftOutputSafe({
-        userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, chapterId: chapter.id, content: args.newText,
+        userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, chapterId: chapter.id, content: candidate,
       })
     }
 
     const updated = await updateOwnedChapterAtRevision(ctx, chapter, {
       content: after,
       wordCount: after.length,
-    }, 'range')
+    }, 'range', !!args.patches, { retainedFindings: args.retainedFindings, editRanges: edit.ranges })
     if (!updated) {
       return buildConflictResult(chapter.title)
     }
@@ -482,8 +471,8 @@ export const chapterEditRangeTool = defineTool({
     }
 
     return {
-      output: `已改写《${chapter.title}》第 ${start}-${end} 字的片段（原 ${end - start} 字 → 新 ${args.newText.length} 字）。`,
-      summary: `改写《${chapter.title}》片段 · ${args.newText.length} 字`,
+      output: `已一次合并改写《${chapter.title}》${edit.ranges.length} 处，当前正文 ${after.length} 字。写入回执仅证明实际文本变化，不代表全部意见已解决或新版已复核。`,
+      summary: `改写《${chapter.title}》${edit.ranges.length} 处`,
       display: {
         kind: 'chapterDiff',
         chapterId: chapter.id,

@@ -1,9 +1,86 @@
 import { describe, expect, it } from 'vitest'
 import type { CriticQualityFinding } from '../../shared/contracts/humanity-quality-contracts.js'
-import { coerceCriticFindings, correctQualityEvidence, locateQuoteSpans, unlocatedQualityEvidence } from '../../api/lib/agent/quality-evidence.js'
+import { buildQualityEvidenceSources, coerceCriticFindings, correctQualityEvidence, locateQualityFindingSpans,
+  locateQuoteSpans, renderQualityEvidenceSources, unlocatedQualityEvidence, validateQualityEvidenceSources } from '../../api/lib/agent/quality-evidence.js'
 
 const finding: CriticQualityFinding = { signal: 'explanation_echo', severity: 'warning', quote: '模型改写的引文', explanation: '重复解释', suggestion: '删除重复解释', confidence: 0.9 }
 const content = '她关上了门。走廊里的声音消失了。'
+const sourceIdentity = { userId: 'owner', novelId: 'novel', chapterId: 'chapter', chapterRevision: 3 }
+
+describe('frozen quality evidence sources', () => {
+  it('binds repeated original sentences by distinct source IDs without inventing offsets', () => {
+    const chapter = '门开了。门开了。'
+    const sources = buildQualityEvidenceSources(sourceIdentity, chapter)
+    expect(sources.entries).toHaveLength(2)
+    expect(sources.entries[0].id).not.toBe(sources.entries[1].id)
+    const result = coerceCriticFindings({ findings: [{ ...finding, quote: undefined, sourceId: sources.entries[1].id }] }, sources)!
+    expect(result).toMatchObject({ dropped: 0, invalidSources: 0 })
+    expect(result.findings[0].quote).toBe('门开了。')
+    expect(locateQualityFindingSpans(chapter, result.findings[0], sources)).toEqual([{ start: 4, end: 8 }])
+    expect(unlocatedQualityEvidence(chapter, result.findings, sources)).toEqual([])
+    expect(locateQuoteSpans(chapter, result.findings[0].quote)).toHaveLength(2)
+    expect(locateQualityFindingSpans(chapter, result.findings[0])).toEqual([])
+  })
+  it.each(['userId', 'novelId', 'chapterId', 'chapterRevision'] as const)('rejects an identical body with changed %s identity', key => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content)
+    const changed = { ...sourceIdentity, [key]: key === 'chapterRevision' ? 4 : 'other' }
+    expect(validateQualityEvidenceSources(sources, changed, content)).toBe(false)
+    expect(buildQualityEvidenceSources(changed, content).entries[0].id).not.toBe(sources.entries[0].id)
+  })
+  it('covers exact paragraph boundaries and long Unicode text without cutting surrogate pairs', () => {
+    const chapter = '她关上了门。\r\n\r\n' + '😀'.repeat(241) + '\n' + '长'.repeat(721)
+    const sources = buildQualityEvidenceSources(sourceIdentity, chapter)
+    expect(sources.entries.map(entry => entry.text).join('')).toBe(chapter)
+    expect(validateQualityEvidenceSources(sources, sourceIdentity, chapter)).toBe(true)
+    for (const entry of sources.entries) {
+      expect(chapter.slice(entry.start, entry.end)).toBe(entry.text)
+      expect(entry.text.length).toBeLessThanOrEqual(360)
+      expect(entry.text).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u)
+    }
+    expect(renderQualityEvidenceSources(sources)).toContain(sources.entries[0].id)
+    expect(renderQualityEvidenceSources(sources)).toContain(JSON.stringify(sources.entries[0].text))
+  })
+  it('rejects unknown, stale, inconsistent or non-string IDs even with a locatable quote', () => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content)
+    const foreign = buildQualityEvidenceSources({ ...sourceIdentity, chapterId: 'other' }, content)
+    for (const sourceId of ['unknown', foreign.entries[0].id, 3, null]) {
+      expect(coerceCriticFindings({ findings: [{ ...finding, sourceId, quote: '她关上了门。' }] }, sources)).toMatchObject({ findings: [], dropped: 1, invalidSources: 1 })
+    }
+    expect(coerceCriticFindings({ findings: [{ ...finding, sourceId: sources.entries[0].id, quote: '走廊里的声音消失了。' }] }, sources)).toMatchObject({ findings: [], invalidSources: 1 })
+    const bound = { ...finding, sourceId: sources.entries[0].id, quote: sources.entries[0].text }
+    expect(locateQualityFindingSpans(content + '新正文。', bound, sources)).toEqual([])
+    expect(coerceCriticFindings({ findings: [bound] })).toMatchObject({ findings: [], invalidSources: 1 })
+  })
+  it('preserves invalid-source accounting alongside valid findings rather than claiming an empty review', () => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content)
+    const valid = { ...finding, quote: undefined, sourceId: sources.entries[0].id }
+    const result = coerceCriticFindings({ findings: [valid, { ...finding, sourceId: 'invented' }] }, sources)!
+    expect(result.findings).toHaveLength(1)
+    expect(result).toMatchObject({ dropped: 1, invalidSources: 1 })
+    expect(coerceCriticFindings({ findings: [] }, sources)).toEqual({ findings: [], dropped: 0, invalidSources: 0 })
+  })
+  it('corrects an unbound old quote using the same frozen source table without changing its judgment', () => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content)
+    const source = sources.entries[1]
+    const corrected = correctQualityEvidence(content, [finding], { corrections: [{ index: 0, sourceId: source.id }] }, sources)
+    expect(corrected).toEqual([{ ...finding, sourceId: source.id, quote: source.text }])
+    expect(unlocatedQualityEvidence(content, corrected, sources)).toEqual([])
+    expect(correctQualityEvidence(content, [finding], { corrections: [{ index: 0, sourceId: source.id, quote: '她关上了门。' }] }, sources)).toEqual([finding])
+    const badId = { ...finding, sourceId: 'unknown' }
+    expect(correctQualityEvidence(content, [badId], { corrections: [{ index: 0, quote: '她关上了门。' }] }, sources)).toEqual([badId])
+  })
+  it('rejects a tampered table and blank evidence while retaining old exact-quote behavior', () => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content)
+    const tampered = structuredClone(sources)
+    tampered.entries[0].end += 1
+    expect(validateQualityEvidenceSources(tampered, sourceIdentity, content)).toBe(false)
+    const whitespace = buildQualityEvidenceSources(sourceIdentity, '\n\n')
+    expect(coerceCriticFindings({ findings: [{ ...finding, quote: undefined, sourceId: whitespace.entries[0].id }] }, whitespace)).toMatchObject({ invalidSources: 1, findings: [] })
+    const old = { ...finding, quote: '她关上了门。' }
+    expect(coerceCriticFindings({ findings: [old] }, sources)!.findings).toEqual([old])
+    expect(unlocatedQualityEvidence(content, [old], sources)).toEqual([])
+  })
+})
 
 describe('quality evidence correction', () => {
   it('corrects only an unbound quote while preserving the original judgment', () => {

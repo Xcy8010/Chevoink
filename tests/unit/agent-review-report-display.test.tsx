@@ -6,6 +6,20 @@ import { AgentMessageParts } from '../../src/features/studio/agent/components/Ag
 import type { AgentMessagePart, AgentToolDisplayPayload } from '../../shared/contracts/index.js'
 
 afterEach(cleanup)
+it('distinguishes a completed assessment with remaining advisory from applied advice', () => {
+  render(<AgentMessageParts parts={[tool({ ...quality, status: 'passed', findings: [{ ...quality.findings[0], severity: 'advisory' }] })]} streaming={false} runActive />)
+  expect(screen.getByText('检查完成 · 1 条建议')).toBeTruthy()
+  expect(screen.queryByText('通过')).toBeNull()
+})
+it('distinguishes equal length changed text from a true unchanged write', () => {
+  const display: AgentToolDisplayPayload = { kind: 'chapterDiff', chapterId: 'chapter', chapterTitle: '合成章', before: '甲句。', after: '乙句。', appliedDirectly: true, revision: 2 }
+  const view = render(<AgentMessageParts parts={[tool(display)]} streaming={false} runActive />)
+  expect(screen.getByText('等长修改')).toBeTruthy()
+  expect(screen.getByText('已写入')).toBeTruthy()
+  view.rerender(<AgentMessageParts parts={[tool({ ...display, after: display.before })]} streaming={false} runActive />)
+  expect(screen.getByText('正文未变化')).toBeTruthy()
+  expect(screen.queryByText('已写入')).toBeNull()
+})
 
 const continuity: Extract<AgentToolDisplayPayload, { kind: 'storyCompiler' }> = {
   kind: 'storyCompiler', phase: 'check', title: '连续性检查', detail: '发现需要核对的问题',
@@ -103,7 +117,7 @@ it('keeps failure summaries, reasoning and prose visible while report details re
 it('shows a passed empty report summary and allows its empty-result detail to be opened', () => {
   render(<AgentMessageParts parts={[tool({ ...quality, status: 'passed', findings: [] })]} streaming={false} runActive />)
   expect(screen.getByText('质量报告 · r2 · 0 条证据')).toBeTruthy()
-  expect(screen.getByText('通过')).toBeTruthy()
+  expect(screen.getByText('检查完成')).toBeTruthy()
   expect(screen.queryByText('没有发现可定位的问题。')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: '展开质量报告' }))
   expect(screen.getByText('没有发现可定位的问题。')).toBeTruthy()

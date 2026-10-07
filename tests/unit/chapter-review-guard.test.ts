@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as original from '../../api/lib/agent/original-request.js'
 import * as lock from '../../api/lib/data/novel-write-lock.js'
-import { assertChapterReviewRevision, isChapterRevisionChannelOpen, probeChapterReviewRevision } from '../../api/lib/agent/chapter-review-guard.js'
+import { assertChapterReviewRevision, isChapterRevisionChannelOpen, probeChapterReviewRevision, continuityDecisionBinding } from '../../api/lib/agent/chapter-review-guard.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { readNewDraftWritingAuthority, prohibitsNewDraftRevision } from '../../api/lib/agent/writing-scope.js'
@@ -88,7 +88,8 @@ describe('one atomic factual correction in the original new draft', () => {
     const compilation = { id: 'compiler', status: 'active', stage: 'check', validation, bridge, sceneTasks: scenes }
     const rows = [compilation]
     const source = { writingBindings: binding }
-    const db = { $queryRaw: vi.fn().mockResolvedValue([]), agentRun: { findFirstOrThrow: vi.fn().mockResolvedValue(source) },
+    const db = { $queryRaw: vi.fn().mockResolvedValue([]), agentRun: { findFirstOrThrow: vi.fn().mockResolvedValue(source),
+      findFirst: vi.fn().mockResolvedValue({ mode: 'act', taskRootId: null, session: { userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: null } }) },
       chapter: { findFirst: vi.fn().mockResolvedValue(chapter) }, chapterQualityReport: { findMany: vi.fn().mockResolvedValue([]) },
       storyCompilation: { findMany: vi.fn().mockImplementation(async () => rows), update: vi.fn().mockImplementation(async ({ data }) => { compilation.validation = data.validation; return compilation }) },
     }
@@ -104,6 +105,15 @@ describe('one atomic factual correction in the original new draft', () => {
     f.db.chapterQualityReport.findMany.mockResolvedValue([report] as never)
     return report
   }
+  it.each(['read_only', 'deny', 'review'] as const)('closes automatic delivery reachability for authenticated %s execution restrictions', async restriction => {
+    const f = fixture()
+    completeQuality(f)
+    f.db.agentRun.findFirst.mockResolvedValue({ mode: restriction === 'review' ? 'review' : 'act', taskRootId: null,
+      session: { userId: 'u', novelId: 'n', sandboxMode: restriction === 'read_only' ? 'read_only' : 'workspace',
+        toolPolicy: restriction === 'deny' ? { contentWrite: 'deny' } : null } } as never)
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toMatchObject({ open: false, code: 'REPAIR_NOT_AUTHORIZED' })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
   it.each(['range', 'append'] as const)('denies %s before consumption for two current findings while the shape-free probe stays open', async mutation => {
     const f = fixture()
     f.validation.findings.push({ ...f.validation.findings[0], evidence: '第二个合成互斥事实' })
@@ -123,6 +133,62 @@ describe('one atomic factual correction in the original new draft', () => {
     completeQuality(f, 1)
     await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'range' })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  function mixedFixture() {
+    const f = fixture()
+    f.chapter.content = '甲句。中句。乙句。'
+    f.validation.findings = [
+      { signal: 'object', severity: 'error', evidence: '当前原文「甲句」与确认事实互斥', suggestion: '校正第一处' },
+      { signal: 'object', severity: 'error', evidence: '当前原文「乙句」与确认事实互斥', suggestion: '校正第二处' },
+    ]
+    f.validation.errorCount = 2
+    f.validation.coverage = compilerContinuityCoverage({ chapter: f.chapter, bridge: f.compilation.bridge, sceneTasks: f.compilation.sceneTasks, source: null })
+    const report = completeQuality(f, 1)
+    Object.assign(report.findings[0], { id: 'finding-middle', evidenceExcerpt: '中句。', startOffset: 3, endOffset: 6 })
+    return { ...f, report }
+  }
+  it('admits one atomic batch while an incidental full rewrite cannot count untouched middle evidence', async () => {
+    const f = mixedFixture()
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '丙句。中句。丁句。' }))
+      .rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    const retainedFindings = [{ source: 'quality' as const, reportId: 'q', findingId: 'finding-middle', reason: '保留人物刻意重复的声口，不能安全删去。' }]
+    const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'range', mergedBatch: true,
+      after: '丙句。中句。丁句。', editRanges: [{ start: 0, end: 2, newText: '丙句' }, { start: 6, end: 8, newText: '丁句' }], retainedFindings })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    await consume?.()
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0, newDraftRevision: { retainedFindings } })
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toMatchObject({ open: false, code: 'REVIEW_AUTOMATION_STOPPED' })
+  })
+  it.each(['old-report', 'unknown-id', 'blank-reason', 'duplicate'] as const)('rejects invalid current-candidate retention: %s', async scenario => {
+    const f = mixedFixture()
+    const item = { source: 'quality' as const, reportId: 'q', findingId: 'finding-middle', reason: '保留当前声口' }
+    if (scenario === 'old-report') item.reportId = 'old-q'
+    if (scenario === 'unknown-id') item.findingId = 'foreign'
+    if (scenario === 'blank-reason') item.reason = ' '
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '丙句。中句。丁句。',
+      retainedFindings: scenario === 'duplicate' ? [item, item] : [item] })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it('persists retain-only decisions without consuming CAS allowance and invalidates them on changed report evidence', async () => {
+    const f = mixedFixture()
+    const reportId = continuityDecisionBinding(f.compilation.id, f.chapter.revision, f.validation)
+    const retainedFindings = [
+      ...['0', '1'].map(findingId => ({ source: 'continuity' as const, reportId, findingId, reason: '不能安全改动正文，保留真实错误交作者核对。' })),
+      { source: 'quality' as const, reportId: 'q', findingId: 'finding-middle', reason: '人物刻意声口，当前建议不能安全应用。' },
+    ]
+    await assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: f.chapter.content, retainedFindings })
+    expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0, errorCount: 2 })
+    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
+    const writes = f.db.storyCompilation.update.mock.calls.length
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '甲新句。中新句。乙新句。' }))
+      .rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'range', mergedBatch: true,
+      after: '甲新句。中新句。乙新句。' })).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+    expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(writes)
+    Object.assign(f.report.findings[0], { suggestion: '当前新建议' })
+    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
   })
   it('allows one range candidate, but an append cannot spend even that correction', async () => {
     const f = fixture()

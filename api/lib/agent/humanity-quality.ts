@@ -28,10 +28,11 @@ import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from './craft-library.js'
 import { recalcNovelStats } from './tools/novel-tools.js'
 import { enqueueChapterMemoryExtraction } from './story-memory.js'
-import { locateQuoteSpans } from './quality-evidence.js'
-import { qualityAutoRepairPending, qualityReportMatchesContent } from './quality-report-contract.js'
+import { locateQualityFindingSpans, validateQualityEvidenceSources, type QualityEvidenceSources } from './quality-evidence.js'
+import { qualityAutoRepairPending, qualityReportMatchesContent, selectAutomaticQualityFindings } from './quality-report-contract.js'
 
-export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v4'
+export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v5'
+export const FROZEN_V4_HUMANITY_CRITIC_VERSION = 'humanity-critic.v4'
 export const PREVIOUS_HUMANITY_CRITIC_VERSION = 'humanity-critic.v3'
 export const LEGACY_HUMANITY_CRITIC_VERSION = 'humanity-critic.v2'
 export const MAX_QUALITY_REPAIR_ROUNDS = 1
@@ -371,12 +372,12 @@ export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof build
   }))
 }
 
-export function locateCriticFindings(content: string, findings: CriticQualityFinding[]): LocatedQualityFinding[] {
+export function locateCriticFindings(content: string, findings: CriticQualityFinding[], sources?: QualityEvidenceSources): LocatedQualityFinding[] {
   const located: LocatedQualityFinding[] = []
   const occupied = new Set<string>()
   for (const finding of findings) {
     // 逐字优先、等价变形（引号样式/全半角/省略号/跨段落换行）回映射兜底；证据始终取自正文原文切片。
-    const spans = locateQuoteSpans(content, finding.quote)
+    const spans = locateQualityFindingSpans(content, finding, sources)
     if (spans.length !== 1) continue
     const span = spans[0]
     if (occupied.has(`${finding.signal}:${span.start}`)) continue
@@ -397,13 +398,14 @@ export function locateCriticFindings(content: string, findings: CriticQualityFin
   return located
 }
 
-export function prepareQualityFindings(content: string, deterministicFindings: LocatedQualityFinding[], criticFindings: CriticQualityFinding[], criticComplete: boolean) {
-  const located = locateCriticFindings(content, criticFindings)
+export function prepareQualityFindings(content: string, deterministicFindings: LocatedQualityFinding[], criticFindings: CriticQualityFinding[], criticComplete: boolean, sources?: QualityEvidenceSources) {
+  const located = locateCriticFindings(content, criticFindings, sources)
   const all = [...deterministicFindings, ...located].filter((finding, index, values) => values.findIndex(item => item.signal === finding.signal && item.start === finding.start && item.end === finding.end) === index)
   // 独立检查按“有正文证据可核验”判定完成：部分引用不可定位时保留已绑定意见并只记录未定位计数；
   // 全部引用都不可定位意味着报告没有一条可核验证据（可能审查了其他文本），仍视为未完成，不能冒充通过。
   // 超 36 条仅截断并记录 omittedFindings，绝不让数量上限把有效检查变成 failed 死锁。
-  return { findings: all.slice(0, 36), complete: criticComplete && (criticFindings.length === 0 || located.length > 0),
+  const invalidSource = criticFindings.some(finding => finding.sourceId !== undefined && locateQualityFindingSpans(content, finding, sources).length !== 1)
+  return { findings: all.slice(0, 36), complete: criticComplete && !invalidSource && (criticFindings.length === 0 || located.length > 0),
     unlocatedFindings: criticFindings.length - located.length, omittedFindings: Math.max(0, all.length - 36), criticFindingCount: criticFindings.length }
 }
 
@@ -418,7 +420,8 @@ export async function persistHumanityQualityReport(input: {
   deterministicMetrics: Record<string, number | string[]>
   qualityContextHash?: string
   /** Recovered pre-upgrade paid work retains the critic rules it actually used. */
-  criticVersion?: typeof HUMANITY_CRITIC_VERSION | typeof PREVIOUS_HUMANITY_CRITIC_VERSION | typeof LEGACY_HUMANITY_CRITIC_VERSION
+  criticVersion?: typeof HUMANITY_CRITIC_VERSION | typeof FROZEN_V4_HUMANITY_CRITIC_VERSION | typeof PREVIOUS_HUMANITY_CRITIC_VERSION | typeof LEGACY_HUMANITY_CRITIC_VERSION
+  sources?: QualityEvidenceSources
   deterministicFindings: LocatedQualityFinding[]
   criticFindings: CriticQualityFinding[]
   /** Explicit successful independent response, never inferred from an empty array. */
@@ -434,7 +437,9 @@ export async function persistHumanityQualityReport(input: {
   const chapter = await getOwnedQualityChapter(input.userId, input.novelId, input.chapterId, tx)
   if (chapter.revision !== input.chapterRevision) throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '章节在质量检查期间已被修改，请基于最新版本重新检查。')
 
-  const { findings, complete, unlocatedFindings, omittedFindings, criticFindingCount } = prepareQualityFindings(chapter.content, input.deterministicFindings, input.criticFindings, input.criticComplete === true)
+  if (input.sources && !validateQualityEvidenceSources(input.sources, { userId: input.userId, novelId: input.novelId,
+    chapterId: input.chapterId, chapterRevision: chapter.revision }, chapter.content)) throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '原文证据表与当前作者、作品、章节或版本不一致，未保存为完整报告。')
+  const { findings, complete, unlocatedFindings, omittedFindings, criticFindingCount } = prepareQualityFindings(chapter.content, input.deterministicFindings, input.criticFindings, input.criticComplete === true, input.sources)
   const actionableCount = findings.filter((finding) => finding.severity !== 'advisory').length
   const scope = await qualityCompilationScope(tx, input.userId, input.novelId, input.runId)
   if (input.compilationId && !await tx.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, chapterId: input.chapterId, ...scope } })) {
@@ -450,6 +455,8 @@ export async function persistHumanityQualityReport(input: {
       chapterId: input.chapterId, chapterRevision: chapter.revision, mode: input.mode,
       status: !complete ? 'failed' : actionableCount > 0 ? 'needs_repair' : 'passed', repairRound: 0,
       deterministicMetrics: { ...input.deterministicMetrics, ...(input.qualityContextHash ? { qualityContextHash: input.qualityContextHash } : {}), independentCheck: complete ? 'complete' : 'unavailable', contentHash: hashText(chapter.content),
+        ...(input.sources ? { evidenceSourceProtocol: input.sources.protocol, evidenceSourceIdentity: input.sources.identity,
+          evidenceSourceTableHash: hashText(JSON.stringify(input.sources)) } : {}),
         unlocatedFindings, omittedFindings, criticFindingCount, droppedFindings: input.criticDropped ?? 0 } as Prisma.InputJsonValue,
       criticVersion: input.criticVersion ?? HUMANITY_CRITIC_VERSION, checkedAt: new Date(),
       findings: {
@@ -520,12 +527,22 @@ export async function selectQualityFindings(userId: string, novelId: string, rep
   return getQualityReport(userId, novelId, reportId)
 }
 
+/** Explicit reasons for selected candidates for which the bounded repairer
+ * returned no actual patch. The source/report/ID remains immutable evidence. */
+export function retainedQualityCandidates(report: { id: string; findings: Array<{ id: string; severity: string; startOffset: number; endOffset: number; disposition?: string; authorFeedback?: string | null }> },
+  replacements: Array<{ findingId: string; replacement: string }>) {
+  return selectAutomaticQualityFindings(report.findings).filter(finding => !replacements.some(patch => patch.findingId === finding.id))
+    .map(finding => ({ source: 'quality' as const, reportId: report.id, findingId: finding.id,
+      reason: '本次有界修订未返回该意见可验证且实际改变原文的安全补丁；保留证据与建议交作者决定，不追加自动修订。' }))
+}
+
 export async function applyQualityRepair(input: {
   userId: string
   novelId: string
   runId?: string | null
   reportId: string
   replacements: Array<{ findingId: string; replacement: string }>
+  retainedFindings?: Array<{ source: 'quality'; reportId: string; findingId: string; reason: string }>
   signal?: AbortSignal
 }, transaction?: Prisma.TransactionClient) {
   input = { ...input, replacements: input.replacements.map(item => ({ ...item })) }
@@ -542,7 +559,7 @@ export async function applyQualityRepair(input: {
   }).filter(patch => patch.before !== patch.replacement).sort((left, right) => right.finding.startOffset - left.finding.startOffset)
   for (let index = 1; index < patches.length; index += 1) {
     if (patches[index - 1].finding.startOffset < patches[index].finding.endOffset) {
-      throw new DataAccessError(400, 'QUALITY_PATCH_OVERLAP', '选中的证据范围重叠，请分两次修订。')
+      throw new DataAccessError(400, 'QUALITY_PATCH_OVERLAP', '选中的证据范围重叠，本次正文未改动；合并为一个安全补丁或明确留置重叠意见，不增加自动修订轮次。')
     }
   }
   let after = report.chapter.content
@@ -574,7 +591,11 @@ export async function applyQualityRepair(input: {
       || current.status !== report.status || current.status === 'stale' || JSON.stringify(current.deterministicMetrics) !== JSON.stringify(report.deterministicMetrics)
       || fingerprint(current) !== fingerprint(report)) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '质量报告、作者选择或正文已变化，未应用旧修订。')
     input.signal?.throwIfAborted()
-    const consumeReviewRevision = input.runId ? await assertChapterReviewRevision(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId }, report.chapter, { requireQualityChannel: true, mutation: 'replace' }) : undefined
+    const consumeReviewRevision = input.runId ? await assertChapterReviewRevision(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId }, report.chapter, {
+      requireQualityChannel: true, mutation: 'replace', after,
+      editRanges: patches.map(patch => ({ start: patch.finding.startOffset, end: patch.finding.endOffset, newText: patch.replacement })),
+      retainedFindings: input.retainedFindings,
+    }) : undefined
     const write = await tx.chapter.updateMany({
       where: { id: report.chapter.id, ...activeChapterScope(input.novelId), authorId: input.userId, revision: report.chapterRevision, content: report.chapter.content },
       data: { content: after, wordCount: after.length, revision: { increment: 1 } },

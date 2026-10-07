@@ -5,22 +5,31 @@ import { continuityCheckRounds, continuityRepairRounds, MAX_CONTINUITY_CHECKS } 
 import { readOriginalTaskRequest, originalTaskRunIds, hasOriginalRepairAuthority } from './original-request.js'
 import { activeChapterScope } from '../data/internal.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches, currentCompilerContinuityAssessment, completeCompilerContinuityAssessment, continuityStoryInput } from './compiler-continuity-contract.js'
-import { qualityReportCheckedCurrentContent, selectAutomaticQualityFindings } from './quality-report-contract.js'
+import { qualityReportCheckedCurrentContent, selectAutomaticQualityFindings, qualityAutoRepairPending } from './quality-report-contract.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import { runtimeJson } from './runtime-common.js'
 
 type ReviewStatus = 'complete' | 'missing' | 'stale' | 'incomplete'
+// Prisma rows contain Dates; persist only JSON-safe finding data in the binding.
+function qualityDecisionHash(findings: unknown[]) {
+  return runtimeJson(JSON.parse(JSON.stringify(findings))).hash
+}
 export type ChapterReviewRevisionOptions = {
   requireQualityChannel?: boolean
   /** Pending quality has no persisted report yet; check required continuity
    * before paying for a repair, without treating candidates as a report. */
   requireCurrentContinuity?: boolean
   mutation?: 'replace' | 'range' | 'append'
+  mergedBatch?: boolean
+  after?: string
+  editRanges?: Array<{ start: number; end: number; newText: string }>
+  retainedFindings?: Array<{ source: 'continuity' | 'quality'; reportId: string; findingId: string; reason: string }>
   pendingQuality?: { compilationId: string; candidates: number }
 }
 export type ChapterReviewReadiness = {
   ready: boolean; checksRequired: boolean; compilationId: string; chapterId: string; revision: number
   continuity: ReviewStatus; quality: ReviewStatus; continuityErrorCount: number; qualityErrorCount: number
+  qualityCandidateCount?: number
   qualityReportId: string | null; requiredTools: Array<{ name: 'continuity_validate' | 'quality_analyze'; args: { compilationId: string } }>
 }
 
@@ -112,7 +121,14 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools,
     continuityErrorCount: assessment?.errorCount ?? 0, qualityErrorCount: quality === 'complete' ? report!.findings.filter(finding =>
       finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0,
+    qualityCandidateCount: quality === 'complete' ? selectAutomaticQualityFindings(report!.findings).length : 0,
     qualityReportId: quality === 'complete' ? report!.id : null }
+}
+
+export function continuityDecisionBinding(compilationId: string, revision: number, validation: unknown) {
+  const value = validation && typeof validation === 'object' && !Array.isArray(validation) ? validation as Record<string, unknown> : {}
+  return `${compilationId}:r${revision}:${runtimeJson({ coverage: value.coverage ?? null, findings: value.findings ?? [],
+    checkedChapterId: value.checkedChapterId ?? null, checkedRevision: value.checkedRevision ?? null }).hash}`
 }
 
 /** A review cannot enlarge the author's request. This guard runs in the same
@@ -190,6 +206,18 @@ export async function assertChapterReviewRevision(
       include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     })
     const latestQuality = qualityReports[0]
+    const decisionBound = latest ?? compilations.find(item => item.id === latestQuality?.compilationId)
+    const decisionValidation = decisionBound?.validation && typeof decisionBound.validation === 'object' && !Array.isArray(decisionBound.validation)
+      ? decisionBound.validation as Record<string, unknown> : null
+    const decision = decisionValidation?.retainedReviewDecision as Record<string, unknown> | undefined
+    if (current && decisionBound && decision?.chapterId === current.id && decision.revision === current.revision
+      && decision.contentHash === runtimeJson({ content: current.content }).hash
+      && decision.continuityBinding === continuityDecisionBinding(decisionBound.id, current.revision, decisionBound.validation)
+      && decision.qualityReportId === (latestQuality && qualityReportCheckedCurrentContent(latestQuality, current.revision, current.content) ? latestQuality.id : null)
+      && decision.qualityReportHash === (latestQuality && qualityReportCheckedCurrentContent(latestQuality, current.revision, current.content)
+        ? qualityDecisionHash(latestQuality.findings) : null)) {
+      throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '当前全部候选已有逐项安全留置决定，正文未改变，原修订额度未消费；保留真实意见与原因交作者决定，不重复自动改写或宣称问题已解决。')
+    }
     const assertMergedMutation = async (bound: typeof compilations[number]) => {
       if (!options?.mutation || !current || !authority) return
       const requirements = originalChapterReviewRequirements(original)
@@ -203,8 +231,53 @@ export async function assertChapterReviewRevision(
         throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '一次合并修订前必须完成同一编译、当前正文的全部原要求检查。保留正文与未消费的修订，在原检查次数内补齐 continuity_validate 与 quality_analyze，再读取完整报告重新合并修订；不得沿用预先生成的改稿或重置次数。')
       }
       const candidates = (continuity?.errorCount ?? 0) + (qualityComplete ? selectAutomaticQualityFindings(latestQuality!.findings).length : 0)
-      if (options.mutation === 'append' || (options.mutation === 'range' && candidates > 1)) {
-        throw new DataAccessError(409, 'REVIEW_MERGED_REVISION_REQUIRED', '本章只有一次合并修订机会。先读取完整正文与全部当前报告，核对证据并合并全部安全修法，用一次 chapter_write 提交完整正文；不得只修第一条或追加片段。完整写入仅保证一次整体提交，不能据此宣称全部问题已修复。')
+      if (options.mutation === 'append' || (options.mutation === 'range' && !options.mergedBatch && candidates > 1)) {
+        throw new DataAccessError(409, 'REVIEW_MERGED_REVISION_REQUIRED', '本章只有一次合并修订机会。读取当前正文与全部报告，核对证据，合并全部安全事实与质量修法，用一次 chapter_edit_range 的 patches 精确批量替换（最多8处），或一次 chapter_write 完整写入；不得逐次只修第一条。写入不证明全部意见已解决，不能据此宣称新版已检查通过。')
+      }
+      if (options.after !== undefined) {
+        const before = current.content
+        let start = 0, end = before.length, afterEnd = options.after.length
+        while (start < end && start < afterEnd && before[start] === options.after[start]) start++
+        while (end > start && afterEnd > start && before[end - 1] === options.after[afterEnd - 1]) { end--; afterEnd-- }
+        const ranges = (options.editRanges ?? [{ start, end, newText: options.after.slice(start, afterEnd) }])
+          .filter(range => before.slice(range.start, range.end) !== range.newText)
+        const continuityBinding = continuityDecisionBinding(bound.id, current.revision, bound.validation)
+        const entries = [
+          ...(continuity && bound.validation && typeof bound.validation === 'object' && !Array.isArray(bound.validation)
+            && Array.isArray(bound.validation.findings) ? bound.validation.findings.map(item => continuityFindingInputSchema.parse(item)) : []).flatMap((finding, index) => finding.severity === 'error' ? [{ source: 'continuity' as const,
+            reportId: continuityBinding, findingId: String(index), evidence: finding.evidence, start: null as number | null, end: null as number | null }] : []),
+          ...(qualityComplete ? selectAutomaticQualityFindings(latestQuality!.findings).map(finding => ({ source: 'quality' as const,
+            reportId: latestQuality!.id, findingId: finding.id, evidence: finding.evidenceExcerpt, start: finding.startOffset, end: finding.endOffset })) : []),
+        ]
+        const retained = options.retainedFindings ?? []
+        const keys = retained.map(item => `${item.source}:${item.reportId}:${item.findingId}`)
+        if (new Set(keys).size !== keys.length || retained.some(item => !item.reason.trim() || !entries.some(entry =>
+          entry.source === item.source && entry.reportId === item.reportId && entry.findingId === item.findingId))) {
+          throw new DataAccessError(409, 'REVIEW_MERGED_REVISION_REQUIRED', '留置意见必须引用同一当前检查的真实意见，原因不能为空；旧报告、跨章或重复引用不允许写入。')
+        }
+        const covered = (entry: typeof entries[number]) => {
+          if (entry.start !== null && entry.end !== null) return (options.editRanges ? ranges.some(range =>
+            range.start < entry.end! && range.end > entry.start! && !range.newText.includes(entry.evidence))
+            : !options.after!.includes(entry.evidence) && ranges.some(range => range.start < entry.end! && range.end > entry.start!))
+          const quotes = [...entry.evidence.matchAll(/[“「『"‘]([^”」』"’]{2,360})[”」』"’]/gu)].map(match => match[1])
+          if (before.includes(entry.evidence)) quotes.push(entry.evidence)
+          return quotes.some(quote => {
+            const offset = before.indexOf(quote)
+            return offset >= 0 && before.indexOf(quote, offset + 1) < 0 && !options.after!.includes(quote)
+              && ranges.some(range => range.start < offset + quote.length && range.end > offset)
+          })
+        }
+        if (entries.some(entry => !covered(entry) && !retained.some(item => item.source === entry.source && item.reportId === entry.reportId && item.findingId === entry.findingId))) {
+          throw new DataAccessError(409, 'REVIEW_MERGED_REVISION_REQUIRED', '一次合并修订须覆盖全部当前安全候选；没有原文可核验改动的意见，必须在 retainedFindings 引用当前检查绑定并写明具体留置原因。留置不清零事实错误，也不证明新版通过。')
+        }
+        if (before === options.after && retained.length) {
+          await tx.storyCompilation.update({ where: { id: bound.id }, data: { validation: {
+            ...(bound.validation && typeof bound.validation === 'object' && !Array.isArray(bound.validation) ? bound.validation : {}),
+            retainedReviewDecision: { version: 1, chapterId: current.id, revision: current.revision,
+              contentHash: runtimeJson({ content: before }).hash, continuityBinding, qualityReportId: qualityComplete ? latestQuality!.id : null,
+              qualityReportHash: qualityComplete ? qualityDecisionHash(latestQuality!.findings) : null, findings: retained },
+          } as Prisma.InputJsonValue } })
+        }
       }
     }
     const findings = Array.isArray(validation?.findings) ? validation.findings.map(item => continuityFindingInputSchema.safeParse(item)) : null
@@ -232,7 +305,9 @@ export async function assertChapterReviewRevision(
         // Call ONLY after its body CAS succeeds; failed CAS must not consume it.
         return async () => {
           await tx.storyCompilation.update({ where: { id: latest.id }, data: { validation: { ...validation,
-            newDraftRevision: { version: 1, taskId: authority.taskId, chapterId: current.id, compilationId: latest.id, checkedRevision: current.revision },
+            newDraftRevision: { version: 1, taskId: authority.taskId, chapterId: current.id, compilationId: latest.id, checkedRevision: current.revision,
+              ...(options?.after !== undefined ? { beforeHash: runtimeJson({ content: current.content }).hash, afterHash: runtimeJson({ content: options.after }).hash,
+                retainedFindings: options.retainedFindings ?? [] } : {}) },
           } as Prisma.InputJsonValue } })
         }
       }
@@ -246,6 +321,7 @@ export async function assertChapterReviewRevision(
       const quality = latestQuality && !!latestQuality.compilationId && latestQuality.repairRound === 0
         && qualityReportCheckedCurrentContent(latestQuality, current.revision, current.content)
         && selectAutomaticQualityFindings(latestQuality.findings).length > 0
+        && (!!options?.mutation || qualityAutoRepairPending(latestQuality))
         && compilations.some(compilation => compilation.id === latestQuality.compilationId && compilation.status === 'active'
           && compilation.bridge && !compilation.bridge.committedAt) ? latestQuality : undefined
       // A pre-payment shape-free probe establishes reachability before the
@@ -261,7 +337,9 @@ export async function assertChapterReviewRevision(
         return async () => {
           await tx.storyCompilation.update({ where: { id: bound.id }, data: { validation: {
             ...(bound.validation && typeof bound.validation === 'object' && !Array.isArray(bound.validation) ? bound.validation : {}),
-            newDraftRevision: { version: 1, taskId: authority.taskId, chapterId: current.id, compilationId: bound.id, checkedRevision: current.revision },
+            newDraftRevision: { version: 1, taskId: authority.taskId, chapterId: current.id, compilationId: bound.id, checkedRevision: current.revision,
+              ...(options?.after !== undefined ? { beforeHash: runtimeJson({ content: current.content }).hash, afterHash: runtimeJson({ content: options.after }).hash,
+                retainedFindings: options.retainedFindings ?? [] } : {}) },
           } as Prisma.InputJsonValue } })
         }
       }
@@ -296,6 +374,36 @@ export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
   options?: ChapterReviewRevisionOptions): Promise<{ open: true } | { open: false; code: string; message: string }> {
   try {
     await assertChapterReviewRevision(tx, subject, chapter, options)
+    const original = await readOriginalTaskRequest(tx, subject)
+    if (!hasOriginalRepairAuthority(original.prompt)) {
+      // Closure evidence narrows automatic reachability only. It never adds
+      // mutation authority, nor rejects a child merely for having a parent.
+      const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId },
+        select: { mode: true, taskRootId: true, session: { select: { userId: true, novelId: true, sandboxMode: true, toolPolicy: true } } } })
+      if (run?.session && (run.session.userId !== subject.userId || run.session.novelId !== subject.novelId)) {
+        throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '当前会话归属无法核实，不能推断正文修订通道已关闭。')
+      }
+      const policy = run?.session.toolPolicy && typeof run.session.toolPolicy === 'object' && !Array.isArray(run.session.toolPolicy)
+        ? run.session.toolPolicy as Record<string, unknown> : null
+      let closed = run?.session.sandboxMode === 'read_only' || policy?.contentWrite === 'deny' || !!run && run.mode !== 'act'
+      if (run?.taskRootId) {
+        const { readExecutionStateInTransaction } = await import('./runtime-state.js')
+        const { configuration } = await readExecutionStateInTransaction(tx, run.taskRootId)
+        const contentWritable = ['chapter_write', 'chapter_edit_range'].some(name => configuration.tools.some(tool => tool.function.name === name)
+          && configuration.toolAuthority.some(grant => grant.name === name && grant.permission !== 'deny'))
+        // quality_analyze can itself execute its existing bounded auto-repair.
+        // An inline quality child only saves reports, while a child with an
+        // actual inherited chapter-writing grant remains legitimately open.
+        const qualityWritable = configuration.creativeFreedom === 'balanced'
+          && configuration.tools.some(tool => tool.function.name === 'quality_analyze')
+          && configuration.toolAuthority.some(grant => grant.name === 'quality_analyze' && grant.permission === 'allow' && !grant.alwaysConfirm)
+          && (await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: subject.runId } }))?.kind !== 'inline'
+          && (await readChapterReviewReadiness(tx, subject))?.continuityErrorCount === 0
+        closed ||= configuration.mode !== 'build' || configuration.protectedChapterIds.includes(chapter.id)
+          || (!contentWritable && !qualityWritable)
+      }
+      if (closed) return { open: false, code: 'REPAIR_NOT_AUTHORIZED', message: '当前服务端会话或原执行权限不允许自动写入此章；报告与真实剩余意见保留待审，正文未修改，不追加修订或宣称问题已解决。' }
+    }
     return { open: true }
   } catch (error) {
     if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) return { open: false, code: error.code, message: error.message }
@@ -321,7 +429,7 @@ export async function readChapterReviewRevisionGuidance(tx: Prisma.TransactionCl
   try {
     const consume = await assertChapterReviewRevision(tx, subject, chapter)
     return consume
-      ? '本章属于原写作任务新建目标，只能作一次合并修订：先完成当前正文的全部原要求检查，读取完整正文与全部报告，一次校对错误的对象身份及原文引证，确认是同一对象同一维度的互斥事实；报告与 suggestion 不能代替原文事实，不机械照建议改剧情。多项候选必须将全部安全事实与质量修法合并为一次 chapter_write 完整写入，不能只修第一条再逐句追加。完整写入不证明全部问题已修复，不追求零警告；一次修订后保留剩余意见交作者决定，复核或换工具不能增加次数。'
+      ? '本章属于原写作任务新建目标，只能作一次合并修订：先完成当前正文的全部原要求检查，读取完整正文与全部报告，一次校对错误的对象身份及原文引证，确认是同一对象同一维度的互斥事实；报告与 suggestion 不能代替原文事实，不机械照建议改剧情。多项候选必须将全部安全事实与质量修法合并为一次 chapter_edit_range 的 patches 精确批量替换（最多8处）或一次 chapter_write；不能只修第一条再逐句追加。未触及的候选用 retainedFindings 引用当前报告并写明具体安全留置原因；正文未变不能声称已修复。完整写入不证明全部问题已修复，不追求零警告；一次修订后保留剩余意见交作者决定，复核或换工具不能增加次数。'
       : '仅在原请求明确授权的修订范围内合并修改；保留剩余意见交作者决定，不为零警告反复改写。'
   } catch (error) {
     if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) {

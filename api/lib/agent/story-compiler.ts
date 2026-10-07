@@ -1,4 +1,6 @@
-import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision } from './writing-scope.js'
+import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision, readNewDraftWritingAuthority } from './writing-scope.js'
+import { classifyContinuityFindingAuthority } from './continuity-finding-authority.js'
+import { readOriginalTaskRequest, hasOriginalRepairAuthority } from './original-request.js'
 import { createHash } from 'node:crypto'
 
 import type { Prisma, StoryCompilationStage, StoryCharter, ReaderPromise, SceneTask } from '@prisma/client'
@@ -594,9 +596,17 @@ export async function validateStoryContinuity(input: {
       deterministic.push({ signal: 'structure', severity: 'error', evidence: source ? `桥接来源《${source.title}》已从 r${compilation.bridge.sourceRevision} 变为 r${source.revision}。` : '桥接来源章节已不存在。', suggestion: '重新执行 story_compiler_prepare，基于最新前章生成桥接。' })
     }
   }
-  const findings = [...deterministic, ...input.findings]
+  const authorRequest = input.coverage?.protocolVersion === 4 && input.runId ? await readOriginalTaskRequest(db, { ...input, runId: input.runId }) : null
+  const findings = [...deterministic, ...(authorRequest
+    ? input.findings.map(finding => classifyContinuityFindingAuthority(finding, authorRequest.prompt,
+      { previous: reviewSource?.content ?? null, current: compilation.chapter!.content })) : input.findings)]
   const nextCheckRounds = continuityCheckRounds(compilation.validation)
   const validation = {
+    ...(compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation)
+      && compilation.validation.checkedRevision === compilation.chapter.revision && compilation.validation.independentCheck === 'complete'
+      && runtimeJson(compilation.validation.findings ?? []).hash === runtimeJson(findings).hash
+      && compilerContinuityCoverageMatches(compilation.validation.coverage, currentCoverage)
+      && compilation.validation.retainedReviewDecision ? { retainedReviewDecision: compilation.validation.retainedReviewDecision } : {}),
     ...(readNewDraftRevision(compilation.validation) ? { newDraftRevision: readNewDraftRevision(compilation.validation) } : {}),
     autoRepairRounds: continuityRepairRounds(compilation.validation),
     checkRounds: nextCheckRounds,
@@ -694,8 +704,12 @@ export async function commitChapterBridge(input: {
     chapterId: compilation.chapter.id, chapterRevision: chapter.revision }, include: { findings: true }, orderBy: { createdAt: 'desc' } })
   const qualityErrorCount = readiness?.qualityErrorCount ?? (report && qualityReportMatchesContent(report, chapter.revision, chapter.content)
     ? report.findings.filter(finding => finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0)
-  let retainedIssueCount = 0
-  if (continuityErrorCount > 0 || qualityErrorCount > 0) {
+  let retainedIssueCount = report?.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length ?? 0
+  const qualityCandidateCount = readiness?.qualityCandidateCount ?? 0
+  const automaticCandidates = qualityCandidateCount > 0 && probeRunId
+    && !hasOriginalRepairAuthority((await readOriginalTaskRequest(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId })).prompt)
+    && await readNewDraftWritingAuthority(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.chapter)
+  if (continuityErrorCount > 0 || qualityErrorCount > 0 || automaticCandidates) {
     // The gate only holds while a merged correction is still reachable. Once the
     // revision channel is closed (consumed/exhausted/unauthorized) no tool can
     // repair the remaining findings anymore, so "fix or hand it to the author"
@@ -708,9 +722,9 @@ export async function commitChapterBridge(input: {
     if (channelOpen) {
       throw new DataAccessError(409, continuityErrorCount > 0 ? 'CONTINUITY_ERRORS_REMAIN' : 'QUALITY_CHECK_REQUIRED',
         continuityErrorCount > 0 ? '当前正文存在已核验的事实错误，仍可自动合并修订一次：请先读取完整正文，一次修完全部安全的事实错误，再提交终态。'
-          : '当前正文存在已核验的质量错误，仍可自动修订一次：请先完成修订，再提交终态。')
+          : '当前完整质量报告还有尚未处理的安全候选（含审美建议），仍可合并修订一次：请读取全部当前报告，一次精确批量修订，或逐项写明具体安全留置原因，再提交终态。检查完成不表示建议已应用。')
     }
-    retainedIssueCount = continuityErrorCount + qualityErrorCount
+    retainedIssueCount = continuityErrorCount + (report?.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length ?? qualityErrorCount)
   }
   const terminalContext = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext as Record<string, Prisma.JsonValue> : {}
   const terminalContentHash = runtimeJson({ content: chapter.content }).hash

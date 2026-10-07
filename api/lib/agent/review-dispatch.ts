@@ -4,6 +4,17 @@ export function reviewDispatchKey(readiness: ChapterReviewReadiness, name: strin
   return `${readiness.compilationId}:${readiness.chapterId}:${readiness.revision}:${name}`
 }
 
+/** A completed assessment can still have one unspent, authorized decision.
+ * This schedules a prompt, never a write, paid request or a new repair round. */
+export function nextMergedReviewReminder(readiness: ChapterReviewReadiness | null,
+  available: ReadonlySet<string>, attempted: ReadonlySet<string>, channelOpen: boolean): string | null {
+  if (!readiness?.ready || !readiness.checksRequired || !channelOpen
+    || !(readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)
+    || !['chapter_edit_range', 'chapter_write'].some(name => available.has(name))) return null
+  const key = reviewDispatchKey(readiness, 'merged')
+  return attempted.has(key) ? null : key
+}
+
 /** Schedule one missing assessment, then reread the saved state. Existing
  * incomplete/unknown work is never dispatched again by this fallback. */
 export function nextReviewDispatch(readiness: ChapterReviewReadiness | null,

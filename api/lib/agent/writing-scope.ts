@@ -164,7 +164,10 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
 
 const bindingSchema = z.object({ version: z.literal(1), taskId: z.string(), targets: z.array(z.object({ orderIndex: z.number().int().positive(), chapterId: z.string() }).strict()) }).strict()
 const newDraftRevisionSchema = z.object({ version: z.literal(1), taskId: z.string().min(1), chapterId: z.string().min(1),
-  compilationId: z.string().min(1), checkedRevision: z.number().int().positive() }).strict()
+  compilationId: z.string().min(1), checkedRevision: z.number().int().positive(),
+  beforeHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(), afterHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  retainedFindings: z.array(z.object({ source: z.enum(['continuity', 'quality']), reportId: z.string().min(1),
+    findingId: z.string().min(1), reason: z.string().trim().min(1).max(1000) }).strict()).max(40).optional() }).strict()
 
 /** Separate from paid repair reservations: consumed only by a successful body CAS. */
 export function readNewDraftRevision(validation: unknown) {

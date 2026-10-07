@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import { readChapterReviewRevisionGuidance } from '../chapter-review-guard.js'
+import { readChapterReviewRevisionGuidance, continuityDecisionBinding } from '../chapter-review-guard.js'
+import { readOriginalTaskRequest } from '../original-request.js'
 import { DataAccessError } from '../../prisma.js'
 import { activeChapterScope } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
@@ -105,11 +106,13 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       message: `同一章节已用完 ${MAX_CONTINUITY_CHECKS} 次自动检查，本次未调用模型，当前版本没有可复用的完整结论。检查上限不是新的正文错误；旧版意见不能证明当前修订失败。保留正文，停止自动改稿和重复检查，不能宣称检查通过。`,
     }
     const repair = false
+    const originalRequest = await readOriginalTaskRequest(tx, ctx)
     return { kind: 'check' as const, version: 1 as const, compiler: baseline, chapter: compilation.chapter, sourceId, coverage,
       criticSystem: continuityCriticSystem, repairSystem: repairPrompt,
       criticInput: [`章节：《${compilation.chapter.title}》`,
+        `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
         `前章已保存原文（事实证据）：\n${source?.content || '无前章'}`,
-        `章节桥（待核对摘要，不能代替前章原文）：${JSON.stringify(continuityStoryInput(compilation.bridge))}`, `场景任务：${JSON.stringify(continuityStoryInput(compilation.sceneTasks))}`, `完整正文：\n${compilation.chapter.content}`,
+        `章节桥（待核对摘要，不能代替前章原文）：${JSON.stringify(continuityStoryInput(compilation.bridge))}`, `生成场景任务草案（目标/代价/转折不是历史事实）：${JSON.stringify(continuityStoryInput(compilation.sceneTasks))}`, `完整正文：\n${compilation.chapter.content}`,
         continuityReviewTail(compilation.validation, compilation.chapter.revision, repair, typeof args.focus === 'string' ? args.focus : undefined)].join('\n'),
       repair,
       cached: reusable ? cached.data.findings : null, route: null, price: null }
@@ -183,7 +186,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       const toolResult: ToolResult = !parsed.structured
         ? { outcome: 'failed', summary: '独立连续性复核未完成', output: '检查未返回完整结构化结果，结论未知。正文未修改。' }
         : { summary: `连续性检查${frozen.cached ? '（复用）' : ''} · ${report.errorCount} 错误 ${report.warningCount} 警告`,
-          output: `检查意见已保存，正文未改动；${repairGuidance || '仅警告不授权改写正文，保留剩余意见交作者决定，不追求零警告。'}${frozen.cached ? '复用当前正文与来源的检查，不重复调用模型。' : ''}\n${report.findings.map(item => `[${item.severity}/${item.signal}] ${item.evidence}；${item.suggestion}`).join('\n')}`,
+          output: `检查意见已保存，正文未改动；${repairGuidance || '仅警告不授权改写正文，保留剩余意见交作者决定，不追求零警告。'}${frozen.cached ? '复用当前正文与来源的检查，不重复调用模型。' : ''}\n留置绑定 reportId=${continuityDecisionBinding(compiler.id, frozen.chapter.revision, { ...report, coverage: frozen.coverage })}；findingId 使用从0开始的编号。\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${item.evidence}；${item.suggestion}`).join('\n')}`,
           display: { kind: 'storyCompiler', compilationId: compiler.id, phase: 'check', title: '连续性检查', detail: `${report.errorCount} 错误 · ${report.warningCount} 警告`, errorCount: report.errorCount, warningCount: report.warningCount, items: report.findings.map(item => item.evidence) } }
       const stateHash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, compiler.id)
       if (!stateHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查后的编译状态缺失。')

@@ -262,6 +262,43 @@ describe('server assessment fallback in the real execution loop', () => {
     requiredTools: [ ...(continuity === 'complete' ? [] : [{ name: 'continuity_validate' as const, args: { compilationId: 'comp' } }]),
       ...(quality === 'complete' ? [] : [{ name: 'quality_analyze' as const, args: { compilationId: 'comp' } }]) ],
   })
+  it('withholds a false aesthetic completion claim and asks for one authorized merged decision without another critic', async () => {
+    let state = { ...readiness('complete', 'complete'), qualityCandidateCount: 2 }
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    mocks.reviewProbe.mockResolvedValue({ open: true })
+    const edit = tool('chapter_edit_range', async () => { state = { ...state, qualityCandidateCount: 0 }; return { output: '候选已处理或明确留置' } }, false)
+    const critic = tool('quality_analyze', async () => ({ output: '不应再次检查' }))
+    const commit = tool('chapter_bridge_commit', async () => { expect(state.qualityCandidateCount).toBe(0); mocks.committedChapter.mockResolvedValue(true); return { output: '终态已提交' } }, false)
+    mocks.tools = [edit, critic, commit]
+    queue(response('全部审美建议已经应用。'), response('', [call('merged', edit.name, '{"chapterId":"c"}')]),
+      response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('已保存。'))
+    await run('写下一章')
+    expect(edit.execute).toHaveBeenCalledOnce()
+    expect(critic.execute).not.toHaveBeenCalled()
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: '正在核对检查意见的处理结果。' }))
+    const history = mocks.chat.mock.calls[1][0].messages
+    expect(history.some((message: { content?: string }) => message.content === '全部审美建议已经应用。')).toBe(false)
+    expect(history.some((message: { content?: string }) => message.content?.includes('一次原授权合并修订尚未处理'))).toBe(true)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+  it('reads pending decisions before an early commit and discards the unexecuted commit proposal', async () => {
+    let state = { ...readiness('complete', 'complete'), qualityCandidateCount: 1 }
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    mocks.reviewProbe.mockResolvedValue({ open: true })
+    const reader = tool('chapter_bridge_get', async () => ({ output: '当前候选仍需一次合并处理' }))
+    const edit = tool('chapter_edit_range', async () => { state = { ...state, qualityCandidateCount: 0 }; return { output: '已处理' } }, false)
+    const commit = tool('chapter_bridge_commit', async () => { expect(state.qualityCandidateCount).toBe(0); mocks.committedChapter.mockResolvedValue(true); return { output: '终态提交' } }, false)
+    mocks.tools = [reader, edit, commit]
+    queue(response('提交终态。', [call('early-commit', commit.name, '{"compilationId":"comp"}')]),
+      response('', [call('merged', edit.name, '{"chapterId":"c"}')]), response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('已保存。'))
+    await run('写下一章')
+    expect(reader.execute).toHaveBeenCalledOnce()
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_bridge_get', 'chapter_edit_range', 'chapter_bridge_commit'])
+    expect(events().some(event => event.type === 'tool.call' && event.callId === 'early-commit')).toBe(false)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
   it('inserts the missing humanity assessment before a premature commit through ordinary tool receipts', async () => {
     let state = readiness('complete', 'missing')
     mocks.reviewReadiness.mockImplementation(async () => state)
@@ -417,6 +454,18 @@ describe('server assessment fallback in the real execution loop', () => {
     const { activeExecutionMs, ...storedCheckpoint } = savedUsage.checkpoint
     expect(mocks.runs.get('run')?.usage).toMatchObject({ ...savedUsage, checkpoint: storedCheckpoint })
     expect((mocks.runs.get('run')?.usage as typeof savedUsage).checkpoint.activeExecutionMs).toBeGreaterThanOrEqual(activeExecutionMs)
+  })
+  it.each(['QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'])('records a known persisted %s report without inventing an unknown paid outcome or refunding the attempt', async failureCode => {
+    mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing'))
+    const critic = tool('quality_analyze', async () => ({ output: '已保存未完成的检查报告', outcome: 'failed', failureCode }))
+    mocks.tools = [critic]
+    queue(response('', [call('known-report', critic.name, '{"compilationId":"comp"}')]), response('检查尚未完成。'))
+    await run('写下一章')
+    const usage = mocks.runs.get('run')?.usage as { checkpoint: { reviewAttempts: string[]; pendingReviews?: unknown[] } }
+    expect(critic.execute).toHaveBeenCalledOnce()
+    expect(usage.checkpoint.pendingReviews).toBeUndefined()
+    expect(usage.checkpoint.reviewAttempts).toContain('comp:c:3:quality_analyze')
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: false, failureCode }))
   })
   it('inherits unresolved review evidence on a typed continuation without a fresh budget or paid turn', async () => {
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing'))

@@ -2,7 +2,7 @@ import { runtimeJson } from './runtime-common.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 
 // Bump when the critic's required coverage or interpretation changes.
-export const COMPILER_CONTINUITY_PROTOCOL = 3
+export const COMPILER_CONTINUITY_PROTOCOL = 4
 
 export type CompilerContinuityCoverage = {
   version: 1; contentHash: string; charCount: number; sourceHash: string | null; reviewHash?: string; protocolVersion?: number

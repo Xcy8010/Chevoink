@@ -122,6 +122,30 @@ function expectCas() {
 }
 
 describe('legacy Agent chapter archive guards', () => {
+  it.each(['legacy', 'durable'] as const)('validates and consumes a multi-patch batch once in %s', async kind => {
+    const before = 'Before', after = 'AbcD'
+    const patches = [{ oldText: 'Be', newText: 'Abc' }, { oldText: 'fore', newText: 'D' }]
+    const consume = vi.fn().mockResolvedValue(undefined)
+    m.reviewGuard.mockResolvedValue(consume)
+    m.tx.chapter.findFirst.mockResolvedValue({ ...row, content: before })
+    const result = kind === 'legacy' ? await chapterEditRangeTool.execute(ctx(), { chapterId: 'c', patches })
+      : await executeDurableChapter(durable('chapter_edit_range'), 'chapter_edit_range', { chapterId: 'c', patches })
+    expect(result.display).toMatchObject({ kind: 'chapterDiff', before, after })
+    expect(m.reviewGuard).toHaveBeenCalledTimes(1)
+    expect(m.reviewGuard.mock.calls[0][3]).toMatchObject({ mutation: 'range', mergedBatch: true, after })
+    expect(m.tx.chapter.updateMany).toHaveBeenCalledTimes(1)
+    expect(consume).toHaveBeenCalledTimes(1)
+    expectCas()
+  })
+  it.each(['legacy', 'durable'] as const)('leaves all effects and consumption untouched for an invalid second patch in %s', async kind => {
+    const patches = [{ oldText: 'Be', newText: 'Abc' }, { oldText: 'missing', newText: 'D' }]
+    const result = kind === 'legacy' ? await chapterEditRangeTool.execute(ctx(), { chapterId: 'c', patches })
+      : await executeDurableChapter(durable('chapter_edit_range'), 'chapter_edit_range', { chapterId: 'c', patches })
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'CHAPTER_ANCHOR_CONFLICT' })
+    expect(m.reviewGuard).not.toHaveBeenCalled()
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
   it.each([0, 1])('consumes a new-draft revision only after successful legacy CAS (count=%s)', async count => {
     const consume = vi.fn().mockResolvedValue(undefined)
     m.reviewGuard.mockResolvedValue(consume)
@@ -144,7 +168,7 @@ describe('legacy Agent chapter archive guards', () => {
       : chapterEditRangeTool.execute(ctx(), { chapterId: 'c', oldText: 'Before', newText: 'After' })
     await expect(execute).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
     expect(m.reviewGuard).toHaveBeenCalledWith(tx, expect.objectContaining({ runId: 'r' }), expect.objectContaining({ id: 'c', revision: 4 }),
-      { mutation: action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range' })
+      expect.objectContaining({ mutation: action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range' }))
     expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
     expectNoEffects()
   })
@@ -364,7 +388,7 @@ describe('durable Agent chapter archive guards', () => {
     m.reviewGuard.mockRejectedValue(new DataAccessError(409, code, '合成修订拒绝'))
     expect(await executeDurableChapter(durable('chapter_edit_range'), 'chapter_edit_range', contentArgs('chapter_edit_range')))
       .toMatchObject({ outcome: 'failed', failureCode: code })
-    expect(m.reviewGuard).toHaveBeenCalledWith(tx, expect.anything(), expect.objectContaining({ id: 'c', revision: 4 }), { mutation: 'range' })
+    expect(m.reviewGuard).toHaveBeenCalledWith(tx, expect.anything(), expect.objectContaining({ id: 'c', revision: 4 }), expect.objectContaining({ mutation: 'range' }))
     expect(m.failure).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code }))
     expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
     expectNoEffects()

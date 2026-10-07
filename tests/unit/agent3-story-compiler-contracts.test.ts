@@ -8,6 +8,7 @@ import * as quality from '../../api/lib/agent/humanity-quality.js'
 import * as review from '../../api/lib/agent/review-completion.js'
 import * as ai from '../../api/lib/ai-service.js'
 import * as scope from '../../api/lib/agent/manuscript-scope.js'
+import * as originalRequest from '../../api/lib/agent/original-request.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as novelTools from '../../api/lib/agent/tools/novel-tools.js'
 import { continuityValidateTool, continuityReviewTail, continuityCriticSystem, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
@@ -25,6 +26,8 @@ import { qualityRevisionApplyTool } from '../../api/lib/agent/tools/humanity-qua
 describe('严谨创作落实连续性警告', () => {
   afterEach(() => vi.restoreAllMocks())
   function fixture(cached: boolean) {
+    vi.spyOn(originalRequest, 'readOriginalTaskRequest').mockResolvedValue({ prompt: '写本章，人物寻找线索。', spec: null,
+      taskId: 'task', sourceRunId: 'r', parentRunId: null })
     const chapter = { id: 'c', title: '本章', revision: 1, content: '原文', orderIndex: 1 }
     const findings = ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在衔接风险', suggestion: '局部澄清' }))
     const validation = { independentCheck: 'complete', checkedRevision: 1, findings, errorCount: 0, warningCount: 3, autoRepairRounds: 0 }
@@ -234,7 +237,7 @@ describe('Agent 3.0 Story Compiler 契约', () => {
     const text = renderTaskSpec(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '写下一章', creativeFreedom: 'balanced' }))
     expect(text).toContain('写作交付先完成当前版本连续性与质量检查')
     expect(text).toContain('修订后只读复核当前版本两类检查，最后提交终态')
-    expect(text).toContain('警告和审美建议保留待审，不自动改正文')
+    expect(text).toContain('质量警告与审美建议，应与事实修法合并为同一次修订')
     expect(text).toContain('本任务冻结的新建目标章')
     expect(text).toContain('一次合并修订')
     expect(text).toContain('已有稿仍需原请求明确修复授权，明确禁止修改优先')

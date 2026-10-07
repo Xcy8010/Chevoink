@@ -54,7 +54,7 @@ import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { createEmptyResponseGuard, createProtocolRecoveryGuard, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { toolFailureRecovery } from './tool-failure-recovery.js'
 import { readChapterReviewReadiness, probeChapterReviewRevision } from './chapter-review-guard.js'
-import { nextReviewDispatch } from './review-dispatch.js'
+import { nextMergedReviewReminder, nextReviewDispatch } from './review-dispatch.js'
 import { activeChapterScope } from '../data/internal.js'
 import { createRepeatDetector } from './repeat-detect.js'
 import {
@@ -1542,6 +1542,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         : []
       const effectiveToolCalls = result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
       let automaticReviewTriggered = false
+      let mergedReviewReminder: string | undefined
       // A weak tool caller cannot skip the delivery assessments by returning
       // prose. These calls use the same original tool ceiling and ordinary
       // journal, approvals, billing and compiler counters as model calls.
@@ -1556,16 +1557,31 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           effectiveToolCalls.push({ id: `review_${messageId}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) })
         }
         else if (next.kind === 'blocked') forceWrapUpReason = next.reason
+        else if (readiness?.ready && toolContext.sandboxMode !== 'read_only'
+          && !toolContext.inlineChild && !toolContext.protectedChapterIds?.has(readiness.chapterId)
+          && (readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)) {
+          const channel = await prisma.$transaction(tx => probeChapterReviewRevision(tx,
+            { userId: params.userId, novelId: params.novelId, runId }, { id: readiness.chapterId, revision: readiness.revision }))
+          const key = nextMergedReviewReminder(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, channel.open)
+          if (key) {
+            automaticReviewAttempts.add(key)
+            await persistCheckpoint()
+            automaticReviewTriggered = true
+            mergedReviewReminder = `[系统/只读状态] 当前 compilationId=${readiness.compilationId}、chapterId=${readiness.chapterId}、r${readiness.revision} 的检查已完成，但一次原授权合并修订尚未处理。读取当前完整正文和两类报告${readiness.qualityReportId ? `（质量报告 ${readiness.qualityReportId}）` : ''}；核对原文事实，合并安全的事实与审美修法，用一次 chapter_edit_range patches 应用，不能仅替换同义词后声称全部完成。不能安全修改的候选用 retainedFindings 绑定原意见并写明具体原因，可留置全部意见而不改文；不得增加修订轮数、付费重放或改变原请求范围。实际改文后只读复核当前版本，再提交终态。`
+          }
+        }
       }
+
+      const reviewProgressText = mergedReviewReminder ? '正在核对检查意见的处理结果。' : '正文已保存，正在完成当前版本的必要检查。'
 
       messages.push({
         role: 'assistant',
-        content: automaticReviewTriggered ? '正文已保存，正在完成当前版本的必要检查。' : recoveredToolCalls.length > 0 ? null : (result.content || null),
+        content: automaticReviewTriggered ? reviewProgressText : recoveredToolCalls.length > 0 ? null : (result.content || null),
         reasoning: result.reasoning || undefined,
         toolCalls: effectiveToolCalls.length > 0 ? effectiveToolCalls : undefined,
       })
 
-      const cleanContent = automaticReviewTriggered ? '正文已保存，正在完成当前版本的必要检查。'
+      const cleanContent = automaticReviewTriggered ? reviewProgressText
         : humanizeAgentVisibleText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；
@@ -1589,6 +1605,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         liveTurn = null
         await wrapUpAndFinish(forceWrapUpReason)
         return
+      }
+
+      if (mergedReviewReminder) {
+        requireNativeToolCall = true
+        await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
+        bus.emit({ type: 'step.finish', turn, usage: result.usage })
+        messages.push({ role: 'user', content: mergedReviewReminder })
+        continue
       }
 
       const invalidToolProtocol =
@@ -1789,6 +1813,29 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             } else if (next.kind === 'blocked') {
               forceWrapUpReason = next.reason
               break
+            } else if (readiness?.ready && call.name === 'chapter_bridge_commit'
+              && toolContext.sandboxMode !== 'read_only' && !toolContext.inlineChild
+              && !toolContext.protectedChapterIds?.has(readiness.chapterId)
+              && (readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)) {
+              const available = new Set(tools.map(tool => tool.name))
+              const channel = await prisma.$transaction(tx => probeChapterReviewRevision(tx,
+                { userId: params.userId, novelId: params.novelId, runId }, { id: readiness.chapterId, revision: readiness.revision }))
+              const key = nextMergedReviewReminder(readiness, available, automaticReviewAttempts, channel.open)
+              const reader = tools.find(tool => tool.name === 'chapter_bridge_get')
+              const readArgs = { compilationId: readiness.compilationId }
+              if (key && reader?.readOnly && reader.parameters.safeParse(readArgs).success) {
+                automaticReviewAttempts.add(key)
+                await persistCheckpoint()
+                const required = { id: `review_decision_${messageId}_${callIndex}`, name: reader.name, arguments: JSON.stringify(readArgs) }
+                // An early commit is only a proposal. Read its current decision
+                // state and ask for a new plan; never execute the stale remainder.
+                effectiveToolCalls.splice(callIndex, effectiveToolCalls.length - callIndex, required)
+                const note = '正在核对检查意见的处理结果，之后再提交章节终态。'
+                for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') parts.splice(index, 1)
+                parts.push({ type: 'text', text: note })
+                bus.emit({ type: 'text.final', messageId, text: note, asReasoning: false })
+                call = required
+              }
             }
           }
         }
@@ -1860,7 +1907,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
         const outcome = await handleToolCall(call, tools, { ...toolContext, callId: call.id, messageId }, bus, messageId, runId)
         if (reviewDispatch && (outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
-          'CONTINUITY_CHECK_BUDGET_EXCEEDED'].includes(outcome.failureCode ?? ''))) {
+          'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? ''))) {
           pendingReviews.delete(`${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`)
           await persistCheckpoint()
         }
