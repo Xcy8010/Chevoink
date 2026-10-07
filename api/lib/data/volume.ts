@@ -20,7 +20,7 @@ import { DataAccessError, prisma } from '../prisma.js'
 
 function requireSplitTitle(value: string): string {
   const title = plainChapterTitle(value)
-  if (!title) throw new DataAccessError(400, 'INVALID_TITLE', '章节标题去除章序后不能为空。')
+  if (!title) throw new DataAccessError(400, 'INVALID_TITLE', '章节标题不能为空。')
   return title
 }
 import { lockNovelActiveScope } from './novel-write-lock.js'

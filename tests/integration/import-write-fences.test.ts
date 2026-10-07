@@ -6,6 +6,7 @@ import { activeChapterScope } from '../../api/lib/data/internal.js'
 import { createChapterData, getReaderPayloadData, updateChapterData } from '../../api/lib/data/chapter.js'
 import { createVolumeData, getStructureReportData } from '../../api/lib/data/volume.js'
 import { assertAgentManuscriptCurrent } from '../../api/lib/agent/manuscript-scope.js'
+import { prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
 import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { applyMemoryExtractionJob, saveStoryMemory } from '../../api/lib/agent/story-memory.js'
 import { mergeStoryBranch } from '../../api/lib/agent/productivity.js'
@@ -120,6 +121,7 @@ describe.skipIf(!available)('import write fences: real isolated PostgreSQL', () 
         buildTaskSpec({ runId: fresh.id, novelId: f.novel.id, prompt: '写第二章。' }), '写第二章。'))
       await prisma.agentRun.update({ where: { id: fresh.id }, data: { taskSpec: JSON.parse(JSON.stringify(task)) } })
       await prisma.$transaction(tx => assertAgentManuscriptCurrent(tx, { userId: f.user.id, novelId: f.novel.id, runId: fresh.id }))
+      await prepareStoryCompilation({ userId: f.user.id, novelId: f.novel.id, runId: fresh.id, targetOrderIndex: 2, mode: 'premium', intentSummary: '写第二章。', volumeDecision: { kind: 'continue', reason: '恢复导入后保留当前卷，继续尚未收束的主线' } })
       const result = await chapterCreateTool.execute({ ...context, runId: fresh.id }, { title: 'Authorized next' })
       expect(result.outcome).toBeUndefined()
       expect(await prisma.chapter.count({ where: activeChapterScope(f.novel.id) })).toBe(2)

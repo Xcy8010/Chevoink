@@ -11,14 +11,14 @@ function unwrapTitle(title: string): string {
   return depth === 0 ? title.slice(1, -1).trim() : title
 }
 
-/** Formatting only. An empty result must be rejected by the write boundary. */
+/** Prefer plain names; a nonempty literal author name must remain usable. */
 export function plainChapterTitle(value: string): string {
   let title = value.trim()
   for (;;) {
     const previous = title
     title = title.replace(chapterPrefix, '').trim()
     title = unwrapTitle(title)
-    if (title === previous) return title
+    if (title === previous) return title || value.trim()
   }
 }
 

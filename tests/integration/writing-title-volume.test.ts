@@ -14,6 +14,7 @@ import { readWritingVolumeContext } from '../../api/lib/agent/writing-volume.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import type { WritingNewVolume } from '../../shared/contracts/writing-volume-contracts.js'
 import { createChapterData, updateChapterData } from '../../api/lib/data/chapter.js'
+import { buildLocalChapterCreateInput } from '../../src/features/studio/lib/form-state.js'
 import { splitChapterData } from '../../api/lib/data/volume.js'
 import { previewBulkReplaceData, applyChangeSetData, rollbackChangeSetData } from '../../api/lib/data/changeset.js'
 import { bulkReplacePreviewRequestSchema } from '../../shared/contracts/index.js'
@@ -85,11 +86,22 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
     const updated = await updateChapterData(f.userId, f.novelId, created.id, { title: '第46节〈读《史记》〉', expectedRevision: created.revision })
     expect(updated?.title).toBe('读《史记》')
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: created.id } })).toMatchObject({ publishedTitle: '火墙', publishedContent: body, content: body })
-    await expect(updateChapterData(f.userId, f.novelId, created.id, { title: '第47章《》', expectedRevision: updated!.revision })).rejects.toThrow()
+    await expect(updateChapterData(f.userId, f.novelId, created.id, { title: '   ', expectedRevision: updated!.revision })).rejects.toThrow()
     const split = await splitChapterData(f.userId, f.novelId, created.id, { expectedRevision: updated!.revision, splitOffset: 6, newChapterTitle: '第48章《定南》' })
     expect(split?.second.title).toBe('定南')
     expect(split!.first.content + split!.second.content).toBe(body)
     await expect(updateChapterData(f.userId, f.novelId, created.id, { title: '第99章 过期覆盖', expectedRevision: updated!.revision })).rejects.toMatchObject({ code: 'CHAPTER_REVISION_CONFLICT' })
+  }))
+  it('the actual manual-new-chapter input saves a named private draft and literal ordinal names work while blank names stay rejected', async () => fixture(async f => {
+    const previous = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const input = buildLocalChapterCreateInput(previous.volumeId, 2)
+    const created = await createChapterData(f.userId, f.novelId, input)
+    expect(created).toMatchObject({ title: '未命名章节', content: '', status: 'draft', visibility: 'private', orderIndex: 2, orderInVolume: 2 })
+    const literal = await createChapterData(f.userId, f.novelId, { ...input, title: '第 3 章', orderInVolume: 3 })
+    expect(literal).toMatchObject({ title: '第 3 章', content: '', orderIndex: 3, orderInVolume: 3 })
+    await expect(createChapterData(f.userId, f.novelId, { ...input, title: '   ', orderInVolume: 4 })).rejects.toThrow()
+    expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(3)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ title: previous.title, content: previous.content, revision: previous.revision, orderIndex: previous.orderIndex, orderInVolume: previous.orderInVolume })
   }))
   it('changeset title preview/apply agree and rollback restores the exact historical title', async () => fixture(async f => {
     await prisma.chapter.update({ where: { id: f.chapterId }, data: { title: '第47章《火墙》' } })
@@ -100,15 +112,30 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ title: '定南', content: before.content })
     await rollbackChangeSetData(f.userId, preview.id)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ title: before.title, content: before.content })
+    const literal = await previewBulkReplaceData(f.userId, f.novelId, bulkReplacePreviewRequestSchema.parse({ query: '火墙', replacement: '', fields: ['title'], reason: '作者明确采用非空字面标题' }))
+    expect(literal.patches[0].after).toBe('第47章《》')
+    await applyChangeSetData(f.userId, literal.id, {})
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ title: '第47章《》', content: before.content })
   }))
-  it('Agent rename uses plain titles and refuses an empty result without changing the chapter', async () => fixture(async f => {
+  it('Agent rename prefers plain names but permits nonempty literal names and refuses blank names without effects', async () => fixture(async f => {
     const { ctx } = await admission(f, '修改本章标题')
     const renamed = await chapterRenameTool.execute(ctx, { chapterId: f.chapterId, title: '第47章《火墙》' })
     expect(renamed.summary).toContain('火墙')
     const saved = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     expect(saved).toMatchObject({ title: '火墙', content: '原文' })
-    await expect(chapterRenameTool.execute(ctx, { chapterId: f.chapterId, title: '第47章〈〉' })).rejects.toMatchObject({ code: 'CHAPTER_RENAME_INVALID' })
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(saved)
+    await chapterRenameTool.execute(ctx, { chapterId: f.chapterId, title: '第47章〈〉' })
+    const literal = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    expect(literal).toMatchObject({ title: '第47章〈〉', content: saved.content, revision: saved.revision + 1 })
+    await expect(chapterRenameTool.execute(ctx, { chapterId: f.chapterId, title: '   ' })).rejects.toMatchObject({ code: 'CHAPTER_RENAME_INVALID' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(literal)
+  }))
+  it('an explicitly requested literal Agent chapter name creates actual body without relaxing target authority', async () => fixture(async f => {
+    const { ctx } = await admission(f, '写下一章，章名为“第2章《》”')
+    await prepare(ctx)
+    const result = await chapterCreateTool.execute(ctx, { title: '第2章《》', content: '林舟沿着墙边走到门前。' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: result.observedState!.id } })).toMatchObject({ title: '第2章《》', content: '林舟沿着墙边走到门前。', orderIndex: 2 })
+    await expect(chapterCreateTool.execute(ctx, { title: '仍须限制范围', position: 3 })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(2)
   }))
   it('every prepare reads the volume goal and exposes saved-plan mismatch instead of a chapter-count threshold', async () => fixture(async f => {
     await prisma.volume.update({ where: { id: (await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).volumeId }, data: { title: '第二卷 雪压边墙', summary: '守住边堡并解除粮药困局' } })
@@ -212,12 +239,12 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
     await saveExecutionState(lease, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
       snapshot: { ...state.frame.state, messages: [...state.frame.state.messages, { role: 'assistant', content: null, toolCalls: [
         { id: 'read-created', name: chapterReadTool.name, arguments: JSON.stringify({ chapterId: chapter.id }) },
-        { id: 'rename-created', name: chapterRenameTool.name, arguments: JSON.stringify({ chapterId: chapter.id, title: '第3章《新困局》' }) }] }] } })
+        { id: 'rename-created', name: chapterRenameTool.name, arguments: JSON.stringify({ chapterId: chapter.id, title: '第3章《》' }) }] }] } })
     expect((await executeDurableToolStep(lease, ctx.signal)).kind).toBe('tool')
     expect((await executeDurableToolStep(lease, ctx.signal)).kind).toBe('tool')
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ title: '新困局', content: chapter.content })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ title: '第3章《》', content: chapter.content })
     const rename = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: lease.taskRootId, action: 'chapter_rename' } }, include: { operation: true } })
-    expect(rename.operation.inputSnapshot).toMatchObject({ input: { args: { title: '第3章《新困局》' } } })
+    expect(rename.operation.inputSnapshot).toMatchObject({ input: { args: { title: '第3章《》' } } })
     expect(runtimeJson(rename.result).hash).toBe(rename.resultHash)
     expect(await prisma.volume.count({ where: { novelId: f.novelId } })).toBe(2)
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: lease.taskRootId } } })).toBe(0)

@@ -103,7 +103,7 @@ export function refreshPreviewWarnings(preview: NovelImportEvidencePreview): Nov
   assertPreviewCoverSelection(preview)
   const issues = resolutionState(preview).issues
   const warnings = issues.map(({ code, message, blocking, resolved }) => ({ code, message, blocking: blocking && !resolved }))
-  if (preview.volumes.some(volume => volume.chapters.some(chapter => !plainChapterTitle(chapter.title)))) warnings.push({ code: 'IMPORT_TITLE_INVALID', message: '章序去除后没有章名，请在目录中补全标题；正文和来源保持完整。', blocking: true })
+  if (preview.volumes.some(volume => volume.chapters.some(chapter => !plainChapterTitle(chapter.title)))) warnings.push({ code: 'IMPORT_TITLE_INVALID', message: '章节标题不能为空，请在目录中补全标题；正文和来源保持完整。', blocking: true })
   // Keep informational service notices, but never trust caller-provided blocking flags.
   warnings.push(...preview.warnings.filter(w => w.code === 'IMPORT_EMPTY_VOLUMES_RETAINED').map(w => ({ code: w.code, message: w.message, blocking: false })))
   if (preview.volumes.some(v => v.chapters.some(c => c.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters))) warnings.push({ code: 'IMPORT_CHAPTER_TOO_LONG', message: '单章超过10万字符，请在预览中拆分。', blocking: true })

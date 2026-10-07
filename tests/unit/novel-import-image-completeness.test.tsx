@@ -39,7 +39,7 @@ function preview(options: { finalized?: boolean; artifacts?: NovelImportArtifact
   const value: NovelImportEvidencePreview = {
     manifestRevision: 1, manifestHash: hash, sourceHash, parserVersion: currentReport.parserVersion, sourceChars: 2,
     metadata: { title: '导入作品' }, metadataSelection: { title: '导入作品' }, warnings: [], partialImport: false,
-    volumes: [{ title: '正文', chapters: [{ title: '第一章', content: '正文', source: { memberPath: '作品.zip!/正文/第一卷/第一章.txt' } }] }],
+    volumes: [{ title: '正文', chapters: [{ title: '起点', content: '正文', source: { memberPath: '作品.zip!/正文/第一卷/第一章.txt' } }] }],
     artifacts: currentArtifacts, report: currentReport, reportHash: reportHash(currentReport), decisions: [],
   }
   return options.finalized ? { ...value, report: finalizeStoredImageReport(currentReport, currentArtifacts), reportHash: reportHash(finalizeStoredImageReport(currentReport, currentArtifacts)) } : value

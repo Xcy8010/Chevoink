@@ -118,8 +118,22 @@ describe.skipIf(!available)('staged novel import actual PostgreSQL transactions'
     // This suite exercises >10 logical imports. Age only its own finished
     // fixtures outside the rolling admission window instead of weakening limits.
     await prisma.novelImportJob.updateMany({ where: { userId, status: { in: ['succeeded', 'cancelled'] } }, data: { createdAt: new Date(Date.now() - 2 * 86400_000) } })
+    // Completed fixtures also cease occupying the independent 20-live-intent
+    // admission quota. Only intents of this owner's finished jobs are expired.
+    const finished = await prisma.novelImportJob.findMany({ where: { userId, status: { in: ['succeeded', 'cancelled'] } }, select: { intentId: true } })
+    await prisma.novelImportIntent.updateMany({ where: { userId, id: { in: finished.map(job => job.intentId) } }, data: { expiresAt: new Date(Date.now() - 1) } })
   })
 
+  it('imports literal ordinal and empty-wrapper names after real ready/confirmation without changing their bodies', async () => {
+    const ready = await approve('第一章\n这是作者确认的第一章正文。\n\n第二章《》\n这是作者确认的第二章正文。')
+    expect(ready.preview.volumes[0].chapters.map((chapter: { title: string }) => chapter.title)).toEqual(['第一章', '第二章《》'])
+    expect(ready.preview.warnings.some((warning: { code: string }) => warning.code === 'IMPORT_TITLE_INVALID')).toBe(false)
+    const response = await request(app).post(`${base()}/${ready.jobId}/commit`).set('Cookie', cookie()).send(ready.input)
+    expect(response.status, JSON.stringify(response.body)).toBe(200)
+    const chapters = await prisma.chapter.findMany({ where: { novelId }, orderBy: { orderIndex: 'asc' } })
+    expect(chapters.map(chapter => [chapter.title, chapter.content])).toEqual(ready.preview.volumes[0].chapters.map((chapter: { title: string; content: string }) => [chapter.title, chapter.content]))
+    expect(chapters.map(chapter => chapter.orderIndex)).toEqual([1, 2])
+  })
   it('concurrent duplicate commit has one atomic receipt, backup and contiguous private draft tree', async () => {
     const usageBefore = await prisma.aiUsageLog.count({ where: { userId } })
     const ledgerBefore = await prisma.creditLedgerEntry.count({ where: { userId } })

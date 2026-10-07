@@ -2,10 +2,14 @@
  * 创作区表单状态构造与脏检查
  * 由 StudioWorkspace.tsx 模块级拆分而来（声明顺序与原文件一致）。
  */
-import type { Chapter, Novel, UpdateNovelRequest } from '../../../../shared/contracts/index.js'
+import type { Chapter, CreateChapterRequest, Novel, UpdateNovelRequest } from '../../../../shared/contracts/index.js'
 import { FIXED_NOVEL_COVER_SIZE } from '../../../../shared/contracts/index.js'
 import { plainChapterTitle } from '../../../../shared/structure/chapter-title'
 import type { AgentRunState, ChapterDraftState, CoverFormState, NovelFormState, ProjectNotesState } from '../types'
+
+export function buildLocalChapterCreateInput(volumeId: string, orderInVolume: number): CreateChapterRequest {
+  return { title: '未命名章节', summary: '新建章节', content: '', status: 'draft', visibility: 'private', volumeId, orderInVolume }
+}
 
 
 

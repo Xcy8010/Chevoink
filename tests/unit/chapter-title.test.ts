@@ -12,7 +12,7 @@ describe('plain chapter titles preserve narrative names and identity', () => {
     ['《读《史记》》', '读《史记》'], ['读《史记》', '读《史记》'],
     ['《史记》与《汉书》', '《史记》与《汉书》'], ['〈甲〉和〈乙〉', '〈甲〉和〈乙〉'],
     ['序章', '序章'], ['第一卷 边镇棋子', '第一卷 边镇棋子'], ['第三个人', '第三个人'],
-    ['第47章', ''], ['《》', ''], ['第47章《》', ''], ['  ', ''], ['《未闭合', '《未闭合'],
+    ['第47章', '第47章'], ['《》', '《》'], ['第47章《》', '第47章《》'], ['  ', ''], ['《未闭合', '《未闭合'],
   ])('%s formats without changing real inner book names', (value, expected) => {
     expect(plainChapterTitle(value)).toBe(expected)
     expect(plainChapterTitle(plainChapterTitle(value))).toBe(expected)

@@ -99,7 +99,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       await expect(resolveQualityChapterTarget({ userId, novelId, runId: freshId, ...target })).rejects.toMatchObject({ code: 'QUALITY_TASK_TARGET_REQUIRED' })
     }
     await expect(prepareStoryCompilation({ userId, novelId, runId: freshId, chapterId: chapter1Id, mode: 'balanced', intentSummary: '恢复旧章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
-    await storyCompilerPrepareTool.execute(ctx, { intentSummary: '写下一章' })
+    await storyCompilerPrepareTool.execute(ctx, { intentSummary: '写下一章', volumeDecision: { kind: 'continue', reason: '当前卷主困局尚未收束，新目标继续原卷' } })
     const fresh = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: freshId, chapterId: null } })
     expect(fresh.targetOrderIndex).toBe(4)
     const preparedDigest = await buildStoryCompilerDigest(userId, novelId, chapter1Id, freshId)

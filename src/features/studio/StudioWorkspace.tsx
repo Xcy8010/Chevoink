@@ -69,7 +69,7 @@ import type { AgentArtifact, AgentLocalRollbackSnapshot, AgentRunState, ChapterD
 
 import { buildArtifactsFromHistory, mergeRestoredArtifactsWithSnapshot, readStoredAgentWorkspace } from './lib/agent-persistence.js'
 import { BOOTSTRAP_NOVEL_SUMMARY, BOOTSTRAP_NOVEL_TITLE, DEFAULT_NOVEL_ID, STUDIO_LAST_NOVEL_STORAGE_KEY, buildAgentTaskWindowFromSession, createLocalAgentTaskWindow, dedupeAgentTaskWindows, formatDateTime, formatWordCount, getAgentWorkspaceStorageKey, isBootstrapNovel, pickFallbackAgentTaskWindow, resolveNovelTitleState, shouldDisplayListedAgentSession, shouldShowWorkspaceNovel } from './lib/agent-session.js'
-import { buildChapterDraft, buildCoverForm, buildNovelFormState, buildNovelUpdatePayload, buildProjectNotes, createIdleAgentRunState, isNovelFormDirty } from './lib/form-state.js'
+import { buildChapterDraft, buildLocalChapterCreateInput, buildCoverForm, buildNovelFormState, buildNovelUpdatePayload, buildProjectNotes, createIdleAgentRunState, isNovelFormDirty } from './lib/form-state.js'
 import { buildCatalogPreview, buildChapterReviewDescription, buildPendingChapterReview, buildServerPlanFile, buildWorkspacePlanFiles, mergeCatalogContentWithChapters, removeChapterAndCompact, replaceChapterItem, toChapterListItem, upsertChapterItem } from './lib/plan-review.js'
 import { usePendingReviewStorage } from './components/use-pending-review-storage'
 import type { AgentTaskWindowState, StoredAgentWorkspaceSnapshot } from './lib/workspace-types.js'
@@ -2516,15 +2516,7 @@ export default function StudioWorkspace() {
       const targetVolume = volumes.find((volume) => volume.id === activeChapterListItem?.volumeId) ?? volumes.at(-1)
       if (!targetVolume) throw new Error('请先新建一卷，再创建章节。')
       const nextOrderInVolume = chapters.filter((chapter) => chapter.volumeId === targetVolume.id).length + 1
-      const savedChapter = await createChapterDraft(activeNovelId, {
-        title: `第 ${nextOrderInVolume} 章`,
-        summary: '新建章节',
-        content: '',
-        status: 'draft',
-        visibility: 'private',
-        volumeId: targetVolume.id,
-        orderInVolume: nextOrderInVolume,
-      })
+      const savedChapter = await createChapterDraft(activeNovelId, buildLocalChapterCreateInput(targetVolume.id, nextOrderInVolume))
 
       queryClient.setQueryData<Chapter>(['studio-chapter', activeNovelId, savedChapter.id], savedChapter)
       setChapters((current) => upsertChapterItem(current, toChapterListItem(savedChapter)))

@@ -125,7 +125,7 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
   it('an already saved PREPARE can advance through first scenes and actual next-chapter body, without certifying delivery', async () => writingFixture(async f => {
     await claim(f)
     const old = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    const prepared = await prepareStoryCompilation({ ...f, chapterId: undefined, mode: 'premium', intentSummary: '写下一章' })
+    const prepared = await prepareStoryCompilation({ ...f, chapterId: undefined, mode: 'premium', intentSummary: '写下一章', volumeDecision: { kind: 'continue', reason: '当前卷困局未收束，继续推进原故事阶段' } })
     expect(prepared.preparedFirstForTarget).toBe(true)
     const ctx = context(f)
     const scene = await sceneTaskBuildTool.execute(ctx, { compilationId: prepared.compilation.id, tasks })

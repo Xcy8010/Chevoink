@@ -25,7 +25,7 @@ import { assertPreparedWritingVolumeDecision, createWritingTailVolume } from '..
 
 function requireChapterTitle(value: string): string {
   const title = plainChapterTitle(value)
-  if (!title) throw new DataAccessError(400, 'CHAPTER_RENAME_INVALID', '章节标题去除章序和外层书名号后不能为空。')
+  if (!title) throw new DataAccessError(400, 'CHAPTER_RENAME_INVALID', '章节标题不能为空。')
   return title
 }
 

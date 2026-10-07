@@ -93,7 +93,7 @@ export function buildNovelImportPlacement(existingVolumes: ExistingVolume[], exi
       const key = normalizeImportTitle(chapter.sourceTitle ?? chapter.title), matches = matchingChapters(old, chapter)
       if (matches.length > 1 || matches.length && sourceCounts.get(key)! > 1) ambiguous()
       const title = plainChapterTitle(chapter.title)
-      if (!title) throw new DataAccessError(400, 'IMPORT_TITLE_INVALID', '章节标题去除章序后不能为空，请在预览中补全章名。')
+      if (!title) throw new DataAccessError(400, 'IMPORT_TITLE_INVALID', '章节标题不能为空，请在预览中补全章名。')
       const row = { id: newId(), title, content: chapter.content, volumeId: destination.id, orderIndex: 0, orderInVolume: 0 }
       imported.push(row)
       if (matches.length) {

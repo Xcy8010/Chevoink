@@ -99,7 +99,7 @@ async function prepared() {
     await confirmNovelImportIntent(human(), intent.intentId, 2, intent.targetHash)
   }
   const job = await prepareNovelImport(scope, intent.intentId)
-  await uploadNovelImportSource(scope, job.jobId, 'original.txt', (async function* () { yield Buffer.from('第一章\n原文不改写') })())
+  await uploadNovelImportSource(scope, job.jobId, 'original.txt', (async function* () { yield Buffer.from('第一章 起点\n原文不改写') })())
   await analyzeNovelImport(scope, job.jobId)
   await vi.waitFor(() => expect(fixture.state.novelImportJob[0].status).toBe('ready'))
   const preview = await getNovelImportPreview(scope, job.jobId)
@@ -113,8 +113,8 @@ async function approved() {
 function existingBook(content = '旧稿正文', published = false) {
   vi.stubEnv('NOVEL_IMPORT_OVERWRITE_ENABLED', 'true')
   const volume = { id: 'old-volume', novelId: scope.novelId, title: '旧卷', summary: null, orderIndex: 1, revision: 4, archivedAt: null, archivedByImportId: null }
-  // 标题与默认解析产物「第一章」一致：智能合并下同名章节命中→归档旧行+导入新版本（等价旧的整卷替换路径）。
-  const chapter = { id: 'old-chapter', novelId: scope.novelId, authorId: scope.userId, volumeId: volume.id, title: '第一章', summary: null, content, orderIndex: 1, orderInVolume: 1, wordCount: content.length, revision: 7, status: published ? 'published' : 'draft', visibility: 'public', archivedAt: null, archivedByImportId: null, publishedTitle: published ? '公开旧标题' : null, publishedContent: published ? '公开原文快照' : null, publishedRevision: published ? 5 : null, publishedAt: published ? new Date('2025-01-01') : null }
+  // 标题与默认解析产物「起点」一致：智能合并下同名章节命中→归档旧行+导入新版本（等价旧的整卷替换路径）。
+  const chapter = { id: 'old-chapter', novelId: scope.novelId, authorId: scope.userId, volumeId: volume.id, title: '起点', summary: null, content, orderIndex: 1, orderInVolume: 1, wordCount: content.length, revision: 7, status: published ? 'published' : 'draft', visibility: 'public', archivedAt: null, archivedByImportId: null, publishedTitle: published ? '公开旧标题' : null, publishedContent: published ? '公开原文快照' : null, publishedRevision: published ? 5 : null, publishedAt: published ? new Date('2025-01-01') : null }
   fixture.state.volume.push(volume); fixture.state.chapter.push(chapter)
   Object.assign(fixture.state.novel[0], { chapterCount: 1, wordCount: content.length, lastChapterTitle: chapter.title })
   return { volume: { ...volume }, chapter: { ...chapter } }
@@ -132,10 +132,26 @@ beforeEach(() => {
   for (const name of Object.keys(fixture.state)) fixture.state[name] = []
   fixture.blobs.clear()
   fixture.state.novel.push({ id: scope.novelId, authorId: scope.userId, title: '原书', summary: '简介', tagNames: ['原标签'], status: 'draft', publishedAt: null, wordCount: 0, chapterCount: 0, lastChapterTitle: null, manuscriptRevision: 0 })
-  fixture.parse.mockResolvedValue({ volumes: [{ title: '正文卷', chapters: [{ title: '第一章', content: '原文不改写', source: 'original.txt#char=0-8' }] }], metadata: { title: '候选书名' }, warnings: [], sourceChars: 8, parserVersion: 'fixture-1' })
+  fixture.parse.mockResolvedValue({ volumes: [{ title: '正文卷', chapters: [{ title: '起点', content: '原文不改写', source: 'original.txt#char=0-8' }] }], metadata: { title: '候选书名' }, warnings: [], sourceChars: 8, parserVersion: 'fixture-1' })
 })
 
 describe('staged import authorization and durability (DB mocked; not concurrency release evidence)', () => {
+  it('accepts nonempty literal ordinal titles through ready and human confirmation without changing source identity or body', async () => {
+    fixture.parse.mockResolvedValueOnce({ volumes: [{ title: '正文卷', chapters: [{ title: '第一章', content: '原文不改写', source: 'original.txt#char=0-8' }] }], metadata: {}, warnings: [], sourceChars: 8, parserVersion: 'fixture-1' })
+    const intent = await preflightNovelImport(scope), job = await prepareNovelImport(scope, intent.intentId)
+    await uploadNovelImportSource(scope, job.jobId, 'original.txt', (async function* () { yield Buffer.from('第一章\n原文不改写') })())
+    await analyzeNovelImport(scope, job.jobId)
+    await vi.waitFor(() => expect(fixture.state.novelImportJob[0].status).toBe('ready'))
+    const preview = await getNovelImportPreview(scope, job.jobId)
+    expect(preview.warnings.some(warning => warning.code === 'IMPORT_TITLE_INVALID')).toBe(false)
+    expect(preview.volumes[0].chapters[0]).toMatchObject({ title: '第一章', content: '原文不改写', source: { memberPath: 'original.txt#char=0-8' } })
+    expect(preview.volumes[0].chapters[0].sourceTitle).toBeUndefined()
+    await expect(confirmNovelImport(human(), job.jobId, { manifestRevision: preview.manifestRevision, manifestHash: preview.manifestHash, targetHash: job.targetHash })).resolves.toHaveProperty('approvalId')
+    const renamed = await editNovelImportPreview(human(), job.jobId, { expectedManifestRevision: preview.manifestRevision, volumes: [{ title: '正文卷', chapters: [{ ...preview.volumes[0].chapters[0], title: '第一章 起点' }] }] })
+    expect(renamed.volumes[0].chapters[0]).toMatchObject({ title: '起点', sourceTitle: '第一章', content: '原文不改写' })
+    expect(renamed.warnings.some(warning => warning.code === 'IMPORT_TITLE_INVALID')).toBe(false)
+    expect(fixture.state.chapter).toHaveLength(0)
+  })
   it('replaces only this work’s unfinished previews, fences workers and hides tombstones', async () => {
     const first = await prepared()
     const old = fixture.state.novelImportJob[0]
@@ -212,7 +228,7 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     Object.assign(fixture.state.volume[0], { title: '淬火', orderIndex: 2 })
     const empty = { id: 'empty-first', novelId: scope.novelId, title: '第一卷', summary: null, orderIndex: 1, revision: 1, archivedAt: null, archivedByImportId: null }
     fixture.state.volume.push({ ...empty })
-    fixture.parse.mockResolvedValue({ volumes: [{ title: '淬火', chapters: [{ title: '第一章', content: '合成更新正文', source: 'original.txt#char=0-6' }] }], metadata: {}, warnings: [], sourceChars: 6, parserVersion: 'fixture-1' })
+    fixture.parse.mockResolvedValue({ volumes: [{ title: '淬火', chapters: [{ title: '起点', content: '合成更新正文', source: 'original.txt#char=0-6' }] }], metadata: {}, warnings: [], sourceChars: 6, parserVersion: 'fixture-1' })
     const result = await committedForRestore()
     expect(fixture.state.volume[0]).toMatchObject({ id: original.volume.id, title: '淬火', orderIndex: 1, archivedAt: null })
     expect(fixture.state.volume[1]).toMatchObject({ id: empty.id, archivedAt: expect.any(Date), archivedByImportId: result.job.jobId })
@@ -517,14 +533,14 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     vi.stubEnv('NOVEL_IMPORT_OVERWRITE_ENABLED', 'true')
     fixture.state.volume.push({ id: 'v1', novelId: scope.novelId, title: '卷A', summary: null, orderIndex: 1, revision: 1, archivedAt: null, archivedByImportId: null })
     fixture.state.chapter.push(
-      { id: 'c-match', novelId: scope.novelId, authorId: scope.userId, volumeId: 'v1', title: '第一章', summary: null, content: '旧第一章', orderIndex: 1, orderInVolume: 1, wordCount: 4, revision: 1, status: 'draft', visibility: 'public', archivedAt: null, archivedByImportId: null },
+      { id: 'c-match', novelId: scope.novelId, authorId: scope.userId, volumeId: 'v1', title: '起点', summary: null, content: '旧第一章', orderIndex: 1, orderInVolume: 1, wordCount: 4, revision: 1, status: 'draft', visibility: 'public', archivedAt: null, archivedByImportId: null },
       { id: 'c-keep', novelId: scope.novelId, authorId: scope.userId, volumeId: 'v1', title: '保留章', summary: null, content: '别动我', orderIndex: 2, orderInVolume: 2, wordCount: 3, revision: 1, status: 'draft', visibility: 'public', archivedAt: null, archivedByImportId: null },
     )
     Object.assign(fixture.state.novel[0], { chapterCount: 2, wordCount: 7, lastChapterTitle: '保留章' })
-    // 源：同名「第一章」更新 + 新增「第二章」；没有「保留章」。
+    // 源：同名「起点」更新 + 新增「远行」；没有「保留章」。
     fixture.parse.mockResolvedValue({ volumes: [{ title: '卷A', chapters: [
-      { title: '第一章', content: '新第一章正文', source: 'original.txt#char=0-6' },
-      { title: '第二章', content: '新第二章', source: 'original.txt#char=6-10' },
+      { title: '起点', content: '新第一章正文', source: 'original.txt#char=0-6' },
+      { title: '远行', content: '新第二章', source: 'original.txt#char=6-10' },
     ] }], metadata: {}, warnings: [], sourceChars: 10, parserVersion: 'fixture-1' })
     const result = await approved()
     const receipt = await commitNovelImport(scope, result.job.jobId, result.input)
@@ -537,8 +553,8 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     expect(fixture.state.volume).toHaveLength(1)
     expect(receipt).toMatchObject({ volumeCount: 1, chapterCount: 2 })
     const live = fixture.state.chapter.filter(c => c.archivedAt === null)
-    expect(live.map(c => c.title).sort()).toEqual(['保留章', '第一章', '第二章'].sort())
-    expect([...live].sort((a, b) => Number(a.orderIndex) - Number(b.orderIndex)).map(c => [c.title, c.volumeId, c.orderInVolume])).toEqual([['第一章', 'v1', 1], ['保留章', 'v1', 2], ['第二章', 'v1', 3]])
+    expect(live.map(c => c.title).sort()).toEqual(['保留章', '起点', '远行'].sort())
+    expect([...live].sort((a, b) => Number(a.orderIndex) - Number(b.orderIndex)).map(c => [c.title, c.volumeId, c.orderInVolume])).toEqual([['起点', 'v1', 1], ['保留章', 'v1', 2], ['远行', 'v1', 3]])
     // 字数/章数对全部非归档章节重算：别动我3 + 新第一章6 + 新第二章4 = 13，共3章
     expect(fixture.state.novel[0]).toMatchObject({ wordCount: 13, chapterCount: 3 })
     // 备份快照只记被归档的旧行，可恢复
@@ -552,7 +568,7 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     const selected = await selectNovelImportContent(human(), result.job.jobId, input)
     expect(selected.manifestRevision).toBe(result.preview.manifestRevision + 1)
     expect(selected.volumes).toEqual([])
-    expect(selected.contentExclusions).toEqual([expect.objectContaining({ kind: 'chapter', title: '第一章' })])
+    expect(selected.contentExclusions).toEqual([expect.objectContaining({ kind: 'chapter', title: '起点' })])
     expect(selected.partialImport).toBe(true)
     expect(fixture.state.novel[0].title).toBe('原书')
     await expect(selectNovelImportContent(human(), result.job.jobId, input)).rejects.toMatchObject({ code: 'IMPORT_PREVIEW_CHANGED' })
@@ -841,7 +857,7 @@ describe('staged import authorization and durability (DB mocked; not concurrency
   it('rechecks the approved target after rolling back an active volume-order collision', async () => {
     existingBook()
     fixture.parse.mockResolvedValue({ volumes: [
-      { title: '正文卷', chapters: [{ title: '第一章', content: '原文不改写', source: 'original.txt#char=0-8' }] },
+      { title: '正文卷', chapters: [{ title: '起点', content: '原文不改写', source: 'original.txt#char=0-8' }] },
       { title: '新增卷', chapters: [{ title: '新章', content: '新增正文', source: 'original.txt#char=8-12' }] },
     ], metadata: {}, warnings: [], sourceChars: 12, parserVersion: 'fixture-1' })
     const result = await approved()
@@ -995,7 +1011,7 @@ describe('import HTTP boundary', () => {
     expect(downloaded.headers['x-content-type-options']).toBe('nosniff')
     expect(downloaded.headers['cache-control']).toBe('private, no-store')
     expect(downloaded.headers['content-disposition']).toContain("filename*=UTF-8''%E6%B5%8B%E8%AF%95%27%28%29.txt")
-    expect(downloaded.body.toString()).toBe('第一章\n原文不改写')
+    expect(downloaded.body.toString()).toBe('第一章 起点\n原文不改写')
     fixture.state.novelImportSource[0].sha256 = '0'.repeat(64)
     const corrupted = await request(app).get(`${base}/${job.jobId}/source`).set('x-test-user', scope.userId)
     expect(corrupted.status).toBe(503)

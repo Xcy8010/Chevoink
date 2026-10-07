@@ -148,10 +148,12 @@ describe.runIf(available)('new-draft quality-first prepayment admission', () => 
       const root = scenario === 'legacy' ? null : await initializeDurableTask({ userId: base.userId, runId, sourceMessageId })
       const ctx: ToolContext = { ...subject, sessionId: base.sessionId, chapterId: null, callId: 'create-new-draft', mode: 'build',
         creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
+      const volumeDecision = { kind: 'continue' as const, reason: '本卷主困局尚未收束，先推进原目标。' }
+      await prepareStoryCompilation({ ...subject, mode: 'balanced', intentSummary: prompt, volumeDecision })
       const created = await chapterCreateTool.execute(ctx, { title: '合成新稿', content: '他按住门把，停了一会。', position: 2 })
       const chapterId = created.observedState!.id
       const before = await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })
-      const prepared = await prepareStoryCompilation({ ...subject, chapterId, mode: 'balanced', intentSummary: prompt })
+      const prepared = await prepareStoryCompilation({ ...subject, chapterId, mode: 'balanced', intentSummary: prompt, volumeDecision })
       const compilationId = prepared.compilation.id
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
       await saveSceneTasks({ ...subject, compilationId, tasks: [{ purpose: '推进场景', entryState: state, goal: '开门', obstacle: '犹豫',
@@ -490,7 +492,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
             : requests === 2 ? JSON.stringify({ corrections: [{ index: 0, quote: scenario === 'evidence-corrected' ? '原文' : '仍不存在' }] })
               : '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}'
           : scenario === 'full-chain' ? ([
-            '{"findings":[{"signal":"body","severity":"warning","evidence":"原文承接不足","suggestion":"局部澄清"}],"patches":[{"oldText":"原文","newText":"新文"}]}',
+            '{"findings":[{"signal":"body","severity":"warning","evidence":"原文承接不足","suggestion":"局部澄清","sourceEvidence":[{"source":"current","quote":"原文"}]}],"patches":[{"oldText":"原文","newText":"新文"}]}',
             '{"findings":[{"signal":"emotion_grounding","severity":"advisory","quote":"原文","explanation":"需要具体动作","suggestion":"局部落实","confidence":0.9}],"patches":[{"key":"emotion_grounding:0:2","replacement":"禁止改写"}]}',
           ][requests - 1] ?? '{"patches":[]}') : scenario === 'context-change' || scenario === 'repair' && requests === 3 ? '{"findings":[]}' : scenario === 'format' || scenario === 'format-retry' && requests === 2 ? 'broken JSON'
           : requests === 1 ? JSON.stringify({ findings: repairing || scenario === 'protected' ? [{ signal: 'emotion_grounding', severity: 'warning', quote: '原文', explanation: '缺少动作', suggestion: '改成新文', confidence: 0.9 }] : [] })
@@ -660,7 +662,7 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('真实报告
       if (family === 'continuity') {
         const current = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId }, include: { chapter: true, bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
         const coverage = compilerContinuityCoverage({ chapter: current.chapter!, bridge: current.bridge, sceneTasks: current.sceneTasks, source: null })
-        await validateStoryContinuity({ ...f, compilationId, findings: ['body', 'object', 'knowledge'].map(signal => ({ signal: signal as 'body' | 'object' | 'knowledge', severity: 'warning', evidence: '原文承接风险', suggestion: '局部澄清' })),
+        await validateStoryContinuity({ ...f, compilationId, findings: ['body', 'object', 'knowledge'].map(signal => ({ signal: signal as 'body' | 'object' | 'knowledge', severity: 'warning', evidence: '原文承接风险', suggestion: '局部澄清', sourceEvidence: [{ source: 'current' as const, quote: '原文' }] })),
           expectedChapterRevision: 1, independentCheck: 'complete', coverage })
       } else {
         const report = await persistHumanityQualityReport({ ...f, compilationId, chapterId: f.chapterId, chapterRevision: 1, mode: 'premium', deterministicMetrics: {}, deterministicFindings: [], criticComplete: true,

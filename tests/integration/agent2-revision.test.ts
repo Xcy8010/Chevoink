@@ -41,7 +41,7 @@ describe.skipIf(!dbAvailable)('Agent 2.0 章节 revision 乐观锁（需 DB）',
     const chapter = await request(app)
       .post(`/api/novels/${novelId}/chapters`)
       .set('Cookie', cookie)
-      .send({ title: '第一章', content: '初始正文', status: 'draft', visibility: 'private' })
+      .send({ title: '第一章 起点', content: '初始正文', status: 'draft', visibility: 'private' })
     expect(chapter.status).toBe(201)
     chapterId = chapter.body.data.chapter.id as string
     initialRevision = chapter.body.data.chapter.revision as number

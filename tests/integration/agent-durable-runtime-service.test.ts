@@ -11,6 +11,7 @@ import { readTaskBudget } from '../../api/lib/agent/runtime-budget.js'
 import { advanceDurableContext } from '../../api/lib/agent/runtime-checkpoint-step.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
+import { prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
 import * as runtimeExecutor from '../../api/lib/agent/runtime-executor.js'
 import { executeDurableStep,waitForDurableDecision } from '../../api/lib/agent/runtime-executor.js'
 import * as runtimeLease from '../../api/lib/agent/runtime-lease.js'
@@ -138,6 +139,7 @@ describe.runIf(available)('durable service dispatch', () => {
       expect(first.configuration.tools.find(tool => tool.function.name === chapterCreateTool.name)).toEqual(toOpenAITools([chapterCreateTool], spec.scope)[0])
       expect(await initializePersistedLoopRun(f.userId, runId, input)).toEqual(first)
       const lease = await claim({ userId: f.userId, runId })
+      await prepareStoryCompilation({ userId: f.userId, novelId: f.novelId, runId, targetOrderIndex: 2, mode: 'balanced', intentSummary: prompt, volumeDecision: { kind: 'continue', reason: '当前卷主困局尚未收束，本章继续推进' } })
       await saveExecutionState(lease, { expectedRevision: first.frame.revision, expectedHash: first.frame.snapshotHash,
         snapshot: { ...first.frame.state, messages: [...first.frame.state.messages, { role: 'assistant', content: null, toolCalls: [
           { id: 'server-positioned-create', name: chapterCreateTool.name, arguments: JSON.stringify({ title: '合成下一章' }) },

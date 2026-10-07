@@ -21,7 +21,8 @@ async function legacy(work: (f: { userId: string; novelId: string; sessionId: st
       taskSpec: json(spec), startRequest: { prompt }, usage: { totalTokens: 524051, checkpoint: { stagnantBatches: 6, progressSignatures: [] } } } })
     const frozen = await prisma.$transaction(tx => freezeWritingScope(tx, { ...base, runId }, spec, prompt))
     await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: json(frozen) } })
-    const prepared = await prepareStoryCompilation({ ...base, runId, chapterId: undefined, mode: 'premium', intentSummary: prompt })
+    const prepared = await prepareStoryCompilation({ ...base, runId, chapterId: undefined, mode: 'premium', intentSummary: prompt,
+      volumeDecision: { kind: 'continue', reason: '本卷主困局尚未收束，继续推进原卷目标。' } })
     await work({ userId: base.userId, novelId: base.novelId, sessionId: session.id, runId, taskSpec: taskSpecSchema.parse(frozen), compilationId: prepared.compilation.id })
   })
 }

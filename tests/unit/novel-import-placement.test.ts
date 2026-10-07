@@ -17,10 +17,11 @@ describe('import volume placement', () => {
     expect(result.chapters.map(item => [item.title, item.orderIndex])).toEqual([['火墙', 1], ['火墙', 2]])
     expect(result.chapters[0].content).toBe('原文第1章《火墙》')
   })
-  it('does not take another ordinal namesake and refuses empty plain titles', () => {
+  it('does not take another ordinal namesake and accepts literal ordinal names while refusing blank titles', () => {
     expect(plan([volume('v1', '第一卷', 1)], [chapter('a', 'v1', '火墙', 1)], [source('第一卷', '第2章 火墙')]).archivedChapterIds).toEqual([])
     expect(plan([volume('v1', '第一卷', 1)], [chapter('a', 'v1', '火墙', 46, 46)], [source('第一卷', '《第45章《火墙》》')]).archivedChapterIds).toEqual([])
-    expect(() => plan([volume('v1', '第一卷', 1)], [], [source('第一卷', '第1章')])).toThrow(/章名/)
+    expect(plan([volume('v1', '第一卷', 1)], [], [source('第一卷', '第1章')]).chapters[0].title).toBe('第1章')
+    expect(() => plan([volume('v1', '第一卷', 1)], [], [source('第一卷', '  ')])).toThrow(/章名/)
   })
   it.each([1, 3])('reuses the sole empty default volume at revision %s, including after restore', revision => {
     const result = plan([{ ...volume('v1', '第一卷', 1), revision, summary: null }], [], [source('淬火', '甲', '乙', '丙', '丁')])
