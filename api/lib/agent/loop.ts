@@ -1,5 +1,6 @@
 import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
+import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
@@ -1056,6 +1057,24 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     if (pendingReviews.size) {
       throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED',
         '上次独立检查或其修订链仍有未确认的请求。正文、进度与原预算保留；请先核对原调用回执，系统不会因继续任务而重发未知付费请求，也未判定检查通过。')
+    }
+    if (params.resume || previousTask) {
+      // Older executions saved prerequisites before those persisted transitions
+      // had semantic receipts. Observe each verified task/target/phase once,
+      // before a provider turn; restarting cannot mint another progress credit.
+      const savedMilestones = await readPersistedWritingWorkflowMilestones({
+        userId: params.userId, novelId: params.novelId, runId, taskSpec,
+      })
+      let recoveredWorkflowProgress = false
+      for (const milestone of savedMilestones) {
+        const action = milestone.phase === 'prepare' ? 'story_compiler_prepare' : 'scene_task_build'
+        recoveredWorkflowProgress = observeWritingWorkflowMilestone(progressSignatures, action, milestone,
+          { userId: params.userId, novelId: params.novelId, runId, taskSpec }) || recoveredWorkflowProgress
+      }
+      if (recoveredWorkflowProgress) {
+        stagnantBatches = nextStagnantBatch(stagnantBatches, true, false)
+        await persistCheckpoint()
+      }
     }
     if (!params.resume && taskSpec.intent !== 'research_analysis') {
       await withGoalExecutionContext(ownedGoalExecution, () => withGoalEffects(() => captureUserDirectives({

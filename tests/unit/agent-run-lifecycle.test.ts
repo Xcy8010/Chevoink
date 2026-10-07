@@ -4,12 +4,14 @@ import type { AgentMessagePart, AgentStreamEventBody, AgentTodoItem, TaskSpec } 
 import type { AgentTool, ToolContext, ToolResult } from '../../api/lib/agent/tools/types.js'
 import type { chatWithTools as chatType } from '../../api/lib/ai-service.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import type { WritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 
 const mocks = vi.hoisted(() => ({
   chat: vi.fn(), emit: vi.fn(), persist: vi.fn(async () => ({})), dispose: vi.fn(async () => {}),
   openAITools: vi.fn(() => []),
   update: vi.fn<(input: { data: Record<string, unknown> }) => Promise<{ taskSpec: TaskSpec | null; usage?: unknown; currentTurn?: number; startedAt?: Date; events?: Array<{ type: string; createdAt: Date }> }>>(async () => ({ taskSpec: null })), owner: vi.fn(async () => ({ userId: 'user' })), previous: vi.fn<(input?: { where?: Record<string, unknown> }) => Promise<unknown>>(async () => null),
   committedChapter: vi.fn(async () => false),
+  savedWorkflow: vi.fn(async (): Promise<WritingWorkflowMilestone[]> => []),
   todos: vi.fn(async (): Promise<AgentTodoItem[]> => []),
   priorRuns: vi.fn(),
   report: vi.fn(async () => ({ chineseCharacters: 0, content: '' })),
@@ -165,6 +167,10 @@ vi.mock('../../api/lib/agent/skills/receipts.js', () => ({ recordSkillLoads: moc
 vi.mock('../../api/lib/agent/skills/service.js', async () => ({ resolveEnabledRuntimeSkills: vi.fn(async () => (await import('../../api/lib/agent/skills/index.js')).skillCatalog) }))
 vi.mock('../../api/lib/agent/context-engine.js', () => ({ captureUserDirectives: vi.fn(), compactSessionContext: vi.fn(async () => null) }))
 vi.mock('../../api/lib/agent/story-memory.js', () => ({ syncNovelMemoryProjection: vi.fn(async () => null) }))
+vi.mock('../../api/lib/agent/story-compiler.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/story-compiler.js')>(),
+  readPersistedWritingWorkflowMilestones: mocks.savedWorkflow,
+}))
 vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChapter: mocks.committedChapter }))
 vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportForDelivery: mocks.report }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
@@ -247,6 +253,7 @@ beforeEach(() => {
   seedAdmission('检查当前章节', 'c')
   mocks.todos.mockResolvedValue([])
   mocks.committedChapter.mockResolvedValue(false)
+  mocks.savedWorkflow.mockReset().mockResolvedValue([])
   mocks.previous.mockResolvedValue(null)
   mocks.priorRuns.mockReset()
   mocks.priorRuns.mockResolvedValue([])
@@ -305,6 +312,80 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(commit.execute).toHaveBeenCalledOnce()
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 524101, checkpoint: { tokenBudget: 500, maxTurns: 1, readProgress: 1, writeProgress: 2, stagnantBatches: 0 } })
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+
+  it('recovers an old saved preparation before the first read turn and then writes the actual next chapter', async () => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 6, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 0, writeBaseline: 0, readProgress: 1, readBaseline: 0, progressSignatures: [] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 10, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 524000, completionTokens: 51, totalTokens: 524051, checkpoint } })
+    const milestone = (phase: 'prepare' | 'scenes'): WritingWorkflowMilestone => ({
+      version: 1, userId: 'user', novelId: 'novel', runId: 'run', targetOrderIndex: 20, phase,
+    })
+    mocks.savedWorkflow.mockResolvedValue([milestone('prepare')])
+    const preparedKey = `workflow:${JSON.stringify(['user', 'novel', taskSpec.id, 20, 'prepare'])}`
+    const read = tool('chapter_bridge_get', async () => {
+      expect(mocks.runs.get('run')?.usage).toMatchObject({
+        checkpoint: { writeProgress: 0, readProgress: 1, stagnantBatches: 0, progressSignatures: [preparedKey] } })
+      return { output: '真实已保存的编译准备，尚无场景和正文' }
+    })
+    const scene = tool('scene_task_build', async () => {
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { writeProgress: 0, stagnantBatches: 1 } })
+      return { output: '场景已保存', workflowMilestone: milestone('scenes') }
+    }, false)
+    let body = ''
+    const write = tool('chapter_write', async () => {
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { writeProgress: 0, stagnantBatches: 0 } })
+      body = '第20章真实新正文'
+      return { output: '正文已保存', display: { kind: 'chapterDiff', chapterId: 'new20', chapterTitle: '第20章', before: '', after: body, appliedDirectly: true } }
+    }, false)
+    const commit = tool('chapter_bridge_commit', async () => {
+      expect(body).toBe('第20章真实新正文')
+      mocks.committedChapter.mockResolvedValue(true)
+      return { output: '终态已提交', requiredResult: { targetId: 'new20', contentHash: 'b'.repeat(64) } }
+    }, false)
+    mocks.tools = [read, scene, write, commit]
+    mocks.chat.mockImplementationOnce(async () => {
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 524051,
+        checkpoint: { writeProgress: 0, readProgress: 1, stagnantBatches: 0, progressSignatures: [preparedKey] } })
+      return response('', [call('read', read.name)])
+    })
+    queue(response('', [call('scene', scene.name)]),
+      response('', [call('write', write.name)]), response('', [call('commit', commit.name)]), response('已保存。'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+    expect(read.execute).toHaveBeenCalledOnce()
+    expect(write.execute).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 524101,
+      checkpoint: { tokenBudget: 500, maxTurns: 1, writeProgress: 2, readProgress: 1, stagnantBatches: 0 } })
+  })
+
+  it.each(['credited', 'missing', 'foreign'] as const)('does not mint a resume grace from %s preparation observations', async state => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const key = `workflow:${JSON.stringify(['user', 'novel', taskSpec.id, 20, 'prepare'])}`
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 6, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 0, writeBaseline: 0, readProgress: 0, readBaseline: 0, progressSignatures: state === 'credited' ? [key] : [] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 10, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 100, completionTokens: 0, totalTokens: 100, checkpoint } })
+    mocks.savedWorkflow.mockResolvedValue(state === 'missing' ? [] : [{ version: 1, userId: state === 'foreign' ? 'foreign' : 'user',
+      novelId: 'novel', runId: 'run', targetOrderIndex: 20, phase: 'prepare' }])
+    const read = tool('chapter_bridge_get', async () => ({ output: '只读取状态不能创造新的准备或正文进度' }))
+    const scene = tool('scene_task_build', async () => ({ output: '不应被此读取解锁' }), false)
+    mocks.tools = [read, scene]
+    queue(response('', [call('read', read.name)]), response('', [call('scene', scene.name)]))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(scene.execute).not.toHaveBeenCalled()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 110,
+      checkpoint: { tokenBudget: 500, maxTurns: 1, writeProgress: 0, readProgress: 0, stagnantBatches: 7 } })
   })
 
   it('does not let a repeated preparation receipt or prose complete a chapter or erase persisted stagnation', async () => {

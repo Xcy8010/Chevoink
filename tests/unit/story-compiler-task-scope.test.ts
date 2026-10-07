@@ -12,7 +12,7 @@ const db = vi.hoisted(() => ({
 vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<typeof import('../../api/lib/prisma.js')>(), prisma: db }))
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
-import { buildStoryCompilerDigest, commitChapterBridge, compilationRunScope, prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
+import { buildStoryCompilerDigest, commitChapterBridge, compilationRunScope, prepareStoryCompilation, readPersistedWritingWorkflowMilestones } from '../../api/lib/agent/story-compiler.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { hasCommittedTaskChapter } from '../../api/lib/agent/humanity-quality.js'
@@ -43,6 +43,16 @@ beforeEach(() => {
 })
 
 describe('story compiler task identity', () => {
+  it.each(['malformed', 'review', 'unbounded', 'selection', 'proposal', 'wrong-run'] as const)('saved workflow recovery rejects %s input before querying progress', async scenario => {
+    const original = spec('写下一章')
+    const taskSpec = scenario === 'malformed' ? {} : scenario === 'review' ? { ...original, intent: 'review' }
+      : scenario === 'unbounded' ? { ...original, scope: { ...original.scope, writing: { ...original.scope.writing, kind: 'unbounded', targets: [] } } }
+        : scenario === 'selection' ? { ...original, scope: { ...original.scope, selection: { chapterId: 'old31', text: '原文', start: 0, end: 2 } } }
+          : scenario === 'proposal' ? { ...original, writingPacing: 'proposal_only' } : { ...original, runId: 'different-run' }
+    expect(await readPersistedWritingWorkflowMilestones({ ...ctx, taskSpec }, db as unknown as Prisma.TransactionClient)).toEqual([])
+    expect(db.agentRun.findFirst).not.toHaveBeenCalled()
+    expect(db.storyCompilation.findMany).not.toHaveBeenCalled()
+  })
   function historicalResume(originOverride: Record<string, unknown> = {}) {
     const originalSpec = { ...spec('写下一章'), runId: 'original-run' }
     const resumed = { runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: originalSpec }

@@ -18,9 +18,10 @@ import { activeChapterScope } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { saveStoryMemory } from './story-memory.js'
 import { qualityReportMatchesContent } from './quality-report-contract.js'
-import { taskSpecSchema } from '../../../shared/contracts/index.js'
+import { taskSpecSchema, sceneTaskInputSchema } from '../../../shared/contracts/index.js'
 import { requiresNextChapterDelivery } from './completion-guard.js'
 import { runtimeJson } from './runtime-common.js'
+import type { WritingWorkflowMilestone } from './semantic-progress.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches, continuityStoryInput, type CompilerContinuityCoverage } from './compiler-continuity-contract.js'
 
@@ -469,6 +470,67 @@ export async function compilationRunScope(db: Prisma.TransactionClient, input: {
     scope.AND = [{ OR: [{ chapterId: null }, { chapter: { createdAt: { gte: firstRun.createdAt } } }] }]
   }
   return scope
+}
+
+/** Legacy compatibility only: read authentic saved prerequisites before the
+ * first resumed provider turn. Stable task/target/phase deduplication belongs
+ * to the checkpoint consumer; this never writes content, budgets or receipts. */
+export async function readPersistedWritingWorkflowMilestones(input: {
+  userId: string; novelId: string; runId: string; taskSpec: unknown
+}, transaction?: Prisma.TransactionClient): Promise<WritingWorkflowMilestone[]> {
+  if (!transaction) return prisma.$transaction(tx => readPersistedWritingWorkflowMilestones(input, tx))
+  const db = transaction
+  const parsed = taskSpecSchema.safeParse(input.taskSpec)
+  if (!parsed.success || parsed.data.runId !== input.runId || parsed.data.scope.novelId !== input.novelId
+    || !['write', 'revise'].includes(parsed.data.intent) || parsed.data.scope.selection
+    || ['proposal_only', 'conversation_only'].includes(parsed.data.writingPacing ?? '')
+    || parsed.data.scope.writing?.kind !== 'bounded') return []
+  const main = { userId: input.userId, novelId: input.novelId, runtimeProtocolVersion: 0, taskRootId: null,
+    incomingChildGrant: null, session: { userId: input.userId, novelId: input.novelId, spawnedFromRunId: null, spawnedFromSessionId: null } }
+  const current = await db.agentRun.findFirst({ where: { ...main, id: input.runId, status: { in: ['queued', 'running', 'awaiting_approval'] } } })
+  if (!current) return []
+  if (!await db.novel.findFirst({ where: { id: input.novelId, authorId: input.userId }, select: { id: true } })) return []
+  const contractHash = (spec: unknown) => {
+    const task = taskSpecSchema.safeParse(spec)
+    return task.success ? runtimeJson(JSON.parse(JSON.stringify({ ...task.data, runId: input.runId }))).hash : null
+  }
+  const expectedHash = contractHash(parsed.data)
+  if (contractHash(current.taskSpec) !== expectedHash) return []
+  const original = await readWritingScope(db, input)
+  if (original.parentRunId || original.taskId !== parsed.data.id || contractHash(original.spec) !== expectedHash
+    || original.writing?.kind !== 'bounded') return []
+  const runs = await db.agentRun.findMany({ where: { ...main, sessionId: current.sessionId,
+    taskSpec: { path: ['id'], equals: parsed.data.id } } })
+  const runIds: string[] = []
+  for (const run of runs) {
+    if (contractHash(run.taskSpec) !== expectedHash) continue
+    const identity = await readCompilerTaskIdentity(db, { ...input, runId: run.id })
+    if (identity.task && contractHash(identity.task) === expectedHash) runIds.push(run.id)
+  }
+  if (!runIds.includes(input.runId) || !runIds.includes(original.sourceRunId)) return []
+  const compilations = await db.storyCompilation.findMany({ where: { userId: input.userId, novelId: input.novelId,
+    runId: { in: runIds }, status: 'active', targetOrderIndex: { in: original.writing.targets.map(target => target.orderIndex) } },
+    include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+  const milestones: WritingWorkflowMilestone[] = []
+  for (const compilation of compilations) {
+    const target = original.writing.targets.find(item => item.orderIndex === compilation.targetOrderIndex)!
+    const chapterId = target.chapterId ?? original.bindings?.targets.find(item => item.orderIndex === target.orderIndex)?.chapterId ?? null
+    const bridge = compilation.bridge
+    if (compilations.filter(item => item.targetOrderIndex === target.orderIndex).length !== 1
+      || compilation.chapterId !== chapterId || !bridge || bridge.userId !== input.userId || bridge.novelId !== input.novelId
+      || bridge.compilationId !== compilation.id || bridge.targetOrderIndex !== target.orderIndex || bridge.toChapterId !== chapterId
+      || bridge.committedAt || !['prepare', 'beat', 'write', 'check', 'repair'].includes(compilation.stage)) continue
+    if (chapterId && (!compilation.chapter || compilation.chapter.authorId !== input.userId || compilation.chapter.novelId !== input.novelId
+      || compilation.chapter.orderIndex !== target.orderIndex || compilation.chapter.archivedAt
+      || !await db.chapter.findFirst({ where: { id: chapterId, authorId: input.userId, ...activeChapterScope(input.novelId) }, select: { id: true } }))) continue
+    const milestone = { version: 1 as const, userId: input.userId, novelId: input.novelId, runId: input.runId, targetOrderIndex: target.orderIndex }
+    milestones.push({ ...milestone, phase: 'prepare' })
+    if (compilation.sceneTasks.length > 0 && compilation.sceneTasks.length <= 4 && compilation.stage !== 'prepare'
+      && compilation.sceneTasks.every((scene, index) => scene.userId === input.userId && scene.novelId === input.novelId
+        && scene.compilationId === compilation.id && scene.chapterId === chapterId && scene.ordinal === index + 1
+        && sceneTaskInputSchema.safeParse(scene).success)) milestones.push({ ...milestone, phase: 'scenes' })
+  }
+  return milestones
 }
 
 /** A chapter-only CHECK can inherit only the original writing task's prepared
