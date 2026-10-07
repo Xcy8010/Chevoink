@@ -189,6 +189,9 @@ jobs:
           --coverage.thresholds.lines=0
           --no-file-parallelism
 
+      - name: 验证本分片含真实覆盖率
+        run: npx tsx scripts/ci-coverage.ts blob .vitest-reports/blob-${{ matrix.shard }}-${{ matrix.count }}.json
+
       - name: 保存 Vitest blob 报告
         if: always()
         uses: actions/upload-artifact@v4
@@ -237,10 +240,24 @@ jobs:
       - name: 验证分片数量、测试文件和执行回执齐全
         run: npx tsx scripts/ci-test-plan.ts verify-reports
 
+      - name: 验证每个分片覆盖率非空且来源完整
+        run: npx tsx scripts/ci-coverage.ts blobs .vitest-reports
+
       - name: 合并测试结果并执行全局覆盖率门禁
         # vitest.config.ts supplies the unchanged CI thresholds (30/73/52/30).
         # --merge-reports runs no tests and therefore needs no database service.
         run: npx vitest --merge-reports .vitest-reports --coverage
+
+      - name: 验证合并覆盖率非空与原有四项门槛
+        run: npx tsx scripts/ci-coverage.ts summary coverage/coverage-summary.json
+
+      - name: 保存本次合并覆盖率证据
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-coverage-${{ github.sha }}
+          path: coverage/coverage-summary.json
+          if-no-files-found: error
+          retention-days: 7
 
   # Keep the existing required status context while making the expensive work
   # explicit above. This fails closed if any static, shard, or merge gate fails.

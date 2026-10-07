@@ -2,8 +2,9 @@ import { fileURLToPath } from 'node:url'
 
 import { defineConfig } from 'vitest/config'
 
+export const ciCoverageThresholds = { statements: 30, branches: 73, functions: 52, lines: 30 } as const
 const coverageThresholds = process.env.CI
-  ? { statements: 30, branches: 73, functions: 52, lines: 30 }
+  ? ciCoverageThresholds
   : { statements: 10, branches: 59, functions: 15, lines: 10 }
 
 export default defineConfig({
@@ -36,7 +37,9 @@ export default defineConfig({
         '**/*.d.ts',
         '**/virtual:*',
         '**/__x00__*',
-        '**/\x00*',
+        // Vitest 4's picomatch strips literal NUL bytes from glob patterns.
+        // Keep the virtual-file exclusion without turning it into **/*.
+        '**/[\\x00]*',
         'cypress/**',
         'test?(s)/**',
         'test?(-*).?(c|m)[jt]s?(x)',
