@@ -127,7 +127,7 @@ describe('saved artifact display withdrawal', () => {
     expect(await readCompletedWritingDelivery(f.db, subject)).toBeNull()
     expect(await readSavedWritingPresentation(f.db, subject)).toBeNull()
   })
-  it('closed completed revision channel preserves current factual errors and quality advice in the saved confirmation', async () => {
+  it('completed automatic revision does not certify unhandled factual errors and quality advice', async () => {
     const f = fixture(), chapter = structuredClone(f.chapter)
     mocks.preference.mockResolvedValue({ mode: 'saved_only', sourceRunId: 'author', sourceMessageId: 'message' })
     f.terminal.validation.errorCount = 1
@@ -135,7 +135,7 @@ describe('saved artifact display withdrawal', () => {
     f.quality.status = 'needs_repair'
     f.quality.findings = [{ id: 'retained', signal: 'object', severity: 'error', disposition: 'pending', authorFeedback: null }]
     expect(await readChapterReviewReadiness(f.db, subject)).toMatchObject({ ready: true, continuity: 'complete', continuityErrorCount: 1, quality: 'complete', qualityErrorCount: 1 })
-    expect(await readCompletedWritingDelivery(f.db, subject)).toMatchObject({ text: '已保存《第一章 旧罗盘》。' })
+    expect(await readCompletedWritingDelivery(f.db, subject)).toBeNull()
     expect(f.chapter).toEqual(chapter)
     expect(f.terminal.validation.errorCount).toBe(1)
     expect(f.quality.status).toBe('needs_repair')

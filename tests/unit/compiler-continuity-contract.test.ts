@@ -9,7 +9,7 @@ import * as memory from '../../api/lib/agent/story-memory.js'
 const revisionChannel = vi.hoisted(() => vi.fn())
 vi.mock('../../api/lib/agent/chapter-review-guard.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/chapter-review-guard.js')>(),
-  isChapterRevisionChannelOpen: revisionChannel,
+  probeChapterReviewRevision: revisionChannel,
   // This suite isolates the legacy/manual error gate. Writing requirements are
   // exercised with real persisted reads in chapter-review-readiness.test.ts.
   readChapterReviewReadiness: vi.fn().mockResolvedValue(null),
@@ -102,7 +102,7 @@ describe('compiler continuity report dependencies', () => {
   })
 })
 
-describe('terminal commit gate follows the revision channel', () => {
+describe('terminal commit gate is independent of paid revision availability', () => {
   const fixture = () => {
     const current = input(), bridge = { ...current.bridge, fromChapterId: null }
     const coverage = compilerContinuityCoverage({ ...current, bridge, source: null })
@@ -134,15 +134,17 @@ describe('terminal commit gate follows the revision channel', () => {
     vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory' } as never)
     const f = fixture()
     await expect(f.commit()).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
-    expect(revisionChannel).toHaveBeenCalledWith(f.db, { userId: 'u', novelId: 'n', runId: 'run-1' }, { id: 'c', revision: 2 })
+    expect(revisionChannel).not.toHaveBeenCalled()
     expect(f.terminalWrite).not.toHaveBeenCalled()
   })
-  it('delivers with the retained findings once the revision channel is closed', async () => {
+  it('keeps unhandled findings pending when automatic revision is unavailable', async () => {
     revisionChannel.mockResolvedValue(false)
     vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory' } as never)
     const f = fixture()
-    await expect(f.commit()).resolves.toMatchObject({ compilationId: 'comp', chapterId: 'c', chapterRevision: 2, skippedMemoryCount: 0, retainedIssueCount: 2 })
-    expect(revisionChannel).toHaveBeenCalledOnce()
+    await expect(f.commit()).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
+    expect(revisionChannel).not.toHaveBeenCalled()
+    expect(f.terminalWrite).not.toHaveBeenCalled()
+    expect(memory.saveStoryMemory).not.toHaveBeenCalled()
   })
 })
 

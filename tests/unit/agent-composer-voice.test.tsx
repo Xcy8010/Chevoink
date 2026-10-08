@@ -78,10 +78,14 @@ describe('Agent voice draft integration', () => {
     fireEvent.click(screen.getByRole('button', { name: '取消指定子 Agent' }))
     expect(useAgentStore.getState().composerSubagent).toBeNull()
   })
-  it('renders an animated preparation card before execution and settles in place', () => {
+  it('distinguishes preparation from execution and settles in place', () => {
     const part = { type: 'tool-call' as const, callId: 'preview', toolName: 'chapter_write', title: '写入章节正文', args: null, status: 'running' as const, preparing: true, progressChars: 80 }
     const { container, rerender } = render(<AgentMessageParts parts={[part]} streaming runActive />)
     expect(screen.getByText('写入章节正文')).toBeTruthy()
+    expect(screen.getByText('准备调用…')).toBeTruthy()
+    expect(container.querySelector('.agent-tool-progress')).toBeNull()
+    expect(screen.queryByText('已生成 80 字 · 执行中…')).toBeNull()
+    rerender(<AgentMessageParts parts={[{ ...part, preparing: false }]} streaming runActive />)
     expect(screen.getByText('已生成 80 字 · 执行中…')).toBeTruthy()
     expect(container.querySelector('.agent-tool-progress')).toBeTruthy()
     expect(screen.queryByText('已完成')).toBeNull()

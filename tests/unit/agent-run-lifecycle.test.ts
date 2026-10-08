@@ -43,9 +43,13 @@ vi.mock('../../api/lib/agent/goal-fence.js', () => ({
 vi.mock('../../api/lib/ai-service.js', () => ({ chatWithTools: mocks.chat }))
 // The real guard has PostgreSQL/coverage regression cases. Here only its
 // read-only observation is controlled to exercise real loop dispatch/order.
-vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({
+vi.mock('../../api/lib/agent/chapter-review-guard.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/chapter-review-guard.js')>(),
   readChapterReviewReadiness: mocks.reviewReadiness, probeChapterReviewRevision: mocks.reviewProbe,
 }))
+// Database call/result authentication is covered by the PostgreSQL recovery suite.
+// These loop-only fixtures contain no settled report witness.
+vi.mock('../../api/lib/agent/quality-review-admission.js', () => ({ readSettledQualityReviews: vi.fn(async () => []) }))
 vi.mock('../../api/lib/agent/quality-format-recovery.js', () => ({ readQualityFormatRecovery: mocks.qualityRecovery }))
 vi.mock('../../api/lib/agent/writing-delivery-limitations.js', () => ({
   readLimitedWritingDelivery: mocks.limitedDelivery, assertLimitedWritingDelivery: mocks.assertLimitedDelivery,
