@@ -55,6 +55,13 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('durable quality non-thinking policy without rewriting old paid requests', () => {
+  it.each([undefined, { tier: 'custom' as const, customModelId: null, reasoningEffort: 'high' as const },
+    { tier: 'speed' as const, customModelId: null, reasoningEffort: 'high' as const }])('rejects missing or mismatched native custom identity %# before any paid fallback', async modelSelection => {
+    await expect(resolveDurableAuxiliaryRuntime({ userId: 'owner', modelRuntime: runtime, modelSelection, task: 'quality' }))
+      .rejects.toMatchObject({ code: 'RUNTIME_MODEL_ADAPTER_REQUIRED' })
+    expect(mocks.runtime).not.toHaveBeenCalled()
+    expect(fetch).not.toHaveBeenCalled()
+  })
   it('resolves new independent quality at the configured default without requesting unsupported low', async () => {
     mocks.runtime.mockResolvedValue({ ...runtime, tier: 'speed' })
     expect(await resolveDurableAuxiliaryRuntime({ userId: 'owner', task: 'quality' })).toMatchObject({ selection: { tier: 'speed', reasoningEffort: 'high' } })
