@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import { createHash } from 'node:crypto'
 import * as aiService from '../../api/lib/ai-service.js'
 import * as review from '../../api/lib/agent/review-completion.js'
@@ -222,6 +222,37 @@ describe('严谨创作自动落实质量建议', () => {
     await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(f.critic.mock.calls[0][1]).toContain(JSON.stringify(f.bundle.originalRequest))
     expect(f.critic.mock.calls[0][1]).toContain('首章收益与情绪强度')
+    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it('separates a returned critic from its failed local finding save without claiming assessment success', async () => {
+    const f = fixture(false)
+    f.ctx.creativeFreedom = 'stable'
+    vi.mocked(humanityQuality.persistHumanityQualityReport).mockRejectedValue(new Prisma.PrismaClientKnownRequestError('conflicting finding', {
+      code: 'P2002', clientVersion: 'fixture', meta: { target: ['report_id', 'source', 'signal', 'evidence_hash'] },
+    }))
+    const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_REPORT_SAVE_FAILED',
+      reviewRequestFinished: { version: 1, chapterId: 'c', revision: 1, contentHash: digest(f.bundle.chapter.content) } })
+    expect(result.display).toBeUndefined()
+    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.model).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it.each(['other-constraint', 'not-returned', 'correction-interrupted'])('does not certify a finished request for %s', async scenario => {
+    const f = fixture(false)
+    f.ctx.creativeFreedom = 'stable'
+    const error = new Prisma.PrismaClientKnownRequestError('conflicting finding', { code: 'P2002', clientVersion: 'fixture',
+      meta: { target: scenario === 'other-constraint' ? ['id'] : ['report_id', 'source', 'signal', 'evidence_hash'] } })
+    vi.mocked(humanityQuality.persistHumanityQualityReport).mockRejectedValue(error)
+    const interruption = new Error('stream interrupted after partial evidence')
+    if (scenario === 'not-returned') f.critic.mockRejectedValue(interruption)
+    if (scenario === 'correction-interrupted') {
+      f.critic.mockResolvedValue(JSON.stringify({ findings: [{ sourceId: 'foreign', signal: 'emotion_grounding', severity: 'advisory',
+        quote: '证据0。', explanation: '具体动作', suggestion: '保留', confidence: 0.8 }] }))
+      f.model.mockRejectedValue(interruption)
+    }
+    await expect(qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })).rejects.toBe(scenario === 'correction-interrupted' ? interruption : error)
     expect(f.critic).toHaveBeenCalledOnce()
     expect(f.write).not.toHaveBeenCalled()
   })

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { Prisma } from '@prisma/client'
 import { assertOriginalRepairAuthority } from '../original-request.js'
 import { auxiliaryTextModel } from '../auxiliary-text-model.js'
 import { z } from 'zod'
@@ -319,15 +321,32 @@ export const qualityAnalyzeTool = defineTool({
       criticFallback = true
     }
     let inspected = inspectCorrectableCriticResponse(response, sources)
+    const saveReviewedReport = async (input: Parameters<typeof persistHumanityQualityReport>[0]) => {
+      try { return await persistHumanityQualityReport(input) } catch (error) {
+        const target = error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'
+          && Array.isArray(error.meta?.target) ? [...error.meta.target].sort().join(',') : ''
+        const findingConflict = ['evidence_hash,report_id,signal,source',
+          'end_offset,evidence_hash,report_id,signal,source,start_offset'].includes(target)
+        const returned = response !== null && !correctionError && !ctx.signal.aborted && !reviewSignal.aborted
+          && (!attemptedEvidenceCorrection || inspected.diagnostic.evidenceCorrection?.returned === true)
+        if (!findingConflict || !returned) throw correctionError ?? error
+        return null
+      }
+    }
+    const unsavedReport = (): ToolResult => ({ outcome: 'failed', failureCode: 'QUALITY_REPORT_SAVE_FAILED',
+      summary: '检查报告暂未保存', output: '检查请求已收到结果，但报告未能保存。正文与费用记录保留；读取最新正文后重新检查，当前版本尚未判定通过。',
+      reviewRequestFinished: { version: 1, chapterId, revision: bundle.chapter.revision,
+        contentHash: createHash('sha256').update(bundle.chapter.content).digest('hex') } })
     if (!formatRecovery && response !== null && !inspected.complete
       && ['json_invalid', 'incomplete_json', 'envelope_invalid', 'ambiguous_envelope', 'duplicate_keys', 'findings_invalid'].includes(inspected.diagnostic.classification)) {
       // Persist the real first failure before reserving recovery. No malformed
       // response is silently converted into an empty or passing assessment.
-      const failed = await persistHumanityQualityReport({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
+      const failed = await saveReviewedReport({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
         compilationId: args.compilationId ?? bundle.compilation?.id, chapterId, chapterRevision: bundle.chapter.revision, mode: ctx.qualityMode,
         deterministicMetrics: deterministic.metrics, qualityContextHash: contextHash, deterministicFindings: deterministic.findings,
         criticFindings: inspected.findings, criticComplete: false, criticDropped: inspected.diagnostic.droppedFindings,
         criticResponseDiagnostic: { ...inspected.diagnostic, callId: ctx.callId }, sources })
+      if (!failed) return unsavedReport()
       formatRecovery = await prisma.$transaction(tx => claimCurrentQualityFormatRecovery(tx, ctx, chapterId,
         { callId: ctx.callId, startedAt, contentHash: inspected.diagnostic.contentHash!, characterCount: inspected.diagnostic.characterCount }))
       if (!formatRecovery) return { outcome: 'failed' as const, failureCode: 'QUALITY_REPORT_INCOMPLETE', summary: '质量报告格式不完整',
@@ -373,7 +392,7 @@ export const qualityAnalyzeTool = defineTool({
     }
     ctx.signal.throwIfAborted()
     const criticFindings = calibrateCriticFindings(rawCriticFindings, bundle.feedback)
-    const created = await persistHumanityQualityReport({
+    const created = await saveReviewedReport({
       userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
       compilationId: args.compilationId ?? bundle.compilation?.id,
       chapterId, chapterRevision: bundle.chapter.revision, mode: ctx.qualityMode,
@@ -383,6 +402,7 @@ export const qualityAnalyzeTool = defineTool({
       criticResponseDiagnostic: { ...inspected.diagnostic, callId: ctx.callId },
       sources,
     })
+    if (!created) return unsavedReport()
     if (created.compilationId) {
       await prisma.storyCompilation.updateMany({
         where: { id: created.compilationId, userId: ctx.userId, novelId: ctx.novelId, status: 'active' },

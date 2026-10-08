@@ -125,3 +125,98 @@ describe.runIf(available)('author continuation after current continuity failure'
     } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
   }))
 })
+
+describe.runIf(available)('explicit returned quality request with local report failure', () => {
+  it.each(['returned', 'new-revision', 'missing-proof', 'wrong-proof', 'wrong-hash', 'wrong-result', 'duplicate-call', 'wrong-args', 'wrong-target'] as const)(
+    '%s resolves only request uncertainty and preserves failed report state', scenario => fixture(async f => {
+      const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '原授权复检' })
+      const start = new Date(Date.now() - 10000), end = new Date(start.getTime() + 1000)
+      const proof = { version: 1, chapterId: scenario === 'wrong-proof' ? 'other' : f.chapterId, revision: 1,
+        contentHash: scenario === 'wrong-hash' ? 'b'.repeat(64) : createHash('sha256').update('原文').digest('hex') }
+      const call = { toolName: 'quality_analyze', callId: 'saved-response', args: {
+        chapterId: scenario === 'wrong-args' ? 'other' : f.chapterId, compilationId: compilation.id } }
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', payload: call, createdAt: start } })
+      if (scenario === 'duplicate-call') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.call', payload: call, createdAt: start } })
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'tool.result', createdAt: end,
+        payload: { toolName: 'quality_analyze', callId: 'saved-response', ok: false,
+          failureCode: scenario === 'wrong-result' ? 'UNEXPECTED_TOOL_ERROR' : 'QUALITY_REPORT_SAVE_FAILED',
+          ...(scenario === 'missing-proof' ? {} : { reviewRequestFinished: proof }) } } })
+      if (scenario === 'new-revision') await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: 2, content: '后续正文' } })
+      if (scenario === 'wrong-target') await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { chapterId: null } })
+      const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const pending = [{ compilationId: compilation.id, chapterId: f.chapterId, revision: 1, toolName: 'quality_analyze' as const, callId: 'saved-response' }]
+      expect(await prisma.$transaction(tx => readSettledQualityReviews(tx, f, pending))).toEqual(['returned', 'new-revision'].includes(scenario) ? pending : [])
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
+      expect(await prisma.chapterQualityReport.count({ where: { userId: f.userId } })).toBe(0)
+      expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
+    }))
+})
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { randomUUID } from 'node:crypto'
+
+describe.runIf(available)('legacy terminal quality failure with known billing', () => {
+  it.each(['known', 'no-admission', 'same-body', 'same-revision', 'wrong-audit', 'wrong-claim', 'wrong-key', 'wrong-window', 'wrong-scope',
+    'third-payment', 'unknown', 'estimated', 'no-response', 'prior-unknown', 'reserved', 'native-pending', 'overlap', 'unfinished', 'duplicate', 'native-run'] as const)(
+    '%s never revives an old report or refunds/replays its chain', scenario => fixture(async f => {
+      try {
+        await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: scenario === 'native-run' ? f.rootId : null,
+          runtimeProtocolVersion: scenario === 'native-run' ? 1 : 0 } })
+        const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '复检原章节' })
+        const start = new Date(Date.now() + 1000), at = (offset: number) => new Date(start.getTime() + offset)
+        const callId = 'failed-inline-check', reportId = randomUUID(), auditHash = 'a'.repeat(64)
+        const usage = { userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, targetType: 'chapter', targetId: f.chapterId,
+          providerType: 'text', providerMode: 'custom', modelName: 'synthetic', requestTokens: 10, responseTokens: 5,
+          billingStatus: 'settled', usageSource: 'reported', billingEvidence: { responseObserved: true }, durationMs: 1000 }
+        const primary = await prisma.aiUsageLog.create({ data: { ...usage, action: 'agent3HumanityCritic', createdAt: at(1000) } })
+        await prisma.aiUsageLog.create({ data: { ...usage, action: 'agent3HumanityFormatRecovery', createdAt: at(5000),
+          ...(scenario === 'unknown' ? { usageSource: 'unknown', billingStatus: 'pending_usage' } : {}),
+          ...(scenario === 'estimated' ? { usageSource: 'estimated' } : {}),
+          ...(scenario === 'no-response' ? { billingEvidence: { responseObserved: false } } : {}),
+          ...(scenario === 'reserved' ? { reservedCreditMilli: 10 } : {}) } })
+        const taskId = scenario === 'native-run' ? f.rootId : f.spec.id, admissionId = 'old-author-admission'
+        await prisma.chapterQualityReport.create({ data: { id: reportId, userId: f.userId, novelId: f.novelId, runId: f.runId,
+          chapterId: f.chapterId, chapterRevision: 1, compilationId: compilation.id, status: 'failed', createdAt: at(3000),
+          deterministicMetrics: { contentHash: createHash('sha256').update('原文').digest('hex'), independentCheck: 'unavailable', qualityContextHash: 'c'.repeat(64),
+            criticResponse: { version: 1, callId: scenario === 'wrong-audit' ? 'other' : callId, contentHash: auditHash, characterCount: 40, classification: 'incomplete_json' },
+            formatRecovery: { version: 1, state: 'claimed', taskId, reportId, chapterId: f.chapterId, chapterRevision: 1, compilationId: compilation.id,
+              claimRunId: scenario === 'wrong-claim' ? 'other' : f.runId, admissionId, claimedAt: at(scenario === 'wrong-window' ? 8000 : 4000).toISOString(), contextHash: 'c'.repeat(64),
+              key: scenario === 'wrong-key' ? 'invalid' : runtimeJson({ taskId, chapterId: f.chapterId, revision: 1, admissionId }).hash,
+              evidenceHash: runtimeJson({ callId, contentHash: auditHash, usageIds: [primary.id] }).hash } } } })
+        const payload = { toolName: 'quality_analyze', callId, args: { chapterId: f.chapterId, compilationId: compilation.id } }
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', createdAt: start, payload } })
+        if (scenario === 'duplicate') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.call', createdAt: start, payload } })
+        const result = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'tool.result', createdAt: at(7000),
+          payload: { toolName: 'quality_analyze', callId, ok: false, failureCode: 'UNEXPECTED_TOOL_ERROR' } } })
+        const terminal = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4, type: 'run.paused', createdAt: at(8000), payload: {} } })
+        if (scenario !== 'no-admission') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'run.started', createdAt: at(9000),
+          payload: { authorContinue: { eventId: terminal.id, afterSeq: 4 } } } })
+        if (scenario === 'overlap' || scenario === 'unfinished') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 0,
+          type: 'tool.call', createdAt: at(scenario === 'overlap' ? 100 : -1), payload: { toolName: 'chapter_write', callId: 'overlap' } } })
+        if (scenario === 'third-payment' || scenario === 'prior-unknown') await prisma.aiUsageLog.create({ data: {
+          ...usage, targetId: scenario === 'third-payment' ? reportId : f.chapterId, action: 'agent3HumanityEvidenceCorrection',
+          createdAt: at(scenario === 'prior-unknown' ? -500 : 5500), usageSource: scenario === 'prior-unknown' ? 'unknown' : 'reported' } })
+        if (scenario === 'native-pending') {
+          const operationId = randomUUID()
+          await prisma.agentOperation.create({ data: { id: operationId, taskRootId: f.rootId, originRunId: f.runId,
+            operationKey: 'unresolved-native', kind: 'provider', action: 'review', inputHash: 'a'.repeat(64) } })
+          await prisma.agentProviderAttempt.create({ data: { id: randomUUID(), operationId, attemptKey: 'unknown', runId: f.runId,
+            ownerEpoch: 1, provider: 'synthetic', model: 'synthetic', requestHash: 'a'.repeat(64), status: 'unknown' } })
+        }
+        if (scenario === 'wrong-scope') await prisma.agentRun.update({ where: { id: f.runId }, data: { taskSpec: runtimeJson({ ...JSON.parse(JSON.stringify(f.spec)),
+          scope: { ...JSON.parse(JSON.stringify(f.spec.scope)), writing: { version: 1, kind: 'bounded', targets: [{ orderIndex: 99, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false } } }).value } })
+        await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: scenario === 'same-revision' ? 1 : 2,
+          content: scenario === 'same-body' ? '原文' : '新正文' } })
+        const before = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: reportId } })
+        const payments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+        const pending = [{ compilationId: compilation.id, chapterId: f.chapterId, revision: 1, toolName: 'quality_analyze' as const, callId }]
+        const settled = await prisma.$transaction(tx => readSettledQualityReviews(tx, f, pending))
+        if (scenario === 'known') expect(settled).toEqual([{ ...pending[0], reconciliation: {
+          status: 'terminal_failed_billing_known', sourceRunId: f.runId, sourceResultId: result.id, sourceReportId: reportId,
+          usageIds: expect.arrayContaining(payments.map(row => row.id)), admissionId: `author-continue:${terminal.id}`,
+          currentRevision: 2, currentContentHash: createHash('sha256').update('新正文').digest('hex') } }])
+        else expect(settled).toEqual([])
+        expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: reportId } })).toEqual(before)
+        expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(payments)
+      } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+    }))
+})

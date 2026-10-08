@@ -92,6 +92,8 @@ export type ToolResult = {
   /** Explicit observed failure; never infer success just because execute resolved. */
   /** A report was received and persisted even if its subsequent local repair failed. */
   reviewCompleted?: boolean
+  /** Request ended, but no valid report is certified. */
+  reviewRequestFinished?: import('../../../../shared/contracts/index.js').AgentReviewRequestReceipt
   outcome?: 'failed'
   /** Bounded diagnostic code, never a copy of private tool arguments. */
   failureCode?: string

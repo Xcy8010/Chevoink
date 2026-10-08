@@ -1,6 +1,20 @@
 import type { AgentAttachmentMeta } from './agent-attachments.js'
 import type { AgentExecutionMode, EntityId } from './models.js'
 
+/** Server proof that a review request returned, even if its local report write failed.
+ * This is not an assessment, manuscript progress or a chapter completion receipt. */
+export type AgentReviewRequestReceipt = { version: 1; chapterId: string; revision: number; contentHash: string }
+export type AgentReviewFailureReconciliation = {
+  status: 'terminal_failed_billing_known'
+  sourceRunId: string
+  sourceResultId: string
+  sourceReportId: string
+  usageIds: string[]
+  admissionId: string
+  currentRevision: number
+  currentContentHash: string
+}
+
 /** 当前逻辑任务的权威待办；空清单不回退到会话历史。 */
 export interface AgentTodoSnapshot {
   runId: EntityId
@@ -297,6 +311,8 @@ export type AgentStreamEventBody =
   | { type: 'run.configuration'; modelTier: import('./credits.js').CreditModelTier; customModelId: string | null;
       reasoningEffort: import('./credits.js').ModelReasoningEffort; creativeFreedom: CreativeFreedom; modelSelectionExplicit: boolean }
   | { type: 'execution.progress'; revision: number; stage: 'model' | 'tool' | 'checkpoint' | 'finalizing' }
+  | { type: 'review.reconciled'; callId: string; chapterId: string; revision: number;
+      compilationId: string | null; receipt: AgentReviewFailureReconciliation }
   | { type: 'text.delta'; messageId: string; delta: string }
   | { type: 'text.final'; messageId: string; text: string; asReasoning: boolean }
   | { type: 'reasoning.delta'; messageId: string; delta: string }
@@ -359,6 +375,7 @@ export type AgentStreamEventBody =
       ok: boolean
       summary: string
       failureCode?: string
+      reviewRequestFinished?: AgentReviewRequestReceipt
       invalidFields?: string[]
       display?: AgentToolDisplayPayload
       durationMs: number

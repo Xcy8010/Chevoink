@@ -250,6 +250,7 @@ const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
 
 type ToolCallOutcome = {
   reviewCompleted?: boolean
+  reviewRequestFinished?: import('../../../shared/contracts/index.js').AgentReviewRequestReceipt
   workflowMilestone?: import('./semantic-progress.js').WritingWorkflowMilestone
   failureCode?: string
   reviewStopReason?: string
@@ -401,7 +402,7 @@ export async function handleToolCall(
 
   let failureCode: string | undefined
   let invalidFields: string[] | undefined
-  const fail = (summary: string, observation: string, status: 'failed' | 'denied'): ToolCallOutcome => {
+  const fail = (summary: string, observation: string, status: 'failed' | 'denied', reviewRequestFinished?: ToolCallOutcome['reviewRequestFinished']): ToolCallOutcome => {
     bus.emit({
       type: 'tool.result',
       messageId,
@@ -411,10 +412,11 @@ export async function handleToolCall(
       summary,
       failureCode,
       invalidFields,
+      ...(reviewRequestFinished ? { reviewRequestFinished } : {}),
       durationMs: Date.now() - startedAt,
       ...subagentMark,
     })
-    return { observation, failureCode, part: { ...basePart, args: parsedArgs, status, summary },
+    return { observation, failureCode, reviewRequestFinished, part: { ...basePart, args: parsedArgs, status, summary },
       ...(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED'].includes(failureCode ?? '')
         ? { reviewStopReason: observation } : {}) }
   }
@@ -504,7 +506,7 @@ export async function handleToolCall(
       failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
       const recovery = toolFailureRecovery(failureCode)
       return { ...fail(result.summary ?? recovery?.label ?? '执行未完成', wrapToolOutput(tool.name,
-        result.output + (recovery ? `\n${recovery.guidance}` : '')), 'failed'), ...(recovery ? { recoveryCode: failureCode } : {}), reviewCompleted: result.reviewCompleted }
+        result.output + (recovery ? `\n${recovery.guidance}` : '')), 'failed', result.reviewRequestFinished), ...(recovery ? { recoveryCode: failureCode } : {}), reviewCompleted: result.reviewCompleted }
     }
     const durationMs = Date.now() - startedAt
     const summary = result.summary ?? `${tool.title}完成`
@@ -1128,6 +1130,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const settled = await prisma.$transaction(tx => readSettledQualityReviews(tx,
         { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]))
       for (const item of settled) {
+        if (item.reconciliation) {
+          bus.emit({ type: 'review.reconciled', callId: item.callId, chapterId: item.chapterId,
+            revision: item.revision, compilationId: item.compilationId, receipt: item.reconciliation })
+          await bus.persist()
+        }
         pendingReviews.delete(`${item.compilationId ?? item.chapterId}:${item.toolName}`)
         for (let index = toolRestrictions.length - 1; index >= 0; index--) {
           if (recoverableQualityRestriction(toolRestrictions[index], item)) toolRestrictions.splice(index, 1)
@@ -2080,7 +2087,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }
         }
         const outcome = await handleToolCall(call, tools, { ...toolContext, callId: call.id, messageId }, bus, messageId, runId)
-        if (reviewDispatch && (outcome.reviewCompleted || outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
+        const requestFinished = reviewDispatch && outcome.reviewRequestFinished?.version === 1
+          && outcome.reviewRequestFinished.chapterId === reviewDispatch.chapterId
+          && outcome.reviewRequestFinished.revision === reviewDispatch.revision
+          && /^[a-f0-9]{64}$/.test(outcome.reviewRequestFinished.contentHash)
+        if (requestFinished) await bus.persist()
+        if (reviewDispatch && (requestFinished || outcome.reviewCompleted || outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
           'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED',
           'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? ''))) {
           pendingReviews.delete(`${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`)
