@@ -27,6 +27,23 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks())
 
 describe('R01 event journal persistence', () => {
+  it.each([true, false])('author continue waits for its journal before paid work (saved=%s)', async saved => {
+    const pending = deferred(), paidWork = vi.fn()
+    db.createMany.mockImplementationOnce(() => pending.promise)
+    const bus = new RunEventBus('author-admission', 72)
+    bus.emit({ type: 'run.started', agent: { type: 'writingOrchestrator', title: '创作', model: 'speed' },
+      mode: 'build', title: '继续', authorContinue: { eventId: 'pause-72', afterSeq: 72 } })
+    const admission = bus.persist().then(paidWork)
+    const result = admission.then(() => 'saved', () => 'failed')
+    await settleMicrotasks()
+    expect(paidWork).not.toHaveBeenCalled()
+    if (saved) pending.resolve()
+    else pending.reject(new Error('journal unavailable'))
+    expect(await result).toBe(saved ? 'saved' : 'failed')
+    expect(paidWork).toHaveBeenCalledTimes(saved ? 1 : 0)
+    await bus.close()
+  })
+
   it('replays only the latest preparation in seq order without persisting body snapshots', async () => {
     const bus = new RunEventBus('preview-reconnect')
     const preview = { type: 'tool.delta' as const, messageId: 'm', callId: 'c', toolName: 'chapter_write', title: '写入章节正文', argsChars: 0 }

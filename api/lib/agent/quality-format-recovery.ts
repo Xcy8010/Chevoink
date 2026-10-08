@@ -7,13 +7,15 @@ import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.
 import { buildHumanityQualityContext, getLatestQualityReport, qualityReviewContextHash } from './humanity-quality.js'
 import { readQualityUnavailableProof } from './quality-unavailable-proof.js'
 import { runtimeJson } from './runtime-common.js'
+import { readQualityReviewAdmission } from './quality-review-admission.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const hashText = (value: string) => createHash('sha256').update(value).digest('hex')
 const formatClasses = new Set(['json_invalid', 'incomplete_json', 'envelope_invalid', 'ambiguous_envelope', 'duplicate_keys', 'findings_invalid'])
 export const qualityFormatRecoverySchema = z.object({ version: z.literal(1), key: z.string(), taskId: z.string(), reportId: z.string(),
-  chapterId: z.string(), chapterRevision: z.number().int().positive(), compilationId: z.string().nullable(), contextHash: z.string(), evidenceHash: z.string() }).strict()
+  chapterId: z.string(), chapterRevision: z.number().int().positive(), compilationId: z.string().nullable(), contextHash: z.string(), evidenceHash: z.string(),
+  admissionId: z.string().optional() }).strict()
 export type QualityFormatRecovery = z.infer<typeof qualityFormatRecoverySchema>
 /** This witness can only originate inside the server's current tool execution,
  * after a completed response. Old reports always require persisted call/result proof. */
@@ -25,12 +27,29 @@ export async function hasQualityFormatRecoveryClaim(tx: Prisma.TransactionClient
   chapterId: string, chapterRevision: number, exceptOperationId?: string) {
   const original = await readOriginalTaskRequest(tx, subject)
   const ids = await originalTaskRunIds(tx, subject, original)
+  const run = await tx.agentRun.findFirstOrThrow({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
+  const admission = await readQualityReviewAdmission(tx, run)
   const reports = await tx.chapterQualityReport.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
-    chapterId, runId: { in: ids } }, select: { deterministicMetrics: true } })
+    chapterId, runId: { in: ids } }, select: { id: true, runId: true, deterministicMetrics: true, updatedAt: true } })
   if (reports.some(item => {
-    const claim = object(object(item.deterministicMetrics).formatRecovery)
-    return claim.taskId === original.taskId && claim.chapterId === chapterId && claim.chapterRevision === chapterRevision
+    const metrics = object(item.deterministicMetrics)
+    return [metrics.formatRecovery, ...(Array.isArray(metrics.formatRecoveryHistory) ? metrics.formatRecoveryHistory : [])].some(value => {
+      const claim = object(value)
+      const oldAdmission = admission && (claim.admissionId ? claim.admissionId !== admission.id
+        : (typeof claim.claimedAt === 'string' ? new Date(claim.claimedAt) : item.updatedAt) < admission.at)
+      const finished = claim.state !== 'claimed' || reports.some(final => {
+        const finalMetrics = object(final.deterministicMetrics)
+        return final.id !== item.id && final.runId === claim.claimRunId
+          && [finalMetrics.formatRecovery, ...(Array.isArray(finalMetrics.formatRecoveryHistory) ? finalMetrics.formatRecoveryHistory : [])].some(value => {
+            const link = object(value)
+            return ['failed', 'completed'].includes(String(link.state)) && link.reportId === item.id
+              && link.key === claim.key && link.evidenceHash === claim.evidenceHash
+          })
+      })
+      return claim.taskId === original.taskId && claim.chapterId === chapterId && claim.chapterRevision === chapterRevision
       && (!exceptOperationId || claim.operationId !== exceptOperationId)
+      && (!oldAdmission || !finished)
+    })
   })) return true
   const operations = await tx.agentOperation.findMany({ where: { originRunId: { in: ids }, action: 'quality_format_recovery',
     kind: 'provider' }, include: { parent: true } })
@@ -38,8 +57,9 @@ export async function hasQualityFormatRecoveryClaim(tx: Prisma.TransactionClient
     if (item.parentOperationId === exceptOperationId) return false
     const work = object(object(item.parent?.inputSnapshot).input).work
     const chapter = object(object(work).chapter)
-    return object(work).kind === 'check' && object(work).version === 5
+    return object(work).kind === 'check' && [5, 6].includes(Number(object(work).version))
       && chapter.id === chapterId && chapter.revision === chapterRevision
+      && (!admission || item.createdAt >= admission.at || item.status !== 'succeeded' || item.parent?.status !== 'succeeded')
   })
 }
 
@@ -61,11 +81,18 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, chap
   if (report.chapterRevision !== bundle.chapter.revision || metrics.qualityContextHash !== contextHash
     || metrics.contentHash !== hashText(bundle.chapter.content) || metrics.independentCheck !== 'unavailable'
     || !formatClasses.has(String(audit.classification))) return null
-  const key = runtimeJson({ taskId: original.taskId, chapterId: target, revision: bundle.chapter.revision }).hash
-  // Claims live on the source report. A later failed recovery report cannot
-  // create a new allowance, including after process restart or another run.
+  const admission = await readQualityReviewAdmission(tx, run)
+  const key = runtimeJson({ taskId: original.taskId, chapterId: target, revision: bundle.chapter.revision,
+    ...(admission ? { admissionId: admission.id } : {}) }).hash
+  // Keep automatic recovery bounded within one real author admission. A later
+  // explicit continue can check again; restart/new compilation cannot mint it.
   if (await hasQualityFormatRecoveryClaim(tx, subject, target, bundle.chapter.revision)) return null
-  if (await tx.aiUsageLog.count({ where: { userId: subject.userId, novelId: subject.novelId, agentRunId: { in: ids }, billingStatus: 'pending_usage' } })
+  const firstRun = await tx.agentRun.findFirstOrThrow({ where: { id: { in: ids } }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } })
+  // Legacy auxiliary usage is chapter-bound and often has no agentRunId.
+  if (await tx.aiUsageLog.count({ where: { userId: subject.userId, novelId: subject.novelId,
+    OR: [{ agentRunId: { in: ids }, billingStatus: 'pending_usage' },
+      { targetType: 'chapter', targetId: target, action: { startsWith: 'agent3Humanity' }, createdAt: { gte: firstRun.createdAt },
+        OR: [{ billingStatus: 'pending_usage' }, { usageSource: 'unknown' }] }] } })
     || await tx.agentProviderAttempt.count({ where: { runId: { in: ids }, status: { in: ['dispatching', 'unknown'] } } })) return null
   let evidenceHash: string
   if (live) {
@@ -80,12 +107,13 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, chap
     evidenceHash = runtimeJson({ callId: live.callId, contentHash: live.contentHash, usageIds: paid.map(item => item.id) }).hash
   } else {
     const hydrated = await tx.chapterQualityReport.findUniqueOrThrow({ where: { id: report.id }, include: { findings: true } })
-    const proof = await readQualityUnavailableProof(tx, subject, ids, hydrated, bundle.chapter, run.taskRootId)
+    const proof = await readQualityUnavailableProof(tx, subject, ids, hydrated, bundle.chapter, run.taskRootId, { allowFormatRecovery: true })
     if (!proof) return null
     evidenceHash = proof.evidenceHash
   }
   return qualityFormatRecoverySchema.parse({ version: 1, key, taskId: original.taskId, reportId: report.id, chapterId: target,
-    chapterRevision: bundle.chapter.revision, compilationId: report.compilationId, contextHash, evidenceHash })
+    chapterRevision: bundle.chapter.revision, compilationId: report.compilationId, contextHash, evidenceHash,
+    ...(admission ? { admissionId: admission.id } : {}) })
 }
 
 /** Read-only eligibility, suitable for precise legacy restriction recovery. */
@@ -103,8 +131,12 @@ export async function claimQualityFormatRecovery(tx: Prisma.TransactionClient, s
   const current = await readRecovery(tx, subject, expected.chapterId, live)
   if (!current || runtimeJson(current).hash !== runtimeJson(expected).hash) return false
   const source = await tx.chapterQualityReport.findUniqueOrThrow({ where: { id: current.reportId } })
-  await tx.chapterQualityReport.update({ where: { id: current.reportId }, data: { deterministicMetrics: runtimeJson({ ...object(source.deterministicMetrics),
-    formatRecovery: { ...current, state: 'claimed', claimRunId: subject.runId } }).value } })
+  const metrics = object(source.deterministicMetrics)
+  const history = Array.isArray(metrics.formatRecoveryHistory) ? metrics.formatRecoveryHistory : []
+  await tx.chapterQualityReport.update({ where: { id: current.reportId }, data: { deterministicMetrics: runtimeJson({ ...metrics,
+    ...(metrics.formatRecovery ? { formatRecoveryHistory: [...history, { ...object(metrics.formatRecovery),
+      claimedAt: object(metrics.formatRecovery).claimedAt ?? source.updatedAt.toISOString() }] } : {}),
+    formatRecovery: { ...current, state: 'claimed', claimRunId: subject.runId, claimedAt: new Date().toISOString() } }).value } })
   return true
 }
 
@@ -115,7 +147,7 @@ export async function claimCurrentQualityFormatRecovery(tx: Prisma.TransactionCl
 }
 
 /** Same frozen operation may finish its original reservation on recovery;
- * another operation or run cannot claim it again. The caller holds its lease. */
+ * this admission cannot claim it twice. The caller holds its lease. */
 export async function claimDurableQualityFormatRecovery(tx: Prisma.TransactionClient, subject: Subject, expected: QualityFormatRecovery, operationId: string) {
   await lockNovelActiveScope(tx, subject.novelId)
   await assertAgentManuscriptCurrent(tx, subject)

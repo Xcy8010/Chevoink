@@ -39,7 +39,7 @@ import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
 import { REPAIR_BLOCK_CODES, REPAIR_CHANNEL_CODES, qualityReportCheckedCurrentContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
 import { probeChapterReviewRevision } from '../chapter-review-guard.js'
-import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, inspectCriticResponse, parseQualityJsonObject, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
+import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, inspectCriticResponse, parseQualityJsonObject, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence, qualityReportHasDroppedFindings } from '../quality-evidence.js'
 import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/writing.js'
 import { renderChapterWritingBackground } from '../writing-request-context.js'
 import { resolveDurableAuxiliaryRuntime } from '../runtime-auxiliary-call.js'
@@ -108,7 +108,7 @@ ${WRITING_REQUEST_GUIDANCE}
 不得要求每章固定钩子、固定对白比例或固定节奏；不得把作者的不规则声音清洗成统一白开水。
 emotion_grounding 按“触发→解释→身体或注意→冲动→选择→后果”检查，但正文不必写全链，只要最有力的两三环成立即可。
 severity 只能是 advisory 或 warning；审美意见绝不报 error。找不到问题返回空数组。最多24项，同一问题仅报告一次；quote最多360字符，explanation与suggestion各用一两句短句（最多1000字符）。完整检查全部维度，但不要复述无问题正文或输出审查过程，直接交付结构化结论，避免输出被截断。
-严格只输出 JSON：{"findings":[{"signal":"style_drift|orphaned_sophistication|plot_progress|description_load|emotion_grounding|explanation_echo|sentence_homology|image_repetition|character_voice|causal_gap|chapter_bridge|reader_pull|punctuation_misuse","severity":"advisory|warning","sourceId":"本次原文证据表编号","explanation":"为何在当前语境构成问题","suggestion":"不改变事实和作者声音的最小修法","confidence":0.0}]}`
+JSON语法：字符串中的换行必须写\\n，ASCII双引号写\\"，反斜线写\\\\；不加尾逗号，不输出分析、说明或省略号。signal从上述十三种值中选一个，severity从advisory与warning选一个，下面仅是一个合法枚举示例。严格只输出 JSON：{"findings":[{"signal":"emotion_grounding","severity":"advisory","sourceId":"本次原文证据表编号","explanation":"为何在当前语境构成问题","suggestion":"不改变事实和作者声音的最小修法","confidence":0.0}]}`
 }
 
 type QualityReport = Awaited<ReturnType<typeof getQualityReport>>
@@ -126,6 +126,7 @@ export function buildCriticInput(bundle: Awaited<ReturnType<typeof buildHumanity
     `确定性统计（只能作为线索，不能替代原文证据）：${JSON.stringify(metrics)}`,
     `正文开始：\n${bundle.chapter.content}\n正文结束。`,
     sources ? renderQualityEvidenceSources(sources) : '',
+    '交付格式：仅输出一个完整 findings JSON 对象；无问题时为 {"findings":[]}。使用合法单个枚举值，字符串换行和 ASCII 引号须按 JSON 转义，不使用尾逗号。',
   ].filter(Boolean).join('\n')
 }
 
@@ -203,7 +204,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
       continue
     }
     try {
-      const parsedAttempt = repairEnvelopeSchema.parse(parseQualityJsonObject(response, 'patches'))
+      const parsedAttempt = repairEnvelopeSchema.parse(parseQualityJsonObject(response, 'patches', 2))
       for (const patch of parsedAttempt.patches) {
         const finding = selectedById.get(patch.findingId)
         if (finding && parsedAttempt.patches.filter(item => item.findingId === patch.findingId).length === 1
@@ -267,7 +268,7 @@ export const qualityAnalyzeTool = defineTool({
     const contextHash = qualityReviewContextHash(bundle)
     const cacheMetrics = existing?.deterministicMetrics
     const matchingContext = !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics) && cacheMetrics.qualityContextHash === contextHash
-    if (existing && matchingContext && existing.compilationId === (bundle.compilation?.id ?? null) && existing.criticVersion === HUMANITY_CRITIC_VERSION && qualityReportCheckedCurrentContent(existing, bundle.chapter.revision, bundle.chapter.content)) {
+    if (existing && matchingContext && existing.compilationId === (bundle.compilation?.id ?? null) && existing.criticVersion === HUMANITY_CRITIC_VERSION && !qualityReportHasDroppedFindings(cacheMetrics) && qualityReportCheckedCurrentContent(existing, bundle.chapter.revision, bundle.chapter.content)) {
       const hydrated = await getQualityReport(ctx.userId, ctx.novelId, existing.id)
       return finishQualityReview(ctx, hydrated, '', true, bundle.compilation?.status !== 'completed')
     }
@@ -323,7 +324,7 @@ export const qualityAnalyzeTool = defineTool({
       if (error instanceof DataAccessError) throw error
       criticFallback = true
     }
-    let inspected = inspectCriticResponse(response, sources)
+    let inspected = inspectCriticResponse(response, sources, true, 2)
     if (!formatRecovery && response !== null && !inspected.complete
       && ['json_invalid', 'incomplete_json', 'envelope_invalid', 'ambiguous_envelope', 'duplicate_keys', 'findings_invalid'].includes(inspected.diagnostic.classification)) {
       // Persist the real first failure before reserving recovery. No malformed
@@ -341,7 +342,7 @@ export const qualityAnalyzeTool = defineTool({
       await assertCurrent()
       response = await generateTextCompletion(buildCriticSystem('balanced'), userPrompt,
         { ...responseOptions, action: 'agent3HumanityFormatRecovery', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true })
-      inspected = inspectCriticResponse(response, sources)
+      inspected = inspectCriticResponse(response, sources, true, 2)
       criticFallback = !inspected.complete
     }
     rawCriticFindings = inspected.findings
@@ -369,7 +370,7 @@ export const qualityAnalyzeTool = defineTool({
           evidenceCorrectionIncomplete = true
         }
         try {
-          rawCriticFindings = correctQualityEvidence(bundle.chapter.content, rawCriticFindings, parseQualityJsonObject(corrected, 'corrections'), sources)
+          rawCriticFindings = correctQualityEvidence(bundle.chapter.content, rawCriticFindings, parseQualityJsonObject(corrected, 'corrections', 2), sources)
         } catch {
           evidenceCorrectionIncomplete = true
           /* Remain incomplete; never reinterpret malformed corrections as success. */
@@ -400,7 +401,7 @@ export const qualityAnalyzeTool = defineTool({
     if (report.status === 'failed') return { outcome: 'failed' as const,
       failureCode: criticFallback ? 'QUALITY_REPORT_INCOMPLETE' : 'QUALITY_EVIDENCE_UNLOCATED',
       output: criticFallback
-        ? `质量模型返回的报告格式不完整，不能判定质量通过。确定性报告和正文已保留；${formatRecovery ? '本输入的一次独立计费格式恢复已使用，需暂停并展示原因，不重复请求。' : ''}不得重复改写正文来解决格式错误。`
+        ? `质量模型返回的报告格式不完整，不能判定质量通过。确定性报告和正文已保留；${formatRecovery ? '本次工具执行内的独立计费格式恢复已完成，报告仍不可验证；后续检查须遵守真实作者继续授权、预算与未知结果保护。' : ''}不得重复改写正文来解决格式错误。`
         : evidenceCorrectionIncomplete
           ? `部分质量意见的引用无法在正文中逐字定位，${attemptedEvidenceCorrection ? '本次引用校正未能完成，' : ''}报告已保留但不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`
           : `质量模型返回的全部引用都无法在正文中逐字定位（可能审查了其他文本或引用严重变形），${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`,

@@ -36,7 +36,7 @@ const isolatedRequest = z.object({ body: z.object({
 /** 缓存报告只能替代首个修订步骤的 Critic 前置；仍核验原任务、报告哈希和正文版本。 */
 export async function hasFrozenRepairReport(tx: Prisma.TransactionClient, lease: RunLeaseToken, snapshot: unknown, step: AuxiliaryModelStep) {
   if (step !== 'quality_repair' && step !== 'continuity_repair') return false
-  const parsed = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)]), repair: z.literal(true),
+  const parsed = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]), repair: z.literal(true),
     compiler: compilerObservationSchema.nullable(), chapter: z.object({ id: z.string(), revision: z.number(), content: z.string() }),
     cached: z.unknown(), coverage: z.unknown().optional(), sources: qualityEvidenceSourcesSchema.optional() }) }) }).safeParse(snapshot)
   if (!parsed.success) return false
@@ -100,16 +100,16 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
     if (grant.permission === 'ask' || grant.alwaysConfirm) await assertToolApproval(tx, lease, source.snapshotHash, original.callId, parent.action, call.arguments, original.normalization.normalizedArgsHash)
     let frozenFormatClaim = false
     if (captured.step === 'quality_format_recovery') {
-      const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.literal(5), parserVersion: z.literal(1),
+      const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(5), z.literal(6)]), parserVersion: z.union([z.literal(1), z.literal(2)]),
         deadlineAt: z.number().int().positive(), formatRecovery: qualityFormatRecoverySchema.nullable(), sources: qualityEvidenceSourcesSchema,
         chapter: z.object({ id: z.string(), revision: z.number(), content: z.string() }) }) }) }).safeParse(parent.inputSnapshot)
-      if (!work.success || Date.now() >= work.data.input.work.deadlineAt) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原冻结质量协议不允许追加格式恢复或已达原等待上限。')
+      if (!work.success || work.data.input.work.parserVersion !== (work.data.input.work.version === 6 ? 2 : 1) || Date.now() >= work.data.input.work.deadlineAt) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原冻结质量协议不允许追加格式恢复或已达原等待上限。')
       const frozen = work.data.input.work
       const owner = await tx.agentRun.findUniqueOrThrow({ where: { id: lease.runId } })
       const ownerSubject = { userId: lease.userId, novelId: owner.novelId, runId: lease.runId }
       await lockNovelActiveScope(tx, owner.novelId)
       if (await hasQualityFormatRecoveryClaim(tx, ownerSubject, frozen.chapter.id, frozen.chapter.revision, parent.id)) {
-        return runtimeError('QUALITY_REPORT_INCOMPLETE', '同一原任务与正文版本的一次格式恢复已经预约，重新准备编译不产生新的付费额度。')
+        return runtimeError('QUALITY_REPORT_INCOMPLETE', '本次请求已有格式恢复记录，或此前请求的结果尚未确认，不能重复发起。作者明确继续且此前结果已确认后可重新检查。')
       }
       if (frozen.formatRecovery) {
         const expected = frozen.formatRecovery
@@ -119,15 +119,15 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         const report = await tx.chapterQualityReport.findFirst({ where: { id: expected.reportId, userId: lease.userId, novelId: run.novelId }, include: { findings: true } })
         const marker = z.object({ formatRecovery: z.object({ key: z.string(), operationId: z.literal(parent.id), evidenceHash: z.string() }) }).safeParse(report?.deterministicMetrics)
         const proof = report && await readQualityUnavailableProof(tx, subject, await originalTaskRunIds(tx, subject, originalTask), report,
-          frozen.chapter, run.taskRootId)
+          frozen.chapter, run.taskRootId, { allowFormatRecovery: frozen.version >= 6 })
         frozenFormatClaim = originalTask.taskId === expected.taskId && !!proof && marker.success && marker.data.formatRecovery.key === expected.key
           && marker.data.formatRecovery.evidenceHash === expected.evidenceHash && proof.evidenceHash === expected.evidenceHash
         if (!frozenFormatClaim) return runtimeError('RUNTIME_RECEIPT_INVALID', '格式恢复缺少原失败报告的持久一次预约和已结算响应证明。')
       }
     }
     if (contract.previous && !frozenFormatClaim && !await hasFrozenRepairReport(tx, lease, parent.inputSnapshot, captured.step)) {
-      const restored = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.literal(5),
-        parserVersion: z.literal(1), formatRecovery: qualityFormatRecoverySchema }) }) }).safeParse(parent.inputSnapshot)
+      const restored = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(5), z.literal(6)]),
+        parserVersion: z.union([z.literal(1), z.literal(2)]), formatRecovery: qualityFormatRecoverySchema }) }) }).safeParse(parent.inputSnapshot)
       // A restored old failed report has no new quality_critic child. Its
       // subsequent evidence/repair stages bind this same parent's confirmed
       // format recovery, never another operation or an unverified report.
@@ -149,7 +149,8 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
       }
       if (captured.step === 'quality_format_recovery') {
         const response = parsedResult.data.result
-        const inspected = inspectCriticResponse(response.content, undefined, response.finishReason === 'stop' && !response.toolCalls.length)
+        const inspected = inspectCriticResponse(response.content, undefined, response.finishReason === 'stop' && !response.toolCalls.length,
+          z.object({ input: z.object({ work: z.object({ parserVersion: z.union([z.literal(1), z.literal(2)]).optional() }) }) }).parse(parent.inputSnapshot).input.work.parserVersion)
         if (result.usageReceipt?.source !== 'reported' || result.usageReceipt.settlementStatus !== 'settled'
           || !['json_invalid', 'incomplete_json', 'envelope_invalid', 'ambiguous_envelope', 'duplicate_keys', 'findings_invalid'].includes(inspected.diagnostic.classification)) {
           return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '首个质量回复不是已确认结算的格式失败，不允许新计费恢复。')

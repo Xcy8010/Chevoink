@@ -50,7 +50,8 @@ function assertUniqueJsonKeys(text: string) {
 /** Mechanical extraction only: quoted braces and escaped quotes are data.
  * Never splice separate objects, select one of conflicting reports, close a
  * truncated container, or invent missing review fields. */
-export function parseQualityJsonObject(raw: string, envelope: 'findings' | 'corrections' | 'patches'): unknown {
+export function parseQualityJsonObject(raw: string, envelope: 'findings' | 'corrections' | 'patches', parserVersion: 1 | 2 = 1): unknown {
+  if (parserVersion === 2) return parseMechanicalQualityJson(raw, envelope)
   const candidates: Record<string, unknown>[] = []
   let sawJson = false
   for (let start = 0; start < raw.length; start++) {
@@ -87,24 +88,99 @@ export function parseQualityJsonObject(raw: string, envelope: 'findings' | 'corr
   return candidates[0]
 }
 
+/** Only syntax with an unambiguous value is repaired. Never add fields, values,
+ * quotes or closing containers. Quoted control characters keep their values. */
+function repairCompleteJsonSyntax(text: string) {
+  let result = '', quoted = false, escaped = false
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]
+    if (quoted) {
+      if (escaped) { result += char; escaped = false }
+      else if (char === '\\') { result += char; escaped = true }
+      else if (char === '"') { result += char; quoted = false }
+      else result += char.charCodeAt(0) < 32 ? `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}` : char
+    } else if (char === '"') { result += char; quoted = true }
+    else if (char === ',' && !/[[{,:]/u.test(text.slice(0, index).trimEnd().slice(-1))
+      && /^\s*[}\]]/u.test(text.slice(index + 1))) { /* only after a value, never a missing item */ }
+    else result += char
+  }
+  return result
+}
+
+function parseMechanicalQualityJson(raw: string, envelope: 'findings' | 'corrections' | 'patches') {
+  const candidates: Record<string, unknown>[] = []
+  let sawJson = false
+  for (let start = 0; start < raw.length; start++) {
+    if (raw[start] !== '{' && raw[start] !== '[') continue
+    const following = raw.slice(start + 1).trimStart()
+    // Ignore only clearly textual delimiters, not JSON-looking damaged outer
+    // containers. In particular never promote an object nested in an array.
+    const jsonLike = raw[start] === '{' ? !following || /^["'}]/u.test(following) || /^[\p{L}_$][\p{L}\p{N}_$]*\s*:/u.test(following)
+      : !following || /^[[\]{"'\d-]/u.test(following) || /^(?:true|false|null)\b/u.test(following) || /^[\p{L}_$][\p{L}\p{N}_$]*\s*[,\]]/u.test(following)
+    if (!jsonLike) continue
+    const stack = [raw[start]]
+    let quoted = false, escaped = false, end = start + 1
+    for (; end < raw.length && stack.length; end++) {
+      const char = raw[end]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+      } else if (char === '"') quoted = true
+      else if (char === '{' || char === '[') stack.push(char)
+      else if (char === '}' || char === ']') {
+        if (stack.at(-1) !== (char === '}' ? '{' : '[')) throw new QualityJsonParseError('json_invalid')
+        stack.pop()
+      }
+    }
+    if (stack.length || quoted) throw new QualityJsonParseError('incomplete_json')
+    const text = repairCompleteJsonSyntax(raw.slice(start, end))
+    let value: unknown
+    try { value = JSON.parse(text); assertUniqueJsonKeys(text); sawJson = true }
+    catch (error) {
+      if (error instanceof QualityJsonParseError) throw error
+      // A JSON-looking container could be a corrupted outer report. It cannot
+      // be discarded in order to accept a nested or later empty report.
+      throw new QualityJsonParseError('json_invalid')
+    }
+    if (Array.isArray(value)) throw new QualityJsonParseError('envelope_invalid')
+    if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, envelope)) candidates.push(value as Record<string, unknown>)
+    start = end - 1
+  }
+  if (candidates.length > 1) throw new QualityJsonParseError('ambiguous_envelope')
+  if (!candidates.length) throw new QualityJsonParseError(sawJson ? 'envelope_invalid' : 'json_invalid')
+  return candidates[0]
+}
+
 export type CriticResponseDiagnostic = {
   version: 1; contentHash: string | null; characterCount: number;
   callId?: string; operationId?: string;
   classification: QualityJsonFailure | 'complete' | 'findings_invalid' | 'source_invalid' | 'provider_unavailable' | 'provider_incomplete';
   findingCount: number; droppedFindings: number; invalidSources: number;
+  parserVersion?: 2; deduplicatedFindings?: number;
+  /** Owned report audit only; never include in tool output or critic input. */
+  rawResponse?: { version: 1; encoding: 'json-string'; content: string; complete: boolean };
 }
 
-/** Audit hashes and counts, never the full private model response. A malformed
- * source remains untrusted even when other authentic findings can be retained. */
-export function inspectCriticResponse(raw: string | null, sources?: QualityEvidenceSources, responseComplete = true) {
+/** Old complete audits with explicit discarded judgments cannot certify a new
+ * complete parser review. Unknown legacy fields keep their original behavior. */
+export function qualityReportHasDroppedFindings(metrics: unknown): boolean {
+  if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) return false
+  const count = (metrics as { droppedFindings?: unknown }).droppedFindings
+  return typeof count === 'number' && count > 0
+}
+
+/** Keep bounded failed response content in the owned report audit, never tool
+ * output. A malformed source stays untrusted despite other authentic findings. */
+export function inspectCriticResponse(raw: string | null, sources?: QualityEvidenceSources, responseComplete = true, parserVersion: 1 | 2 = 1) {
   const diagnostic: CriticResponseDiagnostic = { version: 1, contentHash: raw === null ? null : sha256(raw), characterCount: raw?.length ?? 0,
     classification: raw === null ? 'provider_unavailable' : responseComplete ? 'json_invalid' : 'provider_incomplete',
     findingCount: 0, droppedFindings: 0, invalidSources: 0 }
   let findings: CriticQualityFinding[] = []
   if (raw !== null && responseComplete) {
     try {
-      const object = parseQualityJsonObject(raw, 'findings')
-      const coerced = coerceCriticFindings(object, sources)
+      const object = parseQualityJsonObject(raw, 'findings', parserVersion)
+      const coerced = parserVersion === 2 ? coerceCompleteCriticFindings(object, sources) : coerceCriticFindings(object, sources)
       if (!coerced) diagnostic.classification = 'envelope_invalid'
       else {
         findings = coerced.findings
@@ -112,14 +188,48 @@ export function inspectCriticResponse(raw: string | null, sources?: QualityEvide
         diagnostic.droppedFindings = coerced.dropped
         diagnostic.invalidSources = coerced.invalidSources ?? 0
         diagnostic.classification = diagnostic.invalidSources ? 'source_invalid'
-          : !findings.length && coerced.dropped > 0 ? 'findings_invalid' : 'complete'
+          : (parserVersion === 2 || !findings.length) && coerced.dropped > 0 ? 'findings_invalid' : 'complete'
+        if ('deduplicated' in coerced) diagnostic.deduplicatedFindings = Number(coerced.deduplicated)
       }
     } catch (error) {
       if (!(error instanceof QualityJsonParseError)) throw error
       diagnostic.classification = error.classification
     }
   }
+  if (parserVersion === 2) {
+    diagnostic.parserVersion = 2
+    if (raw !== null && diagnostic.classification !== 'complete') {
+      let end = Math.min(raw.length, 8192)
+      if (end < raw.length && /[\uD800-\uDBFF]/u.test(raw[end - 1]) && /[\uDC00-\uDFFF]/u.test(raw[end])) end--
+      // JSONB rejects literal NUL even inside strings. Store reversible JSON
+      // string text, not the decoded model content; no system/reasoning input.
+      diagnostic.rawResponse = { version: 1, encoding: 'json-string', content: JSON.stringify(raw.slice(0, end)), complete: end === raw.length }
+    }
+  }
   return { findings, complete: diagnostic.classification === 'complete', diagnostic }
+}
+
+function coerceCompleteCriticFindings(raw: unknown, sources?: QualityEvidenceSources) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray((raw as { findings?: unknown }).findings)) return null
+  const list = (raw as { findings: unknown[] }).findings
+  const findings: CriticQualityFinding[] = [], seen = new Set<string>()
+  let dropped = 0, invalidSources = 0, deduplicated = 0
+  for (const item of list) {
+    let bound = item
+    if (item && typeof item === 'object' && !Array.isArray(item) && Object.prototype.hasOwnProperty.call(item, 'sourceId')) {
+      const entry = sourceForFinding(sources?.entries.map(value => value.text).join('') ?? '', item as { sourceId?: string; quote?: string }, sources)
+      if (!entry) { dropped++; invalidSources++; continue }
+      bound = { ...item, quote: entry.text }
+    }
+    const parsed = criticQualityFindingSchema.safeParse(bound)
+    if (!parsed.success) { dropped++; continue }
+    const key = JSON.stringify(parsed.data)
+    if (seen.has(key)) { deduplicated++; continue }
+    seen.add(key)
+    if (findings.length >= 24) { dropped++; continue }
+    findings.push(parsed.data)
+  }
+  return { findings, dropped, invalidSources, deduplicated }
 }
 
 /** A deterministic UTF-16 source table; every character is retained, including

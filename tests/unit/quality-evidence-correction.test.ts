@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import type { CriticQualityFinding } from '../../shared/contracts/humanity-quality-contracts.js'
 import { buildQualityEvidenceSources, coerceCriticFindings, correctQualityEvidence, locateQualityFindingSpans,
   locateQuoteSpans, renderQualityEvidenceSources, unlocatedQualityEvidence, validateQualityEvidenceSources,
-  inspectCriticResponse, parseQualityJsonObject } from '../../api/lib/agent/quality-evidence.js'
+  inspectCriticResponse, parseQualityJsonObject, qualityReportHasDroppedFindings } from '../../api/lib/agent/quality-evidence.js'
 
 const finding: CriticQualityFinding = { signal: 'explanation_echo', severity: 'warning', quote: '模型改写的引文', explanation: '重复解释', suggestion: '删除重复解释', confidence: 0.9 }
 const content = '她关上了门。走廊里的声音消失了。'
@@ -198,5 +198,99 @@ describe('critic finding coercion', () => {
     expect(coerceCriticFindings([])).toBeNull()
     expect(coerceCriticFindings({})).toBeNull()
     expect(coerceCriticFindings({ findings: [] })).toEqual({ findings: [], dropped: 0 })
+  })
+})
+
+// Synthetic malformed outputs; the incident retained only response hashes.
+describe('quality parser v2 mechanical syntax and complete judgments', () => {
+  const valid = { ...finding, quote: '她关上了门。' }
+  it('new review admission refuses only explicit old dropped-finding caches without changing unknown legacy audits', () => {
+    expect(qualityReportHasDroppedFindings({ droppedFindings: 1 })).toBe(true)
+    for (const metrics of [null, {}, [], { droppedFindings: 0 }, { droppedFindings: 'unknown' }]) expect(qualityReportHasDroppedFindings(metrics)).toBe(false)
+  })
+  it.each([
+    '说明：[待审\n{"findings":[]}\n备注：[非报告文字',
+    '说明：{待审文字\n```json\n{"findings":[],}\n```',
+    '{"findings":[],}',
+  ])('extracts only the complete uniquely delimited report from synthetic text %s', raw => {
+    expect(inspectCriticResponse(raw, undefined, true, 2)).toMatchObject({ complete: true, findings: [], diagnostic: { parserVersion: 2, classification: 'complete' } })
+    expect(inspectCriticResponse(raw).complete).toBe(false)
+  })
+  it('escapes raw quoted controls and removes trailing punctuation without changing string values', () => {
+    const value = { ...valid, explanation: '原有换行\n原有制表\t花括号{及}和逗号,]', suggestion: '保留\\反斜线和"引号"' }
+    const raw = JSON.stringify({ findings: [value] }).replace('\\n', '\n').replace('\\t', '\t').replace('}]}', '},],}')
+    expect(inspectCriticResponse(raw).complete).toBe(false)
+    expect(inspectCriticResponse(raw, undefined, true, 2)).toMatchObject({ complete: true, findings: [value] })
+  })
+  it.each([
+    ['{"findings":[{"findings":[]}', 'incomplete_json'],
+    ['[{"findings":[]}', 'incomplete_json'],
+    ['[{"findings":[]}]', 'envelope_invalid'],
+    ['{"findings":[]}\n{"findings":[', 'incomplete_json'],
+    ['{"findings":[]}\n{"findings":[]}', 'ambiguous_envelope'],
+    ['{"findings":[null],"find\\u0069ngs":[]}', 'duplicate_keys'],
+    ['{findings:[{"findings":[]}]}', 'json_invalid'],
+    ['{报告:{"findings":[]}', 'incomplete_json'],
+    ["{'wrapper':{\"findings\":[]}", 'incomplete_json'],
+    ['[报告, {"findings":[]}', 'incomplete_json'],
+    ["{'wrapper':{\"findings\":[]}}", 'json_invalid'],
+    ['[报告, {"findings":[]}]', 'json_invalid'],
+    ['{"findings":[,]}', 'json_invalid'],
+    ['{"findings":[,,]}', 'json_invalid'],
+    ['{"findings":,}', 'json_invalid'],
+    ['{"findings":[{"quote":"unfinished}', 'incomplete_json'],
+    ['{"findings":[]] trailing {"findings":[]}', 'json_invalid'],
+    ['{}', 'envelope_invalid'],
+    ['{"findings":null}', 'envelope_invalid'],
+  ])('never promotes nested reports, guesses omissions or discards damaged second reports %s', (raw, classification) => {
+    expect(inspectCriticResponse(raw, undefined, true, 2)).toMatchObject({ complete: false, diagnostic: { classification } })
+  })
+  it('removes only a trailing comma after a real value without inventing a finding for null', () => {
+    expect(inspectCriticResponse('{"findings":[null,]}', undefined, true, 2))
+      .toMatchObject({ complete: false, findings: [], diagnostic: { classification: 'findings_invalid', droppedFindings: 1 } })
+  })
+  it.each([null, { ...valid, signal: 'invalid' }, { ...valid, severity: 'error' }, { ...valid, suggestion: undefined },
+    { ...valid, quote: '长'.repeat(361) }, { ...valid, explanation: '长'.repeat(1001) }, { ...valid, confidence: 85 }])(
+    'retains a valid judgment but refuses to certify partial malformed findings %#', invalid => {
+      const raw = JSON.stringify({ findings: [valid, invalid] })
+      expect(inspectCriticResponse(raw, undefined, true, 2)).toMatchObject({ complete: false, findings: [valid], diagnostic: {
+        classification: 'findings_invalid', findingCount: 2, droppedFindings: 1 } })
+    })
+  it('retains 24 real opinions and marks a nonidentical overflow incomplete', () => {
+    const list = Array.from({ length: 25 }, (_, index) => ({ ...valid, explanation: `独立意见${index}` }))
+    const result = inspectCriticResponse(JSON.stringify({ findings: list }), undefined, true, 2)
+    expect(result).toMatchObject({ complete: false, findings: list.slice(0, 24), diagnostic: { findingCount: 25, droppedFindings: 1 } })
+  })
+  it('deduplicates identical judgments while preserving different opinions on the same evidence', () => {
+    const other = { ...valid, suggestion: '另一条真实建议' }
+    expect(inspectCriticResponse(JSON.stringify({ findings: [valid, valid, other] }), undefined, true, 2)).toMatchObject({
+      complete: true, findings: [valid, other], diagnostic: { deduplicatedFindings: 1, droppedFindings: 0 } })
+  })
+  it('never clears a foreign evidence binding despite another valid source', () => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content)
+    const bound = { ...valid, quote: sources.entries[0].text, sourceId: sources.entries[0].id }
+    expect(inspectCriticResponse(JSON.stringify({ findings: [bound, { ...valid, sourceId: 'foreign' }] }), sources, true, 2))
+      .toMatchObject({ complete: false, findings: [bound], diagnostic: { classification: 'source_invalid', invalidSources: 1 } })
+  })
+  it('pins old partial-coercion semantics while new parser never certifies dropped judgments', () => {
+    const raw = JSON.stringify({ findings: [valid, null] })
+    expect(inspectCriticResponse(raw)).toMatchObject({ complete: true, findings: [valid], diagnostic: { droppedFindings: 1 } })
+    expect(inspectCriticResponse(raw, undefined, true, 2).complete).toBe(false)
+    expect(inspectCriticResponse(raw).diagnostic).not.toHaveProperty('rawResponse')
+  })
+  it('keeps a reversible bounded failed-response audit with complete original hash and safe JSONB text', () => {
+    const raw = '合成格式故障\0\n'
+    const diagnostic = inspectCriticResponse(raw, undefined, true, 2).diagnostic
+    expect(diagnostic).toMatchObject({ contentHash: createHash('sha256').update(raw).digest('hex'), characterCount: raw.length,
+      rawResponse: { version: 1, encoding: 'json-string', content: JSON.stringify(raw), complete: true } })
+    expect(diagnostic.rawResponse!.content).not.toContain('\0')
+    expect(JSON.parse(diagnostic.rawResponse!.content)).toBe(raw)
+    const long = 'x'.repeat(8191) + '😀后续原文'
+    const limited = inspectCriticResponse(long, undefined, true, 2).diagnostic
+    expect(limited).toMatchObject({ contentHash: createHash('sha256').update(long).digest('hex'), characterCount: long.length,
+      rawResponse: { content: JSON.stringify('x'.repeat(8191)), complete: false } })
+    expect(inspectCriticResponse('{"findings":[]}', undefined, true, 2).diagnostic).not.toHaveProperty('rawResponse')
+    expect(inspectCriticResponse(null, undefined, true, 2).diagnostic).not.toHaveProperty('rawResponse')
+    expect(inspectCriticResponse('{"findings":[]}', undefined, false, 2)).toMatchObject({ complete: false, diagnostic: { classification: 'provider_incomplete' } })
   })
 })

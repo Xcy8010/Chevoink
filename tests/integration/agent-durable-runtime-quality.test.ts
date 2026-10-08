@@ -101,6 +101,7 @@ describe.runIf(available)('native paid failed quality response and limited deliv
     vi.spyOn(toolCursor, 'prepareToolCursorOperation').mockImplementationOnce(async (token, cursor, input, tx) => {
       const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
       snapshot.work.version = 4
+      snapshot.work.parserVersion = 1
       delete snapshot.work.formatRecovery
       delete snapshot.work.deadlineAt
       await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
@@ -437,7 +438,7 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
 })
 
 describe.runIf(available)('durable quality actual tool chain', () => {
-  it.each(['source-id', 'invalid-source-id', 'success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale', 'v2-quality-resume', 'v2-quality-stale', 'json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-valid', 'format-valid-repair', 'format-recovery-unknown', 'format-recovery-stale', 'format-recovery-rollback', 'format-expired', 'old-format-full-chain', 'format-reprepare'] as const)('%s preserves paid results and atomic business effects', async scenario => {
+  it.each(['source-id', 'invalid-source-id', 'success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale', 'v2-quality-resume', 'v2-quality-stale', 'json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-valid', 'format-valid-repair', 'format-recovery-unknown', 'format-recovery-stale', 'format-recovery-rollback', 'format-expired', 'old-format-full-chain', 'format-reprepare', 'synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const authorRequest = '改写当前章为都市异能爽文第一章。主角陆望，31岁，夜班设备维护员。1800字，低谷仅一段；觉醒后识别旧镜头的价值；停在买主报价前；只输出标题与正文。'
     const checkingOriginal = scenario === 'original-request' || scenario === 'original-request-resume'
@@ -492,7 +493,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
         requests++
         const body = JSON.parse(String(init.body))
-        if (['json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise'].includes(scenario) || scenario.startsWith('format')) {
+        if (['json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario) || scenario.startsWith('format')) {
           expect(body.reasoning_effort).toBe('none')
           expect(body.thinking?.type).not.toBe('enabled')
         }
@@ -515,7 +516,9 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         if (scenario === 'stale-compiler') await prisma.storyCompilation.update({ where: { id: compilationId }, data: { preparedContext: { changed: true } } })
         if (scenario === 'late-resume') await pauseDurableTask(f.userId, lease.runId)
         const recovering = ['format-valid', 'format-valid-repair', 'format-recovery-unknown', 'format-recovery-stale', 'format-recovery-rollback'].includes(scenario)
-        const content = scenario === 'old-format-full-chain' ? requests === 1 ? 'broken JSON'
+        const content = scenario === 'synthetic-mechanical' || scenario === 'v5-parser-mechanical' ? '说明：[仅合成文字噪声\n{"findings":[],}\n备注：[非报告文字'
+          : scenario === 'synthetic-partial' ? JSON.stringify({ findings: [{ signal: 'emotion_grounding', severity: 'advisory', quote: '原文', explanation: '真实意见', suggestion: '保留待审' }, null] })
+          : scenario === 'old-format-full-chain' ? requests === 1 ? 'broken JSON'
           : requests === 2 ? JSON.stringify({ findings: [{ signal: 'emotion_grounding', severity: 'warning', quote: '原文', explanation: '缺少具体动作', suggestion: '落实动作', confidence: 0.9 }] })
             : requests === 3 ? '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}' : '{"findings":[]}'
           : recovering ? requests === 1 ? 'broken JSON'
@@ -540,11 +543,24 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       vi.stubGlobal('fetch', fetchMock)
       const step = () => executeDurableToolStep(lease, new AbortController().signal)
       if (scenario !== 'missing') await step()
+      if (scenario === 'v5-parser-mechanical') {
+        const originalPrepare = toolCursor.prepareToolCursorOperation
+        vi.spyOn(toolCursor, 'prepareToolCursorOperation').mockImplementationOnce(async (token, cursor, input, tx) => {
+          const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
+          snapshot.work.version = 5
+          snapshot.work.parserVersion = 1
+          const prepared = await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
+          admittedLegacy = { id: prepared.operation.id, inputHash: prepared.operation.inputHash, inputSnapshot: prepared.operation.inputSnapshot }
+          throw new Error('fixture historical v5 admitted')
+        })
+        await expect(step()).rejects.toThrow('fixture historical v5 admitted')
+      }
       if (scenario === 'old-format-full-chain') {
         const originalPrepare = toolCursor.prepareToolCursorOperation
         vi.spyOn(toolCursor, 'prepareToolCursorOperation').mockImplementationOnce(async (token, cursor, input, tx) => {
           const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
           snapshot.work.version = 4
+          snapshot.work.parserVersion = 1
           delete snapshot.work.formatRecovery
           delete snapshot.work.deadlineAt
           const prepared = await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
@@ -680,7 +696,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: before, revision: 1 })
         return
       }
-      const failed = ['invalid-source-id', 'evidence-unresolved', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-recovery-stale', 'format-expired'].includes(scenario)
+      const failed = ['invalid-source-id', 'evidence-unresolved', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-recovery-stale', 'format-expired', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario)
       const userEdited = ['stale-chapter', 'repair-stale', 'legacy-quality-stale', 'v2-quality-stale', 'format-recovery-stale'].includes(scenario)
       const repairedOnDisk = ['repair', 'evidence-corrected', 'format-retry', 'rollback-resume', 'format-valid-repair', 'format-recovery-rollback'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('质量检查') } })
@@ -701,7 +717,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       const expectedRequests = scenario === 'missing' || scenario === 'format-expired' ? 0
         : scenario === 'full-chain' ? 4
         : ['evidence-corrected', 'format-retry', 'repair', 'format-valid-repair', 'format-recovery-rollback'].includes(scenario) ? 3
-        : ['context-change', 'evidence-unresolved', 'rollback-resume', 'format', 'duplicate-keys', 'format-valid', 'format-recovery-stale'].includes(scenario) ? 2 : 1
+        : ['context-change', 'evidence-unresolved', 'rollback-resume', 'format', 'duplicate-keys', 'format-valid', 'format-recovery-stale', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario) ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
@@ -715,12 +731,23 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       const reports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId }, include: { findings: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
       if (['json-noise', 'duplicate-keys', 'mixed-source'].includes(scenario)) {
         const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
-        expect(operation.inputSnapshot).toMatchObject({ input: { work: { parserVersion: 1 } } })
+        expect(operation.inputSnapshot).toMatchObject({ input: { work: { parserVersion: 2 } } })
         expect(reports[0].deterministicMetrics).toMatchObject({ independentCheck: scenario === 'json-noise' ? 'complete' : 'unavailable',
           criticResponse: { version: 1, operationId: operation.id,
             classification: scenario === 'json-noise' ? 'complete' : scenario === 'duplicate-keys' ? 'duplicate_keys' : 'source_invalid' } })
         if (scenario === 'mixed-source') expect(reports[0].findings.filter(item => item.source === 'critic')).toHaveLength(1)
         expect(reports[0].deterministicMetrics).not.toHaveProperty('rawResponse')
+      }
+      if (['synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario)) {
+        const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
+        expect(operation.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'v5-parser-mechanical' ? 5 : 6, parserVersion: scenario === 'v5-parser-mechanical' ? 1 : 2 } } })
+        expect(reports[0].deterministicMetrics).toMatchObject({ independentCheck: scenario === 'synthetic-mechanical' ? 'complete' : 'unavailable',
+          criticResponse: { classification: scenario === 'synthetic-mechanical' ? 'complete' : scenario === 'synthetic-partial' ? 'findings_invalid' : 'incomplete_json' } })
+        if (scenario === 'synthetic-partial') expect(reports[0].findings.filter(item => item.source === 'critic')).toHaveLength(1)
+        if (scenario === 'synthetic-mechanical') expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'quality_format_recovery' } })).toBe(0)
+        if (scenario !== 'synthetic-partial') expect(reports[0].deterministicMetrics).not.toHaveProperty('criticResponse.rawResponse')
+        expect(result).not.toHaveProperty('result.display.criticResponse')
+        expect(JSON.stringify(result)).not.toContain('仅合成文字噪声')
       }
       if (scenario === 'v4-parser-noise') {
         expect(reports[0]).toMatchObject({ status: 'failed', criticVersion: 'humanity-critic.v5' })
@@ -734,17 +761,18 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       if (['format', 'format-valid', 'format-valid-repair', 'format-recovery-rollback'].includes(scenario)) {
         expect(reports[0].deterministicMetrics).toMatchObject({ formatRecovery: { version: 1, state: scenario === 'format' ? 'failed' : 'completed',
-          initialDiagnostic: { classification: 'json_invalid' } } })
+          initialDiagnostic: { classification: 'json_invalid', rawResponse: { encoding: 'json-string', content: JSON.stringify('broken JSON'), complete: true } } } })
+        expect(JSON.stringify(result)).not.toContain('rawResponse')
         expect(await prisma.$transaction(tx => readQualityFormatRecovery(tx, { userId: f.userId, novelId: f.novelId, runId: lease.runId }, { chapterId: f.chapterId }))).toBeNull()
         const savedWork = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
-        expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 5, parserVersion: 1, deadlineAt: expect.any(Number) } } })
+        expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 6, parserVersion: 2, deadlineAt: expect.any(Number) } } })
         const recoveryOp = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: savedWork.id, action: 'quality_format_recovery' }, include: { attempts: { include: { usageReceipt: true } } } })
         expect(recoveryOp.attempts).toHaveLength(1)
         expect(recoveryOp.attempts[0].usageReceipt).toMatchObject({ source: 'reported', settlementStatus: 'settled' })
       }
       if (admittedLegacy) {
         expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: admittedLegacy.id }, select: { id: true, inputHash: true, inputSnapshot: true } })).toEqual(admittedLegacy)
-        expect(fetchMock).toHaveBeenCalledOnce()
+        expect(fetchMock).toHaveBeenCalledTimes(scenario === 'v5-parser-mechanical' ? 2 : 1)
       }
       if (scenario === 'evidence-corrected' || scenario === 'full-chain') {
         expect(reports[0].findings).toMatchObject([{ severity: 'advisory', evidenceExcerpt: '原文', disposition: repairedOnDisk ? 'repaired' : 'pending' }])

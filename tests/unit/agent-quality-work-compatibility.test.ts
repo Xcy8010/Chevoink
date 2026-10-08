@@ -34,9 +34,11 @@ describe('frozen quality work across deployments', () => {
     expect(qualityWorkContextProjection(bundle, 3)).toEqual(bundle)
     expect(qualityWorkContextProjection(bundle, 4)).toEqual(bundle)
     expect(qualityWorkContextProjection(bundle, 5)).toEqual(bundle)
+    expect(qualityWorkContextProjection(bundle, 6)).toEqual(bundle)
     expect([1, 2, 3].map(version => qualityWorkCriticVersion(version as 1 | 2 | 3))).toEqual(['humanity-critic.v2', 'humanity-critic.v3', 'humanity-critic.v4'])
     expect(qualityWorkCriticVersion(4)).toBe('humanity-critic.v5')
     expect(qualityWorkCriticVersion(5)).toBe('humanity-critic.v5')
+    expect(qualityWorkCriticVersion(6)).toBe('humanity-critic.v5')
     const changedHistory = { ...bundle, chapterWritingBackground: [{ ...bundle.chapterWritingBackground[0], prompt: '当前明确改为2100字。' }] }
     for (const version of [1, 2] as const) expect(runtimeJson(qualityWorkContextProjection(changedHistory, version)).hash).toBe(runtimeJson(qualityWorkContextProjection(bundle, version)).hash)
     expect(runtimeJson(qualityWorkContextProjection(changedHistory, 3)).hash).not.toBe(runtimeJson(qualityWorkContextProjection(bundle, 3)).hash)
@@ -60,5 +62,19 @@ describe('frozen quality work across deployments', () => {
     expect(system).toContain('场景任务与桥的终态不能推翻作者的精确停笔')
     expect(system).toContain('不得以场景已问价为由')
     expect(system).toContain('不把尚未成交本身当缺陷')
+    expect(system).toContain('"signal":"emotion_grounding","severity":"advisory"')
+    expect(system).not.toContain('"signal":"style_drift|')
+    expect(system).toContain('换行必须写\\n')
+    expect(system).toContain('ASCII双引号写\\"')
+  })
+  it('mechanical syntax is enabled only by the new frozen parser without changing old work hashes', () => {
+    const raw = '说明：[非报告\n{"findings":[],}'
+    const old = { version: 5, parserVersion: 1, criticInput: '旧完整输入', criticSystem: '旧冻结规则', deadlineAt: 123, formatRecovery: null }
+    const frozen = structuredClone(old), digest = runtimeJson(old).hash
+    expect(() => qualityWorkParseObject(raw, 'findings', 1)).toThrow('incomplete_json')
+    expect(() => qualityWorkParseObject(raw, 'findings')).toThrow()
+    expect(qualityWorkParseObject(raw, 'findings', 2)).toEqual({ findings: [] })
+    expect(old).toEqual(frozen)
+    expect(runtimeJson(old).hash).toBe(digest)
   })
 })

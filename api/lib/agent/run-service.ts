@@ -1030,6 +1030,8 @@ async function continueLoopRunLocked(
   if (nextTier !== run.modelTier || nextCustomModelId !== run.customModelId || nextReasoningEffort !== run.reasoningEffort) {
     await prisma.agentRun.update({ where: { id: run.id }, data: { modelTier: nextTier, customModelId: nextCustomModelId, reasoningEffort: nextReasoningEffort } })
   }
+  const continueFrom = !activation ? await prisma.agentRunEvent.findFirst({ where: { runId: run.id,
+    type: { in: ['run.paused', 'run.finished'] }, seq: { lte: eventStartSeq } }, orderBy: { seq: 'desc' }, select: { id: true } }) : null
   // No awaits between this second concurrency check and executeAgentRun's synchronous registration.
   if (getActiveRun(runId) || hasActiveRunInSession(run.sessionId)) {
     throw new DataAccessError(409, 'RUN_IN_PROGRESS', '当前会话已有任务在执行。')
@@ -1057,6 +1059,7 @@ async function continueLoopRunLocked(
     tokenBudget: queuedInput?.tokenBudget,
     resume: true,
     eventStartSeq,
+    ...(continueFrom ? { authorContinue: { eventId: continueFrom.id, afterSeq: eventStartSeq } } : {}),
     modelTier: nextTier,
     customModelId: nextCustomModelId,
     reasoningEffort: nextReasoningEffort,

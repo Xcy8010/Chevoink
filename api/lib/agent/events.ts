@@ -103,6 +103,11 @@ export class RunEventBus {
     return this.seq
   }
 
+  /** A server admission must be durable before it can authorize paid work. */
+  async persist(): Promise<void> {
+    await this.flush()
+  }
+
   /** State and terminal journal entry share one transaction. Publication stays
    * with the caller so existing post-run housekeeping retains its ordering. */
   async commitTerminal<T>(body: Extract<AgentStreamEventBody, { type: 'run.finished' | 'run.paused' }>,

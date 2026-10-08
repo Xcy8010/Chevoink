@@ -19,7 +19,7 @@ const fixture: typeof durableFixture = (work, ...rest) => durableFixture(async f
 }, ...rest)
 
 describe.runIf(available)('settled legacy quality format recovery', () => {
-  it.each(['live-valid', 'live-failed', 'old-valid', 'old-repair', 'old-unknown', 'old-stale', 'old-context', 'old-foreign', 'old-tampered', 'old-concurrent', 'old-reprepare', 'live-cancelled'] as const)(
+  it.each(['live-valid', 'live-failed', 'old-valid', 'old-repair', 'old-unknown', 'old-stale', 'old-context', 'old-foreign', 'old-tampered', 'old-concurrent', 'old-reprepare', 'live-cancelled', 'live-mechanical'] as const)(
     '%s preserves paid identity and permits only one authenticated recovery', async scenario => fixture(async f => {
       vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
       await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0, status: 'running' } })
@@ -49,7 +49,7 @@ describe.runIf(available)('settled legacy quality format recovery', () => {
         expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
         if (scenario === 'old-repair' && !seedingOld && requests === 1) resolveRuntime.mockRejectedValue(new Error('Recovery repair must retain its frozen model'))
         if (scenario === 'live-cancelled') controller.abort()
-        const content = seedingOld || scenario === 'live-failed' || scenario === 'live-valid' && requests === 1 || scenario === 'live-cancelled' ? 'broken JSON'
+        const content = scenario === 'live-failed' ? 'broken JSON\0' : scenario === 'live-mechanical' ? '说明：[合成文字噪声\n{"findings":[],}\n备注：[非报告文字' : seedingOld || scenario === 'live-valid' && requests === 1 || scenario === 'live-cancelled' ? 'broken JSON'
           : scenario === 'old-repair' ? requests === 1 ? JSON.stringify({ findings: [{ signal: 'emotion_grounding', severity: 'warning', quote: '原文',
             explanation: '缺少人物具体动作', suggestion: '落实为具体动作', confidence: 0.9 }] }) : '{"patches":[{"findingId":"'+(await prisma.qualityFinding.findFirstOrThrow({ where: { report: { chapterId: f.chapterId }, source: 'critic' } })).id+'","replacement":"新文"}]}'
             : '{"findings":[]}'
@@ -61,8 +61,8 @@ describe.runIf(available)('settled legacy quality format recovery', () => {
       const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
       let sourceReportId: string | undefined
       if (scenario.startsWith('old-')) {
-        // Genuine historical hash-only audit: the raw model reply was not
-        // retained. Its unique call/result interval and settled usage survive.
+        // Earlier caller without live recovery. Its unique call/result
+        // interval and actual settled usage remain authoritative.
         const callId = 'old-quality', calledAt = new Date(Date.now() - 1000)
         await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', createdAt: calledAt,
           payload: { toolName: 'quality_analyze', callId, args: { compilationId, chapterId: f.chapterId } } } })
@@ -78,7 +78,7 @@ describe.runIf(available)('settled legacy quality format recovery', () => {
         sourceReportId = report.id
         requests = 0
         fetchMock.mockClear()
-        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.result', createdAt: new Date(Date.now() + 1),
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.result', createdAt: new Date(Math.max(Date.now(), report.createdAt.getTime()) + 1),
           payload: { toolName: 'quality_analyze', callId, ok: false, failureCode: 'QUALITY_REPORT_INCOMPLETE' } } })
         const subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
         const eligibility = await prisma.$transaction(tx => readQualityFormatRecovery(tx, subject, { chapterId: f.chapterId }))
@@ -133,6 +133,20 @@ describe.runIf(available)('settled legacy quality format recovery', () => {
       const result = await action
       if (scenario === 'live-failed') expect(result).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_REPORT_INCOMPLETE' })
       else expect(result.outcome).toBeUndefined()
+      if (scenario === 'live-mechanical') {
+        expect(fetchMock).toHaveBeenCalledOnce()
+        const paid = await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })
+        expect(paid).toHaveLength(1)
+        expect(paid[0]).toMatchObject({ action: 'agent3HumanityCritic', usageSource: 'reported', billingStatus: 'settled' })
+        const reports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId } })
+        expect(reports).toHaveLength(1)
+        expect(reports[0]).toMatchObject({ status: 'passed', deterministicMetrics: { independentCheck: 'complete', criticResponse: { parserVersion: 2, classification: 'complete' } } })
+        expect(reports[0].deterministicMetrics).not.toHaveProperty('formatRecovery')
+        expect(reports[0].deterministicMetrics).not.toHaveProperty('criticResponse.rawResponse')
+        expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+        expect(JSON.stringify(result)).not.toContain('合成文字噪声')
+        return
+      }
       const expected = scenario === 'live-valid' || scenario === 'live-failed' || scenario === 'old-repair' ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expected)
       const paid = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, action: { startsWith: 'agent3Humanity' } }, orderBy: { createdAt: 'asc' } })
@@ -158,6 +172,9 @@ describe.runIf(available)('settled legacy quality format recovery', () => {
       }
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('active')
       expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).committedAt).toBeNull()
-      expect(reports[0].deterministicMetrics).toMatchObject({ criticResponse: { contentHash: createHash('sha256').update('broken JSON').digest('hex') } })
+      const malformed = scenario === 'live-failed' ? 'broken JSON\0' : 'broken JSON'
+      expect(reports[0].deterministicMetrics).toMatchObject({ criticResponse: { contentHash: createHash('sha256').update(malformed).digest('hex'),
+        rawResponse: { encoding: 'json-string', content: JSON.stringify(malformed), complete: true } } })
+      expect(JSON.stringify(result)).not.toContain('rawResponse')
     }))
 })

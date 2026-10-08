@@ -124,6 +124,8 @@ export type ExecuteAgentRunParams = {
   resume?: boolean
   /** Server-owned journal high water mark, never accepted from model/user input. */
   eventStartSeq?: number
+  /** Verified HTTP continue admission; never supplied by a model or worker. */
+  authorContinue?: { eventId: string; afterSeq: number }
   modelTier?: CreditModelTier
   customModelId?: string | null
   reasoningEffort?: import('../../../shared/contracts/index.js').ModelReasoningEffort
@@ -955,7 +957,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       agent: { type: agent.type, title: agent.title, model: modelRuntime.tier },
       mode: params.mode,
       title: params.prompt.slice(0, 80),
+      ...(params.authorContinue ? { authorContinue: params.authorContinue } : {}),
     })
+    if (params.authorContinue) await bus.persist()
 
     const prompt = params.prompt
     // 附件以 additive attachment parts 随用户消息持久化：气泡缩略图回显 + 历史压缩可见

@@ -281,7 +281,8 @@ export interface AgentArtifactRef {
  */
 export type AgentStreamEventBody =
   | { type: 'goal.snapshot'; snapshot: import('./agent-goal.js').AgentGoalSnapshot }
-  | { type: 'run.started'; agent: AgentRunAgentSummary; mode: AgentExecutionMode; title: string }
+  | { type: 'run.started'; agent: AgentRunAgentSummary; mode: AgentExecutionMode; title: string;
+      authorContinue?: { eventId: string; afterSeq: number } }
   | {
       type: 'skill.route'
       phase: string

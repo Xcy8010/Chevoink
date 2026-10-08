@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(), execute: vi.fn(), active: vi.fn(() => false), prepare: vi.fn(),
-  runUpdate: vi.fn(), creditAccess: vi.fn(), tierRuntime: vi.fn(), goal: vi.fn(), binding: vi.fn(),
+  terminal: vi.fn(), runUpdate: vi.fn(), creditAccess: vi.fn(), tierRuntime: vi.fn(), goal: vi.fn(), binding: vi.fn(),
   lockGoal: vi.fn(), activationSource: vi.fn(), reconcile: vi.fn(), resumeDurable: vi.fn(), pause: vi.fn(),
   transaction: vi.fn(), tx: { $queryRaw: vi.fn(), agentRun: { findFirst: vi.fn() }, agentGoalExecution: { findUnique: vi.fn(async () => null) } },
 }))
 vi.mock('../../api/lib/agent/events.js', () => ({ prepareRunEventResume: mocks.prepare }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } },
-  prisma: { $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoal: { findFirst: mocks.goal }, agentGoalExecution: { findUnique: mocks.binding }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) }, agentExecutionOutbox: { findFirst: mocks.pause } },
+  prisma: { agentRunEvent: { findFirst: mocks.terminal }, $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoal: { findFirst: mocks.goal }, agentGoalExecution: { findUnique: mocks.binding }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) }, agentExecutionOutbox: { findFirst: mocks.pause } },
 }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.creditAccess, getModelTierRuntime: mocks.tierRuntime }))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: mocks.execute }))
@@ -31,6 +31,7 @@ beforeEach(() => {
   mocks.active.mockReturnValue(false)
   mocks.count.mockResolvedValue(0)
   mocks.prepare.mockResolvedValue(72)
+  mocks.terminal.mockResolvedValue({ id: 'pause-72' })
   mocks.find.mockResolvedValueOnce(run).mockResolvedValue({ id: 'run19' })
   mocks.message.mockResolvedValue({ parts: [{ type: 'text', text: '写第19章。' + '完整原始要求'.repeat(100) }] })
 })
@@ -55,6 +56,7 @@ describe('continue API exact target', () => {
   it('validates the human activation before legacy manuscript admission and preserves the original ceiling', async () => {
     const goal = activatedFixture()
     expect(await continueActivatedGoalRun('u', run.id, goal.id, goal.epoch)).toMatchObject({ runId: run.id, runGoalId: goal.id })
+    expect(mocks.execute.mock.calls[0]?.[0].authorContinue).toBeUndefined()
     expect(mocks.lockGoal).toHaveBeenCalledWith(mocks.tx, 'u', run.sessionId, goal.id)
     expect(mocks.reconcile).toHaveBeenCalledWith(mocks.tx, goal, expect.any(Date))
     expect(mocks.tx.agentRun.findFirst).toHaveBeenCalledWith({ where: { id: run.id, userId: 'u', novelId: 'n' },
@@ -118,7 +120,7 @@ describe('continue API exact target', () => {
       where: { id: 'run19', userId: 'u', novelId: 'n' },
       select: { manuscriptRevision: true, novel: { select: { authorId: true, manuscriptRevision: true } } },
     })
-    expect(mocks.execute.mock.calls[0][0]).toMatchObject({ runId: 'run19', chapterId: 'c19', resume: true, eventStartSeq: 72 })
+    expect(mocks.execute.mock.calls[0][0]).toMatchObject({ runId: 'run19', chapterId: 'c19', resume: true, eventStartSeq: 72, authorContinue: { eventId: 'pause-72', afterSeq: 72 } })
     expect(mocks.execute.mock.calls[0][0].prompt.length).toBeGreaterThan(300)
   })
   it('does not dispatch or overwrite a journal while its pending events cannot be saved', async () => {
