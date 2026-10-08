@@ -22,7 +22,7 @@ import { analyzeDeterministicQuality, applyQualityRepair, buildHumanityQualityCo
 import { qualityReportCheckedCurrentContent, qualityAutoRepairPending, selectAutomaticQualityFindings, REPAIR_BLOCK_CODES } from '../quality-report-contract.js'
 import { probeChapterReviewRevision } from '../chapter-review-guard.js'
 import { buildQualityEvidenceSources, qualityEvidenceSourcesSchema, validateQualityEvidenceSources, renderQualityEvidenceSources,
-  inspectCriticResponse, parseQualityJsonObject, coerceCriticFindings, type CriticResponseDiagnostic, correctQualityEvidence, qualityEvidenceCorrectionSystem, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence, qualityReportHasDroppedFindings } from '../quality-evidence.js'
+  inspectCriticResponse, inspectCorrectableCriticResponse, parseQualityJsonObject, coerceCriticFindings, type CriticResponseDiagnostic, correctQualityEvidence, qualityEvidenceCorrectionSystem, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence, qualityReportHasDroppedFindings, qualityCorrectionResponseWitness } from '../quality-evidence.js'
 import { buildCriticInput, buildCriticSystem, reportDisplay } from './humanity-quality-tools.js'
 import { normalizeToolInput } from './input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
@@ -32,6 +32,7 @@ const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
   z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]), compiler: compilerObservationSchema.nullable(),
     parserVersion: z.union([z.literal(1), z.literal(2)]).optional(),
+    repairSourceReferences: z.literal(true).optional(),
     formatRecovery: qualityFormatRecoverySchema.nullable().optional(), deadlineAt: z.number().int().positive().optional(),
     sources: qualityEvidenceSourcesSchema.optional(),
     chapter: z.object({ id: z.string(), title: z.string(), revision: z.number().int().positive(), content: z.string() }).strict(),
@@ -118,7 +119,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
       && matchingContext && !qualityReportHasDroppedFindings(cacheMetrics) && qualityReportCheckedCurrentContent(existingReport, bundle.chapter.revision, bundle.chapter.content)
       ? { id: existingReport.id, hash: jsonHash(await getQualityReport(ctx.userId, ctx.novelId, existingReport.id, tx)) } : null
     const sources = buildQualityEvidenceSources({ userId: ctx.userId, novelId: ctx.novelId, chapterId, chapterRevision: bundle.chapter.revision }, bundle.chapter.content)
-    return { kind: 'check' as const, version: 6 as const, parserVersion: 2 as const, formatRecovery, deadlineAt: Date.now() + env.aiTextTimeoutMs, sources, compiler: bundle.compilation ? baseline : null,
+    return { kind: 'check' as const, version: 6 as const, parserVersion: 2 as const, repairSourceReferences: true as const, formatRecovery, deadlineAt: Date.now() + env.aiTextTimeoutMs, sources, compiler: bundle.compilation ? baseline : null,
       chapter: { id: chapterId, title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content }, contextHash: jsonHash(bundle),
       recentContents: bundle.recentChapters.map(item => item.content), feedback: bundle.feedback,
       mode: state.configuration.qualityMode, repair: comp?.status !== 'completed' && writable && state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId)
@@ -156,7 +157,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     if (frozen.cached && jsonHash(await getQualityReport(ctx.userId, ctx.novelId, frozen.cached.id, tx)) !== frozen.cached.hash) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '原缓存报告已变化，请重新读取。')
   }
   const execute = async (frozen: Work) => {
-    if (frozen.version < 6 && frozen.parserVersion === 2) return runtimeError('RUNTIME_RECEIPT_INVALID', '旧冻结质量协议不能升级解析器。')
+    if (frozen.version < 6 && (frozen.parserVersion === 2 || frozen.repairSourceReferences)) return runtimeError('RUNTIME_RECEIPT_INVALID', '旧冻结质量协议不能升级解析器或引用恢复阶段。')
     if (frozen.version >= 5 && (!frozen.deadlineAt || frozen.parserVersion !== (frozen.version === 6 ? 2 : 1) || frozen.formatRecovery === undefined)) return runtimeError('RUNTIME_RECEIPT_INVALID', '新质量协议缺少原格式恢复合同或等待上限。')
     if (frozen.formatRecovery && !await withRunLease(lease, tx => claimDurableQualityFormatRecovery(tx, ctx, frozen.formatRecovery!, operation.id))) {
       return fail('QUALITY_REPORT_INCOMPLETE', '原格式恢复身份已变化或被其他操作使用，未派发重复请求。')
@@ -191,9 +192,11 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
         }
       }
       if (frozen.parserVersion) {
-        const inspected = inspectCriticResponse(critic.content, frozen.version >= 4 ? frozen.sources : undefined,
-          critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.parserVersion)
-        findings = inspected.findings; complete = inspected.complete; droppedFindings = inspected.diagnostic.droppedFindings
+        const inspected = frozen.repairSourceReferences && frozen.sources
+          ? inspectCorrectableCriticResponse(critic.content, frozen.sources, critic.finishReason === 'stop' && !critic.toolCalls.length)
+          : inspectCriticResponse(critic.content, frozen.version >= 4 ? frozen.sources : undefined,
+            critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.parserVersion)
+        findings = inspected.findings; complete = inspected.complete || ('correctable' in inspected && inspected.correctable === true); droppedFindings = inspected.diagnostic.droppedFindings
         criticResponseDiagnostic = { ...inspected.diagnostic, operationId: operation.id }
       } else if (critic.finishReason === 'stop' && !critic.toolCalls.length) try {
         const coerced = coerceCriticFindings(qualityWorkParseObject(critic.content, 'findings'), frozen.version >= 4 ? frozen.sources : undefined)
@@ -209,6 +212,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
         const correction = await call('quality_evidence_correction', sources ? qualityEvidenceSourceCorrectionSystem : qualityEvidenceCorrectionSystem,
           `待定位意见：${JSON.stringify(missing)}\n${sources ? renderQualityEvidenceSources(sources) : `完整正文：\n${frozen.chapter.content}`}`, 0.15)
         if (correction.finishReason === 'stop' && !correction.toolCalls.length) {
+          if (frozen.repairSourceReferences && criticResponseDiagnostic) criticResponseDiagnostic.evidenceCorrection = qualityCorrectionResponseWitness(correction.content)
           try { findings = correctQualityEvidence(frozen.chapter.content, findings, qualityWorkParseObject(correction.content, 'corrections', frozen.parserVersion), sources) } catch { /* retain incomplete evidence */ }
         }
       }

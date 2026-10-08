@@ -15,7 +15,7 @@ import { readQualityFormatRecovery } from '../../api/lib/agent/quality-format-re
 import { readQualityUnavailableProof } from '../../api/lib/agent/quality-unavailable-proof.js'
 import { readOriginalTaskRequest, originalTaskRunIds } from '../../api/lib/agent/original-request.js'
 import { buildHumanityQualityContext, persistHumanityQualityReport, qualityReviewContextHash } from '../../api/lib/agent/humanity-quality.js'
-import { inspectCriticResponse } from '../../api/lib/agent/quality-evidence.js'
+import { inspectCriticResponse, buildQualityEvidenceSources } from '../../api/lib/agent/quality-evidence.js'
 import { initializeExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
@@ -114,6 +114,34 @@ async function legacyHarness(f: F) {
 }
 
 describe.runIf(available)('author admissions after settled quality format failures', () => {
+  describe.each(['legacy', 'native'] as const)('%s source correction', mode => {
+    const get = phaseFixture()
+    let h: Awaited<ReturnType<typeof legacyHarness>> | Awaited<ReturnType<typeof nativeHarness>>
+    beforeAll(async () => {
+      h = mode === 'legacy' ? await legacyHarness(get()) : await nativeHarness(get())
+      if ('step' in h) await h.step()
+    })
+    it('corrects one bad source without dropping judgments or stopping the check', async () => {
+    const f = get(); installRuntime()
+    const sources = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, chapterRevision: 1 }, '原文')
+    const signals = ['explanation_echo', 'emotion_grounding', 'character_voice', 'description_load', 'sentence_homology']
+    const findings = signals.map((signal, index) => ({ signal, severity: 'advisory', sourceId: index === 4 ? 'wrong-source' : sources.entries[0].id,
+      explanation: `合成意见${index}`, suggestion: `保留建议${index}`, confidence: 0.8 }))
+    const fetchMock = provider(request => request === 1 ? JSON.stringify({ findings })
+      : JSON.stringify({ corrections: [{ index: 4, sourceId: sources.entries[0].id }] }))
+    if ('check' in h) expect((await h.check()).outcome).toBeUndefined()
+    else {
+      expect(await h.step()).toMatchObject({ kind: 'tool' })
+    }
+    expect(fetchMock.requestCount()).toBe(2)
+    const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: f.chapterId }, include: { findings: true } })
+    expect(report.status).not.toBe('failed')
+    expect(report.deterministicMetrics).toMatchObject({ independentCheck: 'complete', droppedFindings: 0,
+      criticResponse: { classification: 'source_invalid', invalidSources: 1 } })
+    expect(report.findings.filter(item => item.source === 'critic')).toHaveLength(5)
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('原文')
+    })
+  })
   describe('one authored task through distinct persisted continuation phases', () => {
     const get = phaseFixture()
     let h: Awaited<ReturnType<typeof legacyHarness>>, fetchMock: ReturnType<typeof provider>

@@ -160,6 +160,18 @@ export type CriticResponseDiagnostic = {
   parserVersion?: 2; deduplicatedFindings?: number;
   /** Owned report audit only; never include in tool output or critic input. */
   rawResponse?: { version: 1; encoding: 'json-string'; content: string; complete: boolean };
+  evidenceCorrection?: { returned: true; contentHash: string; characterCount: number };
+}
+
+export function qualityCorrectionResponseWitness(response: string) {
+  return { returned: true as const, contentHash: sha256(response), characterCount: response.length }
+}
+
+export function hasReturnedQualityCorrection(audit: unknown): boolean {
+  if (!audit || typeof audit !== 'object' || Array.isArray(audit)) return false
+  const value = (audit as CriticResponseDiagnostic).evidenceCorrection
+  return value?.returned === true && /^[a-f0-9]{64}$/.test(value.contentHash)
+    && Number.isSafeInteger(value.characterCount) && value.characterCount > 0
 }
 
 /** Old complete audits with explicit discarded judgments cannot certify a new
@@ -230,6 +242,26 @@ function coerceCompleteCriticFindings(raw: unknown, sources?: QualityEvidenceSou
     findings.push(parsed.data)
   }
   return { findings, dropped, invalidSources, deduplicated }
+}
+
+/** Keep structurally valid judgments with a bad source reference available to
+ * the existing evidence-correction step. Empty quotes are explicitly unbound;
+ * they cannot be stored as verified evidence or silently discarded. */
+export function inspectCorrectableCriticResponse(raw: string | null, sources: QualityEvidenceSources, responseComplete = true) {
+  const inspected = inspectCriticResponse(raw, sources, responseComplete, 2)
+  if (raw === null || inspected.diagnostic.classification !== 'source_invalid') return { ...inspected, correctable: false }
+  const envelope = parseQualityJsonObject(raw, 'findings', 2) as { findings: unknown[] }
+  const pendingSchema = criticQualityFindingSchema.extend({ quote: z.string().max(360).default('') })
+  const findings: CriticQualityFinding[] = []
+  if (envelope.findings.length > 24) return { ...inspected, correctable: false }
+  for (const item of envelope.findings) {
+    const parsed = pendingSchema.safeParse(item)
+    if (!parsed.success || (!parsed.data.sourceId && !parsed.data.quote)) return { ...inspected, correctable: false }
+    const source = parsed.data.sourceId ? sourceForFinding(sources.entries.map(entry => entry.text).join(''), item as { sourceId: string; quote?: string }, sources) : null
+    findings.push(source ? { ...parsed.data, quote: source.text } : parsed.data)
+  }
+  return { ...inspected, findings, correctable: true,
+    diagnostic: { ...inspected.diagnostic, droppedFindings: 0 } }
 }
 
 /** A deterministic UTF-16 source table; every character is retained, including

@@ -8,11 +8,12 @@ import { buildHumanityQualityContext, getLatestQualityReport, qualityReviewConte
 import { readQualityUnavailableProof } from './quality-unavailable-proof.js'
 import { runtimeJson } from './runtime-common.js'
 import { readQualityReviewAdmission } from './quality-review-admission.js'
+import { readOrphanQualityRecoveryProofs } from './quality-orphan-recovery.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const hashText = (value: string) => createHash('sha256').update(value).digest('hex')
-const formatClasses = new Set(['json_invalid', 'incomplete_json', 'envelope_invalid', 'ambiguous_envelope', 'duplicate_keys', 'findings_invalid'])
+const formatClasses = new Set(['json_invalid', 'incomplete_json', 'envelope_invalid', 'ambiguous_envelope', 'duplicate_keys', 'findings_invalid', 'source_invalid'])
 export const qualityFormatRecoverySchema = z.object({ version: z.literal(1), key: z.string(), taskId: z.string(), reportId: z.string(),
   chapterId: z.string(), chapterRevision: z.number().int().positive(), compilationId: z.string().nullable(), contextHash: z.string(), evidenceHash: z.string(),
   admissionId: z.string().optional() }).strict()
@@ -29,8 +30,9 @@ export async function hasQualityFormatRecoveryClaim(tx: Prisma.TransactionClient
   const ids = await originalTaskRunIds(tx, subject, original)
   const run = await tx.agentRun.findFirstOrThrow({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
   const admission = await readQualityReviewAdmission(tx, run)
+  const orphanProofs = admission ? await readOrphanQualityRecoveryProofs(tx, subject, ids, original.taskId, chapterId, chapterRevision) : new Map()
   const reports = await tx.chapterQualityReport.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
-    chapterId, runId: { in: ids } }, select: { id: true, runId: true, deterministicMetrics: true, updatedAt: true } })
+    chapterId, OR: [{ runId: { in: ids } }, { id: { in: [...orphanProofs.keys()] } }] }, select: { id: true, runId: true, deterministicMetrics: true, updatedAt: true } })
   if (reports.some(item => {
     const metrics = object(item.deterministicMetrics)
     return [metrics.formatRecovery, ...(Array.isArray(metrics.formatRecoveryHistory) ? metrics.formatRecoveryHistory : [])].some(value => {
@@ -39,7 +41,8 @@ export async function hasQualityFormatRecoveryClaim(tx: Prisma.TransactionClient
         : (typeof claim.claimedAt === 'string' ? new Date(claim.claimedAt) : item.updatedAt) < admission.at)
       const finished = claim.state !== 'claimed' || reports.some(final => {
         const finalMetrics = object(final.deterministicMetrics)
-        return final.id !== item.id && final.runId === claim.claimRunId
+        return final.id !== item.id && (final.runId === claim.claimRunId || (orphanProofs.get(final.id)?.sourceReportId === item.id
+          && orphanProofs.get(final.id)?.key === claim.key && orphanProofs.get(final.id)?.claimRunId === claim.claimRunId))
           && [finalMetrics.formatRecovery, ...(Array.isArray(finalMetrics.formatRecoveryHistory) ? finalMetrics.formatRecoveryHistory : [])].some(value => {
             const link = object(value)
             return ['failed', 'completed'].includes(String(link.state)) && link.reportId === item.id
@@ -75,13 +78,16 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, chap
   if (!target) return null
   const bundle = await buildHumanityQualityContext(subject.userId, subject.novelId, target, subject.runId, tx)
   const report = await getLatestQualityReport(subject.userId, subject.novelId, target, tx, bundle.compilation?.id ?? null)
-  if (!report || report.status !== 'failed' || !report.runId || !ids.includes(report.runId)) return null
+  if (!report || report.status !== 'failed') return null
+  const admission = await readQualityReviewAdmission(tx, run)
+  const orphanProof = !report.runId && admission && admission.at > report.createdAt
+    ? (await readOrphanQualityRecoveryProofs(tx, subject, ids, original.taskId, target, bundle.chapter.revision)).get(report.id) : null
+  if (!orphanProof && (!report.runId || !ids.includes(report.runId))) return null
   const metrics = object(report.deterministicMetrics), audit = object(metrics.criticResponse)
   const contextHash = qualityReviewContextHash(bundle)
   if (report.chapterRevision !== bundle.chapter.revision || metrics.qualityContextHash !== contextHash
     || metrics.contentHash !== hashText(bundle.chapter.content) || metrics.independentCheck !== 'unavailable'
     || !formatClasses.has(String(audit.classification))) return null
-  const admission = await readQualityReviewAdmission(tx, run)
   const key = runtimeJson({ taskId: original.taskId, chapterId: target, revision: bundle.chapter.revision,
     ...(admission ? { admissionId: admission.id } : {}) }).hash
   // Keep automatic recovery bounded within one real author admission. A later
@@ -105,6 +111,8 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, chap
       || item.billingStatus !== 'settled' || item.usageSource !== 'reported'
       || item.requestTokens === null || item.responseTokens === null || item.responseTokens <= 0)) return null
     evidenceHash = runtimeJson({ callId: live.callId, contentHash: live.contentHash, usageIds: paid.map(item => item.id) }).hash
+  } else if (orphanProof) {
+    evidenceHash = orphanProof.evidenceHash
   } else {
     const hydrated = await tx.chapterQualityReport.findUniqueOrThrow({ where: { id: report.id }, include: { findings: true } })
     const proof = await readQualityUnavailableProof(tx, subject, ids, hydrated, bundle.chapter, run.taskRootId, { allowFormatRecovery: true })

@@ -3,6 +3,9 @@ import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { runtimeJson } from './runtime-common.js'
 import { buildHumanityQualityContext, HUMANITY_CRITIC_VERSION, qualityReviewContextHash } from './humanity-quality.js'
+import { readOriginalTaskRequest } from './original-request.js'
+import { readOrphanQualityRecoveryProofs } from './quality-orphan-recovery.js'
+import { hasReturnedQualityCorrection } from './quality-evidence.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 export const qualityUnavailableProofSchema = z.object({
@@ -27,6 +30,15 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
   const context = await buildHumanityQualityContext(subject.userId, subject.novelId, chapter.id, report.runId, tx)
   if (context.compilation?.id !== report.compilationId || metrics.qualityContextHash !== qualityReviewContextHash(context)) return null
   const audit = metrics.criticResponse === undefined ? null : object(metrics.criticResponse)
+  const validFailure = (code: unknown) => code === 'QUALITY_REPORT_INCOMPLETE'
+    || options.allowFormatRecovery && audit?.classification === 'source_invalid' && code === 'QUALITY_EVIDENCE_UNLOCATED'
+  const sourceOwned = async (source: { id: string; runId: string | null } | null) => {
+    if (!source) return false
+    if (source.runId) return runIds.includes(source.runId)
+    if (!options.allowFormatRecovery) return false
+    const original = await readOriginalTaskRequest(tx, subject)
+    return (await readOrphanQualityRecoveryProofs(tx, subject, runIds, original.taskId, chapter.id, chapter.revision)).has(source.id)
+  }
   if (audit && (audit.version !== 1 || !formatClasses.has(String(audit.classification))
     || !hash.safeParse(audit.contentHash).success || !Number.isSafeInteger(audit.characterCount) || Number(audit.characterCount) <= 0)) return null
   if (taskRootId) {
@@ -34,7 +46,7 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
       include: { effectReceipt: true, children: { include: { attempts: { include: { usageReceipt: true } } } } } })
     const matches = operations.filter(operation => {
       const result = object(object(operation.effectReceipt?.result).toolResult), display = object(result.display)
-      return result.outcome === 'failed' && result.failureCode === 'QUALITY_REPORT_INCOMPLETE' && display.kind === 'qualityReport'
+      return result.outcome === 'failed' && validFailure(result.failureCode) && display.kind === 'qualityReport'
         && display.reportId === report.id && display.chapterId === chapter.id && display.chapterRevision === chapter.revision
     })
     if (matches.length !== 1) return null
@@ -46,16 +58,18 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
       || frozen.kind !== 'check' || frozenChapter.id !== chapter.id || frozenChapter.revision !== chapter.revision
       || frozenChapter.content !== chapter.content || compiler.id !== report.compilationId) return null
     const paid = operation.children.flatMap(child => child.attempts.map(attempt => ({ child, attempt })))
+    if (options.allowFormatRecovery && audit?.classification === 'source_invalid'
+      && paid.some(item => item.child.action === 'quality_evidence_correction') && !hasReturnedQualityCorrection(audit)) return null
     const critics = paid.filter(item => item.child.action === 'quality_critic')
     const recoveries = options.allowFormatRecovery ? paid.filter(item => item.child.action === 'quality_format_recovery') : []
     if (recoveries.length > 1 || (recoveries.length ? critics.length > 1 : critics.length !== 1)) return null
     if (recoveries.length && !critics.length) {
       const link = object(frozen.formatRecovery)
       const source = typeof link.reportId === 'string' ? await tx.chapterQualityReport.findFirst({ where: { id: link.reportId,
-        userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, chapterRevision: chapter.revision, runId: { in: runIds } } }) : null
+        userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, chapterRevision: chapter.revision } }) : null
       const sourceMetrics = object(source?.deterministicMetrics)
       const claims = [sourceMetrics.formatRecovery, ...(Array.isArray(sourceMetrics.formatRecoveryHistory) ? sourceMetrics.formatRecoveryHistory : [])].map(object)
-      if (!source || !claims.some(claim => claim.operationId === operation.id && claim.key === link.key && claim.evidenceHash === link.evidenceHash)) return null
+      if (!await sourceOwned(source) || !claims.some(claim => claim.operationId === operation.id && claim.key === link.key && claim.evidenceHash === link.evidenceHash)) return null
     }
     if (paid.some(({ child, attempt }) => child.status !== 'succeeded' || attempt.status !== 'succeeded'
       || !attempt.resultHash || jsonHash(attempt.result) !== attempt.resultHash || attempt.usageReceipt?.source !== 'reported'
@@ -95,7 +109,7 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
   const pairs = events.flatMap(result => {
     const payload = object(result.payload)
     if (result.type !== 'tool.result' || payload.toolName !== 'quality_analyze' || payload.ok !== false
-      || payload.failureCode !== 'QUALITY_REPORT_INCOMPLETE' || typeof payload.callId !== 'string') return []
+      || !validFailure(payload.failureCode) || typeof payload.callId !== 'string') return []
     const calls = events.filter(call => call.type === 'tool.call' && object(call.payload).callId === payload.callId && object(call.payload).toolName === 'quality_analyze')
     if (calls.length !== 1) return []
     const call = calls[0], args = object(object(call.payload).args)
@@ -121,6 +135,8 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
   const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, targetType: 'chapter', targetId: chapter.id,
     action: { startsWith: 'agent3Humanity' }, createdAt: interval } })
   const critics = paid.filter(item => item.action === 'agent3HumanityCritic')
+  if (options.allowFormatRecovery && audit?.classification === 'source_invalid'
+    && paid.some(item => item.action === 'agent3HumanityEvidenceCorrection') && !hasReturnedQualityCorrection(audit)) return null
   const recoveries = options.allowFormatRecovery ? paid.filter(item => item.action === 'agent3HumanityFormatRecovery') : []
   let sourceReportId: string | undefined
   if (recoveries.length) {
@@ -128,10 +144,10 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
     const links = [metrics.formatRecovery, ...(Array.isArray(metrics.formatRecoveryHistory) ? metrics.formatRecoveryHistory : [])].map(object)
     const link = links.find(item => item.state === 'failed' && typeof item.reportId === 'string' && item.reportId !== report.id)
     const source = link ? await tx.chapterQualityReport.findFirst({ where: { id: String(link.reportId), userId: subject.userId,
-      novelId: subject.novelId, chapterId: chapter.id, chapterRevision: chapter.revision, runId: { in: runIds } } }) : null
+      novelId: subject.novelId, chapterId: chapter.id, chapterRevision: chapter.revision } }) : null
     const sourceMetrics = object(source?.deterministicMetrics)
     const claims = [sourceMetrics.formatRecovery, ...(Array.isArray(sourceMetrics.formatRecoveryHistory) ? sourceMetrics.formatRecoveryHistory : [])].map(object)
-    if (!link || !source || !hash.safeParse(link.evidenceHash).success || !claims.some(claim => claim.claimRunId === report.runId
+    if (!link || !source || !await sourceOwned(source) || !hash.safeParse(link.evidenceHash).success || !claims.some(claim => claim.claimRunId === report.runId
       && claim.key === link.key && claim.evidenceHash === link.evidenceHash)) return null
     sourceReportId = source.id
   } else if (critics.length !== 1) return null

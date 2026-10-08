@@ -3,13 +3,37 @@ import { createHash } from 'node:crypto'
 import type { CriticQualityFinding } from '../../shared/contracts/humanity-quality-contracts.js'
 import { buildQualityEvidenceSources, coerceCriticFindings, correctQualityEvidence, locateQualityFindingSpans,
   locateQuoteSpans, renderQualityEvidenceSources, unlocatedQualityEvidence, validateQualityEvidenceSources,
-  inspectCriticResponse, parseQualityJsonObject, qualityReportHasDroppedFindings } from '../../api/lib/agent/quality-evidence.js'
+  inspectCriticResponse, inspectCorrectableCriticResponse, parseQualityJsonObject, qualityReportHasDroppedFindings } from '../../api/lib/agent/quality-evidence.js'
 
 const finding: CriticQualityFinding = { signal: 'explanation_echo', severity: 'warning', quote: '模型改写的引文', explanation: '重复解释', suggestion: '删除重复解释', confidence: 0.9 }
 const content = '她关上了门。走廊里的声音消失了。'
 const sourceIdentity = { userId: 'owner', novelId: 'novel', chapterId: 'chapter', chapterRevision: 3 }
 
 describe('complete quality JSON response evidence', () => {
+  it('keeps every judgment for source correction without certifying a foreign identifier', () => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content)
+    const raw = JSON.stringify({ findings: [{ ...finding, quote: undefined, sourceId: sources.entries[0].id },
+      { ...finding, quote: undefined, sourceId: 'mistyped-reference' }] })
+    const inspected = inspectCorrectableCriticResponse(raw, sources)
+    expect(inspected).toMatchObject({ complete: false, correctable: true, diagnostic: { invalidSources: 1, droppedFindings: 0 } })
+    expect(inspected.findings).toHaveLength(2)
+    expect(unlocatedQualityEvidence(content, inspected.findings, sources).map(item => item.index)).toEqual([1])
+    const corrected = correctQualityEvidence(content, inspected.findings, { corrections: [{ index: 1, sourceId: sources.entries[1].id }] }, sources)
+    expect(unlocatedQualityEvidence(content, corrected, sources)).toEqual([])
+    expect(corrected[0]).toEqual(inspected.findings[0])
+    expect(corrected[1]).toMatchObject({ signal: finding.signal, explanation: finding.explanation, suggestion: finding.suggestion })
+    expect(unlocatedQualityEvidence(content, correctQualityEvidence(content, inspected.findings,
+      { corrections: [{ index: 1, sourceId: 'still-wrong' }] }, sources), sources)).toHaveLength(1)
+    // Existing frozen parser results keep their historical semantics.
+    expect(inspectCriticResponse(raw, sources, true, 2).findings).toHaveLength(1)
+  })
+  it('does not correct away malformed judgments or truncated output', () => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content)
+    for (const findings of [[{ ...finding, sourceId: 'wrong' }, null], [{ ...finding, sourceId: 'wrong', signal: 'invented' }]]) {
+      expect(inspectCorrectableCriticResponse(JSON.stringify({ findings }), sources).correctable).toBe(false)
+    }
+    expect(inspectCorrectableCriticResponse('{"findings":[', sources).correctable).toBe(false)
+  })
   it('extracts one complete fenced report around unrelated JSON noise and string braces without joining objects', () => {
     const value = { findings: [{ ...finding, quote: '她关上了门。', explanation: '字符串内的 { 与 }，以及 \\"引号\\" 都是数据。' }] }
     const raw = `参考：{"metadata":"untrusted"}\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\`\n说明：{"note":"end"}`

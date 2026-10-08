@@ -39,7 +39,7 @@ import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
 import { REPAIR_BLOCK_CODES, REPAIR_CHANNEL_CODES, qualityReportCheckedCurrentContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
 import { probeChapterReviewRevision } from '../chapter-review-guard.js'
-import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, inspectCriticResponse, parseQualityJsonObject, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence, qualityReportHasDroppedFindings } from '../quality-evidence.js'
+import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, inspectCorrectableCriticResponse, parseQualityJsonObject, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence, qualityReportHasDroppedFindings, qualityCorrectionResponseWitness } from '../quality-evidence.js'
 import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/writing.js'
 import { renderChapterWritingBackground } from '../writing-request-context.js'
 import { resolveDurableAuxiliaryRuntime } from '../runtime-auxiliary-call.js'
@@ -324,7 +324,7 @@ export const qualityAnalyzeTool = defineTool({
       if (error instanceof DataAccessError) throw error
       criticFallback = true
     }
-    let inspected = inspectCriticResponse(response, sources, true, 2)
+    let inspected = inspectCorrectableCriticResponse(response, sources)
     if (!formatRecovery && response !== null && !inspected.complete
       && ['json_invalid', 'incomplete_json', 'envelope_invalid', 'ambiguous_envelope', 'duplicate_keys', 'findings_invalid'].includes(inspected.diagnostic.classification)) {
       // Persist the real first failure before reserving recovery. No malformed
@@ -342,12 +342,12 @@ export const qualityAnalyzeTool = defineTool({
       await assertCurrent()
       response = await generateTextCompletion(buildCriticSystem('balanced'), userPrompt,
         { ...responseOptions, action: 'agent3HumanityFormatRecovery', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true })
-      inspected = inspectCriticResponse(response, sources, true, 2)
-      criticFallback = !inspected.complete
+      inspected = inspectCorrectableCriticResponse(response, sources)
+      criticFallback = !inspected.complete && !inspected.correctable
     }
     rawCriticFindings = inspected.findings
     droppedCriticFindings = inspected.diagnostic.droppedFindings
-    criticFallback ||= !inspected.complete
+    criticFallback ||= !inspected.complete && !inspected.correctable
     if (!criticFallback) {
       const invalid = unlocatedQualityEvidence(bundle.chapter.content, rawCriticFindings, sources)
       if (invalid.length > 0) {
@@ -359,9 +359,9 @@ export const qualityAnalyzeTool = defineTool({
           corrected = await generateTextCompletion(
           qualityEvidenceSourceCorrectionSystem,
           `待定位意见：${JSON.stringify(invalid)}\n${renderQualityEvidenceSources(sources)}`,
-          { modelRuntime: formatRecovery ? resolved.runtime : auxiliaryTextModel(ctx.modelRuntime), ...(formatRecovery ? { explicitModelSelection: true } : {}),
-            signal: formatRecovery ? reviewSignal : AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: 'agent3HumanityEvidenceCorrection', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
+          { ...responseOptions, action: 'agent3HumanityEvidenceCorrection', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
           )
+          inspected.diagnostic.evidenceCorrection = qualityCorrectionResponseWitness(corrected)
         } catch (error) {
           ctx.signal.throwIfAborted()
           // Save the original, incomplete findings below before exposing the

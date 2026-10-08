@@ -780,7 +780,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     return qualityRecoveryKeys.get(key) ?? key
   }
   const recoverableQualityRestriction = (item: ToolRestriction): boolean => !!qualityRecovery
-    && ((item.action === 'quality_analyze' && item.code === 'QUALITY_REPORT_INCOMPLETE'
+    && ((item.action === 'quality_analyze' && ['QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(item.code)
       && [qualityRecovery.compilationId, qualityRecovery.chapterId].includes(item.target))
       || (item.action === 'chapter_bridge_commit' && item.code === 'REVIEW_DEPENDENCY_UNAVAILABLE'
         && item.target === qualityRecovery.compilationId))
@@ -1108,7 +1108,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (recovered.markers.length) await persistCheckpoint()
     }
     if ((params.resume || previousTask) && !pendingReviews.size
-      && toolRestrictions.some(item => item.action === 'quality_analyze' && item.code === 'QUALITY_REPORT_INCOMPLETE')) {
+      && toolRestrictions.some(item => item.action === 'quality_analyze' && ['QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(item.code))) {
       qualityRecovery = await prisma.$transaction(tx => readQualityFormatRecovery(tx,
         { userId: params.userId, novelId: params.novelId, runId }))
       if (qualityRecovery) qualityRecoveryKeys.set(reviewDispatchKey({ compilationId: qualityRecovery.compilationId,
