@@ -3,11 +3,14 @@ import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as original from '../../api/lib/agent/original-request.js'
 import * as lock from '../../api/lib/data/novel-write-lock.js'
-import { assertChapterManuscriptRevision, assertChapterReviewRevision, isChapterRevisionChannelOpen, probeChapterReviewRevision, continuityDecisionBinding } from '../../api/lib/agent/chapter-review-guard.js'
+import { assertChapterManuscriptRevision, assertChapterReviewRevision, probeChapterReviewRevision, continuityDecisionBinding } from '../../api/lib/agent/chapter-review-guard.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { readNewDraftRevision, readNewDraftWritingAuthority, prohibitsNewDraftRevision } from '../../api/lib/agent/writing-scope.js'
 
+async function paidChannelOpen(...args: Parameters<typeof probeChapterReviewRevision>) {
+  return (await probeChapterReviewRevision(...args)).open
+}
 afterEach(() => vi.restoreAllMocks())
 describe('review driven manuscript mutation admission', () => {
   function fixture(prompt: string, validation: Record<string, unknown> | null, reports: Array<{ chapterRevision: number }> = []) {
@@ -135,7 +138,7 @@ describe('one atomic factual correction in the original new draft', () => {
     completeQuality(f, 2)
     await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: f.chapter.content })).resolves.toBeUndefined()
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
-    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
   })
   it('explicit original existing-chapter repair permits repeated manuscript edits after paid repair without reopening it', async () => {
     const f = fixture('检查并修复当前章'), report = completeQuality(f)
@@ -183,7 +186,7 @@ describe('one atomic factual correction in the original new draft', () => {
     completeQuality(f)
     const before = structuredClone(f.compilation)
     await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
-    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
     expect(f.compilation).toEqual(before)
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace' })
@@ -232,6 +235,14 @@ describe('one atomic factual correction in the original new draft', () => {
       retainedFindings: scenario === 'duplicate' ? [item, item] : [item] })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
+  it('accepts a real located quality patch that preserves the quoted phrase while adding the missing detail', async () => {
+    const f = mixedFixture()
+    const after = '丙句。中句。补充动作。丁句。'
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after,
+      editRanges: [{ start: 0, end: 2, newText: '丙句' }, { start: 3, end: 6, newText: '中句。补充动作。' }, { start: 6, end: 8, newText: '丁句' }] }))
+      .resolves.toBeTypeOf('function')
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
   it('persists retain-only decisions without consuming CAS allowance and invalidates them on changed report evidence', async () => {
     const f = mixedFixture()
     const reportId = continuityDecisionBinding(f.compilation.id, f.chapter.revision, f.validation)
@@ -242,7 +253,7 @@ describe('one atomic factual correction in the original new draft', () => {
     await assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: f.chapter.content, retainedFindings })
     expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
     expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0, errorCount: 2 })
-    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
     const writes = f.db.storyCompilation.update.mock.calls.length
     await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '甲新句。中新句。乙新句。' }))
       .rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
@@ -250,7 +261,7 @@ describe('one atomic factual correction in the original new draft', () => {
       after: '甲新句。中新句。乙新句。' })).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
     expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(writes)
     Object.assign(f.report.findings[0], { suggestion: '当前新建议' })
-    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
   })
   it('allows one range candidate, but an append cannot spend even that correction', async () => {
     const f = fixture()
@@ -383,14 +394,14 @@ describe('one atomic factual correction in the original new draft', () => {
   })
   it('reports an open channel without consuming the one merged correction', async () => {
     const f = fixture()
-    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
-    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   it('a complete quality report cannot close an unspent factual correction by moving the compiler to repair', async () => {
     const f = fixture()
     f.compilation.stage = 'repair'
-    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter)
     await consume?.()
@@ -402,7 +413,7 @@ describe('one atomic factual correction in the original new draft', () => {
     f.chapter.revision++
     Object.assign(f.compilation.validation, { checkedRevision: 4, checkRounds: 2 })
     expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(1)
-    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
     expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(1)
   })
   it.each(['exhausted', 'unauthorized', 'committed-window', 'later-failure'] as const)('reports a closed channel while edits stay blocked: %s', async scenario => {
@@ -411,7 +422,7 @@ describe('one atomic factual correction in the original new draft', () => {
     if (scenario === 'unauthorized') f.spec.intent = 'review'
     if (scenario === 'committed-window') f.compilation.bridge.committedAt = new Date() as never
     if (scenario === 'later-failure') f.rows.unshift({ ...f.compilation, id: 'later', validation: { ...f.validation, independentCheck: 'unavailable' } })
-    await expect(isChapterRevisionChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   it('admits the one unspent correction from the final complete check without replenishing checks', async () => {

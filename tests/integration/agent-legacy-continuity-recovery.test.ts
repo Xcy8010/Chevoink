@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { readSettledQualityReviews } from '../../api/lib/agent/quality-review-admission.js'
 import { describe, expect, it } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
 import { readLegacyContinuityRecovery } from '../../api/lib/agent/legacy-continuity-recovery.js'
@@ -55,4 +57,36 @@ describe.runIf(available)('authenticated legacy continuity recovery', () => {
       expect(restrictions).toHaveLength(6)
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
     }))
+})
+
+
+describe.runIf(available)('received quality report and local repair failure recovery', () => {
+  it.each(['settled', 'unknown', 'missing-result', 'wrong-code', 'wrong-revision', 'incomplete', 'wrong-chapter', 'wrong-audit', 'overlap', 'prior-unfinished'] as const)('%s preserves reports and accounting', scenario => fixture(async f => {
+    try {
+      const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '原授权复检' })
+      const start = new Date(Date.now() - 10000), end = new Date(start.getTime() + 5000)
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', createdAt: start,
+        payload: { toolName: 'quality_analyze', callId: 'returned-quality', args: { compilationId: compilation.id, chapterId: scenario === 'wrong-chapter' ? 'other' : f.chapterId } } } })
+      if (scenario !== 'missing-result') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'tool.result', createdAt: end,
+        payload: { toolName: 'quality_analyze', callId: 'returned-quality', ok: false, failureCode: scenario === 'wrong-code' ? 'AI_PROVIDER_TIMEOUT' : 'REVIEW_MERGED_REVISION_REQUIRED' } } })
+      const report = await prisma.chapterQualityReport.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId, compilationId: compilation.id,
+        chapterId: f.chapterId, chapterRevision: scenario === 'wrong-revision' ? 2 : 1, status: scenario === 'incomplete' ? 'failed' : 'passed',
+        deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update('原文').digest('hex'), autoRepairAttempted: true, criticResponse: { callId: scenario === 'wrong-audit' ? 'other' : 'returned-quality' } },
+        createdAt: new Date(start.getTime() + 1000) } })
+      await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, targetType: 'quality_report', targetId: report.id,
+        providerType: 'text', providerMode: 'custom', modelName: 'fixture', action: 'agent3HumanityRevision',
+        requestTokens: scenario === 'unknown' ? null : 10, responseTokens: scenario === 'unknown' ? null : 2,
+        billingStatus: scenario === 'unknown' ? 'pending_usage' : 'settled', usageSource: scenario === 'unknown' ? 'unknown' : 'reported', durationMs: 20,
+        createdAt: new Date(start.getTime() + 2000) } })
+      if (scenario === 'prior-unfinished') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 0, type: 'tool.call', createdAt: new Date(start.getTime() - 1000),
+        payload: { toolName: 'chapter_write', callId: 'unfinished-write' } } })
+      if (scenario === 'overlap') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.call', createdAt: new Date(start.getTime() + 1500),
+        payload: { toolName: 'chapter_write', callId: 'overlapping-write' } } })
+      const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })
+      const pending = [{ compilationId: compilation.id, chapterId: f.chapterId, revision: 1, toolName: 'quality_analyze' as const, callId: 'returned-quality' }]
+      expect(await prisma.$transaction(tx => readSettledQualityReviews(tx, f, pending))).toEqual(scenario === 'settled' ? pending : [])
+      expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })).toEqual(before)
+      expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: report.id } })).toEqual(report)
+    } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+  }))
 })

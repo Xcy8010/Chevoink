@@ -138,6 +138,10 @@ async function updateOwnedChapterAtRevision(
       id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision + 1,
     } })
     if (!updated) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '写入后的章节作用域已变化，本次事务需要回滚。')
+    if (data.content !== undefined && isAgent2FeatureEnabled('storyCompiler', ctx.userId)) {
+      await recordStoryCompilerWrite({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
+        chapterId: updated.id, chapterOrderIndex: updated.orderIndex, chapterRevision: updated.revision }, tx)
+    }
     return updated
   }
   return ctx.transaction ? apply(ctx.transaction) : prisma.$transaction(apply)
@@ -186,16 +190,6 @@ async function writeChapterContent(
   if (isAgent2FeatureEnabled('memory2', ctx.userId)) {
     await enqueueChapterMemoryExtraction({
       novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: updated.revision, before, after,
-    }, ctx.transaction)
-  }
-  if (isAgent2FeatureEnabled('storyCompiler', ctx.userId)) {
-    await recordStoryCompilerWrite({
-      userId: ctx.userId,
-      novelId: ctx.novelId,
-      runId: ctx.runId,
-      chapterId: updated.id,
-      chapterOrderIndex: updated.orderIndex,
-      chapterRevision: updated.revision,
     }, ctx.transaction)
   }
 
@@ -355,6 +349,10 @@ export const chapterCreateTool = defineTool({
       }
       if (slot) await bindWritingChapter(tx, ctx, slot.orderIndex, result.id)
       semanticTransition = { targetId: ctx.novelId, beforeHash, afterHash: await readSemanticStructureHash(tx, ctx.novelId) }
+      if (content && isAgent2FeatureEnabled('storyCompiler', ctx.userId)) {
+        await recordStoryCompilerWrite({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
+          chapterId: result.id, chapterOrderIndex: result.orderIndex, chapterRevision: result.revision }, tx)
+      }
       return { ...result, scopeReused: false }
     }
     const chapter = ctx.transaction ? await create(ctx.transaction) : await prisma.$transaction(create)
@@ -368,16 +366,7 @@ export const chapterCreateTool = defineTool({
         novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: chapter.revision, before: '', after: content,
       }, ctx.transaction)
     }
-    if (!chapter.scopeReused && content && isAgent2FeatureEnabled('storyCompiler', ctx.userId)) {
-      await recordStoryCompilerWrite({
-        userId: ctx.userId,
-        novelId: ctx.novelId,
-        runId: ctx.runId,
-        chapterId: chapter.id,
-        chapterOrderIndex: chapter.orderIndex,
-        chapterRevision: chapter.revision,
-      }, ctx.transaction)
-    }
+
 
     return {
       output: `${chapter.scopeReused ? '复用原请求已绑定的' : '已原子创建'}全书第 ${chapter.orderIndex} 章《${chapter.title}》，位于第 ${chapter.volume.orderIndex} 卷《${chapter.volume.title}》卷内第 ${chapter.orderInVolume} 章，chapterId=${chapter.id}${!chapter.scopeReused && (args.position || args.positionInVolume) ? '，后续章节顺序已自动校正' : ''}${chapter.content ? `，当前正文 ${chapter.content.length} 字` : '（暂无正文）'}。${chapter.scopeReused ? '本次未创建、改名或写入章节。' : '创建已成功。'}后续必须复用该 chapterId，禁止重建同名章。`,
@@ -502,16 +491,6 @@ export const chapterEditRangeTool = defineTool({
     if (isAgent2FeatureEnabled('memory2', ctx.userId)) {
       await enqueueChapterMemoryExtraction({
         novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: updated.revision, before, after,
-      }, ctx.transaction)
-    }
-    if (isAgent2FeatureEnabled('storyCompiler', ctx.userId)) {
-      await recordStoryCompilerWrite({
-        userId: ctx.userId,
-        novelId: ctx.novelId,
-        runId: ctx.runId,
-        chapterId: updated.id,
-        chapterOrderIndex: updated.orderIndex,
-        chapterRevision: updated.revision,
       }, ctx.transaction)
     }
 

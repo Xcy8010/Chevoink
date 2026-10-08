@@ -428,11 +428,10 @@ async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subjec
       source = await tx.chapter.findFirst({ where: { id: terminal.bridge.fromChapterId, ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } })
       if (source?.revision !== terminal.bridge.sourceRevision) return null
     }
-    const { readChapterReviewReadiness, isChapterRevisionChannelOpen } = await import('./chapter-review-guard.js')
+    const { readChapterReviewReadiness, hasPendingChapterReviewDecision } = await import('./chapter-review-guard.js')
     const readiness = await readChapterReviewReadiness(tx, subject, terminal.id)
     if (!readiness?.ready) return null
-    if ((readiness.continuityErrorCount > 0 || readiness.qualityErrorCount > 0)
-      && await isChapterRevisionChannelOpen(tx, subject, chapter)) return null
+    if (hasPendingChapterReviewDecision(readiness)) return null
     if (length && (chapter.content.trim().length < Number(length[1]) || chapter.content.trim().length > Number(length[2]))) return null
     chapters.push({ ...chapter, contentHash: runtimeJson({ content: chapter.content }).hash })
   }

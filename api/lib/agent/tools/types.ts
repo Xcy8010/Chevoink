@@ -90,6 +90,8 @@ export type ToolResult = {
   /** Internal observed revision used by durable write admission; not model authority. */
   observedState?: { kind: 'chapter'; id: string; revision: number } | { kind: 'plan'; id: string; hash: string } | { kind: 'volume'; id: string; revision: number } | { kind: 'novel'; id: string; hash: string } | { kind: 'charter'; id: string; hash: string }
   /** Explicit observed failure; never infer success just because execute resolved. */
+  /** A report was received and persisted even if its subsequent local repair failed. */
+  reviewCompleted?: boolean
   outcome?: 'failed'
   /** Bounded diagnostic code, never a copy of private tool arguments. */
   failureCode?: string

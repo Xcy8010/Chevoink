@@ -122,3 +122,15 @@ it('shows a passed empty report summary and allows its empty-result detail to be
   fireEvent.click(screen.getByRole('button', { name: '展开质量报告' }))
   expect(screen.getByText('没有发现可定位的问题。')).toBeTruthy()
 })
+
+
+it('shows a proposed commit as preparing until its real tool.call arrives', () => {
+  const check = { ...tool(quality), status: 'running' as const, display: undefined, summary: undefined }
+  const commit = { type: 'tool-call' as const, callId: 'commit', toolName: 'chapter_bridge_commit', title: '提交章节终态', status: 'running' as const, preparing: true }
+  const view = render(<AgentMessageParts parts={[check, commit]} streaming runActive />)
+  expect(screen.getAllByText('执行中…')).toHaveLength(1)
+  expect(screen.getByText('准备调用…')).toBeTruthy()
+  view.rerender(<AgentMessageParts parts={[tool(quality), { ...commit, preparing: false }]} streaming={false} runActive />)
+  expect(screen.queryByText('准备调用…')).toBeNull()
+  expect(screen.getAllByText('执行中…')).toHaveLength(1)
+})

@@ -1,6 +1,6 @@
-import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision, readNewDraftWritingAuthority } from './writing-scope.js'
+import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision } from './writing-scope.js'
 import { classifyContinuityFindingAuthority, unlocatedContinuityEvidence } from './continuity-finding-authority.js'
-import { readOriginalTaskRequest, hasOriginalRepairAuthority } from './original-request.js'
+import { readOriginalTaskRequest } from './original-request.js'
 import { createHash } from 'node:crypto'
 
 import type { Prisma, StoryCompilationStage, StoryCharter, ReaderPromise, SceneTask } from '@prisma/client'
@@ -609,22 +609,27 @@ export async function recordStoryCompilerWrite(input: {
   chapterRevision: number
 }, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; stage: StoryCompilationStage } | null> {
   if (!transaction) return prisma.$transaction(tx => recordStoryCompilerWrite(input, tx))
+  await lockNovelActiveScope(transaction, input.novelId)
+  if (!await transaction.chapter.findFirst({ where: { id: input.chapterId, revision: input.chapterRevision,
+    authorId: input.userId, ...activeChapterScope(input.novelId) }, select: { id: true } })) {
+    throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '编译写入回执必须对应当前正文版本，旧回执不能回退章节桥。')
+  }
   const scope = await compilationRunScope(transaction, input)
   const compilation = await transaction.storyCompilation.findFirst({
     where: {
       userId: input.userId,
       novelId: input.novelId,
       ...scope,
-      status: 'active',
+      status: { in: ['active', 'completed'] },
       OR: [{ chapterId: input.chapterId }, { chapterId: null, targetOrderIndex: input.chapterOrderIndex }],
     },
     orderBy: { createdAt: 'desc' },
   })
   if (!compilation) return null
-  const stage: StoryCompilationStage = compilation.stage === 'check' ? 'repair' : 'write'
+  const stage: StoryCompilationStage = ['check', 'repair', 'commit'].includes(compilation.stage) ? 'repair' : 'write'
   await transaction.storyCompilation.update({
       where: { id: compilation.id },
-      data: { chapterId: input.chapterId, stage },
+      data: { chapterId: input.chapterId, stage, status: 'active', completedAt: null },
     })
   await transaction.sceneTask.updateMany({
       where: { compilationId: compilation.id },
@@ -632,7 +637,7 @@ export async function recordStoryCompilerWrite(input: {
     })
   await transaction.chapterBridge.update({
       where: { compilationId: compilation.id },
-      data: { toChapterId: input.chapterId, targetRevision: input.chapterRevision },
+      data: { toChapterId: input.chapterId, targetRevision: input.chapterRevision, committedAt: null },
     })
   return { compilationId: compilation.id, stage }
 }
@@ -812,25 +817,12 @@ export async function commitChapterBridge(input: {
   const qualityErrorCount = readiness?.qualityErrorCount ?? (report && qualityReportMatchesContent(report, chapter.revision, chapter.content)
     ? report.findings.filter(finding => finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0)
   let retainedIssueCount = report?.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length ?? 0
-  const qualityCandidateCount = readiness?.qualityCandidateCount ?? 0
-  const automaticCandidates = qualityCandidateCount > 0 && probeRunId
-    && !hasOriginalRepairAuthority((await readOriginalTaskRequest(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId })).prompt)
-    && await readNewDraftWritingAuthority(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.chapter)
-  if (continuityErrorCount > 0 || qualityErrorCount > 0 || automaticCandidates) {
-    // The gate only holds while a merged correction is still reachable. Once the
-    // revision channel is closed (consumed/exhausted/unauthorized) no tool can
-    // repair the remaining findings anymore, so "fix or hand it to the author"
-    // resolves to delivering with the report instead of blocking forever.
-    const { isChapterRevisionChannelOpen } = await import('./chapter-review-guard.js')
-    // Without any execution identity the channel cannot be proven closed, so the
-    // gate keeps its hold (legacy behavior) instead of guessing a release.
-    const channelOpen = !probeRunId || await isChapterRevisionChannelOpen(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId },
-      { id: compilation.chapter.id, revision: chapter.revision })
-    if (channelOpen) {
-      throw new DataAccessError(409, continuityErrorCount > 0 ? 'CONTINUITY_ERRORS_REMAIN' : 'QUALITY_CHECK_REQUIRED',
-        continuityErrorCount > 0 ? '当前正文存在已核验的事实错误，尚有未处理的自动修订决定：核对当前正文与真实证据，可合并或连续精确修改；全部修改后复核最终版本，再提交终态。'
-          : '当前完整质量报告还有尚未处理的安全候选（含审美建议）：核对当前报告，可合并或连续精确修改，或说明具体安全留置原因，再提交终态。检查完成不表示建议已应用。')
-    }
+  const { hasPendingChapterReviewDecision } = await import('./chapter-review-guard.js')
+  if (readiness ? hasPendingChapterReviewDecision(readiness) : continuityErrorCount > 0 || qualityErrorCount > 0) {
+    throw new DataAccessError(409, continuityErrorCount > 0 ? 'CONTINUITY_ERRORS_REMAIN' : 'QUALITY_CHECK_REQUIRED',
+      '当前检查意见尚未处理：依据当前正文精确修订，或逐项引用当前报告并说明具体留置原因。自动修订已尝试不表示意见已应用；修改后复核最终版本再提交。')
+  }
+  if (continuityErrorCount > 0 || qualityErrorCount > 0) {
     retainedIssueCount = continuityErrorCount + (report?.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length ?? qualityErrorCount)
   }
   const terminalContext = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext as Record<string, Prisma.JsonValue> : {}

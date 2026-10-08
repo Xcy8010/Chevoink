@@ -1,3 +1,4 @@
+import { readSettledQualityReviews } from './quality-review-admission.js'
 import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
@@ -57,7 +58,7 @@ import { toolFailureRecovery, toolRecoveryKey } from './tool-failure-recovery.js
 import { frozenWritingToolGuidance } from './writing-tool-guidance.js'
 import { findToolRestriction, isLocalToolFailure, isInputScopedFailure, restoreToolRestriction, toolFailureInputHash, toolRestrictionTarget, type ToolRestriction } from './tool-local-failure.js'
 import { assertLimitedWritingDelivery, type LimitedWritingDelivery } from './writing-delivery-limitations.js'
-import { readChapterReviewReadiness, probeChapterReviewRevision } from './chapter-review-guard.js'
+import { readChapterReviewReadiness, hasPendingChapterReviewDecision } from './chapter-review-guard.js'
 import { nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from './review-dispatch.js'
 import { readQualityFormatRecovery, type QualityFormatRecovery } from './quality-format-recovery.js'
 import { deferredToolPart } from './deferred-tool.js'
@@ -248,6 +249,7 @@ function reviewPreflightArgs(call: ToolCallRequest, tool?: AgentTool): Record<st
 const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
 
 type ToolCallOutcome = {
+  reviewCompleted?: boolean
   workflowMilestone?: import('./semantic-progress.js').WritingWorkflowMilestone
   failureCode?: string
   reviewStopReason?: string
@@ -502,7 +504,7 @@ export async function handleToolCall(
       failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
       const recovery = toolFailureRecovery(failureCode)
       return { ...fail(result.summary ?? recovery?.label ?? '执行未完成', wrapToolOutput(tool.name,
-        result.output + (recovery ? `\n${recovery.guidance}` : '')), 'failed'), ...(recovery ? { recoveryCode: failureCode } : {}) }
+        result.output + (recovery ? `\n${recovery.guidance}` : '')), 'failed'), ...(recovery ? { recoveryCode: failureCode } : {}), reviewCompleted: result.reviewCompleted }
     }
     const durationMs = Date.now() - startedAt
     const summary = result.summary ?? `${tool.title}完成`
@@ -779,11 +781,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const key = reviewDispatchKey(review, name)
     return qualityRecoveryKeys.get(key) ?? key
   }
-  const recoverableQualityRestriction = (item: ToolRestriction): boolean => !!qualityRecovery
+  const recoverableQualityRestriction = (item: ToolRestriction, binding: Pick<PendingReviewCall, 'compilationId' | 'chapterId'> | null = qualityRecovery): boolean => !!binding
     && ((item.action === 'quality_analyze' && ['QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(item.code)
-      && [qualityRecovery.compilationId, qualityRecovery.chapterId].includes(item.target))
+      && [binding.compilationId, binding.chapterId].includes(item.target))
       || (item.action === 'chapter_bridge_commit' && item.code === 'REVIEW_DEPENDENCY_UNAVAILABLE'
-        && item.target === qualityRecovery.compilationId))
+        && item.target === binding.compilationId))
   const effectiveRestrictions = () => qualityRecovery && !automaticReviewAttempts.has(`quality-format-recovery:${qualityRecovery.key}`)
     ? toolRestrictions.filter(item => !recoverableQualityRestriction(item)) : toolRestrictions
 
@@ -1106,6 +1108,17 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       recovered.markers.forEach(marker => automaticReviewAttempts.add(marker))
       if (firstConversion) compatibilityReadTargets = new Set(recovered.chapterIds)
       if (recovered.markers.length) await persistCheckpoint()
+    }
+    if ((params.resume || previousTask) && pendingReviews.size) {
+      const settled = await prisma.$transaction(tx => readSettledQualityReviews(tx,
+        { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]))
+      for (const item of settled) {
+        pendingReviews.delete(`${item.compilationId ?? item.chapterId}:${item.toolName}`)
+        for (let index = toolRestrictions.length - 1; index >= 0; index--) {
+          if (recoverableQualityRestriction(toolRestrictions[index], item)) toolRestrictions.splice(index, 1)
+        }
+      }
+      if (settled.length) await persistCheckpoint()
     }
     if ((params.resume || previousTask) && !pendingReviews.size
       && toolRestrictions.some(item => item.action === 'quality_analyze' && ['QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(item.code))) {
@@ -1677,9 +1690,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         else if (readiness?.ready && toolContext.sandboxMode !== 'read_only'
           && !toolContext.inlineChild && !toolContext.protectedChapterIds?.has(readiness.chapterId)
           && (readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)) {
-          const channel = await prisma.$transaction(tx => probeChapterReviewRevision(tx,
-            { userId: params.userId, novelId: params.novelId, runId }, { id: readiness.chapterId, revision: readiness.revision }))
-          const key = nextMergedReviewReminder(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, channel.open)
+          const key = nextMergedReviewReminder(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, hasPendingChapterReviewDecision(readiness))
           if (key) {
             automaticReviewAttempts.add(key)
             await persistCheckpoint()
@@ -1939,9 +1950,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               && !toolContext.protectedChapterIds?.has(readiness.chapterId)
               && (readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)) {
               const available = new Set(tools.map(tool => tool.name))
-              const channel = await prisma.$transaction(tx => probeChapterReviewRevision(tx,
-                { userId: params.userId, novelId: params.novelId, runId }, { id: readiness.chapterId, revision: readiness.revision }))
-              const key = nextMergedReviewReminder(readiness, available, automaticReviewAttempts, channel.open)
+              const key = nextMergedReviewReminder(readiness, available, automaticReviewAttempts, hasPendingChapterReviewDecision(readiness))
               const reader = tools.find(tool => tool.name === 'chapter_bridge_get')
               const readArgs = { compilationId: readiness.compilationId }
               if (key && reader?.readOnly && reader.parameters.safeParse(readArgs).success) {
@@ -1950,8 +1959,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
                 const required = { id: `review_decision_${messageId}_${callIndex}`, name: reader.name, arguments: JSON.stringify(readArgs) }
                 parts.push(deferredToolPart(call, preflightTool.title, parsed, '正在处理当前版本的检查意见，处理后再提交章节终态。', messageId, bus))
                 // An early commit is only a proposal. Read its current decision
-                // state and ask for a new plan; never execute the stale remainder.
-                effectiveToolCalls.splice(callIndex, effectiveToolCalls.length - callIndex, required)
+                // state and ask for a new commit; preserve unrelated calls in this batch.
+                effectiveToolCalls.splice(callIndex, 1, required)
                 const note = '正在核对检查意见的处理结果，之后再提交章节终态。'
                 for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') parts.splice(index, 1)
                 parts.push({ type: 'text', text: note })
@@ -2049,11 +2058,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }
         }
         const outcome = await handleToolCall(call, tools, { ...toolContext, callId: call.id, messageId }, bus, messageId, runId)
-        if (reviewDispatch && (outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
+        if (reviewDispatch && (outcome.reviewCompleted || outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
           'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED',
           'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? ''))) {
           pendingReviews.delete(`${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`)
-          if (outcome.part.status !== 'success') {
+          if (outcome.part.status !== 'success' && !outcome.reviewCompleted) {
             const settledKey = reviewAttemptKey(reviewDispatch, reviewDispatch.toolName)
             settledReviewFailures.add(settledKey)
             if (['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? '')) automaticReviewAttempts.add(`settled-continuity:${settledKey}`)
@@ -2061,7 +2070,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await persistCheckpoint()
         }
         if (qualityRecovery && reviewDispatch?.toolName === 'quality_analyze' && reviewDispatch.chapterId === qualityRecovery.chapterId
-          && reviewDispatch.revision === qualityRecovery.chapterRevision && outcome.part.status === 'success') {
+          && reviewDispatch.revision === qualityRecovery.chapterRevision && (outcome.reviewCompleted || outcome.part.status === 'success')) {
           // The original audit events remain intact. Only the now-resolved local
           // ban is retired; subsequent revisions still need their own checks.
           for (let index = toolRestrictions.length - 1; index >= 0; index--) {

@@ -155,7 +155,7 @@ describe.runIf(available)('native paid failed quality response and limited deliv
 })
 
 describe.runIf(available)('new-draft quality-first prepayment admission', () => {
-  it.each(['legacy', 'durable', 'ready-durable', 'waived-durable'] as const)('%s persists a known report and pays for repair only after original continuity requirements', async scenario => {
+  it.each(['legacy', 'durable', 'ready-durable', 'waived-durable', 'repair-timeout', 'repair-error'] as const)('%s persists a known report and pays for repair only after original continuity requirements', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     await fixture(async base => {
       // Admit a separate synthetic human request before creating its target.
@@ -170,7 +170,7 @@ describe.runIf(available)('new-draft quality-first prepayment admission', () => 
       expect(spec.scope.writing?.targets).toEqual([{ orderIndex: 2, chapterId: null }])
       await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
       await prisma.agentMessage.create({ data: { id: sourceMessageId, runId, sessionId: base.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
-      const root = scenario === 'legacy' ? null : await initializeDurableTask({ userId: base.userId, runId, sourceMessageId })
+      const root = scenario === 'legacy' || scenario.startsWith('repair-') ? null : await initializeDurableTask({ userId: base.userId, runId, sourceMessageId })
       const ctx: ToolContext = { ...subject, sessionId: base.sessionId, chapterId: null, callId: 'create-new-draft', mode: 'build',
         creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
       const volumeDecision = { kind: 'continue' as const, reason: '本卷主困局尚未收束，先推进原目标。' }
@@ -186,9 +186,31 @@ describe.runIf(available)('new-draft quality-first prepayment admission', () => 
       await recordStoryCompilerWrite({ ...subject, chapterId, chapterOrderIndex: 2, chapterRevision: before.revision })
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toBeNull()
       expect(await prisma.chapterQualityReport.count({ where: { chapterId } })).toBe(0)
-      if (scenario === 'ready-durable') await validateStoryContinuity({ ...subject, compilationId, expectedChapterRevision: before.revision,
+      if (scenario === 'ready-durable' || scenario.startsWith('repair-')) await validateStoryContinuity({ ...subject, compilationId, expectedChapterRevision: before.revision,
         independentCheck: 'complete', findings: [] })
       const finding = { signal: 'emotion_grounding', severity: 'advisory', quote: '停了一会', explanation: '合成动作可更明确', suggestion: '简化等待动作', confidence: 0.9 }
+      if (scenario.startsWith('repair-')) {
+        vi.spyOn(reviewCompletion, 'generateReviewCompletion').mockResolvedValue(JSON.stringify({ findings: [finding] }))
+        const error = scenario === 'repair-timeout' ? new DOMException('internal review timeout', 'TimeoutError') : new Error('unknown transport result')
+        const repair = vi.spyOn(aiService, 'generateTextCompletion').mockImplementation(async (_system, _prompt, options) => {
+          await prisma.aiUsageLog.create({ data: { userId: base.userId, novelId: base.novelId, targetType: 'quality_report', targetId: options!.targetId,
+            action: 'agent3HumanityRevision', providerType: 'text', providerMode: 'custom', modelName: 'synthetic-unknown', durationMs: 20,
+            usageSource: 'unknown', billingStatus: 'pending_usage', requestTokens: null, responseTokens: null } })
+          throw error
+        })
+        try {
+          await expect(qualityAnalyzeTool.execute({ ...ctx, callId: 'unknown-revision' }, { compilationId })).rejects.toBe(error)
+          expect(repair).toHaveBeenCalledOnce()
+          expect(ctx.signal.aborted).toBe(false)
+          expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).toEqual(before)
+          const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId } })
+          expect(report.deterministicMetrics).toMatchObject({ autoRepairAttempted: true })
+          expect(await prisma.aiUsageLog.findMany({ where: { userId: base.userId } })).toEqual([expect.objectContaining({ usageSource: 'unknown', billingStatus: 'pending_usage' })])
+          expect(await chapterBridgeCommitTool.execute(ctx, { compilationId })).toMatchObject({ outcome: 'failed' })
+          expect(repair).toHaveBeenCalledOnce()
+        } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: base.userId } }) }
+        return
+      }
       let repairRequests = 0
       if (scenario === 'legacy') {
         const reserve = vi.spyOn(humanityQuality, 'reserveQualityAutoRepair')
@@ -290,7 +312,7 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
         if (scenario === 'evidence-ambiguous') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '原文原文' } })
         const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
         const finding = { signal: 'emotion_grounding', severity: 'warning', quote: '原...文', explanation: '缺少动作', suggestion: '局部调整', confidence: 0.9 }
-        // 一条可绑定、一条不可绑定：部分证据缺失不再让整个报告 failed，未定位计数进入指标，章节桥仍可提交。
+        // 可绑定意见照常保存；报告完整不代表已处理意见，不能直接提交。
         const partial = { signal: 'reader_pull', severity: 'warning', quote: '这段引用不在正文里', explanation: '缺少拉力', suggestion: '补充动作', confidence: 0.8 }
         const model = vi.spyOn(aiService, 'generateTextCompletion').mockResolvedValueOnce(JSON.stringify({ findings: scenario === 'evidence-partial' ? [finding, partial] : [finding] }))
         if (scenario === 'evidence-credit-failure') model.mockRejectedValueOnce(new DataAccessError(402, 'CREDITS_EXHAUSTED', 'fixture credit gate'))
@@ -307,7 +329,7 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
         if (scenario === 'evidence-partial') {
           expect(saved.deterministicMetrics).toMatchObject({ independentCheck: 'complete', unlocatedFindings: 1, criticFindingCount: 2, droppedFindings: 0 })
           expect(saved.findings.filter(item => item.source === 'critic')).toEqual([expect.objectContaining({ evidenceExcerpt: '原文', explanation: finding.explanation })])
-          expect(await commitChapterBridge({ userId: f.userId, novelId: f.novelId, compilationId, chapterSummary: '摘要', exitState: state, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '脚印', requireQuality: true, qualityReportId: saved.id })).toMatchObject({ compilationId, chapterRevision: 1 })
+          await expect(commitChapterBridge({ userId: f.userId, novelId: f.novelId, compilationId, chapterSummary: '摘要', exitState: state, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '脚印', requireQuality: true, qualityReportId: saved.id })).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
         }
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: before.content, revision: before.revision })
         return
@@ -714,9 +736,9 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       if (scenario === 'full-chain') {
         expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('连续性检查') } })
-        expect(await step()).toMatchObject({ result: { summary: '提交章节桥与当前故事终态' } })
-        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('completed')
-        expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(2)
+        expect(await step()).toMatchObject({ result: { outcome: 'failed', failureCode: 'QUALITY_CHECK_REQUIRED' } })
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('active')
+        expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
       }
       const expectedRequests = scenario === 'missing' || scenario === 'format-expired' ? 0
         : scenario === 'full-chain' ? 4

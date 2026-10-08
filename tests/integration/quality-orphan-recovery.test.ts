@@ -156,7 +156,7 @@ describe.runIf(available)('quality continuation after actual conversation deleti
   }))
 })
 
-describe.runIf(available)('typed continue passes inherited restrictions through the real loop', () => {
+describe.runIf(available).each(['clean', 'pending-decision'] as const)('typed continue passes inherited restrictions through the real loop: %s', scenario => {
   let f: Parameters<Parameters<typeof fixture>[0]>[0], seeded: Awaited<ReturnType<typeof seed>>
   let release: () => void, cleanup: Promise<void>
   beforeAll(async () => {
@@ -190,23 +190,49 @@ describe.runIf(available)('typed continue passes inherited restrictions through 
     const feature = featureFlags.isAgent2FeatureEnabled
     vi.spyOn(featureFlags, 'isAgent2FeatureEnabled').mockImplementation((key, owner) => key === 'storyCompiler' || key !== 'memory2' && feature(key, owner))
     const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
-      expect(JSON.parse(String(init.body)).reasoning_effort).toBe('none')
-      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`,
+      const body = JSON.parse(String(init.body)), revision = body.messages[0].content.includes('局部修订编辑')
+      expect(body.reasoning_effort).toBe('none')
+      const content = revision ? '{"patches":[]}' : scenario === 'clean' ? '{"findings":[]}' : JSON.stringify({ findings: [{ sourceId: JSON.parse(String(init.body)).messages[1].content.match(/q[a-f0-9]{64}/)[0], signal: 'emotion_grounding', severity: 'advisory', explanation: '合成审美意见', suggestion: '补充动作' }] })
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`,
         { headers: { 'content-type': 'text/event-stream' } })
     })
     vi.stubGlobal('fetch', fetchMock)
+    const revisionErrors: string[] = [], generate = aiService.generateTextCompletion
+    vi.spyOn(aiService, 'generateTextCompletion').mockImplementation(async (...args) => {
+      try { return await generate(...args) } catch (error) { revisionErrors.push(String(error)); throw error }
+    })
     let turn = 0
     vi.spyOn(aiService, 'chatWithTools').mockImplementation(async () => {
-      const name = ['quality_analyze', 'chapter_bridge_commit'][turn++]
-      return { content: name ? '' : '本章检查及终态已提交。', reasoning: '', finishReason: name ? 'tool_calls' : 'stop',
-        toolCalls: name ? [{ id: `call-${turn}`, name, arguments: JSON.stringify({ compilationId: seeded.compilationId }) }] : [],
+      turn++
+      const calls = turn === 1 ? [
+        { id: 'quality-batch', name: 'quality_analyze', arguments: JSON.stringify({ compilationId: seeded.compilationId }) },
+        { id: 'early-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: seeded.compilationId }) },
+        { id: 'independent-read', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
+      ] : []
+      if (scenario === 'pending-decision' && turn === 2) {
+        const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { runId: seeded.subject.runId }, include: { findings: true }, orderBy: { createdAt: 'desc' } })
+        calls.push({ id: 'writer-decision', name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content: '原文',
+          retainedFindings: report.findings.map(finding => ({ source: 'quality', reportId: report.id, findingId: finding.id, reason: '此处有意简短，增添动作会改变作者明确保留的停顿。' })) }) },
+          { id: 'decided-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: seeded.compilationId }) })
+      }
+      return { content: calls.length ? '' : '本章检查及终态已提交。', reasoning: '', finishReason: calls.length ? 'tool_calls' : 'stop',
+        toolCalls: calls,
         usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
     })
     await executeAgentRun({ ...seeded.subject, mode: 'build', prompt: '继续', modelTier: 'speed', qualityMode: 'premium', creativeFreedom: 'stable' })
+    expect(revisionErrors).toEqual([])
     const results = await prisma.agentRunEvent.findMany({ where: { runId: seeded.subject.runId, type: 'tool.result' }, orderBy: { seq: 'asc' } })
     expect(results.map(event => event.payload)).toEqual(expect.arrayContaining([
       expect.objectContaining({ toolName: 'quality_analyze', ok: true }), expect.objectContaining({ toolName: 'chapter_bridge_commit', ok: true })]))
-    expect(fetchMock).toHaveBeenCalledOnce()
+    if (scenario === 'pending-decision') {
+      const calls = await prisma.agentRunEvent.findMany({ where: { runId: seeded.subject.runId, type: 'tool.call' }, orderBy: { seq: 'asc' } })
+      expect(calls.map(event => (event.payload as { callId: string }).callId)).toContain('independent-read')
+      expect(results.find(event => (event.payload as { callId: string }).callId === 'early-commit')?.payload).toMatchObject({ ok: false, durationMs: 0, summary: expect.stringContaining('未执行') })
+      const writer = calls.find(event => (event.payload as { callId: string }).callId === 'writer-decision')!
+      const commit = calls.find(event => (event.payload as { callId: string }).callId === 'decided-commit')!
+      expect(writer.seq).toBeLessThan(commit.seq)
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(scenario === 'clean' ? 1 : 3)
     expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: seeded.subject.runId } })).toMatchObject({ status: 'completed',
       usage: { checkpoint: { inheritedTokens: 30, inheritedTurns: 2 } } })
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: seeded.compilationId } })).toMatchObject({ status: 'completed' })

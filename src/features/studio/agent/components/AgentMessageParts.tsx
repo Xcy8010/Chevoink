@@ -886,7 +886,8 @@ const ToolCallCard = memo(function ToolCallCard({
   const requestMemorySpotlight = useAgentStore((state) => state.requestMemorySpotlight)
   const argumentRows = useMemo(() => describeToolArguments(part.args), [part.args])
   const durationLabel = formatToolDuration(part.durationMs)
-  const running = part.status === 'running'
+  const preparing = part.status === 'running' && part.preparing
+  const running = part.status === 'running' && !preparing
   const importWaiting = running && part.toolName === 'novel_import' && part.importWaiting
     && /^\/studio\/novel\/[^/?#]+\?/.test(part.importWaiting.url) ? part.importWaiting : null
   const writeTool = WRITE_TOOL_NAMES.has(part.toolName)
@@ -928,13 +929,14 @@ const ToolCallCard = memo(function ToolCallCard({
   const headerContent = <>
     {writeTool ? <FileText className="h-3.5 w-3.5 shrink-0 text-sky-500" /> : <Wrench className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />}
     <span className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--text-primary)]">{part.title || part.toolName}</span>
+    {preparing ? <span className="shrink-0 text-[10px] text-[var(--text-secondary)]">准备调用…</span> : null}
     {running ? <span className="agent-tool-running-label shrink-0 text-[10px] font-medium text-[var(--text-secondary)]">{runningLabel}</span> : null}
     {durationLabel ? <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-secondary)]">{durationLabel}</span> : null}
-    {writeTool && !running ? <span className={cn(
+    {writeTool && !running && !preparing ? <span className={cn(
       'shrink-0 text-[10px] font-medium',
       part.status === 'success' ? 'text-emerald-600' : part.status === 'denied' ? 'text-amber-500' : 'text-rose-500',
     )}>{part.status === 'success' ? (part.accepted ? '已接受' : '已完成') : part.status === 'denied' ? '已拒绝' : '失败'}</span> : null}
-    <span className="shrink-0">{toolStatusIcon[part.status]}</span>
+    <span className="shrink-0">{preparing ? null : toolStatusIcon[part.status]}</span>
     {spotlightType !== null ? (
       <SquareStack className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)] transition-colors group-hover:text-[var(--text-primary)]" />
     ) : rowExpandable ? <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)] transition-transform', expanded && 'rotate-180')} /> : null}

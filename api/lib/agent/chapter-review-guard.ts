@@ -30,8 +30,33 @@ export type ChapterReviewReadiness = {
   ready: boolean; checksRequired: boolean; compilationId: string; chapterId: string; revision: number
   continuity: ReviewStatus; quality: ReviewStatus; continuityErrorCount: number; qualityErrorCount: number
   qualityCandidateCount?: number
+  /** Current bound decisions, independent of paid repair quotas. */
+  decisionPending?: boolean
   continuityExhausted?: boolean
   qualityReportId: string | null; requiredTools: Array<{ name: 'continuity_validate' | 'quality_analyze'; args: { compilationId: string } }>
+}
+
+/** Retention is a current, explicit decision; a paid reservation is not one. */
+function retainedReviewDecisionMatches(validation: unknown, chapter: { id: string; revision: number; content: string },
+  compilationId: string, report: { id: string; findings: unknown[] } | null,
+  required: Array<{ source: string; reportId: string; findingId: string }>) {
+  const value = validation && typeof validation === 'object' && !Array.isArray(validation) ? validation as Record<string, unknown> : null
+  const decision = value?.retainedReviewDecision as Record<string, unknown> | undefined
+  if (!decision || decision.version !== 1 || decision.chapterId !== chapter.id || decision.revision !== chapter.revision
+    || decision.contentHash !== runtimeJson({ content: chapter.content }).hash
+    || decision.continuityBinding !== continuityDecisionBinding(compilationId, chapter.revision, validation)
+    || decision.qualityReportId !== (report?.id ?? null)
+    || decision.qualityReportHash !== (report ? qualityDecisionHash(report.findings) : null)
+    || !Array.isArray(decision.findings)) return false
+  const entries = decision.findings as Array<{ source?: string; reportId?: string; findingId?: string; reason?: string }>
+  const key = (item: typeof entries[number]) => `${item.source}:${item.reportId}:${item.findingId}`
+  return entries.every(item => item && typeof item.reason === 'string' && item.reason.trim())
+    && new Set(entries.map(key)).size === entries.length
+    && required.every(item => entries.some(entry => key(entry) === key(item)))
+}
+
+export function hasPendingChapterReviewDecision(readiness: ChapterReviewReadiness) {
+  return readiness.decisionPending ?? (readiness.continuityErrorCount > 0 || readiness.qualityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)
 }
 
 /** Only authenticated original human text may waive a delivery assessment. */
@@ -104,6 +129,17 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '章节桥来源版本已变化，保留原编译与正文，不能自动重建或沿用旧检查交付。')
   }
   const requirements = originalChapterReviewRequirements(original)
+  const spec = original.spec && typeof original.spec === 'object' && !Array.isArray(original.spec) ? original.spec as Record<string, unknown> : null
+  const strictQuality = !['stable', 'bold'].includes(String(spec?.creativeFreedom))
+  const { requiresCompletedReview } = await import('./writing-delivery-limitations.js')
+  const constraints = [original.prompt ?? '',
+    ...(Array.isArray(spec?.hardConstraints) ? spec.hardConstraints.flatMap(item => item && typeof item === 'object' && typeof item.text === 'string' ? [item.text] : []) : []),
+    ...(Array.isArray(spec?.postconditions) ? spec.postconditions.flatMap(item => item && typeof item === 'object' && item.severity === 'error' && typeof item.description === 'string' ? [item.description] : []) : []),
+  ].flatMap(text => text.split(/[。！？!?；;\n，,]+/u)).filter(requiresCompletedReview)
+  const qualityTerms = /质量|人类感|AI味|quality/iu, continuityTerms = /连续性|连贯性|一致性|continuity/iu
+  const mustPassQuality = constraints.some(text => qualityTerms.test(text) || !continuityTerms.test(text))
+  const mustPassContinuity = constraints.some(text => continuityTerms.test(text) || !qualityTerms.test(text))
+
   const validation = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : null
   const { assessment } = readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, chapter, source)
   const validationStale = !!validation && (typeof validation.checkedChapterId === 'string' && validation.checkedChapterId !== chapter.id
@@ -121,8 +157,20 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   const requiredTools: ChapterReviewReadiness['requiredTools'] = []
   if (requirements.continuity && continuity !== 'complete') requiredTools.push({ name: 'continuity_validate', args: { compilationId: compilation.id } })
   if (requirements.quality && quality !== 'complete') requiredTools.push({ name: 'quality_analyze', args: { compilationId: compilation.id } })
+  const continuityBinding = continuityDecisionBinding(compilation.id, chapter.revision, compilation.validation)
+  const requiredDecisions = [
+    ...(assessment && validation && Array.isArray(validation.findings) ? validation.findings.flatMap((finding, index) =>
+      finding && typeof finding === 'object' && 'severity' in finding && finding.severity === 'error'
+        ? [{ source: 'continuity', reportId: continuityBinding, findingId: String(index) }] : []) : []),
+    ...(quality === 'complete' ? selectAutomaticQualityFindings(report!.findings).filter(finding => finding.severity === 'error' || requirements.quality && strictQuality).map(finding =>
+      ({ source: 'quality', reportId: report!.id, findingId: finding.id })) : []),
+  ]
+  const mandatoryReviewPending = mustPassContinuity && (assessment?.errorCount ?? 0) > 0
+    || mustPassQuality && quality === 'complete' && report!.status !== 'passed'
+  const decisionPending = mandatoryReviewPending || requiredDecisions.length > 0 && !retainedReviewDecisionMatches(compilation.validation, chapter,
+    compilation.id, quality === 'complete' ? report! : null, requiredDecisions)
   return { ready: !requiredTools.length, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id,
-    chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools,
+    chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools, decisionPending,
     continuityExhausted: false,
     continuityErrorCount: assessment?.errorCount ?? 0, qualityErrorCount: quality === 'complete' ? report!.findings.filter(finding =>
       finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0,
@@ -170,7 +218,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   if (prohibited || (!authority && reviewed && !hasOriginalRepairAuthority(original.prompt))) {
     throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原始作者请求未授权改写该正文；检查报告不能扩大写入权限。')
   }
-  const latest = compilations.find(item => item.status === 'active' && item.bridge && !item.bridge.committedAt)
+  const latest = compilations.find(item => ['active', 'completed'].includes(item.status) && item.bridge)
   const quality = reports[0]
   if (options.retainedFindings?.length) {
     const source = latest?.bridge?.fromChapterId ? await tx.chapter.findFirst({ where: { id: latest.bridge.fromChapterId,
@@ -344,8 +392,8 @@ export async function assertChapterReviewRevision(
           throw new DataAccessError(409, 'REVIEW_MERGED_REVISION_REQUIRED', '留置意见必须引用同一当前检查的真实意见，原因不能为空；旧报告、跨章或重复引用不允许写入。')
         }
         const covered = (entry: typeof entries[number]) => {
-          if (entry.start !== null && entry.end !== null) return (options.editRanges ? ranges.some(range =>
-            range.start < entry.end! && range.end > entry.start! && !range.newText.includes(entry.evidence))
+          if (entry.start !== null && entry.end !== null) return (options.editRanges
+            ? ranges.some(range => range.start < entry.end! && range.end > entry.start!)
             : !options.after!.includes(entry.evidence) && ranges.some(range => range.start < entry.end! && range.end > entry.start!))
           const quotes = [...entry.evidence.matchAll(/[“「『"‘]([^”」』"’]{2,360})[”」』"’]/gu)].map(match => match[1])
           if (before.includes(entry.evidence)) quotes.push(entry.evidence)
@@ -495,17 +543,6 @@ export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
     if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) return { open: false, code: error.code, message: error.message }
     throw error
   }
-}
-
-/** Commit gates probe the same admission checks read-only before blocking a
- * terminal delivery: while a merged correction is still reachable the gate
- * holds the commit; once the channel is closed (consumed, exhausted or never
- * authorized) no tool can repair the remaining findings anymore, so the
- * "fix or hand it to the author" promise resolves to delivering with the
- * report. The CAS callback is deliberately dropped here. */
-export async function isChapterRevisionChannelOpen(tx: Prisma.TransactionClient,
-  subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number }): Promise<boolean> {
-  return (await probeChapterReviewRevision(tx, subject, chapter)).open
 }
 
 /** Read-only tool feedback uses the same admission checks. The returned CAS

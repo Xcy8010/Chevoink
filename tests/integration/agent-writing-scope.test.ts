@@ -1,10 +1,13 @@
+import * as compiler from '../../api/lib/agent/story-compiler.js'
+import { continuityDecisionBinding } from '../../api/lib/agent/chapter-review-guard.js'
+import type { Prisma } from '@prisma/client'
 import { createHash, randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
 import { verifyTestDatabase } from '../support/database-preflight.js'
 import { isTestDatabaseRequired } from '../support/database-availability.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
-import { assertWritingTarget, freezeWritingScope, readWritingScope, readNewDraftRevision, readNewDraftWritingAuthority } from '../../api/lib/agent/writing-scope.js'
+import { assertWritingTarget, freezeWritingScope, readWritingScope, readNewDraftRevision, readNewDraftWritingAuthority, readCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
 import { chapterCreateTool, chapterWriteTool, chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { continuityValidateTool, storyCompilerPrepareTool, sceneTaskBuildTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
@@ -316,7 +319,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0 })
     expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: f.quality.id } })).toEqual(f.quality)
   }))
-  it.each(['写第一章', '写第一章并润色'])('holds only the automatic advisory-only new-draft channel: %s', prompt => fixture(prompt, async ctx => {
+  it.each(['写第一章', '写第一章并润色'])('requires an explicit decision for strict writing advice regardless of automatic repair authority: %s', prompt => fixture(prompt, async ctx => {
     const f = await newDraftReview(ctx, prompt, '甲句。乙句。')
     // A frozen write contract may also carry an explicit human repair clause.
     // Preserve that historical intersection instead of changing intent parsing.
@@ -330,12 +333,6 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       evidenceHash: createHash('sha256').update('甲句').digest('hex'), explanation: '合成审美建议', suggestion: '补一个动作', confidence: 0.9 } })
     const input = { ...ctx, compilationId: f.compilation.id, chapterSummary: '合成摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
       lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' }
-    if (prompt.includes('润色')) {
-      expect(await prisma.$transaction(tx => commitChapterBridge(input, tx))).toMatchObject({ chapterRevision: f.chapter.revision, retainedIssueCount: 1 })
-      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(f.chapter)
-      expect(readNewDraftRevision((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation)).toBeNull()
-      return
-    }
     await expect(prisma.$transaction(tx => commitChapterBridge(input, tx))).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
     await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: f.chapter.content, retainedFindings: [
       { source: 'quality', reportId: f.quality.id, findingId: finding.id, reason: '此处刻意简短，无法安全增添动作而改变作者声口。' },
@@ -349,10 +346,97 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     await expect(chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '甲新句。乙句。' })).resolves.toBeTruthy()
     await expect(chapterEditRangeTool.execute(ctx, { chapterId: f.chapterId, patches: [{ oldText: '甲新句', newText: '甲再次修改' }] })).resolves.toBeTruthy()
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: '甲再次修改。乙句。', revision: f.chapter.revision + 2 })
-    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation).toEqual(saved.validation)
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation).toMatchObject(saved.validation)
     await expect(prisma.$transaction(tx => commitChapterBridge(input, tx))).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
     expect((await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: f.quality.id }, include: { findings: true } })).findings[0])
       .toMatchObject({ disposition: 'pending', severity: 'advisory' })
+  }))
+  it.each(['revise', 'retain'] as const)('recovers an already completed chapter with six unprocessed findings after a consumed automatic attempt: %s', action => fixture('写第一章，只要章名和正文', async ctx => {
+    const f = await newDraftReview(ctx, '写第一章，只要章名和正文', '甲句。乙句。丙句。丁句。戊句。己句。')
+    await prisma.storyCompilation.update({ where: { id: f.compilation.id }, data: { validation: runtimeJson({ ...f.validation, findings: [], errorCount: 0 }).value } })
+    const input = { ...ctx, compilationId: f.compilation.id, chapterSummary: '合成摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' }
+    await commitChapterBridge(input)
+    await prisma.chapterQualityReport.update({ where: { id: f.quality.id }, data: { deterministicMetrics: {
+      ...f.quality.deterministicMetrics as Prisma.JsonObject, autoRepairAttempted: true } } })
+    const findings = await Promise.all(Array.from({ length: 6 }, (_, index) => prisma.qualityFinding.create({ data: {
+      reportId: f.quality.id, userId: ctx.userId, novelId: ctx.novelId, source: 'critic', signal: 'emotion_grounding', severity: 'advisory',
+      startOffset: index * 3, endOffset: index * 3 + 2, evidenceExcerpt: f.chapter.content.slice(index * 3, index * 3 + 2),
+      evidenceHash: createHash('sha256').update(f.chapter.content.slice(index * 3, index * 3 + 2)).digest('hex'),
+      explanation: '合成建议', suggestion: '核对动作', confidence: 0.9,
+    } })))
+    expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))).toMatchObject({ ready: true, decisionPending: true, qualityCandidateCount: 6 })
+    expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, ctx))).toBeNull()
+    await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    const oldReport = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: f.quality.id } })
+    if (action === 'retain') {
+      await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: f.chapter.content, retainedFindings: findings.map((finding, index) =>
+        ({ source: 'quality' as const, reportId: f.quality.id, findingId: finding.id, reason: `第${index + 1}处是人物有意停顿，增添动作会改变此处节奏。` })) })
+      expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))).toMatchObject({ decisionPending: false })
+      await prisma.qualityFinding.update({ where: { id: findings[0].id }, data: { suggestion: '报告意见已改变' } })
+      await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+      await prisma.qualityFinding.update({ where: { id: findings[0].id }, data: { suggestion: findings[0].suggestion } })
+      await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: f.chapter.content, retainedFindings: findings.map(finding =>
+        ({ source: 'quality' as const, reportId: f.quality.id, findingId: finding.id, reason: '重新核对当前报告，保留人物原本的短句停顿。' })) })
+    } else {
+      await chapterEditRangeTool.execute(ctx, { chapterId: f.chapterId, patches: [{ oldText: '甲句', newText: '甲句后他停步' }] })
+      const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const reopened = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id }, include: { bridge: true, sceneTasks: true } })
+      expect(reopened).toMatchObject({ status: 'active', stage: 'repair', completedAt: null, bridge: { committedAt: null, targetRevision: chapter.revision },
+        validation: { checkRounds: 1, autoRepairRounds: 0 } })
+      await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+      const coverage = compilerContinuityCoverage({ chapter, bridge: reopened.bridge, sceneTasks: reopened.sceneTasks, source: null })
+      await validateStoryContinuity({ ...ctx, compilationId: f.compilation.id, expectedChapterRevision: chapter.revision, coverage, independentCheck: 'complete', findings: [] })
+      await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+      await prisma.chapterQualityReport.create({ data: { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: f.compilation.id,
+        chapterId: f.chapterId, chapterRevision: chapter.revision, status: 'passed', deterministicMetrics: {
+          independentCheck: 'complete', contentHash: createHash('sha256').update(chapter.content).digest('hex') } } })
+    }
+    await commitChapterBridge(input)
+    expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, ctx))).not.toBeNull()
+    expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: f.quality.id } })).toEqual(oldReport)
+    expect(await prisma.aiUsageLog.count({ where: { agentRunId: ctx.runId } })).toBe(0)
+    expect(await prisma.storyCompilation.count({ where: { novelId: ctx.novelId } })).toBe(1)
+  }))
+  it('rolls back manuscript CAS when the compiler transition fails and rejects stale post-write hooks', () => fixture('写第一章', async ctx => {
+    const f = await newDraftReview(ctx)
+    const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id }, include: { bridge: true } })
+    const hook = vi.spyOn(compiler, 'recordStoryCompilerWrite').mockRejectedValueOnce(new Error('synthetic compiler transition failed'))
+    try {
+      await expect(chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '修改后的正文。' })).rejects.toThrow('synthetic compiler transition failed')
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(f.chapter)
+      expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id }, include: { bridge: true } })).toEqual(before)
+    } finally { hook.mockRestore() }
+    await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '真实修改后的正文。' })
+    const latest = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id }, include: { bridge: true } })
+    await expect(compiler.recordStoryCompilerWrite({ ...ctx, chapterId: f.chapterId, chapterOrderIndex: 1, chapterRevision: f.chapter.revision }))
+      .rejects.toMatchObject({ code: 'CHAPTER_REVISION_CONFLICT' })
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id }, include: { bridge: true } })).toEqual(latest)
+  }))
+  it('does not let a retention decision waive an original mandatory continuity pass', () => fixture('写第一章，必须通过连续性检查才能交付', async ctx => {
+    const f = await newDraftReview(ctx, '写第一章，必须通过连续性检查才能交付')
+    await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: f.chapter.content, retainedFindings: [
+      { source: 'continuity', reportId: continuityDecisionBinding(f.compilation.id, f.chapter.revision, f.validation), findingId: '0', reason: '保留问题供作者核对。' },
+    ] })
+    expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))).toMatchObject({ ready: true, decisionPending: true, continuityErrorCount: 1 })
+    await expect(commitChapterBridge({ ...ctx, compilationId: f.compilation.id, chapterSummary: '摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' })).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
+  }))
+  it.each(['质量', '连续性'] as const)('preserves explicit %s pass without expanding it to other reviews', kind => fixture(`写第一章，${kind}检查必须通过才能交付`, async ctx => {
+    const f = await newDraftReview(ctx, `写第一章，${kind}检查必须通过才能交付`)
+    await prisma.storyCompilation.update({ where: { id: f.compilation.id }, data: { validation: { ...f.validation, findings: [], errorCount: 0, warningCount: 0 } } })
+    await prisma.chapterQualityReport.update({ where: { id: f.quality.id }, data: { status: 'needs_repair' } })
+    const finding = await prisma.qualityFinding.create({ data: { reportId: f.quality.id, userId: ctx.userId, novelId: ctx.novelId,
+      source: 'critic', signal: 'emotion_grounding', severity: 'warning', startOffset: 0, endOffset: 3, evidenceExcerpt: '同一扇',
+      evidenceHash: createHash('sha256').update('同一扇').digest('hex'), explanation: '人物声口建议', suggestion: '核对重复用语', confidence: 0.9 } })
+    await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: f.chapter.content, retainedFindings: [
+      { source: 'quality', reportId: f.quality.id, findingId: finding.id, reason: '核对原文后保留人物刻意重复的声口。' },
+    ] })
+    expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))).toMatchObject({ ready: true, decisionPending: kind === '质量', continuityErrorCount: 0, qualityErrorCount: 0 })
+    const input = { ...ctx, compilationId: f.compilation.id, chapterSummary: '摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' }
+    if (kind === '质量') await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    else await expect(commitChapterBridge(input)).resolves.toBeTruthy()
   }))
   it('allows original manuscript edits with failed reports without certifying final review', () => fixture('写第一章', async ctx => {
     const f = await newDraftReview(ctx)

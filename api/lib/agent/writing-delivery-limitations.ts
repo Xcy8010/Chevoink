@@ -30,7 +30,7 @@ const limitedWritingDeliveryV2Schema = limitedWritingDeliveryV1Schema.extend({
 }).strict()
 export const limitedWritingDeliverySchema = z.discriminatedUnion('version', [limitedWritingDeliveryV1Schema, limitedWritingDeliveryV2Schema])
 export type LimitedWritingDelivery = z.infer<typeof limitedWritingDeliverySchema>
-const requiresCompletedReview = (text: string) => /(?:检查|复核|审查|审阅|校验|质量|连续性|一致性|check|review|validat|quality|continuity).{0,30}(?:通过|合格|无误|完成后|才能|才可|再交付|pass|before|deliver)|(?:必须|务必|确保|一定|only|must).{0,25}(?:通过|合格|无误|复核|检查|pass|review|check)|(?:不得|不能|禁止|must not|never).{0,10}(?:跳过|省略|bypass|skip).{0,10}(?:复核|检查|review|check)/iu.test(text)
+export const requiresCompletedReview = (text: string) => /(?:检查|复核|审查|审阅|校验|质量|连续性|一致性|check|review|validat|quality|continuity).{0,30}(?:通过|合格|无误|完成后|才能|才可|再交付|pass|before|deliver)|(?:必须|务必|确保|一定|only|must).{0,25}(?:通过|合格|无误|复核|检查|pass|review|check)|(?:不得|不能|禁止|must not|never).{0,10}(?:跳过|省略|bypass|skip).{0,10}(?:复核|检查|review|check)/iu.test(text)
 
 /** Original author requirements cannot be waived by a tool, a model's todo or
  * a default premium policy. Unknown requirements keep the ordinary gate. */
