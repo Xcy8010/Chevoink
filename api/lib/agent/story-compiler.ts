@@ -24,7 +24,7 @@ import { runtimeJson } from './runtime-common.js'
 import type { WritingWorkflowMilestone } from './semantic-progress.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches, continuityStoryInput, type CompilerContinuityCoverage } from './compiler-continuity-contract.js'
-import { readWritingVolumeContext, assertWritingVolumeBoundary } from './writing-volume.js'
+import { readWritingVolumeContext, assertWritingVolumeBoundary, isWritingVolumeTargetOrderIndex } from './writing-volume.js'
 import { writingVolumeDecisionSchema, type WritingVolumeDecision } from '../../../shared/contracts/writing-volume-contracts.js'
 
 type PreparedBridge = {
@@ -925,7 +925,12 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
     select: { id: true, revision: true, content: true } }) : null
   const hasBody = !!chapter?.content.trim()
   const terminalContext = active?.preparedContext && typeof active.preparedContext === 'object' && !Array.isArray(active.preparedContext) ? active.preparedContext : null
-  const volumeContext = runId && scope ? await readWritingVolumeContext(prisma, { userId, novelId, runId }, active?.targetOrderIndex ?? (await readWritingScope(prisma, { userId, novelId, runId })).writing?.targets[0]?.orderIndex ?? Number.MAX_SAFE_INTEGER) : null
+  const targetOrderIndex = runId && scope
+    ? active?.targetOrderIndex ?? (await readWritingScope(prisma, { userId, novelId, runId })).writing?.targets[0]?.orderIndex
+    : undefined
+  const volumeContext = runId && scope && isWritingVolumeTargetOrderIndex(targetOrderIndex)
+    ? await readWritingVolumeContext(prisma, { userId, novelId, runId }, targetOrderIndex)
+    : null
   const committed = !!active && hasBody && active.status === 'completed' && active.stage === 'commit'
     && !!active.bridge && active.bridge.toChapterId === chapter?.id && !!active.bridge.committedAt && active.bridge.targetRevision === chapter?.revision
     && terminalContext?.terminalContentHash === runtimeJson({ content: chapter?.content }).hash

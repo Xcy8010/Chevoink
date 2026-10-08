@@ -7,8 +7,15 @@ import { writingNewVolumeSchema, type WritingNewVolume } from '../../../shared/c
 
 type Subject = { userId: string; novelId: string; runId: string }
 
+export function isWritingVolumeTargetOrderIndex(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 2_147_483_647
+}
+
 /** Counts prompt a review of the arc; they never determine a volume boundary. */
 export async function readWritingVolumeContext(tx: Prisma.TransactionClient, subject: Subject, targetOrderIndex: number) {
+  if (!isWritingVolumeTargetOrderIndex(targetOrderIndex)) {
+    throw new DataAccessError(400, 'INVALID_ARGUMENTS', '卷上下文需要有效的目标章节序号。')
+  }
   const previous = await tx.chapter.findFirst({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId), orderIndex: { lt: targetOrderIndex } },
     orderBy: { orderIndex: 'desc' }, include: { volume: true } })
   if (!previous) return null
