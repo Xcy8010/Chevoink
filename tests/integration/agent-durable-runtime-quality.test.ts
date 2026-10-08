@@ -102,6 +102,7 @@ describe.runIf(available)('native paid failed quality response and limited deliv
       const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
       snapshot.work.version = 4
       snapshot.work.parserVersion = 1
+      delete snapshot.work.repairSourceReferences
       delete snapshot.work.formatRecovery
       delete snapshot.work.deadlineAt
       await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
@@ -549,6 +550,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
           const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
           snapshot.work.version = 5
           snapshot.work.parserVersion = 1
+          delete snapshot.work.repairSourceReferences
           const prepared = await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
           admittedLegacy = { id: prepared.operation.id, inputHash: prepared.operation.inputHash, inputSnapshot: prepared.operation.inputSnapshot }
           throw new Error('fixture historical v5 admitted')
@@ -561,6 +563,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
           const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
           snapshot.work.version = 4
           snapshot.work.parserVersion = 1
+          delete snapshot.work.repairSourceReferences
           delete snapshot.work.formatRecovery
           delete snapshot.work.deadlineAt
           const prepared = await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
@@ -630,6 +633,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
           snapshot.work = { ...snapshot.work, version: oldWorkVersion, contextHash: runtimeJson(JSON.parse(JSON.stringify(legacy))).hash,
             criticInput: '合成升级前冻结的完整正文与点评输入', criticSystem: '合成升级前的只读点评规则；只输出 findings JSON。' }
           delete snapshot.work.parserVersion
+          delete snapshot.work.repairSourceReferences
           delete snapshot.work.formatRecovery
           delete snapshot.work.deadlineAt
           const prepared = await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
@@ -717,8 +721,13 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       const expectedRequests = scenario === 'missing' || scenario === 'format-expired' ? 0
         : scenario === 'full-chain' ? 4
         : ['evidence-corrected', 'format-retry', 'repair', 'format-valid-repair', 'format-recovery-rollback'].includes(scenario) ? 3
-        : ['context-change', 'evidence-unresolved', 'rollback-resume', 'format', 'duplicate-keys', 'format-valid', 'format-recovery-stale', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario) ? 2 : 1
+        : ['invalid-source-id', 'mixed-source', 'context-change', 'evidence-unresolved', 'rollback-resume', 'format', 'duplicate-keys', 'format-valid', 'format-recovery-stale', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario) ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
+      if (scenario === 'invalid-source-id' || scenario === 'mixed-source') {
+        expect(result).toMatchObject({ result: { outcome: 'failed', failureCode: 'QUALITY_EVIDENCE_UNLOCATED' } })
+        expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'quality_evidence_correction' } })).toBe(1)
+        expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'quality_format_recovery' } })).toBe(0)
+      }
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
       expect(chapter.content).toBe(userEdited ? '用户新文' : repairedOnDisk ? '新文' : before)
@@ -735,7 +744,11 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(reports[0].deterministicMetrics).toMatchObject({ independentCheck: scenario === 'json-noise' ? 'complete' : 'unavailable',
           criticResponse: { version: 1, operationId: operation.id,
             classification: scenario === 'json-noise' ? 'complete' : scenario === 'duplicate-keys' ? 'duplicate_keys' : 'source_invalid' } })
-        if (scenario === 'mixed-source') expect(reports[0].findings.filter(item => item.source === 'critic')).toHaveLength(1)
+        if (scenario === 'mixed-source') {
+          expect(reports[0].findings.filter(item => item.source === 'critic')).toHaveLength(1)
+          expect(reports[0].deterministicMetrics).toMatchObject({ criticFindingCount: 2, unlocatedFindings: 1, droppedFindings: 0,
+            criticResponse: { evidenceCorrection: { returned: true, contentHash: expect.any(String) } } })
+        }
         expect(reports[0].deterministicMetrics).not.toHaveProperty('rawResponse')
       }
       if (['synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario)) {

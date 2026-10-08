@@ -225,7 +225,7 @@ describe('严谨创作自动落实质量建议', () => {
     expect(f.critic).toHaveBeenCalledOnce()
     expect(f.write).not.toHaveBeenCalled()
   })
-  it.each(['noise', 'ambiguous', 'foreign-source'] as const)('legacy critic %s persists exact diagnostics without additional paid dispatch', async scenario => {
+  it.each(['noise', 'ambiguous', 'foreign-source'] as const)('legacy critic %s keeps all judgments and only corrects invalid references', async scenario => {
     const f = fixture(false)
     f.ctx.creativeFreedom = 'stable'
     const valid = { signal: 'emotion_grounding', severity: 'advisory', quote: '证据0。', explanation: '具体动作', suggestion: '保留声音', confidence: 0.8 }
@@ -236,14 +236,20 @@ describe('严谨创作自动落实质量建议', () => {
     if (scenario !== 'noise') f.report.status = 'failed'
     const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(humanityQuality.persistHumanityQualityReport).toHaveBeenCalledWith(expect.objectContaining({
-      criticComplete: scenario === 'noise', criticDropped: scenario === 'foreign-source' ? 1 : 0,
-      criticFindings: scenario === 'foreign-source' ? [valid] : [],
+      criticComplete: scenario === 'noise', criticDropped: 0,
+      criticFindings: scenario === 'foreign-source' ? [valid, { ...valid, sourceId: 'foreign' }] : [],
       criticResponseDiagnostic: expect.objectContaining({ version: 1, contentHash: digest(raw), characterCount: raw.length,
         classification: scenario === 'noise' ? 'complete' : scenario === 'ambiguous' ? 'ambiguous_envelope' : 'source_invalid' }),
     }))
-    if (scenario !== 'noise') expect(result).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_REPORT_INCOMPLETE' })
+    if (scenario !== 'noise') expect(result).toMatchObject({ outcome: 'failed', failureCode: scenario === 'foreign-source' ? 'QUALITY_EVIDENCE_UNLOCATED' : 'QUALITY_REPORT_INCOMPLETE' })
     expect(f.critic).toHaveBeenCalledOnce()
-    expect(f.model).not.toHaveBeenCalled()
+    if (scenario === 'foreign-source') {
+      expect(f.model).toHaveBeenCalledOnce()
+      expect(f.model.mock.calls[0][2]).toMatchObject({ action: 'agent3HumanityEvidenceCorrection', explicitModelSelection: true })
+      expect(humanityQuality.persistHumanityQualityReport).toHaveBeenCalledWith(expect.objectContaining({
+        criticResponseDiagnostic: expect.objectContaining({ evidenceCorrection: { returned: true, contentHash: expect.any(String), characterCount: expect.any(Number) } }),
+      }))
+    } else expect(f.model).not.toHaveBeenCalled()
     expect(f.reserve).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
   })
