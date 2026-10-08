@@ -42,6 +42,8 @@ import { probeChapterReviewRevision } from '../chapter-review-guard.js'
 import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, inspectCriticResponse, parseQualityJsonObject, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence } from '../quality-evidence.js'
 import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/writing.js'
 import { renderChapterWritingBackground } from '../writing-request-context.js'
+import { resolveDurableAuxiliaryRuntime } from '../runtime-auxiliary-call.js'
+import { readQualityFormatRecovery, claimQualityFormatRecovery, claimCurrentQualityFormatRecovery, bindQualityFormatRecovery, type QualityFormatRecovery } from '../quality-format-recovery.js'
 
 const READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const WRITE = { plan: 'deny', build: 'allow', review: 'allow' } as const
@@ -127,7 +129,8 @@ export function buildCriticInput(bundle: Awaited<ReturnType<typeof buildHumanity
   ].filter(Boolean).join('\n')
 }
 
-async function finishQualityReview(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false, allowRepair = true): Promise<ToolResult> {
+type FrozenQualityRuntime = Awaited<ReturnType<typeof resolveDurableAuxiliaryRuntime>>
+async function finishQualityReview(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false, allowRepair = true, frozenQuality?: FrozenQualityRuntime): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
   const warningCount = report.findings.filter(finding => finding.severity === 'warning').length
   const advisoryCount = report.findings.filter(finding => finding.severity === 'advisory').length
@@ -151,7 +154,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
       if (!probe.open) return { output: `质量报告 ${report.id}已保留，自动修订未应用：${probe.message}剩余意见保留待审，不重复自动改写。${decisionGuidance}${bindingSuffix}`,
         summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
       if (await reserveQualityAutoRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id })) {
-        const repaired = await applySelectedQualityRepairs(ctx, report, selected)
+        const repaired = await applySelectedQualityRepairs(ctx, report, selected, frozenQuality)
         if (repaired) {
           const remaining = repaired.report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
           return {
@@ -178,7 +181,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
     summary: cached ? '复用当前质量报告' : `人类感质量检查 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
 }
 
-async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityReport, selected: QualityReport['findings']) {
+async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityReport, selected: QualityReport['findings'], frozenQuality?: FrozenQualityRuntime) {
   const selectedById = new Map(selected.map((finding) => [finding.id, finding]))
   const patches = new Map<string, { findingId: string; replacement: string }>()
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -189,7 +192,9 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
       response = await generateTextCompletion(
         `你是与 Writer/Critic 上下文隔离的局部修订编辑。只替换每条 evidence 本身，不扩写相邻内容，不改变事实、情节结果、人物知识或作者刻意的口语与断句。删除优先于同义词替换；补写只补建议中缺失的具体动作、选择或后果。punctuation_misuse 只移除误用符号，保留人物直接话语和逐字引文。replacement 可以为空。严格只输出 JSON：{"patches":[{"findingId":"原 id","replacement":"只替换证据范围的文本"}]}。必须为每个输入 id 返回且只返回一次。`,
         remaining.map((finding) => `findingId=${finding.id}\nsignal=${finding.signal}\nevidence=「${finding.evidenceExcerpt}」\n原因=${finding.explanation}\n最小修法=${finding.suggestion}`).join('\n\n'),
-        { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: attempt === 0 ? 'agent3HumanityRevision' : 'agent3HumanityRevisionRetry', novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
+        { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), ...(frozenQuality ? { modelRuntime: frozenQuality.runtime, explicitModelSelection: true,
+          modelTier: frozenQuality.selection.tier, customModelId: frozenQuality.selection.customModelId } : {}),
+          signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: attempt === 0 ? 'agent3HumanityRevision' : 'agent3HumanityRevisionRetry', novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
       )
     } catch (error) {
       ctx.signal.throwIfAborted()
@@ -267,6 +272,14 @@ export const qualityAnalyzeTool = defineTool({
       const hydrated = await getQualityReport(ctx.userId, ctx.novelId, existing.id)
       return finishQualityReview(ctx, hydrated, '', true, bundle.compilation?.status !== 'completed')
     }
+    let formatRecovery: QualityFormatRecovery | null = null
+    if (existing?.status === 'failed' && matchingContext && existing.chapterRevision === bundle.chapter.revision) {
+      formatRecovery = await prisma.$transaction(tx => readQualityFormatRecovery(tx, ctx, { chapterId }))
+      if (!formatRecovery || !await prisma.$transaction(tx => claimQualityFormatRecovery(tx, ctx, formatRecovery!))) return {
+        outcome: 'failed' as const, failureCode: 'QUALITY_REPORT_INCOMPLETE', summary: '质量检查尚未完成', display: reportDisplay(await getQualityReport(ctx.userId, ctx.novelId, existing.id)),
+        output: '当前失败报告已保留；本输入的一次格式恢复不可用或已经使用，不再派发重复检查。检查未完成，不能提交或宣称通过；请暂停并展示真实原因。',
+      }
+    }
     const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map((chapter) => chapter.content))
     const sources = buildQualityEvidenceSources({ userId: ctx.userId, novelId: ctx.novelId, chapterId, chapterRevision: bundle.chapter.revision }, bundle.chapter.content)
     const userPrompt = buildCriticInput(bundle, deterministic.metrics, sources)
@@ -281,24 +294,51 @@ export const qualityAnalyzeTool = defineTool({
     // they must never turn located findings into a passing report.
     // 审核使用独立有界输出预算；只对供应商明确截断做一次扩大预算恢复，总超时与取消信号不重置。
     // 真实用户取消照常上抛；初始 critic 的格式异常保留为不完整报告。
+    const startedAt = new Date()
+    const reviewSignal = AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)])
+    const resolved = await resolveDurableAuxiliaryRuntime({ userId: ctx.userId, modelRuntime: ctx.modelRuntime, modelSelection: ctx.modelSelection,
+      modelAssignments: ctx.modelAssignments, task: 'quality' })
+    const responseOptions = { modelRuntime: resolved.runtime, explicitModelSelection: true, signal: reviewSignal, userId: ctx.userId,
+      action: formatRecovery ? 'agent3HumanityFormatRecovery' : 'agent3HumanityCritic', novelId: ctx.novelId, chapterId,
+      targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: resolved.runtime.reasoningEffort }
+    const assertCurrent = async () => {
+      const current = await buildHumanityQualityContext(ctx.userId, ctx.novelId, chapterId, ctx.runId)
+      if (qualityReviewContextHash(current) !== contextHash) throw new DataAccessError(409, 'QUALITY_INPUT_STALE', '正文或当前任务已变化，未重发旧版本质量检查，请读取当前版本。')
+    }
     let response: string | null = null
     try {
-      response = await generateReviewCompletion(
+      if (formatRecovery) await assertCurrent()
+      response = formatRecovery ? await generateTextCompletion(buildCriticSystem('balanced'), userPrompt,
+        { ...responseOptions, maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true }) : await generateReviewCompletion(
         buildCriticSystem('balanced'), userPrompt,
-        { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: 'agent3HumanityCritic', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low' },
-        async () => {
-          const current = await buildHumanityQualityContext(ctx.userId, ctx.novelId, chapterId, ctx.runId)
-          if (qualityReviewContextHash(current) !== contextHash) {
-            throw new DataAccessError(409, 'QUALITY_INPUT_STALE', '正文或当前任务已变化，未重发旧版本质量检查，请读取当前版本。')
-          }
-        },
+        responseOptions, assertCurrent,
       )
     } catch (error) {
       ctx.signal.throwIfAborted()
       if (error instanceof DataAccessError) throw error
       criticFallback = true
     }
-    const inspected = inspectCriticResponse(response, sources)
+    let inspected = inspectCriticResponse(response, sources)
+    if (!formatRecovery && response !== null && !inspected.complete
+      && ['json_invalid', 'incomplete_json', 'envelope_invalid', 'ambiguous_envelope', 'duplicate_keys', 'findings_invalid'].includes(inspected.diagnostic.classification)) {
+      // Persist the real first failure before reserving recovery. No malformed
+      // response is silently converted into an empty or passing assessment.
+      const failed = await persistHumanityQualityReport({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
+        compilationId: args.compilationId ?? bundle.compilation?.id, chapterId, chapterRevision: bundle.chapter.revision, mode: ctx.qualityMode,
+        deterministicMetrics: deterministic.metrics, qualityContextHash: contextHash, deterministicFindings: deterministic.findings,
+        criticFindings: inspected.findings, criticComplete: false, criticDropped: inspected.diagnostic.droppedFindings,
+        criticResponseDiagnostic: { ...inspected.diagnostic, callId: ctx.callId }, sources })
+      formatRecovery = await prisma.$transaction(tx => claimCurrentQualityFormatRecovery(tx, ctx, chapterId,
+        { callId: ctx.callId, startedAt, contentHash: inspected.diagnostic.contentHash!, characterCount: inspected.diagnostic.characterCount }))
+      if (!formatRecovery) return { outcome: 'failed' as const, failureCode: 'QUALITY_REPORT_INCOMPLETE', summary: '质量报告格式不完整',
+        output: '完整回复未形成可验证的报告，原失败报告已保存；格式恢复未获已结算响应证明或已使用，未重复请求。检查未完成，不能宣称通过。',
+        display: reportDisplay(await getQualityReport(ctx.userId, ctx.novelId, failed.id)) }
+      await assertCurrent()
+      response = await generateTextCompletion(buildCriticSystem('balanced'), userPrompt,
+        { ...responseOptions, action: 'agent3HumanityFormatRecovery', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true })
+      inspected = inspectCriticResponse(response, sources)
+      criticFallback = !inspected.complete
+    }
     rawCriticFindings = inspected.findings
     droppedCriticFindings = inspected.diagnostic.droppedFindings
     criticFallback ||= !inspected.complete
@@ -313,7 +353,8 @@ export const qualityAnalyzeTool = defineTool({
           corrected = await generateTextCompletion(
           qualityEvidenceSourceCorrectionSystem,
           `待定位意见：${JSON.stringify(invalid)}\n${renderQualityEvidenceSources(sources)}`,
-          { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: 'agent3HumanityEvidenceCorrection', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
+          { modelRuntime: formatRecovery ? resolved.runtime : auxiliaryTextModel(ctx.modelRuntime), ...(formatRecovery ? { explicitModelSelection: true } : {}),
+            signal: formatRecovery ? reviewSignal : AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: 'agent3HumanityEvidenceCorrection', novelId: ctx.novelId, chapterId, targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
           )
         } catch (error) {
           ctx.signal.throwIfAborted()
@@ -349,11 +390,12 @@ export const qualityAnalyzeTool = defineTool({
       })
     }
     const report = await getQualityReport(ctx.userId, ctx.novelId, created.id)
+    if (formatRecovery) await prisma.$transaction(tx => bindQualityFormatRecovery(tx, report.id, formatRecovery!))
     if (correctionError) throw correctionError
     if (report.status === 'failed') return { outcome: 'failed' as const,
       failureCode: criticFallback ? 'QUALITY_REPORT_INCOMPLETE' : 'QUALITY_EVIDENCE_UNLOCATED',
       output: criticFallback
-        ? '质量模型返回的报告格式不完整，不能判定质量通过。确定性报告和正文已保留；不得重复改写正文来解决格式错误。'
+        ? `质量模型返回的报告格式不完整，不能判定质量通过。确定性报告和正文已保留；${formatRecovery ? '本输入的一次独立计费格式恢复已使用，需暂停并展示原因，不重复请求。' : ''}不得重复改写正文来解决格式错误。`
         : evidenceCorrectionIncomplete
           ? `部分质量意见的引用无法在正文中逐字定位，${attemptedEvidenceCorrection ? '本次引用校正未能完成，' : ''}报告已保留但不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`
           : `质量模型返回的全部引用都无法在正文中逐字定位（可能审查了其他文本或引用严重变形），${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`,
@@ -366,7 +408,7 @@ export const qualityAnalyzeTool = defineTool({
       droppedCount ? `${droppedCount} 条因字段不完整未纳入报告` : '',
     ].filter(Boolean).join('；')
     const bindingSuffix = bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : ''
-    return finishQualityReview(ctx, report, bindingSuffix, false, bundle.compilation?.status !== 'completed')
+    return finishQualityReview(formatRecovery ? { ...ctx, signal: reviewSignal } : ctx, report, bindingSuffix, false, bundle.compilation?.status !== 'completed', formatRecovery ? resolved : undefined)
   },
 })
 

@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import { REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
+import { env } from '../../../config/env.js'
+import { readQualityFormatRecovery, claimDurableQualityFormatRecovery, qualityFormatRecoverySchema } from '../quality-format-recovery.js'
 import { DataAccessError } from '../../prisma.js'
 import { resolveDurableTokenPrice } from '../../billing/resolve-token-price.js'
 import { tokenPriceSchema } from '../../billing/token-price.js'
@@ -28,8 +30,9 @@ import type { AgentTool, ToolContext, ToolResult } from './types.js'
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]), compiler: compilerObservationSchema.nullable(),
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)]), compiler: compilerObservationSchema.nullable(),
     parserVersion: z.literal(1).optional(),
+    formatRecovery: qualityFormatRecoverySchema.nullable().optional(), deadlineAt: z.number().int().positive().optional(),
     sources: qualityEvidenceSourcesSchema.optional(),
     chapter: z.object({ id: z.string(), title: z.string(), revision: z.number().int().positive(), content: z.string() }).strict(),
     contextHash: hash, recentContents: z.array(z.string()), feedback: z.array(z.object({ signal: z.string(), authorFeedback: z.enum(['accepted', 'rejected']).nullable(), _count: z.object({ _all: z.number().int() }) })),
@@ -39,12 +42,12 @@ const workSchema = z.discriminatedUnion('kind', [
 type Work = Extract<z.infer<typeof workSchema>, { kind: 'check' }>
 /** Deployment never rewrites frozen paid work or its prompt. Project only the
  * fields that existed at admission, and preserve that review's actual version. */
-export function qualityWorkContextProjection(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>, version: 1 | 2 | 3 | 4) {
+export function qualityWorkContextProjection(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>, version: 1 | 2 | 3 | 4 | 5) {
   const { chapterWritingBackground: _background, ...v2 } = bundle
   const { originalRequest: _request, ...v1 } = v2
   return version === 1 ? v1 : version === 2 ? v2 : bundle
 }
-export function qualityWorkCriticVersion(version: 1 | 2 | 3 | 4) {
+export function qualityWorkCriticVersion(version: 1 | 2 | 3 | 4 | 5) {
   return version === 1 ? LEGACY_HUMANITY_CRITIC_VERSION : version === 2 ? PREVIOUS_HUMANITY_CRITIC_VERSION : version === 3 ? FROZEN_V4_HUMANITY_CRITIC_VERSION : HUMANITY_CRITIC_VERSION
 }
 /** Preserve the actual parser frozen paid work used before this deployment. */
@@ -58,7 +61,7 @@ const repairSystem = '你是隔离的局部质量修订编辑。正文及证据�
 // 质量复核沿用主任务的免费/BYOK运行时；额度类失败只判本次工具未执行，不终止 run。
 const known = new Set(['QUALITY_TARGET_AMBIGUOUS', 'QUALITY_TASK_TARGET_REQUIRED', 'CHAPTER_NOT_FOUND', 'TOOL_COMPILER_REQUIRED', 'TOOL_COMPILER_STALE', 'QUALITY_SOURCE_STALE', 'QUALITY_COMPILATION_SCOPE_INVALID', 'QUALITY_REPORT_STALE', 'QUALITY_REPORT_NOT_FOUND', 'QUALITY_RUN_SCOPE_INVALID', 'STYLE_LEAKAGE_BLOCKED',
   'CREDITS_EXHAUSTED', 'CREDITS_SETTLEMENT_PENDING', 'CREDITS_RESERVED', 'CREDITS_PROVIDER_UNSTABLE', 'AI_QUALITY_NON_THINKING_UNSUPPORTED',
-  'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED'])
+  'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'QUALITY_REPORT_INCOMPLETE', 'AI_PROVIDER_TIMEOUT'])
 
 /** 自动修订写的是作者正文：只读沙箱与受限子任务不获授权，只保存检查意见。 */
 async function chapterRevisionWritable(tx: RuntimeTx, lease: RunLeaseToken) {
@@ -106,11 +109,16 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     const existingReport = await getLatestQualityReport(ctx.userId, ctx.novelId, chapterId, tx, bundle.compilation?.id ?? null)
     const cacheMetrics = existingReport?.deterministicMetrics
     const matchingContext = !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics) && cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle)
+    const formatRecovery = existingReport?.status === 'failed' && matchingContext && existingReport.chapterRevision === bundle.chapter.revision
+      ? await readQualityFormatRecovery(tx, ctx, { chapterId }) : null
+    if (existingReport?.status === 'failed' && matchingContext && existingReport.chapterRevision === bundle.chapter.revision && !formatRecovery) {
+      return reject('QUALITY_REPORT_INCOMPLETE', '本输入的一次格式恢复不可用或已经使用，未重复检查。原报告与正文保留，检查未完成，请暂停并展示原因。')
+    }
     const cached = existingReport && existingReport.compilationId === (bundle.compilation?.id ?? null) && existingReport.criticVersion === HUMANITY_CRITIC_VERSION
       && matchingContext && qualityReportCheckedCurrentContent(existingReport, bundle.chapter.revision, bundle.chapter.content)
       ? { id: existingReport.id, hash: jsonHash(await getQualityReport(ctx.userId, ctx.novelId, existingReport.id, tx)) } : null
     const sources = buildQualityEvidenceSources({ userId: ctx.userId, novelId: ctx.novelId, chapterId, chapterRevision: bundle.chapter.revision }, bundle.chapter.content)
-    return { kind: 'check' as const, version: 4 as const, parserVersion: 1 as const, sources, compiler: bundle.compilation ? baseline : null,
+    return { kind: 'check' as const, version: 5 as const, parserVersion: 1 as const, formatRecovery, deadlineAt: Date.now() + env.aiTextTimeoutMs, sources, compiler: bundle.compilation ? baseline : null,
       chapter: { id: chapterId, title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content }, contextHash: jsonHash(bundle),
       recentContents: bundle.recentChapters.map(item => item.content), feedback: bundle.feedback,
       mode: state.configuration.qualityMode, repair: comp?.status !== 'completed' && writable && state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId)
@@ -140,7 +148,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
   const fail = (code: string, output: string) => recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code, output, summary: '质量检查未执行' })
   const assertCurrent = async (tx: RuntimeTx, frozen: Work) => {
     const current = await buildHumanityQualityContext(ctx.userId, ctx.novelId, frozen.chapter.id, ctx.runId, tx)
-    if (frozen.version === 4 && !validateQualityEvidenceSources(frozen.sources, { userId: ctx.userId, novelId: ctx.novelId,
+    if (frozen.version >= 4 && !validateQualityEvidenceSources(frozen.sources, { userId: ctx.userId, novelId: ctx.novelId,
       chapterId: frozen.chapter.id, chapterRevision: current.chapter.revision }, current.chapter.content)) {
       throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '冻结原文证据表与当前作者、作品、章节或版本不一致，未重播付费检查。')
     }
@@ -148,28 +156,53 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     if (frozen.cached && jsonHash(await getQualityReport(ctx.userId, ctx.novelId, frozen.cached.id, tx)) !== frozen.cached.hash) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '原缓存报告已变化，请重新读取。')
   }
   const execute = async (frozen: Work) => {
-    const call = (step: AuxiliaryModelStep, system: string, content: string, temperature: number) => {
+    if (frozen.version === 5 && (!frozen.deadlineAt || frozen.parserVersion !== 1 || frozen.formatRecovery === undefined)) return runtimeError('RUNTIME_RECEIPT_INVALID', '新质量协议缺少原格式恢复合同或等待上限。')
+    if (frozen.formatRecovery && !await withRunLease(lease, tx => claimDurableQualityFormatRecovery(tx, ctx, frozen.formatRecovery!, operation.id))) {
+      return fail('QUALITY_REPORT_INCOMPLETE', '原格式恢复身份已变化或被其他操作使用，未派发重复请求。')
+    }
+    const deadlineSignal = frozen.version === 5 ? AbortSignal.timeout(Math.max(0, frozen.deadlineAt! - Date.now())) : null
+    const signal = deadlineSignal ? AbortSignal.any([ctx.signal, deadlineSignal]) : ctx.signal
+    const call = async (step: AuxiliaryModelStep, system: string, content: string, temperature: number) => {
       if (!frozen.route || !frozen.price) return runtimeError('RUNTIME_RECEIPT_INVALID', '原质量路由或价格缺失。')
-      return callDurableAuxiliary({ lease, parentOperationId: operation.id, step, route: frozen.route, price: frozen.price, system, content, temperature, signal: ctx.signal, assertCurrent: tx => assertCurrent(tx, frozen) })
+      let replaySignal = signal
+      if (frozen.version === 5 && Date.now() >= frozen.deadlineAt!) {
+        const saved = await withRunLease(lease, tx => tx.agentOperation.findUnique({ where: { taskRootId_operationKey: {
+          taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:${step}` } } }))
+        if (saved?.status !== 'succeeded') throw new DataAccessError(504, 'AI_PROVIDER_TIMEOUT', '质量检查已达原冻结等待上限，未追加付费请求。')
+        // Confirmed results remain recoverable after their deadline; this only
+        // reads the old priced response and cannot admit a new dispatch.
+        replaySignal = ctx.signal
+      }
+      return callDurableAuxiliary({ lease, parentOperationId: operation.id, step, route: frozen.route, price: frozen.price, system, content, temperature, signal: replaySignal, assertCurrent: tx => assertCurrent(tx, frozen) })
     }
     let findings: z.infer<typeof criticQualityFindingSchema>[] = [], complete = false, droppedFindings = 0
     let criticResponseDiagnostic: CriticResponseDiagnostic | undefined
+    let formatRecoveryAttempted = !!frozen.formatRecovery
+    let firstDiagnostic: CriticResponseDiagnostic | undefined
     if (!frozen.cached) {
-      const critic = await call('quality_critic', frozen.criticSystem, frozen.criticInput, 0.15)
+      let critic = await call(frozen.formatRecovery ? 'quality_format_recovery' : 'quality_critic', frozen.criticSystem, frozen.criticInput, 0.15)
+      if (frozen.version === 5 && !frozen.formatRecovery) {
+        const first = inspectCriticResponse(critic.content, frozen.sources, critic.finishReason === 'stop' && !critic.toolCalls.length)
+        if (!first.complete && ['json_invalid', 'incomplete_json', 'envelope_invalid', 'ambiguous_envelope', 'duplicate_keys', 'findings_invalid'].includes(first.diagnostic.classification)) {
+          firstDiagnostic = { ...first.diagnostic, operationId: operation.id }
+          formatRecoveryAttempted = true
+          critic = await call('quality_format_recovery', frozen.criticSystem, frozen.criticInput, 0.15)
+        }
+      }
       if (frozen.parserVersion === 1) {
-        const inspected = inspectCriticResponse(critic.content, frozen.version === 4 ? frozen.sources : undefined,
+        const inspected = inspectCriticResponse(critic.content, frozen.version >= 4 ? frozen.sources : undefined,
           critic.finishReason === 'stop' && !critic.toolCalls.length)
         findings = inspected.findings; complete = inspected.complete; droppedFindings = inspected.diagnostic.droppedFindings
         criticResponseDiagnostic = { ...inspected.diagnostic, operationId: operation.id }
       } else if (critic.finishReason === 'stop' && !critic.toolCalls.length) try {
-        const coerced = coerceCriticFindings(qualityWorkParseObject(critic.content, 'findings'), frozen.version === 4 ? frozen.sources : undefined)
+        const coerced = coerceCriticFindings(qualityWorkParseObject(critic.content, 'findings'), frozen.version >= 4 ? frozen.sources : undefined)
         if (coerced && !(coerced.invalidSources ?? 0) && (coerced.findings.length > 0 || coerced.dropped === 0)) {
           findings = coerced.findings; complete = true; droppedFindings = coerced.dropped
         }
       } catch { /* Frozen pre-upgrade work retains its original interpretation. */ }
       // Match the legacy path: one journaled, billable quote-only correction.
       // Never rerun the full critic or drop an unbound judgment to pass the gate.
-      const sources = frozen.version === 4 ? frozen.sources : undefined
+      const sources = frozen.version >= 4 ? frozen.sources : undefined
       const missing = complete ? unlocatedQualityEvidence(frozen.chapter.content, findings, sources) : []
       if (missing.length) {
         const correction = await call('quality_evidence_correction', sources ? qualityEvidenceSourceCorrectionSystem : qualityEvidenceCorrectionSystem,
@@ -181,7 +214,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
       findings = calibrateCriticFindings(findings, frozen.feedback)
     }
     const deterministic = analyzeDeterministicQuality(frozen.chapter.content, frozen.recentContents)
-    const evaluated = prepareQualityFindings(frozen.chapter.content, deterministic.findings, findings, complete, frozen.version === 4 ? frozen.sources : undefined)
+    const evaluated = prepareQualityFindings(frozen.chapter.content, deterministic.findings, findings, complete, frozen.version >= 4 ? frozen.sources : undefined)
     const cachedReport = frozen.cached ? await withRunLease(lease, tx => getQualityReport(ctx.userId, ctx.novelId, frozen.cached!.id, tx)) : null
     const candidates = cachedReport ? cachedReport.findings : evaluated.findings.map(item => ({ ...item, startOffset: item.start, endOffset: item.end }))
     // 老协议缓存操作没有冻结修订价目，不为恢复中的操作追加新的付费阶段。
@@ -224,7 +257,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
       const created = frozen.cached ? null : await persistHumanityQualityReport({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
         compilationId: frozen.compiler?.id, chapterId: frozen.chapter.id, chapterRevision: frozen.chapter.revision, mode: frozen.mode,
         deterministicMetrics: deterministic.metrics, deterministicFindings: deterministic.findings, criticFindings: findings, criticComplete: complete,
-        criticDropped: droppedFindings, criticResponseDiagnostic, criticVersion: qualityWorkCriticVersion(frozen.version), ...(frozen.version === 4 ? { sources: frozen.sources } : {}) }, tx)
+        criticDropped: droppedFindings, criticResponseDiagnostic, criticVersion: qualityWorkCriticVersion(frozen.version), ...(frozen.version >= 4 ? { sources: frozen.sources } : {}) }, tx)
       let report = await getQualityReport(ctx.userId, ctx.novelId, frozen.cached?.id ?? created!.id, tx)
       const replacements = report.findings.flatMap(item => {
         const replacement = patches.get(`${item.signal}:${item.startOffset}:${item.endOffset}`)
@@ -253,6 +286,10 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
         bindingNote = [unlocatedCount ? `${unlocatedCount} 条模型意见因引用无法逐字定位未纳入报告` : '',
           droppedCount ? `${droppedCount} 条因字段不完整未纳入报告` : ''].filter(Boolean).join('；')
         await tx.chapterQualityReport.update({ where: { id: report.id }, data: { deterministicMetrics: { ...metrics,
+          ...(formatRecoveryAttempted ? { formatRecovery: { ...(frozen.formatRecovery ?? { version: 1, taskId: lease.taskRootId,
+            key: runtimeJson({ taskId: lease.taskRootId, chapterId: frozen.chapter.id, revision: frozen.chapter.revision }).hash,
+            reportId: report.id, chapterId: frozen.chapter.id, chapterRevision: frozen.chapter.revision }),
+            operationId: operation.id, state: report.status === 'failed' ? 'failed' : 'completed', ...(firstDiagnostic ? { initialDiagnostic: firstDiagnostic } : {}) } } : {}),
           ...(canRepair && selected.length ? { autoRepairAttempted: true,
             ...(!repaired ? { autoRepairRetainedReason: repairNote || '本次有界修订未得到可安全应用的实际文本改变，全部候选保留待审；同一报告不追加自动修订。' } : {}) } : {}),
           ...(repaired ? { repairedQualityContextHash: qualityReviewContextHash(await buildHumanityQualityContext(ctx.userId, ctx.novelId, frozen.chapter.id, ctx.runId, tx)) }
@@ -262,7 +299,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
       const note = (bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : '')
         + (remaining ? `仍有 ${remaining} 项未应用（无安全补丁、范围重叠、数量上限或本次未获修订授权），保留待审，不冒充已修复，不为清零建议循环改写。` : '')
       const toolResult: ToolResult = { ...(report.status === 'failed' ? { outcome: 'failed' as const, failureCode: complete ? 'QUALITY_EVIDENCE_UNLOCATED' : 'QUALITY_REPORT_INCOMPLETE' } : {}), summary: repaired ? `质量检查 · 自动修订 ${repaired.repairedFindingIds.length} 处` : frozen.cached ? '复用当前质量报告' : '人类感质量检查',
-        output: `质量报告 ${report.id} · ${report.status} · r${report.chapterRevision}。${report.status === 'failed' ? '独立检查未完整完成（格式不完整或全部引用无法逐字定位），不能提交章节桥；可重试一次完整检查，禁止改写正文来凑通过。' : `${repaired ? `安全修订已原子写入；${frozen.compiler ? `调用 continuity_validate 和 quality_analyze，传 compilationId=${frozen.compiler.id}，只读复核当前版本；旧报告不证明修订后正文已检查，不要为消除警告继续改写。` : '需对新版本只读重新检查连续性，不能沿用旧版验证。'}` : selected.length ? (repairNote || '已尝试集中处理警告与建议，但未得到可安全应用的实际改动；同一报告不循环重试。') : frozen.cached ? '复用原报告，不重复请求模型或修订。' : '报告已保存；没有可验证补丁的意见保留待审，不冒充已修复。'}${note}`}`,
+        output: `质量报告 ${report.id} · ${report.status} · r${report.chapterRevision}。${report.status === 'failed' ? `独立检查未完整完成（格式不完整或全部引用无法逐字定位），不能提交章节桥；${formatRecoveryAttempted ? '本输入的一次独立计费格式恢复已使用，请暂停并展示真实原因，不重复检查。' : '原报告与正文保留。'}禁止改写正文来凑通过。` : `${repaired ? `安全修订已原子写入；${frozen.compiler ? `调用 continuity_validate 和 quality_analyze，传 compilationId=${frozen.compiler.id}，只读复核当前版本；旧报告不证明修订后正文已检查，不要为消除警告继续改写。` : '需对新版本只读重新检查连续性，不能沿用旧版验证。'}` : selected.length ? (repairNote || '已尝试集中处理警告与建议，但未得到可安全应用的实际改动；同一报告不循环重试。') : frozen.cached ? '复用原报告，不重复请求模型或修订。' : '报告已保存；没有可验证补丁的意见保留待审，不冒充已修复。'}${note}`}`,
         observedState: { kind: 'chapter', id: frozen.chapter.id, revision: report.chapterRevision },
         display: repaired ? { kind: 'chapterDiff', chapterId: frozen.chapter.id, chapterTitle: frozen.chapter.title, before: repaired.before, after: repaired.after, appliedDirectly: true, revision: report.chapterRevision } : reportDisplay(report),
         ...(repaired ? { snapshot: { target: 'chapter' as const, targetId: frozen.chapter.id, field: 'content', previousValue: repaired.before } } : {}) }
@@ -281,5 +318,5 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
   if (runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '质量效果回执损坏。')
   await reduceExecutionReceipt(lease, { expectedRevision: pending.revision, expectedHash: pending.snapshotHash, operationId: operation.id })
   const failed = failedToolResultSchema.safeParse(receipt.result)
-  return failed.success ? { ...failed.data.toolResult, outcome: 'failed' } : z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
+  return failed.success ? { ...failed.data.toolResult, outcome: 'failed', failureCode: failed.data.code } : z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
 }

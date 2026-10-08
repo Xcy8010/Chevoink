@@ -62,6 +62,18 @@ describe('server review fallback', () => {
     expect(nextMergedReviewReminder({ ...state, revision: 5 }, writers, new Set([key]), true)).toBe('compile:chapter:5:merged')
     expect(nextReviewDispatch(state, available, new Set()).kind).toBe('ready')
   })
+  it('uses a separate authenticated format-recovery identity without erasing the original attempt', () => {
+    const state = pending({ quality: 'incomplete' })
+    const original = reviewDispatchKey(state, 'quality_analyze')
+    const recovery = 'quality-format-recovery:received-report'
+    const keys = new Map([[original, recovery]])
+    const attempts = new Set([original])
+    expect(nextReviewDispatch(state, available, attempts, new Set(), keys)).toMatchObject({ kind: 'tool', key: recovery })
+    expect(attempts).toEqual(new Set([original]))
+    expect(nextReviewDispatch(state, available, new Set([original, recovery]), new Set(), keys).kind).toBe('blocked')
+    expect(nextReviewDispatch(state, new Set(), attempts, new Set(), keys).kind).toBe('blocked')
+    expect(nextReviewDispatch({ ...state, chapterId: 'other' }, available, attempts, new Set(), keys).kind).toBe('blocked')
+  })
   it('never prompts for a closed channel, absent writer, missing checks or original waiver', () => {
     const state = pending({ ready: true, quality: 'complete', qualityCandidateCount: 2, requiredTools: [] })
     expect(nextMergedReviewReminder(state, new Set(['chapter_edit_range']), new Set(), false)).toBeNull()

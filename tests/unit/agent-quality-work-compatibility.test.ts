@@ -33,8 +33,10 @@ describe('frozen quality work across deployments', () => {
     expect(qualityWorkContextProjection(bundle, 2)).toEqual(v2)
     expect(qualityWorkContextProjection(bundle, 3)).toEqual(bundle)
     expect(qualityWorkContextProjection(bundle, 4)).toEqual(bundle)
+    expect(qualityWorkContextProjection(bundle, 5)).toEqual(bundle)
     expect([1, 2, 3].map(version => qualityWorkCriticVersion(version as 1 | 2 | 3))).toEqual(['humanity-critic.v2', 'humanity-critic.v3', 'humanity-critic.v4'])
     expect(qualityWorkCriticVersion(4)).toBe('humanity-critic.v5')
+    expect(qualityWorkCriticVersion(5)).toBe('humanity-critic.v5')
     const changedHistory = { ...bundle, chapterWritingBackground: [{ ...bundle.chapterWritingBackground[0], prompt: '当前明确改为2100字。' }] }
     for (const version of [1, 2] as const) expect(runtimeJson(qualityWorkContextProjection(changedHistory, version)).hash).toBe(runtimeJson(qualityWorkContextProjection(bundle, version)).hash)
     expect(runtimeJson(qualityWorkContextProjection(changedHistory, 3)).hash).not.toBe(runtimeJson(qualityWorkContextProjection(bundle, 3)).hash)

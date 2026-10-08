@@ -19,13 +19,15 @@ export function nextMergedReviewReminder(readiness: ChapterReviewReadiness | nul
 /** Schedule one missing assessment, then reread the saved state. Existing
  * incomplete/unknown work is never dispatched again by this fallback. */
 export function nextReviewDispatch(readiness: ChapterReviewReadiness | null,
-  available: ReadonlySet<string>, attempted: ReadonlySet<string>, recovered: ReadonlySet<string> = new Set()) {
+  available: ReadonlySet<string>, attempted: ReadonlySet<string>, recovered: ReadonlySet<string> = new Set(),
+  recoveryKeys: ReadonlyMap<string, string> = new Map()) {
   if (!readiness || readiness.ready) return { kind: 'ready' as const }
   const tool = readiness.requiredTools[0]
   if (!tool) return { kind: 'blocked' as const, reason: '当前版本的必要检查尚未确认完成。正文已保存，不能提交为完成。' }
   const status = tool.name === 'continuity_validate' ? readiness.continuity : readiness.quality
-  const key = reviewDispatchKey(readiness, tool.name)
-  if ((status === 'incomplete' && !recovered.has(key)) || attempted.has(key)) {
+  const originalKey = reviewDispatchKey(readiness, tool.name)
+  const key = recoveryKeys.get(originalKey) ?? originalKey
+  if ((status === 'incomplete' && !recovered.has(originalKey) && !recoveryKeys.has(originalKey)) || attempted.has(key)) {
     return { kind: 'blocked' as const, reason: '当前版本的必要检查未完成或结果尚未确认。正文与进度保留，已停止重复检查请求，未判定检查通过。' }
   }
   if (!available.has(tool.name)) return { kind: 'blocked' as const,

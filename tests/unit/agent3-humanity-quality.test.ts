@@ -3,6 +3,8 @@ import type { Prisma } from '@prisma/client'
 import { createHash } from 'node:crypto'
 import * as aiService from '../../api/lib/ai-service.js'
 import * as review from '../../api/lib/agent/review-completion.js'
+import * as auxiliaryRuntime from '../../api/lib/agent/runtime-auxiliary-call.js'
+import * as formatRecovery from '../../api/lib/agent/quality-format-recovery.js'
 import { selectAutomaticQualityFindings, qualityAutoRepairPending } from '../../api/lib/agent/quality-report-contract.js'
 
 // 自动修订的准入守卫在事务里读真实表；本组用例只验证工具语义，按模块隔离守卫。
@@ -184,6 +186,12 @@ describe('严谨创作自动落实质量建议', () => {
     vi.spyOn(humanityQuality, 'analyzeDeterministicQuality').mockReturnValue({ metrics: {}, findings: [] })
     vi.spyOn(humanityQuality, 'persistHumanityQualityReport').mockResolvedValue(report)
     const critic = vi.spyOn(review, 'generateReviewCompletion').mockResolvedValue('{"findings":[]}')
+    vi.spyOn(auxiliaryRuntime, 'resolveDurableAuxiliaryRuntime').mockResolvedValue({ runtime: { tier: 'speed', provider: 'fixture', modelName: 'fixture',
+      apiKey: 'fixture-only', reasoningEffort: 'low', multiplierBps: 10000, visionEnabled: false, contextWindowTokens: null },
+      selection: { tier: 'speed', customModelId: null, reasoningEffort: 'low' } })
+    // This mock critic does not create settled usage. It cannot authorize a
+    // recovery payment; real paid witnesses have separate PG coverage.
+    vi.spyOn(formatRecovery, 'claimCurrentQualityFormatRecovery').mockResolvedValue(null)
     const reserve = vi.spyOn(humanityQuality, 'reserveQualityAutoRepair').mockImplementation(async () => {
       if (!qualityAutoRepairPending(report)) return false
       report.deterministicMetrics = { ...report.deterministicMetrics as Prisma.JsonObject, autoRepairAttempted: true }

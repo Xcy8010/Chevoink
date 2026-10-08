@@ -2,17 +2,11 @@ import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
 import { DataAccessError } from '../prisma.js'
-import { activeChapterScope } from '../data/internal.js'
-import { lockNovelActiveScope } from '../data/novel-write-lock.js'
-import { originalTaskRunIds, readOriginalTaskRequest } from './original-request.js'
-import { allowsChapterOnlyCompletion, assertWritingTarget, lockWritingRunLineage, readNewDraftRevision, readWritingScope } from './writing-scope.js'
-import { readChapterReviewReadiness, isChapterRevisionChannelOpen } from './chapter-review-guard.js'
-import { continuityCheckRounds, MAX_CONTINUITY_CHECKS } from './story-compiler.js'
-import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
-import { readWritingPresentation } from './writing-request-context.js'
+import { readOriginalTaskRequest } from './original-request.js'
+import { allowsChapterOnlyCompletion } from './writing-scope.js'
+import { MAX_CONTINUITY_CHECKS } from './story-compiler.js'
 import { runtimeJson } from './runtime-common.js'
-import { runCheckpointSchema } from './checkpoint.js'
-import { qualityUnavailableProofSchema, readQualityUnavailableProof } from './quality-unavailable-proof.js'
+import { qualityUnavailableProofSchema } from './quality-unavailable-proof.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
@@ -72,117 +66,11 @@ export async function permitsLimitedWritingContract(tx: Prisma.TransactionClient
   return checks.filter(item => item.severity === 'error').every(item => item.status === 'passed')
 }
 
-/** Read-only evidence of saved writing with confirmed unavailable assessments. This
- * does not commit the bridge, complete scenes, certify a report, or spend a call.
- * Finalizers must re-read under their existing lease/CAS transaction. */
-export async function readLimitedWritingDelivery(tx: Prisma.TransactionClient, subject: Subject): Promise<LimitedWritingDelivery | null> {
-  await lockNovelActiveScope(tx, subject.novelId)
-  await lockWritingRunLineage(tx, subject)
-  await assertAgentManuscriptCurrent(tx, subject)
-  const scope = await readWritingScope(tx, subject)
-  const spec = taskSpecSchema.safeParse(scope.spec)
-  if (!spec.success || !allowsLimitedWritingContract(spec.data, scope.prompt)
-    || scope.writing?.kind !== 'bounded' || scope.writing.targets.length !== 1) return null
-  const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId,
-    status: { in: ['queued', 'running', 'awaiting_approval'] } } })
-  if (!run) return null
-  const root = run.taskRootId ? await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: run.taskRootId } }) : undefined
-  const originalRoot = root && root.id !== scope.taskId ? await tx.agentTaskRoot.findFirstOrThrow({ where: {
-    id: scope.taskId, userId: subject.userId, novelId: subject.novelId } }) : root
-  if (!await permitsLimitedWritingContract(tx, { spec: spec.data, prompt: scope.prompt, root: originalRoot })) return null
-  const usage = run.usage && typeof run.usage === 'object' && !Array.isArray(run.usage) ? run.usage : null
-  if (usage && 'checkpoint' in usage) {
-    const checkpoint = runCheckpointSchema.safeParse(usage.checkpoint)
-    if (!checkpoint.success) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原执行检查点损坏，不能受限交付。')
-    if (checkpoint.data.pendingReviews?.length) return null
-  }
-  const ownSpec = taskSpecSchema.safeParse(run.taskSpec)
-  if (!ownSpec.success || !['write', 'revise'].includes(ownSpec.data.intent)) return null
-  if (scope.parentRunId && !await tx.agentRun.findFirst({ where: { id: scope.parentRunId, userId: subject.userId, novelId: subject.novelId,
-    status: { in: ['queued', 'running', 'awaiting_approval'] } } })) return null
-  const runIds = await originalTaskRunIds(tx, subject, scope)
-  if (!run.taskRootId) {
-    const todos = await readLegacyDeliveryTodos(tx, run.sessionId, runIds)
-    if (todos.some(item => ['pending', 'in_progress'].includes(item.status) && !limitedReviewDependency(item.content))) return null
-  }
-  if (await tx.agentRun.count({ where: { id: { not: subject.runId }, userId: subject.userId, novelId: subject.novelId,
-    OR: [{ session: { spawnedFromRunId: { in: runIds } } }, { incomingChildGrant: { currentParentRunId: { in: runIds } } }],
-    status: { notIn: ['completed', 'cancelled'] } } })
-    || await tx.agentSubtaskRun.count({ where: { userId: subject.userId, novelId: subject.novelId, parentRunId: { in: runIds },
-      status: { notIn: ['completed', 'succeeded', 'cancelled'] } } })) return null
-  const rootIds = (await tx.agentRun.findMany({ where: { id: { in: runIds } }, select: { taskRootId: true } })).flatMap(item => item.taskRootId ? [item.taskRootId] : [])
-  if (await tx.agentOperation.count({ where: { taskRootId: { in: rootIds }, status: { in: ['prepared', 'dispatched', 'unknown'] } } })
-    || await tx.agentProviderAttempt.count({ where: { operation: { taskRootId: { in: rootIds } }, status: { in: ['prepared', 'dispatched', 'unknown'] } } })
-    || await tx.aiUsageLog.count({ where: { userId: subject.userId, agentRunId: { in: runIds }, billingStatus: { in: ['prepared', 'pending_usage'] } } })) return null
-  const target = scope.writing.targets[0]
-  const id = target.chapterId ?? scope.bindings?.targets.find(item => item.orderIndex === target.orderIndex)?.chapterId
-  if (!id) return null
-  await assertWritingTarget(tx, subject, { chapterId: id })
-  await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${id} FOR SHARE`
-  const chapter = await tx.chapter.findFirst({ where: { id, authorId: subject.userId, ...activeChapterScope(subject.novelId) } })
-  if (!chapter?.content.trim() || chapter.orderIndex !== target.orderIndex) return null
-  const compilation = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId,
-    chapterId: id, runId: { in: runIds }, status: 'active' }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-  if (!compilation?.bridge || compilation.bridge.toChapterId !== id || compilation.bridge.targetRevision !== chapter.revision) return null
-  readNewDraftRevision(compilation.validation) // Malformed historical audit proof remains fail-closed.
-  const sourceId = compilation.bridge.fromChapterId
-  if (sourceId) await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${sourceId} FOR SHARE`
-  const source = sourceId ? await tx.chapter.findFirst({ where: { id: sourceId, ...activeChapterScope(subject.novelId) } }) : null
-  if (sourceId && (!source || source.revision !== compilation.bridge.sourceRevision)) return null
-  const readiness = await readChapterReviewReadiness(tx, subject, compilation.id)
-  // Historical counts cannot certify current writing or create a new limited
-  // terminal decision. Old proof schemas/readers remain receipt-compatible.
-  if (!readiness || readiness.ready || readiness.continuity !== 'complete') return null
-  const quality = await tx.chapterQualityReport.findFirst({ where: { userId: subject.userId, novelId: subject.novelId,
-    compilationId: compilation.id, chapterId: id, runId: { in: runIds } }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-  if (!quality) return null
-  const qualityFailure = readiness.quality === 'complete' ? null
-    : await readQualityUnavailableProof(tx, subject, runIds, quality, chapter, root?.id ?? null)
-  if (readiness.quality !== 'complete' && !qualityFailure) return null
-  if (readiness.quality === 'complete' && (readiness.qualityReportId !== quality.id || readiness.continuity === 'complete')) return null
-  // Ordinary writing permission is not an obligation to keep automatically
-  // rewriting after a confirmed unusable quality assessment. A current factual
-  // error and every ordinary v1 remediation channel keep the original gate.
-  if (!(qualityFailure && readiness.continuity === 'complete' && readiness.continuityErrorCount === 0)
-    && await isChapterRevisionChannelOpen(tx, subject, chapter)) return null
-  // Projection precedes domain continuation. Independent obligations must keep
-  // control of the executor; exempt only this exact proven compilation.
-  if (await tx.storyCompilation.count({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds },
-    id: { not: compilation.id }, status: 'active' } })) return null
-  const others = await tx.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
-    runId: { in: runIds }, id: { not: compilation.id }, status: 'completed' }, include: { bridge: true, chapter: true } })
-  if (others.some(item => !item.bridge?.committedAt || item.chapter?.revision !== item.bridge.targetRevision)) return null
-  if (root) {
-    const { readExecutionStateInTransaction } = await import('./runtime-state.js')
-    const { readDurableTodoItems } = await import('./tools/durable-todo.js')
-    const { collectDurableToolEvidence } = await import('./runtime-evidence.js')
-    const { collectDurableDeliverables } = await import('./runtime-deliverables.js')
-    const { collectDurableMemoryWork } = await import('./runtime-memory.js')
-    const { readTaskBudgetInTransaction } = await import('./runtime-budget.js')
-    const current = await readExecutionStateInTransaction(tx, root.id)
-    const todos = await readDurableTodoItems(tx, root.id, current.frame.revision)
-    if (todos.some(item => ['pending', 'in_progress'].includes(item.status) && !limitedReviewDependency(item.content))) return null
-    const evidence = await collectDurableToolEvidence(tx, root.id, current.frame.revision)
-    const deliverables = await collectDurableDeliverables(tx, root, evidence.effects)
-    const memory = await collectDurableMemoryWork(tx, root, evidence.effects)
-    if (deliverables.some(item => ['missing', 'changed'].includes(item.status)) || memory.some(item => !item.completed)
-      || (await readTaskBudgetInTransaction(tx, root.id)).unresolvedAttempts > 0n) return null
-  }
-  const retainedQualityIssueCount = quality.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
-  const length = scope.prompt?.match(/(\d{2,6})\s*[-–—−~～〜－至到]\s*(\d{2,6})\s*字/u)
-  if (length && (chapter.content.trim().length < Number(length[1]) || chapter.content.trim().length > Number(length[2]))) return null
-  const presentation = await readWritingPresentation(tx, subject, [{ ...target, chapterId: id }])
-  const summary = `《${chapter.title}》正文已保存（r${chapter.revision}）；连续性已检查，原报告与意见保留。${qualityFailure
-    ? '质量检查响应已收到，但报告格式未能完成验证；质量尚未判定通过，待复核。' : ''}${retainedQualityIssueCount ? `质量报告仍有${retainedQualityIssueCount}条未处理意见。` : ''}`
-  const full = presentation ? presentation.mode === 'full_text' : scope.writing.titleAndBodyOnly
-  return limitedWritingDeliverySchema.parse({ version: qualityFailure ? 2 : 1, taskId: scope.taskId, targetRunId: subject.runId, sourceRunId: scope.sourceRunId,
-    chapters: [{ id, title: chapter.title, revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash,
-      compilationId: compilation.id, compilerStateHash: runtimeJson(JSON.parse(JSON.stringify(compilation))).hash,
-      sourceChapterId: sourceId, sourceRevision: source?.revision ?? null, sourceContentHash: source ? runtimeJson({ content: source.content }).hash : null,
-      continuityCheckRounds: continuityCheckRounds(compilation.validation), continuityStatus: readiness.continuity, qualityReportId: quality.id,
-      ...(qualityFailure ? { qualityStatus: 'unavailable', qualityFailure } : {}),
-      qualityReportHash: runtimeJson(JSON.parse(JSON.stringify(quality))).hash, retainedQualityIssueCount }],
-    text: `${full ? `${chapter.title}\n\n${chapter.content}\n\n` : ''}${summary}`, outcome: { kind: 'delivered_with_limitations', summary } })
+/** Historical proof shapes remain readable, but a technical assessment failure
+ * never authorizes a new completed task. The normal completion path requires
+ * current checks and an actual chapter commit. */
+export async function readLimitedWritingDelivery(_tx: Prisma.TransactionClient, _subject: Subject): Promise<LimitedWritingDelivery | null> {
+  return null
 }
 
 export async function assertLimitedWritingDelivery(tx: Prisma.TransactionClient, subject: Subject, expected: LimitedWritingDelivery) {
@@ -198,37 +86,6 @@ export function limitedReviewDependency(content: string) {
   if (!/连续性|continuity|质量|quality|人类感|章节终态|章节桥|chapter_bridge_commit/iu.test(content)) return false
   return !content.replace(/连续性(?:检查|复核)?|(?:人类感)?质量(?:检查|复核)?|人类感检查|章节(?:桥|终态)|终态提交|chapter_bridge_commit|quality_analyze|(?:continuity|quality)(?: check| review)?/giu, '')
     .replace(/完成|执行|进行|复核|检查|提交|核对|当前版本|最终版本|当前|本章|并|及|与|and|final|current|complete|submit|[\s、，。:：]/giu, '').trim()
-}
-
-/** Same ordering as loadSessionTodoItems, inside the delivery transaction.
- * Unlike its UI-compatible tolerant reader, invalid authoritative state cannot
- * disappear here and thereby authorize terminal delivery. */
-async function readLegacyDeliveryTodos(tx: Prisma.TransactionClient, sessionId: string, runIds: string[]) {
-  const items = z.array(z.object({ content: z.string().min(1), status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']) }).passthrough())
-  const messages = await tx.agentMessage.findMany({ where: { sessionId, role: 'assistant', runId: { in: runIds } },
-    orderBy: { createdAt: 'desc' }, take: 40, select: { parts: true, createdAt: true } })
-  const artifact = await tx.agentArtifact.findFirst({ where: { artifactType: 'chapterPlan', runId: { in: runIds }, run: { sessionId },
-    metadata: { path: ['todoList'], equals: true } }, orderBy: { updatedAt: 'desc' }, select: { content: true, updatedAt: true } })
-  let value: unknown
-  for (const message of messages) {
-    if (artifact && artifact.updatedAt > message.createdAt) break
-    if (!Array.isArray(message.parts)) continue
-    for (const part of [...message.parts].reverse()) {
-      if (part && typeof part === 'object' && !Array.isArray(part) && part.type === 'tool-call' && part.toolName === 'todo_write' && part.status === 'success'
-        && part.display && typeof part.display === 'object' && !Array.isArray(part.display) && part.display.kind === 'todoList') {
-        value = part.display.items
-        break
-      }
-    }
-    if (value !== undefined) break
-  }
-  if (value === undefined && artifact) {
-    try { value = JSON.parse(artifact.content) } catch { throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原任务待办内容损坏，不能受限交付。') }
-  }
-  if (value === undefined) return []
-  const parsed = items.safeParse(value)
-  if (!parsed.success) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原任务待办清单损坏，不能受限交付。')
-  return parsed.data
 }
 
 /** A persisted limited child is not an unrestricted completion certificate. */

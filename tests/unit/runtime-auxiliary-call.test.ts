@@ -35,7 +35,7 @@ const runtime = { tier: 'custom' as const, provider: 'Ant Ling', modelName: 'Lin
   multiplierBps: 0, visionEnabled: false, contextWindowTokens: 128000 }
 const selection = { tier: 'custom' as const, customModelId: 'owned-model', reasoningEffort: 'high' as const }
 const price = { version: 'credits-v1-exact' as const, modelTier: 'custom' as const, multiplierBps: 0 }
-const steps = ['quality_critic', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'] as const
+const steps = ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'] as const
 const input = (step: typeof steps[number] = 'quality_critic') => ({ lease, parentOperationId: 'parent', step,
   route: auxiliaryRouteForRuntime({ ...runtime, honorAssignedReasoning: true }, selection, 1024), price,
   system: '合成检查规则', content: '合成完整原文', temperature: 0.15, signal: new AbortController().signal, assertCurrent: vi.fn(async () => {}) })

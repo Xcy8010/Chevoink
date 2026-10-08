@@ -23,6 +23,7 @@ import { advanceDurableCompletionObligations } from '../../api/lib/agent/runtime
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { readDurableTodoItems } from '../../api/lib/agent/tools/durable-todo.js'
 import { buildHumanityQualityContext, qualityReviewContextHash, HUMANITY_CRITIC_VERSION } from '../../api/lib/agent/humanity-quality.js'
+import { readQualityUnavailableProof } from '../../api/lib/agent/quality-unavailable-proof.js'
 
 describe.runIf(available)('current saved writing with exhausted continuity review', () => {
   async function capped(f: Parameters<Parameters<typeof fixture>[0]>[0], finishMemory = true) {
@@ -91,24 +92,29 @@ describe.runIf(available)('current saved writing with exhausted continuity revie
         continuityCheckRounds: 3, continuityStatus: 'stale', qualityReportId: report.id, qualityReportHash: runtimeJson(JSON.parse(JSON.stringify(report))).hash,
         retainedQualityIssueCount: 0 }], text: summary, outcome: { kind: 'delivered_with_limitations', summary } })
   }
-  it.each([false, true])('delivers current known-format failure with continuity complete=%s without replay or fake pass', async complete => fixture(async f => {
+  async function unavailableProof(f: Parameters<Parameters<typeof fixture>[0]>[0], c: Awaited<ReturnType<typeof capped>>) {
+    return prisma.$transaction(async tx => {
+      const report = await tx.chapterQualityReport.findUniqueOrThrow({ where: { id: c.report.id }, include: { findings: true } })
+      const chapter = await tx.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      return readQualityUnavailableProof(tx, f, [f.runId], report, chapter, null)
+    })
+  }
+  it.each([false, true])('retains known format evidence without completing unfinished writing; continuity=%s', async complete => fixture(async f => {
     const model = vi.spyOn(ai, 'generateTextCompletion').mockRejectedValue(new Error('Paid replay forbidden'))
     const c = await capped(f), evidence = await failedQuality(f, c, complete)
     try {
       const subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
-      const proof = await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))
-      if (!complete) {
-        expect(proof).toBeNull()
-        expect(await reserveContinuityCheck(f.userId, f.novelId, c.compilationId)).toBe(true)
-        expect(model).not.toHaveBeenCalled()
-        return
-      }
-      expect(proof).toMatchObject({ version: 2, chapters: [{ qualityStatus: 'unavailable', qualityReportId: evidence.report.id,
-        continuityStatus: complete ? 'complete' : 'stale', qualityFailure: { source: 'legacy', witnessIds: [evidence.call.id, evidence.result.id, evidence.paid.id] } }] })
-      expect(proof!.text).toContain('质量尚未判定通过')
+      expect(await unavailableProof(f, c)).toMatchObject({ source: 'legacy', witnessIds: [evidence.call.id, evidence.result.id, evidence.paid.id] })
+      expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, subject))).toBeNull()
-      await prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, proof!))
+      const old = await historicalProofShape(f, c), qualityFailure = await unavailableProof(f, c)
+      const historical = limitedWritingDeliverySchema.parse({ ...old, version: 2, chapters: old.chapters.map(chapter => ({ ...chapter,
+        continuityStatus: complete ? 'complete' : 'stale', qualityStatus: 'unavailable', qualityFailure })) })
+      expect(readRunLimitedWritingOutcome({ outcome: historical.outcome, deliveryProof: historical })).toEqual(historical)
+      await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, historical))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
       expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: c.report.id } })).toMatchObject({ status: 'failed' })
+      expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: c.compilationId } })).toMatchObject({ status: 'active' })
+      expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: c.compilationId } })).committedAt).toBeNull()
       expect(model).not.toHaveBeenCalled()
     } finally { await prisma.aiUsageLog.delete({ where: { id: evidence.paid.id } }) }
   }))
@@ -116,7 +122,7 @@ describe.runIf(available)('current saved writing with exhausted continuity revie
     'interleaved', 'body-changed', 'context-changed', 'continuity-stale', 'independent-todo', 'evidence-changed', 'recovery-unknown', 'audit-provider', 'audit-foreign'] as const)('known-format %s cannot manufacture delivery', async scenario => fixture(async f => {
     const c = await capped(f), evidence = await failedQuality(f, c, true)
     const subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
-    const proof = await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))
+    const proof = await unavailableProof(f, c)
     expect(proof).not.toBeNull()
     let duplicateUsage: string | undefined
     if (scenario === 'missing-call') await prisma.agentRunEvent.delete({ where: { id: evidence.call.id } })
@@ -147,9 +153,11 @@ describe.runIf(available)('current saved writing with exhausted continuity revie
       deterministicMetrics: { ...evidence.report.deterministicMetrics as object, criticResponse: { version: 1, contentHash: 'a'.repeat(64), characterCount: 10,
         classification: scenario === 'audit-provider' ? 'provider_unavailable' : 'json_invalid', callId: 'foreign-call' } } } })
     try {
-      if (scenario === 'evidence-changed') expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).not.toEqual(proof)
-      else expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
-      await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, proof!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+      expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
+      const currentWitness = await unavailableProof(f, c)
+      if (scenario === 'evidence-changed') expect(currentWitness).not.toEqual(proof)
+      else if (['continuity-stale', 'independent-todo'].includes(scenario)) expect(currentWitness).toEqual(proof)
+      else expect(currentWitness).toBeNull()
     } finally { await prisma.aiUsageLog.deleteMany({ where: { id: { in: [evidence.paid.id, ...(duplicateUsage ? [duplicateUsage] : [])] } } }) }
   }))
   it('keeps historical v1 proof readable but cannot project or complete an unreviewed revision after three checks', async () => fixture(async f => {
@@ -170,13 +178,20 @@ describe.runIf(available)('current saved writing with exhausted continuity revie
     await saveExecutionState(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash,
       snapshot: { ...current.frame.state, messages: [...current.frame.state.messages, { role: 'assistant', content: '正文已保存，当前版本的连续性检查仍未完成。' }] } })
     current = await loadExecutionState(f.userId, f.runId)
+    // A pre-deploy candidate is immutable history, not a committed terminal receipt.
+    const projected = runtimeJson({ version: 1, chapters: historical.chapters.map(({ id, revision, contentHash }) => ({ id, revision, contentHash })),
+      text: historical.text, limitedWritingDelivery: historical })
+    await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId,
+      eventKey: `writing-delivery:${f.rootId}:${current.frame.revision}`, type: 'writing.delivery.projected', payload: {
+        sourceRevision: current.frame.revision - 1, sourceHash: 'a'.repeat(64), revision: current.frame.revision,
+        snapshotHash: current.frame.snapshotHash, proof: projected.value, proofHash: projected.hash } } })
     const evidence = await collectDurableCompletionEvidence(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash })
     expect(evidence.snapshot.blockers.length).toBeGreaterThan(0)
     expect(evidence.snapshot.limitedWritingDelivery).toBeUndefined()
     await expect(finalizeDurableTask(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash })).rejects.toMatchObject({ code: 'RUNTIME_COMPLETION_BLOCKED' })
     const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
     expect(finished.status).not.toBe('completed')
-    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'writing.delivery.projected' } })).toBe(0)
+    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'writing.delivery.projected' } })).toBe(1)
     const compiler = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: c.compilationId }, include: { bridge: true, sceneTasks: true } })
     expect(compiler.status).toBe('active')
     expect(compiler.bridge!.committedAt).toBeNull()
@@ -264,8 +279,8 @@ describe.runIf(available)('current saved writing with exhausted continuity revie
       targetType: 'agentRun', targetId: f.runId, providerType: 'text', providerMode: 'fixture', modelName: 'fixture', action: 'workspaceAgent', durationMs: 1, usageSource: 'unknown', billingStatus: scenario === 'settled-unknown' ? 'settled' : 'pending_usage' } })).id
     try {
       if (scenario === 'wrong-proof') await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, { ...proof!, targetRunId: 'foreign' }))).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
-      else if (scenario === 'foreign-subject') await expect(prisma.$transaction(tx => readLimitedWritingDelivery(tx, { ...subject, userId: randomUUID() }))).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })
-      else if (scenario === 'malformed-receipt') await expect(prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+      else if (scenario === 'foreign-subject') expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, { ...subject, userId: randomUUID() }))).toBeNull()
+      else if (scenario === 'malformed-receipt') expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
       else if (scenario === 'quality-changed') {
         expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).not.toEqual(proof)
         await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, proof!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
@@ -336,7 +351,7 @@ describe.runIf(available)('current saved writing with exhausted continuity revie
       await prisma.agentSubtaskRun.create({ data: { subtaskId: definition.id, parentRunId: runId, userId: f.userId, novelId: f.novelId, task: '尚未完成检查', status: 'running' } })
     }
     if (scenario === 'dependency' || scenario === 'old-task-todo') expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toEqual(before)
-    else if (scenario === 'malformed-todo') await expect(prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    else if (scenario === 'malformed-todo') expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
     else {
       expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
       await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, before!))).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })

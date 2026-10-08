@@ -1401,7 +1401,7 @@ export function AgentPanel({
                   : 'bg-[var(--surface-muted)] text-[var(--text-secondary)]',
             )}
           >
-            {outcome?.kind === 'delivered_with_limitations' && !active ? '已交付·待复核' : phaseLabel[panelPhase] ?? panelPhase}
+            {outcome?.kind === 'delivered_with_limitations' && !active ? '未完成' : phaseLabel[panelPhase] ?? panelPhase}
           </span>
         ) : null}
         <span className={cn('ml-auto shrink-0 text-[10px] tabular-nums text-[var(--text-secondary)]', mobileIntegratedHeader && 'hidden')}>

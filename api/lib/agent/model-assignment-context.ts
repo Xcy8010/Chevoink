@@ -25,7 +25,7 @@ export const TEXT_ACTION_TASKS: Readonly<Record<string, ModelAssignmentTask>> = 
   agentCreativeCritique: 'creative_critique', agentCreativeRevision: 'creative_revision', agentResearchDossier: 'research_synthesis',
   agent3HumanityRevision: 'quality', agent3HumanityRevisionRetry: 'quality', agent3HumanityEvidenceCorrection: 'quality',
   agent3HumanityQuality: 'quality', agent3ContinuityValidation: 'continuity', agent3ContinuityRepair: 'continuity', agent3ContinuityRepairRetry: 'continuity',
-  agent3HumanityCritic: 'quality', agent3RigorousContinuityRepair: 'continuity', agent3RigorousContinuityRepairRetry: 'continuity',
+  agent3HumanityCritic: 'quality', agent3HumanityFormatRecovery: 'quality', agent3RigorousContinuityRepair: 'continuity', agent3RigorousContinuityRepairRetry: 'continuity',
   agent3ContinuityCritic: 'continuity', agent3ContinuityCriticSecondPass: 'continuity',
 }
 

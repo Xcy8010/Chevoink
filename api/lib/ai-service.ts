@@ -749,7 +749,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
 
   const reasoningEffort = params.reasoningEffort ?? env.aiReasoningEffort
   const isolatedQuality = params.tools.length === 0 && params.durableExecution?.auxiliaryStep === params.usageLog.action
-    && ['quality_critic', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'].includes(params.usageLog.action)
+    && ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'].includes(params.usageLog.action)
   const qualityReasoning = isolatedQuality ? buildHumanityQualityReasoningPayload({ ...params, model,
     providerBaseUrl: params.providerBaseUrl ?? env.aiTextBaseUrl, reasoningEffort: 'none' }) : undefined
   const body: Record<string, unknown> = {
