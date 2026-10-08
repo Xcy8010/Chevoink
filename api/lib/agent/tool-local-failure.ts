@@ -17,19 +17,21 @@ export function isLocalToolFailure(code: string | undefined): boolean { return !
 
 /** Confirmed argument/locator errors are not a revoked manuscript capability. */
 export function isInputScopedFailure(code: string): boolean {
-  return ['CHAPTER_ANCHOR_CONFLICT', 'INVALID_ARGUMENTS'].includes(code)
+  return ['CHAPTER_ANCHOR_CONFLICT', 'INVALID_ARGUMENTS', 'TOOL_SCHEMA_INVALID',
+    'TOOL_ARGUMENTS_INVALID', 'TOOL_ARGUMENTS_INCOMPLETE', 'TOOL_NORMALIZATION_FAILED'].includes(code)
 }
 export function toolFailureInputHash(action: string, args: unknown): string {
   return runtimeJson(JSON.parse(JSON.stringify({ action, args: args ?? null, anchorProtocol: 2 }))).hash
 }
 
-/** Preserve old failure audits, but narrow the obsolete family-wide anchor ban.
+/** Preserve old failure audits, but narrow confirmed unexecuted-input bans.
  * This is a one-time schema conversion; it neither grants a target nor records
  * progress. Real tools still verify current authority, revision and the body. */
 export function restoreToolRestriction(item: ToolRestriction): ToolRestriction {
-  return item.code === 'CHAPTER_ANCHOR_CONFLICT' && !item.inputHash
-    ? { ...item, inputHash: runtimeJson({ legacyAnchorRestriction: 1, action: item.action, target: item.target, reason: item.reason }).hash }
-    : item
+  if (item.inputHash || !isInputScopedFailure(item.code)) return item
+  return { ...item, inputHash: item.code === 'CHAPTER_ANCHOR_CONFLICT'
+    ? runtimeJson({ legacyAnchorRestriction: 1, action: item.action, target: item.target, reason: item.reason }).hash
+    : runtimeJson({ legacyInputRestriction: 1, action: item.action, target: item.target, code: item.code, reason: item.reason }).hash }
 }
 
 export function toolRestrictionTarget(args: unknown, fallbackChapterId?: string | null): string | null {

@@ -13,6 +13,7 @@ export function toolRecoveryKey(action: string, code: string, args: unknown, fal
  * source revisions, author deletion, or quality gates. */
 export function toolFailureRecovery(code: string): { label: string; guidance: string } | undefined {
   const entries: Record<string, { label: string; guidance: string }> = {
+    INVALID_ARGUMENTS: { label: '工具参数需要纠正', guidance: '本次输入未执行。按具体字段含义纠正参数；同一调用中的章节编号、全书位置和卷内位置必须一致，不能只修改说明文字或重复发送同一冲突输入。原授权、已保存结果和预算保留。' },
     TASK_WAIT_TARGET_NOT_FOUND: { label: '等待窗口不存在或不属于当前作者', guidance: '本次未获得该窗口交付。任务身份和章节编译编号不是派生窗口编号；仅使用本任务实际派生工具返回的窗口编号。没有派生窗口就直接执行当前原任务，不能等待虚构窗口或把失败当作完成。' },
     TASK_WAIT_TARGET_INVALID: { label: '等待窗口身份无效', guidance: '不能等待当前窗口自身或把任务身份当作窗口身份。仅等待本任务实际派生且获授权的窗口；没有窗口时继续当前原任务的必要步骤。' },
     COMPILATION_NOT_FOUND: { label: '未找到本任务章节编译', guidance: '章节编号不是编译编号。使用本任务真实编译编号；本任务尚未准备时按冻结目标准备，再构建场景并保存正文。不要恢复历史旧章、猜编号或重复创建已存在编译。' },

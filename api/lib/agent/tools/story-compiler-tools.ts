@@ -280,6 +280,15 @@ export const storyCompilerPrepareTool = defineTool({
   permission: BUILD_WRITE,
   readOnly: false,
   async execute(ctx, args) {
+    if (args.chapterId && args.targetOrderIndex !== undefined) {
+      const db = ctx.transaction ?? prisma
+      const scope = await readWritingScope(db, ctx)
+      const frozen = scope.writing?.kind === 'bounded' && scope.writing.targets.find(target => target.orderIndex === args.targetOrderIndex)
+      const chapter = frozen ? await db.chapter.findFirst({ where: { id: args.chapterId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) },
+        select: { orderIndex: true } }) : null
+      if (chapter && chapter.orderIndex !== args.targetOrderIndex) return { outcome: 'failed' as const, failureCode: 'INVALID_ARGUMENTS',
+        summary: '准备目标参数相互冲突', output: `本任务允许准备冻结的全书第 ${args.targetOrderIndex} 章；chapterId 指向已有第 ${chapter.orderIndex} 章，两者不是同一目标。前章只作参考，不得填作新章目标ID。本次没有建立编译或修改正文。请重新调用 story_compiler_prepare，保留 intentSummary、targetOrderIndex=${args.targetOrderIndex} 和原 volumeDecision，省略 chapterId；服务端会定位本任务新章或已绑定的目标，不扩大授权。` }
+    }
     const prepared = await prepareStoryCompilation({
       userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
       chapterId: args.chapterId,

@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { toOpenAIParameters, withObjectType } from '../../api/lib/agent/tool-schema.js'
+import { toOpenAIParameters, withObjectType, originalToolParameterSchemas } from '../../api/lib/agent/tool-schema.js'
 import { getToolsForMode, toOpenAITools } from '../../api/lib/agent/tools/registry.js'
 import { novelImportArguments } from '../../api/lib/agent/tools/import-tools.js'
 import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
 
 // 回归：novel_import 顶层 discriminatedUnion 转换后没有 type，DeepSeek 按 type null 拒绝，
@@ -68,13 +69,32 @@ describe('tool schema provider contract', () => {
     expect(toOpenAITools([chapterCreateTool], scope)).toEqual(toOpenAITools([chapterCreateTool]))
   })
 
-  it('does not change any other tool or mutate shared parameter definitions', () => {
+  it('changes only chapter creation/preparation presentation without mutating shared parameter definitions', () => {
     const tools = getToolsForMode('build')
     const generic = toOpenAITools(tools)
     const originalScope = structuredClone(globalScope)
     const narrowed = toOpenAITools(tools, globalScope)
-    expect(narrowed.filter(item => item.function.name !== 'chapter_create')).toEqual(generic.filter(item => item.function.name !== 'chapter_create'))
+    const others = (definitions: typeof generic) => definitions.filter(item => !['chapter_create', 'story_compiler_prepare'].includes(item.function.name))
+    expect(others(narrowed)).toEqual(others(generic))
     expect(toOpenAITools(tools)).toEqual(generic)
     expect(globalScope).toEqual(originalScope)
+  })
+  it('prepares frozen new chapter49 without offering previous chapterId and retains exact old tail-volume schema', () => {
+    const scope: TaskSpec['scope'] = { novelId: 'n', writing: { ...globalScope.writing!, targets: [{ chapterId: null, orderIndex: 49 }],
+      tailVolume: { version: 1, targetOrderIndex: 49, previousChapterId: 'previous48', previousRevision: 6 } } }
+    const original = structuredClone(scope)
+    const presentation = toOpenAITools([storyCompilerPrepareTool], scope)[0].function
+    expect(presentation.parameters.properties).not.toHaveProperty('chapterId')
+    expect(presentation.parameters).toMatchObject({ required: ['intentSummary', 'volumeDecision'], additionalProperties: false,
+      properties: { targetOrderIndex: { enum: [49] } } })
+    expect(presentation.description).toContain('前章只作参考')
+    expect(presentation.description).toContain('冻结的全书第 49 章')
+    const full = toOpenAIParameters(storyCompilerPrepareTool.parameters)
+    const previous = { ...full, required: [...new Set([...(full.required as string[]), 'volumeDecision'])] }
+    expect(originalToolParameterSchemas(storyCompilerPrepareTool, scope)).toContainEqual(previous)
+    expect(previous.properties).toHaveProperty('chapterId')
+    expect(originalToolParameterSchemas(storyCompilerPrepareTool, scope)).not.toContainEqual({ ...presentation.parameters,
+      properties: { ...presentation.parameters.properties as object, targetOrderIndex: { type: 'integer', enum: [50] } } })
+    expect(scope).toEqual(original)
   })
 })

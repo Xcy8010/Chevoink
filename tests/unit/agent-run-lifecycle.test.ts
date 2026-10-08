@@ -274,6 +274,58 @@ function context(): ToolContext {
 }
 
 describe('server assessment fallback in the real execution loop', () => {
+  it('resumes the old schema-blocked next49 checkpoint through actual prerequisites and body without a budget or grace reset', async () => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 49, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false,
+      tailVolume: { version: 1, previousChapterId: 'previous48', previousRevision: 6, targetOrderIndex: 49 } }
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const restriction = { action: 'chapter_create', target: 'c', code: 'TOOL_SCHEMA_INVALID', reason: '连续三次参数无效，该工具未完成；继续其他可执行工作。' }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 30529, stagnantBatches: 4, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 0, writeBaseline: 0, readProgress: 2, readBaseline: 0, progressSignatures: [], toolRestrictions: [restriction] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 5, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 324803, completionTokens: 4959, totalTokens: 329762, checkpoint } })
+    const milestone = (phase: 'prepare' | 'scenes'): WritingWorkflowMilestone => ({ version: 1, userId: 'user', novelId: 'novel', runId: 'run', targetOrderIndex: 49, phase })
+    const prepare = { ...tool('story_compiler_prepare', async () => ({ output: '第49章实际准备已保存', workflowMilestone: milestone('prepare') }), false),
+      parameters: z.object({ targetOrderIndex: z.literal(49), volumeDecision: z.object({ kind: z.literal('continue'), reason: z.string() }) }).strict() }
+    const scene = tool('scene_task_build', async () => ({ output: '第49章实际场景已保存', workflowMilestone: milestone('scenes') }), false)
+    const create = { ...tool('chapter_create', async () => ({ output: '新49已创建，复用现有卷' }), false), parameters: z.object({ title: z.string() }).strict() }
+    const write = tool('chapter_write', async () => ({ output: '第49章真实正文已保存', display: { kind: 'chapterDiff', chapterId: 'new49', chapterTitle: '风眼',
+      before: '', after: '第49章真实新正文', appliedDirectly: true } }), false)
+    const commit = tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '已完成实际终态', requiredResult: { targetId: 'new49', contentHash: 'a'.repeat(64) } } }, false)
+    mocks.tools = [prepare, scene, create, write, commit]
+    mocks.chat.mockImplementationOnce(async input => {
+      expect(input.messages.map((message: { content?: unknown }) => message.content).join('\n')).toContain('已授权新建全书第49章')
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 329762, checkpoint: { stagnantBatches: 4, tokenBudget: 500,
+        toolRestrictions: [{ ...restriction, inputHash: expect.any(String) }] } })
+      return response('', [call('correct-prepare', prepare.name, JSON.stringify({ targetOrderIndex: 49, volumeDecision: { kind: 'continue', reason: '当前卷真实目标尚未收束' } }))])
+    })
+    queue(response('', [call('scene', scene.name)]), response('', [call('create', create.name, '{"title":"风眼"}')]),
+      response('', [call('write49', write.name, '{"chapterId":"new49"}')]), response('', [call('commit49', commit.name)]), response('已保存。'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+    expect(prepare.execute).toHaveBeenCalledOnce()
+    expect(create.execute).toHaveBeenCalledOnce()
+    expect(create.execute).toHaveBeenCalledWith(expect.anything(), { title: '风眼' })
+    expect(write.execute).toHaveBeenCalledWith(expect.anything(), { chapterId: 'new49' })
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 329822, checkpoint: { maxTurns: 1, tokenBudget: 500, readProgress: 2,
+      writeProgress: 2, stagnantBatches: 0, toolRestrictions: [{ ...restriction, inputHash: expect.any(String) }] } })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+  it('does not grant a schema-blocked resume a reading grace or bypass unknown review outcomes', async () => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 49, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 4, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 0, writeBaseline: 0, readProgress: 2, readBaseline: 0, progressSignatures: [],
+      toolRestrictions: [{ action: 'chapter_create', target: 'c', code: 'TOOL_SCHEMA_INVALID', reason: '原参数失败' }],
+      pendingReviews: [{ compilationId: 'unknown', chapterId: 'c', revision: 6, toolName: 'continuity_validate', callId: 'paid-unknown' }] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 5, startedAt: new Date(checkpoint.runStartedAt), usage: { promptTokens: 329762, completionTokens: 0, totalTokens: 329762, checkpoint } })
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+    expect(mocks.chat).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 329762, checkpoint: { stagnantBatches: 4, tokenBudget: 500, pendingReviews: checkpoint.pendingReviews } })
+  })
   it.each(['old-compilation', 'standalone'] as const)('does not replay a %s unknown review by changing compilation aliases for the same chapter', async scenario => {
     let state: ChapterReviewReadiness | null = scenario === 'standalone' ? null : readiness('missing', 'complete')
     mocks.reviewReadiness.mockImplementation(async () => state)
@@ -1815,6 +1867,26 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(result.observation).not.toContain('old-editor-chapter')
     expect(result.observation).not.toContain('当前正在编辑')
     expect(admitted.execute).not.toHaveBeenCalled()
+  })
+
+  it('returns frozen next49 instructions for rejected PREPARE and CREATE inputs without suggesting the editor anchor', async () => {
+    const writingScope: TaskSpec['scope'] = { novelId: 'novel', writing: { version: 1, kind: 'bounded',
+      targets: [{ chapterId: null, orderIndex: 49 }], titleAndBodyOnly: false, repairAuthorized: false,
+      tailVolume: { version: 1, previousChapterId: 'previous48', previousRevision: 6, targetOrderIndex: 49 } } }
+    const prepare = tool('story_compiler_prepare', async () => { throw new DataAccessError(400, 'INVALID_ARGUMENTS', 'chapterId 与全书位置冲突') }, false)
+    const create = { ...tool('chapter_create', async () => ({ output: 'must not execute' }), false), parameters: z.object({ title: z.string(), volumeOrder: z.number().int() }) }
+    const ctx = { ...context(), chapterId: 'old-editor-chapter', writingScope }
+    const failedPrepare = await handleToolCall(call('conflicting', prepare.name, '{"chapterId":"previous48","targetOrderIndex":49}'), [prepare], ctx, { emit: mocks.emit }, 'message', 'run')
+    expect(failedPrepare).toMatchObject({ recoveryCode: 'INVALID_ARGUMENTS', part: { status: 'failed' } })
+    expect(failedPrepare.observation).toContain('已授权新建全书第49章')
+    expect(failedPrepare.observation).toContain('先纠正准备参数')
+    const failedCreate = await handleToolCall(call('bad-string', create.name, '{"title":"风眼","volumeOrder":"2"}'), [create], ctx, { emit: mocks.emit }, 'message', 'run')
+    expect(failedCreate).toMatchObject({ failureCode: 'TOOL_SCHEMA_INVALID', part: { status: 'failed' } })
+    expect(failedCreate.observation).toContain('已授权新建全书第49章')
+    expect(failedCreate.observation).toContain('省略 newVolume')
+    expect(failedCreate.observation).not.toContain('old-editor-chapter')
+    expect(failedCreate.observation).not.toContain('绝对禁止放弃重试')
+    expect(create.execute).not.toHaveBeenCalled()
   })
 
   it('still stops after three chapter scope failures without dispatching a fourth call', async () => {

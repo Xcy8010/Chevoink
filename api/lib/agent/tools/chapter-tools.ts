@@ -10,6 +10,7 @@ import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import { assertChapterManuscriptRevision, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { placeCreatedChapter, resolveChapterPlacement } from '../../data/volume.js'
+import { normalizeToolInput } from './input-validation.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { resolveAgentChapterVolumeId } from './chapter-placement.js'
@@ -224,7 +225,18 @@ export const chapterCreateTool = defineTool({
   name: 'chapter_create',
   title: '新建章节',
   description:
-    '在当前作品原子创建一个新章节。作者说“全书第 N 章”时只传 position=N；作者说“第 M 卷第 N 章/卷内第 N 章”时必须传 volumeOrder=M（或 volumeId）与 positionInVolume=N，严禁改用全书 position，严禁先建到错误卷再移动。未指定位置时紧接全书最后一个已有章节。仅用于新增章节；重写已有章节必须用 chapter_write。创建成功后必须复用返回的 chapterId 写正文，绝不要重复创建同名章。',
+    '在当前作品原子创建一个新章节。默认title只写实际章名，不重复章号或书名号；作者明确命名照其要求。作者说“全书第 N 章”时只传 position=N；作者说“第 M 卷第 N 章/卷内第 N 章”时必须传 volumeOrder=M（或 volumeId）与 positionInVolume=N，位置必须是数字，严禁改用全书 position，严禁先建到错误卷再移动。沿用现有卷时不要传newVolume；newVolume仅用于已通过PREPARE新卷决定的真实新尾卷，不得与固定卷或卷内位置混用。未指定位置时紧接全书最后一个已有章节。仅用于新增章节；重写已有章节必须用 chapter_write。创建成功后必须复用返回的 chapterId 写正文，绝不要重复创建同名章。',
+  coerceArgs(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
+    const args = { ...raw } as Record<string, unknown>
+    for (const key of ['position', 'volumeOrder', 'positionInVolume']) {
+      const value = args[key]
+      if (typeof value !== 'string' || !/^[1-9]\d*$/u.test(value)) continue
+      const number = Number(value)
+      if (Number.isSafeInteger(number) && number <= 2_147_483_647) args[key] = number
+    }
+    return args
+  },
   parameters: z.object({
     title: z.string().min(1).max(120).describe('章节标题'),
     content: z.string().optional().describe('章节正文，可留空'),
@@ -261,7 +273,7 @@ export const chapterCreateTool = defineTool({
     if (ctx.durableCreate) {
       const captured = { ...ctx, protectedChapterIds: new Set(ctx.protectedChapterIds), toolAuthority: new Map(ctx.toolAuthority), durableCreate: { ...ctx.durableCreate, lease: { ...ctx.durableCreate.lease }, cursor: { ...ctx.durableCreate.cursor } } }
       const normalize = (raw: unknown) => {
-        const parsed = chapterCreateTool.parameters.parse(raw)
+        const parsed = chapterCreateTool.parameters.parse(normalizeToolInput(chapterCreateTool, raw))
         return Object.fromEntries(Object.entries({ ...parsed, title: parsed.title.trim() }).filter(([, value]) => value !== undefined))
       }
       const effective = chapterCreateTool.parameters.parse(normalize(args))

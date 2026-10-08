@@ -54,6 +54,7 @@ import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-t
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { createEmptyResponseGuard, createProtocolRecoveryGuard, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { toolFailureRecovery, toolRecoveryKey } from './tool-failure-recovery.js'
+import { frozenWritingToolGuidance } from './writing-tool-guidance.js'
 import { findToolRestriction, isLocalToolFailure, isInputScopedFailure, restoreToolRestriction, toolFailureInputHash, toolRestrictionTarget, type ToolRestriction } from './tool-local-failure.js'
 import { readLimitedWritingDelivery, assertLimitedWritingDelivery, limitedReviewDependency, type LimitedWritingDelivery } from './writing-delivery-limitations.js'
 import { readChapterReviewReadiness, probeChapterReviewRevision } from './chapter-review-guard.js'
@@ -437,8 +438,9 @@ export async function handleToolCall(
       .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
       .join('；')
     // 附带当前章节 ID：缺 chapterId 是最高发的校验失败，直接喂给模型避免它盲猜或多耗一轮去查
-    const chapterHint = call.name !== 'chapter_create' && ctx.chapterId ? `作者当前正在编辑的章节 chapterId=${ctx.chapterId}。` : ''
-    return fail('参数校验失败', `工具 ${call.name} 参数校验失败：${issues}。${chapterHint}本次调用完全没有执行，请补齐/修正参数后立即重新发起同一个工具调用，绝对禁止放弃重试或改在回复正文里完成该操作。`, 'failed')
+    const writingHint = frozenWritingToolGuidance(call.name, ctx.writingScope)
+    const chapterHint = !writingHint && !['chapter_create', 'story_compiler_prepare'].includes(call.name) && ctx.chapterId ? `作者当前正在编辑的章节 chapterId=${ctx.chapterId}。` : ''
+    return fail('参数校验失败', `工具 ${call.name} 参数校验失败：${issues}。${chapterHint}${writingHint}本次调用完全没有执行。纠正所列字段后再调用，不重复相同无效输入，也不能将回复里的正文当作已经保存。`, 'failed')
   }
 
   // 协作作用域约束：检查派生授权和目标归属，不拦截无关章节写入。
@@ -583,7 +585,7 @@ export async function handleToolCall(
     }
     const recovery = error instanceof DataAccessError ? toolFailureRecovery(error.code) : undefined
     if (recovery && error instanceof DataAccessError) return {
-      ...fail(recovery.label, `工具 ${call.name} 未完成（${error.code}）：${error.message} ${recovery.guidance}`, 'failed'),
+      ...fail(recovery.label, `工具 ${call.name} 未完成（${error.code}）：${error.message} ${recovery.guidance} ${frozenWritingToolGuidance(call.name, ctx.writingScope)}`, 'failed'),
       recoveryCode: error.code,
     }
     const message = error instanceof DataAccessError ? error.message : '内部执行异常，本次操作未确认完成；请核对已保存状态，不要盲目重复写入'
@@ -1358,6 +1360,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       chapterId: params.chapterId,
       sessionId: params.sessionId,
       runId,
+      writingScope: taskSpec.scope,
       protectedChapterIds: protectsEarlierContent ? new Set(taskSpec.scope.chapterIds ?? []) : undefined,
       toolAuthority: snapshotToolAuthority(tools, params.mode),
       callId: '',
@@ -1393,6 +1396,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     let todoReminders = 0
     let authorEndRequested = false
     if (continuingTask) messages.push({ role: 'user', content: `[系统] 恢复指定任务 ${taskSpec.id}，不是恢复整个会话的历史工作。原目标：${taskSpec.goals.join('；')}。\n${renderTodoItems(todoItems)}\n历史中其他任务的并行窗口、待办与一次性指令不构成本任务的授权；禁止重新启动它们。被停止时生成但未成功执行的工具不是已保存成果。先核对本任务已保存进度，执行剩余工作。仅尚有多个独立执行单元的长任务或复杂任务需要建立待办；没有清单不是未完成的证据，确已完成时直接交付，禁止在结尾补造已完成清单、提交空清单或覆盖历史待办。不得仅回复下一步打算就结束，也不得将未完成项标为已完成。` })
+    const frozenWritingHint = frozenWritingToolGuidance('story_compiler_prepare', taskSpec.scope)
+    if (frozenWritingHint) messages.push({ role: 'user', content: `[系统·本任务冻结目标] ${frozenWritingHint}` })
     let consecutiveStructureFailures = 0
     // A4：长上下文提醒消息（单实例，每轮移除后重新追加到队尾，保证只存在一条且最靠近当前轮）
     const contextReminder: ChatMessage = {
