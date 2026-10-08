@@ -2897,7 +2897,7 @@ model QualityFinding {
   novel           Novel                     @relation(fields: [novelId], references: [id], onDelete: Cascade)
   report          ChapterQualityReport      @relation(fields: [reportId], references: [id], onDelete: Cascade)
 
-  @@unique([reportId, source, signal, evidenceHash])
+  @@unique([reportId, source, signal, startOffset, endOffset, evidenceHash], map: "quality_findings_report_source_signal_span_key")
   @@index([userId, disposition, updatedAt])
   @@index([novelId, signal, disposition])
   @@index([novelId, signal, authorFeedback])

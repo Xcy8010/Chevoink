@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Routine, compatible-schema release. Prepare off the live path. No idle wait,
-# task cancellation, database writes or automatic whole-script retry.
+# task cancellation or automatic whole-script retry. Database changes are limited
+# to the exact reviewed quality-finding index migration below.
 REVISION="${1:?candidate SHA}"
 ARCHIVE_HASH="${2:?archive digest}"
 BASELINE="${3:?expected active SHA}"
@@ -57,10 +58,9 @@ process.stdout.write(JSON.stringify({pid:a.pid,start:e.pm_uptime}));'
 }
 verify_baseline
 PROCESS_BEFORE=$(snapshot_process)
-# Schema/migration changes require their separately reviewed migration path.
-# Routine deployment performs no migration or writes to the database.
-cmp -s prisma/schema.prisma "$CURRENT/prisma/schema.prisma"
-diff -qr prisma/migrations "$CURRENT/prisma/migrations" >/dev/null
+# The helper accepts byte-identical schemas or one reviewed index migration.
+# There is no generic schema override; routine releases never connect to the DB.
+MIGRATION_PLAN=$(node scripts/verify-release-migration.mjs plan "$STAGE" "$CURRENT")
 node --input-type=module -e '
 import {readFileSync} from "node:fs";import {execFileSync} from "node:child_process";
 const p=JSON.parse(readFileSync("package.json","utf8"));
@@ -76,6 +76,13 @@ verify_baseline
 [[ "$(snapshot_process)" == "$PROCESS_BEFORE" ]]
 printf '{"revision":"%s","archiveSha256":"%s"}\n' "$REVISION" "$ARCHIVE_HASH" > "$STAGE/.chevoink-release.json"
 phase prepared
+if [[ "$MIGRATION_PLAN" == "20261009010000_quality_finding_span_identity" ]]; then
+  DOTENV_CONFIG_QUIET=true node --import dotenv/config scripts/verify-release-migration.mjs before "$STAGE" "$CURRENT" "$STAGE/.release-migration-before.json"
+  phase migrating
+  npx prisma migrate deploy
+  DOTENV_CONFIG_QUIET=true node --import dotenv/config scripts/verify-release-migration.mjs after "$STAGE" "$CURRENT" "$STAGE/.release-migration-after.json"
+  phase migrated
+fi
 
 # Normal authorized restart with native recovery; no task/accounting edits.
 phase stopping

@@ -167,4 +167,29 @@ describe.skipIf(!dbAvailable)('Agent 3.0 人类感质量门（需 DB）', () => 
     expect(report.deterministicMetrics).not.toHaveProperty('rawResponse')
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).toEqual(chapter)
   })
+  it('persists identical critic evidence at distinct offsets and repairs only the selected occurrence', async () => {
+    const original = await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })
+    const content = '他笑了。\n他笑了。'
+    const chapter = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId: original.volumeId,
+      orderIndex: 99, orderInVolume: 99, title: '重复位置', content, wordCount: content.length, revision: 1 } })
+    const sources = buildQualityEvidenceSources({ userId, novelId, chapterId: chapter.id, chapterRevision: 1 }, content)
+    const occurrences = sources.entries.filter(entry => entry.text === '他笑了。')
+    expect(occurrences).toHaveLength(2)
+    const findings = occurrences.map(entry => ({ sourceId: entry.id, signal: 'emotion_grounding', severity: 'warning',
+      quote: entry.text, explanation: '此处人物反应需结合动作判断。', suggestion: '让这一处反应更具体。', confidence: 0.9 }))
+    const report = await persistHumanityQualityReport({ userId, novelId, chapterId: chapter.id, chapterRevision: 1,
+      mode: 'balanced', deterministicMetrics: {}, deterministicFindings: [], criticComplete: true, sources,
+      criticFindings: [...findings, findings[0]] })
+    expect(report.findings).toHaveLength(2)
+    expect(new Set(report.findings.map(finding => finding.evidenceHash)).size).toBe(1)
+    expect(new Set(report.findings.map(finding => finding.startOffset)).size).toBe(2)
+    const target = report.findings.find(finding => finding.startOffset > 0)!
+    const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...duplicate } = target
+    await expect(prisma.qualityFinding.create({ data: duplicate })).rejects.toMatchObject({ code: 'P2002' })
+    await selectQualityFindings(userId, novelId, report.id, [target.id])
+    const repaired = await applyQualityRepair({ userId, novelId, reportId: report.id,
+      replacements: [{ findingId: target.id, replacement: '他别过脸。' }] })
+    expect(repaired.after).toBe('他笑了。\n他别过脸。')
+  })
+
 })
