@@ -12,14 +12,14 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('old compiler continuity recovery before paid dispatch', () => {
-  it.each(['missing-hash', 'old-protocol', 'previous-protocol', 'committed-receipt'] as const)('%s preserves saved critic work without a new repair HTTP request', async scenario => {
-    const oldCritic = { id: 'saved-critic', status: 'succeeded', providerResult: { content: '{"findings":[{"signal":"body","severity":"warning","evidence":"原文风险","suggestion":"局部澄清"}]}',
+  it.each(['missing-hash', 'old-protocol', 'previous-protocol', 'protocol-five', 'protocol-five-unknown', 'committed-receipt'] as const)('%s preserves saved critic work without a new repair HTTP request', async scenario => {
+    const oldCritic = { id: 'saved-critic', status: scenario === 'protocol-five-unknown' ? 'unknown' : 'succeeded', providerResult: { content: '{"findings":[{"signal":"body","severity":"warning","evidence":"原文风险","suggestion":"局部澄清"}]}',
       usage: { promptTokens: 10, completionTokens: 2 }, chargedMilli: 5 } }
     const beforeCritic = structuredClone(oldCritic)
     const work = { kind: 'check', version: 1, compiler: { id: 'comp', hash: 'a'.repeat(64) },
       chapter: { id: 'c', title: '本章', revision: 1, content: '原文', orderIndex: 1 }, sourceId: null,
       coverage: { version: 1, contentHash: 'b'.repeat(64), charCount: 2, sourceHash: null,
-        ...(['old-protocol', 'previous-protocol'].includes(scenario) ? { reviewHash: 'c'.repeat(64), protocolVersion: scenario === 'previous-protocol' ? 2 : 1 } : {}) },
+        ...(['old-protocol', 'previous-protocol', 'protocol-five', 'protocol-five-unknown'].includes(scenario) ? { reviewHash: 'c'.repeat(64), protocolVersion: scenario.startsWith('protocol-five') ? 5 : scenario === 'previous-protocol' ? 2 : 1 } : {}) },
       criticInput: '完整正文：原文', criticSystem: 'old critic protocol', repairSystem: 'old repair protocol', repair: true, cached: null, route: null, price: null }
     const inputSnapshot = { input: { work } }, inputHash = runtimeJson(inputSnapshot).hash
     const result = { toolResult: { output: '原操作已完成', summary: '原连续性检查' }, memoryJobId: null }

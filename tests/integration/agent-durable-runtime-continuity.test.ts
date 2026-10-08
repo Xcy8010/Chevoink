@@ -17,6 +17,9 @@ import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js
 import { commitChapterBridge,prepareStoryCompilation,saveSceneTasks,validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { applyContinuityPatches } from '../../api/lib/agent/tools/durable-continuity.js'
+import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
+import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { chapterBridgeGetTool,continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
@@ -29,14 +32,14 @@ import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture,novelFixture } from '../support/agent-durable-runtime-fixture.js'
 
 describe.runIf(available)('durable continuity actual tool chain', () => {
-  it.each(['success', 'chapter-only', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'source-text', 'approval-denied'] as const)('%s preserves paid results and atomic business effects', async scenario => {
+  it.each(['success', 'chapter-only', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'source-text', 'approval-denied', 'history-over-three', 'single-quotes', 'single-quotes-stale', 'single-quotes-source', 'single-quotes-swapped', 'unavailable-write-recheck'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     await fixture(async f => {
       let lease = await claim(f)
       const before = scenario === 'long' ? '开头锚点' + '长正文'.repeat(6000) + '末尾锚点' : '原文'
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: before, wordCount: before.length } })
       let sourceId: string | undefined
-      if (scenario === 'stale-source' || scenario === 'source-text') {
+      if (scenario === 'stale-source' || scenario === 'source-text' || scenario === 'single-quotes-source' || scenario === 'single-quotes-swapped') {
         const current = await prisma.chapter.update({ where: { id: f.chapterId }, data: { orderIndex: 2, orderInVolume: 2 } })
         sourceId = (await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: current.volumeId, title: '前章', content: '前文', wordCount: 2, orderIndex: 1, orderInVolume: 1 } })).id
       }
@@ -45,10 +48,16 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
       await saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进场景', entryState: state, goal: '寻找线索', obstacle: '门已上锁', choice: '绕路', cost: '耗费时间', turn: '发现脚印', exitState: state,
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
-      const tools = [chapterBridgeGetTool, continuityValidateTool]
+      if (scenario === 'history-over-three') await prisma.storyCompilation.update({ where: { id: compilationId }, data: { validation: { checkRounds: 9 } } })
+      const tools = [chapterBridgeGetTool, continuityValidateTool, ...(scenario === 'unavailable-write-recheck' ? [chapterReadTool, chapterWriteTool] : [])]
       const checkArgs = scenario === 'chapter-only' ? { chapterId: f.chapterId } : { compilationId }
       const calls = [{ id: 'bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) }, { id: 'check', name: 'continuity_validate', arguments: JSON.stringify(checkArgs) }]
       if (scenario === 'success' || scenario === 'chapter-only') calls.push({ id: 'cached', name: 'continuity_validate', arguments: JSON.stringify(checkArgs) })
+      if (scenario === 'unavailable-write-recheck') calls.push(
+        { id: 'read-current', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
+        { id: 'write-current', name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content: '新文，门已经锁好。' }) },
+        { id: 'bridge-current', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) },
+        { id: 'check-current', name: 'continuity_validate', arguments: JSON.stringify(checkArgs) })
       if (scenario === 'missing') calls.shift()
       await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
@@ -81,6 +90,11 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         if (scenario === 'stale-compiler') await prisma.storyCompilation.update({ where: { id: compilationId }, data: { preparedContext: { changed: true } } })
         if (scenario === 'late-resume') await pauseDurableTask(f.userId, lease.runId)
         const content = scenario === 'fused-repair' ? '{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订","sourceEvidence":[{"source":"current","quote":"原文"}]}],"patches":[{"oldText":"原文","newText":"新文"}]}'
+          : scenario === 'unavailable-write-recheck' ? requests === 1 ? 'broken JSON' : '{"findings":[]}'
+          : scenario === 'single-quotes-source' || scenario === 'single-quotes-swapped' ? JSON.stringify({ findings: [{ signal: 'object', severity: 'error',
+            evidence: scenario === 'single-quotes-source' ? "前章原文：'前文' / 当前正文：'原文'" : "前章原文：'原文' / 当前正文：'前文'", suggestion: '核对真实前后章事实，不自动改写正文' }] })
+          : scenario === 'single-quotes' || scenario === 'single-quotes-stale' ? JSON.stringify({ findings: [{ signal: 'object', severity: 'warning',
+            evidence: `当前正文：'${scenario === 'single-quotes' ? '原文' : '不在正文的旧引文'}'`, suggestion: '保留真实风险交作者审阅' }] })
           : scenario === 'format' || scenario === 'format-retry' && requests === 2 ? 'broken JSON'
           : requests === 1 ? JSON.stringify({ findings: scenario === 'warnings' ? ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在承接风险', suggestion: '局部澄清', sourceEvidence: [{ source: 'current', quote: '原文' }] }))
             : repairing || scenario === 'protected' ? [{ signal: 'body', severity: 'error', evidence: '原文有身体状态冲突', suggestion: '改成新文', sourceEvidence: [{ source: 'current', quote: '原文' }] }] : [] })
@@ -123,8 +137,25 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toBeNull()
         return
       }
+      if (scenario === 'unavailable-write-recheck') {
+        expect(await step()).toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE' } })
+        const subject = { userId: f.userId, novelId: f.novelId, runId: lease.runId }
+        expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, subject, compilationId))).toMatchObject({ continuity: 'incomplete' })
+        await step() // real chapter_read creates the current revision observation
+        expect(await step()).toMatchObject({ kind: 'tool', result: { summary: expect.stringContaining('更新') } })
+        expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ revision: 2, content: '新文，门已经锁好。' })
+        expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, subject, compilationId))).toMatchObject({ continuity: 'stale', continuityExhausted: false })
+        await step() // refresh only the compiler observation, not report evidence
+        expect(await step()).toMatchObject({ kind: 'tool', result: { summary: expect.stringContaining('连续性检查') } })
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkedRevision: 2,
+          independentCheck: 'complete', checkRounds: 2, autoRepairRounds: 0 })
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(2)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId }, status: 'unknown' } })).toBe(0)
+        return
+      }
       const result = await step()
-      const failed = ['format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source'].includes(scenario)
+      const failed = ['format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source', 'single-quotes-stale', 'single-quotes-swapped'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('连续性检查') } })
       if (scenario === 'success' || scenario === 'chapter-only') {
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkRounds: 1 })
@@ -137,6 +168,15 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
       expect(chapter.content).toBe(scenario === 'stale-chapter' || scenario === 'repair-stale' ? '用户新文' : before)
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
+      if (scenario === 'history-over-three') expect(saved.validation).toMatchObject({ checkRounds: 10 })
+      if (scenario === 'single-quotes') expect(saved.validation).toMatchObject({ independentCheck: 'complete', warningCount: 1, unlocatedEvidenceCount: 0 })
+      if (scenario === 'single-quotes-stale') expect(saved.validation).toMatchObject({ independentCheck: 'unavailable', unlocatedEvidenceCount: 1 })
+      if (scenario === 'single-quotes-source') expect(saved.validation).toMatchObject({ independentCheck: 'complete', errorCount: 1, unlocatedEvidenceCount: 0 })
+      if (scenario === 'single-quotes-swapped') expect(saved.validation).toMatchObject({ independentCheck: 'unavailable', errorCount: 1, unlocatedEvidenceCount: 1 })
+      if (scenario === 'history-over-three' || scenario === 'single-quotes') {
+        const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' } })
+        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 2, coverage: { protocolVersion: 6 } } } })
+      }
       if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source'].includes(scenario)) expect(saved.validation).toBeNull()
       else expect(saved.validation).toMatchObject({ checkedRevision: 1, independentCheck: failed ? 'unavailable' : 'complete', coverage: { charCount: before.length, contentHash: runtimeJson({ content: before }).hash } })
       if (repairing && scenario !== 'repair-stale') {

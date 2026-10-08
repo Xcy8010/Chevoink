@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 import { DataAccessError } from '../prisma.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
-import { continuityCheckRounds, continuityRepairRounds, MAX_CONTINUITY_CHECKS } from './story-compiler.js'
+import { continuityCheckRounds, continuityRepairRounds } from './story-compiler.js'
 import { readOriginalTaskRequest, originalTaskRunIds, hasOriginalRepairAuthority } from './original-request.js'
 import { activeChapterScope } from '../data/internal.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches, currentCompilerContinuityAssessment, completeCompilerContinuityAssessment, continuityStoryInput } from './compiler-continuity-contract.js'
@@ -106,7 +106,10 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   const requirements = originalChapterReviewRequirements(original)
   const validation = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : null
   const { assessment } = readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, chapter, source)
-  const continuity: ReviewStatus = assessment ? 'complete' : !validation ? 'missing' : !completeCompilerContinuityAssessment(validation) ? 'incomplete' : 'stale'
+  const validationStale = !!validation && (typeof validation.checkedChapterId === 'string' && validation.checkedChapterId !== chapter.id
+    || typeof validation.checkedRevision === 'number' && validation.checkedRevision !== chapter.revision)
+  const continuity: ReviewStatus = assessment ? 'complete' : !validation ? 'missing' : validationStale ? 'stale'
+    : !completeCompilerContinuityAssessment(validation) ? 'incomplete' : 'stale'
   // Latest assessment wins. A failed later attempt must not resurrect an older
   // complete report, and repairedContentHash certifies no new critic call.
   const report = await tx.chapterQualityReport.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, compilationId: compilation.id,
@@ -120,7 +123,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   if (requirements.quality && quality !== 'complete') requiredTools.push({ name: 'quality_analyze', args: { compilationId: compilation.id } })
   return { ready: !requiredTools.length, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id,
     chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools,
-    continuityExhausted: continuity !== 'complete' && continuityCheckRounds(validation) >= MAX_CONTINUITY_CHECKS,
+    continuityExhausted: false,
     continuityErrorCount: assessment?.errorCount ?? 0, qualityErrorCount: quality === 'complete' ? report!.findings.filter(finding =>
       finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0,
     qualityCandidateCount: quality === 'complete' ? selectAutomaticQualityFindings(report!.findings).length : 0,
@@ -244,7 +247,6 @@ export async function assertChapterReviewRevision(
   if (compilations.some(item => readNewDraftRevision(item.validation))) {
     throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本任务新稿已处理过本轮自动修订决定，不再触发额外自动修订。原授权正文工具仍可依据当前正文连续修改；复核、父子任务或重新准备不能补充付费自动修订额度。剩余意见保持真实状态，不能宣称已通过。')
   }
-  const checksExhausted = compilations.some(item => continuityCheckRounds(item.validation) >= MAX_CONTINUITY_CHECKS)
   const reports = await tx.chapterQualityReport.findMany({ where: {
     userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, runId: { in: runIds },
   }, select: { chapterRevision: true, repairRound: true } })
@@ -266,7 +268,7 @@ export async function assertChapterReviewRevision(
         ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } }) : null
       const complete = bound?.bridge && (!bound.bridge.fromChapterId || source?.revision === bound.bridge.sourceRevision)
         && readCurrentCompilerContinuity({ ...bound, bridge: bound.bridge }, current, source).assessment
-      if (!complete) throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '质量报告照常保存；同一编译的当前正文尚未完成原要求连续性检查，不预约或付费自动修订。先在原检查次数内完成 continuity_validate，再根据全部当前报告合并一次尚未执行的授权修订。')
+      if (!complete) throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '质量报告照常保存；同一编译的当前正文尚未完成原要求连续性检查，不预约或付费自动修订。先完成 continuity_validate，再根据全部当前报告合并一次尚未执行的授权修订；累计检查与用量记录保留。')
     }
   }
   const reviewed = reports.length > 0 || validations.some(value => continuityCheckRounds(value) > 0 || typeof value.checkedRevision === 'number')
@@ -314,7 +316,7 @@ export async function assertChapterReviewRevision(
       const qualityComplete = latestQuality?.compilationId === bound.id
         && qualityReportCheckedCurrentContent(latestQuality, current.revision, current.content)
       if ((requirements.continuity && !continuity) || (requirements.quality && !qualityComplete)) {
-        throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '一次合并修订前必须完成同一编译、当前正文的全部原要求检查。保留正文与未消费的修订，在原检查次数内补齐 continuity_validate 与 quality_analyze，再读取完整报告重新合并修订；不得沿用预先生成的改稿或重置次数。')
+        throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '一次合并修订前必须完成同一编译、当前正文的全部原要求检查。保留正文与未消费的修订，补齐 continuity_validate 与 quality_analyze，再读取完整报告重新合并修订；不得沿用预先生成的改稿或重置次数。')
       }
       const candidates = (continuity?.errorCount ?? 0) + (qualityComplete ? selectAutomaticQualityFindings(latestQuality!.findings).length : 0)
       if (options.mutation === 'append' || (options.mutation === 'range' && !options.mergedBatch && candidates > 1)) {
@@ -434,14 +436,12 @@ export async function assertChapterReviewRevision(
       && latest?.status === 'active' && ['check', 'repair'].includes(latest.stage) && latest.bridge && !latest.bridge.committedAt) {
       await assertMergedMutation(latest)
     }
-    if (checksExhausted) throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本章自动检查次数已用完，保留正文和原报告，不增加检查或修订次数。')
     if (authority && current && validation?.independentCheck === 'complete' && typeof validation.checkedRevision === 'number'
       && validation.checkedRevision < current.revision) {
-      throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', `旧报告未检查当前 r${current.revision}，保留已保存正文，在原检查次数内调用 continuity_validate 复核后再合并一次尚未执行的修订；不得重绑旧报告或增加修订次数。`)
+      throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', `旧报告未检查当前 r${current.revision}，保留已保存正文，调用 continuity_validate 复核后再合并一次尚未执行的修订；不得重绑旧报告或增加自动修订次数。`)
     }
     throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '本任务的原始作者请求未授权检查后改写正文，当前也没有可授权一次合并修订的完整证据（新稿通道需要当前版本、绑定活跃编译的完整检查与可修订候选）。保留连贯正文与报告，停止自动修订。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。')
   }
-  if (checksExhausted) throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本章自动检查次数已用完，保留正文和原报告，不增加检查或修订次数。')
   const revisions = [...reports.map(item => item.chapterRevision), ...validations.flatMap(value =>
     typeof value.checkedRevision === 'number' && Number.isSafeInteger(value.checkedRevision) ? [value.checkedRevision] : [])]
   if (revisions.length && Math.max(...revisions) < chapter.revision) {

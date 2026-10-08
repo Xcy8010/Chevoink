@@ -11,7 +11,7 @@ import * as scope from '../../api/lib/agent/manuscript-scope.js'
 import * as originalRequest from '../../api/lib/agent/original-request.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as novelTools from '../../api/lib/agent/tools/novel-tools.js'
-import { continuityValidateTool, continuityReviewTail, continuityCriticSystem, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { continuityValidateTool, continuityReviewTail, continuityCriticSystem, chapterBridgeCommitTool, chapterBridgeGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 import { sceneTaskInputSchema, storyStateSchema } from '../../shared/contracts/index.js'
@@ -75,15 +75,14 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.critic.mock.calls[0][1]).toContain('桥接摘要，需对照原文核实')
     expect(f.write).not.toHaveBeenCalled()
   })
-  it.each([undefined, '模型自行添加的范围'])('exhaustion does not return stale findings or allow a focus bypass: %s', async focus => {
+  it.each([undefined, '模型自行添加的范围'])('a missing compilation reservation does not return stale findings or buy a check: %s', async focus => {
     const f = fixture(true)
     f.chapter.revision = 2
     f.validation.findings = [{ signal: 'object', severity: 'error', evidence: '仅属于旧版的矛盾', suggestion: '旧版最小修改建议' }]
     vi.mocked(compiler.reserveContinuityCheck).mockResolvedValue(false)
     const returned = await continuityValidateTool.execute(f.ctx, { compilationId: 'comp', focus })
-    expect(returned).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_LIMIT', display: { phase: 'check', items: [] } })
+    expect(returned).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_NOT_FOUND', display: { phase: 'check', items: [] } })
     expect(returned.output).toContain('当前 r2')
-    expect(returned.output).toContain('最近报告属于 r1')
     expect(returned.output).not.toContain('旧版最小修改建议')
     expect(returned.output).not.toContain('仅属于旧版的矛盾')
     expect(f.critic).not.toHaveBeenCalled()
@@ -99,6 +98,31 @@ describe('严谨创作落实连续性警告', () => {
     expect(vi.mocked(compiler.validateStoryContinuity).mock.calls[0][0]).toMatchObject({ runId: 'r', compilationId: 'comp', expectedChapterRevision: 1,
       coverage: compilerContinuityCoverage({ chapter: f.chapter, bridge: f.compilation.bridge, sceneTasks: f.compilation.sceneTasks, source: null }) })
     expect(vi.mocked(compiler.validateStoryContinuity).mock.calls[0][0].signal).toBe(f.ctx.signal)
+    expect(f.critic).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it('a legacy CHECK after nine recorded checks still dispatches one critic without a manuscript or paid repair', async () => {
+    const f = fixture(false)
+    f.compilation.validation = { checkRounds: 9 } as never
+    expect(await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })).toMatchObject({ summary: expect.stringContaining('连续性检查') })
+    expect(compiler.reserveContinuityCheck).toHaveBeenCalledOnce()
+    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.repair).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+    expect(f.compilation.validation).toEqual({ checkRounds: 9 })
+  })
+  it.each(['current', 'stale', 'failed'] as const)('bridge reads show quality candidates only from an authentic %s current-body report', async scenario => {
+    const f = fixture(false)
+    vi.spyOn(prisma.agentRun, 'findFirst').mockResolvedValue({ taskRootId: null, runtimeProtocolVersion: 0, sessionId: f.ctx.sessionId,
+      taskSpec: buildTaskSpec({ runId: f.ctx.runId, novelId: f.ctx.novelId, chapterId: f.chapter.id, prompt: '修改本章' }) } as never)
+    const report = { id: 'report', userId: f.ctx.userId, novelId: f.ctx.novelId, chapterId: f.chapter.id, chapterRevision: scenario === 'stale' ? 0 : 1,
+      status: scenario === 'failed' ? 'failed' : 'passed', deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(f.chapter.content).digest('hex') },
+      findings: [{ id: 'candidate', severity: 'warning', disposition: 'pending', authorFeedback: null, evidenceExcerpt: '原文', explanation: '需要澄清真实动作', suggestion: '按作者授权处理' }] }
+    Object.assign(f.compilation, { qualityReports: [report] })
+    const result = await chapterBridgeGetTool.execute(f.ctx, { compilationId: f.compilation.id })
+    expect(result.output).toContain('reportId=report')
+    if (scenario === 'current') { expect(result.output).toContain('findingId=candidate'); expect(result.output).toContain('需要澄清真实动作') }
+    else { expect(result.output).not.toContain('findingId=candidate'); expect(result.output).toContain('不能用旧候选证明当前版本通过') }
     expect(f.critic).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
   })

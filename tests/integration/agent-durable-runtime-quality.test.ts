@@ -49,7 +49,7 @@ describe.runIf(available)('native paid failed quality response and limited deliv
     const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
     await saveSceneTasks({ ...f, compilationId, tasks: [1, 2, 3].map(n => ({ purpose: `推进场景${n}`, entryState: state, goal: '登山', obstacle: '夜色',
       choice: '交出钥匙', cost: '不能返回', turn: '上路', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } })) })
-    const complete = scenario === 'continuity-complete' || scenario === 'continuity-error'
+    const complete = scenario !== 'continuity-capped'
     if (!complete) {
       for (let n = 0; n < 3; n++) expect(await reserveContinuityCheck(f.userId, f.novelId, compilationId)).toBe(true)
       const current = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId }, include: { chapter: true, bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
@@ -97,7 +97,10 @@ describe.runIf(available)('native paid failed quality response and limited deliv
     expect(await step()).toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'QUALITY_REPORT_INCOMPLETE' } })
     const subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
     const proof = await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))
-    if (scenario === 'continuity-error') {
+    if (scenario === 'continuity-capped') {
+      // Three old attempts are audit history, not a current-version assessment.
+      expect(proof).toBeNull()
+    } else if (scenario === 'continuity-error') {
       const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: chapter.id }, include: { findings: true } })
       // A current factual error keeps the repair obligation open even with an
       // authentic paid format failure. Prove that its paid witness is intact.
@@ -840,7 +843,7 @@ describe.runIf(available)('既有章节独立检查', () => {
       if (scenario !== 'unread') await executeDurableToolStep(lease, signal.signal)
       const check = executeDurableToolStep(lease, signal.signal)
       if (scenario === 'cancelled') await expect(check).rejects.toBeDefined()
-      else expect(await check).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
+      else expect(await check).toMatchObject({ kind: 'tool', result: { outcome: 'failed', ...(scenario === 'format' ? { failureCode: 'CONTINUITY_REPORT_INCOMPLETE' } : {}) } })
       expect(fetchMock).toHaveBeenCalledTimes(['unread', 'wrong-id'].includes(scenario) ? 0 : 1)
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(scenario === 'stale' ? '作者的新正文' : '原文')
       expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview' } })).toBe(0)

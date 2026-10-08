@@ -51,8 +51,7 @@ const clip = (value: string, max: number): string =>
 
 export const MAX_CONTINUITY_AUTO_REPAIRS = 1
 
-/** Automatic checks share a finite attempt budget for this chapter/task.
- * Passing, editing, adding focus or resuming never replenishes it. */
+/** Historical threshold retained for receipt compatibility, not a dispatch cap. */
 export const MAX_CONTINUITY_CHECKS = 3
 
 export function continuityRepairRounds(validation: unknown): number {
@@ -67,15 +66,26 @@ export function continuityCheckRounds(validation: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0
 }
 
+/** Canonical writes never turn a malformed historical counter into zero. */
+export function validatedContinuityCheckRounds(validation: unknown, increment = false): number {
+  const previous = validation && typeof validation === 'object' && !Array.isArray(validation) ? validation as Record<string, unknown> : {}
+  if ('checkRounds' in previous && (typeof previous.checkRounds !== 'number' || !Number.isSafeInteger(previous.checkRounds)
+    || previous.checkRounds < 0 || increment && previous.checkRounds === Number.MAX_SAFE_INTEGER)) {
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '连续性检查历史计数无法核实，未重置记录或派发检查。')
+  }
+  return continuityCheckRounds(previous)
+}
+
 /** Reserve before dispatch; failed checks also consume an attempt. */
 export async function reserveContinuityCheck(userId: string, novelId: string, compilationId: string): Promise<boolean> {
   return prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilationId} AND user_id = ${userId} AND novel_id = ${novelId} FOR UPDATE`
     const compilation = await tx.storyCompilation.findFirst({ where: { id: compilationId, userId, novelId, status: { in: ['active', 'completed'] } } })
-    if (!compilation || continuityCheckRounds(compilation.validation) >= MAX_CONTINUITY_CHECKS) return false
+    if (!compilation) return false
     const previous = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
+    const rounds = validatedContinuityCheckRounds(previous, true)
     await tx.storyCompilation.update({ where: { id: compilationId }, data: {
-      validation: { ...previous, checkRounds: continuityCheckRounds(previous) + 1 } as Prisma.InputJsonValue,
+      validation: { ...previous, checkRounds: rounds + 1 } as Prisma.InputJsonValue,
     } })
     return true
   })
@@ -306,7 +316,7 @@ export async function prepareStoryCompilation(input: {
   })
   // 同目标章节的修复与检查额度跨重准备继承：否则重新 prepare 就能重置预算、绕开收敛保险丝。
   const autoRepairRounds = Math.max(0, ...priorRepairStates.map(item => continuityRepairRounds(item.validation)))
-  const checkRounds = Math.max(0, ...priorRepairStates.map(item => continuityCheckRounds(item.validation)))
+  const checkRounds = Math.max(0, ...priorRepairStates.map(item => validatedContinuityCheckRounds(item.validation)))
   const newDraftRevision = priorRepairStates.map(item => readNewDraftRevision(item.validation)).find(Boolean)
   await db.storyCompilation.updateMany({
     where: { userId: input.userId, novelId: input.novelId, ...scope, status: 'active' },
@@ -694,8 +704,9 @@ export async function validateStoryContinuity(input: {
     ? input.findings.map(finding => classifyContinuityFindingAuthority(finding, authorRequest.prompt,
       { previous: reviewSource?.content ?? null, current: compilation.chapter!.content })) : input.findings)]
   const unlocated = input.findings.filter(finding => unlocatedContinuityEvidence(finding,
-    { previous: reviewSource?.content ?? null, current: compilation.chapter!.content }, (input.coverage?.protocolVersion ?? 0) >= 5))
-  const nextCheckRounds = continuityCheckRounds(compilation.validation)
+    { previous: reviewSource?.content ?? null, current: compilation.chapter!.content }, (input.coverage?.protocolVersion ?? 0) >= 5,
+    (input.coverage?.protocolVersion ?? 0) >= 6))
+  const nextCheckRounds = validatedContinuityCheckRounds(compilation.validation)
   const validation = {
     ...(compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation)
       && compilation.validation.checkedRevision === compilation.chapter.revision && compilation.validation.independentCheck === 'complete'

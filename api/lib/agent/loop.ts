@@ -57,7 +57,9 @@ import { toolFailureRecovery, toolRecoveryKey } from './tool-failure-recovery.js
 import { findToolRestriction, isLocalToolFailure, isInputScopedFailure, restoreToolRestriction, toolFailureInputHash, toolRestrictionTarget, type ToolRestriction } from './tool-local-failure.js'
 import { readLimitedWritingDelivery, assertLimitedWritingDelivery, limitedReviewDependency, type LimitedWritingDelivery } from './writing-delivery-limitations.js'
 import { readChapterReviewReadiness, probeChapterReviewRevision } from './chapter-review-guard.js'
-import { nextMergedReviewReminder, nextReviewDispatch } from './review-dispatch.js'
+import { nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from './review-dispatch.js'
+import { deferredToolPart } from './deferred-tool.js'
+import { readLegacyContinuityRecovery } from './legacy-continuity-recovery.js'
 import { activeChapterScope } from '../data/internal.js'
 import { createRepeatDetector } from './repeat-detect.js'
 import {
@@ -765,6 +767,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const toolProviderFailures = new Map<string, number>()
   const recoveryFailures = new Map<string, number>()
   const automaticReviewAttempts = new Set<string>()
+  const recoveredReviewKeys = new Set<string>()
+  const settledReviewFailures = new Set<string>()
   const pendingReviews = new Map<string, PendingReviewCall>()
   const toolRestrictions: ToolRestriction[] = []
   let inputProtocolRecovery: RunCheckpointState['inputProtocolRecovery']
@@ -788,7 +792,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const item = restoreToolRestriction(saved)
       if (!toolRestrictions.some(prior => prior.action === item.action && prior.target === item.target && prior.inputHash === item.inputHash)) toolRestrictions.push(item)
     }
-    checkpoint.reviewAttempts?.forEach(key => automaticReviewAttempts.add(key))
+    checkpoint.reviewAttempts?.forEach(key => {
+      automaticReviewAttempts.add(key)
+      if (key.startsWith('settled-continuity:')) settledReviewFailures.add(key.slice('settled-continuity:'.length))
+    })
     checkpoint.pendingReviews?.forEach(call => pendingReviews.set(`${call.compilationId ?? call.chapterId}:${call.toolName}`, call))
   }
   // 非空时本轮工具执行完立即走 wrap-up（P0 第 4 次同签名 / P1 干预模式二次命中）
@@ -1067,6 +1074,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         taskSpec: taskSpec as unknown as object, usage: { ...usage, checkpoint: checkpointSnapshot() },
       } })
     } else await persistCheckpoint()
+    if ((params.resume || previousTask) && (toolRestrictions.some(item => ['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED'].includes(item.code))
+      || pendingReviews.size || [...automaticReviewAttempts].some(key => key.endsWith(':continuity_validate')))) {
+      const recovered = await prisma.$transaction(tx => readLegacyContinuityRecovery(tx,
+        { userId: params.userId, novelId: params.novelId, runId }, toolRestrictions, [...pendingReviews.values()]))
+      const firstConversion = recovered.markers.some(marker => !automaticReviewAttempts.has(marker))
+      recovered.removed.forEach(item => { const index = toolRestrictions.indexOf(item); if (index >= 0) toolRestrictions.splice(index, 1) })
+      recovered.settled.forEach(item => pendingReviews.delete(`${item.compilationId ?? item.chapterId}:${item.toolName}`))
+      recovered.recovered.forEach(key => recoveredReviewKeys.add(key))
+      recovered.markers.forEach(marker => automaticReviewAttempts.add(marker))
+      if (firstConversion) compatibilityReadTargets = new Set(recovered.chapterIds)
+      if (recovered.markers.length) await persistCheckpoint()
+    }
     if (pendingReviews.size) {
       throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED',
         '上次独立检查或其修订链仍有未确认的请求。正文、进度与原预算保留；请先核对原调用回执，系统不会因继续任务而重发未知付费请求，也未判定检查通过。')
@@ -1630,15 +1649,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)
         && !looksLikePseudoToolCall(result.content, toolNameList)) {
         const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: params.userId, novelId: params.novelId, runId }))
-        const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts)
+        const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys)
         if (next.kind === 'tool') {
           automaticReviewTriggered = true
           effectiveToolCalls.push({ id: `review_${messageId}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) })
         }
-        else if (next.kind === 'blocked' || next.kind === 'limited') {
-          if (next.kind === 'limited' && await finishLimitedWritingIfAllowed()) return
+        else if (next.kind === 'blocked') {
           forceWrapUpReason = next.reason
-          forceWrapUpLocal = next.kind === 'limited' || Boolean(readiness?.requiredTools.some(item => findToolRestriction(toolRestrictions, item.name, item.args, readiness.chapterId)))
+          forceWrapUpLocal = Boolean(readiness?.requiredTools.some(item => findToolRestriction(toolRestrictions, item.name, item.args, readiness.chapterId)
+            || settledReviewFailures.has(reviewDispatchKey(readiness, item.name))))
         }
         else if (readiness?.ready && toolContext.sandboxMode !== 'read_only'
           && !toolContext.inlineChild && !toolContext.protectedChapterIds?.has(readiness.chapterId)
@@ -1650,7 +1669,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             automaticReviewAttempts.add(key)
             await persistCheckpoint()
             automaticReviewTriggered = true
-            mergedReviewReminder = `[系统/只读状态] 当前 compilationId=${readiness.compilationId}、chapterId=${readiness.chapterId}、r${readiness.revision} 的检查已完成，仍有原授权范围内的意见待处理。核对当前正文和两类报告${readiness.qualityReportId ? `（质量报告 ${readiness.qualityReportId}）` : ''}；优先合并安全的事实与审美修改，也可分步调用 chapter_edit_range 或 chapter_write，不限一次调用。不能仅替换同义词后声称全部完成；不能安全修改的候选可用 retainedFindings 绑定原意见并写明具体原因，也可明确留置全部意见。普通编辑不增加付费自动修订或检查额度，不重放未知请求或改变原范围。完成实际修改后，在既有检查次数内复核最终版本，再提交终态。`
+            mergedReviewReminder = `[系统/只读状态] 当前 compilationId=${readiness.compilationId}、chapterId=${readiness.chapterId}、r${readiness.revision} 的检查已完成，仍有原授权范围内的意见待处理。核对当前正文和两类报告${readiness.qualityReportId ? `（质量报告 ${readiness.qualityReportId}）` : ''}；优先合并安全的事实与审美修改，也可分步调用 chapter_edit_range 或 chapter_write，不限一次调用。不能仅替换同义词后声称全部完成；不能安全修改的候选可用 retainedFindings 绑定原意见并写明具体原因，也可明确留置全部意见。普通编辑不增加付费自动修订额度；新的检查照实累计调用与消费，不重放未知请求或改变原范围。完成实际修改后复核最终版本，再提交终态。`
           }
         }
       }
@@ -1877,7 +1896,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           // final saved body at COMMIT, without discarding partial edits or
           // spending a fresh paid assessment between each fragment.
           if (readiness?.checksRequired) {
-            const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts)
+            const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys)
             if (next.kind === 'tool') {
               const required = { id: `review_${messageId}_${callIndex}_${randomUUID()}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
               effectiveToolCalls.splice(callIndex, 0, required)
@@ -1886,13 +1905,17 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               parts.push({ type: 'text', text: note })
               bus.emit({ type: 'text.final', messageId, text: note, asReasoning: false })
               call = required
-            } else if (next.kind === 'blocked' || next.kind === 'limited') {
-              const local = next.kind === 'limited' || readiness.requiredTools.some(item => findToolRestriction(toolRestrictions, item.name, item.args, readiness.chapterId))
+            } else if (next.kind === 'blocked') {
+              const knownContinuityFailure = readiness.requiredTools.some(item => item.name === 'continuity_validate'
+                && settledReviewFailures.has(reviewDispatchKey(readiness, item.name)))
+              const local = knownContinuityFailure || readiness.requiredTools.some(item => findToolRestriction(toolRestrictions, item.name, item.args, readiness.chapterId))
               if (local) {
-                restrictTool(call.name, parsed, 'REVIEW_DEPENDENCY_UNAVAILABLE', next.reason)
+                if (!knownContinuityFailure) restrictTool(call.name, parsed, 'REVIEW_DEPENDENCY_UNAVAILABLE', next.reason)
+                parts.push(deferredToolPart(call, preflightTool.title, parsed, next.reason, messageId, bus))
                 messages.push({ role: 'tool', toolCallId: call.id, content: `[系统] ${next.reason} 此次未提交章节终态。继续本批其余可执行工作，不能声明检查通过。` })
                 continue
               }
+              parts.push(deferredToolPart(call, preflightTool.title, parsed, next.reason, messageId, bus))
               forceWrapUpReason = next.reason
               forceWrapUpLocal = false
               break
@@ -1910,6 +1933,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
                 automaticReviewAttempts.add(key)
                 await persistCheckpoint()
                 const required = { id: `review_decision_${messageId}_${callIndex}`, name: reader.name, arguments: JSON.stringify(readArgs) }
+                parts.push(deferredToolPart(call, preflightTool.title, parsed, '正在处理当前版本的检查意见，处理后再提交章节终态。', messageId, bus))
                 // An early commit is only a proposal. Read its current decision
                 // state and ask for a new plan; never execute the stale remainder.
                 effectiveToolCalls.splice(callIndex, effectiveToolCalls.length - callIndex, required)
@@ -1926,6 +1950,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           reviewPreflightArgs(call, tools.find(tool => tool.name === call.name)), getLastTouchedChapter(runId) ?? params.chapterId)
         if (restricted) {
           blockedRepeat += 1
+          if (call.name === 'chapter_bridge_commit') parts.push(deferredToolPart(call,
+            tools.find(tool => tool.name === call.name)?.title ?? call.name,
+            reviewPreflightArgs(call, tools.find(tool => tool.name === call.name)), restricted.reason, messageId, bus))
           messages.push({ role: 'tool', toolCallId: call.id,
             content: restricted.inputHash ? `[系统] ${call.name} 的这组失败参数已停止重复提交，本次未执行。${restricted.reason}。根据具体错误纠正参数后，仍可在原授权及当前版本内继续；参数纠正不等于完成，不得扩大目标或预算。`
               : `[系统] 该目标的 ${call.name} 已因 ${restricted.code} 停止重复尝试，本次未执行、未产生新费用。原因：${restricted.reason}。继续其他已授权且不依赖此操作的工作；不要换工具绕过权限或把未完成项说成通过。` })
@@ -1966,7 +1993,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             // A stale prerequisite must not insert the same cached call forever.
             // Reuse is not a new current-version assessment; the next state read
             // must either be ready or stop under the persisted attempt bound.
-            automaticReviewAttempts.add(`${reviewDispatch.compilationId}:${reviewDispatch.chapterId}:${reviewDispatch.revision}:${reviewDispatch.toolName}`)
+            automaticReviewAttempts.add(reviewDispatchKey(reviewDispatch, reviewDispatch.toolName))
           }
           blockedRepeat += 1
           const blockSummary = '相同状态下该工具与完整参数已成功执行，复用结果，未重复执行'
@@ -1984,8 +2011,17 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (reviewDispatch) {
           // Commit evidence BEFORE the handler can reserve/send a paid chain.
           // A crash leaves it pending across same-run and typed continuations.
-          const attemptKey = `${reviewDispatch.compilationId}:${reviewDispatch.chapterId}:${reviewDispatch.revision}:${reviewDispatch.toolName}`
+          const attemptKey = reviewDispatchKey(reviewDispatch, reviewDispatch.toolName)
           const pendingKey = `${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`
+          const unconfirmed = [...pendingReviews.values()].some(item => item.toolName === reviewDispatch.toolName && item.chapterId === reviewDispatch.chapterId)
+          if (unconfirmed || (automaticReviewAttempts.has(attemptKey) && settledReviewFailures.has(attemptKey))) {
+            const reason = unconfirmed ? '此前的检查请求结果尚未确认，未重放付费请求。'
+              : '当前版本已收到未完成的检查报告，复用失败原因；正文或检查协议改变后再复核，未重复付费。'
+            parts.push(deferredToolPart(call, tool?.title ?? call.name, reviewPreflightArgs(call, tool), reason, messageId, bus))
+            messages.push({ role: 'tool', toolCallId: call.id, content: `[系统] ${reason} 当前检查未判定通过，继续其余可执行工作。` })
+            blockedRepeat += 1
+            continue
+          }
           const alreadyAttempted = automaticReviewAttempts.has(attemptKey)
           automaticReviewAttempts.add(attemptKey)
           pendingReviews.set(pendingKey, reviewDispatch)
@@ -1999,18 +2035,25 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
         const outcome = await handleToolCall(call, tools, { ...toolContext, callId: call.id, messageId }, bus, messageId, runId)
         if (reviewDispatch && (outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
-          'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? ''))) {
+          'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED',
+          'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? ''))) {
           pendingReviews.delete(`${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`)
+          if (outcome.part.status !== 'success') {
+            const settledKey = reviewDispatchKey(reviewDispatch, reviewDispatch.toolName)
+            settledReviewFailures.add(settledKey)
+            if (['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? '')) automaticReviewAttempts.add(`settled-continuity:${settledKey}`)
+          }
           await persistCheckpoint()
         }
         const localFailure = isLocalToolFailure(outcome.failureCode ?? outcome.recoveryCode)
         if (localFailure) {
           const code = outcome.failureCode ?? outcome.recoveryCode!
-          restrictTool(call.name, outcome.part.args, code, outcome.observation)
+          const receivedContinuityFailure = ['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(code)
+          if (!receivedContinuityFailure) restrictTool(call.name, outcome.part.args, code, outcome.observation)
           // Both public selectors address the same server-resolved assessment.
           // Retain both identities so switching chapterId/compilationId cannot
           // lose the local failure or dispatch another paid attempt.
-          if (reviewDispatch) {
+          if (reviewDispatch && !receivedContinuityFailure) {
             restrictTool(call.name, { chapterId: reviewDispatch.chapterId }, code, outcome.observation)
             if (reviewDispatch.compilationId) restrictTool(call.name, { compilationId: reviewDispatch.compilationId }, code, outcome.observation)
           }
@@ -2034,7 +2077,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           argumentFailures.set(call.name, failures)
           if (failures >= 3) restrictTool(call.name, outcome.part.args, outcome.failureCode ?? 'INVALID_ARGUMENTS', '连续三次参数无效，该工具未完成；继续其他可执行工作。')
         }
-        if (outcome.recoveryCode) {
+        if (outcome.recoveryCode && !['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(outcome.recoveryCode)) {
           const key = toolRecoveryKey(call.name, outcome.recoveryCode, outcome.part.args, getLastTouchedChapter(runId) ?? params.chapterId)
           const failures = (recoveryFailures.get(key) ?? 0) + 1
           recoveryFailures.set(key, failures)

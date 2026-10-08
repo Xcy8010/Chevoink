@@ -28,7 +28,6 @@ import {
   reserveContinuityCheck,
   continuityRepairRounds,
   continuityCheckRounds,
-  MAX_CONTINUITY_CHECKS,
   buildStoryCompilerDigest,
 } from '../../api/lib/agent/story-compiler.js'
 
@@ -157,7 +156,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     expect(await reserveContinuityRepair(userId, novelId, rePrepared.compilation.id)).toBe(false)
   })
 
-  it('连续性检查额度：并发不超发，零错误报告也不能重置累计尝试', async () => {
+  it('连续性检查历史：并发逐次累计，超过旧三次仍可检查，零错误与重准备不重置', async () => {
     // 先补齐正文与场景任务，使确定性检查不产生干扰误差，额度语义只由 findings 决定。
     await prisma.chapter.update({ where: { id: chapter3Id }, data: { content: '林舟在雪原上发现第二把钥匙，齿纹与袖中那把并不相同。', wordCount: 27, revision: { increment: 1 } } })
     const input = { userId, novelId, runId, chapterId: chapter3Id, mode: 'balanced' as const, intentSummary: '检查连续性检查额度' }
@@ -168,16 +167,30 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       exitState: { action: '林舟收起钥匙' }, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' },
     }] })
     const attempts = await Promise.all(Array.from({ length: 4 }, () => reserveContinuityCheck(userId, novelId, prepared.compilation.id)))
-    expect(attempts.filter(Boolean)).toHaveLength(MAX_CONTINUITY_CHECKS)
-    expect(await reserveContinuityCheck(userId, novelId, prepared.compilation.id)).toBe(false)
+    expect(attempts.filter(Boolean)).toHaveLength(4)
+    expect(await reserveContinuityCheck(userId, novelId, prepared.compilation.id)).toBe(true)
     await validateStoryContinuity({ userId, novelId, compilationId: prepared.compilation.id,
       findings: [{ signal: 'body', severity: 'error', evidence: '林舟左臂受伤', suggestion: '保留伤势限制' }], independentCheck: 'complete' })
     const afterError = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id } })
-    expect(continuityCheckRounds(afterError.validation)).toBe(MAX_CONTINUITY_CHECKS)
+    expect(continuityCheckRounds(afterError.validation)).toBe(5)
     await validateStoryContinuity({ userId, novelId, compilationId: prepared.compilation.id, findings: [], independentCheck: 'complete' })
     const afterPass = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id } })
-    expect(continuityCheckRounds(afterPass.validation)).toBe(MAX_CONTINUITY_CHECKS)
-    expect(await reserveContinuityCheck(userId, novelId, prepared.compilation.id)).toBe(false)
+    expect(continuityCheckRounds(afterPass.validation)).toBe(5)
+    expect(await reserveContinuityCheck(userId, novelId, prepared.compilation.id)).toBe(true)
+    const next = await prepareStoryCompilation(input)
+    expect(continuityCheckRounds(next.compilation.validation)).toBe(6)
+    expect(await reserveContinuityCheck(userId, novelId, next.compilation.id)).toBe(true)
+    expect(continuityCheckRounds((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: next.compilation.id } })).validation)).toBe(7)
+  })
+
+  it.each([-1, '3', 1.5, Number.MAX_SAFE_INTEGER])('拒绝无法继续累计的检查记录 %s，而不清零或修改记录', async checkRounds => {
+    const original = await prisma.storyCompilation.findFirstOrThrow({ where: { runId, chapterId: chapter3Id, status: 'active' }, orderBy: { createdAt: 'desc' } })
+    const invalid = { checkRounds, autoRepairRounds: 1 }
+    await prisma.storyCompilation.update({ where: { id: original.id }, data: { validation: invalid } })
+    try {
+      await expect(reserveContinuityCheck(userId, novelId, original.id)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: original.id } })).validation).toEqual(invalid)
+    } finally { await prisma.storyCompilation.update({ where: { id: original.id }, data: { validation: original.validation! } }) }
   })
 
   it('建立作品宪章和读者承诺，并以不可逆哈希保存写作意图', async () => {

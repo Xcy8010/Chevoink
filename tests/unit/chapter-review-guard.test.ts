@@ -31,9 +31,9 @@ describe('review driven manuscript mutation admission', () => {
     const f = fixture('写下一章', validation)
     await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
   })
-  it.each(['写下一章', '检查并修复当前章'])('exhaustion stops mutation even with an original repair request: %s', async prompt => {
+  it.each(['写下一章', '检查并修复当前章'])('historical count does not revoke authority but stale evidence still blocks mutation: %s', async prompt => {
     const f = fixture(prompt, { checkRounds: 3, checkedRevision: 3, errorCount: 1 })
-    await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
+    await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).rejects.toMatchObject({ code: prompt === '写下一章' ? 'REPAIR_NOT_AUTHORIZED' : 'REVIEW_REPAIR_RECHECK_REQUIRED' })
   })
   it.each(['continuity', 'quality'])('allows one explicitly authorized atomic revision, then blocks reuse of old %s evidence', async kind => {
     const f = fixture('检查并修复当前章', kind === 'continuity' ? { checkRounds: 1, checkedRevision: 4 } : null,
@@ -426,6 +426,7 @@ describe('one atomic factual correction in the original new draft', () => {
   })
   it('admits one strict-mode quality correction from a complete report bound to the active compilation', async () => {
     const f = fixture()
+    f.validation.checkRounds = 9
     f.validation.errorCount = 0; f.validation.findings = []
     const quality = { id: 'q', compilationId: 'compiler', chapterRevision: f.chapter.revision, repairRound: 0, status: 'passed',
       deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(f.chapter.content).digest('hex') },

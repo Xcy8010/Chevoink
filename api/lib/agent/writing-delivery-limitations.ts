@@ -130,7 +130,9 @@ export async function readLimitedWritingDelivery(tx: Prisma.TransactionClient, s
   const source = sourceId ? await tx.chapter.findFirst({ where: { id: sourceId, ...activeChapterScope(subject.novelId) } }) : null
   if (sourceId && (!source || source.revision !== compilation.bridge.sourceRevision)) return null
   const readiness = await readChapterReviewReadiness(tx, subject, compilation.id)
-  if (!readiness || readiness.ready || (readiness.continuity !== 'complete' && !readiness.continuityExhausted)) return null
+  // Historical counts cannot certify current writing or create a new limited
+  // terminal decision. Old proof schemas/readers remain receipt-compatible.
+  if (!readiness || readiness.ready || readiness.continuity !== 'complete') return null
   const quality = await tx.chapterQualityReport.findFirst({ where: { userId: subject.userId, novelId: subject.novelId,
     compilationId: compilation.id, chapterId: id, runId: { in: runIds } }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
   if (!quality) return null
@@ -144,7 +146,7 @@ export async function readLimitedWritingDelivery(tx: Prisma.TransactionClient, s
   if (!(qualityFailure && readiness.continuity === 'complete' && readiness.continuityErrorCount === 0)
     && await isChapterRevisionChannelOpen(tx, subject, chapter)) return null
   // Projection precedes domain continuation. Independent obligations must keep
-  // control of the executor; exempt only this exact exhausted compilation.
+  // control of the executor; exempt only this exact proven compilation.
   if (await tx.storyCompilation.count({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds },
     id: { not: compilation.id }, status: 'active' } })) return null
   const others = await tx.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
@@ -170,8 +172,7 @@ export async function readLimitedWritingDelivery(tx: Prisma.TransactionClient, s
   const length = scope.prompt?.match(/(\d{2,6})\s*[-–—−~～〜－至到]\s*(\d{2,6})\s*字/u)
   if (length && (chapter.content.trim().length < Number(length[1]) || chapter.content.trim().length > Number(length[2]))) return null
   const presentation = await readWritingPresentation(tx, subject, [{ ...target, chapterId: id }])
-  const summary = `《${chapter.title}》正文已保存（r${chapter.revision}）；${readiness.continuity === 'complete'
-    ? '连续性已检查，原报告与意见保留。' : `连续性检查已达${MAX_CONTINUITY_CHECKS}次上限，当前版本尚未复核。`}${qualityFailure
+  const summary = `《${chapter.title}》正文已保存（r${chapter.revision}）；连续性已检查，原报告与意见保留。${qualityFailure
     ? '质量检查响应已收到，但报告格式未能完成验证；质量尚未判定通过，待复核。' : ''}${retainedQualityIssueCount ? `质量报告仍有${retainedQualityIssueCount}条未处理意见。` : ''}`
   const full = presentation ? presentation.mode === 'full_text' : scope.writing.titleAndBodyOnly
   return limitedWritingDeliverySchema.parse({ version: qualityFailure ? 2 : 1, taskId: scope.taskId, targetRunId: subject.runId, sourceRunId: scope.sourceRunId,

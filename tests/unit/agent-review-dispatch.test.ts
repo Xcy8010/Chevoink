@@ -35,14 +35,23 @@ describe('server review fallback', () => {
     expect(nextReviewDispatch(null, available, new Set()).kind).toBe('ready')
     expect(nextReviewDispatch(pending({ ready: true, requiredTools: [] }), available, new Set()).kind).toBe('ready')
   })
-  it('isolates exhausted continuity while still scheduling current quality, then requests limited delivery', () => {
+  it('does not turn a historical three-check count into exhaustion or limited delivery', () => {
     const state = pending({ continuity: 'stale', continuityExhausted: true, requiredTools: [
       { name: 'continuity_validate', args: { compilationId: 'compile' } },
       { name: 'quality_analyze', args: { compilationId: 'compile' } },
     ] })
-    expect(nextReviewDispatch(state, available, new Set())).toMatchObject({ kind: 'tool', tool: { name: 'quality_analyze' } })
-    expect(nextReviewDispatch({ ...state, quality: 'complete', requiredTools: state.requiredTools.slice(0, 1) }, available, new Set()).kind).toBe('limited')
+    expect(nextReviewDispatch(state, available, new Set())).toMatchObject({ kind: 'tool', tool: { name: 'continuity_validate' } })
+    expect(nextReviewDispatch({ ...state, quality: 'complete', requiredTools: state.requiredTools.slice(0, 1) }, available, new Set()).kind).toBe('tool')
     expect(state.ready).toBe(false)
+  })
+  it('admits one authenticated protocol recovery while retaining historical attempts and blocking the new attempt on resume', () => {
+    const state = pending({ continuity: 'incomplete', requiredTools: [{ name: 'continuity_validate', args: { compilationId: 'compile' } }] })
+    const old = new Set(['compile:chapter:4:continuity_validate'])
+    const key = reviewDispatchKey(state, 'continuity_validate')
+    expect(nextReviewDispatch(state, available, old).kind).toBe('blocked')
+    expect(nextReviewDispatch(state, available, old, new Set([key]))).toMatchObject({ kind: 'tool', key })
+    expect(old.has('compile:chapter:4:continuity_validate')).toBe(true)
+    expect(nextReviewDispatch(state, available, new Set([...old, key]), new Set([key])).kind).toBe('blocked')
   })
   it('prompts once for an unspent current-version aesthetic decision, without redispatching a paid check', () => {
     const state = pending({ ready: true, quality: 'complete', qualityCandidateCount: 2, requiredTools: [] })

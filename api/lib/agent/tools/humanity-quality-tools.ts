@@ -134,6 +134,12 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
   // 自动修订写的是作者正文：只读沙箱与受限子任务不获授权，只保存检查意见（正文由各自的写入工具负责）。
   const automatic = allowRepair && ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(report.chapterId)
     && !ctx.inlineChild && ctx.sandboxMode !== 'read_only'
+  const ordinary = automatic && report.findings.some(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected')
+    ? await prisma.$transaction(tx => probeChapterReviewRevision(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },
+      { id: report.chapterId, revision: report.chapterRevision }, { mutation: 'replace' })) : null
+  const decisionGuidance = ordinary?.open
+    ? '严谨创作仍须由 Writer 核对未处理意见：读取当前正文及报告，按原写作授权用 chapter_edit_range 或 chapter_write 落实有证据且安全的修法；涉及刻意口语、节奏或可能改变事实的建议，绑定原 findingId 写明具体留置原因。自动修订额度已使用不撤销普通写作权限，也不表示建议已采纳；实际改文后复核最终版本再提交。'
+    : ''
   const selected = automatic && qualityAutoRepairPending(report) ? selectAutomaticQualityFindings(report.findings) : []
   if (selected.length) {
     ctx.signal.throwIfAborted()
@@ -142,19 +148,19 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
       // 授权），被拒时不预约、不调用修订模型，正文与报告保持原样。
       const probe = await prisma.$transaction(tx => probeChapterReviewRevision(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },
         { id: report.chapterId, revision: report.chapterRevision }, { requireQualityChannel: true, mutation: 'replace' }))
-      if (!probe.open) return { output: `质量报告 ${report.id}已保留，自动修订未应用：${probe.message}剩余意见保留待审，不重复自动改写。${bindingSuffix}`,
+      if (!probe.open) return { output: `质量报告 ${report.id}已保留，自动修订未应用：${probe.message}剩余意见保留待审，不重复自动改写。${decisionGuidance}${bindingSuffix}`,
         summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
       if (await reserveQualityAutoRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id })) {
         const repaired = await applySelectedQualityRepairs(ctx, report, selected)
         if (repaired) {
           const remaining = repaired.report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
           return {
-            output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。修订回执已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 和 quality_analyze 只读复核当前版本，旧 critic 结论不证明修订后正文已检查。${bindingSuffix}`,
+            output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。修订回执已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 和 quality_analyze 只读复核当前版本，旧 critic 结论不证明修订后正文已检查。${remaining ? decisionGuidance : ''}${bindingSuffix}`,
             summary: `人类感质量检查 · 自动修订 ${repaired.patchCount} 处`, display: reportDisplay(repaired.report),
             snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },
           }
         }
-        return { output: `质量检查已完成：${warningCount} 个需关注问题、${advisoryCount} 个建议；已尝试集中修订，但未获得可安全验证且实际改变正文的补丁，正文未修改，意见保留待审。同一报告不循环重试。${bindingSuffix}`,
+        return { output: `质量检查已完成：${warningCount} 个需关注问题、${advisoryCount} 个建议；已尝试集中修订，但未获得可安全验证且实际改变正文的补丁，正文未修改，意见保留待审。同一报告不循环重试。${decisionGuidance}${bindingSuffix}`,
           summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
       }
     } catch (error) {
@@ -168,7 +174,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
   }
   const reason = !automatic ? '本次只保存检查意见，正文未改动；修订须由原始请求明确授权'
     : report.findings.length ? '自动修订已尝试、报告不属于当前修订任务或没有待处理的安全候选；剩余意见仍保留待审' : '未发现有证据的问题'
-  return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.findings.length ? '检查完成仍有意见，不能宣称全部建议已应用或全部问题已解决；剩余意见保留待审，不要求为清零意见改稿' : '本次完整检查未发现有证据的问题'}。${report.status === 'needs_repair' ? '不能宣称质量检查通过。' : ''}${bindingSuffix}`,
+  return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.findings.length ? '检查完成仍有意见，不能宣称全部建议已应用或全部问题已解决；剩余意见保留待审，不要求为清零意见改稿' : '本次完整检查未发现有证据的问题'}。${report.status === 'needs_repair' ? '不能宣称质量检查通过。' : ''}${decisionGuidance}${bindingSuffix}`,
     summary: cached ? '复用当前质量报告' : `人类感质量检查 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
 }
 

@@ -102,6 +102,17 @@ describe('persisted current review readiness', () => {
     expect(query.where).not.toHaveProperty('chapterRevision')
     expect(query.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
   })
+  it('keeps current unavailable continuity incomplete but makes it stale after a legitimate new revision', async () => {
+    const f = fixture()
+    f.compilation.validation.independentCheck = 'unavailable'
+    f.compilation.validation.checkRounds = 9
+    await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ continuity: 'incomplete', continuityExhausted: false })
+    f.chapter.content += '他保存了新线索。'; f.chapter.revision++
+    await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ continuity: 'stale', continuityExhausted: false,
+      requiredTools: expect.arrayContaining([{ name: 'continuity_validate', args: { compilationId: f.compilation.id } }]) })
+    expect(f.compilation.validation).toMatchObject({ checkedRevision: 3, checkRounds: 9, independentCheck: 'unavailable' })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
   it('denied stale repair then missing quality cannot commit, and a recheck consumes no correction', async () => {
     const f = fixture()
     Object.assign(f.compilation.validation, { errorCount: 1, findings: [{ signal: 'object', severity: 'error', evidence: '同一门锁状态冲突', suggestion: '保留锁门事实' }] })

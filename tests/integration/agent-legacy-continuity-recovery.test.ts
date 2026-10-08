@@ -1,0 +1,58 @@
+import { describe, expect, it } from 'vitest'
+import { prisma } from '../../api/lib/prisma.js'
+import { readLegacyContinuityRecovery } from '../../api/lib/agent/legacy-continuity-recovery.js'
+import { prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import type { ToolRestriction } from '../../api/lib/agent/tool-local-failure.js'
+import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
+
+describe.runIf(available)('authenticated legacy continuity recovery', () => {
+  it.each(['cap', 'conflicting-alias', 'missing-result', 'wrong-code', 'cap-with-paid-call', 'settled-locator', 'unknown-locator', 'overlapping-call'] as const)(
+    '%s preserves receipts and only recovers a proven obsolete local limit or settled locator response', async scenario => fixture(async f => {
+      try {
+      const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '修改本章' })
+      const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const current = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: true } })
+      const coverage = compilerContinuityCoverage({ chapter, bridge: current.bridge, sceneTasks: current.sceneTasks, source: null })
+      await prisma.storyCompilation.update({ where: { id: compilation.id }, data: {
+        validation: { coverage: { ...coverage, protocolVersion: 5 }, checkedChapterId: f.chapterId, checkedRevision: 1, checkRounds: 3, independentCheck: 'unavailable', unlocatedEvidenceCount: 1 },
+      } })
+      const locator = scenario.endsWith('locator')
+      const code = locator ? 'CONTINUITY_EVIDENCE_UNLOCATED' : scenario === 'wrong-code' ? 'AI_CREDITS_EXHAUSTED' : 'CONTINUITY_CHECK_LIMIT'
+      const start = new Date('2026-10-08T00:00:00Z'), end = new Date(start.getTime() + 10000)
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', createdAt: start,
+        payload: { toolName: 'continuity_validate', callId: 'legacy-check', args: { compilationId: compilation.id,
+          chapterId: scenario === 'conflicting-alias' ? 'other-chapter' : f.chapterId } } } })
+      if (scenario === 'overlapping-call') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.call', createdAt: new Date(start.getTime() + 1000),
+        payload: { toolName: 'chapter_write', callId: 'unfinished-write', args: { chapterId: f.chapterId } } } })
+      if (scenario !== 'missing-result') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'tool.result', createdAt: end,
+        payload: { toolName: 'continuity_validate', callId: 'legacy-check', ok: false, failureCode: code } } })
+      if (locator || scenario === 'cap-with-paid-call') await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId,
+        targetType: 'story_compilation', targetId: compilation.id, providerType: 'text', providerMode: 'custom', modelName: 'synthetic-no-network',
+        action: 'agent3ContinuityCritic', requestTokens: scenario === 'unknown-locator' ? null : 10,
+        responseTokens: scenario === 'unknown-locator' ? null : 2, billingStatus: scenario === 'unknown-locator' ? 'pending_usage' : 'settled',
+        usageSource: scenario === 'unknown-locator' ? 'unknown' : 'reported', durationMs: 20, createdAt: new Date(start.getTime() + 5000) } })
+      const restrictions: ToolRestriction[] = [
+        { action: 'continuity_validate', target: compilation.id, code: 'CONTINUITY_CHECK_LIMIT', reason: 'old cap' },
+        { action: 'continuity_validate', target: f.chapterId, code: 'CONTINUITY_CHECK_LIMIT', reason: 'old cap' },
+        { action: 'chapter_bridge_commit', target: compilation.id, code: 'REVIEW_DEPENDENCY_UNAVAILABLE', reason: '正文已保存；连续性自动检查次数已用完，最终版本尚未复核。继续其余可执行工作，交付时必须保留此限制。' },
+        { action: 'quality_analyze', target: compilation.id, code: 'QUALITY_REPORT_INCOMPLETE', reason: 'separate failure' },
+        { action: 'chapter_bridge_commit', target: compilation.id, code: 'REVIEW_DEPENDENCY_UNAVAILABLE', reason: 'another dependency' },
+        { action: 'continuity_validate', target: compilation.id, code: 'AI_CREDITS_EXHAUSTED', reason: 'real credit rejection' },
+      ]
+      const pending = [{ compilationId: compilation.id, chapterId: f.chapterId, revision: 1, toolName: 'continuity_validate' as const, callId: 'legacy-check' }]
+      const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+      const usageBefore = await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })
+      const result = await prisma.$transaction(tx => readLegacyContinuityRecovery(tx, f, restrictions, pending))
+      if (scenario === 'cap' || scenario === 'settled-locator') {
+        expect(result.recovered).toEqual([`${compilation.id}:${f.chapterId}:1:continuity_validate:protocol6`])
+        expect(result.settled).toEqual(pending)
+        expect(result.markers).toHaveLength(1)
+        expect(result.removed).toEqual(scenario === 'cap' ? restrictions.slice(0, 3) : [])
+      } else expect(result).toEqual({ removed: [], settled: [], recovered: [], markers: [], chapterIds: [] })
+      expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(before)
+      expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })).toEqual(usageBefore)
+      expect(restrictions).toHaveLength(6)
+      } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+    }))
+})

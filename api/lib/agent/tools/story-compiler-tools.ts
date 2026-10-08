@@ -31,7 +31,6 @@ import {
   updateReaderPromise,
   validateStoryContinuity,
   reserveContinuityCheck,
-  MAX_CONTINUITY_CHECKS,
 } from '../story-compiler.js'
 import { defineTool, type ToolContext } from './types.js'
 import { readChapterReviewRevisionGuidance, continuityDecisionBinding } from '../chapter-review-guard.js'
@@ -39,6 +38,7 @@ import { readOriginalTaskRequest } from '../original-request.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
 import { storyCharterHash } from './durable-metadata.js'
 import { readWritingScope } from '../writing-scope.js'
+import { qualityReportCheckedCurrentContent } from '../quality-report-contract.js'
 
 const ALL_READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const PLAN_BUILD_WRITE = { plan: 'allow', build: 'allow', review: 'deny' } as const
@@ -486,7 +486,8 @@ export const chapterBridgeGetTool = defineTool({
       where: { userId: ctx.userId, novelId: ctx.novelId, ...(args.compilationId ? { id: args.compilationId } : {}),
         ...scope },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { title: true, revision: true } } },
+      include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { title: true, revision: true, content: true } },
+        qualityReports: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1, include: { findings: { orderBy: { startOffset: 'asc' } } } } },
     })
     if (!compilation?.bridge) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND',
       output: `当前任务没有可读取的指定 Chapter Bridge，compilationId 不能使用章节或任务合同编号。${compilation ? '编译缺少章节桥，身份异常需核对，不能重建绕过。' : await missingCompilationGuidance(db, ctx, scope)}`, summary: '未找到章节编译状态' }
@@ -499,8 +500,15 @@ export const chapterBridgeGetTool = defineTool({
       `物品状态：${asStrings(bridge.objectState).join('；') || '未记录'}`,
       `开放钩子：${asStrings(bridge.openLoops).join('；') || '无'}`,
     ]
+    const report = compilation.qualityReports?.[0]
+    const currentQuality = report && compilation.chapter && report.userId === ctx.userId && report.novelId === ctx.novelId
+      && report.chapterId === compilation.chapterId && qualityReportCheckedCurrentContent(report, compilation.chapter.revision, compilation.chapter.content)
+    const qualityDetails = currentQuality
+      ? `当前质量报告 reportId=${report.id}，r${report.chapterRevision}；下列候选仍待作者原授权内处理，不代表已修复。\n${report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected')
+        .map(item => `[findingId=${item.id}/${item.severity}/${item.disposition}] 「${item.evidenceExcerpt}」；原因：${item.explanation}；建议：${item.suggestion}`).join('\n') || '无剩余候选。'}`
+      : report ? `质量报告 reportId=${report.id} 不属于当前完整正文检查，不能用旧候选证明当前版本通过。` : '当前质量报告尚未建立。'
     return {
-      output: `compilationId=${compilation.id}，chapterId=${compilation.chapterId ?? '尚未创建'}，阶段=${compilation.stage}，状态=${compilation.status}，目标第 ${compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。\n${items.join('\n')}\nScene Task：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜目标 ${task.goal}｜阻力 ${task.obstacle}｜代价 ${task.cost}｜转折 ${task.turn}`).join('\n') || '尚未建立'}`,
+      output: `compilationId=${compilation.id}，chapterId=${compilation.chapterId ?? '尚未创建'}，阶段=${compilation.stage}，状态=${compilation.status}，目标第 ${compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。\n${items.join('\n')}\nScene Task：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜目标 ${task.goal}｜阻力 ${task.obstacle}｜代价 ${task.cost}｜转折 ${task.turn}`).join('\n') || '尚未建立'}\n${qualityDetails}`,
       summary: `读取第 ${compilation.targetOrderIndex} 章章节桥`,
       display: { kind: 'storyCompiler', compilationId: compilation.id, phase: compilation.stage, title: '章节桥', detail: `第 ${compilation.targetOrderIndex} 章 · ${compilation.stage}`, items },
     }
@@ -535,17 +543,17 @@ export async function readStandaloneContinuityReport(ctx: ToolContext, contextHa
   return metadata.success ? { artifact, findings: metadata.data.findings } : null
 }
 
-export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string): Promise<import('./types.js').ToolResult> {
+export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true): Promise<import('./types.js').ToolResult> {
   ctx.signal.throwIfAborted()
   await assertAgentManuscriptCurrent(db, ctx)
   await db.$queryRaw`SELECT id FROM chapters WHERE id = ${context.chapter.id} FOR UPDATE`
   const current = await buildStandaloneContinuityContext(ctx, context.chapter.id, db)
   if (current.contextHash !== context.contextHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、前章或作品约定已变化，本次报告未保存为当前版本结果；请重新读取。')
   ctx.signal.throwIfAborted()
-  if (!parsed.structured) return { outcome: 'failed', summary: '独立连续性复核未完成', output: '模型没有返回完整结构化报告，未判定通过；正文与章节桥均未修改。' }
+  if (!parsed.structured) return { outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE', summary: '独立连续性复核未完成', output: '模型没有返回完整结构化报告，未判定通过；正文与章节桥均未修改。' }
   const cached = await readStandaloneContinuityReport(ctx, context.contextHash, focus, db)
   const findings = cached?.findings ?? parsed.findings
-  const unlocated = findings.some(item => unlocatedContinuityEvidence(item, { previous: current.precedingBodies, current: current.chapter.content }, true))
+  const unlocated = findings.some(item => unlocatedContinuityEvidence(item, { previous: current.precedingBodies, current: current.chapter.content }, true, allowSingleQuotes))
   const errors = findings.filter(item => item.severity === 'error').length
   const warnings = findings.length - errors
   const output = `独立连续性检查《${context.chapter.title}》@r${context.chapter.revision}：${errors} 错误、${warnings} 警告。${unlocated ? '引用未在对应正文中定位，结论未确认，不能判定通过或据此改稿。' : '仅完成审阅，正文未修改，不需要补建编译或提交章节桥。'}\n${findings.map(item => `[${item.severity}/${item.signal}] ${item.evidence}；${item.suggestion}`).join('\n')}`
@@ -642,15 +650,14 @@ export const continuityValidateTool = defineTool({
         display: { kind: 'storyCompiler', compilationId: compilation.id, phase: errorCount > 0 ? 'repair' : 'check', title: '连续性检查', detail: `${errorCount} 错误 · ${warningCount} 警告 · 已复用`, items: findings.map((item) => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`), errorCount, warningCount },
       }
     }
-    // Current reports were reused above. Exhaustion is a control result, never
-    // another assessment of the current manuscript or permission to edit it.
+    // A check reserves a monotonic audit count; its count is not a dispatch cap.
     if (!await reserveContinuityCheck(ctx.userId, ctx.novelId, compilation.id)) {
       return {
         outcome: 'failed' as const,
-        failureCode: 'CONTINUITY_CHECK_LIMIT',
-        summary: `连续性检查已停止 · 已达 ${MAX_CONTINUITY_CHECKS} 次自动检查上限`,
-        output: `同一章节已用完 ${MAX_CONTINUITY_CHECKS} 次自动检查。当前 r${chapter.revision} 没有可复用的完整连续性结论；${cachedValidation ? `最近报告属于 r${cachedValidation.checkedRevision}，其旧意见不能当作当前版本的新错误。` : '没有完整报告。'}本次未调用模型，不代表正文有错或修订失败。保留正文，停止自动改稿和重复检查，如实说明检查未完成；不能宣称通过。`,
-        display: { kind: 'storyCompiler', compilationId: compilation.id, phase: 'check', title: '连续性检查', detail: `自动复查已停止 · 当前 r${chapter.revision} 未复核`, items: [] },
+        failureCode: 'COMPILATION_NOT_FOUND',
+        summary: '本任务连续性检查未执行',
+        output: `当前编译已不存在或不可继续检查，未调用模型；当前 r${chapter.revision} 未获得新复核。请读取本任务章节桥核对真实状态，不使用旧报告宣称新版通过。`,
+        display: { kind: 'storyCompiler', compilationId: compilation.id, phase: 'check', title: '连续性检查', detail: `编译状态需核对 · 当前 r${chapter.revision} 未复核`, items: [] },
       }
     }
     const allowRepair = false
@@ -704,7 +711,7 @@ export const continuityValidateTool = defineTool({
     if (criticFallback || result.independentCheck !== 'complete') return {
       outcome: 'failed' as const,
       failureCode: criticFallback ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED',
-      output: `独立连续性复核未完成，本次不能判定通过。${criticFallback ? '报告格式不完整。' : '检查引用未在当前对应正文中定位，不能照旧引文改稿。'}保留当前正文和未确认报告；原写作权限内仍可修正有真实依据的问题，再按原检查预算复核。\n${result.findings.map(item => `${item.evidence}；${item.suggestion}`).join('\n')}`,
+      output: `独立连续性复核未完成，本次不能判定通过。${criticFallback ? '报告格式不完整。' : '检查引用未在当前对应正文中定位，不能照旧引文改稿。'}保留当前正文和未确认报告；原写作权限内仍可修正有真实依据的问题再复核，累计检查与用量记录不清零，继续遵守原任务实际预算、额度和取消状态。\n${result.findings.map(item => `${item.evidence}；${item.suggestion}`).join('\n')}`,
       summary: '独立连续性复核未完成',
     }
     const phase = result.errorCount > 0 ? 'repair' : 'check'

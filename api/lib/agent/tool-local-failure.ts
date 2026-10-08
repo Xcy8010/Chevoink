@@ -8,7 +8,8 @@ export const toolRestrictionSchema = z.object({
 export type ToolRestriction = z.infer<typeof toolRestrictionSchema>
 
 const localCodes = new Set(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'REVIEW_AUTOMATION_STOPPED',
-  'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'QUALITY_REPAIR_LIMIT', 'AI_QUALITY_NON_THINKING_UNSUPPORTED', 'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'])
+  'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'QUALITY_REPAIR_LIMIT', 'AI_QUALITY_NON_THINKING_UNSUPPORTED',
+  'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED', 'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'])
 
 /** This allowlist describes confirmed local rejections, never uncertain external
  * effects, revoked execution authority, cancellation or corrupt receipts. */
