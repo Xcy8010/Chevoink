@@ -99,7 +99,8 @@ async function readFailedInlineQualityRequest(tx: Prisma.TransactionClient,
   if (await tx.agentProviderAttempt.count({ where: { runId: { in: ids }, status: { in: ['prepared', 'dispatching', 'unknown'] } } })
     || await tx.aiUsageLog.count({ where: { userId: subject.userId, novelId: subject.novelId,
       AND: [{ OR: [{ agentRunId: { in: ids } }, { action: { startsWith: 'agent3Humanity' }, createdAt: { gte: first.createdAt }, OR: target }] },
-        { OR: [{ billingStatus: { not: 'settled' } }, { usageSource: { in: ['unknown', 'estimated'] } }, { reservedCreditMilli: { gt: 0 } }] }] } })) return null
+        { OR: [{ billingStatus: { not: 'settled' } }, { billingStatus: null },
+          { usageSource: { not: 'reported' } }, { usageSource: null }, { reservedCreditMilli: { gt: 0 } }] }] } })) return null
   const history = await tx.agentRunEvent.findMany({ where: { runId: { in: ids }, type: { in: ['tool.call', 'tool.result'] },
     createdAt: { lte: result.createdAt } }, orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }], take: 2001 })
   if (history.length >= 2001 || history.some(event => {

@@ -156,7 +156,8 @@ import { randomUUID } from 'node:crypto'
 
 describe.runIf(available)('legacy terminal quality failure with known billing', () => {
   it.each(['known', 'no-admission', 'same-body', 'same-revision', 'wrong-audit', 'wrong-claim', 'wrong-key', 'wrong-window', 'wrong-scope',
-    'third-payment', 'unknown', 'estimated', 'no-response', 'prior-unknown', 'reserved', 'native-pending', 'overlap', 'unfinished', 'duplicate', 'native-run'] as const)(
+    'third-payment', 'unknown', 'estimated', 'no-response', 'prior-unknown', 'prior-null-status', 'prior-null-source',
+    'reserved', 'native-pending', 'overlap', 'unfinished', 'duplicate', 'native-run'] as const)(
     '%s never revives an old report or refunds/replays its chain', scenario => fixture(async f => {
       try {
         await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: scenario === 'native-run' ? f.rootId : null,
@@ -195,6 +196,9 @@ describe.runIf(available)('legacy terminal quality failure with known billing', 
         if (scenario === 'third-payment' || scenario === 'prior-unknown') await prisma.aiUsageLog.create({ data: {
           ...usage, targetId: scenario === 'third-payment' ? reportId : f.chapterId, action: 'agent3HumanityEvidenceCorrection',
           createdAt: at(scenario === 'prior-unknown' ? -500 : 5500), usageSource: scenario === 'prior-unknown' ? 'unknown' : 'reported' } })
+        if (scenario === 'prior-null-status' || scenario === 'prior-null-source') await prisma.aiUsageLog.create({ data: {
+          ...usage, action: 'agent3HumanityCritic', createdAt: at(-500),
+          ...(scenario === 'prior-null-status' ? { billingStatus: null } : { usageSource: null }) } })
         if (scenario === 'native-pending') {
           const operationId = randomUUID()
           await prisma.agentOperation.create({ data: { id: operationId, taskRootId: f.rootId, originRunId: f.runId,
