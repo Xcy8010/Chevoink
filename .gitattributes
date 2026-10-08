@@ -1,3 +1,6 @@
 # This public module is SHA-256 pinned by the offline recorder; retain identical
 # bytes on Windows checkouts, Linux CI, and production static-file publication.
 public/voice-capture-worklet.js text eol=lf
+
+# Keep the reviewed production migration checksum identical across platforms.
+prisma/migrations/20261009010000_quality_finding_span_identity/migration.sql text eol=lf

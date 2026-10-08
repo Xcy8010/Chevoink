@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const migrationName = '20261009010000_quality_finding_span_identity'
-export const migrationChecksum = 'ca2151daa4f4e496269b4e6d481918ad44572958313cec7d5febd14e92b3b6d0'
+export const migrationChecksum = '27b78febf135faf99d4d611adf60e1f597e92befb6c961c7a5970153d8a7f21e'
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
