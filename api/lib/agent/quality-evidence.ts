@@ -16,7 +16,7 @@ const qualityEvidenceIdentitySchema = z.object({
   chapterRevision: z.number().int().positive(),
 }).strict()
 export const qualityEvidenceSourcesSchema = z.object({
-  version: z.literal(1), protocol: z.literal(5), identity: qualityEvidenceIdentitySchema,
+  version: z.literal(1), protocol: z.union([z.literal(5), z.literal(6)]), identity: qualityEvidenceIdentitySchema,
   contentHash: z.string().regex(/^[a-f0-9]{64}$/),
   entries: z.array(z.object({ id: z.string().regex(/^q[a-f0-9]{64}$/), start: z.number().int().nonnegative(),
     end: z.number().int().positive(), text: z.string().min(1).max(360) }).strict()),
@@ -231,7 +231,7 @@ function coerceCompleteCriticFindings(raw: unknown, sources?: QualityEvidenceSou
     if (item && typeof item === 'object' && !Array.isArray(item) && Object.prototype.hasOwnProperty.call(item, 'sourceId')) {
       const entry = sourceForFinding(sources?.entries.map(value => value.text).join('') ?? '', item as { sourceId?: string; quote?: string }, sources)
       if (!entry) { dropped++; invalidSources++; continue }
-      bound = { ...item, quote: entry.text }
+      bound = { ...item, sourceId: entry.id, quote: entry.text }
     }
     const parsed = criticQualityFindingSchema.safeParse(bound)
     if (!parsed.success) { dropped++; continue }
@@ -258,7 +258,7 @@ export function inspectCorrectableCriticResponse(raw: string | null, sources: Qu
     const parsed = pendingSchema.safeParse(item)
     if (!parsed.success || (!parsed.data.sourceId && !parsed.data.quote)) return { ...inspected, correctable: false }
     const source = parsed.data.sourceId ? sourceForFinding(sources.entries.map(entry => entry.text).join(''), item as { sourceId: string; quote?: string }, sources) : null
-    findings.push(source ? { ...parsed.data, quote: source.text } : parsed.data)
+    findings.push(source ? { ...parsed.data, sourceId: source.id, quote: source.text } : parsed.data)
   }
   return { ...inspected, findings, correctable: true,
     diagnostic: { ...inspected.diagnostic, droppedFindings: 0 } }
@@ -267,10 +267,10 @@ export function inspectCorrectableCriticResponse(raw: string | null, sources: Qu
 /** A deterministic UTF-16 source table; every character is retained, including
  * whitespace and repeated sentences. IDs bind the complete review identity,
  * manuscript hash, protocol and exact half-open offsets. */
-export function buildQualityEvidenceSources(identity: QualityEvidenceIdentity, content: string): QualityEvidenceSources {
+export function buildQualityEvidenceSources(identity: QualityEvidenceIdentity, content: string, protocol: 5 | 6 = 6): QualityEvidenceSources {
   const parsed = qualityEvidenceIdentitySchema.parse(identity)
   const contentHash = sha256(content)
-  const binding = JSON.stringify({ protocol: 5, ...parsed, contentHash })
+  const binding = JSON.stringify({ protocol, ...parsed, contentHash })
   const entries: QualityEvidenceSources['entries'] = []
   for (let start = 0; start < content.length;) {
     let end = Math.min(content.length, start + 360)
@@ -284,23 +284,25 @@ export function buildQualityEvidenceSources(identity: QualityEvidenceIdentity, c
     entries.push({ id: `q${sha256(`${binding}:${start}:${end}`)}`, start, end, text })
     start = end
   }
-  return { version: 1, protocol: 5, identity: parsed, contentHash, entries }
+  return { version: 1, protocol, identity: parsed, contentHash, entries }
 }
 
 export function validateQualityEvidenceSources(sources: unknown, identity: QualityEvidenceIdentity, content: string): sources is QualityEvidenceSources {
   const parsed = qualityEvidenceSourcesSchema.safeParse(sources)
   if (!parsed.success) return false
-  const expected = buildQualityEvidenceSources(identity, content)
+  const expected = buildQualityEvidenceSources(identity, content, parsed.data.protocol)
   return JSON.stringify(parsed.data) === JSON.stringify(expected)
 }
 
 export function renderQualityEvidenceSources(sources: QualityEvidenceSources): string {
-  return `原文证据表（只引用本次提供的 sourceId；编号只证明位置，不能证明意见正确）：\n${sources.entries.filter(item => item.text.trim()).map(item => `${item.id} ${JSON.stringify(item.text)}`).join('\n')}`
+  return `原文证据表（只引用本次提供的 sourceId；编号只证明位置，不能证明意见正确）：\n${sources.entries.filter(item => item.text.trim()).map(item => `${sources.protocol === 6 ? item.id.slice(0, 13) : item.id} ${JSON.stringify(item.text)}`).join('\n')}`
 }
 
 function sourceForFinding(content: string, finding: { quote?: string; sourceId?: string }, sources?: QualityEvidenceSources) {
   if (!finding.sourceId || !sources || !validateQualityEvidenceSources(sources, sources.identity, content)) return null
-  const entry = sources.entries.find(item => item.id === finding.sourceId)
+  const matches = sources.entries.filter(item => item.id === finding.sourceId
+    || (sources.protocol === 6 && /^q[a-f0-9]{12}$/.test(finding.sourceId!) && item.id.slice(0, 13) === finding.sourceId))
+  const entry = matches.length === 1 ? matches[0] : undefined
   // A model supplying both representations cannot choose an inconsistent quote.
   return entry && entry.text.trim() && (finding.quote === undefined || finding.quote === entry.text) ? entry : null
 }

@@ -1925,7 +1925,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, qualityRecoveryKeys)
             if (next.kind === 'tool') {
               const required = { id: `review_${messageId}_${callIndex}_${randomUUID()}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
-              effectiveToolCalls.splice(callIndex, 0, required)
+              parts.push(deferredToolPart(call, preflightTool.title, parsed, '先完成当前版本检查，读取结果后再提交章节终态。', messageId, bus))
+              effectiveToolCalls.splice(callIndex, 1, required)
               const note = '正在完成当前版本的必要检查，之后再核对修订与章节终态。'
               for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') parts.splice(index, 1)
               parts.push({ type: 'text', text: note })

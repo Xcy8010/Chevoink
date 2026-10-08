@@ -133,6 +133,7 @@ export function buildCriticInput(bundle: Awaited<ReturnType<typeof buildHumanity
 type FrozenQualityRuntime = Pick<Awaited<ReturnType<typeof resolveDurableAuxiliaryRuntime>>, 'runtime'>
 async function finishQualityReview(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false, allowRepair = true, frozenQuality?: FrozenQualityRuntime): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
+  const checkedRevision = report.chapterRevision
   const warningCount = report.findings.filter(finding => finding.severity === 'warning').length
   const advisoryCount = report.findings.filter(finding => finding.severity === 'advisory').length
   // 自动修订写的是作者正文：只读沙箱与受限子任务不获授权，只保存检查意见（正文由各自的写入工具负责）。
@@ -157,7 +158,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
           const remaining = repaired.report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
           return {
             output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。修订回执已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 和 quality_analyze 只读复核当前版本，旧 critic 结论不证明修订后正文已检查。${remaining ? decisionGuidance : ''}${bindingSuffix}`,
-            summary: `人类感质量检查 · 自动修订 ${repaired.patchCount} 处`, display: reportDisplay(repaired.report),
+            summary: `人类感质量检查 · r${checkedRevision} 已检查，修订 ${repaired.patchCount} 处至 r${repaired.result.updated.revision}，需复检`, display: reportDisplay(repaired.report),
             snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },
           }
         }
@@ -394,7 +395,7 @@ export const qualityAnalyzeTool = defineTool({
         ? `质量模型返回的报告格式不完整，不能判定质量通过。确定性报告和正文已保留；${formatRecovery ? '本次工具执行内的独立计费格式恢复已完成，报告仍不可验证；后续检查须遵守真实作者继续授权、预算与未知结果保护。' : ''}不得重复改写正文来解决格式错误。`
         : evidenceCorrectionIncomplete
           ? `部分质量意见的引用无法在正文中逐字定位，${attemptedEvidenceCorrection ? '本次引用校正未能完成，' : ''}报告已保留但不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`
-          : `质量模型返回的全部引用都无法在正文中逐字定位（可能审查了其他文本或引用严重变形），${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`,
+          : `质量报告仍有证据未能在当前正文中定位，已定位的意见与原报告保留，${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`,
       summary: criticFallback ? '质量报告格式不完整' : '质量证据定位未完成', display: reportDisplay(report) }
     const reportMetrics: Record<string, unknown> = report.deterministicMetrics && typeof report.deterministicMetrics === 'object' && !Array.isArray(report.deterministicMetrics) ? report.deterministicMetrics : {}
     const unlocatedCount = typeof reportMetrics.unlocatedFindings === 'number' ? reportMetrics.unlocatedFindings : 0

@@ -104,7 +104,7 @@ describe('frozen quality evidence sources', () => {
       expect(entry.text.length).toBeLessThanOrEqual(360)
       expect(entry.text).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u)
     }
-    expect(renderQualityEvidenceSources(sources)).toContain(sources.entries[0].id)
+    expect(renderQualityEvidenceSources(sources)).toContain(sources.entries[0].id.slice(0, 13))
     expect(renderQualityEvidenceSources(sources)).toContain(JSON.stringify(sources.entries[0].text))
   })
   it('rejects unknown, stale, inconsistent or non-string IDs even with a locatable quote', () => {
@@ -316,5 +316,51 @@ describe('quality parser v2 mechanical syntax and complete judgments', () => {
     expect(inspectCriticResponse('{"findings":[]}', undefined, true, 2).diagnostic).not.toHaveProperty('rawResponse')
     expect(inspectCriticResponse(null, undefined, true, 2).diagnostic).not.toHaveProperty('rawResponse')
     expect(inspectCriticResponse('{"findings":[]}', undefined, false, 2)).toMatchObject({ complete: false, diagnostic: { classification: 'provider_incomplete' } })
+  })
+})
+
+
+describe('short, current-table evidence references', () => {
+  it('binds short references to canonical identities, including repeated text', () => {
+    const text = '她关上了门。她关上了门。'
+    const sources = buildQualityEvidenceSources(sourceIdentity, text)
+    const id = sources.entries[1].id, reference = id.slice(0, 13)
+    expect(renderQualityEvidenceSources(sources)).toContain(reference)
+    expect(renderQualityEvidenceSources(sources)).not.toContain(id)
+    const result = inspectCorrectableCriticResponse(JSON.stringify({ findings: [{ ...finding, quote: undefined, sourceId: reference }] }), sources)
+    expect(result.complete).toBe(true)
+    expect(result.findings[0]).toMatchObject({ sourceId: id, quote: sources.entries[1].text })
+    expect(locateQualityFindingSpans(text, result.findings[0], sources)).toEqual([{ start: sources.entries[1].start, end: sources.entries[1].end }])
+  })
+  it('preserves all ten opinions and corrects only the unbound reference', () => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content)
+    const id = sources.entries[0].id, reference = id.slice(0, 13)
+    const findings = Array.from({ length: 10 }, (_, i) => ({ ...finding, quote: undefined, explanation: `意见${i}`, sourceId: i === 5 ? id.slice(0, -1) : reference }))
+    const result = inspectCorrectableCriticResponse(JSON.stringify({ findings }), sources)
+    expect(result).toMatchObject({ complete: false, correctable: true, diagnostic: { invalidSources: 1, droppedFindings: 0 } })
+    expect(result.findings).toHaveLength(10)
+    expect(result.findings[0].sourceId).toBe(id)
+    const corrected = correctQualityEvidence(content, result.findings, { corrections: [{ index: 5, sourceId: reference }] }, sources)
+    expect(corrected).toHaveLength(10)
+    expect(unlocatedQualityEvidence(content, corrected, sources)).toEqual([])
+    expect(corrected.every(item => item.sourceId === id)).toBe(true)
+  })
+  it('rejects foreign, mistyped and quote-conflicting references without guessing', () => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content)
+    const foreign = buildQualityEvidenceSources({ ...sourceIdentity, chapterRevision: 4 }, content)
+    for (const id of [foreign.entries[0].id.slice(0, 13), sources.entries[0].id.slice(0, 12), sources.entries[0].id.slice(0, 14)]) {
+      expect(inspectCorrectableCriticResponse(JSON.stringify({ findings: [{ ...finding, quote: undefined, sourceId: id }] }), sources).complete).toBe(false)
+    }
+    expect(inspectCriticResponse(JSON.stringify({ findings: [{ ...finding, sourceId: sources.entries[0].id.slice(0, 13) }] }), sources, true, 2).complete).toBe(false)
+  })
+  it('keeps old frozen tables byte-identical and does not grant them new aliases', () => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content, 5)
+    const snapshot = JSON.stringify(sources), id = sources.entries[0].id
+    expect(validateQualityEvidenceSources(sources, sourceIdentity, content)).toBe(true)
+    expect(renderQualityEvidenceSources(sources)).toContain(id)
+    const report = (sourceId: string) => JSON.stringify({ findings: [{ ...finding, quote: undefined, sourceId }] })
+    expect(inspectCriticResponse(report(id), sources, true, 2).complete).toBe(true)
+    expect(inspectCriticResponse(report(id.slice(0, 13)), sources, true, 2).complete).toBe(false)
+    expect(JSON.stringify(sources)).toBe(snapshot)
   })
 })

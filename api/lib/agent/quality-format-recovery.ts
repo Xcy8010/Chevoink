@@ -60,7 +60,7 @@ export async function hasQualityFormatRecoveryClaim(tx: Prisma.TransactionClient
     if (item.parentOperationId === exceptOperationId) return false
     const work = object(object(item.parent?.inputSnapshot).input).work
     const chapter = object(object(work).chapter)
-    return object(work).kind === 'check' && [5, 6].includes(Number(object(work).version))
+    return object(work).kind === 'check' && [5, 6, 7].includes(Number(object(work).version))
       && chapter.id === chapterId && chapter.revision === chapterRevision
       && (!admission || item.createdAt >= admission.at || item.status !== 'succeeded' || item.parent?.status !== 'succeeded')
   })

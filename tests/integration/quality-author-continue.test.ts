@@ -321,7 +321,7 @@ describe.runIf(available)('native quality continuation binds real pause and paym
       expect(await step()).toMatchObject({ kind: 'tool' })
       expect(fetchMock).toHaveBeenCalledTimes(scenario === 'cached-dropped' ? 1 : 0)
       const work = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze' } })
-      expect(work.inputSnapshot).toMatchObject({ input: { work: { version: 6, parserVersion: 2, cached: scenario === 'cached-dropped' ? null : { id: old.id } } } })
+      expect(work.inputSnapshot).toMatchObject({ input: { work: { version: 7, parserVersion: 2, cached: scenario === 'cached-dropped' ? null : { id: old.id } } } })
       return
     }
     if (scenario === 'unknown') await expect(step()).rejects.toThrow('synthetic unknown provider outcome')

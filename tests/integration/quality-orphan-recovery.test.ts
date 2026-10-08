@@ -192,7 +192,7 @@ describe.runIf(available).each(['clean', 'pending-decision'] as const)('typed co
     const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
       const body = JSON.parse(String(init.body)), revision = body.messages[0].content.includes('局部修订编辑')
       expect(body.reasoning_effort).toBe('none')
-      const content = revision ? '{"patches":[]}' : scenario === 'clean' ? '{"findings":[]}' : JSON.stringify({ findings: [{ sourceId: JSON.parse(String(init.body)).messages[1].content.match(/q[a-f0-9]{64}/)[0], signal: 'emotion_grounding', severity: 'advisory', explanation: '合成审美意见', suggestion: '补充动作' }] })
+      const content = revision ? '{"patches":[]}' : scenario === 'clean' ? '{"findings":[]}' : JSON.stringify({ findings: [{ sourceId: JSON.parse(String(init.body)).messages[1].content.match(/q[a-f0-9]{12}(?:[a-f0-9]{52})?/)[0], signal: 'emotion_grounding', severity: 'advisory', explanation: '合成审美意见', suggestion: '补充动作' }] })
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`,
         { headers: { 'content-type': 'text/event-stream' } })
     })

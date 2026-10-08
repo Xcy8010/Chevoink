@@ -397,7 +397,7 @@ export const chapterWriteTool = defineTool({
   name: 'chapter_write',
   title: '写入章节正文',
   description:
-    '用新内容整体覆盖指定章节的正文。需要已存在的 chapterId（新章节请先 chapter_create）。覆盖前建议先 chapter_read 了解现有内容；如只是接着写请用 chapter_append。覆盖前必须确认该章节确实是作者所指：作者按「第N章」指称时，若该排位章节的标题序号对不上（作者删过章导致错位），不要覆盖，改用 chapter_create 传 position 在正确位置插入。',
+    '用新内容整体覆盖指定章节的正文。标题由独立 title 字段展示，正文默认从叙事开始，并沿用前章排版，不在正文首行重复章号或章名；作者明确要求正文含标题或作品已有此格式时照其要求。需要已存在的 chapterId（新章节请先 chapter_create）。覆盖前建议先 chapter_read 了解现有内容；如只是接着写请用 chapter_append。覆盖前必须确认该章节确实是作者所指：作者按「第N章」指称时，若该排位章节的标题序号对不上（作者删过章导致错位），不要覆盖，改用 chapter_create 传 position 在正确位置插入。',
   parameters: chapterWriteArguments,
   permission: WRITE_PERMISSION,
   readOnly: false,
