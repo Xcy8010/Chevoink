@@ -27,6 +27,8 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { getCreatedChapter } from '../../api/lib/agent/baseline.js'
 import * as volumeData from '../../api/lib/data/volume.js'
 import { prepareStoryCompilation, validateStoryContinuity, commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
+import { buildHumanityQualityContext, qualityReviewContextHash } from '../../api/lib/agent/humanity-quality.js'
+import { observeChapterReviewProgress } from '../../api/lib/agent/semantic-progress.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
@@ -350,6 +352,37 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     await expect(prisma.$transaction(tx => commitChapterBridge(input, tx))).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
     expect((await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: f.quality.id }, include: { findings: true } })).findings[0])
       .toMatchObject({ disposition: 'pending', severity: 'advisory' })
+  }))
+  it('observes only current persisted assessments and a real bound no-op decision as progress', () => fixture('写第一章，只要章名和正文', async ctx => {
+    const f = await newDraftReview(ctx, '写第一章，只要章名和正文', '甲句。乙句。')
+    await prisma.storyCompilation.update({ where: { id: f.compilation.id }, data: { validation: runtimeJson({ ...f.validation, findings: [], errorCount: 0 }).value } })
+    const finding = await prisma.qualityFinding.create({ data: { reportId: f.quality.id, userId: ctx.userId, novelId: ctx.novelId,
+      source: 'critic', signal: 'emotion_grounding', severity: 'advisory', startOffset: 0, endOffset: 2, evidenceExcerpt: '甲句',
+      evidenceHash: createHash('sha256').update('甲句').digest('hex'), explanation: '合成建议', suggestion: '补动作', confidence: 0.9 } })
+    const bundle = await buildHumanityQualityContext(ctx.userId, ctx.novelId, f.chapterId, ctx.runId)
+    await prisma.chapterQualityReport.update({ where: { id: f.quality.id }, data: { deterministicMetrics: {
+      ...f.quality.deterministicMetrics as Prisma.JsonObject, qualityContextHash: qualityReviewContextHash(bundle) } } })
+    const read = () => prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))
+    const seen = new Set<string>(), subject = { ...ctx, taskSpec: f.spec, expectedOriginalTaskId: f.spec.id }
+    const first = await read()
+    expect(first).toMatchObject({ decisionPending: true, progressEvidence: { phases: ['continuity', 'quality'] } })
+    expect(observeChapterReviewProgress(seen, first!.progressEvidence, subject)).toBe(true)
+    expect(observeChapterReviewProgress(seen, (await read())!.progressEvidence, subject)).toBe(false)
+    await prisma.chapter.update({ where: { id: f.chapterId }, data: { title: '变更标题' } })
+    expect((await read())!.progressEvidence!.phases).not.toContain('quality')
+    await prisma.chapter.update({ where: { id: f.chapterId }, data: { title: f.chapter.title } })
+    const beforeRetention = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: f.chapter.content, retainedFindings: [
+      { source: 'quality', reportId: f.quality.id, findingId: finding.id, reason: '刻意保留短句节奏，补动作会改变此处作者声口。' } ] })
+    const decided = await read()
+    expect(decided).toMatchObject({ decisionPending: false, progressEvidence: { phases: ['continuity', 'quality', 'decision'] } })
+    expect(observeChapterReviewProgress(seen, decided!.progressEvidence, subject)).toBe(true)
+    expect(observeChapterReviewProgress(new Set(seen), (await read())!.progressEvidence, subject)).toBe(false)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(beforeRetention)
+    await prisma.chapterQualityReport.update({ where: { id: f.quality.id }, data: { status: 'repaired' } })
+    expect((await read())!.progressEvidence!.phases).toEqual(['continuity'])
+    await prisma.chapterQualityReport.update({ where: { id: f.quality.id }, data: { status: 'failed' } })
+    expect((await read())!.progressEvidence!.phases).toEqual(['continuity'])
   }))
   it.each(['revise', 'retain'] as const)('recovers an already completed chapter with six unprocessed findings after a consumed automatic attempt: %s', action => fixture('写第一章，只要章名和正文', async ctx => {
     const f = await newDraftReview(ctx, '写第一章，只要章名和正文', '甲句。乙句。丙句。丁句。戊句。己句。')

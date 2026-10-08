@@ -28,7 +28,7 @@ const routeSchema = auxiliaryRouteSchema
 const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional() }).strict()
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema,
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema,
     sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
@@ -76,7 +76,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       const observed = await readObservedBaseline(tx, lease.taskRootId, cursor.expectedRevision, { kind: 'chapter', id: context.chapter.id })
       if (observed?.kind !== 'chapter' || observed.revision !== context.chapter.revision) return { kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '请先 chapter_read 读取目标正文；独立审阅无需准备章节写作。' }
       const cached = await readStandaloneContinuityReport(ctx, context.contextHash, typeof args.focus === 'string' ? args.focus : undefined, tx)
-      return { kind: 'check' as const, version: 2 as const, compiler: null, standaloneContextHash: context.contextHash, chapter: context.chapter, sourceId: null,
+      return { kind: 'check' as const, version: 3 as const, compiler: null, standaloneContextHash: context.contextHash, chapter: context.chapter, sourceId: null,
         coverage: { version: 1 as const, contentHash: runtimeJson({ content: context.chapter.content }).hash, charCount: context.chapter.content.length, sourceHash: null },
         criticSystem: continuityCriticSystem, criticInput: `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, typeof args.focus === 'string' ? args.focus : undefined)}`,
         repairSystem: repairPrompt, repair: false, cached: cached?.findings ?? null, route: null, price: null }
@@ -102,7 +102,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     const repair = false
     validatedContinuityCheckRounds(compilation.validation, !reusable)
     const originalRequest = await readOriginalTaskRequest(tx, ctx)
-    return { kind: 'check' as const, version: 2 as const, compiler: baseline, chapter: compilation.chapter, sourceId, coverage,
+    return { kind: 'check' as const, version: 3 as const, compiler: baseline, chapter: compilation.chapter, sourceId, coverage,
       criticSystem: continuityCriticSystem, repairSystem: repairPrompt,
       criticInput: [`章节：《${compilation.chapter.title}》`,
         `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
@@ -156,7 +156,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     // fresh repair is dispatched if the original business input has since changed.
     const critic = frozen.cached ? null : await call('continuity_critic', frozen.criticSystem, frozen.criticInput, 0.15)
     const parsed = frozen.cached ? { structured: true, findings: frozen.cached } : critic?.finishReason === 'stop' && !critic.toolCalls.length
-      ? parseIndependentContinuityResult(critic.content) : { structured: false, findings: [] }
+      ? parseIndependentContinuityResult(critic.content, frozen.version >= 3 ? 2 : 1) : { structured: false, findings: [] }
     const compiler = frozen.compiler
     if (!compiler) return commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
       if (!frozen.standaloneContextHash || frozen.repair) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立检查缺少只读上下文。')

@@ -1,3 +1,4 @@
+import { readQualityReviewAdmission } from './quality-review-admission.js'
 import type { Prisma } from '@prisma/client'
 import type { PendingReviewCall } from './checkpoint.js'
 import type { ToolRestriction } from './tool-local-failure.js'
@@ -73,4 +74,76 @@ export async function readLegacyContinuityRecovery(tx: Prisma.TransactionClient,
     }
   }
   return empty
+}
+
+/** A new author continuation may retry a returned, settled legacy review.
+ * Restarting, changing compilers or copying an old request cannot authorize it. */
+export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClient,
+  subject: { userId: string; novelId: string; runId: string }): Promise<Array<[string, string]>> {
+  const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
+  if (!run || run.taskRootId) return []
+  const admission = await readQualityReviewAdmission(tx, run)
+  if (!admission) return []
+  const original = await readWritingScope(tx, subject)
+  if (original.parentRunId || original.writing?.kind !== 'bounded') return []
+  const runIds = await originalTaskRunIds(tx, subject, original)
+  if (await tx.agentProviderAttempt.count({ where: { runId: { in: runIds }, status: { in: ['prepared', 'dispatched', 'unknown'] } } })) return []
+  const compilations = await tx.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds } } })
+  const events = await tx.agentRunEvent.findMany({ where: { runId: { in: runIds }, type: { in: ['tool.call', 'tool.result'] } }, orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }] })
+  const keys: Array<[string, string]> = []
+  for (const compilation of compilations) {
+    const validation = object(compilation.validation), coverage = object(validation.coverage)
+    if (compilation.status !== 'active' || !compilation.chapterId || validation.independentCheck !== 'unavailable' || coverage.protocolVersion !== 6) continue
+    const chapter = await tx.chapter.findFirst({ where: { id: compilation.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true, orderIndex: true } })
+    if (!chapter || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
+      || coverage.contentHash !== runtimeJson({ content: chapter.content }).hash
+      || !original.writing.targets.some(target => target.orderIndex === chapter.orderIndex
+        && (target.chapterId ?? original.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId) === chapter.id)) continue
+    const ids = compilations.filter(item => item.chapterId === chapter.id).map(item => item.id)
+    const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
+      OR: [{ targetType: 'story_compilation', targetId: { in: ids } }, { targetType: 'chapter', targetId: chapter.id }], action: { startsWith: 'agent3Continuity' } } })
+    if (paid.some(item => item.billingStatus !== 'settled' || item.usageSource !== 'reported' || item.requestTokens === null || item.responseTokens === null)) continue
+    const unfinishedMutation = events.some(event => {
+      const payload = object(event.payload), args = object(payload.args)
+      return event.type === 'tool.call' && ['chapter_write', 'chapter_edit_range', 'chapter_append'].includes(String(payload.toolName))
+        && args.chapterId === chapter.id && !events.some(end => end.runId === event.runId && end.type === 'tool.result'
+          && object(end.payload).callId === payload.callId && end.seq > event.seq)
+    })
+    if (unfinishedMutation) continue
+    const calls = events.filter(event => {
+      const payload = object(event.payload), args = object(payload.args)
+      return event.type === 'tool.call' && payload.toolName === 'continuity_validate'
+        && (ids.includes(String(args.compilationId)) || args.chapterId === chapter.id)
+    })
+    if (calls.some(call => events.filter(event => event.runId === call.runId && event.type === 'tool.result'
+      && object(event.payload).callId === object(call.payload).callId && event.seq > call.seq).length !== 1)) continue
+    const call = calls.at(-1)
+    if (!call) continue
+    const callId = object(call.payload).callId
+    if (typeof callId !== 'string' || !callId || events.filter(event => event.runId === call.runId && event.type === 'tool.call' && object(event.payload).callId === callId).length !== 1) continue
+    const args = object(object(call.payload).args)
+    if (args.compilationId !== undefined && args.compilationId !== compilation.id || args.chapterId !== undefined && args.chapterId !== chapter.id) continue
+    const result = events.find(event => event.runId === call.runId && event.type === 'tool.result' && object(event.payload).callId === object(call.payload).callId && event.seq > call.seq)!
+    const payload = object(result.payload), checkedAt = new Date(String(validation.checkedAt)).getTime()
+    if (payload.toolName !== 'continuity_validate' || payload.ok !== false || !['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(String(payload.failureCode))
+      || admission.at <= result.createdAt || !Number.isFinite(checkedAt) || checkedAt < call.createdAt.getTime() || checkedAt > result.createdAt.getTime()) continue
+    const overlaps = events.some(other => {
+      const otherPayload = object(other.payload), otherArgs = object(otherPayload.args)
+      if (other.id === call.id || other.type !== 'tool.call'
+        || !['continuity_validate', 'chapter_write', 'chapter_edit_range', 'chapter_append'].includes(String(otherPayload.toolName))
+        || !(otherArgs.chapterId === chapter.id || ids.includes(String(otherArgs.compilationId)))) return false
+      const ends = events.filter(end => end.runId === other.runId && end.type === 'tool.result'
+        && object(end.payload).callId === otherPayload.callId && end.seq > other.seq)
+      if (ends.length !== 1) return true
+      return other.runId === call.runId ? other.seq < result.seq && ends[0].seq > call.seq
+        : other.createdAt <= result.createdAt && ends[0].createdAt >= call.createdAt
+    })
+    if (overlaps) continue
+    const receipts = paid.filter(item => item.createdAt >= call.createdAt && item.createdAt <= result.createdAt)
+    if (receipts.filter(item => item.action === 'agent3ContinuityCritic').length !== 1 || receipts.some(item => !item.responseTokens || object(item.billingEvidence).responseObserved !== true
+      || !['agent3ContinuityCritic', 'agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery'].includes(item.action))) continue
+    const key = `continuity-author-recovery:${runtimeJson({ taskId: original.taskId, chapterId: chapter.id, contentHash: coverage.contentHash, admissionId: admission.id }).hash}`
+    keys.push([`${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol6`, key])
+  }
+  return keys
 }

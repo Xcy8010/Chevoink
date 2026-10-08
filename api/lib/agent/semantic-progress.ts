@@ -28,6 +28,33 @@ export function observeWritingWorkflowMilestone(seen: Set<string>, action: strin
   return fresh
 }
 
+export type ChapterReviewProgressEvidence = {
+  taskId: string; userId: string; novelId: string; chapterId: string; orderIndex: number; contentHash: string
+  phases: Array<'continuity' | 'quality' | 'decision'>
+}
+
+/** Readiness supplies persisted current evidence, never a model/tool success label.
+ * Revisions, report IDs and compiler IDs cannot manufacture another milestone. */
+export function observeChapterReviewProgress(seen: Set<string>, evidence: ChapterReviewProgressEvidence | undefined,
+  subject: { userId: string; novelId: string; expectedOriginalTaskId: string; taskSpec: TaskSpec }): boolean {
+  const spec = subject.taskSpec
+  if (!evidence || evidence.taskId !== subject.expectedOriginalTaskId || !evidence.taskId || evidence.userId !== subject.userId || evidence.novelId !== subject.novelId
+    || spec.scope.novelId !== subject.novelId || !['write', 'revise'].includes(spec.intent)
+    || ['conversation_only', 'proposal_only'].includes(spec.writingPacing ?? '')
+    || !/^[a-f0-9]{64}$/.test(evidence.contentHash)
+    || !(spec.scope.writing?.kind === 'bounded'
+      ? spec.scope.writing.targets.some(target => target.orderIndex === evidence.orderIndex
+        && (!target.chapterId || target.chapterId === evidence.chapterId))
+      : spec.scope.chapterIds?.includes(evidence.chapterId))) return false
+  let fresh = false
+  for (const phase of evidence.phases) {
+    const key = `review:${JSON.stringify([evidence.userId, evidence.novelId, evidence.taskId, evidence.chapterId, evidence.contentHash, phase])}`
+    fresh = !seen.has(key) || fresh
+    seen.add(key)
+  }
+  return fresh
+}
+
 export function persistedContentHash(content: string): string {
   return createHash('sha256').update(JSON.stringify({ content })).digest('hex')
 }

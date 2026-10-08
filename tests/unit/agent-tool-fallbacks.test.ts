@@ -40,12 +40,21 @@ describe('Agent 工具协议与结构化输出兜底', () => {
     expect(tail).not.toContain('左手受伤')
     expect(continuityReviewTail({ independentCheck: 'unavailable', checkedRevision: 3, findings: [finding] }, 4, true)).not.toContain('左手受伤')
   })
-  it('连续性评审提示词限定 error 判定并禁止换表述重报，表达类问题不升格', () => {
-    expect(continuityCriticSystem).toContain('判定纪律')
-    expect(continuityCriticSystem).toContain('error 仅限同一对象同一维度')
-    expect(continuityCriticSystem).toContain('确有证据风险的记 warning，纯表达推进不报')
-    expect(continuityCriticSystem).toContain('明确互斥事实即使无法安全修复也仍记 error')
-    expect(continuityCriticSystem).toContain('章节桥是待核摘要，不可单凭桥接摘要与正文的差异判错')
+  it('keeps factual reviews concise and binds both source quotations', () => {
+    expect(continuityCriticSystem).toContain('同一时刻、同一对象、同一维度互斥')
+    expect(continuityCriticSystem).toContain('一个事实只报一次')
+    expect(continuityCriticSystem).toContain('sourceEvidence')
+    expect(continuityCriticSystem).toContain('现金与银行余额不同不等于矛盾')
+  })
+  it('parses complete continuity envelopes mechanically without hiding damaged reports', () => {
+    expect(parseIndependentContinuityResult('报告：{"findings":[],}')).toEqual({ structured: true, findings: [] })
+    expect(parseIndependentContinuityResult('{"findings":[],}', 1).structured).toBe(false)
+    for (const raw of ['{"findings":[],"findings":[]}', '{"findings":[]} {"issues":[]}', '{"findings":[],"issues":[]}', '{"findings":[', '[{"findings":[]}]']) {
+      expect(parseIndependentContinuityResult(raw).structured).toBe(false)
+    }
+    const raw = JSON.stringify({ findings: [{ signal: 'object', severity: 'error', evidence: "前章已保存原文：'已卖出铜钱' / 当前正文：'铜钱仍在手中'", suggestion: '核实归属' }] })
+    expect(parseIndependentContinuityResult(raw).findings[0].sourceEvidence).toEqual([{ source: 'previous', quote: '已卖出铜钱' }, { source: 'current', quote: '铜钱仍在手中' }])
+    expect(parseIndependentContinuityResult(raw, 1).findings[0].sourceEvidence).toBeUndefined()
   })
   it('统一解包字符串 arguments 与命名参数列表', () => {
     expect(coerceToolArgumentEnvelope({ arguments: '{"title":"第六章规划","content":"完整正文"}' })).toEqual({ title: '第六章规划', content: '完整正文' })

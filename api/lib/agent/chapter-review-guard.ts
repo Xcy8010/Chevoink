@@ -9,6 +9,8 @@ import { qualityReportCheckedCurrentContent, selectAutomaticQualityFindings, qua
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import { runtimeJson } from './runtime-common.js'
 
+import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
+
 type ReviewStatus = 'complete' | 'missing' | 'stale' | 'incomplete'
 // Prisma rows contain Dates; persist only JSON-safe finding data in the binding.
 function qualityDecisionHash(findings: unknown[]) {
@@ -27,6 +29,7 @@ export type ChapterReviewRevisionOptions = {
   pendingQuality?: { compilationId: string; candidates: number }
 }
 export type ChapterReviewReadiness = {
+  progressEvidence?: ChapterReviewProgressEvidence
   ready: boolean; checksRequired: boolean; compilationId: string; chapterId: string; revision: number
   continuity: ReviewStatus; quality: ReviewStatus; continuityErrorCount: number; qualityErrorCount: number
   qualityCandidateCount?: number
@@ -169,8 +172,23 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     || mustPassQuality && quality === 'complete' && report!.status !== 'passed'
   const decisionPending = mandatoryReviewPending || requiredDecisions.length > 0 && !retainedReviewDecisionMatches(compilation.validation, chapter,
     compilation.id, quality === 'complete' ? report! : null, requiredDecisions)
+  // Progress is stricter than historical delivery compatibility: a quality
+  // milestone needs its saved context binding, not just a revision counter.
+  let qualityContextCurrent = false
+  if (quality === 'complete' && typeof metrics?.qualityContextHash === 'string') {
+    const { buildHumanityQualityContext, qualityReviewContextHash } = await import('./humanity-quality.js')
+    qualityContextCurrent = metrics.qualityContextHash === qualityReviewContextHash(
+      await buildHumanityQualityContext(subject.userId, subject.novelId, chapter.id, subject.runId, tx))
+  }
+  const phases: ChapterReviewProgressEvidence['phases'] = []
+  if (requirements.continuity && continuity === 'complete') phases.push('continuity')
+  if (requirements.quality && quality === 'complete' && qualityContextCurrent) phases.push('quality')
+  if (!requiredTools.length && !decisionPending && requiredDecisions.length > 0
+    && (!requirements.quality || qualityContextCurrent)) phases.push('decision')
   return { ready: !requiredTools.length, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id,
     chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools, decisionPending,
+    progressEvidence: { taskId: original.taskId, userId: subject.userId, novelId: subject.novelId,
+      chapterId: chapter.id, orderIndex: chapter.orderIndex, contentHash: runtimeJson({ content: chapter.content }).hash, phases },
     continuityExhausted: false,
     continuityErrorCount: assessment?.errorCount ?? 0, qualityErrorCount: quality === 'complete' ? report!.findings.filter(finding =>
       finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0,

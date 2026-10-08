@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
-import { observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
+import { observeChapterReviewProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 
 it('credits only finite first prerequisites for the current frozen writing target, without using compiler IDs', () => {
   const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'old47', prompt: '写下一章' })
@@ -133,4 +133,31 @@ it('summary locating revisions and report receipt revisions cannot manufacture f
     sections: [{ id: 'intro', order: 0 }], content, offset: 0, totalChars: content.length, nextOffset: null })
   expect(semanticReadIdentity('research_report_read', report('old', 1, '正文 revision=1'))).toBe(semanticReadIdentity('research_report_read', report('new', 9, '正文 revision=1')))
   expect(semanticReadIdentity('research_report_read', report('old', 1, '正文 revision=1'))).not.toBe(semanticReadIdentity('research_report_read', report('new', 9, '新正文 revision=1')))
+})
+
+
+it('credits current required review phases once per original task and body, not repeated reports or revisions', () => {
+  const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'chapter', prompt: '写下一章' })
+  const subject = { userId: 'user', novelId: 'novel', expectedOriginalTaskId: taskSpec.id, taskSpec }
+  const evidence = { taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'chapter', orderIndex: 50,
+    contentHash: 'a'.repeat(64), phases: ['quality'] as Array<'quality' | 'decision'> }
+  const seen = new Set<string>()
+  expect(observeChapterReviewProgress(seen, evidence, subject)).toBe(true)
+  expect(observeChapterReviewProgress(new Set(seen), evidence, subject)).toBe(false)
+  expect(observeChapterReviewProgress(seen, { ...evidence, phases: ['quality', 'decision'] }, subject)).toBe(true)
+  expect(observeChapterReviewProgress(seen, { ...evidence, phases: ['decision'] }, subject)).toBe(false)
+  expect(observeChapterReviewProgress(seen, { ...evidence, contentHash: 'b'.repeat(64) }, subject)).toBe(true)
+  expect(observeChapterReviewProgress(seen, evidence, subject)).toBe(false)
+  for (const invalid of [undefined, { ...evidence, phases: [] }, { ...evidence, userId: 'other' },
+    { ...evidence, novelId: 'other' }, { ...evidence, taskId: 'other' }, { ...evidence, chapterId: 'other' }, { ...evidence, contentHash: 'invalid' }])
+    expect(observeChapterReviewProgress(new Set(), invalid, subject)).toBe(false)
+})
+
+it('does not let a legacy editor chapter bypass a bounded writing target', () => {
+  const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'old', prompt: '写下一章' })
+  taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 50, chapterId: 'new' }], titleAndBodyOnly: false, repairAuthorized: false }
+  const subject = { userId: 'user', novelId: 'novel', taskSpec, expectedOriginalTaskId: taskSpec.id }
+  const evidence = { taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'old', orderIndex: 49,
+    contentHash: 'a'.repeat(64), phases: ['quality'] as const }
+  expect(observeChapterReviewProgress(new Set(), { ...evidence, phases: [...evidence.phases] }, subject)).toBe(false)
 })

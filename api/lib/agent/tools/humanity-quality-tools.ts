@@ -4,7 +4,7 @@ import { z } from 'zod'
 
 import { env } from '../../../config/env.js'
 import { generateTextCompletion } from '../../ai-service.js'
-import { generateReviewCompletion, REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
+import { generateReviewCompletion, runReviewStep, REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
 import { DataAccessError, prisma } from '../../prisma.js'
 import {
   characterVoiceProfileInputSchema,
@@ -105,6 +105,7 @@ ${WRITING_REQUEST_GUIDANCE}
 同章历史创作背景是未被本次明确修改的创作规格；本次作者修改优先。场景任务与桥的终态不能推翻作者的精确停笔；不得以场景已问价为由要求正文问价、成交或到账。捡漏爽文应让独享的信息优势、可理解的获利空间、兴奋或野心、主动决定在正文中形成鲜明体验；避免长篇低谷挤掉承诺。检查机会收益与实际现金的区别，不把尚未成交本身当缺陷。
 只报告有正文证据且存在最小修法的问题。优先选择本次原文证据表的 sourceId，服务器据此取得原文与精确位置；不要复制或改写 quote。sourceId 仅证明原文位置，不证明意见正确，不允许借编号扩写相邻范围。同句重复时仍选对应位置的编号。没有合适编号时才使用 quote，必须从正文连续复制、逐字一致且全文唯一，不得改写、缩写或拼接；若同时给 sourceId 和 quote，quote 必须与该编号原文逐字一致。
 不得把词汇本身当问题：熵、量子、铁锈味、华丽句、口语、断句、留白、无悬念收束都可能合理。只有题材/人物/场景功能/局部频率/上下文铺垫共同提供证据时才提示。
+正常对话里的新报价、条件、拒绝与接受，以及动作的先后变化，都在推进情节，不能仅因描述同一对象就报 explanation_echo；只有后续旁白重述相同含义且没有新增作用才报。情绪可以由已有行动隐含，不要求每个动作后追加身体反应或内心解释。复检以修订后的完整语境判定，已解决的问题不换说法重报，不为凑维度增加可有可无的润色。
 不得要求每章固定钩子、固定对白比例或固定节奏；不得把作者的不规则声音清洗成统一白开水。
 emotion_grounding 按“触发→解释→身体或注意→冲动→选择→后果”检查，但正文不必写全链，只要最有力的两三环成立即可。
 severity 只能是 advisory 或 warning；审美意见绝不报 error。找不到问题返回空数组。最多24项，同一问题仅报告一次；quote最多360字符，explanation与suggestion各用一两句短句（最多1000字符）。完整检查全部维度，但不要复述无问题正文或输出审查过程，直接交付结构化结论，避免输出被截断。
@@ -302,16 +303,18 @@ export const qualityAnalyzeTool = defineTool({
       const current = await buildHumanityQualityContext(ctx.userId, ctx.novelId, chapterId, ctx.runId)
       if (qualityReviewContextHash(current) !== contextHash) throw new DataAccessError(409, 'QUALITY_INPUT_STALE', '正文或当前任务已变化，未重发旧版本质量检查，请读取当前版本。')
     }
+    const callReview = (...input: Parameters<typeof generateTextCompletion>) => runReviewStep(ctx.signal, reviewSignal, () => generateTextCompletion(...input))
     let response: string | null = null
     try {
       if (formatRecovery) await assertCurrent()
-      response = formatRecovery ? await generateTextCompletion(buildCriticSystem('balanced'), userPrompt,
+      response = formatRecovery ? await callReview(buildCriticSystem('balanced'), userPrompt,
         { ...responseOptions, maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true }) : await generateReviewCompletion(
         buildCriticSystem('balanced'), userPrompt,
         responseOptions, assertCurrent,
       )
     } catch (error) {
       ctx.signal.throwIfAborted()
+      if (reviewSignal.aborted) throw new DataAccessError(504, 'AI_PROVIDER_TIMEOUT', '检查响应未在等待时间内完成，正文和已收到的报告保留。')
       if (error instanceof DataAccessError) throw error
       criticFallback = true
     }
@@ -331,7 +334,7 @@ export const qualityAnalyzeTool = defineTool({
         output: '完整回复未形成可验证的报告，原失败报告已保存；格式恢复未获已结算响应证明或已使用，未重复请求。检查未完成，不能宣称通过。',
         display: reportDisplay(await getQualityReport(ctx.userId, ctx.novelId, failed.id)) }
       await assertCurrent()
-      response = await generateTextCompletion(buildCriticSystem('balanced'), userPrompt,
+      response = await callReview(buildCriticSystem('balanced'), userPrompt,
         { ...responseOptions, action: 'agent3HumanityFormatRecovery', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true })
       inspected = inspectCorrectableCriticResponse(response, sources)
       criticFallback = !inspected.complete && !inspected.correctable
@@ -347,7 +350,7 @@ export const qualityAnalyzeTool = defineTool({
         // never regenerate the review, discard an issue, or alter the chapter here.
         let corrected = ''
         try {
-          corrected = await generateTextCompletion(
+          corrected = await callReview(
           qualityEvidenceSourceCorrectionSystem,
           `待定位意见：${JSON.stringify(invalid)}\n${renderQualityEvidenceSources(sources)}`,
           { ...responseOptions, action: 'agent3HumanityEvidenceCorrection', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },

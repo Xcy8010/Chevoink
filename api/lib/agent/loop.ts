@@ -1,5 +1,5 @@
 import { readSettledQualityReviews } from './quality-review-admission.js'
-import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
+import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { randomUUID } from 'node:crypto'
@@ -62,7 +62,7 @@ import { readChapterReviewReadiness, hasPendingChapterReviewDecision } from './c
 import { nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from './review-dispatch.js'
 import { readQualityFormatRecovery, type QualityFormatRecovery } from './quality-format-recovery.js'
 import { deferredToolPart } from './deferred-tool.js'
-import { readLegacyContinuityRecovery } from './legacy-continuity-recovery.js'
+import { readContinuedContinuityRecovery, readLegacyContinuityRecovery } from './legacy-continuity-recovery.js'
 import { activeChapterScope } from '../data/internal.js'
 import { createRepeatDetector } from './repeat-detect.js'
 import {
@@ -775,11 +775,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const recoveryFailures = new Map<string, number>()
   const automaticReviewAttempts = new Set<string>()
   const recoveredReviewKeys = new Set<string>()
-  const qualityRecoveryKeys = new Map<string, string>()
+  const reviewRecoveryKeys = new Map<string, string>()
   let qualityRecovery: QualityFormatRecovery | null = null
   const reviewAttemptKey = (review: Parameters<typeof reviewDispatchKey>[0], name: string) => {
     const key = reviewDispatchKey(review, name)
-    return qualityRecoveryKeys.get(key) ?? key
+    return reviewRecoveryKeys.get(key) ?? key
   }
   const recoverableQualityRestriction = (item: ToolRestriction, binding: Pick<PendingReviewCall, 'compilationId' | 'chapterId'> | null = qualityRecovery): boolean => !!binding
     && ((item.action === 'quality_analyze' && ['QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(item.code)
@@ -1097,6 +1097,21 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         taskSpec: taskSpec as unknown as object, usage: { ...usage, checkpoint: checkpointSnapshot() },
       } })
     } else await persistCheckpoint()
+    const observePersistedReviewProgress = async () => {
+      if (pendingReviews.size || !['write', 'revise'].includes(taskSpec.intent)
+        || ['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')) return false
+      try {
+        const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
+          { userId: params.userId, novelId: params.novelId, runId }))
+        return observeChapterReviewProgress(progressSignatures, review?.progressEvidence,
+          { userId: params.userId, novelId: params.novelId, expectedOriginalTaskId: taskSpec.id, taskSpec })
+      } catch (error) {
+        // A stale source is not progress. This optional observation must not
+        // turn an otherwise recoverable manuscript state into a run failure.
+        if (error instanceof DataAccessError && ['CONTINUITY_INPUT_STALE', 'CHAPTER_NOT_FOUND'].includes(error.code)) return false
+        throw error
+      }
+    }
     if ((params.resume || previousTask) && (toolRestrictions.some(item => ['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED'].includes(item.code))
       || pendingReviews.size || [...automaticReviewAttempts].some(key => key.endsWith(':continuity_validate')))) {
       const recovered = await prisma.$transaction(tx => readLegacyContinuityRecovery(tx,
@@ -1124,12 +1139,17 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       && toolRestrictions.some(item => item.action === 'quality_analyze' && ['QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(item.code))) {
       qualityRecovery = await prisma.$transaction(tx => readQualityFormatRecovery(tx,
         { userId: params.userId, novelId: params.novelId, runId }))
-      if (qualityRecovery) qualityRecoveryKeys.set(reviewDispatchKey({ compilationId: qualityRecovery.compilationId,
+      if (qualityRecovery) reviewRecoveryKeys.set(reviewDispatchKey({ compilationId: qualityRecovery.compilationId,
         chapterId: qualityRecovery.chapterId, revision: qualityRecovery.chapterRevision }, 'quality_analyze'), `quality-format-recovery:${qualityRecovery.key}`)
     }
     if (pendingReviews.size) {
       throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED',
         '上次独立检查或其修订链仍有未确认的请求。正文、进度与原预算保留；请先核对原调用回执，系统不会因继续任务而重发未知付费请求，也未判定检查通过。')
+    }
+    if ((params.resume || previousTask) && ['write', 'revise'].includes(taskSpec.intent)) {
+      const recovered = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx,
+        { userId: params.userId, novelId: params.novelId, runId }))
+      for (const [key, attempt] of recovered) reviewRecoveryKeys.set(key, attempt)
     }
     if (params.resume || previousTask) {
       // Older executions saved prerequisites before those persisted transitions
@@ -1144,6 +1164,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         recoveredWorkflowProgress = observeWritingWorkflowMilestone(progressSignatures, action, milestone,
           { userId: params.userId, novelId: params.novelId, runId, taskSpec }) || recoveredWorkflowProgress
       }
+      recoveredWorkflowProgress = await observePersistedReviewProgress() || recoveredWorkflowProgress
       if (recoveredWorkflowProgress) {
         stagnantBatches = nextStagnantBatch(stagnantBatches, true, false)
         await persistCheckpoint()
@@ -1677,7 +1698,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)
         && !looksLikePseudoToolCall(result.content, toolNameList)) {
         const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: params.userId, novelId: params.novelId, runId }))
-        const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, qualityRecoveryKeys)
+        const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
         if (next.kind === 'tool') {
           automaticReviewTriggered = true
           effectiveToolCalls.push({ id: `review_${messageId}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) })
@@ -1922,7 +1943,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           // final saved body at COMMIT, without discarding partial edits or
           // spending a fresh paid assessment between each fragment.
           if (readiness?.checksRequired) {
-            const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, qualityRecoveryKeys)
+            const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
             if (next.kind === 'tool') {
               const required = { id: `review_${messageId}_${callIndex}_${randomUUID()}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
               parts.push(deferredToolPart(call, preflightTool.title, parsed, '先完成当前版本检查，读取结果后再提交章节终态。', messageId, bus))
@@ -2233,7 +2254,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const waitingForChild = effectiveToolCalls.some(call => ['task_wait', 'task_get', 'task_list'].includes(call.name))
         && await prisma.agentRun.count({ where: { userId: params.userId, novelId: params.novelId, OR: [{ session: { spawnedFromRunId: runId } }, { incomingChildGrant: { currentParentRunId: runId } }],
           status: { in: ['queued', 'running', 'awaiting_approval'] } } }) > 0
+      const reviewProgress = await observePersistedReviewProgress()
+      if (reviewProgress) {
+        batchProgress = true
+        blockedRepeat = 0
+        todoReminders = 0
+      }
       stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, waitingForChild)
+      if (reviewProgress) await persistCheckpoint()
       const compatibilityRead = compatibilityReadTargets !== null && compatibilityReadObserved
       compatibilityReadTargets = null
       if (compatibilityRead && !batchProgress) messages.push({ role: 'user', content: '[系统] 已核对旧定位失败目标的真实正文。输入协议兼容读取机会已持久记账，仅此一次；历史失败、检查次数和预算保留。下一步按当前正文纠正具体定位参数并执行原目标内修订，不要重复读取或照原失败参数重试。' })

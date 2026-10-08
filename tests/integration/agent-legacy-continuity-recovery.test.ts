@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { readSettledQualityReviews } from '../../api/lib/agent/quality-review-admission.js'
 import { describe, expect, it } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
-import { readLegacyContinuityRecovery } from '../../api/lib/agent/legacy-continuity-recovery.js'
+import { readContinuedContinuityRecovery, readLegacyContinuityRecovery } from '../../api/lib/agent/legacy-continuity-recovery.js'
 import { prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import type { ToolRestriction } from '../../api/lib/agent/tool-local-failure.js'
@@ -87,6 +87,41 @@ describe.runIf(available)('received quality report and local repair failure reco
       expect(await prisma.$transaction(tx => readSettledQualityReviews(tx, f, pending))).toEqual(scenario === 'settled' ? pending : [])
       expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })).toEqual(before)
       expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: report.id } })).toEqual(report)
+    } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+  }))
+})
+
+describe.runIf(available)('author continuation after current continuity failure', () => {
+  it.each(['settled', 'format', 'no-author', 'early-author', 'unknown', 'changed-body', 'complete', 'wrong-window', 'unfinished', 'no-response', 'duplicate-call', 'standalone-unknown', 'completed-overlap'] as const)('%s requires new author intent and the exact returned check', scenario => fixture(async f => {
+    try {
+      await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0 } })
+      const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '修改本章' })
+      const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const start = new Date(Date.now() - 15000), end = new Date(start.getTime() + 5000)
+      await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: {
+        independentCheck: scenario === 'complete' ? 'complete' : 'unavailable', checkedRevision: chapter.revision,
+        checkedChapterId: chapter.id, checkedAt: new Date(end.getTime() + (scenario === 'wrong-window' ? 2000 : -1)).toISOString(),
+        coverage: { version: 1, protocolVersion: 6, contentHash: createHash('sha256').update(JSON.stringify({ content: chapter.content })).digest('hex') },
+      } } })
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', createdAt: start, payload: { toolName: 'continuity_validate', callId: 'returned-check', args: { compilationId: compilation.id, chapterId: chapter.id } } } })
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.result', createdAt: end, payload: { toolName: 'continuity_validate', callId: 'returned-check', ok: false, failureCode: scenario === 'format' ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED' } } })
+      const terminal = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'run.paused', createdAt: end, payload: {} } })
+      if (scenario !== 'no-author') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4, type: 'run.started', createdAt: new Date(end.getTime() + (scenario === 'early-author' ? -1 : 2000)), payload: { authorContinue: { eventId: terminal.id, afterSeq: 3 } } } })
+      if (scenario === 'unfinished') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'tool.call', payload: { toolName: 'chapter_write', callId: 'unconfirmed-write', args: { chapterId: chapter.id } } } })
+      if (scenario === 'duplicate-call') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 6, type: 'tool.call', payload: { toolName: 'continuity_validate', callId: 'returned-check', args: { chapterId: chapter.id } } } })
+      if (scenario === 'standalone-unknown') await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, chapterId: chapter.id, targetType: 'chapter', targetId: chapter.id, providerType: 'text', providerMode: 'custom', modelName: 'synthetic', action: 'agent3ContinuityCritic', usageSource: 'unknown', billingStatus: 'pending_usage', durationMs: 10 } })
+      if (scenario === 'completed-overlap') {
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 0, type: 'tool.call', createdAt: new Date(start.getTime() - 1000), payload: { toolName: 'chapter_write', callId: 'overlapping-write', args: { chapterId: chapter.id } } } })
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 7, type: 'tool.result', createdAt: new Date(end.getTime() + 500), payload: { toolName: 'chapter_write', callId: 'overlapping-write', ok: true } } })
+      }
+      if (scenario === 'changed-body') await prisma.chapter.update({ where: { id: chapter.id }, data: { content: '已变化正文' } })
+      await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, targetType: 'story_compilation', targetId: compilation.id,
+        providerType: 'text', providerMode: 'custom', modelName: 'synthetic', action: 'agent3ContinuityCritic', requestTokens: 10, responseTokens: 2,
+        usageSource: scenario === 'unknown' ? 'unknown' : 'reported', billingStatus: scenario === 'unknown' ? 'pending_usage' : 'settled', billingEvidence: { responseObserved: scenario !== 'no-response' }, durationMs: 20, createdAt: new Date(start.getTime() + 1000) } })
+      const result = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))
+      expect(result).toHaveLength(['settled', 'format'].includes(scenario) ? 1 : 0)
+      expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))).toEqual(result)
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation).toMatchObject({ checkedRevision: chapter.revision })
     } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
   }))
 })

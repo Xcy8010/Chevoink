@@ -50,3 +50,19 @@ export async function generateReviewCompletion(
     throw error
   } finally { clearTimeout(timer) }
 }
+
+/** Classify the existing review deadline without retrying or extending it. */
+export async function runReviewStep<T>(authorSignal: AbortSignal, reviewSignal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+  try {
+    authorSignal.throwIfAborted()
+    reviewSignal.throwIfAborted()
+    const result = await operation()
+    authorSignal.throwIfAborted()
+    reviewSignal.throwIfAborted()
+    return result
+  } catch (error) {
+    authorSignal.throwIfAborted()
+    if (reviewSignal.aborted) throw new DataAccessError(504, 'AI_PROVIDER_TIMEOUT', '检查响应未在等待时间内完成，正文和已收到的报告保留。')
+    throw error
+  }
+}

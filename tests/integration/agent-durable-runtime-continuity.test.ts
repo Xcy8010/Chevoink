@@ -175,7 +175,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       if (scenario === 'single-quotes-swapped') expect(saved.validation).toMatchObject({ independentCheck: 'unavailable', errorCount: 1, unlocatedEvidenceCount: 1 })
       if (scenario === 'history-over-three' || scenario === 'single-quotes') {
         const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' } })
-        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 2, coverage: { protocolVersion: 6 } } } })
+        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 3, coverage: { protocolVersion: 6 } } } })
       }
       if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source'].includes(scenario)) expect(saved.validation).toBeNull()
       else expect(saved.validation).toMatchObject({ checkedRevision: 1, independentCheck: failed ? 'unavailable' : 'complete', coverage: { charCount: before.length, contentHash: runtimeJson({ content: before }).hash } })

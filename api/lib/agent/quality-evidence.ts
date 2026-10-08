@@ -50,7 +50,7 @@ function assertUniqueJsonKeys(text: string) {
 /** Mechanical extraction only: quoted braces and escaped quotes are data.
  * Never splice separate objects, select one of conflicting reports, close a
  * truncated container, or invent missing review fields. */
-export function parseQualityJsonObject(raw: string, envelope: 'findings' | 'corrections' | 'patches', parserVersion: 1 | 2 = 1): unknown {
+export function parseQualityJsonObject(raw: string, envelope: 'findings' | 'corrections' | 'patches' | 'continuity', parserVersion: 1 | 2 = 1): unknown {
   if (parserVersion === 2) return parseMechanicalQualityJson(raw, envelope)
   const candidates: Record<string, unknown>[] = []
   let sawJson = false
@@ -80,7 +80,7 @@ export function parseQualityJsonObject(raw: string, envelope: 'findings' | 'corr
       start = end - 1
       continue
     }
-    if (value && typeof value === 'object' && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, envelope)) candidates.push(value as Record<string, unknown>)
+    if (value && typeof value === 'object' && !Array.isArray(value) && (envelope === 'continuity' ? ['findings', 'issues', 'problems'].some(key => Object.prototype.hasOwnProperty.call(value, key)) : Object.prototype.hasOwnProperty.call(value, envelope))) candidates.push(value as Record<string, unknown>)
     start = end - 1
   }
   if (candidates.length > 1) throw new QualityJsonParseError('ambiguous_envelope')
@@ -107,7 +107,7 @@ function repairCompleteJsonSyntax(text: string) {
   return result
 }
 
-function parseMechanicalQualityJson(raw: string, envelope: 'findings' | 'corrections' | 'patches') {
+function parseMechanicalQualityJson(raw: string, envelope: 'findings' | 'corrections' | 'patches' | 'continuity') {
   const candidates: Record<string, unknown>[] = []
   let sawJson = false
   for (let start = 0; start < raw.length; start++) {
@@ -144,7 +144,7 @@ function parseMechanicalQualityJson(raw: string, envelope: 'findings' | 'correct
       throw new QualityJsonParseError('json_invalid')
     }
     if (Array.isArray(value)) throw new QualityJsonParseError('envelope_invalid')
-    if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, envelope)) candidates.push(value as Record<string, unknown>)
+    if (value && typeof value === 'object' && (envelope === 'continuity' ? ['findings', 'issues', 'problems'].some(key => Object.prototype.hasOwnProperty.call(value, key)) : Object.prototype.hasOwnProperty.call(value, envelope))) candidates.push(value as Record<string, unknown>)
     start = end - 1
   }
   if (candidates.length > 1) throw new QualityJsonParseError('ambiguous_envelope')

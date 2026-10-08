@@ -63,3 +63,16 @@ describe('bounded review completion recovery', () => {
     expect(complete).toHaveBeenCalledOnce()
   })
 })
+
+describe('shared review deadline classification', () => {
+  it('preserves author cancellation and classifies only the actual review deadline', async () => {
+    const { runReviewStep } = await import('../../api/lib/agent/review-completion.js')
+    const author = new AbortController(), deadline = new AbortController()
+    const failure = new Error('unrelated')
+    await expect(runReviewStep(author.signal, deadline.signal, async () => { throw failure })).rejects.toBe(failure)
+    deadline.abort(new DOMException('expired', 'TimeoutError'))
+    await expect(runReviewStep(author.signal, deadline.signal, async () => { throw deadline.signal.reason })).rejects.toMatchObject({ code: 'AI_PROVIDER_TIMEOUT' })
+    author.abort(new Error('author cancelled'))
+    await expect(runReviewStep(author.signal, deadline.signal, async () => { throw deadline.signal.reason })).rejects.toBe(author.signal.reason)
+  })
+})

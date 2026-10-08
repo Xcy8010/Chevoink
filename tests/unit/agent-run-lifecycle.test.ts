@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   limitedDelivery: vi.fn(async () => null as import('../../api/lib/agent/writing-delivery-limitations.js').LimitedWritingDelivery | null),
   qualityRecovery: vi.fn(async () => null as import('../../api/lib/agent/quality-format-recovery.js').QualityFormatRecovery | null),
   assertLimitedDelivery: vi.fn(async () => undefined),
+  continuedContinuity: vi.fn(async (): Promise<Array<[string, string]>> => []),
   continuityRecovery: vi.fn(async () => ({ removed: [] as import('../../api/lib/agent/tool-local-failure.js').ToolRestriction[],
     settled: [] as import('../../api/lib/agent/checkpoint.js').PendingReviewCall[], recovered: [] as string[], markers: [] as string[], chapterIds: [] as string[] })),
   reviewProbe: vi.fn(async () => ({ open: true } as { open: true } | { open: false; code: string; message: string })),
@@ -179,7 +180,7 @@ vi.mock('../../api/lib/agent/story-compiler.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../api/lib/agent/story-compiler.js')>(),
   readPersistedWritingWorkflowMilestones: mocks.savedWorkflow,
 }))
-vi.mock('../../api/lib/agent/legacy-continuity-recovery.js', () => ({ readLegacyContinuityRecovery: mocks.continuityRecovery }))
+vi.mock('../../api/lib/agent/legacy-continuity-recovery.js', () => ({ readLegacyContinuityRecovery: mocks.continuityRecovery, readContinuedContinuityRecovery: mocks.continuedContinuity }))
 vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChapter: mocks.committedChapter }))
 vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportForDelivery: mocks.report }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
@@ -254,6 +255,7 @@ beforeEach(() => {
   mocks.reviewReadiness.mockReset().mockResolvedValue(null)
   mocks.limitedDelivery.mockReset().mockResolvedValue(null)
   mocks.qualityRecovery.mockReset().mockResolvedValue(null)
+  mocks.continuedContinuity.mockReset().mockResolvedValue([])
   mocks.continuityRecovery.mockReset().mockResolvedValue({ removed: [], settled: [], recovered: [], markers: [], chapterIds: [] })
   mocks.assertLimitedDelivery.mockReset().mockResolvedValue(undefined)
   mocks.reviewProbe.mockReset().mockResolvedValue({ open: true })
@@ -568,6 +570,58 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_bridge_commit', 'chapter_bridge_get', 'chapter_edit_range', 'chapter_bridge_commit'])
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'early-commit', ok: false, durationMs: 0 }))
     expect(mocks.chat.mock.calls[1][0].messages.filter((message: { role: string; toolCallId?: string }) => message.role === 'tool' && message.toolCallId === 'early-commit')).toEqual([])
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+  it('does not introduce chapter review reads into a conversation tool batch', async () => {
+    mocks.reviewReadiness.mockRejectedValue(new Error('A conversation must not read an old compilation'))
+    queue(response('', [call('read', 'chapter_read')]), response('你好。'))
+    await run('你好')
+    expect(mocks.reviewReadiness).not.toHaveBeenCalled()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+  it.each(['CONTINUITY_INPUT_STALE', 'CHAPTER_NOT_FOUND'])('treats %s during optional progress observation as no progress, not an internal failure', async code => {
+    mocks.reviewReadiness.mockRejectedValueOnce(new DataAccessError(409, code, '目标已变化'))
+    mocks.committedChapter.mockResolvedValue(true)
+    queue(response('', [call('read', 'chapter_read')]), response('正文已保存。'))
+    await run('写下一章')
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+  it.each(['persisted', 'live'] as const)('counts %s current quality progress at stagnant four and lets the writer handle findings', async source => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const evidence = { taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'c', orderIndex: 50,
+      contentHash: 'a'.repeat(64), phases: ['quality'] as Array<'quality' | 'decision'> }
+    let state: ChapterReviewReadiness = source === 'persisted'
+      ? { ...readiness('complete', 'complete'), qualityCandidateCount: 6, decisionPending: true, progressEvidence: evidence }
+      : readiness('complete', 'missing')
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 4, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 2, writeBaseline: 0, readProgress: 0, readBaseline: 0, progressSignatures: [] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 5, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 329762, completionTokens: 0, totalTokens: 329762, checkpoint } })
+    const critic = tool('quality_analyze', async () => {
+      state = { ...readiness('complete', 'complete'), qualityCandidateCount: 6, decisionPending: true, progressEvidence: evidence }
+      return { output: '当前版本检查完成，6条意见待处理' }
+    })
+    const retain = tool('chapter_edit_range', async () => {
+      state = { ...state, decisionPending: false, progressEvidence: { ...evidence, phases: ['quality', 'decision'] } }
+      return { output: '已核对六条意见并保存绑定当前版本的留置理由，正文不变' }
+    }, false)
+    const commit = tool('chapter_bridge_commit', async () => {
+      expect(state.decisionPending).toBe(false)
+      mocks.committedChapter.mockResolvedValue(true)
+      return { output: '终态已提交' }
+    }, false)
+    mocks.tools = [critic, retain, commit]
+    if (source === 'live') queue(response('', [call('early', commit.name, '{"compilationId":"comp"}')]))
+    queue(response('', [call('retain', retain.name, '{"chapterId":"c"}')]),
+      response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('已保存。'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+    expect(critic.execute).toHaveBeenCalledTimes(source === 'live' ? 1 : 0)
+    expect(retain.execute).toHaveBeenCalledOnce()
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { tokenBudget: 500, maxTurns: 1, writeProgress: 2, resumeCount: 0 } })
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
   it('replaces a premature commit with assessment and requires a new commit after its result', async () => {
