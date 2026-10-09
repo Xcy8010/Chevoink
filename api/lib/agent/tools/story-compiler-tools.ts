@@ -856,6 +856,8 @@ export const chapterBridgeCommitTool = defineTool({
       ) {
         if (error.code === 'REVIEW_DECISION_REQUIRED') return { outcome: 'failed' as const, failureCode: error.code,
           output: error.message, summary: '检查已完成 · 需明确当前意见处置' }
+        if (error.code === 'QUALITY_CHECK_REQUIRED') return { outcome: 'failed' as const, failureCode: error.code,
+          output: error.message, summary: '提交前置未满足 · 正文与意见已保留' }
         const checkedChapter = compilation.chapter
         const guidance = error.code === 'CONTINUITY_ERRORS_REMAIN'
           ? ctx.transaction ? await readChapterReviewRevisionGuidance(ctx.transaction, ctx, checkedChapter)

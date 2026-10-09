@@ -200,6 +200,14 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.repair).not.toHaveBeenCalled()
     expect(f.chapter).toMatchObject({ content: '原文', revision: 1 })
   })
+  it.each(['当前版本缺少完整质量检查；先调用 quality_analyze。', '当前版本质量检查完整，但原始作者要求检查通过；先修订必需问题。'])('preserves the precise quality gate instead of mislabeling completed reviews: %s', async message => {
+    const f = fixture(true)
+    vi.spyOn(compiler, 'commitChapterBridge').mockRejectedValue(new DataAccessError(409, 'QUALITY_CHECK_REQUIRED', message))
+    const result = await chapterBridgeCommitTool.execute(f.ctx, { compilationId: 'comp' })
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_CHECK_REQUIRED', output: message })
+    expect(f.critic).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+  })
   it.each(['quality', 'continuity'] as const)('未修订的可选 %s 警告不强制增加正文工作', async family => {
     const f = fixture(true)
     vi.mocked(flags.isAgent2FeatureEnabled).mockReturnValue(true)

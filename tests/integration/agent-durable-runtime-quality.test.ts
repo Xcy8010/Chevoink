@@ -330,7 +330,7 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
         if (scenario === 'evidence-partial') {
           expect(saved.deterministicMetrics).toMatchObject({ independentCheck: 'complete', unlocatedFindings: 1, criticFindingCount: 2, droppedFindings: 0 })
           expect(saved.findings.filter(item => item.source === 'critic')).toEqual([expect.objectContaining({ evidenceExcerpt: '原文', explanation: finding.explanation })])
-          await expect(commitChapterBridge({ userId: f.userId, novelId: f.novelId, compilationId, chapterSummary: '摘要', exitState: state, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '脚印', requireQuality: true, qualityReportId: saved.id })).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+          await expect(commitChapterBridge({ userId: f.userId, novelId: f.novelId, compilationId, chapterSummary: '摘要', exitState: state, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '脚印', requireQuality: true, qualityReportId: saved.id })).rejects.toMatchObject({ code: 'REVIEW_DECISION_REQUIRED' })
         }
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: before.content, revision: before.revision })
         return
@@ -740,7 +740,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       if (scenario === 'full-chain') {
         expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('连续性检查') } })
-        expect(await step()).toMatchObject({ result: { outcome: 'failed', failureCode: 'QUALITY_CHECK_REQUIRED' } })
+        expect(await step()).toMatchObject({ result: { outcome: 'failed', failureCode: 'REVIEW_DECISION_REQUIRED' } })
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('active')
         expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
       }

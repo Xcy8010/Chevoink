@@ -834,8 +834,11 @@ export async function commitChapterBridge(input: {
   let retainedIssueCount = report?.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length ?? 0
   const { hasPendingChapterReviewDecision } = await import('./chapter-review-guard.js')
   if (readiness ? hasPendingChapterReviewDecision(readiness) : continuityErrorCount > 0 || qualityErrorCount > 0) {
-    throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', readiness ? chapterReviewDecisionGuidance(readiness)
-      : '当前检查意见尚未处理；请核对当前报告，明确修订或逐项留置。')
+    const code = continuityErrorCount > 0 ? 'CONTINUITY_ERRORS_REMAIN'
+      : qualityErrorCount > 0 || readiness?.mustPassPending ? 'QUALITY_CHECK_REQUIRED' : 'REVIEW_DECISION_REQUIRED'
+    throw new DataAccessError(409, code, readiness ? chapterReviewDecisionGuidance(readiness)
+      : continuityErrorCount > 0 ? '当前完整连续性检查仍有事实错误，尚未修订或明确处置，终态未提交。'
+        : '当前检查意见尚未处理；请核对当前报告，明确修订或逐项留置。')
   }
   if (continuityErrorCount > 0 || qualityErrorCount > 0) {
     retainedIssueCount = continuityErrorCount + (report?.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length ?? qualityErrorCount)

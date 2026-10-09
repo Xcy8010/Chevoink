@@ -4,7 +4,7 @@ import type { Prisma } from '@prisma/client'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 const db = vi.hoisted(() => ({
   novel: { findFirst: vi.fn() }, agentArtifact: { findMany: vi.fn() }, agentRun: { findFirst: vi.fn(), findMany: vi.fn(), findFirstOrThrow: vi.fn(), findUniqueOrThrow: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn(), count: vi.fn() },
-  agentSession: { findFirst: vi.fn() }, agentChildExecutionGrant: { findUnique: vi.fn() }, agentMessage: { findFirst: vi.fn() }, chapterQualityReport: { findFirst: vi.fn() },
+  agentSession: { findFirst: vi.fn() }, agentChildExecutionGrant: { findUnique: vi.fn() }, agentMessage: { findFirst: vi.fn() }, chapterQualityReport: { findFirst: vi.fn(), findUnique: vi.fn() },
   storyCompilation: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() },
   chapterBridge: { findFirst: vi.fn(), update: vi.fn() }, sceneTask: { updateMany: vi.fn() }, agentGoalExecution: { findUnique: vi.fn() },
   storyCharter: { findFirst: vi.fn() }, readerPromise: { findMany: vi.fn() }, projectMemoryEntry: { findMany: vi.fn() }, $transaction: vi.fn(), $queryRaw: vi.fn(),
@@ -32,6 +32,7 @@ beforeEach(() => {
   db.novel.findFirst.mockResolvedValue({ id: 'n', chapterCount: 31 })
   db.agentGoalExecution.findUnique.mockResolvedValue(null)
   db.agentSession.findFirst.mockResolvedValue(null); db.agentChildExecutionGrant.findUnique.mockResolvedValue(null); db.agentMessage.findFirst.mockResolvedValue(null); db.chapterQualityReport.findFirst.mockResolvedValue(null)
+  db.chapterQualityReport.findUnique.mockImplementation(query => db.chapterQualityReport.findFirst(query))
   db.agentRun.findFirst.mockResolvedValue({ id: 'new-run', userId: 'u', novelId: 'n', status: 'running', startRequest: { prompt: '写下一章' }, createdAt: new Date('2026-09-20T03:22:41Z'), runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: spec('写下一章') })
   db.agentRun.findFirstOrThrow.mockImplementation(query => db.agentRun.findFirst(query))
   db.agentRun.findMany.mockResolvedValue([])

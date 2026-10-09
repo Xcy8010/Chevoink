@@ -309,7 +309,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id }, include: { bridge: true, sceneTasks: true } })
     const result = await f.call(JSON.stringify(retained))
     expect(result.outcome).toBe('failed')
-    expect(result.failureCode).toBe(kind === 'body' ? 'CONTINUITY_CHECK_REQUIRED' : 'REVIEW_DECISION_REQUIRED')
+    expect(result.failureCode).toBe(kind === 'body' ? 'CONTINUITY_CHECK_REQUIRED' : kind === 'hard-pass' ? 'QUALITY_CHECK_REQUIRED' : 'REVIEW_DECISION_REQUIRED')
     if (kind !== 'body') expect(result.output).toContain('精确参数模板')
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id }, include: { bridge: true, sceneTasks: true } })).toEqual(before)
   }))
@@ -573,7 +573,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     ] })
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))).toMatchObject({ ready: true, decisionPending: true, continuityErrorCount: 1 })
     await expect(commitChapterBridge({ ...ctx, compilationId: f.compilation.id, chapterSummary: '摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
-      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' })).rejects.toMatchObject({ code: 'REVIEW_DECISION_REQUIRED' })
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' })).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
   }))
   it.each(['质量', '连续性'] as const)('preserves explicit %s pass without expanding it to other reviews', kind => fixture(`写第一章，${kind}检查必须通过才能交付`, async ctx => {
     const f = await newDraftReview(ctx, `写第一章，${kind}检查必须通过才能交付`)
@@ -588,7 +588,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))).toMatchObject({ ready: true, decisionPending: kind === '质量', continuityErrorCount: 0, qualityErrorCount: 0 })
     const input = { ...ctx, compilationId: f.compilation.id, chapterSummary: '摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
       lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' }
-    if (kind === '质量') await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'REVIEW_DECISION_REQUIRED' })
+    if (kind === '质量') await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
     else await expect(commitChapterBridge(input)).resolves.toBeTruthy()
   }))
   it('allows original manuscript edits with failed reports without certifying final review', () => fixture('写第一章', async ctx => {
