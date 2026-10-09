@@ -2381,6 +2381,85 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
 })
 
 
+describe('ordinary chapter summary presentation', () => {
+  it.each([false, true])('preserves natural summary and revalidates real saved-only chapter proof; changedBeforeTerminal=%s', async changedBeforeTerminal => {
+    const { prisma } = await import('../../api/lib/prisma.js')
+    const { withHumanAdmission } = await import('../../api/lib/agent/goal-activation-authority.js')
+    const { runtimeJson } = await import('../../api/lib/agent/runtime-common.js')
+    const { readSavedWritingPresentation, freezeWritingScope } = await import('../../api/lib/agent/writing-scope.js')
+    const prompt = '写第一章。只保存到章节。'
+    const summary = '《十五块的碗》已经写好，保留了旧碗与铜钱的细节，结尾让人物的选择自然落地。'
+    const chapter = mocks.chapters[0]
+    chapter.title = '十五块的碗'
+    chapter.content = '天亮之前，他把旧碗放回柜上。铜钱压在碗底，门外的脚步声渐渐远去。'
+    seedAdmission(prompt, 'c')
+    Object.assign(mocks.runs.get('run')!, { startRequest: withHumanAdmission({ novelId: 'novel', sessionId: 'session', chapterId: 'c', mode: 'build', prompt }) })
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt })
+    mocks.runs.get('run')!.taskSpec = await prisma.$transaction(tx => freezeWritingScope(tx, { userId: 'user', novelId: 'novel', runId: 'run' }, taskSpec, prompt))
+    expect(mocks.runs.get('run')!.taskSpec).toMatchObject({ scope: { writing: { kind: 'bounded', targets: [{ chapterId: 'c', orderIndex: 1 }] } } })
+    const messages = vi.mocked(prisma.agentMessage.findMany)
+    const compilations = vi.mocked(prisma.storyCompilation.findFirst)
+    const previousMessages = messages.getMockImplementation()
+    const previousCompilations = compilations.getMockImplementation()
+    const query = vi.mocked(prisma.$queryRaw)
+    const previousQuery = query.getMockImplementation()
+    let changed = false
+    query.mockImplementation(async (...args) => {
+      const sql = (args[0] as TemplateStringsArray).join('?')
+      if (changedBeforeTerminal && !changed && mocks.chat.mock.calls.length && sql.includes('FROM agent_runs') && sql.includes('FOR UPDATE')) {
+        changed = true
+        chapter.revision += 1
+        chapter.content += '作者在交付时补了一句。'
+      }
+      return previousQuery!(...args)
+    })
+    messages.mockResolvedValue([{ id: 'author-message', runId: 'run', sessionId: 'session', role: 'user', parts: [{ type: 'text', text: prompt }] }] as never)
+    compilations.mockResolvedValue({ id: 'comp', userId: 'user', novelId: 'novel', runId: 'run', chapterId: 'c', status: 'completed', stage: 'commit',
+      preparedContext: { terminalContentHash: runtimeJson({ content: chapter.content }).hash },
+      bridge: { toChapterId: 'c', targetRevision: chapter.revision, committedAt: new Date(), fromChapterId: null } } as never)
+    mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'complete', chapter.revision))
+    mocks.committedChapter.mockResolvedValue(true)
+    mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+      input.onChunk?.({ type: 'text-delta', delta: summary.slice(0, 12) })
+      input.onChunk?.({ type: 'text-delta', delta: summary.slice(12) })
+      return response(summary)
+    })
+    try {
+      await executeRealAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt })
+      const { readWritingPresentation } = await import('../../api/lib/agent/writing-request-context.js')
+      expect(await prisma.$transaction(tx => readWritingPresentation(tx, { userId: 'user', novelId: 'novel', runId: 'run' }, [{ chapterId: 'c', orderIndex: 1 }]))).toMatchObject({ mode: 'saved_only' })
+      const { readWritingScope } = await import('../../api/lib/agent/writing-scope.js')
+      expect(await prisma.$transaction(tx => readWritingScope(tx, { userId: 'user', novelId: 'novel', runId: 'run' }))).toMatchObject({ writing: { kind: 'bounded', targets: [{ chapterId: 'c', orderIndex: 1 }] } })
+      if (changedBeforeTerminal) {
+        expect(changed).toBe(true)
+        expect(events()).not.toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded' }))
+        expect(mocks.runs.get('run')?.status).not.toBe('completed')
+        expect(mocks.update.mock.calls.some(([input]) => input.data.status === 'completed')).toBe(false)
+        return
+      }
+      // Prove the real saved-only branch was eligible, rather than passing because its DB fixture was absent.
+      expect(await prisma.$transaction(tx => readSavedWritingPresentation(tx, { userId: 'user', novelId: 'novel', runId: 'run' })))
+        .toMatchObject({ presentationKind: 'completed_saved_only', presentation: { mode: 'saved_only', sourceMessageId: 'author-message' }, text: '已保存《十五块的碗》。' })
+      expect(mocks.chat).toHaveBeenCalledOnce()
+      const deltas = events().filter(event => event.type === 'text.delta')
+      expect(deltas.map(event => event.delta).join('')).toBe(summary)
+      const finals = events().filter(event => event.type === 'text.final')
+      expect(finals.length).toBeGreaterThan(0)
+      for (const final of finals) expect(final).toMatchObject({ messageId: deltas[0].messageId, text: summary })
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: summary })
+      expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', outputSummary: summary })
+      const persisted = mocks.persist.mock.calls as unknown as Array<[{ create?: { role?: string; parts?: AgentMessagePart[] }; update?: { parts?: AgentMessagePart[] } }]>
+      expect(persisted.filter(([input]) => input.create?.role === 'assistant').at(-1)?.[0]).toMatchObject({
+        create: { parts: [{ type: 'text', text: summary }] }, update: { parts: [{ type: 'text', text: summary }] },
+      })
+    } finally {
+      messages.mockImplementation(previousMessages!)
+      compilations.mockImplementation(previousCompilations!)
+      query.mockImplementation(previousQuery!)
+    }
+  })
+})
+
 describe('author-directed task ending in the real execution loop', () => {
   function answerTool(answer: string) {
     return tool('ask_user', async () => ({ output: `作者的回答：${answer}`, display: { kind: 'question', question: '如何处理剩余工作？', options: [{ label: '继续' }, { label: '结束' }], answer } }))

@@ -88,7 +88,7 @@ const oldPolicy = (version: 1 | 2) => ({ version, initialTokens: 500, tokenCeili
   ...(version === 2 ? { initialTurns: 1, turnSlice: 1 } : {}) })
 
 describe.runIf(available)('real durable default execution control', () => {
-  it('short rewrite ordinary completion replaces final/history chat text with a bound saved confirmation and preserves the immutable candidate', async () => {
+  it.each(['prose', 'summary'] as const)('short rewrite ordinary completion projects %s according to the no-repeat preference without changing the immutable candidate', async output => {
     await fixture(async f => {
       const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
       const prompt = '以后不要重复正文，只保存章节。'
@@ -118,7 +118,9 @@ describe.runIf(available)('real durable default execution control', () => {
       expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }, compilation.id)))
         .toMatchObject({ ready: true, continuity: 'complete', quality: 'complete' })
       const lease = await claim(f)
-      const candidate = `${chapter.title}\n\n${content}`
+      const candidate = output === 'prose' ? `${chapter.title}\n\n${content}`
+        : '第一章「旧罗盘」已修改完成。\n\n沈桐发现罗盘价值后压住兴奋，独享机会的爽感更直接；结尾保留询价的悬念。连续性与质量检查均完成，正文已保存。'
+      const expectedText = output === 'prose' ? '已保存《第一章 旧罗盘》。' : candidate
       await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
         tools: [], toolAuthority: [], protectedChapterIds: [], pinnedSkillVersions: [] }, snapshot: { version: 1, turn: 0, nextOperationSequence: 0,
@@ -137,9 +139,14 @@ describe.runIf(available)('real durable default execution control', () => {
       expect(await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId }, select: { requestSnapshot: true, specSnapshot: true, inputHash: true } })).toEqual(originalRoot)
       await publishDurableEvents(f.userId, f.runId)
       const message = await prisma.agentMessage.findUniqueOrThrow({ where: { id: candidateMessageId } })
-      expect(message.parts).toEqual([{ type: 'text', text: '已保存《第一章 旧罗盘》。' }])
+      expect(message.parts).toEqual([{ type: 'text', text: expectedText }])
+      const corrections = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'text.final' } })
+      // The model output is already in history. Completion projects a correction
+      // only when withdrawing prose; a natural summary needs no replacement.
+      expect(corrections.map(event => event.payload)).toEqual(output === 'prose'
+        ? [expect.objectContaining({ messageId: candidateMessageId, text: expectedText })] : [])
       const finished = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId, type: 'run.finished' } })
-      expect(finished.payload).toMatchObject({ outputSummary: '已保存《第一章 旧罗盘》。' })
+      expect(finished.payload).toMatchObject({ outputSummary: expectedText })
       expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(content)
     }, undefined, '重写第一章，突出捡漏爽文。', true)

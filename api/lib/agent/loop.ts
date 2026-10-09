@@ -1,6 +1,6 @@
 import { readSettledQualityReviews } from './quality-review-admission.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
-import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
+import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation, shouldUseSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery } from './review-request-recovery.js'
@@ -633,7 +633,7 @@ async function finalizeLegacyRun(
   allowContextSideEffects = true,
   checkpoint?: RunCheckpointState,
   authorEnded?: { fulfilled: boolean; todoItems?: AgentTodoItem[] },
-  writingDelivery?: { messageId: string; subject: { userId: string; novelId: string; runId: string }; expected: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; signal: AbortSignal; parts?: AgentMessagePart[]; replaceCandidate?: boolean },
+  writingDelivery?: { messageId: string; subject: { userId: string; novelId: string; runId: string }; expected: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; signal: AbortSignal; parts?: AgentMessagePart[]; replaceCandidate?: boolean; displayText?: string },
   withFailureNotice = false,
   limitedDelivery?: { subject: { userId: string; novelId: string; runId: string }; expected: LimitedWritingDelivery; signal: AbortSignal; messageId: string },
   pauseReason: 'user_stop' | 'needs_input' = 'user_stop',
@@ -664,7 +664,7 @@ async function finalizeLegacyRun(
       const existing = await tx.agentMessage.findUnique({ where: { id: writingDelivery.messageId } })
       if (existing && (existing.runId !== runId || existing.sessionId !== sessionId || existing.role !== 'assistant')) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '交付消息不属于本任务。')
       const parts = (writingDelivery.parts ?? (existing?.parts as unknown as AgentMessagePart[] | undefined) ?? []).filter(part => part.type !== 'text')
-      const displayedParts = JSON.parse(JSON.stringify([...parts, { type: 'text' as const, text: writingDelivery.expected.text }])) as Prisma.InputJsonValue
+      const displayedParts = JSON.parse(JSON.stringify([...parts, { type: 'text' as const, text: writingDelivery.displayText ?? writingDelivery.expected.text }])) as Prisma.InputJsonValue
       await tx.agentMessage.upsert({ where: { id: writingDelivery.messageId }, create: { id: writingDelivery.messageId, runId, sessionId,
         role: 'assistant', parts: displayedParts }, update: { parts: displayedParts } })
     }
@@ -687,7 +687,7 @@ async function finalizeLegacyRun(
       select: { userId: true, sessionId: true, novelId: true, taskSpec: true },
     })
   }, writingDelivery ? [...(writingDelivery.replaceCandidate ? [] : [{ type: 'message.start' as const, messageId: writingDelivery.messageId, role: 'assistant' as const }]),
-    { type: 'text.final', messageId: writingDelivery.messageId, text: writingDelivery.expected.text, asReasoning: false }] : failureNotice ? [
+    { type: 'text.final', messageId: writingDelivery.messageId, text: writingDelivery.displayText ?? writingDelivery.expected.text, asReasoning: false }] : failureNotice ? [
     { type: 'message.start', messageId: failureNotice.messageId, role: 'assistant' },
     { type: 'text.final', messageId: failureNotice.messageId, text: failureNotice.text, asReasoning: false },
   ] : limitedDelivery ? [
@@ -1960,8 +1960,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           continue
         }
 
-        const savedPresentation = !prematureFinish && !report?.content ? await prisma.$transaction(tx => readSavedWritingPresentation(tx,
+        const savedCandidate = !prematureFinish && !report?.content ? await prisma.$transaction(tx => readSavedWritingPresentation(tx,
           { userId: params.userId, novelId: params.novelId, runId })) : null
+        const savedPresentation = shouldUseSavedWritingPresentation(savedCandidate, cleanContent) ? savedCandidate : null
         if (!prematureFinish && report?.content) {
           // Deliver the exact persisted report through the existing text UI;
           // a short model wrap-up cannot hide it or trigger paid regeneration.
@@ -1976,8 +1977,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           lastAssistantText = delivered
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
           bus.emit({ type: 'text.final', messageId, text: delivered, asReasoning: false })
-        } else if (savedPresentation) {
-          lastAssistantText = savedPresentation.text
+        } else if (savedCandidate) {
+          lastAssistantText = savedPresentation?.text ?? cleanContent
         } else {
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
         }
@@ -1987,8 +1988,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             ? '修订被安全检查停止后连续多轮没有推进；已保存的正文与报告保留，未判定检查通过。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。'
             : '连续多轮没有推进剩余工作，已保存进度并安全停止；任务未完成。'
           : undefined,
-          true, undefined, undefined, savedPresentation ? { messageId, subject: { userId: params.userId, novelId: params.novelId, runId }, expected: savedPresentation,
-            signal: controller.signal, parts, replaceCandidate: true } : undefined)
+          true, undefined, undefined, savedCandidate ? { messageId, subject: { userId: params.userId, novelId: params.novelId, runId }, expected: savedCandidate,
+            signal: controller.signal, parts, replaceCandidate: true, displayText: lastAssistantText } : undefined)
         return
       }
 

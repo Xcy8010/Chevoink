@@ -11,7 +11,7 @@ import { assertRunGoalFence } from './goal-fence.js'
 import { assertChildParentFence, assertPinnedChildCompletion, pauseChildGrants } from './runtime-child.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
-import { readSavedWritingPresentation, savedChapterPresentationProof } from './writing-scope.js'
+import { readSavedWritingPresentation, shouldUseSavedWritingPresentation, savedChapterPresentationProof } from './writing-scope.js'
 import { assertLimitedWritingDelivery, limitedWritingDeliverySchema } from './writing-delivery-limitations.js'
 
 const liveStatuses = ['queued', 'running', 'awaiting_approval'] as const
@@ -48,8 +48,8 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     if (facts.blockers.length || candidate?.role !== 'assistant' || !candidate.content?.trim() || promisesFurtherAction(candidate.content)) {
       return runtimeError('RUNTIME_COMPLETION_BLOCKED', '原任务仍有未完成事项，不能提交完成终态。')
     }
-    // Ordinary completion has already passed. Only serialize a verified saved
-    // chapter presentation; preserve the paid candidate and frame unchanged.
+    // Ordinary completion has already passed. Preserve the natural wrap-up;
+    // a saved-only preference withdraws repeated prose, not the summary.
     const subject = { userId: lease.userId, novelId: root.novelId, runId: run.id }
     const limited = facts.limitedWritingDelivery
     if (limited) {
@@ -57,7 +57,8 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
       if (candidate.content !== limited.text) return runtimeError('RUNTIME_COMPLETION_BLOCKED', '受限交付必须明确展示当前正文未复核的限制。')
     }
     const savedPresentation = await readSavedWritingPresentation(tx, subject)
-    const chapterPresentation = savedPresentation && candidate.content !== savedPresentation.text ? savedChapterPresentationProof(subject, savedPresentation) : null
+    const chapterPresentation = savedPresentation && shouldUseSavedWritingPresentation(savedPresentation, candidate.content)
+      ? savedChapterPresentationProof(subject, savedPresentation) : null
     const operation = await prepareOperationInTransaction(tx, lease, {
       key: `finalize:${frame.revision}`, kind: 'internal', action: 'completion_finalize',
       input: runtimeJson({ sourceRevision: frame.revision, sourceHash: frame.snapshotHash, evidenceHash: evidence.snapshotHash,

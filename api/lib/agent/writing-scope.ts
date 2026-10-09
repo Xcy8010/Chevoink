@@ -387,6 +387,11 @@ export async function readSavedWritingPresentation(tx: Prisma.TransactionClient,
   return readChapterDelivery(tx, subject, 'completed_saved_only')
 }
 
+/** A no-repeat preference withdraws chapter prose, not the author's wrap-up. */
+export function shouldUseSavedWritingPresentation(delivery: Awaited<ReturnType<typeof readSavedWritingPresentation>>, candidateText: string): boolean {
+  return Boolean(delivery && (!candidateText.trim() || delivery.chapters.some(chapter => candidateText.includes(chapter.content))))
+}
+
 export const savedChapterPresentationSchema = z.object({ version: z.literal(1), targetRunId: z.string().min(1),
   sourceRunId: z.string().min(1), sourceMessageId: z.string().min(1),
   chapters: z.array(z.object({ id: z.string().min(1), title: z.string(), revision: z.number().int().positive(), contentHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1), text: z.string().min(1) }).strict()

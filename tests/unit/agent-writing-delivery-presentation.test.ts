@@ -20,7 +20,7 @@ vi.mock('../../api/lib/agent/runtime-lease.js', async importOriginal => ({
 vi.mock('../../api/lib/agent/runtime-state.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/runtime-state.js')>(), readExecutionStateInTransaction: mocks.state, saveExecutionStateInTransaction: mocks.save,
 }))
-import { readCompletedWritingDelivery, readSavedWritingPresentation, savedChapterPresentationProof, savedChapterPresentationSchema } from '../../api/lib/agent/writing-scope.js'
+import { readCompletedWritingDelivery, readSavedWritingPresentation, shouldUseSavedWritingPresentation, savedChapterPresentationProof, savedChapterPresentationSchema } from '../../api/lib/agent/writing-scope.js'
 import { advanceDurableWritingDelivery } from '../../api/lib/agent/runtime-writing-delivery.js'
 
 const subject = { userId: 'author', novelId: 'novel', runId: 'run' }
@@ -56,6 +56,17 @@ function fixture(prompt = '完成第一章，只输出标题与正文。', title
 beforeEach(() => { vi.clearAllMocks(); mocks.preference.mockResolvedValue(null) })
 
 describe('saved artifact display withdrawal', () => {
+  it('keeps a natural wrap-up with a title and short excerpt under a no-repeat preference', async () => {
+    const f = fixture('重写第一章，突出捡漏爽文。', false)
+    mocks.preference.mockResolvedValue({ mode: 'saved_only', sourceRunId: 'author-correction', sourceMessageId: 'message' })
+    const delivery = await readSavedWritingPresentation(f.db, subject)
+    expect(delivery).not.toBeNull()
+    expect(shouldUseSavedWritingPresentation(delivery, '第一章「旧罗盘」已完成。\n\n开头保留“沈桐眼前浮起价值数字”，突出独享机会的兴奋感，收尾留下询价的悬念。')).toBe(false)
+    expect(shouldUseSavedWritingPresentation(delivery, delivery!.text)).toBe(false)
+    expect(shouldUseSavedWritingPresentation(delivery, `${f.chapter.title}\n\n${f.chapter.content}`)).toBe(true)
+    expect(shouldUseSavedWritingPresentation(delivery, '  ')).toBe(true)
+    expect(shouldUseSavedWritingPresentation(null, f.chapter.content)).toBe(false)
+  })
   it('short rewrite can serialize an already successful completion without obtaining auto-completion eligibility', async () => {
     const f = fixture('重写第一章，突出捡漏爽文。', false)
     mocks.preference.mockResolvedValue({ mode: 'saved_only', sourceRunId: 'author-correction', sourceMessageId: 'message' })
