@@ -7,6 +7,7 @@ import * as compiler from '../../api/lib/agent/story-compiler.js'
 import * as quality from '../../api/lib/agent/humanity-quality.js'
 import * as review from '../../api/lib/agent/review-completion.js'
 import * as ai from '../../api/lib/ai-service.js'
+import { recordTextRequestFailure } from '../../api/lib/text-request-trace.js'
 import * as scope from '../../api/lib/agent/manuscript-scope.js'
 import * as originalRequest from '../../api/lib/agent/original-request.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
@@ -147,8 +148,11 @@ describe('严谨创作落实连续性警告', () => {
       return true
     })
     f.critic.mockRestore()
-    f.repair.mockRejectedValueOnce(new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', 'output ceiling'))
-      .mockResolvedValueOnce('{"findings":[]}')
+    f.repair.mockImplementationOnce(async (system, input, options) => {
+      const error = new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', 'output ceiling')
+      recordTextRequestFailure(error, { usageId: 'original-paid-check', status: 'terminal', billingKnown: true }, system, input, options)
+      throw error
+    }).mockResolvedValueOnce('{"findings":[]}')
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     expect(f.repair).toHaveBeenCalledTimes(2)
     expect(f.repair.mock.calls[1][2]).toMatchObject({ action: 'agent3ContinuityCriticOutputRecovery', boundedReview: true, maxOutputTokens: 32768 })
