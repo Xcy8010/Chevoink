@@ -251,6 +251,7 @@ function reviewPreflightArgs(call: ToolCallRequest, tool?: AgentTool): Record<st
 const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
 
 type ToolCallOutcome = {
+  unresolvedTextRequest?: boolean
   reviewCompleted?: boolean
   reviewRequestFinished?: import('../../../shared/contracts/index.js').AgentReviewRequestReceipt
   workflowMilestone?: import('./semantic-progress.js').WritingWorkflowMilestone
@@ -423,7 +424,8 @@ export async function handleToolCall(
       durationMs: Date.now() - startedAt,
       ...subagentMark,
     })
-    return { observation, failureCode, reviewRequestFinished, part: { ...basePart, args: parsedArgs, status, summary },
+    return { observation, failureCode, reviewRequestFinished,
+      unresolvedTextRequest: requestTrace.records.length > 0 && !textRequestsFinished(requestTrace), part: { ...basePart, args: parsedArgs, status, summary },
       ...(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED'].includes(failureCode ?? '')
         ? { reviewStopReason: observation } : {}) }
   }
@@ -2136,7 +2138,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           && outcome.reviewRequestFinished.revision === reviewDispatch.revision
           && /^[a-f0-9]{64}$/.test(outcome.reviewRequestFinished.contentHash)
         if (requestFinished) await bus.persist()
-        if (reviewDispatch && (requestFinished || outcome.reviewCompleted || outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
+        if (reviewDispatch && !outcome.unresolvedTextRequest && (requestFinished || outcome.reviewCompleted || outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
           'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED',
           'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? ''))) {
           pendingReviews.delete(`${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`)

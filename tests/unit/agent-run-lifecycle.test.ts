@@ -2409,3 +2409,42 @@ it('pauses after consuming a failed admission-bound recovery without replaying i
   expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
   expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewAttempts: expect.arrayContaining(['review-recovery:author-continue:new:old-review']) } })
 })
+
+
+it.each([
+  ['QUALITY_REPORT_INCOMPLETE', false, false],
+  ['QUALITY_EVIDENCE_UNLOCATED', false, false],
+  ['QUALITY_REPORT_INCOMPLETE', true, false],
+  ['QUALITY_REPORT_INCOMPLETE', false, true],
+  ['QUALITY_EVIDENCE_UNLOCATED', false, true],
+  ['QUALITY_REPORT_INCOMPLETE', true, true],
+] as const)('local %s reviewCompleted=%s billingKnown=%s cannot conceal unresolved text requests', async (failureCode, reviewCompleted, billingKnown) => {
+  mocks.chapters[0].revision = 3
+  mocks.reviewReadiness.mockImplementation(async () => readiness('complete', 'missing', mocks.chapters[0].revision))
+  const critic = tool('quality_analyze', async () => {
+    const { record } = beginTextRequest('local-response-usage')
+    record.status = 'terminal'
+    record.billingKnown = billingKnown
+    return { outcome: 'failed', failureCode, reviewCompleted, output: '报告尚未完成' }
+  })
+  const reader = tool('chapter_read', async () => {
+    // A concurrent author edit creates a new body version; it does not settle
+    // the original request or grant another provider dispatch.
+    mocks.chapters[0].revision = 4
+    mocks.chapters[0].content = '作者更新后的正文'
+    return { output: '读取当前正文' }
+  })
+  mocks.tools = [critic, reader]
+  queue(response('', [call('local-failure', critic.name, '{"chapterId":"c","compilationId":"comp"}'),
+    ...(!billingKnown ? [call('read-new-body', reader.name), call('repeat-new-version', critic.name, '{"chapterId":"c"}')] : [])]), response('检查未完成，正文保留。'))
+  await run('写下一章')
+  expect(critic.execute).toHaveBeenCalledOnce()
+  const checkpoint = (mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[] } }).checkpoint
+  if (billingKnown) expect(checkpoint.pendingReviews).toBeUndefined()
+  else {
+    expect(mocks.chapters[0].revision).toBe(4)
+    expect(checkpoint.pendingReviews).toEqual([{ compilationId: 'comp', chapterId: 'c', revision: 3,
+      toolName: 'quality_analyze', callId: 'local-failure' }])
+    expect(events().filter(event => event.type === 'tool.result' && event.callId === 'local-failure')[0]).not.toHaveProperty('reviewRequestFinished')
+  }
+})
