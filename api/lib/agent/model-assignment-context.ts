@@ -29,11 +29,15 @@ export const TEXT_ACTION_TASKS: Readonly<Record<string, ModelAssignmentTask>> = 
   agent3ContinuityCritic: 'continuity', agent3ContinuityCriticSecondPass: 'continuity',
 }
 
-/** Only the known quality chain inherits its assignment during output recovery. */
+/** Only one recovery suffix on an explicit reviewer action inherits its family. */
 export function resolveTextActionTask(action: string): ModelAssignmentTask | undefined {
   const direct = Object.prototype.hasOwnProperty.call(TEXT_ACTION_TASKS, action) ? TEXT_ACTION_TASKS[action] : undefined
   if (direct) return direct
-  const suffix = 'OutputRecovery'
-  return action.endsWith(suffix) && TEXT_ACTION_TASKS[action.slice(0, -suffix.length)] === 'quality'
-    ? 'quality' : undefined
+  for (const suffix of ['OutputRecovery', 'EmptyRecovery']) {
+    if (!action.endsWith(suffix)) continue
+    const base = action.slice(0, -suffix.length)
+    const task = Object.prototype.hasOwnProperty.call(TEXT_ACTION_TASKS, base) ? TEXT_ACTION_TASKS[base] : undefined
+    if (task === 'quality' || task === 'continuity') return task
+  }
+  return undefined
 }

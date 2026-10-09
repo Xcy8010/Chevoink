@@ -1,3 +1,4 @@
+import { continuityRecheckBaseline } from './continuity-review-context.js'
 import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision } from './writing-scope.js'
 import { classifyContinuityFindingAuthority, unlocatedContinuityEvidence } from './continuity-finding-authority.js'
 import { readOriginalTaskRequest } from './original-request.js'
@@ -683,7 +684,7 @@ export async function validateStoryContinuity(input: {
   }
   const reviewSource = compilation.bridge.fromChapterId ? await db.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId, ...activeChapterScope(input.novelId) },
     select: { id: true, revision: true, content: true } }) : null
-  const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus })
+  const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus }, input.coverage?.protocolVersion === 6 ? 6 : 7)
   if (input.coverage && !compilerContinuityCoverageMatches(input.coverage, currentCoverage)) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、章节桥、场景或检查范围已变化，旧检查不能绑定当前编译。')
   const deterministic: ContinuityFindingInput[] = []
   if (compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4) {
@@ -710,7 +711,7 @@ export async function validateStoryContinuity(input: {
       { previous: reviewSource?.content ?? null, current: compilation.chapter!.content })) : input.findings)]
   const unlocated = input.findings.filter(finding => unlocatedContinuityEvidence(finding,
     { previous: reviewSource?.content ?? null, current: compilation.chapter!.content }, (input.coverage?.protocolVersion ?? 0) >= 5,
-    (input.coverage?.protocolVersion ?? 0) >= 6))
+    (input.coverage?.protocolVersion ?? 0) >= 6, (input.coverage?.protocolVersion ?? 0) >= 7))
   const nextCheckRounds = validatedContinuityCheckRounds(compilation.validation)
   const validation = {
     ...(compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation)
@@ -726,6 +727,8 @@ export async function validateStoryContinuity(input: {
     checkedAt: new Date().toISOString(),
     independentCheck: unlocated.length ? 'unavailable' as const : input.independentCheck ?? 'unavailable' as const,
     unlocatedEvidenceCount: unlocated.length,
+    checkedContent: compilation.chapter.content,
+    ...(unlocated.length || input.independentCheck !== 'complete' ? { previousAssessment: continuityRecheckBaseline(compilation.validation) } : {}),
     coverage: currentCoverage,
     reviewFocus: input.focus ?? '',
     findings,
@@ -955,7 +958,7 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
     bundle.charter ? `创作宪章 r${bundle.charter.revision}：${clip(bundle.charter.oneLinePromise, 240)}` : '创作宪章：尚未建立（新书长纲前应先建立）',
     bundle.promises.length ? `待兑现读者承诺：${bundle.promises.slice(0, 5).map((item) => `${item.title}（${item.payoffHorizon}）`).join('；')}` : '待兑现读者承诺：无',
     active ? `本任务编译：${active.id}，chapterId=${active.chapterId ?? '尚未创建'}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，状态 ${active.status}，Scene Task ${active.sceneTasks.length} 个。${resume}` : '本任务尚未建立编译；历史检查失败不构成恢复旧任务的授权。写下一章时以前文为参考，为新章建立本任务编译。',
-    chapter ? `当前正文 r${chapter.revision}，${hasBody ? `非空 ${chapter.content.trim().length} 字（已保存不等于本任务完成）` : '正文为空，未写完'}；连续性检查 revision=${validation?.checkedRevision ?? '未检查'}，状态=${validation?.independentCheck ?? '未完成'}，错误=${validation?.errorCount ?? '未知'}，警告=${validation?.warningCount ?? '未知'}；本编译质量报告 ${JSON.stringify(active?.qualityReports?.[0] ?? null)}。缺失或旧版本报告不代表通过；流水线复核请传 compilationId=${active?.id}，独立章节检查不能代替编译 CHECK。该状态仅描述此章节，其他目标仍须分别验收。` : '',
+    chapter ? `当前正文 r${chapter.revision}，${hasBody ? `非空 ${chapter.content.trim().length} 字（已保存不等于本任务完成）` : '正文为空，未写完'}；连续性检查 revision=${validation?.checkedRevision ?? '未检查'}，状态=${validation?.independentCheck ?? '未完成'}，${validation?.independentCheck === 'complete' ? `错误=${validation.errorCount ?? '未知'}，警告=${validation.warningCount ?? '未知'}` : '候选意见未确认，不能据此改稿'}；本编译质量报告 ${JSON.stringify(active?.qualityReports?.[0] ?? null)}。缺失或旧版本报告不代表通过；流水线复核请传 compilationId=${active?.id}，独立章节检查不能代替编译 CHECK。该状态仅描述此章节，其他目标仍须分别验收。` : '',
     active ? '初稿流程：本任务冻结的新建目标章可在原写作权限内持续修订。先核对对象身份与原文证据，仅将同一对象同一维度的互斥事实视为冲突，不照 suggestion 机械改剧情。相关修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write；不硬性限定一次调用。每次使用当前正文与版本，不要求每次覆盖全部意见；全部修改后复核最终版本。已有章节与明确禁止修改的请求仍按原权限处理。付费自动修订、检查次数及未知调用保护不变，不为清零警告循环改写，剩余意见保留真实状态。' : '',
     latestBridge?.toChapter ? `最近已提交桥（仅作背景，不证明本任务完成）：第 ${latestBridge.toChapter.orderIndex} 章《${latestBridge.toChapter.title}》，提交 r${latestBridge.targetRevision ?? '未知'}，当前 r${latestBridge.toChapter.revision}；未完成动作：${latestBridge.lastUnfinishedAction || '无'}；开放钩子：${asStringArray(latestBridge.openLoops).slice(0, 4).join('、') || '无'}` : '',
   ].filter(Boolean)

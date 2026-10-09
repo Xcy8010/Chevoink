@@ -21,11 +21,14 @@ describe('owned sparse model assignments', () => {
     for (const action of ['agent3HumanityCritic', 'agent3HumanityQuality', 'agent3HumanityEvidenceCorrection', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry']) {
       expect(resolveTextActionTask(action)).toBe('quality')
       expect(resolveTextActionTask(`${action}OutputRecovery`)).toBe('quality')
+      expect(resolveTextActionTask(`${action}EmptyRecovery`)).toBe('quality')
     }
-    for (const action of ['unknownOutputRecovery', 'agent3HumanityCriticOutputRecoveryOutputRecovery', 'agent3ContinuityCriticOutputRecovery', 'constructor']) {
+    for (const action of ['unknownOutputRecovery', 'agent3HumanityCriticOutputRecoveryOutputRecovery', 'agent3ContinuityCriticEmptyRecoveryOutputRecovery', 'agent3HumanityCriticEmptyRecoveryEmptyRecovery', 'constructor']) {
       expect(resolveTextActionTask(action)).toBeUndefined()
     }
-    expect(resolveTextActionTask('agent3ContinuityCritic')).toBe('continuity')
+    for (const action of ['agent3ContinuityCritic', 'agent3ContinuityCriticSecondPass', 'agent3ContinuityRepair', 'agent3ContinuityRepairRetry']) {
+      for (const suffix of ['', 'OutputRecovery', 'EmptyRecovery']) expect(resolveTextActionTask(action + suffix)).toBe('continuity')
+    }
   })
   it('rejects unknown purposes, incompatible custom identity and scope framing', () => {
     expect(modelAssignmentsSchema.safeParse({ export: { modelTier: 'speed' } }).success).toBe(false)

@@ -21,6 +21,20 @@ const input = () => ({ chapter: { id: 'c', title: '本章', revision: 2, content
   source: { id: 'source', revision: 1, content: '前章完整正文' } })
 
 describe('compiler continuity report dependencies', () => {
+  it('completes a frozen protocol6 assessment under its own hash, without upgrading it to current protocol7', async () => {
+    const current = input(), coverage = compilerContinuityCoverage(current, 6)
+    expect(compilerContinuityCoverageMatches(coverage, compilerContinuityCoverage(current, 6))).toBe(true)
+    expect(compilerContinuityCoverageMatches(coverage, compilerContinuityCoverage(current))).toBe(false)
+    const update = vi.fn()
+    const db = { $queryRaw: vi.fn().mockResolvedValue([{ id: 'n' }]), storyCompilation: { findFirst: vi.fn().mockResolvedValue({ id: 'comp', ...current,
+      validation: { checkRounds: 2, autoRepairRounds: 1 } }), update },
+      chapter: { findFirst: vi.fn().mockImplementation(async ({ where }) => where.id === 'source' ? current.source : { id: 'c' }) },
+    } as unknown as Prisma.TransactionClient
+    const result = await validateStoryContinuity({ userId: 'u', novelId: 'n', compilationId: 'comp', expectedChapterRevision: 2,
+      coverage, independentCheck: 'complete', findings: [] }, db)
+    expect(result).toMatchObject({ independentCheck: 'complete', checkRounds: 2, autoRepairRounds: 1 })
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ validation: expect.objectContaining({ coverage }) }) }))
+  })
   it.each(['text', 'revision', 'title', 'source', 'bridge', 'scenes', 'focus', 'protocol'] as const)('%s invalidates reuse', change => {
     const before = input(), after = structuredClone(before)
     const coverage = compilerContinuityCoverage(before)

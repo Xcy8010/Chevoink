@@ -1,3 +1,4 @@
+import { COMPILER_CONTINUITY_PROTOCOL } from './compiler-continuity-contract.js'
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import type { Prisma } from '@prisma/client'
 import type { PendingReviewCall } from './checkpoint.js'
@@ -63,7 +64,7 @@ export async function readLegacyContinuityRecovery(tx: Prisma.TransactionClient,
       if (cap ? paid.length !== 0 : paid.filter(item => item.action === 'agent3ContinuityCritic').length !== 1
         || paid.some(item => item.billingStatus !== 'settled' || item.usageSource !== 'reported'
           || item.requestTokens === null || item.responseTokens === null || item.responseTokens <= 0)) continue
-      const key = `${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol6`
+      const key = `${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`
       empty.recovered.push(key)
       empty.markers.push(`continuity-recovery:protocol6:${runtimeJson({ taskId: original.taskId, compilationId: compilation.id, callId, code }).hash}`)
       empty.chapterIds.push(chapter.id)
@@ -93,7 +94,7 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
   const keys: Array<[string, string]> = []
   for (const compilation of compilations) {
     const validation = object(compilation.validation), coverage = object(validation.coverage)
-    if (compilation.status !== 'active' || !compilation.chapterId || validation.independentCheck !== 'unavailable' || coverage.protocolVersion !== 6) continue
+    if (compilation.status !== 'active' || !compilation.chapterId || validation.independentCheck !== 'unavailable' || ![6, COMPILER_CONTINUITY_PROTOCOL].includes(Number(coverage.protocolVersion))) continue
     const chapter = await tx.chapter.findFirst({ where: { id: compilation.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true, orderIndex: true } })
     if (!chapter || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
       || coverage.contentHash !== runtimeJson({ content: chapter.content }).hash
@@ -143,7 +144,7 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     if (receipts.filter(item => item.action === 'agent3ContinuityCritic').length !== 1 || receipts.some(item => !item.responseTokens || object(item.billingEvidence).responseObserved !== true
       || !['agent3ContinuityCritic', 'agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery'].includes(item.action))) continue
     const key = `continuity-author-recovery:${runtimeJson({ taskId: original.taskId, chapterId: chapter.id, contentHash: coverage.contentHash, admissionId: admission.id }).hash}`
-    keys.push([`${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol6`, key])
+    keys.push([`${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`, key])
   }
   return keys
 }

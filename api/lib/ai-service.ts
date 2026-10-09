@@ -522,9 +522,9 @@ export function buildProviderReasoningPayload(input: ProviderReasoningInput): Re
   return { reasoning_effort: input.reasoningEffort }
 }
 
-/** The quality chain must be non-thinking after assignment and route resolution.
+/** Reviewer chains must be non-thinking after assignment and route resolution.
  * Verified protocols outrank names; an unknown proxy cannot borrow a model's switch. */
-function buildHumanityQualityReasoningPayload(input: ProviderReasoningInput & {
+function buildReviewReasoningPayload(input: ProviderReasoningInput & {
   reasoningEfforts?: import('../../shared/contracts/index.js').ModelReasoningEffort[]
 }): Record<string, unknown> {
   let hostname = ''
@@ -608,6 +608,8 @@ export type ChatWithToolsParams = {
   maxOutputTokens?: number
   /** Internal server capability. Never populated from model/user JSON. */
   durableExecution?: DurableChatExecution
+  /** Internal, hash-verified prepared auxiliary request. Never sourced from tool arguments. */
+  preparedAuxiliaryRequest?: { endpoint: string; body: Record<string, unknown> }
   messages: ChatMessage[]
   tools: OpenAIToolDefinition[]
   model?: string
@@ -722,6 +724,7 @@ function snapshotDurableChatParams(params: ChatWithToolsParams): ChatWithToolsPa
   if (!params.durableExecution) return params
   return { ...params, messages: JSON.parse(JSON.stringify(params.messages)), tools: JSON.parse(JSON.stringify(params.tools)),
     ...(params.reasoningEfforts ? { reasoningEfforts: [...params.reasoningEfforts] } : {}),
+    ...(params.preparedAuxiliaryRequest ? { preparedAuxiliaryRequest: structuredClone(params.preparedAuxiliaryRequest) } : {}),
     durableExecution: { ...params.durableExecution, lease: { ...params.durableExecution.lease },
       ...(params.durableExecution.price ? { price: structuredClone(params.durableExecution.price) } : {}),
       ...(params.durableExecution.cursor ? { cursor: { ...params.durableExecution.cursor } } : {}) } }
@@ -749,11 +752,18 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   const endpoint = `${(params.providerBaseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`
 
   const reasoningEffort = params.reasoningEffort ?? env.aiReasoningEffort
-  const isolatedQuality = params.tools.length === 0 && params.durableExecution?.auxiliaryStep === params.usageLog.action
-    && ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'].includes(params.usageLog.action)
-  const qualityReasoning = isolatedQuality ? buildHumanityQualityReasoningPayload({ ...params, model,
+  const frozenRequest = params.preparedAuxiliaryRequest
+  if (frozenRequest && (!params.durableExecution?.auxiliaryStep || params.durableExecution.auxiliaryStep !== params.usageLog.action
+    || params.tools.length || frozenRequest.endpoint !== endpoint || frozenRequest.body.model !== model
+    || frozenRequest.body.stream !== true || !Array.isArray(frozenRequest.body.messages) || frozenRequest.body.tools !== undefined)) {
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原辅助请求与冻结路由不匹配。')
+  }
+  const isolatedReview = !frozenRequest && params.tools.length === 0 && params.durableExecution?.auxiliaryStep === params.usageLog.action
+    && ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry',
+      'continuity_critic', 'continuity_repair', 'continuity_repair_retry'].includes(params.usageLog.action)
+  const reviewReasoning = isolatedReview ? buildReviewReasoningPayload({ ...params, model,
     providerBaseUrl: params.providerBaseUrl ?? env.aiTextBaseUrl, reasoningEffort: 'none' }) : undefined
-  const body: Record<string, unknown> = {
+  const body: Record<string, unknown> = frozenRequest ? structuredClone(frozenRequest.body) : {
     model,
     ...(params.reasoningParameterMode ? {} : { temperature: params.temperature ?? 0.6 }),
     // 显式拉满单轮输出上限：不传时 DeepSeek 默认仅 4096，
@@ -764,7 +774,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     messages: toProviderMessages(params.messages),
   }
 
-  Object.assign(body, qualityReasoning ?? buildProviderReasoningPayload({
+  if (!frozenRequest) Object.assign(body, reviewReasoning ?? buildProviderReasoningPayload({
     boundedReview: params.boundedReview,
     thinkingEnabled: params.thinkingEnabled,
     reasoningParameterMode: params.reasoningParameterMode,
@@ -1133,7 +1143,7 @@ async function generateGoalTextCompletion(systemPrompt: string, userPrompt: stri
       && (route.providerBaseUrl ?? modelRuntime.baseUrl ?? env.aiTextBaseUrl) === (modelRuntime.baseUrl ?? env.aiTextBaseUrl)
       && (route.providerApiKey ?? modelRuntime.apiKey ?? env.aiTextApiKey) === (modelRuntime.apiKey ?? env.aiTextApiKey)
     return generateTextCompletionImpl(systemPrompt, userPrompt, { ...options, signal: route.signal, modelRuntime: { ...modelRuntime,
-      ...(task === 'quality' && !sameRoute ? { reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: [] } : {}),
+      ...((task === 'quality' || task === 'continuity') && !sameRoute ? { reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: [] } : {}),
       provider: route.provider ?? modelRuntime.provider, modelName: route.model ?? modelRuntime.modelName,
       baseUrl: route.providerBaseUrl ?? modelRuntime.baseUrl, apiKey: route.providerApiKey ?? modelRuntime.apiKey } })
   })
@@ -1154,8 +1164,9 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   const requestedReasoning = options.reasoningEffort ?? modelRuntime.reasoningEffort
   const completionReasoning = modelRuntime.reasoningEfforts && !modelRuntime.reasoningEfforts.includes(requestedReasoning)
     ? modelRuntime.reasoningEffort : requestedReasoning
-  const qualityReasoning = resolveTextActionTask(options.action) === 'quality'
-    ? buildHumanityQualityReasoningPayload({ ...modelRuntime, model: modelRuntime.modelName ?? env.aiTextModel,
+  const reviewTask = resolveTextActionTask(options.action)
+  const reviewReasoning = (reviewTask === 'quality' || reviewTask === 'continuity')
+    ? buildReviewReasoningPayload({ ...modelRuntime, model: modelRuntime.modelName ?? env.aiTextModel,
       providerBaseUrl: modelRuntime.baseUrl ?? env.aiTextBaseUrl, reasoningEffort: 'none' }) : undefined
   ensureTextProviderConfigured(modelRuntime.apiKey)
   await assertCreditAccess(options.userId, modelRuntime.tier, false)
@@ -1192,7 +1203,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
       [outputTokenParameter]: options.maxOutputTokens ?? env.aiTextMaxOutputTokens,
       stream: true,
       stream_options: { include_usage: true },
-      ...(qualityReasoning ?? buildProviderReasoningPayload({
+      ...(reviewReasoning ?? buildProviderReasoningPayload({
         boundedReview: options.boundedReview,
         thinkingEnabled: modelRuntime.thinkingEnabled,
         reasoningParameterMode: modelRuntime.reasoningParameterMode,

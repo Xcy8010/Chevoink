@@ -48,7 +48,7 @@ describe.runIf(available)('authenticated legacy continuity recovery', () => {
       const usageBefore = await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })
       const result = await prisma.$transaction(tx => readLegacyContinuityRecovery(tx, f, restrictions, pending))
       if (scenario === 'cap' || scenario === 'settled-locator') {
-        expect(result.recovered).toEqual([`${compilation.id}:${f.chapterId}:1:continuity_validate:protocol6`])
+        expect(result.recovered).toEqual([`${compilation.id}:${f.chapterId}:1:continuity_validate:protocol7`])
         expect(result.settled).toEqual(pending)
         expect(result.markers).toHaveLength(1)
         expect(result.removed).toEqual(scenario === 'cap' ? restrictions.slice(0, 3) : [])

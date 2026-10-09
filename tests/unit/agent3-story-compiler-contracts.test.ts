@@ -72,7 +72,7 @@ describe('严谨创作落实连续性警告', () => {
     Object.assign(f.compilation.bridge, { fromChapterId: 'source', sourceRevision: 2 })
     vi.spyOn(prisma.chapter, 'findFirst').mockResolvedValue({ id: 'source', revision: 2, content: '合成前章：营火只为制造声势。他随后走向河边。' } as never)
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
-    expect(f.critic.mock.calls[0][1]).toContain('前章已保存原文（事实证据）：\n合成前章：营火只为制造声势。他随后走向河边。')
+    expect(f.critic.mock.calls[0][1]).toContain('"source":"previous","segmentId":"p0","quote":"合成前章：营火只为制造声势。他随后走向河边。"')
     expect(f.critic.mock.calls[0][1]).toContain('桥接摘要，需对照原文核实')
     expect(f.write).not.toHaveBeenCalled()
   })

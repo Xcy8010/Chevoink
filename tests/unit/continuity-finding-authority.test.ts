@@ -6,7 +6,7 @@ const finding = { signal: 'body' as const, severity: 'error' as const,
   evidence: 'Scene Task 草案代价写着晕厥，但正文只是扶住桌沿。', suggestion: '调整场景任务目标以匹配正文。' }
 it('classifies explicit generated plan calibration without spending a manuscript factual repair', () => {
   expect(classifyContinuityFindingAuthority(finding)).toMatchObject({ severity: 'warning' })
-  expect(COMPILER_CONTINUITY_PROTOCOL).toBe(6)
+  expect(COMPILER_CONTINUITY_PROTOCOL).toBe(7)
   expect(continuityCriticSystem).toContain('不能单凭计划偏离报 error')
   expect(continuityCriticSystem).toContain('不得把作者硬要求降级')
 })

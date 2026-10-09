@@ -1,8 +1,9 @@
+import { COMPILER_CONTINUITY_PROTOCOL } from './compiler-continuity-contract.js'
 import type { ChapterReviewReadiness } from './chapter-review-guard.js'
 
 export function reviewDispatchKey(readiness: { compilationId: string | null; chapterId: string; revision: number }, name: string): string {
   const base = `${readiness.compilationId}:${readiness.chapterId}:${readiness.revision}:${name}`
-  return name === 'continuity_validate' ? `${base}:protocol6` : base
+  return name === 'continuity_validate' ? `${base}:protocol${COMPILER_CONTINUITY_PROTOCOL}` : base
 }
 
 /** A completed assessment can still have one unspent, authorized decision.

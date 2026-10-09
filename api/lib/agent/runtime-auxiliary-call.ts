@@ -56,10 +56,9 @@ export async function resolveDurableAuxiliaryRuntime(input: {
     }
     return { runtime: inherited, selection: { ...selection, reasoningEffort: inherited.reasoningEffort } }
   }
-  // Quality's wire policy is applied after resolution; do not request an
+  // Reviewer wire policy is applied after resolution; do not request an
   // unsupported low setting from a model whose native default is high.
-  const runtime = input.task === 'quality' ? await getModelTierRuntime('speed', input.userId)
-    : await getModelTierRuntime('speed', input.userId, null, 'low')
+  const runtime = await getModelTierRuntime('speed', input.userId)
   if (runtime.tier !== 'speed') return runtimeError('RUNTIME_IDENTITY_CONFLICT', '独立辅助模型档位不可替换。')
   return { runtime, selection: { tier: 'speed' as const, customModelId: null, reasoningEffort: runtime.reasoningEffort } }
 }
@@ -104,6 +103,7 @@ export async function callDurableAuxiliary(input: {
     if (!replay.replay) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原请求尚无完整结果。')
     return replay.replay
   }
+  const preparedRequest = existing ? z.object({ input: z.object({ request: z.object({ endpoint: z.string(), body: z.record(z.string(), z.unknown()) }) }) }).parse(existing.inputSnapshot).input.request : undefined
   await withManuscriptRunLease(lease, input.assertCurrent)
   const routeTier = (input.route.tier ?? 'speed') as CreditModelTier
   const routeCustomModelId = input.route.customModelId ?? null
@@ -122,5 +122,5 @@ export async function callDurableAuxiliary(input: {
     boundedReview: !input.route.honorReasoningEffort, thinkingEnabled: runtime.thinkingEnabled, reasoningParameterMode: runtime.reasoningParameterMode,
     reasoningEfforts: [...runtime.reasoningEfforts],
     outputTokenParameter: resolveTextOutputTokenParameter(runtime.outputTokenParameter, { provider: input.route.provider, providerBaseUrl: input.route.baseUrl, model: input.route.model }, true),
-    durableExecution: execution, usageLog: { userId: lease.userId, agentRunId: lease.runId, action: step, modelTier: routeTier, multiplierBps: input.price.multiplierBps } })
+    preparedAuxiliaryRequest: preparedRequest, durableExecution: execution, usageLog: { userId: lease.userId, agentRunId: lease.runId, action: step, modelTier: routeTier, multiplierBps: input.price.multiplierBps } })
 }

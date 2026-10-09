@@ -2,12 +2,13 @@ import type { ContinuityFindingInput } from '../../../shared/contracts/story-com
 
 /** Locate attributed quotations in the actual supplied manuscripts. A report
  * hash certifies its input version, never a critic's invented or stale quote. */
-export function unlocatedContinuityEvidence(finding: ContinuityFindingInput, bodies: { previous: string | null; current: string }, requireQuotes = false, allowSingleQuotes = true): boolean {
+export function unlocatedContinuityEvidence(finding: ContinuityFindingInput, bodies: { previous: string | null; current: string }, requireQuotes = false, allowSingleQuotes = true, requirePair = false): boolean {
   const attributed = /(前章(?:原文)?|当前(?:正文)?|本章|后章)\s*(?:[:：]\s*)?(?:"([^"]{2,360})"|“([^”]{2,360})”|「([^」]{2,360})」|『([^』]{2,360})』)/gu
   const single = /(前章(?:原文)?|当前(?:正文)?|本章|后章)\s*(?:[:：]\s*)?'([^']{2,360})'/gu
   const quotes = [...(finding.sourceEvidence ?? []), ...[...finding.evidence.matchAll(attributed), ...(allowSingleQuotes ? finding.evidence.matchAll(single) : [])]
     .map(match => ({ source: match[1].startsWith('前章') ? 'previous' as const : 'current' as const, quote: match[2] ?? match[3] ?? match[4] ?? match[5] }))]
-  return (requireQuotes && !quotes.length) || quotes.some(item => !(bodies[item.source] ?? '').includes(item.quote))
+  const distinct = new Set(quotes.map(item => `${item.source}:${item.quote}`))
+  return (requirePair && finding.severity === 'error' && distinct.size < 2) || (requireQuotes && !quotes.length) || quotes.some(item => !(bodies[item.source] ?? '').includes(item.quote))
 }
 
 /** Narrow classification of a critic's explicit plan-calibration finding.

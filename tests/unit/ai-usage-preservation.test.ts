@@ -189,13 +189,14 @@ describe('fixed non-thinking humanity quality policy after actual model resoluti
       reasoningParameterMode: undefined, thinkingEnabled: undefined })
     const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => qualityResponse())
     vi.stubGlobal('fetch', fetcher)
-    for (const action of ['mainWriting', 'agent3HumanityCritic', 'mainWriting']) await generateTextCompletion('规则', '合成正文', { userId: 'test', action, modelRuntime })
+    const reviews = ['agent3HumanityCritic', 'agent3HumanityFormatRecovery', 'agent3HumanityEvidenceCorrection', 'agent3ContinuityCritic', 'agent3ContinuityCriticSecondPass'].flatMap(action => [action, `${action}OutputRecovery`, `${action}EmptyRecovery`])
+    for (const action of ['mainWriting', ...reviews, 'mainWriting']) await generateTextCompletion('规则', '合成正文', { userId: 'test', action, modelRuntime })
     const bodies = fetcher.mock.calls.map(call => JSON.parse(String(call[1]?.body)))
-    expect(bodies[0]).toEqual(bodies[2])
+    expect(bodies[0]).toEqual(bodies.at(-1))
     expect(bodies[0]).toMatchObject({ thinking: { type: 'enabled' } })
-    expect(bodies[1]).toMatchObject({ thinking: { type: 'disabled' } })
+    for (const body of bodies.slice(1, -1)) expect(body).toMatchObject({ thinking: { type: 'disabled' } })
     expect(modelRuntime.reasoningEffort).toBe('high')
-    expect(fetcher).toHaveBeenCalledTimes(3)
+    expect(fetcher).toHaveBeenCalledTimes(reviews.length + 2)
   })
 
   it.each(['standard', 'performance'] as const)('reevaluates the actual alternate %s route without borrowing source protocol', async tier => {
@@ -261,13 +262,13 @@ describe('explicit zero provider usage is not missing usage', () => {
     }))
     expect(fetcher).toHaveBeenCalledOnce()
     expect(fetcher.mock.calls[0][0]).toBe('https://selected.example/v1/chat/completions')
-    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'selected-model', reasoning_effort: task === 'quality' ? 'none' : 'high',
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'selected-model', reasoning_effort: task === 'quality' || task === 'continuity' ? 'none' : 'high',
       messages: [{ role: 'system', content: 'isolated-system' }, { role: 'user', content: '完整正文及上下文' }] })
     expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ modelTier: 'ultimate', multiplierBps: 25000,
       billingSnapshot: { version: 'credits-v1-exact', modelTier: 'ultimate', multiplierBps: 25000 } }) }))
   })
   it.each(['speed', 'custom'] as const)('sends non-thinking critic requests for %s without changing the selected model or main-turn effort', async tier => {
-    const runtime = { tier, provider: 'deepseek', modelName: 'deepseek-flash', apiKey: 'fixture-not-a-key', baseUrl: 'https://fixture.test/v1',
+    const runtime = { tier, provider: 'deepseek', modelName: 'deepseek-flash', apiKey: 'fixture-not-a-key', baseUrl: 'https://api.deepseek.com/v1',
       reasoningEffort: 'high' as const, reasoningEfforts: ['low', 'high'] as const, thinkingEnabled: true, reasoningParameterMode: 'native' as const,
       multiplierBps: 0, visionEnabled: false, contextWindowTokens: 128000 }
     const fetcher = vi.fn(async () => new Response('data: {"choices":[{"delta":{"content":"{\\"findings\\":[]}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":8}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
@@ -301,12 +302,12 @@ describe('explicit zero provider usage is not missing usage', () => {
     expect(fetcher).toHaveBeenCalledOnce()
     expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ responseTokens: 8192 }))
   })
-  it('reserves room for thinking and the final continuity JSON, preserving reported usage above the generic ceiling', async () => {
+  it('preserves reported continuity usage even when the provider emits reasoning contrary to the requested non-thinking policy', async () => {
     const fetcher = vi.fn(async () => new Response('data: {"choices":[{"delta":{"reasoning_content":"检查过程"}}]}\n\ndata: {"choices":[{"delta":{"content":"{\\"findings\\":[]}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":9000}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
     vi.stubGlobal('fetch', fetcher)
-    await expect(generateTextCompletion('system', '完整正文', { userId: 'test', action: 'agent3ContinuityCritic', maxOutputTokens: 16_384, reasoningEffort: 'low' })).resolves.toBe('{"findings":[]}')
+    await expect(generateTextCompletion('system', '完整正文', { userId: 'test', action: 'agent3ContinuityCritic', maxOutputTokens: 16_384, reasoningEffort: 'low', modelRuntime: qualityRuntime({ tier: 'speed', multiplierBps: 10000 }) })).resolves.toBe('{"findings":[]}')
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
-    expect(body).toMatchObject({ max_tokens: 16_384, reasoning_effort: 'low' })
+    expect(body).toMatchObject({ max_tokens: 16_384, reasoning_effort: 'none' })
     expect(body.messages[1].content).toBe('完整正文')
     expect(fetcher).toHaveBeenCalledOnce()
     expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ responseTokens: 9000 }))
@@ -319,7 +320,7 @@ describe('explicit zero provider usage is not missing usage', () => {
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
     expect(body.max_completion_tokens).toBe(16_384)
     expect(body).not.toHaveProperty('max_tokens')
-    expect(body.thinking).toEqual({ type: 'enabled' })
+    expect(body.thinking).toEqual({ type: 'disabled' })
     expect(body).not.toHaveProperty('reasoning_effort')
     expect(fetcher).toHaveBeenCalledOnce()
     expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ responseTokens: 9000 }))
