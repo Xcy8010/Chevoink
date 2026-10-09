@@ -68,11 +68,11 @@ async function prepare(f: F, legacy: boolean) {
   return compilation.id
 }
 
-function provider(response: (request: number) => string | never, continuityRequest?: number) {
+function provider(response: (request: number) => string | never) {
   let requests = 0
   const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
     const body = JSON.parse(String(init.body))
-    expect(body.reasoning_effort).toBe(requests + 1 === continuityRequest ? 'low' : 'none')
+    expect(body.reasoning_effort).toBe('none')
     expect(body.thinking?.type).not.toBe('enabled')
     expect(body.tools).toBeUndefined()
     expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
@@ -150,7 +150,7 @@ describe.runIf(available)('author admissions after settled quality format failur
     beforeAll(async () => {
       const f = get()
     h = await legacyHarness(f)
-    fetchMock = provider(request => request <= 3 ? 'synthetic malformed report' : '{"findings":[]}', 5)
+    fetchMock = provider(request => request <= 3 ? 'synthetic malformed report' : '{"findings":[]}')
     before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     })
     beforeEach(() => { installRuntime(); vi.stubGlobal('fetch', fetchMock) })
