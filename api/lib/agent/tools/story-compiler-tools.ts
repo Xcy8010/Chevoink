@@ -1,3 +1,5 @@
+import { retainedFindings } from './chapter-arguments.js'
+import { readChapterReviewReadiness, chapterReviewDecisionGuidance } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
 import { persistedContentHash } from '../semantic-progress.js'
 import { continuityFindingText, continuitySourceInput, resolveContinuitySources, continuityRecheckInput, unconfirmedContinuityOutput, type ContinuityBodies } from '../continuity-review-context.js'
@@ -509,8 +511,7 @@ export const chapterBridgeGetTool = defineTool({
       where: { userId: ctx.userId, novelId: ctx.novelId, ...(args.compilationId ? { id: args.compilationId } : {}),
         ...scope },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { title: true, revision: true, content: true } },
-        qualityReports: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1, include: { findings: { orderBy: { startOffset: 'asc' } } } } },
+      include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { title: true, revision: true, content: true } }, qualityReports: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1, include: { findings: true } } },
     })
     if (!compilation?.bridge) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND',
       output: `当前任务没有可读取的指定 Chapter Bridge，compilationId 不能使用章节或任务合同编号。${compilation ? '编译缺少章节桥，身份异常需核对，不能重建绕过。' : await missingCompilationGuidance(db, ctx, scope)}`, summary: '未找到章节编译状态' }
@@ -523,15 +524,16 @@ export const chapterBridgeGetTool = defineTool({
       `物品状态：${asStrings(bridge.objectState).join('；') || '未记录'}`,
       `开放钩子：${asStrings(bridge.openLoops).join('；') || '无'}`,
     ]
-    const report = compilation.qualityReports?.[0]
-    const currentQuality = report && compilation.chapter && report.userId === ctx.userId && report.novelId === ctx.novelId
+    const review = await readChapterReviewReadiness(db, ctx, compilation.id)
+    const report = review?.qualityReportId ? await db.chapterQualityReport.findUnique({ where: { id: review.qualityReportId }, include: { findings: { orderBy: { startOffset: 'asc' } } } }) : compilation.qualityReports[0]
+    const currentQuality = review?.qualityReportId === report?.id && report && compilation.chapter && report.userId === ctx.userId && report.novelId === ctx.novelId
       && report.chapterId === compilation.chapterId && qualityReportCheckedCurrentContent(report, compilation.chapter.revision, compilation.chapter.content)
     const qualityDetails = currentQuality
-      ? `当前质量报告 reportId=${report.id}，r${report.chapterRevision}；下列候选仍待作者原授权内处理，不代表已修复。\n${report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected')
-        .map(item => `[findingId=${item.id}/${item.severity}/${item.disposition}] 「${item.evidenceExcerpt}」；原因：${item.explanation}；建议：${item.suggestion}`).join('\n') || '无剩余候选。'}`
+      ? `当前质量报告 reportId=${report.id}，r${report.chapterRevision}；下列原报告意见保留审计；已留置项不代表已修复，必需未处置项见末尾精确模板。\n${report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected')
+        .map(item => `[findingId=${item.id}/${item.severity}/${review?.retainedDecisions?.some(saved => saved.source === 'quality' && saved.reportId === report.id && saved.findingId === item.id) ? '已明确留置' : item.disposition}] 「${item.evidenceExcerpt}」；原因：${item.explanation}；建议：${item.suggestion}`).join('\n') || '无剩余候选。'}`
       : report ? `质量报告 reportId=${report.id} 不属于当前完整正文检查，不能用旧候选证明当前版本通过。` : '当前质量报告尚未建立。'
     return {
-      output: `compilationId=${compilation.id}，chapterId=${compilation.chapterId ?? '尚未创建'}，阶段=${compilation.stage}，状态=${compilation.status}，目标第 ${compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。\n${items.join('\n')}\nScene Task：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜目标 ${task.goal}｜阻力 ${task.obstacle}｜代价 ${task.cost}｜转折 ${task.turn}`).join('\n') || '尚未建立'}\n${qualityDetails}`,
+      output: `compilationId=${compilation.id}，chapterId=${compilation.chapterId ?? '尚未创建'}，阶段=${compilation.stage}，状态=${compilation.status}，目标第 ${compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。\n${items.join('\n')}\nScene Task：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜目标 ${task.goal}｜阻力 ${task.obstacle}｜代价 ${task.cost}｜转折 ${task.turn}`).join('\n') || '尚未建立'}\n${qualityDetails}\n${review ? chapterReviewDecisionGuidance(review) : ''}`,
       summary: `读取第 ${compilation.targetOrderIndex} 章章节桥`,
       display: { kind: 'storyCompiler', compilationId: compilation.id, phase: compilation.stage, title: '章节桥', detail: `第 ${compilation.targetOrderIndex} 章 · ${compilation.stage}`, items },
     }
@@ -758,9 +760,10 @@ export const chapterBridgeCommitTool = defineTool({
   name: 'chapter_bridge_commit',
   title: '提交章节终态',
   description:
-    'Story Compiler 的 COMMIT 步骤。用于提交当前已保存正文的终态；写作交付必须具有当前版本完整的连续性与质量检查，只有原始作者请求可明确跳过检查。缺少、失败或旧检查会返回下一步所需工具，不代表已完成。所有参数都可省略：服务端会从当前 run/chapter 的活跃编译、最后一个 Scene Task 和章节状态安全补全，模型不得为补参数重复读取正文。重复调用会幂等返回。',
+    'Story Compiler 的 COMMIT 步骤。用于提交当前已保存正文的终态；写作交付必须具有当前版本完整的连续性与质量检查，只有原始作者请求可明确跳过检查。缺少、失败或旧检查会返回下一步所需工具，不代表已完成。检查完成但有需处置意见时，用 retainedFindings 引用当前报告并逐项说明保留原因；chapter_bridge_get 提供精确引用模板。无待处置意见时所有参数都可省略：服务端会从当前 run/chapter 的活跃编译、最后一个 Scene Task 和章节状态安全补全，模型不得为补参数重复读取正文。重复调用会幂等返回。',
   parameters: z.object({
     compilationId: z.string().min(1).optional(),
+    retainedFindings,
     chapterSummary: z.string().min(1).max(2000).optional(),
     exitState: storyStateSchema.optional(),
     lastUnfinishedAction: z.string().max(1000).optional(),
@@ -772,6 +775,9 @@ export const chapterBridgeCommitTool = defineTool({
   coerceArgs(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
     const next = { ...(raw as Record<string, unknown>) }
+    if (typeof next.retainedFindings === 'string') {
+      try { next.retainedFindings = JSON.parse(next.retainedFindings) } catch { /* Keep invalid input for schema diagnostics. */ }
+    }
     if (!next.compilationId && typeof next.compilation_id === 'string') next.compilationId = next.compilation_id
     for (const [key, value] of Object.entries(next)) if (value === null || value === '') delete next[key]
     return next
@@ -831,8 +837,8 @@ export const chapterBridgeCommitTool = defineTool({
       endingStructure: args.endingStructure?.trim() || `以${lastTask?.turn || lastExit.action || '当前状态变化'}收束`,
     }
     try {
-      const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...terminal, expectedChapterRevision: compilation.chapter.revision, expectedContentHash: createHash('sha256').update(compilation.chapter.content).digest('hex') }, ctx.transaction)
-      const retained = result.retainedIssueCount ? `本次有 ${result.retainedIssueCount} 条已核验错误超出自动修订边界（修订次数已用尽或未获授权），已随检查报告保留交作者决定，不得宣称检查通过；作者可在输入框重新发送明确指令继续处理。` : ''
+      const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...terminal, retainedFindings: args.retainedFindings, expectedChapterRevision: compilation.chapter.revision, expectedContentHash: createHash('sha256').update(compilation.chapter.content).digest('hex') }, ctx.transaction)
+      const retained = result.retainedIssueCount ? `本次仍保留 ${result.retainedIssueCount} 条检查意见及其处置记录；留置不表示已修复，不能把建议数量当作检查失败。` : ''
       return {
         output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge 与 Scene Task 终态已提交。已按原任务核验当前版本所需检查；检查完成不代表所有意见已消除，关注意见仍保留待审。${retained}故事记忆仅提交候选，作者确认前不参与事实召回。${result.skippedMemoryCount ? `其中 ${result.skippedMemoryCount} 项记忆因作者已删除而跳过，未重建；不影响章节终态提交。` : ''}本任务仅在原请求范围内交付。`,
         requiredResult: { targetId: result.chapterId, contentHash: persistedContentHash(compilation.chapter.content) },
@@ -846,8 +852,10 @@ export const chapterBridgeCommitTool = defineTool({
       // 流程顺序类门槛（连续性未重检/仍有错）转成可执行引导：作者侧看到下一步该做什么，而不是「执行失败」
       if (
         error instanceof DataAccessError
-        && (error.code === 'CONTINUITY_CHECK_REQUIRED' || error.code === 'CONTINUITY_ERRORS_REMAIN' || error.code === 'COMPILATION_NOT_FOUND' || error.code === 'QUALITY_CHECK_REQUIRED')
+        && (error.code === 'REVIEW_DECISION_REQUIRED' || error.code === 'CONTINUITY_CHECK_REQUIRED' || error.code === 'CONTINUITY_ERRORS_REMAIN' || error.code === 'COMPILATION_NOT_FOUND' || error.code === 'QUALITY_CHECK_REQUIRED')
       ) {
+        if (error.code === 'REVIEW_DECISION_REQUIRED') return { outcome: 'failed' as const, failureCode: error.code,
+          output: error.message, summary: '检查已完成 · 需明确当前意见处置' }
         const checkedChapter = compilation.chapter
         const guidance = error.code === 'CONTINUITY_ERRORS_REMAIN'
           ? ctx.transaction ? await readChapterReviewRevisionGuidance(ctx.transaction, ctx, checkedChapter)

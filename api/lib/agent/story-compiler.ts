@@ -759,6 +759,7 @@ export async function commitChapterBridge(input: {
   endingStructure: string
   expectedChapterRevision?: number
   expectedContentHash?: string
+  retainedFindings?: import('./chapter-review-guard.js').RetainedChapterReviewDecision[]
   requireQuality?: boolean
   qualityReportId?: string
 }, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number; retainedIssueCount: number }> {
@@ -804,26 +805,37 @@ export async function commitChapterBridge(input: {
   }
   const orderedScenes = [...compilation.sceneTasks].sort((a, b) => a.ordinal - b.ordinal)
   const probeRunId = input.runId ?? compilation.runId
-  const { readChapterReviewReadiness, readCurrentCompilerContinuity, terminalReviewStateHash } = await import('./chapter-review-guard.js')
+  const { readChapterReviewReadiness, readCurrentCompilerContinuity, terminalReviewStateHash, recordChapterReviewDecisions, chapterReviewDecisionGuidance, lockChapterReviewDecisions } = await import('./chapter-review-guard.js')
   const currentContinuityReview = readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, source)
-  const readiness = probeRunId ? await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id) : null
+  let readiness = probeRunId ? await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id) : null
+  if (readiness?.qualityReportId) {
+    await lockChapterReviewDecisions(db, readiness.qualityReportId)
+    readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId! }, compilation.id)
+  }
   if (readiness && !readiness.ready) {
     const required = readiness.requiredTools[0]!
     throw new DataAccessError(409, required.name === 'continuity_validate' ? 'CONTINUITY_CHECK_REQUIRED' : 'QUALITY_CHECK_REQUIRED',
       `当前 r${chapter.revision} 缺少完整且匹配的${required.name === 'continuity_validate' ? '连续性' : '质量'}检查（${required.name === 'continuity_validate' ? readiness.continuity : readiness.quality}）。保留正文；先调用 ${required.name}，compilationId=${compilation.id}，再重新核验交付，不能沿用旧报告或把失败当作通过。`)
   }
+  if (input.retainedFindings?.length) {
+    if (!probeRunId || !readiness) throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '当前任务没有可核验的章节检查记录，未保存留置。')
+    await recordChapterReviewDecisions(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, readiness, input.retainedFindings)
+    readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id)
+
+  }
   // Manual/legacy tasks retain optional checks. Writing delivery requirements
   // come exclusively from the authenticated original contract, never tool flags.
   const continuityErrorCount = readiness?.continuityErrorCount ?? currentContinuityReview.assessment?.errorCount ?? 0
-  const report = await db.chapterQualityReport.findFirst({ where: { userId: input.userId, novelId: input.novelId, compilationId: compilation.id,
-    chapterId: compilation.chapter.id, chapterRevision: chapter.revision }, include: { findings: true }, orderBy: { createdAt: 'desc' } })
+  const report = readiness?.qualityReportId ? await db.chapterQualityReport.findUnique({ where: { id: readiness.qualityReportId }, include: { findings: true } })
+    : readiness ? null : await db.chapterQualityReport.findFirst({ where: { userId: input.userId, novelId: input.novelId, compilationId: compilation.id,
+      chapterId: compilation.chapter.id, chapterRevision: chapter.revision }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
   const qualityErrorCount = readiness?.qualityErrorCount ?? (report && qualityReportMatchesContent(report, chapter.revision, chapter.content)
     ? report.findings.filter(finding => finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0)
   let retainedIssueCount = report?.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length ?? 0
   const { hasPendingChapterReviewDecision } = await import('./chapter-review-guard.js')
   if (readiness ? hasPendingChapterReviewDecision(readiness) : continuityErrorCount > 0 || qualityErrorCount > 0) {
-    throw new DataAccessError(409, continuityErrorCount > 0 ? 'CONTINUITY_ERRORS_REMAIN' : 'QUALITY_CHECK_REQUIRED',
-      '当前检查意见尚未处理：依据当前正文精确修订，或逐项引用当前报告并说明具体留置原因。自动修订已尝试不表示意见已应用；修改后复核最终版本再提交。')
+    throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', readiness ? chapterReviewDecisionGuidance(readiness)
+      : '当前检查意见尚未处理；请核对当前报告，明确修订或逐项留置。')
   }
   if (continuityErrorCount > 0 || qualityErrorCount > 0) {
     retainedIssueCount = continuityErrorCount + (report?.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length ?? qualityErrorCount)

@@ -20,6 +20,7 @@ export function toolFailureRecovery(code: string): { label: string; guidance: st
     COMPILATION_IDENTITY_MISMATCH: { label: '章节编译身份不匹配', guidance: '本次操作未执行。显式编号不会被自动替换；核对本任务已保存的真实编译状态，使用返回的编译编号继续该目标的缺失步骤，不能借旧章或其他任务完成当前任务。' },
     COMPILATION_NOT_WRITTEN: { label: '本任务章节正文尚未保存', guidance: '准备和场景计划不等于正文。保留当前编译与场景，按冻结目标创建或复用已绑定章节，然后写入非空正文，再完成当前版本的必要检查和终态提交。' },
     REVIEW_MERGED_REVISION_REQUIRED: { label: '修订依据需要核对', guidance: '本次修改被拒绝，未写入。按具体拒绝原因核对当前报告绑定和留置意见；quality findingId 必须使用报告返回的真实编号，不能用序号代替。普通正文编辑可在原授权范围内分步调用 chapter_edit_range 或 chapter_write，批量合并只是建议；不要只换工具或重复读取相同正文来重试同一拒绝，也不能把保存修订当作新版检查通过。' },
+    REVIEW_DECISION_REQUIRED: { label: '检查意见需要明确处理', guidance: '检查完成与意见处置是两个状态。按提交结果给出的当前引用逐项处理；不能安全修改的意见直接在 chapter_bridge_commit 的 retainedFindings 中填写 source、reportId、真实 findingId 和具体保留理由。chapter_bridge_get 可读取待处理引用；quality findingId 不能用序号代替。正文不变且检查仍匹配时无需再次检查；只有实际改稿才复核最终版本。保留理由不表示修复或检查通过。' },
     REVIEW_REPAIR_RECHECK_REQUIRED: { label: '需要复核当前版本', guidance: '已保存正文保留，旧报告不能认证新版。普通编辑可在原授权范围内继续，提交前在既有检查次数内复核最终正文；检查次数用尽时如实说明当前版本尚未完成检查，不要重置次数、重绑旧报告或反复调用已耗尽的检查。' },
     CHAPTER_ANCHOR_CONFLICT: { label: '正文片段需要重新定位', guidance: '查看错误给出的失败片段序号。仅对本次原目标调用 chapter_read，逐字使用当前版本中的唯一连续原文；段落换行可确定定位，其他文字必须一致。纠正失败片段后可继续提交，不能重复相同坏参数；必要时在原正文写入授权和当前版本内提交完整修订。不要猜测其他章节 ID、替换到其他章节或照旧报告强行写入。' },
     TODO_CHANGE_REASON_REQUIRED: { label: '待办需要保留原项目身份', guidance: '读取当前清单，更新时保留原 id。确有新增的原授权工作请给出 changeReason，不重建整张清单或扩大章节范围。' },

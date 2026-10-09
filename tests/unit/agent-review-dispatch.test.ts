@@ -59,6 +59,7 @@ describe('server review fallback', () => {
     const key = nextMergedReviewReminder(state, writers, new Set(), true)!
     expect(key).toBe('compile:chapter:4:merged')
     expect(nextMergedReviewReminder(state, writers, new Set([key]), true)).toBeNull()
+    expect(nextMergedReviewReminder(state, new Set(['chapter_bridge_commit']), new Set(), true)).toBe(key)
     expect(nextMergedReviewReminder({ ...state, revision: 5 }, writers, new Set([key]), true)).toBe('compile:chapter:5:merged')
     expect(nextReviewDispatch(state, available, new Set()).kind).toBe('ready')
   })

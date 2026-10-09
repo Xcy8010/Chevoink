@@ -1,6 +1,6 @@
 import { z } from 'zod'
 export const retainedFindingSchema = z.object({ source: z.enum(['continuity', 'quality']), reportId: z.string().min(1), findingId: z.string().min(1), reason: z.string().trim().min(1).max(1000) }).strict()
-const retainedFindings = z.array(retainedFindingSchema).max(40).optional().describe('不能安全改动的当前意见逐项留置：continuity 的 reportId 使用工具给出的检查绑定，findingId 为从0开始的索引；quality 使用当前报告ID与意见ID。必须写明具体安全原因，留置不表示问题已修复')
+export const retainedFindings = z.array(retainedFindingSchema).max(40).optional().describe('不能安全改动的当前意见逐项留置：continuity 的 reportId 使用工具给出的检查绑定，findingId 为从0开始的索引；quality 使用当前报告ID与意见ID。必须写明具体安全原因，留置不表示问题已修复')
 
 export const chapterWriteArguments = z.object({
   chapterId: z.string().optional().describe('目标章节 ID；缺省时默认写入最近操作/当前正在编辑的章节'),

@@ -55,6 +55,13 @@ describe('frozen new-chapter input recovery', () => {
 })
 
 describe('chapter authority failure feedback', () => {
+  it('routes a completed-check decision to commit with exact references instead of another critic', () => {
+    const recovery = toolFailureRecovery('REVIEW_DECISION_REQUIRED')!
+    expect(recovery.guidance).toContain('chapter_bridge_commit')
+    expect(recovery.guidance).toContain('retainedFindings')
+    expect(recovery.guidance).toContain('无需再次检查')
+    expect(recovery.guidance).not.toContain('先完成当前正文的 quality_analyze')
+  })
   it('does not misdiagnose rejected edits as no-ops or force a full-write workaround', () => {
     const recovery = toolFailureRecovery('REVIEW_MERGED_REVISION_REQUIRED')!
     expect(recovery.guidance).toContain('本次修改被拒绝，未写入')

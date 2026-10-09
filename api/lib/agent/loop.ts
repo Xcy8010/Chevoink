@@ -60,7 +60,7 @@ import { toolFailureRecovery, toolRecoveryKey } from './tool-failure-recovery.js
 import { frozenWritingToolGuidance } from './writing-tool-guidance.js'
 import { findToolRestriction, isLocalToolFailure, isInputScopedFailure, restoreToolRestriction, toolFailureInputHash, toolRestrictionTarget, type ToolRestriction } from './tool-local-failure.js'
 import { assertLimitedWritingDelivery, type LimitedWritingDelivery } from './writing-delivery-limitations.js'
-import { readChapterReviewReadiness, hasPendingChapterReviewDecision } from './chapter-review-guard.js'
+import { readChapterReviewReadiness, hasPendingChapterReviewDecision, chapterReviewDecisionGuidance, type ChapterReviewReadiness } from './chapter-review-guard.js'
 import { nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from './review-dispatch.js'
 import { readQualityFormatRecovery, type QualityFormatRecovery } from './quality-format-recovery.js'
 import { deferredToolPart } from './deferred-tool.js'
@@ -1119,12 +1119,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         taskSpec: taskSpec as unknown as object, usage: { ...usage, checkpoint: checkpointSnapshot() },
       } })
     } else await persistCheckpoint()
+    const currentReviewState: { value: ChapterReviewReadiness | null } = { value: null }
     const observePersistedReviewProgress = async () => {
       if (pendingReviews.size || !['write', 'revise'].includes(taskSpec.intent)
         || ['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')) return false
       try {
         const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
           { userId: params.userId, novelId: params.novelId, runId }))
+        currentReviewState.value = review
         return observeChapterReviewProgress(progressSignatures, review?.progressEvidence,
           { userId: params.userId, novelId: params.novelId, expectedOriginalTaskId: taskSpec.id, taskSpec })
       } catch (error) {
@@ -1513,6 +1515,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     if (continuingTask) messages.push({ role: 'user', content: `[系统] 恢复指定任务 ${taskSpec.id}，不是恢复整个会话的历史工作。原目标：${taskSpec.goals.join('；')}。\n${renderTodoItems(todoItems)}\n历史中其他任务的并行窗口、待办与一次性指令不构成本任务的授权；禁止重新启动它们。被停止时生成但未成功执行的工具不是已保存成果。先核对本任务已保存进度，执行剩余工作。仅尚有多个独立执行单元的长任务或复杂任务需要建立待办；没有清单不是未完成的证据，确已完成时直接交付，禁止在结尾补造已完成清单、提交空清单或覆盖历史待办。不得仅回复下一步打算就结束，也不得将未完成项标为已完成。` })
     const frozenWritingHint = frozenWritingToolGuidance('story_compiler_prepare', taskSpec.scope)
     if (frozenWritingHint) messages.push({ role: 'user', content: `[系统·本任务冻结目标] ${frozenWritingHint}` })
+    const currentChapterReview = currentReviewState.value
+    if (continuingTask && currentChapterReview?.ready && hasPendingChapterReviewDecision(currentChapterReview)) {
+      messages.push({ role: 'user', content: `[系统·本次只读核对] compilationId=${currentChapterReview.compilationId}。${chapterReviewDecisionGuidance(currentChapterReview)} 此状态提示不新增权限、不重置预算，也不代表意见已处理或任务完成。` })
+    }
     let consecutiveStructureFailures = 0
     // A4：长上下文提醒消息（单实例，每轮移除后重新追加到队尾，保证只存在一条且最靠近当前轮）
     const contextReminder: ChatMessage = {
@@ -1772,7 +1778,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             automaticReviewAttempts.add(key)
             await persistCheckpoint()
             automaticReviewTriggered = true
-            mergedReviewReminder = `[系统/只读状态] 当前 compilationId=${readiness.compilationId}、chapterId=${readiness.chapterId}、r${readiness.revision} 的检查已完成，仍有原授权范围内的意见待处理。核对当前正文和两类报告${readiness.qualityReportId ? `（质量报告 ${readiness.qualityReportId}）` : ''}；优先合并安全的事实与审美修改，也可分步调用 chapter_edit_range 或 chapter_write，不限一次调用。不能仅替换同义词后声称全部完成；不能安全修改的候选可用 retainedFindings 绑定原意见并写明具体原因，也可明确留置全部意见。普通编辑不增加付费自动修订额度；新的检查照实累计调用与消费，不重放未知请求或改变原范围。完成实际修改后复核最终版本，再提交终态。`
+            mergedReviewReminder = `[系统/只读状态] 当前 compilationId=${readiness.compilationId}、chapterId=${readiness.chapterId}、r${readiness.revision} 的检查已完成，仍有原授权范围内的意见待处理。核对当前正文和两类报告${readiness.qualityReportId ? `（质量报告 ${readiness.qualityReportId}）` : ''}；优先合并安全的事实与审美修改，也可分步调用 chapter_edit_range 或 chapter_write，不限一次调用。不能安全修改的候选，可直接调用 chapter_bridge_commit 并传 retainedFindings，逐项使用当前报告的 source、reportId、findingId 与具体保留原因；quality findingId 使用真实意见ID，不能用序号或把意见ID填为reportId。chapter_bridge_get 可读取准确的待处理引用。没有实际修改正文时，意见留置与终态提交同次完成，不需要重新检查。实际修改后复核最终版本再提交。普通编辑不增加付费自动修订额度，不重放未知请求或改变原范围。`
           }
         }
       }
@@ -2038,6 +2044,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               messages.push({ role: 'tool', toolCallId: call.id, content: `[系统] ${next.reason} 当前章节暂未提交；继续其余独立工作。` })
               continue
             } else if (readiness?.ready && call.name === 'chapter_bridge_commit'
+              && !(Array.isArray(parsed.retainedFindings) && parsed.retainedFindings.length > 0)
               && toolContext.sandboxMode !== 'read_only' && !toolContext.inlineChild
               && !toolContext.protectedChapterIds?.has(readiness.chapterId)
               && (readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)) {

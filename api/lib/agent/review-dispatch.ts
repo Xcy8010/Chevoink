@@ -12,7 +12,7 @@ export function nextMergedReviewReminder(readiness: ChapterReviewReadiness | nul
   available: ReadonlySet<string>, attempted: ReadonlySet<string>, channelOpen: boolean): string | null {
   if (!readiness?.ready || !readiness.checksRequired || !channelOpen
     || !(readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)
-    || !['chapter_edit_range', 'chapter_write'].some(name => available.has(name))) return null
+    || !['chapter_edit_range', 'chapter_write', 'chapter_bridge_commit'].some(name => available.has(name))) return null
   const key = reviewDispatchKey(readiness, 'merged')
   return attempted.has(key) ? null : key
 }

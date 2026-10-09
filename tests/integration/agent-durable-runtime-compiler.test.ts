@@ -207,7 +207,7 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
 })
 
 describe.runIf(available)('durable compiler dispatch', () => {
-  it.each(['chain', 'resume', 'prepare-gap', 'scene-gap', 'replay', 'stale', 'foreign', 'missing', 'approval-denied', 'commit', 'commit-gap', 'commit-no-quality', 'commit-stale'] as const)('%s preserves compilation identity and atomic effects', async scenario => {
+  it.each(['chain', 'resume', 'prepare-gap', 'scene-gap', 'replay', 'stale', 'foreign', 'missing', 'approval-denied', 'commit', 'commit-gap', 'commit-no-quality', 'commit-stale', 'commit-retain'] as const)('%s preserves compilation identity and atomic effects', async scenario => {
     await (scenario === 'chain' ? writingFixture : fixture)(async f => {
       vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
       let lease = await claim(f)
@@ -225,13 +225,14 @@ describe.runIf(available)('durable compiler dispatch', () => {
       const sceneArgs = { ...(foreignId ? { compilationId: foreignId } : {}), tasks: [{ purpose: '推进场景', entryState: state, goal: '寻找线索', obstacle: '门已上锁', choice: '绕路', cost: '耗费时间', turn: '发现脚印', exitState: state,
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] }
       const tools = [storyCompilerPrepareTool, sceneTaskBuildTool, chapterBridgeGetTool, chapterReadTool, chapterWriteTool, chapterBridgeCommitTool]
+      const retained = [{ source: 'quality', reportId: randomUUID(), findingId: randomUUID(), reason: '保留当前停顿，不增加无依据动作。' }]
       const calls = [...(scenario === 'missing' ? [] : [{ id: 'prepare', name: 'story_compiler_prepare', arguments: JSON.stringify(prepareArgs) }]),
         { id: 'scene', name: 'scene_task_build', arguments: JSON.stringify(sceneArgs) },
         { id: 'bridge', name: 'chapter_bridge_get', arguments: '{}' },
         ...(scenario === 'stale' ? [{ id: 'scene-after-read', name: 'scene_task_build', arguments: JSON.stringify(sceneArgs) }] : []),
         { id: 'read', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
         { id: 'write', name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content: '他绕过锁门，在墙根发现了脚印。' }) },
-        ...(scenario.startsWith('commit') ? [{ id: 'refresh', name: 'chapter_bridge_get', arguments: '{}' }, { id: 'commit', name: 'chapter_bridge_commit', arguments: '{}' }, { id: 'commit-again', name: 'chapter_bridge_commit', arguments: '{}' }] : [])]
+        ...(scenario.startsWith('commit') ? [{ id: 'refresh', name: 'chapter_bridge_get', arguments: '{}' }, { id: 'commit', name: 'chapter_bridge_commit', arguments: scenario === 'commit-retain' ? JSON.stringify({ retainedFindings: JSON.stringify(retained) }) : '{}' }, { id: 'commit-again', name: 'chapter_bridge_commit', arguments: scenario === 'commit-retain' ? JSON.stringify({ retainedFindings: retained }) : '{}' }] : [])]
       const initialized = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
         tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
@@ -322,6 +323,13 @@ describe.runIf(available)('durable compiler dispatch', () => {
         await validateStoryContinuity({ ...f, compilationId: id, findings: [], expectedChapterRevision: 2, independentCheck: 'complete' })
         if (scenario !== 'commit-no-quality') await persistHumanityQualityReport({ ...f, compilationId: id, chapterRevision: 2,
           mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
+        if (scenario === 'commit-retain') {
+          const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { compilationId: id }, orderBy: { createdAt: 'desc' } })
+          await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { id: retained[0].reportId } })
+          await prisma.qualityFinding.create({ data: { id: retained[0].findingId, reportId: retained[0].reportId, userId: f.userId, novelId: f.novelId,
+            source: 'critic', signal: 'emotion_grounding', severity: 'advisory', startOffset: 0, endOffset: 2,
+            evidenceExcerpt: '他绕', evidenceHash: 'a'.repeat(64), explanation: '审美建议', suggestion: '增加动作', confidence: 0.9 } })
+        }
         await step() // Save the validated compilation observation before COMMIT.
         if (scenario === 'commit-stale') await prisma.storyCompilation.update({ where: { id }, data: { preparedContext: { changed: true } } })
         if (scenario === 'commit-gap') {
@@ -342,6 +350,11 @@ describe.runIf(available)('durable compiler dispatch', () => {
           }
         } else {
           expect(committed).toMatchObject({ kind: 'tool', result: { summary: '提交章节桥与当前故事终态' } })
+          if (scenario === 'commit-retain') {
+            const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' }, orderBy: { createdAt: 'desc' } })
+            expect(operation.inputSnapshot).toMatchObject({ input: { args: { retainedFindings: retained } } })
+            expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id } })).validation).toMatchObject({ retainedReviewDecision: { findings: retained } })
+          }
           const count = await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })
           expect(count).toBe(2)
           expect(await step()).toMatchObject({ kind: 'tool', result: { summary: '提交章节桥与当前故事终态' } })

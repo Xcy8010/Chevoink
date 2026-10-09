@@ -1042,6 +1042,47 @@ describe('server assessment fallback in the real execution loop', () => {
         'review-retired:author-continue:stop:cancelled-check' ]) } })
     }
   })
+  it.each(['direct', 'after-read'] as const)('commits explicit current opinion decisions %s without replacing them or repeating a critic on resume', async path => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const retained = [{ source: 'quality' as const, reportId: 'report', findingId: 'actual-finding', reason: '保留人物紧张时的短句节奏，改写会损害当前场景。' }]
+    let state = { ...readiness('complete', 'complete', 23), qualityCandidateCount: 1, decisionPending: true,
+      requiredDecisions: retained, retainedDecisions: [] }
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const reader = tool('chapter_bridge_get', async () => ({ output: `检查已完成；待处理引用 ${JSON.stringify(retained)}` }))
+    const critic = tool('quality_analyze', async () => ({ output: '不应重复请求' }))
+    const continuity = tool('continuity_validate', async () => ({ output: '不应重复请求' }))
+    const commit = { ...tool('chapter_bridge_commit', async () => {
+      state = { ...state, decisionPending: false }
+      mocks.committedChapter.mockResolvedValue(true)
+      return { output: '留置原因已记录，章节终态已提交', requiredResult: { targetId: 'c', contentHash: 'a'.repeat(64) } }
+    }, false), parameters: z.object({ compilationId: z.string(), retainedFindings: z.array(z.object({
+      source: z.literal('quality'), reportId: z.string(), findingId: z.string(), reason: z.string(),
+    })).optional() }) }
+    mocks.tools = [reader, critic, continuity, commit]
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: path === 'direct' ? 4 : 2, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 20, writeBaseline: 0, readProgress: 7, readBaseline: 0, progressSignatures: [] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 59, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 678608, completionTokens: 0, totalTokens: 678608, checkpoint } })
+    const explicitCommit = call('retain-commit', commit.name, JSON.stringify({ compilationId: 'comp', retainedFindings: retained }))
+    mocks.chat.mockImplementationOnce(async input => {
+      expect(input.messages.some(message => typeof message.content === 'string' && message.content.includes('精确参数模板')
+        && message.content.includes('actual-finding'))).toBe(true)
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: path === 'direct' ? 4 : 2, tokenBudget: 500, maxTurns: 1 } })
+      return response('', [path === 'direct' ? explicitCommit : call('early', commit.name, '{"compilationId":"comp"}')])
+    })
+    if (path === 'after-read') queue(response('', [explicitCommit]))
+    queue(response('已保存。'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+    expect(reader.execute).toHaveBeenCalledTimes(path === 'after-read' ? 1 : 0)
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(commit.execute).toHaveBeenCalledWith(expect.anything(), { compilationId: 'comp', retainedFindings: retained })
+    expect(critic.execute).not.toHaveBeenCalled()
+    expect(continuity.execute).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { tokenBudget: 500, maxTurns: 1, writeProgress: 21, resumeCount: 0 } })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
   it('inherits unresolved review evidence on a typed continuation without a fresh budget or paid turn', async () => {
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing'))
     const critic = tool('quality_analyze', async () => { throw new DataAccessError(502, 'AI_PROVIDER_TRANSPORT', 'unknown') })

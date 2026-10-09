@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '../../api/lib/prisma.js'
 import { DataAccessError } from '../../api/lib/prisma.js'
+import * as readiness from '../../api/lib/agent/chapter-review-guard.js'
 import * as compiler from '../../api/lib/agent/story-compiler.js'
 import * as quality from '../../api/lib/agent/humanity-quality.js'
 import * as review from '../../api/lib/agent/review-completion.js'
@@ -119,6 +120,9 @@ describe('严谨创作落实连续性警告', () => {
     const report = { id: 'report', userId: f.ctx.userId, novelId: f.ctx.novelId, chapterId: f.chapter.id, chapterRevision: scenario === 'stale' ? 0 : 1,
       status: scenario === 'failed' ? 'failed' : 'passed', deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(f.chapter.content).digest('hex') },
       findings: [{ id: 'candidate', severity: 'warning', disposition: 'pending', authorFeedback: null, evidenceExcerpt: '原文', explanation: '需要澄清真实动作', suggestion: '按作者授权处理' }] }
+    vi.spyOn(readiness, 'readChapterReviewReadiness').mockResolvedValue({ ready: scenario === 'current', revision: 1,
+      continuity: 'complete', quality: scenario === 'current' ? 'complete' : 'incomplete', qualityReportId: scenario === 'current' ? report.id : null } as never)
+    vi.spyOn(prisma.chapterQualityReport, 'findUnique').mockResolvedValue(report as never)
     Object.assign(f.compilation, { qualityReports: [report] })
     const result = await chapterBridgeGetTool.execute(f.ctx, { compilationId: f.compilation.id })
     expect(result.output).toContain('reportId=report')

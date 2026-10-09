@@ -35,7 +35,7 @@ function fixture(prompt = '写下一章') {
     chapter: { findFirst: vi.fn().mockResolvedValue(chapter), update: vi.fn() },
     storyCompilation: { findFirst: vi.fn().mockResolvedValue(compilation), findMany: vi.fn().mockResolvedValue([compilation]),
       update: vi.fn(async ({ data }) => Object.assign(compilation, data)) },
-    chapterQualityReport: { findFirst: vi.fn().mockResolvedValue(report), findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
+    chapterQualityReport: { findUnique: vi.fn().mockResolvedValue(report), findFirst: vi.fn().mockResolvedValue(report), findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
     chapterBridge: { update: vi.fn(async ({ data }) => Object.assign(bridge, data)) },
     sceneTask: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
   }
@@ -166,7 +166,7 @@ describe('persisted current review readiness', () => {
     Object.assign(f.compilation.validation, { errorCount: 1, findings: [{ signal: 'object', severity: 'error', evidence: '同一物件状态仍冲突', suggestion: '交作者确认' }],
       newDraftRevision: { version: 1, taskId: f.task.id, chapterId: f.chapter.id, compilationId: f.compilation.id, checkedRevision: 2 } })
     vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'candidate' } as never)
-    await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
+    await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'REVIEW_DECISION_REQUIRED' })
     expect(memory.saveStoryMemory).not.toHaveBeenCalled()
     expect(f.bridge.committedAt).toBeNull()
     expect(f.compilation.validation).toMatchObject({ independentCheck: 'complete', errorCount: 1, checkRounds: 1,
