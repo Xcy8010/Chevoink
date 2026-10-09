@@ -458,7 +458,7 @@ export const qualityReportGetTool = defineTool({
     const readiness = await readChapterReviewReadiness(ctx.transaction ?? prisma, ctx, report.compilationId ?? undefined)
     const reviewDecisionFeedback = readiness?.qualityReportId === report.id
       && readiness.decisionFeedbackSnapshotHash === qualityDecisionSnapshotHash(report.findings) ? readiness.decisionFeedback : undefined
-    return { output: `当前质量报告 reportId=${report.id}，r${report.chapterRevision}；留置 source=quality，findingId 使用对应意见ID。\n${report.findings.map((finding) => `[${finding.id}/${findingLabel(finding.signal)}/${finding.disposition}] 「${finding.evidenceExcerpt}」→${finding.suggestion}`).join('\n') || '报告没有 finding。'}${reviewDecisionFeedback ? `\n${chapterReviewDecisionGuidance(readiness!)}` : ''}`, summary: '读取质量报告', display: reportDisplay(report), reviewDecisionFeedback }
+    return { output: `当前质量报告 reportId=${report.id}，r${report.chapterRevision}；留置 source=quality，findingId 使用对应意见ID。\n${report.findings.map((finding) => `[${finding.id}/${findingLabel(finding.signal)}/${finding.disposition}] 「${finding.evidenceExcerpt}」→${finding.suggestion}`).join('\n') || '报告没有 finding。'}${reviewDecisionFeedback ? `\n${chapterReviewDecisionGuidance(readiness!)}` : ''}`, summary: '读取质量报告', display: reportDisplay(report), ...(reviewDecisionFeedback ? { reviewDecisionFeedback } : {}) }
   },
 })
 
