@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ findModel: vi.fn(), create: vi.fn(), charge: vi.fn(), access: vi.fn(), update: vi.fn(), updateMany: vi.fn(), runtime: vi.fn(), imageCharge: vi.fn(), owner: vi.fn() }))
+const mocks = vi.hoisted(() => ({ findModel: vi.fn(), create: vi.fn(), charge: vi.fn(), access: vi.fn(), update: vi.fn(), updateMany: vi.fn(), runtime: vi.fn(), imageCharge: vi.fn(), owner: vi.fn(), findUsage: vi.fn() }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.access, consumeTokenCredits: mocks.charge, reserveTokenCredits: vi.fn(), consumeCredits: mocks.imageCharge, getModelTierRuntime: mocks.runtime,
   resolveCustomReasoningEffort: (effort: string, supported: string[]) => supported.includes(effort) ? effort : supported[0] }))
 vi.mock('../../api/lib/data-access.js', () => ({ ensureNovelOwner: mocks.owner, createCoverAssetsData: vi.fn() }))
-vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { agentModelAssignment: { findMany: vi.fn(async () => []) }, aiModelConfig: { findFirst: mocks.findModel }, aiUsageLog: { create: mocks.create, findUnique: vi.fn(async () => null), update: mocks.update, updateMany: mocks.updateMany } } }))
+vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { agentGoalUsage: { findUnique: vi.fn(async () => null) }, agentModelAssignment: { findMany: vi.fn(async () => []) }, aiModelConfig: { findFirst: mocks.findModel }, aiUsageLog: { create: mocks.create, findUnique: mocks.findUsage, update: mocks.update, updateMany: mocks.updateMany } } }))
 vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: (value: string) => value, encryptSecret: (value: string) => value }))
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
   resolveTokenPrice: async (modelTier: string, multiplierBps: number) => ({ version: 'credits-v1-exact', modelTier, multiplierBps }) }))
@@ -12,9 +12,11 @@ import { chatWithTools, generateTextCompletion, generateCoverImageData } from '.
 import { env } from '../../api/config/env.js'
 import { TEXT_ACTION_TASKS, withModelAssignmentContext } from '../../api/lib/agent/model-assignment-context.js'
 import { generateReviewCompletion } from '../../api/lib/agent/review-completion.js'
+import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../../api/lib/text-request-trace.js'
 
 beforeEach(() => {
   mocks.findModel.mockReset().mockResolvedValue(null)
+  mocks.findUsage.mockReset().mockResolvedValue(null)
   mocks.imageCharge.mockReset()
   mocks.owner.mockReset().mockResolvedValue(undefined)
   mocks.create.mockReset().mockResolvedValue({ id: 'test-usage' })
@@ -92,7 +94,73 @@ describe('fixed non-thinking humanity quality policy after actual model resoluti
     expect(mocks.charge).not.toHaveBeenCalled()
   })
 
+  it.each([true, false])('only recovers a provider ceiling when final original fees are known=%s', async known => {
+    const trace = createTextRequestTrace()
+    let created = 0
+    mocks.create.mockImplementation(async () => ({ id: `request-${++created}` }))
+    mocks.findUsage.mockImplementation(async () => known
+      ? { usageSource: 'reported', billingStatus: 'exempt', requestTokens: 100, responseTokens: 20, reservedCreditMilli: 0 }
+      : { usageSource: 'unknown', billingStatus: 'pending_usage', requestTokens: null, responseTokens: null, reservedCreditMilli: 0 })
+    const fetcher = vi.fn().mockImplementationOnce(async () => qualityResponse('length')).mockImplementationOnce(async () => qualityResponse())
+    vi.stubGlobal('fetch', fetcher)
+    const result = withTextRequestTrace(trace, () => generateReviewCompletion('rules', 'complete manuscript', {
+      userId: 'test', action: 'agent3HumanityCritic', modelRuntime: qualityRuntime(), explicitModelSelection: true,
+    }))
+    if (known) await expect(result).resolves.toBe('{"findings":[]}')
+    else await expect(result).rejects.toMatchObject({ code: 'AI_PROVIDER_OUTPUT_LIMIT' })
+    expect(fetcher).toHaveBeenCalledTimes(known ? 2 : 1)
+    expect(trace.records.map(row => row.usageId)).toEqual(known ? ['request-1', 'request-2'] : ['request-1'])
+    expect(textRequestsFinished(trace)).toBe(known)
+    if (known) expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body)).messages[0].content).toContain('响应恢复')
+  })
+  it.each(['settled', 'pending_settlement', 'already_settled'] as const)('settles a truncated SSE original by its existing ID: %s', async disposition => {
+    const rows = new Map<string, Record<string, unknown>>()
+    let sequence = 0
+    mocks.create.mockImplementation(async ({ data }) => {
+      const row = { ...data, id: `stream-${++sequence}`, reservedCreditMilli: 200 }
+      rows.set(row.id, row)
+      return row
+    })
+    mocks.findUsage.mockImplementation(async ({ where }) => rows.get(where.id))
+    mocks.update.mockImplementation(async ({ where, data }) => {
+      const row = rows.get(where.id)!
+      Object.assign(row, data)
+      return row
+    })
+    mocks.updateMany.mockImplementation(async ({ where, data }) => {
+      const row = rows.get(where.id)!
+      const status = where.billingStatus
+      if (status && !(typeof status === 'string' ? row.billingStatus === status : status.in.includes(row.billingStatus))) return { count: 0 }
+      Object.assign(row, data)
+      if (disposition === 'already_settled' && data.usageSource === 'reported') Object.assign(row, { billingStatus: 'settled', reservedCreditMilli: 0 })
+      return { count: 1 }
+    })
+    mocks.charge.mockImplementation(async ({ usageLogId }) => {
+      if (disposition === 'pending_settlement') throw new Error('wallet unavailable')
+      Object.assign(rows.get(usageLogId)!, { billingStatus: 'settled', reservedCreditMilli: 0 })
+      return { chargedMilli: 200, remainingMilli: 1000, exhausted: false }
+    })
+    const frames = `data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[' }, finish_reason: 'length' }] })}\n\ndata: ${JSON.stringify({ usage: { prompt_tokens: 100, completion_tokens: 20, prompt_cache_hit_tokens: 60, prompt_cache_miss_tokens: 40 }, choices: [] })}\n\n`
+    const fetcher = vi.fn().mockImplementationOnce(async () => new Response(frames, { headers: { 'content-type': 'text/event-stream' } }))
+      .mockImplementationOnce(async () => qualityResponse())
+    vi.stubGlobal('fetch', fetcher)
+    const trace = createTextRequestTrace()
+    const request = withTextRequestTrace(trace, () => generateReviewCompletion('rules', 'whole chapter', { userId: 'test', action: 'agent3HumanityCritic',
+      explicitModelSelection: true, modelRuntime: qualityRuntime({ tier: 'speed', provider: 'Ant Ling', modelName: 'Ling-3.0-flash',
+        baseUrl: 'https://api.ant-ling.com/v1', reasoningParameterMode: undefined, thinkingEnabled: undefined, multiplierBps: 10000 }) }))
+    if (disposition === 'pending_settlement') await expect(request).rejects.toMatchObject({ code: 'AI_PROVIDER_OUTPUT_LIMIT' })
+    else await expect(request).resolves.toBe('{"findings":[]}')
+    expect(fetcher).toHaveBeenCalledTimes(disposition === 'pending_settlement' ? 1 : 2)
+    expect(rows.get('stream-1')).toMatchObject({ requestTokens: 100, responseTokens: 20, usageSource: 'reported',
+      promptCacheHitTokens: 60, promptCacheMissTokens: 40, billingStatus: disposition === 'pending_settlement' ? 'pending_settlement' : 'settled' })
+    const originalCharges = mocks.charge.mock.calls.filter(([input]) => input.usageLogId === 'stream-1')
+    expect(originalCharges).toHaveLength(disposition === 'already_settled' ? 0 : 1)
+    if (originalCharges.length) expect(originalCharges[0][0]).toMatchObject({ usageLogId: 'stream-1', requestTokens: 100, responseTokens: 20 })
+    expect(textRequestsFinished(trace)).toBe(disposition !== 'pending_settlement')
+    expect(rows.size).toBe(disposition === 'pending_settlement' ? 1 : 2)
+  })
   it('keeps the assigned quality model and fixed policy through the actual bounded output recovery', async () => {
+    mocks.findUsage.mockResolvedValue({ usageSource: 'reported', billingStatus: 'exempt', requestTokens: 100, responseTokens: 20, reservedCreditMilli: 0 })
     const selected = qualityRuntime({ tier: 'ultimate', provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1',
       reasoningParameterMode: undefined, thinkingEnabled: undefined, multiplierBps: 25000 })
     mocks.runtime.mockResolvedValue(selected)
@@ -108,7 +176,7 @@ describe('fixed non-thinking humanity quality policy after actual model resoluti
     for (const [index, call] of fetcher.mock.calls.entries()) {
       expect(call[0]).toBe('https://api.ant-ling.com/v1/chat/completions')
       expect(JSON.parse(String(call[1]?.body))).toMatchObject({ model: 'Ling-3.0-flash', thinking: { type: 'disabled' },
-        max_tokens: index === 0 ? 16384 : 32768, messages: [{ role: 'system', content: '固定审查规则' }, { role: 'user', content: '合成完整原文首尾' }] })
+        max_tokens: index === 0 ? 16384 : 32768, messages: [{ role: 'system', content: index === 0 ? '固定审查规则' : expect.stringContaining('响应恢复') }, { role: 'user', content: '合成完整原文首尾' }] })
       expect(JSON.parse(String(call[1]?.body))).not.toHaveProperty('reasoning_effort')
     }
     expect(mocks.create.mock.calls.map(([arg]) => arg.data.action)).toEqual(['agent3HumanityCritic', 'agent3HumanityCriticOutputRecovery'])

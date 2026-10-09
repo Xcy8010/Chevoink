@@ -106,7 +106,7 @@ export const continuityCriticSystem = `你是独立的中文小说连续性编�
 原始作者硬要求与已保存原文优先。章节桥是待核摘要，Scene Task 是生成草案，不能单凭计划偏离报 error，不得把作者硬要求降级成草案。warning与审美意见保留待审，不驱动自动改稿；修法困难不改变事实判定。
 完整读完再输出已确认结论。一个事实只报一次，不输出核查过程、“无互斥”推演或同一问题的不同说法。复检核对原问题是否已解决以及改动是否引入真实新冲突；不换角度反复追问已成立的事实。无问题返回 {"findings":[]}。
 每项必须用 sourceEvidence 标明两处逐字连续短引的来源 previous/current，不从旧报告复制引用。evidence 只用一句话说明冲突，suggestion 只给最小修法。signal 选 knowledge/location_time/body/object/relationship/emotion/hook/structure 之一，severity 选 error 或 warning，不把可选值串起来。
-只输出完整 JSON，不输出分析或 Markdown。合法结构示例：{"findings":[{"signal":"object","severity":"error","evidence":"同一枚钱币在同一时刻被描述为已售出和仍在手中。","suggestion":"根据真实事件统一钱币归属。","sourceEvidence":[{"source":"previous","quote":"前章逐字短引"},{"source":"current","quote":"本章逐字短引"}]}]}。示例不是实际意见，不得照抄。`
+只输出完整 JSON 对象，首字符是 {，禁止把整个对象编码成带外层引号的字符串，不输出分析或 Markdown。合法结构示例：{"findings":[{"signal":"object","severity":"error","evidence":"同一枚钱币在同一时刻被描述为已售出和仍在手中。","suggestion":"根据真实事件统一钱币归属。","sourceEvidence":[{"source":"previous","quote":"前章逐字短引"},{"source":"current","quote":"本章逐字短引"}]}]}。示例不是实际意见，不得照抄。`
 
 /** Revision-specific guidance is last, so unchanged facts/body prefixes remain cacheable. */
 export function continuityReviewTail(validation: unknown, revision: number, allowRepair: boolean, focus?: string) {

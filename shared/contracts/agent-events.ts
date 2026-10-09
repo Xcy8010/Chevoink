@@ -3,12 +3,12 @@ import type { AgentExecutionMode, EntityId } from './models.js'
 
 /** Server proof that a review request returned, even if its local report write failed.
  * This is not an assessment, manuscript progress or a chapter completion receipt. */
-export type AgentReviewRequestReceipt = { version: 1; chapterId: string; revision: number; contentHash: string }
+export type AgentReviewRequestReceipt = { version: 1; chapterId: string; revision: number; contentHash: string; usageIds?: string[] }
 export type AgentReviewFailureReconciliation = {
   status: 'terminal_failed_billing_known'
   sourceRunId: string
   sourceResultId: string
-  sourceReportId: string
+  sourceReportId: string | null
   usageIds: string[]
   admissionId: string
   currentRevision: number

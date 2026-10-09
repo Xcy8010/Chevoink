@@ -129,6 +129,23 @@ export async function readQualityFormatRecovery(tx: Prisma.TransactionClient, su
   return readRecovery(tx, subject, input.chapterId)
 }
 
+/** The loop has reconciled the complete failed paid chain under this new human
+ * admission. Start a fresh assessment; do not reuse or reset its old format claim. */
+export async function hasReconciledQualityRequest(tx: Prisma.TransactionClient, subject: Subject,
+  report: { id: string; chapterId: string; chapterRevision: number }) {
+  const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
+  if (!run) return false
+  const admission = await readQualityReviewAdmission(tx, run)
+  if (!admission) return false
+  const events = await tx.agentRunEvent.findMany({ where: { runId: subject.runId, type: 'review.reconciled', createdAt: { gte: admission.at } } })
+  return events.some(event => {
+    const payload = object(event.payload), receipt = object(payload.receipt)
+    return payload.chapterId === report.chapterId && payload.revision === report.chapterRevision
+      && receipt.status === 'terminal_failed_billing_known' && receipt.sourceReportId === report.id
+      && receipt.admissionId === admission.id && Array.isArray(receipt.usageIds) && receipt.usageIds.length > 0
+  })
+}
+
 /** Serialize the once-only claim before any new payment. Lost/unknown attempts
  * consume this reservation rather than being replayed on another invocation. */
 export async function claimQualityFormatRecovery(tx: Prisma.TransactionClient, subject: Subject,

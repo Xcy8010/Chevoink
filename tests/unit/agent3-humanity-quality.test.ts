@@ -185,7 +185,7 @@ describe('严谨创作自动落实质量建议', () => {
     vi.spyOn(humanityQuality, 'getQualityReport').mockImplementation(async () => report)
     vi.spyOn(humanityQuality, 'analyzeDeterministicQuality').mockReturnValue({ metrics: {}, findings: [] })
     vi.spyOn(humanityQuality, 'persistHumanityQualityReport').mockResolvedValue(report)
-    const critic = vi.spyOn(review, 'generateReviewCompletion').mockResolvedValue('{"findings":[]}')
+    const critic = vi.spyOn(review, 'generateReviewCompletion').mockImplementation(async (system, input, options) => options.action === 'agent3HumanityEvidenceCorrection' ? model(system, input, options) : '{"findings":[]}')
     vi.spyOn(auxiliaryRuntime, 'resolveDurableAuxiliaryRuntime').mockResolvedValue({ runtime: { tier: 'speed', provider: 'fixture', modelName: 'fixture',
       apiKey: 'fixture-only', reasoningEffort: 'low', multiplierBps: 10000, visionEnabled: false, contextWindowTokens: null },
       selection: { tier: 'speed', customModelId: null, reasoningEffort: 'low' } })
@@ -248,12 +248,12 @@ describe('严谨创作自动落实质量建议', () => {
     const interruption = new Error('stream interrupted after partial evidence')
     if (scenario === 'not-returned') f.critic.mockRejectedValue(interruption)
     if (scenario === 'correction-interrupted') {
-      f.critic.mockResolvedValue(JSON.stringify({ findings: [{ sourceId: 'foreign', signal: 'emotion_grounding', severity: 'advisory',
+      f.critic.mockResolvedValueOnce(JSON.stringify({ findings: [{ sourceId: 'foreign', signal: 'emotion_grounding', severity: 'advisory',
         quote: '证据0。', explanation: '具体动作', suggestion: '保留', confidence: 0.8 }] }))
       f.model.mockRejectedValue(interruption)
     }
     await expect(qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })).rejects.toBe(scenario === 'correction-interrupted' ? interruption : error)
-    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.critic).toHaveBeenCalledTimes(scenario === 'correction-interrupted' ? 2 : 1)
     expect(f.write).not.toHaveBeenCalled()
   })
   it.each(['noise', 'ambiguous', 'foreign-source'] as const)('legacy critic %s keeps all judgments and only corrects invalid references', async scenario => {
@@ -263,7 +263,7 @@ describe('严谨创作自动落实质量建议', () => {
     const raw = scenario === 'noise' ? '参考 {"note":"not a report"}\n```json\n{"findings":[]}\n```\n{"note":"end"}'
       : scenario === 'ambiguous' ? '{"findings":[]}\n{"findings":[]}'
         : JSON.stringify({ findings: [valid, { ...valid, sourceId: 'foreign' }] })
-    f.critic.mockResolvedValue(raw)
+    f.critic.mockResolvedValueOnce(raw)
     if (scenario !== 'noise') f.report.status = 'failed'
     const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(humanityQuality.persistHumanityQualityReport).toHaveBeenCalledWith(expect.objectContaining({
@@ -273,7 +273,7 @@ describe('严谨创作自动落实质量建议', () => {
         classification: scenario === 'noise' ? 'complete' : scenario === 'ambiguous' ? 'ambiguous_envelope' : 'source_invalid' }),
     }))
     if (scenario !== 'noise') expect(result).toMatchObject({ outcome: 'failed', failureCode: scenario === 'foreign-source' ? 'QUALITY_EVIDENCE_UNLOCATED' : 'QUALITY_REPORT_INCOMPLETE' })
-    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.critic).toHaveBeenCalledTimes(scenario === 'foreign-source' ? 2 : 1)
     if (scenario === 'foreign-source') {
       expect(f.model).toHaveBeenCalledOnce()
       expect(f.model.mock.calls[0][2]).toMatchObject({ action: 'agent3HumanityEvidenceCorrection', explicitModelSelection: true })

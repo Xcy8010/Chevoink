@@ -2,7 +2,9 @@ import { readSettledQualityReviews } from './quality-review-admission.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
-import { randomUUID } from 'node:crypto'
+import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
+import { readReviewRequestRecovery } from './review-request-recovery.js'
+import { createHash, randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
 
@@ -400,9 +402,14 @@ export async function handleToolCall(
 
   bus.emit({ type: 'tool.call', messageId, callId: call.id, toolName: call.name, title: basePart.title, args: parsedArgs, autoApproved, ...subagentMark })
 
+  const requestTrace = createTextRequestTrace()
+  let reviewSnapshot: { chapterId: string; revision: number; contentHash: string } | undefined
   let failureCode: string | undefined
   let invalidFields: string[] | undefined
   const fail = (summary: string, observation: string, status: 'failed' | 'denied', reviewRequestFinished?: ToolCallOutcome['reviewRequestFinished']): ToolCallOutcome => {
+    if (requestTrace.records.length) reviewRequestFinished = reviewSnapshot && textRequestsFinished(requestTrace) ? {
+      version: 1, ...reviewSnapshot, usageIds: requestTrace.records.map(row => row.usageId),
+    } : undefined
     bus.emit({
       type: 'tool.result',
       messageId,
@@ -499,8 +506,18 @@ export async function handleToolCall(
   }
 
   try {
+    if (STATE_SENSITIVE_VALIDATORS.has(call.name)) {
+      const args = validated.data as { chapterId?: string; compilationId?: string }
+      const compilation = args.compilationId ? await prisma.storyCompilation.findFirst({ where: { id: args.compilationId,
+        userId: ctx.userId, novelId: ctx.novelId }, select: { chapterId: true } }) : null
+      const chapterId = args.chapterId ?? compilation?.chapterId ?? ctx.chapterId
+      const chapter = chapterId ? await prisma.chapter.findFirst({ where: { id: chapterId, authorId: ctx.userId,
+        ...activeChapterScope(ctx.novelId) }, select: { id: true, revision: true, content: true } }) : null
+      if (chapter) reviewSnapshot = { chapterId: chapter.id, revision: chapter.revision,
+        contentHash: createHash('sha256').update(chapter.content).digest('hex') }
+    }
     const goalContext = await readGoalExecution(ctx.userId, ctx.runId)
-    const result = await withGoalExecutionContext(goalContext, () => withGoalEffects(() => tool.execute({ ...ctx, inlineChild: Boolean(subagent) }, validated.data)))
+    const result = await withGoalExecutionContext(goalContext, () => withGoalEffects(() => withTextRequestTrace(requestTrace, () => tool.execute({ ...ctx, inlineChild: Boolean(subagent) }, validated.data))))
     failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
     if (result.outcome === 'failed') {
       failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
@@ -1126,6 +1143,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (firstConversion) compatibilityReadTargets = new Set(recovered.chapterIds)
       if (recovered.markers.length) await persistCheckpoint()
     }
+    if ((params.resume || previousTask) && ['write', 'revise'].includes(taskSpec.intent)) {
+      const recovered = await prisma.$transaction(tx => readReviewRequestRecovery(tx,
+        { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]))
+      for (const item of recovered) {
+        bus.emit({ type: 'review.reconciled', callId: item.callId, chapterId: item.chapterId,
+          revision: item.revision, compilationId: item.compilationId, receipt: item.reconciliation })
+        await bus.persist()
+        pendingReviews.delete(`${item.compilationId ?? item.chapterId}:${item.toolName}`)
+        reviewRecoveryKeys.set(reviewDispatchKey(item, item.toolName), `review-recovery:${item.reconciliation.admissionId}:${item.callId}`)
+      }
+      if (recovered.length) await persistCheckpoint()
+    }
     if ((params.resume || previousTask) && pendingReviews.size) {
       const settled = await prisma.$transaction(tx => readSettledQualityReviews(tx,
         { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]))
@@ -1713,7 +1742,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         else if (next.kind === 'blocked') {
           forceWrapUpReason = next.reason
           forceWrapUpLocal = Boolean(readiness?.requiredTools.some(item => findToolRestriction(effectiveRestrictions(), item.name, item.args, readiness.chapterId)
-            || settledReviewFailures.has(reviewDispatchKey(readiness, item.name))))
+            || settledReviewFailures.has(reviewAttemptKey(readiness, item.name))
+            || [...pendingReviews.values()].some(pending => pending.chapterId === readiness.chapterId && pending.toolName === item.name)))
         }
         else if (readiness?.ready && toolContext.sandboxMode !== 'read_only'
           && !toolContext.inlineChild && !toolContext.protectedChapterIds?.has(readiness.chapterId)
@@ -1857,6 +1887,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const reportIncomplete = Boolean(report && report.chineseCharacters < reportMinimum)
         const reportReminder = reportIncomplete
           ? `\n本任务报告main已保存${report!.chineseCharacters}个汉字，要求至少${reportMinimum}个。先用research_report_read核对区块与revision，再用research_report_save只保存缺失或待修订区块；不得重写整份或凑字。来源读取失败时先核对搜索实际返回的URL、错误分类及页面真实链接，在既有预算内尝试可用来源，不编造地址、不重复请求已失败且未变化的来源。记录未取得的资料与受限原因，不能把简介或乱码当正文，也不能宣称已读全书；仅在确实需要用户提供信息时使用ask_user，不把上传小说作为排查404的前提。` : ''
+        if (pendingReviews.size) {
+          await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
+          bus.emit({ type: 'step.finish', turn, usage: result.usage })
+          forceWrapUpLocal = true
+          await wrapUpAndFinish('检查未完成；已保存当前可执行操作的结果。检查请求仍需确认，正文与原预算保留，未将任务标记完成。')
+          return
+        }
         const nextChapterRequired = requiresNextChapterDelivery(taskSpec.goals)
         const chapterIncomplete = nextChapterRequired
           && !await (await import('./humanity-quality.js')).hasCommittedTaskChapter(prisma, params.userId, params.novelId, runId)
@@ -1944,6 +1981,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           && call.name === 'chapter_bridge_commit') {
           const parsed = preflightArgs
           const compilationId = typeof parsed.compilationId === 'string' ? parsed.compilationId : undefined
+          const unresolved = [...pendingReviews.values()].some(item => compilationId ? item.compilationId === compilationId
+            : item.chapterId === (typeof parsed.chapterId === 'string' ? parsed.chapterId : getLastTouchedChapter(runId) ?? params.chapterId))
+          if (unresolved) {
+            const reason = '该章节的检查请求仍未确认结束，本次未执行提交。保留正文，继续其他独立工作。'
+            parts.push(deferredToolPart(call, preflightTool.title, parsed, reason, messageId, bus))
+            messages.push({ role: 'tool', toolCallId: call.id, content: reason })
+            continue
+          }
           const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
             { userId: params.userId, novelId: params.novelId, runId }, compilationId))
           // Ordinary edits retain their original writing authority. Check the
@@ -1962,7 +2007,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               call = required
             } else if (next.kind === 'blocked') {
               const knownContinuityFailure = readiness.requiredTools.some(item => item.name === 'continuity_validate'
-                && settledReviewFailures.has(reviewDispatchKey(readiness, item.name)))
+                && settledReviewFailures.has(reviewAttemptKey(readiness, item.name)))
               const local = knownContinuityFailure || readiness.requiredTools.some(item => findToolRestriction(effectiveRestrictions(), item.name, item.args, readiness.chapterId))
               if (local) {
                 if (!knownContinuityFailure) restrictTool(call.name, parsed, 'REVIEW_DEPENDENCY_UNAVAILABLE', next.reason)
@@ -1971,9 +2016,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
                 continue
               }
               parts.push(deferredToolPart(call, preflightTool.title, parsed, next.reason, messageId, bus))
-              forceWrapUpReason = next.reason
-              forceWrapUpLocal = false
-              break
+              messages.push({ role: 'tool', toolCallId: call.id, content: `[系统] ${next.reason} 当前章节暂未提交；继续其余独立工作。` })
+              continue
             } else if (readiness?.ready && call.name === 'chapter_bridge_commit'
               && toolContext.sandboxMode !== 'read_only' && !toolContext.inlineChild
               && !toolContext.protectedChapterIds?.has(readiness.chapterId)
@@ -2131,7 +2175,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         pendingSkillPhase = nextSkillPhase(call.name, outcome.part, taskSpec.intent, params.prompt) ?? pendingSkillPhase
         {
           if (outcome.part.status === 'success') toolProviderFailures.delete(call.name)
-          else if (outcome.providerFailure && !localFailure) {
+          else if (outcome.providerFailure && !localFailure && !reviewDispatch) {
             const failures = (toolProviderFailures.get(call.name) ?? 0) + 1
             toolProviderFailures.set(call.name, failures)
             if (['AI_PROVIDER_QUOTA_EXCEEDED', 'AI_QUALITY_NON_THINKING_UNSUPPORTED', 'AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_INCOMPLETE', 'AI_PROVIDER_TIMEOUT'].includes(outcome.providerFailureCode ?? '')) forceWrapUpReason = outcome.observation
@@ -2279,7 +2323,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (compatibilityRead && !batchProgress) messages.push({ role: 'user', content: '[系统] 已核对旧定位失败目标的真实正文。输入协议兼容读取机会已持久记账，仅此一次；历史失败、检查次数和预算保留。下一步按当前正文纠正具体定位参数并执行原目标内修订，不要重复读取或照原失败参数重试。' })
       if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead)) {
         forceWrapUpReason = '连续多轮没有推进原任务的内容或必需成果，已停止重复执行，进度保留。'
-        forceWrapUpLocal = toolRestrictions.length > 0
+        forceWrapUpLocal = toolRestrictions.length > 0 || pendingReviews.size > 0 || settledReviewFailures.size > 0
       }
 
       // P0/P1 熔断收尾：结构熔断优先级更高（上方已 return），这里处理重复签名第 4 次/复读二次命中

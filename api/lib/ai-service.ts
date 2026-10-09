@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { currentGoalExecution, withGoalExecutionContext, withoutGoalEffects } from './agent/goal-context.js'
 import { readGoalExecution } from './agent/goal-fence.js'
 import { assertGoalProviderAdmission, reserveGoalUsage, syncGoalLegacyUsage } from './agent/goal-budget.js'
+import { beginTextRequest, recordTextRequestFailure, type TextRequestRecord } from './text-request-trace.js'
 import { SseDataDecoder, readWithIdleTimeout } from './ai-sse.js'
 import { beginDurableChat, type DurableChatExecution } from './agent/runtime-provider.js'
 import { validateModelCursor } from './agent/runtime-model-cursor.js'
@@ -1138,6 +1139,16 @@ async function generateGoalTextCompletion(systemPrompt: string, userPrompt: stri
   })
 }
 
+async function finishTextRequest(record: TextRequestRecord, dispatched: boolean) {
+  const usage = await prisma.aiUsageLog.findUnique({ where: { id: record.usageId }, select: {
+    usageSource: true, billingStatus: true, requestTokens: true, responseTokens: true, reservedCreditMilli: true,
+  } }).catch(() => null)
+  record.billingKnown = !!usage && (usage.billingStatus === 'not_dispatched'
+    || usage.usageSource === 'reported' && ['settled', 'exempt'].includes(usage.billingStatus ?? '')
+      && usage.requestTokens !== null && usage.responseTokens !== null && usage.reservedCreditMilli === 0)
+  record.status = !dispatched ? 'not_dispatched' : record.billingKnown ? 'terminal' : 'unknown'
+}
+
 async function generateTextCompletionImpl(systemPrompt: string, userPrompt: string, options: TextCompletionOptions & { modelRuntime: Awaited<ReturnType<typeof getModelTierRuntime>> }) {
   const modelRuntime = options.modelRuntime
   const requestedReasoning = options.reasoningEffort ?? modelRuntime.reasoningEffort
@@ -1161,6 +1172,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     novelId: options.novelId, chapterId: options.chapterId, targetType: options.targetType, targetId: options.targetId,
     providerName: modelRuntime.provider })
   let dispatched = false
+  const request = beginTextRequest(prepared.id)
   try {
   options.signal?.throwIfAborted()
   await assertGoalProviderAdmission()
@@ -1253,10 +1265,32 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   return content.trim()
   } catch (error) {
     await markUnobservedUsage(prepared.id, dispatched)
+    if (request.traced || error instanceof DataAccessError && ['AI_PROVIDER_OUTPUT_LIMIT', 'AI_PROVIDER_EMPTY_RESPONSE'].includes(error.code)) {
+      // The provider promise has ended. Content validity and fee certainty are
+      // separate: an empty/truncated report may have fully confirmed charges.
+      // A failed billing read cannot mint a recovery proof.
+      const observed = await prisma.aiUsageLog.findUnique({ where: { id: prepared.id } }).catch(() => null)
+      if (observed?.usageSource === 'reported' && observed.billingStatus === 'observed'
+        && observed.requestTokens !== null && observed.responseTokens !== null) {
+        // Streaming failures retain their final usage frame. Settle that exact
+        // original reservation through the same idempotent path as a success.
+        await recordUsage({ preparedUsageId: prepared.id, usageSource: 'reported', userId: options.userId,
+          providerType: 'text', action: options.action, modelName: modelRuntime.modelName ?? env.aiTextModel,
+          novelId: options.novelId, chapterId: options.chapterId, targetType: options.targetType, targetId: options.targetId,
+          providerName: modelRuntime.provider, requestTokens: observed.requestTokens, responseTokens: observed.responseTokens,
+          promptCacheHitTokens: observed.promptCacheHitTokens, promptCacheMissTokens: observed.promptCacheMissTokens,
+          durationMs: Date.now() - startedAt, modelTier: modelRuntime.tier,
+          multiplierBps: options.multiplierBps ?? modelRuntime.multiplierBps }).catch(() => undefined)
+      }
+      await finishTextRequest(request.record, dispatched)
+      recordTextRequestFailure(error, request.record, systemPrompt, userPrompt, options)
+    }
     if (!options.signal?.aborted && error instanceof TypeError && /fetch|network|terminated/i.test(error.message)) {
       throw new DataAccessError(502, 'AI_PROVIDER_TRANSPORT', '模型连接中断，未取得完整结果；已保存用量证据。')
     }
     throw error
+  } finally {
+    if (request.traced && request.record.status === 'prepared') await finishTextRequest(request.record, dispatched)
   }
 }
 
