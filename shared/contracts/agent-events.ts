@@ -15,6 +15,14 @@ export type AgentReviewFailureReconciliation = {
   currentContentHash: string
 }
 
+/** A stopped exempt request stays unknown; retirement does not certify any review. */
+export type AgentCancelledReviewRetirement = Omit<AgentReviewFailureReconciliation, 'status'> & {
+  status: 'cancelled_review_billing_exempt'
+  sourceStopEventId: string
+  sourceCallId: string
+  usageOutcome: 'unknown_preserved'
+}
+
 /** 当前逻辑任务的权威待办；空清单不回退到会话历史。 */
 export interface AgentTodoSnapshot {
   runId: EntityId
@@ -312,7 +320,7 @@ export type AgentStreamEventBody =
       reasoningEffort: import('./credits.js').ModelReasoningEffort; creativeFreedom: CreativeFreedom; modelSelectionExplicit: boolean }
   | { type: 'execution.progress'; revision: number; stage: 'model' | 'tool' | 'checkpoint' | 'finalizing' }
   | { type: 'review.reconciled'; callId: string; chapterId: string; revision: number;
-      compilationId: string | null; receipt: AgentReviewFailureReconciliation }
+      compilationId: string | null; receipt: AgentReviewFailureReconciliation | AgentCancelledReviewRetirement }
   | { type: 'text.delta'; messageId: string; delta: string }
   | { type: 'text.final'; messageId: string; text: string; asReasoning: boolean }
   | { type: 'reasoning.delta'; messageId: string; delta: string }
@@ -508,6 +516,8 @@ export interface StartAgentLoopRunResponse {
   runGoalId: EntityId | null
   status: string
   streamUrl: string
+  /** Persisted journal cursor immediately before this continuation was admitted. */
+  eventStartSeq?: number
 }
 
 export interface ResolveAgentApprovalRequest {

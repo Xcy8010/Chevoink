@@ -112,7 +112,7 @@ describe('continue API exact target', () => {
     expect(mocks.prepare).not.toHaveBeenCalled()
   })
   it('resumes the requested run with full original input, not the 300-char summary', async () => {
-    expect(await continueLoopRun('u', 'run19')).toMatchObject({ runId: 'run19' })
+    expect(await continueLoopRun('u', 'run19')).toMatchObject({ runId: 'run19', eventStartSeq: 72 })
     expect(mocks.transaction).toHaveBeenCalledOnce()
     expect(mocks.tx.$queryRaw.mock.calls[0][0].join('?')).toBe('SELECT id FROM novels WHERE id = ? FOR UPDATE')
     expect(mocks.tx.$queryRaw.mock.calls[0][1]).toBe('n')
@@ -166,7 +166,7 @@ describe('continue API exact target', () => {
     expect(mocks.execute.mock.calls[0][0]).toMatchObject({ runId: 'run19', modelTier: 'lite', customModelId: null, reasoningEffort: 'high', resume: true })
   })
   it('keeps the saved tier and skips the write-back when no model selection travels with the resume', async () => {
-    expect(await continueLoopRun('u', 'run19')).toMatchObject({ runId: 'run19' })
+    expect(await continueLoopRun('u', 'run19')).toMatchObject({ runId: 'run19', eventStartSeq: 72 })
     expect(mocks.creditAccess).toHaveBeenCalledWith('u', 'speed')
     expect(mocks.tierRuntime).toHaveBeenCalledWith('speed', 'u', null, 'high')
     expect(mocks.runUpdate).not.toHaveBeenCalled()

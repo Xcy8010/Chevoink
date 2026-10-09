@@ -1,3 +1,4 @@
+import { readRetiredReviewUsageIds } from './cancelled-review-recovery.js'
 import { COMPILER_CONTINUITY_PROTOCOL } from './compiler-continuity-contract.js'
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import type { Prisma } from '@prisma/client'
@@ -88,6 +89,7 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
   const original = await readWritingScope(tx, subject)
   if (original.parentRunId || original.writing?.kind !== 'bounded') return []
   const runIds = await originalTaskRunIds(tx, subject, original)
+  const retiredUsageIds = await readRetiredReviewUsageIds(tx, subject, runIds)
   if (await tx.agentProviderAttempt.count({ where: { runId: { in: runIds }, status: { in: ['prepared', 'dispatched', 'unknown'] } } })) return []
   const compilations = await tx.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds } } })
   const events = await tx.agentRunEvent.findMany({ where: { runId: { in: runIds }, type: { in: ['tool.call', 'tool.result'] } }, orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }] })
@@ -103,7 +105,9 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     const ids = compilations.filter(item => item.chapterId === chapter.id).map(item => item.id)
     const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
       OR: [{ targetType: 'story_compilation', targetId: { in: ids } }, { targetType: 'chapter', targetId: chapter.id }], action: { startsWith: 'agent3Continuity' } } })
-    if (paid.some(item => item.billingStatus !== 'settled' || item.usageSource !== 'reported' || item.requestTokens === null || item.responseTokens === null)) continue
+    const known = (item: typeof paid[number]) => item.billingStatus === 'settled' && item.usageSource === 'reported'
+      && item.requestTokens !== null && item.responseTokens !== null && item.reservedCreditMilli === 0
+    if (paid.some(item => !known(item) && !retiredUsageIds.has(item.id))) continue
     const unfinishedMutation = events.some(event => {
       const payload = object(event.payload), args = object(payload.args)
       return event.type === 'tool.call' && ['chapter_write', 'chapter_edit_range', 'chapter_append'].includes(String(payload.toolName))
@@ -141,7 +145,7 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     })
     if (overlaps) continue
     const receipts = paid.filter(item => item.createdAt >= call.createdAt && item.createdAt <= result.createdAt)
-    if (receipts.filter(item => item.action === 'agent3ContinuityCritic').length !== 1 || receipts.some(item => !item.responseTokens || object(item.billingEvidence).responseObserved !== true
+    if (receipts.filter(item => item.action === 'agent3ContinuityCritic').length !== 1 || receipts.some(item => !known(item) || !item.responseTokens || object(item.billingEvidence).responseObserved !== true
       || !['agent3ContinuityCritic', 'agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery'].includes(item.action))) continue
     const key = `continuity-author-recovery:${runtimeJson({ taskId: original.taskId, chapterId: chapter.id, contentHash: coverage.contentHash, admissionId: admission.id }).hash}`
     keys.push([`${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`, key])

@@ -138,6 +138,25 @@ describe('Agent model preference ownership', () => {
     act(() => listeners.get('run.configuration')!(new MessageEvent('run.configuration', { data: JSON.stringify(event) })))
     expect(received).toHaveBeenCalledWith(event)
   })
+  it('starts resumed streaming after the server cursor and still closes on the new terminal', () => {
+    const listeners = new Map<string, (event: MessageEvent) => void>()
+    const opened = vi.fn(), closed = vi.fn()
+    class Source {
+      onerror = null
+      constructor(url: string) { opened(url) }
+      addEventListener(type: string, listener: (event: MessageEvent) => void) { listeners.set(type, listener) }
+      close() { closed() }
+    }
+    vi.stubGlobal('EventSource', Source)
+    const { result } = renderHook(() => useAgentStream())
+    act(() => result.current.connect('run-a', 12704))
+    expect(opened).toHaveBeenCalledWith(expect.stringContaining('/run-a/stream?since=12704'))
+    expect(closed).not.toHaveBeenCalled()
+    const event: AgentStreamEvent = { type: 'run.paused', runId: 'run-a', seq: 12709, ts: new Date().toISOString(), reason: 'needs_input' }
+    act(() => listeners.get('run.paused')!(new MessageEvent('run.paused', { data: JSON.stringify(event) })))
+    expect(useAgentStore.getState()).toMatchObject({ phase: 'paused', lastSeq: 12709 })
+    expect(closed).toHaveBeenCalledOnce()
+  })
   it('does not override an inherited model when only creative mode changes', async () => {
     const { result } = mount()
     await waitFor(() => expect(result.current.inheritMain).toBe(true))

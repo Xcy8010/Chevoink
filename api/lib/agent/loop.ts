@@ -65,6 +65,7 @@ import { nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from 
 import { readQualityFormatRecovery, type QualityFormatRecovery } from './quality-format-recovery.js'
 import { deferredToolPart } from './deferred-tool.js'
 import { readContinuedContinuityRecovery, readLegacyContinuityRecovery } from './legacy-continuity-recovery.js'
+import { readCancelledReviewRetirements } from './cancelled-review-recovery.js'
 import { activeChapterScope } from '../data/internal.js'
 import { createRepeatDetector } from './repeat-detect.js'
 import {
@@ -1179,6 +1180,22 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         { userId: params.userId, novelId: params.novelId, runId }))
       if (qualityRecovery) reviewRecoveryKeys.set(reviewDispatchKey({ compilationId: qualityRecovery.compilationId,
         chapterId: qualityRecovery.chapterId, revision: qualityRecovery.chapterRevision }, 'quality_analyze'), `quality-format-recovery:${qualityRecovery.key}`)
+    }
+    if ((params.resume || previousTask) && pendingReviews.size) {
+      const retired = await prisma.$transaction(tx => readCancelledReviewRetirements(tx,
+        { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]))
+      for (const item of retired) {
+        // Only the cancelled author-exempt execution lock is retired. Usage is
+        // still unknown; no returned response, progress or assessment is signed.
+        if (!item.persisted) {
+          bus.emit({ type: 'review.reconciled', callId: item.callId, chapterId: item.chapterId,
+            revision: item.revision, compilationId: item.compilationId, receipt: item.retirement })
+          await bus.persist()
+        }
+        pendingReviews.delete(`${item.compilationId ?? item.chapterId}:${item.toolName}`)
+        reviewRecoveryKeys.set(reviewDispatchKey(item, item.toolName), `review-retired:${item.retirement.admissionId}:${item.callId}`)
+      }
+      if (retired.length) await persistCheckpoint()
     }
     if (pendingReviews.size) {
       throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED',

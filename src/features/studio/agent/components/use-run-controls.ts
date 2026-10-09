@@ -10,7 +10,7 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
   phase: AgentRunPhase
   pendingApproval: PendingApproval | null
   pendingQuestion: PendingQuestion | null
-  connect: (runId: string) => void
+  connect: (runId: string, sinceSeq?: number) => void
   setActionError: (error: string | null) => void
   /** 续跑随请求携带作者当前模型选择：点击时从 ref 读取最新值，避免闭包过期 */
   selectedModelRef?: RefObject<ContinueAgentLoopRunModel | null>
@@ -57,7 +57,7 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
     setActionError(null)
     await command(`continue:${target}`, () => continueAgentLoopRun(target, selectedModelRef?.current ?? null), (result) => {
       useAgentStore.getState().resumeRun(result.runId, sessionId, result.runGoalId)
-      connect(result.runId)
+      connect(result.runId, result.eventStartSeq ?? 0)
     }, '续跑失败，请稍后再试。')
   }, [runId, resumeableRunId, sessionId, connect, command, setActionError, selectedModelRef])
 

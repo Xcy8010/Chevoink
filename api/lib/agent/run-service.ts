@@ -1073,6 +1073,7 @@ async function continueLoopRunLocked(
     runGoalId: activation?.goalId ?? null,
     status: 'running',
     streamUrl: `/api/agent/runs/${run.id}/stream`,
+    eventStartSeq,
   }
 }
 

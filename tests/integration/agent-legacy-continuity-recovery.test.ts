@@ -1,3 +1,4 @@
+import { readCancelledReviewRetirements } from '../../api/lib/agent/cancelled-review-recovery.js'
 import { hasReconciledQualityRequest } from '../../api/lib/agent/quality-format-recovery.js'
 import { createHash } from 'node:crypto'
 import { readSettledQualityReviews } from '../../api/lib/agent/quality-review-admission.js'
@@ -287,6 +288,59 @@ describe.runIf(available)('returned review provider request recovery', () => {
         }
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
         expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usage.id } })).toEqual(usage)
+      } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+    }))
+})
+
+
+describe.runIf(available)('new reviewer failure after an audited exempt cancellation', () => {
+  it.each(['retired', 'missing-audit', 'wrong-audit', 'new-unknown', 'retired-in-current-window'] as const)(
+    '%s never turns retired unknown usage into current returned evidence', scenario => fixture(async f => {
+      try {
+        await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0 } })
+        const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '复核当前授权正文' })
+        const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+        const start = new Date(), at = (ms: number) => new Date(start.getTime() + ms)
+        const pending = { callId: 'cancelled-first', toolName: 'continuity_validate' as const, chapterId: f.chapterId, compilationId: compilation.id, revision: chapter.revision }
+        const event = (seq: number, type: string, payload: object, ms: number) => prisma.agentRunEvent.create({ data: {
+          runId: f.runId, seq, type, payload: runtimeJson(payload).value, createdAt: at(ms) } })
+        await event(1, 'tool.call', { ...pending, args: { chapterId: f.chapterId, compilationId: compilation.id } }, 0)
+        await event(2, 'tool.result', { ...pending, ok: false, failureCode: 'UNEXPECTED_TOOL_ERROR', summary: '已中断' }, 1000)
+        const stopped = await event(3, 'run.paused', { reason: 'user_stop' }, 1100)
+        await event(4, 'run.started', { authorContinue: { eventId: stopped.id, afterSeq: 3 } }, 1200)
+        const originalUsage = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, chapterId: f.chapterId,
+          targetType: 'story_compilation', targetId: compilation.id, providerType: 'text', providerMode: 'custom', modelName: 'no-provider', modelTier: 'speed',
+          action: 'agent3ContinuityCritic', requestTokens: null, responseTokens: null, usageSource: 'unknown', billingStatus: 'settled',
+          multiplierBps: 0, creditChargeMilli: 0, reservedCreditMilli: 0, billingSnapshot: { version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 0 },
+          durationMs: 0, createdAt: at(100) } })
+        const retired = await prisma.$transaction(tx => readCancelledReviewRetirements(tx, f, [pending]))
+        expect(retired).toHaveLength(1)
+        if (scenario !== 'missing-audit') await event(5, 'review.reconciled', { ...pending,
+          receipt: { ...retired[0].retirement, ...(scenario === 'wrong-audit' ? { sourceStopEventId: 'wrong-stop' } : {}) } }, 1300)
+        const usage = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, chapterId: f.chapterId,
+          targetType: 'story_compilation', targetId: compilation.id, providerType: 'text', providerMode: 'custom', modelName: 'no-provider',
+          action: 'agent3ContinuityCritic', requestTokens: scenario === 'new-unknown' ? null : 10, responseTokens: scenario === 'new-unknown' ? null : 2,
+          usageSource: scenario === 'new-unknown' ? 'unknown' : 'reported', billingStatus: 'settled', reservedCreditMilli: 0,
+          billingEvidence: { responseObserved: true }, durationMs: 20, createdAt: at(2100) } })
+        const current = { ...pending, callId: 'new-returned-check' }
+        await event(6, 'tool.call', { ...current, args: { chapterId: f.chapterId, compilationId: compilation.id } }, 2000)
+        await event(7, 'tool.result', { ...current, ok: false, failureCode: 'CONTINUITY_REPORT_INCOMPLETE',
+          reviewRequestFinished: { version: 1, chapterId: f.chapterId, revision: chapter.revision,
+            contentHash: createHash('sha256').update(chapter.content).digest('hex'), usageIds: [usage.id] } }, 3000)
+        const nextStop = await event(8, 'run.paused', { reason: 'needs_input' }, 3100)
+        await event(9, 'run.started', { authorContinue: { eventId: nextStop.id, afterSeq: 8 } }, 3200)
+        await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: {
+          independentCheck: 'unavailable', checkedChapterId: f.chapterId, checkedRevision: chapter.revision, checkedAt: at(2999).toISOString(),
+          coverage: { version: 1, protocolVersion: 6, contentHash: runtimeJson({ content: chapter.content }).hash },
+        } } })
+        if (scenario === 'retired-in-current-window') await prisma.aiUsageLog.update({ where: { id: originalUsage.id }, data: { createdAt: at(2200) } })
+        const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+        const requestRecovery = await prisma.$transaction(tx => readReviewRequestRecovery(tx, f, [current]))
+        const authorRecovery = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))
+        expect(requestRecovery).toHaveLength(scenario === 'retired' ? 1 : 0)
+        expect(authorRecovery).toHaveLength(scenario === 'retired' ? 1 : 0)
+        if (requestRecovery.length) expect(requestRecovery[0].reconciliation.usageIds).toEqual([usage.id])
+        expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
     }))
 })

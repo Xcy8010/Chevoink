@@ -36,6 +36,7 @@ const mocks = vi.hoisted(() => ({
   limitedDelivery: vi.fn(async () => null as import('../../api/lib/agent/writing-delivery-limitations.js').LimitedWritingDelivery | null),
   qualityRecovery: vi.fn(async () => null as import('../../api/lib/agent/quality-format-recovery.js').QualityFormatRecovery | null),
   requestRecovery: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/review-request-recovery.js').readReviewRequestRecovery>>> => []),
+  cancelledReviews: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/cancelled-review-recovery.js').readCancelledReviewRetirements>>> => []),
   settledQuality: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/quality-review-admission.js').readSettledQualityReviews>>> => []),
   assertLimitedDelivery: vi.fn(async () => undefined),
   continuedContinuity: vi.fn(async (): Promise<Array<[string, string]>> => []),
@@ -62,6 +63,7 @@ vi.mock('../../api/lib/agent/chapter-review-guard.js', async importOriginal => (
 // Database call/result authentication is covered by the PostgreSQL recovery suite.
 // These loop-only fixtures contain no settled report witness.
 vi.mock('../../api/lib/agent/review-request-recovery.js', () => ({ readReviewRequestRecovery: mocks.requestRecovery }))
+vi.mock('../../api/lib/agent/cancelled-review-recovery.js', () => ({ readCancelledReviewRetirements: mocks.cancelledReviews }))
 vi.mock('../../api/lib/agent/quality-review-admission.js', () => ({ readSettledQualityReviews: mocks.settledQuality }))
 vi.mock('../../api/lib/agent/quality-format-recovery.js', () => ({ readQualityFormatRecovery: mocks.qualityRecovery }))
 vi.mock('../../api/lib/agent/writing-delivery-limitations.js', () => ({
@@ -270,6 +272,7 @@ beforeEach(() => {
   mocks.qualityRecovery.mockReset().mockResolvedValue(null)
   mocks.settledQuality.mockReset().mockResolvedValue([])
   mocks.requestRecovery.mockReset().mockResolvedValue([])
+  mocks.cancelledReviews.mockReset().mockResolvedValue([])
   mocks.continuedContinuity.mockReset().mockResolvedValue([])
   mocks.continuityRecovery.mockReset().mockResolvedValue({ removed: [], settled: [], recovered: [], markers: [], chapterIds: [] })
   mocks.assertLimitedDelivery.mockReset().mockResolvedValue(undefined)
@@ -999,6 +1002,45 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewAttempts: expect.arrayContaining(['comp:c:3:quality_analyze', 'comp:c:4:quality_analyze']) } })
     expect((mocks.runs.get('run')?.usage as { checkpoint: unknown }).checkpoint).not.toHaveProperty('pendingReviews')
+  })
+  it.each(['persisted', 'unavailable', 'already-persisted'] as const)('retires only the exempt cancelled execution lock before a new check: %s', async journal => {
+    mocks.reviewReadiness.mockResolvedValue(readiness('missing', 'complete'))
+    const critic = tool('continuity_validate', async () => { throw new Error('old aborted check') })
+    mocks.tools = [critic]
+    queue(response('', [call('cancelled-check', critic.name, '{"compilationId":"comp"}')]), response('原检查未确认。'))
+    await run('写下一章')
+    const stopped = structuredClone(mocks.runs.get('run')!)
+    const original = (stopped.usage as { checkpoint: { tokenBudget: number; maxTurns: number; writeProgress: number; readProgress: number } }).checkpoint
+    mocks.update.mockResolvedValueOnce(stopped as never)
+    const receipt = { status: 'cancelled_review_billing_exempt' as const, sourceRunId: 'run', sourceResultId: 'cancelled-result',
+      sourceReportId: null, sourceStopEventId: 'user-stop', sourceCallId: 'cancelled-check', usageOutcome: 'unknown_preserved' as const,
+      usageIds: ['unknown-exempt-usage'], admissionId: 'author-continue:stop', currentRevision: 3, currentContentHash: 'b'.repeat(64) }
+    mocks.cancelledReviews.mockResolvedValue([{ callId: 'cancelled-check', compilationId: 'comp', chapterId: 'c', revision: 3,
+      toolName: 'continuity_validate', retirement: receipt, persisted: journal === 'already-persisted' }])
+    mocks.chat.mockClear()
+    mocks.emit.mockClear()
+    if (journal === 'unavailable') mocks.journal.mockRejectedValueOnce(new Error('retirement journal unavailable'))
+    critic.execute = vi.fn(async () => {
+      // Retirement unlocks execution; it does not certify an assessment or grant progress/budget.
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { tokenBudget: original.tokenBudget,
+        maxTurns: original.maxTurns, writeProgress: original.writeProgress, readProgress: original.readProgress } })
+      return { output: '本次真实检查仍需复核', outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE' }
+    })
+    queue(response('', [call('fresh-check', critic.name, '{"compilationId":"comp"}')]), response('检查尚未完成。'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    const audits = events().filter(event => event.type === 'review.reconciled')
+    expect(audits).toEqual(journal === 'already-persisted' ? [] : [expect.objectContaining({ callId: 'cancelled-check', receipt })])
+    if (journal === 'unavailable') {
+      expect(critic.execute).not.toHaveBeenCalled()
+      expect(mocks.chat).not.toHaveBeenCalled()
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { pendingReviews: [{ callId: 'cancelled-check' }], tokenBudget: original.tokenBudget } })
+    } else {
+      expect(critic.execute).toHaveBeenCalledOnce()
+      expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.call', callId: 'fresh-check' }))
+      expect((mocks.runs.get('run')?.usage as { checkpoint: unknown }).checkpoint).not.toHaveProperty('pendingReviews')
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewAttempts: expect.arrayContaining([
+        'review-retired:author-continue:stop:cancelled-check' ]) } })
+    }
   })
   it('inherits unresolved review evidence on a typed continuation without a fresh budget or paid turn', async () => {
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing'))

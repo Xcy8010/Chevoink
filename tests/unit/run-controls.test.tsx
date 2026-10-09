@@ -25,14 +25,14 @@ function fixture(selectedModelRef?: { current: ContinueAgentLoopRunModel | null 
 }
 
 it('deduplicates concurrent resume clicks and connects once', async () => {
-  let finish!: (value: { runId: string }) => void
+  let finish!: (value: { runId: string; eventStartSeq?: number }) => void
   mocks.resume.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
   const { result, connect } = fixture()
   let first!: Promise<void>, second!: Promise<void>
   act(() => { first = result.current.handleContinue(); second = result.current.handleContinue() })
   expect(mocks.resume).toHaveBeenCalledTimes(1)
-  await act(async () => { finish({ runId: 'resumed' }); await Promise.all([first, second]) })
-  expect(connect).toHaveBeenCalledExactlyOnceWith('resumed')
+  await act(async () => { finish({ runId: 'resumed', eventStartSeq: 12704 }); await Promise.all([first, second]) })
+  expect(connect).toHaveBeenCalledExactlyOnceWith('resumed', 12704)
   expect(mocks.restore).toHaveBeenCalledExactlyOnceWith('resumed', 'a', undefined)
   expect(mocks.begin).not.toHaveBeenCalled()
 })
@@ -48,7 +48,7 @@ it('passes the current free or BYOK model selection when continuing a run', asyn
 })
 
 it('does not hydrate an old resume into another window', async () => {
-  let finish!: (value: { runId: string }) => void
+  let finish!: (value: { runId: string; eventStartSeq?: number }) => void
   mocks.resume.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
   const { result, rerender, connect } = fixture()
   let pending!: Promise<void>
@@ -74,7 +74,7 @@ it('does not display an old stop failure in another task', async () => {
 })
 
 it('does not restore a late continue response over a newer run in the same session', async () => {
-  let finish!: (value: { runId: string }) => void
+  let finish!: (value: { runId: string; eventStartSeq?: number }) => void
   mocks.resume.mockImplementation(() => new Promise(resolve => { finish = resolve }))
   const { result, rerender, connect } = fixture()
   let pending!: Promise<void>

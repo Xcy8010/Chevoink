@@ -1,3 +1,4 @@
+import { readRetiredReviewUsageIds } from './cancelled-review-recovery.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import type { AgentReviewFailureReconciliation } from '../../../shared/contracts/index.js'
@@ -20,6 +21,7 @@ export async function readReviewRequestRecovery(tx: Prisma.TransactionClient,
   const admission = await readQualityReviewAdmission(tx, run)
   if (!admission) return recovered
   const original = await readOriginalTaskRequest(tx, subject), ids = await originalTaskRunIds(tx, subject, original)
+  const retiredUsageIds = await readRetiredReviewUsageIds(tx, subject, ids)
   const first = await tx.agentRun.findFirstOrThrow({ where: { id: { in: ids } }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } })
   if (await tx.agentProviderAttempt.count({ where: { runId: { in: ids }, status: { in: ['prepared', 'dispatching', 'unknown'] } } })) return recovered
   const history = await tx.agentRunEvent.findMany({ where: { runId: { in: ids }, type: { in: ['tool.call', 'tool.result'] } },
@@ -76,9 +78,9 @@ export async function readReviewRequestRecovery(tx: Prisma.TransactionClient,
         OR: [{ chapterId: item.chapterId }, { targetId: { in: targets } }] }] } })
     const known = (row: typeof related[number]) => row.usageSource === 'reported' && ['settled', 'exempt'].includes(row.billingStatus ?? '')
       && row.requestTokens !== null && row.responseTokens !== null && row.reservedCreditMilli === 0
-    if (related.some(row => !known(row))) continue
+    if (related.some(row => !known(row) && !retiredUsageIds.has(row.id))) continue
     const payments = related.filter(row => row.action.startsWith(family) && row.createdAt >= call.createdAt && row.createdAt <= result.createdAt)
-    if (!payments.length || payments.some(row => row.createdAt.getTime() + row.durationMs > result.createdAt.getTime())) continue
+    if (!payments.length || payments.some(row => !known(row) || row.createdAt.getTime() + row.durationMs > result.createdAt.getTime())) continue
     if (typed && (proof.usageIds as string[]).some(id => !payments.some(row => row.id === id))) continue
     if (typed && payments.some(row => !(proof.usageIds as string[]).includes(row.id))) continue
     const sourceReports = reports.filter(row => row.runId === call.runId && row.chapterRevision === item.revision && row.status === 'failed'
