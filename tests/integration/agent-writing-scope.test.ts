@@ -1,3 +1,5 @@
+import * as reviewGuard from '../../api/lib/agent/chapter-review-guard.js'
+import { qualityReportGetTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import * as compiler from '../../api/lib/agent/story-compiler.js'
 import { continuityDecisionBinding } from '../../api/lib/agent/chapter-review-guard.js'
@@ -207,6 +209,45 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       { compilationId: f.compilation.id, retainedFindings: retained })))
     return { ...f, findings, retainedFindings, call }
   }
+  it('binds both report readers to the same current semantic decision feedback without audit-ID churn or stale evidence', () => fixture('写第一章', async ctx => {
+    const f = await finalizationFixture(ctx)
+    const bundle = await buildHumanityQualityContext(ctx.userId, ctx.novelId, f.chapterId, ctx.runId)
+    const metrics = { ...f.quality.deterministicMetrics as Prisma.JsonObject, qualityContextHash: qualityReviewContextHash(bundle) }
+    await prisma.chapterQualityReport.update({ where: { id: f.quality.id }, data: { deterministicMetrics: metrics } })
+    expect((await readChapterReviewReadiness(prisma, ctx, f.compilation.id))?.decisionFeedback).toBeDefined()
+    const qualityRead = await qualityReportGetTool.execute(ctx, { reportId: f.quality.id })
+    const bridgeRead = await chapterBridgeGetTool.execute(ctx, { compilationId: f.compilation.id })
+    expect(qualityRead.reviewDecisionFeedback).toMatchObject({ key: expect.stringMatching(/^[a-f0-9]{64}$/), taskId: f.spec.id,
+      userId: ctx.userId, novelId: ctx.novelId, chapterId: f.chapterId, compilationId: f.compilation.id, revision: f.chapter.revision })
+    expect(bridgeRead.reviewDecisionFeedback).toEqual(qualityRead.reviewDecisionFeedback)
+    expect(qualityRead.output).toContain('审美建议')
+    expect(qualityRead.output).toContain('增加动作')
+    expect(qualityRead.output).toContain(f.findings[0].evidenceExcerpt)
+    const newer = await prisma.chapterQualityReport.create({ data: { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
+      compilationId: f.compilation.id, chapterId: f.chapterId, chapterRevision: f.chapter.revision, status: 'passed', deterministicMetrics: metrics,
+      createdAt: new Date(Date.now() + 1000) } })
+    for (const finding of f.findings) {
+      const { id: _id, reportId: _report, createdAt: _created, updatedAt: _updated, ...data } = finding
+      await prisma.qualityFinding.create({ data: { ...data, reportId: newer.id } })
+    }
+    expect((await qualityReportGetTool.execute(ctx, { reportId: newer.id })).reviewDecisionFeedback?.key).toBe(qualityRead.reviewDecisionFeedback!.key)
+    expect((await qualityReportGetTool.execute(ctx, { reportId: f.quality.id })).reviewDecisionFeedback).toBeUndefined()
+    const changed = await prisma.qualityFinding.findFirstOrThrow({ where: { reportId: newer.id } })
+    await prisma.qualityFinding.update({ where: { id: changed.id }, data: { suggestion: '另一条真实建议' } })
+    expect((await qualityReportGetTool.execute(ctx, { reportId: newer.id })).reviewDecisionFeedback?.key).not.toBe(qualityRead.reviewDecisionFeedback!.key)
+    const actualReadiness = reviewGuard.readChapterReviewReadiness
+    const race = vi.spyOn(reviewGuard, 'readChapterReviewReadiness').mockImplementationOnce(async (...args) => {
+      await prisma.qualityFinding.update({ where: { id: changed.id }, data: { suggestion: '读取期间刚发生的意见变化' } })
+      return actualReadiness(...args)
+    })
+    try { expect((await qualityReportGetTool.execute(ctx, { reportId: newer.id })).reviewDecisionFeedback).toBeUndefined() }
+    finally { race.mockRestore() }
+    await prisma.novel.update({ where: { id: ctx.novelId }, data: { categoryName: '变更上下文' } })
+    expect((await qualityReportGetTool.execute(ctx, { reportId: newer.id })).reviewDecisionFeedback).toBeUndefined()
+    expect((await chapterBridgeGetTool.execute(ctx, { compilationId: f.compilation.id })).reviewDecisionFeedback).toBeUndefined()
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(f.chapter)
+    expect(await prisma.aiUsageLog.count({ where: { novelId: ctx.novelId } })).toBe(0)
+  }))
   it('accepts exact JSON-string decisions through the real tool schema and commits without manuscript or report mutation', () => fixture('写第一章', async ctx => {
     const f = await finalizationFixture(ctx, 10)
     const readiness = await readChapterReviewReadiness(prisma, ctx, f.compilation.id)

@@ -1042,14 +1042,18 @@ describe('server assessment fallback in the real execution loop', () => {
         'review-retired:author-continue:stop:cancelled-check' ]) } })
     }
   })
-  it.each(['direct', 'after-read'] as const)('commits explicit current opinion decisions %s without replacing them or repeating a critic on resume', async path => {
+  it.each(['direct', 'after-read', 'quality-read', 'old-pauses'] as const)('commits explicit current opinion decisions %s without replacing them or repeating a critic on resume', async path => {
     const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
     mocks.currentOriginal = { prompt: '写下一章', taskSpec }
     const retained = [{ source: 'quality' as const, reportId: 'report', findingId: 'actual-finding', reason: '保留人物紧张时的短句节奏，改写会损害当前场景。' }]
+    const feedback = { key: 'b'.repeat(64), taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'c',
+      orderIndex: 1, compilationId: 'comp', revision: 23, contentHash: 'a'.repeat(64) }
     let state = { ...readiness('complete', 'complete', 23), qualityCandidateCount: 1, decisionPending: true,
-      requiredDecisions: retained, retainedDecisions: [] }
+      requiredDecisions: retained, retainedDecisions: [], decisionFeedback: feedback,
+      decisionDetails: [{ ...retained[0], evidence: '他停住脚步。', explanation: '此处短句保留人物犹豫。', suggestion: '核对节奏。', severity: 'advisory', disposition: 'pending' }] }
     mocks.reviewReadiness.mockImplementation(async () => state)
-    const reader = tool('chapter_bridge_get', async () => ({ output: `检查已完成；待处理引用 ${JSON.stringify(retained)}` }))
+    const reader = tool('chapter_bridge_get', async () => ({ output: `检查已完成；待处理引用 ${JSON.stringify(retained)}`, reviewDecisionFeedback: feedback }))
+    const qualityReader = tool('quality_report_get', async () => ({ output: '真实原文和意见已读取', reviewDecisionFeedback: feedback }))
     const critic = tool('quality_analyze', async () => ({ output: '不应重复请求' }))
     const continuity = tool('continuity_validate', async () => ({ output: '不应重复请求' }))
     const commit = { ...tool('chapter_bridge_commit', async () => {
@@ -1059,9 +1063,9 @@ describe('server assessment fallback in the real execution loop', () => {
     }, false), parameters: z.object({ compilationId: z.string(), retainedFindings: z.array(z.object({
       source: z.literal('quality'), reportId: z.string(), findingId: z.string(), reason: z.string(),
     })).optional() }) }
-    mocks.tools = [reader, critic, continuity, commit]
+    mocks.tools = [reader, qualityReader, critic, continuity, commit]
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
-      activeExecutionMs: 100, stagnantBatches: path === 'direct' ? 4 : 2, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      activeExecutionMs: 100, stagnantBatches: path === 'old-pauses' ? 6 : 4, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
       writeProgress: 20, writeBaseline: 0, readProgress: 7, readBaseline: 0, progressSignatures: [] }
     mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 59, startedAt: new Date(checkpoint.runStartedAt),
       usage: { promptTokens: 678608, completionTokens: 0, totalTokens: 678608, checkpoint } })
@@ -1069,19 +1073,70 @@ describe('server assessment fallback in the real execution loop', () => {
     mocks.chat.mockImplementationOnce(async input => {
       expect(input.messages.some(message => typeof message.content === 'string' && message.content.includes('精确参数模板')
         && message.content.includes('actual-finding'))).toBe(true)
-      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: path === 'direct' ? 4 : 2, tokenBudget: 500, maxTurns: 1 } })
-      return response('', [path === 'direct' ? explicitCommit : call('early', commit.name, '{"compilationId":"comp"}')])
+      expect(input.messages.some(message => typeof message.content === 'string' && message.content.includes('此处短句保留人物犹豫'))).toBe(true)
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: checkpoint.stagnantBatches, tokenBudget: 500, maxTurns: 1 } })
+      return response('', [path === 'direct' ? explicitCommit : path === 'after-read' ? call('early', commit.name, '{"compilationId":"comp"}')
+        : call('inspect-report', qualityReader.name, '{"reportId":"report"}')])
     })
-    if (path === 'after-read') queue(response('', [explicitCommit]))
+    if (path !== 'direct') mocks.chat.mockImplementationOnce(async () => {
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: checkpoint.stagnantBatches + 1,
+        tokenBudget: 500, maxTurns: 1, readProgress: 7, writeProgress: 20, consumedReviewDecisionFeedback: [feedback.key] } })
+      return response('', [explicitCommit])
+    })
     queue(response('已保存。'))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
     expect(reader.execute).toHaveBeenCalledTimes(path === 'after-read' ? 1 : 0)
+    expect(qualityReader.execute).toHaveBeenCalledTimes(['quality-read', 'old-pauses'].includes(path) ? 1 : 0)
     expect(commit.execute).toHaveBeenCalledOnce()
     expect(commit.execute).toHaveBeenCalledWith(expect.anything(), { compilationId: 'comp', retainedFindings: retained })
     expect(critic.execute).not.toHaveBeenCalled()
     expect(continuity.execute).not.toHaveBeenCalled()
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { tokenBudget: 500, maxTurns: 1, writeProgress: 21, resumeCount: 0 } })
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+  it.each(['repeat', 'other-tool', 'resume', 'failed-read', 'stale-feedback', 'persist-failure'] as const)('does not replenish decision feedback or invent progress: %s', async scenario => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const feedback = { key: 'b'.repeat(64), taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'c',
+      orderIndex: 1, compilationId: 'comp', revision: 23, contentHash: 'a'.repeat(64) }
+    let state = { ...readiness('complete', 'complete', 23), qualityCandidateCount: 1, decisionPending: true, decisionFeedback: feedback }
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const reader = tool('quality_report_get', async () => {
+      if (scenario === 'stale-feedback') state = { ...state, decisionFeedback: { ...feedback, contentHash: 'c'.repeat(64), key: 'c'.repeat(64) } }
+      if (scenario === 'persist-failure') mocks.journal.mockRejectedValueOnce(new Error('feedback journal unavailable'))
+      return { output: '当前报告与具体意见', reviewDecisionFeedback: feedback,
+        ...(scenario === 'failed-read' ? { outcome: 'failed' as const, failureCode: 'REPORT_READ_FAILED' } : {}) }
+    })
+    const bridgeReader = tool('chapter_bridge_get', async () => ({ output: '同一意见，不产生新的决定', reviewDecisionFeedback: feedback }))
+    const commit = tool('chapter_bridge_commit', async () => ({ output: '不应提交' }), false)
+    const critic = tool('quality_analyze', async () => ({ output: '不应再次检查' }))
+    mocks.tools = [reader, bridgeReader, commit, critic]
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 4, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 20, writeBaseline: 0, readProgress: 7, readBaseline: 0, progressSignatures: [] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 59, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 678608, completionTokens: 0, totalTokens: 678608, checkpoint } })
+    queue(response('', [call('first-read', reader.name, '{"reportId":"report"}')]))
+    const successful = ['repeat', 'other-tool', 'resume'].includes(scenario)
+    if (successful) queue(response('', [call('again', scenario === 'other-tool' ? bridgeReader.name : reader.name,
+      scenario === 'other-tool' ? '{"compilationId":"comp"}' : '{"reportId":"report"}')]))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+    expect(mocks.chat).toHaveBeenCalledTimes(successful ? 2 : 1)
+    expect(commit.execute).not.toHaveBeenCalled()
+    expect(critic.execute).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { tokenBudget: 500, maxTurns: 1,
+      writeProgress: 20, readProgress: 7, stagnantBatches: successful ? 6 : 5 } })
+    expect(events().at(-1)).not.toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    if (scenario === 'resume') {
+      const stopped = structuredClone(mocks.runs.get('run')!)
+      mocks.update.mockResolvedValueOnce({ ...stopped, startedAt: new Date(checkpoint.runStartedAt) } as never)
+      mocks.chat.mockClear()
+      queue(response('', [call('after-resume', reader.name, '{"reportId":"another-report-label"}')]))
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+      expect(mocks.chat).toHaveBeenCalledOnce()
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { consumedReviewDecisionFeedback: [feedback.key],
+        stagnantBatches: 7, writeProgress: 20, readProgress: 7, tokenBudget: 500 } })
+    }
   })
   it('inherits unresolved review evidence on a typed continuation without a fresh budget or paid turn', async () => {
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing'))

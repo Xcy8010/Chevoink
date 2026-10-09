@@ -1,5 +1,5 @@
 import { retainedFindings } from './chapter-arguments.js'
-import { readChapterReviewReadiness, chapterReviewDecisionGuidance } from '../chapter-review-guard.js'
+import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
 import { persistedContentHash } from '../semantic-progress.js'
 import { continuityFindingText, continuitySourceInput, resolveContinuitySources, continuityRecheckInput, unconfirmedContinuityOutput, type ContinuityBodies } from '../continuity-review-context.js'
@@ -534,6 +534,7 @@ export const chapterBridgeGetTool = defineTool({
       : report ? `质量报告 reportId=${report.id} 不属于当前完整正文检查，不能用旧候选证明当前版本通过。` : '当前质量报告尚未建立。'
     return {
       output: `compilationId=${compilation.id}，chapterId=${compilation.chapterId ?? '尚未创建'}，阶段=${compilation.stage}，状态=${compilation.status}，目标第 ${compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。\n${items.join('\n')}\nScene Task：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜目标 ${task.goal}｜阻力 ${task.obstacle}｜代价 ${task.cost}｜转折 ${task.turn}`).join('\n') || '尚未建立'}\n${qualityDetails}\n${review ? chapterReviewDecisionGuidance(review) : ''}`,
+      reviewDecisionFeedback: currentQuality && review?.decisionFeedbackSnapshotHash === qualityDecisionSnapshotHash(report.findings) ? review.decisionFeedback : undefined,
       summary: `读取第 ${compilation.targetOrderIndex} 章章节桥`,
       display: { kind: 'storyCompiler', compilationId: compilation.id, phase: compilation.stage, title: '章节桥', detail: `第 ${compilation.targetOrderIndex} 章 · ${compilation.stage}`, items },
     }

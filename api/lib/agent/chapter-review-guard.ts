@@ -13,10 +13,17 @@ import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
 
 export type ChapterReviewDecision = { source: 'continuity' | 'quality'; reportId: string; findingId: string }
 export type RetainedChapterReviewDecision = ChapterReviewDecision & { reason: string }
+export type ReviewDecisionFeedback = { key: string; taskId: string; userId: string; novelId: string; chapterId: string;
+  orderIndex: number; compilationId: string; revision: number; contentHash: string }
+export type ChapterReviewDecisionDetail = ChapterReviewDecision & { evidence: string; explanation: string; suggestion: string; severity: string; disposition: string }
 type ReviewStatus = 'complete' | 'missing' | 'stale' | 'incomplete'
 // Prisma rows contain Dates; persist only JSON-safe finding data in the binding.
 function qualityDecisionHash(findings: unknown[]) {
   return runtimeJson(JSON.parse(JSON.stringify(findings))).hash
+}
+/** Read tools order findings for presentation; compare the full persisted set. */
+export function qualityDecisionSnapshotHash(findings: unknown[]) {
+  return runtimeJson(findings.map(item => JSON.stringify(item)).sort()).hash
 }
 export type ChapterReviewRevisionOptions = {
   requireQualityChannel?: boolean
@@ -37,6 +44,9 @@ export type ChapterReviewReadiness = {
   qualityCandidateCount?: number
   /** Current bound decisions, independent of paid repair quotas. */
   decisionPending?: boolean
+  decisionFeedbackSnapshotHash?: string
+  decisionFeedback?: ReviewDecisionFeedback
+  decisionDetails?: ChapterReviewDecisionDetail[]
   requiredDecisions?: ChapterReviewDecision[]
   retainedDecisions?: RetainedChapterReviewDecision[]
   decisionEntries?: ChapterReviewDecision[]
@@ -194,6 +204,35 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     qualityContextCurrent = metrics.qualityContextHash === qualityReviewContextHash(
       await buildHumanityQualityContext(subject.userId, subject.novelId, chapter.id, subject.runId, tx))
   }
+  const decisionDetails: ChapterReviewDecisionDetail[] = requiredDecisions.map(reference => {
+    if (reference.source === 'quality') {
+      const finding = report!.findings.find(item => item.id === reference.findingId)!
+      return { ...reference, evidence: finding.evidenceExcerpt, explanation: finding.explanation, suggestion: finding.suggestion,
+        severity: finding.severity, disposition: finding.disposition }
+    }
+    const finding = continuityFindingInputSchema.parse((validation!.findings as unknown[])[Number(reference.findingId)])
+    return { ...reference, evidence: finding.evidence, explanation: finding.evidence, suggestion: finding.suggestion,
+      severity: finding.severity, disposition: 'pending' }
+  })
+  // Control feedback identity excludes database IDs, timestamps and revision counters.
+  // Recreating a report or switching read tools cannot buy another decision turn.
+  const semanticFindings = [
+    ...(assessment && validation && Array.isArray(validation.findings) ? validation.findings.map(item => {
+      const finding = continuityFindingInputSchema.parse(item)
+      return { source: 'continuity', signal: finding.signal, severity: finding.severity, evidence: finding.evidence, suggestion: finding.suggestion }
+    }) : []),
+    ...(quality === 'complete' ? report!.findings.map(finding => ({ source: 'quality', signal: finding.signal, severity: finding.severity,
+      evidence: finding.evidenceExcerpt, explanation: finding.explanation, suggestion: finding.suggestion, start: finding.startOffset, end: finding.endOffset,
+      disposition: finding.disposition, authorFeedback: finding.authorFeedback, feedbackReason: finding.feedbackReason })) : []),
+  ].map(item => JSON.stringify(item)).sort()
+  const contentHash = runtimeJson({ content: chapter.content }).hash
+  const decisionFeedback: ReviewDecisionFeedback | undefined = !requiredTools.length && decisionPending && continuity === 'complete'
+    && quality === 'complete' && qualityContextCurrent ? {
+      key: runtimeJson({ taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, contentHash,
+        findings: semanticFindings }).hash,
+      taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id,
+      orderIndex: chapter.orderIndex, compilationId: compilation.id, revision: chapter.revision, contentHash,
+    } : undefined
   const phases: ChapterReviewProgressEvidence['phases'] = []
   if (requirements.continuity && continuity === 'complete') phases.push('continuity')
   if (requirements.quality && quality === 'complete' && qualityContextCurrent) phases.push('quality')
@@ -201,7 +240,8 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     && (!requirements.quality || qualityContextCurrent)) phases.push('decision')
   return { ready: !requiredTools.length, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id,
     chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools, decisionPending,
-    requiredDecisions, retainedDecisions, decisionEntries, mustPassPending: mandatoryReviewPending,
+    decisionFeedbackSnapshotHash: quality === 'complete' ? qualityDecisionSnapshotHash(report!.findings) : undefined,
+    decisionFeedback, decisionDetails, requiredDecisions, retainedDecisions, decisionEntries, mustPassPending: mandatoryReviewPending,
     decisionBinding: { contentHash: runtimeJson({ content: chapter.content }).hash, continuityBinding,
       qualityReportId: quality === 'complete' ? report!.id : null, qualityReportHash: quality === 'complete' ? qualityDecisionHash(report!.findings) : null },
     progressEvidence: { taskId: original.taskId, userId: subject.userId, novelId: subject.novelId,
@@ -218,7 +258,7 @@ const decisionKey = (item: ChapterReviewDecision) => `${item.source}:${item.repo
 export function chapterReviewDecisionGuidance(readiness: ChapterReviewReadiness) {
   const retained = readiness.retainedDecisions ?? []
   const pending = (readiness.requiredDecisions ?? []).filter(item => !retained.some(saved => decisionKey(saved) === decisionKey(item)))
-  return `当前 r${readiness.revision} 检查状态：连续性=${readiness.continuity}，质量=${readiness.quality}。已明确留置${retained.length}项，仍需处理${pending.length}项；质量项按最多8处安全候选选取，不等于报告所有pending建议都必须改写。${readiness.mustPassPending ? '原始作者明确要求检查通过，留置不能替代该硬要求。' : ''}保留正文时直接用 chapter_bridge_commit 的 retainedFindings 逐项记录具体原因，无需无变化写入或重新检查。精确参数模板（请替换reason为实际原因，不要修改引用）：${JSON.stringify(pending.map(item => ({ ...item, reason: '填写此意见不能安全修改或应保留的具体原因' })))}`
+  return `当前 r${readiness.revision} 检查状态：连续性=${readiness.continuity}，质量=${readiness.quality}。已明确留置${retained.length}项，仍需处理${pending.length}项；质量项按最多8处安全候选选取，不等于报告所有pending建议都必须改写。${readiness.mustPassPending ? '原始作者明确要求检查通过，留置不能替代该硬要求。' : ''}保留正文时直接用 chapter_bridge_commit 的 retainedFindings 逐项记录具体原因，无需无变化写入或重新检查。当前必需意见详情：${JSON.stringify((readiness.decisionDetails ?? []).filter(item => pending.some(reference => decisionKey(reference) === decisionKey(item))))}。精确参数模板（请替换reason为实际原因，不要修改引用）：${JSON.stringify(pending.map(item => ({ ...item, reason: '填写此意见不能安全修改或应保留的具体原因' })))}`
 }
 
 /** Shared exact-reference validation for manuscript and terminal decisions. */

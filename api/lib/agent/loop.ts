@@ -255,6 +255,7 @@ type ToolCallOutcome = {
   unresolvedTextRequest?: boolean
   reviewCompleted?: boolean
   reviewRequestFinished?: import('../../../shared/contracts/index.js').AgentReviewRequestReceipt
+  reviewDecisionFeedback?: import('./chapter-review-guard.js').ReviewDecisionFeedback
   workflowMilestone?: import('./semantic-progress.js').WritingWorkflowMilestone
   failureCode?: string
   reviewStopReason?: string
@@ -546,6 +547,7 @@ export async function handleToolCall(
     return {
       observation: wrapToolOutput(tool.name, result.output),
       workflowMilestone: ctx.inlineChild ? undefined : result.workflowMilestone,
+      reviewDecisionFeedback: ctx.inlineChild ? undefined : result.reviewDecisionFeedback,
       requiredResult: result.requiredResult,
       semanticTransition: result.semanticTransition,
       observedChapterRange: result.observedChapterRange,
@@ -790,6 +792,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   // P0 重复签名滑窗：只记成功执行；失败后同签名正当重试不计次
   const admission = new ToolAdmissionGuard()
   const progressSignatures = new Set<string>()
+  const consumedReviewDecisionFeedback = new Set<string>()
   let blockedRepeat = 0
   let stagnantBatches = 0
   const argumentFailures = new Map<string, number>()
@@ -825,6 +828,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
   }
   const restoreReviewEvidence = (checkpoint: RunCheckpointState) => {
+    checkpoint.consumedReviewDecisionFeedback?.forEach(key => consumedReviewDecisionFeedback.add(key))
     inputProtocolRecovery ??= checkpoint.inputProtocolRecovery
     const oldAnchors = (checkpoint.toolRestrictions ?? []).filter(item => item.code === 'CHAPTER_ANCHOR_CONFLICT' && !item.inputHash && item.target)
     if (params.resume && checkpoint.version === 2 && checkpoint.stagnantBatches >= 4 && !inputProtocolRecovery && oldAnchors.length) {
@@ -877,6 +881,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     writeProgress: writeProgressCount, writeBaseline: checkpointWriteBaseline,
     readProgress: readProgressCount, readBaseline: checkpointReadBaseline,
     progressSignatures: [...progressSignatures],
+    ...(consumedReviewDecisionFeedback.size ? { consumedReviewDecisionFeedback: [...consumedReviewDecisionFeedback] } : {}),
     ...(automaticReviewAttempts.size ? { reviewAttempts: [...automaticReviewAttempts] } : {}),
     ...(pendingReviews.size ? { pendingReviews: [...pendingReviews.values()] } : {}),
     ...(toolRestrictions.length ? { toolRestrictions } : {}),
@@ -1121,6 +1126,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     } else await persistCheckpoint()
     const currentReviewState: { value: ChapterReviewReadiness | null } = { value: null }
     const observePersistedReviewProgress = async () => {
+      currentReviewState.value = null
       if (pendingReviews.size || !['write', 'revise'].includes(taskSpec.intent)
         || ['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')) return false
       try {
@@ -1988,6 +1994,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
       let reviewStopReason: string | undefined
       let batchProgress = false
+      const decisionFeedback: NonNullable<ToolCallOutcome['reviewDecisionFeedback']>[] = []
       let compatibilityReadObserved = false
       for (let callIndex = 0; callIndex < effectiveToolCalls.length; callIndex += 1) {
         let call = effectiveToolCalls[callIndex]
@@ -2224,6 +2231,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         lastActivityAt = Date.now()
         // 滑窗更新：只记成功执行；失败不碰窗口（同签名重试不会被误杀）
         if (outcome.part.status === 'success') {
+          if (['quality_report_get', 'chapter_bridge_get'].includes(call.name) && outcome.reviewDecisionFeedback) {
+            decisionFeedback.push(outcome.reviewDecisionFeedback)
+          }
           const range = outcome.observedChapterRange
           if (compatibilityReadTargets && call.name === 'chapter_read' && range && compatibilityReadTargets.has(range.targetId)
             && /^[a-f0-9]{64}$/u.test(range.contentHash) && Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end)
@@ -2344,10 +2354,30 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, waitingForChild)
       if (reviewProgress) await persistCheckpoint()
+      // A just-read, current decision needs to reach the model before the stop
+      // test. This consumes feedback once; it creates no progress or allowance.
+      const review = currentReviewState.value
+      const currentFeedback = review?.decisionFeedback
+      const feedbackRead = !forceWrapUpReason && blockedRepeat < 4 && !pendingReviews.size && review?.ready
+        && hasPendingChapterReviewDecision(review) && currentFeedback?.taskId === taskSpec.id
+        && currentFeedback.userId === params.userId && currentFeedback.novelId === params.novelId
+        && /^[a-f0-9]{64}$/u.test(currentFeedback.key)
+        && !consumedReviewDecisionFeedback.has(currentFeedback.key)
+        && decisionFeedback.some(item => item.key === currentFeedback.key && item.taskId === currentFeedback.taskId
+          && item.userId === currentFeedback.userId && item.novelId === currentFeedback.novelId
+          && item.chapterId === currentFeedback.chapterId && item.orderIndex === currentFeedback.orderIndex
+          && item.compilationId === currentFeedback.compilationId && item.revision === currentFeedback.revision
+          && item.contentHash === currentFeedback.contentHash)
+      if (feedbackRead) {
+        await bus.persist()
+        consumedReviewDecisionFeedback.add(currentFeedback!.key)
+        await persistCheckpoint()
+        messages.push({ role: 'user', content: `[系统] 已取得当前版本的真实检查意见，按刚读取的依据作具体修订或逐项留置并提交终态。正文未变时无需再次检查；读取不是修复或完成。${chapterReviewDecisionGuidance(review!)}` })
+      }
       const compatibilityRead = compatibilityReadTargets !== null && compatibilityReadObserved
       compatibilityReadTargets = null
       if (compatibilityRead && !batchProgress) messages.push({ role: 'user', content: '[系统] 已核对旧定位失败目标的真实正文。输入协议兼容读取机会已持久记账，仅此一次；历史失败、检查次数和预算保留。下一步按当前正文纠正具体定位参数并执行原目标内修订，不要重复读取或照原失败参数重试。' })
-      if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead)) {
+      if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead && !feedbackRead)) {
         forceWrapUpReason = '连续多轮没有推进原任务的内容或必需成果，已停止重复执行，进度保留。'
         forceWrapUpLocal = toolRestrictions.length > 0 || pendingReviews.size > 0 || settledReviewFailures.size > 0
       }

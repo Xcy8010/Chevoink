@@ -40,7 +40,7 @@ import {
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
 import { REPAIR_BLOCK_CODES, REPAIR_CHANNEL_CODES, qualityReportCheckedCurrentContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
-import { probeChapterReviewRevision, readChapterReviewRevisionGuidance } from '../chapter-review-guard.js'
+import { probeChapterReviewRevision, readChapterReviewRevisionGuidance, readChapterReviewReadiness, qualityDecisionSnapshotHash, chapterReviewDecisionGuidance } from '../chapter-review-guard.js'
 import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, inspectCorrectableCriticResponse, parseQualityJsonObject, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence, qualityReportHasDroppedFindings, qualityCorrectionResponseWitness } from '../quality-evidence.js'
 import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/writing.js'
 import { renderChapterWritingBackground } from '../writing-request-context.js'
@@ -455,7 +455,10 @@ export const qualityReportGetTool = defineTool({
   parameters: z.object({ reportId: z.string().min(1) }), permission: READ, readOnly: true,
   async execute(ctx, args) {
     const report = await getQualityReport(ctx.userId, ctx.novelId, args.reportId, ctx.transaction)
-    return { output: `当前质量报告 reportId=${report.id}，r${report.chapterRevision}；留置 source=quality，findingId 使用对应意见ID。\n${report.findings.map((finding) => `[${finding.id}/${findingLabel(finding.signal)}/${finding.disposition}] 「${finding.evidenceExcerpt}」→${finding.suggestion}`).join('\n') || '报告没有 finding。'}`, summary: '读取质量报告', display: reportDisplay(report) }
+    const readiness = await readChapterReviewReadiness(ctx.transaction ?? prisma, ctx, report.compilationId ?? undefined)
+    const reviewDecisionFeedback = readiness?.qualityReportId === report.id
+      && readiness.decisionFeedbackSnapshotHash === qualityDecisionSnapshotHash(report.findings) ? readiness.decisionFeedback : undefined
+    return { output: `当前质量报告 reportId=${report.id}，r${report.chapterRevision}；留置 source=quality，findingId 使用对应意见ID。\n${report.findings.map((finding) => `[${finding.id}/${findingLabel(finding.signal)}/${finding.disposition}] 「${finding.evidenceExcerpt}」→${finding.suggestion}`).join('\n') || '报告没有 finding。'}${reviewDecisionFeedback ? `\n${chapterReviewDecisionGuidance(readiness!)}` : ''}`, summary: '读取质量报告', display: reportDisplay(report), reviewDecisionFeedback }
   },
 })
 

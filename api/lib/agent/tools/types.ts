@@ -72,6 +72,7 @@ export type ToolContext = {
 }
 
 export type ToolResult = {
+  reviewDecisionFeedback?: import('../chapter-review-guard.js').ReviewDecisionFeedback
   /** First persisted prerequisite for a frozen writing target. Not a body or completion receipt. */
   workflowMilestone?: import('../semantic-progress.js').WritingWorkflowMilestone
   /** Server-observed body and returned range, never model-provided progress. */
