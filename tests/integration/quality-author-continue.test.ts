@@ -11,6 +11,8 @@ import { chapterBridgeGetTool, continuityValidateTool } from '../../api/lib/agen
 import { commitChapterBridge, prepareStoryCompilation, recordStoryCompilerWrite, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
 import { withHumanAdmission } from '../../api/lib/agent/goal-activation-authority.js'
 import { readQualityReviewAdmission } from '../../api/lib/agent/quality-review-admission.js'
+import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import { nextReviewDispatch, reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
 import { readQualityFormatRecovery } from '../../api/lib/agent/quality-format-recovery.js'
 import { readQualityUnavailableProof } from '../../api/lib/agent/quality-unavailable-proof.js'
 import { readOriginalTaskRequest, originalTaskRunIds } from '../../api/lib/agent/original-request.js'
@@ -209,6 +211,45 @@ describe.runIf(available)('author admissions after settled quality format failur
     expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toMatchObject({ currentTurn: 0 })
     })
   })
+
+  it.each(['settled', 'unknown'] as const)('old failed quality remains audit-only for a new revision, current %s outcome remains fenced', async outcome => fixture(async f => {
+    const h = await legacyHarness(f)
+    const fetchMock = provider(request => {
+      if (request <= 2) return 'synthetic malformed old report'
+      if (outcome === 'unknown') throw new Error('synthetic current review transport unknown')
+      return '{"findings":[]}'
+    })
+    expect(await h.check()).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_REPORT_INCOMPLETE' })
+    expect(fetchMock.requestCount()).toBe(2)
+    const old = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId }, orderBy: { id: 'asc' } })
+    const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const initial = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f))
+    expect(initial).toMatchObject({ quality: 'incomplete', revision: before.revision })
+    // Fixture represents a separately authorized real manuscript CAS. The
+    // classifier does not perform or grant this write.
+    await prisma.chapter.update({ where: { id: f.chapterId, revision: before.revision }, data: { content: '原文。作者保存的新线索。', revision: { increment: 1 } } })
+    const current = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f))
+    expect(current).toMatchObject({ ready: false, quality: 'stale', revision: before.revision + 1, qualityReportId: null })
+    const qualityOnly = { ...current!, requiredTools: current!.requiredTools.filter(tool => tool.name === 'quality_analyze') }
+    expect(nextReviewDispatch(qualityOnly, new Set(['quality_analyze']), new Set([reviewDispatchKey(initial!, 'quality_analyze')])).kind).toBe('tool')
+    if (outcome === 'unknown') expect(await h.check()).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_REPORT_INCOMPLETE' })
+    else expect((await h.check()).outcome).toBeUndefined()
+    expect(fetchMock.requestCount()).toBe(3)
+    const after = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f))
+    expect(after).toMatchObject({ ready: false, quality: outcome === 'unknown' ? 'incomplete' : 'complete', revision: before.revision + 1 })
+    if (outcome === 'unknown') {
+      expect(nextReviewDispatch({ ...after!, requiredTools: [{ name: 'quality_analyze', args: { compilationId: h.compilationId } }] },
+        new Set(['quality_analyze']), new Set([reviewDispatchKey(after!, 'quality_analyze')])).kind).toBe('blocked')
+      expect(await h.check()).toMatchObject({ outcome: 'failed' })
+      expect(fetchMock.requestCount()).toBe(3)
+      expect(await prisma.aiUsageLog.count({ where: { userId: f.userId, usageSource: 'unknown', billingStatus: 'pending_usage' } })).toBeGreaterThan(0)
+    }
+    const oldAfter = await prisma.chapterQualityReport.findMany({ where: { id: { in: old.map(report => report.id) } }, orderBy: { id: 'asc' } })
+    expect(oldAfter.map(report => { const { status, updatedAt, ...audit } = report; expect(status).toBe('stale'); expect(updatedAt >= report.createdAt).toBe(true); return audit }))
+      .toEqual(old.map(report => { const { status, updatedAt, ...audit } = report; expect(status).toBe('failed'); expect(updatedAt >= report.createdAt).toBe(true); return audit }))
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).revision).toBe(before.revision + 1)
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: h.compilationId } })).status).toBe('active')
+  }))
 
   it.each(['ordinary-start', 'pending-usage', 'no-credit'] as const)('%s never resets accounting or pays again without a valid affordable result', async scenario => fixture(async f => {
     const h = await legacyHarness(f), fetchMock = provider(() => 'synthetic malformed report')

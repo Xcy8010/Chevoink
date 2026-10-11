@@ -41,6 +41,7 @@ const mocks = vi.hoisted(() => ({
   settledQuality: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/quality-review-admission.js').readSettledQualityReviews>>> => []),
   assertLimitedDelivery: vi.fn(async () => undefined),
   continuedContinuity: vi.fn(async (): Promise<Array<[string, string]>> => []),
+  legacyAnchorRecovery: vi.fn(async (): Promise<import('../../api/lib/agent/legacy-input-recovery.js').LegacyAnchorInputRecovery | null> => null),
   continuityRecovery: vi.fn(async () => ({ removed: [] as import('../../api/lib/agent/tool-local-failure.js').ToolRestriction[],
     settled: [] as import('../../api/lib/agent/checkpoint.js').PendingReviewCall[], recovered: [] as string[], markers: [] as string[], chapterIds: [] as string[] })),
   reviewProbe: vi.fn(async () => ({ open: true } as { open: true } | { open: false; code: string; message: string })),
@@ -204,6 +205,7 @@ vi.mock('../../api/lib/agent/story-compiler.js', async (importOriginal) => ({
   readPersistedWritingWorkflowMilestones: mocks.savedWorkflow,
 }))
 vi.mock('../../api/lib/agent/legacy-continuity-recovery.js', () => ({ readLegacyContinuityRecovery: mocks.continuityRecovery, readContinuedContinuityRecovery: mocks.continuedContinuity }))
+vi.mock('../../api/lib/agent/legacy-input-recovery.js', () => ({ readLegacyAnchorInputRecovery: mocks.legacyAnchorRecovery }))
 vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChapter: mocks.committedChapter }))
 vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportForDelivery: mocks.report }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
@@ -283,6 +285,7 @@ beforeEach(() => {
   mocks.requestRecovery.mockReset().mockResolvedValue([])
   mocks.cancelledReviews.mockReset().mockResolvedValue([])
   mocks.continuedContinuity.mockReset().mockResolvedValue([])
+  mocks.legacyAnchorRecovery.mockReset().mockResolvedValue(null)
   mocks.continuityRecovery.mockReset().mockResolvedValue({ removed: [], settled: [], recovered: [], markers: [], chapterIds: [] })
   mocks.assertLimitedDelivery.mockReset().mockResolvedValue(undefined)
   mocks.reviewProbe.mockReset().mockResolvedValue({ open: true })
@@ -1781,6 +1784,54 @@ describe('tool execution authority (real dispatch, mocked global registry)', () 
 })
 
 describe('Agent run admission and completion lifecycle (real loop, mocked provider/persistence)', () => {
+  it.each(['corrected', 'duplicate-read', 'wrong-target', 'already-used', 'unproven'] as const)(
+    'recovers the legacy turn21/no-restriction checkpoint through owned one-shot input evidence (%s)', async scenario => {
+      const hash = 'a'.repeat(64)
+      const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+      taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ chapterId: null, orderIndex: 5 }],
+        repairAuthorized: false, titleAndBodyOnly: false,
+        tailVolume: { version: 1, previousChapterId: 'previous', previousRevision: 23, targetOrderIndex: 5 } }
+      mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+      const restriction = { action: 'quality_analyze', target: 'comp', code: 'QUALITY_REPORT_INCOMPLETE', reason: '已保存旧报告',
+        reviewInput: { chapterId: 'c', revision: 3 } }
+      const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+        activeExecutionMs: 147649, stagnantBatches: 7, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+        writeProgress: 3, writeBaseline: 0, readProgress: 3, readBaseline: 0,
+        progressSignatures: ['read-range:' + JSON.stringify(['c', hash]) + ':0-2502'],
+        reviewAttempts: ['comp:c:3:quality_analyze'], toolRestrictions: [restriction],
+        ...(scenario === 'already-used' ? { inputProtocolRecovery: { protocol: 2, key: 'b'.repeat(64) } } : {}) }
+      mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 21, startedAt: new Date(checkpoint.runStartedAt),
+        usage: { promptTokens: 1334319, completionTokens: 17456, totalTokens: 1351775, checkpoint } })
+      if (scenario !== 'unproven') mocks.legacyAnchorRecovery.mockResolvedValue({ key: 'c'.repeat(64), chapterIds: ['c'], sourceMessageIds: ['failed-anchor'] })
+      const read = tool('chapter_read', async () => {
+        if (mocks.chat.mock.calls.length === 1) expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: {
+          stagnantBatches: 7, readProgress: 3, writeProgress: 3, tokenBudget: 500, progressSignatures: checkpoint.progressSignatures,
+          toolRestrictions: [restriction], reviewAttempts: checkpoint.reviewAttempts,
+          ...(scenario === 'unproven' ? {} : { inputProtocolRecovery: { protocol: 2, key: scenario === 'already-used' ? 'b'.repeat(64) : 'c'.repeat(64) } }) } })
+        return { output: '当前 r4 正文保留', observedChapterRange: { targetId: scenario === 'wrong-target' ? 'another' : 'c', contentHash: hash,
+          start: 0, end: scenario === 'wrong-target' ? 0 : 2502 } }
+      })
+      const edit = tool('chapter_edit_range', async () => {
+        expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: 8, readProgress: 3, writeProgress: 3, tokenBudget: 500 } })
+        return { output: '原任务合法修改已保存', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '八千八',
+          before: '当前正文', after: '当前修订正文', revision: 5, appliedDirectly: true } }
+      }, false)
+      const commit = tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '当前版本必要成果已提交' } }, false)
+      mocks.tools = [read, edit, commit]
+      const next = scenario === 'duplicate-read' ? [call('read-again', read.name, '{"chapterId":"c"}')]
+        : [call('corrected-anchor', edit.name, '{"chapterId":"c","oldText":"当前正文","newText":"当前修订正文"}'), call('commit', commit.name)]
+      queue(response('', [call('diagnostic-read', read.name, '{"chapterId":"c"}')]), response('', next), response('完成。'))
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+      const completed = scenario === 'corrected'
+      expect(mocks.legacyAnchorRecovery).toHaveBeenCalledTimes(scenario === 'already-used' ? 0 : 1)
+      expect(read.execute).toHaveBeenCalledOnce()
+      expect(edit.execute).toHaveBeenCalledTimes(completed ? 1 : 0)
+      expect(commit.execute).toHaveBeenCalledTimes(completed ? 1 : 0)
+      expect(mocks.runs.get('run')).toMatchObject({ status: completed ? 'completed' : 'paused', usage: { checkpoint: {
+        tokenBudget: 500, writeProgress: completed ? 4 : 3, readProgress: 3,
+        stagnantBatches: completed ? 0 : scenario === 'duplicate-read' ? 9 : 8, toolRestrictions: [restriction],
+        reviewAttempts: checkpoint.reviewAttempts } } })
+    })
   it.each([false, true])('allows one persisted legacy locator diagnostic read, never replenished on resume (already used=%s)', async used => {
     const hash = 'a'.repeat(64)
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,

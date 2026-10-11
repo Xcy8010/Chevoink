@@ -7,6 +7,7 @@ import { qualityReportCheckedCurrentContent, qualityReportMatchesContent } from 
 import { commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import * as original from '../../api/lib/agent/original-request.js'
+import { nextReviewDispatch, reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
 import * as lock from '../../api/lib/data/novel-write-lock.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 
@@ -117,10 +118,31 @@ describe('persisted current review readiness', () => {
   it('a latest failed assessment cannot revive an earlier passing report by filtering on revision', async () => {
     const f = fixture()
     f.report.status = 'failed'; f.report.chapterRevision--
-    await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ ready: false, quality: 'incomplete' })
+    await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ ready: false, quality: 'stale', qualityReportId: null })
     const query = f.db.chapterQualityReport.findFirst.mock.calls[0][0]
     expect(query.where).not.toHaveProperty('chapterRevision')
     expect(query.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+  })
+  it.each(['failed', 'analyzing'] as const)('keeps current %s quality blocked, but permits only the new revision assessment', async status => {
+    const f = fixture()
+    f.report.status = status
+    Object.assign(f.report.deterministicMetrics, { independentCheck: 'unavailable' })
+    const before = structuredClone(f.report)
+    const available = new Set(['quality_analyze'])
+    const current = await readChapterReviewReadiness(f.tx, f.subject)
+    expect(current).toMatchObject({ ready: false, quality: 'incomplete', qualityReportId: null })
+    expect(nextReviewDispatch(current, available, new Set()).kind).toBe('blocked')
+    f.chapter.content += '他继续追查脚印。'; f.chapter.revision++
+    f.refreshContinuity()
+    const next = await readChapterReviewReadiness(f.tx, f.subject)
+    expect(next).toMatchObject({ ready: false, quality: 'stale', qualityReportId: null, requiredTools: [{ name: 'quality_analyze', args: { compilationId: f.compilation.id } }] })
+    expect(nextReviewDispatch(next, available, new Set([reviewDispatchKey(current!, 'quality_analyze')])).kind).toBe('tool')
+    expect(nextReviewDispatch(next, available, new Set([reviewDispatchKey(next!, 'quality_analyze')])).kind).toBe('blocked')
+    expect(nextReviewDispatch(next, new Set(), new Set()).kind).toBe('blocked')
+    expect(f.report).toEqual(before)
+    await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    expect(f.db.chapterQualityReport.update).not.toHaveBeenCalled()
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   it('keeps current unavailable continuity incomplete but makes it stale after a legitimate new revision', async () => {
     const f = fixture()

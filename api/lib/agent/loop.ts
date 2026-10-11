@@ -66,6 +66,7 @@ import { nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from 
 import { readQualityFormatRecovery, type QualityFormatRecovery } from './quality-format-recovery.js'
 import { deferredToolPart } from './deferred-tool.js'
 import { readContinuedContinuityRecovery, readLegacyContinuityRecovery } from './legacy-continuity-recovery.js'
+import { readLegacyAnchorInputRecovery } from './legacy-input-recovery.js'
 import { readCancelledReviewRetirements } from './cancelled-review-recovery.js'
 import { activeChapterScope } from '../data/internal.js'
 import { createRepeatDetector } from './repeat-detect.js'
@@ -1220,6 +1221,19 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const recovered = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx,
         { userId: params.userId, novelId: params.novelId, runId }))
       for (const [key, attempt] of recovered) reviewRecoveryKeys.set(key, attempt)
+    }
+    if (params.resume && stagnantBatches >= 4 && !inputProtocolRecovery && !compatibilityReadTargets
+      && ['write', 'revise'].includes(taskSpec.intent)) {
+      // Older tool cards retained a confirmed locator failure without saving
+      // a checkpoint restriction. Authenticate original-task evidence;
+      // Continue itself grants neither progress nor another budget allowance.
+      const recovery = await prisma.$transaction(tx => readLegacyAnchorInputRecovery(tx,
+        { userId: params.userId, novelId: params.novelId, runId }, taskSpec))
+      if (recovery) {
+        inputProtocolRecovery = { protocol: 2, key: recovery.key }
+        compatibilityReadTargets = new Set(recovery.chapterIds)
+        await persistCheckpoint()
+      }
     }
     if (params.resume || previousTask) {
       // Older executions saved prerequisites before those persisted transitions

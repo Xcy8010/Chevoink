@@ -8,6 +8,28 @@ describe('Agent 写入审查生命周期', () => {
     useAgentStore.getState().resumeRun('run-review', 'session-review')
   })
 
+  it('继续后重复读取并暂停仍保留已保存变更和历史，不把定位预览当已写正文', () => {
+    const store = () => useAgentStore.getState()
+    const base = { runId: 'run-review', ts: new Date().toISOString() }
+    store().restoreMessages([{ id: 'saved', runId: 'run-review', role: 'assistant', createdAt: base.ts, parts: [{
+      type: 'tool-call', callId: 'saved-edit', toolName: 'chapter_edit_range', title: '修改本章', args: {}, status: 'success', summary: '已保存',
+      display: { kind: 'chapterDiff', chapterId: 'chapter', chapterTitle: '八千八', before: '旧稿', after: '已保存第4版', revision: 4, appliedDirectly: true } }] }], 'session-review')
+    const saved = structuredClone(store().workspaceActivities)
+    store().resumeRun('run-review', 'session-review')
+    store().applyEvent({ ...base, seq: 101, type: 'message.start', messageId: 'continued', role: 'assistant' })
+    store().applyEvent({ ...base, seq: 102, type: 'tool.call', messageId: 'continued', callId: 'read', toolName: 'chapter_read', title: '读取本章', args: { chapterId: 'chapter' } })
+    store().applyEvent({ ...base, seq: 103, type: 'tool.result', messageId: 'continued', callId: 'read', toolName: 'chapter_read', ok: true, summary: '已读' })
+    store().applyEvent({ ...base, seq: 104, type: 'tool.delta', messageId: 'continued', callId: 'preview', toolName: 'chapter_edit_range', title: '准备修改', argsChars: 20,
+      draft: { kind: 'chapter', toolName: 'chapter_edit_range', content: '尚未保存的定位预览' } })
+    store().applyEvent({ ...base, seq: 105, type: 'run.paused', reason: 'needs_input' })
+    expect(store().workspaceActivities.filter(item => item.callId === 'saved-edit')).toEqual(saved)
+    expect(store().messages[0].parts[0]).toMatchObject({ status: 'success', display: { after: '已保存第4版', revision: 4 } })
+    expect(store().liveToolDrafts).toEqual({})
+    store().resumeRun('run-review', 'session-review')
+    store().applyEvent({ ...base, seq: 103, type: 'tool.result', messageId: 'continued', callId: 'read', toolName: 'chapter_read', ok: true, summary: '已读' })
+    expect(store().workspaceActivities.filter(item => item.callId === 'saved-edit')).toEqual(saved)
+    expect(store().messages.filter(item => item.id === 'saved')).toHaveLength(1)
+  })
   it('旧审批决定不能关闭同callId的新审批卡片', () => {
     const apply = useAgentStore.getState().applyEvent
     const base = { runId: 'run-review', ts: new Date().toISOString() }

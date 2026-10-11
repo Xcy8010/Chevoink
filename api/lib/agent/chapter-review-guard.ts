@@ -181,7 +181,10 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     chapterId: chapter.id, runId: { in: runIds } }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
   const metrics = report?.deterministicMetrics && typeof report.deterministicMetrics === 'object' && !Array.isArray(report.deterministicMetrics) ? report.deterministicMetrics : null
   const quality: ReviewStatus = report && qualityReportCheckedCurrentContent(report, chapter.revision, chapter.content) ? 'complete'
-    : !report ? 'missing' : ['failed', 'analyzing'].includes(report.status) || metrics?.independentCheck !== 'complete'
+    // A failed old assessment still wins the audit lookup, but cannot describe
+    // the unchanged/newly saved revision as an in-flight current assessment.
+    : !report ? 'missing' : report.chapterRevision !== chapter.revision ? 'stale'
+      : ['failed', 'analyzing'].includes(report.status) || metrics?.independentCheck !== 'complete'
       || typeof metrics.contentHash !== 'string' || !/^[a-f0-9]{64}$/.test(metrics.contentHash) ? 'incomplete' : 'stale'
   const requiredTools: ChapterReviewReadiness['requiredTools'] = []
   if (requirements.continuity && continuity !== 'complete') requiredTools.push({ name: 'continuity_validate', args: { compilationId: compilation.id } })
