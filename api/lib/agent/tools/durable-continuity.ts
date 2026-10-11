@@ -167,10 +167,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     const compiler = frozen.compiler
     if (!compiler) return commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
       if (!frozen.standaloneContextHash || frozen.repair) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立检查缺少只读上下文。')
-      const toolResult = await saveStandaloneContinuityReport(ctx, { chapter: frozen.chapter, contextHash: frozen.standaloneContextHash, criticInput: frozen.criticInput }, parsed, tx, typeof args.focus === 'string' ? args.focus : undefined, frozen.version >= 2, frozen.version >= 4)
-      if (inspected) await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: `${frozen.chapter.title} · 检查回复诊断`,
-        content: '独立连续性回复审计；不代表检查通过。', summary: inspected.audit.classification,
-        metadata: runtimeJson({ chapterId: frozen.chapter.id, revision: frozen.chapter.revision, criticResponse: inspected.audit }).value } })
+      const toolResult = await saveStandaloneContinuityReport(ctx, { chapter: frozen.chapter, contextHash: frozen.standaloneContextHash, criticInput: frozen.criticInput }, parsed, tx, typeof args.focus === 'string' ? args.focus : undefined, frozen.version >= 2, frozen.version >= 4, inspected?.audit)
       return runtimeJson({ toolResult, memoryJobId: null }).value
     })
     return commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {

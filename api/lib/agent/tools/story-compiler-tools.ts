@@ -577,7 +577,7 @@ export async function readStandaloneContinuityReport(ctx: ToolContext, contextHa
   return metadata.success ? { artifact, findings: metadata.data.findings } : null
 }
 
-export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true, requirePair = true): Promise<import('./types.js').ToolResult> {
+export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true, requirePair = true, criticResponse?: ReturnType<typeof inspectContinuityResponse>['audit']): Promise<import('./types.js').ToolResult> {
   ctx.signal.throwIfAborted()
   await assertAgentManuscriptCurrent(db, ctx)
   await db.$queryRaw`SELECT id FROM chapters WHERE id = ${context.chapter.id} FOR UPDATE`
@@ -592,7 +592,7 @@ export async function saveStandaloneContinuityReport(ctx: ToolContext, context: 
   const warnings = findings.length - errors
   const output = `独立连续性检查《${context.chapter.title}》@r${context.chapter.revision}：${unlocated ? '候选未确认。' : `${errors} 错误、${warnings} 警告。`}${unlocated ? '引用未在对应正文中定位，结论未确认，不能判定通过或据此改稿。' : '仅完成审阅，正文未修改，不需要补建编译或提交章节桥。'}${unlocated ? '' : `\n${findings.map(item => `[${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`}`
   const artifact = cached?.artifact ?? await db.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: `${context.chapter.title} · 连续性检查`, content: output,
-    summary: unlocated ? '候选未确认' : `${errors} 错误、${warnings} 警告`, metadata: { standaloneContinuity: true, independentCheck: unlocated ? 'unavailable' : 'complete', standaloneKey: standaloneReviewKey(context.contextHash, focus, requirePair ? 2 : 1), chapterId: context.chapter.id, revision: context.chapter.revision, contextHash: context.contextHash, findings } } })
+    summary: unlocated ? '候选未确认' : `${errors} 错误、${warnings} 警告`, metadata: { standaloneContinuity: true, independentCheck: unlocated ? 'unavailable' : 'complete', standaloneKey: standaloneReviewKey(context.contextHash, focus, requirePair ? 2 : 1), chapterId: context.chapter.id, revision: context.chapter.revision, contextHash: context.contextHash, findings, ...(criticResponse ? { criticResponse } : {}) } } })
   ctx.signal.throwIfAborted()
   return { ...(unlocated ? { outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED' } : {}),
     summary: unlocated ? '连续性引用待核对' : `独立连续性检查 · ${errors} 错误 ${warnings} 警告`, output: `artifactId=${artifact.id}\n${output}`, observedState: { kind: 'chapter', id: context.chapter.id, revision: context.chapter.revision } }
@@ -647,13 +647,7 @@ export const continuityValidateTool = defineTool({
       const response = await generateReviewCompletion(continuityCriticSystem, `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, args.focus)}`,
         { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: context.chapter.id, targetType: 'chapter', targetId: context.chapter.id, temperature: 0, reasoningEffort: 'low' }, assertCurrent)
       const inspected = inspectContinuityResponse(response, { previous: context.precedingBodies, current: context.chapter.content })
-      return prisma.$transaction(async tx => {
-        const result = await saveStandaloneContinuityReport(ctx, context, inspected, tx, args.focus)
-        await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: `${context.chapter.title} · 检查回复诊断`,
-          content: '独立连续性回复审计；不代表检查通过。', summary: inspected.audit.classification,
-          metadata: runtimeJson({ chapterId: context.chapter.id, revision: context.chapter.revision, contextHash: context.contextHash, criticResponse: inspected.audit }).value } })
-        return result
-      })
+      return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, inspected, tx, args.focus, true, true, inspected.audit))
     }
     if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, summary: '本任务连续性检查未执行', output: '指定编译不属于本任务或尚未写入正文。独立检查既有章节请省略 compilationId、传真实 chapterId；不要为检查创建新章或接管旧编译。' }
     const chapter = compilation.chapter
