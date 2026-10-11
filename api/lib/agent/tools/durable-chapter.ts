@@ -18,6 +18,7 @@ import { composeChapterEdit } from './chapter-patches.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { reduceExecutionReceipt, failedToolResultSchema } from '../runtime-reducer.js'
 import { DataAccessError, prisma } from '../../prisma.js'
+import { projectChapterBodyResult, projectConfirmedToolFailure } from './contract.js'
 
 type Action = 'chapter_write' | 'chapter_append' | 'chapter_edit_range'
 
@@ -123,7 +124,8 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
       const rejected = await rejectToolCursorCall(lease, capability.cursor!, ctx.callId)
       const failure = failedToolResultSchema.parse(rejected.receipt.result)
       await reduceExecutionReceipt(lease, { expectedRevision: rejected.pending.revision, expectedHash: rejected.pending.snapshotHash, operationId: rejected.operation.id })
-      return { rejected: { ...failure.toolResult, outcome: 'failed' as const } }
+      return { rejected: projectConfirmedToolFailure(ctx, { ...failure.toolResult, outcome: 'failed' as const }, failure.code,
+        { taskRootId: lease.taskRootId, operationId: rejected.operation.id, receiptId: rejected.receipt.operationId, resultHash: rejected.receipt.resultHash }) }
     }) : undefined
   if (prepared && 'rejected' in prepared) return prepared.rejected
   const operation = prepared?.operation ?? await prepareOperation(lease, { key: capability.operationKey, kind: 'tool', action, input: operationInput })
@@ -180,7 +182,8 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   const failed = failedToolResultSchema.safeParse(receipt.result)
   if (failed.success) {
     if (prepared) await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: operation.id })
-    return { ...failed.data.toolResult, failureCode: failed.data.code, outcome: 'failed' }
+    return projectConfirmedToolFailure(ctx, { ...failed.data.toolResult, failureCode: failed.data.code, outcome: 'failed' }, failed.data.code,
+      { taskRootId: lease.taskRootId, operationId: operation.id, receiptId: receipt.operationId, resultHash: receipt.resultHash })
   }
   const saved = resultSchema.safeParse(receipt.result)
   if (!saved.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '正文工具回执损坏。')
@@ -189,5 +192,6 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   // unfenced multi-write processor after losing/pausing this task's lease.
   ctx.signal.throwIfAborted()
   if (prepared) await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: operation.id })
-  return saved.data.toolResult
+  return projectChapterBodyResult(ctx, saved.data.toolResult,
+    { taskRootId: lease.taskRootId, operationId: operation.id, receiptId: receipt.operationId, resultHash: receipt.resultHash })
 }

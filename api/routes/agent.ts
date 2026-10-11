@@ -4,6 +4,7 @@ import agentGoalsRouter from './agent-goals.js'
 import { z } from 'zod'
 import { patchModelAssignmentsSchema } from '../../shared/contracts/agent-model-assignments.js'
 import { getModelAssignments, patchModelAssignments } from '../lib/agent/model-assignments.js'
+import { readAgentCreationState } from '../lib/agent/creation-state.js'
 
 import {
   continueAgentLoopRunSchema,
@@ -893,6 +894,13 @@ router.post('/runs', async (req: Request, res: Response): Promise<void> => {
   } catch (error) {
     sendRouteError(res, requestId, error)
   }
+})
+
+// Authenticated, read-only diagnostics. It does not issue tool grants or resume.
+router.get('/runs/:runId/creation-state', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { res.json(buildSuccess(requestId, await readAgentCreationState(requireSessionUserId(req), String(req.params.runId)))) }
+  catch (error) { sendRouteError(res, requestId, error) }
 })
 
 router.get('/runs/:runId/stream', async (req: Request, res: Response): Promise<void> => {

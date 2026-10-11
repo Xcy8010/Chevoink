@@ -1,6 +1,84 @@
+import { createHash } from 'node:crypto'
 import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
 import { AGENT_TOOL_GOVERNANCE } from './governance.js'
-import type { AgentTool, ToolContext } from './types.js'
+import type { AgentTool, ToolContext, ToolResult } from './types.js'
+
+type ResultProvenance = {
+  source: 'legacy_body_transaction' | 'durable_receipt' | 'confirmed_preexecution_failure'
+  taskRootId?: string
+  operationId?: string
+  receipt?: { id: string; resultHash: string }
+}
+export type DurableResultProvenance = {
+  taskRootId: string
+  operationId: string
+  /** Actual AgentEffectReceipt primary key (operationId), never a generated ID. */
+  receiptId?: string
+  resultHash?: string
+}
+type ResultScope = {
+  runId: string
+  callId: string
+  targetId?: string
+  revision?: number
+  /** SHA256 of the raw UTF-8 body, not runtimeJson({content})'s envelope hash. */
+  contentHash?: string
+}
+
+/** Optional internal diagnostics. A body effect, receipt commit, valid report
+ * and task delivery are separate facts. This never grants recovery authority. */
+export type AgentToolResultSemantics = {
+  version: 1
+  scope: ResultScope
+  provenance: ResultProvenance
+} & (
+  | { kind: 'applied'; effectDomain: 'chapter_body'; effectState: 'committed'; reasonCode: 'CHAPTER_BODY_APPLIED' }
+  | { kind: 'no_change'; effectDomain: 'chapter_body'; effectState: 'known_not_applied'; reasonCode: 'CHAPTER_BODY_UNCHANGED' }
+  | { kind: 'failed'; effectDomain: 'tool_execution'; effectState: 'known_not_applied'; reasonCode: string }
+)
+
+function resultProvenance(source: ResultProvenance['source'], durable?: DurableResultProvenance): ResultProvenance {
+  return durable ? {
+    source: 'durable_receipt', taskRootId: durable.taskRootId, operationId: durable.operationId,
+    ...(durable.receiptId && durable.resultHash && /^[a-f0-9]{64}$/u.test(durable.resultHash)
+      ? { receipt: { id: durable.receiptId, resultHash: durable.resultHash } } : {}),
+  } : { source }
+}
+
+/** Invoke only after the owned body transaction or existing durable receipt
+ * validation. Return a new projection; never persist it into canonical receipts.
+ * Outer legacy transactions have not committed, so they supply no effect claim. */
+export function projectChapterBodyResult(ctx: Pick<ToolContext, 'runId' | 'callId' | 'transaction'>, result: ToolResult,
+  durable?: DurableResultProvenance): ToolResult {
+  const projected = { ...result }
+  delete projected.resultSemantics
+  const display = result.display
+  if ((!durable && ctx.transaction) || result.outcome === 'failed' || display?.kind !== 'chapterDiff' || !display.appliedDirectly
+    || !display.chapterId || typeof display.revision !== 'number' || !Number.isSafeInteger(display.revision) || display.revision < 1) return projected
+  const changed = display.before !== display.after
+  projected.resultSemantics = {
+    version: 1, scope: { runId: ctx.runId, callId: ctx.callId, targetId: display.chapterId, revision: display.revision,
+      contentHash: createHash('sha256').update(display.after).digest('hex') },
+    provenance: resultProvenance('legacy_body_transaction', durable),
+    ...(changed ? { kind: 'applied', effectDomain: 'chapter_body', effectState: 'committed', reasonCode: 'CHAPTER_BODY_APPLIED' } as const
+      : { kind: 'no_change', effectDomain: 'chapter_body', effectState: 'known_not_applied', reasonCode: 'CHAPTER_BODY_UNCHANGED' } as const),
+  }
+  return projected
+}
+
+/** Only a confirmed preexecution refusal or the existing validated
+ * outcome=failed/effectApplied=false receipt may call this. Unknown exceptions
+ * stay on their existing throw/reconciliation path without diagnostic fiction. */
+export function projectConfirmedToolFailure(ctx: Pick<ToolContext, 'runId' | 'callId' | 'transaction'>, result: ToolResult,
+  code: string, durable?: DurableResultProvenance): ToolResult {
+  const projected = { ...result }
+  delete projected.resultSemantics
+  if ((!durable && ctx.transaction) || result.outcome !== 'failed' || !code) return projected
+  return { ...projected, resultSemantics: {
+    version: 1, kind: 'failed', effectDomain: 'tool_execution', effectState: 'known_not_applied', reasonCode: code,
+    scope: { runId: ctx.runId, callId: ctx.callId }, provenance: resultProvenance('confirmed_preexecution_failure', durable),
+  } }
+}
 
 /** Diagnostic requirements, not a second authority/scheduler. Runtime checks and
  * immutable execution snapshots remain the source of admission and effects. */

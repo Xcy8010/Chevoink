@@ -55,6 +55,19 @@ describe('frozen new-chapter input recovery', () => {
 })
 
 describe('chapter authority failure feedback', () => {
+  it('keeps a failed locator in the original fragment scope instead of offering a whole-body fallback', () => {
+    const recovery = toolFailureRecovery('CHAPTER_ANCHOR_CONFLICT')!
+    expect(recovery.guidance).toContain('本批片段未写入')
+    expect(recovery.guidance).toContain('唯一连续原文')
+    expect(recovery.guidance).toContain('chapter_edit_range')
+    expect(recovery.guidance).toContain('原修订范围')
+    expect(recovery.guidance).toContain('不能改用整章重写绕过定位失败')
+    expect(recovery.guidance).toContain('哪些修改受阻')
+    expect(recovery.guidance).not.toContain('提交完整修订')
+    expect(recovery.guidance).not.toContain('chapter_write')
+    expect(toolRecoveryKey('chapter_edit_range', 'CHAPTER_ANCHOR_CONFLICT', { chapterId: 'c' }))
+      .toBe(toolRecoveryKey('chapter_write', 'CHAPTER_ANCHOR_CONFLICT', { chapterId: 'c' }))
+  })
   it('routes a completed-check decision to commit with exact references instead of another critic', () => {
     const recovery = toolFailureRecovery('REVIEW_DECISION_REQUIRED')!
     expect(recovery.guidance).toContain('chapter_bridge_commit')

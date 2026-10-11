@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client'
+import type { AgentEffectReceipt, Prisma } from '@prisma/client'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const m = vi.hoisted(() => ({
@@ -14,7 +14,7 @@ const m = vi.hoisted(() => ({
     volume: { findFirst: vi.fn(), findMany: vi.fn() }, agentTaskRoot: { findUniqueOrThrow: vi.fn() },
   },
   reviewGuard: vi.fn(), stats: vi.fn(), memory: vi.fn(), compiler: vi.fn(), flags: vi.fn(), craft: vi.fn(), placement: vi.fn(), place: vi.fn(),
-  prepare: vi.fn(), prepareCursor: vi.fn(), commit: vi.fn(), failure: vi.fn(), reduce: vi.fn(),
+  prepare: vi.fn(), prepareCursor: vi.fn(), rejectCursor: vi.fn(), commit: vi.fn(), failure: vi.fn(), reduce: vi.fn(),
 }))
 vi.mock('../../api/lib/prisma.js', () => ({
   prisma: m.db,
@@ -30,7 +30,7 @@ vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({ assertChapterMan
 vi.mock('../../api/lib/agent/craft-library.js', () => ({ assertCraftOutputSafe: m.craft }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ isAgent2FeatureEnabled: m.flags }))
 vi.mock('../../api/lib/agent/runtime-operations.js', () => ({ prepareOperation: m.prepare, commitOperationEffect: m.commit, recordToolFailure: m.failure }))
-vi.mock('../../api/lib/agent/runtime-tool-cursor.js', () => ({ prepareToolCursorOperation: m.prepareCursor, rejectToolCursorCall: vi.fn() }))
+vi.mock('../../api/lib/agent/runtime-tool-cursor.js', () => ({ prepareToolCursorOperation: m.prepareCursor, rejectToolCursorCall: m.rejectCursor }))
 vi.mock('../../api/lib/agent/runtime-reducer.js', async () => {
   const { z } = await import('zod')
   return { reduceExecutionReceipt: m.reduce, failedToolResultSchema: z.object({ outcome: z.literal('failed'), effectApplied: z.literal(false), code: z.string(), toolResult: z.object({ output: z.string(), summary: z.string() }) }).strict() }
@@ -43,6 +43,7 @@ import { chapterAppendTool, chapterCreateTool, chapterEditRangeTool, chapterRena
 import { executeDurableChapter, executeDurableChapterRename } from '../../api/lib/agent/tools/durable-chapter.js'
 import type { AgentTool, ToolContext, ToolResult } from '../../api/lib/agent/tools/types.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 const tx = m.tx as unknown as Prisma.TransactionClient
 const row = { id: 'c', novelId: 'n', authorId: 'u', volumeId: 'v', volume: { title: 'Volume', orderIndex: 1 }, title: 'Title', content: 'Before', revision: 4, wordCount: 6, orderIndex: 1, orderInVolume: 1, status: 'published', visibility: 'public', publishedContent: 'Snapshot', publishedRevision: 2, archivedAt: null }
@@ -123,6 +124,55 @@ function expectCas() {
 }
 
 describe('legacy Agent chapter archive guards', () => {
+  it.each(['legacy', 'durable'].flatMap(executor => actions.map(action => ({ executor, action }))))('projects the same applied body facts for $executor $action without changing canonical results', async ({ executor, action }) => {
+    const after = action === 'chapter_append' ? 'Before\n\nAfter' : 'After'
+    m.tx.chapter.findFirst.mockImplementation(async ({ where }) => where.revision === 5 ? { ...row, revision: 5, content: after } : row)
+    let canonical: unknown
+    m.commit.mockImplementation(async (_lease, _id, _hash, work) => {
+      canonical = await work(tx)
+      const metadata = { operationId: 'op', resultHash: runtimeJson(canonical).hash } satisfies Pick<AgentEffectReceipt, 'operationId' | 'resultHash'>
+      return { ...metadata, result: canonical }
+    })
+    const result = executor === 'durable' ? await executeDurableChapter(durable(action), action, contentArgs(action))
+      : action === 'chapter_write' ? await chapterWriteTool.execute(ctx(), contentArgs(action) as { chapterId: string; content: string })
+        : action === 'chapter_append' ? await chapterAppendTool.execute(ctx(), contentArgs(action) as { chapterId: string; content: string })
+          : await chapterEditRangeTool.execute(ctx(), { chapterId: 'c', oldText: 'Before', newText: 'After' })
+    expect(result.resultSemantics).toMatchObject({ kind: 'applied', effectDomain: 'chapter_body', effectState: 'committed',
+      reasonCode: 'CHAPTER_BODY_APPLIED', scope: { runId: 'r', callId: 'call', targetId: 'c', revision: 5 } })
+    expect(result.display).toMatchObject({ before: 'Before', after, revision: 5 })
+    expect(result.outcome).toBeUndefined()
+    expect(m.tx.chapter.updateMany).toHaveBeenCalledTimes(1)
+    expect(m.stats).toHaveBeenCalledTimes(1)
+    expect(m.memory).toHaveBeenCalledTimes(1)
+    expect(m.compiler).toHaveBeenCalledTimes(1)
+    if (executor === 'durable') {
+      expect(JSON.stringify(canonical)).not.toContain('resultSemantics')
+      expect(result.resultSemantics?.provenance).toMatchObject({ taskRootId: 'root', operationId: 'op',
+        receipt: { id: 'op', resultHash: runtimeJson(canonical).hash } })
+    }
+  })
+
+  it.each(['legacy', 'durable'].flatMap(executor => ['chapter_write', 'chapter_edit_range'].map(action => ({ executor, action }))))('projects $executor $action no_change without CAS or revision consumption', async ({ executor, action }) => {
+    const consume = vi.fn()
+    m.reviewGuard.mockResolvedValue(consume)
+    const result = executor === 'durable' ? await executeDurableChapter(durable(action), action as typeof actions[number], contentArgs(action as typeof actions[number], true))
+      : action === 'chapter_write' ? await chapterWriteTool.execute(ctx(), { chapterId: 'c', content: 'Before' })
+        : await chapterEditRangeTool.execute(ctx(), { chapterId: 'c', oldText: 'Before', newText: 'Before' })
+    expect(result.resultSemantics).toMatchObject({ kind: 'no_change', effectDomain: 'chapter_body', effectState: 'known_not_applied',
+      reasonCode: 'CHAPTER_BODY_UNCHANGED', scope: { targetId: 'c', revision: 4 } })
+    expect(result.display).toMatchObject({ before: 'Before', after: 'Before', revision: 4, appliedDirectly: true })
+    expect(result.outcome).toBeUndefined()
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expect(consume).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
+
+  it.each([false, true])('leaves legacy outer transaction results unannotated for changed=%s', async changed => {
+    const result = await chapterWriteTool.execute(ctx({ transaction: tx }), { chapterId: 'c', content: changed ? 'After' : 'Before' })
+    expect(result.resultSemantics).toBeUndefined()
+    expect(m.db.$transaction).not.toHaveBeenCalled()
+  })
+
   it.each(['legacy', 'durable'] as const)('validates and consumes a multi-patch batch once in %s', async kind => {
     const before = 'Before', after = 'AbcD'
     const patches = [{ oldText: 'Be', newText: 'Abc' }, { oldText: 'fore', newText: 'D' }]
@@ -143,6 +193,7 @@ describe('legacy Agent chapter archive guards', () => {
     const result = kind === 'legacy' ? await chapterEditRangeTool.execute(ctx(), { chapterId: 'c', patches })
       : await executeDurableChapter(durable('chapter_edit_range'), 'chapter_edit_range', { chapterId: 'c', patches })
     expect(result).toMatchObject({ outcome: 'failed', failureCode: 'CHAPTER_ANCHOR_CONFLICT' })
+    expect(result.resultSemantics).toMatchObject({ kind: 'failed', effectState: 'known_not_applied', reasonCode: 'CHAPTER_ANCHOR_CONFLICT' })
     expect(m.reviewGuard).not.toHaveBeenCalled()
     expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
     expectNoEffects()
@@ -393,6 +444,77 @@ describe('legacy Agent chapter archive guards', () => {
 })
 
 describe('durable Agent chapter archive guards', () => {
+  it.each(['DENIED', 'EXPIRED'] as const)('diagnoses saved approval %s without changing old outcome/failureCode or its receipt', async suffix => {
+    const { DataAccessError } = await import('../../api/lib/prisma.js')
+    const code = `TOOL_APPROVAL_${suffix}`
+    const saved = { outcome: 'failed', effectApplied: false, code, toolResult: { output: '原审批决定', summary: '未执行' } }
+    const receipt = { operationId: 'rejected-op', result: saved, resultHash: runtimeJson(saved).hash } satisfies Pick<AgentEffectReceipt, 'operationId' | 'resultHash'> & { result: typeof saved }
+    const original = structuredClone(receipt)
+    m.prepareCursor.mockRejectedValue(new DataAccessError(409, `RUNTIME_APPROVAL_${suffix}`, '原决定阻止执行'))
+    m.rejectCursor.mockResolvedValue({ operation: { id: 'rejected-op' }, receipt, pending: { revision: 2, snapshotHash: 'pending' } })
+    const result = await executeDurableChapter(durable('chapter_write'), 'chapter_write', contentArgs('chapter_write'))
+    expect(result.outcome).toBe('failed')
+    expect(result.failureCode).toBeUndefined()
+    expect(result.resultSemantics).toMatchObject({ kind: 'failed', effectState: 'known_not_applied', reasonCode: code,
+      provenance: { operationId: 'rejected-op', receipt: { id: receipt.operationId, resultHash: receipt.resultHash } } })
+    expect(receipt).toEqual(original)
+    expect(m.commit).not.toHaveBeenCalled()
+    expect(m.tx.chapter.findFirst).not.toHaveBeenCalled()
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
+
+  it.each([false, true].flatMap(changed => [false, true].map(hasProgress => ({ changed, hasProgress }))))('projects old/new saved body receipts equivalently changed=$changed progress=$hasProgress', async ({ changed, hasProgress }) => {
+    const saved = { toolResult: { output: '原回执文字', summary: '原摘要', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: 'Title',
+      before: 'Before', after: changed ? 'After' : 'Before', appliedDirectly: true, revision: changed ? 5 : 4 },
+      snapshot: { target: 'chapter', targetId: 'c', field: 'content', previousValue: 'Before' } }, memoryJobId: null,
+      ...(hasProgress ? { progress: { kind: 'content_revision', targetId: 'c', beforeHash: 'old', afterHash: 'new' } } : {}) }
+    const receipt = { operationId: 'op', result: saved, resultHash: runtimeJson(saved).hash } satisfies Pick<AgentEffectReceipt, 'operationId' | 'resultHash'> & { result: typeof saved }
+    const original = structuredClone(receipt)
+    m.commit.mockResolvedValue(receipt)
+    const result = await executeDurableChapter(durable('chapter_write'), 'chapter_write', contentArgs('chapter_write'))
+    expect(result.resultSemantics).toMatchObject({ kind: changed ? 'applied' : 'no_change',
+      effectState: changed ? 'committed' : 'known_not_applied', scope: { targetId: 'c', revision: changed ? 5 : 4 },
+      provenance: { source: 'durable_receipt', operationId: 'op', receipt: { id: 'op', resultHash: original.resultHash } } })
+    expect(result.output).toBe(saved.toolResult.output)
+    expect(result.display).toEqual(saved.toolResult.display)
+    expect(receipt).toEqual(original)
+    expect(m.tx.chapter.findFirst).not.toHaveBeenCalled()
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expectNoEffects()
+    expect(m.reduce).toHaveBeenCalledTimes(1)
+  })
+
+  it('projects the exact saved failure code without changing the canonical failed receipt', async () => {
+    const saved = { outcome: 'failed', effectApplied: false, code: 'CHAPTER_ANCHOR_CONFLICT', toolResult: { output: '原拒绝', summary: '未执行' } }
+    const receipt = { operationId: 'op', result: saved, resultHash: runtimeJson(saved).hash } satisfies Pick<AgentEffectReceipt, 'operationId' | 'resultHash'> & { result: typeof saved }
+    const original = structuredClone(receipt)
+    m.commit.mockResolvedValue(receipt)
+    const result = await executeDurableChapter(durable('chapter_write'), 'chapter_write', contentArgs('chapter_write'))
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: saved.code,
+      resultSemantics: { kind: 'failed', effectState: 'known_not_applied', reasonCode: saved.code,
+        provenance: { receipt: { id: receipt.operationId, resultHash: receipt.resultHash } } } })
+    expect(receipt).toEqual(original)
+    expect(m.tx.chapter.findFirst).not.toHaveBeenCalled()
+    expect(m.failure).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
+
+  it.each(['RUNTIME_RECONCILIATION_REQUIRED', 'DATABASE_UNAVAILABLE'])('keeps unproven %s on its original throw path without a failure projection', async code => {
+    const { DataAccessError } = await import('../../api/lib/prisma.js')
+    m.commit.mockRejectedValue(new DataAccessError(409, code, '未知事务结果'))
+    await expect(executeDurableChapter(durable('chapter_write'), 'chapter_write', contentArgs('chapter_write'))).rejects.toMatchObject({ code })
+    expect(m.failure).not.toHaveBeenCalled()
+    expect(m.reduce).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
+
+  it('keeps malformed saved receipts rejected rather than manufacturing applied diagnostics', async () => {
+    m.commit.mockResolvedValue({ result: { toolResult: { output: '看似成功', summary: '文字不能证明正文' }, memoryJobId: null } })
+    await expect(executeDurableChapter(durable('chapter_write'), 'chapter_write', contentArgs('chapter_write'))).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    expectNoEffects()
+  })
+
   it.each(['REVIEW_MERGED_REVISION_REQUIRED', 'REVIEW_REPAIR_RECHECK_REQUIRED'] as const)('journals %s with no manuscript or correction effects', async code => {
     const { DataAccessError } = await import('../../api/lib/prisma.js')
     m.reviewGuard.mockRejectedValue(new DataAccessError(409, code, '合成修订拒绝'))

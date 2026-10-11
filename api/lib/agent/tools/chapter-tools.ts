@@ -23,6 +23,7 @@ import { composeChapterEdit } from './chapter-patches.js'
 import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
 import { writingNewVolumeSchema } from '../../../../shared/contracts/writing-volume-contracts.js'
 import { assertPreparedWritingVolumeDecision, createWritingTailVolume } from '../writing-volume.js'
+import { projectChapterBodyResult, projectConfirmedToolFailure } from './contract.js'
 
 function requireChapterTitle(value: string): string {
   const title = plainChapterTitle(value)
@@ -74,21 +75,22 @@ async function buildChapterNotFound(ctx: ToolContext, chapterId: string): Promis
       ?? scope.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId).filter((id): id is string => !!id) : []
     if (ids.length) hint = `本任务已冻结或绑定的章节编号：${ids.slice(0, 10).join('、')}。显式错误编号未被自动替换，请逐字复制真实编号纠正。`
   } catch { /* Diagnostics never manufacture a target when original scope cannot be read. */ }
-  return {
+  return projectConfirmedToolFailure(ctx, {
     outcome: 'failed',
     failureCode: 'CHAPTER_NOT_FOUND',
     summary: '章节编号不存在或不匹配',
     output: `章节 ${chapterId} 已归档、不存在或不属于当前作品。${hint}编辑器当前打开的旧章不决定本任务目标。必要时用 novel_get_context 核对真实章节列表；不要猜编号、重复建章或按同序号替换旧章节 ID。`,
-  }
+  }, 'CHAPTER_NOT_FOUND')
 }
 
 /** 基线冲突检测：用户在 Agent 运行期间改过章节时不盲写 */
-function buildConflictResult(chapterTitle: string): ToolResult {
-  return {
+function buildConflictResult(chapterTitle: string, ctx?: ToolContext): ToolResult {
+  const result: ToolResult = {
     outcome: 'failed',
     output: `冲突：章节《${chapterTitle}》在你上次读取后已被修改或归档。请先用 chapter_read 重新读取当前内容，再决定如何写入，避免覆盖用户的修改。`,
     summary: `《${chapterTitle}》存在编辑冲突，已阻止写入`,
   }
+  return ctx ? projectConfirmedToolFailure(ctx, result, 'CHAPTER_REVISION_CONFLICT') : result
 }
 
 function assertChapterMutable(ctx: ToolContext, chapter: { id: string; title: string }) {
@@ -165,7 +167,7 @@ async function writeChapterContent(
 
   const baseline = getChapterBaseline(ctx.runId, chapter.id)
   if (baseline !== null && baseline !== chapter.revision) {
-    return buildConflictResult(chapter.title)
+    return buildConflictResult(chapter.title, ctx)
   }
 
   const before = chapter.content
@@ -182,9 +184,9 @@ async function writeChapterContent(
     wordCount: after.length,
   }, mutation, false, { retainedFindings })
   if (!updated) {
-    return buildConflictResult(chapter.title)
+    return buildConflictResult(chapter.title, ctx)
   }
-  if (after === before) return unchangedChapterResult(chapter)
+  if (after === before) return unchangedChapterResult(chapter, ctx)
   await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
   if (!ctx.transaction) recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
   if (isAgent2FeatureEnabled('memory2', ctx.userId)) {
@@ -193,7 +195,7 @@ async function writeChapterContent(
     }, ctx.transaction)
   }
 
-  return {
+  return projectChapterBodyResult(ctx, {
     output: `已${actionLabel}章节《${chapter.title}》，当前正文 ${after.length} 字。`,
     summary: `${actionLabel}《${chapter.title}》 · ${after.length} 字`,
     display: {
@@ -206,13 +208,13 @@ async function writeChapterContent(
       revision: updated.revision,
     },
     snapshot: { target: 'chapter', targetId: chapter.id, field: 'content', previousValue: before },
-  }
+  })
 }
 
-function unchangedChapterResult(chapter: { id: string; title: string; content: string; revision: number }): ToolResult {
-  return { output: `章节《${chapter.title}》正文未变化。`, summary: `未变化《${chapter.title}》 · ${chapter.content.length} 字`,
+function unchangedChapterResult(chapter: { id: string; title: string; content: string; revision: number }, ctx: ToolContext): ToolResult {
+  return projectChapterBodyResult(ctx, { output: `章节《${chapter.title}》正文未变化。`, summary: `未变化《${chapter.title}》 · ${chapter.content.length} 字`,
     display: { kind: 'chapterDiff', chapterId: chapter.id, chapterTitle: chapter.title, before: chapter.content, after: chapter.content,
-      appliedDirectly: true, revision: chapter.revision } }
+      appliedDirectly: true, revision: chapter.revision } })
 }
 
 export const chapterCreateTool = defineTool({
@@ -404,7 +406,7 @@ export const chapterWriteTool = defineTool({
   async execute(ctx, args) {
     const chapterId = await resolveChapterId(ctx, args.chapterId)
     if (!chapterId) {
-      return { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }
+      return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }, 'CHAPTER_NOT_FOUND')
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_write', { ...args, chapterId })
     return writeChapterContent(ctx, chapterId, () => args.content, '覆盖写入', args.content, 'replace', args.retainedFindings)
@@ -421,7 +423,7 @@ export const chapterAppendTool = defineTool({
   async execute(ctx, args) {
     const chapterId = await resolveChapterId(ctx, args.chapterId)
     if (!chapterId) {
-      return { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }
+      return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }, 'CHAPTER_NOT_FOUND')
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_append', { ...args, chapterId })
     return writeChapterContent(
@@ -446,7 +448,7 @@ export const chapterEditRangeTool = defineTool({
   async execute(ctx, args) {
     const chapterId = await resolveChapterId(ctx, args.chapterId)
     if (!chapterId) {
-      return { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }
+      return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }, 'CHAPTER_NOT_FOUND')
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_edit_range', { ...args, chapterId })
     const chapter = await findOwnedChapter(ctx, chapterId)
@@ -461,12 +463,12 @@ export const chapterEditRangeTool = defineTool({
     let edit: ReturnType<typeof composeChapterEdit>
     try { edit = composeChapterEdit(before, args) } catch (error) {
       if (!(error instanceof DataAccessError)) throw error
-      return { outcome: 'failed', failureCode: error.code, summary: '正文片段需要纠正定位', output: `chapterId=${chapter.id}，当前 r${chapter.revision}。${error.message}` }
+      return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: error.code, summary: '正文片段需要纠正定位', output: `chapterId=${chapter.id}，当前 r${chapter.revision}。${error.message}` }, error.code)
     }
 
     const baseline = getChapterBaseline(ctx.runId, chapter.id)
     if (baseline !== null && baseline !== chapter.revision) {
-      return buildConflictResult(chapter.title)
+      return buildConflictResult(chapter.title, ctx)
     }
 
     const after = edit.after
@@ -483,9 +485,9 @@ export const chapterEditRangeTool = defineTool({
       wordCount: after.length,
     }, 'range', !!args.patches, { retainedFindings: args.retainedFindings, editRanges: edit.ranges })
     if (!updated) {
-      return buildConflictResult(chapter.title)
+      return buildConflictResult(chapter.title, ctx)
     }
-    if (after === before) return unchangedChapterResult(chapter)
+    if (after === before) return unchangedChapterResult(chapter, ctx)
     await recalculateNovelStats(ctx.transaction ?? prisma, ctx.novelId)
     if (!ctx.transaction) recordChapterBaseline(ctx.runId, chapter.id, updated.revision)
     if (isAgent2FeatureEnabled('memory2', ctx.userId)) {
@@ -494,7 +496,7 @@ export const chapterEditRangeTool = defineTool({
       }, ctx.transaction)
     }
 
-    return {
+    return projectChapterBodyResult(ctx, {
       output: `已一次合并改写《${chapter.title}》${edit.ranges.length} 处，当前正文 ${after.length} 字。写入回执仅证明实际文本变化，不代表全部意见已解决或新版已复核。`,
       summary: `改写《${chapter.title}》${edit.ranges.length} 处`,
       display: {
@@ -509,7 +511,7 @@ export const chapterEditRangeTool = defineTool({
         revision: updated.revision,
       },
       snapshot: { target: 'chapter', targetId: chapter.id, field: 'content', previousValue: before },
-    }
+    })
   },
 })
 

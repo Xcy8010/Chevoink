@@ -22,7 +22,7 @@ export function toolFailureRecovery(code: string): { label: string; guidance: st
     REVIEW_MERGED_REVISION_REQUIRED: { label: '修订依据需要核对', guidance: '本次修改被拒绝，未写入。按具体拒绝原因核对当前报告绑定和留置意见；quality findingId 必须使用报告返回的真实编号，不能用序号代替。普通正文编辑可在原授权范围内分步调用 chapter_edit_range 或 chapter_write，批量合并只是建议；不要只换工具或重复读取相同正文来重试同一拒绝，也不能把保存修订当作新版检查通过。' },
     REVIEW_DECISION_REQUIRED: { label: '检查意见需要明确处理', guidance: '检查完成与意见处置是两个状态。按提交结果给出的当前引用逐项处理；不能安全修改的意见直接在 chapter_bridge_commit 的 retainedFindings 中填写 source、reportId、真实 findingId 和具体保留理由。chapter_bridge_get 可读取待处理引用；quality findingId 不能用序号代替。正文不变且检查仍匹配时无需再次检查；只有实际改稿才复核最终版本。保留理由不表示修复或检查通过。' },
     REVIEW_REPAIR_RECHECK_REQUIRED: { label: '需要复核当前版本', guidance: '已保存正文保留，旧报告不能认证新版。普通编辑可在原授权范围内继续，提交前在既有检查次数内复核最终正文；检查次数用尽时如实说明当前版本尚未完成检查，不要重置次数、重绑旧报告或反复调用已耗尽的检查。' },
-    CHAPTER_ANCHOR_CONFLICT: { label: '正文片段需要重新定位', guidance: '查看错误给出的失败片段序号。仅对本次原目标调用 chapter_read，逐字使用当前版本中的唯一连续原文；段落换行可确定定位，其他文字必须一致。纠正失败片段后可继续提交，不能重复相同坏参数；必要时在原正文写入授权和当前版本内提交完整修订。不要猜测其他章节 ID、替换到其他章节或照旧报告强行写入。' },
+    CHAPTER_ANCHOR_CONFLICT: { label: '正文片段需要重新定位', guidance: '本批片段未写入，当前正文保留。查看错误给出的失败片段序号；仅对本次原目标调用 chapter_read，逐字使用当前版本中的唯一连续原文，段落换行可确定定位，其他文字必须一致。重新定位后用 chapter_edit_range 精确提交原修订范围内的片段，可将独立片段合为一次批量修改。不能重复相同坏参数，不能改用整章重写绕过定位失败或原修订边界。仍无法唯一定位时说明哪些修改受阻、正文未变以及需要核对的原文，不猜测其他章节 ID、换章或照旧报告强行写入。' },
     TODO_CHANGE_REASON_REQUIRED: { label: '待办需要保留原项目身份', guidance: '读取当前清单，更新时保留原 id。确有新增的原授权工作请给出 changeReason，不重建整张清单或扩大章节范围。' },
     CONTINUITY_CHECK_REQUIRED: { label: '当前版本尚未完成连续性检查', guidance: '先完成当前正文的 continuity_validate，保留现有编译和检查次数，不能把缺报告视为通过。' },
     CONTINUITY_EVIDENCE_UNLOCATED: { label: '检查引用需要核对', guidance: '报告引用未在对应当前正文中定位，不能照旧引文改稿，也不能判定通过。保留正文和报告，核对本任务当前原文；原写作授权内可继续纠正确有原文依据的问题，再在原检查预算内复核最终版。不得反复提交同一检查或重置次数。' },

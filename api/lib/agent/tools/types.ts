@@ -72,6 +72,8 @@ export type ToolContext = {
 }
 
 export type ToolResult = {
+  /** Return-only server diagnostics; never canonical receipt data or authority. */
+  resultSemantics?: import('./contract.js').AgentToolResultSemantics
   reviewDecisionFeedback?: import('../chapter-review-guard.js').ReviewDecisionFeedback
   /** First persisted prerequisite for a frozen writing target. Not a body or completion receipt. */
   workflowMilestone?: import('../semantic-progress.js').WritingWorkflowMilestone
