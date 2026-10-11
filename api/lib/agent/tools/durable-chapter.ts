@@ -110,7 +110,13 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     ? prior.inputSnapshot.input : undefined
   const priorProtocol = priorInput && typeof priorInput === 'object' && !Array.isArray(priorInput) ? priorInput.anchorProtocol : undefined
   if (priorProtocol !== undefined && priorProtocol !== 1 && priorProtocol !== 2) return runtimeError('RUNTIME_RECEIPT_INVALID', '原片段定位协议损坏，不能改变冻结操作。')
-  const selection = action === 'chapter_edit_range' && originalSelectionBoundary((await readWritingScope(prisma, ctx)).spec)
+  // Prior operations already freeze their locator protocol, including receipt
+  // replay after an import. Only new edits may consult the current scope, and
+  // their manuscript fence must precede that authorization observation.
+  const selection = action === 'chapter_edit_range' && !prior && await prisma.$transaction(async tx => {
+    await assertAgentManuscriptCurrent(tx, ctx)
+    return originalSelectionBoundary((await readWritingScope(tx, ctx)).spec)
+  })
   const anchorProtocol = prior ? priorProtocol === 2 ? 2 : 1 : selection ? 1 : 2
   const operationInput = runtimeJson({ callId: ctx.callId, novelId: ctx.novelId, chapterId: args.chapterId, expectedRevision, args: effectiveArgs,
     ...(action === 'chapter_edit_range' && (anchorProtocol === 2 || priorProtocol !== undefined || !prior && selection) ? { anchorProtocol } : {}) }).value

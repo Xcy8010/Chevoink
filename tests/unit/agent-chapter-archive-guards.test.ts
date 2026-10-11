@@ -539,6 +539,47 @@ describe('durable Agent chapter archive guards', () => {
     await expect(executeDurableChapter(durable(action), action, contentArgs(action))).rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })
     expect(m.tx.chapter.findFirst).not.toHaveBeenCalled()
     expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expect(m.tx.agentRun.findFirstOrThrow).not.toHaveBeenCalled()
+    if (action === 'chapter_edit_range') {
+      expect(m.prepareCursor).not.toHaveBeenCalled()
+      expect(m.commit).not.toHaveBeenCalled()
+    }
+    expectNoEffects()
+  })
+  it('rechecks the manuscript epoch after fresh range protocol admission and before its effect', async () => {
+    m.commit.mockImplementation(async (_lease, _id, _hash, work) => {
+      m.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 2 } })
+      return { result: await work(tx) }
+    })
+    await expect(executeDurableChapter(durable('chapter_edit_range'), 'chapter_edit_range', contentArgs('chapter_edit_range')))
+      .rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })
+    expect(m.prepareCursor).toHaveBeenCalledTimes(1)
+    expect(m.tx.chapter.findFirst).not.toHaveBeenCalled()
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    expect(m.failure).not.toHaveBeenCalled()
+    expectNoEffects()
+  })
+  it.each([undefined, 1, 2])('replays a committed range receipt with frozen protocol %s after an import without new scope observation', async anchorProtocol => {
+    m.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 2 } })
+    m.db.agentOperation.findUnique.mockResolvedValue({ inputSnapshot: { input: { ...(anchorProtocol === undefined ? {} : { anchorProtocol }) } } })
+    const saved = { toolResult: { output: '原回执文字', summary: '原摘要', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: 'Title',
+      before: 'Before', after: 'After', appliedDirectly: true, revision: 5 },
+      snapshot: { target: 'chapter', targetId: 'c', field: 'content', previousValue: 'Before' } }, memoryJobId: null }
+    const receipt = { operationId: 'op', result: saved, resultHash: runtimeJson(saved).hash }
+    const original = structuredClone(receipt)
+    m.commit.mockResolvedValue(receipt)
+    const result = await executeDurableChapter(durable('chapter_edit_range'), 'chapter_edit_range', contentArgs('chapter_edit_range'))
+    expect(result.display).toEqual(saved.toolResult.display)
+    expect(receipt).toEqual(original)
+    expect(m.db.$transaction).not.toHaveBeenCalled()
+    expect(m.tx.agentRun.findFirst).not.toHaveBeenCalled()
+    expect(m.tx.agentRun.findFirstOrThrow).not.toHaveBeenCalled()
+    expect(m.tx.chapter.findFirst).not.toHaveBeenCalled()
+    expect(m.tx.chapter.updateMany).not.toHaveBeenCalled()
+    const operationInput = m.prepareCursor.mock.calls[0][2].operationInput
+    if (anchorProtocol === undefined) expect(operationInput).not.toHaveProperty('anchorProtocol')
+    else expect(operationInput.anchorProtocol).toBe(anchorProtocol)
+    expect(m.reduce).toHaveBeenCalledTimes(1)
     expectNoEffects()
   })
   it.each(actions)('%s records failure, not a successful write receipt, for an archived source at the same revision', async action => {
