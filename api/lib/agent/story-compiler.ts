@@ -713,12 +713,13 @@ export async function validateStoryContinuity(input: {
     { previous: reviewSource?.content ?? null, current: compilation.chapter!.content }, (input.coverage?.protocolVersion ?? 0) >= 5,
     (input.coverage?.protocolVersion ?? 0) >= 6, (input.coverage?.protocolVersion ?? 0) >= 7))
   const nextCheckRounds = validatedContinuityCheckRounds(compilation.validation)
+  const previousValidation = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
+  const sameReviewedInput = previousValidation.checkedRevision === compilation.chapter.revision && previousValidation.independentCheck === 'complete'
+    && runtimeJson(previousValidation.findings ?? []).hash === runtimeJson(findings).hash
+    && compilerContinuityCoverageMatches(previousValidation.coverage, currentCoverage)
   const validation = {
-    ...(compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation)
-      && compilation.validation.checkedRevision === compilation.chapter.revision && compilation.validation.independentCheck === 'complete'
-      && runtimeJson(compilation.validation.findings ?? []).hash === runtimeJson(findings).hash
-      && compilerContinuityCoverageMatches(compilation.validation.coverage, currentCoverage)
-      && compilation.validation.retainedReviewDecision ? { retainedReviewDecision: compilation.validation.retainedReviewDecision } : {}),
+    ...(sameReviewedInput && previousValidation.retainedReviewDecision ? { retainedReviewDecision: previousValidation.retainedReviewDecision } : {}),
+    ...(sameReviewedInput && previousValidation.continuityCriticResponse ? { continuityCriticResponse: previousValidation.continuityCriticResponse } : {}),
     ...(readNewDraftRevision(compilation.validation) ? { newDraftRevision: readNewDraftRevision(compilation.validation) } : {}),
     autoRepairRounds: continuityRepairRounds(compilation.validation),
     checkRounds: nextCheckRounds,

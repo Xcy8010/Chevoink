@@ -819,12 +819,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const toolRestrictions: ToolRestriction[] = []
   let inputProtocolRecovery: RunCheckpointState['inputProtocolRecovery']
   let compatibilityReadTargets: Set<string> | null = null
-  const restrictTool = (action: string, args: unknown, code: string, reason: string) => {
+  const restrictTool = (action: string, args: unknown, code: string, reason: string, reviewInput?: ToolRestriction['reviewInput']) => {
     const target = toolRestrictionTarget(args, getLastTouchedChapter(runId) ?? params.chapterId)
     const inputHash = isInputScopedFailure(code) ? toolFailureInputHash(action, args) : undefined
     const writers = ['chapter_edit_range', 'chapter_write', 'chapter_append']
     for (const name of !inputHash && writers.includes(action) ? writers : [action]) {
-      if (!toolRestrictions.some(item => item.action === name && item.target === target && item.inputHash === inputHash)) toolRestrictions.push({ action: name, target, code, reason, ...(inputHash ? { inputHash } : {}) })
+      if (!toolRestrictions.some(item => item.action === name && item.target === target && item.inputHash === inputHash && item.reviewInput?.revision === reviewInput?.revision && item.reviewInput?.chapterId === reviewInput?.chapterId)) toolRestrictions.push({ action: name, target, code, reason, ...(inputHash ? { inputHash } : {}), ...(reviewInput ? { reviewInput } : {}) })
     }
   }
   const restoreReviewEvidence = (checkpoint: RunCheckpointState) => {
@@ -837,7 +837,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
     for (const saved of checkpoint.toolRestrictions ?? []) {
       const item = restoreToolRestriction(saved)
-      if (!toolRestrictions.some(prior => prior.action === item.action && prior.target === item.target && prior.inputHash === item.inputHash)) toolRestrictions.push(item)
+      if (!toolRestrictions.some(prior => prior.action === item.action && prior.target === item.target && prior.inputHash === item.inputHash && prior.reviewInput?.revision === item.reviewInput?.revision && prior.reviewInput?.chapterId === item.reviewInput?.chapterId)) toolRestrictions.push(item)
     }
     checkpoint.reviewAttempts?.forEach(key => {
       automaticReviewAttempts.add(key)
@@ -1162,6 +1162,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           revision: item.revision, compilationId: item.compilationId, receipt: item.reconciliation })
         await bus.persist()
         pendingReviews.delete(`${item.compilationId ?? item.chapterId}:${item.toolName}`)
+        if (item.changedReviewInput) {
+          for (const restriction of toolRestrictions) {
+            if (!restriction.reviewInput && recoverableQualityRestriction(restriction, item)
+              && restriction.action === 'quality_analyze') restriction.reviewInput = item.changedReviewInput
+          }
+        }
         reviewRecoveryKeys.set(reviewDispatchKey(item, item.toolName), `review-recovery:${item.reconciliation.admissionId}:${item.callId}`)
       }
       if (recovered.length) await persistCheckpoint()
@@ -1658,7 +1664,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       liveTurn = { messageId, parts: [], streamedText: '', streamedReasoning: '' }
 
       // Preview preparation immediately without announcing an admitted execution.
-      // Only handleToolCall emits tool.call; unadmitted previews expire at the step boundary.
+      // Only handleToolCall emits tool.call; previews end when parameter generation ends.
       const announcedToolNames = new Map<string, string>()
       const toolArgsProgress = new Map<string, { chars: number; lastEmitted: number }>()
       const streamingToolArgs = new Map<string, string>()
@@ -1744,6 +1750,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         },
       })
 
+      // A generated proposal may be replaced, restricted or served from cache.
+      // End all parameter previews before admission/preflight can wait on other work.
+      // Journal this small tombstone so reconnect also clears previews seen earlier.
+      if (announcedToolNames.size > 0) bus.emit({ type: 'tool.preparation.end', messageId, callIds: [...announcedToolNames.keys()] })
       observeTurnUsage(result.usage)
       await persistCheckpoint()
 
@@ -1772,7 +1782,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
         else if (next.kind === 'blocked') {
           forceWrapUpReason = next.reason
-          forceWrapUpLocal = Boolean(readiness?.requiredTools.some(item => findToolRestriction(effectiveRestrictions(), item.name, item.args, readiness.chapterId)
+          forceWrapUpLocal = Boolean(readiness?.requiredTools.some(item => findToolRestriction(effectiveRestrictions(), item.name, item.args, readiness.chapterId, readiness)
             || settledReviewFailures.has(reviewAttemptKey(readiness, item.name))
             || [...pendingReviews.values()].some(pending => pending.chapterId === readiness.chapterId && pending.toolName === item.name)))
         }
@@ -2041,7 +2051,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             } else if (next.kind === 'blocked') {
               const knownContinuityFailure = readiness.requiredTools.some(item => item.name === 'continuity_validate'
                 && settledReviewFailures.has(reviewAttemptKey(readiness, item.name)))
-              const local = knownContinuityFailure || readiness.requiredTools.some(item => findToolRestriction(effectiveRestrictions(), item.name, item.args, readiness.chapterId))
+              const local = knownContinuityFailure || readiness.requiredTools.some(item => findToolRestriction(effectiveRestrictions(), item.name, item.args, readiness.chapterId, readiness))
               if (local) {
                 if (!knownContinuityFailure) restrictTool(call.name, parsed, 'REVIEW_DEPENDENCY_UNAVAILABLE', next.reason)
                 parts.push(deferredToolPart(call, preflightTool.title, parsed, next.reason, messageId, bus))
@@ -2077,18 +2087,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             }
           }
         }
-        const restricted = findToolRestriction(effectiveRestrictions(), call.name,
-          reviewPreflightArgs(call, tools.find(tool => tool.name === call.name)), getLastTouchedChapter(runId) ?? params.chapterId)
-        if (restricted) {
-          blockedRepeat += 1
-          if (call.name === 'chapter_bridge_commit') parts.push(deferredToolPart(call,
-            tools.find(tool => tool.name === call.name)?.title ?? call.name,
-            reviewPreflightArgs(call, tools.find(tool => tool.name === call.name)), restricted.reason, messageId, bus))
-          messages.push({ role: 'tool', toolCallId: call.id,
-            content: restricted.inputHash ? `[系统] ${call.name} 的这组失败参数已停止重复提交，本次未执行。${restricted.reason}。根据具体错误纠正参数后，仍可在原授权及当前版本内继续；参数纠正不等于完成，不得扩大目标或预算。`
-              : `[系统] 该目标的 ${call.name} 已因 ${restricted.code} 停止重复尝试，本次未执行、未产生新费用。原因：${restricted.reason}。继续其他已授权且不依赖此操作的工作；不要换工具绕过权限或把未完成项说成通过。` })
-          continue
-        }
         let reviewDispatch: PendingReviewCall | undefined
         if (STATE_SENSITIVE_VALIDATORS.has(call.name)) {
           const validator = tools.find(tool => tool.name === call.name)
@@ -2107,6 +2105,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
                 toolName: call.name as PendingReviewCall['toolName'], callId: call.id }
             }
           }
+        }
+        const restricted = findToolRestriction(effectiveRestrictions(), call.name,
+          reviewPreflightArgs(call, tools.find(tool => tool.name === call.name)), getLastTouchedChapter(runId) ?? params.chapterId, reviewDispatch)
+        if (restricted) {
+          blockedRepeat += 1
+          if (call.name === 'chapter_bridge_commit') parts.push(deferredToolPart(call,
+            tools.find(tool => tool.name === call.name)?.title ?? call.name,
+            reviewPreflightArgs(call, tools.find(tool => tool.name === call.name)), restricted.reason, messageId, bus))
+          messages.push({ role: 'tool', toolCallId: call.id,
+            content: restricted.inputHash ? `[系统] ${call.name} 的这组失败参数已停止重复提交，本次未执行。${restricted.reason}。根据具体错误纠正参数后，仍可在原授权及当前版本内继续；参数纠正不等于完成，不得扩大目标或预算。`
+              : `[系统] 该目标的 ${call.name} 已因 ${restricted.code} 停止重复尝试，本次未执行、未产生新费用。原因：${restricted.reason}。继续其他已授权且不依赖此操作的工作；不要换工具绕过权限或把未完成项说成通过。` })
+          continue
         }
         // Admit only fresh work. Cached calls never emit tool.call; repeated requests reuse
         // the previous observation. Four consecutive blocked calls trigger a bounded stop.
@@ -2195,13 +2205,16 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (localFailure) {
           const code = outcome.failureCode ?? outcome.recoveryCode!
           const receivedContinuityFailure = ['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(code)
-          if (!receivedContinuityFailure) restrictTool(call.name, outcome.part.args, code, outcome.observation)
+          const reviewInput = reviewDispatch && !outcome.unresolvedTextRequest
+            && call.name === 'quality_analyze' && ['QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(code)
+            ? { chapterId: reviewDispatch.chapterId, revision: reviewDispatch.revision } : undefined
+          if (!receivedContinuityFailure) restrictTool(call.name, outcome.part.args, code, outcome.observation, reviewInput)
           // Both public selectors address the same server-resolved assessment.
           // Retain both identities so switching chapterId/compilationId cannot
           // lose the local failure or dispatch another paid attempt.
           if (reviewDispatch && !receivedContinuityFailure) {
-            restrictTool(call.name, { chapterId: reviewDispatch.chapterId }, code, outcome.observation)
-            if (reviewDispatch.compilationId) restrictTool(call.name, { compilationId: reviewDispatch.compilationId }, code, outcome.observation)
+            restrictTool(call.name, { chapterId: reviewDispatch.chapterId }, code, outcome.observation, reviewInput)
+            if (reviewDispatch.compilationId) restrictTool(call.name, { compilationId: reviewDispatch.compilationId }, code, outcome.observation, reviewInput)
           }
         }
         reviewStopReason = localFailure ? undefined : outcome.reviewStopReason ?? (taskSpec.intent === 'review'

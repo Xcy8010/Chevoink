@@ -140,9 +140,9 @@ describe.runIf(available)('settled legacy quality format recovery', () => {
         expect(paid[0]).toMatchObject({ action: 'agent3HumanityCritic', usageSource: 'reported', billingStatus: 'settled' })
         const reports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId } })
         expect(reports).toHaveLength(1)
-        expect(reports[0]).toMatchObject({ status: 'passed', deterministicMetrics: { independentCheck: 'complete', criticResponse: { parserVersion: 2, classification: 'complete' } } })
+        expect(reports[0]).toMatchObject({ status: 'passed', deterministicMetrics: { independentCheck: 'complete', criticResponse: { parserVersion: 3, classification: 'complete' } } })
         expect(reports[0].deterministicMetrics).not.toHaveProperty('formatRecovery')
-        expect(reports[0].deterministicMetrics).not.toHaveProperty('criticResponse.rawResponse')
+        expect(reports[0].deterministicMetrics).toMatchObject({ criticResponse: { rawResponse: { encoding: 'json-string', complete: true } } })
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
         expect(JSON.stringify(result)).not.toContain('合成文字噪声')
         return

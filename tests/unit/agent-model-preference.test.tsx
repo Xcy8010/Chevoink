@@ -138,6 +138,30 @@ describe('Agent model preference ownership', () => {
     act(() => listeners.get('run.configuration')!(new MessageEvent('run.configuration', { data: JSON.stringify(event) })))
     expect(received).toHaveBeenCalledWith(event)
   })
+  it('subscribes to preparation end and flushes queued previews before withdrawing them', () => {
+    const listeners = new Map<string, (event: MessageEvent) => void>()
+    class Source {
+      onerror = null
+      addEventListener(type: string, listener: (event: MessageEvent) => void) { listeners.set(type, listener) }
+      close() {}
+    }
+    vi.stubGlobal('EventSource', Source)
+    const received = vi.fn()
+    const { result } = renderHook(() => useAgentStream(received))
+    act(() => result.current.connect('run-a'))
+    expect(listeners.has('tool.preparation.end')).toBe(true)
+    const send = (event: AgentStreamEvent) => listeners.get(event.type)!(new MessageEvent(event.type, { data: JSON.stringify(event) }))
+    const base = { runId: 'run-a', ts: new Date().toISOString() }
+    act(() => {
+      send({ ...base, type: 'message.start', messageId: 'm', role: 'assistant', seq: 2 })
+      send({ ...base, type: 'tool.delta', messageId: 'm', callId: 'skipped', toolName: 'chapter_read', title: '读取章节', argsChars: 8, seq: 3 })
+      send({ ...base, type: 'tool.preparation.end', messageId: 'm', callIds: ['skipped'], seq: 4 })
+    })
+    expect(received.mock.calls.map(([event]) => event.type)).toEqual(['message.start', 'tool.delta', 'tool.preparation.end'])
+    expect(useAgentStore.getState().messages.find(message => message.id === 'm')?.parts).toEqual([])
+    expect(useAgentStore.getState().lastSeq).toBe(4)
+  })
+
   it('starts resumed streaming after the server cursor and still closes on the new terminal', () => {
     const listeners = new Map<string, (event: MessageEvent) => void>()
     const opened = vi.fn(), closed = vi.fn()

@@ -446,3 +446,28 @@ describe('Agent 3.0 人类感质量契约与确定性检查', () => {
     expect(sparse[0].confidence).toBe(0.8)
   })
 })
+
+
+describe('parser v3 lossless persisted judgment projection', () => {
+  it('keeps distinct opinions at one database identity together and preserves frozen projection', () => {
+    const opinions = Array.from({ length: 35 }, (_, index) => ({ signal: 'emotion_grounding' as const, severity: 'advisory' as const,
+      quote: '她关上了门。', explanation: `意见${index}`, suggestion: `建议${index}`, confidence: 0.9 }))
+    const current = prepareQualityFindings('她关上了门。', [], opinions, true, undefined, 3)
+    expect(current).toMatchObject({ complete: true, criticFindingCount: 35, omittedFindings: 0 })
+    expect(current.findings).toHaveLength(1)
+    for (let index = 0; index < 35; index++) {
+      expect(current.findings[0].explanation).toContain(`${index + 1}. 意见${index}`)
+      expect(current.findings[0].suggestion).toContain(`${index + 1}. 建议${index}`)
+    }
+    expect(prepareQualityFindings('她关上了门。', [], opinions, true, undefined, 2).findings[0]).toMatchObject({ explanation: '意见0', suggestion: '建议0' })
+  })
+  it('keeps more than 36 located findings without treating a display convention as lost evidence', () => {
+    const snippets = Array.from({ length: 40 }, (_, index) => `人物${index}关上门。`)
+    const content = snippets.join('\n')
+    const opinions = snippets.map(quote => ({ signal: 'emotion_grounding' as const, severity: 'advisory' as const,
+      quote, explanation: '有独立证据', suggestion: '由作者核对', confidence: 0.9 }))
+    expect(prepareQualityFindings(content, [], opinions, true, undefined, 3)).toMatchObject({ complete: true, omittedFindings: 0, criticFindingCount: 40 })
+    expect(prepareQualityFindings(content, [], opinions, true, undefined, 3).findings).toHaveLength(40)
+    expect(prepareQualityFindings(content, [], opinions, true, undefined, 2)).toMatchObject({ complete: true, omittedFindings: 4 })
+  })
+})

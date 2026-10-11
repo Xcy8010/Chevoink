@@ -15,7 +15,7 @@ const sensitive = [...reviewers, 'chapter_write', 'chapter_edit_range', 'chapter
  * permits one new assessment; old attempts, reservations and claims remain. */
 export async function readReviewRequestRecovery(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, pending: readonly PendingReviewCall[]) {
-  const recovered: Array<PendingReviewCall & { reconciliation: AgentReviewFailureReconciliation }> = []
+  const recovered: Array<PendingReviewCall & { reconciliation: AgentReviewFailureReconciliation; changedReviewInput?: { chapterId: string; revision: number } }> = []
   const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
   if (!run) return recovered
   const admission = await readQualityReviewAdmission(tx, run)
@@ -85,7 +85,17 @@ export async function readReviewRequestRecovery(tx: Prisma.TransactionClient,
     if (typed && payments.some(row => !(proof.usageIds as string[]).includes(row.id))) continue
     const sourceReports = reports.filter(row => row.runId === call.runId && row.chapterRevision === item.revision && row.status === 'failed'
       && row.createdAt >= call.createdAt && row.createdAt <= result.createdAt && object(object(row.deterministicMetrics).criticResponse).callId === item.callId)
-    recovered.push({ ...item, reconciliation: { status: 'terminal_failed_billing_known', sourceRunId: call.runId,
+    // Only a complete, exactly billed old request can narrow a legacy target ban.
+    // A newer revision alone is insufficient: its actual body must differ too.
+    const changedReviewInput = typed && item.toolName === 'quality_analyze' && chapter.revision > item.revision
+      && proof.contentHash !== contentHash
+      && !pending.some(other => other.callId !== item.callId && other.toolName === item.toolName && other.chapterId === item.chapterId)
+      && !history.some(event => event.type === 'tool.call' && event.createdAt > call.createdAt
+        && object(event.payload).toolName === item.toolName
+        && (object(object(event.payload).args).chapterId === item.chapterId
+          || item.compilationId && object(object(event.payload).args).compilationId === item.compilationId))
+      ? { chapterId: item.chapterId, revision: item.revision } : undefined
+    recovered.push({ ...item, ...(changedReviewInput ? { changedReviewInput } : {}), reconciliation: { status: 'terminal_failed_billing_known', sourceRunId: call.runId,
       sourceResultId: result.id, sourceReportId: sourceReports.length === 1 ? sourceReports[0].id : null, usageIds: payments.map(row => row.id), admissionId: admission.id,
       currentRevision: chapter.revision, currentContentHash: contentHash } })
   }

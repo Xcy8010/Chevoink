@@ -14,6 +14,7 @@ import type { AgentTool, ToolContext, ToolResult } from '../../api/lib/agent/too
 import type { chatWithTools as chatType } from '../../api/lib/ai-service.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 import type { WritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
+import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 const mocks = vi.hoisted(() => ({
   chat: vi.fn(), emit: vi.fn(), persist: vi.fn(async () => ({})), journal: vi.fn(async () => {}), dispose: vi.fn(async () => {}),
@@ -1365,6 +1366,56 @@ describe('original task context on resume', () => {
     expect(events().filter(event => event.type === 'tool.call').map(event => event.callId)).toEqual(['preparing-read'])
     expect(mocks.tools[0].execute).toHaveBeenCalledOnce()
   })
+  it('ends replaced preview identities before admitting the accepted streamed call', async () => {
+    mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+      input.onChunk?.({ type: 'tool-call-start', id: 'old-preview', name: 'chapter_read' })
+      input.onChunk?.({ type: 'tool-call-start', id: 'accepted', name: 'chapter_read' })
+      return response('', [call('accepted')])
+    })
+    queue(response('已核对。'))
+    await run()
+    expect(events()).toContainEqual({ type: 'tool.preparation.end', messageId: expect.any(String), callIds: ['old-preview', 'accepted'] })
+    const endIndex = events().findIndex(event => event.type === 'tool.preparation.end')
+    const callIndex = events().findIndex(event => event.type === 'tool.call')
+    expect(endIndex).toBeLessThan(callIndex)
+    expect(events().filter(event => event.type === 'tool.call').map(event => event.callId)).toEqual(['accepted'])
+    expect(mocks.tools[0].execute).toHaveBeenCalledOnce()
+  })
+
+  it('withdraws a cached proposal before its slow same-name sibling runs, without inventing an execution or result', async () => {
+    const store = useAgentStore.getState
+    store().resetRun()
+    store().resumeRun('run', 'session')
+    let seq = 0
+    mocks.emit.mockImplementation((body: AgentStreamEventBody) => store().applyEvent({ ...body, runId: 'run', seq: ++seq, ts: new Date().toISOString() }))
+    let release!: () => void
+    let started!: () => void
+    const slowStarted = new Promise<void>(resolve => { started = resolve })
+    const slowResult = new Promise<void>(resolve => { release = resolve })
+    let count = 0
+    const reader = tool('chapter_read', async () => {
+      if (++count === 2) { started(); await slowResult }
+      return { output: '当前章节正文' }
+    })
+    mocks.tools = [reader]
+    queue(response('', [call('first')]), response('', [call('cached'), call('slow', 'chapter_read', '{"chapterId":"other"}')]), response('已核对。'))
+    const active = run()
+    try {
+      await Promise.race([slowStarted, active.then(() => { throw new Error('slow sibling was never dispatched') })])
+      const slowMessage = store().messages.find(message => message.parts.some(part => part.type === 'tool-call' && part.callId === 'slow'))
+      expect(slowMessage?.parts).toEqual([expect.objectContaining({ callId: 'slow', status: 'running', preparing: false })])
+      expect(events().filter(event => (event.type === 'tool.call' || event.type === 'tool.result') && event.callId === 'cached')).toEqual([])
+      expect(events().filter(event => event.type === 'step.finish')).toHaveLength(1)
+      expect(reader.execute).toHaveBeenCalledTimes(2)
+    } finally {
+      release()
+      await active
+      store().resetRun()
+      mocks.emit.mockImplementation(() => undefined)
+    }
+    expect(events().filter(event => event.type === 'tool.result').map(event => event.callId)).toEqual(['first', 'slow'])
+  })
+
   it('restores the complete research request on typed continue and does not revive legacy writing authority', async () => {
     const originalPrompt = '搜索并拆解这本小说，不要写章节。' + '核对人物与情节证据。'.repeat(130)
     const taskSpec = { ...buildTaskSpec({ runId: 'original', novelId: 'novel', prompt: originalPrompt }), intent: 'write' as const }
@@ -2664,4 +2715,30 @@ it.each([
       toolName: 'quality_analyze', callId: 'local-failure' }])
     expect(events().filter(event => event.type === 'tool.result' && event.callId === 'local-failure')[0]).not.toHaveProperty('reviewRequestFinished')
   }
+})
+
+
+it.each([true, false])('resumes r4 beyond the real r3 target-wide quality checkpoint only with verified ended-body-change proof: %s', async proved => {
+  mocks.chapters[0].revision = 4
+  mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing', 4))
+  const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+    activeExecutionMs: 100, stagnantBatches: 4, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+    writeProgress: 3, writeBaseline: 0, readProgress: 3, readBaseline: 0, progressSignatures: [],
+    reviewAttempts: ['comp:c:3:quality_analyze'],
+    toolRestrictions: ['comp', 'c'].map(target => ({ action: 'quality_analyze', target, code: 'QUALITY_REPORT_INCOMPLETE', reason: 'r3格式恢复已结束但报告无效' })) }
+  mocks.update.mockResolvedValueOnce({ taskSpec: null, currentTurn: 18, startedAt: new Date(checkpoint.runStartedAt),
+    usage: { promptTokens: 1000, completionTokens: 100, totalTokens: 1100, checkpoint } })
+  if (proved) mocks.requestRecovery.mockResolvedValue([{ compilationId: 'comp', chapterId: 'c', revision: 3,
+    toolName: 'quality_analyze', callId: 'old-review', changedReviewInput: { chapterId: 'c', revision: 3 },
+    reconciliation: { status: 'terminal_failed_billing_known', sourceRunId: 'run', sourceResultId: 'old-result',
+      sourceReportId: null, usageIds: ['primary', 'format'], admissionId: 'author-continue:new', currentRevision: 4, currentContentHash: 'a'.repeat(64) } }])
+  const critic = tool('quality_analyze', async () => { mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'complete', 4)); return { output: 'r4检查完成' } })
+  mocks.tools = [critic]
+  queue(response('', [call('r4-check', critic.name, '{"compilationId":"comp"}')]), response('本章检查已处理。'))
+  await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+  expect(critic.execute).toHaveBeenCalledTimes(proved ? 1 : 0)
+  expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { tokenBudget: 500,
+    reviewAttempts: expect.arrayContaining(['comp:c:3:quality_analyze']),
+    toolRestrictions: expect.arrayContaining([expect.objectContaining({ action: 'quality_analyze', target: 'comp',
+      ...(proved ? { reviewInput: { chapterId: 'c', revision: 3 } } : {}) })]) } })
 })

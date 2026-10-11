@@ -23,6 +23,7 @@ const EVENT_TYPES = [
   'reasoning.delta',
   'tool.call',
   'tool.delta',
+  'tool.preparation.end',
   'tool.result',
   'permission.ask',
   'permission.resolved',

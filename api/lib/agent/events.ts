@@ -158,6 +158,10 @@ export class RunEventBus {
   }
 
   private reconcilePreviews(event: AgentStreamEvent): void {
+    if (event.type === 'tool.preparation.end') for (const callId of event.callIds) {
+      const preview = this.previews.get(callId)
+      if (preview?.type === 'tool.delta' && preview.messageId === event.messageId) this.previews.delete(callId)
+    }
     if (event.type === 'tool.call' || event.type === 'tool.result') this.previews.delete(event.callId)
     if (event.type === 'step.finish' || event.type === 'run.paused' || event.type === 'run.finished'
       || (event.type === 'error' && !event.recoverable)) this.previews.clear()

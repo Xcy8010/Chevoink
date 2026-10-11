@@ -76,6 +76,22 @@ describe('R01 event journal persistence', () => {
     await bus.close()
   })
 
+  it('journals preparation end so an existing reconnect clears skipped previews before a slow batch settles', async () => {
+    const bus = new RunEventBus('preview-end')
+    bus.emit({ type: 'message.start', messageId: 'm', role: 'assistant' })
+    const preview = bus.emitTransient({ type: 'tool.delta', messageId: 'm', callId: 'cached', toolName: 'chapter_read', title: '读取', argsChars: 9 })
+    bus.emitTransient({ type: 'tool.delta', messageId: 'other', callId: 'other-call', toolName: 'chapter_read', title: '读取', argsChars: 5 })
+    bus.emit({ type: 'tool.preparation.end', messageId: 'm', callIds: ['cached'] })
+    bus.emit({ type: 'tool.call', messageId: 'm', callId: 'slow', toolName: 'chapter_read', title: '读取', args: {} })
+    const listener = vi.fn()
+    bus.subscribe(listener, preview.seq)
+    expect(listener.mock.calls.map(([event]) => event.type)).toEqual(['tool.delta', 'tool.preparation.end', 'tool.call'])
+    expect(listener.mock.calls.some(([event]) => event.type === 'tool.delta' && event.callId === 'cached')).toBe(false)
+    await bus.close()
+    expect(db.createMany.mock.calls.flatMap(([arg]) => arg.data.map((event: { type: string }) => event.type)))
+      .toEqual(['message.start', 'tool.preparation.end', 'tool.call'])
+  })
+
   it('bounds retained preparation snapshots', async () => {
     const bus = new RunEventBus('preview-bound')
     for (let i = 0; i < 20; i++) bus.emitTransient({ type: 'tool.delta', messageId: 'm', callId: String(i), argsChars: i })

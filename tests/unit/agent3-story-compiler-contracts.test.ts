@@ -32,7 +32,7 @@ describe('严谨创作落实连续性警告', () => {
       taskId: 'task', sourceRunId: 'r', parentRunId: null })
     const chapter = { id: 'c', title: '本章', revision: 1, content: '原文', orderIndex: 1 }
     const findings = ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在衔接风险', suggestion: '局部澄清' }))
-    const validation = { independentCheck: 'complete', checkedRevision: 1, findings, errorCount: 0, warningCount: 3, autoRepairRounds: 0 }
+    const validation = { independentCheck: 'complete', checkedRevision: 1, findings, errorCount: 0, warningCount: 3, autoRepairRounds: 0, checkRounds: 0 }
     const compilation = { id: 'comp', createdAt: new Date(1), chapterId: 'c', chapter, bridge: { fromChapterId: null }, sceneTasks: [{ ordinal: 1 }], validation: cached ? validation : null, status: 'active' }
     Object.assign(validation, { coverage: compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: null }) })
     const findCompilation = vi.spyOn(prisma.storyCompilation, 'findFirst').mockImplementation(async args => args?.where?.createdAt
@@ -46,17 +46,21 @@ describe('严谨创作落实连续性警告', () => {
       validation.autoRepairRounds++
       return true
     })
-    vi.spyOn(compiler, 'validateStoryContinuity').mockResolvedValue(validation as unknown as Awaited<ReturnType<typeof compiler.validateStoryContinuity>>)
+    vi.spyOn(compiler, 'validateStoryContinuity').mockImplementation(async input => ({ ...validation, coverage: input.coverage ?? validation.coverage, checkRounds: (frozen => frozen && typeof frozen === 'object' && 'checkRounds' in frozen ? frozen.checkRounds : validation.checkRounds)(compilation.validation) } as unknown as Awaited<ReturnType<typeof compiler.validateStoryContinuity>>))
     const critic = vi.spyOn(review, 'generateReviewCompletion').mockResolvedValue(JSON.stringify({ findings }))
     const repair = vi.spyOn(ai, 'generateTextCompletion').mockResolvedValue('{"patches":[{"oldText":"原文","newText":"新文"}]}')
     const write = vi.fn().mockResolvedValue({ count: 1 })
-    const tx = { $queryRaw: vi.fn(), chapter: { updateMany: write, findUniqueOrThrow: vi.fn().mockResolvedValue({ ...chapter, revision: 2 }) }, storyCompilation: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) } } as unknown as Prisma.TransactionClient
+    const tx = { $queryRaw: vi.fn(), agentRun: { findFirst: vi.fn().mockResolvedValue({ id: 'r' }) },
+      chapter: { findFirst: vi.fn((...args: Parameters<typeof prisma.chapter.findFirst>) => prisma.chapter.findFirst(...args)), updateMany: write, findUniqueOrThrow: vi.fn().mockResolvedValue({ ...chapter, revision: 2 }) },
+      storyCompilation: { findFirst: findCompilation, findUniqueOrThrow: vi.fn(async () => compilation),
+        update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => { Object.assign(compilation, data); return compilation }),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }) } } as unknown as Prisma.TransactionClient
     vi.spyOn(prisma, '$transaction').mockImplementation(async callback => (callback as (db: Prisma.TransactionClient) => Promise<unknown>)(tx))
     vi.spyOn(scope, 'assertAgentManuscriptCurrent').mockResolvedValue(undefined)
     vi.spyOn(flags, 'isAgent2FeatureEnabled').mockReturnValue(false)
     vi.spyOn(novelTools, 'recalcNovelStats').mockResolvedValue(undefined)
     const ctx: ToolContext = { userId: 'u', novelId: 'n', runId: 'r', sessionId: 's', callId: 'check', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
-    return { ctx, chapter, compilation, validation, qualityReport, reserve, critic, repair, write, findCompilation }
+    return { ctx, chapter, compilation, validation, qualityReport, reserve, critic, repair, write, findCompilation, tx }
   }
   it.each([false, true])('0错误3警告仅保存检查意见并复用，不自动修订，缓存=%s', async cached => {
     const f = fixture(cached)
@@ -67,6 +71,16 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.chapter).toMatchObject({ content: '原文', revision: 1 })
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     expect(f.repair).not.toHaveBeenCalled()
+  })
+  it('complete wrapped legacy findings are parsed locally without another model call', async () => {
+    const f = fixture(false)
+    const findings = [{ signal: 'object', severity: 'warning', evidence: '原文承接需留意', suggestion: '交作者审阅', sourceEvidence: [{ source: 'current', quote: '原文' }] }]
+    f.critic.mockResolvedValueOnce(JSON.stringify({ report: { findings } }))
+    await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
+    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.repair).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+    expect(f.compilation.validation).toMatchObject({ continuityCriticResponse: { parserVersion: 3, classification: 'complete', unwrapped: true } })
   })
   it('连续性判断取得前章已保存原文，桥接摘要不单独充当事实证据', async () => {
     const f = fixture(false)
@@ -111,7 +125,7 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.critic).toHaveBeenCalledOnce()
     expect(f.repair).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
-    expect(f.compilation.validation).toEqual({ checkRounds: 9 })
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 9 })
   })
   it.each(['current', 'stale', 'failed'] as const)('bridge reads show quality candidates only from an authentic %s current-body report', async scenario => {
     const f = fixture(false)
@@ -160,7 +174,7 @@ describe('严谨创作落实连续性警告', () => {
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     expect(f.repair).toHaveBeenCalledTimes(2)
     expect(f.repair.mock.calls[1][2]).toMatchObject({ action: 'agent3ContinuityCriticOutputRecovery', boundedReview: true, maxOutputTokens: 32768 })
-    expect(compiler.validateStoryContinuity).toHaveBeenCalledWith(expect.objectContaining({ independentCheck: 'complete', expectedChapterRevision: 1 }))
+    expect(compiler.validateStoryContinuity).toHaveBeenCalledWith(expect.objectContaining({ independentCheck: 'complete', expectedChapterRevision: 1 }), f.tx)
     expect(f.write).not.toHaveBeenCalled()
   })
   it.each(['chapter', 'bridge', 'scenes', 'removed', 'after-response'] as const)('rejects genuinely changed %s before recovery or applying the result', async change => {

@@ -1211,6 +1211,16 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           }
         }
 
+        case 'tool.preparation.end': {
+          const callIds = new Set(event.callIds)
+          return {
+            ...base,
+            liveToolDrafts: Object.fromEntries(Object.entries(state.liveToolDrafts).filter(([callId]) => !callIds.has(callId))),
+            messages: updateMessageParts(state.messages, event.messageId, parts => parts.filter(part =>
+              !(part.type === 'tool-call' && part.preparing && callIds.has(part.callId)))),
+          }
+        }
+
         case 'subagent.progress':
           // 子 Agent 内嵌执行进度：更新到对应的 subagent_run 容器卡片
           return {
@@ -1225,6 +1235,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           }
 
         case 'tool.result': {
+          // A reconnect can deliver the terminal witness without its call/start.
+          // Restore only this exact message/call, never another tool with the same name.
+          const messages: AgentUIMessage[] = state.messages.some(message => message.id === event.messageId)
+            ? state.messages : [...state.messages, { id: event.messageId, runId: event.runId, role: 'assistant',
+                goalId: event.runId === state.runId ? state.runGoalId : null, parts: [], createdAt: event.ts }]
           const extracted = activityFromDisplay(event.display)
           const clearQuestion = state.pendingQuestion?.callId === event.callId
           const clearImport = event.toolName === 'novel_import' && state.messages.some(message => message.parts.some(part =>
@@ -1258,20 +1273,20 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                   }
                 : activity,
             ),
-            messages: updateMessageParts(state.messages, event.messageId, (parts) =>
-              parts.map((part) =>
-                part.type === 'tool-call' && part.callId === event.callId
-                  ? {
-                      ...part,
-                      status: event.ok ? 'success' : 'failed',
-                      preparing: false,
-                      summary: event.summary,
-                      display: event.display,
-                      durationMs: event.durationMs,
-                    }
-                  : part,
-              ),
-            ),
+            messages: updateMessageParts(messages, event.messageId, (parts) => {
+              const index = parts.findIndex(part => part.type === 'tool-call' && part.callId === event.callId)
+              const previous = parts[index]
+              const settled: AgentMessagePart = {
+                ...(previous?.type === 'tool-call' ? previous : {}),
+                type: 'tool-call', callId: event.callId, toolName: event.toolName,
+                title: previous?.type === 'tool-call' ? previous.title : WRITE_TOOL_LABELS[event.toolName] ?? event.toolName,
+                args: previous?.type === 'tool-call' ? previous.args : null,
+                status: event.ok ? 'success' : 'failed', preparing: false,
+                summary: event.summary, display: event.display, durationMs: event.durationMs,
+                ...(event.subagentCallId ? { subagentCallId: event.subagentCallId } : {}),
+              }
+              return index < 0 ? [...parts, settled] : parts.map((part, at) => at === index ? settled : part)
+            }),
           }
         }
 

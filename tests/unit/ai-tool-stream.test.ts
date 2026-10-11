@@ -192,6 +192,19 @@ describe('lossless tool argument transport', () => {
     const result = await invoke()
     expect(result.toolCalls).toEqual([{ id: 'call', name: 'scene_task_build', arguments: '{"tasks":[{"goal":"审俘破线"}]}' }])
   })
+  it('exposes both preview identities when a provider replaces the id at the same stream index', async () => {
+    const frame = (id: string, args: string) => ({ choices: [{ delta: { tool_calls: [{ index: 0, id, function: { name: 'chapter_read', arguments: args } }] } }] })
+    stream(`data: ${JSON.stringify(frame('old-preview', ''))}\n\ndata: ${JSON.stringify(frame('accepted', '{}'))}\n\ndata: ${JSON.stringify(ending('tool_calls'))}\n\n`)
+    const onChunk = vi.fn()
+    const result = await chatWithTools({ messages: [], tools: [], onChunk, providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+    expect(onChunk.mock.calls.map(([chunk]) => chunk).filter(chunk => chunk.type === 'tool-call-start')).toEqual([
+      { type: 'tool-call-start', id: 'old-preview', name: 'chapter_read' },
+      { type: 'tool-call-start', id: 'accepted', name: 'chapter_read' },
+    ])
+    expect(result.toolCalls).toEqual([{ id: 'accepted', name: 'chapter_read', arguments: '{}' }])
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
   it('preserves length finish reason and marks partial calls unsafe to execute', async () => {
     stream(`data: ${JSON.stringify(delta('{"tasks":[', true))}\n\ndata: ${JSON.stringify(ending('length'))}\n\n`)
     const result = await invoke()

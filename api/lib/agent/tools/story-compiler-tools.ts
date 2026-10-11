@@ -1,6 +1,8 @@
 import { retainedFindings } from './chapter-arguments.js'
 import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
+import { inspectContinuityResponse } from '../continuity-format-recovery.js'
+import { runtimeJson } from '../runtime-common.js'
 import { persistedContentHash } from '../semantic-progress.js'
 import { continuityFindingText, continuitySourceInput, resolveContinuitySources, continuityRecheckInput, unconfirmedContinuityOutput, type ContinuityBodies } from '../continuity-review-context.js'
 import { unlocatedContinuityEvidence } from '../continuity-finding-authority.js'
@@ -78,7 +80,11 @@ const independentContinuityResultSchema = z.object({
   findings: z.array(continuityFindingInputSchema).max(30),
 })
 
-export function parseIndependentContinuityResult(content: string, parserVersion: 1 | 2 = 2, bodies?: ContinuityBodies): { findings: z.infer<typeof continuityFindingInputSchema>[]; structured: boolean } {
+export function parseIndependentContinuityResult(content: string, parserVersion: 1 | 2 | 3 = 3, bodies?: ContinuityBodies): { findings: z.infer<typeof continuityFindingInputSchema>[]; structured: boolean } {
+  if (parserVersion === 3) {
+    const inspected = inspectContinuityResponse(content, bodies)
+    return { findings: inspected.findings, structured: inspected.structured }
+  }
   const start = content.indexOf('{')
   const end = content.lastIndexOf('}')
   if (start === -1 || end <= start) return { findings: [], structured: false }
@@ -640,7 +646,14 @@ export const continuityValidateTool = defineTool({
       }
       const response = await generateReviewCompletion(continuityCriticSystem, `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, args.focus)}`,
         { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: context.chapter.id, targetType: 'chapter', targetId: context.chapter.id, temperature: 0, reasoningEffort: 'low' }, assertCurrent)
-      return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, parseIndependentContinuityResult(response, 2, { previous: context.precedingBodies, current: context.chapter.content }), tx, args.focus))
+      const inspected = inspectContinuityResponse(response, { previous: context.precedingBodies, current: context.chapter.content })
+      return prisma.$transaction(async tx => {
+        const result = await saveStandaloneContinuityReport(ctx, context, inspected, tx, args.focus)
+        await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: `${context.chapter.title} · 检查回复诊断`,
+          content: '独立连续性回复审计；不代表检查通过。', summary: inspected.audit.classification,
+          metadata: runtimeJson({ chapterId: context.chapter.id, revision: context.chapter.revision, contextHash: context.contextHash, criticResponse: inspected.audit }).value } })
+        return result
+      })
     }
     if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, summary: '本任务连续性检查未执行', output: '指定编译不属于本任务或尚未写入正文。独立检查既有章节请省略 compilationId、传真实 chapterId；不要为检查创建新章或接管旧编译。' }
     const chapter = compilation.chapter
@@ -706,15 +719,15 @@ export const continuityValidateTool = defineTool({
         continuityReviewTail(compilation.validation, chapter.revision, allowRepair, args.focus, chapter.content),
         continuitySourceInput({ previous: sourceChapter?.content ?? null, current: chapter.content }),
       ].filter(Boolean).join('\n')
-    const assertCurrent = async () => {
-      const current = await prisma.storyCompilation.findFirst({
+    const assertCurrent = async (db: Prisma.TransactionClient = prisma) => {
+      const current = await db.storyCompilation.findFirst({
         where: { id: compilation.id, userId: ctx.userId, novelId: ctx.novelId, status: compilation.status,
-          ...await qualityCompilationScope(prisma, ctx.userId, ctx.novelId, ctx.runId),
+          ...await qualityCompilationScope(db, ctx.userId, ctx.novelId, ctx.runId),
           chapter: { authorId: ctx.userId, ...activeChapterScope(ctx.novelId) } },
         include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
       })
-      const source = bridge.fromChapterId ? await prisma.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { revision: true } }) : null
-      if (reviewInput(current) !== frozenReviewInput || source?.revision !== sourceChapter?.revision) {
+      const source = bridge.fromChapterId ? await db.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { revision: true, content: true } }) : null
+      if (reviewInput(current) !== frozenReviewInput || source?.revision !== sourceChapter?.revision || source?.content !== sourceChapter?.content) {
         throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文或章节桥已变化，未应用或重发旧版本连续性检查，请读取当前版本。')
       }
     }
@@ -724,17 +737,27 @@ export const continuityValidateTool = defineTool({
       systemPrompt,
       criticInput,
       { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: ctx.signal, userId: ctx.userId, action: index === 0 ? 'agent3ContinuityCritic' : 'agent3ContinuityCriticSecondPass', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0, reasoningEffort: 'low' },
-      assertCurrent,
+      () => assertCurrent(),
     )))
     ctx.signal.throwIfAborted()
     await assertCurrent()
-    const parsedCriticResponses = criticResponses.map(response => parseIndependentContinuityResult(response, 2, { previous: sourceChapter?.content ?? null, current: chapter.content }))
+    const bodies = { previous: sourceChapter?.content ?? null, current: chapter.content }
+    const inspected = inspectContinuityResponse(criticResponses[0], bodies)
+    const parsedCriticResponses = [{ structured: inspected.structured, findings: inspected.findings }]
     const criticFallback = parsedCriticResponses.some((response) => !response.structured)
     const independentFindings = parsedCriticResponses
       .flatMap((response) => response.findings)
-      .filter((finding, index, all) => all.findIndex((item) => item.signal === finding.signal && item.evidence === finding.evidence) === index)
-    const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, compilationId: compilation.id, findings: independentFindings,
-      runId: ctx.runId, expectedChapterRevision: chapter.revision, independentCheck: criticFallback ? 'unavailable' : 'complete', coverage, focus: args.focus, signal: ctx.signal })
+    const result = await prisma.$transaction(async tx => {
+      ctx.signal.throwIfAborted()
+      await assertAgentManuscriptCurrent(tx, ctx)
+      await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilation.id} FOR UPDATE`
+      await assertCurrent(tx)
+      const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, compilationId: compilation.id, findings: independentFindings,
+        runId: ctx.runId, expectedChapterRevision: chapter.revision, independentCheck: criticFallback ? 'unavailable' : 'complete', coverage, focus: args.focus, signal: ctx.signal }, tx)
+      await tx.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...result,
+        continuityCriticResponse: inspected.audit }).value } })
+      return result
+    })
     if (criticFallback || result.independentCheck !== 'complete') return {
       outcome: 'failed' as const,
       failureCode: criticFallback ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED',

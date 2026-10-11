@@ -3,6 +3,7 @@ import { runtimeJson } from './runtime-common.js'
 
 export const toolRestrictionSchema = z.object({
   action: z.string().min(1), target: z.string().nullable(), code: z.string().min(1), reason: z.string().min(1),
+  reviewInput: z.object({ chapterId: z.string().min(1), revision: z.number().int().positive() }).strict().optional(),
   inputHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
 }).strict()
 export type ToolRestriction = z.infer<typeof toolRestrictionSchema>
@@ -41,8 +42,9 @@ export function toolRestrictionTarget(args: unknown, fallbackChapterId?: string 
   return typeof target === 'string' ? target.trim() : fallbackChapterId?.trim() || null
 }
 
-export function findToolRestriction(restrictions: readonly ToolRestriction[], action: string, args: unknown, fallbackChapterId?: string | null) {
+export function findToolRestriction(restrictions: readonly ToolRestriction[], action: string, args: unknown, fallbackChapterId?: string | null, reviewInput?: { chapterId: string; revision: number } | null) {
   const target = toolRestrictionTarget(args, fallbackChapterId)
   return restrictions.find(item => item.action === action && (item.target === null || item.target === target)
-    && (!item.inputHash || item.inputHash === toolFailureInputHash(action, args)))
+    && (!item.inputHash || item.inputHash === toolFailureInputHash(action, args))
+    && (!item.reviewInput || !reviewInput || item.reviewInput.chapterId !== reviewInput.chapterId || item.reviewInput.revision === reviewInput.revision))
 }

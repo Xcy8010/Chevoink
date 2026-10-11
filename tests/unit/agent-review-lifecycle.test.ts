@@ -61,6 +61,44 @@ describe('Agent 写入审查生命周期', () => {
     expect(useAgentStore.getState().messages[0].parts).toEqual([])
   })
 
+  it('参数生成结束立即撤下缓存与被替换预告，保留实际执行和其他消息', () => {
+    const apply = useAgentStore.getState().applyEvent
+    const base = { runId: 'run-review', ts: new Date().toISOString() }
+    apply({ ...base, seq: 1, type: 'message.start', messageId: 'm', role: 'assistant' })
+    apply({ ...base, seq: 2, type: 'message.start', messageId: 'other', role: 'assistant' })
+    const preview = { type: 'tool.delta' as const, toolName: 'chapter_read', title: '读取章节', argsChars: 10 }
+    apply({ ...base, seq: 3, ...preview, messageId: 'other', callId: 'other-call' })
+    apply({ ...base, seq: 4, ...preview, messageId: 'm', callId: 'cached', draft: { kind: 'chapter', toolName: 'chapter_read', content: '缓存预告' } })
+    apply({ ...base, seq: 5, ...preview, messageId: 'm', callId: 'replaced' })
+    apply({ ...base, seq: 6, type: 'tool.call', messageId: 'm', callId: 'actual', toolName: 'chapter_read', title: '读取章节', args: {} })
+    apply({ ...base, seq: 7, type: 'tool.preparation.end', messageId: 'm', callIds: ['cached', 'replaced', 'actual'] })
+    expect(useAgentStore.getState().messages[0].parts).toEqual([expect.objectContaining({ callId: 'actual', preparing: false, status: 'running' })])
+    expect(useAgentStore.getState().messages[1].parts).toEqual([expect.objectContaining({ callId: 'other-call', preparing: true })])
+    expect(useAgentStore.getState().liveToolDrafts).toEqual({})
+    apply({ ...base, seq: 4, ...preview, messageId: 'm', callId: 'cached' })
+    expect(useAgentStore.getState().messages[0].parts).toHaveLength(1)
+    expect(useAgentStore.getState().lastSeq).toBe(7)
+  })
+
+  it.each([true, false])('缺正式call时结果按messageId和callId补入终态，保持同名调用独立 (ok=%s)', ok => {
+    const apply = useAgentStore.getState().applyEvent
+    const base = { runId: 'run-review', ts: new Date().toISOString() }
+    apply({ ...base, seq: 1, type: 'message.start', messageId: 'm', role: 'assistant' })
+    apply({ ...base, seq: 2, type: 'tool.delta', messageId: 'm', callId: 'other', toolName: 'chapter_read', title: '读取章节', argsChars: 9 })
+    const result = { type: 'tool.result' as const, messageId: 'm', callId: 'finished', toolName: 'chapter_read', ok, summary: '已收到结果', durationMs: 12 }
+    apply({ ...base, seq: 3, ...result })
+    apply({ ...base, seq: 3, ...result })
+    expect(useAgentStore.getState().messages[0].parts).toEqual([
+      expect.objectContaining({ callId: 'other', preparing: true, status: 'running' }),
+      expect.objectContaining({ callId: 'finished', preparing: false, status: ok ? 'success' : 'failed', args: null, summary: result.summary, durationMs: 12 }),
+    ])
+    // Even a missing message.start must not swallow an authenticated terminal event.
+    apply({ ...base, seq: 4, ...result, messageId: 'missing-message', callId: 'restored', subagentCallId: 'parent' })
+    expect(useAgentStore.getState().messages[1]).toMatchObject({ id: 'missing-message', runId: 'run-review', parts: [
+      expect.objectContaining({ callId: 'restored', subagentCallId: 'parent', status: ok ? 'success' : 'failed' }),
+    ] })
+  })
+
   it('补入检查按实际执行顺序排在提前生成的终态预览前，重连不重复或重排已执行卡', () => {
     const apply = useAgentStore.getState().applyEvent
     const base = { runId: 'run-review', ts: new Date().toISOString() }

@@ -364,3 +364,48 @@ describe('short, current-table evidence references', () => {
     expect(JSON.stringify(sources)).toBe(snapshot)
   })
 })
+
+
+describe('quality parser v3 separates complete judgments from prompt count guidance', () => {
+  const list = Array.from({ length: 35 }, (_, index) => ({ ...finding, quote: '她关上了门。', explanation: `独立意见${index}` }))
+  it('preserves all 35 valid opinions while frozen v2 retains its original count contract', () => {
+    const raw = JSON.stringify({ findings: list })
+    expect(inspectCriticResponse(raw, undefined, true, 3)).toMatchObject({ complete: true, findings: list,
+      diagnostic: { parserVersion: 3, findingCount: 35, droppedFindings: 0 } })
+    expect(inspectCriticResponse(raw, undefined, true, 2)).toMatchObject({ complete: false, findings: list.slice(0, 24),
+      diagnostic: { parserVersion: 2, findingCount: 35, droppedFindings: 11 } })
+  })
+  it('keeps the complete received audit beyond the old 8192 character projection', () => {
+    const raw = JSON.stringify({ findings: list.map(item => ({ ...item, explanation: '完整意见'.repeat(150) })) })
+    expect(raw.length).toBeGreaterThan(8192)
+    const parsed = inspectCriticResponse(raw, undefined, true, 3)
+    expect(parsed.complete).toBe(true)
+    expect(parsed.diagnostic.rawResponse).toMatchObject({ complete: true, encoding: 'json-string' })
+    expect(JSON.parse(parsed.diagnostic.rawResponse!.content)).toBe(raw)
+  })
+  it('does not guess the missing signal key seen in a complete provider response', () => {
+    expect(inspectCriticResponse('{"findings":[{"sentence_homology","severity":"advisory"}]}', undefined, true, 3))
+      .toMatchObject({ complete: false, diagnostic: { classification: 'json_invalid' } })
+  })
+  it.each([null, { ...finding, signal: 'invented' }, { ...finding, suggestion: undefined }])('does not certify an invalid judgment after the first 24 %#', invalid => {
+    expect(inspectCriticResponse(JSON.stringify({ findings: [...list, invalid] }), undefined, true, 3))
+      .toMatchObject({ complete: false, findings: list, diagnostic: { findingCount: 36, droppedFindings: 1, classification: 'findings_invalid' } })
+  })
+  it('corrects every invalid source reference without changing any of 35 judgments or relaxing frozen v2', () => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, content)
+    const pending = list.map((item, index) => ({ ...item, quote: undefined, sourceId: `invalid-${index}` }))
+    const raw = JSON.stringify({ findings: pending })
+    const inspected = inspectCorrectableCriticResponse(raw, sources, true, 3)
+    expect(inspected).toMatchObject({ complete: false, correctable: true, diagnostic: { invalidSources: 35, droppedFindings: 0 } })
+    expect(inspected.findings).toHaveLength(35)
+    const corrections = { corrections: list.map((_, index) => ({ index, sourceId: sources.entries[0].id })) }
+    const fixed = correctQualityEvidence(content, inspected.findings, corrections, sources, 3)
+    expect(unlocatedQualityEvidence(content, fixed, sources)).toHaveLength(0)
+    expect(fixed.map(item => item.explanation)).toEqual(list.map(item => item.explanation))
+    expect(correctQualityEvidence(content, inspected.findings, corrections, sources, 2)).toEqual(inspected.findings)
+    expect(inspectCorrectableCriticResponse(raw, sources, true, 2).correctable).toBe(false)
+  })
+  it.each(['{"findings":[],"findings":[]}', '{"findings":[]} {"findings":[]}', '{"findings":['])('still rejects ambiguity, duplicate keys and truncation: %s', raw => {
+    expect(inspectCriticResponse(raw, undefined, true, 3).complete).toBe(false)
+  })
+})

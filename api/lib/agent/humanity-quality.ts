@@ -372,7 +372,7 @@ export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof build
   }))
 }
 
-export function locateCriticFindings(content: string, findings: CriticQualityFinding[], sources?: QualityEvidenceSources): LocatedQualityFinding[] {
+export function locateCriticFindings(content: string, findings: CriticQualityFinding[], sources?: QualityEvidenceSources, preserveJudgments = false): LocatedQualityFinding[] {
   const located: LocatedQualityFinding[] = []
   const occupied = new Set<string>()
   for (const finding of findings) {
@@ -380,7 +380,7 @@ export function locateCriticFindings(content: string, findings: CriticQualityFin
     const spans = locateQualityFindingSpans(content, finding, sources)
     if (spans.length !== 1) continue
     const span = spans[0]
-    if (occupied.has(`${finding.signal}:${span.start}`)) continue
+    if (!preserveJudgments && occupied.has(`${finding.signal}:${span.start}`)) continue
     occupied.add(`${finding.signal}:${span.start}`)
     const end = Math.min(span.end, span.start + 360)
     located.push({
@@ -398,15 +398,32 @@ export function locateCriticFindings(content: string, findings: CriticQualityFin
   return located
 }
 
-export function prepareQualityFindings(content: string, deterministicFindings: LocatedQualityFinding[], criticFindings: CriticQualityFinding[], criticComplete: boolean, sources?: QualityEvidenceSources) {
-  const located = locateCriticFindings(content, criticFindings, sources)
-  const all = [...deterministicFindings, ...located].filter((finding, index, values) => values.findIndex(item => item.signal === finding.signal && item.start === finding.start && item.end === finding.end) === index)
+export function prepareQualityFindings(content: string, deterministicFindings: LocatedQualityFinding[], criticFindings: CriticQualityFinding[], criticComplete: boolean, sources?: QualityEvidenceSources, parserVersion?: 1 | 2 | 3) {
+  const located = locateCriticFindings(content, criticFindings, sources, parserVersion === 3)
+  const supplied = [...deterministicFindings, ...located]
+  // Database identity is a source/signal/span, not a single editorial judgment.
+  // New reviews retain every distinct judgment under that identity; old frozen
+  // reviews preserve their original projection and display-count contract.
+  const all = parserVersion === 3 ? [...supplied.reduce((groups, item) => {
+    const key = JSON.stringify([item.source, item.signal, item.start, item.end])
+    const group = groups.get(key) ?? []
+    if (!group.some(existing => existing.explanation === item.explanation && existing.suggestion === item.suggestion
+      && existing.severity === item.severity && existing.confidence === item.confidence)) group.push(item)
+    groups.set(key, group)
+    return groups
+  }, new Map<string, LocatedQualityFinding[]>()).values()].map(group => group.length === 1 ? group[0] : {
+    ...group[0], severity: group.some(item => item.severity === 'error') ? 'error' as const
+      : group.some(item => item.severity === 'warning') ? 'warning' as const : 'advisory' as const,
+    confidence: Math.max(...group.map(item => item.confidence)),
+    explanation: group.map((item, index) => `${index + 1}. ${item.explanation}`).join('\n'),
+    suggestion: group.map((item, index) => `${index + 1}. ${item.suggestion}`).join('\n'),
+  }) : supplied.filter((finding, index, values) => values.findIndex(item => item.signal === finding.signal && item.start === finding.start && item.end === finding.end) === index)
   // 独立检查按“有正文证据可核验”判定完成：部分引用不可定位时保留已绑定意见并只记录未定位计数；
   // 全部引用都不可定位意味着报告没有一条可核验证据（可能审查了其他文本），仍视为未完成，不能冒充通过。
-  // 超 36 条仅截断并记录 omittedFindings，绝不让数量上限把有效检查变成 failed 死锁。
+  // 旧冻结协议保留 36 条投影与 omittedFindings；新协议保存全部已定位意见。
   const invalidSource = criticFindings.some(finding => finding.sourceId !== undefined && locateQualityFindingSpans(content, finding, sources).length !== 1)
-  return { findings: all.slice(0, 36), complete: criticComplete && !invalidSource && (criticFindings.length === 0 || located.length > 0),
-    unlocatedFindings: criticFindings.length - located.length, omittedFindings: Math.max(0, all.length - 36), criticFindingCount: criticFindings.length }
+  return { findings: parserVersion === 3 ? all : all.slice(0, 36), complete: criticComplete && !invalidSource && (criticFindings.length === 0 || located.length > 0),
+    unlocatedFindings: criticFindings.length - located.length, omittedFindings: parserVersion === 3 ? 0 : Math.max(0, all.length - 36), criticFindingCount: criticFindings.length }
 }
 
 export async function persistHumanityQualityReport(input: {
@@ -440,7 +457,7 @@ export async function persistHumanityQualityReport(input: {
 
   if (input.sources && !validateQualityEvidenceSources(input.sources, { userId: input.userId, novelId: input.novelId,
     chapterId: input.chapterId, chapterRevision: chapter.revision }, chapter.content)) throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '原文证据表与当前作者、作品、章节或版本不一致，未保存为完整报告。')
-  const { findings, complete, unlocatedFindings, omittedFindings, criticFindingCount } = prepareQualityFindings(chapter.content, input.deterministicFindings, input.criticFindings, input.criticComplete === true, input.sources)
+  const { findings, complete, unlocatedFindings, omittedFindings, criticFindingCount } = prepareQualityFindings(chapter.content, input.deterministicFindings, input.criticFindings, input.criticComplete === true, input.sources, input.criticResponseDiagnostic?.parserVersion)
   const actionableCount = findings.filter((finding) => finding.severity !== 'advisory').length
   const scope = await qualityCompilationScope(tx, input.userId, input.novelId, input.runId)
   if (input.compilationId && !await tx.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, chapterId: input.chapterId, ...scope } })) {

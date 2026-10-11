@@ -376,6 +376,12 @@ export type AgentStreamEventBody =
       draft?: AgentToolDraft
     }
   | {
+      /** 参数生成已结束；撤下本批预告，只有正式 tool.call 才代表实际执行。 */
+      type: 'tool.preparation.end'
+      messageId: string
+      callIds: string[]
+    }
+  | {
       type: 'tool.result'
       messageId: string
       callId: string

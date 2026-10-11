@@ -29,3 +29,18 @@ describe('input failures preserve usable manuscript authority', () => {
     expect(runCheckpointSchema.parse(checkpoint)).toMatchObject({ tokenBudget: 500, activeExecutionMs: 40, stagnantBatches: 4, toolRestrictions: [converted] })
   })
 })
+
+
+describe('server revision-scoped quality failures', () => {
+  const restriction = { action: 'quality_analyze', target: 'comp', code: 'QUALITY_REPORT_INCOMPLETE', reason: 'r3格式失败',
+    reviewInput: { chapterId: 'chapter', revision: 3 } }
+  it('preserves the old revision and permits only a server-confirmed different current revision', () => {
+    const saved = toolRestrictionSchema.parse(restriction)
+    expect(findToolRestriction([saved], 'quality_analyze', { compilationId: 'comp' }, 'chapter', { chapterId: 'chapter', revision: 3 })).toEqual(saved)
+    expect(findToolRestriction([saved], 'quality_analyze', { compilationId: 'comp' }, 'chapter', { chapterId: 'chapter', revision: 4 })).toBeUndefined()
+    expect(findToolRestriction([saved], 'quality_analyze', { compilationId: 'comp' }, 'chapter')).toEqual(saved)
+    expect(findToolRestriction([saved], 'quality_analyze', { compilationId: 'comp' }, 'chapter', { chapterId: 'foreign', revision: 4 })).toEqual(saved)
+    const legacy = { action: saved.action, target: saved.target, code: saved.code, reason: saved.reason }
+    expect(findToolRestriction([legacy], 'quality_analyze', { compilationId: 'comp' }, 'chapter', { chapterId: 'chapter', revision: 4 })).toEqual(legacy)
+  })
+})

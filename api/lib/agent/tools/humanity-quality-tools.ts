@@ -336,7 +336,7 @@ export const qualityAnalyzeTool = defineTool({
       if (error instanceof DataAccessError) throw error
       criticFallback = true
     }
-    let inspected = inspectCorrectableCriticResponse(response, sources)
+    let inspected = inspectCorrectableCriticResponse(response, sources, true, 3)
     const saveReviewedReport = async (input: Parameters<typeof persistHumanityQualityReport>[0]) => {
       try { return await persistHumanityQualityReport(input) } catch (error) {
         const target = error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'
@@ -372,7 +372,7 @@ export const qualityAnalyzeTool = defineTool({
       const restored = qualityFormatRecoveryPrompt(buildCriticSystem('balanced'), userPrompt, response)
       response = await callReview(restored.system, restored.content,
         { ...responseOptions, action: 'agent3HumanityFormatRecovery' }, assertCurrent)
-      inspected = inspectCorrectableCriticResponse(response, sources)
+      inspected = inspectCorrectableCriticResponse(response, sources, true, 3)
       criticFallback = !inspected.complete && !inspected.correctable
     }
     rawCriticFindings = inspected.findings
@@ -400,7 +400,7 @@ export const qualityAnalyzeTool = defineTool({
           evidenceCorrectionIncomplete = true
         }
         try {
-          rawCriticFindings = correctQualityEvidence(bundle.chapter.content, rawCriticFindings, parseQualityJsonObject(corrected, 'corrections', 2), sources)
+          rawCriticFindings = correctQualityEvidence(bundle.chapter.content, rawCriticFindings, parseQualityJsonObject(corrected, 'corrections', 3), sources, 3)
         } catch {
           evidenceCorrectionIncomplete = true
           /* Remain incomplete; never reinterpret malformed corrections as success. */

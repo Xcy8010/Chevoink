@@ -78,7 +78,7 @@ describe.runIf(available)('received quality report and local repair failure reco
       await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, targetType: 'quality_report', targetId: report.id,
         providerType: 'text', providerMode: 'custom', modelName: 'fixture', action: 'agent3HumanityRevision',
         requestTokens: scenario === 'unknown' ? null : 10, responseTokens: scenario === 'unknown' ? null : 2,
-        billingStatus: scenario === 'unknown' ? 'pending_usage' : 'settled', usageSource: scenario === 'unknown' ? 'unknown' : 'reported', durationMs: 20,
+        billingStatus: scenario === 'unknown' ? 'pending_usage' : 'settled', usageSource: ['unknown', 'quality-unknown'].includes(scenario) ? 'unknown' : 'reported', durationMs: 20,
         createdAt: new Date(start.getTime() + 2000) } })
       if (scenario === 'prior-unfinished') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 0, type: 'tool.call', createdAt: new Date(start.getTime() - 1000),
         payload: { toolName: 'chapter_write', callId: 'unfinished-write' } } })
@@ -119,7 +119,7 @@ describe.runIf(available)('author continuation after current continuity failure'
       if (scenario === 'changed-body') await prisma.chapter.update({ where: { id: chapter.id }, data: { content: '已变化正文' } })
       await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, targetType: 'story_compilation', targetId: compilation.id,
         providerType: 'text', providerMode: 'custom', modelName: 'synthetic', action: 'agent3ContinuityCritic', requestTokens: 10, responseTokens: 2,
-        usageSource: scenario === 'unknown' ? 'unknown' : 'reported', billingStatus: scenario === 'unknown' ? 'pending_usage' : 'settled', billingEvidence: { responseObserved: scenario !== 'no-response' }, durationMs: 20, createdAt: new Date(start.getTime() + 1000) } })
+        usageSource: ['unknown', 'quality-unknown'].includes(scenario) ? 'unknown' : 'reported', billingStatus: scenario === 'unknown' ? 'pending_usage' : 'settled', billingEvidence: { responseObserved: scenario !== 'no-response' }, durationMs: 20, createdAt: new Date(start.getTime() + 1000) } })
       const result = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))
       expect(result).toHaveLength(['settled', 'format'].includes(scenario) ? 1 : 0)
       expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))).toEqual(result)
@@ -229,7 +229,7 @@ describe.runIf(available)('legacy terminal quality failure with known billing', 
 import { readReviewRequestRecovery } from '../../api/lib/agent/review-request-recovery.js'
 
 describe.runIf(available)('returned review provider request recovery', () => {
-  it.each(['continuity', 'quality', 'typed', 'unknown', 'estimated', 'null-billing', 'no-author', 'early-author', 'duplicate', 'overlap', 'wrong-target', 'wrong-proof', 'extra-payment', 'inherited-unknown'] as const)(
+  it.each(['continuity', 'quality', 'typed', 'unknown', 'estimated', 'null-billing', 'no-author', 'early-author', 'duplicate', 'overlap', 'wrong-target', 'wrong-proof', 'extra-payment', 'inherited-unknown', 'quality-changed', 'quality-same-body', 'quality-unknown', 'quality-current'] as const)(
     '%s needs complete billing and fresh author admission without changing the manuscript', scenario => fixture(async f => {
       try {
         await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0 } })
@@ -246,11 +246,11 @@ describe.runIf(available)('returned review provider request recovery', () => {
             action: 'agent3ContinuityCritic', usageSource: 'unknown', billingStatus: 'pending_usage', durationMs: 10,
             createdAt: new Date(earlier.getTime() + 1000) } })
         }
-        const toolName = scenario === 'quality' ? 'quality_analyze' as const : 'continuity_validate' as const
-        const action = scenario === 'quality' ? 'agent3HumanityCritic' : 'agent3ContinuityCritic'
+        const toolName = scenario.startsWith('quality') ? 'quality_analyze' as const : 'continuity_validate' as const
+        const action = scenario.startsWith('quality') ? 'agent3HumanityCritic' : 'agent3ContinuityCritic'
         const usage = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, chapterId: f.chapterId,
           targetType: 'story_compilation', targetId: compilation.id, providerType: 'text', providerMode: 'custom', modelName: 'synthetic',
-          action, requestTokens: 10, responseTokens: 10, usageSource: scenario === 'unknown' ? 'unknown' : scenario === 'estimated' ? 'estimated' : 'reported',
+          action, requestTokens: 10, responseTokens: 10, usageSource: ['unknown', 'quality-unknown'].includes(scenario) ? 'unknown' : scenario === 'estimated' ? 'estimated' : 'reported',
           billingStatus: scenario === 'null-billing' ? null : 'settled', durationMs: 10, createdAt: at(100) } })
         const payload = { toolName, callId: 'provider-review', args: { chapterId: scenario === 'wrong-target' ? 'other' : f.chapterId, compilationId: compilation.id } }
         await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', payload, createdAt: start } })
@@ -260,7 +260,7 @@ describe.runIf(available)('returned review provider request recovery', () => {
           compilationId: compilation.id, status: 'failed', createdAt: at(500),
           deterministicMetrics: { criticResponse: { callId: 'provider-review' }, formatRecovery: { state: 'claimed' } },
         } }) : null
-        const typed = ['typed', 'wrong-proof', 'extra-payment'].includes(scenario)
+        const typed = ['typed', 'wrong-proof', 'extra-payment'].includes(scenario) || scenario.startsWith('quality-')
         await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'tool.result', createdAt: at(1000), payload: {
           toolName, callId: 'provider-review', ok: false, failureCode: typed ? 'UNEXPECTED_TOOL_ERROR' : 'AI_PROVIDER_EMPTY_RESPONSE',
           ...(typed ? { reviewRequestFinished: { version: 1, chapterId: f.chapterId, revision: 1,
@@ -273,11 +273,14 @@ describe.runIf(available)('returned review provider request recovery', () => {
           targetType: 'chapter', targetId: f.chapterId, providerType: 'text', providerMode: 'custom', modelName: 'synthetic', action,
           requestTokens: 2, responseTokens: 1, usageSource: 'reported', billingStatus: 'settled', durationMs: 10, createdAt: at(200) } })
         const pending = [{ compilationId: compilation.id, chapterId: f.chapterId, revision: 1, toolName, callId: 'provider-review' }]
+        if (scenario.startsWith('quality-') && scenario !== 'quality-current') await prisma.chapter.update({ where: { id: f.chapterId },
+          data: { revision: 2, content: scenario === 'quality-same-body' ? '原文' : '修订后正文' } })
         const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
         const recovered = await prisma.$transaction(tx => readReviewRequestRecovery(tx, f, scenario === 'typed' ? [] : pending))
-        expect(recovered).toHaveLength(['continuity', 'quality', 'typed'].includes(scenario) ? 1 : 0)
+        expect(recovered).toHaveLength(['continuity', 'quality', 'typed', 'quality-changed', 'quality-same-body', 'quality-current'].includes(scenario) ? 1 : 0)
         if (recovered.length) expect(recovered[0].reconciliation).toMatchObject({ status: 'terminal_failed_billing_known', usageIds: [usage.id],
-          admissionId: `author-continue:${terminal.id}`, currentRevision: 1, sourceReportId: failedReport?.id ?? null })
+          admissionId: `author-continue:${terminal.id}`, currentRevision: before.revision, sourceReportId: failedReport?.id ?? null })
+        expect(recovered[0]?.changedReviewInput).toEqual(scenario === 'quality-changed' ? { chapterId: f.chapterId, revision: 1 } : undefined)
         if (failedReport) {
           expect(await prisma.$transaction(tx => hasReconciledQualityRequest(tx, f, failedReport))).toBe(false)
           await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 6, type: 'review.reconciled', createdAt: at(1300),

@@ -32,7 +32,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture,novelFixture } from '../support/agent-durable-runtime-fixture.js'
 
 describe.runIf(available)('durable continuity actual tool chain', () => {
-  it.each(['success', 'chapter-only', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'source-text', 'approval-denied', 'history-over-three', 'single-quotes', 'single-quotes-stale', 'single-quotes-source', 'single-quotes-swapped', 'unavailable-write-recheck'] as const)('%s preserves paid results and atomic business effects', async scenario => {
+  it.each(['wrapped-report', 'full-report', 'success', 'chapter-only', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'source-text', 'approval-denied', 'history-over-three', 'single-quotes', 'single-quotes-stale', 'single-quotes-source', 'single-quotes-swapped', 'unavailable-write-recheck'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     await fixture(async f => {
       let lease = await claim(f)
@@ -90,7 +90,10 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         }
         if (scenario === 'stale-compiler') await prisma.storyCompilation.update({ where: { id: compilationId }, data: { preparedContext: { changed: true } } })
         if (scenario === 'late-resume') await pauseDurableTask(f.userId, lease.runId)
-        const content = scenario === 'fused-repair' ? '{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订","sourceEvidence":[{"source":"current","quote":"门开着"},{"source":"current","quote":"门同时锁着"}]}],"patches":[{"oldText":"原文","newText":"新文"}]}'
+        const originalFindings = Array.from({ length: scenario === 'full-report' ? 31 : 1 }, (_, index) => ({ signal: 'object', severity: 'warning', evidence: '原文承接意见 ' + index, suggestion: '保留原意见交作者审阅', sourceEvidence: [{ source: 'current', quote: '原文' }] }))
+        const content = scenario === 'wrapped-report' ? JSON.stringify({ report: { findings: originalFindings } })
+          : scenario === 'full-report' ? JSON.stringify({ findings: originalFindings })
+          : scenario === 'fused-repair' ? '{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订","sourceEvidence":[{"source":"current","quote":"门开着"},{"source":"current","quote":"门同时锁着"}]}],"patches":[{"oldText":"原文","newText":"新文"}]}'
           : scenario === 'unavailable-write-recheck' ? requests === 1 ? 'broken JSON' : '{"findings":[]}'
           : scenario === 'single-quotes-source' || scenario === 'single-quotes-swapped' ? JSON.stringify({ findings: [{ signal: 'object', severity: 'error',
             evidence: scenario === 'single-quotes-source' ? "前章原文：'前文' / 当前正文：'原文'" : "前章原文：'原文' / 当前正文：'前文'", suggestion: '核对真实前后章事实，不自动改写正文' }] })
@@ -169,6 +172,16 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
       expect(chapter.content).toBe(scenario === 'stale-chapter' || scenario === 'repair-stale' ? '用户新文' : before)
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
+      if (scenario === 'wrapped-report' || scenario === 'full-report') {
+        expect(saved.validation).toMatchObject({ independentCheck: 'complete', warningCount: scenario === 'full-report' ? 31 : 1,
+          unlocatedEvidenceCount: 0, continuityCriticResponse: { parserVersion: 3, classification: 'complete', unwrapped: scenario === 'wrapped-report' } })
+        const audit = (saved.validation as { continuityCriticResponse: unknown }).continuityCriticResponse
+        const findings = (saved.validation as { findings: unknown[] }).findings
+        expect(findings).toHaveLength(scenario === 'full-report' ? 31 : 1)
+        await validateStoryContinuity({ ...f, compilationId, findings: findings as Parameters<typeof validateStoryContinuity>[0]['findings'], expectedChapterRevision: 1, independentCheck: 'complete' })
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ continuityCriticResponse: audit })
+        expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, kind: 'provider' } })).toBe(1)
+      }
       if (scenario === 'history-over-three') expect(saved.validation).toMatchObject({ checkRounds: 10 })
       if (scenario === 'single-quotes') expect(saved.validation).toMatchObject({ independentCheck: 'complete', warningCount: 1, unlocatedEvidenceCount: 0 })
       if (scenario === 'single-quotes-stale') expect(saved.validation).toMatchObject({ independentCheck: 'unavailable', unlocatedEvidenceCount: 1 })
@@ -176,7 +189,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       if (scenario === 'single-quotes-swapped') expect(saved.validation).toMatchObject({ independentCheck: 'unavailable', errorCount: 1, unlocatedEvidenceCount: 1 })
       if (scenario === 'history-over-three' || scenario === 'single-quotes') {
         const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' } })
-        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 4, coverage: { protocolVersion: 7 } } } })
+        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 5, coverage: { protocolVersion: 7 } } } })
       }
       if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source'].includes(scenario)) expect(saved.validation).toBeNull()
       else expect(saved.validation).toMatchObject({ checkedRevision: 1, independentCheck: failed ? 'unavailable' : 'complete', coverage: { charCount: before.length, contentHash: runtimeJson({ content: before }).hash } })
