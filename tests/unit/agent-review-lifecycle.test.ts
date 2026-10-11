@@ -27,7 +27,7 @@ describe('Agent 写入审查生命周期', () => {
     const base = { runId: 'run-review', ts: new Date().toISOString() }
     const preview = { type: 'tool.delta' as const, messageId: 'm', callId: 'c', toolName: 'chapter_write', title: '写入章节正文', argsChars: 0 }
     apply({ ...base, seq: 1, type: 'message.start', messageId: 'm', role: 'assistant' })
-    apply({ ...base, seq: 2, type: 'text.delta', messageId: 'm', delta: '开始写作。' })
+    apply({ ...base, seq: 2, type: 'text.delta', messageId: 'm', delta: '开始写作。\n\n' })
     apply({ ...base, seq: 3, ...preview })
     expect(useAgentStore.getState().messages[0].parts[1]).toMatchObject({ preparing: true, status: 'running', args: null })
     expect(useAgentStore.getState().workspaceActivities).toEqual([])

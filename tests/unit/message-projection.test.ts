@@ -11,7 +11,7 @@ describe('message presentation projection', () => {
     expect(projectMessages([])).toEqual({ blockInfoById: new Map(), recentConversationText: '', lastAssistantId: undefined })
   })
 
-  it('preserves consecutive assistant blocks and excludes text from operation counts', () => {
+  it('preserves consecutive assistant blocks and excludes text and private reasoning from operation counts', () => {
     const messages = [
       message('u1', 'user'),
       message('a1', 'assistant', [{ type: 'reasoning', text: 'thinking' }]),
@@ -22,11 +22,13 @@ describe('message presentation projection', () => {
     const before = structuredClone(messages)
     const result = projectMessages(messages)
     expect([...result.blockInfoById]).toEqual([
-      ['a1', { firstId: 'a1', lastId: 'a2', ops: 1 }],
-      ['a2', { firstId: 'a1', lastId: 'a2', ops: 1 }],
+      ['a1', { firstId: 'a1', lastId: 'a2', ops: 0 }],
+      ['a2', { firstId: 'a1', lastId: 'a2', ops: 0 }],
       ['a3', { firstId: 'a3', lastId: 'a3', ops: 0 }],
     ])
     expect(result.lastAssistantId).toBe('a3')
+    expect(result.recentConversationText).toBe('answer')
+    expect(result.recentConversationText).not.toContain('thinking')
     expect(messages).toEqual(before)
   })
 
@@ -40,6 +42,17 @@ describe('message presentation projection', () => {
     expect(result.lastAssistantId).toBe('r')
   })
 
+  it('counts actual tool operations while keeping reasoning outside the author preview', () => {
+    const result = projectMessages([
+      message('a', 'assistant', [
+        { type: 'reasoning', text: 'private operation plan' },
+        { type: 'tool-call', callId: 'c', toolName: 'chapter_read', title: '读取章节', args: null, status: 'failed', summary: '读取未完成' },
+      ]),
+    ])
+    expect(result.blockInfoById.get('a')?.ops).toBe(1)
+    expect(result.recentConversationText).toBe('')
+  })
+
   it('groups resumed runs of the same goal while keeping internal continuation records outside author presentation', () => {
     const messages = [
       { ...message('u1', 'user'), goalId: 'goal' },
@@ -48,10 +61,10 @@ describe('message presentation projection', () => {
       { ...message('a2', 'assistant', [{ type: 'text', text: 'final' }]), goalId: 'goal', runId: 'r2' },
     ]
     const result = projectMessages(messages)
-    const block = { firstId: 'a1', lastId: 'a2', ops: 1, goalId: 'goal' }
+    const block = { firstId: 'a1', lastId: 'a2', ops: 0, goalId: 'goal' }
     expect([...result.blockInfoById]).toEqual([['a1', block], ['resume', block], ['a2', block]])
     expect(result.recentConversationText).toBe('final')
-    expect(projectMessages(messages.slice(0, 3)).recentConversationText).not.toBe('system resume')
+    expect(projectMessages(messages.slice(0, 3)).recentConversationText).toBe('')
     expect(messages.filter(shouldRenderAuthorMessage).map(item => item.id)).toEqual(['u1'])
   })
 

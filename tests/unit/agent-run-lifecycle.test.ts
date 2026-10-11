@@ -2493,10 +2493,14 @@ describe('ordinary chapter summary presentation', () => {
         .toMatchObject({ presentationKind: 'completed_saved_only', presentation: { mode: 'saved_only', sourceMessageId: 'author-message' }, text: '已保存《十五块的碗》。' })
       expect(mocks.chat).toHaveBeenCalledOnce()
       const deltas = events().filter(event => event.type === 'text.delta')
-      expect(deltas.map(event => event.delta).join('')).toBe(summary)
+      // A paragraph without a blank-line boundary stays private until final;
+      // classification must not expose or rewrite an incomplete prefix.
+      expect(deltas).toEqual([])
+      const messageId = events().find(event => event.type === 'message.start' && event.role === 'assistant')?.messageId
+      expect(messageId).toBeTruthy()
       const finals = events().filter(event => event.type === 'text.final')
       expect(finals.length).toBeGreaterThan(0)
-      for (const final of finals) expect(final).toMatchObject({ messageId: deltas[0].messageId, text: summary })
+      for (const final of finals) expect(final).toMatchObject({ messageId, text: summary })
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: summary })
       expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', outputSummary: summary })
       const persisted = mocks.persist.mock.calls as unknown as Array<[{ create?: { role?: string; parts?: AgentMessagePart[] }; update?: { parts?: AgentMessagePart[] } }]>

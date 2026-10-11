@@ -6,7 +6,7 @@ import { shouldShowProcessingHint } from '../../src/features/studio/agent/lib/pa
 import type { AgentUIMessage } from '../../shared/contracts/index.js'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 import { OUTPUT_SILENCE_MS, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
-afterEach(() => { cleanup(); vi.useRealTimers() })
+afterEach(() => { cleanup(); useAgentStore.getState().resetRun(); vi.useRealTimers() })
 
 it('cancels the fallback timer when goal control suppresses a stale running phase', () => {
   vi.useFakeTimers()
@@ -21,22 +21,45 @@ it('cancels the fallback timer when goal control suppresses a stale running phas
   expect(view.result.current).toBe(true)
 })
 
-it.each(['text.delta', 'reasoning.delta'] as const)('hides on real %s output and returns only after silence without another event', type => {
+it('hides on published paragraph output and returns only after silence without another event', () => {
   vi.useFakeTimers()
   const message: AgentUIMessage = { id: 'm', runId: 'r', role: 'assistant', createdAt: new Date().toISOString(), parts: [] }
   useAgentStore.setState({ runId: 'r', lastSeq: 0, messages: [message], lastVisibleOutput: null })
   const view = renderHook(() => useProcessingHint(useAgentStore(state => state.messages), 'r', 'running', false))
   expect(view.result.current).toBe(true)
-  act(() => useAgentStore.getState().applyEvent({ type, messageId: 'm', runId: 'r', delta: '正在输出', seq: 1, ts: new Date().toISOString() }))
+  act(() => useAgentStore.getState().applyEvent({ type: 'text.delta', messageId: 'm', runId: 'r', delta: '正在输出。\n\n', seq: 1, ts: new Date().toISOString() }))
   expect(view.result.current).toBe(false)
   act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS - 100))
-  act(() => useAgentStore.getState().applyEvent({ type, messageId: 'm', runId: 'r', delta: '继续输出', seq: 2, ts: new Date().toISOString() }))
+  act(() => useAgentStore.getState().applyEvent({ type: 'text.delta', messageId: 'm', runId: 'r', delta: '继续输出。\n\n', seq: 2, ts: new Date().toISOString() }))
   act(() => vi.advanceTimersByTime(200))
   expect(view.result.current).toBe(false)
   act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS))
   expect(view.result.current).toBe(true)
   view.unmount()
   expect(vi.getTimerCount()).toBe(0)
+})
+
+it.each(['text.delta', 'reasoning.delta'] as const)('keeps truthful waiting feedback while %s contains invisible progress', type => {
+  vi.useFakeTimers()
+  useAgentStore.getState().resetRun()
+  useAgentStore.getState().resumeRun('r', 'session')
+  useAgentStore.setState({ lastVisibleOutput: null })
+  const view = renderHook(() => useProcessingHint(useAgentStore(state => state.messages), 'r', 'running', false))
+  const apply = useAgentStore.getState().applyEvent
+  const base = { runId: 'r', messageId: 'm', ts: new Date().toISOString() }
+  act(() => apply({ ...base, seq: 1, type: 'message.start', role: 'assistant' }))
+  act(() => apply({ ...base, seq: 2, type, delta: '调用 chapter_' }))
+  expect(view.result.current).toBe(true)
+  expect(useAgentStore.getState().messages[0].parts).toEqual([])
+  expect(useAgentStore.getState().lastVisibleOutput).toBeNull()
+  act(() => apply({ ...base, seq: 3, type, delta: 'write，chapterId=private-id。\n\n' }))
+  expect(view.result.current).toBe(true)
+  const parts = useAgentStore.getState().messages[0].parts
+  expect(parts.every(part => part.type === 'text' && part.text.trim() === '')).toBe(true)
+  expect(JSON.stringify(parts)).not.toMatch(/chapter_write|chapterId|private-id|reasoning/)
+  act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS))
+  expect(view.result.current).toBe(true)
+  expect(useAgentStore.getState().lastVisibleOutput).toBeNull()
 })
 
 it('does not let old-run or whitespace events suppress waiting; replay does not extend the timer', () => {
@@ -47,7 +70,7 @@ it('does not let old-run or whitespace events suppress waiting; replay does not 
   expect(view.result.current).toBe(true)
   act(() => useAgentStore.getState().applyEvent({ type: 'text.delta', messageId: 'm', runId: 'r', delta: '\n', seq: 2, ts: new Date().toISOString() }))
   expect(view.result.current).toBe(true)
-  const event = { type: 'text.delta' as const, messageId: 'm', runId: 'r', delta: '字', seq: 3, ts: new Date().toISOString() }
+  const event = { type: 'text.delta' as const, messageId: 'm', runId: 'r', delta: '字\n\n', seq: 3, ts: new Date().toISOString() }
   act(() => useAgentStore.getState().applyEvent(event))
   act(() => vi.advanceTimersByTime(1000))
   act(() => useAgentStore.getState().applyEvent(event))

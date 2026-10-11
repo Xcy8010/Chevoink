@@ -23,7 +23,10 @@ describe('local tool restrictions and truthful delivery outcome', () => {
     store().resumeRun('limited', 'session')
     store().applyEvent({ runId: 'limited', ts: new Date().toISOString(), seq: 1, type: 'run.finished', status: 'succeeded', outcome,
       usage: { promptTokens: 10, completionTokens: 2, totalTokens: 12 } })
-    expect(store()).toMatchObject({ phase: 'succeeded', outcome })
+    expect(store()).toMatchObject({ phase: 'succeeded', outcome, outputSummary: '' })
+    store().applyEvent({ runId: 'limited', ts: new Date().toISOString(), seq: 2, type: 'run.finished', status: 'succeeded', outcome,
+      outputSummary: outcome.summary, usage: { promptTokens: 10, completionTokens: 2, totalTokens: 12 } })
+    expect(store()).toMatchObject({ phase: 'succeeded', outcome, outputSummary: outcome.summary })
     store().resumeRun('limited', 'session')
     store().syncRemoteRunStatuses({ session: { runId: 'limited', runGoalId: null, status: 'completed', finishedAt: new Date().toISOString(), outcome } })
     expect(store()).toMatchObject({ phase: 'succeeded', outcome })

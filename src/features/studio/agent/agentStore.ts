@@ -1343,7 +1343,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             authorEnded: event.authorEnded ?? null,
             outcome: event.outcome ?? null,
             usage: event.usage,
-            outputSummary: projectAgentAuthorText(event.outputSummary),
+            outputSummary: event.outputSummary === undefined ? '' : projectAgentAuthorText(event.outputSummary),
             pendingApproval: null,
             pendingQuestion: null,
             liveToolDrafts: {},
