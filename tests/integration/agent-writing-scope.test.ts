@@ -861,7 +861,10 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     await prisma.chapterQualityReport.update({ where: { id: f.quality.id }, data: { status: 'failed' } })
     await expect(chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '同一扇门已经锁上。他随后用钥匙打开门。' })).resolves.toBeTruthy()
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))
-    expect(readiness).toMatchObject({ ready: false, continuity: 'stale', quality: 'incomplete' })
+    expect(readiness).toMatchObject({ ready: false, continuity: 'stale', quality: 'stale' })
+    expect(readiness?.requiredTools).toEqual(expect.arrayContaining([{ name: 'continuity_validate', args: { compilationId: f.compilation.id } }, { name: 'quality_analyze', args: { compilationId: f.compilation.id } }]))
+    await expect(commitChapterBridge({ ...ctx, compilationId: f.compilation.id, chapterSummary: '摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' })).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0 })
   }))
   it('preserves automatic decision consumption through CHECK and reprepare while ordinary writes remain authorized', () => fixture('写第一章', async ctx => {
