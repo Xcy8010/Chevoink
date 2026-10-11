@@ -126,7 +126,7 @@ describe.runIf(available)('durable service dispatch', () => {
       ])
       const prompt = '写下一章', runId = randomUUID()
       const input = { sessionId: f.sessionId, novelId: f.novelId, chapterId: f.chapterId, mode: 'build' as const, prompt }
-      vi.spyOn(contextAssembler, 'assembleContext').mockResolvedValue({ messages: [{ role: 'user', content: prompt }], skillRoute: null })
+      vi.spyOn(contextAssembler, 'assembleContext').mockResolvedValue({ messages: [{ role: 'user', content: prompt }], skillRoute: null, availableSkillVersions: [], timings: {} })
       await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: f.chapterId,
         status: 'queued', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', startRequest: input } })
       await prisma.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
@@ -161,7 +161,7 @@ describe.runIf(available)('durable service dispatch', () => {
         { ...chapterReadTool, execute: (ctx, args) => chapterReadTool.execute(ctx, chapterReadTool.parameters.parse(args)) },
         { ...chapterWriteTool, execute: (ctx, args) => chapterWriteTool.execute(ctx, chapterWriteTool.parameters.parse(args)) },
       ])
-      const assemble = vi.spyOn(contextAssembler, 'assembleContext').mockResolvedValue({ messages: [{ role: 'system', content: '保留任务范围' }, { role: 'user', content: '修改本章' }], skillRoute: null })
+      const assemble = vi.spyOn(contextAssembler, 'assembleContext').mockResolvedValue({ messages: [{ role: 'system', content: '保留任务范围' }, { role: 'user', content: '修改本章' }], skillRoute: null, availableSkillVersions: [], timings: {} })
       if (scenario === 'read-only') await prisma.agentSession.update({ where: { id: f.sessionId }, data: { sandboxMode: 'read_only' } })
       const input = { sessionId: f.sessionId, novelId: f.novelId, chapterId: f.chapterId, mode: 'build' as const, prompt: scenario === 'wrong-input' ? '改写旧任务' : '修改本章' }
       if (scenario === 'saved-input' || scenario === 'changed-selection') {
@@ -190,7 +190,7 @@ describe.runIf(available)('durable service dispatch', () => {
         try {
           env.aiTextMaxOutputTokens += 1024
           env.agentContextWindowTokens += 16000
-          assemble.mockResolvedValue({ messages: [{ role: 'user', content: '后来变化的历史，不应采用' }], skillRoute: null })
+          assemble.mockResolvedValue({ messages: [{ role: 'user', content: '后来变化的历史，不应采用' }], skillRoute: null, availableSkillVersions: [], timings: {} })
           const replay = await initializePersistedLoopRun(f.userId, f.runId, input)
           expect(replay.frame.snapshotHash).toBe(first.frame.snapshotHash)
           expect(replay.head.configurationHash).toBe(first.head.configurationHash)

@@ -188,7 +188,15 @@ vi.mock('../../api/lib/agent/active-runs.js', () => ({ registerActiveRun: vi.fn(
 vi.mock('../../api/lib/agent/baseline.js', () => ({ clearRunBaselines: vi.fn(), getLastTouchedChapter: () => undefined }))
 vi.mock('../../api/lib/agent/context.js', () => ({ assembleContext: vi.fn(async () => ({ messages: [] })), insertSubagentCatalog: vi.fn() }))
 vi.mock('../../api/lib/agent/skills/receipts.js', () => ({ recordSkillLoads: mocks.skillLoads }))
-vi.mock('../../api/lib/agent/skills/service.js', async () => ({ resolveEnabledRuntimeSkills: vi.fn(async () => (await import('../../api/lib/agent/skills/index.js')).skillCatalog) }))
+vi.mock('../../api/lib/agent/skills/service.js', async () => {
+  const { skillCatalog, SKILL_ROUTER_VERSION } = await import('../../api/lib/agent/skills/index.js')
+  // Phase refresh consumes catalog and router identity together. Frozen-resource
+  // persistence has real PostgreSQL coverage; these fixtures exercise the loop.
+  return {
+    resolveRuntimeSkillContext: vi.fn(async () => ({ catalog: skillCatalog, routerVersion: SKILL_ROUTER_VERSION })),
+    resolveEnabledRuntimeSkills: vi.fn(async () => skillCatalog),
+  }
+})
 vi.mock('../../api/lib/agent/context-engine.js', () => ({ captureUserDirectives: vi.fn(), compactSessionContext: vi.fn(async () => null) }))
 vi.mock('../../api/lib/agent/story-memory.js', () => ({ syncNovelMemoryProjection: vi.fn(async () => null) }))
 vi.mock('../../api/lib/agent/story-compiler.js', async (importOriginal) => ({
