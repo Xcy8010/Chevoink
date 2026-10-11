@@ -24,7 +24,7 @@ export type CurrentReviewNextStep = NonNullable<ReturnType<typeof projectCurrent
 export function currentReviewNextStepGuidance(step: CurrentReviewNextStep) {
   const facts = `当前 compilationId=${step.compilationId}、chapterId=${step.chapterId}、r${step.revision}：连续性=${step.continuity}，质量=${step.quality}。`
   const authority = step.selectionOnly
-    ? '原任务仅授权冻结选区，写入只能使用 chapter_edit_range 逐字唯一锚点，保留选区外正文；不得使用 chapter_write、chapter_append 或元数据修改扩大范围。'
+    ? '原任务仅授权冻结选区或局部范围，写入只能使用 chapter_edit_range 逐字唯一锚点，保留范围外正文；未明确定位则先请作者补准确原文或选区后重新发起任务。不得使用 chapter_write、chapter_append 或元数据修改扩大范围。'
     : '具体修改仍须原始作者写入授权与必要审批，允许时使用当前正文的精确 chapter_edit_range，也可原授权内 chapter_write。'
   const scope = `${authority}报告不授予定位或写入权限；未定位、重叠、证据不足的意见可引用真实ref说明保留原因，不能猜测位置或机械改剧情。quality_finding_feedback 的 rejected 仅为反馈态度，不能替代绑定当前版本的 retainedFindings 理由与决定。`
   const candidates = `自动本批安全候选=${step.automaticCandidateCount}（自动修订最多8处）；${step.completeStrictReview ? '完整严格意见义务独立于自动安全窗口，' : ''}当前尚需处置${step.pending.length}项，已明确留置${step.retainedCount}项。`

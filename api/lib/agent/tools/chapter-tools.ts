@@ -1,5 +1,6 @@
 import { readSemanticStructureHash } from '../semantic-progress.js'
 import { assertWritingTarget, bindWritingChapter, readWritingScope, resolveWritingCreateTarget, originalSelectionBoundary } from '../writing-scope.js'
+import { assertLocalEditArguments, originalLocalEditBoundary } from '../local-edit-scope.js'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 
@@ -463,7 +464,10 @@ export const chapterEditRangeTool = defineTool({
 
     let edit: ReturnType<typeof composeChapterEdit>
     const scope = await readWritingScope(ctx.transaction ?? prisma, ctx)
-    try { edit = composeChapterEdit(before, args, originalSelectionBoundary(scope.spec) ? 1 : 2) } catch (error) {
+    try {
+      assertLocalEditArguments(scope.spec, args)
+      edit = composeChapterEdit(before, args, originalSelectionBoundary(scope.spec) || originalLocalEditBoundary(scope.spec) ? 1 : 2)
+    } catch (error) {
       if (!(error instanceof DataAccessError)) throw error
       return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: error.code, summary: '正文片段需要纠正定位', output: `chapterId=${chapter.id}，当前 r${chapter.revision}。${error.message}` }, error.code)
     }

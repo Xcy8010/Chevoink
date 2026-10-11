@@ -9,6 +9,8 @@ import { evaluateCraftLibraryBaseline } from '../tests/agent-evals/craft-library
 import { getAgentToolManifest } from '../api/lib/agent/tools/registry.js'
 import { getDurableToolAdapterNames } from '../api/lib/agent/runtime-tool-step.js'
 import { CREATION_QUALITY_DIMENSIONS } from '../tests/agent-evals/reliable-creation-metrics.js'
+import { BUILTIN_SKILL_PACK_VERSION, SKILL_ROUTER_VERSION } from '../api/lib/agent/skills/index.js'
+import { AGENT35_REGRESSION_CORPUS, AGENT35_REGRESSION_CORPUS_VERSION } from '../tests/agent-evals/agent35-regression-corpus.js'
 
 function readGitSha(): string {
   try {
@@ -27,7 +29,8 @@ const report = {
   codeSha: readGitSha(),
   model: process.env.AGENT3_EVAL_MODEL ?? 'deterministic-skill-router',
   temperature: Number(process.env.AGENT3_EVAL_TEMPERATURE ?? 0),
-  skillCatalogVersion: '3.0.0',
+  skillCatalogVersion: BUILTIN_SKILL_PACK_VERSION,
+  skillRouterVersion: SKILL_ROUTER_VERSION,
   generatedAt: new Date().toISOString(),
   routing: evaluateSkillRouting(CN_FICTION_EVAL_SCENARIOS),
   chapterBridge: evaluateFiftyChapterBridge(),
@@ -38,6 +41,7 @@ const report = {
     literaryQualityMeasured: false,
     providerAcceptanceMeasured: false,
     paidCalls: 0,
+    regressionCorpus: { version: AGENT35_REGRESSION_CORPUS_VERSION, cases: AGENT35_REGRESSION_CORPUS },
     dimensions: CREATION_QUALITY_DIMENSIONS,
     tools: getAgentToolManifest().map(tool => ({ ...tool, executors: {
       legacy: 'registered', durable: durableAdapters.has(tool.name) ? 'adapter_registered' : 'not_adapted',

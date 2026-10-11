@@ -1,8 +1,10 @@
 # Creative skills, sample learning and subagents
 
+The current built-in pack and resource-routing contract are **3.5.0**. Fresh admission persists immutable resources before freezing enabled versions. Local edits follow the complete original request, server-frozen boundaries and current checks. Saved tasks and legacy continuations retain historical skill/router resources; historical 3.0.x/3.1.0 records are unchanged. Author and third-party skills retain their independent versions.
+
 Skills are instructions loaded into context, not model training or proof of compliance. Absence of a `skill_load` call does not imply absence of automatic skill loading.
 
-Router 3.1.0 permits the two built-in planning skills during Work/build planning. Pure formatting/export/navigation requests remain excluded; mixed creative requests are no longer rejected by a single operational keyword. Author-defined modes and negative triggers remain unchanged. Usually 2–3 skills are selected per phase, with an absolute cap of six including manual/author skills. Weak contextual specialist signals can reserve one slot without removing the writing foundation.
+Router 3.5.0 permits the two built-in planning skills during Work/build planning. Pure formatting/export/navigation requests remain excluded; mixed creative requests are no longer rejected by a single operational keyword. Author-defined modes and negative triggers remain unchanged. Usually 2–3 skills are selected per phase, with an absolute cap of six including manual/author skills. Weak contextual specialist signals can reserve one slot without removing the writing foundation.
 
 The eleven built-ins cover project positioning, long outlines, scene tasks, natural prose, character voice/knowledge boundaries, grounded emotion, concrete language, style continuity, chapter bridging, evidence-based continuity review and recent structural repetition. Exact metadata lives in `api/lib/agent/skills/index.ts`; the Chinese companion documents scenario examples.
 

@@ -1,4 +1,5 @@
 import { assertWritingTarget, readWritingScope, originalSelectionBoundary } from '../writing-scope.js'
+import { assertLocalEditArguments, originalLocalEditBoundary } from '../local-edit-scope.js'
 import { assertChapterManuscriptRevision } from '../chapter-review-guard.js'
 import { z } from 'zod'
 import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
@@ -59,7 +60,7 @@ export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentT
         observedState: { kind: 'chapter', id: chapter.id, revision },
         snapshot: { target: 'chapter', targetId: chapter.id, field: 'title', previousValue: chapter.title } } }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || !['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_RENAME_INVALID', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || !['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_RENAME_INVALID', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: '章节未改名' })
   })
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
@@ -115,7 +116,8 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   // their manuscript fence must precede that authorization observation.
   const selection = action === 'chapter_edit_range' && !prior && await prisma.$transaction(async tx => {
     await assertAgentManuscriptCurrent(tx, ctx)
-    return originalSelectionBoundary((await readWritingScope(tx, ctx)).spec)
+    const spec = (await readWritingScope(tx, ctx)).spec
+    return originalSelectionBoundary(spec) || originalLocalEditBoundary(spec)
   })
   const anchorProtocol = prior ? priorProtocol === 2 ? 2 : 1 : selection ? 1 : 2
   const operationInput = runtimeJson({ callId: ctx.callId, novelId: ctx.novelId, chapterId: args.chapterId, expectedRevision, args: effectiveArgs,
@@ -139,7 +141,8 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   const receipt = await commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()
     await assertAgentManuscriptCurrent(tx, ctx)
-    await assertWritingTarget(tx, ctx, { chapterId: args.chapterId, effect: action === 'chapter_edit_range' ? 'range' : action === 'chapter_append' ? 'append' : 'replace' })
+    const scope = await assertWritingTarget(tx, ctx, { chapterId: args.chapterId, effect: action === 'chapter_edit_range' ? 'range' : action === 'chapter_append' ? 'append' : 'replace' })
+    if (action === 'chapter_edit_range') assertLocalEditArguments(scope.spec, args)
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) runtimeError('RUNTIME_SCOPE_MISMATCH', '正文操作不属于原任务范围。')
     const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
@@ -176,7 +179,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
       snapshot: { target: 'chapter', targetId: chapter.id, field: 'content', previousValue: before } }, memoryJobId,
       progress: { kind: 'content_revision', targetId: chapter.id, beforeHash: runtimeJson({ content: before }).hash, afterHash: runtimeJson({ content: after }).hash } }
   }).catch(async error => {
-    if (!prepared || !(error instanceof DataAccessError) || !['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) throw error
+    if (!prepared || !(error instanceof DataAccessError) || !['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code: error.code,
       summary: '正文变更未执行', output: error.message })
   })

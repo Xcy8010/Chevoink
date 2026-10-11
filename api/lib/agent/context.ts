@@ -13,7 +13,7 @@ import { OPERATION_KNOWLEDGE } from './knowledge/operation.js'
 import { buildGeneralWritingDigest, buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from './knowledge/writing.js'
 import { readChapterWritingBackground, readWritingPresentation, renderChapterWritingBackground, renderWritingPresentation } from './writing-request-context.js'
 import { buildSkillExecutionDigest, routeSkills, type SkillRouteDecision } from './skills/index.js'
-import { resolveEnabledRuntimeSkills } from './skills/service.js'
+import { resolveRuntimeSkillContext } from './skills/service.js'
 import { loadSessionTodoItems, renderTodoItems } from './tools/todo-tools.js'
 import { getTaskRunIds } from './task-lineage.js'
 import {
@@ -434,10 +434,18 @@ export type AssembleContextInput = {
 export type AssembledAgentContext = {
   messages: ChatMessage[]
   skillRoute: SkillRouteDecision | null
+  availableSkillVersions: Array<{ id: string; version: string }>
+  timings: Record<string, number>
 }
 
 export async function assembleContext(input: AssembleContextInput): Promise<AssembledAgentContext> {
+  const started = performance.now()
+  // Independent reads may overlap; stage waits are not additive wall latency.
+  const timings: Record<string, number> = { checkpointMs: 0, resourcesMs: 0, skillsMs: 0, styleMs: 0, writingPresentationMs: 0, goalMs: 0, totalMs: 0 }
+  let stageStarted = started
+  const stage = (name: string) => { const now = performance.now(); timings[name] = now - stageStarted; stageStarted = now }
   const checkpointState = await loadContextCheckpoint(input.sessionId)
+  stage('checkpointMs')
   const contextWindowTokens = input.contextWindowTokens ?? env.agentContextWindowTokens
   const historyBudgetTokens = Math.max(2_000, Math.min(20_000, Math.floor(contextWindowTokens * 0.18)))
   const storyCompilerFeatureEnabled = isAgent2FeatureEnabled('storyCompiler', input.userId)
@@ -446,7 +454,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     && !['conversation_only', 'proposal_only'].includes(input.taskSpec.writingPacing ?? '')
     && input.taskSpec.scope.writing?.kind === 'bounded'
   const writingTaskRunIds = frozenWriting ? new Set(await getTaskRunIds(input.sessionId, input.runId)) : undefined
-  const [ruleBundleSplit, memoryDigest, planDigest, coverDigest, todoDigest, directives, history, chapter, novelTags, storyCompilerDigest] = await Promise.all([
+  const [ruleBundleSplit, memoryDigest, planDigest, coverDigest, todoDigest, directives, history, chapter, novelTags, storyCompilerDigest, goalMessages] = await Promise.all([
     buildNovelRuleBundle(input.novelId),
     buildStoryMemoryDigest(input.userId, input.novelId, input.prompt),
     buildPlanFolderDigest(input.userId, input.novelId),
@@ -466,13 +474,23 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     storyCompilerFeatureEnabled
       ? buildStoryCompilerDigest(input.userId, input.novelId, input.chapterId, input.runId)
       : Promise.resolve(null),
+    // Measured cold goal-module/read wait can overlap independent workspace
+    // reads. Message ordering and downstream effect fences are unchanged.
+    (async () => {
+      const goalStarted = performance.now()
+      const messages = await (await import('./goal-runtime.js')).buildGoalContextMessages(input.userId, input.runId)
+      timings.goalMs = performance.now() - goalStarted
+      return messages
+    })(),
   ])
+  stage('resourcesMs')
 
-  // Skill OS 3.0：服务端确定性召回并完整加载本轮 Skill，模型不再自行决定“要不要加载”。
+  // Resolve current release for fresh tasks, saved resources for resumed runs.
   const skillFeatureEnabled = input.taskSpec.intent !== 'research_analysis' && isAgent2FeatureEnabled('skill2', input.userId)
-  const runtimeSkills = skillFeatureEnabled
-    ? await resolveEnabledRuntimeSkills(input.userId, input.novelId)
+  const skillContext = skillFeatureEnabled
+    ? await resolveRuntimeSkillContext(input.userId, input.novelId, input.runId)
     : null
+  const runtimeSkills = skillContext?.catalog ?? null
   // 作者手动指定的技能必须真实存在于本作品已启用目录，避免前端传入陈旧 id 或越权 id。
   const enabledSkillIds = runtimeSkills ? new Set(runtimeSkills.map((skill) => skill.id)) : null
   const pinnedSkillIds = (input.pinnedSkillIds ?? []).filter((skillId) => enabledSkillIds?.has(skillId) ?? false)
@@ -484,6 +502,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
         freedom: input.taskSpec.creativeFreedom,
         enabledSkillIds: enabledSkillIds ?? undefined,
         catalog: runtimeSkills ?? undefined,
+        routerVersion: skillContext?.routerVersion,
         pinnedSkillIds: pinnedSkillIds.length > 0 ? new Set(pinnedSkillIds) : undefined,
       })
     : null
@@ -499,6 +518,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
         pinnedSkillIds,
       })
     : 'Skill OS 当前未对该账号启用；直接遵从作者目标，不得自行套用未知写作模板。'
+  stage('skillsMs')
   const checkpointDigest = checkpointState.checkpoint ? renderCheckpointDigest(checkpointState.checkpoint, { runId: input.runId, directives }) : null
   const directiveDigest = renderDirectiveDigest(directives)
 
@@ -524,9 +544,11 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     ? `作者当前正在编辑：第${chapter.orderIndex}章 · ${plainChapterTitle(chapter.title) || chapter.title}（chapterId=${chapter.id}，${chapter.wordCount} 字）。`
     : '作者当前未打开具体章节。'
 
+  const learnedStyleDigest = await getLearnedStyleDigest(input.userId, input.novelId)
+  stage('styleMs')
   const workspaceSnapshot = buildWorkspaceSnapshot({
     skillDigest,
-    learnedStyleDigest: await getLearnedStyleDigest(input.userId, input.novelId),
+    learnedStyleDigest,
     novelDataBundle,
     memoryDigest,
     planDigest,
@@ -545,6 +567,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     chapterWriting ? readChapterWritingBackground(prisma, subject, writingChapterId) : Promise.resolve([]),
     chapterWriting ? readWritingPresentation(prisma, subject, writingTargets.length ? writingTargets : chapter ? [{ chapterId: chapter.id, orderIndex: chapter.orderIndex }] : []) : Promise.resolve(null),
   ])
+  stage('writingPresentationMs')
   // Durable admission verifies that this message starts with the immutable
   // original request. Historical specifications are supplemental context.
   const intentSections = [input.prompt.trim(), renderChapterWritingBackground(writingBackground)].filter((section): section is string => !!section)
@@ -591,9 +614,11 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
 
   if (storyCompilerDigest) intentSections.push(`[本任务已保存编译状态；历史助手总结不证明阶段或完成]\n${storyCompilerDigest}`)
 
-  const goalMessages = await (await import('./goal-runtime.js')).buildGoalContextMessages(input.userId, input.runId)
+  timings.totalMs = performance.now() - started
   return {
     skillRoute,
+    availableSkillVersions: (runtimeSkills ?? []).map(({ id, version }) => ({ id, version })),
+    timings,
     messages: [
       { role: 'system', content: systemPrompt },
       ...goalMessages,

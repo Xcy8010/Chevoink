@@ -149,14 +149,14 @@ export default function AdminAgentEvalsPage() {
   return (
     <div className="space-y-5">
       <AdminPageHeader
-        title="Agent 3.0 创作盲评"
+        title="Agent 3.5 创作盲评"
         description="固定量表、匿名候选、可追溯授权；评审过程中不展示候选真实来源。"
       />
 
       {admin?.isSuperAdmin ? <SuiteCreator /> : null}
 
       {admin?.isSuperAdmin && operationsQuery.data ? <AdminCard>
-        <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-sm font-semibold">Agent 3.0 近 30 天运行门禁</h2><p className="mt-1 text-xs text-[var(--text-secondary)]">只汇总匿名计数、耗时和预算，不读取小说正文。</p></div><StatusPill tone={operationsQuery.data.research.queryBudgetViolations === 0 ? 'success' : 'danger'}>{operationsQuery.data.research.queryBudgetViolations === 0 ? '研究预算正常' : '存在预算越界'}</StatusPill></div>
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-sm font-semibold">Agent 3.5 近 30 天运行门禁</h2><p className="mt-1 text-xs text-[var(--text-secondary)]">只汇总匿名计数、耗时和预算，不读取小说正文。</p></div><StatusPill tone={operationsQuery.data.research.queryBudgetViolations === 0 ? 'success' : 'danger'}>{operationsQuery.data.research.queryBudgetViolations === 0 ? '研究预算正常' : '存在预算越界'}</StatusPill></div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Metric label="研究构建 / 复用" value={`${operationsQuery.data.research.builds} / ${operationsQuery.data.research.reuses}`} detail={`复用率 ${Math.round(operationsQuery.data.research.reuseRate * 100)}%`} />
           <Metric label="单档案搜索" value={operationsQuery.data.research.averageSearchesPerBuild.toFixed(1)} detail={`平均 ${Math.round(operationsQuery.data.research.averageInputTokensPerBuild)} input tokens`} />

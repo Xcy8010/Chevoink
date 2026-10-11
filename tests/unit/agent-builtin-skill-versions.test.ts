@@ -1,22 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { skillCatalog } from '../../api/lib/agent/skills/index.js'
+import { historicalBuiltinCatalog, skillCatalog } from '../../api/lib/agent/skills/index.js'
 import { buildCustomSkillArtifacts } from '../../api/lib/agent/skills/custom.js'
-import { resolveEnabledRuntimeSkills, syncBuiltinSkillCatalog } from '../../api/lib/agent/skills/service.js'
+import { resolveEnabledRuntimeSkills, resolveRuntimeSkillContext, syncBuiltinSkillCatalog } from '../../api/lib/agent/skills/service.js'
 import { prisma } from '../../api/lib/prisma.js'
 
 afterEach(() => vi.restoreAllMocks())
 
 describe('versioned built-in writing resources', () => {
-  it('creates 3.0.2 assets without updating any existing immutable version', async () => {
+  it('creates 3.5.0 assets without updating any existing immutable version', async () => {
     vi.spyOn(prisma.agentSkillDefinition, 'upsert').mockResolvedValue({} as never)
     const versions = vi.spyOn(prisma.agentSkillVersion, 'upsert').mockResolvedValue({} as never)
     vi.spyOn(prisma, '$transaction').mockResolvedValue([])
     await syncBuiltinSkillCatalog()
     const changed = ['cn-scene-task.v3', 'cn-webfiction-draft.v3', 'cn-emotion-grounding.v3']
     for (const id of changed) {
-      const call = versions.mock.calls.find(([input]) => input.where.skillId_version?.skillId === id)![0]
-      expect(call.where.skillId_version).toEqual({ skillId: id, version: '3.0.2' })
-      expect(call.create).toMatchObject({ version: '3.0.2', contentHash: expect.stringMatching(/^[a-f0-9]{64}$/) })
+      const call = versions.mock.calls.find(([input]) => input.where.skillId_version?.skillId === id && input.where.skillId_version.version === '3.5.0')![0]
+      expect(call.where.skillId_version).toEqual({ skillId: id, version: '3.5.0' })
+      expect(call.create).toMatchObject({ version: '3.5.0', contentHash: expect.stringMatching(/^[a-f0-9]{64}$/) })
       expect(call.update).toEqual({})
     }
     expect(versions.mock.calls.every(([input]) => Object.keys(input.update).length === 0)).toBe(true)
@@ -38,9 +38,25 @@ describe('versioned built-in writing resources', () => {
     const runtime = await resolveEnabledRuntimeSkills('fixture-user', 'fixture-novel')
     const current = runtime.find(skill => skill.id === 'cn-webfiction-draft.v3')!
     expect(current).toBe(skillCatalog.find(skill => skill.id === current.id))
-    expect(current.version).toBe('3.0.2')
+    expect(current.version).toBe('3.5.0')
     expect(current.resources.draft).toContain('低修辞预算只控制无功能修饰，不代表低情绪')
     expect(runtime.some(skill => skill.id === 'cn-scene-task.v3')).toBe(false)
     expect(runtime.find(skill => skill.id === 'custom.fixture')).toMatchObject({ version: '0.1.0', resources: instructions })
+  })
+
+  it('resumes an owned old run with its saved router and exact immutable resource, without changing stored records', async () => {
+    const saved = { routerVersion: '3.1.0', selected: [{ id: 'cn-webfiction-draft.v3', name: '正文', version: '3.0.1' }], loaded: [] }
+    const read = vi.spyOn(prisma.agentSkillRun, 'findFirst').mockResolvedValue(saved as never)
+    vi.spyOn(prisma.agentRun, 'findFirst').mockResolvedValue(null)
+    vi.spyOn(prisma.agentSkillInstallation, 'findMany').mockResolvedValue([])
+    const version = vi.spyOn(prisma.agentSkillVersion, 'findUnique').mockResolvedValue({ status: 'active', instructions: { draft: '合成的冻结原资源' } } as never)
+    const result = await resolveRuntimeSkillContext('fixture-user', 'fixture-novel', 'fixture-run')
+    expect(read).toHaveBeenCalledWith({ where: { runId: 'fixture-run', userId: 'fixture-user', novelId: 'fixture-novel' } })
+    expect(result.routerVersion).toBe('3.1.0')
+    expect(result.catalog.find(skill => skill.id === 'cn-webfiction-draft.v3')).toMatchObject({ version: '3.0.1', resources: { draft: '合成的冻结原资源' } })
+    expect(result.catalog.find(skill => skill.id === 'cn-scene-task.v3')).toBe(historicalBuiltinCatalog.find(skill => skill.id === 'cn-scene-task.v3'))
+    expect(version).toHaveBeenCalledOnce()
+    version.mockResolvedValue(null)
+    await expect(resolveRuntimeSkillContext('fixture-user', 'fixture-novel', 'fixture-run')).rejects.toMatchObject({ code: 'SKILL_FROZEN_VERSION_UNAVAILABLE' })
   })
 })

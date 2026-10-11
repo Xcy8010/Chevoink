@@ -141,6 +141,26 @@ function buildInput(visionEnabled = false): AssembleInput {
 }
 
 describe('assembleContext 缓存友好布局（阶段二：动态上下文后移）', () => {
+  it('overlaps the owned goal read with workspace waits while preserving the original request', async () => {
+    let release!: () => void
+    const memory = vi.mocked(searchStoryMemory).getMockImplementation()!
+    const pendingMemory = new Promise<void>(resolve => { release = resolve })
+    vi.mocked(searchStoryMemory).mockImplementationOnce(async (...args) => { await pendingMemory; return memory(...args) })
+    const pending = assembleContext(buildInput())
+    try {
+      await vi.waitFor(() => expect(prisma.agentGoalExecution.findUnique).toHaveBeenCalledWith({ where: { runId: 'run-1' }, include: { goal: true } }))
+    } finally { release() }
+    const result = await pending
+    expect(String(result.messages.at(-1)?.content)).toContain('把第三章开头改得更抓人')
+    expect(result.messages[0].role).toBe('system')
+  })
+  it('measures context waits without adding timings or changing authorization inside model messages', async () => {
+    const result = await assembleContext(buildInput())
+    expect(Object.keys(result.timings)).toEqual(['checkpointMs', 'resourcesMs', 'skillsMs', 'styleMs', 'writingPresentationMs', 'goalMs', 'totalMs'])
+    expect(Object.values(result.timings).every(value => Number.isFinite(value) && value >= 0)).toBe(true)
+    expect(JSON.stringify(result.messages)).not.toContain('checkpointMs')
+    console.info('[synthetic-context-timing]', result.timings)
+  })
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(isAgent2FeatureEnabled).mockReturnValue(false)

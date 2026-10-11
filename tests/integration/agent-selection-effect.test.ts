@@ -31,7 +31,7 @@ const prompt = '修改第一章选区，优化所选文字'
 
 async function fixture(mode: 'legacy' | 'durable', work: (ctx: ToolContext, spec: Awaited<ReturnType<typeof freezeWritingScope>>,
   invoke: (tool: typeof chapterEditRangeTool, args: Record<string, unknown>) => Promise<unknown>,
-  lease?: Awaited<ReturnType<typeof acquireRunLease>>) => Promise<void>, legacy = false) {
+  lease?: Awaited<ReturnType<typeof acquireRunLease>>) => Promise<void>, legacy = false, naturalPrompt?: string) {
   const userId = randomUUID(), novelId = randomUUID(), sessionId = randomUUID(), runId = randomUUID(), chapterId = randomUUID(), volumeId = randomUUID()
   try {
     await prisma.user.create({ data: { id: userId, nickname: 'selection-synthetic', passwordHash: 'test-only' } })
@@ -40,17 +40,19 @@ async function fixture(mode: 'legacy' | 'durable', work: (ctx: ToolContext, spec
     await prisma.chapter.create({ data: { id: chapterId, novelId, authorId: userId, volumeId, title: '原名', content: body, wordCount: body.length, orderIndex: 1, orderInVolume: 1 } })
     await prisma.agentSession.create({ data: { id: sessionId, userId, novelId, title: 'selection-synthetic' } })
     await prisma.agentRun.create({ data: { id: runId, sessionId, userId, novelId, chapterId, status: mode === 'durable' ? 'queued' : 'running', engine: 'loop', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator',
-      startRequest: { prompt, selection: { start, end, text: body.slice(start, end) } } } })
+      startRequest: naturalPrompt ? { prompt: naturalPrompt } : { prompt, selection: { start, end, text: body.slice(start, end) } } } })
     const ctx: ToolContext = { userId, novelId, sessionId, runId, chapterId, callId: 'selection-call', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal,
       toolAuthority: new Map(['chapter_edit_range', 'chapter_write', 'chapter_append', 'chapter_rename'].map(name => [name, { permission: 'allow', alwaysConfirm: false, dangerous: false }])) }
-    const initial = buildTaskSpec({ runId, novelId, chapterId, prompt, selection: { start, end }, manuscriptProtocol: 1 })
+    const initial = buildTaskSpec({ runId, novelId, chapterId, prompt: naturalPrompt ?? prompt,
+      ...(naturalPrompt ? { localEditProtocol: 1 as const, reviewProtocol: 1 as const } : { selection: { start, end }, manuscriptProtocol: 1 as const }) })
     if (legacy) delete initial.scope.manuscriptProtocol
-    const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, initial, prompt))
+    if (legacy) delete initial.scope.localEditProtocol
+    const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, initial, naturalPrompt ?? prompt))
     await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
     let lease: Awaited<ReturnType<typeof acquireRunLease>> | undefined
     if (mode === 'durable') {
       const sourceMessageId = randomUUID()
-      await prisma.agentMessage.create({ data: { id: sourceMessageId, sessionId, runId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+      await prisma.agentMessage.create({ data: { id: sourceMessageId, sessionId, runId, role: 'user', parts: [{ type: 'text', text: naturalPrompt ?? prompt }] } })
       await initializeDurableTask({ userId, runId, sourceMessageId })
       lease = await acquireRunLease({ userId, runId, ownerId: 'selection-synthetic', claimId: randomUUID() })
     }
@@ -75,6 +77,157 @@ async function fixture(mode: 'legacy' | 'durable', work: (ctx: ToolContext, spec
 }
 
 describe.skipIf(!available)('versioned original author selection effect', () => {
+  it.each(['legacy', 'durable'] as const)('freezes prose locality and permits ten ordinary edits/atomic batches/no-op via %s', mode => fixture(mode, async (ctx, spec, invoke) => {
+    expect(spec.scope.selection).toBeUndefined()
+    expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'bounded', regions: [{ chapterId: ctx.chapterId, start, end }] })
+    const compiler = await import('../../api/lib/agent/story-compiler.js')
+    // This is binding/prepare authority, not a body or metadata effect.
+    await expect(compiler.prepareStoryCompilation({ ...ctx, chapterId: ctx.chapterId!, mode: 'balanced', intentSummary: '原作者局部修改' })).resolves.toBeTruthy()
+    let oldText = '选段甲'
+    for (let index = 0; index < 10; index++) {
+      const newText = `片段第${index}轮😀`
+      await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, oldText, newText })
+      oldText = newText
+    }
+    const before = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
+    await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, oldText, newText: oldText })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(before)
+    await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, patches: [
+      { oldText, newText: '片段更新' }, { oldText: '。重复。\n尾段', newText: '跨出冻结范围' },
+    ] }).then(() => { throw new Error('mixed batch must fail') }, error => expect(error).toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' }))
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(before)
+    await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, patches: [{ oldText: '片段第', newText: '新' }, { oldText: '9轮😀', newText: '片段' }] })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toMatchObject({ revision: 12,
+      content: `${body.slice(0, start)}新片段。重复。${body.slice(end)}` })
+    expect(await prisma.$transaction(tx => probeChapterReviewRevision(tx, ctx, before))).toMatchObject({ open: false, code: 'AUTHOR_LOCAL_SCOPE' })
+  }, false, '只润色第一章第二段'))
+
+  it.each(['legacy', 'durable'] as const)('denies local wholebody/metadata/append/outside/coordinates/ambiguous/formatting bypass via %s', mode => fixture(mode, async (ctx, _spec, invoke) => {
+    const before = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
+    const novel = await prisma.novel.findUniqueOrThrow({ where: { id: ctx.novelId } })
+    for (const tool of [chapterWriteTool, chapterAppendTool]) await expect(invoke(tool, { chapterId: ctx.chapterId, content: body })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    for (const args of [{ oldText: '前😀段', newText: '前😀段' }, { oldText: body, newText: '覆盖' }]) {
+      await expect(invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, ...args })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    }
+    for (const [args, code] of [
+      [{ start, end, newText: '猜定位' }, 'AUTHOR_LOCAL_SCOPE'],
+      [{ oldText: '重复。', newText: '猜出现' }, 'CHAPTER_ANCHOR_CONFLICT'],
+      [{ oldText: '选段甲。重复。尾段', newText: '去换行匹配' }, 'CHAPTER_ANCHOR_CONFLICT'],
+    ] as const) {
+      if (mode === 'legacy') expect(await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, ...args })).toMatchObject({ outcome: 'failed', failureCode: code })
+      else await expect(invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, ...args })).rejects.toMatchObject({ code })
+    }
+    await expect(chapterRenameTool.execute(ctx, { chapterId: ctx.chapterId!, title: '越权' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    await expect(chapterCreateTool.execute(ctx, { title: '越权' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    const preview = await previewBulkReplaceData(ctx.userId, ctx.novelId, bulkReplacePreviewRequestSchema.parse({ query: '重复', replacement: '越权', fields: ['content'], reason: '合成预览' }))
+    const change = await prisma.changeSet.findUniqueOrThrow({ where: { id: preview.id } })
+    await expect(changeSetApplyTool.execute(ctx, { changeSetId: preview.id })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    expect(await prisma.changeSet.findUniqueOrThrow({ where: { id: preview.id } })).toEqual(change)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(before)
+    expect(await prisma.novel.findUniqueOrThrow({ where: { id: ctx.novelId } })).toEqual(novel)
+    expect(await prisma.memoryExtractionJob.count({ where: { novelId: ctx.novelId } })).toBe(0)
+    await applyChangeSetData(ctx.userId, preview.id, {}) // independent direct author action
+    const applied = await prisma.changeSet.findUniqueOrThrow({ where: { id: preview.id } })
+    const appliedChapter = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
+    await expect(changeSetRollbackTool.execute(ctx, { changeSetId: preview.id })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    expect(await prisma.changeSet.findUniqueOrThrow({ where: { id: preview.id } })).toEqual(applied)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(appliedChapter)
+  }, false, '只润色第一章第二段'))
+
+  it('retains prose-local scope through a continuation/child and intersects an actual editor selection', () => fixture('legacy', async (ctx, spec, invoke) => {
+    const childSession = await prisma.agentSession.create({ data: { userId: ctx.userId, novelId: ctx.novelId, title: 'local child', spawnedFromRunId: ctx.runId, spawnedFromSessionId: ctx.sessionId } })
+    const continuation = await prisma.agentRun.create({ data: { sessionId: ctx.sessionId, userId: ctx.userId, novelId: ctx.novelId, chapterId: ctx.chapterId,
+      status: 'running', engine: 'loop', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value, startRequest: { prompt: '继续，重写整章' } } })
+    const child = await prisma.agentRun.create({ data: { sessionId: childSession.id, userId: ctx.userId, novelId: ctx.novelId, chapterId: ctx.chapterId,
+      status: 'running', engine: 'loop', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', startRequest: { prompt: '模型总结授权全章' } } })
+    for (const run of [continuation, child]) {
+      const next = { ...ctx, runId: run.id, sessionId: run.sessionId }
+      expect((await readWritingScope(prisma, next)).spec).toMatchObject({ scope: { localEditBoundary: spec.scope.localEditBoundary } })
+      await expect(chapterWriteTool.execute(next, { chapterId: ctx.chapterId!, content: '扩大范围' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    }
+    const fresh = buildTaskSpec({ ...ctx, prompt: '只润色第二段', localEditProtocol: 1, manuscriptProtocol: 1, reviewProtocol: 1,
+      selection: { start, end: start + 3 } })
+    const intersection = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, fresh, '模型计划扩大范围'))
+    expect(intersection.scope.localEditBoundary).toEqual(spec.scope.localEditBoundary)
+    expect(intersection.scope.selectionBoundary).toMatchObject({ start, end: start + 3 })
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(intersection))).value } })
+    await expect(invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, oldText: '选段甲。重复。', newText: '本段内但选区外' })).rejects.toMatchObject({ code: 'AUTHOR_SELECTION_SCOPE' })
+    await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, oldText: '选段甲', newText: '合法交集' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toMatchObject({ content: body.replace('选段甲', '合法交集'), revision: 2 })
+  }, false, '只润色第二段，其余不要改'))
+
+  it('preserves exact local receipts before reauthorization; a new operation cannot inherit them', () => fixture('durable', async (ctx, _spec, _invoke, lease) => {
+    const capability = { lease: lease!, operationKey: 'exact-local-receipt', chapterId: ctx.chapterId!, expectedRevision: 1 }
+    const args = { chapterId: ctx.chapterId!, oldText: '选段甲', newText: '合法新片段' }
+    const saved = await chapterEditRangeTool.execute({ ...ctx, durableContent: capability }, args)
+    await prisma.chapter.update({ where: { id: ctx.chapterId! }, data: { content: body.replace('前😀段', '作者另改前段'), revision: { increment: 1 } } })
+    const current = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
+    expect(await chapterEditRangeTool.execute({ ...ctx, durableContent: capability }, args)).toEqual(saved)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(current)
+    await expect(chapterEditRangeTool.execute({ ...ctx, durableContent: { ...capability, operationKey: 'new-local-effect', expectedRevision: current.revision } }, args)).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_STALE' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(current)
+    expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: lease!.taskRootId } } })).toBe(1)
+  }, false, '修改第一章第二段'))
+
+  it.each(['chapter_write', 'chapter_append', 'chapter_rename', 'chapter_create', 'volume_create'])(
+    'receipts local cursor denial of %s and reaches the next allowed read without budget effects', action => fixture('durable', async (ctx, _spec, _invoke, lease) => {
+      const tools = [chapterReadTool, volumeListTool, chapterWriteTool, chapterAppendTool, chapterRenameTool, chapterCreateTool, volumeCreateTool]
+      const before = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
+      const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: lease!.taskRootId } })
+      const args = ['chapter_create', 'volume_create'].includes(action) ? { title: '不允许新建' }
+        : action === 'chapter_rename' ? { chapterId: ctx.chapterId, title: '不允许改名' } : { chapterId: ctx.chapterId, content: '不允许覆盖追加' }
+      await initializeExecutionState(lease!, {
+        configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
+          model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+          tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
+          toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          successfulToolSignatures: [], messages: [{ role: 'user', content: '只修改第二段' }, { role: 'assistant', content: null, toolCalls: [
+            { id: 'read-before', name: chapterReadTool.name, arguments: JSON.stringify({ chapterId: ctx.chapterId }) }, { id: 'volumes-before', name: volumeListTool.name, arguments: '{}' },
+            { id: 'denied', name: action, arguments: JSON.stringify(args) }, { id: 'read-after', name: chapterReadTool.name, arguments: JSON.stringify({ chapterId: ctx.chapterId }) },
+          ] }] },
+      })
+      await executeDurableToolStep(lease!, ctx.signal)
+      await executeDurableToolStep(lease!, ctx.signal)
+      expect(await executeDurableToolStep(lease!, ctx.signal)).toMatchObject({ kind: 'tool', result: { outcome: 'failed', output: expect.stringContaining('局部') } })
+      expect(await executeDurableToolStep(lease!, ctx.signal)).toMatchObject({ kind: 'tool' })
+      expect(await executeDurableToolStep(lease!, ctx.signal)).toEqual({ kind: 'idle' })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(before)
+      expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(1)
+      expect(await prisma.volume.count({ where: { novelId: ctx.novelId } })).toBe(1)
+      expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: lease!.taskRootId } })).toEqual(budget)
+      const receipt = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: lease!.taskRootId, action }, include: { effectReceipt: true } })
+      expect(receipt).toMatchObject({ status: 'failed', effectReceipt: { result: { code: 'AUTHOR_LOCAL_SCOPE' } } })
+      expect((await loadExecutionState(ctx.userId, ctx.runId)).frame.state.messages.filter(message => message.role === 'tool' && message.toolCallId === 'denied')).toHaveLength(1)
+    }, false, '只润色第二段'))
+
+  it.each(['修改第一章结尾', '只修改这段，其余保持不变', '修改第一章“重复。”', '先局部润色第一章，然后重写整章',
+    '只修改第二段里的“选段甲”', '只修改第二段的前三个字'])(
+    'freezes unprovable locality with zero body effects: %s', request => fixture('legacy', async (ctx, spec, invoke) => {
+      expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
+      const before = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
+      await expect(invoke(chapterWriteTool, { chapterId: ctx.chapterId, content: '模型摘要授权全章' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      await expect(invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, oldText: '选段甲', newText: '模型猜范围' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(before)
+    }, false, request))
+
+  it.each(['legacy', 'durable'] as const)('never opts old frozen prose requests into a new interpretation via %s', mode => fixture(mode, async (ctx, spec, invoke) => {
+    expect(spec.scope.localEditProtocol).toBeUndefined()
+    expect(spec.scope.localEditBoundary).toBeUndefined()
+    await invoke(chapterWriteTool, { chapterId: ctx.chapterId, content: '旧合同仍走原普通作者编辑协议' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toMatchObject({ revision: 2 })
+  }, true, '修改第一章第二段'))
+
+  it('allows an original quoted author edit after a critic report without spending automatic allowance', () => fixture('legacy', async (ctx, spec, invoke) => {
+    expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'bounded', regions: [{ start, end: start + 3 }] })
+    const report = await persistHumanityQualityReport({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, chapterId: ctx.chapterId!, chapterRevision: 1,
+      mode: 'balanced', deterministicMetrics: {}, deterministicFindings: [], criticComplete: true, criticFindings: [] })
+    await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, oldText: '选段甲', newText: '准确的新片段' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toMatchObject({ content: body.replace('选段甲', '准确的新片段'), revision: 2 })
+    expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: report.id }, include: { findings: true } })).toEqual(report)
+    expect(await prisma.agentProviderAttempt.count({ where: { runId: ctx.runId } })).toBe(0)
+  }, false, '将“选段甲”改为“准确的新片段”'))
+
   it.each(['legacy', 'durable'] as const)('retains readonly quality findings for another owned chapter via %s without acquiring write scope', mode => fixture(mode, async (ctx, _spec, _invoke, lease) => {
     const first = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
     const other = await prisma.chapter.create({ data: { authorId: ctx.userId, novelId: ctx.novelId, volumeId: first.volumeId,

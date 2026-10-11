@@ -14,6 +14,7 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { chatWithTools } from '../../api/lib/ai-service.js'
 import { getCreditWindow } from '../../api/lib/credits.js'
 import { prisma } from '../../api/lib/prisma.js'
+import * as providerOperations from '../../api/lib/agent/runtime-operations.js'
 import { available,claim,fixture } from '../support/agent-durable-runtime-fixture.js'
 
 describe.runIf(available)('model tool model durable execution chain', () => {
@@ -187,7 +188,7 @@ describe.runIf(available)('model tool model durable execution chain', () => {
 })
 
 describe.runIf(available)('actual model adapter execution cursor', () => {
-  it.each(['normal', 'v2-price', 'byok-v1', 'concurrent', 'prepare-state-gap', 'result-state-gap', 'unknown', 'context', 'route', 'tool-list', 'pending-tools', 'mutated-input', 'stop-resume'] as const)('%s', async scenario => {
+  it.each(['normal', 'v2-price', 'byok-v1', 'concurrent', 'prepare-state-gap', 'dispatched-before-send', 'result-state-gap', 'unknown', 'context', 'route', 'tool-list', 'pending-tools', 'mutated-input', 'stop-resume'] as const)('%s', async scenario => {
     await fixture(async f => {
       const window = getCreditWindow()
       await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 1, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
@@ -222,6 +223,26 @@ describe.runIf(available)('actual model adapter execution cursor', () => {
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '完整结果' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       })
       vi.stubGlobal('fetch', fetchMock)
+      if (scenario === 'dispatched-before-send') {
+        const dispatch = providerOperations.markProviderDispatched
+        const spy = vi.spyOn(providerOperations, 'markProviderDispatched').mockImplementationOnce(async (...args) => {
+          await dispatch(...args)
+          throw new Error('fixture exited after durable dispatch marker before send')
+        })
+        try {
+          await expect(chatWithTools(request)).rejects.toThrow('before send')
+          expect(fetchMock).not.toHaveBeenCalled()
+          const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId } } })
+          expect(attempt.status).toBe('dispatched')
+          expect(attempt.dispatchedAt).not.toBeNull()
+          expect((await loadExecutionState(f.userId, f.runId)).frame.state.phase).toBe('awaiting_operation')
+          await expect(chatWithTools(request)).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+          expect(fetchMock).not.toHaveBeenCalled()
+          expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(1)
+          expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+        } finally { spy.mockRestore() }
+        return
+      }
       if (scenario === 'prepare-state-gap') {
         await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: lease.runId,
           eventKey: `state:${f.rootId}:1`, type: 'fixture.collision', payload: {} } })

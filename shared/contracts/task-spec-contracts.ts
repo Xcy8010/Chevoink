@@ -22,6 +22,12 @@ export const taskScopeSchema = z.object({
   manuscriptProtocol: z.literal(1).optional(),
   /** Fresh author admission: complete strict review obligations, separate from automatic repair windows. */
   reviewProtocol: z.literal(1).optional(),
+  /** Genuine fresh admission only: natural-language locality is server frozen. */
+  localEditProtocol: z.literal(1).optional(),
+  localEditBoundary: z.object({ version: z.literal(1), kind: z.enum(['bounded', 'needs_input']),
+    regions: z.array(z.object({ chapterId: z.string().min(1), revision: z.number().int().positive(),
+      contentHash: z.string().regex(/^[a-f0-9]{64}$/), start: z.number().int().nonnegative(), end: z.number().int().positive(),
+      prefix: z.string(), suffix: z.string() }).strict()) }).strict().optional(),
   selectionBoundary: z.object({ version: z.literal(1), chapterId: z.string().min(1),
     revision: z.number().int().positive(), contentHash: z.string().regex(/^[a-f0-9]{64}$/),
     start: z.number().int().nonnegative(), end: z.number().int().nonnegative(),

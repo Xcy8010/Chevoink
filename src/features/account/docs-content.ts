@@ -636,7 +636,7 @@ export const DOCS: DocEntry[] = [
     sections: [
       {
         id: 'v3',
-        heading: 'Agent 3.0 与多窗口协作',
+        heading: 'Agent 3.5 与多窗口协作',
         bullets: [
           '写作 Agent 升级任务窗口内核，支持派生子窗口并行写章。',
           '新增中断续跑协作：异常终止后一键继续，自动驱动子窗口续跑。',

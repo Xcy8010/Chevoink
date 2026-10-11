@@ -39,6 +39,17 @@ describe('3.5 complete creation evidence', () => {
     expect(freezeCreationPreregistration({ ...registration, nonInferiorityMargin: 0.2 })).not.toBe(frozen)
     expect(() => freezeCreationPreregistration({ ...registration, dualIndependentReviewerSubset: 0 })).toThrow()
   })
+  it('decomposes waits over the whole enrolled queue without treating missing failures as zero or adding overlapping stages to latency', () => {
+    const summary = summarizeCreationCohort([
+      { ...row, stageWaitMs: { context: 10, model: 60, checks: 30 } },
+      { ...row, taskKey: 'failed', state: 'failed', fulfilledMs: null, stageWaitMs: { context: 20, model: 40, checks: null } },
+      { ...row, taskKey: 'unfinished', state: 'unfinished', fulfilledMs: null },
+    ])[1]
+    expect(summary.stageWaits.context).toEqual({ observedTasks: 2, missingOrUnknownTasks: 1, knownMs: 30, totalMs: null, observedP95Ms: 20 })
+    expect(summary.stageWaits.checks).toMatchObject({ observedTasks: 1, missingOrUnknownTasks: 2, totalMs: null })
+    expect(summary.fulfilledLatency.allTasksP95Ms).toBeNull()
+    expect(() => summarizeCreationCohort([{ ...row, stageWaitMs: { model: -1 } }])).toThrow('Invalid')
+  })
   it('blind pair exposes full manuscripts/diffs/retention reasons without origin labels', () => {
     const pair = { taskKey: 'synthetic', authorCluster: 'author', workCluster: 'work', originalRequest: '保留人物意图', priorContext: '前章',
       baseline: { fullManuscript: '原完整稿', revisionDiff: '-旧句\n+原句', retainedReasons: [] },

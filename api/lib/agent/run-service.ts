@@ -1,4 +1,5 @@
 import { freezeWritingScope } from './writing-scope.js'
+import { syncBuiltinSkillCatalog } from './skills/service.js'
 import { readAuthorEnded } from './author-ended.js'
 import { readRunOutcome } from './run-outcome.js'
 import { hasAuthorEnded } from './completion-guard.js'
@@ -191,6 +192,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const assembled = await assembleContext({ agent, mode: input.mode, userId, sessionId: run.sessionId, runId, novelId: run.novelId, chapterId: run.chapterId,
     prompt: input.prompt, selection: input.selection, attachments: input.attachments, visionEnabled: runtime.visionEnabled, taskSpec: spec,
     modelTier: runtime.tier, modelName: runtime.modelName, contextWindowTokens: runtime.contextWindowTokens, pinnedSkillIds: input.pinnedSkillIds })
+  console.info('[agent-context-timing]', { runId, ...assembled.timings })
   if (agent.type === 'orchestrator') {
     const catalog = await (await import('./productivity.js')).renderSubagentCatalog(userId, run.novelId, input.pinnedSubagentId)
     insertSubagentCatalog(assembled.messages, catalog, 'system')
@@ -209,7 +211,8 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
           endpoint: `${(runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: runtime.reasoningEffort }) },
       tools: toOpenAITools(tools, spec.scope), toolAuthority: [...snapshotToolAuthority(tools, input.mode)].map(([name, grant]) => ({ name, ...grant })),
       protectedChapterIds: spec.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED') ? spec.scope.chapterIds ?? [] : [],
-      pinnedSkillVersions: (assembled.skillRoute?.selected ?? []).map(skill => ({ id: skill.id, version: skill.version })) },
+      skillRouterVersion: assembled.skillRoute?.routerVersion ?? (await import('./skills/index.js')).SKILL_ROUTER_VERSION,
+      pinnedSkillVersions: assembled.availableSkillVersions },
       snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
         messages: assembled.messages, successfulToolSignatures: [] } })
   } finally { await releaseRunLease(lease) }
@@ -475,10 +478,14 @@ export async function startLoopRunLocked(
     if (!previousRun && !previousSpec && !durablePrevious
       && !session.spawnedFromRunId && options.concurrencyScope !== 'orchestration'
       && (!options.goal || options.goal.trigger === 'author')) {
+      // Persist current built-in resources before this fresh admission can
+      // assemble/pin a new configuration. Failure rolls back admission; old
+      // contracts and durable continuation never refresh frozen resources.
+      await syncBuiltinSkillCatalog(tx)
       const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
-        prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1,
+        prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1,
         creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
-      if (input.selection || ['write', 'revise'].includes(fresh.intent) && !['proposal_only', 'conversation_only'].includes(fresh.writingPacing ?? '')) {
+      if (input.selection || ['write', 'revise', 'review'].includes(fresh.intent) && !['proposal_only', 'conversation_only'].includes(fresh.writingPacing ?? '')) {
         // Preserve the original protected-body snapshot normally captured by
         // async initialization when freezing this fresh contract at admission.
         if (fresh.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')) {

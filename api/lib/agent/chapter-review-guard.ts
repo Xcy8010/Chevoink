@@ -10,6 +10,7 @@ import { qualityReportCheckedCurrentContent, selectAutomaticQualityFindings, qua
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import { runtimeJson } from './runtime-common.js'
 import { assertSelectionBodyEffect, originalSelectionBoundary } from './writing-scope.js'
+import { hasReadOnlyRevisionAssessment, localEditGuidance, localRevisionAuthorityText, originalLocalEditBoundary } from './local-edit-scope.js'
 
 import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
 
@@ -249,7 +250,8 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   if (!requiredTools.length && !decisionPending && requiredDecisions.length > 0
     && (!requirements.quality || qualityContextCurrent)) phases.push('decision')
   return { ready: !requiredTools.length, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id,
-    ...(reviewProtocol ? { reviewProtocol, completeStrictReview, selectionOnly: !!originalSelectionBoundary(original.spec) } : {}),
+    ...(reviewProtocol ? { reviewProtocol, completeStrictReview,
+      selectionOnly: !!originalSelectionBoundary(original.spec) || !!originalLocalEditBoundary(original.spec) } : {}),
     chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools, decisionPending,
     ...(quality === 'complete' ? { decisionFeedbackSnapshotHash: qualityDecisionSnapshotHash(report!.findings) } : {}),
     ...(decisionFeedback ? { decisionFeedback } : {}), decisionDetails, requiredDecisions, retainedDecisions, decisionEntries, mustPassPending: mandatoryReviewPending,
@@ -372,9 +374,14 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
     || !!item.validation && typeof item.validation === 'object' && !Array.isArray(item.validation) && typeof item.validation.checkedRevision === 'number')
   const spec = original.spec && typeof original.spec === 'object' && !Array.isArray(original.spec) ? original.spec as Record<string, unknown> : null
   const newReview = !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope) && (spec.scope as Record<string, unknown>).reviewProtocol === 1
-  const prohibited = prohibitsNewDraftRevision(original.prompt) || Array.isArray(spec?.hardConstraints) && spec.hardConstraints.some(item =>
-    !!item && typeof item === 'object' && 'text' in item && typeof item.text === 'string' && prohibitsNewDraftRevision(item.text))
-  if (prohibited || (!authority && reviewed && !hasOriginalRepairAuthority(original.prompt))) {
+  const prohibited = prohibitsNewDraftRevision(localRevisionAuthorityText(original.prompt, original.spec)) || Array.isArray(spec?.hardConstraints) && spec.hardConstraints.some(item =>
+    !!item && typeof item === 'object' && 'text' in item && typeof item.text === 'string'
+      && prohibitsNewDraftRevision(localRevisionAuthorityText(item.text, original.spec)))
+  const localAuthority = originalLocalEditBoundary(original.spec)?.kind === 'bounded'
+  const freshAssessment = !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope)
+    && (spec.scope as Record<string, unknown>).localEditProtocol === 1 && hasReadOnlyRevisionAssessment(original.prompt)
+  if (prohibited || freshAssessment || (!authority && !localAuthority && (reviewed || newReview && spec?.intent === 'review')
+    && !hasOriginalRepairAuthority(original.prompt))) {
     throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原始作者请求未授权改写该正文；检查报告不能扩大写入权限。')
   }
   const latest = compilations.find(item => ['active', 'completed'].includes(item.status) && item.bridge)
@@ -698,7 +705,7 @@ export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
     }
     return { open: true }
   } catch (error) {
-    if (error instanceof DataAccessError && ['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) return { open: false, code: error.code, message: error.message }
+    if (error instanceof DataAccessError && ['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) return { open: false, code: error.code, message: error.message }
     throw error
   }
 }
@@ -709,10 +716,12 @@ export async function readChapterReviewRevisionGuidance(tx: Prisma.TransactionCl
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number }) {
   try {
     await assertChapterManuscriptRevision(tx, subject, chapter, {})
+    const local = localEditGuidance((await readOriginalTaskRequest(tx, subject)).spec)
+    if (local) return local
     if (originalSelectionBoundary((await readOriginalTaskRequest(tx, subject)).spec)) return '原任务只授权作者所选正文范围。读取当前正文，用 chapter_edit_range 的逐字唯一锚点或选区内坐标连续修改，所有补丁必须保留原选区外文本；每批最多8处，不限制原授权内批次数。不得 chapter_write、chapter_append、改名或通过其他工具扩大范围。最终所需检查须绑定最后保存版本。'
     return '在原始作者写入授权内可连续修订本章；相关安全修法优先合并为 chapter_edit_range patches（每次最多8处），也可多次单片段替换或 chapter_write，每次使用当前正文与版本，不硬性限定一次调用。核对对象身份与逐字证据，报告不能扩大权限，不能机械照建议改剧情。不要求每次改文覆盖全部候选；未处理意见保留，可引用当前报告通过 retainedFindings 写明具体原因。留置、正文未变或写入均不表示意见已解决。全部修改后复核最终版本两类原要求检查，再提交终态；付费自动修订、检查次数与未知调用保护保持。'
   } catch (error) {
-    if (error instanceof DataAccessError && ['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) {
+    if (error instanceof DataAccessError && ['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) {
       return `${error.message}保留事实错误及其证据，当前版本不能宣称通过。`
     }
     throw error

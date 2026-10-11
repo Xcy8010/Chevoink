@@ -800,7 +800,7 @@ export default function StudioSettingsDialog(props: Props) {
           {filteredGroups.map((group) => <div key={group.label}><p className="mb-1.5 px-3 text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--text-tertiary)]">{group.label}</p><div className="space-y-0.5">{group.items.map((item) => navButton(item))}</div></div>)}
           {filteredGroups.length === 0 ? <p className="px-3 py-8 text-center text-xs text-[var(--text-tertiary)]">没有匹配的设置</p> : null}
         </nav>
-        <div className="mt-4 flex items-center gap-2 border-t border-[var(--border-subtle)] px-2 pt-4 text-xs text-[var(--text-tertiary)]"><img src="/chevoink-agent.png" alt="" className="h-4 w-4 object-contain" />Chevoink Agent 3.0</div>
+        <div className="mt-4 flex items-center gap-2 border-t border-[var(--border-subtle)] px-2 pt-4 text-xs text-[var(--text-tertiary)]"><img src="/chevoink-agent.png" alt="" className="h-4 w-4 object-contain" />Chevoink Agent 3.5</div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col bg-[var(--surface-default)]">

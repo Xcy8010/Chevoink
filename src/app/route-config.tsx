@@ -539,7 +539,7 @@ export const appRoutes: AppRouteDefinition[] = [
   },
   {
     path: '/admin/evals',
-    title: 'Agent 3.0 创作盲评',
+    title: 'Agent 3.5 创作盲评',
     description: '以匿名候选和统一量表开展中文网文专家盲评。',
     element: (
       <AdminLayout>
@@ -550,7 +550,7 @@ export const appRoutes: AppRouteDefinition[] = [
   },
   {
     path: '/admin/craft',
-    title: 'Agent 3.0 合法文笔库',
+    title: 'Agent 3.5 合法文笔库',
     description: '管理语料权利台账、审批、受控导入与可追溯撤权。',
     element: (
       <AdminLayout>

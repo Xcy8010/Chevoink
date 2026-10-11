@@ -81,7 +81,7 @@ import { autoNameSession } from './session-title.js'
 import { withModelAssignmentContext, updateModelAssignmentContext } from './model-assignment-context.js'
 import { buildTaskSpec, narrowLegacyResearchTask, narrowLegacyConversationTask } from './task-spec.js'
 import { buildSkillExecutionDigest, routeSkills, type SkillPhase } from './skills/index.js'
-import { resolveEnabledRuntimeSkills } from './skills/service.js'
+import { resolveRuntimeSkillContext } from './skills/service.js'
 import { nextSkillPhase, phaseIntent, phaseSignals } from './skills/lifecycle.js'
 import { recordSkillLoads } from './skills/receipts.js'
 import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/index.js'
@@ -1295,6 +1295,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       contextWindowTokens: modelRuntime.contextWindowTokens,
       pinnedSkillIds: params.pinnedSkillIds ?? [],
     })
+    console.info('[agent-context-timing]', { runId, ...assembledContext.timings })
     const messages: ChatMessage[] = assembledContext.messages
     // The last assembled user message is the original goal input. Attach its
     // pixels before adding steering or orchestration messages to the tail.
@@ -1400,11 +1401,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (!phase) { activateSkillDigest(); return }
       const cached = phaseDigests.get(phase)
       if (cached !== undefined) { activateSkillDigest(cached); return }
-      const catalog = await resolveEnabledRuntimeSkills(params.userId, params.novelId)
+      const { catalog, routerVersion } = await resolveRuntimeSkillContext(params.userId, params.novelId, runId)
       if (controller.signal.aborted) throw new DOMException('run aborted', 'AbortError')
       const decision = routeSkills({ mode: params.mode, intent: phaseIntent(phase), phase,
         prompt: `${params.prompt}\n当前已验证工作阶段：${phaseSignals[phase] ?? phase}`,
-        freedom: taskSpec.creativeFreedom, catalog, pinnedSkillIds: new Set(params.pinnedSkillIds ?? []) })
+        freedom: taskSpec.creativeFreedom, catalog, routerVersion, pinnedSkillIds: new Set(params.pinnedSkillIds ?? []) })
       const digest = decision.selected.length ? buildSkillExecutionDigest(decision, taskSpec.creativeFreedom) : ''
       phaseDigests.set(phase, digest)
       // Appended only between complete tool batches, never inside call/result pairs.

@@ -9,6 +9,7 @@ import { hasOriginalRepairAuthority, readOriginalTaskRequest, originalTaskRunIds
 import { runtimeJson } from './runtime-common.js'
 import { assertRunGoalFence } from './goal-fence.js'
 import { readWritingPresentation } from './writing-request-context.js'
+import { freezeLocalEditBoundary, originalLocalEditBoundary, requestedLocalEdit } from './local-edit-scope.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 type Writing = NonNullable<TaskSpec['scope']['writing']>
@@ -122,12 +123,14 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   }
   if (!['write', 'revise', 'review'].includes(spec.intent) || spec.writingPacing === 'proposal_only' || spec.writingPacing === 'conversation_only') return spec
   const admissionPrompt = original.prompt ?? prompt
+  const localRequest = spec.scope.localEditProtocol === 1 ? requestedLocalEdit(admissionPrompt) : null
   const range = requestedWritingRange(admissionPrompt)
   // A prompt that names chapters/volumes with numbers but fails to parse must not
   // silently freeze onto the editor's current chapter: that rewrote the author's
   // target ("前 20 章优化" froze to a single chapter). Surface needs_input instead.
   const ambiguousRange = !range && /(?:第|前|后|余|剩|卷|章)/u.test(admissionPrompt)
     && /[0-9零〇一二两三四五六七八九十百千]/u.test(admissionPrompt)
+    && !(localRequest && !/(?:章|卷|chapter|volume)/iu.test(admissionPrompt))
   const chapters = await tx.chapter.findMany({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) },
     select: { id: true, revision: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
   const run = await tx.agentRun.findFirstOrThrow({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId }, select: { chapterId: true, session: { select: { sandboxMode: true, spawnedFromRunId: true } } } })
@@ -194,7 +197,11 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     && !/(?:只读|不(?:要|得|能|许|必)?(?:新建|建|改|调整|分)卷|(?:不要|不得|禁止|不能).{0,12}(?:结构|分卷)|read.only|do not.{0,20}(?:volume|structure))/iu.test(admissionPrompt + spec.hardConstraints.map(item => item.text).join('；'))) {
     writing.tailVolume = { version: 1, targetOrderIndex: writing.targets[0].orderIndex, previousChapterId: last.id, previousRevision: last.revision }
   }
-  return { ...spec, scope: { ...spec.scope, writing } }
+  const localEditBoundary = localRequest
+    ? freezeLocalEditBoundary(admissionPrompt, writing, await tx.chapter.findMany({ where: { authorId: subject.userId,
+      ...activeChapterScope(subject.novelId), id: { in: writing.targets.flatMap(target => target.chapterId ? [target.chapterId] : []) } },
+      select: { id: true, revision: true, content: true } })) : undefined
+  return { ...spec, scope: { ...spec.scope, writing, ...(localEditBoundary ? { localEditBoundary } : {}) } }
 }
 
 const bindingSchema = z.object({ version: z.literal(1), taskId: z.string(), targets: z.array(z.object({ orderIndex: z.number().int().positive(), chapterId: z.string() }).strict()) }).strict()
@@ -307,7 +314,9 @@ export function originalSelectionBoundary(value: unknown) {
 export async function assertSelectionBodyEffect(tx: Prisma.TransactionClient, subject: Subject,
   chapter: { id: string; revision: number }, options: { mutation?: 'range' | 'replace' | 'append'; after?: string;
     editRanges?: Array<{ start: number; end: number; newText: string }> }, automatic = false) {
-  const boundary = originalSelectionBoundary((await readOriginalTaskRequest(tx, subject)).spec)
+  const spec = (await readOriginalTaskRequest(tx, subject)).spec
+  await assertLocalBodyEffect(tx, subject, chapter, options, automatic, spec)
+  const boundary = originalSelectionBoundary(spec)
   if (!boundary) return
   if (chapter.id !== boundary.chapterId || automatic || options.mutation && options.mutation !== 'range') {
     throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '原选区只授权精确片段工具；整章写入、追加或自动整章修订不能扩大范围。')
@@ -336,6 +345,38 @@ export async function assertSelectionBodyEffect(tx: Prisma.TransactionClient, su
   }
 }
 
+async function assertLocalBodyEffect(tx: Prisma.TransactionClient, subject: Subject, chapter: { id: string; revision: number },
+  options: { mutation?: 'range' | 'replace' | 'append'; after?: string; editRanges?: Array<{ start: number; end: number; newText: string }> },
+  automatic: boolean, spec: unknown) {
+  const local = originalLocalEditBoundary(spec)
+  if (!local) return
+  if (!options.mutation && !automatic) return // readonly report/guidance remains possible
+  const boundary = local.regions.find(region => region.chapterId === chapter.id)
+  if (local.kind === 'needs_input' || !boundary || automatic || options.mutation !== 'range') {
+    throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '原局部请求只允许冻结范围内精确片段替换；定位不明须补准确原文或选区后重新发起任务。')
+  }
+  const current = await tx.chapter.findFirst({ where: { id: chapter.id, revision: chapter.revision, authorId: subject.userId,
+    ...activeChapterScope(subject.novelId) }, select: { content: true } })
+  if (!current) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '当前正文版本已变化，局部替换未执行。')
+  const before = current.content, end = before.length - boundary.suffix.length
+  if (chapter.revision < boundary.revision || end < boundary.start || !before.startsWith(boundary.prefix) || !before.endsWith(boundary.suffix)
+    || chapter.revision === boundary.revision && runtimeJson({ content: before }).hash !== boundary.contentHash) {
+    throw new DataAccessError(409, 'AUTHOR_LOCAL_STALE', '冻结范围外正文或原版本已变化，请重新发起局部任务，不能重定位旧授权。')
+  }
+  const ranges = options.editRanges
+  if (!ranges?.length || options.after === undefined || ranges.some(range => !Number.isSafeInteger(range.start)
+    || !Number.isSafeInteger(range.end) || range.start < boundary.start || range.end <= range.start || range.end > end
+    || range.start === 0 && range.end === before.length)) {
+    throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '本批补丁超出冻结局部范围或整体覆盖正文，全部变更未执行。')
+  }
+  let after = before
+  for (const range of [...ranges].sort((a, b) => b.start - a.start)) after = after.slice(0, range.start) + range.newText + after.slice(range.end)
+  if (after !== options.after || !after.startsWith(boundary.prefix) || !after.endsWith(boundary.suffix)
+    || after.length < boundary.prefix.length + boundary.suffix.length) {
+    throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '局部补丁与实际正文效果不一致，全部变更未执行。')
+  }
+}
+
 export async function lockWritingRunLineage(tx: Prisma.TransactionClient, subject: Subject) {
   await lockNovelActiveScope(tx, subject.novelId)
   const original = await readOriginalTaskRequest(tx, subject)
@@ -359,6 +400,11 @@ export async function assertWritingTarget(tx: Prisma.TransactionClient, subject:
   const boundary = originalSelectionBoundary(scope.spec)
   if (boundary && (target.chapterId !== boundary.chapterId || target.effect && target.effect !== 'range')) {
     throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '原任务只授权选区内片段替换，不能整体覆盖、追加、改名、创建或通过其他工具改动正文。')
+  }
+  const local = originalLocalEditBoundary(scope.spec)
+  if (local && target.effect && (local.kind !== 'bounded' || !local.regions.some(region => region.chapterId === target.chapterId)
+    || target.effect !== 'range')) {
+    throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '原局部请求不能整体覆盖、追加、改名、创建或借其他工具改动正文；定位不明须补准确原文或选区后重新发起任务。')
   }
   if (scope.parentRunId && !await tx.agentRun.findFirst({ where: { id: scope.parentRunId, userId: subject.userId, novelId: subject.novelId,
     status: { in: ['queued', 'running', 'awaiting_approval'] } }, select: { id: true } })) throw new DataAccessError(409, 'RUNTIME_PARENT_LEASE_LOST', '父任务已暂停或结束，子任务不能写入。')
@@ -426,6 +472,7 @@ export async function bindWritingChapter(tx: Prisma.TransactionClient, subject: 
 export async function assertWritingStructureAuthority(tx: Prisma.TransactionClient, subject: Subject) {
   const scope = await readWritingScope(tx, subject)
   if (originalSelectionBoundary(scope.spec)) throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '选区授权不允许改变章节结构。')
+  if (originalLocalEditBoundary(scope.spec)) throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '局部正文授权不允许改变章节结构。')
   if (scope.writing && scope.writing.kind !== 'unbounded') throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原请求仅授权指定章节正文，未授权拆分、合并或重排作品结构。')
 }
 

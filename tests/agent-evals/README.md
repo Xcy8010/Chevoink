@@ -1,6 +1,6 @@
 # Chevoink-CN-Fiction-Eval
 
-这是 Agent 3.0 的冻结中文网文评测集，不是训练语料或小说正文库。
+这是 Agent 3.5 的确定性回归与中文网文评测入口。原冻结数据集保留自身版本，不是训练语料或小说正文库。
 
 ## 当前内容
 
@@ -9,6 +9,8 @@
 - `metrics.ts`：任务成功率、token、延迟与回滚口径；
 - `cn-fiction-metrics.ts`：Skill 必要加载率、误触发率、确定性复现率及专家盲评汇总。
 - `craft-library-metrics.ts`：合法文笔库题材/场景覆盖、权利账本、检索追踪、泄漏检查与撤权回执的冻结基线。
+- `agent35-regression-corpus.ts`：F01–F32 合成/脱敏故障目录，复用实际单元与 PostgreSQL 集成测试；目录存在不代表测试通过，须绑定同 SHA 完整 CI 的实际结果。
+- `reliable-creation-metrics.ts`：完整稿及 diff 配对评估、失败/未完成任务的全部费用、固定观察龄分母和阶段等待。等待可重叠，未知值保持未知，不能求和冒充端到端延迟。
 
 所有场景均为 Chevoink 自建任务夹具，不包含受版权保护的小说原文。正式盲评正文必须走脱敏样本管线，不得直接提交到仓库。
 
@@ -19,6 +21,8 @@ npm run agent3:eval
 ```
 
 报告固定记录数据集版本、数据集 hash、代码 SHA、模型、温度和 Skill 目录版本。模型正文评测时还必须由运行方记录模型供应商版本、采样参数、检索库版本和每个场景至少五次运行结果。
+
+该命令运行确定性路由与契约目录，不发收费模型请求。`reliableCreation.evidenceKind` 为 `deterministic_contract_inventory`；真实 provider、完整稿文学盲评及原生设备验收均另记，不能由离线报告推定通过。上下文计时写入服务日志，不进入模型消息或变更作者授权。
 
 ## 门禁纪律
 

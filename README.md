@@ -53,9 +53,18 @@
   </tr>
 </table>
 
-## Chevoink Agent 3.0
+## Chevoink Agent 3.5
 
-Agent 3.0 不是单次提示词生成器，而是围绕一部作品持续工作的有状态创作 Agent。它会先识别任务和作品阶段，再按需加载 2–3 个 Skill；需要调研时建立可缓存的 Research Dossier，需要写作时由 Story Compiler 把读者承诺、人物欲望、阻力、选择、代价与状态变化编译为场景任务；写后经过连续性与人类感质量检查，最后通过带 revision 的原子写入、ChangeSet 和事件流提交到工作区。
+Agent 3.5 围绕一部作品持续研究、规划、写作与修订，按任务和阶段加载技能，保留完整作者要求、作品事实和真实执行结果。Work 与 IDE 的任务窗口用中文显示核对前文、撰写、修改、复查和保存；首次流式显示、历史、刷新与复制共用作者展示规则，模型所需的推理回传保留在执行协议内。
+
+### 3.5 的写作边界与技能
+
+- 编辑器选区与明确的自然语言局部修改在新任务入场时冻结范围。可定位的局部要求使用精确片段修改；无法唯一定位时先请求准确片段或选区。批量修改全批校验、一次版本比较写入，重复恢复复用回执，无变化不新增正文版本。
+- 正文修改后，本任务要求的检查必须对应最终当前版本。严谨模式逐项实际应用或记录有依据的保留理由；事实硬伤与作者明确要求的全部检查通过仍独立把关。普通作者编辑和自动修订次数分开，没有检查义务的手动编辑不额外强制付费检查。
+- 本次内置技能包为 **3.5.0**，路由契约为 **3.5.0**，技能稳定 ID 保持兼容。作品技能区显示新任务实际使用的内置版本；旧资源、已保存任务的技能/路由版本和付费回执保留。作者与第三方技能继续使用各自版本，不随产品版本自动升级。
+- 已发送但结果不明的模型请求保持待核，不自动重发或补零费用。只读状态、保存成功、检查完成、有限交付与原目标全部完成分别表达。
+
+这些规则保护执行与恢复，不代表文学质量、真实模型速度或原生设备验收已经通过。真实 provider 配对、完整稿与修改差异盲评、Android/Windows 真机验收仍需对应授权与实测；不承诺零失误或 99.99% 可靠性。原生壳加载同一线上站点，本次网页版本更新不等于新 APK/Windows 安装包验收。
 
 ### 运行流程
 
@@ -72,7 +81,7 @@ flowchart TD
   F --> G{任务类型}
   G -->|新书 / 换题材 / 事实依赖| H[Research Dossier<br/>搜索·深读·来源记录·缓存 TTL]
   G -->|规划 / 写作 / 改稿 / 续写| I[Story Compiler<br/>Charter → Promise → Scene Task → Chapter Bridge]
-  G -->|检索 / 管理 / 导出| J[Agent Tool Loop<br/>105 个受治理工具·附件·封面·导出]
+  G -->|检索 / 管理 / 导出| J[Agent Tool Loop<br/>116 个受治理工具·附件·封面·导出]
   G -->|复杂协作 / 定时巡检| K[子 Agent / Schedule<br/>独立会话·预算·工具白名单·可取消]
   H --> I
   I --> L[模型执行<br/>流式思考·正文·工具参数]
@@ -104,13 +113,13 @@ flowchart LR
   end
   subgraph Service[Chevoink 服务]
     API[Express API<br/>认证·作品·社区·Credits]
-    LOOP[Agent 3.0 Runtime<br/>Loop·105 Tools·权限沙箱]
-    SKILL[Skill OS 3.0<br/>Router·Loader·版本/测试/回滚]
+    LOOP[Agent 3.5 Runtime<br/>Loop·116 Tools·权限沙箱]
+    SKILL[Skill OS 3.5<br/>Router·Loader·版本/测试/回滚]
     STORY[Story Compiler<br/>Memory·Quality Gate·Craft Retrieval]
     SSE[SSE Event Stream<br/>持久化·续传·回放]
   end
   subgraph Data[数据层]
-    PG[(PostgreSQL<br/>106 Models·72 Migrations)]
+    PG[(PostgreSQL<br/>schema·migrations)]
     FILES[(受管上传与导出)]
   end
   subgraph Providers[外部能力]
@@ -158,7 +167,7 @@ Agent 支持有预算和进展校验的长任务续跑；暂停后恢复原任�
 | Windows 客户端开发 | [构建说明](desktop/windows/README.md) · [验收状态](docs/WINDOWS_DESKTOP.md)；当前为内部候选版，尚未正式签名发布 |
 | 了解怎么用 | [使用教程](#使用教程) |
 | 了解功能 | [功能一览](#功能一览) |
-| 了解 Agent 3.0 | [运行流程与系统架构](#chevoink-agent-30) · [Agent 3.0 方案](./plan/23-Agent3.0中文网文人类化创作与技能生态升级方案.md) |
+| 了解 Agent 3.5 | [运行流程与系统架构](#chevoink-agent-35) · [历史 Agent 3.0 方案](./plan/23-Agent3.0中文网文人类化创作与技能生态升级方案.md) |
 | 本地跑起来 | [快速开始](#快速开始) |
 | 了解架构 | [技术栈](#技术栈) · [目录结构](#目录结构) |
 | 深入工程细节 | [工程文档](./docs/ENGINEERING.md)（[English](./docs/ENGINEERING.en.md)）· [开发规范](./docs/DEVELOPMENT-STANDARDS.md)（[English](./docs/DEVELOPMENT-STANDARDS.en.md)）· [Agent 评测说明](./tests/agent-evals/README.md) |
@@ -191,8 +200,8 @@ Agent 支持有预算和进展校验的长任务续跑；暂停后恢复原任�
 ### 作者
 
 1. 进入**创作区**即可直接与 Chevoink Agent 对话；零作品时会显示随机创作示例，点击只填入输入框，首次发送后 Agent 通过受作品范围校验的 `novel_create` 原子动作，把隐藏占位工作区完善为真实作品。新建任务对话为空时也会按当前作品随机推荐四个可继续构建的方向；
-2. 在章节编辑器直接写作，或呼出 **Chevoink Agent 3.0**：默认最大权限自主执行（工具调用自动批准，保留追踪按钮），能按你的设定与知识集流式生成章节、改写润色，按需建立题材 Research Dossier，以 Story Charter、Reader Promise、Scene Task 和 Chapter Bridge 维持长篇因果与连续性，写后输出带原文证据的质量 finding；
-3. 在 Work、IDE 或手机端的**作品技能**区管理 Skill OS 3.0：内置 Skill 按任务自动路由，私有 Skill 可由作者或 Agent 草拟，经过正/负触发测试后发布；每个版本都可锁定、停用和回滚，共享安装需作者确认，第三方源码必须登记许可证、归属与固定版本；
+2. 在章节编辑器直接写作，或呼出 **Chevoink Agent 3.5**：默认最大权限自主执行（工具调用自动批准，保留追踪按钮），能按你的设定与知识集流式生成章节、改写润色，按需建立题材 Research Dossier，以 Story Charter、Reader Promise、Scene Task 和 Chapter Bridge 维持长篇因果与连续性，写后输出带原文证据的质量 finding；
+3. 在 Work、IDE 或手机端的**作品技能**区管理 Skill OS 3.5：内置 Skill 按任务自动路由，私有 Skill 可由作者或 Agent 草拟，经过正/负触发测试后发布；私有及第三方技能保留独立的固定版本，可停用或选择历史版本；内置技能新任务使用当前代码发布版，已有任务保留冻结资源。共享安装需作者确认，第三方源码必须登记许可证、归属与固定版本；
 4. 输入框可附加**图片（≤6 张）与文件（≤3 个，pdf/docx/txt/md）**随提示词发送；支持多模态的模型直接接收图片像素，纯文本模型自动走安全视觉旁路，文件统一先读取再行动；对话内文件可点击打开、长文件内容默认折叠；
 5. 用 **AI 封面生成**一键产出封面图（远程直链自动落盘本站）；也可以让 Agent 直接「查看当前封面」核对画面效果；
 6. **一键导出**：沉浸模式工具栏、「…」更多菜单与手机端「更多」均可发起，勾选导出范围（规划/目录/章节/作品信息以及发布建议，章节可逐章自选），服务端打包 zip 直接下载，附 AI 按番茄小说官方词表生成的发布建议；也可在对话里让 Agent 按需导出（只导出指定章节、排除某部分内容）；
@@ -211,7 +220,7 @@ Agent 支持有预算和进展校验的长任务续跑；暂停后恢复原任�
 ## 功能一览
 
 - **阅读区**：书城首页（轮播、榜单、分类推荐）、书架与阅读进度云同步、沉浸式阅读器、TTS 听书
-- **创作区**：Codex 风格 Work/IDE 工作区、Agent 3.0（Research Dossier、Skill OS、Story Compiler、Chapter Bridge、人类感质量门、合法技法检索、作者私有 Style DNA、前三章试制与专家盲评链路）、跨作品任务搜索/置顶/归档、分支/差异/冲突安全合并、内嵌子 Agent、定时任务、权限沙箱、运行回放、多模态附件、联网与站内调研、跨会话记忆、作品关系网、AI 封面与范围化 ZIP 导出
+- **创作区**：Codex 风格 Work/IDE 工作区、Agent 3.5（Research Dossier、Skill OS、Story Compiler、Chapter Bridge、人类感质量门、合法技法检索、作者私有 Style DNA、前三章试制与专家盲评链路）、跨作品任务搜索/置顶/归档、分支/差异/冲突安全合并、内嵌子 Agent、定时任务、权限沙箱、运行回放、多模态附件、联网与站内调研、跨会话记忆、作品关系网、AI 封面与范围化 ZIP 导出
 - **社区**：帖子与话题系统、推荐算法、评论/点赞/收藏、关注与粉丝、私信与在线状态
 - **账号体系**：手机号验证码登录（腾讯云短信）、HttpOnly Cookie 会话 + Bearer 备选通道（安卓壳杀后台不掉登录）、公测 Credits 与唯一邀请奖励
 - **管理后台**：数据看板、用户/作品/内容治理、内置模型与加密密钥管理、Credits 单用户与批量重置/暂停、Token 用量排行与创作任务下钻、联网/生图调用统计、移动端适配
@@ -224,7 +233,7 @@ Agent 支持有预算和进展校验的长任务续跑；暂停后恢复原任�
 | 前端 | React 18 · Vite 6 · TypeScript · TailwindCSS · React Query 5 · Zustand 5 · React Router 7 |
 | 后端 | Express 4 · Prisma 6 · PostgreSQL · Zod |
 | AI | DeepSeek 文本生成 · 智谱 GLM-4.1V 图像理解 · OpenAI 兼容图像生成 · Edge TTS 语音合成 · 博查联网搜索（多引擎降级） |
-| Agent | Agent 3.0 Runtime（`api/lib/agent`）：统一 Loop、116 个受治理工具、Skill OS 3.0、Story Compiler、分层记忆、质量门、内嵌子 Agent、长任务自动续跑与防失控保护、持久化 SSE 事件流 |
+| Agent | Agent 3.5 Runtime（`api/lib/agent`）：统一 Loop、116 个受治理工具、Skill OS 3.5、Story Compiler、分层记忆、质量门、内嵌子 Agent、长任务自动续跑与防失控保护、持久化 SSE 事件流 |
 | 测试 | Vitest + Supertest + Testing Library（单元、PostgreSQL 集成、真实 DOM 交互与冻结 Agent 评测；2026-09-08：161 个测试文件 / 1,885 项测试通过；覆盖率门禁） |
 | 部署 | PM2 + nginx（生产）· GitHub Actions CI（push 即跑类型检查/lint/单测/集成测试）· 安卓 Capacitor 壳工程（独立仓库目录） |
 
@@ -269,14 +278,15 @@ npm run dev
 | `npm run check` | TypeScript 类型检查 |
 | `npm run test` | 运行全部 Vitest 测试 |
 | `npx vitest run --coverage` | 运行测试并执行本地/CI 双基线覆盖率门禁 |
-| `npm run agent3:eval` | 生成带版本、Hash 与代码 SHA 的 Agent 3.0 确定性评测快照 |
+| `npm run agent3:eval` | 生成带版本、Hash 与代码 SHA 的 Agent 3.5 确定性评测快照 |
 | `npm run lint` | ESLint 检查 |
 | `npm run build` | 生产构建 |
-| `npm run deploy:prod` | 一键部署到生产服务器 |
+| `pwsh -NoProfile -File scripts/deploy-production.ps1 -ExpectedCurrentRevision <线上完整SHA> -CiRunId <CI编号>` | 已授权的同 SHA CI 维护部署（PowerShell 7） |
 
 ## 部署与发布
 
-- **生产部署**：完整四闸、Agent 评测与双依赖审计 → 简短中文提交并推送 → 同 SHA CI 成功 → 授权后 `npm run deploy:prod`。发布包来自 `git archive HEAD`；远端固定 Node、迁移/构建、PM2 重载与健康核验。当前仍是原目录部署，不宣称原子回滚。受控远端已通过同 SHA 门禁时才可获准使用 `-SkipLocalChecks`。
+- **生产部署**：完整四闸、确定性 Agent 评测与双依赖审计 → 简短中文提交并推送 → 原完整同 SHA CI 成功（核心 PostgreSQL 零跳过、覆盖率原门槛不变）→ 使用上表 PowerShell 7 维护入口。先核线上 SHA 与 journal，复用同 SHA CI 门禁；发布包来自 `git archive HEAD`，在独立目录安装、构建，核对后切换并正常重启 API，验证固定 Node、进程、健康与公开资源。前一目录保留；没有自动回滚，未知外部结果先核日志与版本，不重复整段发布。
+- **恢复兼容**：新局部范围、审查和技能冻结标记的任务须由理解或拒绝这些标记的应用恢复；不能直接回退至忽略它们的旧代码。旧任务保留原冻结合同、资源、价格与回执；数据库不自动下迁移，不删除成果或清零预算/账目。
 - **推送 GitHub**：`powershell -ExecutionPolicy Bypass -File scripts\push-to-github.ps1`，支持 `-Tag v1.50 -ReleaseAsset <apk路径>` 打 Tag 并发布 Release（附安卓 APK）
 - **安卓 APK**：由独立的 Capacitor 壳工程构建，通过应用内更新条幅 / 设置页检测更新分发
 
@@ -296,7 +306,7 @@ npm run dev
 
 ## 特别鸣谢
 
-Chevoink 是独立设计与实现的开源项目。在 Agent 3.0、小说工程结构和创作区体验的演进过程中，以下优秀开源项目提供了重要参考：
+Chevoink 是独立设计与实现的开源项目。在 Agent 3.5、小说工程结构和创作区体验的演进过程中，以下优秀开源项目提供了重要参考：
 
 | 开源项目 | Chevoink 中的参考位置 | 主要参考内容 |
 | --- | --- | --- |

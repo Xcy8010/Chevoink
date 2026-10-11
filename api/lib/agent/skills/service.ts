@@ -15,7 +15,7 @@ import type {
 } from '../../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { customSkillToRuntime, buildCustomSkillArtifacts } from './custom.js'
-import { routeSkills, skillCatalog, type AgentSkill } from './index.js'
+import { historicalBuiltinCatalog, routeSkills, skillCatalog, SKILL_ROUTER_VERSION, type AgentSkill } from './index.js'
 import { getSkillUsage } from './receipts.js'
 
 const BUILTIN_SOURCE = 'builtin'
@@ -58,8 +58,9 @@ function contentHash(skill: AgentSkill): string {
 }
 
 /** 内置目录是代码资产；同步只做幂等 upsert，版本内容一旦存在不被覆盖。 */
-export async function syncBuiltinSkillCatalog(): Promise<void> {
-  const definitionOperations = skillCatalog.map((skill) => prisma.agentSkillDefinition.upsert({
+export async function syncBuiltinSkillCatalog(tx?: Prisma.TransactionClient): Promise<void> {
+  const client = tx ?? prisma
+  const definitionOperations = skillCatalog.map((skill) => client.agentSkillDefinition.upsert({
     where: { id: skill.id },
     create: {
       id: skill.id,
@@ -80,9 +81,12 @@ export async function syncBuiltinSkillCatalog(): Promise<void> {
       defaultVersion: skill.version,
     },
   }))
-  await prisma.$transaction(definitionOperations)
+  // Fresh admission already owns a transaction/connection. Keep its writes and
+  // rollback there rather than waiting on a nested global pool connection.
+  if (tx) { for (const operation of definitionOperations) await operation }
+  else await prisma.$transaction(definitionOperations)
 
-  const versionOperations = skillCatalog.map((skill) => prisma.agentSkillVersion.upsert({
+  const versionOperations = [...historicalBuiltinCatalog, ...skillCatalog].map((skill) => client.agentSkillVersion.upsert({
     where: { skillId_version: { skillId: skill.id, version: skill.version } },
     create: {
       skillId: skill.id,
@@ -95,7 +99,8 @@ export async function syncBuiltinSkillCatalog(): Promise<void> {
     // 不可变版本：同一 skillId@version 已存在时禁止静默改写内容。
     update: {},
   }))
-  await prisma.$transaction(versionOperations)
+  if (tx) { for (const operation of versionOperations) await operation }
+  else await prisma.$transaction(versionOperations)
 }
 
 async function assertOwnedNovel(userId: string, novelId: string): Promise<void> {
@@ -164,7 +169,9 @@ export async function listNovelSkills(userId: string, novelId: string): Promise<
   const items: AgentSkillListItem[] = definitions.map((definition) => {
     const installation = installationBySkill.get(definition.id)
     const runtime = runtimeById.get(definition.id)
-    const activeVersion = installation?.lockedVersion ?? definition.defaultVersion
+    // Built-ins follow the current code-asset policy for new tasks. A saved
+    // historical lock remains in storage and frozen runs resolve it separately.
+    const activeVersion = runtime?.version ?? installation?.lockedVersion ?? definition.defaultVersion
     const customVersion = definition.versions.find((version) => version.version === activeVersion)
     const customManifest = customVersion?.manifest && typeof customVersion.manifest === 'object' && !Array.isArray(customVersion.manifest)
       ? customVersion.manifest as Record<string, unknown>
@@ -593,18 +600,51 @@ export async function deleteNovelSkill(userId: string, novelId: string, skillId:
 }
 
 /** 运行时目录：内置代码资产 + 当前作品已启用且已发布的私有技能。 */
-export async function resolveEnabledRuntimeSkills(userId: string, novelId: string): Promise<AgentSkill[]> {
+export async function resolveRuntimeSkillContext(userId: string, novelId: string, runId?: string): Promise<{ catalog: AgentSkill[]; routerVersion: string }> {
+  let saved = runId ? await prisma.agentSkillRun.findFirst({ where: { runId, userId, novelId } }) : null
+  const run = runId ? await prisma.agentRun.findFirst({ where: { id: runId, userId, novelId }, select: { runtimeProtocolVersion: true, taskRootId: true, status: true } }) : null
+  if (runId && !run && !saved) throw new DataAccessError(409, 'SKILL_RUN_SCOPE_MISMATCH', '技能加载不属于当前作者和作品的任务。')
+  // Durable tasks already own a configuration hash. Read/validate that exact
+  // snapshot; neither a catalog lookup nor a resume may rewrite it.
+  const durable = run?.runtimeProtocolVersion === 1 && run.taskRootId
+    && await prisma.agentExecutionState.findUnique({ where: { taskRootId: run.taskRootId }, select: { taskRootId: true } })
+    ? await (await import('../runtime-state.js')).loadExecutionState(userId, runId!) : null
+  if (run && !durable) {
+    const original = await (await import('../original-request.js')).readOriginalTaskRequest(prisma, { userId, novelId, runId: runId! })
+    if (original.sourceRunId !== runId) {
+      const source = await prisma.agentSkillRun.findFirst({ where: { runId: original.sourceRunId, userId, novelId } })
+      if (source) saved = { ...source, loaded: [...readSelected(source.loaded), ...readSelected(saved?.loaded ?? [])], selected: source.selected }
+    }
+  }
   const installations = await prisma.agentSkillInstallation.findMany({
     where: { userId, scope: NOVEL_SCOPE, scopeId: novelId },
     include: { skill: { include: { versions: true } } },
   })
   const installationBySkill = new Map(installations.map((installation) => [installation.skillId, installation]))
-  const runtime: AgentSkill[] = skillCatalog.filter((skill) => installationBySkill.get(skill.id)?.enabled !== false)
+  const routerVersion = durable ? durable.configuration.skillRouterVersion ?? '3.1.0' : saved?.routerVersion ?? SKILL_ROUTER_VERSION
+  const builtinCatalog = routerVersion !== SKILL_ROUTER_VERSION ? historicalBuiltinCatalog : skillCatalog
+  const pinned = new Map([...readSelected(saved?.loaded ?? []), ...readSelected(saved?.selected ?? [])].map(item => [item.id, item.version]))
+  for (const item of durable?.configuration.pinnedSkillVersions ?? []) pinned.set(item.id, item.version)
+  const runtime: AgentSkill[] = []
+  for (const skill of builtinCatalog) {
+    if (installationBySkill.get(skill.id)?.enabled === false) continue
+    const versionName = pinned.get(skill.id)
+    if (!versionName || versionName === skill.version) { runtime.push(skill); continue }
+    const stored = await prisma.agentSkillVersion.findUnique({ where: { skillId_version: { skillId: skill.id, version: versionName } } })
+    if (!stored || stored.status !== 'active' || !stored.instructions || typeof stored.instructions !== 'object' || Array.isArray(stored.instructions)) {
+      throw new DataAccessError(409, 'SKILL_FROZEN_VERSION_UNAVAILABLE', '原任务的技能版本不可用，不能替换为新版本继续。')
+    }
+    const resources = Object.fromEntries(Object.entries(stored.instructions).filter(([phase, value]) => skill.phases.includes(phase as AgentSkill['phases'][number]) && typeof value === 'string'))
+    runtime.push({ ...skill, version: versionName, resources })
+  }
   for (const installation of installations) {
     if (!installation.enabled || installation.skill.source === BUILTIN_SOURCE || installation.skill.status !== 'active') continue
-    const versionName = installation.lockedVersion ?? installation.skill.defaultVersion
+    const versionName = pinned.get(installation.skillId) ?? installation.lockedVersion ?? installation.skill.defaultVersion
     const version = installation.skill.versions.find((item) => item.version === versionName && item.status === 'active')
-    if (!version) continue
+    if (!version) {
+      if (pinned.has(installation.skillId)) throw new DataAccessError(409, 'SKILL_FROZEN_VERSION_UNAVAILABLE', '原任务的技能版本不可用，不能替换为新版本继续。')
+      continue
+    }
     const custom = customSkillToRuntime({
       id: installation.skill.id,
       name: installation.skill.name,
@@ -616,8 +656,13 @@ export async function resolveEnabledRuntimeSkills(userId: string, novelId: strin
       instructions: version.instructions,
     })
     if (custom) runtime.push(custom)
+    else if (pinned.has(installation.skillId)) throw new DataAccessError(409, 'SKILL_FROZEN_VERSION_UNAVAILABLE', '原任务的技能资源无效，不能忽略后继续。')
   }
-  return runtime
+  return { catalog: runtime, routerVersion }
+}
+
+export async function resolveEnabledRuntimeSkills(userId: string, novelId: string, runId?: string): Promise<AgentSkill[]> {
+  return (await resolveRuntimeSkillContext(userId, novelId, runId)).catalog
 }
 
 /** 路由热路径不做目录同步；没有安装记录等价于默认启用，关闭后下一轮立即生效。 */

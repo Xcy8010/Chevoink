@@ -55,7 +55,7 @@ export type SkillRouteCandidate = {
 }
 
 export type SkillRouteDecision = {
-  routerVersion: '3.1.0'
+  routerVersion: string
   phase: SkillPhase
   candidates: SkillRouteCandidate[]
   selected: AgentSkill[]
@@ -94,10 +94,10 @@ function blockedByNegative(skill: AgentSkill, prompt: string): boolean {
 }
 
 /**
- * Agent 3.0 首批内置中文网文 Skill Pack。
+ * Historical built-in resources remain readable for frozen runs.
  * 元数据始终可见，resources 只在服务端路由命中后完整装载，避免把整套规范常驻上下文。
  */
-export const skillCatalog: AgentSkill[] = [
+export const historicalBuiltinCatalog: AgentSkill[] = [
   {
     id: 'cn-project-positioning.v3',
     name: '中文网文项目定位',
@@ -279,6 +279,17 @@ export const skillCatalog: AgentSkill[] = [
   },
 ]
 
+export const BUILTIN_SKILL_PACK_VERSION = '3.5.0'
+// 3.5 binds a run's resource versions across phase loads; ranking stays the same.
+export const SKILL_ROUTER_VERSION = '3.5.0'
+const RELEASE_GUIDANCE = '本任务的完整原始作者要求与服务端冻结边界优先。局部修改先读取当前正文，再用唯一原文片段精确修订，不借整章覆盖扩大范围；定位不足先补充证据。正文改变后完成本任务要求的当前版本检查。严格审查逐项实际应用或记录有依据的保留理由；保存、检查完成和任务交付分别按真实结果汇报。'
+
+/** Current release; historical resources above are never edited in place. */
+export const skillCatalog: AgentSkill[] = historicalBuiltinCatalog.map(skill => ({
+  ...skill, version: BUILTIN_SKILL_PACK_VERSION,
+  resources: Object.fromEntries(Object.entries(skill.resources).map(([phase, resource]) => [phase, `${resource}\n${RELEASE_GUIDANCE}`])),
+}))
+
 const legacySkillAliases: Record<string, string> = {
   'scene-craft.v2': 'cn-scene-task.v3',
   'character-voice.v2': 'cn-character-voice.v3',
@@ -346,12 +357,15 @@ export function routeSkills(input: {
   freedom: CreativeFreedom
   enabledSkillIds?: ReadonlySet<string>
   catalog?: readonly AgentSkill[]
+  /** Saved run identity; resuming does not publish a new router version. */
+  routerVersion?: string
   /** 作者在输入框里手动指定的技能；它们绕过意图/阶段/评分门槛，必需装载。 */
   pinnedSkillIds?: ReadonlySet<string>
 }): SkillRouteDecision {
   const phase = input.phase ?? inferSkillPhase(input.intent)
   const normalizedPrompt = input.prompt.trim()
   const catalog = input.catalog ?? skillCatalog
+  const routerVersion = input.routerVersion ?? SKILL_ROUTER_VERSION
   const isEnabled = (skill: AgentSkill): boolean => input.enabledSkillIds?.has(skill.id) ?? true
 
   const pinnedCandidates: SkillRouteCandidate[] = input.pinnedSkillIds?.size
@@ -367,7 +381,7 @@ export function routeSkills(input: {
   // 手动指定是作者的明确指令，优先于“非创作操作”早退。
   if (pinnedCandidates.length === 0 && (skipMinorEdit || skipOperation)) {
     return {
-      routerVersion: '3.1.0', phase, candidates: [], selected: [], reasonCodes: [], confidence: 1,
+      routerVersion, phase, candidates: [], selected: [], reasonCodes: [], confidence: 1,
       estimatedTokens: 0, skippedReason: 'NON_CREATIVE_OPERATION',
     }
   }
@@ -393,7 +407,7 @@ export function routeSkills(input: {
 
   if (candidates.length === 0) {
     return {
-      routerVersion: '3.1.0', phase, candidates: [], selected: [], reasonCodes: [], confidence: 1,
+      routerVersion, phase, candidates: [], selected: [], reasonCodes: [], confidence: 1,
       estimatedTokens: 0, skippedReason: 'NO_MATCH',
     }
   }
@@ -440,7 +454,7 @@ export function routeSkills(input: {
   const confidence = Math.min(0.99, Math.max(0.55, 0.62 + topScore / 220 + (topScore - secondScore) / 400))
 
   return {
-    routerVersion: '3.1.0', phase, candidates, selected,
+    routerVersion, phase, candidates, selected,
     reasonCodes: uniqueReasonCodes(selectedCandidates),
     confidence: Math.round(confidence * 100) / 100,
     estimatedTokens: estimateLoadedTokens(selected, phase),

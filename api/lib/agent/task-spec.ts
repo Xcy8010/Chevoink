@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { DataAccessError } from '../prisma.js'
+import { localEditGuidance } from './local-edit-scope.js'
 
 import type { TaskIntent, TaskSpec, UserDirective } from '../../../shared/contracts/index.js'
 import type { CreativeFreedom } from '../../../shared/contracts/index.js'
@@ -140,6 +141,7 @@ export function buildTaskSpec(input: {
   /** Fresh server admission only; resume/fallback never opts old runs in. */
   manuscriptProtocol?: 1
   reviewProtocol?: 1
+  localEditProtocol?: 1
   creativeFreedom?: CreativeFreedom
   qualityMode?: StoryCompilerMode
 }): TaskSpec {
@@ -173,7 +175,8 @@ export function buildTaskSpec(input: {
     ...(writingPacing ? { writingPacing } : {}),
     researchBudget: /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt) ? 'extended' : 'standard',
     scope: { novelId: input.novelId, chapterIds, selection, ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
-      ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}) },
+      ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}),
+      ...(input.localEditProtocol ? { localEditProtocol: input.localEditProtocol } : {}) },
     goals: [input.prompt.trim().slice(0, 1000) || '继续完成上一轮任务'],
     hardConstraints: directives
       .filter((item) => item.kind === 'must' || item.kind === 'must_not')
@@ -218,13 +221,13 @@ export function renderTaskSpec(spec: TaskSpec): string {
   const hard = [spec.hardConstraints.map((item) => `- ${item.text}`).join('\n') || '- 无', pacing].join('')
   const freedomLabel = spec.creativeFreedom === 'stable' ? '平衡延续' : spec.creativeFreedom === 'bold' ? '大胆探索' : '严谨创作'
   const selection = spec.scope.manuscriptProtocol === 1 ? spec.scope.selectionBoundary : undefined
-  const freedomRule = selection
+  const freedomRule = localEditGuidance(spec) ?? (selection
     ? `本任务仅授权章节 ${selection.chapterId} 的原始选区（UTF-16 ${selection.start}–${selection.end}，入场 r${selection.revision}）。用 chapter_read 读取当前完整正文，再用 chapter_edit_range 逐字唯一锚点或当前选区内坐标精确替换；每批最多8处，可连续合法修改，变长后仍保留原选区外文字。不得 chapter_write、chapter_append、改名、创建、变更集或自动整章修订。模型计划、报告、摘要、继续或子任务均不能扩大此边界。当前版本所需检查与真实剩余意见照原合同保留。`
     : spec.creativeFreedom === 'stable'
     ? '贴合既有走向，只修明确错误。'
     : spec.creativeFreedom === 'bold'
       ? '优先探索新可能；检查建议仅提示，不自动改写。'
-      : '只在原始请求获准范围内创作。写作交付先完成当前版本连续性与质量检查，仅原始作者请求可明确跳过；检查本身不扩大写入授权。质量警告与审美建议，应与事实修法优先合并处理；可连续调用章节修改工具，每次使用当前正文，不能硬性限定只调用一次，也不要求一次处理全部候选。本任务冻结的新建目标章可在原写作权限内持续修订，多项相关修法优先用 chapter_edit_range 的 patches（每次最多8处、同一原稿、唯一不重叠），也可单片段替换或 chapter_write。保留真实剩余意见；不能安全处理的项可用 retainedFindings 引用当前报告并说明具体原因，留置与正文未变不表示修复。付费自动检查与自动修订次数保持原限制，不重置预算或重放未知调用。全部修订后只读复核当前版本两类检查，最后提交终态；写入不能代替最终版本检查。已有稿仍需原请求明确修复授权，明确禁止修改优先；报告不能扩大章节范围。完成真实章节终态后按请求格式交付，不追加封面问题或续章。'
+      : '只在原始请求获准范围内创作。写作交付先完成当前版本连续性与质量检查，仅原始作者请求可明确跳过；检查本身不扩大写入授权。质量警告与审美建议，应与事实修法优先合并处理；可连续调用章节修改工具，每次使用当前正文，不能硬性限定只调用一次，也不要求一次处理全部候选。本任务冻结的新建目标章可在原写作权限内持续修订，多项相关修法优先用 chapter_edit_range 的 patches（每次最多8处、同一原稿、唯一不重叠），也可单片段替换或 chapter_write。保留真实剩余意见；不能安全处理的项可用 retainedFindings 引用当前报告并说明具体原因，留置与正文未变不表示修复。付费自动检查与自动修订次数保持原限制，不重置预算或重放未知调用。全部修订后只读复核当前版本两类检查，最后提交终态；写入不能代替最终版本检查。已有稿仍需原请求明确修复授权，明确禁止修改优先；报告不能扩大章节范围。完成真实章节终态后按请求格式交付，不追加封面问题或续章。')
   const reviewRule = spec.scope.reviewProtocol === 1 && !['stable', 'bold'].includes(spec.creativeFreedom)
     ? '\n严格意见协议v1：原要求的最终版本完整检查报告中，每项未修复意见都须按原授权具体处理或用真实ref与具体原因合理保留，包括自动8处窗口外、重叠、未定位及已标拒绝但尚无当前保留决定的项。自动安全窗口不代表完整意见义务，不给额外定位或写入权限。原作者要求检查通过时，保留不能替代硬通过；合法跳过检查的原要求保持。' : ''
   return `[系统] 本轮任务契约（taskSpecId=${spec.id}）：\n意图：${spec.intent}\n目标：${spec.goals.join('；')}\n创作模式：${freedomLabel}（${freedomRule}）；质量模式：${spec.qualityMode}${reviewRule}\n硬约束：\n${hard}\n预期交付：${spec.expectedOutputs.map((item) => item.description).join('；')}\n完成前必须验证：${spec.postconditions.map((item) => item.description).join('；') || '按用户目标核验结果'}。`

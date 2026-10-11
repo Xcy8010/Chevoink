@@ -30,6 +30,7 @@ const configurationSchema = z.object({ version: z.literal(1), mode: z.enum(['pla
   tools: z.array(z.object({ type: z.literal('function'), function: z.object({ name: z.string().min(1), description: z.string(), parameters: z.record(z.string(), z.unknown()) }).strict() }).strict()),
   toolAuthority: z.array(z.object({ name: z.string().min(1), permission: z.enum(['allow', 'ask', 'deny']), alwaysConfirm: z.boolean(), dangerous: z.boolean() }).strict()),
   protectedChapterIds: z.array(id), pinnedSkillVersions: z.array(z.object({ id, version: z.string().min(1) }).strict()),
+  skillRouterVersion: z.string().min(1).optional(),
   modelAssignments: frozenModelAssignmentsSchema.optional(),
   pinnedSubagentId: id.optional(),
 }).strict().refine(value => new Set(value.tools.map(tool => tool.function.name)).size === value.tools.length

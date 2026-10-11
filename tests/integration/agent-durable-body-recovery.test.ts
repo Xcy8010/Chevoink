@@ -12,7 +12,7 @@ import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { available, claim, fixture } from '../support/agent-durable-runtime-fixture.js'
 
 describe.runIf(available)('F15 actual body adapter recovery', () => {
-  it.each(['receipt-return', 'before-reduction', 'reduction-return', 'projection-return'] as const)(
+  it.each(['receipt-return', 'before-reduction', 'reduction-return', 'before-projection', 'projection-return'] as const)(
     '%s interruption preserves one body CAS and its original evidence', async fault => {
       vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
       await fixture(async f => {
@@ -50,7 +50,7 @@ describe.runIf(available)('F15 actual body adapter recovery', () => {
             throw interruption
           })
         }
-        if (fault === 'projection-return') await executeDurableToolStep(lease, signal)
+        if (fault === 'projection-return' || fault === 'before-projection') await executeDurableToolStep(lease, signal)
         else await expect(executeDurableToolStep(lease, signal)).rejects.toThrow(interruption.message)
 
         const saved = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
@@ -71,7 +71,11 @@ describe.runIf(available)('F15 actual body adapter recovery', () => {
         const frame = (await loadExecutionState(f.userId, f.runId)).frame
         expect(frame.state.messages.filter(message => message.role === 'tool' && message.toolCallId === 'edit')).toHaveLength(1)
         expect(frame.state.phase).toBe('idle')
-        if (fault === 'projection-return') {
+        if (fault === 'before-projection') {
+          expect(await prisma.agentRunEvent.count({ where: { runId: f.runId } })).toBe(0)
+          await expect((async () => { throw interruption })()).rejects.toThrow(interruption.message)
+          await publishDurableEvents(f.userId, f.runId)
+        } else if (fault === 'projection-return') {
           await expect((async () => { await publishDurableEvents(f.userId, f.runId); throw interruption })()).rejects.toThrow(interruption.message)
         } else await publishDurableEvents(f.userId, f.runId)
         const events = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })

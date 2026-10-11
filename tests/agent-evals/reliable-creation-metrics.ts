@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 /** One enrollment per logical author task, not one row per successful retry. */
+export const CREATION_WAIT_STAGES = ['queue', 'context', 'model', 'tool', 'checks', 'database', 'ui'] as const
 export type CreationObservation = {
   taskKey: string
   cohort: 'baseline' | 'candidate'
@@ -10,6 +11,9 @@ export type CreationObservation = {
   savedMs: number | null
   fulfilledMs: number | null
   attempts: Array<{ tokens: number | null; cashMilli: number | null }>
+  /** Per-task accumulated waits, including failed attempts. Concurrent stage
+   * waits may overlap; their sum is not end-to-end latency. Absent is unknown. */
+  stageWaitMs?: Partial<Record<typeof CREATION_WAIT_STAGES[number], number | null>>
 }
 
 function percentile(values: number[]): number | null {
@@ -26,7 +30,7 @@ export function summarizeCreationCohort(rows: CreationObservation[]) {
     if (keys.has(key)) throw new Error('Duplicate logical task enrollment')
     keys.add(key)
     for (const value of [row.observationAgeMs, row.firstMeaningfulResponseMs, row.savedMs, row.fulfilledMs,
-      ...row.attempts.flatMap(attempt => [attempt.tokens, attempt.cashMilli])]) {
+      ...row.attempts.flatMap(attempt => [attempt.tokens, attempt.cashMilli]), ...Object.values(row.stageWaitMs ?? {})]) {
       if (value !== null && (!Number.isFinite(value) || value < 0)) throw new Error('Invalid observation')
     }
     if (row.state === 'fulfilled' && (row.savedMs === null || row.fulfilledMs === null)) throw new Error('Fulfilled task lacks actual saved/completed times')
@@ -56,7 +60,13 @@ export function summarizeCreationCohort(rows: CreationObservation[]) {
       knownCashMilli, unknownCostAttempts, totalCashMilli: unknownCostAttempts ? null : knownCashMilli,
       cashPerEnrolledTask: tasks.length && !unknownCostAttempts ? knownCashMilli / tasks.length : null,
       firstResponse: latency(row => row.firstMeaningfulResponseMs), saved: latency(row => row.savedMs),
-      fulfilledLatency: latency(row => row.fulfilledMs) }
+      fulfilledLatency: latency(row => row.fulfilledMs),
+      stageWaits: Object.fromEntries(CREATION_WAIT_STAGES.map(stage => {
+        const values = tasks.flatMap(row => typeof row.stageWaitMs?.[stage] === 'number' ? [row.stageWaitMs[stage]!] : [])
+        const knownMs = values.reduce((sum, value) => sum + value, 0)
+        return [stage, { observedTasks: values.length, missingOrUnknownTasks: tasks.length - values.length,
+          knownMs, totalMs: values.length === tasks.length ? knownMs : null, observedP95Ms: percentile(values) }]
+      })) }
   })
 }
 

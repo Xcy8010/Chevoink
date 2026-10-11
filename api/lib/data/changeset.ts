@@ -503,7 +503,7 @@ export async function applyChangeSetData(
       })
     })
   } catch (error) {
-    if (error instanceof DataAccessError && error.status === 409 && !['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE'].includes(error.code)) {
+    if (error instanceof DataAccessError && error.status === 409 && !['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE'].includes(error.code)) {
       await prisma.changeSet.update({
         where: { id: changeSetId },
         data: {
@@ -571,7 +571,7 @@ export async function rollbackChangeSetData(userId: string, changeSetId: string,
       })
     })
   } catch (error) {
-    if (error instanceof DataAccessError && error.status === 409 && !['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE'].includes(error.code)) {
+    if (error instanceof DataAccessError && error.status === 409 && !['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE'].includes(error.code)) {
       await prisma.changeSet.update({
         where: { id: changeSetId },
         data: { validations: [{ code: error.code, status: 'failed', message: error.message, targetIds: [] }] },

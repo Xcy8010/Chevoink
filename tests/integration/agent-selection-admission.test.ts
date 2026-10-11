@@ -10,6 +10,8 @@ import { enqueueRequest } from '../../api/lib/agent/request-queue.js'
 import { verifyTestDatabase } from '../support/database-preflight.js'
 import { isTestDatabaseRequired } from '../support/database-availability.js'
 import { taskSpecSchema } from '../../shared/contracts/index.js'
+import * as skillService from '../../api/lib/agent/skills/service.js'
+import { chapterEditRangeTool, chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -24,6 +26,8 @@ async function fixture(work: (subject: { userId: string; novelId: string; sessio
     await prisma.agentSession.create({ data: { id: sessionId, userId, novelId, title: '准入测试' } })
     await work({ userId, novelId, sessionId, chapterId })
   } finally {
+    await prisma.memoryExtractionJob.deleteMany({ where: { novelId, novel: { authorId: userId } } })
+    await prisma.projectMemoryEntry.deleteMany({ where: { novelId, novel: { authorId: userId } } })
     await prisma.agentQueuedRequest.deleteMany({ where: { userId } })
     await prisma.agentRun.deleteMany({ where: { userId } })
     await prisma.agentSession.deleteMany({ where: { userId } })
@@ -33,6 +37,88 @@ async function fixture(work: (subject: { userId: string; novelId: string; sessio
   }
 }
 describe.skipIf(!available)('fresh selected server admission transaction', () => {
+  it.each(['检查是否需要修改第二段', '看看需不需要润色第二段', '判断修改第二段有没有必要',
+    '评估是否需要重写第二段', '评估第二段有没有必要润色', 'Check whether to edit paragraph 2',
+    'Assess if paragraph 2 needs polishing', 'Evaluate if we should rewrite paragraph 2', '检查是否需要修改整章'])(
+    'keeps a fresh revision assessment without mutation authority: %s', prompt => fixture(async f => {
+      await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '首段。\n第二段原文。\n末段。' } })
+      const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt })
+      const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
+      expect(spec.scope.localEditProtocol).toBe(1)
+      expect(spec.scope.localEditBoundary?.kind).not.toBe('bounded')
+      await prisma.agentRun.update({ where: { id: result.runId }, data: { status: 'running' } })
+      const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      await expect(chapterEditRangeTool.execute({ ...f, runId: result.runId, mode: 'build', callId: 'assessment-denied',
+        creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
+      { chapterId: f.chapterId, oldText: '第二段原文。', newText: '模型改写。' })).rejects.toMatchObject({
+        code: prompt.includes('整章') ? 'REPAIR_NOT_AUTHORIZED' : 'AUTHOR_LOCAL_SCOPE',
+      })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+      expect(await prisma.chapterQualityReport.count({ where: { runId: result.runId } })).toBe(0)
+    }))
+  it('does not reinterpret an unmarked original whole-chapter request as a fresh assessment contract', () => fixture(async f => {
+    await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '首段。\n第二段原文。\n末段。' } })
+    const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '检查是否需要修改整章' })
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
+    delete spec.scope.localEditProtocol
+    await prisma.agentRun.update({ where: { id: result.runId }, data: { status: 'running', taskSpec: spec } })
+    await chapterEditRangeTool.execute({ ...f, runId: result.runId, mode: 'build', callId: 'old-contract-unchanged',
+      creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
+    { chapterId: f.chapterId, oldText: '第二段原文。', newText: '旧契约行为。' })
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('首段。\n旧契约行为。\n末段。')
+  }))
+  it('preserves an explicit fresh check-and-repair grant for a paragraph', () => fixture(async f => {
+    await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '首段。\n第二段原文。\n末段。' } })
+    const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '检查并修复第二段' })
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
+    expect(spec.scope.localEditBoundary?.kind).toBe('bounded')
+    await prisma.agentRun.update({ where: { id: result.runId }, data: { status: 'running' } })
+    await chapterEditRangeTool.execute({ ...f, runId: result.runId, mode: 'build', callId: 'check-and-repair-allowed',
+      creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
+    { chapterId: f.chapterId, oldText: '第二段原文。', newText: '作者授权修复。' })
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('首段。\n作者授权修复。\n末段。')
+  }))
+  it('propagates fresh built-in persistence failure before author execution or frozen snapshots', () => fixture(async f => {
+    const partialSkillId = `admission-rollback-${randomUUID()}`
+    const sync = vi.spyOn(skillService, 'syncBuiltinSkillCatalog').mockImplementationOnce(async tx => {
+      expect(tx).toBeDefined()
+      if (!tx) throw new Error('fresh persistence must share the admission transaction')
+      await tx.agentSkillDefinition.create({ data: { id: partialSkillId, name: 'partial admission skill', description: 'test-only', source: 'builtin',
+        visibility: 'builtin', license: 'test-only', status: 'active', defaultVersion: 'test-only' } })
+      throw new Error('synthetic builtin persistence failure')
+    })
+    try {
+      await expect(startLoopRun(f.userId, { ...f, mode: 'build', prompt: '修改第一章' })).rejects.toThrow('synthetic builtin persistence failure')
+      expect(sync).toHaveBeenCalledTimes(1)
+      expect(await prisma.agentRun.count({ where: { userId: f.userId } })).toBe(0)
+      expect(await prisma.agentMessage.count({ where: { sessionId: f.sessionId } })).toBe(0)
+      expect(await prisma.agentSkillDefinition.count({ where: { id: partialSkillId } })).toBe(0)
+      expect(execution).not.toHaveBeenCalled()
+    } finally { sync.mockRestore(); await prisma.agentSkillDefinition.deleteMany({ where: { id: partialSkillId } }) }
+  }))
+  it.each(['将“选区原文。”改为“准确的新句。”', '只修改这段，其余保持不变', '缩写第二段', '检查并修复结尾'])(
+    'freezes natural-language locality only at genuine fresh admission: %s', prompt => fixture(async f => {
+      const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt })
+      const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
+      expect(spec.scope.localEditProtocol).toBe(1)
+      expect(spec.scope.selection).toBeUndefined()
+      expect(spec.scope.localEditBoundary).toMatchObject(prompt.startsWith('将') ? { kind: 'bounded', regions: [{ chapterId: f.chapterId,
+        revision: 3, start: 5, end: 10, prefix: '前😀段。', suffix: '后段。' }] } : { kind: 'needs_input', regions: [] })
+    }))
+  it('a fresh readonly review does not authorize editing even before its first report', () => fixture(async f => {
+    const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '只检查当前章节，不给修改建议' })
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
+    expect(spec.intent).toBe('review')
+    expect(spec.scope.reviewProtocol).toBe(1)
+    expect(spec.scope.localEditBoundary).toBeUndefined()
+    await prisma.agentRun.update({ where: { id: result.runId }, data: { status: 'running' } })
+    const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    await expect(chapterWriteTool.execute({ ...f, runId: result.runId, mode: 'build', callId: 'readonly-author-denied',
+      creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
+    { chapterId: f.chapterId, content: '模型想写全章' })).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+    expect(await prisma.chapterQualityReport.count({ where: { runId: result.runId } })).toBe(0)
+  }))
   it('freezes owned revision and UTF-16 boundaries before asynchronous execution starts', () => fixture(async f => {
     const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '修改第一章选区', selection: { start: 5, end: 10, text: '选区原文。' } })
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })

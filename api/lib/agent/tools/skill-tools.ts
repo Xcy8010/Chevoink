@@ -21,11 +21,11 @@ const PHASE = z.enum(['research', 'plan', 'scene', 'draft', 'critique', 'revisio
 
 export const skillCatalogTool = defineTool({
   name: 'skill_catalog', title: '查看创作能力',
-  description: '查看可用 Skill 3.0 元数据。只返回名称、版本、阶段和说明，不加载完整工作流。',
+  description: '查看本任务可用技能元数据。只返回名称、实际版本、阶段和说明，不加载完整工作流。',
   parameters: z.object({ phase: PHASE.optional() }),
   permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: true,
   async execute(ctx, args) {
-    const runtime = await resolveEnabledRuntimeSkills(ctx.userId, ctx.novelId)
+    const runtime = await resolveEnabledRuntimeSkills(ctx.userId, ctx.novelId, ctx.runId)
     const items = args.phase ? runtime.filter((item) => item.phases.includes(args.phase!)) : runtime
     return {
       output: items.map((item) => `${item.id}@${item.version} [${item.phases.join('/')}] ${item.synopsis}${item.attribution ? ` 来源说明：${item.attribution}` : ''}`).join('\n'),
@@ -40,7 +40,7 @@ export const skillLoadTool = defineTool({
   parameters: z.object({ skillId: z.string().min(1), phase: PHASE, creativeFreedom: FREEDOM }),
   permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: true,
   async execute(ctx, args) {
-    const runtime = await resolveEnabledRuntimeSkills(ctx.userId, ctx.novelId)
+    const runtime = await resolveEnabledRuntimeSkills(ctx.userId, ctx.novelId, ctx.runId)
     const content = loadSkill(args.skillId, args.phase, args.creativeFreedom, runtime)
     const loaded = content ? runtime.filter(skill => content.startsWith(`[Skill ${skill.id}@${skill.version} /`)) : []
     if (ctx.runId && loaded.length) await recordSkillLoads(ctx as typeof ctx & { runId: string }, loaded, args.phase, 'tool')
@@ -177,8 +177,8 @@ export const skillInstallSharedTool = defineTool({
   },
 })
 
-async function skillResources(userId: string, novelId: string, skillIds: string[], phase: SkillPhase, freedom: CreativeFreedom): Promise<string> {
-  const runtime = await resolveEnabledRuntimeSkills(userId, novelId)
+async function skillResources(userId: string, novelId: string, skillIds: string[], phase: SkillPhase, freedom: CreativeFreedom, runId?: string): Promise<string> {
+  const runtime = await resolveEnabledRuntimeSkills(userId, novelId, runId)
   return skillIds.map((id) => loadSkill(id, phase, freedom, runtime)).filter(Boolean).join('\n\n')
 }
 
@@ -200,7 +200,7 @@ export const creativeCritiqueTool = defineTool({
     const start = args.start ?? 0
     const end = Math.min(args.end ?? chapter.content.length, chapter.content.length)
     const text = chapter.content.slice(start, end)
-    const resources = await skillResources(ctx.userId, ctx.novelId, args.skillIds, 'critique', args.creativeFreedom)
+    const resources = await skillResources(ctx.userId, ctx.novelId, args.skillIds, 'critique', args.creativeFreedom, ctx.runId)
     const critique = await generateTextCompletion(
       `你是与写作者上下文隔离的小说批评编辑。只依据给定原文指出问题，不续写、不改写、不套固定检查表。每条含编号、短引文、问题和修改方向；把事实硬伤与审美建议分开。\n${resources}`,
       `章节：${chapter.title}，revision=${chapter.revision}，范围=[${start},${end})\n原文：\n${text}`,
@@ -232,7 +232,7 @@ export const creativeRevisionDraftTool = defineTool({
     const start = args.start ?? 0
     const end = Math.min(args.end ?? chapter.content.length, chapter.content.length)
     const source = chapter.content.slice(start, end)
-    const resources = await skillResources(ctx.userId, ctx.novelId, args.skillIds, 'revision', args.creativeFreedom)
+    const resources = await skillResources(ctx.userId, ctx.novelId, args.skillIds, 'revision', args.creativeFreedom, ctx.runId)
     const revised = await generateTextCompletion(
       `你是与 Draft/Critique 上下文隔离的修订编辑。只落实 selectedFindings，不顺手应用其他建议，不改变未授权事实和情节。只输出可替换原文的修订文本。\n${resources}`,
       `作者选中的批评项：\n${args.selectedFindings.map((item, index) => `${index + 1}. ${item}`).join('\n')}\n待修订原文：\n${source}`,
