@@ -32,14 +32,13 @@ try {
   $revision = (Invoke-Checked git @('rev-parse', '--verify', 'HEAD')).Trim()
   if ($revision -notmatch '^[a-f0-9]{40}$') { throw 'Cannot resolve candidate SHA.' }
   Invoke-Checked git @('diff', '--quiet', 'HEAD', '--') | Out-Null
-  if (-not $CiRunId) {
-    $runs = (Invoke-Checked gh @('run', 'list', '--workflow', 'CI', '--commit', $revision, '--json', 'databaseId,status,conclusion', '--limit', '20')) -join "`n" | ConvertFrom-Json
-    $selected = @($runs | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'success' }) | Select-Object -First 1
-    if (-not $selected) { throw 'No completed successful CI for this exact SHA.' }
-    $CiRunId = [string]$selected.databaseId
-  }
-  if ($CiRunId -notmatch '^\d+$') { throw 'Invalid CI run ID.' }
-  $ci = (Invoke-Checked gh @('run', 'view', $CiRunId, '--json', 'headSha,status,conclusion,workflowName,jobs')) -join "`n" | ConvertFrom-Json
+  # Standard readonly REST endpoints avoid run view's legacy preview media types.
+  # The same complete SHA/job gates still run before packaging or any SSH action.
+  $ciArguments = @('scripts/release-ci-read.mjs', $revision)
+  if ($CiRunId) { $ciArguments += $CiRunId }
+  $ciRead = (Invoke-Checked node $ciArguments) -join "`n" | ConvertFrom-Json
+  $CiRunId = [string]$ciRead.ciRunId
+  $ci = $ciRead.ci
   $ciEvidencePath = Join-Path ([System.IO.Path]::GetTempPath()) ("chevoink-ci-" + [guid]::NewGuid().ToString('N') + '.json')
   $ci | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $ciEvidencePath -Encoding utf8
   Invoke-Checked node @('scripts/release-ci.mjs', $revision, $ciEvidencePath)
