@@ -37,7 +37,7 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
     const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '修改第一章选区', selection: { start: 5, end: 10, text: '选区原文。' } })
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })
     const spec = taskSpecSchema.parse(run.taskSpec)
-    expect(spec.scope).toMatchObject({ manuscriptProtocol: 1, selectionBoundary: { version: 1, chapterId: f.chapterId,
+    expect(spec.scope).toMatchObject({ reviewProtocol: 1, manuscriptProtocol: 1, selectionBoundary: { version: 1, chapterId: f.chapterId,
       revision: 3, start: 5, end: 10, prefix: '前😀段。', suffix: '后段。' } })
     expect(await prisma.agentMessage.count({ where: { runId: run.id, role: 'user' } })).toBe(1)
     expect(execution).toHaveBeenCalledWith(expect.objectContaining({ runId: run.id }))
@@ -54,8 +54,16 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
       expect(await prisma.agentQueuedRequest.findUniqueOrThrow({ where: { id: queuedId } })).toEqual(queued)
       expect(execution).not.toHaveBeenCalled()
     }))
-  it('leaves nonselected fresh startup on the existing protocol', () => fixture(async f => {
-    const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '修改第一章' })
+  it.each(['修改第一章', '写下一章'])('freezes a fresh whole-chapter review contract for %s without selection interpretation', prompt => fixture(async f => {
+    const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt })
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
+    expect(spec.scope.reviewProtocol).toBe(1)
+    expect(spec.scope.manuscriptProtocol).toBeUndefined()
+    expect(spec.scope.selectionBoundary).toBeUndefined()
+    expect(spec.scope.writing?.targets).toEqual(prompt === '修改第一章' ? [{ chapterId: f.chapterId, orderIndex: 1 }] : [{ chapterId: null, orderIndex: 2 }])
+  }))
+  it('does not mint a writing review protocol for a nonwriting fresh request', () => fixture(async f => {
+    const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '你好' })
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec).toBeNull()
   }))
 })

@@ -4,12 +4,22 @@ import { toOpenAIParameters, withObjectType, originalToolParameterSchemas } from
 import { getToolsForMode, toOpenAITools } from '../../api/lib/agent/tools/registry.js'
 import { novelImportArguments } from '../../api/lib/agent/tools/import-tools.js'
 import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
-import { storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { chapterBridgeCommitTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
 
 // 回归：novel_import 顶层 discriminatedUnion 转换后没有 type，DeepSeek 按 type null 拒绝，
 // 导致线上继续任务时报 Invalid schema for function 'novel_import'。
 describe('tool schema provider contract', () => {
+  it('preserves exact old frozen commit schema and reveals decision-only only to newly marked tasks', () => {
+    const full = toOpenAIParameters(chapterBridgeCommitTool.parameters)
+    const old = { ...full, properties: Object.fromEntries(Object.entries(full.properties as object).filter(([key]) => key !== 'decisionOnly')) }
+    const scope: TaskSpec['scope'] = { novelId: 'n' }
+    expect(toOpenAITools([chapterBridgeCommitTool], scope)[0].function.parameters).toEqual(old)
+    expect(toOpenAITools([chapterBridgeCommitTool], { ...scope, reviewProtocol: 1 })[0].function.parameters).toEqual(full)
+    expect(originalToolParameterSchemas(chapterBridgeCommitTool, scope)).toContainEqual(old)
+    expect(originalToolParameterSchemas(chapterBridgeCommitTool, { ...scope, reviewProtocol: 1 })).toContainEqual(old)
+    expect((old.required as string[] | undefined) ?? []).not.toContain('decisionOnly')
+  })
   it('every published tool keeps top-level object parameters', () => {
     process.env.NOVEL_IMPORT_ENABLED = 'true'
     for (const mode of ['plan', 'build', 'review'] as const) {

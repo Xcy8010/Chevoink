@@ -761,9 +761,10 @@ export async function commitChapterBridge(input: {
   expectedChapterRevision?: number
   expectedContentHash?: string
   retainedFindings?: import('./chapter-review-guard.js').RetainedChapterReviewDecision[]
+  decisionOnly?: true
   requireQuality?: boolean
   qualityReportId?: string
-}, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number; retainedIssueCount: number }> {
+}, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number; retainedIssueCount: number; decisionOnly?: true; decisionChanged?: boolean; decisionProgress?: { targetId: string; beforeHash: string; afterHash: string } }> {
   if (!transaction) return prisma.$transaction(tx => commitChapterBridge(input, tx))
   const db = transaction
   await lockNovelActiveScope(db, input.novelId)
@@ -818,11 +819,23 @@ export async function commitChapterBridge(input: {
     throw new DataAccessError(409, required.name === 'continuity_validate' ? 'CONTINUITY_CHECK_REQUIRED' : 'QUALITY_CHECK_REQUIRED',
       `当前 r${chapter.revision} 缺少完整且匹配的${required.name === 'continuity_validate' ? '连续性' : '质量'}检查（${required.name === 'continuity_validate' ? readiness.continuity : readiness.quality}）。保留正文；先调用 ${required.name}，compilationId=${compilation.id}，再重新核验交付，不能沿用旧报告或把失败当作通过。`)
   }
+  if (input.decisionOnly && (!input.runId || readiness?.reviewProtocol !== 1 || !input.retainedFindings?.length)) {
+    throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '仅新严格意见协议可分批记录当前完整报告的真实保留决定；未提交章节终态。')
+  }
+  let decisionChanged = false
+  const beforeDecisions = readiness
   if (input.retainedFindings?.length) {
     if (!probeRunId || !readiness) throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '当前任务没有可核验的章节检查记录，未保存留置。')
-    await recordChapterReviewDecisions(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, readiness, input.retainedFindings)
+    decisionChanged = await recordChapterReviewDecisions(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, readiness, input.retainedFindings)
     readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id)
 
+  }
+  if (input.decisionOnly) {
+    const { chapterReviewDecisionTransition } = await import('./chapter-review-guard.js')
+    const decisionProgress = beforeDecisions && readiness ? chapterReviewDecisionTransition(beforeDecisions, readiness) : undefined
+    return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision,
+      skippedMemoryCount: 0, retainedIssueCount: readiness?.retainedDecisions?.length ?? 0, decisionOnly: true, decisionChanged,
+      ...(decisionProgress ? { decisionProgress } : {}) }
   }
   // Manual/legacy tasks retain optional checks. Writing delivery requirements
   // come exclusively from the authenticated original contract, never tool flags.
@@ -832,7 +845,9 @@ export async function commitChapterBridge(input: {
       chapterId: compilation.chapter.id, chapterRevision: chapter.revision }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
   const qualityErrorCount = readiness?.qualityErrorCount ?? (report && qualityReportMatchesContent(report, chapter.revision, chapter.content)
     ? report.findings.filter(finding => finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0)
-  let retainedIssueCount = report?.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length ?? 0
+  const unresolvedQualityCount = report?.findings.filter(finding => finding.disposition !== 'repaired'
+    && (readiness?.reviewProtocol === 1 || finding.authorFeedback !== 'rejected')).length
+  let retainedIssueCount = unresolvedQualityCount ?? 0
   const { hasPendingChapterReviewDecision } = await import('./chapter-review-guard.js')
   if (readiness ? hasPendingChapterReviewDecision(readiness) : continuityErrorCount > 0 || qualityErrorCount > 0) {
     const code = continuityErrorCount > 0 ? 'CONTINUITY_ERRORS_REMAIN'
@@ -842,8 +857,13 @@ export async function commitChapterBridge(input: {
         : '当前检查意见尚未处理；请核对当前报告，明确修订或逐项留置。')
   }
   if (continuityErrorCount > 0 || qualityErrorCount > 0) {
-    retainedIssueCount = continuityErrorCount + (report?.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length ?? qualityErrorCount)
+    retainedIssueCount = continuityErrorCount + (unresolvedQualityCount ?? qualityErrorCount)
   }
+  if (readiness?.reviewProtocol === 1) retainedIssueCount = new Set([
+    ...(report?.findings.filter(finding => finding.disposition !== 'repaired').map(finding => `quality:${report.id}:${finding.id}`) ?? []),
+    ...(readiness.requiredDecisions ?? []).map(item => `${item.source}:${item.reportId}:${item.findingId}`),
+    ...(readiness.retainedDecisions ?? []).map(item => `${item.source}:${item.reportId}:${item.findingId}`),
+  ]).size
   const terminalContext = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext as Record<string, Prisma.JsonValue> : {}
   const terminalContentHash = runtimeJson({ content: chapter.content }).hash
   const sameTerminal = compilation.status === 'completed' && !!compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision

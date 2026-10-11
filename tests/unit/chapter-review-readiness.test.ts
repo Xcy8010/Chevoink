@@ -49,6 +49,26 @@ function fixture(prompt = '写下一章') {
 }
 
 describe('persisted current review readiness', () => {
+  it('keeps old automatic-window interpretation while fresh strict requires every actual unhandled report ref', async () => {
+    const f = fixture()
+    const findings = Array.from({ length: 10 }, (_, i) => ({ id: `f${i}`, source: 'critic', signal: 'emotion_grounding', severity: 'advisory',
+      disposition: 'pending', authorFeedback: null, feedbackReason: null, startOffset: i * 2, endOffset: i * 2 + 1,
+      evidenceExcerpt: '门', explanation: '动作不足', suggestion: '补动作', confidence: 0.9 }))
+    f.report.findings = findings as never
+    expect((await readChapterReviewReadiness(f.tx, f.subject))?.requiredDecisions).toHaveLength(8)
+    f.task.scope.reviewProtocol = 1
+    findings[8].startOffset = findings[0].startOffset; findings[8].endOffset = findings[0].endOffset
+    findings[9].startOffset = 999; findings[9].endOffset = 1000
+    Object.assign(findings[9], { authorFeedback: 'rejected', feedbackReason: '此处保持克制', severity: 'error' })
+    const current = await readChapterReviewReadiness(f.tx, f.subject)
+    expect(current).toMatchObject({ ready: true, completeStrictReview: true, decisionPending: true, qualityErrorCount: 1 })
+    expect(current?.requiredDecisions?.map(item => item.findingId)).toEqual(findings.map(item => item.id))
+    expect(current?.qualityCandidateCount).toBeLessThanOrEqual(8)
+    Object.assign(findings[9], { disposition: 'repaired' })
+    expect((await readChapterReviewReadiness(f.tx, f.subject))?.requiredDecisions).toHaveLength(9)
+    f.task.creativeFreedom = 'bold'
+    expect((await readChapterReviewReadiness(f.tx, f.subject))?.completeStrictReview).toBe(false)
+  })
   it('reads server-owned original lineage without reserving or consuming any budget', async () => {
     const f = fixture()
     await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ ready: true, checksRequired: true,

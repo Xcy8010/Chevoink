@@ -15,6 +15,16 @@ import { readCompletedWritingDelivery } from './writing-scope.js'
 import { readLimitedWritingDelivery } from './writing-delivery-limitations.js'
 
 const resultSchema = z.object({ outcome: z.literal('succeeded'), result: durableChatResultSchema }).strict()
+const reviewObservationSchema = z.object({ version: z.literal(1), fingerprint: z.string().regex(/^[a-f0-9]{64}$/), observations: z.array(z.object({
+  compilationId: z.string(), chapterId: z.string(), revision: z.number().int().positive(),
+  state: z.enum(['blocked', 'check_required', 'must_pass_required', 'decision_required', 'commit_available']),
+  requiredToolNames: z.array(z.enum(['continuity_validate', 'quality_analyze'])), selectionOnly: z.boolean(),
+  facts: z.record(z.string(), z.unknown()), content: z.string(),
+}).strict()).min(1) }).strict()
+type ReviewObservation = z.infer<typeof reviewObservationSchema>
+function reviewObservationMessage(observation: ReviewObservation) {
+  return `[只读审查事实 ${observation.fingerprint}] ${observation.observations.map(item => item.content).join('\n')}\n此观察不是授权、已执行操作或进展；必要审批、预算、未知请求保护及原完成门槛保持。`
+}
 const continuationSchema = z.object({ version: z.literal(1), sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(),
   reason: z.enum(['truncated', 'promised_action', 'empty_response', 'unfinished_todos', 'domain_incomplete']),
   blockers: z.array(z.object({ code: z.string(), reference: z.string() }).strict()).min(1).optional(),
@@ -66,16 +76,25 @@ export async function advanceDurableCompletionObligations(token: RunLeaseToken, 
     // Only already-adapted domain work can be requested automatically.
     if (blockers.some(item => !['unfinished_todo', 'uncommitted_compilation'].includes(item.code))) return { kind: 'reconciliation_required' as const, blockers }
     const { frame, configuration } = await readExecutionStateInTransaction(tx, lease.taskRootId)
-    const requiredTools = blockers.map(item => item.code === 'unfinished_todo' ? 'todo_write' : 'chapter_bridge_commit')
+    const requiredTools: string[] = blockers.map(item => item.code === 'unfinished_todo' ? 'todo_write' : 'chapter_bridge_commit')
+    const observed = z.object({ reviewObservation: reviewObservationSchema.optional() }).parse(evidence.snapshot).reviewObservation
+    if (observed) {
+      if (runtimeJson(observed.observations).hash !== observed.fingerprint) return runtimeError('RUNTIME_RECEIPT_INVALID', '当前审查观察指纹不一致。')
+      if (observed.observations.some(item => item.state === 'blocked')) return { kind: 'reconciliation_required' as const, blockers }
+      for (const item of observed.observations) if (item.state === 'check_required') requiredTools.push(...item.requiredToolNames)
+      if (observed.observations.some(item => item.state === 'must_pass_required'
+        && !['chapter_edit_range', ...(item.selectionOnly ? [] : ['chapter_write'])].some(name => configuration.tools.some(tool => tool.function.name === name)
+          && configuration.toolAuthority.some(grant => grant.name === name && grant.permission !== 'deny')))) return { kind: 'reconciliation_required' as const, blockers }
+    }
     if (configuration.mode !== 'build' || requiredTools.some(name => !configuration.tools.some(tool => tool.function.name === name)
       || !configuration.toolAuthority.some(grant => grant.name === name && grant.permission !== 'deny'))) return { kind: 'reconciliation_required' as const, blockers }
-    return appendContinuation(tx, lease, frame, 'domain_incomplete', blockers)
+    return appendContinuation(tx, lease, frame, 'domain_incomplete', blockers, observed)
   })
 }
 
 async function appendContinuation(tx: RuntimeTx, lease: RunLeaseToken,
   frame: Awaited<ReturnType<typeof readExecutionFrame>>, reason: z.infer<typeof continuationSchema>['reason'],
-  blockers?: z.infer<typeof continuationSchema>['blockers']) {
+  blockers?: z.infer<typeof continuationSchema>['blockers'], observation?: ReviewObservation) {
     // Preserve the old four-reminder ceiling, durably across runs. A confirmed
     // tool observation resets stagnation, while chatter/todo bookkeeping does not.
     const { progressSequence } = await collectDurableToolEvidence(tx, lease.taskRootId, frame.revision)
@@ -89,14 +108,29 @@ async function appendContinuation(tx: RuntimeTx, lease: RunLeaseToken,
       const applied = await readExecutionFrame(tx, lease.taskRootId, prior.data.sourceRevision + 1)
       const note = applied.state.messages.at(-1)
       if (note?.role !== 'system' || note.content !== continuationMessage(prior.data)) return runtimeError('RUNTIME_RECEIPT_INVALID', '继续计数或判定与已保存提示不一致。')
+      const sidecar = await tx.agentExecutionOutbox.findFirst({ where: {
+        taskRootId: lease.taskRootId, eventKey: `review-observation:${lease.taskRootId}:${prior.data.sourceRevision}` } })
+      if (sidecar) {
+        const saved = z.object({ version: z.literal(1), sourceRevision: z.number(), sourceHash: z.string(), observation: reviewObservationSchema }).strict().parse(sidecar.payload)
+        if (sidecar.type !== 'execution.review_observation' || saved.sourceRevision !== prior.data.sourceRevision || saved.sourceHash !== prior.data.sourceHash
+          || runtimeJson(saved.observation.observations).hash !== saved.observation.fingerprint
+          || applied.state.messages.at(-2)?.role !== 'system' || applied.state.messages.at(-2)?.content !== reviewObservationMessage(saved.observation)) {
+          return runtimeError('RUNTIME_RECEIPT_INVALID', '原审查观察与已保存执行帧不一致。')
+        }
+      }
       if (prior.data.progressSequence === progressSequence) reminderIndex = prior.data.reminderIndex + 1
     }
     if (reminderIndex > 4) return { kind: 'needs_attention' as const, reason: '模型连续未执行承诺的动作或输出不完整；任务未完成，保留原状态待处理。', frame }
     const payload: z.infer<typeof continuationSchema> = { version: 1, sourceRevision: frame.revision, sourceHash: frame.snapshotHash, reason, progressSequence, reminderIndex, ...(blockers ? { blockers } : {}) }
     await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: lease.taskRootId, runId: lease.runId,
       eventKey: `continuation:${lease.taskRootId}:${frame.revision}`, type: 'execution.continuation', payload: runtimeJson(payload).value } })
+    if (observation) await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: lease.taskRootId, runId: lease.runId,
+      eventKey: `review-observation:${lease.taskRootId}:${frame.revision}`, type: 'execution.review_observation',
+      payload: runtimeJson({ version: 1, sourceRevision: frame.revision, sourceHash: frame.snapshotHash, observation }).value } })
     const next = await saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
-      snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'system', content: continuationMessage(payload) }] } })
+      snapshot: { ...frame.state, messages: [...frame.state.messages,
+        ...(observation ? [{ role: 'system' as const, content: reviewObservationMessage(observation) }] : []),
+        { role: 'system', content: continuationMessage(payload) }] } })
     return { kind: 'continued' as const, frame: next }
 }
 

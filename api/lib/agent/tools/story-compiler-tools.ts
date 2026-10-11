@@ -783,6 +783,7 @@ export const chapterBridgeCommitTool = defineTool({
   parameters: z.object({
     compilationId: z.string().min(1).optional(),
     retainedFindings,
+    decisionOnly: z.literal(true).optional(),
     chapterSummary: z.string().min(1).max(2000).optional(),
     exitState: storyStateSchema.optional(),
     lastUnfinishedAction: z.string().max(1000).optional(),
@@ -856,7 +857,15 @@ export const chapterBridgeCommitTool = defineTool({
       endingStructure: args.endingStructure?.trim() || `以${lastTask?.turn || lastExit.action || '当前状态变化'}收束`,
     }
     try {
-      const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...terminal, retainedFindings: args.retainedFindings, expectedChapterRevision: compilation.chapter.revision, expectedContentHash: createHash('sha256').update(compilation.chapter.content).digest('hex') }, ctx.transaction)
+      const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...terminal, retainedFindings: args.retainedFindings,
+        ...(args.decisionOnly ? { decisionOnly: true } : {}), expectedChapterRevision: compilation.chapter.revision, expectedContentHash: createHash('sha256').update(compilation.chapter.content).digest('hex') }, ctx.transaction)
+      if (result.decisionOnly) return {
+        output: `已${result.decisionChanged ? '记录' : '核对原有'} ${result.retainedIssueCount} 条当前意见保留决定。正文、章节桥、Scene Task及故事记忆未提交，检查意见未被修复或判定通过；普通提交仍须全部当前意见决策与原硬通过要求。`,
+        summary: result.decisionChanged ? '记录当前意见决定 · 章节未提交' : '原意见决定未变化 · 章节未提交',
+        ...(result.decisionProgress ? { semanticTransition: result.decisionProgress } : {}),
+        display: { kind: 'storyCompiler', compilationId: result.compilationId, phase: 'check', title: '意见决定已保存 · 未提交终态',
+          detail: `r${result.chapterRevision}`, items: [`当前已保留 ${result.retainedIssueCount} 项，尚须核验其余义务`] },
+      }
       const retained = result.retainedIssueCount ? `本次仍保留 ${result.retainedIssueCount} 条检查意见及其处置记录；留置不表示已修复，不能把建议数量当作检查失败。` : ''
       return {
         output: `COMMIT 完成，章节 ${result.chapterId}@r${result.chapterRevision} 的 Chapter Bridge 与 Scene Task 终态已提交。已按原任务核验当前版本所需检查；检查完成不代表所有意见已消除，关注意见仍保留待审。${retained}故事记忆仅提交候选，作者确认前不参与事实召回。${result.skippedMemoryCount ? `其中 ${result.skippedMemoryCount} 项记忆因作者已删除而跳过，未重建；不影响章节终态提交。` : ''}本任务仅在原请求范围内交付。`,

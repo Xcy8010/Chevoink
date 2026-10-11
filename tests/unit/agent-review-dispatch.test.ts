@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
+import { currentReviewNextStepGuidance, projectCurrentReviewNextStep, nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 
 function pending(overrides: Partial<ChapterReviewReadiness> = {}): ChapterReviewReadiness {
@@ -8,6 +8,45 @@ function pending(overrides: Partial<ChapterReviewReadiness> = {}): ChapterReview
     requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'compile' } }], ...overrides }
 }
 describe('server review fallback', () => {
+  it('keeps old interpretation absent and projects complete current strict refs separately from automatic candidates', () => {
+    expect(projectCurrentReviewNextStep(pending())).toBeNull()
+    const refs = Array.from({ length: 10 }, (_, i) => ({ source: 'quality' as const, reportId: 'q', findingId: `f${i}` }))
+    const state = pending({ reviewProtocol: 1, completeStrictReview: true, selectionOnly: true, ready: true, quality: 'complete', requiredTools: [],
+      qualityCandidateCount: 8, decisionPending: true, requiredDecisions: refs, retainedDecisions: refs.slice(0, 2) })
+    const step = projectCurrentReviewNextStep(state)!
+    expect(step).toMatchObject({ state: 'decision_required', automaticCandidateCount: 8, pending: refs.slice(2), retainedCount: 2, retentionCompletes: true })
+    const text = currentReviewNextStepGuidance(step)
+    expect(text).toContain('decisionOnly:true')
+    expect(text).toContain('不得使用 chapter_write')
+    expect(text).toContain('rejected 仅为反馈态度')
+    expect(nextMergedReviewReminder({ ...state, qualityCandidateCount: 0 }, new Set(['chapter_bridge_commit']), new Set(), true)).toBe('compile:chapter:4:merged')
+  })
+  it('does not turn retained decisions into hard pass or incomplete assessment completion', () => {
+    const hard = projectCurrentReviewNextStep(pending({ reviewProtocol: 1, ready: true, quality: 'complete', requiredTools: [], mustPassPending: true }))!
+    expect(hard).toMatchObject({ state: 'must_pass_required', retentionCompletes: false })
+    expect(currentReviewNextStepGuidance(hard)).toContain('不能替代硬通过要求')
+    const incomplete = projectCurrentReviewNextStep(pending({ reviewProtocol: 1, quality: 'incomplete' }))!
+    expect(incomplete).toMatchObject({ state: 'blocked', retentionCompletes: false })
+    expect(currentReviewNextStepGuidance(incomplete)).toContain('不重放未知或已尝试付费请求')
+    expect(projectCurrentReviewNextStep(pending({ reviewProtocol: 1, continuity: 'missing', quality: 'incomplete', requiredTools: [
+      { name: 'continuity_validate', args: { compilationId: 'compile' } }, { name: 'quality_analyze', args: { compilationId: 'compile' } },
+    ] }))?.state).toBe('blocked')
+    const missing = projectCurrentReviewNextStep(pending({ reviewProtocol: 1 }))!
+    expect(missing).toMatchObject({ state: 'check_required', requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'compile' } }] })
+    const complete = projectCurrentReviewNextStep(pending({ reviewProtocol: 1, ready: true, quality: 'complete', requiredTools: [] }))!
+    expect(complete.state).toBe('commit_available')
+  })
+  it('keeps every strict ref as a fact but offers a legally sized first retention batch', () => {
+    const refs = Array.from({ length: 81 }, (_, i) => ({ source: 'quality' as const, reportId: 'q', findingId: `f${i}` }))
+    const step = projectCurrentReviewNextStep(pending({ reviewProtocol: 1, ready: true, requiredTools: [], decisionPending: true, requiredDecisions: refs }))!
+    const text = currentReviewNextStepGuidance(step)
+    const template = JSON.parse(text.split('reason须替换为实际原因）：')[1].split('。留置不是修复')[0])
+    expect(template).toMatchObject({ decisionOnly: true })
+    expect(template.retainedFindings.map((item: { findingId: string }) => item.findingId)).toEqual(refs.slice(0, 40).map(item => item.findingId))
+    expect(step.pending).toEqual(refs)
+    expect(text).toContain('当前尚需处置81项')
+    expect(text).toContain('每批后重读当前待处理引用')
+  })
   const available = new Set(['quality_analyze', 'continuity_validate'])
   it('runs a missing current assessment through its original compiler', () => {
     expect(nextReviewDispatch(pending(), available, new Set())).toMatchObject({ kind: 'tool',

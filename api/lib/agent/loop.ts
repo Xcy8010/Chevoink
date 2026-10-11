@@ -1792,13 +1792,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
         else if (readiness?.ready && toolContext.sandboxMode !== 'read_only'
           && !toolContext.inlineChild && !toolContext.protectedChapterIds?.has(readiness.chapterId)
-          && (readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)) {
+          && (readiness.reviewProtocol === 1 ? hasPendingChapterReviewDecision(readiness) : readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)) {
           const key = nextMergedReviewReminder(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, hasPendingChapterReviewDecision(readiness))
           if (key) {
             automaticReviewAttempts.add(key)
             await persistCheckpoint()
             automaticReviewTriggered = true
-            mergedReviewReminder = `[系统/只读状态] 当前 compilationId=${readiness.compilationId}、chapterId=${readiness.chapterId}、r${readiness.revision} 的检查已完成，仍有原授权范围内的意见待处理。核对当前正文和两类报告${readiness.qualityReportId ? `（质量报告 ${readiness.qualityReportId}）` : ''}；优先合并安全的事实与审美修改，也可分步调用 chapter_edit_range 或 chapter_write，不限一次调用。不能安全修改的候选，可直接调用 chapter_bridge_commit 并传 retainedFindings，逐项使用当前报告的 source、reportId、findingId 与具体保留原因；quality findingId 使用真实意见ID，不能用序号或把意见ID填为reportId。chapter_bridge_get 可读取准确的待处理引用。没有实际修改正文时，意见留置与终态提交同次完成，不需要重新检查。实际修改后复核最终版本再提交。普通编辑不增加付费自动修订额度，不重放未知请求或改变原范围。`
+            mergedReviewReminder = readiness.reviewProtocol === 1 ? `[系统/只读状态] ${chapterReviewDecisionGuidance(readiness)}` : `[系统/只读状态] 当前 compilationId=${readiness.compilationId}、chapterId=${readiness.chapterId}、r${readiness.revision} 的检查已完成，仍有原授权范围内的意见待处理。核对当前正文和两类报告${readiness.qualityReportId ? `（质量报告 ${readiness.qualityReportId}）` : ''}；优先合并安全的事实与审美修改，也可分步调用 chapter_edit_range 或 chapter_write，不限一次调用。不能安全修改的候选，可直接调用 chapter_bridge_commit 并传 retainedFindings，逐项使用当前报告的 source、reportId、findingId 与具体保留原因；quality findingId 使用真实意见ID，不能用序号或把意见ID填为reportId。chapter_bridge_get 可读取准确的待处理引用。没有实际修改正文时，意见留置与终态提交同次完成，不需要重新检查。实际修改后复核最终版本再提交。普通编辑不增加付费自动修订额度，不重放未知请求或改变原范围。`
           }
         }
       }
@@ -2073,7 +2073,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               && !(Array.isArray(parsed.retainedFindings) && parsed.retainedFindings.length > 0)
               && toolContext.sandboxMode !== 'read_only' && !toolContext.inlineChild
               && !toolContext.protectedChapterIds?.has(readiness.chapterId)
-              && (readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)) {
+              && (readiness.reviewProtocol === 1 ? hasPendingChapterReviewDecision(readiness) : readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)) {
               const available = new Set(tools.map(tool => tool.name))
               const key = nextMergedReviewReminder(readiness, available, automaticReviewAttempts, hasPendingChapterReviewDecision(readiness))
               const reader = tools.find(tool => tool.name === 'chapter_bridge_get')
@@ -2394,7 +2394,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         await bus.persist()
         consumedReviewDecisionFeedback.add(currentFeedback!.key)
         await persistCheckpoint()
-        messages.push({ role: 'user', content: `[系统] 已取得当前版本的真实检查意见，按刚读取的依据作具体修订或逐项留置并提交终态。正文未变时无需再次检查；读取不是修复或完成。${chapterReviewDecisionGuidance(review!)}` })
+        messages.push({ role: 'user', content: review!.reviewProtocol === 1 ? `[系统] 已读取真实检查意见；读取不是处理或完成。${chapterReviewDecisionGuidance(review!)}` : `[系统] 已取得当前版本的真实检查意见，按刚读取的依据作具体修订或逐项留置并提交终态。正文未变时无需再次检查；读取不是修复或完成。${chapterReviewDecisionGuidance(review!)}` })
       }
       const compatibilityRead = compatibilityReadTargets !== null && compatibilityReadObserved
       compatibilityReadTargets = null

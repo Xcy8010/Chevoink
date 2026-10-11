@@ -19,6 +19,11 @@ export function toOpenAIParameters(parameters: z.ZodType): Record<string, unknow
  * Execution still parses the original full schema and validates scope. */
 export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
   const parameters = toOpenAIParameters(tool.parameters)
+  if (tool.name === 'chapter_bridge_commit') {
+    const properties = parameters.properties as Record<string, unknown>
+    return scope?.reviewProtocol === 1 ? { description: `${tool.description} 新严格意见协议可传decisionOnly:true与每批最多40条retainedFindings，仅保存当前真实意见保留决定，不提交章节桥、正文或记忆；随后普通提交仍校验全部意见和硬通过要求。`, parameters }
+      : { description: tool.description, parameters: { ...parameters, properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'decisionOnly')) } }
+  }
   const writing = scope?.writing
   const target = writing?.kind === 'bounded' && writing.targets.length === 1 ? writing.targets[0] : undefined
   const globalNewChapter = target?.chapterId === null && Number.isSafeInteger(target.orderIndex) && target.orderIndex > 0
@@ -48,7 +53,7 @@ export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'descrip
  * Callers must supply scope from the verified original task, never model input. */
 export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope: TaskSpec['scope']): Record<string, unknown>[] {
   const current = toOpenAIParameters(tool.parameters)
-  const additive = tool.name === 'chapter_create' ? 'newVolume' : tool.name === 'story_compiler_prepare' ? 'volumeDecision' : null
+  const additive = tool.name === 'chapter_create' ? 'newVolume' : tool.name === 'story_compiler_prepare' ? 'volumeDecision' : tool.name === 'chapter_bridge_commit' ? 'decisionOnly' : null
   const legacy = additive && current.properties && typeof current.properties === 'object'
     ? { ...current, properties: Object.fromEntries(Object.entries(current.properties).filter(([key]) => key !== additive)) } : null
   const previousPrepare = tool.name === 'story_compiler_prepare' && scope.writing?.tailVolume

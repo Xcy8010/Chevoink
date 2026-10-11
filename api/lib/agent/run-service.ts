@@ -469,17 +469,25 @@ export async function startLoopRunLocked(
     }
     await tx.agentMessage.create({ data: { id: admittedMessageId, runId: created.id, sessionId: session.id,
       role: options.goal && options.goal.trigger !== 'author' ? 'system' : 'user', parts: admittedParts } })
-    // Opt in only a genuine fresh selected author admission. Async bootstrap,
+    // Opt in only a genuine fresh author admission. Async bootstrap,
     // old missing contracts, goal continuation and child briefs cannot mint a
     // new interpretation of an already admitted task.
-    if (input.selection && !previousRun && !previousSpec && !durablePrevious
+    if (!previousRun && !previousSpec && !durablePrevious
       && !session.spawnedFromRunId && options.concurrencyScope !== 'orchestration'
       && (!options.goal || options.goal.trigger === 'author')) {
       const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
-        prompt: input.prompt, selection: input.selection, manuscriptProtocol: 1,
+        prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1,
         creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
-      const frozen = await freezeWritingScope(tx, { userId, novelId: session.novelId, runId: created.id }, fresh, input.prompt)
-      created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(frozen)) as Prisma.InputJsonValue } })
+      if (input.selection || ['write', 'revise'].includes(fresh.intent) && !['proposal_only', 'conversation_only'].includes(fresh.writingPacing ?? '')) {
+        // Preserve the original protected-body snapshot normally captured by
+        // async initialization when freezing this fresh contract at admission.
+        if (fresh.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')) {
+          const chapters = await tx.chapter.findMany({ where: { ...activeChapterScope(session.novelId), authorId: userId }, select: { id: true } })
+          fresh.scope.chapterIds = chapters.map(chapter => chapter.id)
+        }
+        const frozen = await freezeWritingScope(tx, { userId, novelId: session.novelId, runId: created.id }, fresh, input.prompt)
+        created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(frozen)) as Prisma.InputJsonValue } })
+      }
     }
     if (steering) await tx.agentMessage.create({ data: { id: steeringMessageId!, runId: created.id, sessionId: session.id, role: 'user', parts: [
       { type: 'text', text: steering.prompt }, ...(steering.attachments ?? []).map(item => ({

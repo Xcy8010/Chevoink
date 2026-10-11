@@ -20,6 +20,8 @@ export const taskScopeSchema = z.object({
   chapterIds: z.array(z.string().min(1)).optional(),
   /** Only fresh server admission opts in; absence preserves frozen legacy runs. */
   manuscriptProtocol: z.literal(1).optional(),
+  /** Fresh author admission: complete strict review obligations, separate from automatic repair windows. */
+  reviewProtocol: z.literal(1).optional(),
   selectionBoundary: z.object({ version: z.literal(1), chapterId: z.string().min(1),
     revision: z.number().int().positive(), contentHash: z.string().regex(/^[a-f0-9]{64}$/),
     start: z.number().int().nonnegative(), end: z.number().int().nonnegative(),

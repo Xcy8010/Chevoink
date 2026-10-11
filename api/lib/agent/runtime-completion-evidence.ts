@@ -1,4 +1,6 @@
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
+import { readChapterReviewReadiness } from './chapter-review-guard.js'
+import { projectCurrentReviewNextStep, currentReviewNextStepGuidance } from './review-dispatch.js'
 import { countReportChineseCharacters } from '../../../shared/agent-output.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { withManuscriptRunLease, type RunLeaseToken } from './runtime-lease.js'
@@ -73,11 +75,21 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       ...limitedChildren.map(item => ({ code: 'limited_child_delivery', reference: item.childRunId })),
       ...(budget.unresolvedAttempts > 0n ? [{ code: 'unresolved_usage', reference: root.id }] : []),
     ]
+    const observations = []
+    if (spec.scope.reviewProtocol === 1) for (const item of blockers.filter(item => item.code === 'uncommitted_compilation')) {
+      const review = await readChapterReviewReadiness(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId }, item.reference)
+      const next = review && projectCurrentReviewNextStep(review)
+      if (next) observations.push({ compilationId: next.compilationId, chapterId: next.chapterId, revision: next.revision,
+        state: next.state, requiredToolNames: next.requiredTools.map(tool => tool.name), selectionOnly: next.selectionOnly,
+        facts: next, content: currentReviewNextStepGuidance(next) })
+    }
+    const reviewObservation = observations.length ? { version: 1, observations, fingerprint: runtimeJson(observations).hash } : null
     const snapshot = runtimeJson({ version: 1, taskRootId: root.id, inputHash: root.inputHash, sourceRevision: frame.revision, sourceHash: frame.snapshotHash,
       candidateHash: runtimeJson({ content: last.content, reasoning: last.reasoning ?? null }).hash,
       originalRequest: root.requestSnapshot,
       obligations: { goals: spec.goals, expectedOutputs: spec.expectedOutputs, postconditions: spec.postconditions, hardConstraints: spec.hardConstraints },
       verification: 'required', postconditionChecks, reportLengthChecks, deliverables, blockers, effects: evidence.effects, failedOperations, todos,
+      ...(reviewObservation ? { reviewObservation } : {}),
       ...(limitedWritingDelivery ? { limitedWritingDelivery } : {}),
       memoryJobs: memoryWork.map(item => ({ id: item.job.id, sourceOperationId: item.source.operationId, chapterId: item.job.chapterId,
         chapterRevision: item.job.chapterRevision, verified: item.completed })),

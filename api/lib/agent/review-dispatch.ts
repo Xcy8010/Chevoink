@@ -1,6 +1,41 @@
 import { COMPILER_CONTINUITY_PROTOCOL } from './compiler-continuity-contract.js'
 import type { ChapterReviewReadiness } from './chapter-review-guard.js'
 
+/** Current facts only. This is neither a writing grant nor a retry/paid-call instruction. */
+export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) {
+  if (readiness.reviewProtocol !== 1) return null
+  const retained = readiness.retainedDecisions ?? []
+  const same = (a: { source: string; reportId: string; findingId: string }, b: typeof a) =>
+    a.source === b.source && a.reportId === b.reportId && a.findingId === b.findingId
+  const pending = (readiness.requiredDecisions ?? []).filter(item => !retained.some(saved => same(item, saved)))
+  const incomplete = readiness.requiredTools.some(tool => (tool.name === 'quality_analyze' ? readiness.quality : readiness.continuity) === 'incomplete')
+  const state = !readiness.ready ? incomplete ? 'blocked' : 'check_required'
+    : readiness.mustPassPending ? 'must_pass_required'
+      : readiness.decisionPending ? 'decision_required' : 'commit_available'
+  return { version: 1 as const, compilationId: readiness.compilationId, chapterId: readiness.chapterId, revision: readiness.revision,
+    state, continuity: readiness.continuity, quality: readiness.quality, binding: readiness.decisionBinding ?? null,
+    requiredTools: readiness.requiredTools, pending, details: (readiness.decisionDetails ?? []).filter(item => pending.some(ref => same(item, ref))),
+    retainedCount: retained.length, automaticCandidateCount: readiness.qualityCandidateCount ?? 0,
+    completeStrictReview: readiness.completeStrictReview === true, selectionOnly: readiness.selectionOnly === true,
+    retentionCompletes: state === 'decision_required', unresolvedFactErrors: readiness.continuityErrorCount + readiness.qualityErrorCount }
+}
+
+export type CurrentReviewNextStep = NonNullable<ReturnType<typeof projectCurrentReviewNextStep>>
+export function currentReviewNextStepGuidance(step: CurrentReviewNextStep) {
+  const facts = `当前 compilationId=${step.compilationId}、chapterId=${step.chapterId}、r${step.revision}：连续性=${step.continuity}，质量=${step.quality}。`
+  const authority = step.selectionOnly
+    ? '原任务仅授权冻结选区，写入只能使用 chapter_edit_range 逐字唯一锚点，保留选区外正文；不得使用 chapter_write、chapter_append 或元数据修改扩大范围。'
+    : '具体修改仍须原始作者写入授权与必要审批，允许时使用当前正文的精确 chapter_edit_range，也可原授权内 chapter_write。'
+  const scope = `${authority}报告不授予定位或写入权限；未定位、重叠、证据不足的意见可引用真实ref说明保留原因，不能猜测位置或机械改剧情。quality_finding_feedback 的 rejected 仅为反馈态度，不能替代绑定当前版本的 retainedFindings 理由与决定。`
+  const candidates = `自动本批安全候选=${step.automaticCandidateCount}（自动修订最多8处）；${step.completeStrictReview ? '完整严格意见义务独立于自动安全窗口，' : ''}当前尚需处置${step.pending.length}项，已明确留置${step.retainedCount}项。`
+  const retentionTemplate = { ...(step.pending.length > 40 ? { decisionOnly: true } : {}), retainedFindings: step.pending.slice(0, 40).map(item => ({ ...item, reason: '说明此意见为何应保留或无法安全修改' })) }
+  if (step.state === 'blocked') return `${facts}必要检查未确认完成。读取已保存状态与失败证据；不重放未知或已尝试付费请求，不以留置替代完整检查。正文与进度保留，尚不能提交为完成。`
+  if (step.state === 'check_required') return `${facts}最终保存版本仍缺必要检查：${JSON.stringify(step.requiredTools)}。先核对当前状态，仅通过原工具、原审批、原预算与恢复准入执行缺项；不重买已完成检查。尚不能提交为完成。`
+  if (step.state === 'must_pass_required') return `${facts}${candidates}${scope}原作者明确要求检查通过；retainedFindings不能替代硬通过要求。按证据合法修改后复核最终版本；无法安全完成时保留事实及阻碍，不能提交或宣称通过。当前真实意见：${JSON.stringify(step.details)}。`
+  if (step.state === 'commit_available') return `${facts}当前必要检查与意见决策已齐备，可在原权限及必要审批下提交 chapter_bridge_commit。${step.unresolvedFactErrors > 0 ? '保留的事实错误仍未解决，留置不表示检查通过。' : ''}`
+  return `${facts}${candidates}${scope}先用 chapter_bridge_get / quality_report_get 核对真实意见，在原授权内精确应用或通过 chapter_bridge_commit 的 retainedFindings 逐项合理保留。超过单次40项时可用 decisionOnly:true 分批保存真实保留决定，不提交章节终态；每批后重读当前待处理引用，最后普通提交仍校验全部当前义务。实际修改后复核最终保存版本；正文未变无需重买检查，也不制造无变化正文写入。详情：${JSON.stringify(step.details)}。精确保留模板（仅当前首批最多40项，reason须替换为实际原因）：${JSON.stringify(retentionTemplate)}。留置不是修复，不能声称全部意见已应用。`
+}
+
 export function reviewDispatchKey(readiness: { compilationId: string | null; chapterId: string; revision: number }, name: string): string {
   const base = `${readiness.compilationId}:${readiness.chapterId}:${readiness.revision}:${name}`
   return name === 'continuity_validate' ? `${base}:protocol${COMPILER_CONTINUITY_PROTOCOL}` : base
@@ -11,7 +46,7 @@ export function reviewDispatchKey(readiness: { compilationId: string | null; cha
 export function nextMergedReviewReminder(readiness: ChapterReviewReadiness | null,
   available: ReadonlySet<string>, attempted: ReadonlySet<string>, channelOpen: boolean): string | null {
   if (!readiness?.ready || !readiness.checksRequired || !channelOpen
-    || !(readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)
+    || !(readiness.reviewProtocol === 1 ? readiness.decisionPending : readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)
     || !['chapter_edit_range', 'chapter_write', 'chapter_bridge_commit'].some(name => available.has(name))) return null
   const key = reviewDispatchKey(readiness, 'merged')
   return attempted.has(key) ? null : key
