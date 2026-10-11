@@ -1,4 +1,6 @@
 import { toOpenAIToolPresentation } from '../tool-schema.js'
+import { describeAgentToolContract } from './contract.js'
+import { hasAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
 import { configureAgentTool, modelListTool } from './configuration-tools.js'
 import { modelAssignmentTool } from './model-assignment-tools.js'
 
@@ -235,10 +237,22 @@ export const allTools: AgentTool<any>[] = [
   subAgentDelegateTool,
   // 交互
   askUserTool,
-]
+].map(tool => {
+  if (!hasAgentToolPresentation(tool.name)) throw new Error(`Author presentation missing: ${tool.name}`)
+  return { ...tool, contract: describeAgentToolContract(tool) }
+})
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 const toolsByName = new Map(allTools.map((tool) => [tool.name, tool]))
+if (toolsByName.size !== allTools.length) throw new Error('Duplicate registered agent tool')
+
+/** Every field comes from the actual registered definition. No independent
+ * allowlist, model call, permission widening or execution side effect. */
+export function getAgentToolManifest() {
+  return allTools.map(tool => ({ name: tool.name, title: tool.title, contract: tool.contract!,
+    permission: { ...tool.permission }, readOnly: tool.readOnly,
+    dangerous: tool.dangerous === true, alwaysConfirm: tool.alwaysConfirm === true }))
+}
 
 /** Goal tools are a server-owned capability, never a consequence of the
  * orchestrator's catch-all registry entry. Callers must prove goal ownership

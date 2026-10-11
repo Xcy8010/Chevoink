@@ -11,9 +11,11 @@ import type { AgentRunPhase } from '../../src/features/studio/agent/agentStore'
 import { useMemo } from 'react'
 
 afterEach(cleanup)
+const row = (id: string) => document.querySelector(`[data-agent-call-id="${id}"]`)
+
 const parts: AgentMessagePart[] = [
   { type: 'reasoning', text: '执行中的思考' },
-  { type: 'tool-call', callId: 'check', toolName: 'quality_analyze', title: '质量检查', status: 'failed', summary: '检查已中断' },
+  { type: 'tool-call', callId: 'check', toolName: 'quality_analyze', title: '质量检查', status: 'success', summary: '检查已完成' },
   { type: 'text', text: '检查前的执行记录' },
 ]
 
@@ -58,41 +60,41 @@ it.each(['paused', 'usage_limited', 'budget_limited', 'blocked', 'cancelled'] as
   expect(screen.getByText('正在处理...')).toBeTruthy()
   ui.rerender(<Fixture status={status} />)
   expect(screen.queryByText('正在处理...')).toBeNull()
-  expect(screen.getByText('a1检查')).toBeTruthy()
+  expect(row('a1')).toBeTruthy()
   expect(screen.getByText('a1执行记录')).toBeTruthy()
-  fireEvent.click(screen.getByRole('button', { name: '已处理 2 个操作' }))
-  expect(screen.queryByText('a1检查')).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: '已处理 2 个操作' }))
-  expect(screen.getByText('a1检查')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '查看 1 项操作' }))
+  expect(row('a1')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '查看 1 项操作' }))
+  expect(row('a1')).toBeTruthy()
 })
 
 it('continues folding completed work by default', () => {
   render(<Fixture status="completed" />)
-  expect(screen.queryByText('a1检查')).toBeNull()
+  expect(row('a1')).toBeNull()
   expect(screen.queryByText('正在处理...')).toBeNull()
 })
 
 it('pause -> resume -> completed retains one execution process without presenting internal prompts even during manual expansion', () => {
   const ui = render(<Fixture status="paused" />)
-  fireEvent.click(screen.getByRole('button', { name: '已处理 2 个操作' }))
-  fireEvent.click(screen.getByRole('button', { name: '已处理 2 个操作' }))
+  fireEvent.click(screen.getByRole('button', { name: '查看 1 项操作' }))
+  fireEvent.click(screen.getByRole('button', { name: '查看 1 项操作' }))
   ui.rerender(<Fixture status="active" messages={resumedMessages} runId="r2" />)
-  expect(screen.getByText('a1检查')).toBeTruthy()
-  expect(screen.getByText('a2检查')).toBeTruthy()
+  expect(row('a1')).toBeTruthy()
+  expect(row('a2')).toBeTruthy()
   expect(screen.queryByText('系统续跑记录')).toBeNull()
   ui.rerender(<Fixture status="completed" messages={resumedMessages} runId="r2" />)
-  expect(screen.getAllByRole('button', { name: '已处理 4 个操作' })).toHaveLength(1)
-  expect(screen.queryByText('a1检查')).toBeNull()
-  expect(screen.queryByText('a2检查')).toBeNull()
+  expect(screen.getAllByRole('button', { name: '查看 2 项操作' })).toHaveLength(1)
+  expect(row('a1')).toBeNull()
+  expect(row('a2')).toBeNull()
   expect(screen.queryByText('a1执行记录')).toBeNull()
   expect(screen.queryByText('系统续跑记录')).toBeNull()
   expect(screen.getByText('a2执行记录')).toBeTruthy()
   expect(screen.queryByText('正在处理...')).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: '已处理 4 个操作' }))
-  expect(screen.getByText('a1检查')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '查看 2 项操作' }))
+  expect(row('a1')).toBeTruthy()
   expect(screen.queryByText('系统续跑记录')).toBeNull()
   ui.rerender(<Fixture status="completed" messages={[...resumedMessages]} runId="r2" />)
-  expect(screen.getByText('a1检查')).toBeTruthy()
+  expect(row('a1')).toBeTruthy()
 })
 
 it.each(['active', 'paused', 'completed'] as const)('%s goal history preserves author steering and saved progress after an edited revision without a duplicate prompt', status => {
@@ -110,11 +112,11 @@ it.each(['active', 'paused', 'completed'] as const)('%s goal history preserves a
   expect(screen.queryByText('内部重复原目标')).toBeNull()
   // The genuine steering boundary keeps its own execution block, and both
   // blocks retain their saved operations when the author opens the history.
-  const buttons = screen.getAllByRole('button', { name: '已处理 2 个操作' })
-  if (!screen.queryByText('a1检查')) fireEvent.click(buttons[0])
-  if (!screen.queryByText('a2检查')) fireEvent.click(buttons[1])
-  expect(screen.getByText('a1检查')).toBeTruthy()
-  expect(screen.getByText('a2检查')).toBeTruthy()
+  const buttons = screen.getAllByRole('button', { name: '查看 1 项操作' })
+  if (!row('a1')) fireEvent.click(buttons[0])
+  if (!row('a2')) fireEvent.click(buttons[1])
+  expect(row('a1')).toBeTruthy()
+  expect(row('a2')).toBeTruthy()
   expect(screen.queryByText('内部重复原目标')).toBeNull()
   ui.rerender(<Fixture status={status} messages={[...messages]} runId={null} runPhase="idle" runGoalId={null} revision={2} objective="作者修订后的目标" />)
   expect(screen.getByText('作者原目标')).toBeTruthy()
@@ -125,41 +127,41 @@ it.each(['active', 'paused', 'completed'] as const)('%s goal history preserves a
 
 it('a successful run cannot fold an unfinished goal', () => {
   const ui = render(<Fixture status="active" runPhase="succeeded" />)
-  expect(screen.getByText('a1检查')).toBeTruthy()
+  expect(row('a1')).toBeTruthy()
   expect(screen.queryByText('正在处理...')).toBeNull()
   ui.rerender(<Fixture status="usage_limited" runPhase="failed" />)
-  expect(screen.getByText('a1检查')).toBeTruthy()
+  expect(row('a1')).toBeTruthy()
 })
 
 it.each(['paused', 'usage_limited', 'budget_limited', 'cancelled', 'completed'] as const)('refresh restores unified %s history without a live run', status => {
   render(<Fixture status={status} messages={resumedMessages} runId={null} runPhase="idle" runGoalId={null} />)
-  expect(screen.getAllByRole('button', { name: '已处理 4 个操作' })).toHaveLength(1)
-  expect(Boolean(screen.queryByText('a1检查'))).toBe(status !== 'completed')
+  expect(screen.getAllByRole('button', { name: '查看 2 项操作' })).toHaveLength(1)
+  expect(Boolean(row('a1'))).toBe(status !== 'completed')
   expect(screen.queryByText('正在处理...')).toBeNull()
 })
 
 it('completion and A -> B -> A preserve manually expanded history and isolate duplicate block ids by session', () => {
   const messages = [message('old', 'ordinary', null), ...initialMessages]
   const ui = render(<Fixture status="paused" messages={messages} />)
-  fireEvent.click(screen.getAllByRole('button', { name: '已处理 2 个操作' })[0])
+  fireEvent.click(screen.getAllByRole('button', { name: '查看 1 项操作' })[0])
   ui.rerender(<Fixture status="completed" messages={messages} />)
-  expect(screen.getByText('old检查')).toBeTruthy()
-  expect(screen.queryByText('a1检查')).toBeNull()
-  fireEvent.click(screen.getAllByRole('button', { name: '已处理 2 个操作' })[1])
+  expect(row('old')).toBeTruthy()
+  expect(row('a1')).toBeNull()
+  fireEvent.click(screen.getAllByRole('button', { name: '查看 1 项操作' })[1])
   ui.rerender(<Fixture status="completed" sessionId="B" messages={messages} />)
-  expect(screen.queryByText('old检查')).toBeNull()
-  expect(screen.queryByText('a1检查')).toBeNull()
+  expect(row('old')).toBeNull()
+  expect(row('a1')).toBeNull()
   ui.rerender(<Fixture status="completed" messages={messages} />)
-  expect(screen.getByText('old检查')).toBeTruthy()
-  expect(screen.getByText('a1检查')).toBeTruthy()
+  expect(row('old')).toBeTruthy()
+  expect(row('a1')).toBeTruthy()
 })
 
 it('new goals and later ordinary runs retain their own boundaries and activity', () => {
   const ui = render(<Fixture status="paused" />)
   ui.rerender(<Fixture status="completed" goalId="new-goal" messages={[...initialMessages, message('next', 'next-run', 'new-goal')]} runId="next-run" />)
-  expect(screen.getByText('a1检查')).toBeTruthy()
-  expect(screen.queryByText('next检查')).toBeNull()
+  expect(row('a1')).toBeTruthy()
+  expect(row('next')).toBeNull()
   ui.rerender(<Fixture status="completed" messages={[...initialMessages, message('ordinary', 'ordinary-run', null)]} runId="ordinary-run" runGoalId={null} />)
-  expect(screen.getByText('ordinary检查')).toBeTruthy()
+  expect(row('ordinary')).toBeTruthy()
   expect(screen.getByText('正在处理...')).toBeTruthy()
 })

@@ -116,6 +116,8 @@ export type ToolResult = {
 
 export type AgentTool<Args = unknown> = {
   name: string
+  /** Registry-derived read-only contract. Not authorization or a receipt. */
+  contract?: import('./contract.js').AgentToolContract
   /** 工具卡片显示的中文名 */
   title: string
   /** 给模型看的自然语言说明（替代穷举规则 prompt） */

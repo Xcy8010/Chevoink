@@ -1731,7 +1731,7 @@ export default function StudioWorkspace() {
       items.push({
         id: message.id,
         userMessageId: message.id,
-        userText: getMessageText(message.parts),
+        userText: getMessageText(message.parts, message.role),
         assistantText: assistantText.trim(),
       })
     }

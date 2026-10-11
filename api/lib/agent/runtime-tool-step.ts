@@ -97,6 +97,9 @@ const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(chapterReadTool), checkedAdapter(planReadTool), checkedAdapter(novelGetContextTool), checkedAdapter(chapterListSummariesTool), checkedAdapter(memorySearchTool), checkedAdapter(volumeListTool), checkedAdapter(volumeCreateTool), checkedAdapter(chapterCreateTool), checkedAdapter(chapterWriteTool), checkedAdapter(chapterAppendTool), checkedAdapter(chapterEditRangeTool), checkedAdapter(planSaveTool),
 ].map(tool => [tool.name, tool]))
 
+/** Coverage diagnostics only. Availability never grants frozen tool authority. */
+export function getDurableToolAdapterNames(): string[] { return [...adapters.keys()] }
+
 /** One real tool step, selected exclusively from saved execution state.
  * Not yet the full scheduler: unadapted tools must not fall back to legacy effects. */
 export async function executeDurableToolStep(token: RunLeaseToken, signal: AbortSignal) {

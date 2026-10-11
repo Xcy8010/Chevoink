@@ -102,14 +102,14 @@ it('does not auto-open a report when its running tool receives an error-filled r
   expect(screen.getByRole('button', { name: '展开检查详情' }).getAttribute('aria-expanded')).toBe('false')
 })
 
-it('keeps failure summaries, reasoning and prose visible while report details remain folded', async () => {
+it('keeps real failure summaries and prose visible while hiding supplier reasoning while report details remain folded', async () => {
   render(<AgentMessageParts parts={[
     { type: 'reasoning', text: '先核对章节状态。' },
     { ...tool(quality), status: 'failed', summary: '质量检查失败，请稍后重试' },
     { type: 'text', text: '已保存本章正文。' },
   ]} streaming={false} runActive />)
   expect(screen.getByText('质量检查失败，请稍后重试')).toBeTruthy()
-  expect(screen.getByText('先核对章节状态。')).toBeTruthy()
+  expect(screen.queryByText('先核对章节状态。')).toBeNull()
   expect(await screen.findByText('已保存本章正文。')).toBeTruthy()
   expect(screen.queryByText(quality.findings[0].evidence)).toBeNull()
 })
@@ -129,8 +129,8 @@ it('shows a proposed commit as preparing until its real tool.call arrives', () =
   const commit = { type: 'tool-call' as const, callId: 'commit', toolName: 'chapter_bridge_commit', title: '提交章节终态', status: 'running' as const, preparing: true }
   const view = render(<AgentMessageParts parts={[check, commit]} streaming runActive />)
   expect(screen.getAllByText('执行中…')).toHaveLength(1)
-  expect(screen.getByText('准备调用…')).toBeTruthy()
+  expect(screen.getByText('准备中…')).toBeTruthy()
   view.rerender(<AgentMessageParts parts={[tool(quality), { ...commit, preparing: false }]} streaming={false} runActive />)
-  expect(screen.queryByText('准备调用…')).toBeNull()
+  expect(screen.queryByText('准备中…')).toBeNull()
   expect(screen.getAllByText('执行中…')).toHaveLength(1)
 })

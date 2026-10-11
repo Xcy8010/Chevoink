@@ -1,4 +1,5 @@
 import type { AgentUIMessage } from '../../../../../shared/contracts/index.js'
+import { getAgentAuthorMessageText } from '../../../../../shared/agent-author-view.js'
 
 /**
  * AgentPanel 的模块级纯声明（自 AgentPanel.tsx 抽取，逐字保留）：
@@ -29,7 +30,8 @@ export const skillPhaseLabel: Record<string, string> = {
 }
 
 /** 提取消息纯文本（复制用） */
-export function getMessageText(parts: AgentUIMessage['parts']): string {
+export function getMessageText(parts: AgentUIMessage['parts'], role: 'user' | 'assistant' = 'assistant'): string {
+  if (role === 'assistant') return getAgentAuthorMessageText(parts)
   return parts
     .map((part) => (part.type === 'text' ? part.text : ''))
     .filter(Boolean)

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { memo, useId, useMemo, useState } from 'react'
 import {
   BookOpenText,
   Bot,
@@ -6,7 +6,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  ChevronUp,
   CircleAlert,
   Download,
   Eye,
@@ -31,6 +30,7 @@ import type {
 } from '../../../../../shared/contracts/index.js'
 import { AgentMarkdownText } from './AgentMarkdownText'
 import { useAgentStore } from '../agentStore'
+import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
 import { describeToolArguments, getToolTargetTitle } from '../tool-argument-view'
 
 /**
@@ -245,7 +245,7 @@ function StoryCompilerCard({ display }: { display: Extract<AgentToolDisplayPaylo
           <Brain className={cn('h-3.5 w-3.5 transition-opacity', display.items.length > 0 && !expanded && 'group-hover:opacity-0')} />
           {display.items.length > 0 ? <ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} /> : null}
         </span>
-        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-secondary)]">{storyCompilerPhaseLabel[display.phase]} · {display.detail}</span>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-secondary)]">{storyCompilerPhaseLabel[display.phase]} · {projectAgentAuthorText(display.detail)}</span>
         {hasProblems ? (
           <span className={cn('shrink-0 text-[11px]', (display.errorCount ?? 0) > 0 ? 'text-rose-500' : 'text-amber-500')}>
             {(display.errorCount ?? 0) > 0 ? `${display.errorCount} 错误` : `${display.warningCount} 警告`}
@@ -254,7 +254,7 @@ function StoryCompilerCard({ display }: { display: Extract<AgentToolDisplayPaylo
       </button>
       {expanded && display.items.length > 0 ? (
         <ul id={detailsId} className="space-y-1 pb-1.5 pl-[22px]">
-          {display.items.map((item, index) => <li key={`${index}-${item}`} className="break-words text-[11px] leading-5 text-[var(--text-secondary)]">{item}</li>)}
+          {display.items.map((item, index) => <li key={`${index}-${item}`} className="break-words text-[11px] leading-5 text-[var(--text-secondary)]">{projectAgentAuthorText(item)}</li>)}
         </ul>
       ) : null}
     </div>
@@ -792,7 +792,7 @@ function ToolDisplayRenderer({
             <div className="min-w-0 flex-1">
               <p className="truncate text-xs font-medium text-[var(--text-primary)]">{display.fileName}</p>
               <p className="mt-0.5 text-[11px] leading-4 text-[var(--text-secondary)]">
-                含{display.detail} · 链接 15 分钟内有效
+                含{projectAgentAuthorText(display.detail)} · 链接 15 分钟内有效
               </p>
             </div>
           </div>
@@ -829,7 +829,7 @@ function ToolDisplayRenderer({
           <p className="font-medium text-[var(--text-primary)]">
             全书变更 · {display.selectedCount}/{display.patchCount} 项 · {display.status}
           </p>
-          <p>变更集 {display.changeSetId} 已同步到审查抽屉。</p>
+          <p>作品变更已同步到审查抽屉。</p>
         </div>
       )
     default:
@@ -922,14 +922,12 @@ const ToolCallCard = memo(function ToolCallCard({
         : running && part.toolName === 'platform_novel_read'
           ? '查看作品中…'
           : running
-            ? part.progressChars
-              ? `已生成 ${part.progressChars} 字 · 执行中…`
-              : '执行中…'
+            ? '执行中…'
             : ''
   const headerContent = <>
     {writeTool ? <FileText className="h-3.5 w-3.5 shrink-0 text-sky-500" /> : <Wrench className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />}
-    <span className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--text-primary)]">{part.title || part.toolName}</span>
-    {preparing ? <span className="shrink-0 text-[10px] text-[var(--text-secondary)]">准备调用…</span> : null}
+    <span className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--text-primary)]">{part.title}</span>
+    {preparing ? <span className="shrink-0 text-[10px] text-[var(--text-secondary)]">准备中…</span> : null}
     {running ? <span className="agent-tool-running-label shrink-0 text-[10px] font-medium text-[var(--text-secondary)]">{runningLabel}</span> : null}
     {durationLabel ? <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-secondary)]">{durationLabel}</span> : null}
     {writeTool && !running && !preparing ? <span className={cn(
@@ -944,6 +942,7 @@ const ToolCallCard = memo(function ToolCallCard({
 
   return (
     <div
+      data-agent-call-id={part.callId}
       className={cn(
         'relative overflow-hidden border-b border-[var(--border-subtle)] bg-transparent transition-colors',
         running && 'agent-tool-running',
@@ -1025,7 +1024,7 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
   const report = part.display?.kind === 'subagentReport' ? part.display : null
   const running = part.status === 'running'
   const durationLabel = formatToolDuration(report?.durationMs ?? part.durationMs)
-  const roleLabel = report?.role ? SUBAGENT_ROLE_LABELS[report.role] ?? report.role : null
+  const roleLabel = report?.role ? SUBAGENT_ROLE_LABELS[report.role] ?? '协作助手' : null
   const subagentName = report?.subagentName ?? '子 Agent'
   const progress = part.subagentProgress
 
@@ -1046,7 +1045,7 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
         <span className="min-w-0 shrink-0 text-xs font-medium text-[var(--text-primary)]">{subagentName}</span>
         {roleLabel ? <span className="shrink-0 rounded bg-[var(--surface-muted)] px-1 py-0.5 text-[9px] font-medium text-[var(--text-secondary)]">{roleLabel}</span> : null}
         <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--text-tertiary)]">
-          {running ? (progress?.message ?? '准备中…') : report?.triggerCondition ?? ''}
+          {running ? (progress?.message ? projectAgentAuthorText(progress.message) : '准备中…') : report?.triggerCondition ? projectAgentAuthorText(report.triggerCondition) : ''}
         </span>
         {durationLabel ? <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-secondary)]">{durationLabel}</span> : null}
         {report && report.steps > 0 ? <span className="shrink-0 text-[10px] text-[var(--text-tertiary)]">{report.steps} 次调用</span> : null}
@@ -1064,109 +1063,12 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
           {report?.report ? (
             <div className="border-t border-[var(--border-subtle)] px-2 py-2">
               <p className="mb-1 text-[10px] font-medium text-[var(--text-secondary)]">工作报告 · 待主 Agent 审查</p>
-              <p className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[var(--text-secondary)]">{report.report}</p>
+              <p className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-[var(--text-secondary)]">{projectAgentAuthorText(report.report)}</p>
             </div>
           ) : null}
           {part.status !== 'running' && !report?.report && part.summary ? (
             <p className="border-t border-[var(--border-subtle)] px-2 py-2 text-[11px] leading-5 text-[var(--text-secondary)]">{part.summary}</p>
           ) : null}
-        </div>
-      ) : null}
-    </div>
-  )
-})
-
-const ReasoningPart = memo(function ReasoningPart({
-  part,
-  streaming,
-}: {
-  part: Extract<AgentMessagePart, { type: 'reasoning' }>
-  streaming: boolean
-}) {
-  // null = 跟随默认（思考中展开、思考结束收起）；true/false = 用户本轮手动指定，思考中也能收起
-  const [manualOpen, setManualOpen] = useState<boolean | null>(null)
-  const showBody = manualOpen ?? false
-  const bodyRef = useRef<HTMLDivElement | null>(null)
-  // 是否跟随最新思考文本：默认跟随，用户在思考区内往上翻即暂停，重新滑回底部即恢复
-  const followRef = useRef(true)
-
-  // 思考结束时清掉手动状态，维持紧凑收起态。
-  useEffect(() => {
-    if (!streaming) {
-      setManualOpen(null)
-    }
-  }, [streaming])
-
-  useEffect(() => {
-    // 只在思考中跟随；思考结束后用户手动展开回看时，从头开始读而不是跳到末尾
-    if (!streaming || !showBody) {
-      return
-    }
-    const node = bodyRef.current
-    if (!node || !followRef.current) {
-      return
-    }
-    node.scrollTop = node.scrollHeight
-  }, [part.text, streaming, showBody])
-
-  const handleBodyScroll = useCallback(() => {
-    const node = bodyRef.current
-    if (!node) {
-      return
-    }
-    // 程序自动滚底后本就贴底，不会被误判成用户干预；内容没溢出时差值为 0，同样保持跟随
-    followRef.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 12
-  }, [])
-
-  const handleToggle = useCallback(() => {
-    setManualOpen((current) => {
-      const nextOpen = !(current ?? streaming)
-      // 收起时重置跟随，再次展开直接看最新思考
-      if (!nextOpen) {
-        followRef.current = true
-      }
-      return nextOpen
-    })
-  }, [streaming])
-
-  const visibleText = part.text.trim()
-  const meaningfulLines = visibleText.split('\n').map((line) => line.trim()).filter(Boolean)
-  const summary = (streaming ? meaningfulLines.at(-1) : meaningfulLines[0]) ?? (streaming ? '正在分析…' : '已完成分析')
-
-  return (
-    <div className="relative overflow-hidden" data-reasoning-running={streaming || undefined}>
-      {streaming ? <span aria-hidden className="pointer-events-none absolute inset-y-0 -left-72 z-0 w-72 animate-[reasoning-sweep_2.6s_ease-out_infinite] bg-gradient-to-r from-transparent via-[color:var(--surface-muted)]/70 to-transparent motion-reduce:hidden" /> : null}
-      <button
-        type="button"
-        onClick={handleToggle}
-        className="relative z-10 flex h-8 w-full items-center gap-2 overflow-hidden text-left"
-      >
-        <Brain
-          className={cn(
-            'h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]',
-            streaming && 'animate-pulse',
-          )}
-        />
-        <span className="shrink-0 text-[11px] font-medium text-[var(--text-secondary)]">
-          {streaming ? '思考中' : '思考'}
-        </span>
-        <span className="h-0.5 w-0.5 shrink-0 rounded-full bg-[var(--text-tertiary)]" />
-        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-tertiary)]">{summary}</span>
-        {showBody ? (
-          <ChevronUp className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
-        ) : (
-          <ChevronDown className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
-        )}
-      </button>
-      {showBody ? (
-        /* 这里刻意不加 overscroll-contain：思考区滚到边界后手势要能继续传给外层对话列表，
-           否则手指落在思考区上时整个对话就滑不动了 */
-        <div
-          ref={bodyRef}
-          onScroll={handleBodyScroll}
-          className="max-h-44 overflow-y-auto whitespace-pre-wrap border-l border-[var(--border-subtle)] py-1 pl-[22px] text-xs leading-6 text-[var(--text-tertiary)] [-webkit-overflow-scrolling:auto]"
-        >
-          {part.text}
         </div>
       ) : null}
     </div>
@@ -1197,12 +1099,13 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   /** 折叠态下本消息正文是否可收起（块内非最后一条）：run 结束后过程进展正文折进摘要行 */
   textCollapsible?: boolean
 }) {
+  const authorParts = useMemo(() => projectAgentAuthorParts(parts), [parts])
   const showSummary = !runActive && (summaryCount ?? 0) > 0
   const collapsed = !runActive && !summaryExpanded
   // 子 Agent 内部工具卡片归组：嵌套渲染进所属的 subagent_run 容器（codex/Zcode 模式）
   const subagentChildren = useMemo(() => {
     const grouped = new Map<string, Array<Extract<AgentMessagePart, { type: 'tool-call' }>>>()
-    for (const part of parts) {
+    for (const part of authorParts) {
       if (part.type === 'tool-call' && part.subagentCallId) {
         const list = grouped.get(part.subagentCallId)
         if (list) list.push(part)
@@ -1210,7 +1113,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
       }
     }
     return grouped
-  }, [parts])
+  }, [authorParts])
 
   return (
     <div className="space-y-2">
@@ -1224,7 +1127,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
           }}
           className="flex w-full animate-fade-in items-center gap-1 text-left"
         >
-          <span className="text-[11px] text-[var(--text-secondary)]">已处理 {summaryCount} 个操作</span>
+          <span className="text-[11px] text-[var(--text-secondary)]">查看 {summaryCount} 项操作</span>
           {collapsed ? (
             <ChevronRight className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
           ) : (
@@ -1232,8 +1135,8 @@ export const AgentMessageParts = memo(function AgentMessageParts({
           )}
         </button>
       ) : null}
-      {parts.map((part, index) => {
-        const isLast = index === parts.length - 1
+      {authorParts.map((part, index) => {
+        const isLast = index === authorParts.length - 1
 
         if (part.type === 'text') {
           // 折叠态且可收起：过程进展正文折进「已处理 n 个操作」，只留结尾总结的正文可见
@@ -1243,13 +1146,10 @@ export const AgentMessageParts = memo(function AgentMessageParts({
         }
 
         // 折叠态：隐藏思考/动作，仅保留 text 结论
-        if (collapsed) {
+        if (collapsed && !(part.type === 'tool-call' && (part.status === 'failed' || part.status === 'denied'))) {
           return null
         }
 
-        if (part.type === 'reasoning') {
-          return <ReasoningPart key={index} part={part} streaming={streaming && isLast} />
-        }
 
         if (part.type === 'tool-call') {
           // 子 Agent 内部工具卡片已嵌套进容器渲染，平铺处跳过

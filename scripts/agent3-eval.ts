@@ -6,6 +6,9 @@ import { evaluateSkillRouting } from '../tests/agent-evals/cn-fiction-metrics.js
 import { evaluateFiftyChapterBridge } from '../tests/agent-evals/chapter-bridge-metrics.js'
 import { evaluateDeterministicHumanityGate } from '../tests/agent-evals/humanity-quality-metrics.js'
 import { evaluateCraftLibraryBaseline } from '../tests/agent-evals/craft-library-metrics.js'
+import { getAgentToolManifest } from '../api/lib/agent/tools/registry.js'
+import { getDurableToolAdapterNames } from '../api/lib/agent/runtime-tool-step.js'
+import { CREATION_QUALITY_DIMENSIONS } from '../tests/agent-evals/reliable-creation-metrics.js'
 
 function readGitSha(): string {
   try {
@@ -16,6 +19,7 @@ function readGitSha(): string {
 }
 
 const datasetHash = createHash('sha256').update(JSON.stringify(CN_FICTION_EVAL_SCENARIOS)).digest('hex')
+const durableAdapters = new Set(getDurableToolAdapterNames())
 const report = {
   schemaVersion: 'agent3-eval-report.v1',
   datasetVersion: CN_FICTION_EVAL_VERSION,
@@ -29,6 +33,16 @@ const report = {
   chapterBridge: evaluateFiftyChapterBridge(),
   humanityQuality: evaluateDeterministicHumanityGate(),
   craftLibrary: evaluateCraftLibraryBaseline(),
+  reliableCreation: {
+    evidenceKind: 'deterministic_contract_inventory',
+    literaryQualityMeasured: false,
+    providerAcceptanceMeasured: false,
+    paidCalls: 0,
+    dimensions: CREATION_QUALITY_DIMENSIONS,
+    tools: getAgentToolManifest().map(tool => ({ ...tool, executors: {
+      legacy: 'registered', durable: durableAdapters.has(tool.name) ? 'adapter_registered' : 'not_adapted',
+    } })),
+  },
 }
 
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)

@@ -56,10 +56,10 @@ export type RecoveredAgentToolCall = {
 
 /** Use CommonMark source positions, not fence regexes: nested lists, indented
  * code, variable fence lengths and incomplete streamed fences remain examples. */
-function outputSegments(text: string, protectLinks = false): Array<{ code: boolean; text: string }> {
-  if (!/[`~]/.test(text) && !/^(?: {4}|\t)/m.test(text) && !(protectLinks && /[[<]|https?:\/\//i.test(text))) return [{ code: false, text }]
+function outputSegments(text: string, protectLinks = false, protectedRanges: readonly { start: number; end: number }[] = []): Array<{ code: boolean; text: string }> {
+  if (protectedRanges.length === 0 && !/[`~]/.test(text) && !/^(?: {4}|\t)/m.test(text) && !(protectLinks && /[[<]|https?:\/\//i.test(text))) return [{ code: false, text }]
   type Node = { type: string; position?: { start: { offset?: number }; end: { offset?: number } }; children?: Node[] }
-  const ranges: Array<{ start: number; end: number }> = []
+  const ranges: Array<{ start: number; end: number }> = [...protectedRanges]
   const pending: Node[] = [fromMarkdown(text)]
   while (pending.length) {
     const node = pending.pop()!
@@ -105,8 +105,8 @@ function outputSegments(text: string, protectLinks = false): Array<{ code: boole
 }
 
 /** Human-readable labels belong in prose, never in code or source URLs. */
-export function mapAgentVisibleProse(text: string, transform: (prose: string) => string): string {
-  return outputSegments(text, true).map(segment => segment.code ? segment.text : transform(segment.text)).join('')
+export function mapAgentVisibleProse(text: string, transform: (prose: string) => string, protectedRanges: readonly { start: number; end: number }[] = []): string {
+  return outputSegments(text, true, protectedRanges).map(segment => segment.code ? segment.text : transform(segment.text)).join('')
 }
 
 function decodeProtocolEntities(value: string): string {

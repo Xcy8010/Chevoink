@@ -26,6 +26,7 @@ import { chatWithTools } from '../../api/lib/ai-service.js'
 import { auxiliaryRouteForRuntime, callDurableAuxiliary, resolveDurableAuxiliaryRuntime } from '../../api/lib/agent/runtime-auxiliary-call.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { DataAccessError } from '../../api/lib/prisma.js'
+import { buildProviderCompatibilitySnapshot, type ProviderCompatibilityRoute } from '../../api/lib/agent/provider-compatibility.js'
 
 const lease = { userId: 'owner', runId: 'run', taskRootId: 'root', ownerId: 'worker', claimId: 'claim', epoch: 1n }
 const result: ChatCompletionResult = { content: '合成检查结果', reasoning: '', toolCalls: [], finishReason: 'stop',
@@ -55,6 +56,32 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('durable reviewer non-thinking policy without rewriting old paid requests', () => {
+  it.each([
+    { source: 'builtin', provider: runtime.provider, baseUrl: runtime.baseUrl, model: runtime.modelName },
+    { source: 'byok', provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-v4-flash' },
+    { source: 'proxy', provider: 'deepseek', baseUrl: 'https://proxy.example/v1', model: 'alias', reasoningParameterMode: 'native', thinkingEnabled: false },
+    { source: 'alias', provider: 'opaque', baseUrl: 'https://proxy.example/v1', model: 'alias', reasoningParameterMode: 'omit', thinkingEnabled: true },
+  ] satisfies Array<Pick<ProviderCompatibilityRoute, 'source' | 'provider' | 'baseUrl' | 'model'> & Partial<ProviderCompatibilityRoute>>)('binds $source matrix encodings to the actual frozen durable main request', async inputRoute => {
+    const route: ProviderCompatibilityRoute = { ...inputRoute, executor: 'durable', purpose: 'tool_turn', reasoningEffort: 'high',
+      toolsPresent: true, toolChoice: 'required', maxOutputTokens: 1024 }
+    const matrix = buildProviderCompatibilitySnapshot({ route, observedAt: '2026-10-11T12:00:00Z', codeRevision: 'fixture',
+      configurationPointers: ['tests/unit/runtime-auxiliary-call.test.ts'] })
+    await chatWithTools({ messages: [], tools: [{ type: 'function', function: { name: 'chapter_read', description: '合成工具', parameters: {} } }],
+      provider: route.provider, model: route.model, providerBaseUrl: route.baseUrl, providerApiKey: 'fixture-not-a-key',
+      reasoningEffort: route.reasoningEffort, reasoningParameterMode: route.reasoningParameterMode, thinkingEnabled: route.thinkingEnabled,
+      toolChoice: route.toolChoice, maxOutputTokens: route.maxOutputTokens, durableExecution: { lease, operationKey: 'main:0', attemptKey: '1', price },
+      usageLog: { userId: lease.userId, agentRunId: lease.runId, action: 'mainWriting', modelTier: 'custom', multiplierBps: 0 } })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect({ ...(body.thinking ? { thinking: body.thinking } : {}), ...(body.reasoning_effort ? { reasoning_effort: body.reasoning_effort } : {}) })
+      .toEqual(matrix.requestEncoding?.reasoning)
+    expect(body.tool_choice ? { tool_choice: body.tool_choice } : {}).toEqual(matrix.requestEncoding?.toolChoice)
+    expect(body.max_tokens).toBe(1024)
+    expect(mocks.begin.mock.calls[0][0].request).toEqual({ endpoint: matrix.route.endpoint, body })
+    expect(matrix.capabilities.native_tool_stream.status).toBe('unknown')
+    expect(matrix.route.reasoningEffort).toBe('high')
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
   it.each([undefined, { tier: 'custom' as const, customModelId: null, reasoningEffort: 'high' as const },
     { tier: 'speed' as const, customModelId: null, reasoningEffort: 'high' as const }])('rejects missing or mismatched native custom identity %# before any paid fallback', async modelSelection => {
     await expect(resolveDurableAuxiliaryRuntime({ userId: 'owner', modelRuntime: runtime, modelSelection, task: 'quality' }))

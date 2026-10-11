@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import { createAgentAuthorTextStream, projectAgentAuthorMessage, projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../../shared/agent-author-view.js'
+import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
 
 import type {
   AgentAttachmentMeta,
@@ -20,6 +22,9 @@ import type {
  * - messages 由 SSE 事件流实时构建（parts 结构），历史用 /sessions/:id/messages 恢复
  * - lastSeq 用于断线重连（Last-Event-ID）
  */
+
+// Private, run-scoped pending prose never enters author messages or caches.
+const authorTextStreams = new Map<string, ReturnType<typeof createAgentAuthorTextStream>>()
 
 export type AgentRunPhase =
   | 'idle'
@@ -459,7 +464,7 @@ function updateMessageParts(
   update: (parts: AgentMessagePart[]) => AgentMessagePart[],
 ): AgentUIMessage[] {
   return messages.map((message) =>
-    message.id === messageId ? { ...message, parts: update(message.parts) } : message,
+    message.id === messageId ? { ...message, parts: projectAgentAuthorParts(update(message.parts)) } : message,
   )
 }
 
@@ -664,7 +669,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     })),
 
   restoreMessages: (messages, sessionId = null, snapshot) => {
-    const restored = decorateAcceptedMessages(messages)
+    authorTextStreams.clear()
+    const restored = decorateAcceptedMessages(messages.map(projectAgentAuthorMessage))
     const derived = deriveSessionStateFromMessages(restored)
     const cached = sessionId ? sessionMessagesCache.get(sessionId) : undefined
     const todos = snapshot !== undefined ? snapshot?.items ?? [] : cached?.messages === messages ? cached.todos : derived.todos
@@ -728,7 +734,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   prependMessages: (incoming) =>
     set((state) => {
       const known = new Set(state.messages.map((message) => message.id))
-      const older = decorateAcceptedMessages(incoming).filter((message) => !known.has(message.id))
+      const older = decorateAcceptedMessages(incoming.map(projectAgentAuthorMessage)).filter((message) => !known.has(message.id))
       if (older.length === 0) {
         return {}
       }
@@ -741,6 +747,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     }),
 
   resetRun: () => {
+    authorTextStreams.clear()
     // 离开旧会话前把最新消息（含刚直播完的内容）快照进缓存：切回来可零延迟复原
     const { loadedSessionId: leavingSessionId, messages: leavingMessages, todos } = get()
     writeSessionMessagesCache(leavingSessionId, leavingMessages, todos)
@@ -1055,56 +1062,41 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ],
           }
 
-        case 'text.delta':
+        case 'text.delta': {
+          const key = `${event.runId}:${event.messageId}`
+          const stream = authorTextStreams.get(key) ?? createAgentAuthorTextStream()
+          authorTextStreams.set(key, stream)
+          const delta = stream.push(event.delta)
           return {
             ...base,
-            ...(event.runId === state.runId && event.delta.trim() ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
-            messages: updateMessageParts(state.messages, event.messageId, (parts) =>
-              appendDelta(parts, 'text', event.delta),
-            ),
+            ...(event.runId === state.runId && delta.trim() ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
+            ...(delta ? { messages: updateMessageParts(state.messages, event.messageId, parts => appendDelta(parts, 'text', delta)) } : {}),
           }
+        }
 
         case 'execution.progress':
           return base
 
-        case 'text.final':
+        case 'text.final': {
+          authorTextStreams.delete(`${event.runId}:${event.messageId}`)
+          const text = event.asReasoning ? '' : projectAgentAuthorText(event.text)
           return {
             ...base,
-            // 正文定稿：登记 id，渲染层即刻停掉该消息正文尾部的流式光标
             finalizedTextIds: state.finalizedTextIds.includes(event.messageId)
-              ? state.finalizedTextIds
-              : [...state.finalizedTextIds, event.messageId],
-            messages: updateMessageParts(state.messages, event.messageId, (parts) => {
-              const withoutText = parts.filter((part) => part.type !== 'text')
-              if (!event.text) return withoutText
-              if (!event.asReasoning) {
-                // Final prose must stay before parameter-preview cards, not jump below them.
-                const previewIndex = withoutText.findIndex(part => part.type === 'tool-call' && part.preparing)
-                const at = previewIndex < 0 ? withoutText.length : previewIndex
-                return [...withoutText.slice(0, at), { type: 'text' as const, text: event.text }, ...withoutText.slice(at)]
-              }
-              let reasoningIndex = -1
-              for (let index = withoutText.length - 1; index >= 0; index -= 1) {
-                if (withoutText[index]?.type === 'reasoning') {
-                  reasoningIndex = index
-                  break
-                }
-              }
-              if (reasoningIndex < 0) return [...withoutText, { type: 'reasoning' as const, text: event.text }]
-              return withoutText.map((part, index) => index === reasoningIndex && part.type === 'reasoning'
-                ? { ...part, text: [part.text, event.text].filter(Boolean).join('\n') }
-                : part)
+              ? state.finalizedTextIds : [...state.finalizedTextIds, event.messageId],
+            messages: updateMessageParts(state.messages, event.messageId, parts => {
+              const withoutText = parts.filter(part => part.type !== 'text' && part.type !== 'reasoning')
+              if (!text) return withoutText
+              const previewIndex = withoutText.findIndex(part => part.type === 'tool-call' && part.preparing)
+              const at = previewIndex < 0 ? withoutText.length : previewIndex
+              return [...withoutText.slice(0, at), { type: 'text' as const, text }, ...withoutText.slice(at)]
             }),
           }
+        }
 
+        // Hidden supplier reasoning remains in server protocol/context only.
         case 'reasoning.delta':
-          return {
-            ...base,
-            ...(event.runId === state.runId && event.delta.trim() ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
-            messages: updateMessageParts(state.messages, event.messageId, (parts) =>
-              appendDelta(parts, 'reasoning', event.delta),
-            ),
-          }
+          return base
 
         case 'tool.call': {
           const isWrite = WORKSPACE_WRITE_TOOLS.has(event.toolName)
@@ -1128,7 +1120,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                     {
                       callId: event.callId,
                       toolName: event.toolName,
-                      label: WRITE_TOOL_LABELS[event.toolName] ?? event.title,
+                      label: getAgentToolPresentation(event.toolName).label,
                       chapterId: null,
                       deltaChars: null,
                       status: 'running' as const,
@@ -1147,7 +1139,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                 const previewIndex = ordered.findIndex(part => part.type === 'tool-call' && part.preparing)
                 const started: AgentMessagePart = {
                   ...(previous?.type === 'tool-call' ? previous : {}),
-                  type: 'tool-call', callId: event.callId, toolName: event.toolName, title: event.title,
+                  type: 'tool-call', callId: event.callId, toolName: event.toolName, title: getAgentToolPresentation(event.toolName).label,
                   args: event.args ?? (previous?.type === 'tool-call' ? previous.args : null),
                   status: 'running', preparing: false,
                   ...(event.importWaiting ? { importWaiting: event.importWaiting } : {}),
@@ -1162,7 +1154,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                     ? {
                         ...part,
                         toolName: event.toolName,
-                        title: event.title,
+                        title: getAgentToolPresentation(event.toolName).label,
                         args: event.args ?? part.args,
                         preparing: false,
                         ...(event.importWaiting ? { importWaiting: event.importWaiting } : {}),
@@ -1177,7 +1169,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                   type: 'tool-call',
                   callId: event.callId,
                   toolName: event.toolName,
-                  title: event.title,
+                  title: getAgentToolPresentation(event.toolName).label,
                   args: event.args,
                   status: 'running',
                   ...(event.importWaiting ? { importWaiting: event.importWaiting } : {}),
@@ -1199,7 +1191,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...(event.draft ? { liveToolDrafts: { ...state.liveToolDrafts, [event.callId]: event.draft } } : {}),
             messages: updateMessageParts(state.messages, event.messageId, (parts) => {
               if (!existing && event.toolName && event.title) return [...parts, {
-                type: 'tool-call', callId: event.callId, toolName: event.toolName, title: event.title,
+                type: 'tool-call', callId: event.callId, toolName: event.toolName, title: getAgentToolPresentation(event.toolName).label,
                 args: null, status: 'running', preparing: true, progressChars: event.argsChars,
               }]
               return parts.map((part) =>
@@ -1269,7 +1261,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                     display: event.display,
                     before: extracted.before ?? activity.before,
                     after: extracted.after ?? activity.after,
-                    summary: event.summary,
+                    summary: projectAgentToolSummary(event.summary, event.ok ? 'success' : 'failed'),
                   }
                 : activity,
             ),
@@ -1279,7 +1271,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               const settled: AgentMessagePart = {
                 ...(previous?.type === 'tool-call' ? previous : {}),
                 type: 'tool-call', callId: event.callId, toolName: event.toolName,
-                title: previous?.type === 'tool-call' ? previous.title : WRITE_TOOL_LABELS[event.toolName] ?? event.toolName,
+                title: previous?.type === 'tool-call' ? previous.title : getAgentToolPresentation(event.toolName).label,
                 args: previous?.type === 'tool-call' ? previous.args : null,
                 status: event.ok ? 'success' : 'failed', preparing: false,
                 summary: event.summary, display: event.display, durationMs: event.durationMs,
@@ -1298,7 +1290,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               approvalId: event.approvalId,
               callId: event.callId,
               toolName: event.toolName,
-              title: event.title,
+              title: getAgentToolPresentation(event.toolName).label,
               args: event.args,
               allowAlways: event.allowAlways,
               expiresAt: event.expiresAt,
@@ -1351,7 +1343,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             authorEnded: event.authorEnded ?? null,
             outcome: event.outcome ?? null,
             usage: event.usage,
-            outputSummary: event.outputSummary,
+            outputSummary: projectAgentAuthorText(event.outputSummary),
             pendingApproval: null,
             pendingQuestion: null,
             liveToolDrafts: {},
@@ -1366,7 +1358,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         case 'error':
           return {
             ...base,
-            errorMessage: event.message,
+            errorMessage: projectAgentToolSummary(event.message, 'failed'),
             errorCode: event.code,
             ...(event.recoverable
               ? {}

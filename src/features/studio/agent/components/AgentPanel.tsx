@@ -1629,7 +1629,7 @@ export function AgentPanel({
                     </div>
                   </div>
                   <UserMessageActions createdAt={message.createdAt} visible={touchActionsId === message.id} copied={copiedId === message.id} disabled={active}
-                    onCopy={() => void handleCopyText(message.id, getMessageText(message.parts))}
+                    onCopy={() => void handleCopyText(message.id, getMessageText(message.parts, message.role))}
                     onRollback={() => setConfirmAction({ kind: 'rollbackMessage', messageId: message.id })}
                     onDelete={() => setConfirmAction({ kind: 'deleteMessage', messageId: message.id })} />
                 </div>
@@ -1671,12 +1671,12 @@ export function AgentPanel({
                     textCollapsible={textCollapsible}
                   />
                   {/* 结论操作条：每个对话块结尾均提供复制与创建分支（纯 icon，悬停 title 说明，流式进行中不显示） */}
-                  {isBlockLast && !messageRunActive && getMessageText(message.parts) ? (
+                  {isBlockLast && !messageRunActive && getMessageText(message.parts, message.role) ? (
                     <div className="mt-1 flex items-center justify-start gap-0.5">
                       <button
                         type="button"
                         onClick={() =>
-                          void handleCopyText(message.id, getMessageText(message.parts))
+                          void handleCopyText(message.id, getMessageText(message.parts, message.role))
                         }
                         className="inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"
                         aria-label="复制回复"

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation.js'
 import { ShieldAlert, TriangleAlert } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
@@ -49,7 +50,7 @@ export function AgentPermissionCard({ approval, onResolve }: AgentPermissionCard
         </p>
       </div>
       <p className="mt-2 text-sm leading-6 text-[var(--text-primary)]">
-        Agent 请求执行：<span className="font-medium">{approval.title || approval.toolName}</span>
+        Agent 请求执行：<span className="font-medium">{getAgentToolPresentation(approval.toolName).label}</span>
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button

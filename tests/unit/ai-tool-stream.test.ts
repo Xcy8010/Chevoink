@@ -7,6 +7,7 @@ vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
   resolveTokenPrice: async () => ({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 }) }))
 import { buildProviderToolChoice, chatWithTools } from '../../api/lib/ai-service.js'
+import { buildProviderCompatibilitySnapshot, type ProviderCompatibilityRoute } from '../../api/lib/agent/provider-compatibility.js'
 
 afterEach(() => vi.unstubAllGlobals())
 const delta = (args: string, first = false) => ({ choices: [{ delta: { tool_calls: [{ index: 0, ...(first ? { id: 'call', function: { name: 'scene_task_build', arguments: args } } : { function: { arguments: args } }) }] } }] })
@@ -21,6 +22,68 @@ function stream(text: string) {
 }
 const invoke = () => chatWithTools({ messages: [], tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
 describe('lossless tool argument transport', () => {
+  it.each([
+    { source: 'builtin', provider: 'Ant Ling', baseUrl: 'https://api.ant-ling.com/v1', model: 'Ling-3.0-flash' },
+    { source: 'byok', provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-v4-flash' },
+    { source: 'proxy', provider: 'Ant Ling', baseUrl: 'https://proxy.example/v1', model: 'Ling-3.0-flash' },
+    { source: 'alias', provider: 'opaque', baseUrl: 'https://proxy.example/v1', model: 'author-model', reasoningParameterMode: 'omit', thinkingEnabled: false },
+    { source: 'alias', provider: 'opaque', baseUrl: 'https://proxy.example/v1', model: 'author-model', reasoningParameterMode: 'native', thinkingEnabled: true },
+  ] satisfies Array<Pick<ProviderCompatibilityRoute, 'source' | 'provider' | 'baseUrl' | 'model'> & Partial<ProviderCompatibilityRoute>>)('binds offline $source matrix observations to the actual legacy request encoder', async input => {
+    const route: ProviderCompatibilityRoute = { ...input, executor: 'legacy', purpose: 'tool_turn',
+      reasoningEffort: 'high', toolsPresent: true, toolChoice: 'required', maxOutputTokens: 2000,
+      outputTokenParameter: 'max_completion_tokens', schemaFingerprint: 'fixture-strict-schema' }
+    const matrix = buildProviderCompatibilitySnapshot({ route, observedAt: '2026-10-11T12:00:00Z',
+      codeRevision: 'fixture', configurationPointers: ['tests/unit/ai-tool-stream.test.ts'] })
+    const tools = [{ type: 'function' as const, function: { name: 'chapter_read', description: 'fixture', strict: true,
+      parameters: { type: 'object', properties: { chapterId: { type: 'string' } }, required: ['chapterId'], additionalProperties: false } } }]
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    await chatWithTools({ messages: [], tools, provider: route.provider, providerBaseUrl: route.baseUrl, model: route.model,
+      reasoningEffort: route.reasoningEffort, reasoningParameterMode: route.reasoningParameterMode, thinkingEnabled: route.thinkingEnabled,
+      toolChoice: route.toolChoice, maxOutputTokens: route.maxOutputTokens, outputTokenParameter: route.outputTokenParameter,
+      providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'fixture', modelTier: 'custom' } })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe(matrix.route.endpoint)
+    expect({ ...(body.thinking ? { thinking: body.thinking } : {}), ...(body.reasoning_effort ? { reasoning_effort: body.reasoning_effort } : {}) })
+      .toEqual(matrix.requestEncoding?.reasoning)
+    expect(body.tool_choice ? { tool_choice: body.tool_choice } : {}).toEqual(matrix.requestEncoding?.toolChoice)
+    expect(body.max_completion_tokens).toBe(2000)
+    expect(body).not.toHaveProperty('max_tokens')
+    expect(body.tools).toEqual(tools)
+    expect(matrix.capabilities.strict_schema_subset.status).toBe('unknown')
+    expect(matrix.capabilities.non_thinking.status).toBe('unknown')
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('associates interleaved out-of-order tool indices and preserves reasoning plus final usage', async () => {
+    const frame = (tool_calls: unknown[], reasoning_content?: string) => ({ choices: [{ delta: { tool_calls, reasoning_content } }] })
+    const frames = [
+      frame([{ index: 1, id: 'second', function: { name: 'chapter_read', arguments: '{"chapterId":"' } }], 'protocol reasoning'),
+      frame([{ index: 0, id: 'first', function: { name: 'novel_get', arguments: '{"novelId":' } }]),
+      frame([{ id: 'second', function: { arguments: '第二章"}' } }, { index: 0, function: { arguments: '"novel"}' } }]),
+      ending('tool_calls'),
+      { choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, prompt_tokens_details: { cached_tokens: 60 } } },
+    ]
+    stream(frames.map(value => `data: ${JSON.stringify(value)}\r\n\r\n`).join(''))
+    const result = await invoke()
+    expect(result.toolCalls).toEqual([
+      { id: 'first', name: 'novel_get', arguments: '{"novelId":"novel"}' },
+      { id: 'second', name: 'chapter_read', arguments: '{"chapterId":"第二章"}' },
+    ])
+    expect(result.reasoning).toBe('protocol reasoning')
+    expect(result.usage).toEqual({ promptTokens: 100, completionTokens: 20, totalTokens: 120, promptCacheHitTokens: 60, promptCacheMissTokens: 40 })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('rejects ambiguous fragments after multiple call identities without retry', async () => {
+    const frames = [{ choices: [{ delta: { tool_calls: [
+      { index: 0, id: 'one', function: { name: 'chapter_read', arguments: '{' } },
+      { index: 1, id: 'two', function: { name: 'chapter_read', arguments: '{' } },
+    ] } }] }, { choices: [{ delta: { tool_calls: [{ function: { arguments: '}' } }] } }] }, ending('tool_calls')]
+    stream(frames.map(value => `data: ${JSON.stringify(value)}\n\n`).join(''))
+    await expect(invoke()).rejects.toThrow('无法安全关联')
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
   it.each(['none', 'high'] as const)('sends Ling %s thinking mode and preserves split native tool arguments', async reasoningEffort => {
     const first = '{"tasks":[{"goal":"'
     const second = '核对河防","beats":["察看旧堤"]}]}'

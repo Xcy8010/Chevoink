@@ -1,3 +1,4 @@
+import { projectAgentAuthorText } from '../../../../shared/agent-author-view.js'
 import type { AgentToolDisplayPayload } from '../../../../shared/contracts/index.js'
 
 export type ToolArgumentRow = { label: string; value: string }
@@ -30,34 +31,20 @@ const ARGUMENT_LABELS: Record<string, string> = {
 
 const LONG_TEXT_KEYS = new Set(['content', 'newText', 'oldText', 'text', 'markdown'])
 
-function formatValue(key: string, value: unknown): string {
-  if (typeof value === 'boolean') return value ? '是' : '否'
-  if (typeof value === 'number') return String(value)
-  if (typeof value === 'string') {
-    const normalized = value.trim()
-    if (LONG_TEXT_KEYS.has(key)) {
-      const preview = normalized.replace(/\s+/g, ' ').slice(0, 72)
-      return `${normalized.length} 字${preview ? ` · ${preview}${normalized.length > 72 ? '…' : ''}` : ''}`
-    }
-    return normalized.length > 120 ? `${normalized.slice(0, 120)}…` : normalized
-  }
-  if (Array.isArray(value)) {
-    const visible = value.slice(0, 5).map((item) => typeof item === 'string' || typeof item === 'number' ? String(item) : '结构项')
-    return `${value.length} 项${visible.length ? ` · ${visible.join('、')}${value.length > visible.length ? '…' : ''}` : ''}`
-  }
-  if (value && typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>).filter(([, nested]) => nested !== null && nested !== undefined)
-    const visible = entries.slice(0, 4).map(([nestedKey, nested]) => `${ARGUMENT_LABELS[nestedKey] ?? nestedKey}：${formatValue(nestedKey, nested)}`)
-    return `${entries.length} 个字段${visible.length ? ` · ${visible.join('；')}` : ''}`
-  }
-  return '未提供'
-}
+// Only author-readable intent is useful here. IDs, enum keys, nested input and
+// arbitrary unknown fields belong to execution records, never expanded details.
+const AUTHOR_INTENT_KEYS = new Set(['title', 'reason', 'query'])
 
 export function describeToolArguments(args: unknown): ToolArgumentRow[] {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return []
-  return Object.entries(args as Record<string, unknown>)
-    .filter(([, value]) => value !== undefined && value !== null && value !== '')
-    .map(([key, value]) => ({ label: ARGUMENT_LABELS[key] ?? key, value: formatValue(key, value) }))
+  return Object.entries(args as Record<string, unknown>).flatMap(([key, value]) => {
+    if (LONG_TEXT_KEYS.has(key) && typeof value === 'string') {
+      return [{ label: ARGUMENT_LABELS[key], value: `${value.length} 字` }]
+    }
+    if (!AUTHOR_INTENT_KEYS.has(key) || typeof value !== 'string' || !value.trim()) return []
+    const text = projectAgentAuthorText(value.trim())
+    return text ? [{ label: ARGUMENT_LABELS[key], value: text }] : []
+  })
 }
 
 export function getToolTargetTitle(display: AgentToolDisplayPayload | undefined, args: unknown): string | null {

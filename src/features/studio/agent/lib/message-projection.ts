@@ -36,7 +36,7 @@ export function projectMessages(messages: readonly AgentUIMessage[]) {
       ids.push(message.id)
       assistantIds.push(message.id)
       lastAssistantId = message.id
-      for (const part of message.parts) if (part.type !== 'text') ops++
+      for (const part of message.parts) if (part.type === 'tool-call') ops++
     } else if (message.goalContinuation && message.goalId) {
       if (ids.length > 0 && message.goalId !== goalId) flush()
       goalId = message.goalId
@@ -48,7 +48,7 @@ export function projectMessages(messages: readonly AgentUIMessage[]) {
   flush()
   for (let index = messages.length - 1; index >= 0; index--) {
     if (messages[index].goalContinuation) continue
-    const text = getMessageText(messages[index].parts).replace(/\s+/g, ' ').trim()
+    const text = getMessageText(messages[index].parts, messages[index].role).replace(/\s+/g, ' ').trim()
     if (text) {
       recentConversationText = text.slice(0, 1000)
       break

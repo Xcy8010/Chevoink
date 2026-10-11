@@ -54,6 +54,7 @@ import { getTaskRunIds } from './task-lineage.js'
 import type { AgentTool, ToolContext } from './tools/types.js'
 import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestrationResumeNote } from './tools/task-orchestration-tools.js'
 import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-text.js'
+import { createExecutionTextDetector, normalizeExecutionText } from './execution-text-detector.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { createEmptyResponseGuard, createProtocolRecoveryGuard, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { toolFailureRecovery, toolRecoveryKey } from './tool-failure-recovery.js'
@@ -926,7 +927,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const live = liveTurn
     if (!live) return
     const fallbackParts: AgentMessagePart[] = []
-    if (live.streamedReasoning.trim()) fallbackParts.push({ type: 'reasoning', text: humanizeAgentVisibleText(live.streamedReasoning) })
+    if (live.streamedReasoning.trim()) fallbackParts.push({ type: 'reasoning', text: normalizeExecutionText(live.streamedReasoning) })
     if (live.streamedText.trim()) fallbackParts.push({ type: 'text', text: humanizeAgentVisibleText(live.streamedText) })
     // 优先用正式组装的 parts（含工具卡片）；模型流式中断、parts 尚未组装时退化为已流式原文
     const partsToSave = live.parts.length > 0 ? live.parts : fallbackParts
@@ -1672,6 +1673,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // 从源头杜绝「先播英文、轮末再修正成中文」的二次闪变（作者明确不要二次修正观感）
       const visibleTextStreamer = createVisibleTextStreamer()
       const visibleReasoningStreamer = createVisibleTextStreamer()
+      // Execution safeguards retain their original incremental input. Author
+      // classification may hold a paragraph and must never delay detection.
+      const executionTextDetector = createExecutionTextDetector()
+      const executionReasoningDetector = createExecutionTextDetector()
 
       const observeTurnUsage = trackRequestUsage(usage)
       const result = await chatWithTools({
@@ -1694,19 +1699,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             // 正文与 reasoning 都逐 token 实时播出，但只播清洗后的安全增量；轮末由 text.final 统一结算整段
             if (liveTurn) liveTurn.streamedText += chunk.delta
             lastActivityAt = Date.now()
+            handleRepeatHit(repeatDetector.push(executionTextDetector.push(chunk.delta)))
             const textIncrement = visibleTextStreamer.push(chunk.delta)
             if (textIncrement) {
               bus.emit({ type: 'text.delta', messageId, delta: textIncrement })
-              // P1：对清洗后的可见增量做重复检测（避免英文协议残留干扰判定）
-              handleRepeatHit(repeatDetector.push(textIncrement))
             }
           } else if (chunk.type === 'reasoning-delta') {
             if (liveTurn) liveTurn.streamedReasoning += chunk.delta
             lastActivityAt = Date.now()
+            handleRepeatHit(repeatDetector.push(executionReasoningDetector.push(chunk.delta)))
             const reasoningIncrement = visibleReasoningStreamer.push(chunk.delta)
             if (reasoningIncrement) {
               bus.emit({ type: 'reasoning.delta', messageId, delta: reasoningIncrement })
-              handleRepeatHit(repeatDetector.push(reasoningIncrement))
             }
           } else if (chunk.type === 'tool-call-start') {
             lastActivityAt = Date.now()
@@ -1809,22 +1813,26 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       })
 
       const cleanContent = automaticReviewTriggered ? reviewProgressText
+        : normalizeExecutionText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
+      // This projection affects publication only. Empty-response, promise and
+      // saved-delivery decisions below retain baseline execution normalization.
+      const authorContent = automaticReviewTriggered ? reviewProgressText
         : humanizeAgentVisibleText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；
       // 只有模型原生 reasoning 才进思考信道，执行旁白不再改道思考区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
-      if (result.content || automaticReviewTriggered) bus.emit({ type: 'text.final', messageId, text: cleanContent, asReasoning: false })
+      if (result.content || automaticReviewTriggered) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
 
       const parts: AgentMessagePart[] = []
       if (liveTurn) liveTurn.parts = parts
       if (result.reasoning) {
         // 思考信道作者可见：落库同样清洗，避免刷新后历史思考行里残留英文协议词汇
-        parts.push({ type: 'reasoning', text: humanizeAgentVisibleText(result.reasoning) })
+        parts.push({ type: 'reasoning', text: normalizeExecutionText(result.reasoning) })
       }
-      if (cleanContent) {
-        parts.push({ type: 'text', text: cleanContent })
+      if (authorContent) {
+        parts.push({ type: 'text', text: authorContent })
       }
       if (forceWrapUpReason && effectiveToolCalls.length === 0) {
         await persistMessage(messageId, runId, params.sessionId, 'assistant', parts.filter(part => part.type !== 'text'))
@@ -1880,7 +1888,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         return
       }
 
-      if (cleanContent) lastAssistantText = cleanContent
+      if (cleanContent) lastAssistantText = authorContent
 
       const emptyDecision = emptyResponseRecovery.observe(cleanContent, effectiveToolCalls.length)
       if (emptyDecision !== 'continue') {
@@ -1988,7 +1996,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
           bus.emit({ type: 'text.final', messageId, text: delivered, asReasoning: false })
         } else if (savedCandidate) {
-          lastAssistantText = savedPresentation?.text ?? cleanContent
+          lastAssistantText = savedPresentation?.text ?? authorContent
         } else {
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
         }
