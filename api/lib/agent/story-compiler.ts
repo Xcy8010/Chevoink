@@ -717,15 +717,25 @@ export async function validateStoryContinuity(input: {
   const sameReviewedInput = previousValidation.checkedRevision === compilation.chapter.revision && previousValidation.independentCheck === 'complete'
     && runtimeJson(previousValidation.findings ?? []).hash === runtimeJson(findings).hash
     && compilerContinuityCoverageMatches(previousValidation.coverage, currentCoverage)
+  const recovery = previousValidation.continuityFormatRecovery
+  const originalAudit = previousValidation.continuityCriticResponse
+  const preservedRecovery = sameReviewedInput && recovery && typeof recovery === 'object' && !Array.isArray(recovery)
+    && originalAudit && typeof originalAudit === 'object' && !Array.isArray(originalAudit)
+    && recovery.version === 1 && recovery.parserVersion === 4 && recovery.originalParserVersion === 3
+    && originalAudit.parserVersion === 3 && originalAudit.classification === 'findings_invalid'
+    && recovery.rawHash === originalAudit.contentHash && recovery.characterCount === originalAudit.characterCount
+    && recovery.coverageHash === runtimeJson(currentCoverage).hash && Array.isArray(recovery.sourceRelocations) && recovery.sourceRelocations.length > 0
+    && typeof previousValidation.checkedAt === 'string' && Number.isFinite(Date.parse(previousValidation.checkedAt))
   const validation = {
     ...(sameReviewedInput && previousValidation.retainedReviewDecision ? { retainedReviewDecision: previousValidation.retainedReviewDecision } : {}),
     ...(sameReviewedInput && previousValidation.continuityCriticResponse ? { continuityCriticResponse: previousValidation.continuityCriticResponse } : {}),
+    ...(preservedRecovery ? { continuityFormatRecovery: recovery } : {}),
     ...(readNewDraftRevision(compilation.validation) ? { newDraftRevision: readNewDraftRevision(compilation.validation) } : {}),
     autoRepairRounds: continuityRepairRounds(compilation.validation),
     checkRounds: nextCheckRounds,
     checkedChapterId: compilation.chapter.id,
     checkedRevision: compilation.chapter.revision,
-    checkedAt: new Date().toISOString(),
+    checkedAt: preservedRecovery ? previousValidation.checkedAt as string : new Date().toISOString(),
     independentCheck: unlocated.length ? 'unavailable' as const : input.independentCheck ?? 'unavailable' as const,
     unlocatedEvidenceCount: unlocated.length,
     checkedContent: compilation.chapter.content,

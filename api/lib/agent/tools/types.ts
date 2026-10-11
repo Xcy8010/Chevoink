@@ -24,6 +24,10 @@ export type ToolContext = {
   runId: string
   /** Verified original task scope for input guidance only; never model input. */
   writingScope?: import('../../../../shared/contracts/index.js').TaskSpec['scope']
+  /** Server-authenticated per-call offline recovery fence. Never populated
+   * from model/tool arguments, UI input, or inherited by an inline child. */
+  offlineContinuityOnly?: { version: 1; compilationId: string; chapterId: string; revision: number; contentHash: string;
+    admissionKey: string; validationHash: string; auditHash: string }
   /** Per-execution server observations; never populated from tool arguments. */
   planContentHashes?: Map<string, string>
   /** 作者明确要求“已有/前文保持不变”时，本轮启动前已存在的章节集合。 */

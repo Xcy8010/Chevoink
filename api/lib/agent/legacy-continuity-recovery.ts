@@ -81,7 +81,8 @@ export async function readLegacyContinuityRecovery(tx: Prisma.TransactionClient,
 /** A new author continuation may retry a returned, settled legacy review.
  * Restarting, changing compilers or copying an old request cannot authorize it. */
 export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClient,
-  subject: { userId: string; novelId: string; runId: string }): Promise<Array<[string, string]>> {
+  subject: { userId: string; novelId: string; runId: string },
+  ignoreCurrentCall?: { callId: string; compilationId: string; chapterId: string }): Promise<Array<[string, string]>> {
   const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
   if (!run || run.taskRootId) return []
   const admission = await readQualityReviewAdmission(tx, run)
@@ -92,7 +93,24 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
   const retiredUsageIds = await readRetiredReviewUsageIds(tx, subject, runIds)
   if (await tx.agentProviderAttempt.count({ where: { runId: { in: runIds }, status: { in: ['prepared', 'dispatched', 'unknown'] } } })) return []
   const compilations = await tx.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds } } })
-  const events = await tx.agentRunEvent.findMany({ where: { runId: { in: runIds }, type: { in: ['tool.call', 'tool.result'] } }, orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }] })
+  let events = await tx.agentRunEvent.findMany({ where: { runId: { in: runIds }, type: { in: ['tool.call', 'tool.result'] } }, orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }] })
+  // Only a real, uniquely owned current tool invocation may be omitted from
+  // historical returned-call proof. Default readers retain their old behavior.
+  if (ignoreCurrentCall) {
+    if (run.status !== 'running' || !ignoreCurrentCall.callId || await tx.agentProviderAttempt.count({ where: {
+      runId: { in: runIds }, status: { in: ['dispatching'] } } })) return []
+    const matching = events.filter(event => event.runId === run.id && object(event.payload).callId === ignoreCurrentCall.callId)
+    const call = matching[0], payload = object(call?.payload), args = object(payload.args)
+    if (matching.length !== 1 || call.type !== 'tool.call' || payload.toolName !== 'continuity_validate' || call.createdAt < admission.at
+      || args.compilationId !== undefined && args.compilationId !== ignoreCurrentCall.compilationId
+      || args.chapterId !== undefined && args.chapterId !== ignoreCurrentCall.chapterId
+      || args.compilationId === undefined && args.chapterId === undefined
+      || !compilations.some(item => item.id === ignoreCurrentCall.compilationId && item.chapterId === ignoreCurrentCall.chapterId)
+      || await tx.aiUsageLog.count({ where: { userId: subject.userId, novelId: subject.novelId, action: { startsWith: 'agent3Continuity' },
+        OR: [{ targetType: 'story_compilation', targetId: ignoreCurrentCall.compilationId }, { targetType: 'chapter', targetId: ignoreCurrentCall.chapterId }],
+        createdAt: { gte: call.createdAt } } })) return []
+    events = events.filter(event => event.id !== call.id)
+  }
   const keys: Array<[string, string]> = []
   for (const compilation of compilations) {
     const validation = object(compilation.validation), coverage = object(validation.coverage)

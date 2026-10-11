@@ -80,7 +80,7 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.critic).toHaveBeenCalledOnce()
     expect(f.repair).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
-    expect(f.compilation.validation).toMatchObject({ continuityCriticResponse: { parserVersion: 3, classification: 'complete', unwrapped: true } })
+    expect(f.compilation.validation).toMatchObject({ continuityCriticResponse: { parserVersion: 4, classification: 'complete', unwrapped: true } })
   })
   it('连续性判断取得前章已保存原文，桥接摘要不单独充当事实证据', async () => {
     const f = fixture(false)

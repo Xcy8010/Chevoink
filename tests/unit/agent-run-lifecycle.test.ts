@@ -41,6 +41,7 @@ const mocks = vi.hoisted(() => ({
   settledQuality: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/quality-review-admission.js').readSettledQualityReviews>>> => []),
   assertLimitedDelivery: vi.fn(async () => undefined),
   continuedContinuity: vi.fn(async (): Promise<Array<[string, string]>> => []),
+  offlineContinuity: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/continuity-offline-recovery.js').readOfflineContinuityRecovery>>> => null),
   legacyAnchorRecovery: vi.fn(async (): Promise<import('../../api/lib/agent/legacy-input-recovery.js').LegacyAnchorInputRecovery | null> => null),
   continuityRecovery: vi.fn(async () => ({ removed: [] as import('../../api/lib/agent/tool-local-failure.js').ToolRestriction[],
     settled: [] as import('../../api/lib/agent/checkpoint.js').PendingReviewCall[], recovered: [] as string[], markers: [] as string[], chapterIds: [] as string[] })),
@@ -206,6 +207,7 @@ vi.mock('../../api/lib/agent/story-compiler.js', async (importOriginal) => ({
 }))
 vi.mock('../../api/lib/agent/legacy-continuity-recovery.js', () => ({ readLegacyContinuityRecovery: mocks.continuityRecovery, readContinuedContinuityRecovery: mocks.continuedContinuity }))
 vi.mock('../../api/lib/agent/legacy-input-recovery.js', () => ({ readLegacyAnchorInputRecovery: mocks.legacyAnchorRecovery }))
+vi.mock('../../api/lib/agent/continuity-offline-recovery.js', () => ({ readOfflineContinuityRecovery: mocks.offlineContinuity }))
 vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChapter: mocks.committedChapter }))
 vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportForDelivery: mocks.report }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
@@ -285,6 +287,7 @@ beforeEach(() => {
   mocks.requestRecovery.mockReset().mockResolvedValue([])
   mocks.cancelledReviews.mockReset().mockResolvedValue([])
   mocks.continuedContinuity.mockReset().mockResolvedValue([])
+  mocks.offlineContinuity.mockReset().mockResolvedValue(null)
   mocks.legacyAnchorRecovery.mockReset().mockResolvedValue(null)
   mocks.continuityRecovery.mockReset().mockResolvedValue({ removed: [], settled: [], recovered: [], markers: [], chapterIds: [] })
   mocks.assertLimitedDelivery.mockReset().mockResolvedValue(undefined)
@@ -420,6 +423,125 @@ describe('server assessment fallback in the real execution loop', () => {
     const checkpoint = (mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[]; toolRestrictions?: unknown[] } }).checkpoint
     expect(checkpoint.pendingReviews ?? []).toEqual([])
     expect(checkpoint.toolRestrictions ?? []).toEqual([])
+  })
+  it.each(['CONTINUITY_EVIDENCE_UNLOCATED', 'CONTINUITY_REPORT_INCOMPLETE'])('%s retains its current cause at legacy stagnant nine without resetting the checkpoint', async failureCode => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 172197, stagnantBatches: 8, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 3, writeBaseline: 0, readProgress: 3, readBaseline: 0, progressSignatures: ['read-range:' + JSON.stringify(['c', 'b'.repeat(64)]) + ':0-2502'],
+      inputProtocolRecovery: { protocol: 2, key: 'a'.repeat(64) } }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 22, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint } })
+    let state = readiness('missing', 'stale', 4)
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const check = tool('continuity_validate', async () => { state = readiness('incomplete', 'stale', 4); return { outcome: 'failed', failureCode, output: '原始报告已保存，引用尚未确认' } })
+    const read = tool('chapter_read', async () => ({ output: '保存的 r4 正文', observedChapterRange: { targetId: 'c', contentHash: 'b'.repeat(64), start: 0, end: 2502 } }))
+    const commit = tool('chapter_bridge_commit', async () => ({ output: '不可提交' }), false)
+    mocks.tools = [check, read, commit]
+    queue(response('', [call('check', check.name, '{"compilationId":"comp"}'), call('read', read.name), call('commit', commit.name, '{"compilationId":"comp"}')]))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    expect(check.execute).toHaveBeenCalledOnce()
+    expect(read.execute).toHaveBeenCalledOnce()
+    expect(commit.execute).not.toHaveBeenCalled()
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: expect.stringContaining('本章连续性复核尚未完成：') }))
+    expect(events().some(event => event.type === 'text.final' && event.text.includes('连续多轮没有推进'))).toBe(false)
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: {
+      stagnantBatches: 9, writeProgress: 3, readProgress: 3, maxTurns: 1, tokenBudget: 500,
+      inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
+    expect((mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[] } }).checkpoint.pendingReviews ?? []).toEqual([])
+  })
+  it('does not attribute a previous revision failure to the current incomplete review', async () => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 22, startedAt: new Date(Date.now() - 1000), usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050,
+      checkpoint: { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now(), activeExecutionMs: 100,
+        stagnantBatches: 8, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500, readProgress: 3, readBaseline: 0, writeProgress: 3, writeBaseline: 0, progressSignatures: [] } } })
+    let state = readiness('missing', 'stale', 4)
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const check = tool('continuity_validate', async () => { state = readiness('incomplete', 'stale', 5); return { outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE', output: '旧版报告无效' } })
+    mocks.tools = [check]
+    queue(response('', [call('check', check.name, '{"compilationId":"comp"}')]))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    expect(events().some(event => event.type === 'text.final' && event.text.includes('本章连续性复核尚未完成：'))).toBe(false)
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: expect.stringContaining('连续多轮没有推进') }))
+  })
+  it('settles only a confirmed offline no-request stale receipt without progress or a new retry allowance', async () => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 172197, stagnantBatches: 8, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 3, writeBaseline: 0, readProgress: 3, readBaseline: 0,
+      progressSignatures: ['read-range:' + JSON.stringify(['c', 'b'.repeat(64)]) + ':0-2502'], inputProtocolRecovery: { protocol: 2, key: 'a'.repeat(64) } }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 22, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint } })
+    let state = readiness('missing', 'stale', 4)
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const check = tool('continuity_validate', async () => { state = readiness('incomplete', 'stale', 5); return { outcome: 'failed', failureCode: 'CONTINUITY_INPUT_STALE',
+      output: '正文在离线恢复前发生变化，未发起新模型检查', reviewRequestFinished: { version: 1, chapterId: 'c', revision: 4, contentHash: 'b'.repeat(64) } } })
+    const read = tool('chapter_read', async () => ({ output: '已核对的旧正文仍保留', observedChapterRange: { targetId: 'c', contentHash: 'b'.repeat(64), start: 0, end: 2502 } }))
+    const commit = tool('chapter_bridge_commit', async () => ({ output: '不能提交' }), false)
+    mocks.tools = [check, read, commit]
+    queue(response('', [call('offline-check', check.name, '{"compilationId":"comp"}'), call('read', read.name), call('commit', commit.name, '{"compilationId":"comp"}')]))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    expect(check.execute).toHaveBeenCalledOnce()
+    expect(read.execute).toHaveBeenCalledOnce()
+    expect(commit.execute).not.toHaveBeenCalled()
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
+    const saved = (mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[]; reviewAttempts: string[] } }).checkpoint
+    expect(saved.pendingReviews ?? []).toEqual([])
+    expect(saved.reviewAttempts).toContain('comp:c:4:continuity_validate:protocol7')
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: {
+      stagnantBatches: 9, readProgress: 3, writeProgress: 3, tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
+  })
+  it.each(['restored', 'proof-lost', 'no-author', 'no-proof'] as const)('dispatches only authenticated offline evidence before the cp9 repeated read: %s', async scenario => {
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 172197, stagnantBatches: 9, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 3, writeBaseline: 0, readProgress: 3, readBaseline: 0,
+      progressSignatures: ['read-range:' + JSON.stringify(['c', 'b'.repeat(64)]) + ':0-2502'], inputProtocolRecovery: { protocol: 2, key: 'a'.repeat(64) } }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 23, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint } })
+    const key = 'continuity-author-recovery:' + 'c'.repeat(64)
+    if (scenario !== 'no-author') mocks.continuedContinuity.mockResolvedValue([['comp:c:4:continuity_validate:protocol7', key]])
+    if (scenario !== 'no-proof') mocks.offlineContinuity.mockResolvedValue({ chapter: { id: 'c', revision: 4 }, coverage: { contentHash: 'b'.repeat(64) },
+      validationHash: 'd'.repeat(64), audit: { admissionKey: key } } as never)
+    let state = readiness('incomplete', 'stale', 4)
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const check = tool('continuity_validate', async () => {
+      if (scenario === 'proof-lost') return { outcome: 'failed', failureCode: 'CONTINUITY_INPUT_STALE', output: '恢复证明改变，没有新模型请求',
+        reviewRequestFinished: { version: 1, chapterId: 'c', revision: 4, contentHash: 'b'.repeat(64) } }
+      state = { ...readiness('complete', 'stale', 4), continuityErrorCount: 4, progressEvidence: {
+        taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'c', orderIndex: 20, contentHash: 'b'.repeat(64), phases: ['continuity'] } }
+      return { output: '原报告4条意见完整恢复；正文与费用未改' }
+    })
+    const read = tool('chapter_read', async () => ({ output: '已读的 r4 正文', observedChapterRange: { targetId: 'c', contentHash: 'b'.repeat(64), start: 0, end: 2502 } }))
+    mocks.tools = [check, read]
+    queue(response('', [call('repeat-read', read.name, '{"chapterId":"c"}')]))
+    if (scenario === 'restored') queue(response('4条意见仍待处理，质量检查仍缺失。'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    const injected = scenario === 'restored' || scenario === 'proof-lost'
+    expect(check.execute).toHaveBeenCalledTimes(injected ? 1 : 0)
+    expect(read.execute).toHaveBeenCalledOnce()
+    expect(mocks.chat).toHaveBeenCalledTimes(scenario === 'restored' ? 2 : 1)
+    expect(mocks.offlineContinuity).toHaveBeenCalledTimes(scenario === 'no-author' ? 0 : 1)
+    if (injected) expect(check.execute).toHaveBeenCalledWith(expect.objectContaining({ offlineContinuityOnly: expect.objectContaining({ version: 1,
+      compilationId: 'comp', chapterId: 'c', revision: 4, contentHash: 'b'.repeat(64), admissionKey: key, validationHash: 'd'.repeat(64) }) }), expect.anything())
+    if (scenario === 'restored') {
+      expect(mocks.chat.mock.calls[1][0].messages.some((message: { role: string; content?: string | null }) => message.role === 'tool' && message.content?.includes('原报告4条意见'))).toBe(true)
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1070, checkpoint: { stagnantBatches: 0, writeProgress: 3,
+        tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
+    } else expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: { stagnantBatches: 10, readProgress: 3,
+      writeProgress: 3, tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
+    expect((mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[] } }).checkpoint.pendingReviews ?? []).toEqual([])
+    expect(events().some(event => event.type === 'run.finished' && event.status === 'succeeded')).toBe(false)
   })
   it('keeps a bad wait as a failed observation while the next authorized call in the batch executes', async () => {
     const wait = tool('task_wait', async () => ({ outcome: 'failed', failureCode: 'TASK_WAIT_TARGET_NOT_FOUND', output: '任务身份不是窗口编号；当前任务没有派生窗口' }))

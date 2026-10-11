@@ -2,6 +2,7 @@ import { retainedFindings } from './chapter-arguments.js'
 import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
 import { inspectContinuityResponse } from '../continuity-format-recovery.js'
+import { readOfflineContinuityRecovery, applyOfflineContinuityRecovery } from '../continuity-offline-recovery.js'
 import { runtimeJson } from '../runtime-common.js'
 import { persistedContentHash } from '../semantic-progress.js'
 import { continuityFindingText, continuitySourceInput, resolveContinuitySources, continuityRecheckInput, unconfirmedContinuityOutput, type ContinuityBodies } from '../continuity-review-context.js'
@@ -80,9 +81,9 @@ const independentContinuityResultSchema = z.object({
   findings: z.array(continuityFindingInputSchema).max(30),
 })
 
-export function parseIndependentContinuityResult(content: string, parserVersion: 1 | 2 | 3 = 3, bodies?: ContinuityBodies): { findings: z.infer<typeof continuityFindingInputSchema>[]; structured: boolean } {
-  if (parserVersion === 3) {
-    const inspected = inspectContinuityResponse(content, bodies)
+export function parseIndependentContinuityResult(content: string, parserVersion: 1 | 2 | 3 | 4 = 3, bodies?: ContinuityBodies): { findings: z.infer<typeof continuityFindingInputSchema>[]; structured: boolean } {
+  if (parserVersion >= 3) {
+    const inspected = inspectContinuityResponse(content, bodies, true, parserVersion as 3 | 4)
     return { findings: inspected.findings, structured: inspected.structured }
   }
   const start = content.indexOf('{')
@@ -598,6 +599,34 @@ export async function saveStandaloneContinuityReport(ctx: ToolContext, context: 
     summary: unlocated ? '连续性引用待核对' : `独立连续性检查 · ${errors} 错误 ${warnings} 警告`, output: `artifactId=${artifact.id}\n${output}`, observedState: { kind: 'chapter', id: context.chapter.id, revision: context.chapter.revision } }
 }
 
+async function executeOfflineContinuityOnly(ctx: ToolContext, args: { compilationId?: string; chapterId?: string; focus?: string }) {
+  const marker = ctx.offlineContinuityOnly!
+  const stale = () => ({ outcome: 'failed' as const, failureCode: 'CONTINUITY_INPUT_STALE', summary: '本章在离线恢复前发生变化',
+    output: '原离线检查凭据或目标已变化；未应用旧检查、未派发模型、未增加检查次数。请读取当前正文和章节桥后继续，不能宣称新版已通过。',
+    reviewRequestFinished: { version: 1 as const, chapterId: marker.chapterId, revision: marker.revision, contentHash: marker.contentHash } })
+  ctx.signal.throwIfAborted()
+  if (marker.version !== 1 || ctx.inlineChild || ctx.durableCompiler || args.compilationId !== marker.compilationId
+    || args.chapterId !== undefined && args.chapterId !== marker.chapterId) return stale()
+  const input = { compilationId: marker.compilationId, focus: args.focus }
+  let recovered: NonNullable<Awaited<ReturnType<typeof readOfflineContinuityRecovery>>>
+  let report: Awaited<ReturnType<typeof applyOfflineContinuityRecovery>>
+  try {
+    const proof = await prisma.$transaction(tx => readOfflineContinuityRecovery(tx, ctx, input))
+    if (!proof || proof.chapter.id !== marker.chapterId || proof.chapter.revision !== marker.revision || proof.coverage.contentHash !== marker.contentHash
+      || proof.audit.admissionKey !== marker.admissionKey || proof.validationHash !== marker.validationHash || runtimeJson(proof.audit).hash !== marker.auditHash) return stale()
+    recovered = proof
+    report = await prisma.$transaction(tx => applyOfflineContinuityRecovery(tx, ctx, input, proof))
+  } catch (error) {
+    if (!(error instanceof DataAccessError) || error.code !== 'CONTINUITY_INPUT_STALE') throw error
+    return stale()
+  }
+  const guidance = report.errorCount ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, recovered.chapter)) : ''
+  return { summary: `离线复用连续性检查 · ${report.errorCount} 错误 ${report.warningCount} 警告`,
+    output: `原完整检查响应已按同来源唯一原文纠正定位并复用；正文未改动，未调用模型、未增加检查次数。${guidance || '警告保留待审，不自动改正文。'}\n留置绑定 reportId=${continuityDecisionBinding(marker.compilationId, marker.revision, { ...report, coverage: recovered.coverage })}；findingId 使用从0开始的编号。\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`,
+    display: { kind: 'storyCompiler' as const, compilationId: marker.compilationId, phase: report.errorCount ? 'repair' as const : 'check' as const, title: '连续性检查', detail: `${report.errorCount} 错误 · ${report.warningCount} 警告 · 离线复用`, errorCount: report.errorCount, warningCount: report.warningCount,
+      items: report.findings.map(item => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`) } }
+}
+
 export const continuityValidateTool = defineTool({
   name: 'continuity_validate',
   title: '检查章节连续性',
@@ -622,6 +651,7 @@ export const continuityValidateTool = defineTool({
   permission: ALL_READ,
   readOnly: true,
   async execute(ctx, args) {
+    if (ctx.offlineContinuityOnly) return executeOfflineContinuityOnly(ctx, args)
     const compilation = await prisma.storyCompilation.findFirst({
       where: {
         userId: ctx.userId,
@@ -646,7 +676,7 @@ export const continuityValidateTool = defineTool({
       }
       const response = await generateReviewCompletion(continuityCriticSystem, `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, args.focus)}`,
         { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: context.chapter.id, targetType: 'chapter', targetId: context.chapter.id, temperature: 0, reasoningEffort: 'low' }, assertCurrent)
-      const inspected = inspectContinuityResponse(response, { previous: context.precedingBodies, current: context.chapter.content })
+      const inspected = inspectContinuityResponse(response, { previous: context.precedingBodies, current: context.chapter.content }, true, 4)
       return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, inspected, tx, args.focus, true, true, inspected.audit))
     }
     if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, summary: '本任务连续性检查未执行', output: '指定编译不属于本任务或尚未写入正文。独立检查既有章节请省略 compilationId、传真实 chapterId；不要为检查创建新章或接管旧编译。' }
@@ -683,6 +713,27 @@ export const continuityValidateTool = defineTool({
         output: `当前 r${chapter.revision} 已完成连续性检查，直接复用结果：${errorCount} 个错误、${warningCount} 个警告；${errorCount ? repairGuidance : '连续性检查已完成；警告保留待审，不自动改正文。'}\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...cachedValidation, checkedChapterId: chapter.id })}；findingId 使用从0开始的编号。\n${findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`,
         summary: `复用连续性检查 · ${errorCount} 错误 ${warningCount} 警告`,
         display: { kind: 'storyCompiler', compilationId: compilation.id, phase: errorCount > 0 ? 'repair' : 'check', title: '连续性检查', detail: `${errorCount} 错误 · ${warningCount} 警告 · 已复用`, items: findings.map((item) => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`), errorCount, warningCount },
+      }
+    }
+    const failedAudit = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation)
+      ? compilation.validation.continuityCriticResponse : null
+    if (failedAudit && typeof failedAudit === 'object' && !Array.isArray(failedAudit) && failedAudit.parserVersion === 3 && failedAudit.classification === 'findings_invalid') {
+      const input = { compilationId: compilation.id, focus: args.focus }
+      const recovery = await prisma.$transaction(tx => readOfflineContinuityRecovery(tx, ctx, input))
+      if (recovery) {
+        let report: Awaited<ReturnType<typeof applyOfflineContinuityRecovery>>
+        try { report = await prisma.$transaction(tx => applyOfflineContinuityRecovery(tx, ctx, input, recovery)) }
+        catch (error) {
+          if (!(error instanceof DataAccessError) || error.code !== 'CONTINUITY_INPUT_STALE') throw error
+          return { outcome: 'failed' as const, failureCode: error.code, summary: '本章在离线恢复前发生变化',
+            output: '本章或原检查凭据在离线恢复前发生变化；未应用旧检查，未派发新模型、未增加检查次数。请读取当前正文和章节桥后按当前版本继续检查，不能宣称新版已通过。',
+            reviewRequestFinished: { version: 1 as const, chapterId: chapter.id, revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash } }
+        }
+        const guidance = report.errorCount ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
+        return { summary: `离线复用连续性检查 · ${report.errorCount} 错误 ${report.warningCount} 警告`,
+          output: `原完整检查响应已按同来源唯一原文纠正定位并复用；正文未改动，未调用模型、未增加检查次数。${guidance || '警告保留待审，不自动改正文。'}\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...report, coverage })}；findingId 使用从0开始的编号。\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`,
+          display: { kind: 'storyCompiler', compilationId: compilation.id, phase: report.errorCount ? 'repair' : 'check', title: '连续性检查', detail: `${report.errorCount} 错误 · ${report.warningCount} 警告 · 离线复用`, errorCount: report.errorCount, warningCount: report.warningCount,
+            items: report.findings.map(item => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`) } }
       }
     }
     // A check reserves a monotonic audit count; its count is not a dispatch cap.
@@ -736,7 +787,7 @@ export const continuityValidateTool = defineTool({
     ctx.signal.throwIfAborted()
     await assertCurrent()
     const bodies = { previous: sourceChapter?.content ?? null, current: chapter.content }
-    const inspected = inspectContinuityResponse(criticResponses[0], bodies)
+    const inspected = inspectContinuityResponse(criticResponses[0], bodies, true, 4)
     const parsedCriticResponses = [{ structured: inspected.structured, findings: inspected.findings }]
     const criticFallback = parsedCriticResponses.some((response) => !response.structured)
     const independentFindings = parsedCriticResponses

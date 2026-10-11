@@ -67,6 +67,8 @@ import { readQualityFormatRecovery, type QualityFormatRecovery } from './quality
 import { deferredToolPart } from './deferred-tool.js'
 import { readContinuedContinuityRecovery, readLegacyContinuityRecovery } from './legacy-continuity-recovery.js'
 import { readLegacyAnchorInputRecovery } from './legacy-input-recovery.js'
+import { readOfflineContinuityRecovery } from './continuity-offline-recovery.js'
+import { runtimeJson } from './runtime-common.js'
 import { readCancelledReviewRetirements } from './cancelled-review-recovery.js'
 import { activeChapterScope } from '../data/internal.js'
 import { createRepeatDetector } from './repeat-detect.js'
@@ -1786,6 +1788,34 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const effectiveToolCalls = result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
       let automaticReviewTriggered = false
       let mergedReviewReminder: string | undefined
+      const offlineContinuityCalls = new Map<string, NonNullable<ToolContext['offlineContinuityOnly']>>()
+      // A repeated read must not strand already-returned recoverable evidence
+      // before its tool executes. Only a fresh authenticated author proof can
+      // schedule this zero-provider path; execution rechecks the frozen proof
+      // and must fail without a paid fallback if any binding has changed.
+      if (stagnantBatches >= 4 && !pendingReviews.size && ['write', 'revise'].includes(taskSpec.intent)
+        && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only'
+        && effectiveToolCalls.length > 0 && effectiveToolCalls.every(call => tools.find(tool => tool.name === call.name)?.readOnly)
+        && effectiveToolCalls.some(call => ['chapter_read', 'chapter_bridge_get'].includes(call.name))
+        && !effectiveToolCalls.some(call => call.name === 'continuity_validate')
+        && [...reviewRecoveryKeys.values()].some(key => key.startsWith('continuity-author-recovery:'))) {
+        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: params.userId, novelId: params.novelId, runId }))
+        const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
+        if (readiness?.compilationId && readiness.continuity === 'incomplete' && next.kind === 'tool'
+          && next.tool.name === 'continuity_validate' && next.key.startsWith('continuity-author-recovery:')) {
+          const id = 'offline_review_' + randomUUID()
+          const args = { ...next.tool.args, compilationId: readiness.compilationId }
+          const proof = await prisma.$transaction(tx => readOfflineContinuityRecovery(tx,
+            { userId: params.userId, novelId: params.novelId, runId, callId: id }, { compilationId: readiness.compilationId! }))
+          if (proof && proof.chapter.id === readiness.chapterId && proof.chapter.revision === readiness.revision && proof.audit.admissionKey === next.key) {
+            offlineContinuityCalls.set(id, { version: 1, compilationId: readiness.compilationId, chapterId: proof.chapter.id,
+              revision: proof.chapter.revision, contentHash: proof.coverage.contentHash, admissionKey: proof.audit.admissionKey,
+              validationHash: proof.validationHash, auditHash: runtimeJson(proof.audit).hash })
+            effectiveToolCalls.unshift({ id, name: 'continuity_validate', arguments: JSON.stringify(args) })
+            automaticReviewTriggered = true
+          }
+        }
+      }
       // A weak tool caller cannot skip the delivery assessments by returning
       // prose. These calls use the same original tool ceiling and ordinary
       // journal, approvals, billing and compiler counters as model calls.
@@ -2027,6 +2057,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
 
       let reviewStopReason: string | undefined
+      let incompleteReview: { toolName: 'continuity_validate' | 'quality_analyze'; chapterId: string; revision: number; compilationId?: string | null; failureCode: string } | undefined
       let batchProgress = false
       const decisionFeedback: NonNullable<ToolCallOutcome['reviewDecisionFeedback']>[] = []
       let compatibilityReadObserved = false
@@ -2197,7 +2228,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             throw error
           }
         }
-        const outcome = await handleToolCall(call, tools, { ...toolContext, callId: call.id, messageId }, bus, messageId, runId)
+        const outcome = await handleToolCall(call, tools, { ...toolContext, ...(call.name === 'continuity_validate' && offlineContinuityCalls.has(call.id) ? { offlineContinuityOnly: offlineContinuityCalls.get(call.id) } : {}), callId: call.id, messageId }, bus, messageId, runId)
         const requestFinished = reviewDispatch && outcome.reviewRequestFinished?.version === 1
           && outcome.reviewRequestFinished.chapterId === reviewDispatch.chapterId
           && outcome.reviewRequestFinished.revision === reviewDispatch.revision
@@ -2223,6 +2254,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }
           qualityRecovery = null
           await persistCheckpoint()
+        }
+        // Preserve a confirmed failure's cause for this batch only. It grants
+        // neither progress nor a retry, and cannot describe unknown requests.
+        if (reviewDispatch && !outcome.unresolvedTextRequest && outcome.part.status !== 'success'
+          && ['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED', 'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? '')) {
+          incompleteReview = { ...reviewDispatch, failureCode: outcome.failureCode! }
         }
         const localFailure = isLocalToolFailure(outcome.failureCode ?? outcome.recoveryCode)
         if (localFailure) {
@@ -2415,7 +2452,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       compatibilityReadTargets = null
       if (compatibilityRead && !batchProgress) messages.push({ role: 'user', content: '[系统] 已核对旧定位失败目标的真实正文。输入协议兼容读取机会已持久记账，仅此一次；历史失败、检查次数和预算保留。下一步按当前正文纠正具体定位参数并执行原目标内修订，不要重复读取或照原失败参数重试。' })
       if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead && !feedbackRead)) {
-        forceWrapUpReason = '连续多轮没有推进原任务的内容或必需成果，已停止重复执行，进度保留。'
+        const sameIncompleteReview = incompleteReview && review && !review.ready
+          && review.chapterId === incompleteReview.chapterId && review.revision === incompleteReview.revision
+          && (review.compilationId ?? null) === (incompleteReview.compilationId ?? null)
+          && (incompleteReview.toolName === 'continuity_validate' ? review.continuity : review.quality) === 'incomplete'
+        forceWrapUpReason = sameIncompleteReview
+          ? (incompleteReview!.toolName === 'continuity_validate' ? '本章连续性复核尚未完成：' : '本章质量复核尚未完成：')
+            + (incompleteReview!.failureCode.endsWith('EVIDENCE_UNLOCATED') ? '报告中的正文引用尚未确认。' : '检查报告未能完整解析。')
+            + '原始报告和检查记录保留，已停止重复请求；继续时需先恢复或完成这项检查。'
+          : '连续多轮没有推进原任务的内容或必需成果，已停止重复执行，进度保留。'
         forceWrapUpLocal = toolRestrictions.length > 0 || pendingReviews.size > 0 || settledReviewFailures.size > 0
       }
 
