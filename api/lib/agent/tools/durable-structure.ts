@@ -75,7 +75,7 @@ export async function executeDurableStructure(ctx: ToolContext, tool: AgentTool,
       contentBefore, contentAfter, memoryJobIds,
       progress: { kind: 'structure_revision', targetId: ctx.novelId, beforeHash: result.semanticTransition?.beforeHash, afterHash: result.semanticTransition?.afterHash } }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || !['STRUCTURE_TARGET_NOT_FOUND', 'STRUCTURE_REVISION_CONFLICT', 'VOLUME_REVISION_CONFLICT', 'CHAPTER_REVISION_CONFLICT',
+    if (!(error instanceof DataAccessError) || !['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'STRUCTURE_TARGET_NOT_FOUND', 'STRUCTURE_REVISION_CONFLICT', 'VOLUME_REVISION_CONFLICT', 'CHAPTER_REVISION_CONFLICT',
       'AUTHOR_SCOPE_PROTECTED', 'LAST_VOLUME_REQUIRED', 'VOLUME_NOT_EMPTY', 'VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'INVALID_SPLIT_OFFSET', 'INVALID_MERGE_TARGET'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: '结构操作未执行' })
   })

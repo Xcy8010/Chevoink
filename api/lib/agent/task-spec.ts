@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { DataAccessError } from '../prisma.js'
 
 import type { TaskIntent, TaskSpec, UserDirective } from '../../../shared/contracts/index.js'
 import type { CreativeFreedom } from '../../../shared/contracts/index.js'
@@ -136,9 +137,15 @@ export function buildTaskSpec(input: {
   chapterId?: string | null
   prompt: string
   selection?: { start?: number; end?: number } | null
+  /** Fresh server admission only; resume/fallback never opts old runs in. */
+  manuscriptProtocol?: 1
   creativeFreedom?: CreativeFreedom
   qualityMode?: StoryCompilerMode
 }): TaskSpec {
+  if (input.manuscriptProtocol === 1 && input.selection && (!input.chapterId || !Number.isSafeInteger(input.selection.start)
+    || !Number.isSafeInteger(input.selection.end) || input.selection.start! < 0 || input.selection.end! <= input.selection.start!)) {
+    throw new DataAccessError(409, 'AUTHOR_SELECTION_STALE', '选区必须绑定当前章节及非空 UTF-16 坐标，请重新选择正文。')
+  }
   const writingPacing = classifyWritingPacing(input.prompt)
   const intent = writingPacing === 'proposal_only' ? 'plan' : classifyIntent(input.prompt)
   const minimumChineseCharacters = intent === 'review' || intent === 'research_analysis' ? explicitReportMinimum(input.prompt) : undefined
@@ -164,7 +171,7 @@ export function buildTaskSpec(input: {
     controlPolicy: 'until_completion',
     ...(writingPacing ? { writingPacing } : {}),
     researchBudget: /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt) ? 'extended' : 'standard',
-    scope: { novelId: input.novelId, chapterIds, selection },
+    scope: { novelId: input.novelId, chapterIds, selection, ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}) },
     goals: [input.prompt.trim().slice(0, 1000) || '继续完成上一轮任务'],
     hardConstraints: directives
       .filter((item) => item.kind === 'must' || item.kind === 'must_not')
@@ -208,7 +215,10 @@ export function renderTaskSpec(spec: TaskSpec): string {
     : '\n创作节奏：写作严格限于本任务原始请求。面对宽泛整书目标先交可审阅的大纲并确认首批范围，再进入正文；用户明确授权自主整书创作时先保存大纲、按计划分批推进，每批回报真实进度与重大偏差。用户明确指定章节/续写范围时直接执行该范围，不反复确认，不擅自向后无限续章。调研结果和历史任务不是新的写作授权。'
   const hard = [spec.hardConstraints.map((item) => `- ${item.text}`).join('\n') || '- 无', pacing].join('')
   const freedomLabel = spec.creativeFreedom === 'stable' ? '平衡延续' : spec.creativeFreedom === 'bold' ? '大胆探索' : '严谨创作'
-  const freedomRule = spec.creativeFreedom === 'stable'
+  const selection = spec.scope.manuscriptProtocol === 1 ? spec.scope.selectionBoundary : undefined
+  const freedomRule = selection
+    ? `本任务仅授权章节 ${selection.chapterId} 的原始选区（UTF-16 ${selection.start}–${selection.end}，入场 r${selection.revision}）。用 chapter_read 读取当前完整正文，再用 chapter_edit_range 逐字唯一锚点或当前选区内坐标精确替换；每批最多8处，可连续合法修改，变长后仍保留原选区外文字。不得 chapter_write、chapter_append、改名、创建、变更集或自动整章修订。模型计划、报告、摘要、继续或子任务均不能扩大此边界。当前版本所需检查与真实剩余意见照原合同保留。`
+    : spec.creativeFreedom === 'stable'
     ? '贴合既有走向，只修明确错误。'
     : spec.creativeFreedom === 'bold'
       ? '优先探索新可能；检查建议仅提示，不自动改写。'

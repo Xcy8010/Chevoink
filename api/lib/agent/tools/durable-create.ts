@@ -88,7 +88,7 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
     return runtimeJson({ toolResult: result, memoryJobId: memoryJob?.id ?? null, ...(createdBody ? { progress: { kind: 'content_revision', targetId: target.id,
       beforeHash: runtimeJson({ content: '' }).hash, afterHash: runtimeJson({ content: target.content }).hash } } : {}) }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || !['VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'AUTHOR_SCOPE_PROTECTED', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || !['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'AUTHOR_SCOPE_PROTECTED', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH'].includes(error.code)) throw error
     const recovery = error.code === 'AUTHOR_CHAPTER_SCOPE' ? toolFailureRecovery(error.code) : undefined
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code,
       output: recovery ? `${error.message} ${recovery.guidance}` : error.message,

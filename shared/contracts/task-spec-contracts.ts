@@ -18,6 +18,12 @@ export const taskScopeSchema = z.object({
   novelId: z.string().min(1),
   volumeIds: z.array(z.string().min(1)).optional(),
   chapterIds: z.array(z.string().min(1)).optional(),
+  /** Only fresh server admission opts in; absence preserves frozen legacy runs. */
+  manuscriptProtocol: z.literal(1).optional(),
+  selectionBoundary: z.object({ version: z.literal(1), chapterId: z.string().min(1),
+    revision: z.number().int().positive(), contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+    start: z.number().int().nonnegative(), end: z.number().int().nonnegative(),
+    prefix: z.string(), suffix: z.string() }).strict().optional(),
   /** Admission-time ceiling from the complete original request. Never widened by tools. */
   writing: z.object({ version: z.literal(1), kind: z.enum(['bounded', 'unbounded', 'needs_input']),
     targets: z.array(z.object({ orderIndex: z.number().int().positive(), chapterId: z.string().min(1).nullable(),

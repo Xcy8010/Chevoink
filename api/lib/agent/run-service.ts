@@ -469,6 +469,18 @@ export async function startLoopRunLocked(
     }
     await tx.agentMessage.create({ data: { id: admittedMessageId, runId: created.id, sessionId: session.id,
       role: options.goal && options.goal.trigger !== 'author' ? 'system' : 'user', parts: admittedParts } })
+    // Opt in only a genuine fresh selected author admission. Async bootstrap,
+    // old missing contracts, goal continuation and child briefs cannot mint a
+    // new interpretation of an already admitted task.
+    if (input.selection && !previousRun && !previousSpec && !durablePrevious
+      && !session.spawnedFromRunId && options.concurrencyScope !== 'orchestration'
+      && (!options.goal || options.goal.trigger === 'author')) {
+      const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
+        prompt: input.prompt, selection: input.selection, manuscriptProtocol: 1,
+        creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
+      const frozen = await freezeWritingScope(tx, { userId, novelId: session.novelId, runId: created.id }, fresh, input.prompt)
+      created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(frozen)) as Prisma.InputJsonValue } })
+    }
     if (steering) await tx.agentMessage.create({ data: { id: steeringMessageId!, runId: created.id, sessionId: session.id, role: 'user', parts: [
       { type: 'text', text: steering.prompt }, ...(steering.attachments ?? []).map(item => ({
         type: 'attachment', kind: item.kind, name: item.name, url: item.url, size: item.size,

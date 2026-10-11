@@ -1,5 +1,5 @@
 import { readSemanticStructureHash } from '../semantic-progress.js'
-import { assertWritingTarget, bindWritingChapter, readWritingScope, resolveWritingCreateTarget } from '../writing-scope.js'
+import { assertWritingTarget, bindWritingChapter, readWritingScope, resolveWritingCreateTarget, originalSelectionBoundary } from '../writing-scope.js'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 
@@ -20,6 +20,7 @@ import { executeDurableChapter } from './durable-chapter.js'
 import { executeDurableCreate } from './durable-create.js'
 import { chapterWriteArguments, chapterAppendArguments, chapterEditArguments } from './chapter-arguments.js'
 import { composeChapterEdit } from './chapter-patches.js'
+import { composeChapterBody } from './chapter-body.js'
 import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
 import { writingNewVolumeSchema } from '../../../../shared/contracts/writing-volume-contracts.js'
 import { assertPreparedWritingVolumeDecision, createWritingTailVolume } from '../writing-volume.js'
@@ -114,7 +115,7 @@ async function updateOwnedChapterAtRevision(
 ) {
   const apply = async (tx: Prisma.TransactionClient) => {
     await assertAgentManuscriptCurrent(tx, ctx)
-    await assertWritingTarget(tx, ctx, { chapterId: chapter.id })
+    await assertWritingTarget(tx, ctx, { chapterId: chapter.id, effect: mutation ?? 'metadata' })
     if (typeof data.content === 'string' && data.content === chapter.content) {
       await assertChapterManuscriptRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review, after: data.content })
       // Authenticate the still-active revision inside the transaction even for
@@ -152,7 +153,7 @@ async function updateOwnedChapterAtRevision(
 async function writeChapterContent(
   ctx: ToolContext,
   chapterId: string,
-  buildNextContent: (current: string) => string,
+  content: string,
   actionLabel: string,
   leakageCandidate: string,
   mutation: 'replace' | 'append',
@@ -171,7 +172,7 @@ async function writeChapterContent(
   }
 
   const before = chapter.content
-  const after = buildNextContent(before)
+  const after = composeChapterBody(before, mutation, { content }).after
 
   if (isAgent2FeatureEnabled('craftLibrary', ctx.userId) && leakageCandidate.trim().length >= 80) {
     await assertCraftOutputSafe({
@@ -409,7 +410,7 @@ export const chapterWriteTool = defineTool({
       return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: 'CHAPTER_NOT_FOUND', output: MISSING_CHAPTER_HINT }, 'CHAPTER_NOT_FOUND')
     }
     if (ctx.durableContent) return executeDurableChapter(ctx, 'chapter_write', { ...args, chapterId })
-    return writeChapterContent(ctx, chapterId, () => args.content, '覆盖写入', args.content, 'replace', args.retainedFindings)
+    return writeChapterContent(ctx, chapterId, args.content, '覆盖写入', args.content, 'replace', args.retainedFindings)
   },
 })
 
@@ -429,7 +430,7 @@ export const chapterAppendTool = defineTool({
     return writeChapterContent(
       ctx,
       chapterId,
-      (current) => (current.trim() ? `${current.replace(/\s+$/, '')}\n\n${args.content}` : args.content),
+      args.content,
       '追加',
       args.content,
       'append',
@@ -461,7 +462,8 @@ export const chapterEditRangeTool = defineTool({
     const before = chapter.content
 
     let edit: ReturnType<typeof composeChapterEdit>
-    try { edit = composeChapterEdit(before, args) } catch (error) {
+    const scope = await readWritingScope(ctx.transaction ?? prisma, ctx)
+    try { edit = composeChapterEdit(before, args, originalSelectionBoundary(scope.spec) ? 1 : 2) } catch (error) {
       if (!(error instanceof DataAccessError)) throw error
       return projectConfirmedToolFailure(ctx, { outcome: 'failed', failureCode: error.code, summary: '正文片段需要纠正定位', output: `chapterId=${chapter.id}，当前 r${chapter.revision}。${error.message}` }, error.code)
     }

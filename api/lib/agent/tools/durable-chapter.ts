@@ -1,4 +1,4 @@
-import { assertWritingTarget } from '../writing-scope.js'
+import { assertWritingTarget, readWritingScope, originalSelectionBoundary } from '../writing-scope.js'
 import { assertChapterManuscriptRevision } from '../chapter-review-guard.js'
 import { z } from 'zod'
 import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
@@ -14,7 +14,7 @@ import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import type { ToolContext, ToolResult, AgentTool } from './types.js'
 import { chapterWriteArguments, chapterAppendArguments, chapterEditArguments } from './chapter-arguments.js'
 import { chapterPatchSchema, retainedFindingSchema } from './chapter-arguments.js'
-import { composeChapterEdit } from './chapter-patches.js'
+import { composeChapterBody } from './chapter-body.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { reduceExecutionReceipt, failedToolResultSchema } from '../runtime-reducer.js'
 import { DataAccessError, prisma } from '../../prisma.js'
@@ -38,7 +38,7 @@ export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentT
   const receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()
     await assertAgentManuscriptCurrent(tx, ctx)
-    await assertWritingTarget(tx, ctx, { chapterId: args.chapterId })
+    await assertWritingTarget(tx, ctx, { chapterId: args.chapterId, effect: 'metadata' })
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId || args.chapterId !== capability.chapterId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '章节改名范围与原任务不符。')
     const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
@@ -59,7 +59,7 @@ export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentT
         observedState: { kind: 'chapter', id: chapter.id, revision },
         snapshot: { target: 'chapter', targetId: chapter.id, field: 'title', previousValue: chapter.title } } }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || !['CHAPTER_REVISION_CONFLICT', 'CHAPTER_RENAME_INVALID', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || !['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_RENAME_INVALID', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: '章节未改名' })
   })
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
@@ -109,10 +109,11 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   const priorInput = prior?.inputSnapshot && typeof prior.inputSnapshot === 'object' && !Array.isArray(prior.inputSnapshot)
     ? prior.inputSnapshot.input : undefined
   const priorProtocol = priorInput && typeof priorInput === 'object' && !Array.isArray(priorInput) ? priorInput.anchorProtocol : undefined
-  if (priorProtocol !== undefined && priorProtocol !== 2) return runtimeError('RUNTIME_RECEIPT_INVALID', '原片段定位协议损坏，不能改变冻结操作。')
-  const anchorProtocol = prior && priorProtocol === undefined ? 1 : 2
+  if (priorProtocol !== undefined && priorProtocol !== 1 && priorProtocol !== 2) return runtimeError('RUNTIME_RECEIPT_INVALID', '原片段定位协议损坏，不能改变冻结操作。')
+  const selection = action === 'chapter_edit_range' && originalSelectionBoundary((await readWritingScope(prisma, ctx)).spec)
+  const anchorProtocol = prior ? priorProtocol === 2 ? 2 : 1 : selection ? 1 : 2
   const operationInput = runtimeJson({ callId: ctx.callId, novelId: ctx.novelId, chapterId: args.chapterId, expectedRevision, args: effectiveArgs,
-    ...(action === 'chapter_edit_range' && anchorProtocol === 2 ? { anchorProtocol: 2 } : {}) }).value
+    ...(action === 'chapter_edit_range' && (anchorProtocol === 2 || priorProtocol !== undefined || !prior && selection) ? { anchorProtocol } : {}) }).value
   const prepared = capability.cursor ? await prepareToolCursorOperation(lease, capability.cursor, { key: capability.operationKey, action,
     requireApproval: grant!.permission === 'ask' || grant!.alwaysConfirm,
     callId: ctx.callId, targetId: args.chapterId, operationInput, effectiveArgs, normalize: raw => {
@@ -132,21 +133,15 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   const receipt = await commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()
     await assertAgentManuscriptCurrent(tx, ctx)
-    await assertWritingTarget(tx, ctx, { chapterId: args.chapterId })
+    await assertWritingTarget(tx, ctx, { chapterId: args.chapterId, effect: action === 'chapter_edit_range' ? 'range' : action === 'chapter_append' ? 'append' : 'replace' })
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) runtimeError('RUNTIME_SCOPE_MISMATCH', '正文操作不属于原任务范围。')
     const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
     if (!chapter) return runtimeError('CHAPTER_REVISION_CONFLICT', '章节已归档、不存在或不属于当前作品，请重新读取当前章节。')
     if (chapter.revision !== expectedRevision) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已被修改，请重新读取后建立新操作，不能覆盖用户修改。')
     const before = chapter.content
-    let after = candidate
-    let editRanges: ReturnType<typeof composeChapterEdit>['ranges'] | undefined
-    if (action === 'chapter_append') after = before.trim() ? `${before.replace(/\s+$/, '')}\n\n${candidate}` : candidate
-    if (action === 'chapter_edit_range') {
-      const edit = composeChapterEdit(before, args, anchorProtocol)
-      after = edit.after
-      editRanges = edit.ranges
-    }
+    const { after, ranges: editRanges } = composeChapterBody(before,
+      action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range', args, anchorProtocol)
     const changed = before !== after
     if (!changed) await assertChapterManuscriptRevision(tx, ctx, chapter, {
       mutation: action === 'chapter_write' ? 'replace' : 'range', mergedBatch: !!args.patches, after, editRanges, retainedFindings: args.retainedFindings,
@@ -175,7 +170,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
       snapshot: { target: 'chapter', targetId: chapter.id, field: 'content', previousValue: before } }, memoryJobId,
       progress: { kind: 'content_revision', targetId: chapter.id, beforeHash: runtimeJson({ content: before }).hash, afterHash: runtimeJson({ content: after }).hash } }
   }).catch(async error => {
-    if (!prepared || !(error instanceof DataAccessError) || !['CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) throw error
+    if (!prepared || !(error instanceof DataAccessError) || !['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code: error.code,
       summary: '正文变更未执行', output: error.message })
   })

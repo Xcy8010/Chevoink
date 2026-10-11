@@ -92,13 +92,35 @@ export function requestedWritingRange(prompt: string): RequestedWritingRange | n
 }
 
 export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: Subject, spec: TaskSpec, prompt: string): Promise<TaskSpec> {
-  if (spec.scope.writing || !['write', 'revise', 'review'].includes(spec.intent) || spec.writingPacing === 'proposal_only' || spec.writingPacing === 'conversation_only') return spec
   await lockNovelActiveScope(tx, subject.novelId)
   const original = await readOriginalTaskRequest(tx, subject)
   if (original.parentRunId) {
     const parent = taskSpecSchema.parse(original.spec)
     return { ...spec, scope: parent.scope, hardConstraints: parent.hardConstraints }
   }
+  // Frozen contracts, including old selected runs, are never reinterpreted on
+  // continuation. Only a fresh server-created contract carries this marker.
+  if (spec.scope.writing) return spec
+  if (spec.scope.manuscriptProtocol === 1 && spec.scope.selection && !spec.scope.selectionBoundary) {
+    const selection = spec.scope.selection
+    const chapter = await tx.chapter.findFirst({ where: { id: selection.chapterId, authorId: subject.userId,
+      ...activeChapterScope(subject.novelId) }, select: { content: true, revision: true } })
+    const source = await tx.agentRun.findFirstOrThrow({ where: { id: original.sourceRunId, userId: subject.userId, novelId: subject.novelId }, select: { startRequest: true } })
+    const request = source.startRequest && typeof source.startRequest === 'object' && !Array.isArray(source.startRequest) ? source.startRequest : null
+    const supplied = request?.selection && typeof request.selection === 'object' && !Array.isArray(request.selection) ? request.selection : null
+    // textarea indices are UTF-16 body offsets. Coordinate-only clients bind
+    // the current server snapshot; supplied text must match that snapshot.
+    if (!chapter || !Number.isSafeInteger(selection.start) || !Number.isSafeInteger(selection.end)
+      || selection.start < 0 || selection.end <= selection.start || selection.end > chapter.content.length
+      || supplied && (supplied.start !== selection.start || supplied.end !== selection.end
+        || typeof supplied.text !== 'string' || supplied.text !== chapter.content.slice(selection.start, selection.end))) {
+      throw new DataAccessError(409, 'AUTHOR_SELECTION_STALE', '选区坐标或原文与当前已保存正文不一致，请重新选择已保存正文后发起任务。')
+    }
+    spec = { ...spec, scope: { ...spec.scope, selectionBoundary: { version: 1, chapterId: selection.chapterId,
+      revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash, start: selection.start, end: selection.end,
+      prefix: chapter.content.slice(0, selection.start), suffix: chapter.content.slice(selection.end) } } }
+  }
+  if (!['write', 'revise', 'review'].includes(spec.intent) || spec.writingPacing === 'proposal_only' || spec.writingPacing === 'conversation_only') return spec
   const admissionPrompt = original.prompt ?? prompt
   const range = requestedWritingRange(admissionPrompt)
   // A prompt that names chapters/volumes with numbers but fails to parse must not
@@ -261,6 +283,59 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
   return { ...original, writing, bindings }
 }
 
+/** Read only the authenticated original contract. Never mint on an old run. */
+export function originalSelectionBoundary(value: unknown) {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+  const scope = raw?.scope && typeof raw.scope === 'object' && !Array.isArray(raw.scope) ? raw.scope as Record<string, unknown> : null
+  if (scope?.manuscriptProtocol === undefined) return null
+  const parsed = taskSpecSchema.safeParse(value)
+  if (!parsed.success || parsed.data.scope.selection && !parsed.data.scope.selectionBoundary) {
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原选区授权快照缺失或损坏，不能扩大正文范围。')
+  }
+  const boundary = parsed.data.scope.selectionBoundary
+  const selection = parsed.data.scope.selection
+  if (boundary && (!selection || boundary.chapterId !== selection.chapterId || boundary.start !== selection.start
+    || boundary.end !== selection.end || boundary.end <= boundary.start || boundary.prefix.length !== boundary.start)) {
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原选区授权绑定损坏。')
+  }
+  return boundary ?? null
+}
+
+/** Final in-transaction body check shared by ordinary and automatic writers.
+ * Exact outside text defines the current interval after variable-length edits;
+ * no search for repeated selection text can shift or expand its identity. */
+export async function assertSelectionBodyEffect(tx: Prisma.TransactionClient, subject: Subject,
+  chapter: { id: string; revision: number }, options: { mutation?: 'range' | 'replace' | 'append'; after?: string;
+    editRanges?: Array<{ start: number; end: number; newText: string }> }, automatic = false) {
+  const boundary = originalSelectionBoundary((await readOriginalTaskRequest(tx, subject)).spec)
+  if (!boundary) return
+  if (chapter.id !== boundary.chapterId || automatic || options.mutation && options.mutation !== 'range') {
+    throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '原选区只授权精确片段工具；整章写入、追加或自动整章修订不能扩大范围。')
+  }
+  // A probe is read-only. Automatic whole-body repair is rejected above before
+  // its provider operation is admitted, while ordinary guidance remains open.
+  if (!options.mutation) return
+  const current = await tx.chapter.findFirst({ where: { id: chapter.id, revision: chapter.revision, authorId: subject.userId,
+    ...activeChapterScope(subject.novelId) }, select: { content: true } })
+  if (!current) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '当前正文版本已变化，选区替换未执行。')
+  const before = current.content, end = before.length - boundary.suffix.length
+  if (chapter.revision < boundary.revision || end < boundary.start || !before.startsWith(boundary.prefix) || !before.endsWith(boundary.suffix)
+    || chapter.revision === boundary.revision && runtimeJson({ content: before }).hash !== boundary.contentHash) {
+    throw new DataAccessError(409, 'AUTHOR_SELECTION_STALE', '选区外正文或原绑定版本已变化，不能重定位旧选区；请重新发起任务。')
+  }
+  const ranges = options.editRanges
+  let composed = before
+  if (!ranges?.length || options.after === undefined || ranges.some(range => !Number.isSafeInteger(range.start)
+    || !Number.isSafeInteger(range.end) || range.start < boundary.start || range.end < range.start || range.end > end)) {
+    throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '本批补丁超出原作者选区，全部正文变更未执行。')
+  }
+  for (const range of [...ranges].sort((a, b) => b.start - a.start)) composed = composed.slice(0, range.start) + range.newText + composed.slice(range.end)
+  if (composed !== options.after || !options.after.startsWith(boundary.prefix) || !options.after.endsWith(boundary.suffix)
+    || options.after.length < boundary.prefix.length + boundary.suffix.length) {
+    throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '补丁与实际正文效果不一致，全部正文变更未执行。')
+  }
+}
+
 export async function lockWritingRunLineage(tx: Prisma.TransactionClient, subject: Subject) {
   await lockNovelActiveScope(tx, subject.novelId)
   const original = await readOriginalTaskRequest(tx, subject)
@@ -274,12 +349,17 @@ export async function lockWritingRunLineage(tx: Prisma.TransactionClient, subjec
   await tx.$queryRaw`SELECT id FROM agent_runs WHERE id = ${subject.runId} AND user_id = ${subject.userId} AND novel_id = ${subject.novelId} FOR UPDATE`
 }
 
-export async function assertWritingTarget(tx: Prisma.TransactionClient, subject: Subject, target: { chapterId?: string; orderIndex?: number }) {
+export async function assertWritingTarget(tx: Prisma.TransactionClient, subject: Subject, target: { chapterId?: string; orderIndex?: number;
+  effect?: 'range' | 'replace' | 'append' | 'metadata' | 'changeset' | 'create' }) {
   await lockWritingRunLineage(tx, subject)
   if (!await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId, status: { in: ['queued', 'running', 'awaiting_approval'] } }, select: { id: true } })) {
     throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '当前执行已暂停或结束，不能再写入章节。')
   }
   const scope = await readWritingScope(tx, subject)
+  const boundary = originalSelectionBoundary(scope.spec)
+  if (boundary && (target.chapterId !== boundary.chapterId || target.effect && target.effect !== 'range')) {
+    throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '原任务只授权选区内片段替换，不能整体覆盖、追加、改名、创建或通过其他工具改动正文。')
+  }
   if (scope.parentRunId && !await tx.agentRun.findFirst({ where: { id: scope.parentRunId, userId: subject.userId, novelId: subject.novelId,
     status: { in: ['queued', 'running', 'awaiting_approval'] } }, select: { id: true } })) throw new DataAccessError(409, 'RUNTIME_PARENT_LEASE_LOST', '父任务已暂停或结束，子任务不能写入。')
   if (!scope.writing || scope.writing.kind === 'unbounded') return scope
@@ -327,7 +407,7 @@ export async function resolveWritingCreateTarget(tx: Prisma.TransactionClient, s
       && target.orderIndex === chapters.filter(item => item.volume.orderIndex < volume.orderIndex).length + position
   })
   if (bounded && !slot) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '显式创建目标不匹配原始请求的冻结章节范围，本次未创建或复用其他章节。')
-  await assertWritingTarget(tx, subject, existing ? { chapterId: existing.id } : { orderIndex: slot?.orderIndex ?? args.position })
+  await assertWritingTarget(tx, subject, existing ? { chapterId: existing.id, effect: 'create' } : { orderIndex: slot?.orderIndex ?? args.position, effect: 'create' })
   return { slot, volumeId: volume?.id, chapters }
 }
 
@@ -345,6 +425,7 @@ export async function bindWritingChapter(tx: Prisma.TransactionClient, subject: 
 
 export async function assertWritingStructureAuthority(tx: Prisma.TransactionClient, subject: Subject) {
   const scope = await readWritingScope(tx, subject)
+  if (originalSelectionBoundary(scope.spec)) throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '选区授权不允许改变章节结构。')
   if (scope.writing && scope.writing.kind !== 'unbounded') throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原请求仅授权指定章节正文，未授权拆分、合并或重排作品结构。')
 }
 

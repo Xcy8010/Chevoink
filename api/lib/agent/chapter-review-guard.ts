@@ -8,6 +8,7 @@ import { compilerContinuityCoverage, compilerContinuityCoverageMatches, currentC
 import { qualityReportCheckedCurrentContent, selectAutomaticQualityFindings, qualityAutoRepairPending } from './quality-report-contract.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import { runtimeJson } from './runtime-common.js'
+import { assertSelectionBodyEffect, originalSelectionBoundary } from './writing-scope.js'
 
 import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
 
@@ -313,6 +314,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number },
   options: ChapterReviewRevisionOptions) {
   await lockNovelActiveScope(tx, subject.novelId)
+  await assertSelectionBodyEffect(tx, subject, chapter, options)
   const original = await readOriginalTaskRequest(tx, subject)
   const runIds = await originalTaskRunIds(tx, subject, original)
   await tx.$queryRaw(Prisma.sql`SELECT id FROM story_compilations WHERE user_id = ${subject.userId}
@@ -406,6 +408,7 @@ export async function assertChapterReviewRevision(
   options?: ChapterReviewRevisionOptions,
 ) {
   await lockNovelActiveScope(tx, subject.novelId)
+  await assertSelectionBodyEffect(tx, subject, chapter, options ?? {}, true)
   const original = await readOriginalTaskRequest(tx, subject)
   const runIds = await originalTaskRunIds(tx, subject, original)
   // Check/repair reservations also lock these rows. Read counters and preserve
@@ -665,7 +668,7 @@ export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
     }
     return { open: true }
   } catch (error) {
-    if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) return { open: false, code: error.code, message: error.message }
+    if (error instanceof DataAccessError && ['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED'].includes(error.code)) return { open: false, code: error.code, message: error.message }
     throw error
   }
 }
@@ -676,9 +679,10 @@ export async function readChapterReviewRevisionGuidance(tx: Prisma.TransactionCl
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number }) {
   try {
     await assertChapterManuscriptRevision(tx, subject, chapter, {})
+    if (originalSelectionBoundary((await readOriginalTaskRequest(tx, subject)).spec)) return '原任务只授权作者所选正文范围。读取当前正文，用 chapter_edit_range 的逐字唯一锚点或选区内坐标连续修改，所有补丁必须保留原选区外文本；每批最多8处，不限制原授权内批次数。不得 chapter_write、chapter_append、改名或通过其他工具扩大范围。最终所需检查须绑定最后保存版本。'
     return '在原始作者写入授权内可连续修订本章；相关安全修法优先合并为 chapter_edit_range patches（每次最多8处），也可多次单片段替换或 chapter_write，每次使用当前正文与版本，不硬性限定一次调用。核对对象身份与逐字证据，报告不能扩大权限，不能机械照建议改剧情。不要求每次改文覆盖全部候选；未处理意见保留，可引用当前报告通过 retainedFindings 写明具体原因。留置、正文未变或写入均不表示意见已解决。全部修改后复核最终版本两类原要求检查，再提交终态；付费自动修订、检查次数与未知调用保护保持。'
   } catch (error) {
-    if (error instanceof DataAccessError && ['REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) {
+    if (error instanceof DataAccessError && ['AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) {
       return `${error.message}保留事实错误及其证据，当前版本不能宣称通过。`
     }
     throw error

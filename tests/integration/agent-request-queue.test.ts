@@ -73,8 +73,12 @@ describe.skipIf(!dbAvailable)('queue database transactions (isolated test DB)', 
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: original.runId } })).status).toBe('paused')
   })
   it('direct resume preserves selection, skills and internal profile/budget without a queue row', async () => {
-    const input = { sessionId, novelId, mode: 'build' as const, prompt: '只处理选中的原文',
-      selection: { text: '不能从摘要丢失的选区', start: 12, end: 24 }, creativeFreedom: 'stable' as const,
+    const prefix = '前文'.repeat(6), selected = '不能从摘要丢失的选区'
+    const volume = await prisma.volume.create({ data: { novelId, title: '第一卷', orderIndex: 1 } })
+    const chapter = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId: volume.id, title: '原选区章节',
+      orderIndex: 1, orderInVolume: 1, content: prefix + selected + '后文' } })
+    const input = { sessionId, novelId, chapterId: chapter.id, mode: 'build' as const, prompt: '只处理选中的原文',
+      selection: { text: selected, start: prefix.length, end: prefix.length + selected.length }, creativeFreedom: 'stable' as const,
       qualityMode: 'balanced' as const, pinnedSkillIds: ['skill-a'], agentProfile: 'continuity' as const, tokenBudget: 1200 }
     const result = await startLoopRun(userId, input)
     const stored = await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })

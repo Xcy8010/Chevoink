@@ -186,7 +186,7 @@ export const changeSetApplyTool = defineTool({
     const changeSet = await applyChangeSetData(ctx.userId, changeSetId, { selectedPatchIds }, async (tx, novelId, ids) => {
       if (novelId !== ctx.novelId) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '变更集不属于当前授权作品。')
       await assertAgentManuscriptCurrent(tx, ctx)
-      for (const chapterId of ids) await assertWritingTarget(tx, ctx, { chapterId })
+      for (const chapterId of ids) await assertWritingTarget(tx, ctx, { chapterId, effect: 'changeset' })
     })
     if (!changeSet) return { output: '变更集不存在或不属于当前作者。' }
     return {
@@ -210,7 +210,7 @@ export const changeSetRollbackTool = defineTool({
     const changeSet = await rollbackChangeSetData(ctx.userId, args.changeSetId, async (tx, novelId, ids) => {
       if (novelId !== ctx.novelId) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '变更集不属于当前授权作品。')
       await assertAgentManuscriptCurrent(tx, ctx)
-      for (const chapterId of ids) await assertWritingTarget(tx, ctx, { chapterId })
+      for (const chapterId of ids) await assertWritingTarget(tx, ctx, { chapterId, effect: 'changeset' })
     })
     if (!changeSet) return { output: '变更集不存在或不属于当前作者。' }
     return {
