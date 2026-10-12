@@ -2,6 +2,7 @@ import type { AgentRun, Prisma } from '@prisma/client'
 import type { AgentReviewReceiptWait } from '../../../shared/contracts/index.js'
 import { runCheckpointSchema } from './checkpoint.js'
 import { readReviewRequestRecoveryEvidence } from './review-request-recovery.js'
+import { readAuthorReviewReplacements } from './author-review-replacement.js'
 import { readSettledQualityReviews } from './quality-review-admission.js'
 import { readLegacyContinuityRecovery } from './legacy-continuity-recovery.js'
 import { originalTaskRunIds, readOriginalTaskRequest } from './original-request.js'
@@ -18,9 +19,10 @@ export async function readReviewReceiptWait(tx: Prisma.TransactionClient, run: A
   const subject = { userId: run.userId, novelId: run.novelId, runId: run.id }
   const evidence = await readReviewRequestRecoveryEvidence(tx, subject, pending)
   const settled = await readSettledQualityReviews(tx, subject, pending)
+  const replacements = await readAuthorReviewReplacements(tx, subject, pending)
   const continuity = pending.some(item => item.toolName === 'continuity_validate')
     ? await readLegacyContinuityRecovery(tx, subject, checkpoint.success ? checkpoint.data.toolRestrictions ?? [] : [], pending) : null
-  const confirmed = new Set([...evidence, ...settled, ...(continuity?.settled ?? [])].map(item => item.callId))
+  const confirmed = new Set([...evidence, ...settled, ...replacements, ...(continuity?.settled ?? [])].map(item => item.callId))
   const unresolved = pending.filter(item => !confirmed.has(item.callId))
   if (!unresolved.length) return null
   const original = await readOriginalTaskRequest(tx, subject)

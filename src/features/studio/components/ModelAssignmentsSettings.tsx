@@ -64,6 +64,11 @@ export default function ModelAssignmentsSettings({ novelId, novelTitle }: { nove
   }
   const error = errors[owner] || (assignments.error instanceof Error ? assignments.error.message : '') || (models.error instanceof Error ? models.error.message : '') || (customModels.error instanceof Error ? customModels.error.message : '')
   const row = (task: typeof MODEL_ASSIGNMENT_TASKS[number]) => {
+    if (task.key === 'quality' || task.key === 'continuity') return <div key={task.key}
+      className="grid gap-2 border-b border-[var(--border-subtle)] py-3 sm:grid-cols-[140px_minmax(0,1fr)] sm:items-center">
+      <span className="text-sm font-medium">{task.label}</span>
+      <span className="text-sm text-[var(--text-secondary)]">跟随对话中当前选择的模型与 Credits 倍率</span>
+    </div>
     const selection = draft && Object.prototype.hasOwnProperty.call(draft.changes, task.key) ? draft.changes[task.key] : record?.assignments[task.key]
     const value = modelKey(selection)
     const choices = task.kind === 'vision' ? options.filter(option => option.vision) : options

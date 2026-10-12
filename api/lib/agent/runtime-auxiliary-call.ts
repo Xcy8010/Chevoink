@@ -11,7 +11,6 @@ import type { AuxiliaryModelStep } from './runtime-auxiliary-model.js'
 import type { DurableTokenPrice } from './runtime-settlement.js'
 import type { ToolContext } from './tools/types.js'
 import { estimateChatMessagesTokens, resolveDurableInputLimit } from './context-budget.js'
-import { assignedTaskModel } from './model-assignment-context.js'
 
 const auxiliaryTierSchema = creditModelTierSchema
 const reasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
@@ -46,9 +45,7 @@ type ReviewRuntimeInput = {
  * Native adapters may supply only the frozen selected identity; resolve that
  * exact tier/account instead of minting an independent speed critic. */
 async function resolveReviewRuntime(input: ReviewRuntimeInput, nativeIdentity: boolean) {
-  const assigned = input.task ? await assignedTaskModel(input.userId, input.novelId ?? null, input.task, input.modelAssignments, true) : undefined
-  if (assigned) return { runtime: { ...assigned.runtime, honorAssignedReasoning: true as const }, selection: { tier: assigned.selection.modelTier,
-    customModelId: assigned.selection.customModelId ?? null, reasoningEffort: assigned.runtime.reasoningEffort } }
+  // Review task assignments cannot replace the current admitted model or price.
   const selected = input.modelSelection
   if (!input.modelRuntime && !selected || selected?.tier === 'custom' && !selected.customModelId) {
     return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '检查缺少原任务已选择的完整模型身份，未派发模型请求。')

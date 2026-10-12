@@ -4,6 +4,7 @@ import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPrese
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery } from './review-request-recovery.js'
+import { readAuthorReviewReplacements } from './author-review-replacement.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
@@ -1177,6 +1178,27 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       recovered.markers.forEach(marker => automaticReviewAttempts.add(marker))
       if (firstConversion) compatibilityReadTargets = new Set(recovered.chapterIds)
       if (recovered.markers.length) await persistCheckpoint()
+    }
+    if ((params.resume || previousTask) && pendingReviews.size) {
+      const replacements = await prisma.$transaction(tx => readAuthorReviewReplacements(tx,
+        { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]))
+      for (const item of replacements) {
+        bus.emit({ type: 'review.reconciled', callId: item.callId, chapterId: item.chapterId,
+          revision: item.revision, compilationId: item.compilationId, receipt: item.replacementReceipt })
+        await bus.persist()
+        const key = `${item.compilationId ?? item.chapterId}:${item.toolName}`
+        if (pendingReviews.get(key)?.callId === item.callId) pendingReviews.delete(key)
+        // Satisfy this execution dependency without rewriting the unknown
+        // usage or granting another paid retry key.
+        for (let index = toolRestrictions.length - 1; index >= 0; index--) {
+          const restriction = toolRestrictions[index]
+          if (recoverableQualityRestriction(restriction, item) && (!restriction.reviewInput
+            || (restriction.reviewInput.chapterId === item.chapterId && restriction.reviewInput.revision === item.revision))) {
+            toolRestrictions.splice(index, 1)
+          }
+        }
+      }
+      if (replacements.length) await persistCheckpoint()
     }
     if ((params.resume || previousTask) && ['write', 'revise'].includes(taskSpec.intent)) {
       const recovered = await prisma.$transaction(tx => readReviewRequestRecovery(tx,

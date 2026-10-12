@@ -47,6 +47,14 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('model assignment settings', () => {
+  it('shows current-model checks without offering an ineffective separate reviewer override', async () => {
+    mount()
+    await screen.findByRole('combobox', { name: '正文写作模型' })
+    expect(screen.queryByRole('combobox', { name: '质量检查模型' })).toBeNull()
+    expect(screen.queryByRole('combobox', { name: '连续性检查模型' })).toBeNull()
+    expect(screen.getAllByText('跟随对话中当前选择的模型与 Credits 倍率')).toHaveLength(2)
+    expect(api.request.mock.calls.some(call => call[1]?.method === 'PATCH')).toBe(false)
+  })
   it('inherits global choices without sending an override and saves only changed work with the novel revision', async () => {
     mount()
     const writing = await screen.findByRole('combobox', { name: '正文写作模型' })

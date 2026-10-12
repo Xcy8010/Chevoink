@@ -51,7 +51,9 @@ describe('actual failed text request terminal trace', () => {
         responseTokens: null as number | null, reservedCreditMilli: 123 }
       mocks.create.mockImplementation(async () => { if (scenario.startsWith('unsent')) controller.abort(); return { id: usage.id } })
       mocks.updateMany.mockImplementation(async ({ where, data }) => {
-        if (!where.billingStatus || where.billingStatus === usage.billingStatus) Object.assign(usage, data)
+        const status = where.billingStatus
+        if (status && !(typeof status === 'string' ? status === usage.billingStatus : status.in.includes(usage.billingStatus))) return { count: 0 }
+        Object.assign(usage, data)
         return { count: 1 }
       })
       mocks.update.mockImplementation(async ({ data }) => { Object.assign(usage, data); return usage })
@@ -95,6 +97,20 @@ describe('actual failed text request terminal trace', () => {
 })
 
 describe('fixed non-thinking humanity quality policy after actual model resolution', () => {
+  it.each(['agent3HumanityCritic', 'agent3ContinuityCritic'])('%s rejects missing current selection even with a frozen assignment before HTTP or billing', async action => {
+    const task = TEXT_ACTION_TASKS[action]
+    const fetcher = vi.fn()
+    vi.stubGlobal('fetch', fetcher)
+    await expect(withModelAssignmentContext({ userId: 'test', novelId: 'novel', frozen: { version: 1, globalRevision: 1, novelRevision: 0,
+      assignments: { [task]: { modelTier: 'ultimate', reasoningEffort: 'high' } } } }, () => generateTextCompletion('规则', '完整正文', {
+      userId: 'test', novelId: 'novel', action,
+    }))).rejects.toMatchObject({ code: 'RUNTIME_MODEL_ADAPTER_REQUIRED' })
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(mocks.runtime).not.toHaveBeenCalled()
+    expect(mocks.access).not.toHaveBeenCalled()
+    expect(mocks.create).not.toHaveBeenCalled()
+    expect(mocks.charge).not.toHaveBeenCalled()
+  })
   it.each([
     { label: 'official Ling', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1', reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { thinking: { type: 'disabled' } } },
     { label: 'official DeepSeek', runtime: { provider: 'deepseek', modelName: 'deepseek-v4-flash', baseUrl: 'https://api.deepseek.com/v1', reasoningEfforts: ['low', 'high'], reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { thinking: { type: 'disabled' } } },
@@ -210,18 +226,18 @@ describe('fixed non-thinking humanity quality policy after actual model resoluti
     expect(textRequestsFinished(trace)).toBe(disposition !== 'pending_settlement')
     expect(rows.size).toBe(disposition === 'pending_settlement' ? 1 : 2)
   })
-  it('keeps the assigned quality model and fixed policy through the actual bounded output recovery', async () => {
-    mocks.findUsage.mockResolvedValue({ usageSource: 'reported', billingStatus: 'exempt', requestTokens: 100, responseTokens: 20, reservedCreditMilli: 0 })
+  it('keeps the current quality model and price despite a conflicting assignment through bounded output recovery', async () => {
+    mocks.findUsage.mockResolvedValue({ usageSource: 'reported', billingStatus: 'settled', requestTokens: 100, responseTokens: 20, reservedCreditMilli: 0 })
     const selected = qualityRuntime({ tier: 'ultimate', provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1',
       reasoningParameterMode: undefined, thinkingEnabled: undefined, multiplierBps: 25000 })
     mocks.runtime.mockResolvedValue(selected)
     const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => qualityResponse())
       .mockImplementationOnce(async () => qualityResponse('length'))
     vi.stubGlobal('fetch', fetcher)
-    const frozen = { version: 1 as const, globalRevision: 2, novelRevision: 0, assignments: { quality: { modelTier: 'ultimate' as const, reasoningEffort: 'high' as const } } }
+    const frozen = { version: 1 as const, globalRevision: 2, novelRevision: 0, assignments: { quality: { modelTier: 'custom' as const, customModelId: 'different-assigned', reasoningEffort: 'low' as const } } }
     const original = structuredClone(frozen)
     await withModelAssignmentContext({ userId: 'test', novelId: 'novel', frozen }, () => generateReviewCompletion('固定审查规则', '合成完整原文首尾', {
-      userId: 'test', novelId: 'novel', action: 'agent3HumanityCritic', reasoningEffort: 'low', modelRuntime: qualityRuntime(),
+      userId: 'test', novelId: 'novel', action: 'agent3HumanityCritic', reasoningEffort: 'low', modelRuntime: selected,
     }))
     expect(fetcher).toHaveBeenCalledTimes(2)
     for (const [index, call] of fetcher.mock.calls.entries()) {
@@ -231,6 +247,12 @@ describe('fixed non-thinking humanity quality policy after actual model resoluti
       expect(JSON.parse(String(call[1]?.body))).not.toHaveProperty('reasoning_effort')
     }
     expect(mocks.create.mock.calls.map(([arg]) => arg.data.action)).toEqual(['agent3HumanityCritic', 'agent3HumanityCriticOutputRecovery'])
+    for (const [arg] of mocks.create.mock.calls) expect(arg.data).toMatchObject({ modelTier: 'ultimate', multiplierBps: 25000,
+      billingSnapshot: { version: 'credits-v1-exact', modelTier: 'ultimate', multiplierBps: 25000 } })
+    expect(mocks.charge).toHaveBeenCalledTimes(2)
+    for (const [arg] of mocks.charge.mock.calls) expect(arg).toMatchObject({ modelTier: 'ultimate', multiplierBps: 25000,
+      requestTokens: 100, responseTokens: 20 })
+    expect(mocks.runtime).not.toHaveBeenCalled()
     expect(selected.reasoningEffort).toBe('high')
     expect(frozen).toEqual(original)
   })
@@ -250,7 +272,7 @@ describe('fixed non-thinking humanity quality policy after actual model resoluti
     expect(fetcher).toHaveBeenCalledTimes(reviews.length + 2)
   })
 
-  it.each(['standard', 'performance'] as const)('reevaluates the actual alternate %s route without borrowing source protocol', async tier => {
+  it.each(['standard', 'performance'] as const)('does not switch the current %s check to an alternate route after provider rejection', async tier => {
     const unsupported = tier === 'performance'
     const source = qualityRuntime({ tier, provider: 'fixture', modelName: `primary-${tier}`, baseUrl: `https://primary-${tier}.example/v1` })
     mocks.runtime.mockResolvedValue(source)
@@ -262,17 +284,11 @@ describe('fixed non-thinking humanity quality policy after actual model resoluti
       .mockImplementationOnce(async () => new Response('{"error":{"message":"busy"},"usage":{"prompt_tokens":0,"completion_tokens":0}}', { status: 503 }))
     vi.stubGlobal('fetch', fetcher)
     const result = generateTextCompletion('规则', '合成完整正文', { userId: 'test', action: 'agent3HumanityCritic', modelRuntime: source })
-    if (unsupported) {
-      await expect(result).rejects.toMatchObject({ code: 'AI_QUALITY_NON_THINKING_UNSUPPORTED' })
-      expect(fetcher).toHaveBeenCalledOnce()
-      expect(mocks.create).toHaveBeenCalledOnce()
-    } else {
-      await expect(result).resolves.toBe('{"findings":[]}')
-      expect(fetcher).toHaveBeenCalledTimes(2)
-      const body = JSON.parse(String(fetcher.mock.calls[1][1]?.body))
-      expect(body).toMatchObject({ model: 'deepseek-v4-flash', thinking: { type: 'disabled' } })
-      expect(body).not.toHaveProperty('reasoning_effort')
-    }
+    await expect(result).rejects.toThrow()
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(mocks.create).toHaveBeenCalledOnce()
+    expect(fetcher.mock.calls[0][0]).toBe(source.baseUrl + '/chat/completions')
+    expect(mocks.findModel).not.toHaveBeenCalled()
     expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ reasoning_effort: 'none' })
     expect(source.reasoningParameterMode).toBe('native')
     expect(source.reasoningEffort).toBe('high')
@@ -298,7 +314,7 @@ describe('explicit zero provider usage is not missing usage', () => {
     expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ requestTokens: 20, responseTokens: 8 }))
   })
 
-  it.each(Object.entries(TEXT_ACTION_TASKS))('routes actual auxiliary %s body through frozen purpose %s and honors effort', async (action, task) => {
+  it.each(Object.entries(TEXT_ACTION_TASKS).filter(([, task]) => task !== 'quality' && task !== 'continuity'))('routes ordinary auxiliary %s body through frozen purpose %s and honors effort', async (action, task) => {
     mocks.runtime.mockImplementation(async (tier, _user, _custom, effort) => ({ tier, provider: 'openai', modelName: 'selected-model',
       baseUrl: 'https://selected.example/v1', apiKey: 'fixture-not-a-key', reasoningEffort: effort ?? 'high', reasoningEfforts: ['none', 'low', 'medium', 'high'],
       reasoningParameterMode: 'native', thinkingEnabled: false,
@@ -313,10 +329,42 @@ describe('explicit zero provider usage is not missing usage', () => {
     }))
     expect(fetcher).toHaveBeenCalledOnce()
     expect(fetcher.mock.calls[0][0]).toBe('https://selected.example/v1/chat/completions')
-    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'selected-model', reasoning_effort: task === 'quality' || task === 'continuity' ? 'none' : 'high',
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'selected-model', reasoning_effort: 'high',
       messages: [{ role: 'system', content: 'isolated-system' }, { role: 'user', content: '完整正文及上下文' }] })
     expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ modelTier: 'ultimate', multiplierBps: 25000,
       billingSnapshot: { version: 'credits-v1-exact', modelTier: 'ultimate', multiplierBps: 25000 } }) }))
+  })
+  it.each(Object.entries(TEXT_ACTION_TASKS).filter(([, task]) => task === 'quality' || task === 'continuity')
+    .flatMap(([action, task]) => ([
+      { tier: 'speed', multiplierBps: 10000 }, { tier: 'builtin_1234567890abcdef', multiplierBps: 17500 }, { tier: 'custom', multiplierBps: 0 },
+    ] as const).map(selected => ({ action, task, ...selected }))))(
+    '$action uses current $tier and multiplier $multiplierBps instead of its $task assignment', async ({ action, task, tier, multiplierBps }) => {
+    const selected = qualityRuntime({ tier, multiplierBps })
+    const frozen = { version: 1 as const, globalRevision: 1, novelRevision: 0,
+      assignments: { [task]: { modelTier: 'ultimate' as const, reasoningEffort: 'high' as const } } }
+    const original = structuredClone(frozen)
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => qualityResponse())
+    vi.stubGlobal('fetch', fetcher)
+    await withModelAssignmentContext({ userId: 'test', novelId: 'novel', frozen }, () => generateTextCompletion('检查规则', '完整正文及上下文', {
+      userId: 'test', novelId: 'novel', action, modelRuntime: selected, multiplierBps: 0,
+    }))
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(fetcher.mock.calls[0][0]).toBe(selected.baseUrl + '/chat/completions')
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: selected.modelName, reasoning_effort: 'none',
+      messages: [{ role: 'system', content: '检查规则' }, { role: 'user', content: '完整正文及上下文' }] })
+    expect(mocks.runtime).not.toHaveBeenCalled()
+    expect(mocks.findModel).not.toHaveBeenCalled()
+    expect(mocks.create).toHaveBeenCalledOnce()
+    expect(mocks.create.mock.calls[0][0].data).toMatchObject({ modelTier: tier, multiplierBps,
+      billingSnapshot: tier === 'custom' ? { version: 'byok-exempt' } : { version: 'credits-v1-exact', modelTier: tier, multiplierBps } })
+    if (tier === 'custom') expect(mocks.charge).not.toHaveBeenCalled()
+    else {
+      expect(mocks.charge).toHaveBeenCalledOnce()
+      expect(mocks.charge.mock.calls[0][0]).toMatchObject({ modelTier: tier, multiplierBps, requestTokens: 100, responseTokens: 20 })
+      expect(mocks.imageCharge).not.toHaveBeenCalled()
+    }
+    expect(frozen).toEqual(original)
+    expect(selected.multiplierBps).toBe(multiplierBps)
   })
   it.each(['speed', 'custom'] as const)('sends non-thinking critic requests for %s without changing the selected model or main-turn effort', async tier => {
     const runtime = { tier, provider: 'deepseek', modelName: 'deepseek-flash', apiKey: 'fixture-not-a-key', baseUrl: 'https://api.deepseek.com/v1',
@@ -346,6 +394,22 @@ describe('explicit zero provider usage is not missing usage', () => {
     expect(fetcher).toHaveBeenCalledTimes(2)
     expect(fetcher.mock.calls[0][1].headers.Authorization).not.toBe(fetcher.mock.calls[1][1].headers.Authorization)
   })
+  it.each(['agent3HumanityCritic', 'agent3ContinuityCritic'].flatMap(action => [429, 500, 503].map(status => ({ action, status }))))(
+    '$action rejects HTTP $status after one current-model dispatch without alternate routing', async ({ action, status }) => {
+    const selected = qualityRuntime({ tier: 'standard', multiplierBps: 15000 })
+    mocks.findModel.mockResolvedValue({ id: 'primary-check', tier: 'standard', provider: selected.provider, modelName: selected.modelName,
+      baseUrl: selected.baseUrl, apiKeyCiphertext: selected.apiKey, metadata: { routes: [{ id: '00000000-0000-4000-8000-000000000041',
+        label: 'backup', provider: 'openai', modelName: 'backup', baseUrl: 'https://backup.test/v1', apiKeyCiphertext: 'other-fixture-key', enabled: true }] } })
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(JSON.stringify({ error: { message: 'busy' },
+      usage: { prompt_tokens: 0, completion_tokens: 0 } }), { status }))
+    vi.stubGlobal('fetch', fetcher)
+    await expect(generateTextCompletion('规则', '完整正文', { userId: 'test', action, modelRuntime: selected })).rejects.toThrow()
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(fetcher.mock.calls[0][0]).toBe(selected.baseUrl + '/chat/completions')
+    expect(mocks.create).toHaveBeenCalledOnce()
+    expect(mocks.findModel).not.toHaveBeenCalled()
+    expect(mocks.runtime).not.toHaveBeenCalled()
+  })
   it('does not treat a valid-looking truncated JSON gateway report as complete', async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: '{"findings":[]}' }, finish_reason: 'length' }], usage: { prompt_tokens: 20, completion_tokens: 8192 } })))
     vi.stubGlobal('fetch', fetcher)
@@ -367,7 +431,7 @@ describe('explicit zero provider usage is not missing usage', () => {
     const fetcher = vi.fn(async () => new Response('data: {"choices":[{"delta":{"reasoning_content":"核对过程"}}]}\n\ndata: {"choices":[{"delta":{"content":"{\\"findings\\":[]}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":9000,"completion_tokens_details":{"reasoning_tokens":6000}}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
     vi.stubGlobal('fetch', fetcher)
     mocks.runtime.mockResolvedValue({ tier: 'standard', apiKey: 'fixture-not-a-key', provider: 'xiaomi', baseUrl: 'https://api.xiaomimimo.com/v1', reasoningEffort: 'low', multiplierBps: 0, modelName: 'mimo-v2.6-flash' })
-    await expect(generateTextCompletion('system', '完整正文', { userId: 'test', action: 'agent3ContinuityCritic', maxOutputTokens: 16_384, reasoningEffort: 'low' })).resolves.toBe('{"findings":[]}')
+    await expect(generateTextCompletion('system', '完整正文', { userId: 'test', action: 'agent3ContinuityCritic', modelTier: 'standard', maxOutputTokens: 16_384, reasoningEffort: 'low' })).resolves.toBe('{"findings":[]}')
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
     expect(body.max_completion_tokens).toBe(16_384)
     expect(body).not.toHaveProperty('max_tokens')
@@ -385,7 +449,7 @@ describe('explicit zero provider usage is not missing usage', () => {
       } }), { headers: { 'content-type': 'text/event-stream' } }))
       vi.stubGlobal('fetch', fetcher)
       mocks.runtime.mockResolvedValue({ tier: 'standard', apiKey: 'fixture-not-a-key', provider: 'xiaomi', baseUrl: 'https://api.xiaomimimo.com/v1', reasoningEffort: 'low', multiplierBps: 0, modelName: 'mimo-v2.6-flash' })
-      const result = generateTextCompletion('system', '完整正文', { userId: 'test', action: 'agent3ContinuityCritic', maxOutputTokens: 16_384, reasoningEffort: 'low' })
+      const result = generateTextCompletion('system', '完整正文', { userId: 'test', action: 'agent3ContinuityCritic', modelTier: 'standard', maxOutputTokens: 16_384, reasoningEffort: 'low' })
       const assertion = expect(result).rejects.toMatchObject({ code: 'AI_PROVIDER_TIMEOUT' })
       await vi.advanceTimersByTimeAsync(env.aiTextStreamIdleMs)
       await assertion

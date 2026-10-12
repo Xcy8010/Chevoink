@@ -86,6 +86,7 @@ import { projectMessages, shouldRenderAuthorMessage } from '../lib/message-proje
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
+import { AgentReviewRecovery } from './AgentReviewRecovery'
 import { AgentActivityBar } from './AgentActivityBar'
 import { MessageTime, UserMessageActions } from './MessageActions'
 import { AgentComposer } from './AgentComposer'
@@ -399,7 +400,8 @@ export function AgentPanel({
   // 续跑必须跟随作者当前的模型选择：ref 在下方每次渲染同步最新值，点击续跑时读取。
   // 否则旧任务保存的收费档会重新把 0 余额用户拦在额度闸门外。
   const continueModelRef = useRef<ContinueAgentLoopRunModel | null>(null)
-  const { stoppingRunId, reviewReceiptWait, handleStop, handleContinue, handleResolveApproval, handleResolveQuestion } = useRunControls({
+  const { stoppingRunId, reviewReceiptWait, reviewReplacementReady, markReviewReplacementReady,
+    handleStop, handleContinue, handleResolveApproval, handleResolveQuestion } = useRunControls({
     runId, resumeableRunId, sessionId, phase, pendingApproval, pendingQuestion, connect, setActionError,
     selectedModelRef: continueModelRef,
   })
@@ -1077,7 +1079,7 @@ export function AgentPanel({
 
 
   const canContinue = !authorEnded && ((Boolean(runId) && (panelPhase === 'paused' || panelPhase === 'failed')) || (!runId && Boolean(resumeableRunId)))
-  const combinedError = actionError ?? (reviewReceiptWait ? null : errorMessage)
+  const combinedError = actionError ?? (reviewReceiptWait || reviewReplacementReady ? null : errorMessage)
 
   const handleCopyText = useCallback(async (id: string, text: string) => {
     if (await copyToClipboard(text)) {
@@ -1759,6 +1761,10 @@ export function AgentPanel({
         <div className="mx-4 mb-2 rounded-[14px] border border-[var(--border)] bg-[var(--surface)] px-3 py-2" role="status">
           <p className="text-xs leading-5 text-[var(--text-secondary)]">{reviewReceiptWait.message}</p>
         </div>
+      ) : null}
+      {(reviewReceiptWait?.checks.includes('quality') || reviewReplacementReady) && (runId ?? resumeableRunId) ? (
+        <AgentReviewRecovery runId={(runId ?? resumeableRunId)!} sessionId={sessionId} enabled={!!reviewReceiptWait}
+          model={continueModelRef.current} onReady={markReviewReplacementReady} />
       ) : null}
       {combinedError ? (
         <div className="mx-4 mb-2 flex items-start gap-2 rounded-[14px] border border-rose-200 bg-rose-50 px-3 py-2">

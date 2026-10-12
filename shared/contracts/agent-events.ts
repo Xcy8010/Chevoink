@@ -25,6 +25,26 @@ export type AgentCancelledReviewRetirement = Omit<AgentReviewFailureReconciliati
   usageOutcome: 'unknown_preserved'
 }
 
+/** A separately authorized current report satisfies an execution dependency.
+ * The original request and its unknown bill remain intact. This is no retry key. */
+export type AgentAuthorReviewReplacement = {
+  status: 'author_replacement_review_complete'
+  sourceRunId: string
+  sourceCallId: string
+  sourceResultId: string
+  sourceReportId: string
+  newCallId: string
+  authorizationId: string
+  authorizationEventId: string
+  completionEventId: string
+  newUsageIds: string[]
+  originalUsageIds: string[]
+  originalRequestOutcome: 'unknown_preserved'
+  currentRevision: number
+  currentContentHash: string
+  qualityContextHash: string
+}
+
 /** 当前逻辑任务的权威待办；空清单不回退到会话历史。 */
 export interface AgentTodoSnapshot {
   runId: EntityId
@@ -322,7 +342,7 @@ export type AgentStreamEventBody =
       reasoningEffort: import('./credits.js').ModelReasoningEffort; creativeFreedom: CreativeFreedom; modelSelectionExplicit: boolean }
   | { type: 'execution.progress'; revision: number; stage: 'model' | 'tool' | 'checkpoint' | 'finalizing' }
   | { type: 'review.reconciled'; callId: string; chapterId: string; revision: number;
-      compilationId: string | null; receipt: AgentReviewFailureReconciliation | AgentCancelledReviewRetirement }
+      compilationId: string | null; receipt: AgentReviewFailureReconciliation | AgentCancelledReviewRetirement | AgentAuthorReviewReplacement }
   | { type: 'text.delta'; messageId: string; delta: string }
   | { type: 'text.final'; messageId: string; text: string; asReasoning: boolean }
   | { type: 'reasoning.delta'; messageId: string; delta: string }

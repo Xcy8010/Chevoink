@@ -28,7 +28,8 @@ import type {
 } from '../../shared/contracts/index.js'
 import { createCoverAssetsData, ensureNovelOwner } from './data-access.js'
 import { assertCreditAccess, consumeCredits, consumeTokenCredits, reserveTokenCredits, getModelTierRuntime, getAuxiliaryModelRuntime, IMAGE_CALL_MILLI, recordImageRefundIntent, reconcileCreditRefunds } from './credits.js'
-import { FALLBACK_USAGE_POLICY } from './billing/reservation-policy.js'
+import { FALLBACK_USAGE_POLICY, priceTokenEvidence } from './billing/reservation-policy.js'
+import { tokenPriceSchema, type TokenPrice } from './billing/token-price.js'
 import type { CreditModelTier } from '../../shared/contracts/index.js'
 import {
   FANQIE_ALL_CATEGORIES,
@@ -49,6 +50,8 @@ type TextCompletionOptions = {
   action: string
   novelId?: string | null
   chapterId?: string | null
+  /** Server-owned run identity for an isolated, consent-bound check. */
+  agentRunId?: string | null
   targetType?: string
   targetId?: string | null
   temperature?: number
@@ -64,6 +67,15 @@ type TextCompletionOptions = {
   maxOutputTokens?: number
   /** 有界评审调用（critic/独立复核）。网关可按模型特性收紧采样：输出契约不变，仅影响过程开销。 */
   boundedReview?: boolean
+  /** Server-only consent-bound request. Never deserialize this from tool args. */
+  authorizedRequest?: {
+    price: TokenPrice
+    inputTokenCeiling: number
+    maxCreditMilli: number
+    beforeDispatch: () => Promise<void>
+  }
+  /** Actual successful transport evidence; callers do not infer stop/usage. */
+  onObservedCompletion?: (value: { usageId: string; content: string; finishReason: string | null; toolCalls: unknown[] }) => void
 }
 
 function ensureTextProviderConfigured(apiKey?: string | null) {
@@ -190,42 +202,49 @@ async function prepareTextUsage(input: {
   userId: string; action: string; modelName: string; modelTier: CreditModelTier; multiplierBps: number;
   novelId?: string | null; chapterId?: string | null; targetType?: string; targetId?: string | null;
   agentRunId?: string | null; turn?: number | null; providerName?: string | null;
-  inputEstimate: number; maxOutput: number;
+  inputEstimate: number; maxOutput: number; frozenPrice?: TokenPrice;
 }) {
-  const { inputEstimate, maxOutput, ...identity } = input
-  const price = input.modelTier === 'custom' ? { version: 'byok-exempt' }
+  const { inputEstimate, maxOutput, frozenPrice, ...identity } = input
+  const price = frozenPrice ? tokenPriceSchema.parse(frozenPrice) : input.modelTier === 'custom' ? { version: 'byok-exempt' }
     : await resolveTokenPrice(input.modelTier, input.multiplierBps)
+  if (frozenPrice && (frozenPrice.modelTier !== input.modelTier || frozenPrice.multiplierBps !== input.multiplierBps)) {
+    throw new DataAccessError(409, 'TEXT_REQUEST_PRICE_CONFLICT', '本次检查的冻结费率与当前模型不一致。')
+  }
   const prepared = await prisma.aiUsageLog.create({ data: { ...identity, targetType: input.targetType ?? 'text',
     providerType: 'text', providerMode: env.aiProviderMode, durationMs: 0,
     billingEvidence: { policy: FALLBACK_USAGE_POLICY, inputEstimate, outputEstimate: 0, responseObserved: false },
-    billingSnapshot: price, usageSource: 'prepared', billingStatus: 'prepared' } })
+    billingSnapshot: price, usageSource: 'prepared', billingStatus: frozenPrice ? 'authorized_pending' : 'prepared' } })
   try {
     await reserveGoalUsage(`legacy:${prepared.id}`, inputEstimate + maxOutput)
-    if (input.modelTier !== 'custom') await reserveTokenCredits(input.userId, prepared.id, inputEstimate, maxOutput)
+    if (input.modelTier !== 'custom') await reserveTokenCredits(input.userId, prepared.id, inputEstimate, maxOutput, frozenPrice ? {
+      price: frozenPrice, newCallId: input.targetId!, runId: input.agentRunId!, novelId: input.novelId!, chapterId: input.chapterId!,
+    } : undefined)
   } catch (error) { await markUnobservedUsage(prepared.id, false); throw error }
   return prepared
 }
 
-async function markUnobservedUsage(id: string | undefined, dispatched = true) {
+async function markUnobservedUsage(id: string | undefined, dispatched = true, authorizationHeld = false) {
   if (!id) return
-  await prisma.aiUsageLog.updateMany({ where: { id, billingStatus: 'prepared' },
-    data: { usageSource: 'unknown', billingStatus: dispatched ? 'pending_usage' : 'not_dispatched',
+  await prisma.aiUsageLog.updateMany({ where: { id, billingStatus: { in: ['prepared', 'authorized_pending'] } },
+    data: { usageSource: 'unknown', billingStatus: dispatched ? authorizationHeld ? 'pending_authorization' : 'pending_usage' : 'not_dispatched',
       ...(!dispatched ? { reservedCreditMilli: 0, reservationExpiresAt: null } : {}) } }).catch(() => undefined)
   await syncGoalLegacyUsage(id)
 }
 
 async function saveOutputEvidence(id: string, inputEstimate: number, output: string) {
   if (!output) return
-  await prisma.aiUsageLog.updateMany({ where: { id, billingStatus: 'prepared' }, data: {
+  await prisma.aiUsageLog.updateMany({ where: { id, billingStatus: { in: ['prepared', 'authorized_pending'] } }, data: {
     billingEvidence: { policy: FALLBACK_USAGE_POLICY, inputEstimate, outputEstimate: estimateTokenCount(output), responseObserved: true },
   } })
 }
 
 /** Accept SSE when supported and JSON from compatible non-streaming gateways.
  * Persist only counts, never manuscript text or credentials, for interruption billing. */
-async function readAuxiliaryResponse(response: Response, usageId: string, inputEstimate: number, custom: boolean): Promise<JsonProviderPayload> {
+async function readAuxiliaryResponse(response: Response, usageId: string, inputEstimate: number, custom: boolean, authorizationHeld = false): Promise<JsonProviderPayload> {
   if (!response.ok || !response.headers.get('content-type')?.includes('text/event-stream') || !response.body) return { ...await parseJsonResponse(response), localOutputEstimate: undefined }
   let content = '', reasoning = '', done = false, truncated = false, lastSaved = 0
+  let finishReason: string | null = null
+  const toolCalls: unknown[] = []
   let usage: JsonProviderPayload['usage']
   let reasoningTokens: number | undefined
   const decoder = new TextDecoder()
@@ -252,9 +271,11 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
     }
     if (frame.error) throw isProviderQuotaError(frame.error) ? providerQuotaError(custom)
       : new DataAccessError(502, 'AI_PROVIDER_ERROR', '模型服务返回错误。')
+    if (typeof frame.choices?.[0]?.finish_reason === 'string') finishReason = frame.choices[0].finish_reason
     if (frame.choices?.[0]?.finish_reason === 'length') truncated = true
     if (frame.choices?.[0]?.finish_reason === 'stop') done = true
     const delta = frame.choices?.[0]?.delta
+    if (Array.isArray(delta?.tool_calls)) toolCalls.push(...delta.tool_calls)
     if (typeof delta?.content === 'string') content += delta.content
     if (typeof delta?.reasoning_content === 'string') reasoning += delta.reasoning_content
   })
@@ -270,7 +291,7 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
     frames.push(decoder.decode(), true)
     if (truncated) throw new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', '模型输出达到上限，未将部分检查结果当作完成。')
     if (!done) throw new DataAccessError(502, 'AI_PROVIDER_INCOMPLETE', '模型连接提前结束，未将部分检查结果当作完成。')
-    return { choices: [{ message: { content } }], usage, localOutputEstimate: estimateTokenCount(reasoning + content), reasoningTokens }
+    return { choices: [{ message: { content, tool_calls: toolCalls }, ...(finishReason ? { finish_reason: finishReason } : {}) }], usage, localOutputEstimate: estimateTokenCount(reasoning + content), reasoningTokens }
   } finally {
     await reader.cancel().catch(() => {})
     reader.releaseLock()
@@ -278,10 +299,10 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
     // A final usage frame received before interruption is stronger than estimates.
     if (usage?.prompt_tokens != null || usage?.completion_tokens != null) {
       const cache = extractCacheTokens(usage!)
-      await prisma.aiUsageLog.updateMany({ where: { id: usageId, billingStatus: 'prepared' }, data: {
+      await prisma.aiUsageLog.updateMany({ where: { id: usageId, billingStatus: { in: ['prepared', 'authorized_pending'] } }, data: {
         requestTokens: usage!.prompt_tokens ?? null, responseTokens: usage!.completion_tokens ?? null,
         usageSource: usage!.prompt_tokens != null && usage!.completion_tokens != null ? 'reported' : 'unknown',
-        promptCacheHitTokens: cache.hit, promptCacheMissTokens: cache.miss, billingStatus: custom ? 'exempt' : 'observed',
+        promptCacheHitTokens: cache.hit, promptCacheMissTokens: cache.miss, billingStatus: authorizationHeld ? 'pending_authorization' : custom ? 'exempt' : 'observed',
       } })
     }
   }
@@ -294,7 +315,7 @@ type JsonProviderPayload = {
   reasoningTokens?: number
   error?: { message?: unknown; code?: unknown; type?: unknown }
   data?: unknown
-  choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>
+  choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown[] }; finish_reason?: unknown }>
   usage?: {
     prompt_tokens?: number
     completion_tokens?: number
@@ -1134,21 +1155,21 @@ async function generateGoalTextCompletion(systemPrompt: string, userPrompt: stri
   options = { ...options }
   options.signal?.throwIfAborted()
   const task = resolveTextActionTask(options.action)
-  const assigned = task && !options.explicitModelSelection ? await assignedTaskModel(options.userId, options.novelId, task) : undefined
+  const review = task === 'quality' || task === 'continuity'
+  if (review && !options.modelRuntime && !options.modelTier) throw new DataAccessError(409, 'RUNTIME_MODEL_ADAPTER_REQUIRED', '检查缺少当前选择的模型身份，未派发请求。')
+  const assigned = task && !review && !options.explicitModelSelection ? await assignedTaskModel(options.userId, options.novelId, task) : undefined
   if (assigned) options = { ...options, modelRuntime: assigned.runtime, reasoningEffort: assigned.runtime.reasoningEffort, multiplierBps: undefined, boundedReview: false }
   const sourceRuntime = options.modelRuntime ?? await getModelTierRuntime(options.modelTier ?? 'speed', options.userId)
   const modelRuntime = sourceRuntime.tier === 'custom' ? sourceRuntime : { ...sourceRuntime, multiplierBps: effectiveModelMultiplier({
     multiplierBps: sourceRuntime.multiplierBps, metadata: { freePromotion: sourceRuntime.freePromotion },
   }) }
+  if (review || options.authorizedRequest) return generateTextCompletionImpl(systemPrompt, userPrompt, {
+    ...options, ...(review ? { multiplierBps: undefined } : {}), modelRuntime,
+  })
   return withModelRoutePool({ messages: [], tools: [], model: modelRuntime.modelName ?? undefined,
     provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, providerApiKey: modelRuntime.apiKey,
     signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route => {
-    const sameRoute = (route.provider ?? modelRuntime.provider) === modelRuntime.provider
-      && (route.model ?? modelRuntime.modelName ?? env.aiTextModel) === (modelRuntime.modelName ?? env.aiTextModel)
-      && (route.providerBaseUrl ?? modelRuntime.baseUrl ?? env.aiTextBaseUrl) === (modelRuntime.baseUrl ?? env.aiTextBaseUrl)
-      && (route.providerApiKey ?? modelRuntime.apiKey ?? env.aiTextApiKey) === (modelRuntime.apiKey ?? env.aiTextApiKey)
     return generateTextCompletionImpl(systemPrompt, userPrompt, { ...options, signal: route.signal, modelRuntime: { ...modelRuntime,
-      ...((task === 'quality' || task === 'continuity') && !sameRoute ? { reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: [] } : {}),
       provider: route.provider ?? modelRuntime.provider, modelName: route.model ?? modelRuntime.modelName,
       baseUrl: route.providerBaseUrl ?? modelRuntime.baseUrl, apiKey: route.providerApiKey ?? modelRuntime.apiKey } })
   })
@@ -1172,6 +1193,20 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     ? buildReviewReasoningPayload({ ...modelRuntime, model: modelRuntime.modelName ?? env.aiTextModel,
       providerBaseUrl: modelRuntime.baseUrl ?? env.aiTextBaseUrl, reasoningEffort: 'none' }) : undefined
   ensureTextProviderConfigured(modelRuntime.apiKey)
+  const authorized = options.authorizedRequest
+  if (authorized) {
+    const price = tokenPriceSchema.parse(authorized.price)
+    if (!Number.isSafeInteger(authorized.inputTokenCeiling) || authorized.inputTokenCeiling <= 0
+      || options.action !== 'agent3HumanityAuthorReplacement' || options.targetType !== 'chapter'
+      || [options.userId, options.novelId, options.chapterId, options.agentRunId, options.targetId].some(id => typeof id !== 'string' || !id)
+      || !Number.isSafeInteger(authorized.maxCreditMilli) || authorized.maxCreditMilli < 0
+      || !Number.isSafeInteger(options.maxOutputTokens) || (options.maxOutputTokens ?? 0) <= 0
+      || price.modelTier !== modelRuntime.tier || price.multiplierBps !== modelRuntime.multiplierBps
+      || Buffer.byteLength(`${systemPrompt}\n${userPrompt}`, 'utf8') > authorized.inputTokenCeiling
+      || priceTokenEvidence(price, authorized.inputTokenCeiling, options.maxOutputTokens!, 0) !== authorized.maxCreditMilli) {
+      throw new DataAccessError(409, 'TEXT_REQUEST_AUTHORIZATION_CONFLICT', '正文、当前模型或正常计费报价与本次确认不一致，未派发检查。')
+    }
+  }
   await assertCreditAccess(options.userId, modelRuntime.tier, false)
 
   const startedAt = Date.now()
@@ -1183,11 +1218,13 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     inputEstimate: estimateTokenCount(`${systemPrompt}\n${userPrompt}`), maxOutput: options.maxOutputTokens ?? env.aiTextMaxOutputTokens,
     modelName: modelRuntime.modelName ?? env.aiTextModel, modelTier: modelRuntime.tier,
     multiplierBps: options.multiplierBps ?? modelRuntime.multiplierBps,
-    novelId: options.novelId, chapterId: options.chapterId, targetType: options.targetType, targetId: options.targetId,
-    providerName: modelRuntime.provider })
+    novelId: options.novelId, chapterId: options.chapterId, agentRunId: options.agentRunId, targetType: options.targetType, targetId: options.targetId,
+    providerName: modelRuntime.provider, frozenPrice: options.authorizedRequest?.price })
   let dispatched = false
   const request = beginTextRequest(prepared.id)
   try {
+  options.signal?.throwIfAborted()
+  await options.authorizedRequest?.beforeDispatch()
   options.signal?.throwIfAborted()
   await assertGoalProviderAdmission()
   dispatched = true
@@ -1222,7 +1259,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     }),
   })
 
-  const payload = await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom')
+  const payload = await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized)
   if (payload.reasoningTokens != null) console.info('[ai-reasoning-usage]', {
     action: options.action, model: modelRuntime.modelName ?? env.aiTextModel,
     reasoningTokens: payload.reasoningTokens, completionTokens: payload.usage?.completion_tokens ?? null, durationMs: Date.now() - startedAt,
@@ -1231,6 +1268,9 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   const content = payload.choices?.[0]?.message?.content
   const quotaRejected = isProviderQuotaError(payload.error ?? (!response.ok ? payload : undefined))
   const validContent = response.ok && !quotaRejected && typeof content === 'string' && Boolean(content.trim())
+  if (validContent) options.onObservedCompletion?.({ usageId: prepared.id, content: content as string,
+    finishReason: typeof payload.choices?.[0]?.finish_reason === 'string' ? payload.choices[0].finish_reason : null,
+    toolCalls: payload.choices?.[0]?.message?.tool_calls ?? [] })
   if (validContent && payload.localOutputEstimate === undefined) await saveOutputEvidence(prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), content as string)
   const reportedPrompt = payload.usage?.prompt_tokens
   const reportedCompletion = payload.usage?.completion_tokens
@@ -1240,6 +1280,19 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     }
   }
   const completionCache = extractCacheTokens(payload.usage ?? {})
+  if (authorized && (validContent || reportedPrompt != null || reportedCompletion != null)
+    && (reportedPrompt == null || reportedCompletion == null || reportedPrompt > authorized.inputTokenCeiling
+      || reportedCompletion > options.maxOutputTokens! || priceTokenEvidence(authorized.price, reportedPrompt, reportedCompletion, completionCache.hit) > authorized.maxCreditMilli)) {
+    // Preserve actual observations; neither a guessed zero nor an automatic
+    // settlement may exceed the exact author-confirmed request envelope.
+    await prisma.aiUsageLog.update({ where: { id: prepared.id }, data: {
+      requestTokens: reportedPrompt ?? null, responseTokens: reportedCompletion ?? null,
+      promptCacheHitTokens: completionCache.hit, promptCacheMissTokens: completionCache.miss,
+      usageSource: reportedPrompt != null && reportedCompletion != null ? 'reported' : 'unknown',
+      billingStatus: 'pending_authorization', durationMs: Date.now() - startedAt,
+    } })
+    throw new DataAccessError(409, 'TEXT_REQUEST_USAGE_UNCONFIRMED', '本次检查用量尚未确认或超出确认范围，原观察已保留，未追加扣费或重发。')
+  }
   // CR02: a non-streaming empty/error response can still carry real usage.
   // Keep that observation, but do not estimate missing usage from an error body.
   if (validContent || reportedPrompt != null || reportedCompletion != null) await recordUsage({
@@ -1251,6 +1304,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     modelName: modelRuntime.modelName ?? env.aiTextModel,
     novelId: options.novelId ?? null,
     chapterId: options.chapterId ?? null,
+    agentRunId: options.agentRunId ?? null,
     targetType: options.targetType ?? 'text',
     targetId: options.targetId ?? null,
     providerName: modelRuntime.provider,
@@ -1266,7 +1320,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   if (quotaRejected) throw providerQuotaError(modelRuntime.tier === 'custom')
   if (!response.ok) {
     if ([400, 401, 403, 404, 422, 429].includes(response.status) && payload.usage == null && reportedPrompt == null && reportedCompletion == null) {
-      await prisma.aiUsageLog.updateMany({ where: { id: prepared.id, billingStatus: 'prepared' },
+      await prisma.aiUsageLog.updateMany({ where: { id: prepared.id, billingStatus: { in: ['prepared', 'authorized_pending'] } },
         data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } })
     }
     if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)) throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
@@ -1278,7 +1332,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   if (payload.choices?.[0]?.finish_reason === 'length') throw new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', '模型输出达到上限，检查未完成。')
   return content.trim()
   } catch (error) {
-    await markUnobservedUsage(prepared.id, dispatched)
+    await markUnobservedUsage(prepared.id, dispatched, !!authorized)
     if (request.traced || error instanceof DataAccessError && ['AI_PROVIDER_OUTPUT_LIMIT', 'AI_PROVIDER_EMPTY_RESPONSE'].includes(error.code)) {
       // The provider promise has ended. Content validity and fee certainty are
       // separate: an empty/truncated report may have fully confirmed charges.
@@ -1290,7 +1344,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
         // original reservation through the same idempotent path as a success.
         await recordUsage({ preparedUsageId: prepared.id, usageSource: 'reported', userId: options.userId,
           providerType: 'text', action: options.action, modelName: modelRuntime.modelName ?? env.aiTextModel,
-          novelId: options.novelId, chapterId: options.chapterId, targetType: options.targetType, targetId: options.targetId,
+          novelId: options.novelId, chapterId: options.chapterId, agentRunId: options.agentRunId, targetType: options.targetType, targetId: options.targetId,
           providerName: modelRuntime.provider, requestTokens: observed.requestTokens, responseTokens: observed.responseTokens,
           promptCacheHitTokens: observed.promptCacheHitTokens, promptCacheMissTokens: observed.promptCacheMissTokens,
           durationMs: Date.now() - startedAt, modelTier: modelRuntime.tier,
