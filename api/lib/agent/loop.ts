@@ -236,6 +236,9 @@ const STRUCTURE_MUTATION_TOOLS = new Set([
 const STRUCTURE_FAILURE_LIMIT = 3
 
 const STATE_SENSITIVE_VALIDATORS = new Set(['continuity_validate', 'quality_analyze'])
+// Verified local persisted reads only. readOnly also covers billed/external
+// operations, so it cannot authorize work while a review request is unknown.
+const PENDING_REVIEW_LOCAL_READS = new Set(['chapter_read', 'chapter_bridge_get', 'quality_report_get', 'plan_read'])
 // Polling/question tools observe external activity; they are intentionally repeatable.
 const REPEATABLE_TOOLS = new Set(['task_wait', 'task_get', 'task_list', 'ask_user'])
 function reviewPreflightArgs(call: ToolCallRequest, tool?: AgentTool): Record<string, unknown> | null {
@@ -599,7 +602,9 @@ export async function handleToolCall(
         : error.code === 'AI_PROVIDER_TRANSPORT' ? '模型连接中断，结果未确认'
         : error.code === 'AI_PROVIDER_INVALID_RESPONSE' ? '模型响应格式异常' : '模型服务异常'
       console.warn('[agent-tool-provider]', { runId, tool: call.name, code: error.code, durationMs: Date.now() - startedAt })
-      const guidance = error.code === 'AI_PROVIDER_QUOTA_EXCEEDED' ? error.message
+      const unknownRequest = requestTrace.records.length > 0 && !textRequestsFinished(requestTrace)
+      const guidance = unknownRequest ? '原请求的模型结果或用量尚未确认；保留原调用、费用与预算，先核对真实回执，不重发未知付费请求，也不调用模型作收尾。'
+        : error.code === 'AI_PROVIDER_QUOTA_EXCEEDED' ? error.message
         : error.code === 'AI_QUALITY_NON_THINKING_UNSUPPORTED'
         ? `${error.message} 本次未发送检查模型请求；不要重试同一配置或修改正文来绕过，检查仍未完成。`
         : error.code === 'AI_PROVIDER_OUTPUT_LIMIT'
@@ -1131,13 +1136,22 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const currentReviewState: { value: ChapterReviewReadiness | null } = { value: null }
     const observePersistedReviewProgress = async () => {
       currentReviewState.value = null
-      if (pendingReviews.size || !['write', 'revise'].includes(taskSpec.intent)
+      if (!['write', 'revise'].includes(taskSpec.intent)
         || ['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')) return false
       try {
         const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
           { userId: params.userId, novelId: params.novelId, runId }))
+        // Pending receipt truth belongs to one chapter/version/phase. A
+        // different current persisted assessment remains independently true;
+        // no unresolved request can authorize a final decision on its chapter.
         currentReviewState.value = review
-        return observeChapterReviewProgress(progressSignatures, review?.progressEvidence,
+        if (review?.progressEvidence) {
+          const pending = [...pendingReviews.values()].filter(item => item.chapterId === review.chapterId)
+          const phases = review.progressEvidence.phases.filter(phase => !pending.some(item => phase === 'decision'
+            || item.revision === review.revision && item.toolName === (phase === 'continuity' ? 'continuity_validate' : 'quality_analyze')))
+          currentReviewState.value = { ...review, progressEvidence: { ...review.progressEvidence, phases } }
+        }
+        return observeChapterReviewProgress(progressSignatures, currentReviewState.value?.progressEvidence,
           { userId: params.userId, novelId: params.novelId, expectedOriginalTaskId: taskSpec.id, taskSpec })
       } catch (error) {
         // A stale source is not progress. This optional observation must not
@@ -1145,6 +1159,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (error instanceof DataAccessError && ['CONTINUITY_INPUT_STALE', 'CHAPTER_NOT_FOUND'].includes(error.code)) return false
         throw error
       }
+    }
+    const pendingReviewPauseReason = () => {
+      const types = [...new Set([...pendingReviews.values()].map(item => item.toolName === 'quality_analyze' ? '质量' : '连续性'))]
+      const completed = currentReviewState.value?.progressEvidence?.phases.filter(phase => phase !== 'decision')
+        .map(phase => phase === 'continuity' ? '连续性' : '质量') ?? []
+      return `${types.join('、')}检查仍有未确认的请求，模型结果或用量尚未确认。${completed.length ? `当前${[...new Set(completed)].join('、')}检查结果已独立保存；` : ''}正文、进度与原预算保留；先核对原调用回执，不重发未知付费请求、不调用模型作收尾，也未将任务标记完成。`
     }
     if ((params.resume || previousTask) && (toolRestrictions.some(item => ['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED'].includes(item.code))
       || pendingReviews.size || [...automaticReviewAttempts].some(key => key.endsWith(':continuity_validate')))) {
@@ -1216,8 +1236,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (retired.length) await persistCheckpoint()
     }
     if (pendingReviews.size) {
-      throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED',
-        '上次独立检查或其修订链仍有未确认的请求。正文、进度与原预算保留；请先核对原调用回执，系统不会因继续任务而重发未知付费请求，也未判定检查通过。')
+      // A prior batch may already have saved an independent current report
+      // before stopping. Record its semantic receipt without buying another
+      // turn, retiring the unknown request or changing convergence counters.
+      if (await observePersistedReviewProgress()) await persistCheckpoint()
+      throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED', pendingReviewPauseReason())
     }
     if ((params.resume || previousTask) && ['write', 'revise'].includes(taskSpec.intent)) {
       const recovered = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx,
@@ -1587,6 +1610,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
 
     const finishPersistedWritingIfComplete = async (beforeFinish?: () => Promise<void>) => {
+      if (pendingReviews.size) return false
       let delivery = await prisma.$transaction(tx => readCompletedWritingDelivery(tx,
         { userId: params.userId, novelId: params.novelId, runId }))
       if (!delivery) return false
@@ -1985,7 +2009,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
           bus.emit({ type: 'step.finish', turn, usage: result.usage })
           forceWrapUpLocal = true
-          await wrapUpAndFinish('检查未完成；已保存当前可执行操作的结果。检查请求仍需确认，正文与原预算保留，未将任务标记完成。')
+          await wrapUpAndFinish(pendingReviewPauseReason())
           return
         }
         const nextChapterRequired = requiresNextChapterDelivery(taskSpec.goals)
@@ -2074,6 +2098,33 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
         const preflightTool = tools.find(tool => tool.name === call.name)
         const preflightArgs = reviewPreflightArgs(call, preflightTool)
+        if (pendingReviews.size) {
+          // A read-only declaration does not make an external/billed call a
+          // safe local observation. Only authenticated continuity bytes may
+          // complete this independent phase while another request is unknown.
+          let safe = Boolean(preflightTool?.readOnly) && PENDING_REVIEW_LOCAL_READS.has(call.name)
+          if (call.name === 'continuity_validate' && preflightTool?.readOnly && preflightArgs && preflightTool.parameters.safeParse(preflightArgs).success
+            && typeof preflightArgs.compilationId === 'string' && !toolContext.inlineChild
+            && ![...pendingReviews.values()].some(item => item.toolName === 'continuity_validate'
+              && (item.compilationId === preflightArgs.compilationId || typeof preflightArgs.chapterId === 'string' && item.chapterId === preflightArgs.chapterId))) {
+            const proof = await prisma.$transaction(tx => readOfflineContinuityRecovery(tx,
+              { userId: params.userId, novelId: params.novelId, runId, callId: call.id },
+              { compilationId: preflightArgs.compilationId as string, ...(typeof preflightArgs.focus === 'string' ? { focus: preflightArgs.focus } : {}) }))
+            if (proof && (preflightArgs.chapterId === undefined || preflightArgs.chapterId === proof.chapter.id)
+              && ![...pendingReviews.values()].some(item => item.toolName === 'continuity_validate' && item.chapterId === proof.chapter.id)) {
+              offlineContinuityCalls.set(call.id, { version: 1, compilationId: preflightArgs.compilationId, chapterId: proof.chapter.id,
+                revision: proof.chapter.revision, contentHash: proof.coverage.contentHash, admissionKey: proof.audit.admissionKey,
+                validationHash: proof.validationHash, auditHash: runtimeJson(proof.audit).hash })
+              safe = true
+            }
+          }
+          if (!safe) {
+            const reason = '独立检查仍有未确认的请求；本次只允许普通读取或已认证的离线连续性恢复，未派发新检查模型、未执行写入。'
+            parts.push(deferredToolPart(call, preflightTool?.title ?? call.name, preflightArgs, reason, messageId, bus))
+            messages.push({ role: 'tool', toolCallId: call.id, content: reason })
+            continue
+          }
+        }
         if (preflightTool && preflightArgs && preflightTool.parameters.safeParse(preflightArgs).success
           && call.name === 'chapter_bridge_commit') {
           const parsed = preflightArgs
@@ -2371,6 +2422,19 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
       await persistCheckpoint()
       bus.emit({ type: 'step.finish', turn, usage: result.usage })
+
+      if (pendingReviews.size) {
+        // Finish the batch's already admitted safe independent observations,
+        // then pause locally. Independent report progress cannot make unknown
+        // usage retryable or authorize another billed main-model wrap-up.
+        const reviewProgress = await observePersistedReviewProgress()
+        batchProgress = reviewProgress || batchProgress
+        stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, false)
+        await persistCheckpoint()
+        forceWrapUpLocal = true
+        await wrapUpAndFinish(pendingReviewPauseReason())
+        return
+      }
 
       if (reviewStopReason) {
         // A review denial is never reported as a passed review, but a single
