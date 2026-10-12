@@ -153,4 +153,18 @@ describe('supplier quota error boundary', () => {
     expect(mocks.create).not.toHaveBeenCalled()
     expect(mocks.charge).not.toHaveBeenCalled()
   })
+
+  it.each([400, 503])('preserves actual counts from non-quota HTTP%s in the durable receipt', async status => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"message":"synthetic failure"},"usage":{"prompt_tokens":12,"completion_tokens":3}}', { status })))
+    await expect(chatWithTools({ messages: [], tools: [], providerApiKey: 'fixture-key',
+      usageLog: { userId: 'owner', action: 'failure-fixture' }, durableExecution: {
+        operationKey: 'operation', attemptKey: '1', lease: { userId: 'owner', runId: 'run', taskRootId: 'task', epoch: 1, leaseToken: 'lease' },
+        price: { modelTier: 'speed' },
+      } as NonNullable<Parameters<typeof chatWithTools>[0]['durableExecution']> })).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR' })
+    expect(mocks.rejected).toHaveBeenCalledWith(status, { quotaExceeded: false, usage: { source: 'reported', promptTokens: 12,
+      completionTokens: 3, cacheHitTokens: null, cacheMissTokens: null } })
+    expect(mocks.create).not.toHaveBeenCalled()
+    expect(mocks.charge).not.toHaveBeenCalled()
+    expect(fetch).toHaveBeenCalledOnce()
+  })
 })

@@ -1325,6 +1325,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...base,
             phase: 'paused',
             ...(event.reason === 'model_stalled' ? { outputSummary: '模型暂未完成任务，已保留进度并暂停。请补充指示后继续。' } : {}),
+            ...(event.reason === 'review_receipt_pending' ? { errorMessage: null, outputSummary: '检查正在等待原请求确认，正文和已完成的检查已保留。' } : {}),
             pendingApproval: null,
             pendingQuestion: null,
             liveToolDrafts: {},

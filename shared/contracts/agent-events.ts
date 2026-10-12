@@ -2,6 +2,8 @@ import type { AgentAttachmentMeta } from './agent-attachments.js'
 import type { AgentExecutionMode, EntityId } from './models.js'
 
 /** Server proof that a review request returned, even if its local report write failed.
+ * contentHash is SHA-256 of the raw UTF-8 chapter text. Historical continuity
+ * receipts may use the exact saved runtimeJson({content}) envelope instead.
  * This is not an assessment, manuscript progress or a chapter completion receipt. */
 export type AgentReviewRequestReceipt = { version: 1; chapterId: string; revision: number; contentHash: string; usageIds?: string[] }
 export type AgentReviewFailureReconciliation = {
@@ -409,7 +411,7 @@ export type AgentStreamEventBody =
     }
   | { type: 'permission.resolved'; callId: string; approved: boolean; approvalId?: string }
   | { type: 'step.finish'; turn: number; usage: AgentTokenUsage }
-  | { type: 'run.paused'; reason: 'user_stop' | 'approval_timeout' | 'model_stalled' | 'needs_input' }
+  | { type: 'run.paused'; reason: 'user_stop' | 'approval_timeout' | 'model_stalled' | 'needs_input' | 'review_receipt_pending' }
   | {
       type: 'run.finished'
       outcome?: import('./models.js').AgentRunOutcome
@@ -515,6 +517,12 @@ export interface StartAgentLoopRunRequest {
 
 export type CreativeFreedom = 'stable' | 'balanced' | 'bold'
 
+export interface AgentReviewReceiptWait {
+  kind: 'waiting_for_original_receipt'
+  checks: Array<'quality' | 'continuity'>
+  message: string
+}
+
 export interface StartAgentLoopRunResponse {
   runId: EntityId
   sessionId: EntityId
@@ -524,6 +532,8 @@ export interface StartAgentLoopRunResponse {
   streamUrl: string
   /** Persisted journal cursor immediately before this continuation was admitted. */
   eventStartSeq?: number
+  /** No execution or new admission was created; checking again only reads receipts. */
+  reviewReceiptWait?: AgentReviewReceiptWait
 }
 
 export interface ResolveAgentApprovalRequest {

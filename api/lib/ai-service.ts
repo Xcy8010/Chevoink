@@ -3,6 +3,7 @@ import { currentGoalExecution, withGoalExecutionContext, withoutGoalEffects } fr
 import { readGoalExecution } from './agent/goal-fence.js'
 import { assertGoalProviderAdmission, reserveGoalUsage, syncGoalLegacyUsage } from './agent/goal-budget.js'
 import { beginTextRequest, recordTextRequestFailure, type TextRequestRecord } from './text-request-trace.js'
+import { isKnownTextRequestBilling } from './agent/text-request-billing.js'
 import { SseDataDecoder, readWithIdleTimeout } from './ai-sse.js'
 import { beginDurableChat, type DurableChatExecution } from './agent/runtime-provider.js'
 import { validateModelCursor } from './agent/runtime-model-cursor.js'
@@ -145,13 +146,15 @@ async function recordUsage(input: {
       multiplierBps: input.multiplierBps ?? 10000,
       durationMs: input.durationMs,
       usageSource: input.usageSource ?? null,
-      billingStatus: input.preparedUsageId ? input.modelTier === 'custom' ? 'exempt' : 'observed' : null,
+      billingStatus: input.preparedUsageId ? input.modelTier === 'custom' ? 'exempt'
+        : input.usageSource === 'unknown' && (input.requestTokens == null || input.responseTokens == null) ? 'pending_usage' : 'observed' : null,
   }
   const usageLog = input.preparedUsageId
     ? await prisma.aiUsageLog.update({ where: { id: input.preparedUsageId, userId: input.userId,
       providerType: input.providerType, modelName: input.modelName, action: input.action }, data })
     : await prisma.aiUsageLog.create({ data })
-  if (input.providerType === 'text' && input.modelTier !== 'custom') {
+  if (input.providerType === 'text' && input.modelTier !== 'custom'
+    && !(input.preparedUsageId && input.usageSource === 'unknown' && (input.requestTokens == null || input.responseTokens == null))) {
     try {
       const charged = await consumeTokenCredits({
         userId: input.userId,
@@ -859,23 +862,25 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     const reportedCompletion = payload.usage?.completion_tokens
     for (const count of [reportedPrompt, reportedCompletion]) {
       if (count != null && (!Number.isSafeInteger(count) || count < 0 || count > 2147483647)) {
-        await durable?.rejected(response.status, { quotaExceeded: quotaRejected })
+        await durable?.rejected(response.status, { quotaExceeded: quotaRejected, usage: {
+          source: 'unknown', promptTokens: null, completionTokens: null, cacheHitTokens: null, cacheMissTokens: null,
+        } })
         throw new DataAccessError(502, 'AI_USAGE_INVALID', '供应商返回了无效用量，不能据此结算。')
       }
     }
     const cache = extractCacheTokens(payload.usage ?? {})
-    await durable?.rejected(response.status, quotaRejected ? { quotaExceeded: true, usage: {
+    await durable?.rejected(response.status, { quotaExceeded: quotaRejected, ...((reportedPrompt != null || reportedCompletion != null || quotaRejected || payload.usage != null) ? { usage: {
       source: reportedPrompt != null && reportedCompletion != null ? 'reported' : 'unknown',
       promptTokens: reportedPrompt ?? null, completionTokens: reportedCompletion ?? null,
       cacheHitTokens: cache.hit, cacheMissTokens: cache.miss,
-    } } : undefined)
+    } } : {}) })
     if (prepared && (reportedPrompt != null || reportedCompletion != null)) {
       await recordUsage({ ...params.usageLog, preparedUsageId: prepared.id, providerType: 'text', modelName: model,
         providerName: params.provider ?? env.aiTextProvider, requestTokens: reportedPrompt ?? null, responseTokens: reportedCompletion ?? null,
         promptCacheHitTokens: cache.hit, promptCacheMissTokens: cache.miss, durationMs: Date.now() - startedAt,
         usageSource: reportedPrompt != null && reportedCompletion != null ? 'reported' : 'unknown' })
     }
-    if (prepared && !quotaRejected && [400, 401, 403, 404, 422, 429].includes(response.status) && reportedPrompt == null && reportedCompletion == null) {
+    if (prepared && !quotaRejected && [400, 401, 403, 404, 422, 429].includes(response.status) && payload.usage == null && reportedPrompt == null && reportedCompletion == null) {
       await prisma.aiUsageLog.updateMany({ where: { id: prepared.id, billingStatus: 'prepared' },
         data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } })
       await syncGoalLegacyUsage(prepared.id)
@@ -1153,10 +1158,8 @@ async function finishTextRequest(record: TextRequestRecord, dispatched: boolean)
   const usage = await prisma.aiUsageLog.findUnique({ where: { id: record.usageId }, select: {
     usageSource: true, billingStatus: true, requestTokens: true, responseTokens: true, reservedCreditMilli: true,
   } }).catch(() => null)
-  record.billingKnown = !!usage && (usage.billingStatus === 'not_dispatched'
-    || usage.usageSource === 'reported' && ['settled', 'exempt'].includes(usage.billingStatus ?? '')
-      && usage.requestTokens !== null && usage.responseTokens !== null && usage.reservedCreditMilli === 0)
-  record.status = !dispatched ? 'not_dispatched' : record.billingKnown ? 'terminal' : 'unknown'
+  record.billingKnown = !!usage && isKnownTextRequestBilling(usage)
+  record.status = record.billingKnown ? !dispatched ? 'not_dispatched' : 'terminal' : 'unknown'
 }
 
 async function generateTextCompletionImpl(systemPrompt: string, userPrompt: string, options: TextCompletionOptions & { modelRuntime: Awaited<ReturnType<typeof getModelTierRuntime>> }) {
@@ -1262,7 +1265,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
 
   if (quotaRejected) throw providerQuotaError(modelRuntime.tier === 'custom')
   if (!response.ok) {
-    if ([400, 401, 403, 404, 422, 429].includes(response.status) && reportedPrompt == null && reportedCompletion == null) {
+    if ([400, 401, 403, 404, 422, 429].includes(response.status) && payload.usage == null && reportedPrompt == null && reportedCompletion == null) {
       await prisma.aiUsageLog.updateMany({ where: { id: prepared.id, billingStatus: 'prepared' },
         data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } })
     }

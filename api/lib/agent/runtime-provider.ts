@@ -12,6 +12,7 @@ import { prepareAuxiliaryModelOperation, type AuxiliaryModelStep } from './runti
 import { observeGoalUsage } from './goal-budget.js'
 import { readGoalExecution } from './goal-fence.js'
 import { estimateChatMessagesTokens } from './context-budget.js'
+import { DataAccessError } from '../prisma.js'
 
 export type DurableChatExecution = { lease: RunLeaseToken; operationKey: string; attemptKey: string; parentOperationId?: string; cursor?: ModelExecutionCursor;
   auxiliaryStep?: AuxiliaryModelStep;
@@ -62,6 +63,43 @@ export async function beginDurableChat(input: {
         || runtimeJson(event.payload).hash !== runtimeJson({ attemptId: attempt.id, status: 'succeeded', resultHash: attempt.resultHash }).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立模型结果缺少匹配的持久事件。')
     })
     replay = await withSettlement(parsed.data.result)
+  } else if (attempt.status === 'failed' || attempt.status === 'cancelled') {
+    if (!attempt.result || !attempt.resultHash) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原失败模型请求尚无完整回执，不能自动重新请求。')
+    // Execution failure is a terminal receipt, not an unknown dispatch. Replay
+    // only the original owned/hash-bound error; its accounting may still be
+    // unknown and is never settled or released by this readonly path.
+    const terminal = await withRunLease(execution.lease, async tx => {
+      const saved = await tx.agentProviderAttempt.findFirst({ where: { id: attempt.id, operationId: operation.id,
+        operation: { taskRootId: execution.lease.taskRootId } }, include: { operation: true } })
+      if (!saved || saved.operationId !== operation.id || saved.operation.taskRootId !== execution.lease.taskRootId
+        || saved.status !== attempt.status || saved.operation.status !== saved.status
+        || !saved.requestSnapshot || saved.requestHash !== attempt.requestHash || runtimeJson(saved.requestSnapshot).hash !== saved.requestHash
+        || !saved.operation.inputSnapshot || runtimeJson(saved.operation.inputSnapshot).hash !== saved.operation.inputHash
+        || !saved.resultHash || runtimeJson(saved.result).hash !== saved.resultHash) {
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '原失败模型回执不能安全恢复。')
+      }
+      const failed = z.object({ outcome: z.literal('failed'), result: z.object({ httpStatus: z.number().int().min(100).max(599),
+        code: z.literal('AI_PROVIDER_QUOTA_EXCEEDED').optional() }).strict() }).strict()
+      const cancelled = z.object({ outcome: z.literal('cancelled'), result: z.object({ code: z.string().min(1).max(96).regex(/^[A-Z0-9_]+$/),
+        dispatched: z.literal(false) }).strict() }).strict()
+      const parsed = saved.status === 'failed' ? failed.safeParse(saved.result) : cancelled.safeParse(saved.result)
+      if (!parsed.success || saved.status === 'failed' && !saved.dispatchedAt || saved.status === 'cancelled' && saved.dispatchedAt) {
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '原失败模型回执状态不一致。')
+      }
+      const unsent = parsed.data.outcome === 'cancelled'
+      const code = parsed.data.outcome === 'cancelled' ? parsed.data.result.code : parsed.data.result.code
+        ?? ([408, 504].includes(parsed.data.result.httpStatus) ? 'AI_PROVIDER_TIMEOUT' : 'AI_PROVIDER_ERROR')
+      const eventKey = unsent ? `provider.not_dispatched:${saved.id}` : `result:${saved.id}:${saved.resultHash}`
+      const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey } })
+      const expected = unsent ? { attemptId: saved.id, requestHash: saved.requestHash, code, resultHash: saved.resultHash }
+        : { attemptId: saved.id, status: 'failed', resultHash: saved.resultHash }
+      if (!event || event.taskRootId !== execution.lease.taskRootId || event.operationId !== operation.id || event.runId !== saved.runId
+        || event.type !== (unsent ? 'provider.not_dispatched' : 'provider.result.recorded')
+        || runtimeJson(event.payload).hash !== runtimeJson(expected).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原失败模型结果缺少匹配的持久事件。')
+      return { code, unsent }
+    })
+    throw new DataAccessError(terminal.unsent ? 409 : 502, terminal.code,
+      terminal.unsent ? '原模型请求在派发前已终止，未再次请求供应商。' : '原模型请求已取得失败回执，未再次请求供应商；原用量和账记状态保留。')
   } else {
     if (attempt.status !== 'prepared') runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原模型请求已派发但结果未确认，不能自动重新请求。')
     let goalTokenEstimate: number | undefined
@@ -127,7 +165,7 @@ export async function beginDurableChat(input: {
       // counts, and hold unknown accounting for normal reconciliation.
       await observeGoalUsage(goalUsageKey, { inputTokens: rejection?.usage?.promptTokens ?? null,
         outputTokens: rejection?.usage?.completionTokens ?? null, creditsMilli: 0,
-        status: !rejection?.quotaExceeded && [400, 401, 403, 404, 422, 429].includes(httpStatus) ? 'rejected' : 'unknown' })
+        status: !rejection?.quotaExceeded && !rejection?.usage && [400, 401, 403, 404, 422, 429].includes(httpStatus) ? 'rejected' : 'unknown' })
     },
   }
 }

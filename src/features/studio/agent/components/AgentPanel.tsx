@@ -399,7 +399,7 @@ export function AgentPanel({
   // 续跑必须跟随作者当前的模型选择：ref 在下方每次渲染同步最新值，点击续跑时读取。
   // 否则旧任务保存的收费档会重新把 0 余额用户拦在额度闸门外。
   const continueModelRef = useRef<ContinueAgentLoopRunModel | null>(null)
-  const { stoppingRunId, handleStop, handleContinue, handleResolveApproval, handleResolveQuestion } = useRunControls({
+  const { stoppingRunId, reviewReceiptWait, handleStop, handleContinue, handleResolveApproval, handleResolveQuestion } = useRunControls({
     runId, resumeableRunId, sessionId, phase, pendingApproval, pendingQuestion, connect, setActionError,
     selectedModelRef: continueModelRef,
   })
@@ -1077,7 +1077,7 @@ export function AgentPanel({
 
 
   const canContinue = !authorEnded && ((Boolean(runId) && (panelPhase === 'paused' || panelPhase === 'failed')) || (!runId && Boolean(resumeableRunId)))
-  const combinedError = actionError ?? errorMessage
+  const combinedError = actionError ?? (reviewReceiptWait ? null : errorMessage)
 
   const handleCopyText = useCallback(async (id: string, text: string) => {
     if (await copyToClipboard(text)) {
@@ -1755,6 +1755,11 @@ export function AgentPanel({
       ) : null}
 
       {/* 错误提示 */}
+      {reviewReceiptWait ? (
+        <div className="mx-4 mb-2 rounded-[14px] border border-[var(--border)] bg-[var(--surface)] px-3 py-2" role="status">
+          <p className="text-xs leading-5 text-[var(--text-secondary)]">{reviewReceiptWait.message}</p>
+        </div>
+      ) : null}
       {combinedError ? (
         <div className="mx-4 mb-2 flex items-start gap-2 rounded-[14px] border border-rose-200 bg-rose-50 px-3 py-2">
           <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-500" />
@@ -1841,6 +1846,7 @@ export function AgentPanel({
           voiceDisabled={voiceDisabled || sessionResolving}
           running={active}
           onContinue={canContinue ? goalView.runBelongsToGoal && !goalView.terminal ? handleGoalResume : handleContinue : undefined}
+          continueLabel={reviewReceiptWait ? '核对检查状态' : undefined}
           disabled={conversationLoading || modelPreference.loading}
           onSend={(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId) => handleSend(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId)}
           creativeFreedom={creativeFreedom}

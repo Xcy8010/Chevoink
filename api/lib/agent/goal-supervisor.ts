@@ -163,7 +163,10 @@ export async function superviseAgentGoal(userId: string, sessionId: string, goal
     await actOnAgentGoal(userId, sessionId, goalId, { requestId: randomUUID(), expectedStateVersion: action.version, action: 'pause' }); return
   }
   if (action.kind === 'activation_continue') {
-    try { await (await import('./run-service.js')).continueActivatedGoalRun(userId, action.runId, action.goal.id, action.goal.epoch) }
+    try {
+      const resumed = await (await import('./run-service.js')).continueActivatedGoalRun(userId, action.runId, action.goal.id, action.goal.epoch)
+      if (resumed?.reviewReceiptWait) throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED', resumed.reviewReceiptWait.message)
+    }
     catch (error) {
       const code = error instanceof DataAccessError ? error.code : 'GOAL_DISPATCH_UNAVAILABLE'
       if (['RUN_IN_PROGRESS', 'RUN_LIMIT', 'RUNTIME_LEASE_BUSY', 'GOAL_VERSION_CONFLICT'].includes(code)) return

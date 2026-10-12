@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -86,7 +86,8 @@ describe.runIf(available)('owned returned continuity bytes on genuine legacy aut
           expect(proof!.audit.sourceRelocations).toHaveLength(1)
           if (scenario.startsWith('marker-')) {
             const marker: NonNullable<ToolContext['offlineContinuityOnly']> = { version: 1, compilationId: compilation.id, chapterId: chapter.id, revision: 4,
-              contentHash: proof!.coverage.contentHash, admissionKey: proof!.audit.admissionKey, validationHash: proof!.validationHash, auditHash: runtimeJson(proof!.audit).hash }
+              contentHash: proof!.coverage.contentHash, receiptContentHash: createHash('sha256').update(chapter.content).digest('hex'),
+              admissionKey: proof!.audit.admissionKey, validationHash: proof!.validationHash, auditHash: runtimeJson(proof!.audit).hash }
             if (scenario === 'marker-revision') await prisma.chapter.update({ where: { id: chapter.id }, data: { revision: 5 } })
             if (scenario === 'marker-validation') await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...validation, checkRounds: 4 }).value } })
             if (scenario === 'marker-complete') await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...validation, independentCheck: 'complete', findings: proof!.findings }).value } })
@@ -125,7 +126,7 @@ describe.runIf(available)('owned returned continuity bytes on genuine legacy aut
                   autoRepairRounds: 0, continuityCriticResponse: audit, independentCheck: 'complete', findings: proof!.findings })
               } else {
                 expect(result).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_INPUT_STALE',
-                  reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: 4, contentHash: marker.contentHash } })
+                  reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: 4, contentHash: marker.receiptContentHash } })
                 expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(beforeTool)
               }
             }
@@ -142,7 +143,7 @@ describe.runIf(available)('owned returned continuity bytes on genuine legacy aut
             const ctx: ToolContext = { ...subject, chapterId: f.chapterId, mode: 'build', qualityMode: 'premium', creativeFreedom: 'balanced', signal: new AbortController().signal, emit: () => {} }
             if (scenario === 'tool-error') await expect(continuityValidateTool.execute(ctx, input)).rejects.toThrow('fixture database connection failure')
             else expect(await continuityValidateTool.execute(ctx, input)).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_INPUT_STALE',
-              summary: '本章在离线恢复前发生变化', reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: 4, contentHash: runtimeJson({ content: chapter.content }).hash } })
+              summary: '本章在离线恢复前发生变化', reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: 4, contentHash: createHash('sha256').update(chapter.content).digest('hex') } })
             expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(before)
             expect(await prisma.chapter.findMany({ where: { authorId: f.userId }, orderBy: { id: 'asc' } })).toEqual(concurrentBodies)
           } else if (scenario === 'race') {

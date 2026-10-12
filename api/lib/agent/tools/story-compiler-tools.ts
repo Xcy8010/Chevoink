@@ -603,7 +603,8 @@ async function executeOfflineContinuityOnly(ctx: ToolContext, args: { compilatio
   const marker = ctx.offlineContinuityOnly!
   const stale = () => ({ outcome: 'failed' as const, failureCode: 'CONTINUITY_INPUT_STALE', summary: '本章在离线恢复前发生变化',
     output: '原离线检查凭据或目标已变化；未应用旧检查、未派发模型、未增加检查次数。请读取当前正文和章节桥后继续，不能宣称新版已通过。',
-    reviewRequestFinished: { version: 1 as const, chapterId: marker.chapterId, revision: marker.revision, contentHash: marker.contentHash } })
+    ...(marker.receiptContentHash ? { reviewRequestFinished: { version: 1 as const, chapterId: marker.chapterId,
+      revision: marker.revision, contentHash: marker.receiptContentHash } } : {}) })
   ctx.signal.throwIfAborted()
   if (marker.version !== 1 || ctx.inlineChild || ctx.durableCompiler || args.compilationId !== marker.compilationId
     || args.chapterId !== undefined && args.chapterId !== marker.chapterId) return stale()
@@ -728,7 +729,7 @@ export const continuityValidateTool = defineTool({
           if (!(error instanceof DataAccessError) || error.code !== 'CONTINUITY_INPUT_STALE') throw error
           return { outcome: 'failed' as const, failureCode: error.code, summary: '本章在离线恢复前发生变化',
             output: '本章或原检查凭据在离线恢复前发生变化；未应用旧检查，未派发新模型、未增加检查次数。请读取当前正文和章节桥后按当前版本继续检查，不能宣称新版已通过。',
-            reviewRequestFinished: { version: 1 as const, chapterId: chapter.id, revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash } }
+            reviewRequestFinished: { version: 1 as const, chapterId: chapter.id, revision: chapter.revision, contentHash: createHash('sha256').update(chapter.content).digest('hex') } }
         }
         const guidance = report.errorCount ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
         return { summary: `离线复用连续性检查 · ${report.errorCount} 错误 ${report.warningCount} 警告`,

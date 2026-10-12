@@ -645,7 +645,7 @@ async function finalizeLegacyRun(
   writingDelivery?: { messageId: string; subject: { userId: string; novelId: string; runId: string }; expected: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; signal: AbortSignal; parts?: AgentMessagePart[]; replaceCandidate?: boolean; displayText?: string },
   withFailureNotice = false,
   limitedDelivery?: { subject: { userId: string; novelId: string; runId: string }; expected: LimitedWritingDelivery; signal: AbortSignal; messageId: string },
-  pauseReason: 'user_stop' | 'needs_input' = 'user_stop',
+  pauseReason: 'user_stop' | 'needs_input' | 'review_receipt_pending' = 'user_stop',
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
@@ -1185,7 +1185,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         bus.emit({ type: 'review.reconciled', callId: item.callId, chapterId: item.chapterId,
           revision: item.revision, compilationId: item.compilationId, receipt: item.reconciliation })
         await bus.persist()
-        pendingReviews.delete(`${item.compilationId ?? item.chapterId}:${item.toolName}`)
+        const pendingKey = `${item.compilationId ?? item.chapterId}:${item.toolName}`
+        if (pendingReviews.get(pendingKey)?.callId === item.callId) pendingReviews.delete(pendingKey)
         if (item.changedReviewInput) {
           for (const restriction of toolRestrictions) {
             if (!restriction.reviewInput && recoverableQualityRestriction(restriction, item)
@@ -1833,7 +1834,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             { userId: params.userId, novelId: params.novelId, runId, callId: id }, { compilationId: readiness.compilationId! }))
           if (proof && proof.chapter.id === readiness.chapterId && proof.chapter.revision === readiness.revision && proof.audit.admissionKey === next.key) {
             offlineContinuityCalls.set(id, { version: 1, compilationId: readiness.compilationId, chapterId: proof.chapter.id,
-              revision: proof.chapter.revision, contentHash: proof.coverage.contentHash, admissionKey: proof.audit.admissionKey,
+              revision: proof.chapter.revision, contentHash: proof.coverage.contentHash,
+              receiptContentHash: createHash('sha256').update(proof.chapter.content).digest('hex'), admissionKey: proof.audit.admissionKey,
               validationHash: proof.validationHash, auditHash: runtimeJson(proof.audit).hash })
             effectiveToolCalls.unshift({ id, name: 'continuity_validate', arguments: JSON.stringify(args) })
             automaticReviewTriggered = true
@@ -2113,7 +2115,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (proof && (preflightArgs.chapterId === undefined || preflightArgs.chapterId === proof.chapter.id)
               && ![...pendingReviews.values()].some(item => item.toolName === 'continuity_validate' && item.chapterId === proof.chapter.id)) {
               offlineContinuityCalls.set(call.id, { version: 1, compilationId: preflightArgs.compilationId, chapterId: proof.chapter.id,
-                revision: proof.chapter.revision, contentHash: proof.coverage.contentHash, admissionKey: proof.audit.admissionKey,
+                revision: proof.chapter.revision, contentHash: proof.coverage.contentHash,
+                receiptContentHash: createHash('sha256').update(proof.chapter.content).digest('hex'), admissionKey: proof.audit.admissionKey,
                 validationHash: proof.validationHash, auditHash: runtimeJson(proof.audit).hash })
               safe = true
             }
@@ -2590,7 +2593,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       await finalizeRun(runId, bus, 'failed', usage, turn, message, message)
       return
     }
-    if (error instanceof DataAccessError && ['AI_PROVIDER_QUOTA_EXCEEDED', 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED'].includes(error.code)) {
+    if (error instanceof DataAccessError && error.code === 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED') {
+      await flushLiveTurn()
+      // Waiting for an original receipt is a pause, not another failed task or
+      // assistant notice. This also handles a receipt changing after preflight.
+      await finalizeRun(runId, bus, 'paused', usage, turn, '检查正在等待原请求的结果或用量确认。正文和已完成的检查已保留。', undefined, false,
+        undefined, undefined, undefined, false, undefined, 'review_receipt_pending')
+      return
+    }
+    if (error instanceof DataAccessError && error.code === 'AI_PROVIDER_QUOTA_EXCEEDED') {
       await flushLiveTurn()
       // Supplier quota cannot be resolved by another billed summary or a
       // transient-limit retry. Finalize once with the original usage intact.

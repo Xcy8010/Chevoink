@@ -156,6 +156,8 @@ Long tasks can resume within budget and progress checks, retaining the original 
 
 Studio settings → Model assignments lets you choose built-in or custom models and reasoning effort for writing, continuity checks, quality checks, import analysis, and other work. Global settings apply to all novels; Current novel overrides individual choices for one work. Without a separate assignment, continuity and quality checks and their associated repairs follow the model selected for the current task; other work keeps its existing defaults. Model options show their multiplier or BYOK status, and calls follow the selected model's billing policy. Dispatched checks retain their original model and billing records; switching models does not resend requests whose results remain unconfirmed.
 
+When an earlier check is waiting for its original result or usage receipt, Continue first checks the saved evidence and displays a waiting state. Repeated receipt checks do not restart the model or append the same failure message. A confirmed unsent request, confirmed rejection, or failed request with settled billing can proceed through the original authorization and budget checks. The system cannot invent a missing provider receipt; saved text and completed checks remain available.
+
 You can also ask Agent to change creative mode, switch the current model, or assign a model to a type of work. A switch applies on the next turn after the tool completes, retaining the current task and context. An explicitly selected model with no effort specified uses that model's configured default strength.
 
 ## Quick Navigation

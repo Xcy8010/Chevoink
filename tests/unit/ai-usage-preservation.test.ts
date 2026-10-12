@@ -43,6 +43,57 @@ function qualityRuntime(overrides: Partial<TextRuntime> = {}): TextRuntime {
 const qualityResponse = (finish = 'stop') => new Response(JSON.stringify({ choices: [{ message: { content: '{"findings":[]}' }, finish_reason: finish }],
   usage: { prompt_tokens: 100, completion_tokens: 20 } }))
 
+describe('actual failed text request terminal trace', () => {
+  it.each(['rejected', 'rejected-receipt-db-failed', 'reported', 'partial', 'empty-usage', 'invalid-usage', 'unsent', 'unsent-db-failed', 'transport', 'timeout', 'abort-after', 'server-error', 'quota-no-counts'] as const)(
+    '%s preserves accounting certainty separately from report failure', async scenario => {
+      const controller = new AbortController(), trace = createTextRequestTrace()
+      const usage = { id: 'test-usage', usageSource: 'prepared', billingStatus: 'prepared', requestTokens: null as number | null,
+        responseTokens: null as number | null, reservedCreditMilli: 123 }
+      mocks.create.mockImplementation(async () => { if (scenario.startsWith('unsent')) controller.abort(); return { id: usage.id } })
+      mocks.updateMany.mockImplementation(async ({ where, data }) => {
+        if (!where.billingStatus || where.billingStatus === usage.billingStatus) Object.assign(usage, data)
+        return { count: 1 }
+      })
+      mocks.update.mockImplementation(async ({ data }) => { Object.assign(usage, data); return usage })
+      mocks.charge.mockImplementation(async () => {
+        Object.assign(usage, { billingStatus: 'settled', reservedCreditMilli: 0 })
+        return { chargedMilli: 0, remainingMilli: 1000, exhausted: false }
+      })
+      mocks.findUsage.mockImplementation(async input => {
+        if (scenario.endsWith('db-failed') && input.select) throw new Error('billing read unavailable')
+        return usage
+      })
+      const fetcher = vi.fn(async () => {
+        if (scenario === 'transport') throw new TypeError('fetch failed')
+        if (scenario === 'timeout') throw new DOMException('timeout', 'TimeoutError')
+        if (scenario === 'abort-after') { controller.abort(); throw new DOMException('aborted after dispatch', 'AbortError') }
+        return new Response(JSON.stringify({ error: { message: 'synthetic provider rejection', ...(scenario === 'quota-no-counts' ? { code: 'insufficient_quota' } : {}) },
+          ...(scenario === 'reported' ? { usage: { prompt_tokens: 12, completion_tokens: 3 } } : scenario === 'partial' ? { usage: { prompt_tokens: 12 } }
+            : scenario === 'empty-usage' ? { usage: {} } : scenario === 'invalid-usage' ? { usage: { prompt_tokens: -1, completion_tokens: 3 } } : {}) }),
+        { status: scenario === 'server-error' ? 503 : scenario === 'quota-no-counts' ? 429 : 400 })
+      })
+      vi.stubGlobal('fetch', fetcher)
+      await expect(withTextRequestTrace(trace, () => generateTextCompletion('rules', 'synthetic chapter', {
+        userId: 'test', action: 'agent3HumanityCritic', signal: controller.signal, explicitModelSelection: true,
+        modelRuntime: qualityRuntime({ tier: 'speed', multiplierBps: 10000 }),
+      }))).rejects.toBeDefined()
+      const known = ['rejected', 'reported', 'unsent'].includes(scenario)
+      expect(trace.records).toEqual([{ usageId: usage.id, status: known ? scenario === 'unsent' ? 'not_dispatched' : 'terminal' : 'unknown', billingKnown: known }])
+      expect(textRequestsFinished(trace)).toBe(known)
+      expect(fetcher).toHaveBeenCalledTimes(scenario.startsWith('unsent') ? 0 : 1)
+      if (scenario === 'reported') {
+        expect(usage).toMatchObject({ usageSource: 'reported', requestTokens: 12, responseTokens: 3, billingStatus: 'settled', reservedCreditMilli: 0 })
+        expect(mocks.charge).toHaveBeenCalledOnce()
+      } else {
+        expect(mocks.charge).not.toHaveBeenCalled()
+        if (scenario === 'partial') expect(usage.requestTokens).toBe(12)
+        else expect(usage.requestTokens).toBeNull()
+        expect(usage.responseTokens).toBeNull()
+        if (!scenario.startsWith('rejected') && !scenario.startsWith('unsent')) expect(usage).toMatchObject({ billingStatus: 'pending_usage', reservedCreditMilli: 123 })
+      }
+    })
+})
+
 describe('fixed non-thinking humanity quality policy after actual model resolution', () => {
   it.each([
     { label: 'official Ling', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1', reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { thinking: { type: 'disabled' } } },

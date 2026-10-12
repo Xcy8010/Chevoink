@@ -76,6 +76,7 @@ import { withHumanAdmission } from './goal-activation-authority.js'
 import { freezeModelAssignments, resolveAssignedModel } from './model-assignments.js'
 import { frozenModelAssignmentsSchema, agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
 import { buildTaskSpec } from './task-spec.js'
+import { readReviewReceiptWait } from './review-resume-readiness.js'
 
 /**
  * Agent Loop 新链路的路由服务层（plan/13 §4.9）。
@@ -999,15 +1000,6 @@ async function continueLoopRunLocked(
     throw new DataAccessError(409, 'RUN_LIMIT', `同时进行的任务数已达上限（${env.agentUserMaxConcurrent}），请稍后再试。`)
   }
 
-  // 续跑跟随作者当前模型选择：0 余额用户换上 0 倍率免费档后必须能继续旧任务，
-  // 不能被原收费档的额度闸门拦截；未提供选择时沿用原任务档位。
-  const nextTier = (model?.modelTier ?? run.modelTier) as CreditModelTier
-  const nextCustomModelId = nextTier === 'custom' ? model?.customModelId ?? run.customModelId ?? null : null
-  if (nextTier === 'custom' && !nextCustomModelId) throw new DataAccessError(400, 'VALIDATION_ERROR', '请选择要使用的自定义模型。')
-  const nextReasoningEffort = (model?.reasoningEffort ?? run.reasoningEffort) as ModelReasoningEffort
-  await assertCreditAccess(userId, nextTier)
-  await getModelTierRuntime(nextTier, userId, nextCustomModelId, nextReasoningEffort)
-
   // A stale tab must not revive an old task after the author has started a new one.
   const latest = await prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId: run.sessionId }, orderBy: { createdAt: 'desc' }, select: { id: true } })
   if (latest?.id !== run.id) {
@@ -1033,6 +1025,21 @@ async function continueLoopRunLocked(
   const resumePrompt = originalPrompt || queuedInput?.prompt
   if (!resumePrompt?.trim()) throw new DataAccessError(409, 'RUN_INPUT_REQUIRED', '该历史任务缺少完整原始需求，无法安全继续。请在输入框重新说明本次任务；已保存内容不会改变。')
   await assertManagedAttachmentsAccess(queuedInput?.attachments, userId)
+  // A receipt query is not another execution or paid admission. Unknown paid
+  // reviews keep their original event cursor, model, budget and reservations.
+  const savedPending = (run.usage as { checkpoint?: { pendingReviews?: unknown } } | null)?.checkpoint?.pendingReviews
+  const reviewReceiptWait = Array.isArray(savedPending) && savedPending.length
+    ? await prisma.$transaction(tx => readReviewReceiptWait(tx, run), { isolationLevel: 'RepeatableRead' }) : null
+  if (reviewReceiptWait) return { runId: run.id, sessionId: run.sessionId, runGoalId: activation?.goalId ?? null,
+    status: run.status, streamUrl: `/api/agent/runs/${run.id}/stream`, reviewReceiptWait }
+
+  // A genuinely admitted continuation follows the author's current selection.
+  const nextTier = (model?.modelTier ?? run.modelTier) as CreditModelTier
+  const nextCustomModelId = nextTier === 'custom' ? model?.customModelId ?? run.customModelId ?? null : null
+  if (nextTier === 'custom' && !nextCustomModelId) throw new DataAccessError(400, 'VALIDATION_ERROR', '请选择要使用的自定义模型。')
+  const nextReasoningEffort = (model?.reasoningEffort ?? run.reasoningEffort) as ModelReasoningEffort
+  await assertCreditAccess(userId, nextTier)
+  await getModelTierRuntime(nextTier, userId, nextCustomModelId, nextReasoningEffort)
   try {
     eventStartSeq = await prepareRunEventResume(run.id)
   } catch {

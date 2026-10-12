@@ -37,6 +37,34 @@ it('deduplicates concurrent resume clicks and connects once', async () => {
   expect(mocks.begin).not.toHaveBeenCalled()
 })
 
+it('shows a typed receipt wait without resuming or replaying SSE, then resumes only after confirmation', async () => {
+  const wait = { kind: 'waiting_for_original_receipt', checks: ['quality'], message: '等待原请求确认' }
+  mocks.resume.mockResolvedValue({ runId: 'run', status: 'failed', reviewReceiptWait: wait })
+  const { result, connect, setActionError } = fixture()
+  for (let index = 0; index < 3; index++) await act(async () => { await result.current.handleContinue() })
+  expect(result.current.reviewReceiptWait).toEqual(wait)
+  expect(connect).not.toHaveBeenCalled()
+  expect(mocks.restore).not.toHaveBeenCalled()
+  expect(setActionError.mock.calls.every(([error]) => error === null)).toBe(true)
+  mocks.resume.mockResolvedValue({ runId: 'run', eventStartSeq: 100 })
+  await act(async () => { await result.current.handleContinue() })
+  expect(result.current.reviewReceiptWait).toBeNull()
+  expect(mocks.restore).toHaveBeenCalledOnce()
+  expect(connect).toHaveBeenCalledExactlyOnceWith('run', 100)
+})
+
+it('does not show a late receipt wait in another task', async () => {
+  let finish!: (value: unknown) => void
+  mocks.resume.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+  const { result, rerender, connect } = fixture()
+  let waiting!: Promise<void>
+  act(() => { waiting = result.current.handleContinue() })
+  rerender({ sessionId: 'b', runId: 'run-b' })
+  await act(async () => { finish({ runId: 'run', reviewReceiptWait: { kind: 'waiting_for_original_receipt', checks: ['quality'], message: 'old' } }); await waiting })
+  expect(result.current.reviewReceiptWait).toBeNull()
+  expect(connect).not.toHaveBeenCalled()
+})
+
 it('passes the current free or BYOK model selection when continuing a run', async () => {
   mocks.resume.mockResolvedValue({ runId: 'resumed' })
   const selectedModelRef = { current: { modelTier: 'custom' as const, customModelId: 'byok-1', reasoningEffort: 'xhigh' as const } }

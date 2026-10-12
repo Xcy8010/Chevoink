@@ -52,6 +52,13 @@ describe('durable supplier quota accounting', () => {
     expect(mocks.goal).toHaveBeenCalledWith('durable:attempt', { inputTokens: null, outputTokens: null, creditsMilli: 0, status: 'rejected' })
     expect(mocks.usage).not.toHaveBeenCalled()
   })
+  it('keeps a non-quota4xx with actual usage measured and reserved rather than zero-charge rejected', async () => {
+    const provider = await beginDurableChat(input)
+    const usage = { source: 'reported' as const, promptTokens: 12, completionTokens: 3, cacheHitTokens: null, cacheMissTokens: null }
+    await provider.rejected(400, { quotaExceeded: false, usage })
+    expect(mocks.usage).toHaveBeenCalledWith({ userId: 'owner', attemptId: 'attempt', requestHash: 'request', revision: 1, usage })
+    expect(mocks.goal).toHaveBeenCalledWith('durable:attempt', { inputTokens: 12, outputTokens: 3, creditsMilli: 0, status: 'unknown' })
+  })
   it('refuses a changed owner before preparing or dispatching', async () => {
     await expect(beginDurableChat({ ...input, userId: 'other-owner' })).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })
     expect(mocks.attempt).not.toHaveBeenCalled()

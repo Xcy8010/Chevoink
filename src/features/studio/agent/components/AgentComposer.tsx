@@ -79,6 +79,7 @@ type AgentComposerProps = {
   onSend: (prompt: string, attachments: AgentAttachmentMeta[], creativeFreedom: CreativeFreedom, qualityMode: StoryCompilerMode, pinnedSkillIds: string[], pinnedSubagentId?: string) => Promise<void> | void
   onStop: () => void
   onContinue?: () => Promise<void>
+  continueLabel?: string
   creativeFreedom: CreativeFreedom
   onCreativeFreedomChange: (value: CreativeFreedom) => void
   qualityMode: StoryCompilerMode
@@ -257,6 +258,7 @@ export function AgentComposer({
   onSend,
   onStop,
   onContinue,
+  continueLabel = '继续运行',
   creativeFreedom,
   onCreativeFreedomChange,
   qualityMode,
@@ -1261,8 +1263,8 @@ export function AgentComposer({
             onClick={() => void (showContinue && !running ? handleContinue() : handleSend())}
             disabled={showContinue && !running ? !canContinue : !canSend}
             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--surface-contrast)] text-[var(--text-contrast)] transition-opacity hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-35 mobile:h-11 mobile:w-11"
-            aria-label={running ? '加入待发队列' : showContinue ? '继续运行' : '发送'}
-            title={running ? '当前任务结束后发送' : showContinue ? '继续当前任务' : '发送'}
+            aria-label={running ? '加入待发队列' : showContinue ? continueLabel : '发送'}
+            title={running ? '当前任务结束后发送' : showContinue ? continueLabel : '发送'}
           >
             {sending ? <LoaderCircle className="h-4 w-4 animate-spin" /> : showContinue && !running ? <Play className="h-4 w-4 fill-current" /> : <ArrowUp className="h-4 w-4" />}
           </button>

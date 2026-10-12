@@ -513,7 +513,7 @@ describe('server assessment fallback in the real execution loop', () => {
       usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint } })
     const key = 'continuity-author-recovery:' + 'c'.repeat(64)
     if (scenario !== 'no-author') mocks.continuedContinuity.mockResolvedValue([['comp:c:4:continuity_validate:protocol7', key]])
-    if (scenario !== 'no-proof') mocks.offlineContinuity.mockResolvedValue({ chapter: { id: 'c', revision: 4 }, coverage: { contentHash: 'b'.repeat(64) },
+    if (scenario !== 'no-proof') mocks.offlineContinuity.mockResolvedValue({ chapter: { id: 'c', revision: 4, content: '原文' }, coverage: { contentHash: 'b'.repeat(64) },
       validationHash: 'd'.repeat(64), audit: { admissionKey: key } } as never)
     let state = readiness('incomplete', 'stale', 4)
     mocks.reviewReadiness.mockImplementation(async () => state)
@@ -1062,7 +1062,8 @@ describe('server assessment fallback in the real execution loop', () => {
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(mocks.chat).not.toHaveBeenCalled()
-    expect(mocks.runs.get('run')?.errorMessage).toContain('未确认的请求')
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', errorMessage: null })
+    expect(mocks.runs.get('run')?.outputSummary).toContain('检查正在等待原请求的结果或用量确认')
     const { activeExecutionMs, ...storedCheckpoint } = savedUsage.checkpoint
     expect(mocks.runs.get('run')?.usage).toMatchObject({ ...savedUsage, checkpoint: storedCheckpoint })
     expect((mocks.runs.get('run')?.usage as typeof savedUsage).checkpoint.activeExecutionMs).toBeGreaterThanOrEqual(activeExecutionMs)
@@ -1288,7 +1289,8 @@ describe('server assessment fallback in the real execution loop', () => {
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续' })
     expect(mocks.chat).not.toHaveBeenCalled()
     expect(critic.execute).toHaveBeenCalledOnce()
-    expect(mocks.runs.get('run')?.errorMessage).toContain('未确认的请求')
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', errorMessage: null })
+    expect(mocks.runs.get('run')?.outputSummary).toContain('检查正在等待原请求的结果或用量确认')
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { inheritedTokens: (original.usage as { totalTokens: number }).totalTokens, inheritedTurns: original.currentTurn,
       pendingReviews: [{ compilationId: 'comp', chapterId: 'c', revision: 3, toolName: 'quality_analyze', callId: 'unknown-check' }] } })
   })
@@ -1305,7 +1307,8 @@ describe('server assessment fallback in the real execution loop', () => {
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '检查当前章节', resume: true })
     expect(mocks.chat).not.toHaveBeenCalled()
     expect(critic.execute).toHaveBeenCalledOnce()
-    expect(mocks.runs.get('run')?.errorMessage).toContain('未确认的请求')
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', errorMessage: null })
+    expect(mocks.runs.get('run')?.outputSummary).toContain('检查正在等待原请求的结果或用量确认')
   })
   it('sends no critic when pre-dispatch evidence cannot persist and does not invent an unknown request', async () => {
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing'))
@@ -1344,7 +1347,8 @@ describe('server assessment fallback in the real execution loop', () => {
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: null, mode: 'build', prompt: '写下一章', resume: true })
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(mocks.chat).not.toHaveBeenCalled()
-    expect(mocks.runs.get('run')?.errorMessage).toContain('未确认的请求')
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', errorMessage: null })
+    expect(mocks.runs.get('run')?.outputSummary).toContain('检查正在等待原请求的结果或用量确认')
   })
 })
 
@@ -2972,7 +2976,7 @@ describe('independent persisted review phases with unresolved usage', () => {
     mocks.update.mockResolvedValueOnce({ taskSpec: f.taskSpec, currentTurn: 24, startedAt: new Date(f.checkpoint.runStartedAt), usage: f.usage })
     let state = readiness('incomplete', 'missing', 4)
     mocks.reviewReadiness.mockImplementation(async () => state)
-    mocks.offlineContinuity.mockResolvedValue({ chapter: { id: 'c', revision: 4 }, coverage: { contentHash: f.contentHash },
+    mocks.offlineContinuity.mockResolvedValue({ chapter: { id: 'c', revision: 4, content: '原文' }, coverage: { contentHash: f.contentHash },
       validationHash: 'd'.repeat(64), audit: { admissionKey: 'continuity-author-recovery:' + 'e'.repeat(64) } } as never)
     let unknown: ReturnType<typeof beginTextRequest>['record'] | undefined
     const quality = tool('quality_analyze', async () => {
@@ -3023,7 +3027,7 @@ describe('independent persisted review phases with unresolved usage', () => {
       if (name === 'web_search' || name === 'web_read') { charge(); externalRequest() }
       return { output: '普通读取内容' }
     }, name !== 'chapter_write')
-    if (['valid-proof', 'proof-lost', 'foreign-chapter'].includes(scenario)) mocks.offlineContinuity.mockResolvedValue({ chapter: { id: 'c', revision: 4 }, coverage: { contentHash: f.contentHash },
+    if (['valid-proof', 'proof-lost', 'foreign-chapter'].includes(scenario)) mocks.offlineContinuity.mockResolvedValue({ chapter: { id: 'c', revision: 4, content: '原文' }, coverage: { contentHash: f.contentHash },
       validationHash: 'd'.repeat(64), audit: { admissionKey: 'continuity-author-recovery:' + 'e'.repeat(64) } } as never)
     mocks.tools = [quality, ...(independent === quality ? [] : [independent])]
     queue(response('', [call('unknown', quality.name, '{"compilationId":"comp"}'), call('independent', name,
@@ -3068,7 +3072,10 @@ describe('independent persisted review phases with unresolved usage', () => {
     expect(checkpoint.progressSignatures).toEqual([...f.checkpoint.progressSignatures, ...expected])
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1050, checkpoint: { stagnantBatches: 10, readProgress: 3, writeProgress: 3,
       tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: f.checkpoint.inputProtocolRecovery, pendingReviews: [pending], reviewAttempts: f.checkpoint.reviewAttempts } })
-    expect(mocks.runs.get('run')?.errorMessage).toContain('质量检查仍有未确认的请求')
+    expect(mocks.runs.get('run')?.errorMessage).toBeNull()
+    expect(mocks.runs.get('run')?.outputSummary).toContain('检查正在等待原请求的结果或用量确认')
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'review_receipt_pending' })
+    expect(events().some(event => event.type === 'text.final')).toBe(false)
   })
   it('cannot early-deliver a concurrently complete manuscript while a quality request is unknown', async () => {
     const f = saved(9)
