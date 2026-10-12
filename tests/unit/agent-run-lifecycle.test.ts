@@ -40,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   requestRecovery: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/review-request-recovery.js').readReviewRequestRecovery>>> => []),
   cancelledReviews: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/cancelled-review-recovery.js').readCancelledReviewRetirements>>> => []),
   settledQuality: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/quality-review-admission.js').readSettledQualityReviews>>> => []),
+  replacementReviews: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/author-review-replacement.js').readAuthorReviewReplacements>>> => []),
   assertLimitedDelivery: vi.fn(async () => undefined),
   continuedContinuity: vi.fn(async (): Promise<Array<[string, string]>> => []),
   offlineContinuity: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/continuity-offline-recovery.js').readOfflineContinuityRecovery>>> => null),
@@ -69,6 +70,7 @@ vi.mock('../../api/lib/agent/chapter-review-guard.js', async importOriginal => (
 vi.mock('../../api/lib/agent/review-request-recovery.js', () => ({ readReviewRequestRecovery: mocks.requestRecovery }))
 vi.mock('../../api/lib/agent/cancelled-review-recovery.js', () => ({ readCancelledReviewRetirements: mocks.cancelledReviews }))
 vi.mock('../../api/lib/agent/quality-review-admission.js', () => ({ readSettledQualityReviews: mocks.settledQuality }))
+vi.mock('../../api/lib/agent/author-review-replacement.js', () => ({ readAuthorReviewReplacements: mocks.replacementReviews }))
 vi.mock('../../api/lib/agent/quality-format-recovery.js', () => ({ readQualityFormatRecovery: mocks.qualityRecovery }))
 vi.mock('../../api/lib/agent/writing-delivery-limitations.js', () => ({
   readLimitedWritingDelivery: mocks.limitedDelivery, assertLimitedWritingDelivery: mocks.assertLimitedDelivery,
@@ -285,6 +287,7 @@ beforeEach(() => {
   mocks.limitedDelivery.mockReset().mockResolvedValue(null)
   mocks.qualityRecovery.mockReset().mockResolvedValue(null)
   mocks.settledQuality.mockReset().mockResolvedValue([])
+  mocks.replacementReviews.mockReset().mockResolvedValue([])
   mocks.requestRecovery.mockReset().mockResolvedValue([])
   mocks.cancelledReviews.mockReset().mockResolvedValue([])
   mocks.continuedContinuity.mockReset().mockResolvedValue([])
