@@ -208,7 +208,9 @@ describe('selected paid review model through resolution, frozen route and actual
     await callDurableAuxiliary({ ...input('quality_critic'), route, price: selectedPrice })
     expect(mocks.runtime).toHaveBeenLastCalledWith('speed', 'owner', null, 'high')
     expect(mocks.begin).toHaveBeenCalledOnce()
-    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))).toMatchObject({ model: env.aiTextModel, reasoning_effort: 'none' })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body).toMatchObject({ model: env.aiTextModel, thinking: { type: 'disabled' } })
+    expect(body).not.toHaveProperty('reasoning_effort')
     expect(fetch).toHaveBeenCalledOnce()
   })
   it('rejects a different frozen model when the current runtime model is null', async () => {
