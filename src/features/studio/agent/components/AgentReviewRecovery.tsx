@@ -89,7 +89,7 @@ export function AgentReviewRecovery({ runId, sessionId, enabled, model, onReady 
   const confirm = async () => {
     if (!quote || locked.current) return
     if (quotedSelection.current !== currentSelection.current || Date.parse(quote.expiresAt) <= Date.now()) {
-      setQuote(null); setMessage('模型选择或报价已改变，请重新核对当前价格。'); return
+      setQuote(null); setRetryQuote(null); setMessage('模型选择或报价已改变，请重新核对当前价格。'); return
     }
     const owner = epoch.current, currentQuote = quote
     locked.current = true; setBusy(true); setQuote(null); setRetryQuote(null)

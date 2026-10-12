@@ -17,7 +17,7 @@ beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value() { this.open = true } })
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value() { this.open = false } })
 })
-afterEach(() => { cleanup(); vi.useRealTimers() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 function fixture() {
   const ready = vi.fn()
   const view = render(<AgentReviewRecovery runId="run" sessionId="session" enabled model={model} onReady={ready} />)
@@ -81,6 +81,41 @@ it('a definitively absent action allows explicit confirmation of the same quote 
   await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(2))
   expect(mocks.submit.mock.calls).toEqual([['run', 'signed'], ['run', 'signed']])
   expect(mocks.preview).toHaveBeenCalledOnce()
+})
+it.each(['expired', 'changed selection'] as const)('an absent action with an %s retry quote permits only an explicit fresh preview and confirmation', async scenario => {
+  const expiresAt = Date.now() + 300000
+  const originalQuote = { ...quote, expiresAt: new Date(expiresAt).toISOString() }
+  const currentModel = scenario === 'changed selection' ? { modelTier: 'ultimate' as const, reasoningEffort: 'high' as const } : model
+  const freshQuote = { ...quote, quoteToken: 'fresh-signed', authorizationId: 'author:a:fresh-nonce',
+    expiresAt: new Date(expiresAt + 300000).toISOString(), currentModel: { ...quote.currentModel, modelTier: currentModel.modelTier,
+      reasoningEffort: currentModel.reasoningEffort, modelName: 'current-selected-model' } }
+  mocks.preview.mockResolvedValueOnce(originalQuote).mockResolvedValueOnce(freshQuote)
+  mocks.submit.mockRejectedValueOnce(new Error('network lost')).mockResolvedValueOnce({ ...running, authorizationId: freshQuote.authorizationId })
+  mocks.status.mockRejectedValue(new mocks.ApiError('no action', 404, 'REVIEW_REPLACEMENT_NOT_FOUND'))
+  const { rerender, ready } = fixture(); await preview()
+  fireEvent.click(screen.getByRole('button', { name: '确认检查' }))
+  await screen.findByRole('button', { name: '再次确认这次检查' })
+  expect(mocks.submit).toHaveBeenCalledExactlyOnceWith('run', 'signed')
+  expect(mocks.preview).toHaveBeenCalledOnce()
+  expect(mocks.status).toHaveBeenCalledExactlyOnceWith('run', originalQuote.authorizationId)
+  if (scenario === 'expired') vi.spyOn(Date, 'now').mockReturnValue(expiresAt + 1)
+  else rerender(<AgentReviewRecovery runId="run" sessionId="session" enabled model={currentModel} onReady={ready} />)
+  fireEvent.click(screen.getByRole('button', { name: '再次确认这次检查' }))
+  fireEvent.click(await screen.findByRole('button', { name: '确认检查' }))
+  expect(screen.getByText(/模型选择或报价已改变/)).toBeDefined()
+  expect(screen.queryByRole('button', { name: '再次确认这次检查' })).toBeNull()
+  const freshPreviewButton = await screen.findByRole('button', { name: '按当前模型重新检查' })
+  expect(mocks.preview).toHaveBeenCalledOnce(); expect(mocks.submit).toHaveBeenCalledOnce(); expect(ready).not.toHaveBeenCalled()
+  fireEvent.click(freshPreviewButton)
+  await screen.findByRole('button', { name: '确认检查' })
+  expect(mocks.preview).toHaveBeenCalledTimes(2)
+  expect(mocks.preview.mock.calls).toEqual([['run', model], ['run', currentModel]])
+  expect(mocks.submit).toHaveBeenCalledOnce()
+  expect(screen.getByText(/current-selected-model/)).toBeDefined()
+  fireEvent.click(screen.getByRole('button', { name: '确认检查' }))
+  await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(2))
+  expect(mocks.submit.mock.calls).toEqual([['run', 'signed'], ['run', 'fresh-signed']])
+  expect(ready).not.toHaveBeenCalled()
 })
 it('ignores late recovery in a different task window', async () => {
   let resolve!: (value: unknown) => void
