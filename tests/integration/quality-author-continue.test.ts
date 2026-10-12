@@ -31,7 +31,7 @@ const fixture: typeof durableFixture = (work, ...rest) => durableFixture(async f
 type F = Parameters<Parameters<typeof fixture>[0]>[0]
 const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
 const runtime = { tier: 'speed' as const, provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real',
-  multiplierBps: 10000, reasoningEffort: 'low' as const, reasoningEfforts: ['none', 'low'] as Array<'none' | 'low'>,
+  multiplierBps: 10000, reasoningEffort: 'high' as const, reasoningEfforts: ['none', 'low', 'high'] as Array<'none' | 'low' | 'high'>,
   reasoningParameterMode: 'native' as const, thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
 
 // The two continuation chains have separate bounded assertion phases over one

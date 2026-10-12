@@ -31,6 +31,10 @@ import { getCreditWindow } from '../../api/lib/credits.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture,novelFixture } from '../support/agent-durable-runtime-fixture.js'
 
+const legacyReviewRuntime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
+  baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['none', 'low'],
+  reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
+
 describe.runIf(available)('durable continuity actual tool chain', () => {
   it.each(['relocated', 'old5-relocated', 'wrapped-report', 'full-report', 'success', 'chapter-only', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'source-text', 'approval-denied', 'history-over-three', 'single-quotes', 'single-quotes-stale', 'single-quotes-source', 'single-quotes-swapped', 'unavailable-write-recheck'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
@@ -438,7 +442,7 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       const completion = vi.spyOn(aiService, 'generateTextCompletion').mockResolvedValueOnce(JSON.stringify({ findings: [{ signal: 'object', severity: 'error',
         evidence: '账户扣除碗款后的余额算术不符。', suggestion: '核对成交款后的余额，不重扣已付房租。',
         sourceEvidence: [{ source: 'current', segmentId: 'c0', quote: '卡余80200' }, { source: 'current', segmentId: 'c0', quote: '银行卡余71700' }] }] })).mockResolvedValueOnce('{"findings":[]}')
-      const ctx: ToolContext = { ...f, callId: 'check', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
+      const ctx: ToolContext = { ...f, callId: 'check', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', modelRuntime: legacyReviewRuntime, signal: new AbortController().signal, emit: () => {} }
       const first = await continuityValidateTool.execute(ctx, { compilationId })
       expect(first.output).toContain('卡余80200')
       expect(first.output).toContain('银行卡余71700')
@@ -465,7 +469,7 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
       const completion = vi.spyOn(aiService, 'generateTextCompletion').mockResolvedValueOnce('{"findings":[{"signal":"body","severity":"error","evidence":"原文存在冲突","suggestion":"局部修订","sourceEvidence":[{"source":"current","quote":"门开着"},{"source":"current","quote":"门同时锁着"}]}],"patches":[{"oldText":"原文","newText":"修订正文"}]}')
         .mockResolvedValueOnce('{"findings":[]}')
-      const ctx: ToolContext = { ...f, callId: 'critic', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
+      const ctx: ToolContext = { ...f, callId: 'critic', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', modelRuntime: legacyReviewRuntime, signal: new AbortController().signal, emit: () => {} }
       expect(await continuityValidateTool.execute(ctx, { compilationId })).toMatchObject({ summary: expect.stringContaining('连续性检查') })
       expect(completion).toHaveBeenCalledOnce()
       expect(completion.mock.calls[0][2]).toMatchObject({ maxOutputTokens: 16_384, reasoningEffort: 'low' })
@@ -501,7 +505,7 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
           await changeChapter()
           return '{"patches":[{"oldText":"原文","newText":"模型修改"}]}'
         })
-        const ctx: ToolContext = { ...f, callId: 'critic', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
+        const ctx: ToolContext = { ...f, callId: 'critic', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', modelRuntime: legacyReviewRuntime, signal: new AbortController().signal, emit: () => {} }
         const check = continuityValidateTool.execute(ctx, { compilationId })
         if (scenario === 'tool-unavailable') expect(await check).toMatchObject({ outcome: 'failed', summary: '独立连续性复核未完成' })
         else if (scenario === 'tool-stale') {

@@ -41,6 +41,12 @@ import { readLimitedWritingDelivery } from '../../api/lib/agent/writing-delivery
 import { readQualityFormatRecovery, claimQualityFormatRecovery } from '../../api/lib/agent/quality-format-recovery.js'
 import { readQualityUnavailableProof } from '../../api/lib/agent/quality-unavailable-proof.js'
 
+// Native admission freezes this already-resolved identity, including high.
+// Legacy loop/inline tools receive the same complete runtime directly.
+const selectedRuntime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
+  baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'high', reasoningEfforts: ['none', 'low', 'high'],
+  reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
+
 describe.runIf(available)('native paid failed quality response and limited delivery proof', () => {
   it.each(['continuity-complete', 'continuity-capped', 'response-outbox', 'settlement', 'usage-observation', 'charge-association', 'continuity-error'] as const)('%s requires the authentic saved body, response and settled payment chain', async scenario => fixture(async f => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
@@ -83,8 +89,7 @@ describe.runIf(available)('native paid failed quality response and limited deliv
     }
     const window = getCreditWindow()
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
-      baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })
+    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
     vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
       rateCardId: 'failed-quality-proof-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
     const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
@@ -173,7 +178,7 @@ describe.runIf(available)('new-draft quality-first prepayment admission', () => 
       await prisma.agentMessage.create({ data: { id: sourceMessageId, runId, sessionId: base.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
       const root = scenario === 'legacy' || scenario.startsWith('repair-') ? null : await initializeDurableTask({ userId: base.userId, runId, sourceMessageId })
       const ctx: ToolContext = { ...subject, sessionId: base.sessionId, chapterId: null, callId: 'create-new-draft', mode: 'build',
-        creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
+        creativeFreedom: 'balanced', qualityMode: 'premium', modelRuntime: selectedRuntime, signal: new AbortController().signal, emit: () => {} }
       const volumeDecision = { kind: 'continue' as const, reason: '本卷主困局尚未收束，先推进原目标。' }
       await prepareStoryCompilation({ ...subject, mode: 'balanced', intentSummary: prompt, volumeDecision })
       const created = await chapterCreateTool.execute(ctx, { title: '合成新稿', content: '他按住门把，停了一会。', position: 2 })
@@ -237,8 +242,7 @@ describe.runIf(available)('new-draft quality-first prepayment admission', () => 
             ] }], successfulToolSignatures: [] } })
         const window = getCreditWindow()
         await prisma.creditAccount.create({ data: { userId: base.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-        vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
-          baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })
+        vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
         vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
           rateCardId: 'quality-first-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
         const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
@@ -286,7 +290,7 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
       await saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进', entryState: state, goal: '找线索', obstacle: '锁门', choice: '绕路', cost: '时间', turn: '脚印', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
       await recordStoryCompilerWrite({ ...f, chapterId: f.chapterId, chapterOrderIndex: 1, chapterRevision: 1 })
       await validateStoryContinuity({ ...f, compilationId, findings: [], expectedChapterRevision: 1, independentCheck: 'complete' })
-      const ctx: ToolContext = { ...f, callId: 'quality', mode: 'build', creativeFreedom: 'stable', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
+      const ctx: ToolContext = { ...f, callId: 'quality', mode: 'build', creativeFreedom: 'stable', qualityMode: 'balanced', modelRuntime: selectedRuntime, signal: new AbortController().signal, emit: () => {} }
       if (scenario === 'quality-provider-failure' || scenario === 'continuity-provider-failure') {
         const error = new DataAccessError(402, 'CREDITS_EXHAUSTED', 'fixture credit gate')
         const model = vi.spyOn(aiService, 'generateTextCompletion').mockRejectedValue(error)
@@ -507,8 +511,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
           messages: [{ role: 'user', content: '完整检查本章' }, { role: 'assistant', content: null, toolCalls: calls }], successfulToolSignatures: [] } })
       const window = getCreditWindow()
       await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-      const runtime = vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
-        baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })
+      const runtime = vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'quality-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
       const repairing = ['repair', 'evidence-corrected', 'format-retry', 'rollback-resume', 'repair-stale', 'format-valid-repair', 'format-recovery-rollback'].includes(scenario)
@@ -918,8 +921,7 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('真实报告
           ] }], successfulToolSignatures: [] } })
       const window = getCreditWindow()
       await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-      const runtime = vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
-        baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })
+      const runtime = vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'cached-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
       const signal = new AbortController()
@@ -964,9 +966,7 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('真实报告
         if (family === 'quality' && scenario === 'rollback-resume') {
           // Original repair replay resolved no new route. The next distinct
           // check of r2 legitimately admits a new paid critic operation.
-          runtime.mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
-            baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['none', 'low'],
-            reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })
+          runtime.mockResolvedValue(selectedRuntime)
         }
         await step()
       }
@@ -1017,8 +1017,7 @@ describe.runIf(available)('既有章节独立检查', () => {
           ] }], successfulToolSignatures: [] } })
       const window = getCreditWindow()
       await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-      vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
-        baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })
+      vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'standalone-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
       const fetchMock = vi.fn(async () => new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`))
@@ -1037,7 +1036,7 @@ describe.runIf(available)('既有章节独立检查', () => {
       expect(await prisma.chapterBridge.count({ where: { novelId: f.novelId } })).toBe(0)
       if (name === 'continuity_validate') {
         expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview' } })).toBe(1)
-        const ctx: ToolContext = { ...f, callId: 'legacy-cache', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', emit: () => {}, signal: new AbortController().signal }
+        const ctx: ToolContext = { ...f, callId: 'legacy-cache', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', modelRuntime: selectedRuntime, emit: () => {}, signal: new AbortController().signal }
         expect((await continuityValidateTool.execute(ctx, { chapterId: f.chapterId })).outcome).not.toBe('failed')
         expect(fetchMock).toHaveBeenCalledOnce()
       }
@@ -1060,8 +1059,7 @@ describe.runIf(available)('既有章节独立检查', () => {
           messages: [{ role: 'user', content: '只检查已有章' }, { role: 'assistant', content: null, toolCalls: calls }], successfulToolSignatures: [] } })
       const window = getCreditWindow()
       await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-      vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
-        baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })
+      vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'standalone-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
       const fetchMock = vi.fn(async () => {

@@ -58,7 +58,7 @@ async function resolveReviewRuntime(input: ReviewRuntimeInput, nativeIdentity: b
   if (nativeIdentity && selection.tier === 'custom' && !selection.customModelId) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '辅助模型未能继承原任务的模型身份。')
   if (selection.tier !== runtime.tier || selection.reasoningEffort !== runtime.reasoningEffort
     || selected?.provider !== undefined && selected.provider !== runtime.provider
-    || selected?.modelName !== undefined && selected.modelName !== runtime.modelName) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原任务的检查模型身份已变化，不能替换供应商或模型。')
+    || selected?.modelName !== undefined && selected.modelName !== (runtime.modelName ?? env.aiTextModel)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原任务的检查模型身份已变化，不能替换供应商或模型。')
   return { runtime, selection: { ...selection, reasoningEffort: runtime.reasoningEffort } }
 }
 

@@ -28,6 +28,7 @@ import * as assignments from '../../api/lib/agent/model-assignment-context.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { DataAccessError } from '../../api/lib/prisma.js'
 import { buildProviderCompatibilitySnapshot, type ProviderCompatibilityRoute } from '../../api/lib/agent/provider-compatibility.js'
+import { env } from '../../api/config/env.js'
 
 const lease = { userId: 'owner', runId: 'run', taskRootId: 'root', ownerId: 'worker', claimId: 'claim', epoch: 1n }
 const result: ChatCompletionResult = { content: '合成检查结果', reasoning: '', toolCalls: [], finishReason: 'stop',
@@ -192,6 +193,33 @@ describe('durable reviewer non-thinking policy without rewriting old paid reques
 })
 
 describe('selected paid review model through resolution, frozen route and actual HTTP', () => {
+  it('normalizes an admitted server-default null model exactly as admission and dispatch', async () => {
+    const admittedRuntime = { ...runtime, tier: 'speed' as const, provider: 'deepseek', modelName: null,
+      baseUrl: 'https://api.deepseek.com/v1', multiplierBps: 10000 }
+    const admittedSelection = { tier: 'speed' as const, customModelId: null, reasoningEffort: 'high' as const,
+      provider: admittedRuntime.provider, modelName: env.aiTextModel }
+    mocks.runtime.mockResolvedValue(admittedRuntime)
+    const resolved = await resolveDurableAuxiliaryRuntime({ userId: 'owner', modelSelection: admittedSelection, task: 'quality' })
+    expect(resolved.runtime).toBe(admittedRuntime)
+    expect(resolved.selection).toMatchObject(admittedSelection)
+    const route = auxiliaryRouteForRuntime(resolved.runtime, resolved.selection, 1024)
+    expect(route.model).toBe(env.aiTextModel)
+    const selectedPrice = { version: 'credits-v1-exact' as const, modelTier: 'speed' as const, multiplierBps: 10000 }
+    await callDurableAuxiliary({ ...input('quality_critic'), route, price: selectedPrice })
+    expect(mocks.runtime).toHaveBeenLastCalledWith('speed', 'owner', null, 'high')
+    expect(mocks.begin).toHaveBeenCalledOnce()
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))).toMatchObject({ model: env.aiTextModel, reasoning_effort: 'none' })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+  it('rejects a different frozen model when the current runtime model is null', async () => {
+    mocks.runtime.mockResolvedValue({ ...runtime, tier: 'speed', provider: 'deepseek', modelName: null, multiplierBps: 10000 })
+    await expect(resolveDurableAuxiliaryRuntime({ userId: 'owner', task: 'continuity', modelSelection: {
+      tier: 'speed', customModelId: null, reasoningEffort: 'high', provider: 'deepseek', modelName: env.aiTextModel + '-different',
+    } })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+    expect(mocks.begin).not.toHaveBeenCalled()
+    expect(mocks.access).not.toHaveBeenCalled()
+    expect(fetch).not.toHaveBeenCalled()
+  })
   const chosenModels = [
     { tier: 'builtin_1234567890abcdef' as const, provider: 'Xiaomi', modelName: 'mimo-v2.6-flash', baseUrl: 'https://api.xiaomimimo.com/v1', outputTokenParameter: 'max_completion_tokens' as const },
     { tier: 'builtin_abcdef1234567890' as const, provider: 'Zhipu', modelName: 'glm-5', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', outputTokenParameter: 'max_tokens' as const },
