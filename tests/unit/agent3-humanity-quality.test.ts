@@ -186,9 +186,8 @@ describe('严谨创作自动落实质量建议', () => {
     vi.spyOn(humanityQuality, 'analyzeDeterministicQuality').mockReturnValue({ metrics: {}, findings: [] })
     vi.spyOn(humanityQuality, 'persistHumanityQualityReport').mockResolvedValue(report)
     const critic = vi.spyOn(review, 'generateReviewCompletion').mockImplementation(async (system, input, options) => options.action === 'agent3HumanityEvidenceCorrection' ? model(system, input, options) : '{"findings":[]}')
-    vi.spyOn(auxiliaryRuntime, 'resolveDurableAuxiliaryRuntime').mockResolvedValue({ runtime: { tier: 'speed', provider: 'fixture', modelName: 'fixture',
-      apiKey: 'fixture-only', reasoningEffort: 'low', multiplierBps: 10000, visionEnabled: false, contextWindowTokens: null },
-      selection: { tier: 'speed', customModelId: null, reasoningEffort: 'low' } })
+    vi.spyOn(auxiliaryRuntime, 'resolveReviewModelRuntime').mockResolvedValue({ tier: 'speed', provider: 'fixture', modelName: 'fixture',
+      apiKey: 'fixture-only', reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], multiplierBps: 10000, visionEnabled: false, contextWindowTokens: null })
     // This mock critic does not create settled usage. It cannot authorize a
     // recovery payment; real paid witnesses have separate PG coverage.
     vi.spyOn(formatRecovery, 'claimCurrentQualityFormatRecovery').mockResolvedValue(null)

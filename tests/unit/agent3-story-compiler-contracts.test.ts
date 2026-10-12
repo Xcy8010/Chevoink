@@ -59,7 +59,9 @@ describe('严谨创作落实连续性警告', () => {
     vi.spyOn(scope, 'assertAgentManuscriptCurrent').mockResolvedValue(undefined)
     vi.spyOn(flags, 'isAgent2FeatureEnabled').mockReturnValue(false)
     vi.spyOn(novelTools, 'recalcNovelStats').mockResolvedValue(undefined)
-    const ctx: ToolContext = { userId: 'u', novelId: 'n', runId: 'r', sessionId: 's', callId: 'check', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
+    const ctx: ToolContext = { userId: 'u', novelId: 'n', runId: 'r', sessionId: 's', callId: 'check', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {},
+      modelRuntime: { tier: 'speed', provider: 'selected-fixture', modelName: 'selected', baseUrl: 'https://selected.invalid', apiKey: 'fixture-only',
+        multiplierBps: 10000, reasoningEffort: 'high', reasoningEfforts: ['none', 'high'], thinkingEnabled: true, reasoningParameterMode: 'native', visionEnabled: false, contextWindowTokens: 64000 } }
     return { ctx, chapter, compilation, validation, qualityReport, reserve, critic, repair, write, findCompilation, tx }
   }
   it.each([false, true])('0错误3警告仅保存检查意见并复用，不自动修订，缓存=%s', async cached => {
@@ -81,6 +83,13 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.repair).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
     expect(f.compilation.validation).toMatchObject({ continuityCriticResponse: { parserVersion: 4, classification: 'complete', unwrapped: true } })
+  })
+  it('sends the selected paid complete runtime to continuity instead of the generic cheap auxiliary policy', async () => {
+    const f = fixture(false)
+    await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
+    expect(f.critic).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.objectContaining({
+      modelRuntime: f.ctx.modelRuntime, explicitModelSelection: true, reasoningEffort: 'high' }), expect.any(Function))
+    expect(f.ctx.modelRuntime).toMatchObject({ provider: 'selected-fixture', multiplierBps: 10000, contextWindowTokens: 64000 })
   })
   it('连续性判断取得前章已保存原文，桥接摘要不单独充当事实证据', async () => {
     const f = fixture(false)

@@ -85,7 +85,9 @@ async function createFixture(prompt = '完成当前章节') {
       { goalId: goal.id, goalRevision: 1, epoch: 2n, runId: resumedId, continuationIndex: 2, trigger: 'goal_auto', sourceEventId: randomUUID() },
     ] })
     const ctx: ToolContext = { userId: user.id, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, runId: resumedId,
-      callId: 'resume-commit', mode: 'build', creativeFreedom: 'stable', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
+      callId: 'resume-commit', mode: 'build', creativeFreedom: 'stable', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {},
+      modelRuntime: { tier: 'speed', provider: 'selected-fixture', modelName: 'selected', baseUrl: 'https://selected.invalid', apiKey: 'fixture-only',
+        multiplierBps: 10000, reasoningEffort: 'high', reasoningEfforts: ['none', 'high'], thinkingEnabled: false, reasoningParameterMode: 'native', visionEnabled: false, contextWindowTokens: 64000 } }
     // Prove the actual resumed execution is writable before the test reaches any
     // quality/commit assertions: feature, owner/scope, active goal/run, revision,
     // epoch and manuscript generation must satisfy the production guards.

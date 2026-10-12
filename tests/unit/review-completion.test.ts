@@ -15,6 +15,20 @@ function knownFailure(code = 'AI_PROVIDER_OUTPUT_LIMIT') {
   return error
 }
 describe('bounded review completion recovery', () => {
+  it.each(['agent3HumanityCritic', 'agent3ContinuityCritic'] as const)('paid %s output recovery retains the same selected runtime and explicit family selection', async action => {
+    const modelRuntime = { tier: 'builtin_1234567890abcdef' as const, provider: 'Xiaomi', modelName: 'mimo-v2.6-flash', baseUrl: 'https://api.xiaomimimo.com/v1', apiKey: 'fixture-only',
+      multiplierBps: 15000, reasoningEffort: 'high' as const, reasoningEfforts: ['none', 'high'] as Array<'none' | 'high'>, visionEnabled: false, contextWindowTokens: 128000 }
+    const selected = { ...options, action, modelRuntime, explicitModelSelection: true }
+    const failure = new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', 'known ceiling')
+    recordTextRequestFailure(failure, { usageId: 'settled-original', status: 'terminal', billingKnown: true }, 's', 'c', selected)
+    complete.mockRejectedValueOnce(failure).mockResolvedValueOnce('{"findings":[]}')
+    await generateReviewCompletion('s', 'c', selected)
+    expect(complete.mock.calls.map(call => call[2].action)).toEqual([action, action + 'OutputRecovery'])
+    for (const call of complete.mock.calls) {
+      expect(call[2].modelRuntime).toBe(modelRuntime)
+      expect(call[2]).toMatchObject({ explicitModelSelection: true, boundedReview: true })
+    }
+  })
   it('recovers confirmed truncation once with the complete input and larger allowance', async () => {
     const failure = knownFailure()
     recordTextRequestFailure(failure, { usageId: 'settled-original', status: 'terminal', billingKnown: true }, '审查规则', '正文首\n完整原文\n正文尾', options)

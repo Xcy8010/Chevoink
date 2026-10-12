@@ -98,7 +98,7 @@ async function oldCompleteReport(f: F, compilationId: string, dropped: boolean) 
 
 async function legacyHarness(f: F) {
   const compilationId = await prepare(f, true)
-  const ctx: ToolContext = { ...f, callId: 'quality', mode: 'build', creativeFreedom: 'stable', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
+  const ctx: ToolContext = { ...f, callId: 'quality', mode: 'build', creativeFreedom: 'stable', qualityMode: 'premium', modelRuntime: runtime, signal: new AbortController().signal, emit: () => {} }
   let sequence = 0
   const event = (type: string, payload: Prisma.InputJsonObject) => prisma.agentRunEvent.create({ data: { runId: f.runId, seq: ++sequence, type, payload } })
   const check = async () => {

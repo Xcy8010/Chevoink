@@ -4,7 +4,6 @@ import type { CreditModelTier, ModelReasoningEffort } from '../../../shared/cont
 import { env } from '../../config/env.js'
 import { chatWithTools, resolveTextOutputTokenParameter, type ChatCompletionResult } from '../ai-service.js'
 import { getModelTierRuntime } from '../credits.js'
-import { auxiliaryTextModel } from './auxiliary-text-model.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { withManuscriptRunLease, withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { beginDurableChat } from './runtime-provider.js'
@@ -34,33 +33,43 @@ export type DurableAuxiliaryModelSelection = {
   reasoningEffort: ModelReasoningEffort
 }
 
-/** Resolve auxiliary work from the already admitted main runtime when it is
- * free or BYOK. Paid platform runs keep the historical independent speed
- * critic policy. The returned selection is the exact route identity frozen
- * into the operation input. */
-export async function resolveDurableAuxiliaryRuntime(input: {
+type ReviewRuntimeInput = {
   userId: string
+  novelId?: string | null
   modelRuntime?: ToolContext['modelRuntime']
-  modelSelection?: DurableAuxiliaryModelSelection
+  modelSelection?: DurableAuxiliaryModelSelection & Partial<Pick<NonNullable<ToolContext['modelSelection']>, 'provider' | 'modelName'>>
   modelAssignments?: import('../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments
   task?: 'continuity' | 'quality'
-}) {
-  const assigned = input.task ? await assignedTaskModel(input.userId, null, input.task, input.modelAssignments, true) : undefined
+}
+
+/** New checks follow the admitted complete runtime, including paid models.
+ * Native adapters may supply only the frozen selected identity; resolve that
+ * exact tier/account instead of minting an independent speed critic. */
+async function resolveReviewRuntime(input: ReviewRuntimeInput, nativeIdentity: boolean) {
+  const assigned = input.task ? await assignedTaskModel(input.userId, input.novelId ?? null, input.task, input.modelAssignments, true) : undefined
   if (assigned) return { runtime: { ...assigned.runtime, honorAssignedReasoning: true as const }, selection: { tier: assigned.selection.modelTier,
     customModelId: assigned.selection.customModelId ?? null, reasoningEffort: assigned.runtime.reasoningEffort } }
-  const inherited = auxiliaryTextModel(input.modelRuntime)
-  if (inherited) {
-    const selection = input.modelSelection ?? { tier: inherited.tier, customModelId: null, reasoningEffort: inherited.reasoningEffort }
-    if (selection.tier !== inherited.tier || selection.tier === 'custom' && !selection.customModelId) {
-      return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '辅助模型未能继承原任务的模型身份。')
-    }
-    return { runtime: inherited, selection: { ...selection, reasoningEffort: inherited.reasoningEffort } }
+  const selected = input.modelSelection
+  if (!input.modelRuntime && !selected || selected?.tier === 'custom' && !selected.customModelId) {
+    return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '检查缺少原任务已选择的完整模型身份，未派发模型请求。')
   }
-  // Reviewer wire policy is applied after resolution; do not request an
-  // unsupported low setting from a model whose native default is high.
-  const runtime = await getModelTierRuntime('speed', input.userId)
-  if (runtime.tier !== 'speed') return runtimeError('RUNTIME_IDENTITY_CONFLICT', '独立辅助模型档位不可替换。')
-  return { runtime, selection: { tier: 'speed' as const, customModelId: null, reasoningEffort: runtime.reasoningEffort } }
+  const runtime = input.modelRuntime ?? await getModelTierRuntime(selected!.tier, input.userId, selected!.customModelId, selected!.reasoningEffort)
+  const selection = selected ?? { tier: runtime.tier, customModelId: null, reasoningEffort: runtime.reasoningEffort }
+  if (nativeIdentity && selection.tier === 'custom' && !selection.customModelId) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '辅助模型未能继承原任务的模型身份。')
+  if (selection.tier !== runtime.tier || selection.reasoningEffort !== runtime.reasoningEffort
+    || selected?.provider !== undefined && selected.provider !== runtime.provider
+    || selected?.modelName !== undefined && selected.modelName !== runtime.modelName) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原任务的检查模型身份已变化，不能替换供应商或模型。')
+  return { runtime, selection: { ...selection, reasoningEffort: runtime.reasoningEffort } }
+}
+
+/** Legacy main/inline calls already carry owned credentials/capabilities; a
+ * custom runtime needs no reconstructed model ID for its in-process request. */
+export async function resolveReviewModelRuntime(input: ReviewRuntimeInput) {
+  return (await resolveReviewRuntime(input, false)).runtime
+}
+
+export async function resolveDurableAuxiliaryRuntime(input: ReviewRuntimeInput) {
+  return resolveReviewRuntime(input, true)
 }
 
 export function auxiliaryRouteForRuntime(runtime: NonNullable<ToolContext['modelRuntime']> & { honorAssignedReasoning?: true }, selection: DurableAuxiliaryModelSelection, maxOutputTokens: number) {

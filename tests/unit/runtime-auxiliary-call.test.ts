@@ -23,7 +23,8 @@ vi.mock('../../api/lib/agent/runtime-lease.js', () => ({
 }))
 
 import { chatWithTools } from '../../api/lib/ai-service.js'
-import { auxiliaryRouteForRuntime, callDurableAuxiliary, resolveDurableAuxiliaryRuntime } from '../../api/lib/agent/runtime-auxiliary-call.js'
+import { auxiliaryRouteForRuntime, callDurableAuxiliary, resolveDurableAuxiliaryRuntime, resolveReviewModelRuntime } from '../../api/lib/agent/runtime-auxiliary-call.js'
+import * as assignments from '../../api/lib/agent/model-assignment-context.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { DataAccessError } from '../../api/lib/prisma.js'
 import { buildProviderCompatibilitySnapshot, type ProviderCompatibilityRoute } from '../../api/lib/agent/provider-compatibility.js'
@@ -53,7 +54,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: result.content }, finish_reason: 'stop' }],
     usage: { prompt_tokens: 10, completion_tokens: 1 } })}\n\ndata: [DONE]\n\n`)))
 })
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('durable reviewer non-thinking policy without rewriting old paid requests', () => {
   it.each([
@@ -82,20 +83,18 @@ describe('durable reviewer non-thinking policy without rewriting old paid reques
     expect(fetch).toHaveBeenCalledOnce()
   })
 
-  it.each([undefined, { tier: 'custom' as const, customModelId: null, reasoningEffort: 'high' as const },
-    { tier: 'speed' as const, customModelId: null, reasoningEffort: 'high' as const }])('rejects missing or mismatched native custom identity %# before any paid fallback', async modelSelection => {
+  it.each([{ modelSelection: undefined, code: 'RUNTIME_MODEL_ADAPTER_REQUIRED' },
+    { modelSelection: { tier: 'custom' as const, customModelId: null, reasoningEffort: 'high' as const }, code: 'RUNTIME_MODEL_ADAPTER_REQUIRED' },
+    { modelSelection: { tier: 'speed' as const, customModelId: null, reasoningEffort: 'high' as const }, code: 'RUNTIME_IDENTITY_CONFLICT' }])('rejects missing or mismatched native custom identity %# before any paid fallback', async ({ modelSelection, code }) => {
     await expect(resolveDurableAuxiliaryRuntime({ userId: 'owner', modelRuntime: runtime, modelSelection, task: 'quality' }))
-      .rejects.toMatchObject({ code: 'RUNTIME_MODEL_ADAPTER_REQUIRED' })
+      .rejects.toMatchObject({ code })
     expect(mocks.runtime).not.toHaveBeenCalled()
     expect(fetch).not.toHaveBeenCalled()
   })
-  it('resolves new independent quality at the configured default without requesting unsupported low', async () => {
-    mocks.runtime.mockResolvedValue({ ...runtime, tier: 'speed' })
-    expect(await resolveDurableAuxiliaryRuntime({ userId: 'owner', task: 'quality' })).toMatchObject({ selection: { tier: 'speed', reasoningEffort: 'high' } })
-    expect(mocks.runtime).toHaveBeenCalledExactlyOnceWith('speed', 'owner')
-    mocks.runtime.mockClear()
-    await resolveDurableAuxiliaryRuntime({ userId: 'owner', task: 'continuity' })
-    expect(mocks.runtime).toHaveBeenCalledExactlyOnceWith('speed', 'owner')
+  it.each(['quality', 'continuity'] as const)('does not invent a speed route when the %s task has no selected identity', async task => {
+    await expect(resolveDurableAuxiliaryRuntime({ userId: 'owner', task })).rejects.toMatchObject({ code: 'RUNTIME_MODEL_ADAPTER_REQUIRED' })
+    await expect(resolveReviewModelRuntime({ userId: 'owner', task })).rejects.toMatchObject({ code: 'RUNTIME_MODEL_ADAPTER_REQUIRED' })
+    expect(mocks.runtime).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled()
   })
   it.each(steps)('forces new %s HTTP off even when the assignment honors high', async step => {
     const request = input(step)
@@ -189,5 +188,61 @@ describe('durable reviewer non-thinking policy without rewriting old paid reques
     await chatWithTools(params)
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
     expect(body).toMatchObject({ thinking: { type: 'enabled' }, tools: params.tools })
+  })
+})
+
+describe('selected paid review model through resolution, frozen route and actual HTTP', () => {
+  const chosenModels = [
+    { tier: 'builtin_1234567890abcdef' as const, provider: 'Xiaomi', modelName: 'mimo-v2.6-flash', baseUrl: 'https://api.xiaomimimo.com/v1', outputTokenParameter: 'max_completion_tokens' as const },
+    { tier: 'builtin_abcdef1234567890' as const, provider: 'Zhipu', modelName: 'glm-5', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', outputTokenParameter: 'max_tokens' as const },
+  ]
+  it.each(chosenModels.flatMap(chosen => steps.flatMap(step => ['runtime', 'selection'].map(entry => ({ chosen, step, entry })))))(
+    '$chosen.modelName $step follows the admitted $entry instead of speed/DS', async ({ chosen, step, entry }) => {
+      const selectedRuntime = { ...runtime, ...chosen, multiplierBps: 15000, thinkingEnabled: true, reasoningParameterMode: 'native' as const }
+      const selected = { tier: chosen.tier, customModelId: null, reasoningEffort: 'high' as const, provider: chosen.provider, modelName: chosen.modelName }
+      mocks.runtime.mockResolvedValue(selectedRuntime)
+      const task = step.startsWith('quality') ? 'quality' as const : 'continuity' as const
+      const resolved = await resolveDurableAuxiliaryRuntime({ userId: 'owner', task, modelSelection: selected,
+        ...(entry === 'runtime' ? { modelRuntime: selectedRuntime } : {}) })
+      expect(resolved.runtime).toBe(selectedRuntime)
+      expect(resolved.selection).toMatchObject(selected)
+      expect(mocks.runtime).toHaveBeenCalledTimes(entry === 'runtime' ? 0 : 1)
+      const route = auxiliaryRouteForRuntime(resolved.runtime, resolved.selection, 1024)
+      const selectedPrice = { version: 'credits-v1-exact' as const, modelTier: chosen.tier, multiplierBps: 15000 }
+      await callDurableAuxiliary({ ...input(step), route, price: selectedPrice })
+      const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+      expect(body.model).toBe(chosen.modelName)
+      expect(body.thinking?.type).not.toBe('enabled')
+      expect(body.reasoning_effort ?? 'none').toBe('none')
+      expect(body[chosen.outputTokenParameter]).toBe(1024)
+      expect(vi.mocked(fetch).mock.calls[0][0]).toBe(chosen.baseUrl + '/chat/completions')
+      expect(mocks.runtime).toHaveBeenLastCalledWith(chosen.tier, 'owner', null, 'high')
+      expect(mocks.begin.mock.calls[0][0]).toMatchObject({ provider: chosen.provider, model: chosen.modelName,
+        price: selectedPrice, request: { body: { model: chosen.modelName } } })
+      expect(fetch).toHaveBeenCalledOnce()
+    })
+  it.each(['tier', 'provider', 'model', 'reasoning', 'fallback-basic'] as const)('%s identity drift rejects before a new HTTP request', async mismatch => {
+    const chosen = chosenModels[0], selectedRuntime = { ...runtime, ...chosen, multiplierBps: 15000 }
+    const selected = { tier: mismatch === 'fallback-basic' ? 'basic' as const : chosen.tier, customModelId: null, reasoningEffort: 'high' as const,
+      provider: chosen.provider, modelName: chosen.modelName }
+    mocks.runtime.mockResolvedValue({ ...selectedRuntime, ...(mismatch === 'tier' || mismatch === 'fallback-basic' ? { tier: 'speed' } : {}),
+      ...(mismatch === 'provider' ? { provider: 'deepseek' } : {}), ...(mismatch === 'model' ? { modelName: 'other' } : {}), ...(mismatch === 'reasoning' ? { reasoningEffort: 'low' } : {}) })
+    await expect(resolveDurableAuxiliaryRuntime({ userId: 'owner', task: 'quality', modelSelection: selected })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+    expect(fetch).not.toHaveBeenCalled(); expect(mocks.begin).not.toHaveBeenCalled()
+  })
+  it('preserves the legacy paid/BYOK full runtime without reconstructing a native custom ID', async () => {
+    const paid = { ...runtime, ...chosenModels[0], multiplierBps: 15000 }
+    expect(await resolveReviewModelRuntime({ userId: 'owner', novelId: 'novel', modelRuntime: paid, task: 'quality' })).toBe(paid)
+    expect(await resolveReviewModelRuntime({ userId: 'owner', novelId: 'novel', modelRuntime: runtime, task: 'continuity' })).toBe(runtime)
+    expect(mocks.runtime).not.toHaveBeenCalled()
+  })
+  it('respects an explicit task assignment over the main selected paid model', async () => {
+    const chosen = chosenModels[0], main = { ...runtime, ...chosen, multiplierBps: 15000 }
+    const assigned = vi.spyOn(assignments, 'assignedTaskModel').mockResolvedValue({ runtime,
+      selection: { modelTier: 'custom', customModelId: 'owned-assigned' } })
+    const resolved = await resolveDurableAuxiliaryRuntime({ userId: 'owner', modelRuntime: main, task: 'quality' })
+    expect(assigned).toHaveBeenCalledWith('owner', null, 'quality', undefined, true)
+    expect(resolved).toMatchObject({ runtime: { ...runtime, honorAssignedReasoning: true }, selection: { tier: 'custom', customModelId: 'owned-assigned' } })
+    expect(mocks.runtime).not.toHaveBeenCalled()
   })
 })

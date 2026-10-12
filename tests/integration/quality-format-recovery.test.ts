@@ -36,7 +36,7 @@ describe.runIf(available)('settled legacy quality format recovery', () => {
       vi.spyOn(prices, 'resolveTokenPrice').mockResolvedValue({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 })
       const controller = new AbortController()
       const ctx: ToolContext = { ...f, callId: 'new-quality', mode: 'build', creativeFreedom: scenario === 'old-repair' ? 'balanced' : 'stable',
-        qualityMode: 'premium', signal: controller.signal, emit: () => {} }
+        qualityMode: 'premium', modelRuntime: runtime, signal: controller.signal, emit: () => {} }
       let requests = 0
       let seedingOld = false
       const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {

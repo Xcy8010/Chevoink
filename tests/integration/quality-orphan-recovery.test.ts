@@ -133,7 +133,7 @@ describe.runIf(available)('quality continuation after actual conversation deleti
       const content = requests === 1 ? JSON.stringify({ findings }) : requests === 2 ? '{"corrections":[]}' : '{"findings":[]}'
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     }))
-    const ctx: ToolContext = { ...s.subject, callId: 'new-check', mode: 'build', creativeFreedom: 'stable', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
+    const ctx: ToolContext = { ...s.subject, callId: 'new-check', mode: 'build', creativeFreedom: 'stable', qualityMode: 'premium', modelRuntime: runtime, signal: new AbortController().signal, emit: () => {} }
     await prisma.agentRunEvent.create({ data: { runId: ctx.runId, seq: 1, type: 'tool.call', payload: { toolName: 'quality_analyze', callId: ctx.callId, args: { compilationId: s.compilationId } } } })
     const checking = qualityAnalyzeTool.execute(ctx, { compilationId: s.compilationId })
     if (mode === 'unknown') await expect(checking).rejects.toThrow()

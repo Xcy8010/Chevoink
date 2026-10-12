@@ -55,8 +55,8 @@ describe('auxiliary text model inheritance', () => {
     expect(auxiliaryTextModel(undefined)).toBeUndefined()
     expect(auxiliaryTextModel(runtime('speed', 10000))).toBeUndefined()
   })
-  it.each(['lite', 'custom'] as const)('keeps %s in actual quality review and evidence correction, never falling back to a paid model', async tier => {
-    const selected = runtime(tier)
+  it.each(['lite', 'custom', 'speed'] as const)('keeps selected %s in actual quality review and evidence correction without changing models', async tier => {
+    const selected = runtime(tier, tier === 'speed' ? 10000 : 0)
     mocks.complete.mockImplementation(async (_system, _content, options) => {
       // Simulate exhausted platform credits: an omitted runtime would resolve speed and fail.
       if (options.modelRuntime !== selected) throw new DataAccessError(402, 'CREDITS_EXHAUSTED', 'platform credits exhausted')
@@ -156,8 +156,8 @@ describe('auxiliary text model inheritance', () => {
     expect(mocks.complete).toHaveBeenCalledOnce()
     expect(mocks.persist).not.toHaveBeenCalled()
   })
-  it.each(['lite', 'custom'] as const)('keeps %s through explicitly authorized repair and its bounded format retry', async tier => {
-    const selected = runtime(tier)
+  it.each(['lite', 'custom', 'speed'] as const)('keeps selected %s through explicitly authorized repair and its bounded format retry', async tier => {
+    const selected = runtime(tier, tier === 'speed' ? 10000 : 0)
     const prompt = '修复当前章节中作者已选择的质量意见。'
     const run = { id: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', taskRootId: null,
       startRequest: { prompt }, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'chapter', prompt }) }

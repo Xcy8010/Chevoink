@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { assertOriginalRepairAuthority } from '../original-request.js'
-import { auxiliaryTextModel } from '../auxiliary-text-model.js'
 import { z } from 'zod'
 
 import { env } from '../../../config/env.js'
@@ -44,7 +43,7 @@ import { probeChapterReviewRevision, readChapterReviewRevisionGuidance, readChap
 import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, inspectCorrectableCriticResponse, parseQualityJsonObject, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence, qualityReportHasDroppedFindings, qualityCorrectionResponseWitness } from '../quality-evidence.js'
 import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/writing.js'
 import { renderChapterWritingBackground } from '../writing-request-context.js'
-import { resolveDurableAuxiliaryRuntime } from '../runtime-auxiliary-call.js'
+import { resolveDurableAuxiliaryRuntime, resolveReviewModelRuntime } from '../runtime-auxiliary-call.js'
 import { readQualityFormatRecovery, claimQualityFormatRecovery, claimCurrentQualityFormatRecovery, bindQualityFormatRecovery, hasReconciledQualityRequest, type QualityFormatRecovery } from '../quality-format-recovery.js'
 
 const READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
@@ -190,6 +189,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
 }
 
 async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityReport, selected: QualityReport['findings'], frozenQuality?: FrozenQualityRuntime) {
+  const repairRuntime = frozenQuality?.runtime ?? await resolveReviewModelRuntime({ ...ctx, task: 'quality' })
   const selectedById = new Map(selected.map((finding) => [finding.id, finding]))
   const patches = new Map<string, { findingId: string; replacement: string }>()
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -200,7 +200,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
     const response = await generateTextCompletion(
         `你是与 Writer/Critic 上下文隔离的局部修订编辑。只替换每条 evidence 本身，不扩写相邻内容，不改变事实、情节结果、人物知识或作者刻意的口语与断句。删除优先于同义词替换；补写只补建议中缺失的具体动作、选择或后果。punctuation_misuse 只移除误用符号，保留人物直接话语和逐字引文。replacement 可以为空。严格只输出 JSON：{"patches":[{"findingId":"原 id","replacement":"只替换证据范围的文本"}]}。必须为每个输入 id 返回且只返回一次。`,
         remaining.map((finding) => `findingId=${finding.id}\nsignal=${finding.signal}\nevidence=「${finding.evidenceExcerpt}」\n原因=${finding.explanation}\n最小修法=${finding.suggestion}`).join('\n\n'),
-        { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), ...(frozenQuality ? { modelRuntime: frozenQuality.runtime, explicitModelSelection: true } : {}),
+        { modelRuntime: repairRuntime, explicitModelSelection: true,
           signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: attempt === 0 ? 'agent3HumanityRevision' : 'agent3HumanityRevisionRetry', novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
       )
     try {
@@ -297,14 +297,7 @@ export const qualityAnalyzeTool = defineTool({
     // 真实用户取消照常上抛；初始 critic 的格式异常保留为不完整报告。
     const startedAt = new Date()
     const reviewSignal = AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)])
-    // Legacy main/inline contexts carry a server-resolved free/BYOK runtime,
-    // without the native adapter's frozen model ID. Preserve that full runtime;
-    // explicit quality assignments and supplied selections retain strict resolution.
-    const inherited = auxiliaryTextModel(ctx.modelRuntime)
-    const resolved = inherited && !ctx.modelSelection && !ctx.modelAssignments?.assignments.quality
-      ? { runtime: inherited }
-      : await resolveDurableAuxiliaryRuntime({ userId: ctx.userId, modelRuntime: ctx.modelRuntime, modelSelection: ctx.modelSelection,
-        modelAssignments: ctx.modelAssignments, task: 'quality' })
+    const resolved = { runtime: await resolveReviewModelRuntime({ ...ctx, task: 'quality' }) }
     const responseOptions = { modelRuntime: resolved.runtime, explicitModelSelection: true, signal: reviewSignal, userId: ctx.userId,
       action: formatRecovery ? 'agent3HumanityFormatRecovery' : 'agent3HumanityCritic', novelId: ctx.novelId, chapterId,
       targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: resolved.runtime.reasoningEffort }
@@ -445,7 +438,7 @@ export const qualityAnalyzeTool = defineTool({
       droppedCount ? `${droppedCount} 条因字段不完整未纳入报告` : '',
     ].filter(Boolean).join('；')
     const bindingSuffix = bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : ''
-    return finishQualityReview(formatRecovery ? { ...ctx, signal: reviewSignal } : ctx, report, bindingSuffix, false, bundle.compilation?.status !== 'completed', formatRecovery ? resolved : undefined)
+    return finishQualityReview(formatRecovery ? { ...ctx, signal: reviewSignal } : ctx, report, bindingSuffix, false, bundle.compilation?.status !== 'completed', resolved)
   },
 })
 

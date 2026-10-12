@@ -9,7 +9,7 @@ import { continuityFindingText, continuitySourceInput, resolveContinuitySources,
 import { unlocatedContinuityEvidence } from '../continuity-finding-authority.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
-import { auxiliaryTextModel } from '../auxiliary-text-model.js'
+import { resolveReviewModelRuntime } from '../runtime-auxiliary-call.js'
 import { z } from 'zod'
 import { writingVolumeDecisionSchema } from '../../../../shared/contracts/writing-volume-contracts.js'
 
@@ -674,8 +674,9 @@ export const continuityValidateTool = defineTool({
       const assertCurrent = async () => {
         if ((await buildStandaloneContinuityContext(ctx, context.chapter.id)).contextHash !== context.contextHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查资料已变化，请读取当前版本。')
       }
+      const modelRuntime = await resolveReviewModelRuntime({ ...ctx, task: 'continuity' })
       const response = await generateReviewCompletion(continuityCriticSystem, `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, args.focus)}`,
-        { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: context.chapter.id, targetType: 'chapter', targetId: context.chapter.id, temperature: 0, reasoningEffort: 'low' }, assertCurrent)
+        { modelRuntime, explicitModelSelection: true, signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: context.chapter.id, targetType: 'chapter', targetId: context.chapter.id, temperature: 0, reasoningEffort: modelRuntime.reasoningEffort }, assertCurrent)
       const inspected = inspectContinuityResponse(response, { previous: context.precedingBodies, current: context.chapter.content }, true, 4)
       return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, inspected, tx, args.focus, true, true, inspected.audit))
     }
@@ -736,6 +737,7 @@ export const continuityValidateTool = defineTool({
             items: report.findings.map(item => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`) } }
       }
     }
+    const reviewRuntime = await resolveReviewModelRuntime({ ...ctx, task: 'continuity' })
     // A check reserves a monotonic audit count; its count is not a dispatch cap.
     if (!await reserveContinuityCheck(ctx.userId, ctx.novelId, compilation.id)) {
       return {
@@ -781,7 +783,7 @@ export const continuityValidateTool = defineTool({
     const criticResponses = await Promise.all(criticPrompts.map((systemPrompt, index) => generateReviewCompletion(
       systemPrompt,
       criticInput,
-      { modelRuntime: auxiliaryTextModel(ctx.modelRuntime), signal: ctx.signal, userId: ctx.userId, action: index === 0 ? 'agent3ContinuityCritic' : 'agent3ContinuityCriticSecondPass', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0, reasoningEffort: 'low' },
+      { modelRuntime: reviewRuntime, explicitModelSelection: true, signal: ctx.signal, userId: ctx.userId, action: index === 0 ? 'agent3ContinuityCritic' : 'agent3ContinuityCriticSecondPass', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0, reasoningEffort: reviewRuntime.reasoningEffort },
       () => assertCurrent(),
     )))
     ctx.signal.throwIfAborted()
