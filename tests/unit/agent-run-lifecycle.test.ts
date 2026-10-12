@@ -3037,7 +3037,17 @@ describe('independent persisted review phases with unresolved usage', () => {
     expect(charge).not.toHaveBeenCalled(); expect(externalRequest).not.toHaveBeenCalled()
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: { writeProgress: 3, tokenBudget: 500, maxTurns: 1,
       inputProtocolRecovery: f.checkpoint.inputProtocolRecovery, pendingReviews: [{ callId: 'unknown', toolName: 'quality_analyze', chapterId: 'c', revision: 4, compilationId: 'comp' }] } })
-    if (!['ordinary-read', 'valid-proof', 'proof-lost'].includes(scenario)) expect(events().some(event => event.type === 'tool.call' && event.callId === 'independent')).toBe(false)
+    if (!['ordinary-read', 'valid-proof', 'proof-lost'].includes(scenario)) {
+      // The existing deferred protocol displays the rejected proposal; its
+      // call card is not a handler invocation, provider request or effect.
+      const rejected = events().filter(event => (event.type === 'tool.call' || event.type === 'tool.result') && event.callId === 'independent')
+      expect(rejected).toEqual([
+        expect.objectContaining({ type: 'tool.call', callId: 'independent', toolName: name, autoApproved: false }),
+        expect.objectContaining({ type: 'tool.result', callId: 'independent', toolName: name, ok: false, durationMs: 0,
+          summary: '未执行：独立检查仍有未确认的请求；本次只允许普通读取或已认证的离线连续性恢复，未派发新检查模型、未执行写入。' }),
+      ])
+      expect(rejected[1]).not.toHaveProperty('reviewRequestFinished')
+    }
     const signatures = (mocks.runs.get('run')?.usage as { checkpoint: { progressSignatures: string[] } }).checkpoint.progressSignatures
     expect(signatures.includes(f.signature('continuity'))).toBe(scenario === 'valid-proof')
     expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
