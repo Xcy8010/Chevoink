@@ -1074,7 +1074,10 @@ describe.runIf(available)('既有章节独立检查', () => {
       else expect(await check).toMatchObject({ kind: 'tool', result: { outcome: 'failed', ...(scenario === 'format' ? { failureCode: 'CONTINUITY_REPORT_INCOMPLETE' } : {}) } })
       expect(fetchMock).toHaveBeenCalledTimes(['unread', 'wrong-id'].includes(scenario) ? 0 : 1)
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(scenario === 'stale' ? '作者的新正文' : '原文')
-      expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview' } })).toBe(0)
+      const diagnostics = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview' } })
+      expect(diagnostics).toHaveLength(scenario === 'format' ? 1 : 0)
+      if (scenario === 'format') expect(diagnostics[0].metadata).toMatchObject({ independentCheck: 'unavailable',
+        criticResponse: { parserVersion: 5, classification: 'json_invalid', rawResponse: { content: JSON.stringify('无法提供结构化报告'), complete: true } } })
       expect(await prisma.storyCompilation.count({ where: { novelId: f.novelId } })).toBe(0)
     }, undefined, '检查当前既有章节')
   })

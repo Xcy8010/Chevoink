@@ -36,6 +36,29 @@ describe('server review fallback', () => {
     const complete = projectCurrentReviewNextStep(pending({ reviewProtocol: 1, ready: true, quality: 'complete', requiredTools: [] }))!
     expect(complete.state).toBe('commit_available')
   })
+  it('keeps absent-marker batch capability closed while exposing the same current decisions', () => {
+    const refs = [{ source: 'quality' as const, reportId: 'q', findingId: 'f' }]
+    const legacy = projectCurrentReviewNextStep(pending({ ready: true, quality: 'complete', requiredTools: [], decisionPending: true,
+      requiredDecisions: refs }))!
+    expect(legacy).toMatchObject({ state: 'decision_required', phase: 'decisions', pending: refs, decisionBatchesAvailable: false })
+    expect(currentReviewNextStepGuidance(legacy)).toContain('原任务未开放 decisionOnly 分批能力')
+    expect(currentReviewNextStepGuidance(legacy)).not.toContain('decisionOnly:true')
+    const marked = projectCurrentReviewNextStep(pending({ reviewProtocol: 1, ready: true, quality: 'complete', requiredTools: [],
+      decisionPending: true, requiredDecisions: refs }))!
+    expect(marked.decisionBatchesAvailable).toBe(true)
+    expect(currentReviewNextStepGuidance(marked)).toContain('decisionOnly:true')
+  })
+  it('keeps current hard-pass evidence visible after explicit retention consumes decision refs', () => {
+    const ref = { source: 'quality' as const, reportId: 'current-quality', findingId: 'current-error' }
+    const detail = { ...ref, evidence: '门锁着', explanation: '同一物件状态相互冲突', suggestion: '按正文核对门锁', severity: 'error', disposition: 'pending' }
+    const step = projectCurrentReviewNextStep(pending({ ready: true, quality: 'complete', requiredTools: [], mustPassPending: true,
+      requiredDecisions: [ref], retainedDecisions: [{ ...ref, reason: '保留原叙述以待作者确认' }], decisionDetails: [detail] }))!
+    expect(step.pending).toEqual([])
+    expect(step.details).toEqual([detail])
+    expect(step.retentionCompletes).toBe(false)
+    expect(currentReviewNextStepGuidance(step)).toContain('current-error')
+    expect(currentReviewNextStepGuidance(step)).toContain('不能替代硬通过要求')
+  })
   it('keeps every strict ref as a fact but offers a legally sized first retention batch', () => {
     const refs = Array.from({ length: 81 }, (_, i) => ({ source: 'quality' as const, reportId: 'q', findingId: `f${i}` }))
     const step = projectCurrentReviewNextStep(pending({ reviewProtocol: 1, ready: true, requiredTools: [], decisionPending: true, requiredDecisions: refs }))!

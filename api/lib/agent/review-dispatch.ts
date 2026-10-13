@@ -19,7 +19,8 @@ export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) 
   return { version: 1 as const, compilationId: readiness.compilationId, chapterId: readiness.chapterId, revision: readiness.revision,
     phase: cycle.phase, reviewCycle: cycle,
     state, continuity: readiness.continuity, quality: readiness.quality, binding: readiness.decisionBinding ?? null,
-    requiredTools: readiness.requiredTools, pending, details: (readiness.decisionDetails ?? []).filter(item => pending.some(ref => same(item, ref))),
+    requiredTools: readiness.requiredTools, pending, details: (readiness.decisionDetails ?? []).filter(item => state === 'must_pass_required' || pending.some(ref => same(item, ref))),
+    decisionBatchesAvailable: readiness.reviewProtocol === 1,
     retainedCount: retained.length, automaticCandidateCount: readiness.qualityCandidateCount ?? 0,
     completeStrictReview: readiness.completeStrictReview === true, selectionOnly: readiness.selectionOnly === true,
     retentionCompletes: state === 'decision_required', unresolvedFactErrors: readiness.continuityErrorCount + readiness.qualityErrorCount }
@@ -33,7 +34,10 @@ export function currentReviewNextStepGuidance(step: CurrentReviewNextStep) {
     : '具体修改仍须原始作者写入授权与必要审批，允许时使用当前正文的精确 chapter_edit_range，也可原授权内 chapter_write。'
   const scope = `${authority}报告不授予定位或写入权限；未定位、重叠、证据不足的意见可引用真实ref说明保留原因，不能猜测位置或机械改剧情。quality_finding_feedback 的 rejected 仅为反馈态度，不能替代绑定当前版本的 retainedFindings 理由与决定。`
   const candidates = `自动本批安全候选=${step.automaticCandidateCount}（自动修订最多8处）；${step.completeStrictReview ? '完整严格意见义务独立于自动安全窗口，' : ''}当前尚需处置${step.pending.length}项，已明确留置${step.retainedCount}项。`
-  const retentionTemplate = { ...(step.pending.length > 40 ? { decisionOnly: true } : {}), retainedFindings: step.pending.slice(0, 40).map(item => ({ ...item, reason: '说明此意见为何应保留或无法安全修改' })) }
+  const retentionTemplate = { ...(step.decisionBatchesAvailable && step.pending.length > 40 ? { decisionOnly: true } : {}), retainedFindings: step.pending.slice(0, 40).map(item => ({ ...item, reason: '说明此意见为何应保留或无法安全修改' })) }
+  const batch = step.decisionBatchesAvailable
+    ? '超过单次40项时可用 decisionOnly:true 分批保存真实保留决定，不提交章节终态；每批后重读当前待处理引用，最后普通提交仍校验全部当前义务。'
+    : '原任务未开放 decisionOnly 分批能力；普通 retainedFindings 提交仍须完整覆盖当前原有义务，不扩展冻结工具参数。'
   const phase = step.phase === 'verification'
     ? `本周期已经保存真实修订（基线r${step.reviewCycle.baselineRevision}），当前处于最终核验。新出现的纯质量建议须由当前模型逐项核对并写明具体保留原因，或以真实原文与基线证明是应处理的回归；不能因每次完整检查又有新措辞就自动开启下一轮润色。相同锚点意见延续同一问题，模糊映射为unknown，不推断已解决；任何再修改仍使最终检查失效。当前意见关系：${JSON.stringify(step.reviewCycle.findings)}。`
     : '当前处于初始评估与意见决策：核对真实意见后，在原授权内完成所需修改；完整修改后进入最终核验。'
@@ -41,7 +45,7 @@ export function currentReviewNextStepGuidance(step: CurrentReviewNextStep) {
   if (step.state === 'check_required') return `${facts}最终保存版本仍缺必要检查：${JSON.stringify(step.requiredTools)}。先核对当前状态，仅通过原工具、原审批、原预算与恢复准入执行缺项；不重买已完成检查。尚不能提交为完成。`
   if (step.state === 'must_pass_required') return `${facts}${candidates}${scope}原作者明确要求检查通过；retainedFindings不能替代硬通过要求。按证据合法修改后复核最终版本；无法安全完成时保留事实及阻碍，不能提交或宣称通过。当前真实意见：${JSON.stringify(step.details)}。`
   if (step.state === 'commit_available') return `${facts}当前必要检查与意见决策已齐备，可在原权限及必要审批下提交 chapter_bridge_commit。${step.unresolvedFactErrors > 0 ? '保留的事实错误仍未解决，留置不表示检查通过。' : ''}`
-  return `${facts}${phase}${candidates}${scope}先用 chapter_bridge_get / quality_report_get 核对真实意见，在原授权内精确应用或通过 chapter_bridge_commit 的 retainedFindings 逐项合理保留。超过单次40项时可用 decisionOnly:true 分批保存真实保留决定，不提交章节终态；每批后重读当前待处理引用，最后普通提交仍校验全部当前义务。实际修改后复核最终保存版本；正文未变无需重买检查，也不制造无变化正文写入。详情：${JSON.stringify(step.details)}。精确参数模板（仅当前首批最多40项，reason须替换为实际原因）：${JSON.stringify(retentionTemplate)}。留置不是修复，不能声称全部意见已应用。`
+  return `${facts}${phase}${candidates}${scope}先用 chapter_bridge_get / quality_report_get 核对真实意见，在原授权内精确应用或通过 chapter_bridge_commit 的 retainedFindings 逐项合理保留。${batch}实际修改后复核最终保存版本；正文未变无需重买检查，也不制造无变化正文写入。详情：${JSON.stringify(step.details)}。精确参数模板（仅当前首批最多40项，reason须替换为实际原因）：${JSON.stringify(retentionTemplate)}。留置不是修复，不能声称全部意见已应用。`
 }
 
 export function reviewDispatchKey(readiness: { compilationId: string | null; chapterId: string; revision: number }, name: string): string {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '../../api/lib/agent/continuity-format-recovery.js'
 import { applyContinuityEvidenceCorrection, runContinuityEvidenceCorrection, continuityCorrectionRecoveryDecision } from '../../api/lib/agent/continuity-response-correction.js'
 
 const bodies = { previous: '上一章门打开。', current: '这一章门锁住。' }
@@ -30,6 +30,7 @@ describe('continuity typed response and evidence correction', () => {
       audit: { parserVersion: 5, classification: 'source_invalid' } })
     expect(JSON.parse(inspected.audit.rawResponse.content)).toBe(raw)
     expect(inspected.audit.candidateFindings).toEqual(JSON.parse(raw).findings)
+    expect(continuityUnlocatedCandidateCount(inspected)).toBe(2)
   })
   it('binds all exact original signals, severity, evidence and suggestions', () => {
     const result = applyContinuityEvidenceCorrection(original(), JSON.stringify(corrections()), bodies)

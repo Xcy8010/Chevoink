@@ -22,7 +22,7 @@ import { compilerContinuityCoverage, compilerContinuityCoverageMatches, hasCurre
 import { normalizeToolInput } from './input-validation.js'
 import { parseIndependentContinuityResult, continuityCriticSystem, continuityReviewTail, CONTINUITY_MAX_OUTPUT_TOKENS, buildStandaloneContinuityContext, saveStandaloneContinuityReport, readStandaloneContinuityReport } from './story-compiler-tools.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
-import { inspectContinuityResponse } from '../continuity-format-recovery.js'
+import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '../continuity-format-recovery.js'
 import { runContinuityEvidenceCorrection } from '../continuity-response-correction.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
@@ -207,6 +207,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       const nextCheckRounds = report.checkRounds + (frozen.cached ? 0 : 1)
       if (nextCheckRounds !== report.checkRounds || inspected) await tx.storyCompilation.update({ where: { id: compiler.id }, data: {
         validation: runtimeJson({ ...report, checkRounds: nextCheckRounds,
+          ...(frozen.version >= 7 && inspected?.audit.classification === 'source_invalid' ? { unlocatedEvidenceCount: continuityUnlocatedCandidateCount(inspected) } : {}),
           ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }).value,
       } })
       const repairGuidance = parsed.structured && report.independentCheck === 'complete' && report.errorCount > 0 ? await readChapterReviewRevisionGuidance(tx, ctx, frozen.chapter) : ''

@@ -76,7 +76,10 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       ...(budget.unresolvedAttempts > 0n ? [{ code: 'unresolved_usage', reference: root.id }] : []),
     ]
     const observations = []
-    for (const item of blockers.filter(item => item.code === 'uncommitted_compilation')) {
+    // Shared current facts do not upgrade an old durable continuation protocol.
+    // Only roots admitted with the sidecar marker add these capability gates;
+    // legacy reads and their real terminal checks use the shared projection.
+    if (spec.scope.reviewProtocol === 1) for (const item of blockers.filter(item => item.code === 'uncommitted_compilation')) {
       const review = await readChapterReviewReadiness(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId }, item.reference)
       const next = review && projectCurrentReviewNextStep(review)
       if (next) observations.push({ compilationId: next.compilationId, chapterId: next.chapterId, revision: next.revision,

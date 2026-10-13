@@ -30,8 +30,9 @@ describe('严谨创作落实连续性警告', () => {
   function fixture(cached: boolean) {
     vi.spyOn(originalRequest, 'readOriginalTaskRequest').mockResolvedValue({ prompt: '写本章，人物寻找线索。', spec: null,
       taskId: 'task', sourceRunId: 'r', parentRunId: null })
+    vi.spyOn(originalRequest, 'originalTaskRunIds').mockResolvedValue(['r'])
     const chapter = { id: 'c', title: '本章', revision: 1, content: '原文', orderIndex: 1 }
-    const findings = ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在衔接风险', suggestion: '局部澄清' }))
+    const findings = ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在衔接风险', suggestion: '局部澄清', sourceEvidence: [{ source: 'current', quote: '原文' }] }))
     const validation = { independentCheck: 'complete', checkedRevision: 1, findings, errorCount: 0, warningCount: 3, autoRepairRounds: 0, checkRounds: 0 }
     const compilation = { id: 'comp', createdAt: new Date(1), chapterId: 'c', chapter, bridge: { fromChapterId: null }, sceneTasks: [{ ordinal: 1 }], validation: cached ? validation : null, status: 'active' }
     Object.assign(validation, { coverage: compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: null }) })
@@ -51,6 +52,7 @@ describe('严谨创作落实连续性警告', () => {
     const repair = vi.spyOn(ai, 'generateTextCompletion').mockResolvedValue('{"patches":[{"oldText":"原文","newText":"新文"}]}')
     const write = vi.fn().mockResolvedValue({ count: 1 })
     const tx = { $queryRaw: vi.fn(), agentRun: { findFirst: vi.fn().mockResolvedValue({ id: 'r' }) },
+      agentArtifact: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null) },
       chapter: { findFirst: vi.fn((...args: Parameters<typeof prisma.chapter.findFirst>) => prisma.chapter.findFirst(...args)), updateMany: write, findUniqueOrThrow: vi.fn().mockResolvedValue({ ...chapter, revision: 2 }) },
       storyCompilation: { findFirst: findCompilation, findUniqueOrThrow: vi.fn(async () => compilation),
         update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => { Object.assign(compilation, data); return compilation }),
@@ -82,7 +84,7 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.critic).toHaveBeenCalledOnce()
     expect(f.repair).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
-    expect(f.compilation.validation).toMatchObject({ continuityCriticResponse: { parserVersion: 4, classification: 'complete', unwrapped: true } })
+    expect(f.compilation.validation).toMatchObject({ continuityCriticResponse: { parserVersion: 5, classification: 'complete', unwrapped: true } })
   })
   it('sends the selected paid complete runtime to continuity instead of the generic cheap auxiliary policy', async () => {
     const f = fixture(false)
@@ -144,7 +146,8 @@ describe('严谨创作落实连续性警告', () => {
       status: scenario === 'failed' ? 'failed' : 'passed', deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(f.chapter.content).digest('hex') },
       findings: [{ id: 'candidate', severity: 'warning', disposition: 'pending', authorFeedback: null, evidenceExcerpt: '原文', explanation: '需要澄清真实动作', suggestion: '按作者授权处理' }] }
     vi.spyOn(readiness, 'readChapterReviewReadiness').mockResolvedValue({ ready: scenario === 'current', revision: 1,
-      continuity: 'complete', quality: scenario === 'current' ? 'complete' : 'incomplete', qualityReportId: scenario === 'current' ? report.id : null } as never)
+      continuity: 'complete', quality: scenario === 'current' ? 'complete' : 'incomplete', qualityReportId: scenario === 'current' ? report.id : null,
+      requiredTools: [], continuityFindings: [], qualityCandidateCount: scenario === 'current' ? 1 : 0, decisionPending: scenario === 'current' } as never)
     vi.spyOn(prisma.chapterQualityReport, 'findUnique').mockResolvedValue(report as never)
     Object.assign(f.compilation, { qualityReports: [report] })
     const result = await chapterBridgeGetTool.execute(f.ctx, { compilationId: f.compilation.id })

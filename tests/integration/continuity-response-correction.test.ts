@@ -57,7 +57,7 @@ describe.runIf(available)('continuity evidence correction actual PostgreSQL effe
           expect(request.messages[0].content).toContain('不增删意见')
         }
         const content = sends === 1 ? raw : correction
-        return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`)
+        return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
       })
       vi.stubGlobal('fetch', fetch)
       if (path === 'legacy') {
@@ -151,7 +151,7 @@ describe.runIf(available)('continuity evidence correction actual PostgreSQL effe
           ? sends === 1 ? ['invalid-continue', 'unknown-fresh'].includes(scenario) ? '{"corrections":[]}' : scenario === 'truncated-continue' ? '{"corrections":[' : correction
             : scenario === 'unknown-fresh' ? 'broken first assessment' : '{"findings":[]}' : correction
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: scenario === 'truncated-continue' && sends === 1 ? 'length' : 'stop' }],
-          ...(scenario === 'unknown-fresh' && sends === 2 ? {} : { usage: { prompt_tokens: 12, completion_tokens: 8 } }) })}\n\ndata: [DONE]\n\n`)
+          ...(scenario === 'unknown-fresh' && sends === 2 ? {} : { usage: { prompt_tokens: 12, completion_tokens: 8 } }) })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
       })
       vi.stubGlobal('fetch', fetch)
       if (scenario.startsWith('valid-unapplied')) {
@@ -273,7 +273,7 @@ describe.runIf(available)('continuity evidence correction actual PostgreSQL effe
       const fetch = vi.fn(async () => {
         sends++
         const content = scenario === 'offline-correction' ? sends === 1 ? raw : sends === 2 ? correction : '{"findings":[]}' : '{"findings":[]}'
-        return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`)
+        return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
       })
       vi.stubGlobal('fetch', fetch)
       const fresh = { ...ctx, callId: 'fresh' }

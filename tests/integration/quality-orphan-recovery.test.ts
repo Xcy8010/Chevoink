@@ -227,7 +227,12 @@ describe.runIf(available).each(['clean', 'pending-decision'] as const)('typed co
     if (scenario === 'pending-decision') {
       const calls = await prisma.agentRunEvent.findMany({ where: { runId: seeded.subject.runId, type: 'tool.call' }, orderBy: { seq: 'asc' } })
       expect(calls.map(event => (event.payload as { callId: string }).callId)).toContain('independent-read')
-      expect(results.find(event => (event.payload as { callId: string }).callId === 'early-commit')?.payload).toMatchObject({ ok: false, durationMs: 0, summary: expect.stringContaining('未执行') })
+      expect(calls.some(event => (event.payload as { callId: string }).callId === 'early-commit')).toBe(false)
+      expect(results.some(event => (event.payload as { callId: string }).callId === 'early-commit')).toBe(false)
+      const deferred = await prisma.agentRunEvent.findMany({ where: { runId: seeded.subject.runId, type: 'tool.deferred' } })
+      expect(deferred.map(event => event.payload)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ callId: 'early-commit', toolName: 'chapter_bridge_commit', execution: 'not_dispatched', reason: expect.any(String) }),
+      ]))
       const writer = calls.find(event => (event.payload as { callId: string }).callId === 'writer-decision')!
       const commit = calls.find(event => (event.payload as { callId: string }).callId === 'decided-commit')!
       expect(writer.seq).toBeLessThan(commit.seq)

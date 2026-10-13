@@ -1,7 +1,7 @@
 import { retainedFindings } from './chapter-arguments.js'
 import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
-import { inspectContinuityResponse } from '../continuity-format-recovery.js'
+import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '../continuity-format-recovery.js'
 import { runContinuityEvidenceCorrection, claimLegacyContinuityCorrection, readLegacyContinuityCorrectionGate,
   claimContinuedContinuityAssessment, recordLegacyContinuityCorrectionObservation, recordLegacyContinuityAssessmentObservation } from '../continuity-response-correction.js'
 import { readReusableLegacyContinuityCorrection, markLegacyContinuityCorrectionApplied, markLegacyContinuityAssessmentApplied } from '../continuity-response-correction.js'
@@ -951,6 +951,7 @@ export const continuityValidateTool = defineTool({
         await markLegacyContinuityAssessmentApplied(tx, ctx)
       }
       await tx.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...result,
+        ...(inspected.audit.classification === 'source_invalid' ? { unlocatedEvidenceCount: continuityUnlocatedCandidateCount(inspected) } : {}),
         ...(continued ? { checkedAt: (compilation.validation as Record<string, unknown>).checkedAt,
           checkRounds: (compilation.validation as Record<string, unknown>).checkRounds, autoRepairRounds: (compilation.validation as Record<string, unknown>).autoRepairRounds,
           continuityEvidenceRecovery: { version: 1, admissionKey: continued.admissionKey, usageIds: continued.usageIds,

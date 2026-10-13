@@ -100,7 +100,11 @@ describe('server review cycle lineage and final verification', () => {
       continuity: 'complete', quality: 'complete', continuityErrorCount: 0, qualityErrorCount: 0, qualityReportId: 'q', requiredTools: [],
       decisionPending: true, requiredDecisions: [finding(content)] }
     const legacy = projectCurrentReviewNextStep(base)!, durable = projectCurrentReviewNextStep({ ...base, reviewProtocol: 1 })!
-    expect(legacy).toEqual(durable)
+    const { decisionBatchesAvailable: legacyBatches, ...legacyCoordination } = legacy
+    const { decisionBatchesAvailable: durableBatches, ...durableCoordination } = durable
+    expect(legacyCoordination).toEqual(durableCoordination)
+    expect(legacyBatches).toBe(false)
+    expect(durableBatches).toBe(true)
     expect(base.reviewProtocol).toBeUndefined()
     expect(projectCurrentReviewNextStep({ ...base, decisionPending: false })!.phase).toBe('resolution')
   })

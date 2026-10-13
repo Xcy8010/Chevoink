@@ -16,6 +16,7 @@ const guard = vi.hoisted(() => ({ probe: vi.fn(async () => ({ open: true })) }))
 vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({
   probeChapterReviewRevision: guard.probe, assertChapterReviewRevision: vi.fn(async () => undefined),
   isChapterRevisionChannelOpen: vi.fn(async () => true), readChapterReviewRevisionGuidance: vi.fn(async () => ''),
+  readChapterReviewReadiness: vi.fn(async () => null),
 }))
 import { auxiliaryTextModel } from '../../api/lib/agent/auxiliary-text-model.js'
 import { qualityAnalyzeTool, qualityRevisionApplyTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
@@ -33,6 +34,7 @@ function context(modelRuntime: ToolContext['modelRuntime']): ToolContext {
     creativeFreedom: 'bold', qualityMode: 'balanced', modelRuntime, signal: new AbortController().signal, emit: vi.fn() }
 }
 beforeEach(() => {
+  vi.spyOn(prisma, '$transaction').mockImplementation(async work => (work as (tx: Prisma.TransactionClient) => Promise<unknown>)({} as Prisma.TransactionClient))
   mocks.complete.mockReset()
   mocks.persist.mockReset().mockResolvedValue({ id: 'report', compilationId: null })
   mocks.report.mockReset().mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 1, repairRound: 0, status: 'passed', findings: [] })

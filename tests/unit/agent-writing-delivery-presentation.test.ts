@@ -39,7 +39,8 @@ function fixture(prompt = '完成第一章，只输出标题与正文。', title
       coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks, source: null }) } }
   const quality = { id: 'quality', compilationId: terminal.id, runId: subject.runId, chapterId: chapter.id, chapterRevision: chapter.revision,
     status: 'passed', repairRound: 0, deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(chapter.content).digest('hex') },
-    findings: [] as Array<{ id: string; signal: string; severity: string; disposition: string; authorFeedback: null }> }
+    findings: [] as Array<{ id: string; signal: string; severity: string; disposition: string; authorFeedback: null;
+      evidenceExcerpt: string; startOffset: number; endOffset: number; explanation: string; suggestion: string }> }
   const db = { $queryRaw: vi.fn(async () => [{ id: 'novel' }]),
     agentRun: { findFirstOrThrow: vi.fn(async () => ({ writingBindings: null })) },
     chapter: { findFirst: vi.fn(async () => chapter) }, storyCompilation: { findFirst: vi.fn(async () => terminal), findMany: vi.fn(async () => [terminal]) },
@@ -144,7 +145,9 @@ describe('saved artifact display withdrawal', () => {
     f.terminal.validation.errorCount = 1
     f.terminal.validation.findings = [{ signal: 'object', severity: 'error', evidence: '罗盘同一状态仍需作者确认', suggestion: '交作者确认' }]
     f.quality.status = 'needs_repair'
-    f.quality.findings = [{ id: 'retained', signal: 'object', severity: 'error', disposition: 'pending', authorFeedback: null }]
+    f.quality.findings = [{ id: 'retained', signal: 'object', severity: 'error', disposition: 'pending', authorFeedback: null,
+      evidenceExcerpt: '价值数字', startOffset: f.chapter.content.indexOf('价值数字'), endOffset: f.chapter.content.indexOf('价值数字') + 4,
+      explanation: '罗盘数字与同一物件状态仍冲突', suggestion: '核对当前物件事实' }]
     expect(await readChapterReviewReadiness(f.db, subject)).toMatchObject({ ready: true, continuity: 'complete', continuityErrorCount: 1, quality: 'complete', qualityErrorCount: 1 })
     expect(await readCompletedWritingDelivery(f.db, subject)).toBeNull()
     expect(f.chapter).toEqual(chapter)

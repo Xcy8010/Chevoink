@@ -10,6 +10,9 @@ const sourceReferenceSchema = z.object({ source: z.enum(['previous', 'current'])
 export const continuityCandidateSchema = continuityFindingInputSchema.omit({ sourceEvidence: true }).extend({ sourceEvidence: z.array(sourceReferenceSchema).min(1).max(8).optional() })
 export type ContinuityCandidate = z.infer<typeof continuityCandidateSchema>
 export type InvalidContinuitySource = { findingIndex: number; referenceIndex: number; source: 'previous' | 'current' }
+export function continuityUnlocatedCandidateCount(inspected: { audit: { classification: string }; invalidSourceReferences: InvalidContinuitySource[] }) {
+  return inspected.audit.classification === 'source_invalid' ? new Set(inspected.invalidSourceReferences.map(ref => ref.findingIndex)).size : 0
+}
 
 const MAX_AUDIT_CHARS = 262_144
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null

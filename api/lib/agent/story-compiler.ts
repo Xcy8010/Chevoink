@@ -836,8 +836,8 @@ export async function commitChapterBridge(input: {
     throw new DataAccessError(409, required.name === 'continuity_validate' ? 'CONTINUITY_CHECK_REQUIRED' : 'QUALITY_CHECK_REQUIRED',
       `当前 r${chapter.revision} 缺少完整且匹配的${required.name === 'continuity_validate' ? '连续性' : '质量'}检查（${required.name === 'continuity_validate' ? readiness.continuity : readiness.quality}）。保留正文；先调用 ${required.name}，compilationId=${compilation.id}，再重新核验交付，不能沿用旧报告或把失败当作通过。`)
   }
-  if (input.decisionOnly && (!input.runId || !readiness || !input.retainedFindings?.length)) {
-    throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '分批决定须引用原任务当前完整报告的真实意见与具体保留原因；未提交章节终态。')
+  if (input.decisionOnly && (!input.runId || readiness?.reviewProtocol !== 1 || !input.retainedFindings?.length)) {
+    throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '分批决定须由原任务冻结的严格意见协议允许，并引用当前完整报告的真实意见与具体保留原因；未提交章节终态。')
   }
   let decisionChanged = false
   const beforeDecisions = readiness

@@ -575,7 +575,14 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const result = await f.call(JSON.stringify(retained))
     expect(result.outcome).toBe('failed')
     expect(result.failureCode).toBe(kind === 'body' ? 'CONTINUITY_CHECK_REQUIRED' : kind === 'hard-pass' ? 'QUALITY_CHECK_REQUIRED' : 'REVIEW_DECISION_REQUIRED')
-    if (kind !== 'body') expect(result.output).toContain('精确参数模板')
+    if (kind === 'stale') {
+      expect(result.output).toContain('留置必须引用当前版本真实报告')
+      expect(result.output).toContain('旧报告')
+      expect(result.output).toContain(`compilationId=${f.compilation.id}`)
+    } else if (kind === 'hard-pass') {
+      expect(result.output).toContain('不能替代硬通过要求')
+      for (const item of f.retainedFindings) expect(result.output).toContain(item.findingId)
+    } else if (kind !== 'body') expect(result.output).toContain('精确参数模板')
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id }, include: { bridge: true, sceneTasks: true } })).toEqual(before)
   }))
   it('recovers an opaque-ID typo and paragraph-format anchor while refusing stale critic evidence and preserving review counts', () => fixture('写第一章', async ctx => {
