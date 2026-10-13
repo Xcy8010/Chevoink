@@ -8,7 +8,7 @@ import { DataAccessError, prisma } from '../../prisma.js'
 import { getChapterBaseline, getCreatedChapter, getLastTouchedChapter, recordChapterBaseline, recordCreatedChapter } from '../baseline.js'
 import { activeChapterScope, recalculateNovelStats } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
-import { assertChapterManuscriptRevision, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
+import { assertChapterManuscriptRevision, readChapterReviewWriteAdmission, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { placeCreatedChapter, resolveChapterPlacement } from '../../data/volume.js'
 import { normalizeToolInput } from './input-validation.js'
@@ -67,6 +67,37 @@ async function resolveChapterId(ctx: ToolContext, chapterId: string | undefined)
 
 const MISSING_CHAPTER_HINT =
   '未传 chapterId 且当前没有正在编辑的章节。请先用 novel_get_context 查看章节列表拿到 chapterId，或用 chapter_create 新建章节。'
+
+/** Same identity and composition as the effect adapters; malformed inputs and
+ * stale anchors remain the handler's existing errors. This never reserves work. */
+export async function preflightChapterReviewWrite(ctx: ToolContext, name: string, raw: unknown) {
+  const tool = name === 'chapter_write' ? chapterWriteTool : name === 'chapter_append' ? chapterAppendTool
+    : name === 'chapter_edit_range' ? chapterEditRangeTool : null
+  if (!tool) return null
+  let parsed: ReturnType<typeof chapterEditArguments.safeParse> | ReturnType<typeof chapterWriteArguments.safeParse>
+  try { parsed = tool.parameters.safeParse(normalizeToolInput(tool, raw)) } catch { return null }
+  if (!parsed.success) return null
+  const args = parsed.data
+  const chapterId = await resolveChapterId(ctx, args.chapterId)
+  if (!chapterId) return null
+  const chapter = await findOwnedChapter(ctx, chapterId)
+  if (!chapter) return null
+  const baseline = ctx.durableContent?.expectedRevision ?? getChapterBaseline(ctx.runId, chapter.id)
+  if (baseline !== null && baseline !== chapter.revision) return null
+  let effect: ReturnType<typeof composeChapterBody>
+  try {
+    if (name === 'chapter_edit_range') {
+      const editArgs = chapterEditArguments.parse(args)
+      const scope = await readWritingScope(ctx.transaction ?? prisma, ctx)
+      assertLocalEditArguments(scope.spec, editArgs)
+      effect = composeChapterBody(chapter.content, 'range', editArgs,
+        originalSelectionBoundary(scope.spec) || originalLocalEditBoundary(scope.spec) ? 1 : 2)
+    } else effect = composeChapterBody(chapter.content, name === 'chapter_write' ? 'replace' : 'append', args)
+  } catch (error) { if (error instanceof DataAccessError) return null; throw error }
+  return readChapterReviewWriteAdmission(ctx.transaction ?? prisma, ctx, {
+    chapterId, revision: chapter.revision, after: effect.after, editRanges: effect.ranges,
+  })
+}
 
 /** 章节不存在时附带当前章节提示，帮模型一次性纠错而不是盲猜 */
 async function buildChapterNotFound(ctx: ToolContext, chapterId: string): Promise<ToolResult> {

@@ -76,6 +76,8 @@ type TextCompletionOptions = {
   }
   /** Actual observed transport payload, including incomplete SSE; completeness and usage remain separate. */
   onObservedCompletion?: (value: { usageId: string; content: string; finishReason: string | null; toolCalls: unknown[]; transportComplete?: false }) => void
+  /** Server-only request ownership journal; must commit before provider send. */
+  beforeProviderDispatch?: (usageId: string) => Promise<void>
 }
 
 function ensureTextProviderConfigured(apiKey?: string | null) {
@@ -1233,6 +1235,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   try {
   options.signal?.throwIfAborted()
   await options.authorizedRequest?.beforeDispatch()
+  await options.beforeProviderDispatch?.(prepared.id)
   options.signal?.throwIfAborted()
   await assertGoalProviderAdmission()
   dispatched = true

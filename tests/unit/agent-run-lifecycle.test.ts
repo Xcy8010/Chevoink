@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   admissionPrompt: '', sourcePrompt: null as string | null,
   currentOriginal: null as { prompt: string; taskSpec: TaskSpec } | null,
   reviewReadiness: vi.fn<() => Promise<ChapterReviewReadiness | null>>(async () => null),
+  reviewWritePreflight: vi.fn(async (): Promise<{ kind: 'decision_required'; guidance: string } | null> => null),
   limitedDelivery: vi.fn(async () => null as import('../../api/lib/agent/writing-delivery-limitations.js').LimitedWritingDelivery | null),
   qualityRecovery: vi.fn(async () => null as import('../../api/lib/agent/quality-format-recovery.js').QualityFormatRecovery | null),
   requestRecovery: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/review-request-recovery.js').readReviewRequestRecovery>>> => []),
@@ -71,6 +72,9 @@ vi.mock('../../api/lib/agent/chapter-review-guard.js', async importOriginal => (
   ...await importOriginal<typeof import('../../api/lib/agent/chapter-review-guard.js')>(),
   readChapterReviewReadiness: mocks.reviewReadiness, probeChapterReviewRevision: mocks.reviewProbe,
 }))
+// Actual candidate construction and transactional admission have PostgreSQL
+// coverage. These tests exercise how the real loop handles that decision.
+vi.mock('../../api/lib/agent/tools/chapter-tools.js', () => ({ preflightChapterReviewWrite: mocks.reviewWritePreflight }))
 // Database call/result authentication is covered by the PostgreSQL recovery suite.
 // These loop-only fixtures contain no settled report witness.
 vi.mock('../../api/lib/agent/review-request-recovery.js', () => ({ readReviewRequestRecovery: mocks.requestRecovery }))
@@ -295,6 +299,7 @@ beforeEach(() => {
   mocks.sourcePrompt = null
   mocks.currentOriginal = null
   mocks.reviewReadiness.mockReset().mockResolvedValue(null)
+  mocks.reviewWritePreflight.mockReset().mockResolvedValue(null)
   mocks.limitedDelivery.mockReset().mockResolvedValue(null)
   mocks.qualityRecovery.mockReset().mockResolvedValue(null)
   mocks.settledQuality.mockReset().mockResolvedValue([])
@@ -337,6 +342,41 @@ function context(): ToolContext {
 }
 
 describe('server assessment fallback in the real execution loop', () => {
+  it('defers repeated advisory-driven writes and accepts current reasoned retention in the same batch', async () => {
+    let state = { ...readiness('complete', 'complete'), decisionPending: true }
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const guidance = '当前正文已进入核验；新增文风建议保留具体理由，提交当前报告，不再改稿重新检查。'
+    mocks.reviewWritePreflight.mockResolvedValue({ kind: 'decision_required', guidance })
+    const writers = ['chapter_edit_range', 'chapter_write', 'chapter_append'].map(name => tool(name, async () => {
+      throw new Error('A deferred advisory proposal must not reach its writer')
+    }, false))
+    const check = tool('continuity_validate', async () => { throw new Error('Current assessment must not be repurchased') })
+    const retainedFindings = [{ source: 'quality', reportId: 'current-report', findingId: 'current-advice', reason: '当前动作承接完整，保留简洁叙述而不新增解释。' }]
+    const commit = tool('chapter_bridge_commit', async () => {
+      state = { ...state, decisionPending: false }
+      mocks.committedChapter.mockResolvedValue(true)
+      return { output: '已提交当前检查与具体保留决定' }
+    }, false)
+    mocks.tools = [...writers, check, commit]
+    const before = structuredClone(mocks.chapters)
+    queue(response('', [
+      ...Array.from({ length: 6 }, (_, index) => call(`advisory-${index}`, writers[index % 3].name,
+        JSON.stringify({ chapterId: 'c', content: `另一种措辞${index}`, oldText: '当前章节正文', newText: `另一种措辞${index}` }))),
+      call('retain-and-commit', commit.name, JSON.stringify({ compilationId: 'comp', retainedFindings })),
+    ]), response('已保存正文和检查结果。'))
+    await run('写下一章')
+    expect(mocks.reviewWritePreflight).toHaveBeenCalledTimes(6)
+    writers.forEach(writer => expect(writer.execute).not.toHaveBeenCalled())
+    expect(check.execute).not.toHaveBeenCalled()
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(commit.execute).toHaveBeenCalledWith(expect.anything(), { compilationId: 'comp', retainedFindings })
+    expect(mocks.chapters).toEqual(before)
+    const deferred = events().filter(event => event.type === 'tool.deferred' && event.callId.startsWith('advisory-'))
+    expect(deferred).toHaveLength(6)
+    expect(deferred.every(event => event.type === 'tool.deferred' && event.execution === 'not_dispatched' && event.reason === guidance)).toBe(true)
+    expect(events().filter(event => (event.type === 'tool.call' || event.type === 'tool.result') && event.callId.startsWith('advisory-'))).toEqual([])
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
   it('resumes the old schema-blocked next49 checkpoint through actual prerequisites and body without a budget or grace reset', async () => {
     const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
     taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 49, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false,

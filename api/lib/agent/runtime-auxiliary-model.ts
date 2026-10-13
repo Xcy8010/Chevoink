@@ -16,10 +16,12 @@ import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.
 import { readQualityUnavailableProof } from './quality-unavailable-proof.js'
 import { inspectContinuityResponse } from './continuity-format-recovery.js'
 import { continuityEvidenceCorrectionInput, continuityEvidenceCorrectionSystem } from './continuity-response-correction.js'
+import { continuityReassessmentRequest } from './assessment-response-lifecycle.js'
 
 const steps = {
   continuity_critic: { parent: 'continuity_validate', previous: null },
   continuity_evidence_correction: { parent: 'continuity_validate', previous: 'continuity_critic' },
+  continuity_reassessment: { parent: 'continuity_validate', previous: 'continuity_critic' },
   continuity_repair: { parent: 'continuity_validate', previous: 'continuity_critic' },
   continuity_repair_retry: { parent: 'continuity_validate', previous: 'continuity_repair' },
   quality_critic: { parent: 'quality_analyze', previous: null },
@@ -29,7 +31,7 @@ const steps = {
   quality_repair_retry: { parent: 'quality_analyze', previous: 'quality_repair' },
 } as const
 export type AuxiliaryModelStep = keyof typeof steps
-const stepSchema = z.enum(['continuity_critic', 'continuity_evidence_correction', 'continuity_repair', 'continuity_repair_retry', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
+const stepSchema = z.enum(['continuity_critic', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
 const parentInput = z.object({ input: z.object({ callId: z.string(), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema }) })
 const isolatedRequest = z.object({ body: z.object({
   messages: z.array(z.object({ role: z.enum(['system', 'user']), content: z.string() })).min(1),
@@ -175,6 +177,25 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         if (inspected.audit.classification !== 'source_invalid' || !inspected.structured || !inspected.audit.rawResponse.complete
           || runtimeJson(request.body.messages).hash !== runtimeJson(expected).hash) {
           return runtimeError('RUNTIME_RECEIPT_INVALID', '引用纠正只能定位原连续性意见，不能重新审稿或改变原判断。')
+        }
+      }
+      if (captured.step === 'continuity_reassessment') {
+        const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.literal(8), criticSystem: z.string(), criticInput: z.string(),
+          sourceBodies: z.object({ previous: z.string().nullable(), current: z.string() }) }) }) }).safeParse(parent.inputSnapshot)
+        const usage = result.usageReceipt, response = parsedResult.data.result
+        if (!work.success || usage?.source !== 'reported' || usage.settlementStatus !== 'settled' || usage.promptTokens === null || usage.completionTokens === null
+          || usage.promptTokens < 0 || usage.completionTokens < 0 || response.finishReason !== 'stop' || response.toolCalls.length) {
+          return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '首个连续性回复尚无完整已结算结果，不能派发完整复评。')
+        }
+        const frozen = work.data.input.work
+        const inspected = inspectContinuityResponse(response.content, frozen.sourceBodies, true, 6)
+        const expected = continuityReassessmentRequest(frozen.criticSystem, frozen.criticInput, inspected, frozen.sourceBodies)
+        const request = isolatedRequest.parse(captured.request)
+        const claim = await tx.agentArtifact.findFirst({ where: { runId: lease.runId, artifactType: 'continuityReview',
+          metadata: { path: ['fullReassessmentKey'], equals: `durable:${parent.id}:continuity_reassessment` } } })
+        if (inspected.complete || !inspected.audit.rawResponse.complete || !claim
+          || runtimeJson(request.body.messages).hash !== runtimeJson([{ role: 'system', content: expected.system }, { role: 'user', content: expected.content }]).hash) {
+          return runtimeError('RUNTIME_RECEIPT_INVALID', '完整复评须绑定原响应、完整输入和唯一预约，不能重审已完成报告或借用旧协议。')
         }
       }
     }

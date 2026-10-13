@@ -24,6 +24,8 @@ import { parseIndependentContinuityResult, continuityCriticSystem, continuityRev
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
 import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '../continuity-format-recovery.js'
 import { runContinuityEvidenceCorrection } from '../continuity-response-correction.js'
+import { runContinuityReassessment } from '../assessment-response-lifecycle.js'
+import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const chapterSchema = z.object({ id: z.string(), title: z.string(), revision: z.number().int().positive(), content: z.string(), orderIndex: z.number().int() }).strict()
@@ -31,7 +33,7 @@ const routeSchema = auxiliaryRouteSchema
 const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional() }).strict()
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema,
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema,
     sourceBodies: z.object({ previous: z.string().nullable(), current: z.string() }).optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
@@ -79,7 +81,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       const observed = await readObservedBaseline(tx, lease.taskRootId, cursor.expectedRevision, { kind: 'chapter', id: context.chapter.id })
       if (observed?.kind !== 'chapter' || observed.revision !== context.chapter.revision) return { kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '请先 chapter_read 读取目标正文；独立审阅无需准备章节写作。' }
       const cached = await readStandaloneContinuityReport(ctx, context.contextHash, typeof args.focus === 'string' ? args.focus : undefined, tx)
-      return { kind: 'check' as const, version: 7 as const, compiler: null, standaloneContextHash: context.contextHash, chapter: context.chapter, sourceBodies: { previous: context.precedingBodies, current: context.chapter.content }, sourceId: null,
+      return { kind: 'check' as const, version: 8 as const, compiler: null, standaloneContextHash: context.contextHash, chapter: context.chapter, sourceBodies: { previous: context.precedingBodies, current: context.chapter.content }, sourceId: null,
         coverage: { version: 1 as const, contentHash: runtimeJson({ content: context.chapter.content }).hash, charCount: context.chapter.content.length, sourceHash: null },
         criticSystem: continuityCriticSystem, criticInput: `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, typeof args.focus === 'string' ? args.focus : undefined)}`,
         repairSystem: repairPrompt, repair: false, cached: cached?.findings ?? null, route: null, price: null }
@@ -105,7 +107,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     const repair = false
     validatedContinuityCheckRounds(compilation.validation, !reusable)
     const originalRequest = await readOriginalTaskRequest(tx, ctx)
-    return { kind: 'check' as const, version: 7 as const, compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content }, sourceId, coverage,
+    return { kind: 'check' as const, version: 8 as const, compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content }, sourceId, coverage,
       criticSystem: continuityCriticSystem, repairSystem: repairPrompt,
       criticInput: [`章节：《${compilation.chapter.title}》`,
         `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
@@ -163,8 +165,8 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     let parsed = frozen.cached ? { structured: true, findings: frozen.cached } : critic?.finishReason === 'stop' && !critic.toolCalls.length
       ? parseIndependentContinuityResult(critic.content, frozen.version >= 3 ? 2 : 1, frozen.version >= 4 ? frozen.sourceBodies : undefined) : { structured: false, findings: [] }
     let inspected = frozen.version >= 5 && critic && frozen.sourceBodies
-      ? inspectContinuityResponse(critic.content, frozen.sourceBodies, critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3) : null
-    if (frozen.version >= 7 && inspected && frozen.sourceBodies && inspected.audit.classification === 'source_invalid') {
+      ? inspectContinuityResponse(critic.content, frozen.sourceBodies, critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3) : null
+    if (frozen.version === 7 && inspected && frozen.sourceBodies && inspected.audit.classification === 'source_invalid') {
       const billingKnown = await withRunLease(lease, async tx => {
         const previous = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:continuity_critic` } } })
         const attempt = previous && await tx.agentProviderAttempt.findUnique({ where: { operationId_attemptKey: { operationId: previous.id, attemptKey: '1' } }, include: { usageReceipt: true } })
@@ -187,6 +189,41 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
           return { content: response.content, complete: response.finishReason === 'stop' && !response.toolCalls.length }
         } })
     }
+    if (frozen.version >= 8 && inspected && critic && frozen.sourceBodies && !inspected.complete) {
+      const billingKnown = await withRunLease(lease, async tx => {
+        const previous = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:continuity_critic` } } })
+        const attempt = previous && await tx.agentProviderAttempt.findUnique({ where: { operationId_attemptKey: { operationId: previous.id, attemptKey: '1' } }, include: { usageReceipt: true } })
+        const usage = attempt?.usageReceipt
+        return previous?.status === 'succeeded' && attempt?.status === 'succeeded' && usage?.source === 'reported' && usage.settlementStatus === 'settled'
+          && usage.promptTokens !== null && usage.completionTokens !== null && usage.promptTokens >= 0 && usage.completionTokens >= 0
+      })
+      inspected = await runContinuityReassessment({ original: inspected, bodies: frozen.sourceBodies, system: frozen.criticSystem, content: frozen.criticInput,
+        billingKnown, providerComplete: critic.finishReason === 'stop' && !critic.toolCalls.length, slotUsed: false, signal: ctx.signal,
+        assertCurrent: () => withRunLease(lease, tx => assertCurrent(tx, frozen)),
+        claim: request => withRunLease(lease, async tx => {
+          await assertCurrent(tx, frozen)
+          const key = `durable:${operation.id}:continuity_reassessment`
+          const prior = await tx.agentArtifact.findFirst({ where: { runId: lease.runId, artifactType: 'continuityReview', metadata: { path: ['fullReassessmentKey'], equals: key } } })
+          if (prior) return true // The immutable provider operation replays; it cannot resend.
+          await tx.agentArtifact.create({ data: { runId: lease.runId, artifactType: 'continuityReview', title: '连续性复评请求审计', content: '原响应及完整冻结输入保留；本工具的一次完整复评已预约。',
+            metadata: runtimeJson({ version: 1, fullReassessmentKey: key, operationId: operation.id, original: inspected!.audit,
+              frozenInput: { system: frozen.criticSystem, content: frozen.criticInput, bodies: frozen.sourceBodies, coverage: frozen.coverage }, request }).value } })
+          return true
+        }),
+        notDispatched: () => withRunLease(lease, async tx => {
+          const key = `durable:${operation.id}:continuity_reassessment`
+          if (await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId,
+            operationKey: `aux:${operation.id}:continuity_reassessment` } } })) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '已存在复评请求，不能观察为未派发。')
+          if (!await tx.agentArtifact.findFirst({ where: { runId: lease.runId, artifactType: 'continuityReview', metadata: { path: ['fullReassessmentNotDispatchedKey'], equals: key } } })) {
+            await tx.agentArtifact.create({ data: { runId: lease.runId, artifactType: 'continuityReview', title: '连续性复评未派发审计', content: '本实例在供应商请求建立前观察到取消或输入变化。',
+              metadata: runtimeJson({ version: 1, fullReassessmentNotDispatchedKey: key, operationId: operation.id, outcome: 'guard_failed_before_dispatch' }).value } })
+          }
+        }),
+        dispatch: async request => {
+          const response = await call('continuity_reassessment', request.system, request.content, 0)
+          return { content: response.content, complete: response.finishReason === 'stop' && !response.toolCalls.length }
+        } })
+    }
     if (inspected) parsed = { structured: frozen.version >= 7 ? inspected.complete : inspected.structured, findings: inspected.findings }
     const compiler = frozen.compiler
     if (!compiler) return commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
@@ -201,6 +238,10 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${frozen.chapter.id} FOR UPDATE`
       if (frozen.sourceId) await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${frozen.sourceId} FOR SHARE`
       await assertCurrent(tx, frozen)
+      if (frozen.version >= 8 && !frozen.cached) await markChapterReviewCycleVerification(tx, ctx, {
+        compilationId: compiler.id, chapterId: frozen.chapter.id, revision: frozen.chapter.revision, contentHash: frozen.coverage.contentHash,
+        kind: 'continuity', callId: ctx.callId,
+      })
       const report = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compiler.id, findings: parsed.findings,
         expectedChapterRevision: frozen.chapter.revision, independentCheck: parsed.structured ? 'complete' : 'unavailable', coverage: frozen.coverage, focus: typeof args.focus === 'string' ? args.focus : undefined, signal: ctx.signal }, tx)
       // durable 在提交事务里累计已完成的检查，零错误也不恢复次数。

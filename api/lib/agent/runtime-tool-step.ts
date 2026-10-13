@@ -12,7 +12,8 @@ import { rejectToolCursorCall } from './runtime-tool-cursor.js'
 import { failedToolResultSchema, reduceExecutionReceipt } from './runtime-reducer.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { chapterReadTool, planReadTool, novelGetContextTool, chapterListSummariesTool, memorySearchTool } from './tools/read-tools.js'
-import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool, chapterCreateTool, chapterRenameTool } from './tools/chapter-tools.js'
+import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool, chapterCreateTool, chapterRenameTool, preflightChapterReviewWrite } from './tools/chapter-tools.js'
+import { deferReviewWriteInTransaction } from './runtime-review-deferral.js'
 import { executeDurableChapterRename } from './tools/durable-chapter.js'
 import { planSaveTool, planRenameTool, planDeleteTool, memorySaveTool } from './tools/write-tools.js'
 import { executeDurablePlanSave } from './tools/durable-plan.js'
@@ -201,8 +202,15 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       if (baseline?.kind !== 'chapter') return { reject: { cursor, callId: call.id, tool } }
       ctx.durableContent = { ...capability, chapterId: target, expectedRevision: baseline.revision }
     }
+    // A prepared operation has an immutable input and must recover through its
+    // original receipt path. Only a genuinely unreserved proposal can defer.
+    if (current.frame.state.phase === 'idle' && ['chapter_write', 'chapter_append', 'chapter_edit_range'].includes(call.name)) {
+      const admission = await preflightChapterReviewWrite({ ...ctx, transaction: tx }, call.name, args)
+      if (admission?.kind === 'decision_required') return { deferred: await deferReviewWriteInTransaction(tx, lease, frame, call, admission.guidance) }
+    }
     return { tool, args, ctx, cursor, needsApproval: grant.permission === 'ask' || grant.alwaysConfirm }
   })
+  if ('deferred' in selected) return { kind: 'context' as const, frame: selected.deferred! }
   if ('recover' in selected) {
     // Results can arrive after the worker dies between recording and reduction.
     // Recover the original bill/result without reconstructing or redispatching HTTP.

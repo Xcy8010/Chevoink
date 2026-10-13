@@ -27,7 +27,8 @@ import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches, continuityStoryInput, type CompilerContinuityCoverage } from './compiler-continuity-contract.js'
 import { readWritingVolumeContext, assertWritingVolumeBoundary, isWritingVolumeTargetOrderIndex } from './writing-volume.js'
 import { writingVolumeDecisionSchema, type WritingVolumeDecision } from '../../../shared/contracts/writing-volume-contracts.js'
-import { readReviewCycle } from './review-cycle.js'
+import { readReviewCycle, markReviewCycleVerification } from './review-cycle.js'
+import { observedReviewCycleVerificationBody } from './review-cycle-store.js'
 
 type PreparedBridge = {
   lastUnfinishedAction: string
@@ -318,9 +319,15 @@ export async function prepareStoryCompilation(input: {
     where: { userId: input.userId, novelId: input.novelId, runId: { in: originalRunIds }, targetOrderIndex: target.targetOrderIndex },
     select: { validation: true, preparedContext: true, chapterId: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   })
-  const priorCycle = target.chapter ? priorRepairStates.map(item => readReviewCycle(item.preparedContext, {
+  let priorCycle = target.chapter ? priorRepairStates.map(item => readReviewCycle(item.preparedContext, {
     taskId: writing.taskId, userId: input.userId, novelId: input.novelId, chapterId: target.chapter!.id,
   })).find(Boolean) : null
+  if (priorCycle && !priorCycle.verificationStarted && target.chapter) {
+    const report = await db.chapterQualityReport.findFirst({ where: { userId: input.userId, novelId: input.novelId,
+      chapterId: target.chapter.id, runId: { in: originalRunIds } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+    const evidence = priorRepairStates.map(item => observedReviewCycleVerificationBody(priorCycle!, item.validation, report, target.chapter!)).find(Boolean)
+    if (evidence) priorCycle = markReviewCycleVerification(priorCycle, evidence)
+  }
   // 同目标章节的修复与检查额度跨重准备继承：否则重新 prepare 就能重置预算、绕开收敛保险丝。
   const autoRepairRounds = Math.max(0, ...priorRepairStates.map(item => continuityRepairRounds(item.validation)))
   const checkRounds = Math.max(0, ...priorRepairStates.map(item => validatedContinuityCheckRounds(item.validation)))

@@ -46,6 +46,8 @@ import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/
 import { renderChapterWritingBackground } from '../writing-request-context.js'
 import { resolveDurableAuxiliaryRuntime, resolveReviewModelRuntime } from '../runtime-auxiliary-call.js'
 import { readQualityFormatRecovery, claimQualityFormatRecovery, claimCurrentQualityFormatRecovery, bindQualityFormatRecovery, hasReconciledQualityRequest, type QualityFormatRecovery } from '../quality-format-recovery.js'
+import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
+import { runtimeJson } from '../runtime-common.js'
 
 const READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const WRITE = { plan: 'deny', build: 'allow', review: 'allow' } as const
@@ -313,7 +315,11 @@ export const qualityAnalyzeTool = defineTool({
     const callReview = (...input: Parameters<typeof generateReviewCompletion>) => runReviewStep(ctx.signal, reviewSignal, () => generateReviewCompletion(...input))
     let response: string | null = null
     try {
-      if (formatRecovery) await assertCurrent()
+      await assertCurrent()
+      if (bundle.compilation) await prisma.$transaction(tx => markChapterReviewCycleVerification(tx, ctx, {
+        compilationId: bundle.compilation!.id, chapterId, revision: bundle.chapter.revision, contentHash: runtimeJson({ content: bundle.chapter.content }).hash,
+        kind: 'quality', callId: ctx.callId,
+      }))
       const stored = z.object({ criticResponse: z.object({ rawResponse: z.object({ encoding: z.literal('json-string'), content: z.string() }) }) }).safeParse(cacheMetrics)
       let previousResponse: string | null = null
       if (stored.success) {
@@ -432,8 +438,8 @@ export const qualityAnalyzeTool = defineTool({
       output: criticFallback
         ? `质量模型返回的报告格式不完整，不能判定质量通过。确定性报告和正文已保留；${formatRecovery ? '本次工具执行内的独立计费格式恢复已完成，报告仍不可验证；后续检查须遵守真实作者继续授权、预算与未知结果保护。' : ''}不得重复改写正文来解决格式错误。`
         : evidenceCorrectionIncomplete
-          ? `部分质量意见的引用无法在正文中逐字定位，${attemptedEvidenceCorrection ? '本次引用校正未能完成，' : ''}报告已保留但不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`
-          : `质量报告仍有证据未能在当前正文中定位，已定位的意见与原报告保留，${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。可对同一正文重试一次完整检查；若再次失败请交作者处理，禁止改写正文来凑通过。`,
+          ? `部分质量意见的引用无法在正文中逐字定位，${attemptedEvidenceCorrection ? '本次引用校正未能完成，' : ''}报告已保留但不能判定质量通过。本次恢复额度已用，保留真实失败原因等待作者继续，不为解除检查阻塞改写正文。`
+          : `质量报告仍有证据未能在当前正文中定位，已定位的意见与原报告保留，${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。保留真实失败原因等待作者继续，不为解除检查阻塞改写正文。`,
       summary: criticFallback ? '质量报告格式不完整' : '质量证据定位未完成', display: reportDisplay(report) }
     const reportMetrics: Record<string, unknown> = report.deterministicMetrics && typeof report.deterministicMetrics === 'object' && !Array.isArray(report.deterministicMetrics) ? report.deterministicMetrics : {}
     const unlocatedCount = typeof reportMetrics.unlocatedFindings === 'number' ? reportMetrics.unlocatedFindings : 0

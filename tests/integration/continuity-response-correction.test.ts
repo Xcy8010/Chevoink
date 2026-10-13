@@ -30,6 +30,9 @@ const raw = JSON.stringify({ findings: [finding] })
 const correction = JSON.stringify({ corrections: [{ index: 0, sourceEvidence: [
   { source: 'current', segmentId: 'c0', quote: '门开着' }, { source: 'current', segmentId: 'c0', quote: '门锁着' },
 ] }] })
+const reassessment = JSON.stringify({ decisions: [{ index: 0, action: 'confirm', reason: '核对两处实际原文后确认原判断并纠正定位。',
+  sourceEvidence: [{ source: 'current', segmentId: 'c0', quote: '门开着' }, { source: 'current', segmentId: 'c0', quote: '门锁着' }], findingIndex: 0 }],
+  findings: [{ ...finding, sourceEvidence: [{ source: 'current', segmentId: 'c0', quote: '门开着' }, { source: 'current', segmentId: 'c0', quote: '门锁着' }] }] })
 
 describe.runIf(available)('continuity evidence correction actual PostgreSQL effects', () => {
   it.each(['legacy', 'durable'] as const)('%s applies the same exact report policy through actual tools', path => fixture(async f => {
@@ -54,9 +57,9 @@ describe.runIf(available)('continuity evidence correction actual PostgreSQL effe
           const diagnostic = await prisma.agentArtifact.findFirst({ where: { runId: f.runId, artifactType: 'continuityReview',
             metadata: { path: ['original', 'contentHash'], equals: inspectContinuityResponse(raw, { previous: null, current: body }, true, 5).audit.contentHash } } })
           expect(diagnostic).not.toBeNull()
-          expect(request.messages[0].content).toContain('不增删意见')
+          expect(request.messages[0].content).toContain('为每个原 index')
         }
-        const content = sends === 1 ? raw : correction
+        const content = sends === 1 ? raw : reassessment
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
       })
       vi.stubGlobal('fetch', fetch)
@@ -82,7 +85,7 @@ describe.runIf(available)('continuity evidence correction actual PostgreSQL effe
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
       expect(saved.validation).toMatchObject({ independentCheck: 'complete', findings: [{ signal: finding.signal, severity: finding.severity,
         evidence: finding.evidence, suggestion: finding.suggestion, sourceEvidence: [{ source: 'current', quote: '门开着' }, { source: 'current', quote: '门锁着' }] }],
-        continuityCriticResponse: { parserVersion: 5, candidateFindings: [finding] } })
+        continuityCriticResponse: { parserVersion: 6, reassessment: { original: { candidateFindings: [finding] } } } })
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(body)
     } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
   }))
@@ -284,7 +287,7 @@ describe.runIf(available)('continuity evidence correction actual PostgreSQL effe
       let sends = 0
       const fetch = vi.fn(async () => {
         sends++
-        const content = scenario === 'offline-correction' ? sends === 1 ? raw : sends === 2 ? correction : '{"findings":[]}' : '{"findings":[]}'
+        const content = scenario === 'offline-correction' ? sends === 1 ? raw : sends === 2 ? reassessment : '{"findings":[]}' : '{"findings":[]}'
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
       })
       vi.stubGlobal('fetch', fetch)
@@ -301,8 +304,7 @@ describe.runIf(available)('continuity evidence correction actual PostgreSQL effe
       }
       const applied = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview' } })
       expect(applied.some(item => typeof (item.metadata as Record<string, unknown> | null)?.assessmentAppliedReservationId === 'string')).toBe(true)
-      if (scenario === 'offline-correction') expect(applied.some(item => (item.metadata as Record<string, unknown> | null)?.sourceCallId === 'fresh'
-        && typeof (item.metadata as Record<string, unknown>).correctionObservationId === 'string')).toBe(true)
+      if (scenario === 'offline-correction') expect(applied.some(item => typeof (item.metadata as Record<string, unknown> | null)?.assessmentApplicationKey === 'string')).toBe(true)
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者的新正文，门已经打开。', revision: { increment: 1 } } })
       expect((await continuityValidateTool.execute({ ...fresh, callId: 'next-revision' }, { chapterId: f.chapterId })).outcome).not.toBe('failed')
       expect(fetch).toHaveBeenCalledTimes(scenario === 'offline-correction' ? 3 : 2)

@@ -10,6 +10,7 @@ import { runtimeJson, runtimeError, type RuntimeTx } from '../runtime-common.js'
 import { withRunLease, type RunLeaseToken } from '../runtime-lease.js'
 import { readExecutionStateInTransaction } from '../runtime-state.js'
 import { compilerStateHash, compilerObservationSchema } from '../runtime-compiler-observation.js'
+import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { readObservedBaseline } from '../runtime-observed-baseline.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
@@ -271,6 +272,10 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
       if (frozen.compiler) await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${frozen.compiler.id} FOR UPDATE`
       await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${frozen.chapter.id} FOR UPDATE`
       await assertCurrent(tx, frozen)
+      if (frozen.compiler && !frozen.cached) await markChapterReviewCycleVerification(tx, ctx, {
+        compilationId: frozen.compiler.id, chapterId: frozen.chapter.id, revision: frozen.chapter.revision,
+        contentHash: runtimeJson({ content: frozen.chapter.content }).hash, kind: 'quality', callId: ctx.callId,
+      })
       const created = frozen.cached ? null : await persistHumanityQualityReport({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
         compilationId: frozen.compiler?.id, chapterId: frozen.chapter.id, chapterRevision: frozen.chapter.revision, mode: frozen.mode,
         deterministicMetrics: deterministic.metrics, deterministicFindings: deterministic.findings, criticFindings: findings, criticComplete: complete,

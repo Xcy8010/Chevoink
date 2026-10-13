@@ -485,6 +485,30 @@ describe('explicit zero provider usage is not missing usage', () => {
     await expect(generateTextCompletion('system', 'user', { userId: 'test', action: 'test' })).resolves.toBe('完整报告')
     expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ requestTokens: 100, responseTokens: 20 }))
   })
+  it.each([false, true])('journals the actual usage ID before provider send; rejected=%s', async rejected => {
+    const usage: Record<string, unknown> = { id: 'test-usage', usageSource: 'prepared', billingStatus: 'prepared',
+      requestTokens: null, responseTokens: null, reservedCreditMilli: 200 }
+    mocks.updateMany.mockImplementation(async ({ data }) => { Object.assign(usage, data); return { count: 1 } })
+    mocks.update.mockImplementation(async ({ data }) => { Object.assign(usage, data); return usage })
+    mocks.findUsage.mockResolvedValue(usage)
+    let journaled = false
+    const fetcher = vi.fn(async () => { expect(journaled).toBe(true); return qualityResponse() })
+    vi.stubGlobal('fetch', fetcher)
+    const trace = createTextRequestTrace(), failure = new Error('ownership journal rejected')
+    const journal = vi.fn(async (usageId: string) => {
+      expect(usageId).toBe('test-usage'); expect(fetcher).not.toHaveBeenCalled()
+      if (rejected) throw failure
+      journaled = true
+    })
+    const request = withTextRequestTrace(trace, () => generateTextCompletion('system', 'user', { userId: 'test', action: 'test', beforeProviderDispatch: journal }))
+    if (rejected) {
+      await expect(request).rejects.toBe(failure)
+      expect(fetcher).not.toHaveBeenCalled(); expect(mocks.charge).not.toHaveBeenCalled()
+      expect(usage).toMatchObject({ billingStatus: 'not_dispatched', reservedCreditMilli: 0, requestTokens: null, responseTokens: null })
+      expect(trace.records).toEqual([{ usageId: 'test-usage', status: 'not_dispatched', billingKnown: true }])
+    } else { await expect(request).resolves.toBe('{"findings":[]}'); expect(fetcher).toHaveBeenCalledOnce() }
+    expect(journal).toHaveBeenCalledOnce()
+  })
   it.each(['stop', 'length', 'incomplete', 'malformed-after-stop'] as const)('observes %s SSE once and preserves real usage even when its observer throws', async finish => {
     for (const observerThrows of [false, true]) {
       const usage: Record<string, unknown> = { id: 'test-usage', usageSource: 'prepared', billingStatus: 'prepared',

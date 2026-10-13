@@ -15,6 +15,7 @@ import { continuitySourceInput } from './continuity-review-context.js'
 import { COMPILER_CONTINUITY_PROTOCOL } from './compiler-continuity-contract.js'
 import { runtimeJson } from './runtime-common.js'
 import { isKnownTextRequestBilling } from './text-request-billing.js'
+import { readOwnedContinuityReassessment } from './continuity-reassessment-witness.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -214,11 +215,15 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, pend
     const family = item.toolName === 'quality_analyze' ? 'agent3Humanity' : 'agent3Continuity'
     const primaryAction = `${family}Critic`
     const actions = new Set([primaryAction, `${primaryAction}OutputRecovery`, `${primaryAction}EmptyRecovery`,
-      ...(item.toolName === 'quality_analyze' ? ['agent3HumanityFormatRecovery'] : ['agent3ContinuityEvidenceCorrection'])])
+      ...(item.toolName === 'quality_analyze' ? ['agent3HumanityFormatRecovery'] : ['agent3ContinuityEvidenceCorrection', 'agent3ContinuityCriticSecondPass'])])
     const payments = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, providerType: 'text', action: { startsWith: family },
       createdAt: { gte: call.createdAt, lte: result.createdAt }, OR: [{ agentRunId: call.runId }, { chapterId: item.chapterId },
         { targetId: { in: [item.chapterId, ...(item.compilationId ? [item.compilationId] : [])] } }] }, orderBy: { id: 'asc' } })
     const primaryCount = payments.filter(row => row.action === primaryAction).length
+    if (payments.some(row => row.action === 'agent3ContinuityCriticSecondPass') && !await readOwnedContinuityReassessment(tx, subject, {
+      runId: call.runId, callId: item.callId, chapterId: item.chapterId, revision: item.revision, compilationId: item.compilationId,
+      callAt: call.createdAt, resultAt: result.createdAt, payments,
+    })) continue
     const corrections = payments.filter(row => row.action === 'agent3ContinuityEvidenceCorrection')
     if (corrections.length) {
       // A correction-only call reuses a confirmed earlier critic. Authenticate

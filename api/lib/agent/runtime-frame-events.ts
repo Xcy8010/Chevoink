@@ -3,6 +3,7 @@ import type { AgentExecutionOutbox } from '@prisma/client'
 import type { AgentStreamEventBody, AgentToolDisplayPayload, AgentMessagePart, AgentRollbackSnapshot } from '../../../shared/contracts/index.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
+import { projectReviewWriteDeferral } from './runtime-review-deferral.js'
 
 export const durableMessageId = (rootId: string, turn: number) => `dm-${runtimeJson({ rootId, turn }).hash.slice(0, 48)}`
 const sourceSchema = z.object({ revision: z.number().int().nonnegative(), snapshotHash: z.string(), previousHash: z.string().nullable() }).strict()
@@ -65,6 +66,8 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
     model: current.configuration.model.modelName ?? current.configuration.model.tier }, mode: current.configuration.mode, title: '创作任务' }]
   const previous = await readExecutionFrame(tx, source.taskRootId, frame.revision - 1)
   const messageId = durableMessageId(source.taskRootId, frame.state.turn)
+  const deferred = await projectReviewWriteDeferral(tx, source.taskRootId, previous, frame, messageId)
+  if (deferred) return deferred
   if (frame.state.phase === 'awaiting_operation' && previous.state.pendingOperationId !== frame.state.pendingOperationId) {
     const operation = await tx.agentOperation.findFirst({ where: { id: frame.state.pendingOperationId!, taskRootId: source.taskRootId } })
     if (!operation || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '待执行操作事件缺少原输入。')

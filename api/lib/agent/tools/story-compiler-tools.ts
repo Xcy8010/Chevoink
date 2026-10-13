@@ -6,6 +6,11 @@ import { runContinuityEvidenceCorrection, claimLegacyContinuityCorrection, readL
   claimContinuedContinuityAssessment, recordLegacyContinuityCorrectionObservation, recordLegacyContinuityAssessmentObservation } from '../continuity-response-correction.js'
 import { readReusableLegacyContinuityCorrection, markLegacyContinuityCorrectionApplied, markLegacyContinuityAssessmentApplied } from '../continuity-response-correction.js'
 import { readContinuedContinuityEvidence } from '../continued-continuity-evidence.js'
+import { runContinuityReassessment, observeLegacyContinuityAssessment, claimLegacyContinuityReassessment, reserveLegacyContinuityAssessment,
+  readLegacyContinuityAssessment, markLegacyContinuityAssessmentApplication, type LegacyAssessmentInput } from '../assessment-response-lifecycle.js'
+import { readReusableLegacyContinuityAssessment, bindLegacyContinuityAssessment } from '../assessment-response-lifecycle.js'
+import { observeLegacyContinuityReassessmentNotDispatched, observeLegacyContinuityFirstNotDispatched, bindLegacyContinuityRequest } from '../assessment-response-lifecycle.js'
+import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { createTextRequestTrace, withTextRequestTrace, textRequestsFinished } from '../../text-request-trace.js'
 import { readOfflineContinuityRecovery, applyOfflineContinuityRecovery } from '../continuity-offline-recovery.js'
 import { runtimeJson } from '../runtime-common.js'
@@ -116,24 +121,87 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   const trace = createTextRequestTrace()
   let observedContent: string | undefined
   let observedComplete: boolean | undefined
+  const frozen: LegacyAssessmentInput = { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system,
+    content: input.content, ...(input.bindingHash ? { bindingHash: input.bindingHash } : {}),
+    targetType: input.options.targetType as 'chapter' | 'story_compilation', targetId: input.options.targetId! }
+  type Observation = Parameters<typeof observeLegacyContinuityAssessment>[3] & { usageId: string }
+  const observations: Observation[] = []
+  const savedUsageIds = new Set<string>()
+  const observe = async () => {
+    for (const [index, record] of trace.records.entries()) {
+      if (savedUsageIds.has(record.usageId)) continue
+      const response = observations.find(row => row.usageId === record.usageId)
+        ?? { content: null, finishReason: null, toolCalls: [], transportComplete: false as const }
+      await prisma.$transaction(tx => observeLegacyContinuityAssessment(tx, ctx, frozen, response, [record.usageId], index ? 'output_recovery' : 'first'))
+      savedUsageIds.add(record.usageId)
+    }
+  }
+  await input.assertCurrent()
+  const reusable = await prisma.$transaction(tx => readReusableLegacyContinuityAssessment(tx, ctx, frozen))
+  if (reusable) return reusable
+  const reservation = await prisma.$transaction(tx => reserveLegacyContinuityAssessment(tx, ctx, frozen, input.assertCurrent))
+  if (reservation === 'blocked') throw new DataAccessError(409, 'CONTINUITY_REPORT_INCOMPLETE', '原检查或复评尚未确认，本次未重放模型请求；保留真实记录等待作者继续。')
+  const replay = reservation === 'replay' ? await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, frozen)) : null
   let raw: string
   try {
-    raw = await withTextRequestTrace(trace, () => generateReviewCompletion(input.system, input.content, { ...input.options,
-      onObservedCompletion: observation => { observedContent = observation.content; observedComplete = observation.transportComplete !== false; input.options.onObservedCompletion?.(observation) },
-    }, input.assertCurrent))
+    if (!replay) {
+      ctx.signal.throwIfAborted(); await input.assertCurrent()
+      if (frozen.targetType === 'story_compilation') await prisma.$transaction(tx => markChapterReviewCycleVerification(tx, ctx, {
+        compilationId: frozen.targetId, chapterId: input.chapterId, revision: input.revision, contentHash: runtimeJson({ content: input.bodies.current }).hash,
+        kind: 'continuity', callId: ctx.callId,
+      }))
+    }
+    raw = replay ? JSON.parse(replay.inspected.audit.rawResponse.content) as string : await withTextRequestTrace(trace, () => generateReviewCompletion(input.system, input.content, { ...input.options, agentRunId: ctx.runId,
+      beforeProviderDispatch: usageId => prisma.$transaction(tx => bindLegacyContinuityRequest(tx, ctx, frozen, usageId, trace.records.length > 1 ? 'output_recovery' : 'first', input.assertCurrent)),
+      onObservedCompletion: observation => {
+        observations.push({ ...observation, toolCalls: [...observation.toolCalls] })
+        observedContent = observation.content; observedComplete = observation.transportComplete !== false
+        input.options.onObservedCompletion?.(observation)
+      },
+    }, async () => { await observe(); await input.assertCurrent() }))
+  } catch (error) {
+    if (reservation === 'new' && trace.records.every(record => record.status === 'not_dispatched' && record.billingKnown)) {
+      await prisma.$transaction(tx => observeLegacyContinuityFirstNotDispatched(tx, ctx, frozen, trace.records.map(record => record.usageId)))
+    }
+    throw error
   } finally {
+    await observe()
     if (input.assessmentAdmissionId) await prisma.$transaction(tx => recordLegacyContinuityAssessmentObservation(tx, ctx, {
       admissionId: input.assessmentAdmissionId!, usageIds: trace.records.map(record => record.usageId), observedContent, observedComplete }))
   }
-  const original = inspectContinuityResponse(raw, input.bodies, true, 5)
-  return runContinuityEvidenceCorrection({ original, bodies: input.bodies, billingKnown: textRequestsFinished(trace), signal: ctx.signal,
+  const last = observations.at(-1)
+  const original = replay?.inspected ?? inspectContinuityResponse(last?.content ?? raw, input.bodies, true, 6)
+  const assessed = await runContinuityReassessment({ original, bodies: input.bodies, system: input.system, content: input.content,
+    billingKnown: replay?.billingKnown ?? textRequestsFinished(trace), providerComplete: replay?.providerComplete ?? (!!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length),
+    slotUsed: replay?.slotUsed ?? trace.records.length > 1, signal: ctx.signal,
     assertCurrent: input.assertCurrent,
-    claim: inspected => prisma.$transaction(tx => claimLegacyContinuityCorrection(tx, ctx, { chapterId: input.chapterId, revision: input.revision,
-      bodies: input.bodies, original: inspected, usageIds: trace.records.map(record => record.usageId),
-      targetType: input.options.targetType as 'chapter' | 'story_compilation', targetId: input.options.targetId!, assertCurrent: input.assertCurrent, bindingHash: input.bindingHash })),
-    // Evidence correction has no output-recovery subrequest: the claim buys one
-    // source-only response, never another full chapter review.
-    dispatch: (system, content) => dispatchLegacyContinuityCorrection(ctx, { original, bodies: input.bodies, system, content, options: input.options }) })
+    claim: request => prisma.$transaction(tx => claimLegacyContinuityReassessment(tx, ctx, frozen, original,
+      replay?.usageIds ?? trace.records.map(record => record.usageId), request, input.assertCurrent)),
+    notDispatched: () => prisma.$transaction(tx => observeLegacyContinuityReassessmentNotDispatched(tx, ctx, frozen)),
+    dispatch: async request => {
+      const { generateTextCompletion } = await import('../../ai-service.js')
+      const followupTrace = createTextRequestTrace()
+      let observed: Observation | null = null
+      try {
+        const content = await withTextRequestTrace(followupTrace, () => generateTextCompletion(request.system, request.content, {
+          ...input.options, agentRunId: ctx.runId, action: 'agent3ContinuityCriticSecondPass', maxOutputTokens: CONTINUITY_MAX_OUTPUT_TOKENS, boundedReview: true,
+          beforeProviderDispatch: usageId => prisma.$transaction(tx => bindLegacyContinuityRequest(tx, ctx, frozen, usageId, 'reassessment', input.assertCurrent)),
+          onObservedCompletion: value => { observed = { ...value, toolCalls: [...value.toolCalls] }; input.options.onObservedCompletion?.(value) },
+        }))
+        const response = observed as Observation | null
+        return { content, complete: textRequestsFinished(followupTrace) && !!response && response.transportComplete !== false && response.finishReason === 'stop' && !response.toolCalls.length }
+      } catch (error) {
+        if (followupTrace.records.every(record => record.status === 'not_dispatched' && record.billingKnown)) {
+          await prisma.$transaction(tx => observeLegacyContinuityReassessmentNotDispatched(tx, ctx, frozen, followupTrace.records.map(record => record.usageId)))
+        }
+        throw error
+      } finally {
+        const response = observed as Observation | null
+        await prisma.$transaction(tx => observeLegacyContinuityAssessment(tx, ctx, frozen,
+          response ?? { content: null, finishReason: null, toolCalls: [], transportComplete: false }, followupTrace.records.map(record => record.usageId), 'reassessment'))
+      }
+    } })
+  return bindLegacyContinuityAssessment(assessed, ctx, frozen)
 }
 
 const independentContinuityResultSchema = z.object({
@@ -770,7 +838,11 @@ export const continuityValidateTool = defineTool({
         content: `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, args.focus)}`,
         options: { modelRuntime, explicitModelSelection: true, signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: context.chapter.id, targetType: 'chapter', targetId: context.chapter.id, temperature: 0, reasoningEffort: modelRuntime.reasoningEffort }, assertCurrent, bindingHash: standaloneContinuityBindingHash(context.contextHash, args.focus),
         assessmentAdmissionId: standaloneGate.freshAdmissionId ?? undefined })
-      return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, inspected, tx, args.focus, true, true, inspected.audit))
+      return prisma.$transaction(async tx => {
+        const result = await saveStandaloneContinuityReport(ctx, context, inspected, tx, args.focus, true, true, inspected.audit)
+        if (inspected.complete && result.outcome !== 'failed') await markLegacyContinuityAssessmentApplication(tx, ctx, inspected)
+        return result
+      })
     }
     if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, summary: '本任务连续性检查未执行', output: '指定编译不属于本任务或尚未写入正文。独立检查既有章节请省略 compilationId、传真实 chapterId；不要为检查创建新章或接管旧编译。' }
     const chapter = compilation.chapter
@@ -950,6 +1022,7 @@ export const continuityValidateTool = defineTool({
         await markLegacyContinuityCorrectionApplied(tx, ctx, { originalHash: inspected.audit.contentHash,
           correctionHash: ((inspected.audit as unknown as Record<string, unknown>).evidenceCorrection as { contentHash?: string } | undefined)?.contentHash })
         await markLegacyContinuityAssessmentApplied(tx, ctx)
+        await markLegacyContinuityAssessmentApplication(tx, ctx, inspected)
       }
       await tx.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...result,
         ...(inspected.audit.classification === 'source_invalid' ? { unlocatedEvidenceCount: continuityUnlocatedCandidateCount(inspected) } : {}),

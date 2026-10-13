@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
-import { assertChapterManuscriptRevision, readChapterReviewReadiness, recordChapterReviewDecisions } from '../../api/lib/agent/chapter-review-guard.js'
+import { assertChapterManuscriptRevision, readChapterReviewReadiness, recordChapterReviewDecisions, readChapterReviewWriteAdmission } from '../../api/lib/agent/chapter-review-guard.js'
 import { prepareStoryCompilation, recordStoryCompilerWrite, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
 import { readReviewCycle } from '../../api/lib/agent/review-cycle.js'
@@ -76,6 +76,9 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     expect(projectCurrentReviewNextStep(readiness!)).toMatchObject({ phase: 'verification', state: 'decision_required',
       reviewCycle: { findings: [expect.objectContaining({ relation: 'new_advisory' })] } })
     const ref = readiness!.requiredDecisions![0]
+    // Real complete final reports close the original ordinary writing stage,
+    // even when an old v1 snapshot lacks the newly explicit phase marker.
+    await expect(mutate(7, finalBody.replace('灯光落在桌上', '灯光照着桌面'))).rejects.toMatchObject({ code: 'REVIEW_CYCLE_DECISION_REQUIRED' })
     await prisma.$transaction(async tx => {
       // Same transaction locking contract as terminal decisions.
       await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${prepared.compilation.id} FOR UPDATE`
@@ -117,7 +120,12 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).toEqual(budgetBefore)
     expect(await prisma.aiUsageLog.count({ where: { agentRunId: f.runId } })).toBe(billingBefore)
     const rePrepared = await prepareStoryCompilation(input)
-    expect(readReviewCycle(rePrepared.compilation.preparedContext, scope)).toEqual(cycle)
+    const carried = readReviewCycle(rePrepared.compilation.preparedContext, scope)!
+    expect(carried.baseline).toEqual(cycle.baseline)
+    expect(carried.transitions).toEqual(cycle.transitions)
+    expect(carried.verificationStarted).toEqual(cycle.transitions.at(-1)!.after)
+    expect(await prisma.$transaction(tx => readChapterReviewWriteAdmission(tx, f, { chapterId, revision: 7,
+      after: finalBody.replace('灯光落在桌上', '灯光照着桌面') }))).toMatchObject({ kind: 'decision_required' })
     expect((await prisma.$transaction(tx => readChapterReviewReadiness(tx, f)))?.ready).toBe(false)
   }, undefined, '修改第一章，只要标题和正文。', { freezeWriting: true }))
   it('records exactly one concurrent CAS and preserves unrelated prepared context', async () => fixture(async f => {

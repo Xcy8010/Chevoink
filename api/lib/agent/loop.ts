@@ -53,6 +53,7 @@ import { assertLegacyRuntimeCompatible, startLegacyRuntimeRun } from './runtime-
 import { normalizeToolInput, validateToolInput } from './tools/input-validation.js'
 import { loadSessionTodoItems, renderTodoItems, cancelTaskTodoItems } from './tools/todo-tools.js'
 import { parseToolArgsTolerant } from './tool-argument-parser.js'
+import { preflightChapterReviewWrite } from './tools/chapter-tools.js'
 import { getTaskRunIds } from './task-lineage.js'
 import type { AgentTool, ToolContext } from './tools/types.js'
 import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestrationResumeNote } from './tools/task-orchestration-tools.js'
@@ -2236,6 +2237,19 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             continue
           }
         }
+        if (preflightTool && preflightArgs && ['chapter_write', 'chapter_append', 'chapter_edit_range'].includes(call.name)
+          && preflightTool.parameters.safeParse(preflightArgs).success) {
+          // Author scope and review progress are different contracts. The
+          // shared writer preflight uses the exact manuscript candidate; its
+          // admission is checked again inside the actual body CAS transaction.
+          const reviewWrite = await preflightChapterReviewWrite({ ...toolContext, callId: call.id, messageId }, call.name, preflightArgs)
+          if (reviewWrite?.kind === 'decision_required') {
+            deferToolProposal(call, reviewWrite.guidance, messageId, bus)
+            messages.push({ role: 'tool', toolCallId: call.id,
+              content: `[系统] 本次改稿提议未执行，正文与当前检查保持不变。${reviewWrite.guidance}` })
+            continue
+          }
+        }
         if (preflightTool && preflightArgs && preflightTool.parameters.safeParse(preflightArgs).success
           && call.name === 'chapter_bridge_commit') {
           const parsed = preflightArgs
@@ -2371,7 +2385,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const unconfirmed = [...pendingReviews.values()].some(item => item.toolName === reviewDispatch.toolName && item.chapterId === reviewDispatch.chapterId)
           if (unconfirmed || (automaticReviewAttempts.has(attemptKey) && settledReviewFailures.has(attemptKey))) {
             const reason = unconfirmed ? '此前的检查请求结果尚未确认，未重放付费请求。'
-              : '当前版本已收到未完成的检查报告，复用失败原因；正文或检查协议改变后再复核，未重复付费。'
+              : '本次检查返回的报告尚未完成有效核验；检查自身的格式或引用问题不代表正文需要修改。保留检查结果与费用记录，不通过改稿重新触发同一检查。'
             deferToolProposal(call, reason, messageId, bus)
             messages.push({ role: 'tool', toolCallId: call.id, content: `[系统] ${reason} 当前检查未判定通过，继续其余可执行工作。` })
             blockedRepeat += 1

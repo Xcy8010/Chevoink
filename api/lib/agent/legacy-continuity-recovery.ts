@@ -10,6 +10,7 @@ import { runtimeJson } from './runtime-common.js'
 import { activeChapterScope } from '../data/internal.js'
 import { isKnownTextRequestBilling } from './text-request-billing.js'
 import { readKnownFailedContinuityCorrection } from './continuity-response-correction.js'
+import { readOwnedContinuityReassessment, readUnsentContinuityAdmission } from './continuity-reassessment-witness.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const capCodes = new Set(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED'])
@@ -181,15 +182,27 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     })
     if (overlaps) continue
     const receipts = paid.filter(item => item.createdAt >= call.createdAt && item.createdAt <= result.createdAt)
+    if (receipts.some(row => row.action === 'agent3ContinuityCriticSecondPass') && !await readOwnedContinuityReassessment(tx, subject, {
+      runId: call.runId, callId, chapterId: chapter.id, revision: chapter.revision, compilationId: compilation.id,
+      callAt: call.createdAt, resultAt: result.createdAt, payments: receipts,
+    })) continue
     const correctionOnly = receipts.filter(item => item.action === 'agent3ContinuityEvidenceCorrection')
     if (knownCorrection && correctionOnly.length !== knownCorrection.usage.length) continue
     if (correctionOnly.length && (!knownCorrection || knownCorrection.usage.length !== correctionOnly.length
       || correctionOnly.some(row => !knownCorrection.usage.some(item => item.id === row.id)))) continue
     if ((!knownCorrection && receipts.filter(item => item.action === 'agent3ContinuityCritic').length !== 1)
       || receipts.some(item => !known(item) || object(item.billingEvidence).responseObserved !== true
-        || !['agent3ContinuityCritic', 'agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery', 'agent3ContinuityEvidenceCorrection'].includes(item.action))) continue
+        || !['agent3ContinuityCritic', 'agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery', 'agent3ContinuityEvidenceCorrection', 'agent3ContinuityCriticSecondPass'].includes(item.action))) continue
     const key = `continuity-author-recovery:${runtimeJson({ taskId: original.taskId, chapterId: chapter.id, contentHash: coverage.contentHash, admissionId: admission.id }).hash}`
     keys.push([`${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`, key])
+  }
+  for (const compilation of compilations) {
+    const proof = await readUnsentContinuityAdmission(tx, subject, { runIds, compilationId: compilation.id, admission, retiredUsageIds })
+    if (!proof || !original.writing.targets.some(target => target.orderIndex === proof.chapter.orderIndex
+      && (target.chapterId ?? original.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId) === proof.chapter.id)) continue
+    const target = `${compilation.id}:${proof.chapter.id}:${proof.chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`
+    if (!keys.some(([saved]) => saved === target)) keys.push([target, `continuity-author-recovery:${runtimeJson({ taskId: original.taskId,
+      chapterId: proof.chapter.id, contentHash: proof.coverage.contentHash, admissionId: admission.id }).hash}`])
   }
   return keys
 }

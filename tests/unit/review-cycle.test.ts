@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { advanceReviewCycle, beginReviewCycle, projectReviewCycle, readReviewCycle, reviewCycleContentHash, reviewCycleFinding, verificationQualityAdviceRequiresDecision } from '../../api/lib/agent/review-cycle.js'
+import { advanceReviewCycle, beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, attemptedReviewCycleRefs, markReviewCycleVerification, readReviewCycle, reviewCycleContentHash, reviewCycleFinding, verificationQualityAdviceRequiresDecision } from '../../api/lib/agent/review-cycle.js'
+import { observedReviewCycleVerification, observedReviewCycleVerificationBody } from '../../api/lib/agent/review-cycle-store.js'
 import { currentReviewNextStepGuidance, projectCurrentReviewNextStep } from '../../api/lib/agent/review-dispatch.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 
@@ -20,6 +21,47 @@ function revisions() {
   return { cycle, body }
 }
 describe('server review cycle lineage and final verification', () => {
+  it('permits several original writes before verification, then denies new advice and broad locator overlap', () => {
+    const { cycle, body } = revisions()
+    const after = body.replace('灯光落在桌上', '灯光照着桌面')
+    const input = { before: body, after, baselineObligations: [finding(content)], currentErrorAnchors: [] }
+    expect(projectReviewCycleWrite(cycle, { ...input, verificationStarted: false })).toMatchObject({ kind: 'allow', basis: 'original_writing' })
+    const verified = markReviewCycleVerification(cycle, { revision: 7, contentHash: reviewCycleContentHash(body) })
+    expect(projectReviewCycleWrite(verified, { ...input, verificationStarted: true })).toMatchObject({ kind: 'decision_required' })
+    expect(projectReviewCycleWrite(verified, { ...input, verificationStarted: true,
+      ranges: [{ start: 0, end: body.length, newText: after }] })).toMatchObject({ kind: 'decision_required' })
+    expect(projectReviewCycleWrite(verified, { ...input, after: body + '新审美动作。', verificationStarted: true })).toMatchObject({ kind: 'decision_required' })
+    expect(projectReviewCycleWrite(verified, { ...input, after: body, verificationStarted: true })).toMatchObject({ kind: 'allow', basis: 'no_change' })
+  })
+  it('permits only exact unattempted baseline evidence or current genuine error, never repeated attempts', () => {
+    const { cycle, body } = revisions()
+    const verified = markReviewCycleVerification(cycle, { revision: 7, contentHash: reviewCycleContentHash(body) })
+    const after = body.replace('她没有回答', '她轻轻点头')
+    const input = { before: body, after, verificationStarted: true, baselineObligations: [finding(content)], currentErrorAnchors: [] }
+    expect(projectReviewCycleWrite(verified, input)).toMatchObject({ kind: 'allow', basis: 'baseline_obligation' })
+    const attempted = advanceReviewCycle(verified, { beforeRevision: 7, before: body, afterRevision: 8, after })
+    expect(attemptedReviewCycleRefs(attempted)).toEqual([expect.objectContaining({ findingId: 'f4' })])
+    const restored = advanceReviewCycle(attempted, { beforeRevision: 8, before: after, afterRevision: 9, after: body })
+    expect(projectReviewCycleWrite(restored, input)).toMatchObject({ kind: 'decision_required' })
+    const start = body.indexOf('灯光落在桌上'), text = '灯光落在桌上'
+    expect(projectReviewCycleWrite(verified, { ...input, after: body.replace(text, '桌上没有灯光'),
+      currentErrorAnchors: [{ start, end: start + text.length, text }] })).toMatchObject({ kind: 'allow', basis: 'current_error' })
+    expect(projectReviewCycleWrite(verified, { ...input, baselineObligations: [{ ...finding(content), reportId: 'foreign' }] })).toMatchObject({ kind: 'decision_required' })
+  })
+  it('infers old v1 verification only from actual CAS-bound saved assessment and preserves the evidence across restart', () => {
+    const { cycle, body } = revisions()
+    const validation = { independentCheck: 'unavailable', checkedRevision: 7, coverage: { contentHash: reviewCycleContentHash(body) } }
+    expect(observedReviewCycleVerification(cycle, validation, null, { revision: 7, content: body })).toBe(true)
+    expect(observedReviewCycleVerification(cycle, { ...validation, checkedRevision: 99 }, null, { revision: 7, content: body })).toBe(false)
+    expect(observedReviewCycleVerification(cycle, { ...validation, coverage: { contentHash: '0'.repeat(64) } }, null, { revision: 7, content: body })).toBe(false)
+    const evidence = observedReviewCycleVerificationBody(cycle, validation, null, { revision: 7, content: body })
+    expect(evidence).toBeTruthy()
+    const copied = readReviewCycle(JSON.parse(JSON.stringify({ reviewCycle: markReviewCycleVerification(cycle, evidence || cycle.transitions[2].after) })), scope)!
+    expect(observedReviewCycleVerification(copied, null, null, { revision: 7, content: body })).toBe(true)
+    const external = body + '作者外部输入。', gap = advanceReviewCycle(copied, { beforeRevision: 8, before: external, afterRevision: 9, after: external + '额外段落。' })
+    expect(projectReviewCycleWrite(gap, { before: external + '额外段落。', after: external.replace('她没有回答', '她点头') + '额外段落。',
+      verificationStarted: true, baselineObligations: [finding(content)], currentErrorAnchors: [] })).toMatchObject({ kind: 'decision_required' })
+  })
   it('defer predicate excludes errors, mandatory pass, empty candidates and initial assessment', () => {
     const ready = { reviewCycle: { edited: true }, mustPassPending: false, qualityPassRequired: false }
     expect(verificationQualityAdviceRequiresDecision(ready, [{ severity: 'advisory' }, { severity: 'warning' }])).toBe(true)

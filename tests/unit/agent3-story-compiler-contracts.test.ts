@@ -51,8 +51,10 @@ describe('严谨创作落实连续性警告', () => {
     const critic = vi.spyOn(review, 'generateReviewCompletion').mockResolvedValue(JSON.stringify({ findings }))
     const repair = vi.spyOn(ai, 'generateTextCompletion').mockResolvedValue('{"patches":[{"oldText":"原文","newText":"新文"}]}')
     const write = vi.fn().mockResolvedValue({ count: 1 })
-    const tx = { $queryRaw: vi.fn(), agentRun: { findFirst: vi.fn().mockResolvedValue({ id: 'r' }) },
-      agentArtifact: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null) },
+    const tx = { $queryRaw: vi.fn().mockResolvedValue([{ id: 'n' }]), agentRun: { findFirst: vi.fn().mockResolvedValue({ id: 'r' }),
+      findFirstOrThrow: vi.fn().mockResolvedValue({ id: 'r', novelId: 'n', sessionId: 's', taskRootId: null, startRequest: {} }) },
+      agentRunEvent: { findMany: vi.fn().mockResolvedValue([]) },
+      agentArtifact: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'audit' }) },
       chapter: { findFirst: vi.fn((...args: Parameters<typeof prisma.chapter.findFirst>) => prisma.chapter.findFirst(...args)), updateMany: write, findUniqueOrThrow: vi.fn().mockResolvedValue({ ...chapter, revision: 2 }) },
       storyCompilation: { findFirst: findCompilation, findUniqueOrThrow: vi.fn(async () => compilation),
         update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => { Object.assign(compilation, data); return compilation }),
@@ -84,7 +86,7 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.critic).toHaveBeenCalledOnce()
     expect(f.repair).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
-    expect(f.compilation.validation).toMatchObject({ continuityCriticResponse: { parserVersion: 5, classification: 'complete', unwrapped: true } })
+    expect(f.compilation.validation).toMatchObject({ continuityCriticResponse: { parserVersion: 6, classification: 'complete', unwrapped: true } })
   })
   it('sends the selected paid complete runtime to continuity instead of the generic cheap auxiliary policy', async () => {
     const f = fixture(false)

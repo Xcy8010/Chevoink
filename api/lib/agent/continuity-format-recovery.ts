@@ -25,7 +25,7 @@ function normalize(value: unknown, bodies: ContinuityBodies | undefined, parserV
 }
 
 /** Mechanical envelope compatibility; no new model call or missing-content reconstruction. */
-export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies, responseComplete = true, parserVersion: 3 | 4 | 5 = 3) {
+export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies, responseComplete = true, parserVersion: 3 | 4 | 5 | 6 = 3) {
   const sourceRelocations: ContinuitySourceRelocation[] = []
   let classification = responseComplete ? 'json_invalid' : 'response_incomplete'
   let record: Record<string, unknown> | null = null
@@ -52,7 +52,7 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
     if (keys.length !== 1) classification = 'ambiguous_envelope'
     else {
       const candidate = record[keys[0]]
-      const fields = parserVersion === 5 ? z.array(continuityCandidateSchema).safeParse(Array.isArray(candidate) ? candidate.map(item => normalize(item, undefined, 4, [], 0)) : candidate) : null
+      const fields = parserVersion >= 5 ? z.array(continuityCandidateSchema).safeParse(Array.isArray(candidate) ? candidate.map(item => normalize(item, undefined, 4, [], 0)) : candidate) : null
       if (fields?.success) {
         structured = true
         candidateFindings = fields.data
@@ -80,9 +80,9 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
         })
         classification = invalidSourceReferences.length ? 'source_invalid' : 'complete'
         findings = classification === 'complete' ? bound.filter((item): item is ContinuityFindingInput => item !== null) : []
-      } else if (parserVersion === 5) classification = 'findings_invalid'
+      } else if (parserVersion >= 5) classification = 'findings_invalid'
       else {
-        const parsed = z.array(continuityFindingInputSchema).safeParse(Array.isArray(candidate) ? candidate.map((item, index) => normalize(item, bodies, parserVersion, sourceRelocations, index)) : candidate)
+        const parsed = z.array(continuityFindingInputSchema).safeParse(Array.isArray(candidate) ? candidate.map((item, index) => normalize(item, bodies, parserVersion as 3 | 4, sourceRelocations, index)) : candidate)
         if (!parsed.success) classification = 'findings_invalid'
         else {
           structured = true
@@ -94,7 +94,7 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
   }
   if (raw.length > MAX_AUDIT_CHARS) classification = 'response_too_large'
   const audit = { version: 1, parserVersion, classification, unwrapped, ...(parserVersion >= 4 ? { sourceRelocations } : {}),
-    ...(parserVersion === 5 ? { candidateFindings, invalidSourceReferences } : {}), contentHash: createHash('sha256').update(raw).digest('hex'),
+    ...(parserVersion >= 5 ? { candidateFindings, invalidSourceReferences } : {}), contentHash: createHash('sha256').update(raw).digest('hex'),
     characterCount: raw.length, rawResponse: { version: 1, encoding: 'json-string', content: JSON.stringify(raw.slice(0, MAX_AUDIT_CHARS)), complete: raw.length <= MAX_AUDIT_CHARS } }
   return { structured, findings, complete: structured && classification === 'complete', candidateFindings, invalidSourceReferences, audit }
 }

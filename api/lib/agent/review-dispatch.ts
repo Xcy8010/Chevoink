@@ -39,10 +39,10 @@ export function currentReviewNextStepGuidance(step: CurrentReviewNextStep) {
     ? '超过单次40项时可用 decisionOnly:true 分批保存真实保留决定，不提交章节终态；每批后重读当前待处理引用，最后普通提交仍校验全部当前义务。'
     : '原任务未开放 decisionOnly 分批能力；普通 retainedFindings 提交仍须完整覆盖当前原有义务，不扩展冻结工具参数。'
   const phase = step.phase === 'verification'
-    ? `本周期已经保存真实修订（基线r${step.reviewCycle.baselineRevision}），当前处于最终核验。新出现的纯质量建议须由当前模型逐项核对并写明具体保留原因，或以真实原文与基线证明是应处理的回归；不能因每次完整检查又有新措辞就自动开启下一轮润色。相同锚点意见延续同一问题，模糊映射为unknown，不推断已解决；任何再修改仍使最终检查失效。当前意见关系：${JSON.stringify(step.reviewCycle.findings)}。`
+    ? `本周期已经保存真实修订（基线r${step.reviewCycle.baselineRevision}），当前处于最终核验。新出现的纯质量建议须由当前模型逐项核对并写明具体保留原因；不能因每次完整检查又有新措辞就自动开启下一轮润色。首次复核已开始后，正文写入只接受精确落在尚未尝试的原始义务证据或当前完整报告真实错误证据内的改动；仅称为回归、模糊重叠或unknown不授予写入。相同锚点意见延续同一问题，不推断已解决；任何合法再修改仍使最终检查失效。当前意见关系：${JSON.stringify(step.reviewCycle.findings)}。`
     : '当前处于初始评估与意见决策：核对真实意见后，在原授权内完成所需修改；完整修改后进入最终核验。'
-  if (step.state === 'blocked') return `${facts}必要检查未确认完成。读取已保存状态与失败证据；不重放未知或已尝试付费请求，不以留置替代完整检查。正文与进度保留，尚不能提交为完成。`
-  if (step.state === 'check_required') return `${facts}最终保存版本仍缺必要检查：${JSON.stringify(step.requiredTools)}。先核对当前状态，仅通过原工具、原审批、原预算与恢复准入执行缺项；不重买已完成检查。尚不能提交为完成。`
+  if (step.state === 'blocked') return `${facts}${phase}必要检查未确认完成。读取已保存状态与失败证据；不重放未知或已尝试付费请求，不以改文购买新检查，也不以留置替代完整检查。正文与进度保留，尚不能提交为完成。`
+  if (step.state === 'check_required') return `${facts}${phase}最终保存版本仍缺必要检查：${JSON.stringify(step.requiredTools)}。先核对当前状态，仅通过原工具、原审批、原预算与恢复准入执行缺项；不重买已完成检查。尚不能提交为完成。`
   if (step.state === 'must_pass_required') return `${facts}${candidates}${scope}原作者明确要求检查通过；retainedFindings不能替代硬通过要求。按证据合法修改后复核最终版本；无法安全完成时保留事实及阻碍，不能提交或宣称通过。当前真实意见：${JSON.stringify(step.details)}。`
   if (step.state === 'commit_available') return `${facts}当前必要检查与意见决策已齐备，可在原权限及必要审批下提交 chapter_bridge_commit。${step.unresolvedFactErrors > 0 ? '保留的事实错误仍未解决，留置不表示检查通过。' : ''}`
   return `${facts}${phase}${candidates}${scope}先用 chapter_bridge_get / quality_report_get 核对真实意见，在原授权内精确应用或通过 chapter_bridge_commit 的 retainedFindings 逐项合理保留。${batch}实际修改后复核最终保存版本；正文未变无需重买检查，也不制造无变化正文写入。详情：${JSON.stringify(step.details)}。精确参数模板（仅当前首批最多40项，reason须替换为实际原因）：${JSON.stringify(retentionTemplate)}。留置不是修复，不能声称全部意见已应用。`
