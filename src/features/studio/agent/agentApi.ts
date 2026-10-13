@@ -3,8 +3,6 @@ import { buildAuthHeader } from '@/lib/auth-token'
 import type { AgentQueueAction, AgentQueueSnapshot, EnqueueAgentRequest } from '../../../../shared/contracts/agent-queue.js'
 import type {
   AgentSession,
-  AgentReviewReplacementQuote,
-  AgentReviewReplacementStatus,
   AgentSessionRunStatusPayload,
   AgentTodoItem,
   AgentUIMessage,
@@ -124,26 +122,6 @@ export function continueAgentLoopRun(runId: string, model?: ContinueAgentLoopRun
     method: 'POST',
     ...(model ? { body: JSON.stringify(model) } : {}),
   })
-}
-
-export function quoteAgentReviewReplacement(runId: string, model?: ContinueAgentLoopRunModel | null): Promise<AgentReviewReplacementQuote> {
-  return requestData(`/api/agent/runs/${encodeURIComponent(runId)}/review-replacement/quote`, {
-    method: 'POST', body: JSON.stringify(model ?? {}),
-  })
-}
-
-export function submitAgentReviewReplacement(runId: string, quoteToken: string): Promise<AgentReviewReplacementStatus> {
-  return requestData(`/api/agent/runs/${encodeURIComponent(runId)}/review-replacement`, {
-    method: 'POST', body: JSON.stringify({ quoteToken }),
-  })
-}
-
-export function fetchAgentReviewReplacementStatus(runId: string, authorizationId: string): Promise<AgentReviewReplacementStatus> {
-  return requestData(`/api/agent/runs/${encodeURIComponent(runId)}/review-replacement/${encodeURIComponent(authorizationId)}/status`)
-}
-
-export function fetchLatestAgentReviewReplacementStatus(runId: string): Promise<AgentReviewReplacementStatus | null> {
-  return requestData(`/api/agent/runs/${encodeURIComponent(runId)}/review-replacement/status`)
 }
 
 export function resolveAgentApproval(

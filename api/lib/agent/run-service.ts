@@ -76,7 +76,6 @@ import { withHumanAdmission } from './goal-activation-authority.js'
 import { freezeModelAssignments, resolveAssignedModel } from './model-assignments.js'
 import { frozenModelAssignmentsSchema, agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
 import { buildTaskSpec } from './task-spec.js'
-import { readReviewReceiptWait } from './review-resume-readiness.js'
 
 /**
  * Agent Loop 新链路的路由服务层（plan/13 §4.9）。
@@ -946,6 +945,13 @@ async function continueLoopRunLocked(
     throw new DataAccessError(409, 'GOAL_RESUME_REQUIRED', '请使用目标条继续原任务，原预算与权限会保留。')
   }
   if (goalExecution && (!activation || goalExecution.goalId !== activation.goalId)) throw new DataAccessError(409, 'GOAL_RESUME_REQUIRED', '请使用目标条的继续操作，原目标预算与进度会保留。')
+  const active = getActiveRun(runId)
+  if (!activation && !goalExecution && run.engine === 'loop' && !run.taskRootId && run.runtimeProtocolVersion !== 1
+    && active?.userId === userId && active.sessionId === run.sessionId && !active.controller.signal.aborted) {
+    const latest = await prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId: run.sessionId }, orderBy: { createdAt: 'desc' }, select: { id: true } })
+    if (latest?.id !== run.id) throw new DataAccessError(409, 'STALE_RESUME_TARGET', '当前会话已开始新任务，不能从旧入口续跑。')
+    return { runId: run.id, sessionId: run.sessionId, runGoalId: null, status: 'running', streamUrl: `/api/agent/runs/${run.id}/stream`, eventStartSeq: active.eventStartSeq ?? 0 }
+  }
   const activationReceipt = activation ? await runtimeTransaction(async tx => {
     const goal = await (await import('./goal-store.js')).lockOwnedGoal(tx, userId, run.sessionId, activation.goalId)
     if (goal.status !== 'active' || goal.currentRevision !== 1 || goal.pendingRevision !== null
@@ -1025,14 +1031,6 @@ async function continueLoopRunLocked(
   const resumePrompt = originalPrompt || queuedInput?.prompt
   if (!resumePrompt?.trim()) throw new DataAccessError(409, 'RUN_INPUT_REQUIRED', '该历史任务缺少完整原始需求，无法安全继续。请在输入框重新说明本次任务；已保存内容不会改变。')
   await assertManagedAttachmentsAccess(queuedInput?.attachments, userId)
-  // A receipt query is not another execution or paid admission. Unknown paid
-  // reviews keep their original event cursor, model, budget and reservations.
-  const savedPending = (run.usage as { checkpoint?: { pendingReviews?: unknown } } | null)?.checkpoint?.pendingReviews
-  const reviewReceiptWait = Array.isArray(savedPending) && savedPending.length
-    ? await prisma.$transaction(tx => readReviewReceiptWait(tx, run), { isolationLevel: 'RepeatableRead' }) : null
-  if (reviewReceiptWait) return { runId: run.id, sessionId: run.sessionId, runGoalId: activation?.goalId ?? null,
-    status: run.status, streamUrl: `/api/agent/runs/${run.id}/stream`, reviewReceiptWait }
-
   // A genuinely admitted continuation follows the author's current selection.
   const nextTier = (model?.modelTier ?? run.modelTier) as CreditModelTier
   const nextCustomModelId = nextTier === 'custom' ? model?.customModelId ?? run.customModelId ?? null : null

@@ -63,7 +63,6 @@ import {
   updateNovelSkill,
 } from '../lib/agent/skills/service.js'
 import { getQualityReport, recordQualityFindingFeedback } from '../lib/agent/humanity-quality.js'
-import { getAuthorReviewReplacementStatus, getLatestAuthorReviewReplacementStatus, quoteAuthorReviewReplacement, submitAuthorReviewReplacement } from '../lib/agent/author-review-replacement-service.js'
 import {
   extractAuthorStyleProfile,
   getAuthorStyleProfile,
@@ -971,37 +970,6 @@ router.post('/runs/:runId/stop', async (req: Request, res: Response): Promise<vo
   } catch (error) {
     sendRouteError(res, requestId, error)
   }
-})
-
-// 作者明确确认当前模型报价后，独立获取一次原待确认检查的报告。
-router.post('/runs/:runId/review-replacement/quote', async (req, res) => {
-  const requestId = createRequestId()
-  try {
-    const userId = requireSessionUserId(req)
-    const model = parseBody(continueAgentLoopRunSchema.strict(), req.body ?? {}, '检查报价的模型选择无效。')
-    res.status(200).json(buildSuccess(requestId, await quoteAuthorReviewReplacement(userId, String(req.params.runId), model)))
-  } catch (error) { sendRouteError(res, requestId, error) }
-})
-router.post('/runs/:runId/review-replacement', async (req, res) => {
-  const requestId = createRequestId()
-  try {
-    const userId = requireSessionUserId(req)
-    const body = parseBody(z.object({ quoteToken: z.string().min(1).max(16_384) }).strict(), req.body, '请确认有效的当前模型检查报价。')
-    res.status(202).json(buildSuccess(requestId, await submitAuthorReviewReplacement(userId, String(req.params.runId), body.quoteToken)))
-  } catch (error) { sendRouteError(res, requestId, error) }
-})
-router.get('/runs/:runId/review-replacement/status', async (req, res) => {
-  const requestId = createRequestId()
-  try {
-    res.status(200).json(buildSuccess(requestId, await getLatestAuthorReviewReplacementStatus(requireSessionUserId(req), String(req.params.runId))))
-  } catch (error) { sendRouteError(res, requestId, error) }
-})
-router.get('/runs/:runId/review-replacement/:authorizationId/status', async (req, res) => {
-  const requestId = createRequestId()
-  try {
-    res.status(200).json(buildSuccess(requestId, await getAuthorReviewReplacementStatus(requireSessionUserId(req),
-      String(req.params.runId), String(req.params.authorizationId))))
-  } catch (error) { sendRouteError(res, requestId, error) }
 })
 
 // 新链路：从 paused/failed 恢复循环（可选 body 携带作者当前模型选择，缺省沿用原任务档位）

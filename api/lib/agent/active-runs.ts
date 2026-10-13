@@ -11,6 +11,8 @@ export type ActiveRun = {
   bus?: RunEventBus
   sessionId: string
   userId: string
+  /** Cursor admitted for this executor; duplicate Continue only reattaches. */
+  eventStartSeq?: number
   /** Same-session delegated execution is discovered for stop/recovery, but is
    * never presented as the session's main run or its interactive admission. */
   internalChild?: boolean

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { continueAgentLoopRun, resolveAgentApproval, resolveAgentQuestion, stopAgentLoopRun, type ContinueAgentLoopRunModel } from '../agentApi'
 import { isRunActive, useAgentStore, type AgentRunPhase, type PendingApproval, type PendingQuestion } from '../agentStore'
-import type { AgentReviewReceiptWait } from '../../../../../shared/contracts'
 
 /** Commands are bound to a view epoch: late responses must never affect another task. */
 export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendingApproval, pendingQuestion, connect, setActionError, selectedModelRef }: {
@@ -19,22 +18,14 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
   const epoch = useRef(0)
   const pending = useRef(new Set<string>())
   const [stoppingRunId, setStoppingRunId] = useState<string | null>(null)
-  const [reviewReceiptWait, setReviewReceiptWait] = useState<AgentReviewReceiptWait | null>(null)
-  const [reviewReplacementReady, setReviewReplacementReady] = useState(false)
   useLayoutEffect(() => {
     const owner = ++epoch.current
     pending.current = new Set()
     setStoppingRunId(null)
-    setReviewReceiptWait(null)
-    setReviewReplacementReady(false)
     return () => { epoch.current = owner + 1 }
   }, [sessionId, runId, resumeableRunId])
   useEffect(() => {
     if (!isRunActive(phase) || stoppingRunId !== runId) setStoppingRunId(null)
-    if (isRunActive(phase) || phase === 'succeeded' || phase === 'cancelled') {
-      setReviewReceiptWait(null)
-      setReviewReplacementReady(false)
-    }
   }, [phase, runId, stoppingRunId])
 
   const command = useCallback(async <T,>(key: string, request: () => Promise<T>, success: (value: T) => void, fallback: string, failed?: () => void) => {
@@ -65,13 +56,6 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
     if (!target) return
     setActionError(null)
     await command(`continue:${target}`, () => continueAgentLoopRun(target, selectedModelRef?.current ?? null), (result) => {
-      if (result.reviewReceiptWait) {
-        setReviewReplacementReady(false)
-        if (result.runId === target) setReviewReceiptWait(result.reviewReceiptWait)
-        return
-      }
-      setReviewReceiptWait(null)
-      setReviewReplacementReady(false)
       useAgentStore.getState().resumeRun(result.runId, sessionId, result.runGoalId)
       connect(result.runId, result.eventStartSeq ?? 0)
     }, '续跑失败，请稍后再试。')
@@ -91,12 +75,6 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
     }), () => {}, '提交失败，请稍后再试。')
   }, [runId, pendingQuestion, command])
 
-  const markReviewReplacementReady = useCallback(() => {
-    setReviewReceiptWait(null)
-    setReviewReplacementReady(true)
-    setActionError(null)
-  }, [setActionError])
-
-  return { stoppingRunId, reviewReceiptWait, reviewReplacementReady, markReviewReplacementReady,
+  return { stoppingRunId,
     handleStop, handleContinue, handleResolveApproval, handleResolveQuestion }
 }

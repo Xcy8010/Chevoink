@@ -8,6 +8,7 @@ vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: creditAccess, g
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { continueLoopRun } from '../../api/lib/agent/run-service.js'
+import { registerActiveRun, deregisterActiveRun } from '../../api/lib/agent/active-runs.js'
 import { readReviewReceiptWait } from '../../api/lib/agent/review-resume-readiness.js'
 import { readReviewRequestRecovery } from '../../api/lib/agent/review-request-recovery.js'
 
@@ -56,7 +57,7 @@ describe.runIf(available)('owned Continue receipt preflight with real persisted 
   it.each([
     { outcome: 'reported', observedCounts: false }, { outcome: 'reported', observedCounts: true },
     { outcome: 'provider_rejected', observedCounts: false }, { outcome: 'not_dispatched', observedCounts: false },
-  ] as const)('waits idempotently then admits only an authoritative $outcome receipt, observedCounts=$observedCounts', async ({ outcome, observedCounts }) => fixture(async f => {
+  ] as const)('normal Continue admits once while original $outcome reconciliation remains independent, observedCounts=$observedCounts', async ({ outcome, observedCounts }) => fixture(async f => {
     execution.mockClear(); creditAccess.mockClear(); modelRuntime.mockClear()
     const base = Date.now() - 3000, at = (offset: number) => new Date(base + offset)
     const callId = 'original-paid-quality'
@@ -87,14 +88,38 @@ describe.runIf(available)('owned Continue receipt preflight with real persisted 
       const original = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
       const eventCount = await prisma.agentRunEvent.count({ where: { runId: f.runId } })
       const messages = await prisma.agentMessage.count({ where: { runId: f.runId } })
-      await Promise.all([1, 2, 3].map(() => continueLoopRun(f.userId, f.runId, { modelTier: 'lite', reasoningEffort: 'low' }).then(response => {
-        expect(response).toMatchObject({ runId: f.runId, status: 'failed', reviewReceiptWait: { kind: 'waiting_for_original_receipt', checks: ['quality'] } })
-        expect(response.eventStartSeq).toBeUndefined()
-      })))
+      // This denial-only reader remains read-only evidence of the original
+      // uncertainty. Ordinary Continue independently authorizes new necessary
+      // checks, rather than using settlement of that old row as its admission.
+      expect(await prisma.$transaction(tx => readReviewReceiptWait(tx, original))).toMatchObject({ kind: 'waiting_for_original_receipt', checks: ['quality'] })
       expect(execution).not.toHaveBeenCalled(); expect(creditAccess).not.toHaveBeenCalled(); expect(modelRuntime).not.toHaveBeenCalled()
       expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toEqual(original)
       expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usage.id } })).toEqual(usage)
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
+      expect(await prisma.agentRunEvent.count({ where: { runId: f.runId } })).toBe(eventCount)
+      expect(await prisma.agentMessage.count({ where: { runId: f.runId } })).toBe(messages)
+
+      // Match the real loop's synchronous registration before its first await.
+      // No model transport is available in this fixture.
+      execution.mockImplementation(async input => {
+        registerActiveRun(f.runId, { userId: f.userId, sessionId: f.sessionId, controller: new AbortController(),
+          eventStartSeq: typeof input.eventStartSeq === 'number' ? input.eventStartSeq : undefined })
+      })
+      const responses = await Promise.all([1, 2, 3].map(() => continueLoopRun(f.userId, f.runId, { modelTier: 'lite', reasoningEffort: 'low' })))
+      for (const response of responses) {
+        expect(response).toMatchObject({ runId: f.runId, status: 'running', eventStartSeq: 4, streamUrl: `/api/agent/runs/${f.runId}/stream` })
+        expect(response).not.toHaveProperty('reviewReceiptWait')
+      }
+      expect(execution).toHaveBeenCalledOnce(); expect(creditAccess).toHaveBeenCalledOnce(); expect(modelRuntime).toHaveBeenCalledOnce()
+      expect(creditAccess).toHaveBeenCalledWith(f.userId, 'lite')
+      expect(modelRuntime).toHaveBeenCalledWith('lite', f.userId, null, 'low')
+      const args = execution.mock.calls[0][0]
+      expect(args).toMatchObject({ runId: f.runId, resume: true, modelTier: 'lite', reasoningEffort: 'low', eventStartSeq: 4 })
+      const admission = args.authorContinue as { eventId: string; afterSeq: number }
+      expect(admission.afterSeq).toBe(4)
+      expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usage.id } })).toEqual(usage)
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage).toEqual(original.usage)
       expect(await prisma.agentRunEvent.count({ where: { runId: f.runId } })).toBe(eventCount)
       expect(await prisma.agentMessage.count({ where: { runId: f.runId } })).toBe(messages)
 
@@ -106,11 +131,8 @@ describe.runIf(available)('owned Continue receipt preflight with real persisted 
       expect(await prisma.$transaction(tx => readReviewReceiptWait(tx, original))).toBeNull()
       const resumed = await continueLoopRun(f.userId, f.runId)
       expect(resumed).toMatchObject({ runId: f.runId, status: 'running', eventStartSeq: 4 })
-      expect(resumed.reviewReceiptWait).toBeUndefined()
+      expect(resumed).not.toHaveProperty('reviewReceiptWait')
       expect(execution).toHaveBeenCalledOnce(); expect(creditAccess).toHaveBeenCalledOnce(); expect(modelRuntime).toHaveBeenCalledOnce()
-      const args = execution.mock.calls[0][0]
-      const admission = args.authorContinue as { eventId: string; afterSeq: number }
-      expect(admission.afterSeq).toBe(4)
       await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'run.started', payload: { authorContinue: admission } } })
       const recovered = await prisma.$transaction(tx => readReviewRequestRecovery(tx, f, [pending]))
       expect(recovered).toHaveLength(1)
@@ -118,6 +140,6 @@ describe.runIf(available)('owned Continue receipt preflight with real persisted 
         admissionId: `author-continue:${admission.eventId}`, currentRevision: chapter.revision, currentContentHash: contentHash } })
       expect(await prisma.chapterQualityReport.count({ where: { chapterId: f.chapterId } })).toBe(0)
       expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage).toEqual(original.usage)
-    } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+    } finally { deregisterActiveRun(f.runId); await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
   }))
 })

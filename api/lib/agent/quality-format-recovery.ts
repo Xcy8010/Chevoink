@@ -8,6 +8,7 @@ import { buildHumanityQualityContext, getLatestQualityReport, qualityReviewConte
 import { readQualityUnavailableProof } from './quality-unavailable-proof.js'
 import { runtimeJson } from './runtime-common.js'
 import { readQualityReviewAdmission } from './quality-review-admission.js'
+import { readContinuedReviewRecovery } from './continued-review-recovery.js'
 import { readOrphanQualityRecoveryProofs } from './quality-orphan-recovery.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
@@ -137,6 +138,9 @@ export async function hasReconciledQualityRequest(tx: Prisma.TransactionClient, 
   if (!run) return false
   const admission = await readQualityReviewAdmission(tx, run)
   if (!admission) return false
+  const continued = await readContinuedReviewRecovery(tx, subject, [])
+  if (continued.some(item => item.persisted && item.toolName === 'quality_analyze' && item.chapterId === report.chapterId
+    && item.receipt.sourceReportId === report.id && item.revision === report.chapterRevision && item.receipt.admissionId === admission.id)) return true
   const events = await tx.agentRunEvent.findMany({ where: { runId: subject.runId, type: 'review.reconciled', createdAt: { gte: admission.at } } })
   return events.some(event => {
     const payload = object(event.payload), receipt = object(payload.receipt)

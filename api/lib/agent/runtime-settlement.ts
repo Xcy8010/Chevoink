@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { consumeCreditsInTransaction } from '../credits.js'
-import { calculateV1ChargeMilli, calculateV2ChargeMilli, BillingCacheUsageRequired, V1_PRICING_VERSION, V2_PRICING_VERSION } from '../billing/pricing.js'
+import { calculateV1ChargeMilli, calculateV2UserChargeMilli, V1_PRICING_VERSION, V2_PRICING_VERSION } from '../billing/pricing.js'
 import { tokenPriceSchema as priceSchema, type TokenPrice } from '../billing/token-price.js'
 import { runtimeError, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 import { lockOwnedAttempt, prepareOperation, prepareOperationInTransaction } from './runtime-operations.js'
@@ -79,15 +79,6 @@ export async function settleProviderOperation(input: { userId: string; attemptId
     }
     if (!['pending', 'settled'].includes(usage.settlementStatus)) runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '未知结算状态不能重扣。')
     const frozenPrice = price.data!
-    let amountMilli: number
-    try {
-      amountMilli = frozenPrice.version === V1_PRICING_VERSION
-        ? calculateV1ChargeMilli(usage.promptTokens, usage.completionTokens, frozenPrice.multiplierBps)
-        : calculateV2ChargeMilli(usage.promptTokens, usage.completionTokens, usage.cacheHitTokens, frozenPrice.rates, frozenPrice.v1CeilingBps)
-    } catch (error) {
-      if (error instanceof BillingCacheUsageRequired) return { status: 'pending' as const, reason: 'cache_usage_not_confirmed' as const }
-      throw error
-    }
     const eventKey = `settlement:${operation.id}`
     const priorEvent = await tx.agentExecutionOutbox.findUnique({ where: { eventKey } })
     const chargeKey = `operation:${operation.id}`
@@ -98,6 +89,17 @@ export async function settleProviderOperation(input: { userId: string; attemptId
     if (usage.settlementStatus === 'pending' && (priorEvent || priorCharge)) {
       runtimeError('RUNTIME_RECEIPT_INVALID', '待结算操作已有资金或通知记录，需要核对。')
     }
+    // Use the same existing user-charge policy as ordinary text requests.
+    // Missing cache detail stays null; known input/output totals can settle.
+    const amountMilli = frozenPrice.version === V1_PRICING_VERSION
+      ? calculateV1ChargeMilli(usage.promptTokens, usage.completionTokens, frozenPrice.multiplierBps)
+      : calculateV2UserChargeMilli(usage.promptTokens, usage.completionTokens, usage.cacheHitTokens, frozenPrice.rates, frozenPrice.v1CeilingBps)
+    const priorMetadata = priorCharge?.metadata && typeof priorCharge.metadata === 'object' && !Array.isArray(priorCharge.metadata)
+      ? priorCharge.metadata : null
+    // Equal-rate/zero-input operations could already settle without this
+    // policy. Keep their historical ledger fingerprint unchanged on replay.
+    const missingCacheConcession = frozenPrice.version === V2_PRICING_VERSION && usage.cacheHitTokens === null
+      && (!priorCharge || priorMetadata?.cachePricingPolicy === 'unknown-cache-discount-2026-09-09')
     const charge = await consumeCreditsInTransaction(tx, {
       userId: captured.userId, amountMilli, kind: 'usage', sourceType: 'model_tokens',
       idempotencyKey: chargeKey, referenceId: operation.id,
@@ -106,6 +108,7 @@ export async function settleProviderOperation(input: { userId: string; attemptId
       allowPartialOnExhaustion: true,
       metadata: { pricingVersion: frozenPrice.version, taskRootId: operation.taskRootId, operationId: operation.id,
         ...(frozenPrice.version === V2_PRICING_VERSION ? { rateCardId: frozenPrice.rateCardId, rates: frozenPrice.rates, cacheHitTokens: usage.cacheHitTokens, cacheMissTokens: usage.cacheMissTokens,
+          ...(missingCacheConcession ? { cachePricingPolicy: 'unknown-cache-discount-2026-09-09', platformAbsorbsDifference: true } : {}),
           ...(frozenPrice.v1CeilingBps !== undefined ? { v1CeilingBps: frozenPrice.v1CeilingBps } : {}) } : {}),
         attemptId: attempt.id, requestHash: attempt.requestHash, usageRevision: usage.revision, observationHash: usage.observationHash },
     })

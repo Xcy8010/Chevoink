@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(), execute: vi.fn(), active: vi.fn(() => false), prepare: vi.fn(),
+  activeRun: vi.fn(),
   terminal: vi.fn(), runUpdate: vi.fn(), creditAccess: vi.fn(), tierRuntime: vi.fn(), goal: vi.fn(), binding: vi.fn(), receiptWait: vi.fn(),
   lockGoal: vi.fn(), activationSource: vi.fn(), reconcile: vi.fn(), resumeDurable: vi.fn(), pause: vi.fn(),
   transaction: vi.fn(), tx: { $queryRaw: vi.fn(), agentRun: { findFirst: vi.fn() }, agentGoalExecution: { findUnique: vi.fn(async () => null) } },
@@ -11,7 +12,7 @@ vi.mock('../../api/lib/prisma.js', () => ({
 }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.creditAccess, getModelTierRuntime: mocks.tierRuntime }))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: mocks.execute }))
-vi.mock('../../api/lib/agent/active-runs.js', () => ({ getActiveRun: () => undefined, hasActiveRunInSession: mocks.active, countActiveRunsByUser: () => 0 }))
+vi.mock('../../api/lib/agent/active-runs.js', () => ({ getActiveRun: mocks.activeRun, hasActiveRunInSession: mocks.active, countActiveRunsByUser: () => 0 }))
 vi.mock('../../api/lib/agent/goal-store.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/goal-store.js')>(), lockOwnedGoal: mocks.lockGoal }))
 vi.mock('../../api/lib/agent/goal-activation.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/goal-activation.js')>(), readGoalActivationReceipt: mocks.activationSource }))
 vi.mock('../../api/lib/agent/goal-activation-supervisor.js', () => ({ reconcileGoalActivation: mocks.reconcile }))
@@ -31,6 +32,7 @@ beforeEach(() => {
   mocks.binding.mockResolvedValue(null)
   mocks.receiptWait.mockResolvedValue(null)
   mocks.active.mockReturnValue(false)
+  mocks.activeRun.mockReturnValue(undefined)
   mocks.count.mockResolvedValue(0)
   mocks.prepare.mockResolvedValue(72)
   mocks.terminal.mockResolvedValue({ id: 'pause-72' })
@@ -55,45 +57,60 @@ function activatedFixture(durable = false) {
   return goal
 }
 describe('continue API exact target', () => {
-  it('keeps an activated goal receipt query behind its original goal and manuscript gates', async () => {
+  it('keeps an activated goal continuation behind its original goal, manuscript and normal credit admission', async () => {
     const goal = activatedFixture()
     const original = { ...run, usage: { checkpoint: { pendingReviews: [{ callId: 'pending' }] } } }
     mocks.find.mockReset().mockImplementation(async args => args.where.id ? original : { id: run.id })
     mocks.receiptWait.mockResolvedValue({ kind: 'waiting_for_original_receipt', checks: ['quality'], message: 'waiting' })
     expect(await continueActivatedGoalRun('u', run.id, goal.id, goal.epoch))
-      .toMatchObject({ runId: run.id, runGoalId: goal.id, reviewReceiptWait: { kind: 'waiting_for_original_receipt' } })
+      .toMatchObject({ runId: run.id, runGoalId: goal.id, status: 'running' })
     expect(mocks.lockGoal).toHaveBeenCalledWith(mocks.tx, 'u', run.sessionId, goal.id)
     expect(mocks.reconcile).toHaveBeenCalled()
-    expect(mocks.execute).not.toHaveBeenCalled(); expect(mocks.resumeDurable).not.toHaveBeenCalled()
-    expect(mocks.prepare).not.toHaveBeenCalled(); expect(mocks.creditAccess).not.toHaveBeenCalled(); expect(mocks.runUpdate).not.toHaveBeenCalled()
+    expect(mocks.execute).toHaveBeenCalledOnce(); expect(mocks.resumeDurable).not.toHaveBeenCalled()
+    expect(mocks.prepare).toHaveBeenCalledWith(run.id); expect(mocks.creditAccess).toHaveBeenCalledWith('u', 'speed'); expect(mocks.runUpdate).not.toHaveBeenCalled()
+    expect(mocks.receiptWait).not.toHaveBeenCalled()
   })
-  it('repeated receipt checks do not admit execution, persist a model switch or touch fees and event cursors', async () => {
+  it('ordinary Continue uses current-model credit admission and preserves old unknown usage instead of returning a receipt-only denial', async () => {
     const original = { ...run, status: 'failed', runtimeProtocolVersion: 0, taskRootId: null,
       usage: { totalTokens: 123, checkpoint: { pendingReviews: [{ callId: 'old-quality' }] } } }
     const before = JSON.stringify(original)
     mocks.find.mockReset().mockImplementation(async args => args.where.id ? original : { id: run.id })
     const reviewReceiptWait = { kind: 'waiting_for_original_receipt', checks: ['quality'], message: '等待原请求确认' }
     mocks.receiptWait.mockResolvedValue(reviewReceiptWait)
-    mocks.creditAccess.mockRejectedValue(new Error('credits must not be queried while only reading receipts'))
-    for (let index = 0; index < 3; index++) {
-      expect(await continueLoopRun('u', run.id, { modelTier: 'lite', reasoningEffort: 'low' }))
-        .toMatchObject({ runId: run.id, status: 'failed', reviewReceiptWait })
-    }
-    expect(mocks.receiptWait).toHaveBeenCalledTimes(3)
+    mocks.creditAccess.mockRejectedValueOnce(new Error('current credits unavailable'))
+    await expect(continueLoopRun('u', run.id, { modelTier: 'lite', reasoningEffort: 'low' })).rejects.toThrow('current credits unavailable')
+    expect(mocks.receiptWait).not.toHaveBeenCalled()
     expect(mocks.execute).not.toHaveBeenCalled()
     expect(mocks.prepare).not.toHaveBeenCalled()
     expect(mocks.runUpdate).not.toHaveBeenCalled()
-    expect(mocks.creditAccess).not.toHaveBeenCalled()
+    expect(mocks.creditAccess).toHaveBeenCalledWith('u', 'lite')
     expect(mocks.tierRuntime).not.toHaveBeenCalled()
     expect(JSON.stringify(original)).toBe(before)
-    // A newly available receipt only removes the probe's denial. The normal
-    // admission still checks credits and all original execution constraints.
-    mocks.receiptWait.mockResolvedValue(null)
-    await expect(continueLoopRun('u', run.id)).rejects.toThrow('credits must not be queried')
-    expect(mocks.execute).not.toHaveBeenCalled()
     mocks.creditAccess.mockResolvedValue(undefined)
-    expect(await continueLoopRun('u', run.id)).toMatchObject({ runId: run.id, status: 'running', eventStartSeq: 72 })
+    expect(await continueLoopRun('u', run.id, { modelTier: 'lite', reasoningEffort: 'low' })).toMatchObject({ runId: run.id, status: 'running', eventStartSeq: 72 })
     expect(mocks.execute).toHaveBeenCalledOnce()
+    expect(mocks.execute.mock.calls[0][0]).toMatchObject({ authorContinue: { eventId: 'pause-72', afterSeq: 72 }, modelTier: 'lite', reasoningEffort: 'low' })
+    expect(JSON.stringify(original)).toBe(before)
+  })
+  it('concurrent duplicate Continue reattaches to the same owned latest executor without another start, model mutation or cursor reset', async () => {
+    mocks.find.mockReset().mockImplementation(async args => args.where.id ? run : { id: run.id })
+    mocks.execute.mockImplementationOnce(async () => {
+      mocks.activeRun.mockReturnValue({ userId: 'u', sessionId: 's', controller: new AbortController(), eventStartSeq: 72 })
+      mocks.active.mockReturnValue(true)
+    })
+    const result = await Promise.all([continueLoopRun('u', run.id), continueLoopRun('u', run.id, { modelTier: 'ultimate', reasoningEffort: 'high' })])
+    expect(result).toEqual([expect.objectContaining({ runId: run.id, streamUrl: `/api/agent/runs/${run.id}/stream`, eventStartSeq: 72 }),
+      expect.objectContaining({ runId: run.id, streamUrl: `/api/agent/runs/${run.id}/stream`, eventStartSeq: 72 })])
+    expect(mocks.execute).toHaveBeenCalledOnce(); expect(mocks.prepare).toHaveBeenCalledOnce(); expect(mocks.creditAccess).toHaveBeenCalledOnce()
+    expect(mocks.runUpdate).not.toHaveBeenCalled()
+  })
+  it('does not use an active executor to bypass a newer main task or an explicitly ended task', async () => {
+    mocks.activeRun.mockReturnValue({ userId: 'u', sessionId: 's', controller: new AbortController(), eventStartSeq: 72 })
+    mocks.find.mockReset().mockResolvedValueOnce(run).mockResolvedValueOnce({ id: 'newer' })
+    await expect(continueLoopRun('u', run.id)).rejects.toMatchObject({ code: 'STALE_RESUME_TARGET' })
+    mocks.find.mockReset().mockResolvedValue({ ...run, usage: { authorEnded: { fulfilled: false } } })
+    await expect(continueLoopRun('u', run.id)).rejects.toMatchObject({ code: 'RUN_AUTHOR_ENDED' })
+    expect(mocks.execute).not.toHaveBeenCalled(); expect(mocks.prepare).not.toHaveBeenCalled()
   })
   it('validates the human activation before legacy manuscript admission and preserves the original ceiling', async () => {
     const goal = activatedFixture()

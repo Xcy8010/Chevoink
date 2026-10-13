@@ -164,8 +164,7 @@ export async function superviseAgentGoal(userId: string, sessionId: string, goal
   }
   if (action.kind === 'activation_continue') {
     try {
-      const resumed = await (await import('./run-service.js')).continueActivatedGoalRun(userId, action.runId, action.goal.id, action.goal.epoch)
-      if (resumed?.reviewReceiptWait) throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED', resumed.reviewReceiptWait.message)
+      await (await import('./run-service.js')).continueActivatedGoalRun(userId, action.runId, action.goal.id, action.goal.epoch)
     }
     catch (error) {
       const code = error instanceof DataAccessError ? error.code : 'GOAL_DISPATCH_UNAVAILABLE'

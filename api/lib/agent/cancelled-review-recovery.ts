@@ -5,6 +5,7 @@ import type { PendingReviewCall } from './checkpoint.js'
 import { activeChapterScope } from '../data/internal.js'
 import { originalTaskRunIds, readOriginalTaskRequest } from './original-request.js'
 import { readQualityReviewAdmission } from './quality-review-admission.js'
+import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const sensitive = ['continuity_validate', 'quality_analyze', 'chapter_write', 'chapter_edit_range', 'chapter_append']
@@ -36,6 +37,7 @@ export async function readRetiredReviewUsageIds(tx: Prisma.TransactionClient,
   if (!runIds.includes(subject.runId)) return ids
   const runs = await tx.agentRun.findMany({ where: { id: { in: [...runIds] }, userId: subject.userId, novelId: subject.novelId } })
   if (runs.length !== runIds.length) return ids
+  for (const id of await readAuthorContinuedReviewUsageIds(tx, subject)) ids.add(id)
   const original = await readOriginalTaskRequest(tx, subject)
   const history = await tx.agentRunEvent.findMany({ where: { runId: { in: [...runIds] },
     type: { in: ['tool.call', 'tool.result', 'run.paused', 'run.started', 'run.finished', 'review.reconciled'] } }, orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }] })

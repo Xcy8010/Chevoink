@@ -43,6 +43,12 @@ const mocks = vi.hoisted(() => ({
   replacementReviews: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/author-review-replacement.js').readAuthorReviewReplacements>>> => []),
   assertLimitedDelivery: vi.fn(async () => undefined),
   continuedContinuity: vi.fn(async (): Promise<Array<[string, string]>> => []),
+  continuedReviews: vi.fn(async (): Promise<import('../../api/lib/agent/continued-review-recovery.js').ContinuedReviewRecovery[]> => []),
+  continuedDispatch: vi.fn(async (_tx: unknown, _subject: unknown, _item: import('../../api/lib/agent/continued-review-recovery.js').ContinuedReviewRecovery, callId: string): Promise<import('../../api/lib/agent/continued-review-recovery.js').ContinuedReviewDispatchWitness | null> =>
+    ({ callId, at: new Date(), compilationId: _item.compilationId, qualityContextHash: 'quality-context', repairInvariantHash: 'repair-context', specHash: 'spec' })),
+  continuedRepair: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/continued-review-recovery.js').readContinuedReviewRepairHandoff>>> => false),
+  approval: vi.fn(async () => ({ approved: false, alwaysAllow: false, timedOut: false })),
+  modelRuntime: vi.fn(async () => ({ tier: 'speed', contextWindowTokens: 128000, modelName: 'selected-current-model', provider: 'selected-provider', multiplierBps: 12000 })),
   offlineContinuity: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/continuity-offline-recovery.js').readOfflineContinuityRecovery>>> => null),
   legacyAnchorRecovery: vi.fn(async (): Promise<import('../../api/lib/agent/legacy-input-recovery.js').LegacyAnchorInputRecovery | null> => null),
   continuityRecovery: vi.fn(async () => ({ removed: [] as import('../../api/lib/agent/tool-local-failure.js').ToolRestriction[],
@@ -71,6 +77,11 @@ vi.mock('../../api/lib/agent/review-request-recovery.js', () => ({ readReviewReq
 vi.mock('../../api/lib/agent/cancelled-review-recovery.js', () => ({ readCancelledReviewRetirements: mocks.cancelledReviews }))
 vi.mock('../../api/lib/agent/quality-review-admission.js', () => ({ readSettledQualityReviews: mocks.settledQuality }))
 vi.mock('../../api/lib/agent/author-review-replacement.js', () => ({ readAuthorReviewReplacements: mocks.replacementReviews }))
+vi.mock('../../api/lib/agent/continued-review-recovery.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/continued-review-recovery.js')>(),
+  readContinuedReviewRecovery: mocks.continuedReviews,
+  readContinuedReviewDispatchWitness: mocks.continuedDispatch, readContinuedReviewRepairHandoff: mocks.continuedRepair,
+}))
 vi.mock('../../api/lib/agent/quality-format-recovery.js', () => ({ readQualityFormatRecovery: mocks.qualityRecovery }))
 vi.mock('../../api/lib/agent/writing-delivery-limitations.js', () => ({
   readLimitedWritingDelivery: mocks.limitedDelivery, assertLimitedWritingDelivery: mocks.assertLimitedDelivery,
@@ -182,7 +193,7 @@ vi.mock('../../api/lib/prisma.js', () => {
   prisma: db,
   }
 })
-vi.mock('../../api/lib/credits.js', () => ({ getModelTierRuntime: vi.fn(async () => ({ tier: 'speed', contextWindowTokens: 128000 })) }))
+vi.mock('../../api/lib/credits.js', () => ({ getModelTierRuntime: mocks.modelRuntime }))
 vi.mock('../../api/lib/agent/agents.js', () => ({
   getAgentDefinition: () => ({ type: 'test', model: 'test', title: '测试' }),
   getToolsForAgent: () => mocks.tools,
@@ -220,7 +231,7 @@ vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: () => ({ em
     result: await work(mocks.db), publish: () => { for (const event of [...preceding, body]) mocks.emit(event) },
   }),
 }), disposeRunEventBus: mocks.dispose }))
-vi.mock('../../api/lib/agent/permissions.js', () => ({ cancelAllQuestions: vi.fn(), grantAlwaysAllow: vi.fn(), hasAlwaysAllow: () => false, rejectAllApprovals: vi.fn(), waitForApproval: vi.fn() }))
+vi.mock('../../api/lib/agent/permissions.js', () => ({ cancelAllQuestions: vi.fn(), grantAlwaysAllow: vi.fn(), hasAlwaysAllow: () => false, rejectAllApprovals: vi.fn(), waitForApproval: mocks.approval }))
 vi.mock('../../api/lib/agent/tools/todo-tools.js', () => ({ loadSessionTodoItems: mocks.todos, cancelTaskTodoItems: vi.fn(async () => []), renderTodoItems: (items: AgentTodoItem[]) => JSON.stringify(items) }))
 vi.mock('../../api/lib/agent/task-lineage.js', () => ({ getTaskRunIds: async () => ['run'] }))
 vi.mock('../../api/lib/agent/tools/task-orchestration-tools.js', () => ({ ORCHESTRATION_TOOL_NAMES: new Set(), assertOrchestrationResumeGuard: vi.fn(), buildOrchestrationResumeNote: vi.fn() }))
@@ -291,6 +302,12 @@ beforeEach(() => {
   mocks.requestRecovery.mockReset().mockResolvedValue([])
   mocks.cancelledReviews.mockReset().mockResolvedValue([])
   mocks.continuedContinuity.mockReset().mockResolvedValue([])
+  mocks.continuedReviews.mockReset().mockResolvedValue([])
+  mocks.continuedDispatch.mockReset().mockImplementation(async (_tx, _subject, _item, callId) =>
+    ({ callId, at: new Date(), compilationId: _item.compilationId, qualityContextHash: 'quality-context', repairInvariantHash: 'repair-context', specHash: 'spec' }))
+  mocks.continuedRepair.mockReset().mockResolvedValue(false)
+  mocks.approval.mockReset().mockResolvedValue({ approved: false, alwaysAllow: false, timedOut: false })
+  mocks.modelRuntime.mockReset().mockResolvedValue({ tier: 'speed', contextWindowTokens: 128000, modelName: 'selected-current-model', provider: 'selected-provider', multiplierBps: 12000 })
   mocks.offlineContinuity.mockReset().mockResolvedValue(null)
   mocks.legacyAnchorRecovery.mockReset().mockResolvedValue(null)
   mocks.continuityRecovery.mockReset().mockResolvedValue({ removed: [], settled: [], recovered: [], markers: [], chapterIds: [] })
@@ -1352,6 +1369,158 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(mocks.chat).not.toHaveBeenCalled()
     expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', errorMessage: null })
     expect(mocks.runs.get('run')?.outputSummary).toContain('检查正在等待原请求的结果或用量确认')
+  })
+})
+
+describe('author Continue bootstraps checks through the real execution loop', () => {
+  function restored() {
+    const prompt = '修改本章', taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 1, chapterId: 'c' }], titleAndBodyOnly: false, repairAuthorized: true }
+    mocks.currentOriginal = { prompt, taskSpec }; mocks.chapters[0].revision = 4
+    const item: import('../../api/lib/agent/continued-review-recovery.js').ContinuedReviewRecovery = {
+      callId: 'old-unknown', toolName: 'quality_analyze', compilationId: 'comp', chapterId: 'c', revision: 4, persisted: false,
+      receipt: { status: 'author_continued_review', usageOutcome: 'unknown_preserved', sourceRunId: 'run', sourceCallId: 'old-unknown',
+        sourceResultId: 'old-result', sourceReportId: null, usageIds: ['old-held-usage'], admissionId: 'author-continue:pause', admissionEventId: 'author-start',
+        taskId: taskSpec.id, currentRevision: 4, currentContentHash: 'b'.repeat(64), currentContextHash: 'c'.repeat(64), recoveryKey: 'author-continued-review:' + 'd'.repeat(64) },
+    }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 9, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      readProgress: 3, readBaseline: 0, writeProgress: 3, writeBaseline: 0, progressSignatures: [], reviewAttempts: ['old-consumed-attempt'],
+      pendingReviews: [{ compilationId: item.compilationId, chapterId: item.chapterId, revision: item.revision, toolName: item.toolName, callId: item.callId }],
+      inputProtocolRecovery: { protocol: 2, key: 'a'.repeat(64) } }
+    const usage = { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 24, startedAt: new Date(checkpoint.runStartedAt), usage })
+    mocks.continuedReviews.mockResolvedValueOnce([item]).mockResolvedValue([{ ...item, persisted: true }])
+    const evidence = (phases: Array<'continuity' | 'quality'>) => ({ taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'c',
+      orderIndex: 1, contentHash: persistedContentHash(mocks.chapters[0].content), phases })
+    const execute = () => executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build',
+      prompt: '继续', resume: true, authorContinue: { eventId: 'pause', afterSeq: 3 }, modelTier: 'speed' })
+    return { item, taskSpec, checkpoint, usage, evidence, execute }
+  }
+  it('runs both current required phases before the first main request and proceeds in the original loop with real report progress only', async () => {
+    const f = restored(), order: string[] = []
+    let state = readiness('missing', 'missing', 4)
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const continuity = tool('continuity_validate', async () => ({ output: 'saved current continuity' }))
+    continuity.execute = vi.fn(async ctx => {
+      order.push('continuity'); expect(mocks.chat).not.toHaveBeenCalled()
+      expect(ctx.modelRuntime).toMatchObject({ tier: 'speed', modelName: 'selected-current-model', provider: 'selected-provider', multiplierBps: 12000 })
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1050, checkpoint: { stagnantBatches: 9, tokenBudget: 500,
+        pendingReviews: [expect.objectContaining({ callId: expect.stringMatching(/^continued_review_/u), toolName: continuity.name })],
+        reviewAttempts: expect.arrayContaining(['old-consumed-attempt', f.item.receipt.recoveryKey + ':continuity_validate']) } })
+      expect(mocks.journal).toHaveBeenCalled()
+      state = { ...readiness('complete', 'missing', 4), progressEvidence: f.evidence(['continuity']) }
+      return { output: 'saved current continuity' }
+    })
+    const quality = tool('quality_analyze', async () => {
+      order.push('quality'); expect(mocks.chat).not.toHaveBeenCalled()
+      state = { ...readiness('complete', 'complete', 4), progressEvidence: f.evidence(['continuity', 'quality']) }
+      return { output: 'saved current quality' }
+    })
+    mocks.tools = [continuity, quality]
+    mocks.chat.mockImplementationOnce(async () => { order.push('main'); return response('已核对实际当前报告。') })
+    await f.execute()
+    expect(events().filter(event => event.type === 'error')).toEqual([])
+    expect(order).toEqual(['continuity', 'quality', 'main'])
+    expect(continuity.execute).toHaveBeenCalledOnce(); expect(quality.execute).toHaveBeenCalledOnce(); expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'review.reconciled', callId: 'old-unknown', receipt: f.item.receipt }))
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: { stagnantBatches: 0, tokenBudget: 500, maxTurns: 1,
+      readProgress: 3, writeProgress: 3, reviewAttempts: expect.arrayContaining(['old-consumed-attempt', f.item.receipt.recoveryKey + ':quality_analyze']) } })
+    expect(events().filter(event => event.type === 'error')).toEqual([])
+  })
+  it('uses an already complete current assessment without buying another check', async () => {
+    const f = restored()
+    mocks.reviewReadiness.mockResolvedValue({ ...readiness('complete', 'complete', 4), progressEvidence: f.evidence(['continuity', 'quality']) })
+    const quality = tool('quality_analyze', async () => ({ output: 'must not send' })), continuity = tool('continuity_validate', async () => ({ output: 'must not send' }))
+    mocks.tools = [quality, continuity]; queue(response('现有当前报告已核对。'))
+    await f.execute()
+    expect(quality.execute).not.toHaveBeenCalled(); expect(continuity.execute).not.toHaveBeenCalled(); expect(mocks.chat).toHaveBeenCalledOnce()
+  })
+  it.each(['body', 'context', 'admission', 'cancel'] as const)('actual first phase progress cannot grant a second synthetic phase after unrelated %s drift', async kind => {
+    const f = restored()
+    let state = readiness('missing', 'missing', 4)
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const continuity = tool('continuity_validate', async () => {
+      state = { ...readiness('complete', 'missing', 4), progressEvidence: f.evidence(['continuity']) }
+      if (kind === 'body') { mocks.chapters[0].revision = 5; mocks.chapters[0].content = '其他窗口写入的正文' }
+      mocks.continuedReviews.mockResolvedValue([])
+      return { output: '真实连续性报告已保存；其他当前事实后来变化' }
+    })
+    const quality = tool('quality_analyze', async () => ({ output: 'must not dispatch' }))
+    mocks.tools = [continuity, quality]
+    await f.execute()
+    expect(continuity.execute).toHaveBeenCalledOnce(); expect(quality.execute).not.toHaveBeenCalled(); expect(mocks.chat).not.toHaveBeenCalled()
+    expect(mocks.continuedRepair).toHaveBeenCalledOnce()
+    const attempts = (mocks.runs.get('run')?.usage as { checkpoint: { reviewAttempts: string[] } }).checkpoint.reviewAttempts
+    expect(attempts).toContain(f.item.receipt.recoveryKey + ':continuity_validate')
+    expect(attempts).not.toContain(f.item.receipt.recoveryKey + ':quality_analyze')
+  })
+  it('rechecks the same author/input fence after an approval wait and sends no handler if that binding was lost', async () => {
+    const f = restored(), quality = tool('quality_analyze', async () => ({ output: 'must not dispatch' }))
+    quality.permission.build = 'ask'; quality.alwaysConfirm = true
+    mocks.tools = [quality]; mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing', 4))
+    mocks.approval.mockImplementationOnce(async () => {
+      mocks.continuedDispatch.mockResolvedValue(null)
+      return { approved: true, alwaysAllow: false, timedOut: false }
+    })
+    await f.execute()
+    expect(mocks.approval).toHaveBeenCalledOnce(); expect(mocks.continuedDispatch).toHaveBeenCalledOnce()
+    expect(quality.execute).not.toHaveBeenCalled(); expect(mocks.chat).not.toHaveBeenCalled()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', failureCode: 'CONTINUED_REVIEW_INPUT_STALE', ok: false }))
+  })
+  it('hands this exact verified quality repair r4→r5 to the ordinary main loop once, without another Continue or old synthetic key', async () => {
+    const f = restored(), before = mocks.chapters[0].content, after = '该检查实际原子修订后的正文'
+    let state = readiness('complete', 'missing', 4)
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const quality = tool('quality_analyze', async () => {
+      mocks.chapters[0].content = after; mocks.chapters[0].revision = 5
+      mocks.continuedReviews.mockResolvedValue([])
+      state = readiness('stale', 'stale', 5)
+      return { output: '本调用真实保存报告并原子修补，新版仍须原流程复核',
+        snapshot: { target: 'chapter', targetId: 'c', field: 'content', previousValue: before },
+        display: { kind: 'qualityReport', reportId: 'actual-report', chapterId: 'c', chapterRevision: 5, status: 'repaired', repairRound: 1, findings: [] } }
+    })
+    mocks.continuedRepair.mockResolvedValue({ chapterId: 'c', beforeHash: persistedContentHash(before), afterHash: persistedContentHash(after) })
+    const continuation = tool('chapter_read', async () => { throw new DataAccessError(502, 'AI_PROVIDER_QUOTA_EXCEEDED', 'test ends normal continuation') })
+    mocks.tools = [quality, continuation]
+    queue(response('', [call('native-current-read', continuation.name, '{"chapterId":"c"}')]))
+    await f.execute()
+    expect(quality.execute).toHaveBeenCalledOnce(); expect(mocks.chat).toHaveBeenCalledOnce(); expect(continuation.execute).toHaveBeenCalledOnce()
+    expect(mocks.continuedRepair).toHaveBeenCalledWith(expect.anything(), expect.anything(), f.item, expect.objectContaining({ callId: expect.stringMatching(/^continued_review_/u) }),
+      expect.objectContaining({ callId: expect.stringMatching(/^continued_review_/u), snapshot: expect.objectContaining({ previousValue: before }) }))
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: { writeProgress: 4, tokenBudget: 500,
+      reviewAttempts: expect.arrayContaining(['old-consumed-attempt', f.item.receipt.recoveryKey + ':quality_analyze']) } })
+    expect(events().filter(event => event.type === 'error' && event.code === 'CONTINUED_REVIEW_INPUT_STALE')).toEqual([])
+  })
+  it('retains a new unknown request and its consumed key across worker restart without another check or main request', async () => {
+    const f = restored()
+    mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing', 4))
+    const quality = tool('quality_analyze', async () => {
+      const trace = beginTextRequest('new-held-usage').record; trace.status = 'unknown'; trace.billingKnown = false
+      throw new DataAccessError(502, 'AI_PROVIDER_TRANSPORT', 'unknown actual request')
+    })
+    mocks.tools = [quality]
+    await f.execute()
+    const stopped = structuredClone(mocks.runs.get('run')!)
+    expect(quality.execute).toHaveBeenCalledOnce(); expect(mocks.chat).not.toHaveBeenCalled()
+    expect(stopped.usage).toMatchObject({ totalTokens: 1050, checkpoint: { stagnantBatches: 10, tokenBudget: 500,
+      pendingReviews: [expect.objectContaining({ callId: expect.stringMatching(/^continued_review_/u), toolName: 'quality_analyze' })],
+      reviewAttempts: expect.arrayContaining(['old-consumed-attempt', f.item.receipt.recoveryKey + ':quality_analyze']) } })
+    mocks.update.mockResolvedValueOnce(stopped as never)
+    await f.execute()
+    expect(quality.execute).toHaveBeenCalledOnce(); expect(mocks.chat).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1050, checkpoint: { stagnantBatches: 10, tokenBudget: 500 } })
+  })
+  it.each(['deny', 'journal-failure', 'input-drift', 'consumed-key'] as const)('bootstrap respects %s before any handler/model dispatch and does not manufacture progress', async kind => {
+    const f = restored(), quality = tool('quality_analyze', async () => ({ output: 'must not run' }))
+    mocks.tools = [quality]; mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing', 4))
+    if (kind === 'deny') quality.permission.build = 'deny'
+    if (kind === 'journal-failure') mocks.journal.mockRejectedValueOnce(new Error('audit journal unavailable'))
+    if (kind === 'input-drift') mocks.continuedReviews.mockResolvedValue([])
+    if (kind === 'consumed-key') f.checkpoint.reviewAttempts.push(f.item.receipt.recoveryKey + ':quality_analyze')
+    await f.execute()
+    expect(quality.execute).not.toHaveBeenCalled(); expect(mocks.chat).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1050, checkpoint: { stagnantBatches: kind === 'deny' ? 10 : 9, tokenBudget: 500, readProgress: 3, writeProgress: 3 } })
   })
 })
 

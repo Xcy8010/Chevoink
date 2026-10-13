@@ -45,6 +45,25 @@ export type AgentAuthorReviewReplacement = {
   qualityContextHash: string
 }
 
+/** An authenticated Continue permits fresh work, while its earlier request and
+ * billing remain unknown. This author action is not a completed assessment. */
+export type AgentAuthorContinuedReview = {
+  status: 'author_continued_review'
+  usageOutcome: 'unknown_preserved'
+  sourceRunId: string
+  sourceCallId: string
+  sourceResultId: string
+  sourceReportId: string | null
+  usageIds: string[]
+  admissionId: string
+  admissionEventId: string
+  taskId: string
+  currentRevision: number
+  currentContentHash: string
+  currentContextHash: string
+  recoveryKey: string
+}
+
 /** 当前逻辑任务的权威待办；空清单不回退到会话历史。 */
 export interface AgentTodoSnapshot {
   runId: EntityId
@@ -342,7 +361,7 @@ export type AgentStreamEventBody =
       reasoningEffort: import('./credits.js').ModelReasoningEffort; creativeFreedom: CreativeFreedom; modelSelectionExplicit: boolean }
   | { type: 'execution.progress'; revision: number; stage: 'model' | 'tool' | 'checkpoint' | 'finalizing' }
   | { type: 'review.reconciled'; callId: string; chapterId: string; revision: number;
-      compilationId: string | null; receipt: AgentReviewFailureReconciliation | AgentCancelledReviewRetirement | AgentAuthorReviewReplacement }
+      compilationId: string | null; receipt: AgentReviewFailureReconciliation | AgentCancelledReviewRetirement | AgentAuthorReviewReplacement | AgentAuthorContinuedReview }
   | { type: 'text.delta'; messageId: string; delta: string }
   | { type: 'text.final'; messageId: string; text: string; asReasoning: boolean }
   | { type: 'reasoning.delta'; messageId: string; delta: string }
@@ -552,8 +571,6 @@ export interface StartAgentLoopRunResponse {
   streamUrl: string
   /** Persisted journal cursor immediately before this continuation was admitted. */
   eventStartSeq?: number
-  /** No execution or new admission was created; checking again only reads receipts. */
-  reviewReceiptWait?: AgentReviewReceiptWait
 }
 
 export interface ResolveAgentApprovalRequest {

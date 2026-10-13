@@ -5,6 +5,8 @@ import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery } from './review-request-recovery.js'
 import { readAuthorReviewReplacements } from './author-review-replacement.js'
+import { readContinuedReviewRecovery, readContinuedReviewDispatchWitness, readContinuedReviewRepairHandoff, continuedReviewAttemptKey, continuedReviewCallId,
+  type ContinuedReviewRecovery, type ContinuedReviewDispatchWitness } from './continued-review-recovery.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
@@ -335,6 +337,8 @@ export async function handleToolCall(
   runId: string,
   /** 非 undefined 表示本次调用发生在子 Agent 内嵌执行内部：事件与卡片带 subagentCallId 归属标记，审批透传到父 run */
   subagent?: { callId: string },
+  /** Internal caller fence after permission/approval waits, never tool args. */
+  beforeExecute?: () => Promise<void>,
 ): Promise<ToolCallOutcome> {
   const startedAt = Date.now()
   const admitted = tools.find((candidate) => candidate.name === call.name)
@@ -529,7 +533,12 @@ export async function handleToolCall(
         contentHash: createHash('sha256').update(chapter.content).digest('hex') }
     }
     const goalContext = await readGoalExecution(ctx.userId, ctx.runId)
-    const result = await withGoalExecutionContext(goalContext, () => withGoalEffects(() => withTextRequestTrace(requestTrace, () => tool.execute({ ...ctx, inlineChild: Boolean(subagent) }, validated.data))))
+    const result = await withGoalExecutionContext(goalContext, () => withGoalEffects(() => withTextRequestTrace(requestTrace, async () => {
+      ctx.signal.throwIfAborted()
+      await beforeExecute?.()
+      ctx.signal.throwIfAborted()
+      return tool.execute({ ...ctx, inlineChild: Boolean(subagent) }, validated.data)
+    })))
     failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
     if (result.outcome === 'failed') {
       failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
@@ -554,6 +563,7 @@ export async function handleToolCall(
 
     return {
       observation: wrapToolOutput(tool.name, result.output),
+      unresolvedTextRequest: requestTrace.records.length > 0 && !textRequestsFinished(requestTrace),
       workflowMilestone: ctx.inlineChild ? undefined : result.workflowMilestone,
       reviewDecisionFeedback: ctx.inlineChild ? undefined : result.reviewDecisionFeedback,
       requiredResult: result.requiredResult,
@@ -775,7 +785,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const controller = new AbortController()
   const bus = createRunEventBus(runId, params.eventStartSeq ?? 0)
 
-  registerActiveRun(runId, { controller, bus, sessionId: params.sessionId, userId: params.userId })
+  registerActiveRun(runId, { controller, bus, sessionId: params.sessionId, userId: params.userId, eventStartSeq: params.eventStartSeq ?? 0 })
 
   const usage = emptyUsage()
   let turn = 0
@@ -811,6 +821,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const automaticReviewAttempts = new Set<string>()
   const recoveredReviewKeys = new Set<string>()
   const reviewRecoveryKeys = new Map<string, string>()
+  const continuedReviewBootstrap: ContinuedReviewRecovery[] = []
   let qualityRecovery: QualityFormatRecovery | null = null
   const reviewAttemptKey = (review: Parameters<typeof reviewDispatchKey>[0], name: string) => {
     const key = reviewDispatchKey(review, name)
@@ -1258,6 +1269,29 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       if (retired.length) await persistCheckpoint()
     }
+    if (params.resume || previousTask) {
+      const continued = await prisma.$transaction(tx => readContinuedReviewRecovery(tx,
+        { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]))
+      for (const item of continued) {
+        if (!item.persisted) {
+          bus.emit({ type: 'review.reconciled', callId: item.callId, chapterId: item.chapterId,
+            revision: item.revision, compilationId: item.compilationId, receipt: item.receipt })
+          await bus.persist()
+        }
+        const pendingKey = `${item.compilationId ?? item.chapterId}:${item.toolName}`
+        if (pendingReviews.get(pendingKey)?.callId === item.callId) pendingReviews.delete(pendingKey)
+        for (let index = toolRestrictions.length - 1; index >= 0; index--) {
+          const restriction = toolRestrictions[index]
+          if ((restriction.action === item.toolName || restriction.action === 'chapter_bridge_commit')
+            && ['QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED', 'REVIEW_DEPENDENCY_UNAVAILABLE'].includes(restriction.code)
+            && !!restriction.target && [item.chapterId, item.compilationId].includes(restriction.target)
+            && (!restriction.reviewInput || restriction.reviewInput.chapterId === item.chapterId && restriction.reviewInput.revision === item.revision)) toolRestrictions.splice(index, 1)
+        }
+        continuedReviewBootstrap.push(item)
+        reviewRecoveryKeys.set(reviewDispatchKey({ ...item, revision: item.receipt.currentRevision }, item.toolName), continuedReviewAttemptKey(item.receipt, item.toolName))
+      }
+      if (continued.length) await persistCheckpoint()
+    }
     if (pendingReviews.size) {
       // A prior batch may already have saved an independent current report
       // before stopping. Record its semantic receipt without buying another
@@ -1269,6 +1303,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const recovered = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx,
         { userId: params.userId, novelId: params.novelId, runId }))
       for (const [key, attempt] of recovered) reviewRecoveryKeys.set(key, attempt)
+    }
+    // Continue authorizes missing phases of this bound current assessment. Each
+    // phase keeps its own stable key; historical attempts remain consumed.
+    for (const item of continuedReviewBootstrap) for (const name of ['continuity_validate', 'quality_analyze'] as const) {
+      const key = reviewDispatchKey({ ...item, revision: item.receipt.currentRevision }, name)
+      if (!reviewRecoveryKeys.get(key)?.startsWith('author-continued-review:')) reviewRecoveryKeys.set(key, continuedReviewAttemptKey(item.receipt, name))
     }
     if (params.resume && stagnantBatches >= 4 && !inputProtocolRecovery && !compatibilityReadTargets
       && ['write', 'revise'].includes(taskSpec.intent)) {
@@ -1664,6 +1704,27 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     while (executionControl.controlPolicy === 'until_completion') {
       if (controller.signal.aborted) throw new DOMException('run aborted', 'AbortError')
       if (await finishPersistedWritingIfComplete()) return
+      let bootstrapCall: ToolCallRequest | undefined
+      let bootstrapItem: ContinuedReviewRecovery | undefined
+      while (continuedReviewBootstrap.length && !bootstrapCall) {
+        const item = continuedReviewBootstrap[0]
+        const current = await prisma.$transaction(tx => readContinuedReviewRecovery(tx,
+          { userId: params.userId, novelId: params.novelId, runId }, []))
+        const bound = current.some(plan => plan.receipt.recoveryKey === item.receipt.recoveryKey)
+        if (!bound) throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '本次继续的检查输入已变化，未派发旧检查或生成新许可。')
+        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
+          { userId: params.userId, novelId: params.novelId, runId }, item.compilationId ?? undefined))
+        if (readiness?.ready) { continuedReviewBootstrap.shift(); continue }
+        if (readiness && (readiness.chapterId !== item.chapterId || readiness.revision !== item.receipt.currentRevision)) throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '本次继续的检查目标已变化，未派发请求。')
+        const next = readiness ? nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
+          : { kind: 'tool' as const, key: continuedReviewAttemptKey(item.receipt, item.toolName), tool: { name: item.toolName,
+            args: { chapterId: item.chapterId, ...(item.compilationId ? { compilationId: item.compilationId } : {}) } } }
+        if (next.kind === 'blocked') throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED', next.reason)
+        if (next.kind === 'ready') { continuedReviewBootstrap.shift(); continue }
+        if (automaticReviewAttempts.has(next.key) || !tools.some(tool => tool.name === next.tool.name)) throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED', '本次继续的检查已领取或不在原工具权限中，未重发。')
+        bootstrapCall = { id: continuedReviewCallId(next.key), name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
+        bootstrapItem = item
+      }
       const configurationChanges = await prisma.agentConfigurationChange.findMany({ where: { runId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
       if (configurationChanges.length) {
         const current = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
@@ -1718,7 +1779,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       // 在发往供应商之前执行模型窗口感知的压缩；仍超限则安全收尾，不把必失败请求交给供应商。
       const requestBudget = prepareContextForRequest(openAITools, 'turn')
-      if (!requestBudget.fits) {
+      if (!bootstrapCall && !requestBudget.fits) {
         await wrapUpAndFinish('当前任务上下文已达到所选模型的安全窗口上限。')
         return
       }
@@ -1743,7 +1804,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const executionReasoningDetector = createExecutionTextDetector()
 
       const observeTurnUsage = trackRequestUsage(usage)
-      const result = await chatWithTools({
+      const result = bootstrapCall ? { content: '', reasoning: '', toolCalls: [bootstrapCall], finishReason: 'tool_calls' as const,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } } : await chatWithTools({
         freePromotion: modelRuntime.freePromotion,
         onUsage: observeTurnUsage,
         messages,
@@ -1822,7 +1884,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // End all parameter previews before admission/preflight can wait on other work.
       // Journal this small tombstone so reconnect also clears previews seen earlier.
       if (announcedToolNames.size > 0) bus.emit({ type: 'tool.preparation.end', messageId, callIds: [...announcedToolNames.keys()] })
-      observeTurnUsage(result.usage)
+      if (!bootstrapCall) observeTurnUsage(result.usage)
       await persistCheckpoint()
 
       const recoveredToolCalls = result.toolCalls.length === 0
@@ -2304,7 +2366,25 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             throw error
           }
         }
-        const outcome = await handleToolCall(call, tools, { ...toolContext, ...(call.name === 'continuity_validate' && offlineContinuityCalls.has(call.id) ? { offlineContinuityOnly: offlineContinuityCalls.get(call.id) } : {}), callId: call.id, messageId }, bus, messageId, runId)
+        let bootstrapWitness: ContinuedReviewDispatchWitness | null = null
+        const boundBootstrap = bootstrapCall?.id === call.id ? bootstrapItem : undefined
+        const outcome = await handleToolCall(call, tools, { ...toolContext, ...(call.name === 'continuity_validate' && offlineContinuityCalls.has(call.id) ? { offlineContinuityOnly: offlineContinuityCalls.get(call.id) } : {}), callId: call.id, messageId }, bus, messageId, runId, undefined,
+          boundBootstrap ? async () => {
+            controller.signal.throwIfAborted()
+            bootstrapWitness = await prisma.$transaction(tx => readContinuedReviewDispatchWitness(tx,
+              { userId: params.userId, novelId: params.novelId, runId }, boundBootstrap, call.id))
+            if (!bootstrapWitness) throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '本次继续的检查输入或作者许可已变化，未派发请求。')
+            controller.signal.throwIfAborted()
+          } : undefined)
+        const controlledRepair = boundBootstrap && bootstrapWitness && !outcome.unresolvedTextRequest ? await prisma.$transaction(tx => readContinuedReviewRepairHandoff(tx,
+          { userId: params.userId, novelId: params.novelId, runId }, boundBootstrap, bootstrapWitness!, outcome.part)) : false
+        if (controlledRepair) {
+          // This exact call saved a controlled repair. Retire only its old
+          // bootstrap plan; normal native permissions/current checks continue.
+          for (let index = continuedReviewBootstrap.length - 1; index >= 0; index--) {
+            if (continuedReviewBootstrap[index].chapterId === controlledRepair.chapterId) continuedReviewBootstrap.splice(index, 1)
+          }
+        }
         const requestFinished = reviewDispatch && outcome.reviewRequestFinished?.version === 1
           && outcome.reviewRequestFinished.chapterId === reviewDispatch.chapterId
           && outcome.reviewRequestFinished.revision === reviewDispatch.revision
@@ -2389,6 +2469,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             && /^[a-f0-9]{64}$/u.test(range.contentHash) && Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end)
             && range.start >= 0 && range.end > range.start) compatibilityReadObserved = true
           const contentProgress = observeLegacyContentProgress(progressSignatures, outcome.part)
+            || Boolean(controlledRepair && observeSemanticTransition(progressSignatures, `chapter:${controlledRepair.chapterId}`, controlledRepair.beforeHash, controlledRepair.afterHash))
           const transition = outcome.semanticTransition
           const structureProgress = Boolean(transition && observeSemanticTransition(progressSignatures, `structure:${transition.targetId}`, transition.beforeHash, transition.afterHash))
           const durableProgress = contentProgress || structureProgress

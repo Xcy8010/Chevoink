@@ -75,17 +75,17 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
       const { identity, operation } = await pricedCall(f, 10000, price)
       const known = scenario === 'known-cache'
       await recordProviderUsage({ ...identity, revision: 1, usage: { source: 'reported', promptTokens: 10000, completionTokens: 1000, cacheHitTokens: known ? 5000 : null, cacheMissTokens: known ? 5000 : null } })
-      if (scenario === 'unknown-discount') {
-        expect(await settleProviderOperation(identity)).toEqual({ status: 'pending', reason: 'cache_usage_not_confirmed' })
-        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
-        return
-      }
-      const amount = known ? 1600 : 2000
+      const amount = known ? 1600 : scenario === 'unknown-discount' ? 1200 : 2000
       const results = await Promise.all([settleProviderOperation(identity), settleProviderOperation(identity)])
       for (const result of results) expect(result).toMatchObject({ status: 'settled', amountMilli: amount, chargedMilli: amount })
       const rows = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId } })
       expect(rows).toHaveLength(1)
       expect(rows[0].metadata).toMatchObject({ pricingVersion: 'credits-v2-itemized', rateCardId: price.rateCardId, rates: price.rates })
+      if (!known) expect(rows[0].metadata).toMatchObject({ cacheHitTokens: null, cacheMissTokens: null,
+        cachePricingPolicy: 'unknown-cache-discount-2026-09-09', platformAbsorbsDifference: true })
+      expect(await prisma.agentProviderUsageReceipt.findUnique({ where: { attemptId: identity.attemptId } }))
+        .toMatchObject({ source: 'reported', cacheHitTokens: known ? 5000 : null, cacheMissTokens: known ? 5000 : null, settlementStatus: 'settled' })
+      expect(await prisma.creditAccount.findUnique({ where: { userId: f.userId } })).toMatchObject({ dailyUsedMilli: amount })
       expect(await prisma.agentExecutionOutbox.count({ where: { operationId: operation.id, type: 'credit.settled' } })).toBe(1)
     })
   })

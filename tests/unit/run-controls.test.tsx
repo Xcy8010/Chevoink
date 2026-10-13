@@ -37,32 +37,25 @@ it('deduplicates concurrent resume clicks and connects once', async () => {
   expect(mocks.begin).not.toHaveBeenCalled()
 })
 
-it('shows a typed receipt wait without resuming or replaying SSE, then resumes only after confirmation', async () => {
-  const wait = { kind: 'waiting_for_original_receipt', checks: ['quality'], message: '等待原请求确认' }
-  mocks.resume.mockResolvedValue({ runId: 'run', status: 'failed', reviewReceiptWait: wait })
-  const { result, connect, setActionError } = fixture()
-  for (let index = 0; index < 3; index++) await act(async () => { await result.current.handleContinue() })
-  expect(result.current.reviewReceiptWait).toEqual(wait)
-  expect(connect).not.toHaveBeenCalled()
-  expect(mocks.restore).not.toHaveBeenCalled()
-  expect(setActionError.mock.calls.every(([error]) => error === null)).toBe(true)
-  mocks.resume.mockResolvedValue({ runId: 'run', eventStartSeq: 100 })
+it('one Continue restores the original task and connects directly using the current model', async () => {
+  mocks.resume.mockResolvedValue({ runId: 'run', status: 'running', eventStartSeq: 100 })
+  const selectedModelRef = { current: { modelTier: 'standard' as const, reasoningEffort: 'medium' as const } }
+  const { result, connect, setActionError } = fixture(selectedModelRef)
   await act(async () => { await result.current.handleContinue() })
-  expect(result.current.reviewReceiptWait).toBeNull()
-  expect(mocks.restore).toHaveBeenCalledOnce()
+  expect(mocks.resume).toHaveBeenCalledExactlyOnceWith('run', selectedModelRef.current)
+  expect(mocks.restore).toHaveBeenCalledExactlyOnceWith('run', 'a', undefined)
   expect(connect).toHaveBeenCalledExactlyOnceWith('run', 100)
+  expect(setActionError).toHaveBeenCalledExactlyOnceWith(null)
 })
 
-it('does not show a late receipt wait in another task', async () => {
-  let finish!: (value: unknown) => void
-  mocks.resume.mockImplementation(() => new Promise(resolve => { finish = resolve }))
-  const { result, rerender, connect } = fixture()
-  let waiting!: Promise<void>
-  act(() => { waiting = result.current.handleContinue() })
-  rerender({ sessionId: 'b', runId: 'run-b' })
-  await act(async () => { finish({ runId: 'run', reviewReceiptWait: { kind: 'waiting_for_original_receipt', checks: ['quality'], message: 'old' } }); await waiting })
-  expect(result.current.reviewReceiptWait).toBeNull()
+it('does not restore or connect when ordinary continuation is rejected', async () => {
+  mocks.resume.mockRejectedValue(new Error('continue unavailable'))
+  const { result, connect, setActionError } = fixture()
+  await act(async () => { await result.current.handleContinue() })
+  expect(mocks.resume).toHaveBeenCalledOnce()
   expect(connect).not.toHaveBeenCalled()
+  expect(mocks.restore).not.toHaveBeenCalled()
+  expect(setActionError).toHaveBeenLastCalledWith('continue unavailable')
 })
 
 it('passes the current free or BYOK model selection when continuing a run', async () => {
