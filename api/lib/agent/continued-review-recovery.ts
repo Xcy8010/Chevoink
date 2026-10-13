@@ -52,7 +52,8 @@ async function sourceContent(tx: Prisma.TransactionClient, subject: Subject, bun
 async function reviewContext(tx: Prisma.TransactionClient, subject: Subject, item: PendingReviewCall, manuscriptRevision: number,
   original: Awaited<ReturnType<typeof readOriginalTaskRequest>>, bundle: QualityBundle) {
   const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map(row => row.content))
-  const sources = buildQualityEvidenceSources({ ...subject, chapterId: bundle.chapter.id, chapterRevision: bundle.chapter.revision }, bundle.chapter.content)
+  const sources = buildQualityEvidenceSources({ userId: subject.userId, novelId: subject.novelId,
+    chapterId: bundle.chapter.id, chapterRevision: bundle.chapter.revision }, bundle.chapter.content)
   const previous = await sourceContent(tx, subject, bundle), qualityContextHash = qualityReviewContextHash(bundle)
   return { previous, qualityContextHash, contextHash: hash({ taskId: original.taskId, spec: original.spec, manuscriptRevision, compilationId: item.compilationId,
     qualityContextHash, system: buildCriticSystem('balanced'), input: buildCriticInput(bundle, deterministic.metrics, sources),

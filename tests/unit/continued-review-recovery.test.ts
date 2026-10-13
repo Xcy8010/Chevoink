@@ -10,7 +10,6 @@ vi.mock('../../api/lib/agent/original-request.js', () => ({ readOriginalTaskRequ
 vi.mock('../../api/lib/agent/quality-review-admission.js', () => ({ readQualityReviewAdmission: async () => mocks.admission }))
 vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ HUMANITY_CRITIC_VERSION: 'current-test', buildHumanityQualityContext: async () => mocks.bundle,
   analyzeDeterministicQuality: () => ({ metrics: {}, findings: [] }), qualityReviewContextHash: (value: unknown) => JSON.stringify(value) }))
-vi.mock('../../api/lib/agent/quality-evidence.js', () => ({ buildQualityEvidenceSources: () => ({ full: true }) }))
 vi.mock('../../api/lib/agent/tools/humanity-quality-tools.js', () => ({ buildCriticSystem: () => 'full rules', buildCriticInput: () => JSON.stringify(mocks.bundle) }))
 vi.mock('../../api/lib/agent/tools/story-compiler-tools.js', () => ({ continuityCriticSystem: 'full continuity rules' }))
 type Row = Record<string, unknown>
