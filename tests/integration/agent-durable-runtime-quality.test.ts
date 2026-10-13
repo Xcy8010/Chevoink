@@ -1072,12 +1072,19 @@ describe.runIf(available)('既有章节独立检查', () => {
       const check = executeDurableToolStep(lease, signal.signal)
       if (scenario === 'cancelled') await expect(check).rejects.toBeDefined()
       else expect(await check).toMatchObject({ kind: 'tool', result: { outcome: 'failed', ...(scenario === 'format' ? { failureCode: 'CONTINUITY_REPORT_INCOMPLETE' } : {}) } })
-      expect(fetchMock).toHaveBeenCalledTimes(['unread', 'wrong-id'].includes(scenario) ? 0 : 1)
+      const requests = ['unread', 'wrong-id'].includes(scenario) ? 0 : scenario === 'format' ? 2 : 1
+      expect(fetchMock).toHaveBeenCalledTimes(requests)
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(scenario === 'stale' ? '作者的新正文' : '原文')
       const diagnostics = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview' } })
-      expect(diagnostics).toHaveLength(scenario === 'format' ? 1 : 0)
-      if (scenario === 'format') expect(diagnostics[0].metadata).toMatchObject({ independentCheck: 'unavailable',
-        criticResponse: { parserVersion: 5, classification: 'json_invalid', rawResponse: { content: JSON.stringify('无法提供结构化报告'), complete: true } } })
+      expect(diagnostics).toHaveLength(scenario === 'format' ? 2 : 0)
+      if (scenario === 'format') {
+        expect(diagnostics.find(row => (row.metadata as Record<string, unknown>).independentCheck === 'unavailable')?.metadata).toMatchObject({ independentCheck: 'unavailable',
+          criticResponse: { parserVersion: 6, classification: 'json_invalid', rawResponse: { content: JSON.stringify('无法提供结构化报告'), complete: true },
+            reassessment: { classification: 'invalid' } } })
+        expect(diagnostics.filter(row => typeof (row.metadata as Record<string, unknown>).fullReassessmentKey === 'string')).toHaveLength(1)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId }, status: 'succeeded' } })).toBe(2)
+        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(2)
+      }
       expect(await prisma.storyCompilation.count({ where: { novelId: f.novelId } })).toBe(0)
     }, undefined, '检查当前既有章节')
   })

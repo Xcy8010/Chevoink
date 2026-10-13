@@ -874,7 +874,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' })).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0 })
   }))
-  it('preserves automatic decision consumption through CHECK and reprepare while ordinary writes remain authorized', () => fixture('写第一章', async ctx => {
+  it('preserves consumed repair and verified-cycle write admission through CHECK and reprepare', () => fixture('写第一章', async ctx => {
     const f = await newDraftReview(ctx)
     expect((await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '同一扇门已经锁上。他用钥匙打开门。' })).outcome).not.toBe('failed')
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
@@ -884,7 +884,8 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       afterHash: runtimeJson({ content: chapter.content }).hash, retainedFindings: [] })
     expect(saved.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0,
       newDraftRevision: { taskId: f.spec.id, chapterId: f.chapterId, checkedRevision: f.chapter.revision } })
-    // A complete report cannot replenish automatic repair, but ordinary writes keep their original authority.
+    // A complete report cannot replenish automatic repair or reopen arbitrary
+    // polishing. An unlocated error is not evidence for any proposed text range.
     await prisma.chapterBridge.update({ where: { compilationId: f.compilation.id }, data: { targetRevision: chapter.revision } })
     await validateStoryContinuity({ ...ctx, compilationId: f.compilation.id, expectedChapterRevision: chapter.revision, independentCheck: 'complete', findings: [
       { signal: 'object', severity: 'error', evidence: '合成剩余事实冲突', suggestion: '交作者决定' },
@@ -893,13 +894,16 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     for (const execute of [
       () => chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '不应再整体修改。' }),
       () => chapterAppendTool.execute(ctx, { chapterId: f.chapterId, content: '不应追加。' }),
-      () => chapterEditRangeTool.execute(ctx, { chapterId: f.chapterId, oldText: '不应再整体修改', newText: '连续局部修改' }),
-    ]) await expect(execute()).resolves.toBeTruthy()
+      () => chapterEditRangeTool.execute(ctx, { chapterId: f.chapterId, oldText: '他用钥匙打开门', newText: '他随后走出门' }),
+    ]) await expect(execute()).rejects.toMatchObject({ code: 'REVIEW_CYCLE_DECISION_REQUIRED' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
     const reprepared = await prepareStoryCompilation({ ...ctx, chapterId: f.chapterId, mode: 'balanced', intentSummary: '写第一章' })
     expect(readNewDraftRevision(reprepared.compilation.validation)).toEqual(receipt)
     expect(reprepared.compilation.validation).toMatchObject({ checkRounds: 1, newDraftRevision: { chapterId: f.chapterId } })
-    await expect(chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '重新准备后依旧按原授权修改。' })).resolves.toBeTruthy()
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: '重新准备后依旧按原授权修改。', revision: chapter.revision + 4 })
+    await expect(chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '重新准备也不能重开无依据润色。' }))
+      .rejects.toMatchObject({ code: 'REVIEW_CYCLE_DECISION_REQUIRED' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
+    expect(await prisma.aiUsageLog.count({ where: { agentRunId: ctx.runId } })).toBe(0)
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(runtimeJson(JSON.parse(JSON.stringify(f.spec))).value)
   }))
   it.each(['parent', 'child'] as const)('a %s correction shares the original automatic decision receipt but does not remove opposite lineage writing authority', writer => fixture('写第一章', async ctx => {

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { env } from '../../api/config/env.js'
+import { getCreditWindow } from '../../api/lib/credits.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
@@ -20,7 +21,7 @@ import { freezeWritingScope, readCompletedWritingDelivery } from '../../api/lib/
 
 const available = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 const previousGoalEnabled = env.agentGoalEnabled
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 afterAll(async () => {
   env.agentGoalEnabled = previousGoalEnabled
   await prisma.$disconnect()
@@ -32,6 +33,7 @@ async function fixture(work: (f: Awaited<ReturnType<typeof createFixture>>) => P
 }
 
 async function cleanupFixture(userId: string) {
+  await prisma.aiUsageLog.deleteMany({ where: { userId } })
   // Goal deletion cascades revisions/executions (including their deferred FK).
   // Runs RESTRICT session deletion; artifacts RESTRICT run deletion. The goal's
   // currentRunId is an unreferenced scalar, so removing goals first also clears
@@ -248,18 +250,28 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       const ctx = { ...f.ctx, creativeFreedom: 'balanced' as const }
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId } })).validation).toMatchObject({ checkedRevision: f.chapter.revision })
       expect(changed.revision).not.toBe(f.chapter.revision)
-      const critic = vi.spyOn(review, 'generateReviewCompletion').mockResolvedValue(JSON.stringify({ findings: [
+      const window = getCreditWindow()
+      await prisma.creditAccount.create({ data: { userId: ctx.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      const content = JSON.stringify({ findings: [
         { signal: 'body', severity: 'warning', evidence: '脚印仍待解释', suggestion: '保留待审', sourceEvidence: [{ source: 'current', quote: '一串刚留下的脚印' }] },
         { signal: 'hook', severity: 'warning', evidence: '锁门线索未揭晓', suggestion: '保留待审', sourceEvidence: [{ source: 'current', quote: '他绕过锁门' }] },
-      ] }))
+      ] })
+      const critic = vi.fn(async () => new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } }))
+      vi.stubGlobal('fetch', critic)
       expect(await continuityValidateTool.execute(ctx, { chapterId: changed.id })).toMatchObject({ display: { compilationId: f.compilationId, errorCount: 0, warningCount: 2 } })
       const checked = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilationId } })
       expect(checked).toMatchObject({ runId: f.originalId, stage: 'check', validation: { checkedRevision: changed.revision, independentCheck: 'complete',
         coverage: { contentHash: runtimeJson({ content: changed.content }).hash, reviewHash: expect.stringMatching(/^[a-f0-9]{64}$/) } } })
       expect(await continuityValidateTool.execute(ctx, { chapterId: changed.id })).toMatchObject({ summary: '复用连续性检查 · 0 错误 2 警告' })
       expect(critic).toHaveBeenCalledOnce()
-      expect(critic.mock.calls[0][1]).toContain('本次只读复核')
-      expect(await prisma.agentArtifact.count({ where: { runId: ctx.runId, artifactType: 'continuityReview' } })).toBe(0)
+      expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body)).messages[1].content).toContain('本次只读复核')
+      const audit = await prisma.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview' } })
+      expect(audit.filter(row => typeof (row.metadata as Record<string, unknown>).assessmentResponseKey === 'string')).toHaveLength(1)
+      expect(audit.filter(row => typeof (row.metadata as Record<string, unknown>).assessmentApplicationKey === 'string')).toHaveLength(1)
+      expect(await prisma.aiUsageLog.findMany({ where: { userId: ctx.userId, action: 'agent3ContinuityCritic' } })).toMatchObject([
+        { agentRunId: ctx.runId, usageSource: 'reported', billingStatus: 'settled', requestTokens: 12, responseTokens: 8 },
+      ])
       expect(await chapterBridgeCommitTool.execute(ctx, {})).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_CHECK_REQUIRED' })
       const currentQuality = await persistHumanityQualityReport({ ...f.ctx, compilationId: f.compilationId, chapterRevision: changed.revision,
         mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })

@@ -19,6 +19,40 @@ const finding = { signal: 'object', severity: 'error', evidence: '当前正文�
 const retraction = JSON.stringify({ decisions: [{ index: 0, action: 'retract', reason: '原判断混淆事件先后，实际原文先锁门随后开门。', sourceEvidence: proof }], findings: [] })
 
 describe('complete continuity assessment lifecycle in actual PostgreSQL', () => {
+  it('standalone source-invalid judgments and an invalid known second response never certify an empty report', () => fixture(async f => {
+    try {
+      await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0, status: 'running' } })
+      await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: body, wordCount: body.length } })
+      const window = credits.getCreditWindow()
+      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      const first = JSON.stringify({ findings: [finding] }), second = '{"decisions":[],"findings":[]}'
+      const responses = [first, second]
+      const fetcher = vi.fn(async () => new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: responses.shift() }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } }))
+      vi.stubGlobal('fetch', fetcher)
+      const ctx: ToolContext = { ...f, callId: 'standalone', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', modelRuntime: runtime,
+        signal: new AbortController().signal, emit: () => {} }
+      expect(await continuityValidateTool.execute(ctx, { chapterId: f.chapterId })).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED' })
+      expect(fetcher).toHaveBeenCalledTimes(2)
+      const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview' } })
+      const metadata = artifacts.map(row => row.metadata as Record<string, unknown>)
+      expect(metadata.filter(row => row.independentCheck === 'complete' || typeof row.assessmentApplicationKey === 'string')).toEqual([])
+      expect(metadata.find(row => row.independentCheck === 'unavailable')).toMatchObject({ criticResponse: {
+        parserVersion: 6, classification: 'source_invalid', candidateFindings: [finding], rawResponse: { content: JSON.stringify(first) },
+        reassessment: { classification: 'invalid', rawResponse: { content: JSON.stringify(second) } },
+      } })
+      expect(metadata.filter(row => typeof row.assessmentResponseKey === 'string')).toHaveLength(2)
+      const usage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, action: { startsWith: 'agent3ContinuityCritic' } } })
+      expect(usage).toHaveLength(2)
+      for (const row of usage) {
+        expect(row).toMatchObject({ usageSource: 'reported', billingStatus: 'settled', requestTokens: 12, responseTokens: 8, multiplierBps: 10000 })
+        expect(row.creditChargeMilli).toBe(priceTokenEvidence(tokenPriceSchema.parse(row.billingSnapshot), 12, 8, row.promptCacheHitTokens))
+      }
+      expect((await continuityValidateTool.execute({ ...ctx, callId: 'same-admission' }, { chapterId: f.chapterId }).catch(() => ({ outcome: 'failed' }))).outcome).toBe('failed')
+      expect(fetcher).toHaveBeenCalledTimes(2)
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(body)
+    } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+  }))
   it.each(['syntax', 'fields', 'judgment', 'pair', 'failed-second', 'unknown-first', 'unknown-second', 'cancelled-second', 'stale-second', 'abort-after-claim', 'stale-after-claim', 'abort-first-reserved', 'credit-first-reserved', 'abort-first-bound', 'abort-second-bound', 'stale-second-bound', 'credit-second-reserved'] as const)(
     '%s preserves every actual request and consumes one recovery slot', scenario => fixture(async f => {
       try {
@@ -46,7 +80,9 @@ describe('complete continuity assessment lifecycle in actual PostgreSQL', () => 
           if (scenario === 'unknown-first') throw new TypeError('fetch failed after send')
           if (sends === 2) {
             expect(request.messages[0].content).toContain('一次完整复评')
-            const observation = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, artifactType: 'continuityReview', metadata: { path: ['stage'], equals: 'first' } } })
+            const observation = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, artifactType: 'continuityReview', AND: [
+              { metadata: { path: ['stage'], equals: 'first' } }, { metadata: { path: ['assessmentResponseKey'], string_contains: '' } },
+            ] } })
             expect(observation.metadata).toMatchObject({ input: { bodies: { current: body } }, response: { content: JSON.stringify(first), transportComplete: true } })
             expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview', metadata: { path: ['fullReassessmentKey'], string_contains: '' } } })).toBe(1)
             if (scenario === 'cancelled-second') controller.abort()

@@ -434,6 +434,7 @@ describe.runIf(available)('auxiliary model route inheritance (isolated PG)', () 
 describe.runIf(available)('continuity validation and atomic commit', () => {
   it('hands the original evidence and actual revision to recheck, then reuses the completed assessment', async () => {
     await novelFixture(async f => {
+      try {
       const before = '卡余80200，已付房租1800。碗8200成交。银行卡余71700。'
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: before } })
       const prepared = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '检查当前章节' })
@@ -441,9 +442,14 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
       await saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进交易', entryState: state, goal: '买碗', obstacle: '议价', choice: '成交', cost: '8200', turn: '取得碗', exitState: state,
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
-      const completion = vi.spyOn(aiService, 'generateTextCompletion').mockResolvedValueOnce(JSON.stringify({ findings: [{ signal: 'object', severity: 'error',
+      const responses = [JSON.stringify({ findings: [{ signal: 'object', severity: 'error',
         evidence: '账户扣除碗款后的余额算术不符。', suggestion: '核对成交款后的余额，不重扣已付房租。',
-        sourceEvidence: [{ source: 'current', segmentId: 'c0', quote: '卡余80200' }, { source: 'current', segmentId: 'c0', quote: '银行卡余71700' }] }] })).mockResolvedValueOnce('{"findings":[]}')
+        sourceEvidence: [{ source: 'current', segmentId: 'c0', quote: '卡余80200' }, { source: 'current', segmentId: 'c0', quote: '银行卡余71700' }] }] }), '{"findings":[]}']
+      const window = getCreditWindow()
+      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      const completion = vi.fn(async () => new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: responses.shift() }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } }))
+      vi.stubGlobal('fetch', completion)
       const ctx: ToolContext = { ...f, callId: 'check', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', modelRuntime: legacyReviewRuntime, signal: new AbortController().signal, emit: () => {} }
       const first = await continuityValidateTool.execute(ctx, { compilationId })
       expect(first.output).toContain('卡余80200')
@@ -451,13 +457,19 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       expect(first.summary).toContain('1 错误')
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: before.replace('71700', '72000'), revision: { increment: 1 } } })
       expect((await continuityValidateTool.execute(ctx, { compilationId })).summary).toContain('0 错误')
-      expect(completion.mock.calls[1][1]).toContain('issueId')
-      expect(completion.mock.calls[1][1]).toContain('before→after')
-      expect(completion.mock.calls[1][1]).toContain('71700')
-      expect(completion.mock.calls[1][1]).toContain('72000')
+      const secondInput = JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body)).messages[1].content
+      expect(secondInput).toContain('issueId')
+      expect(secondInput).toContain('before→after')
+      expect(secondInput).toContain('71700')
+      expect(secondInput).toContain('72000')
       expect((await continuityValidateTool.execute(ctx, { compilationId })).summary).toContain('复用')
       expect(completion).toHaveBeenCalledTimes(2)
+      const usage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, action: 'agent3ContinuityCritic' } })
+      expect(usage).toHaveLength(2)
+      expect(usage.every(row => row.usageSource === 'reported' && row.billingStatus === 'settled')).toBe(true)
+      expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentApplicationKey'], string_contains: '' } } })).toBe(2)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkedRevision: 2, checkedContent: before.replace('71700', '72000'), independentCheck: 'complete', checkRounds: 2 })
+      } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
     })
   })
   it('ignores critic patches, reuses current findings, and keeps verified factual errors separate from missing checks', async () => {

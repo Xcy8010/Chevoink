@@ -383,6 +383,30 @@ describe('explicit zero provider usage is not missing usage', () => {
     }
     expect(runtime.reasoningEffort).toBe('high')
   })
+  it.each(['continuity_critic', 'continuity_reassessment'] as const)('freezes %s with the same bounded critic reasoning and selected route', async action => {
+    const provider = await import('../../api/lib/agent/runtime-provider.js')
+    const heartbeatModule = await import('../../api/lib/agent/runtime-heartbeat.js')
+    // This unit observes request construction before admission. Actual lease,
+    // price and send guards are exercised by the durable PostgreSQL suite.
+    const heartbeat = vi.spyOn(heartbeatModule, 'withLeaseHeartbeat').mockImplementation(async (_lease, signal, work) => work(signal ?? new AbortController().signal))
+    const capture = vi.spyOn(provider, 'beginDurableChat').mockRejectedValueOnce(new Error('captured admission before HTTP'))
+    const fetcher = vi.fn()
+    vi.stubGlobal('fetch', fetcher)
+    const price = { version: 'credits-v2-itemized' as const, modelTier: 'speed' as const, multiplierBps: 10000,
+      rateCardId: 'fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } }
+    try {
+      await expect(chatWithTools({ messages: [{ role: 'system', content: 'review rules' }, { role: 'user', content: 'full current input' }], tools: [],
+        provider: 'fixture', model: 'selected', providerBaseUrl: 'https://selected.invalid/v1', providerApiKey: 'fixture-only',
+        reasoningEffort: 'high', reasoningEfforts: ['none', 'high'], reasoningParameterMode: 'native', boundedReview: false,
+        durableExecution: { lease: { userId: 'test', runId: 'run', taskRootId: 'root', ownerId: 'worker', claimId: 'claim', epoch: 1n },
+          parentOperationId: 'tool', operationKey: `aux:tool:${action}`, auxiliaryStep: action, attemptKey: '1', price },
+        usageLog: { userId: 'test', action, modelTier: 'speed', multiplierBps: 10000 },
+      })).rejects.toThrow('captured admission before HTTP')
+      expect(capture.mock.calls[0][0]).toMatchObject({ provider: 'fixture', model: 'selected', price,
+        request: { endpoint: 'https://selected.invalid/v1/chat/completions', body: { model: 'selected', reasoning_effort: 'none' } } })
+      expect(fetcher).not.toHaveBeenCalled()
+    } finally { capture.mockRestore(); heartbeat.mockRestore() }
+  })
   it.each([429, 500, 503])('routes a rejected HTTP %s request to another configured account', async status => {
     const primary = { id: `primary-${status}`, tier: 'speed', provider: 'openai', modelName: 'fixture', baseUrl: 'https://primary.test/v1', apiKeyCiphertext: 'fixture-not-a-key', metadata: { routes: [{ id: `00000000-0000-4000-8000-000000000${status}`, label: 'backup', provider: 'openai', modelName: 'backup', baseUrl: 'https://backup.test/v1', apiKeyCiphertext: 'other-fixture-key', enabled: true }] } }
     mocks.findModel.mockResolvedValue(primary)

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { applyContinuityReassessment, continuityReassessmentCandidates, runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import type { AiUsageLog, Prisma } from '@prisma/client'
+import { readOwnedContinuityReassessment } from '../../api/lib/agent/continuity-reassessment-witness.js'
 
 const bodies = { previous: '前章门锁着，之后门打开。', current: '本章人物走进已打开的门。' }
 const proof = [{ source: 'previous', segmentId: 'p0' }, { source: 'current', segmentId: 'c0' }]
@@ -10,6 +12,17 @@ const original = (content = raw) => inspectContinuityResponse(content, bodies, t
 const retract = () => ({ decisions: [{ index: 0, action: 'retract', reason: '原判断忽略前章后续已开门的事件，核对两章原文后撤回。', sourceEvidence: proof }], findings: [] })
 
 describe('one complete continuity reassessment', () => {
+  it('limits the Prisma run filter to the owner even when the caller has a full tool context', async () => {
+    const findMany = vi.fn(async () => [])
+    const tx = { agentArtifact: { findMany } } as unknown as Prisma.TransactionClient
+    const subject = { userId: 'owner', novelId: 'novel', runId: 'run', sessionId: 'session', chapterId: 'chapter', spec: { intent: 'revise' } }
+    const usage = { usageSource: 'reported', billingStatus: 'settled', reservedCreditMilli: 0, requestTokens: 12, responseTokens: 0,
+      billingEvidence: { responseObserved: true } }
+    await expect(readOwnedContinuityReassessment(tx, subject, { runId: 'run', callId: 'call', chapterId: 'chapter', revision: 1,
+      callAt: new Date(1), resultAt: new Date(2), payments: [{ ...usage, action: 'agent3ContinuityCritic' },
+        { ...usage, action: 'agent3ContinuityCriticSecondPass' }] as AiUsageLog[] })).resolves.toBeNull()
+    expect(findMany.mock.calls[0]).toEqual([expect.objectContaining({ where: expect.objectContaining({ run: { userId: 'owner', novelId: 'novel' } }) })])
+  })
   it('preserves parseable invalid fields as original indices and invents none for unparseable syntax', () => {
     expect(continuityReassessmentCandidates(JSON.stringify({ findings: [{ ...finding, severity: 'unsupported' }] }))).toEqual([{ ...finding, severity: 'unsupported' }])
     expect(continuityReassessmentCandidates('{broken')).toBeNull()

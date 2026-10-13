@@ -17,7 +17,7 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
   const second = input.payments.filter(row => row.action === 'agent3ContinuityCriticSecondPass')
   if (input.payments.length !== 2 || primary.length !== 1 || second.length !== 1 || primary[0].usageSource !== 'reported'
     || !isKnownTextRequestBilling(primary[0]) || object(primary[0].billingEvidence).responseObserved !== true) return null
-  const claims = await tx.agentArtifact.findMany({ where: { runId: input.runId, run: subject, artifactType: 'continuityReview',
+  const claims = await tx.agentArtifact.findMany({ where: { runId: input.runId, run: { userId: subject.userId, novelId: subject.novelId }, artifactType: 'continuityReview',
     createdAt: { gte: input.callAt, lte: input.resultAt }, metadata: { path: ['callId'], equals: input.callId } } })
   const full = claims.filter(row => typeof object(row.metadata).fullReassessmentKey === 'string')
   if (full.length !== 1) return null

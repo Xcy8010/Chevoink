@@ -712,7 +712,7 @@ export async function saveStandaloneContinuityReport(ctx: ToolContext, context: 
   const current = await buildStandaloneContinuityContext(ctx, context.chapter.id, db)
   if (current.contextHash !== context.contextHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、前章或作品约定已变化，本次报告未保存为当前版本结果；请重新读取。')
   ctx.signal.throwIfAborted()
-  if (!parsed.structured || criticResponse?.parserVersion === 5 && criticResponse.classification !== 'complete') {
+  if (!parsed.structured || criticResponse && criticResponse.parserVersion >= 5 && criticResponse.classification !== 'complete') {
     if (criticResponse) await db.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: `${context.chapter.title} · 连续性诊断`,
       content: unconfirmedContinuityOutput, summary: '独立连续性复核未完成', metadata: runtimeJson({ independentCheck: 'unavailable', chapterId: context.chapter.id,
         revision: context.chapter.revision, contextHash: context.contextHash, criticResponse }).value } })
@@ -810,6 +810,19 @@ export const continuityValidateTool = defineTool({
       const context = await buildStandaloneContinuityContext(ctx, args.chapterId)
       const cached = await readStandaloneContinuityReport(ctx, context.contextHash, args.focus)
       if (cached) return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, { structured: true, findings: cached.findings }, tx, args.focus))
+      const assessmentInput: LegacyAssessmentInput = { chapterId: context.chapter.id, revision: context.chapter.revision,
+        bodies: { previous: context.precedingBodies, current: context.chapter.content }, system: continuityCriticSystem,
+        content: `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, args.focus)}`,
+        bindingHash: standaloneContinuityBindingHash(context.contextHash, args.focus), targetType: 'chapter', targetId: context.chapter.id }
+      // A received complete reassessment can survive a failed report transaction.
+      // Resolve the latest exact frozen input before the older admission gate;
+      // this applies existing paid evidence and does not authorize a new send.
+      const received = await prisma.$transaction(tx => readReusableLegacyContinuityAssessment(tx, ctx, assessmentInput))
+      if (received) return prisma.$transaction(async tx => {
+        const result = await saveStandaloneContinuityReport(ctx, context, received, tx, args.focus, true, true, received.audit)
+        if (result.outcome !== 'failed') await markLegacyContinuityAssessmentApplication(tx, ctx, received)
+        return result
+      })
       const reusable = await prisma.$transaction(tx => readReusableLegacyContinuityCorrection(tx, ctx, { chapterId: context.chapter.id, revision: context.chapter.revision,
         bodies: { previous: context.precedingBodies, current: context.chapter.content }, bindingHash: standaloneContinuityBindingHash(context.contextHash, args.focus) }))
       if (reusable) return prisma.$transaction(async tx => {
@@ -833,10 +846,8 @@ export const continuityValidateTool = defineTool({
         standaloneGate.freshAdmissionId!, assertCurrent))) return { outcome: 'failed' as const, failureCode: 'CONTINUITY_REPORT_INCOMPLETE',
         summary: '独立连续性复核未完成', output: unconfirmedContinuityOutput }
       const modelRuntime = await resolveReviewModelRuntime({ ...ctx, task: 'continuity' })
-      const inspected = await runLegacyContinuityReview(ctx, { chapterId: context.chapter.id, revision: context.chapter.revision,
-        bodies: { previous: context.precedingBodies, current: context.chapter.content }, system: continuityCriticSystem,
-        content: `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, args.focus)}`,
-        options: { modelRuntime, explicitModelSelection: true, signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: context.chapter.id, targetType: 'chapter', targetId: context.chapter.id, temperature: 0, reasoningEffort: modelRuntime.reasoningEffort }, assertCurrent, bindingHash: standaloneContinuityBindingHash(context.contextHash, args.focus),
+      const inspected = await runLegacyContinuityReview(ctx, { ...assessmentInput,
+        options: { modelRuntime, explicitModelSelection: true, signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: context.chapter.id, targetType: 'chapter', targetId: context.chapter.id, temperature: 0, reasoningEffort: modelRuntime.reasoningEffort }, assertCurrent,
         assessmentAdmissionId: standaloneGate.freshAdmissionId ?? undefined })
       return prisma.$transaction(async tx => {
         const result = await saveStandaloneContinuityReport(ctx, context, inspected, tx, args.focus, true, true, inspected.audit)
