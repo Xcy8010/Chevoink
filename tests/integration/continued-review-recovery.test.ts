@@ -22,6 +22,7 @@ describe.runIf(available)('ordinary author Continue preserves real unknown billi
       await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: delta ? 6 : 2, type: 'tool.result', createdAt: new Date(resultAt.getTime() + delta),
         payload: { callId: pending.callId, toolName, ok: false, failureCode: 'AI_PROVIDER_TRANSPORT' } } })
       const usage = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId, chapterId: f.chapterId,
+        targetType: 'chapter', targetId: f.chapterId,
         providerType: 'text', providerMode: 'custom', modelName: 'isolated-no-provider', modelTier: 'standard', multiplierBps: 12000,
         action: toolName === 'quality_analyze' ? 'agent3HumanityCritic' : 'agent3ContinuityCritic', requestTokens: null, responseTokens: null,
         usageSource: 'unknown', billingStatus: 'pending_usage', creditChargeMilli: 0, reservedCreditMilli: 18023, durationMs: 0,
