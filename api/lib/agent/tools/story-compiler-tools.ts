@@ -87,20 +87,20 @@ async function dispatchLegacyContinuityCorrection(ctx: ToolContext, input: { ori
   system: string; content: string; options: Parameters<typeof generateReviewCompletion>[2] }) {
   const { generateTextCompletion } = await import('../../ai-service.js')
   const trace = createTextRequestTrace()
-  let observed: { usageId: string; content: string; finishReason: string | null; toolCallsPresent: boolean } | null = null
+  let observed: { usageId: string; content: string; finishReason: string | null; toolCallsPresent: boolean; transportComplete?: false } | null = null
   try {
     const content = await withTextRequestTrace(trace, () => generateTextCompletion(input.system, input.content, {
       ...input.options, action: 'agent3ContinuityEvidenceCorrection', maxOutputTokens: CONTINUITY_MAX_OUTPUT_TOKENS, boundedReview: true,
       onObservedCompletion: observation => {
         observed = { usageId: observation.usageId, content: observation.content, finishReason: observation.finishReason,
-          toolCallsPresent: observation.toolCalls.length > 0 }
+          toolCallsPresent: observation.toolCalls.length > 0, transportComplete: observation.transportComplete }
         input.options.onObservedCompletion?.(observation)
       },
     }))
     return { content, complete: textRequestsFinished(trace) }
   } finally {
     if (observed) {
-      const observation = observed as { usageId: string; content: string; finishReason: string | null; toolCallsPresent: boolean }
+      const observation = observed as { usageId: string; content: string; finishReason: string | null; toolCallsPresent: boolean; transportComplete?: false }
       await prisma.$transaction(tx => recordLegacyContinuityCorrectionObservation(tx, ctx, { original: input.original, bodies: input.bodies,
         ...observation, usageIds: [...new Set([...trace.records.map(record => record.usageId), observation.usageId])] }))
     }
@@ -115,14 +115,15 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
 }) {
   const trace = createTextRequestTrace()
   let observedContent: string | undefined
+  let observedComplete: boolean | undefined
   let raw: string
   try {
     raw = await withTextRequestTrace(trace, () => generateReviewCompletion(input.system, input.content, { ...input.options,
-      onObservedCompletion: observation => { observedContent = observation.content; input.options.onObservedCompletion?.(observation) },
+      onObservedCompletion: observation => { observedContent = observation.content; observedComplete = observation.transportComplete !== false; input.options.onObservedCompletion?.(observation) },
     }, input.assertCurrent))
   } finally {
     if (input.assessmentAdmissionId) await prisma.$transaction(tx => recordLegacyContinuityAssessmentObservation(tx, ctx, {
-      admissionId: input.assessmentAdmissionId!, usageIds: trace.records.map(record => record.usageId), observedContent }))
+      admissionId: input.assessmentAdmissionId!, usageIds: trace.records.map(record => record.usageId), observedContent, observedComplete }))
   }
   const original = inspectContinuityResponse(raw, input.bodies, true, 5)
   return runContinuityEvidenceCorrection({ original, bodies: input.bodies, billingKnown: textRequestsFinished(trace), signal: ctx.signal,
@@ -840,8 +841,8 @@ export const continuityValidateTool = defineTool({
         const current = await tx.storyCompilation.findUnique({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } },
           chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } } })
         const source = bridge.fromChapterId ? await tx.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { id: true, revision: true, content: true } }) : null
-        if (reviewInput(current) !== frozenReviewInput || runtimeJson(current?.validation).hash !== runtimeJson(compilation.validation).hash
-          || runtimeJson(source).hash !== runtimeJson(sourceChapter).hash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '已收到的纠正报告上下文变化，未离线应用。')
+        if (reviewInput(current) !== frozenReviewInput || runtimeJson({ validation: current?.validation }).hash !== runtimeJson({ validation: compilation.validation }).hash
+          || runtimeJson({ source }).hash !== runtimeJson({ source: sourceChapter }).hash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '已收到的纠正报告上下文变化，未离线应用。')
         const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id,
           findings: reusable.inspected.findings, expectedChapterRevision: chapter.revision, independentCheck: 'complete', coverage, focus: args.focus, signal: ctx.signal }, tx)
         if (result.independentCheck === 'complete') {

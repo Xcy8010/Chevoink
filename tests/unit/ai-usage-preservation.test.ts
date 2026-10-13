@@ -485,6 +485,44 @@ describe('explicit zero provider usage is not missing usage', () => {
     await expect(generateTextCompletion('system', 'user', { userId: 'test', action: 'test' })).resolves.toBe('完整报告')
     expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ requestTokens: 100, responseTokens: 20 }))
   })
+  it.each(['stop', 'length', 'incomplete', 'malformed-after-stop'] as const)('observes %s SSE once and preserves real usage even when its observer throws', async finish => {
+    for (const observerThrows of [false, true]) {
+      const usage: Record<string, unknown> = { id: 'test-usage', usageSource: 'prepared', billingStatus: 'prepared',
+        requestTokens: null, responseTokens: null, reservedCreditMilli: 200 }
+      mocks.updateMany.mockImplementation(async ({ where, data }) => {
+        const status = where.billingStatus
+        if (status && !(typeof status === 'string' ? usage.billingStatus === status : status.in.includes(usage.billingStatus))) return { count: 0 }
+        Object.assign(usage, data)
+        return { count: 1 }
+      })
+      mocks.update.mockImplementation(async ({ data }) => { Object.assign(usage, data); return usage })
+      mocks.findUsage.mockResolvedValue(usage)
+      mocks.charge.mockImplementation(async () => {
+        Object.assign(usage, { billingStatus: 'settled', reservedCreditMilli: 0 })
+        return { chargedMilli: 200, remainingMilli: 1000, exhausted: false }
+      })
+      const content = ' actual received payload '
+      const finishReason = finish === 'incomplete' ? null : finish === 'malformed-after-stop' ? 'stop' : finish
+      const frames = `data: ${JSON.stringify({ choices: [{ delta: { content }, ...(finishReason ? { finish_reason: finishReason } : {}) }] })}\n\ndata: ${JSON.stringify({ usage: { prompt_tokens: 100, completion_tokens: 20 }, choices: [] })}\n\n${finish === 'malformed-after-stop' ? 'data: malformed final frame\n\n' : ''}`
+      const fetcher = vi.fn(async () => new Response(frames, { headers: { 'content-type': 'text/event-stream' } }))
+      vi.stubGlobal('fetch', fetcher)
+      const observerFailure = new Error('observation unavailable')
+      const observe = vi.fn(() => { if (observerThrows) throw observerFailure })
+      const trace = createTextRequestTrace()
+      const request = withTextRequestTrace(trace, () => generateTextCompletion('system', 'user', {
+        userId: 'test', action: 'test', onObservedCompletion: observe,
+      }))
+      if (finish !== 'stop') await expect(request).rejects.toMatchObject({ code: finish === 'length' ? 'AI_PROVIDER_OUTPUT_LIMIT' : finish === 'incomplete' ? 'AI_PROVIDER_INCOMPLETE' : 'AI_PROVIDER_INVALID_RESPONSE' })
+      else if (observerThrows) await expect(request).rejects.toBe(observerFailure)
+      else await expect(request).resolves.toBe(content.trim())
+      expect(observe).toHaveBeenCalledExactlyOnceWith({ usageId: 'test-usage', content, finishReason, toolCalls: [], ...(finish !== 'stop' ? { transportComplete: false } : {}) })
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(usage).toMatchObject({ usageSource: 'reported', requestTokens: 100, responseTokens: 20,
+        billingStatus: 'settled', reservedCreditMilli: 0, billingEvidence: { responseObserved: true } })
+      expect(mocks.charge).toHaveBeenLastCalledWith(expect.objectContaining({ usageLogId: 'test-usage', requestTokens: 100, responseTokens: 20 }))
+      expect(textRequestsFinished(trace)).toBe(true)
+    }
+  })
   it('accepts a provider-confirmed stop without a DONE marker, but keeps missing usage separate', async () => {
     const frames = 'data: {"choices":[{"delta":{"content":"完整报告"},"finish_reason":"stop"}]}\n\n'
     vi.stubGlobal('fetch', vi.fn(async () => new Response(frames, { headers: { 'content-type': 'text/event-stream' } })))

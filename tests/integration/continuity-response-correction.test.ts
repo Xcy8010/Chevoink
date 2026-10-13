@@ -167,6 +167,18 @@ describe.runIf(available)('continuity evidence correction actual PostgreSQL effe
       }
       expect(firstCritic).not.toHaveBeenCalled()
       expect(fetch).toHaveBeenCalledTimes(1)
+      if (scenario === 'truncated-continue') {
+        const observation = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, artifactType: 'continuityReview',
+          metadata: { path: ['finishReason'], equals: 'length' } } })
+        expect(observation.metadata).toMatchObject({ finishReason: 'length', assessmentComplete: false,
+          rawResponse: { encoding: 'json-string', content: JSON.stringify('{"corrections":['), complete: false } })
+        const observedUsageIds = (observation.metadata as { usageIds: string[] }).usageIds
+        expect(observedUsageIds).toHaveLength(1)
+        expect(await prisma.aiUsageLog.findMany({ where: { id: { in: observedUsageIds } } })).toMatchObject([
+          { action: 'agent3ContinuityEvidenceCorrection', usageSource: 'reported', requestTokens: 12, responseTokens: 8,
+            billingStatus: 'settled', reservedCreditMilli: 0, billingEvidence: { responseObserved: true } },
+        ])
+      }
       if (scenario.startsWith('valid-unapplied')) expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview',
         metadata: { path: ['rawResponse', 'content'], equals: JSON.stringify(correction) } } })).toBe(1)
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })

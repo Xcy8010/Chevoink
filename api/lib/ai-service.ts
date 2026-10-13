@@ -74,8 +74,8 @@ type TextCompletionOptions = {
     maxCreditMilli: number
     beforeDispatch: () => Promise<void>
   }
-  /** Actual successful transport evidence; callers do not infer stop/usage. */
-  onObservedCompletion?: (value: { usageId: string; content: string; finishReason: string | null; toolCalls: unknown[] }) => void
+  /** Actual observed transport payload, including incomplete SSE; completeness and usage remain separate. */
+  onObservedCompletion?: (value: { usageId: string; content: string; finishReason: string | null; toolCalls: unknown[]; transportComplete?: false }) => void
 }
 
 function ensureTextProviderConfigured(apiKey?: string | null) {
@@ -240,7 +240,8 @@ async function saveOutputEvidence(id: string, inputEstimate: number, output: str
 
 /** Accept SSE when supported and JSON from compatible non-streaming gateways.
  * Persist only counts, never manuscript text or credentials, for interruption billing. */
-async function readAuxiliaryResponse(response: Response, usageId: string, inputEstimate: number, custom: boolean, authorizationHeld = false): Promise<JsonProviderPayload> {
+async function readAuxiliaryResponse(response: Response, usageId: string, inputEstimate: number, custom: boolean, authorizationHeld = false,
+  onObservedCompletion?: TextCompletionOptions['onObservedCompletion']): Promise<JsonProviderPayload> {
   if (!response.ok || !response.headers.get('content-type')?.includes('text/event-stream') || !response.body) return { ...await parseJsonResponse(response), localOutputEstimate: undefined }
   let content = '', reasoning = '', done = false, truncated = false, lastSaved = 0
   let finishReason: string | null = null
@@ -292,6 +293,13 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
     if (truncated) throw new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', '模型输出达到上限，未将部分检查结果当作完成。')
     if (!done) throw new DataAccessError(502, 'AI_PROVIDER_INCOMPLETE', '模型连接提前结束，未将部分检查结果当作完成。')
     return { choices: [{ message: { content, tool_calls: toolCalls }, ...(finishReason ? { finish_reason: finishReason } : {}) }], usage, localOutputEstimate: estimateTokenCount(reasoning + content), reasoningTokens }
+  } catch (error) {
+    try {
+      if (content.trim()) onObservedCompletion?.({ usageId, content, finishReason, toolCalls, transportComplete: false })
+    } catch {
+      // Observation failure cannot hide the original provider failure.
+    }
+    throw error
   } finally {
     await reader.cancel().catch(() => {})
     reader.releaseLock()
@@ -1259,7 +1267,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     }),
   })
 
-  const payload = await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized)
+  const payload = await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized, options.onObservedCompletion)
   if (payload.reasoningTokens != null) console.info('[ai-reasoning-usage]', {
     action: options.action, model: modelRuntime.modelName ?? env.aiTextModel,
     reasoningTokens: payload.reasoningTokens, completionTokens: payload.usage?.completion_tokens ?? null, durationMs: Date.now() - startedAt,

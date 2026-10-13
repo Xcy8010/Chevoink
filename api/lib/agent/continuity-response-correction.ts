@@ -128,7 +128,7 @@ export async function readLegacyContinuityCorrectionGate(tx: Prisma.TransactionC
 /** First requests admitted after a known correction failure have their own
  * outcome witness; a later admission cannot turn unknown usage into permission. */
 export async function recordLegacyContinuityAssessmentObservation(tx: Prisma.TransactionClient, ctx: ToolContext, input: {
-  admissionId: string; usageIds: string[]; observedContent?: string;
+  admissionId: string; usageIds: string[]; observedContent?: string; observedComplete?: boolean;
 }) {
   const reservations = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, run: { userId: ctx.userId, novelId: ctx.novelId }, artifactType: 'continuityReview', AND: [
     { metadata: { path: ['callId'], equals: ctx.callId } }, { metadata: { path: ['continuityAssessmentAdmissionId'], equals: input.admissionId } }] } })
@@ -141,7 +141,7 @@ export async function recordLegacyContinuityAssessmentObservation(tx: Prisma.Tra
   await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性检查响应记录', content: '新检查的实际请求观察已保存，结算与检查结论分别核验。',
     metadata: runtimeJson({ version: 1, assessmentReservationId: reservation.id, usageIds: usage.map(row => row.id),
       dispatchState: usage.length ? 'finished' : 'not_dispatched', ...(input.observedContent !== undefined ? { rawResponse: {
-        version: 1, encoding: 'json-string', content: JSON.stringify(input.observedContent), complete: true } } : {}) }).value } })
+        version: 1, encoding: 'json-string', content: JSON.stringify(input.observedContent), complete: input.observedComplete !== false } } : {}) }).value } })
 }
 
 /** Commit the received fresh assessment's application with its report. A
@@ -358,7 +358,7 @@ export async function claimLegacyContinuityCorrection(tx: Prisma.TransactionClie
 /** Response observation is separate from application. No abort/manuscript
  * guard may erase bytes already received from this owned claimed request. */
 export async function recordLegacyContinuityCorrectionObservation(tx: Prisma.TransactionClient, ctx: ToolContext, input: {
-  original: Inspection; bodies: ContinuityBodies; content: string; finishReason: string | null; toolCallsPresent: boolean; usageIds: string[];
+  original: Inspection; bodies: ContinuityBodies; content: string; finishReason: string | null; toolCallsPresent: boolean; transportComplete?: false; usageIds: string[];
 }) {
   const claims = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, run: { userId: ctx.userId, novelId: ctx.novelId }, artifactType: 'continuityReview', AND: [
     { metadata: { path: ['callId'], equals: ctx.callId } }, { metadata: { path: ['state'], equals: 'claimed' } },
@@ -374,7 +374,7 @@ export async function recordLegacyContinuityCorrectionObservation(tx: Prisma.Tra
     if (object(previous.metadata).contentHash !== contentHash) throw new Error('Correction observation cannot be replaced')
     return previous.id
   }
-  const complete = input.finishReason === 'stop' && !input.toolCallsPresent
+  const complete = input.transportComplete !== false && input.finishReason === 'stop' && !input.toolCallsPresent
   let assessmentComplete = false
   if (complete) try { assessmentComplete = applyContinuityEvidenceCorrection(input.original, input.content, input.bodies).complete } catch { /* An observed invalid report stays invalid. */ }
   const saved = await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性响应记录', content: '已收到引用纠正响应；是否可应用另行校验。',

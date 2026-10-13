@@ -283,6 +283,31 @@ describe('authenticated author review quote and sole sender', () => {
     expect(replay.state).toBe('complete'); expect(mocks.claim).toHaveBeenCalledOnce(); expect(mocks.generate).toHaveBeenCalledOnce()
     expect(JSON.stringify(mocks.usage)).toBe(originalUsage); expect(JSON.stringify(mocks.run)).toBe(originalRun)
   })
+  it('preserves a stop payload followed by transport failure without creating a completion or another sender', async () => {
+    const quote = await quoteAuthorReviewReplacement('owner', 'run'), before = snapshot()
+    mocks.generate.mockImplementation(async (_system: string, _content: string, options: Parameters<typeof import('../../api/lib/ai-service.js').generateTextCompletion>[2]) => {
+      expect(mocks.claimCommitted).toBe(true)
+      const { record } = beginTextRequest('newUsage')
+      await options.authorizedRequest!.beforeDispatch()
+      mocks.providerRequest()
+      options.onObservedCompletion!({ usageId: 'newUsage', content: '{"findings":[]}', finishReason: 'stop', toolCalls: [], transportComplete: false })
+      record.status = 'terminal'; record.billingKnown = true
+      throw new DataAccessError(502, 'AI_PROVIDER_INVALID_RESPONSE', 'malformed frame after observed stop')
+    })
+    await submitAuthorReviewReplacement('owner', 'run', quote.quoteToken)
+    expect((await settled(quote.authorizationId)).state).toBe('incomplete')
+    expect(mocks.observe).toHaveBeenCalledExactlyOnceWith(mocks.tx, { authorizationId: quote.authorizationId, newCallId: 'newCall',
+      rawResponse: '{"findings":[]}', finishReason: 'stop', toolCalls: [], newUsageIds: ['newUsage'] })
+    expect(mocks.fail).toHaveBeenCalledExactlyOnceWith(mocks.tx, quote.authorizationId, {
+      failureCode: 'AI_PROVIDER_INVALID_RESPONSE', usageIds: ['newUsage'],
+    })
+    expect(mocks.observe.mock.invocationCallOrder[0]).toBeLessThan(mocks.fail.mock.invocationCallOrder[0])
+    expect(mocks.complete).not.toHaveBeenCalled()
+    expect((await submitAuthorReviewReplacement('owner', 'run', quote.quoteToken)).state).toBe('incomplete')
+    expect(mocks.generate).toHaveBeenCalledOnce(); expect(mocks.providerRequest).toHaveBeenCalledOnce(); expect(mocks.claim).toHaveBeenCalledOnce()
+    expect(JSON.stringify(mocks.usage)).toBe(JSON.stringify(JSON.parse(before).usage))
+    expect(JSON.stringify(mocks.run)).toBe(JSON.stringify(JSON.parse(before).run))
+  })
   it('binds an explicit new UI model in the same transaction and retains original counters/status', async () => {
     mocks.runtime.mockResolvedValue({ ...(await mocks.runtime()), tier: 'builtin_1234567890abcdef', multiplierBps: 17500 })
     mocks.price.mockResolvedValue({ version: 'credits-v1-exact', modelTier: 'builtin_1234567890abcdef', multiplierBps: 17500 })

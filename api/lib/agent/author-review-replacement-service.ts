@@ -266,6 +266,12 @@ async function executeClaim(claim: Claim, expectedRuntimeHash: string) {
     // Commit the actual response independently before rechecking current text,
     // model and context. A later edit cannot roll this observation back.
     await prisma.$transaction(tx => observeAuthorReviewResponse(tx, observation), { isolationLevel: 'Serializable' })
+    if (raw.transportComplete === false) {
+      await prisma.$transaction(tx => failAuthorReviewReplacement(tx, claim.authorizationId, {
+        failureCode, usageIds: [raw.usageId],
+      }), { isolationLevel: 'Serializable' })
+      return
+    }
     try {
       await prisma.$transaction(tx => completeAuthorReviewReplacement(tx, observation), { isolationLevel: 'Serializable' })
     } catch (error) {
