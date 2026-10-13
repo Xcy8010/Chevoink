@@ -5,13 +5,14 @@ import { prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
 import { readContinuedReviewRecovery, readAuthorContinuedReviewUsageIds } from '../../api/lib/agent/continued-review-recovery.js'
 
 describe.runIf(available)('ordinary author Continue preserves real unknown billing while retiring only its prior execution slot', () => {
-  it.each(['quality', 'continuity', 'no-author', 'post-admission'] as const)('%s uses authenticated PostgreSQL call/admission/input evidence', scenario => fixture(async f => {
+  it.each(['quality', 'continuity', 'no-author', 'post-admission', 'correction', 'correction-no-claim', 'correction-unknown-source', 'correction-late-claim'] as const)('%s uses authenticated PostgreSQL call/admission/input evidence', scenario => fixture(async f => {
     try {
       const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '原授权章节复核' })
       await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0, status: 'running',
         usage: { totalTokens: 329762, checkpoint: { stagnantBatches: 9, tokenBudget: 500, reviewAttempts: ['original-consumed'] } } } })
       const startAt = new Date(Date.now() + 5000), resultAt = new Date(startAt.getTime() + 1000)
-      const toolName = scenario === 'continuity' ? 'continuity_validate' as const : 'quality_analyze' as const
+      const corrective = scenario.startsWith('correction')
+      const toolName = scenario === 'continuity' || corrective ? 'continuity_validate' as const : 'quality_analyze' as const
       const pending = { compilationId: compilation.id, chapterId: f.chapterId, revision: 1, toolName, callId: 'exact-prior-call' }
       const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'run.paused', createdAt: new Date(resultAt.getTime() + 10), payload: {} } })
       if (scenario !== 'no-author') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4, type: 'run.started',
@@ -22,15 +23,26 @@ describe.runIf(available)('ordinary author Continue preserves real unknown billi
       await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: delta ? 6 : 2, type: 'tool.result', createdAt: new Date(resultAt.getTime() + delta),
         payload: { callId: pending.callId, toolName, ok: false, failureCode: 'AI_PROVIDER_TRANSPORT' } } })
       const usage = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId, chapterId: f.chapterId,
-        targetType: 'chapter', targetId: f.chapterId,
+        targetType: corrective ? 'story_compilation' : 'chapter', targetId: corrective ? compilation.id : f.chapterId,
         providerType: 'text', providerMode: 'custom', modelName: 'isolated-no-provider', modelTier: 'standard', multiplierBps: 12000,
-        action: toolName === 'quality_analyze' ? 'agent3HumanityCritic' : 'agent3ContinuityCritic', requestTokens: null, responseTokens: null,
+        action: corrective ? 'agent3ContinuityEvidenceCorrection' : toolName === 'quality_analyze' ? 'agent3HumanityCritic' : 'agent3ContinuityCritic', requestTokens: null, responseTokens: null,
         usageSource: 'unknown', billingStatus: 'pending_usage', creditChargeMilli: 0, reservedCreditMilli: 18023, durationMs: 0,
         billingSnapshot: { version: 'credits-v1-exact', modelTier: 'standard', multiplierBps: 12000 }, createdAt: new Date(startAt.getTime() + delta + 100) } })
+      if (corrective) {
+        const original = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId, chapterId: f.chapterId,
+          targetType: 'story_compilation', targetId: compilation.id, providerType: 'text', providerMode: 'custom', modelName: 'isolated-no-provider',
+          modelTier: 'standard', multiplierBps: 12000, action: 'agent3ContinuityCritic', requestTokens: 100, responseTokens: 30,
+          usageSource: scenario === 'correction-unknown-source' ? 'unknown' : 'reported', billingStatus: 'settled', creditChargeMilli: 16,
+          durationMs: 10, billingEvidence: { responseObserved: true }, createdAt: new Date(startAt.getTime() - 2000) } })
+        if (scenario !== 'correction-no-claim') await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview',
+          title: '原引用纠正预约', content: '仅测试请求归属', createdAt: new Date(startAt.getTime() + (scenario === 'correction-late-claim' ? 200 : 50)),
+          metadata: { version: 1, state: 'claimed', callId: pending.callId, chapterId: f.chapterId, revision: 1,
+            targetType: 'story_compilation', targetId: compilation.id, usageIds: [original.id] } } })
+      }
       const beforeUsage = await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usage.id } })
       const beforeRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
       const recovered = await prisma.$transaction(tx => readContinuedReviewRecovery(tx, f, [pending]))
-      expect(recovered).toHaveLength(['quality', 'continuity'].includes(scenario) ? 1 : 0)
+      expect(recovered).toHaveLength(['quality', 'continuity', 'correction'].includes(scenario) ? 1 : 0)
       if (recovered.length) {
         const first = recovered[0]
         expect(first.receipt).toMatchObject({ status: 'author_continued_review', usageOutcome: 'unknown_preserved', usageIds: [usage.id],

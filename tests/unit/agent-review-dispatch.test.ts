@@ -8,8 +8,8 @@ function pending(overrides: Partial<ChapterReviewReadiness> = {}): ChapterReview
     requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'compile' } }], ...overrides }
 }
 describe('server review fallback', () => {
-  it('keeps old interpretation absent and projects complete current strict refs separately from automatic candidates', () => {
-    expect(projectCurrentReviewNextStep(pending())).toBeNull()
+  it('unifies legacy projection and projects complete current strict refs separately from automatic candidates', () => {
+    expect(projectCurrentReviewNextStep(pending())).toMatchObject({ state: 'check_required', phase: 'assessment' })
     const refs = Array.from({ length: 10 }, (_, i) => ({ source: 'quality' as const, reportId: 'q', findingId: `f${i}` }))
     const state = pending({ reviewProtocol: 1, completeStrictReview: true, selectionOnly: true, ready: true, quality: 'complete', requiredTools: [],
       qualityCandidateCount: 8, decisionPending: true, requiredDecisions: refs, retainedDecisions: refs.slice(0, 2) })

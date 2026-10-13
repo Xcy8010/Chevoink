@@ -1203,8 +1203,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           }
         }
 
+        case 'tool.deferred':
         case 'tool.preparation.end': {
-          const callIds = new Set(event.callIds)
+          const callIds = new Set(event.type === 'tool.deferred' ? [event.callId] : event.callIds)
           return {
             ...base,
             liveToolDrafts: Object.fromEntries(Object.entries(state.liveToolDrafts).filter(([callId]) => !callIds.has(callId))),

@@ -34,7 +34,7 @@ function fixture(prompt = '写下一章') {
     agentRun: { findFirstOrThrow: vi.fn().mockResolvedValue({ writingBindings: { version: 1, taskId: task.id, targets: [{ orderIndex: 44, chapterId: chapter.id }] } }),
       findFirst: vi.fn().mockResolvedValue({ mode: 'act', taskRootId: null, session: { userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: null } }) },
     chapter: { findFirst: vi.fn().mockResolvedValue(chapter), update: vi.fn() },
-    storyCompilation: { findFirst: vi.fn().mockResolvedValue(compilation), findMany: vi.fn().mockResolvedValue([compilation]),
+    storyCompilation: { findFirst: vi.fn().mockResolvedValue(compilation), findFirstOrThrow: vi.fn().mockResolvedValue(compilation), findMany: vi.fn().mockResolvedValue([compilation]),
       update: vi.fn(async ({ data }) => Object.assign(compilation, data)) },
     chapterQualityReport: { findUnique: vi.fn().mockResolvedValue(report), findFirst: vi.fn().mockResolvedValue(report), findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
     chapterBridge: { update: vi.fn(async ({ data }) => Object.assign(bridge, data)) },

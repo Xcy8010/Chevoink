@@ -7,7 +7,7 @@ export type TextRequestRecord = {
   billingKnown: boolean
 }
 export type TextRequestTrace = { records: TextRequestRecord[] }
-const active = new AsyncLocalStorage<TextRequestTrace>()
+const active = new AsyncLocalStorage<readonly TextRequestTrace[]>()
 type Identity = { userId: string; action: string; targetId?: string | null }
 type RecoveryProof = { record: TextRequestRecord; identity: string; consumed: boolean }
 const failures = new WeakMap<object, RecoveryProof>()
@@ -15,14 +15,20 @@ const identity = (system: string, content: string, options: Identity) => createH
   .update(JSON.stringify([options.userId, options.action, options.targetId ?? null, system, content])).digest('hex')
 
 export const createTextRequestTrace = (): TextRequestTrace => ({ records: [] })
-export const withTextRequestTrace = <T>(trace: TextRequestTrace, operation: () => Promise<T>): Promise<T> => active.run(trace, operation)
+/** Nested stage observers share each actual record with the owning tool trace.
+ * Inner scopes must never hide an unresolved bill from their caller. */
+export const withTextRequestTrace = <T>(trace: TextRequestTrace, operation: () => Promise<T>): Promise<T> => {
+  const parents = active.getStore() ?? []
+  return active.run(parents.includes(trace) ? parents : [...parents, trace], operation)
+}
 export const textRequestsFinished = (trace: TextRequestTrace): boolean => trace.records.length > 0
   && trace.records.every(record => record.billingKnown && ['terminal', 'not_dispatched'].includes(record.status))
 
 export function beginTextRequest(usageId: string) {
   const record: TextRequestRecord = { usageId, status: 'prepared', billingKnown: false }
-  active.getStore()?.records.push(record)
-  return { record, traced: !!active.getStore() }
+  const observers = active.getStore() ?? []
+  for (const trace of observers) trace.records.push(record)
+  return { record, traced: observers.length > 0 }
 }
 
 /** A failure proof belongs to one actual request, never its error code alone. */

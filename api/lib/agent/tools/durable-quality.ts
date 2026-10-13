@@ -20,7 +20,8 @@ import { analyzeDeterministicQuality, applyQualityRepair, buildHumanityQualityCo
   getLatestQualityReport, getQualityReport, HUMANITY_CRITIC_VERSION, FROZEN_V4_HUMANITY_CRITIC_VERSION, PREVIOUS_HUMANITY_CRITIC_VERSION, LEGACY_HUMANITY_CRITIC_VERSION, persistHumanityQualityReport,
   prepareQualityFindings, qualityReviewContextHash, resolveQualityChapterTarget, retainedQualityCandidates } from '../humanity-quality.js'
 import { qualityReportCheckedCurrentContent, qualityAutoRepairPending, selectAutomaticQualityFindings, REPAIR_BLOCK_CODES } from '../quality-report-contract.js'
-import { probeChapterReviewRevision, readChapterReviewRevisionGuidance } from '../chapter-review-guard.js'
+import { chapterReviewDecisionGuidance, probeChapterReviewRevision, readChapterReviewReadiness, readChapterReviewRevisionGuidance } from '../chapter-review-guard.js'
+import { verificationQualityAdviceRequiresDecision } from '../review-cycle.js'
 import { buildQualityEvidenceSources, qualityEvidenceSourcesSchema, validateQualityEvidenceSources, renderQualityEvidenceSources,
   inspectCriticResponse, inspectCorrectableCriticResponse, parseQualityJsonObject, coerceCriticFindings, type CriticResponseDiagnostic, correctQualityEvidence, qualityEvidenceCorrectionSystem, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence, qualityReportHasDroppedFindings, qualityCorrectionResponseWitness } from '../quality-evidence.js'
 import { buildCriticInput, buildCriticSystem, reportDisplay } from './humanity-quality-tools.js'
@@ -248,6 +249,16 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     if (canRepair) for (const step of ['quality_repair', 'quality_repair_retry'] as const) {
       const missingPatch = selected.filter(item => !patches.has(item.key))
       if (!missingPatch.length) break
+      // Existing paid children retain their exact frozen input and recovery.
+      // Only a new automatic child is withheld at final stylistic decisions.
+      const defer = await withRunLease(lease, async tx => {
+        const saved = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: {
+          taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:${step}` } } })
+        if (saved) return null
+        const review = await readChapterReviewReadiness(tx, ctx, frozen.compiler?.id)
+        return review?.chapterId === frozen.chapter.id && verificationQualityAdviceRequiresDecision(review, missingPatch) ? chapterReviewDecisionGuidance(review) : null
+      })
+      if (defer) { repairNote = defer; if (!patches.size) canRepair = false; break }
       const reply = await call(step, frozen.repairSystem, JSON.stringify(missingPatch.map(item => ({ key: item.key, evidence: frozen.chapter.content.slice(item.start, item.end), explanation: item.explanation, suggestion: item.suggestion }))), 0.3)
       if (reply.finishReason !== 'stop' || reply.toolCalls.length) continue
       try {

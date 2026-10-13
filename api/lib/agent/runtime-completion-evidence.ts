@@ -76,7 +76,7 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       ...(budget.unresolvedAttempts > 0n ? [{ code: 'unresolved_usage', reference: root.id }] : []),
     ]
     const observations = []
-    if (spec.scope.reviewProtocol === 1) for (const item of blockers.filter(item => item.code === 'uncommitted_compilation')) {
+    for (const item of blockers.filter(item => item.code === 'uncommitted_compilation')) {
       const review = await readChapterReviewReadiness(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId }, item.reference)
       const next = review && projectCurrentReviewNextStep(review)
       if (next) observations.push({ compilationId: next.compilationId, chapterId: next.chapterId, revision: next.revision,

@@ -8,10 +8,12 @@ import * as formatRecovery from '../../api/lib/agent/quality-format-recovery.js'
 import { selectAutomaticQualityFindings, qualityAutoRepairPending } from '../../api/lib/agent/quality-report-contract.js'
 
 // 自动修订的准入守卫在事务里读真实表；本组用例只验证工具语义，按模块隔离守卫。
-const guard = vi.hoisted(() => ({ probe: vi.fn(), assert: vi.fn(), channel: vi.fn(), guidance: vi.fn() }))
+const guard = vi.hoisted(() => ({ probe: vi.fn(), assert: vi.fn(), channel: vi.fn(), guidance: vi.fn(),
+  readiness: vi.fn().mockResolvedValue(null), decisions: vi.fn().mockReturnValue('当前报告须逐项写明保留原因。') }))
 vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({
   probeChapterReviewRevision: guard.probe, assertChapterReviewRevision: guard.assert,
   isChapterRevisionChannelOpen: guard.channel, readChapterReviewRevisionGuidance: guard.guidance,
+  readChapterReviewReadiness: guard.readiness, chapterReviewDecisionGuidance: guard.decisions,
 }))
 
 import {
@@ -169,6 +171,8 @@ describe('严谨创作自动落实质量建议', () => {
   const digest = (content: string) => createHash('sha256').update(content).digest('hex')
   function fixture(cached: boolean, behavior = 'apply') {
     guard.probe.mockReset().mockResolvedValue({ open: true })
+    guard.readiness.mockReset().mockResolvedValue(null)
+    guard.decisions.mockReset().mockReturnValue('当前报告须逐项写明保留原因。')
     // 付费前探测与写入守卫走同一准入；这里只验证工具语义，不连接真实事务。
     vi.spyOn(prisma, '$transaction').mockImplementation(async work => (work as (tx: Prisma.TransactionClient) => Promise<unknown>)({} as Prisma.TransactionClient))
     const content = Array.from({ length: 8 }, (_, index) => `证据${index}。`).join('')
@@ -214,6 +218,26 @@ describe('严谨创作自动落实质量建议', () => {
       creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
     return { ctx, report, critic, reserve, model, write, bundle }
   }
+  it.each([true, false])('final verification retains new stylistic advice without another paid patch (cached=%s)', async cached => {
+    const f = fixture(cached)
+    guard.readiness.mockResolvedValue({ chapterId: 'c', ready: true, reviewCycle: { edited: true }, qualityPassRequired: false, mustPassPending: false })
+    const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(result.output).toContain('当前属于最终核验的质量建议')
+    expect(result.output).toContain('逐项写明保留原因')
+    expect(f.reserve).not.toHaveBeenCalled()
+    expect(f.model).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+    expect(f.report.chapterRevision).toBe(1)
+    expect(f.report.findings.every(item => item.disposition === 'pending')).toBe(true)
+  })
+  it('does not waive a genuine error or explicit mandatory pass at final verification', async () => {
+    const f = fixture(true)
+    guard.readiness.mockResolvedValue({ chapterId: 'c', reviewCycle: { edited: true }, qualityPassRequired: true, mustPassPending: true })
+    await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(f.reserve).toHaveBeenCalledOnce()
+    expect(f.model).toHaveBeenCalledOnce()
+    expect(f.write).toHaveBeenCalledOnce()
+  })
   it('sends the complete author constraints to the critic without adding a repair call', async () => {
     const f = fixture(false)
     // 只验证 Critic 输入装配时用稳定模式隔离自动修订路径。

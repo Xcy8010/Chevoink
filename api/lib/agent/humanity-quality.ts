@@ -1,5 +1,7 @@
 import { assertWritingTarget } from './writing-scope.js'
-import { assertChapterReviewRevision } from './chapter-review-guard.js'
+import { assertChapterReviewRevision, readChapterReviewReadiness } from './chapter-review-guard.js'
+import { verificationQualityAdviceRequiresDecision } from './review-cycle.js'
+import { prepareReviewCycleTransition } from './review-cycle-store.js'
 import { readOriginalTaskRequest } from './original-request.js'
 import { readChapterWritingBackground } from './writing-request-context.js'
 import { createHash } from 'node:crypto'
@@ -526,6 +528,8 @@ export async function reserveQualityAutoRepair(input: { userId: string; novelId:
       throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '正文或报告已变化，未启动旧报告修订。')
     }
     if (!qualityAutoRepairPending(current)) return false
+    if (current.compilationId && verificationQualityAdviceRequiresDecision(
+      await readChapterReviewReadiness(tx, input, current.compilationId), selectAutomaticQualityFindings(current.findings))) return false
     const metrics = current.deterministicMetrics as Prisma.JsonObject
     await tx.chapterQualityReport.update({ where: { id: current.id }, data: {
       deterministicMetrics: { ...metrics, autoRepairAttempted: true },
@@ -615,12 +619,16 @@ export async function applyQualityRepair(input: {
       editRanges: patches.map(patch => ({ start: patch.finding.startOffset, end: patch.finding.endOffset, newText: patch.replacement })),
       retainedFindings: input.retainedFindings,
     }) : undefined
+    const recordCycle = input.runId && report.compilationId ? await prepareReviewCycleTransition(tx,
+      { userId: input.userId, novelId: input.novelId, runId: input.runId }, report.chapter, report.compilationId, after,
+      patches.map(patch => ({ start: patch.finding.startOffset, end: patch.finding.endOffset, newText: patch.replacement }))) : undefined
     const write = await tx.chapter.updateMany({
       where: { id: report.chapter.id, ...activeChapterScope(input.novelId), authorId: input.userId, revision: report.chapterRevision, content: report.chapter.content },
       data: { content: after, wordCount: after.length, revision: { increment: 1 } },
     })
     if (write.count !== 1) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '章节在修订期间已变化，请重新检查。')
     await consumeReviewRevision?.()
+    await recordCycle?.()
     await tx.qualityFinding.updateMany({ where: { reportId: report.id, id: { in: patches.map((patch) => patch.finding.id) } }, data: { disposition: 'repaired' } })
     const updatedChapter = await tx.chapter.findUniqueOrThrow({ where: { id: report.chapter.id } })
     const metrics = report.deterministicMetrics && typeof report.deterministicMetrics === 'object' && !Array.isArray(report.deterministicMetrics) ? report.deterministicMetrics : {}

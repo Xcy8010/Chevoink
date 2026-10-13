@@ -3,6 +3,21 @@ import { beginTextRequest, consumeTextRequestRecovery, createTextRequestTrace, r
   textRequestsFinished, withTextRequestTrace } from '../../api/lib/text-request-trace.js'
 
 describe('exact auxiliary request trace', () => {
+  it('shares nested records with every parent and observes later settlement without duplicate records', async () => {
+    const outer = createTextRequestTrace(), inner = createTextRequestTrace(), sibling = createTextRequestTrace()
+    await withTextRequestTrace(outer, async () => {
+      await Promise.all([withTextRequestTrace(inner, async () => withTextRequestTrace(inner, async () => {
+        beginTextRequest('critic')
+        await Promise.resolve()
+      })), withTextRequestTrace(sibling, async () => { Object.assign(beginTextRequest('correction').record, { status: 'terminal', billingKnown: true }) })])
+    })
+    expect(outer.records.map(record => record.usageId)).toEqual(['critic', 'correction'])
+    expect(inner.records).toHaveLength(1); expect(sibling.records).toHaveLength(1)
+    expect(outer.records[0]).toBe(inner.records[0])
+    expect(textRequestsFinished(outer)).toBe(false)
+    Object.assign(inner.records[0], { status: 'terminal', billingKnown: true })
+    expect(textRequestsFinished(outer)).toBe(true)
+  })
   it('keeps a later unknown recovery from certifying the completed primary chain', async () => {
     const trace = createTextRequestTrace()
     await withTextRequestTrace(trace, async () => {

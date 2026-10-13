@@ -14,9 +14,12 @@ import { qualityFormatRecoverySchema, hasQualityFormatRecoveryClaim } from './qu
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.js'
 import { readQualityUnavailableProof } from './quality-unavailable-proof.js'
+import { inspectContinuityResponse } from './continuity-format-recovery.js'
+import { continuityEvidenceCorrectionInput, continuityEvidenceCorrectionSystem } from './continuity-response-correction.js'
 
 const steps = {
   continuity_critic: { parent: 'continuity_validate', previous: null },
+  continuity_evidence_correction: { parent: 'continuity_validate', previous: 'continuity_critic' },
   continuity_repair: { parent: 'continuity_validate', previous: 'continuity_critic' },
   continuity_repair_retry: { parent: 'continuity_validate', previous: 'continuity_repair' },
   quality_critic: { parent: 'quality_analyze', previous: null },
@@ -26,7 +29,7 @@ const steps = {
   quality_repair_retry: { parent: 'quality_analyze', previous: 'quality_repair' },
 } as const
 export type AuxiliaryModelStep = keyof typeof steps
-const stepSchema = z.enum(['continuity_critic', 'continuity_repair', 'continuity_repair_retry', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
+const stepSchema = z.enum(['continuity_critic', 'continuity_evidence_correction', 'continuity_repair', 'continuity_repair_retry', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
 const parentInput = z.object({ input: z.object({ callId: z.string(), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema }) })
 const isolatedRequest = z.object({ body: z.object({
   messages: z.array(z.object({ role: z.enum(['system', 'user']), content: z.string() })).min(1),
@@ -154,6 +157,24 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         if (result.usageReceipt?.source !== 'reported' || result.usageReceipt.settlementStatus !== 'settled'
           || !['json_invalid', 'incomplete_json', 'envelope_invalid', 'ambiguous_envelope', 'duplicate_keys', 'findings_invalid'].includes(inspected.diagnostic.classification)) {
           return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '首个质量回复不是已确认结算的格式失败，不允许新计费恢复。')
+        }
+      }
+      if (captured.step === 'continuity_evidence_correction') {
+        const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.literal(7),
+          sourceBodies: z.object({ previous: z.string().nullable(), current: z.string() }) }) }) }).safeParse(parent.inputSnapshot)
+        const usage = result.usageReceipt, response = parsedResult.data.result
+        if (!work.success || usage?.source !== 'reported' || usage.settlementStatus !== 'settled'
+          || usage.promptTokens === null || usage.completionTokens === null || usage.promptTokens < 0 || usage.completionTokens < 0) {
+          return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原连续性回复尚未确认完整用量与结算，不能派发引用纠正。')
+        }
+        const bodies = work.data.input.work.sourceBodies
+        const inspected = inspectContinuityResponse(response.content, bodies, response.finishReason === 'stop' && !response.toolCalls.length, 5)
+        const request = isolatedRequest.parse(captured.request)
+        const expected = [{ role: 'system', content: continuityEvidenceCorrectionSystem },
+          { role: 'user', content: continuityEvidenceCorrectionInput(inspected, bodies) }]
+        if (inspected.audit.classification !== 'source_invalid' || !inspected.structured || !inspected.audit.rawResponse.complete
+          || runtimeJson(request.body.messages).hash !== runtimeJson(expected).hash) {
+          return runtimeError('RUNTIME_RECEIPT_INVALID', '引用纠正只能定位原连续性意见，不能重新审稿或改变原判断。')
         }
       }
     }

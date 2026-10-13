@@ -88,14 +88,16 @@ describe('one atomic factual correction in the original new draft', () => {
     const validation = { checkRounds: 1, autoRepairRounds: 0, checkedChapterId: chapter.id, checkedRevision: chapter.revision,
       independentCheck: 'complete', errorCount: 1, warningCount: 0, findings: [{ signal: 'object', severity: 'error', evidence: '同一扇门锁着却从未锁门', suggestion: '保留门锁事实' }],
       coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks: scenes, source: null }) }
-    const compilation = { id: 'compiler', status: 'active', stage: 'check', validation, bridge, sceneTasks: scenes }
+    const compilation = { id: 'compiler', chapterId: chapter.id, runId: 'original-run', preparedContext: {} as Record<string, unknown>, status: 'active', stage: 'check', validation, bridge, sceneTasks: scenes }
     const rows = [compilation]
     const source = { writingBindings: binding }
     const db = { $queryRaw: vi.fn().mockResolvedValue([]), agentRun: { findFirstOrThrow: vi.fn().mockResolvedValue(source),
       findFirst: vi.fn().mockResolvedValue({ mode: 'act', taskRootId: null, session: { userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: null } }) },
-      chapter: { findFirst: vi.fn().mockResolvedValue(chapter) }, chapterQualityReport: { findMany: vi.fn().mockResolvedValue([]) },
-      storyCompilation: { findMany: vi.fn().mockImplementation(async () => rows), update: vi.fn().mockImplementation(async ({ data }) => { compilation.validation = data.validation; return compilation }) },
+      chapter: { findFirst: vi.fn().mockResolvedValue(chapter) }, chapterQualityReport: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn() },
+      storyCompilation: { findMany: vi.fn().mockImplementation(async () => rows), findFirst: vi.fn().mockResolvedValue(compilation),
+        findFirstOrThrow: vi.fn().mockResolvedValue(compilation), update: vi.fn().mockImplementation(async ({ data }) => Object.assign(compilation, data)) },
     }
+    db.chapterQualityReport.findFirst.mockImplementation(async () => (await db.chapterQualityReport.findMany())[0] ?? null)
     const tx = db as unknown as Prisma.TransactionClient
     const subject = { userId: 'u', novelId: 'n', runId: 'child-run' }
     return { tx, db, subject, chapter, request, spec, binding, source, validation, compilation, rows }
@@ -103,8 +105,9 @@ describe('one atomic factual correction in the original new draft', () => {
   function completeQuality(f: ReturnType<typeof fixture>, candidates = 0) {
     const report = { id: 'q', compilationId: f.compilation.id, chapterRevision: f.chapter.revision, repairRound: 0, status: 'passed',
       deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(f.chapter.content).digest('hex') },
-      findings: Array.from({ length: candidates }, (_, index) => ({ severity: 'warning', startOffset: index * 4, endOffset: index * 4 + 2,
-        disposition: 'pending', authorFeedback: null })) }
+      findings: Array.from({ length: candidates }, (_, index) => ({ id: `quality-${index}`, source: 'critic', signal: 'emotion_grounding',
+        severity: 'warning', startOffset: index * 4, endOffset: index * 4 + 2, evidenceExcerpt: f.chapter.content.slice(index * 4, index * 4 + 2),
+        explanation: '合成建议', suggestion: '合成修法', confidence: 0.9, disposition: 'pending', authorFeedback: null })) }
     f.db.chapterQualityReport.findMany.mockResolvedValue([report] as never)
     return report
   }
@@ -114,10 +117,13 @@ describe('one atomic factual correction in the original new draft', () => {
     report.repairRound = 1
     const before = structuredClone(report)
     const consume = await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: '第一处改动，其他意见未处理。' })
+    f.chapter.content = '第一处改动，其他意见未处理。'; f.chapter.revision++
     await consume?.()
     const receipt = readNewDraftRevision(f.compilation.validation)
     for (const mutation of ['range', 'replace', 'append'] as const) {
-      await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation, after: '后续合法修改。' })).resolves.toBeUndefined()
+      const next = await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation, after: '后续合法修改。' + mutation })
+      f.chapter.content = '后续合法修改。' + mutation; f.chapter.revision++
+      await next?.()
     }
     expect(f.compilation.validation).toMatchObject({ checkRounds: 3, autoRepairRounds: 0, newDraftRevision: receipt })
     expect(report).toEqual(before)
@@ -147,7 +153,7 @@ describe('one atomic factual correction in the original new draft', () => {
     f.validation.checkRounds = 3
     const before = structuredClone(f.compilation.validation)
     for (const after of ['第一处改动。', '第二处改动。']) {
-      await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after })).resolves.toBeUndefined()
+      expect(await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after })).toBeTypeOf('function')
     }
     expect(f.compilation.validation).toEqual(before)
     expect(report.repairRound).toBe(1)

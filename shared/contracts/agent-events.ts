@@ -423,6 +423,15 @@ export type AgentStreamEventBody =
       callIds: string[]
     }
   | {
+      /** Server proposal arbitration; no handler, provider request or effect occurred. */
+      type: 'tool.deferred'
+      messageId: string
+      callId: string
+      toolName: string
+      reason: string
+      execution: 'not_dispatched'
+    }
+  | {
       type: 'tool.result'
       messageId: string
       callId: string

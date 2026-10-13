@@ -214,11 +214,35 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, pend
     const family = item.toolName === 'quality_analyze' ? 'agent3Humanity' : 'agent3Continuity'
     const primaryAction = `${family}Critic`
     const actions = new Set([primaryAction, `${primaryAction}OutputRecovery`, `${primaryAction}EmptyRecovery`,
-      ...(item.toolName === 'quality_analyze' ? ['agent3HumanityFormatRecovery'] : [])])
+      ...(item.toolName === 'quality_analyze' ? ['agent3HumanityFormatRecovery'] : ['agent3ContinuityEvidenceCorrection'])])
     const payments = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, providerType: 'text', action: { startsWith: family },
       createdAt: { gte: call.createdAt, lte: result.createdAt }, OR: [{ agentRunId: call.runId }, { chapterId: item.chapterId },
         { targetId: { in: [item.chapterId, ...(item.compilationId ? [item.compilationId] : [])] } }] }, orderBy: { id: 'asc' } })
-    if (payments.filter(row => row.action === primaryAction).length !== 1 || !payments.some(row => row.usageSource === 'unknown')
+    const primaryCount = payments.filter(row => row.action === primaryAction).length
+    const corrections = payments.filter(row => row.action === 'agent3ContinuityEvidenceCorrection')
+    if (corrections.length) {
+      // A correction-only call reuses a confirmed earlier critic. Authenticate
+      // that original request and the claim preceding this exact new request;
+      // a similarly named payment cannot mint a continuation exemption.
+      const claims = await tx.agentArtifact.findMany({ where: { runId: call.runId, artifactType: 'continuityReview',
+        createdAt: { gte: call.createdAt, lte: result.createdAt }, AND: [
+          { metadata: { path: ['callId'], equals: item.callId } }, { metadata: { path: ['state'], equals: 'claimed' } },
+          { metadata: { path: ['chapterId'], equals: item.chapterId } }, { metadata: { path: ['revision'], equals: item.revision } }] } })
+      if (claims.length !== 1) continue
+      const claim = claims[0], frozen = object(claim.metadata), originalIds = frozen.usageIds
+      const targetType = item.compilationId ? 'story_compilation' : 'chapter', targetId = item.compilationId ?? item.chapterId
+      if (frozen.version !== 1 || frozen.targetType !== targetType || frozen.targetId !== targetId
+        || corrections.some(row => row.targetType !== targetType || row.targetId !== targetId || row.createdAt < claim.createdAt)
+        || !Array.isArray(originalIds) || !originalIds.length || originalIds.some(id => typeof id !== 'string')
+        || new Set(originalIds).size !== originalIds.length) continue
+      const originalUsage = await tx.aiUsageLog.findMany({ where: { id: { in: originalIds as string[] }, userId: subject.userId,
+        novelId: subject.novelId, targetType, targetId, createdAt: { lte: claim.createdAt } } })
+      if (originalUsage.length !== originalIds.length || originalUsage.filter(row => row.action === primaryAction).length !== 1
+        || originalUsage.some(row => ![primaryAction, `${primaryAction}OutputRecovery`, `${primaryAction}EmptyRecovery`].includes(row.action)
+          || row.agentRunId !== null && !ids.includes(row.agentRunId) || row.usageSource !== 'reported' || !isKnownTextRequestBilling(row)
+          || object(row.billingEvidence).responseObserved !== true)) continue
+    }
+    if ((primaryCount !== 1 && !(primaryCount === 0 && corrections.length === payments.length && corrections.length === 1)) || !payments.some(row => row.usageSource === 'unknown')
       || payments.some(row => !actions.has(row.action) || row.agentRunId !== null && row.agentRunId !== call.runId
       || row.chapterId !== null && row.chapterId !== item.chapterId || row.durationMs < 0 || row.createdAt.getTime() + row.durationMs > result.createdAt.getTime())) continue
     const reports = item.toolName === 'quality_analyze' ? await tx.chapterQualityReport.findMany({ where: { userId: subject.userId, novelId: subject.novelId,

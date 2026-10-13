@@ -11,6 +11,9 @@ import { continuityFindingInputSchema } from '../../../shared/contracts/story-co
 import { runtimeJson } from './runtime-common.js'
 import { assertSelectionBodyEffect, originalSelectionBoundary } from './writing-scope.js'
 import { hasReadOnlyRevisionAssessment, localEditGuidance, localRevisionAuthorityText, originalLocalEditBoundary } from './local-edit-scope.js'
+import { beginReviewCycle, projectReviewCycle, readReviewCycle, reviewCycleFinding,
+  type ReviewCycleFinding } from './review-cycle.js'
+import { prepareReviewCycleTransition } from './review-cycle-store.js'
 
 import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
 
@@ -41,6 +44,8 @@ export type ChapterReviewRevisionOptions = {
   pendingQuality?: { compilationId: string; candidates: number }
 }
 export type ChapterReviewReadiness = {
+  reviewCycle?: ReturnType<typeof projectReviewCycle>
+  reviewCycleFindings?: ReviewCycleFinding[]
   reviewProtocol?: 1
   completeStrictReview?: boolean
   selectionOnly?: boolean
@@ -57,6 +62,7 @@ export type ChapterReviewReadiness = {
   retainedDecisions?: RetainedChapterReviewDecision[]
   decisionEntries?: ChapterReviewDecision[]
   mustPassPending?: boolean
+  qualityPassRequired?: boolean
   decisionBinding?: { contentHash: string; continuityBinding: string; qualityReportId: string | null; qualityReportHash: string | null }
   continuityExhausted?: boolean
   qualityReportId: string | null; requiredTools: Array<{ name: 'continuity_validate' | 'quality_analyze'; args: { compilationId: string } }>
@@ -240,6 +246,20 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       disposition: finding.disposition, authorFeedback: finding.authorFeedback, feedbackReason: finding.feedbackReason })) : []),
   ].map(item => JSON.stringify(item)).sort()
   const contentHash = runtimeJson({ content: chapter.content }).hash
+  const cycleFindings: ReviewCycleFinding[] = [
+    ...(assessment && validation && Array.isArray(validation.findings) ? validation.findings.map((item, index) => {
+      const finding = continuityFindingInputSchema.parse(item)
+      return reviewCycleFinding({ source: 'continuity', reportId: continuityBinding, findingId: String(index), signal: finding.signal,
+        severity: finding.severity, evidence: finding.evidence }, chapter.content)
+    }) : []),
+    ...(quality === 'complete' ? report!.findings.filter(item => item.disposition !== 'repaired').map(finding => reviewCycleFinding({ source: 'quality',
+      reportId: report!.id, findingId: finding.id, signal: finding.signal, severity: finding.severity,
+      evidence: finding.evidenceExcerpt, startOffset: finding.startOffset, endOffset: finding.endOffset }, chapter.content)) : []),
+  ]
+  const reviewCycle = projectReviewCycle(readReviewCycle(compilation.preparedContext, { taskId: original.taskId,
+    userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id }), { revision: chapter.revision, contentHash,
+    ready: !requiredTools.length, pending: decisionPending, findings: cycleFindings.filter(item => requiredDecisions.some(ref =>
+      ref.source === item.source && ref.reportId === item.reportId && ref.findingId === item.findingId)) })
   const decisionFeedback: ReviewDecisionFeedback | undefined = !requiredTools.length && decisionPending && continuity === 'complete'
     && quality === 'complete' && qualityContextCurrent ? {
       key: runtimeJson({ taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, contentHash,
@@ -255,9 +275,10 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   return { ready: !requiredTools.length, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id,
     ...(reviewProtocol ? { reviewProtocol, completeStrictReview,
       selectionOnly: !!originalSelectionBoundary(original.spec) || !!originalLocalEditBoundary(original.spec) } : {}),
-    chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools, decisionPending,
+    chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools, decisionPending, reviewCycle, reviewCycleFindings: cycleFindings,
     ...(quality === 'complete' ? { decisionFeedbackSnapshotHash: qualityDecisionSnapshotHash(report!.findings) } : {}),
     ...(decisionFeedback ? { decisionFeedback } : {}), decisionDetails, requiredDecisions, retainedDecisions, decisionEntries, mustPassPending: mandatoryReviewPending,
+    qualityPassRequired: mustPassQuality,
     decisionBinding: { contentHash: runtimeJson({ content: chapter.content }).hash, continuityBinding,
       qualityReportId: quality === 'complete' ? report!.id : null, qualityReportHash: quality === 'complete' ? qualityDecisionHash(report!.findings) : null },
     progressEvidence: { taskId: original.taskId, userId: subject.userId, novelId: subject.novelId,
@@ -274,7 +295,7 @@ const decisionKey = (item: ChapterReviewDecision) => `${item.source}:${item.repo
 /** Progress from actually added current decisions, excluding audit IDs and reason wording. */
 export function chapterReviewDecisionTransition(before: ChapterReviewReadiness, after: ChapterReviewReadiness) {
   const old = before.retainedDecisions ?? [], current = after.retainedDecisions ?? []
-  if (before.reviewProtocol !== 1 || !before.decisionBinding || runtimeJson(before.decisionBinding).hash !== runtimeJson(after.decisionBinding).hash
+  if (!before.decisionBinding || runtimeJson(before.decisionBinding).hash !== runtimeJson(after.decisionBinding).hash
     || !current.some(item => !old.some(saved => decisionKey(item) === decisionKey(saved)) && before.requiredDecisions?.some(ref => decisionKey(ref) === decisionKey(item)))) return undefined
   const semantic = (entries: ChapterReviewDecision[]) => entries.flatMap(entry => {
     const detail = before.decisionDetails?.find(item => decisionKey(item) === decisionKey(entry))
@@ -287,11 +308,7 @@ export function chapterReviewDecisionTransition(before: ChapterReviewReadiness, 
 }
 
 export function chapterReviewDecisionGuidance(readiness: ChapterReviewReadiness) {
-  const next = projectCurrentReviewNextStep(readiness)
-  if (next) return currentReviewNextStepGuidance(next)
-  const retained = readiness.retainedDecisions ?? []
-  const pending = (readiness.requiredDecisions ?? []).filter(item => !retained.some(saved => decisionKey(saved) === decisionKey(item)))
-  return `当前 r${readiness.revision} 检查状态：连续性=${readiness.continuity}，质量=${readiness.quality}。已明确留置${retained.length}项，仍需处理${pending.length}项；质量项按最多8处安全候选选取，不等于报告所有pending建议都必须改写。${readiness.mustPassPending ? '原始作者明确要求检查通过，留置不能替代该硬要求。' : ''}保留正文时直接用 chapter_bridge_commit 的 retainedFindings 逐项记录具体原因，无需无变化写入或重新检查。当前必需意见详情：${JSON.stringify((readiness.decisionDetails ?? []).filter(item => pending.some(reference => decisionKey(reference) === decisionKey(item))))}。精确参数模板（请替换reason为实际原因，不要修改引用）：${JSON.stringify(pending.map(item => ({ ...item, reason: '填写此意见不能安全修改或应保留的具体原因' })))}`
+  return currentReviewNextStepGuidance(projectCurrentReviewNextStep(readiness))
 }
 
 /** Shared exact-reference validation for manuscript and terminal decisions. */
@@ -324,12 +341,25 @@ export async function recordChapterReviewDecisions(tx: Prisma.TransactionClient,
     if (error instanceof DataAccessError) throw new DataAccessError(error.status, error.code, `${error.message} ${chapterReviewDecisionGuidance(readiness)}`)
     throw error
   }
-  if (readiness.reviewProtocol === 1 && runtimeJson(findings).hash === runtimeJson(readiness.retainedDecisions ?? []).hash) return false
+  if (runtimeJson(findings).hash === runtimeJson(readiness.retainedDecisions ?? []).hash) return false
   const original = await readOriginalTaskRequest(tx, subject), runIds = await originalTaskRunIds(tx, subject, original)
   const compilation = await tx.storyCompilation.findFirstOrThrow({ where: { id: readiness.compilationId, userId: subject.userId,
     novelId: subject.novelId, chapterId: readiness.chapterId, runId: { in: runIds } } })
   const validation = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
-  await tx.storyCompilation.update({ where: { id: compilation.id }, data: { validation: { ...validation,
+  const scope = { taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: readiness.chapterId }
+  const context = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}
+  let cycle = readReviewCycle(context, scope)
+  if (!cycle) {
+    const chapter = await tx.chapter.findFirst({ where: { id: readiness.chapterId, revision: readiness.revision, authorId: subject.userId,
+      ...activeChapterScope(subject.novelId) }, select: { content: true } })
+    if (!chapter || runtimeJson({ content: chapter.content }).hash !== readiness.decisionBinding.contentHash) {
+      throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '正文在意见决策前变化，未保存旧版本决定。')
+    }
+    cycle = beginReviewCycle(scope, { compilationId: readiness.compilationId, revision: readiness.revision, content: chapter.content,
+      ready: readiness.ready, binding: readiness.decisionBinding, required: originalChapterReviewRequirements(original), findings: readiness.reviewCycleFindings ?? [] })
+  }
+  await tx.storyCompilation.update({ where: { id: compilation.id }, data: { preparedContext: { ...context, reviewCycle: cycle } as Prisma.InputJsonValue,
+    validation: { ...validation,
     retainedReviewDecision: { version: 1, chapterId: readiness.chapterId, revision: readiness.revision, ...readiness.decisionBinding, findings },
   } as Prisma.InputJsonValue } })
   return true
@@ -419,17 +449,30 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
       } as Prisma.InputJsonValue } })
     }
   }
-  // This historical receipt closes the bounded automatic-remediation decision,
-  // not the author's writing grant. Only a real, successful CAS may mint it;
-  // later writes preserve it and never alter paid/check counters or reports.
-  if (authority && reviewed && latest && !receipts.some(Boolean) && options.after !== undefined && options.after !== current.content) {
+  // Workflow evidence is independent of ordinary writing permission and paid
+  // allowances. A complete baseline is captured before the actual body CAS.
+  if (latest && options.after !== undefined && options.after !== current.content) {
+    if (quality) await lockChapterReviewDecisions(tx, quality.id)
+    const recordCycle = await prepareReviewCycleTransition(tx, subject, current, latest.id, options.after, options.editRanges)
+    const mintReceipt = authority && reviewed && !receipts.some(Boolean)
+    if (!mintReceipt) return recordCycle
+    const before = current.content, beforeRevision = current.revision, after = options.after
     return async () => {
-      await tx.storyCompilation.update({ where: { id: latest.id }, data: { validation: {
-        ...(latest.validation && typeof latest.validation === 'object' && !Array.isArray(latest.validation) ? latest.validation : {}),
-        newDraftRevision: { version: 1, taskId: authority.taskId, chapterId: current.id, compilationId: latest.id,
-          checkedRevision: current.revision, beforeHash: runtimeJson({ content: current.content }).hash,
-          afterHash: runtimeJson({ content: options.after! }).hash, retainedFindings: options.retainedFindings ?? [] },
-      } as Prisma.InputJsonValue } })
+      const saved = await tx.chapter.findFirst({ where: { id: current.id, authorId: subject.userId, ...activeChapterScope(subject.novelId),
+        revision: beforeRevision + 1 }, select: { revision: true, content: true } })
+      if (!saved || saved.revision !== beforeRevision + 1 || saved.content !== after) {
+        throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '复查周期仅能记录同一事务成功保存的正文转换，未创建修订凭证。')
+      }
+      // Reread validation after the successful CAS to preserve decisions.
+      const fresh = await tx.storyCompilation.findFirstOrThrow({ where: { id: latest.id, userId: subject.userId, novelId: subject.novelId,
+        chapterId: current.id, runId: { in: runIds } } })
+      const validation = fresh.validation && typeof fresh.validation === 'object' && !Array.isArray(fresh.validation) ? fresh.validation : {}
+      await tx.storyCompilation.update({ where: { id: latest.id }, data: {
+        validation: { ...validation, newDraftRevision: { version: 1, taskId: authority!.taskId, chapterId: current.id,
+          compilationId: latest.id, checkedRevision: beforeRevision, beforeHash: runtimeJson({ content: before }).hash,
+          afterHash: runtimeJson({ content: after }).hash, retainedFindings: options.retainedFindings ?? [] } } as Prisma.InputJsonValue,
+      } })
+      await recordCycle?.()
     }
   }
 }

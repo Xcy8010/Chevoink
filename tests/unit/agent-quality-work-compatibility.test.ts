@@ -12,6 +12,11 @@ const bundle = { chapter: { id: 'chapter', title: '旧物摊', content: '沈桐�
   chapterWritingBackground: [{ sourceRunId: 'original', compilationId: 'old-compiler', prompt: '沈桐29岁，仓库调度员；1600–1900字；开篇低谷1–2段；问价前停笔。' }] } as unknown as Bundle
 
 describe('frozen quality work across deployments', () => {
+  it('review-cycle bookkeeping cannot invalidate a complete current quality report', () => {
+    const current = { ...bundle, compilation: { ...bundle.compilation!, preparedContext: { reviewCycle: { version: 1,
+      scope: { taskId: 'task', chapterId: 'chapter' }, transitions: [{ after: { revision: 1 } }] } } } }
+    expect(qualityReviewContextHash(current)).toBe(qualityReviewContextHash(bundle))
+  })
   it('only newly frozen parserVersion enables deterministic extraction and duplicate-key rejection', () => {
     const noisy = '{"metadata":"noise"}\n```json\n{"findings":[]}\n```'
     expect(() => qualityWorkParseObject(noisy, 'findings')).toThrow()

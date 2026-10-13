@@ -94,7 +94,7 @@ describe.runIf(available)('received quality report and local repair failure reco
 })
 
 describe.runIf(available)('author continuation after current continuity failure', () => {
-  it.each(['settled', 'format', 'no-author', 'early-author', 'unknown', 'changed-body', 'complete', 'wrong-window', 'unfinished', 'no-response', 'duplicate-call', 'standalone-unknown', 'completed-overlap'] as const)('%s requires new author intent and the exact returned check', scenario => fixture(async f => {
+  it.each(['settled', 'format', 'deferred', 'deferred-paid', 'deferred-other-error', 'deferred-gap', 'no-author', 'early-author', 'unknown', 'changed-body', 'complete', 'wrong-window', 'unfinished', 'no-response', 'duplicate-call', 'standalone-unknown', 'completed-overlap'] as const)('%s requires new author intent and the exact returned check', scenario => fixture(async f => {
     try {
       await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0 } })
       const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '修改本章' })
@@ -107,8 +107,19 @@ describe.runIf(available)('author continuation after current continuity failure'
       } } })
       await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', createdAt: start, payload: { toolName: 'continuity_validate', callId: 'returned-check', args: { compilationId: compilation.id, chapterId: chapter.id } } } })
       await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.result', createdAt: end, payload: { toolName: 'continuity_validate', callId: 'returned-check', ok: false, failureCode: scenario === 'format' ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED' } } })
-      const terminal = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'run.paused', createdAt: end, payload: {} } })
-      if (scenario !== 'no-author') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4, type: 'run.started', createdAt: new Date(end.getTime() + (scenario === 'early-author' ? -1 : 2000)), payload: { authorContinue: { eventId: terminal.id, afterSeq: 3 } } } })
+      if (scenario.startsWith('deferred')) {
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'tool.call', createdAt: new Date(end.getTime() + 100), payload: {
+          toolName: 'continuity_validate', callId: 'rejected-proposal', args: { compilationId: compilation.id }, autoApproved: false } } })
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: scenario === 'deferred-gap' ? 5 : 4, type: 'tool.result', createdAt: new Date(end.getTime() + 102), payload: {
+          toolName: 'continuity_validate', callId: 'rejected-proposal', ok: false, durationMs: 0,
+          summary: scenario === 'deferred-other-error' ? '未执行：模型服务异常' : '未执行：当前版本已收到未完成的检查报告，复用失败原因；正文或检查协议改变后再复核，未重复付费。' } } })
+        if (scenario === 'deferred-paid') await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, targetType: 'story_compilation', targetId: compilation.id,
+          providerType: 'text', providerMode: 'custom', modelName: 'synthetic', action: 'agent3ContinuityCritic', requestTokens: 1, responseTokens: 1,
+          usageSource: 'reported', billingStatus: 'settled', durationMs: 1, createdAt: new Date(end.getTime() + 101) } })
+      }
+      const terminalSeq = scenario.startsWith('deferred') ? 10 : 3
+      const terminal = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: terminalSeq, type: 'run.paused', createdAt: end, payload: {} } })
+      if (scenario !== 'no-author') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: terminalSeq + 1, type: 'run.started', createdAt: new Date(end.getTime() + (scenario === 'early-author' ? -1 : 2000)), payload: { authorContinue: { eventId: terminal.id, afterSeq: terminalSeq } } } })
       if (scenario === 'unfinished') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'tool.call', payload: { toolName: 'chapter_write', callId: 'unconfirmed-write', args: { chapterId: chapter.id } } } })
       if (scenario === 'duplicate-call') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 6, type: 'tool.call', payload: { toolName: 'continuity_validate', callId: 'returned-check', args: { chapterId: chapter.id } } } })
       if (scenario === 'standalone-unknown') await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, chapterId: chapter.id, targetType: 'chapter', targetId: chapter.id, providerType: 'text', providerMode: 'custom', modelName: 'synthetic', action: 'agent3ContinuityCritic', usageSource: 'unknown', billingStatus: 'pending_usage', durationMs: 10 } })
@@ -121,7 +132,7 @@ describe.runIf(available)('author continuation after current continuity failure'
         providerType: 'text', providerMode: 'custom', modelName: 'synthetic', action: 'agent3ContinuityCritic', requestTokens: 10, responseTokens: 2,
         usageSource: ['unknown', 'quality-unknown'].includes(scenario) ? 'unknown' : 'reported', billingStatus: scenario === 'unknown' ? 'pending_usage' : 'settled', billingEvidence: { responseObserved: scenario !== 'no-response' }, durationMs: 20, createdAt: new Date(start.getTime() + 1000) } })
       const result = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))
-      expect(result).toHaveLength(['settled', 'format'].includes(scenario) ? 1 : 0)
+      expect(result).toHaveLength(['settled', 'format', 'deferred'].includes(scenario) ? 1 : 0)
       expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))).toEqual(result)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation).toMatchObject({ checkedRevision: chapter.revision })
     } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }

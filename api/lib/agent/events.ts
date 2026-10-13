@@ -162,7 +162,7 @@ export class RunEventBus {
       const preview = this.previews.get(callId)
       if (preview?.type === 'tool.delta' && preview.messageId === event.messageId) this.previews.delete(callId)
     }
-    if (event.type === 'tool.call' || event.type === 'tool.result') this.previews.delete(event.callId)
+    if (event.type === 'tool.call' || event.type === 'tool.result' || event.type === 'tool.deferred') this.previews.delete(event.callId)
     if (event.type === 'step.finish' || event.type === 'run.paused' || event.type === 'run.finished'
       || (event.type === 'error' && !event.recoverable)) this.previews.clear()
   }

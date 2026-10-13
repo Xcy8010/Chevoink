@@ -158,6 +158,8 @@ Studio settings → Model assignments lets you choose built-in or custom models 
 
 Click Continue to resume the original task. Agent reuses completed checks for the current revision, performs any remaining checks and repairs, and continues the work without a separate review purchase or a second Continue click. Actual model usage from both the main model and checking tools is billed at the selected model's normal Credits multiplier. Historical requests and billing records remain intact; resuming does not certify an unfinished check as passed.
 
+Chapter review separates the initial assessment, verification after edits, and final decisions. New stylistic advice during verification receives an explicit decision instead of automatically starting another paid polishing pass; final checks still cover the current text. Unlocatable citations retain the original findings for citation correction, and requests with unconfirmed results or usage are not automatically resent. Activity labels use “复查章节” and “修改章节内容”; internal prerequisite scheduling before a save is not displayed as a failed tool execution.
+
 You can also ask Agent to change creative mode, switch the current model, or assign a model to a type of work. A switch applies on the next turn after the tool completes, retaining the current task and context. An explicitly selected model with no effort specified uses that model's configured default strength.
 
 ## Quick Navigation

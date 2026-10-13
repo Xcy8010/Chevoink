@@ -4,7 +4,7 @@ import { classifyContinuityFindingAuthority, unlocatedContinuityEvidence } from 
 import { readOriginalTaskRequest } from './original-request.js'
 import { createHash } from 'node:crypto'
 
-import type { Prisma, StoryCompilationStage, StoryCharter, ReaderPromise, SceneTask } from '@prisma/client'
+import { Prisma, type StoryCompilationStage, type StoryCharter, type ReaderPromise, type SceneTask } from '@prisma/client'
 
 import type {
   ContinuityFindingInput,
@@ -27,6 +27,7 @@ import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches, continuityStoryInput, type CompilerContinuityCoverage } from './compiler-continuity-contract.js'
 import { readWritingVolumeContext, assertWritingVolumeBoundary, isWritingVolumeTargetOrderIndex } from './writing-volume.js'
 import { writingVolumeDecisionSchema, type WritingVolumeDecision } from '../../../shared/contracts/writing-volume-contracts.js'
+import { readReviewCycle } from './review-cycle.js'
 
 type PreparedBridge = {
   lastUnfinishedAction: string
@@ -311,10 +312,15 @@ export async function prepareStoryCompilation(input: {
   }
 
   const originalRunIds = await (await import('./original-request.js')).originalTaskRunIds(db, input, writing)
+  await db.$queryRaw(Prisma.sql`SELECT id FROM story_compilations WHERE user_id = ${input.userId}
+    AND novel_id = ${input.novelId} AND run_id IN (${Prisma.join(originalRunIds)}) AND target_order_index = ${target.targetOrderIndex} ORDER BY id FOR UPDATE`)
   const priorRepairStates = await db.storyCompilation.findMany({
     where: { userId: input.userId, novelId: input.novelId, runId: { in: originalRunIds }, targetOrderIndex: target.targetOrderIndex },
-    select: { validation: true },
+    select: { validation: true, preparedContext: true, chapterId: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   })
+  const priorCycle = target.chapter ? priorRepairStates.map(item => readReviewCycle(item.preparedContext, {
+    taskId: writing.taskId, userId: input.userId, novelId: input.novelId, chapterId: target.chapter!.id,
+  })).find(Boolean) : null
   // 同目标章节的修复与检查额度跨重准备继承：否则重新 prepare 就能重置预算、绕开收敛保险丝。
   const autoRepairRounds = Math.max(0, ...priorRepairStates.map(item => continuityRepairRounds(item.validation)))
   const checkRounds = Math.max(0, ...priorRepairStates.map(item => validatedContinuityCheckRounds(item.validation)))
@@ -324,6 +330,7 @@ export async function prepareStoryCompilation(input: {
     data: { status: 'abandoned' },
   })
   const preparedContext = {
+    ...(priorCycle ? { reviewCycle: priorCycle } : {}),
     volumeContext, volumeDecision,
     charterRevision: bundle.charter?.revision ?? null,
     charterPromise: bundle.charter?.oneLinePromise ?? null,
@@ -829,8 +836,8 @@ export async function commitChapterBridge(input: {
     throw new DataAccessError(409, required.name === 'continuity_validate' ? 'CONTINUITY_CHECK_REQUIRED' : 'QUALITY_CHECK_REQUIRED',
       `当前 r${chapter.revision} 缺少完整且匹配的${required.name === 'continuity_validate' ? '连续性' : '质量'}检查（${required.name === 'continuity_validate' ? readiness.continuity : readiness.quality}）。保留正文；先调用 ${required.name}，compilationId=${compilation.id}，再重新核验交付，不能沿用旧报告或把失败当作通过。`)
   }
-  if (input.decisionOnly && (!input.runId || readiness?.reviewProtocol !== 1 || !input.retainedFindings?.length)) {
-    throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '仅新严格意见协议可分批记录当前完整报告的真实保留决定；未提交章节终态。')
+  if (input.decisionOnly && (!input.runId || !readiness || !input.retainedFindings?.length)) {
+    throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '分批决定须引用原任务当前完整报告的真实意见与具体保留原因；未提交章节终态。')
   }
   let decisionChanged = false
   const beforeDecisions = readiness
@@ -874,7 +881,9 @@ export async function commitChapterBridge(input: {
     ...(readiness.requiredDecisions ?? []).map(item => `${item.source}:${item.reportId}:${item.findingId}`),
     ...(readiness.retainedDecisions ?? []).map(item => `${item.source}:${item.reportId}:${item.findingId}`),
   ]).size
-  const terminalContext = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext as Record<string, Prisma.JsonValue> : {}
+  const latestCompilation = await db.storyCompilation.findFirst({ where: { id: compilation.id, userId: input.userId, novelId: input.novelId } })
+  if (!latestCompilation) throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', '意见决策后编译已变化，终态未提交。')
+  const terminalContext = latestCompilation.preparedContext && typeof latestCompilation.preparedContext === 'object' && !Array.isArray(latestCompilation.preparedContext) ? latestCompilation.preparedContext as Record<string, Prisma.JsonValue> : {}
   const terminalContentHash = runtimeJson({ content: chapter.content }).hash
   const sameTerminal = compilation.status === 'completed' && !!compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision
   if (sameTerminal && terminalContext.terminalContentHash === terminalContentHash) {

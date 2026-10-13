@@ -40,6 +40,7 @@ import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
 import { REPAIR_BLOCK_CODES, REPAIR_CHANNEL_CODES, qualityReportCheckedCurrentContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
 import { probeChapterReviewRevision, readChapterReviewRevisionGuidance, readChapterReviewReadiness, qualityDecisionSnapshotHash, chapterReviewDecisionGuidance } from '../chapter-review-guard.js'
+import { verificationQualityAdviceRequiresDecision } from '../review-cycle.js'
 import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, inspectCorrectableCriticResponse, parseQualityJsonObject, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence, qualityReportHasDroppedFindings, qualityCorrectionResponseWitness } from '../quality-evidence.js'
 import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/writing.js'
 import { renderChapterWritingBackground } from '../writing-request-context.js'
@@ -154,6 +155,10 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
   if (selected.length) {
     ctx.signal.throwIfAborted()
     try {
+      const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, report.compilationId ?? undefined))
+      if (review?.chapterId === report.chapterId && verificationQualityAdviceRequiresDecision(review, selected)) return { reviewCompleted: true,
+        output: `质量报告 ${report.id}已保存。当前属于最终核验的质量建议，保留正文并逐项决定，不自动开启新一轮润色。${review ? chapterReviewDecisionGuidance(review) : decisionGuidance}${bindingSuffix}`,
+        summary: '质量核验 · 意见待决定', display: reportDisplay(report) }
       // 付费前只读探测：同一次合并修订的准入由守卫统一判定（新稿质量通道或原始修复
       // 授权），被拒时不预约、不调用修订模型，正文与报告保持原样。
       const probe = await prisma.$transaction(tx => probeChapterReviewRevision(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },

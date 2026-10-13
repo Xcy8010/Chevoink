@@ -6,7 +6,7 @@
       ...(quality === 'complete' ? [] : [{ name: 'quality_analyze' as const, args: { compilationId: 'comp' } }]) ],
   })
 
-import { beginTextRequest } from '../../api/lib/text-request-trace.js'
+import { beginTextRequest, createTextRequestTrace, withTextRequestTrace } from '../../api/lib/text-request-trace.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import type { AgentMessagePart, AgentStreamEventBody, AgentTodoItem, TaskSpec } from '../../shared/contracts/index.js'
@@ -403,7 +403,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(mocks.chat).toHaveBeenCalledOnce()
     const pending = (mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews: Array<{ callId: string; compilationId: string | null }> } }).checkpoint.pendingReviews
     expect(pending).toEqual([expect.objectContaining({ callId: 'unknown', compilationId: scenario === 'standalone' ? null : 'comp' })])
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'new-alias', ok: false, durationMs: 0 }))
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'new-alias', execution: 'not_dispatched' }))
   })
   it('keeps known continuity failures scoped to the reviewed body across three failures and a fourth new revision', async () => {
     let state = readiness('missing', 'complete', 1), checks = 0
@@ -426,10 +426,10 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(checks).toBe(4)
     expect(edit.execute).toHaveBeenCalledTimes(3)
     expect(commit.execute).toHaveBeenCalledOnce()
-    expect(events().filter(event => event.type === 'tool.result' && event.callId.startsWith('repeat'))).toHaveLength(3)
+    expect(events().filter(event => event.type === 'tool.deferred' && event.callId.startsWith('repeat'))).toHaveLength(3)
     expect((mocks.runs.get('run')?.usage as { checkpoint: { toolRestrictions?: unknown[] } }).checkpoint.toolRestrictions ?? []).toEqual([])
   })
-  it.each(['CONTINUITY_EVIDENCE_UNLOCATED', 'CONTINUITY_REPORT_INCOMPLETE'])('%s clears the received pending call and keeps the blocked commit card and remaining batch', async failureCode => {
+  it.each(['CONTINUITY_EVIDENCE_UNLOCATED', 'CONTINUITY_REPORT_INCOMPLETE'])('%s clears the received pending call and records a deferred commit without a failed tool card and keeps the remaining batch', async failureCode => {
     let state = readiness('missing', 'complete')
     mocks.reviewReadiness.mockImplementation(async () => state)
     const check = tool('continuity_validate', async () => { state = readiness('incomplete', 'complete'); return { outcome: 'failed', failureCode, output: '已收到报告，证据尚未定位' } })
@@ -441,7 +441,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(check.execute).toHaveBeenCalledOnce()
     expect(commit.execute).not.toHaveBeenCalled()
     expect(read.execute).toHaveBeenCalledOnce()
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'commit', ok: false, durationMs: 0 }))
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'commit', execution: 'not_dispatched' }))
     const checkpoint = (mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[]; toolRestrictions?: unknown[] } }).checkpoint
     expect(checkpoint.pendingReviews ?? []).toEqual([])
     expect(checkpoint.toolRestrictions ?? []).toEqual([])
@@ -521,7 +521,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: {
       stagnantBatches: 9, readProgress: 3, writeProgress: 3, tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
   })
-  it.each(['restored', 'proof-lost', 'no-author', 'no-proof'] as const)('dispatches only authenticated offline evidence before the cp9 repeated read: %s', async scenario => {
+  it.each(['restored', 'proof-lost', 'no-author', 'no-proof'] as const)('bootstraps an authenticated returned review before a cp9 main-model read: %s', async scenario => {
     const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
     taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
     mocks.currentOriginal = { prompt: '写下一章', taskSpec }
@@ -547,20 +547,21 @@ describe('server assessment fallback in the real execution loop', () => {
     const read = tool('chapter_read', async () => ({ output: '已读的 r4 正文', observedChapterRange: { targetId: 'c', contentHash: 'b'.repeat(64), start: 0, end: 2502 } }))
     mocks.tools = [check, read]
     queue(response('', [call('repeat-read', read.name, '{"chapterId":"c"}')]))
-    if (scenario === 'restored') queue(response('4条意见仍待处理，质量检查仍缺失。'))
+    if (scenario === 'restored' || scenario === 'no-proof') queue(response('4条意见仍待处理，质量检查仍缺失。'))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
-    const injected = scenario === 'restored' || scenario === 'proof-lost'
+    const injected = scenario !== 'no-author'
     expect(check.execute).toHaveBeenCalledTimes(injected ? 1 : 0)
-    expect(read.execute).toHaveBeenCalledOnce()
-    expect(mocks.chat).toHaveBeenCalledTimes(scenario === 'restored' ? 2 : 1)
-    expect(mocks.offlineContinuity).toHaveBeenCalledTimes(scenario === 'no-author' ? 0 : 1)
-    if (injected) expect(check.execute).toHaveBeenCalledWith(expect.objectContaining({ offlineContinuityOnly: expect.objectContaining({ version: 1,
-      compilationId: 'comp', chapterId: 'c', revision: 4, contentHash: 'b'.repeat(64), admissionKey: key, validationHash: 'd'.repeat(64) }) }), expect.anything())
-    if (scenario === 'restored') {
+    expect(read.execute).toHaveBeenCalledTimes(scenario === 'proof-lost' ? 0 : 1)
+    expect(mocks.chat).toHaveBeenCalledTimes(scenario === 'proof-lost' ? 0 : scenario === 'no-author' ? 1 : 2)
+    if (injected) {
+      expect(mocks.continuedContinuity).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ compilationId: 'comp', chapterId: 'c' }))
+      expect(check.execute).toHaveBeenCalledWith(expect.not.objectContaining({ offlineContinuityOnly: expect.anything() }), expect.anything())
+    }
+    if (scenario === 'restored' || scenario === 'no-proof') {
       expect(mocks.chat.mock.calls[1][0].messages.some((message: { role: string; content?: string | null }) => message.role === 'tool' && message.content?.includes('原报告4条意见'))).toBe(true)
-      expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1070, checkpoint: { stagnantBatches: 0, writeProgress: 3,
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1070, checkpoint: { stagnantBatches: 1, writeProgress: 3,
         tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
-    } else expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: { stagnantBatches: 10, readProgress: 3,
+    } else expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: scenario === 'proof-lost' ? 1050 : 1060, checkpoint: { stagnantBatches: 10, readProgress: 3,
       writeProgress: 3, tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
     expect((mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[] } }).checkpoint.pendingReviews ?? []).toEqual([])
     expect(events().some(event => event.type === 'run.finished' && event.status === 'succeeded')).toBe(false)
@@ -718,7 +719,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: '正在核对检查意见的处理结果。' }))
     const history = mocks.chat.mock.calls[1][0].messages
     expect(history.some((message: { content?: string }) => message.content === '全部审美建议已经应用。')).toBe(false)
-    expect(history.some((message: { content?: string }) => message.content?.includes('仍有原授权范围内的意见待处理'))).toBe(true)
+    expect(history.some((message: { content?: string }) => message.content?.includes('逐项合理保留'))).toBe(true)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
   it('reads pending decisions before an early commit and discards the unexecuted commit proposal', async () => {
@@ -734,8 +735,8 @@ describe('server assessment fallback in the real execution loop', () => {
     await run('写下一章')
     expect(reader.execute).toHaveBeenCalledOnce()
     expect(commit.execute).toHaveBeenCalledOnce()
-    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_bridge_commit', 'chapter_bridge_get', 'chapter_edit_range', 'chapter_bridge_commit'])
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'early-commit', ok: false, durationMs: 0 }))
+    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_bridge_get', 'chapter_edit_range', 'chapter_bridge_commit'])
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'early-commit', execution: 'not_dispatched' }))
     expect(mocks.chat.mock.calls[1][0].messages.filter((message: { role: string; toolCallId?: string }) => message.role === 'tool' && message.toolCallId === 'early-commit')).toEqual([])
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
@@ -801,10 +802,10 @@ describe('server assessment fallback in the real execution loop', () => {
     await run('写下一章')
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(commit.execute).toHaveBeenCalledOnce()
-    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_bridge_commit', 'quality_analyze', 'chapter_bridge_commit'])
+    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['quality_analyze', 'chapter_bridge_commit'])
     const history = mocks.chat.mock.calls[1][0].messages
     const emittedIds = events().filter(event => event.type === 'tool.result' && event.callId !== 'commit').map(event => event.callId)
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'commit', ok: false, durationMs: 0 }))
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'commit', execution: 'not_dispatched' }))
     expect(history.filter((message: { role: string; toolCalls?: unknown[] }) => message.role === 'assistant' && message.toolCalls?.length).flatMap((message: { toolCalls: Array<{ id: string }> }) => message.toolCalls.map(item => item.id))).toEqual(emittedIds)
     expect(history.filter((message: { role: string }) => message.role === 'tool').map((item: { toolCallId: string }) => item.toolCallId)).toEqual(emittedIds)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
@@ -841,7 +842,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(edit.execute).toHaveBeenCalledOnce()
     expect(quality.execute).toHaveBeenCalledOnce()
     expect(events().some(event => event.type === 'tool.call' && event.callId === 'old-edit')).toBe(true)
-    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_rename', 'chapter_edit_range', 'chapter_bridge_commit', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit'])
+    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_rename', 'chapter_edit_range', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit'])
   })
   it('permits successive partial and full edits without interposed paid checks, then checks the final revision', async () => {
     let state = readiness('complete', 'missing')
@@ -864,11 +865,11 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(check.execute).toHaveBeenCalledOnce()
     expect(quality.execute).toHaveBeenCalledOnce()
     expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual([
-      'chapter_edit_range', 'chapter_edit_range', 'chapter_write', 'chapter_bridge_commit', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit',
+      'chapter_edit_range', 'chapter_edit_range', 'chapter_write', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit',
     ])
     const saved = mocks.persist.mock.calls.flatMap(([input]) => (input as { create?: { parts?: AgentMessagePart[] } }).create?.parts ?? [])
     expect(saved.filter(part => part.type === 'tool-call').map(part => part.type === 'tool-call' && part.toolName)).toEqual([
-      'chapter_edit_range', 'chapter_edit_range', 'chapter_write', 'chapter_bridge_commit', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit',
+      'chapter_edit_range', 'chapter_edit_range', 'chapter_write', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit',
     ])
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
@@ -918,7 +919,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(reader.execute).toHaveBeenCalledOnce()
     expect(commit.execute).not.toHaveBeenCalled()
-    expect(events().filter(event => event.type === 'tool.result' && event.toolName === 'chapter_bridge_commit')).toEqual([expect.objectContaining({ callId: 'early', ok: false, durationMs: 0 })])
+    expect(events().filter(event => event.type === 'tool.deferred' && event.toolName === 'chapter_bridge_commit')).toEqual([expect.objectContaining({ callId: 'early', execution: 'not_dispatched' })])
     expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
   })
   it('recovers a received old format failure, handles its finding, checks the edited revision and actually commits', async () => {
@@ -1039,7 +1040,8 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(commit.execute).not.toHaveBeenCalled()
     expect(mocks.chat).toHaveBeenCalledOnce()
-    expect(events().filter(event => event.type === 'tool.result')).toEqual([expect.objectContaining({ callId: 'commit', ok: false, durationMs: 0 }), expect.objectContaining({ ok: false, failureCode: 'AI_PROVIDER_TIMEOUT' })])
+    expect(events().filter(event => event.type === 'tool.result')).toEqual([expect.objectContaining({ ok: false, failureCode: 'AI_PROVIDER_TIMEOUT' })])
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'commit', execution: 'not_dispatched' }))
     expect(events().at(-1)).not.toMatchObject({ type: 'run.finished', status: 'completed' })
   })
   it('terminates supplier quota rejection once with a Chinese actionable notice', async () => {
@@ -1193,7 +1195,8 @@ describe('server assessment fallback in the real execution loop', () => {
       expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { pendingReviews: [{ callId: 'cancelled-check' }], tokenBudget: original.tokenBudget } })
     } else {
       expect(critic.execute).toHaveBeenCalledOnce()
-      expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.call', callId: 'fresh-check' }))
+      expect(events().filter(event => event.type === 'tool.call' && event.toolName === 'continuity_validate')).toHaveLength(1)
+      expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'fresh-check', execution: 'not_dispatched' }))
       expect((mocks.runs.get('run')?.usage as { checkpoint: unknown }).checkpoint).not.toHaveProperty('pendingReviews')
       expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewAttempts: expect.arrayContaining([
         'review-retired:author-continue:stop:cancelled-check' ]) } })
@@ -2389,8 +2392,8 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     await run()
     expect(count).toBe(1)
     expect(mocks.chat).toHaveBeenCalledOnce()
-    expect(events().filter(event => event.type === 'tool.result' && event.callId !== 'a')).toEqual(expect.arrayContaining([
-      expect.objectContaining({ callId: 'b', ok: false }), expect.objectContaining({ callId: 'c', ok: false }), expect.objectContaining({ callId: 'd', ok: false }),
+    expect(events().filter(event => event.type === 'tool.deferred' && event.callId !== 'a')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ callId: 'b', execution: 'not_dispatched' }), expect.objectContaining({ callId: 'c', execution: 'not_dispatched' }), expect.objectContaining({ callId: 'd', execution: 'not_dispatched' }),
     ]))
     expect((mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews: Array<{ callId: string }> } }).checkpoint.pendingReviews).toEqual([expect.objectContaining({ callId: 'a' })])
   })
@@ -3109,6 +3112,40 @@ it.each([true, false])('resumes r4 beyond the real r3 target-wide quality checkp
 
 describe('independent persisted review phases with unresolved usage', () => {
   const prompt = '修改本章'
+  it.each(['critic-unknown', 'correction-unknown', 'all-known'] as const)('real handler sees nested continuity billing: %s', async scenario => {
+    const critic = tool('continuity_validate', async () => {
+      await withTextRequestTrace(createTextRequestTrace(), async () => {
+        Object.assign(beginTextRequest('nested-critic').record, { status: 'terminal', billingKnown: scenario !== 'critic-unknown' })
+      })
+      await withTextRequestTrace(createTextRequestTrace(), async () => {
+        Object.assign(beginTextRequest('nested-correction').record, { status: 'terminal', billingKnown: scenario !== 'correction-unknown' })
+      })
+      return { outcome: 'failed', failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED', output: '已收到完整响应，但引用不正确' }
+    })
+    const outcome = await handleToolCall(call('nested', critic.name, '{"chapterId":"c"}'), [critic], context(), { emit: mocks.emit }, 'message', 'run')
+    expect(outcome.unresolvedTextRequest).toBe(scenario !== 'all-known')
+    if (scenario === 'all-known') expect(outcome.reviewRequestFinished).toMatchObject({ usageIds: ['nested-critic', 'nested-correction'] })
+    else expect(outcome.reviewRequestFinished).toBeUndefined()
+  })
+  it.each(['critic', 'correction'] as const)('full content with nested %s unknown usage keeps pending and does not buy another main turn', async unknownStage => {
+    const f = saved(0)
+    mocks.update.mockResolvedValueOnce({ taskSpec: f.taskSpec, currentTurn: 2, startedAt: new Date(f.checkpoint.runStartedAt), usage: f.usage })
+    let state = readiness('missing', 'complete', 4)
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const check = tool('continuity_validate', async () => {
+      for (const stage of ['critic', 'correction']) await withTextRequestTrace(createTextRequestTrace(), async () => {
+        Object.assign(beginTextRequest(stage).record, { status: 'terminal', billingKnown: stage !== unknownStage })
+      })
+      state = readiness('complete', 'complete', 4)
+      return { output: '完整报告已保存', reviewCompleted: true }
+    })
+    mocks.tools = [check]
+    queue(response('', [call('nested-check', check.name, '{"compilationId":"comp"}')]), response('不应派发的后续主模型'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: true })
+    expect(check.execute).toHaveBeenCalledOnce(); expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { pendingReviews: [expect.objectContaining({ callId: 'nested-check' })] } })
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
+  })
   it.each(['unknown', 'terminal'] as const)('AI_PROVIDER_ERROR %s guidance follows the real request trace', async status => {
     const critic = tool('quality_analyze', async () => {
       const record = beginTextRequest('real-traced-usage').record
@@ -3214,15 +3251,11 @@ describe('independent persisted review phases with unresolved usage', () => {
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: { writeProgress: 3, tokenBudget: 500, maxTurns: 1,
       inputProtocolRecovery: f.checkpoint.inputProtocolRecovery, pendingReviews: [{ callId: 'unknown', toolName: 'quality_analyze', chapterId: 'c', revision: 4, compilationId: 'comp' }] } })
     if (!['ordinary-read', 'valid-proof', 'proof-lost'].includes(scenario)) {
-      // The existing deferred protocol displays the rejected proposal; its
-      // call card is not a handler invocation, provider request or effect.
-      const rejected = events().filter(event => (event.type === 'tool.call' || event.type === 'tool.result') && event.callId === 'independent')
-      expect(rejected).toEqual([
-        expect.objectContaining({ type: 'tool.call', callId: 'independent', toolName: name, autoApproved: false }),
-        expect.objectContaining({ type: 'tool.result', callId: 'independent', toolName: name, ok: false, durationMs: 0,
-          summary: '未执行：独立检查仍有未确认的请求；本次只允许普通读取或已认证的离线连续性恢复，未派发新检查模型、未执行写入。' }),
-      ])
-      expect(rejected[1]).not.toHaveProperty('reviewRequestFinished')
+      const rejected = events().filter(event => event.type === 'tool.deferred' && event.callId === 'independent')
+      expect(rejected).toEqual([expect.objectContaining({ type: 'tool.deferred', callId: 'independent', toolName: name, execution: 'not_dispatched',
+        reason: '独立检查仍有未确认的请求；本次只允许普通读取或已认证的离线连续性恢复，未派发新检查模型、未执行写入。' })])
+      expect(events().filter(event => (event.type === 'tool.call' || event.type === 'tool.result') && event.callId === 'independent')).toEqual([])
+      expect(rejected[0]).not.toHaveProperty('reviewRequestFinished')
     }
     const signatures = (mocks.runs.get('run')?.usage as { checkpoint: { progressSignatures: string[] } }).checkpoint.progressSignatures
     expect(signatures.includes(f.signature('continuity'))).toBe(scenario === 'valid-proof')

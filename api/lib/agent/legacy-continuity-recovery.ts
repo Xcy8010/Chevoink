@@ -8,6 +8,8 @@ import { originalTaskRunIds } from './original-request.js'
 import { readWritingScope } from './writing-scope.js'
 import { runtimeJson } from './runtime-common.js'
 import { activeChapterScope } from '../data/internal.js'
+import { isKnownTextRequestBilling } from './text-request-billing.js'
+import { readKnownFailedContinuityCorrection } from './continuity-response-correction.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const capCodes = new Set(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED'])
@@ -63,8 +65,7 @@ export async function readLegacyContinuityRecovery(tx: Prisma.TransactionClient,
         targetType: 'story_compilation', targetId: compilation.id, action: { startsWith: 'agent3Continuity' },
         createdAt: { gte: call.createdAt, lte: result.createdAt } } })
       if (cap ? paid.length !== 0 : paid.filter(item => item.action === 'agent3ContinuityCritic').length !== 1
-        || paid.some(item => item.billingStatus !== 'settled' || item.usageSource !== 'reported'
-          || item.requestTokens === null || item.responseTokens === null || item.responseTokens <= 0)) continue
+        || paid.some(item => item.usageSource !== 'reported' || !isKnownTextRequestBilling(item))) continue
       const key = `${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`
       empty.recovered.push(key)
       empty.markers.push(`continuity-recovery:protocol6:${runtimeJson({ taskId: original.taskId, compilationId: compilation.id, callId, code }).hash}`)
@@ -123,8 +124,7 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     const ids = compilations.filter(item => item.chapterId === chapter.id).map(item => item.id)
     const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
       OR: [{ targetType: 'story_compilation', targetId: { in: ids } }, { targetType: 'chapter', targetId: chapter.id }], action: { startsWith: 'agent3Continuity' } } })
-    const known = (item: typeof paid[number]) => item.billingStatus === 'settled' && item.usageSource === 'reported'
-      && item.requestTokens !== null && item.responseTokens !== null && item.reservedCreditMilli === 0
+    const known = (item: typeof paid[number]) => item.usageSource === 'reported' && isKnownTextRequestBilling(item)
     if (paid.some(item => !known(item) && !retiredUsageIds.has(item.id))) continue
     const unfinishedMutation = events.some(event => {
       const payload = object(event.payload), args = object(payload.args)
@@ -140,15 +140,33 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     })
     if (calls.some(call => events.filter(event => event.runId === call.runId && event.type === 'tool.result'
       && object(event.payload).callId === object(call.payload).callId && event.seq > call.seq).length !== 1)) continue
-    const call = calls.at(-1)
+    // Old servers represented this exact preflight rejection as a failed
+    // invocation. Authenticate that zero-effect pair before selecting the last
+    // actual assessment. No generic failure or unconfirmed request is skipped.
+    const executedCalls = calls.filter(call => {
+      const start = object(call.payload)
+      const pair = events.filter(event => event.runId === call.runId && object(event.payload).callId === start.callId)
+      const result = pair.find(event => event.type === 'tool.result'), end = object(result?.payload)
+      return !(pair.length === 2 && start.autoApproved === false && result && result.seq === call.seq + 1
+        && end.toolName === 'continuity_validate' && end.ok === false && end.durationMs === 0
+        && end.failureCode === undefined && end.reviewRequestFinished === undefined && end.display === undefined
+        && end.summary === '未执行：当前版本已收到未完成的检查报告，复用失败原因；正文或检查协议改变后再复核，未重复付费。'
+        && result.createdAt >= call.createdAt && result.createdAt.getTime() - call.createdAt.getTime() <= 1000
+        && !paid.some(item => item.createdAt >= call.createdAt && item.createdAt <= result.createdAt))
+    })
+    const call = executedCalls.at(-1)
     if (!call) continue
     const callId = object(call.payload).callId
     if (typeof callId !== 'string' || !callId || events.filter(event => event.runId === call.runId && event.type === 'tool.call' && object(event.payload).callId === callId).length !== 1) continue
     const args = object(object(call.payload).args)
     if (args.compilationId !== undefined && args.compilationId !== compilation.id || args.chapterId !== undefined && args.chapterId !== chapter.id) continue
     const result = events.find(event => event.runId === call.runId && event.type === 'tool.result' && object(event.payload).callId === object(call.payload).callId && event.seq > call.seq)!
-    const payload = object(result.payload), checkedAt = new Date(String(validation.checkedAt)).getTime()
-    if (payload.toolName !== 'continuity_validate' || payload.ok !== false || !['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(String(payload.failureCode))
+    const knownCorrection = await readKnownFailedContinuityCorrection(tx, subject, {
+      runIds, runId: call.runId, callId, chapterId: chapter.id, revision: chapter.revision, resultAt: result.createdAt,
+    })
+    const payload = object(result.payload), checkedAt = knownCorrection?.observation.createdAt.getTime()
+      ?? new Date(String(object(validation.continuityEvidenceRecovery).observedAt ?? validation.checkedAt)).getTime()
+    if (payload.toolName !== 'continuity_validate' || payload.ok !== false || !knownCorrection && !['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(String(payload.failureCode))
       || admission.at <= result.createdAt || !Number.isFinite(checkedAt) || checkedAt < call.createdAt.getTime() || checkedAt > result.createdAt.getTime()) continue
     const overlaps = events.some(other => {
       const otherPayload = object(other.payload), otherArgs = object(otherPayload.args)
@@ -163,8 +181,13 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     })
     if (overlaps) continue
     const receipts = paid.filter(item => item.createdAt >= call.createdAt && item.createdAt <= result.createdAt)
-    if (receipts.filter(item => item.action === 'agent3ContinuityCritic').length !== 1 || receipts.some(item => !known(item) || !item.responseTokens || object(item.billingEvidence).responseObserved !== true
-      || !['agent3ContinuityCritic', 'agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery'].includes(item.action))) continue
+    const correctionOnly = receipts.filter(item => item.action === 'agent3ContinuityEvidenceCorrection')
+    if (knownCorrection && correctionOnly.length !== knownCorrection.usage.length) continue
+    if (correctionOnly.length && (!knownCorrection || knownCorrection.usage.length !== correctionOnly.length
+      || correctionOnly.some(row => !knownCorrection.usage.some(item => item.id === row.id)))) continue
+    if ((!knownCorrection && receipts.filter(item => item.action === 'agent3ContinuityCritic').length !== 1)
+      || receipts.some(item => !known(item) || object(item.billingEvidence).responseObserved !== true
+        || !['agent3ContinuityCritic', 'agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery', 'agent3ContinuityEvidenceCorrection'].includes(item.action))) continue
     const key = `continuity-author-recovery:${runtimeJson({ taskId: original.taskId, chapterId: chapter.id, contentHash: coverage.contentHash, admissionId: admission.id }).hash}`
     keys.push([`${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`, key])
   }

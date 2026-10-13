@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { acquireRunLease } from '../../api/lib/agent/runtime-lease.js'
 import type { ProviderUsageObservation } from '../../api/lib/agent/runtime-operations.js'
@@ -14,7 +15,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 export async function fixture(work: (f: {
   userId: string; novelId: string; sessionId: string; chapterId: string; runId: string; sourceMessageId: string;
   spec: ReturnType<typeof buildTaskSpec>; rootId: string;
-}) => Promise<void>, tokenBudget?: number, prompt = '修改本章') {
+}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { freezeWriting?: boolean }) {
   const user = await prisma.user.create({ data: { nickname: 'durable-runtime-fixture', passwordHash: 'test-only-unusable' } })
   const userId = user.id
   try {
@@ -26,12 +27,16 @@ export async function fixture(work: (f: {
     const volume = await prisma.volume.create({ data: { novelId: novel.id, title: '卷', orderIndex: 1 } })
     const chapter = await prisma.chapter.create({ data: { authorId: userId, novelId: novel.id, volumeId: volume.id, title: '原章', content: '原文', orderIndex: 1, orderInVolume: 1, wordCount: 2 } })
     const runId = randomUUID(), sourceMessageId = randomUUID()
-    const spec = buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt })
+    let spec = buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt })
     await prisma.agentRun.create({ data: {
       id: runId, userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, status: 'queued',
       mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', taskSpec: JSON.parse(JSON.stringify(spec)),
     } })
     await prisma.agentMessage.create({ data: { id: sourceMessageId, runId, sessionId: session.id, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+    if (options?.freezeWriting) {
+      spec = await prisma.$transaction(tx => freezeWritingScope(tx, { userId, novelId: novel.id, runId }, spec, prompt))
+      await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } })
+    }
     const root = await initializeDurableTask({ userId, runId, sourceMessageId, tokenBudget })
     await work({ userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, runId, sourceMessageId, spec, rootId: root.id })
   } finally {
