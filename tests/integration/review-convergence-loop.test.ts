@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { assertChapterManuscriptRevision, readChapterReviewReadiness, readChapterReviewWriteAdmission } from '../../api/lib/agent/chapter-review-guard.js'
-import { prepareStoryCompilation, recordStoryCompilerWrite, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { commitChapterBridge, prepareStoryCompilation, recordStoryCompilerWrite, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
+import { buildQualityEvidenceSources } from '../../api/lib/agent/quality-evidence.js'
 import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
 import { readCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
 import { readReviewCycle } from '../../api/lib/agent/review-cycle.js'
@@ -22,6 +24,119 @@ const sha = (text: string) => createHash('sha256').update(text).digest('hex')
 const prompt = '修改第一章，只要标题和正文。'
 const initial = '门锁仍在。屋里没有灯。她没有回答。桌上有书。墙上有钟。窗边有椅。地上有箱。'
 const initialEvidence = ['门锁仍在', '屋里没有灯', '她没有回答', '桌上有书', '墙上有钟', '窗边有椅', '地上有箱']
+const mandatoryPrompt = '修改第一章，质量必须通过后才能交付。'
+describe('mandatory quality pass through persisted current warning repair', () => {
+  it.each([
+    ['legacy', false], ['durable', false], ['legacy', true], ['durable', true],
+  ] as const)('repairs a current warning then really commits under %s, repeated evidence=%s', async (protocol, duplicate) => fixture(async f => {
+    if (protocol === 'legacy') {
+      const spec = structuredClone(f.spec); delete spec.scope.reviewProtocol
+      await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0,
+        taskSpec: JSON.parse(JSON.stringify(spec)), startRequest: { prompt: mandatoryPrompt } } })
+    }
+    await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
+    const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, f))
+    const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })
+    const usageCount = await prisma.aiUsageLog.count({ where: { agentRunId: f.runId } })
+    const body = `门锁仍在。屋里没有灯。灯光落在桌上。${duplicate ? '灯光落在桌上。' : ''}她没有回答。`
+    await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: body, revision: 4, wordCount: body.length } })
+    const prepared = await prepareStoryCompilation({ ...f, mode: 'balanced', intentSummary: '修改本章' })
+    const compilationId = prepared.compilation.id
+    await saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '合成场景', entryState: { action: '进屋' },
+      goal: '看门锁', obstacle: '灯灭了', choice: '等待', cost: '时间', turn: '她打开灯', exitState: { action: '等待回应' },
+      styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
+    const assess = async (severity?: 'advisory' | 'warning', evidence = '屋里没有灯。', last = false) => {
+      const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      await validateStoryContinuity({ ...f, compilationId, findings: [], independentCheck: 'complete', expectedChapterRevision: chapter.revision })
+      const sources = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: f.chapterId,
+        chapterRevision: chapter.revision }, chapter.content)
+      const selected = sources.entries.filter(entry => entry.text === evidence)
+      const source = last ? selected.at(-1) : selected[0]
+      if (severity) expect(source).toBeDefined()
+      return persistHumanityQualityReport({ ...f, compilationId, chapterId: f.chapterId, chapterRevision: chapter.revision,
+        mode: 'balanced', deterministicMetrics: {}, deterministicFindings: [], criticComplete: true, sources,
+        criticFindings: severity ? [{ signal: 'description_load', sourceId: source!.id, quote: source!.text, severity,
+          explanation: '合成质量意见', suggestion: '修改这处已定位的正文', confidence: 0.9 }] : [] })
+    }
+    const mutate = (after: string, ranges?: Array<{ start: number; end: number; newText: string }>, rollback = false) => prisma.$transaction(async tx => {
+      const chapter = await tx.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const callback = await assertChapterManuscriptRevision(tx, f, chapter, { mutation: ranges ? 'range' : 'replace', after, editRanges: ranges })
+      expect((await tx.chapter.updateMany({ where: { id: chapter.id, revision: chapter.revision }, data: { content: after,
+        wordCount: after.length, revision: { increment: 1 } } })).count).toBe(1)
+      await callback?.()
+      await recordStoryCompilerWrite({ ...f, chapterId: chapter.id, chapterOrderIndex: 1, chapterRevision: chapter.revision + 1 }, tx)
+      if (rollback) throw new Error('synthetic rollback after mandatory-warning CAS')
+    })
+    await assess('advisory')
+    const finalBody = body.replace('屋里没有灯', '屋里灯亮着')
+    await mutate(finalBody)
+    const warningReport = await assess('warning', '灯光落在桌上。', duplicate)
+    const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilationId))
+    expect(readiness).toMatchObject({ ready: true, quality: 'complete', mustPassPending: true, qualityPassRequired: true,
+      qualityErrorCount: 0, reviewCycle: { verificationStarted: true, transitionCount: 1 } })
+    const warning = warningReport.findings[0]
+    const start = duplicate ? finalBody.lastIndexOf(warning.evidenceExcerpt) : finalBody.indexOf(warning.evidenceExcerpt)
+    const end = start + warning.evidenceExcerpt.length
+    const ranges = [{ start, end, newText: '灯光照着桌面。' }]
+    const after = finalBody.slice(0, start) + ranges[0].newText + finalBody.slice(end)
+    const proposal = { chapterId: f.chapterId, revision: 5, after, editRanges: ranges }
+    const admission = () => prisma.$transaction(tx => readChapterReviewWriteAdmission(tx, f, proposal))
+    expect(await admission()).toMatchObject({ kind: 'allow', basis: 'current_required_quality' })
+    const terminal = { ...f, compilationId, chapterSummary: '她进屋等待回应。', lastUnfinishedAction: '等待回应',
+      exitState: { action: '等待回应', location: '门口', knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+      hookDecision: '', delayedHookReason: '', openingStructure: '进屋', endingStructure: '等待' }
+    await expect(commitChapterBridge({ ...terminal, retainedFindings: readiness!.requiredDecisions!.map(ref => ({ ...ref,
+      reason: '合成留置理由不能代替原任务明确要求的质量通过。' })) })).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, f))).toBeNull()
+    expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: warningReport.id }, include: { findings: true } }))
+      .toMatchObject({ status: 'needs_repair', findings: [expect.objectContaining({ severity: 'warning', disposition: 'pending' })] })
+    // No union of adjacent proof spans and no insertion on an anchor boundary.
+    for (const at of [start, end]) expect(await prisma.$transaction(tx => readChapterReviewWriteAdmission(tx, f, { ...proposal,
+      after: finalBody.slice(0, at) + '新增' + finalBody.slice(at), editRanges: [{ start: at, end: at, newText: '新增' }] })))
+      .toMatchObject({ kind: 'decision_required' })
+    expect(await prisma.$transaction(tx => readChapterReviewWriteAdmission(tx, f, { ...proposal,
+      after: after.replace('门锁仍在', '门已打开'), editRanges: undefined }))).toMatchObject({ kind: 'decision_required' })
+    if (duplicate) {
+      expect(await prisma.$transaction(tx => readChapterReviewWriteAdmission(tx, f, { ...proposal,
+        after: finalBody.replace(warning.evidenceExcerpt, ranges[0].newText), editRanges: undefined }))).toMatchObject({ kind: 'decision_required' })
+      await prisma.qualityFinding.update({ where: { id: warning.id }, data: { evidenceHash: '0'.repeat(64) } })
+      expect(await admission()).toMatchObject({ kind: 'decision_required' })
+      await prisma.qualityFinding.update({ where: { id: warning.id }, data: { evidenceHash: sha(warning.evidenceExcerpt),
+        startOffset: start - 1, endOffset: end - 1 } })
+      expect(await admission()).toMatchObject({ kind: 'decision_required' })
+      await prisma.qualityFinding.update({ where: { id: warning.id }, data: { startOffset: start, endOffset: end } })
+    }
+    await prisma.chapterQualityReport.update({ where: { id: warningReport.id }, data: { deterministicMetrics: { independentCheck: 'unavailable',
+      contentHash: sha(finalBody) } } })
+    expect(await admission()).toMatchObject({ kind: 'decision_required' })
+    await prisma.chapterQualityReport.update({ where: { id: warningReport.id }, data: { deterministicMetrics: {
+      independentCheck: 'complete', contentHash: '0'.repeat(64) } } })
+    expect(await admission()).toMatchObject({ kind: 'decision_required' })
+    // A complete report from outside the original task remains outside its grant.
+    await prisma.chapterQualityReport.update({ where: { id: warningReport.id }, data: { deterministicMetrics: warningReport.deterministicMetrics!, runId: null } })
+    expect(await admission()).toMatchObject({ kind: 'decision_required' })
+    await prisma.chapterQualityReport.update({ where: { id: warningReport.id }, data: { runId: f.runId } })
+    await expect(mutate(after, ranges, true)).rejects.toThrow('synthetic rollback after mandatory-warning CAS')
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ revision: 5, content: finalBody })
+    await mutate(after, ranges)
+    expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilationId))).toMatchObject({ ready: false, quality: 'stale' })
+    await validateStoryContinuity({ ...f, compilationId, findings: [], independentCheck: 'complete', expectedChapterRevision: 6 })
+    await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    const passed = await assess()
+    expect(passed).toMatchObject({ status: 'passed', chapterRevision: 6, findings: [] })
+    expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilationId))).toMatchObject({ ready: true, mustPassPending: false,
+      qualityPassRequired: true, decisionPending: false, qualityErrorCount: 0 })
+    expect(await commitChapterBridge({ ...terminal, expectedChapterRevision: 6, expectedContentHash: sha(after) })).toMatchObject({ chapterRevision: 6 })
+    expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, f))).toMatchObject({ chapters: [{ id: f.chapterId, revision: 6, content: after }] })
+    const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
+    const cycle = readReviewCycle(saved.preparedContext, { taskId: original.taskId, userId: f.userId, novelId: f.novelId, chapterId: f.chapterId })!
+    expect(cycle.transitions.map(step => step.after.revision)).toEqual([5, 6])
+    expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).toEqual(budget)
+    expect(await prisma.aiUsageLog.count({ where: { agentRunId: f.runId } })).toBe(usageCount)
+    expect(await prisma.$transaction(tx => readOriginalTaskRequest(tx, f))).toEqual(original)
+    expect(await prisma.chapterQualityReport.count({ where: { compilationId } })).toBe(3)
+  }, undefined, mandatoryPrompt, { freezeWriting: true }))
+})
 // This suite deliberately has no availability/skip gate. Its real PostgreSQL
 // assertions are required in the same-SHA whole CI, not simulated locally.
 describe('legacy review convergence through actual loop and terminal delivery', () => {

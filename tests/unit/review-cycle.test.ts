@@ -1,8 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
+import type { Prisma } from '@prisma/client'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { advanceReviewCycle, beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, attemptedReviewCycleRefs, markReviewCycleVerification, readReviewCycle, reviewCycleContentHash, reviewCycleFinding, verificationQualityAdviceRequiresDecision } from '../../api/lib/agent/review-cycle.js'
 import { observedReviewCycleVerification, observedReviewCycleVerificationBody } from '../../api/lib/agent/review-cycle-store.js'
 import { currentReviewNextStepGuidance, projectCurrentReviewNextStep } from '../../api/lib/agent/review-dispatch.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import { readChapterReviewReadiness, readChapterReviewWriteAdmission } from '../../api/lib/agent/chapter-review-guard.js'
+import * as originalRequest from '../../api/lib/agent/original-request.js'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+
+afterEach(() => vi.restoreAllMocks())
 
 const scope = { taskId: 'task', userId: 'u', novelId: 'n', chapterId: 'c' }
 const content = '门锁仍在。屋里没有灯。她没有回答。'
@@ -20,6 +27,95 @@ function revisions() {
   bodies.forEach((after, i) => { cycle = advanceReviewCycle(cycle, { beforeRevision: 4 + i, before: body, afterRevision: 5 + i, after }); body = after })
   return { cycle, body }
 }
+describe('current mandatory quality warning write admission', () => {
+  const sha = (text: string) => createHash('sha256').update(text).digest('hex')
+  function current(mandatory = true, duplicate = false) {
+    const { cycle, body } = revisions()
+    const text = '灯光落在桌上', manuscript = duplicate ? `${body}${text}。` : body
+    const chapter = { id: 'c', title: '本章', orderIndex: 1, revision: 7, content: manuscript }
+    const spec = { intent: 'revise', qualityMode: 'balanced', creativeFreedom: 'balanced', scope: { reviewProtocol: 1 } }
+    vi.spyOn(originalRequest, 'readOriginalTaskRequest').mockResolvedValue({ taskId: scope.taskId, sourceRunId: 'r', parentRunId: null,
+      prompt: mandatory ? '修改本章，质量必须通过后才能交付。' : '修改本章。', spec })
+    vi.spyOn(originalRequest, 'originalTaskRunIds').mockResolvedValue(['r'])
+    const bridge = { fromChapterId: null, sourceRevision: null, targetRevision: 7, committedAt: null }
+    const scenes: Array<{ ordinal: number }> = []
+    const compilation = { id: 'comp', chapterId: chapter.id, status: 'active', stage: 'check', bridge, sceneTasks: scenes,
+      validation: { independentCheck: 'complete', checkedChapterId: chapter.id, checkedRevision: 7, findings: [], errorCount: 0, warningCount: 0,
+        coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks: scenes, source: null }) },
+      preparedContext: { reviewCycle: markReviewCycleVerification(cycle, cycle.transitions.at(-1)!.after) } }
+    const start = duplicate ? manuscript.lastIndexOf(text) : manuscript.indexOf(text)
+    const warning = { id: 'w', signal: 'description_load', severity: 'warning', disposition: 'pending', authorFeedback: null,
+      evidenceExcerpt: text, evidenceHash: sha(text), startOffset: start, endOffset: start + text.length, explanation: '意见', suggestion: '修订' }
+    const report = { id: 'current-q', status: 'needs_repair', chapterRevision: 7, findings: [warning],
+      deterministicMetrics: { independentCheck: 'complete', contentHash: sha(manuscript) } }
+    const db = { chapter: { findFirst: vi.fn().mockResolvedValue(chapter) }, storyCompilation: { findFirst: vi.fn().mockResolvedValue(compilation) },
+      chapterQualityReport: { findFirst: vi.fn().mockResolvedValue(report) } }
+    const tx = db as unknown as Prisma.TransactionClient
+    const subject = { userId: scope.userId, novelId: scope.novelId, runId: 'r' }
+    const proposal = { chapterId: chapter.id, revision: 7, after: manuscript.slice(0, start) + '桌上漆黑一片' + manuscript.slice(warning.endOffset),
+      editRanges: [{ start, end: warning.endOffset, newText: '桌上漆黑一片' }] }
+    return { tx, db, subject, chapter, compilation, warning, report, proposal }
+  }
+  it('allows the exact current warning required by the original pass constraint without changing its severity or readiness', async () => {
+    const f = current()
+    expect(await readChapterReviewReadiness(f.tx, f.subject)).toMatchObject({ ready: true, mustPassPending: true, qualityPassRequired: true,
+      qualityErrorCount: 0, reviewCycle: { verificationStarted: true } })
+    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'allow', basis: 'current_required_quality' })
+    expect(f.warning.severity).toBe('warning')
+    expect(f.report.status).toBe('needs_repair')
+  })
+  it('uses only the persisted exact occurrence for repeated source evidence, never guessed positions', async () => {
+    const f = current(true, true)
+    expect((await readChapterReviewReadiness(f.tx, f.subject))!.reviewCycleFindings![0].anchor).toEqual({ start: f.warning.startOffset,
+      end: f.warning.endOffset, text: f.warning.evidenceExcerpt })
+    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'allow', basis: 'current_required_quality' })
+    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, { ...f.proposal, after: f.chapter.content.replace('灯光落在桌上', '桌上漆黑一片'),
+      editRanges: undefined })).toMatchObject({ kind: 'decision_required' })
+  })
+  it.each(['hash', 'offset', 'fraction', 'empty', 'missing'] as const)('rejects repeated evidence with unproven %s', async invalid => {
+    const f = current(true, true)
+    if (invalid === 'hash') f.warning.evidenceHash = '0'.repeat(64)
+    else if (invalid === 'offset') { f.warning.startOffset--; f.warning.endOffset-- }
+    else if (invalid === 'fraction') f.warning.startOffset += 0.5
+    else if (invalid === 'empty') f.warning.endOffset = f.warning.startOffset
+    else Reflect.deleteProperty(f.warning, 'evidenceHash')
+    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'decision_required' })
+  })
+  it.each(['hash', 'offset'] as const)('does not wash contradictory persisted %s through a unique-quote fallback', async invalid => {
+    const f = current()
+    if (invalid === 'hash') f.warning.evidenceHash = '0'.repeat(64)
+    else { f.warning.startOffset--; f.warning.endOffset-- }
+    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'decision_required' })
+  })
+  it('retains the unique-quote path when an old record has no position/hash proof, and never trusts generic duplicate offsets', async () => {
+    const f = current()
+    for (const key of ['startOffset', 'endOffset', 'evidenceHash']) Reflect.deleteProperty(f.warning, key)
+    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'allow', basis: 'current_required_quality' })
+    expect(reviewCycleFinding({ source: 'quality', reportId: 'q', findingId: 'f', signal: 'description_load', severity: 'warning',
+      evidence: '相同句', startOffset: 4, endOffset: 7 }, '相同句。相同句。').anchor).toBeNull()
+  })
+  it.each(['ordinary', 'advisory', 'failed', 'stale', 'bodyHash', 'repaired'] as const)('does not extend mandatory repair authority to %s', async excluded => {
+    const f = current(excluded !== 'ordinary')
+    if (excluded === 'advisory') f.warning.severity = 'advisory'
+    else if (excluded === 'failed') f.report.deterministicMetrics.independentCheck = 'unavailable'
+    else if (excluded === 'stale') f.report.chapterRevision--
+    else if (excluded === 'bodyHash') f.report.deterministicMetrics.contentHash = '0'.repeat(64)
+    else if (excluded === 'repaired') f.warning.disposition = 'repaired'
+    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'decision_required' })
+  })
+  it('denies boundary insertions, broad edits and a stale body proposal', async () => {
+    const f = current()
+    for (const at of [f.warning.startOffset, f.warning.endOffset]) {
+      expect(await readChapterReviewWriteAdmission(f.tx, f.subject, { ...f.proposal,
+        after: f.chapter.content.slice(0, at) + '新增' + f.chapter.content.slice(at), editRanges: [{ start: at, end: at, newText: '新增' }] }))
+        .toMatchObject({ kind: 'decision_required' })
+    }
+    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, { ...f.proposal,
+      after: f.proposal.after.replace('门锁还在', '门已敞开'), editRanges: undefined })).toMatchObject({ kind: 'decision_required' })
+    f.db.chapter.findFirst.mockResolvedValueOnce(null)
+    await expect(readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).rejects.toMatchObject({ code: 'CHAPTER_REVISION_CONFLICT' })
+  })
+})
 describe('server review cycle lineage and final verification', () => {
   it('permits several original writes before verification, then denies new advice and broad locator overlap', () => {
     const { cycle, body } = revisions()
@@ -47,6 +143,20 @@ describe('server review cycle lineage and final verification', () => {
     expect(projectReviewCycleWrite(verified, { ...input, after: body.replace(text, '桌上没有灯光'),
       currentErrorAnchors: [{ start, end: start + text.length, text }] })).toMatchObject({ kind: 'allow', basis: 'current_error' })
     expect(projectReviewCycleWrite(verified, { ...input, baselineObligations: [{ ...finding(content), reportId: 'foreign' }] })).toMatchObject({ kind: 'decision_required' })
+  })
+  it('keeps mandatory warning evidence separate from errors and denies a hull across two proof anchors', () => {
+    const { cycle, body } = revisions()
+    const verified = markReviewCycleVerification(cycle, { revision: 7, contentHash: reviewCycleContentHash(body) })
+    const text = '灯光落在桌上', start = body.indexOf(text), end = start + text.length
+    const input = { before: body, after: body.replace(text, '灯光照着桌面'), verificationStarted: true,
+      baselineObligations: [], currentErrorAnchors: [], currentRequiredQualityAnchors: [{ start, end, text }] }
+    expect(projectReviewCycleWrite(verified, input)).toMatchObject({ kind: 'allow', basis: 'current_required_quality' })
+    expect(projectReviewCycleWrite(verified, { ...input, currentRequiredQualityAnchors: undefined })).toMatchObject({ kind: 'decision_required' })
+    const second = '她没有回答', secondStart = body.indexOf(second)
+    expect(projectReviewCycleWrite(verified, { ...input, after: body.slice(0, start) + '合并修改' + body.slice(secondStart + second.length),
+      currentRequiredQualityAnchors: [...input.currentRequiredQualityAnchors, { start: secondStart, end: secondStart + second.length, text: second }] }))
+      .toMatchObject({ kind: 'decision_required' })
+    expect(readReviewCycle(JSON.parse(JSON.stringify({ reviewCycle: verified })), scope)).toEqual(verified)
   })
   it('infers old v1 verification only from actual CAS-bound saved assessment and preserves the evidence across restart', () => {
     const { cycle, body } = revisions()

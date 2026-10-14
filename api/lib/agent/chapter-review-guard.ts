@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { currentReviewNextStepGuidance, projectCurrentReviewNextStep } from './review-dispatch.js'
 import { DataAccessError } from '../prisma.js'
@@ -252,9 +253,21 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       return reviewCycleFinding({ source: 'continuity', reportId: continuityBinding, findingId: String(index), signal: finding.signal,
         severity: finding.severity, evidence: finding.evidence }, chapter.content)
     }) : []),
-    ...(quality === 'complete' ? report!.findings.filter(item => item.disposition !== 'repaired').map(finding => reviewCycleFinding({ source: 'quality',
-      reportId: report!.id, findingId: finding.id, signal: finding.signal, severity: finding.severity,
-      evidence: finding.evidenceExcerpt, startOffset: finding.startOffset, endOffset: finding.endOffset }, chapter.content)) : []),
+    ...(quality === 'complete' ? report!.findings.filter(item => item.disposition !== 'repaired').map(finding => {
+      const projected = reviewCycleFinding({ source: 'quality', reportId: report!.id, findingId: finding.id, signal: finding.signal,
+        severity: finding.severity, evidence: finding.evidenceExcerpt, startOffset: finding.startOffset, endOffset: finding.endOffset }, chapter.content)
+      // Only this owned, complete, revision/hash-bound persisted report can
+      // prove a repeated occurrence. Generic/model offsets remain untrusted.
+      const { startOffset: start, endOffset: end, evidenceExcerpt: text } = finding
+      const positioned = Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 0 && end > start && end <= chapter.content.length
+        && text.length > 0 && chapter.content.slice(start, end) === text
+      const hashed = finding.evidenceHash === createHash('sha256').update(text).digest('hex')
+      // Missing legacy proof retains the unique-quote path. Contradictory saved
+      // proof must not be washed away by finding that quote somewhere else.
+      if ((start != null || end != null) && !positioned || finding.evidenceHash != null && !hashed) projected.anchor = null
+      else if (positioned && hashed) projected.anchor = { start, end, text }
+      return projected
+    }) : []),
   ]
   const savedCycle = readReviewCycle(compilation.preparedContext, { taskId: original.taskId,
     userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id })
@@ -420,6 +433,12 @@ export async function readChapterReviewWriteAdmission(tx: Prisma.TransactionClie
   obligations = obligations.filter(item => !retainedKeys.has(reviewCycleRefKey(item)))
   const errorAnchors = (readiness.reviewCycleFindings ?? []).filter(item => item.severity === 'error'
     && (item.source === 'quality' ? readiness.quality : readiness.continuity) === 'complete').flatMap(item => item.anchor ? [item.anchor] : [])
+  // A frozen human pass requirement cannot be satisfied by retaining a warning.
+  // Permit its exact current evidence without relabeling the critic's severity
+  // or extending ordinary final stylistic advice into another repair grant.
+  const requiredQualityAnchors = readiness.qualityPassRequired === true && readiness.quality === 'complete'
+    ? (readiness.reviewCycleFindings ?? []).filter(item => item.source === 'quality' && item.severity === 'warning')
+      .flatMap(item => item.anchor ? [item.anchor] : []) : []
   if (readiness.continuity === 'complete' && compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation)
     && Array.isArray(compilation.validation.findings)) for (const raw of compilation.validation.findings) {
       const parsed = continuityFindingInputSchema.safeParse(raw)
@@ -432,7 +451,8 @@ export async function readChapterReviewWriteAdmission(tx: Prisma.TransactionClie
       }
     }
   const decision = projectReviewCycleWrite(cycle, { before: chapter.content, after: proposal.after, ranges: proposal.editRanges,
-    verificationStarted: true, baselineObligations: obligations, currentErrorAnchors: errorAnchors })
+    verificationStarted: true, baselineObligations: obligations, currentErrorAnchors: errorAnchors,
+    currentRequiredQualityAnchors: requiredQualityAnchors })
   if (decision.kind === 'allow') return decision
   const step = projectCurrentReviewNextStep(readiness)
   const next = readiness.ready ? '请对当前真实引用写明逐项保留原因，在全部必要检查与原义务满足后用普通 chapter_bridge_commit.retainedFindings 提交。'

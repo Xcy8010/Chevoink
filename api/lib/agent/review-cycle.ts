@@ -153,7 +153,9 @@ export function markReviewCycleVerification(cycle: ReviewCycle, body: { revision
  * original grant. Every changed character must lie in a proven issue anchor. */
 export function projectReviewCycleWrite(cycle: ReviewCycle | null, input: { before: string; after: string; verificationStarted: boolean;
   ranges?: Array<{ start: number; end: number; newText: string }>; baselineObligations: Array<Pick<ReviewCycleFinding, 'source' | 'reportId' | 'findingId'>>;
-  currentErrorAnchors: Array<{ start: number; end: number; text: string }> }) {
+  currentErrorAnchors: Array<{ start: number; end: number; text: string }>;
+  /** Server-proven current warnings under the original mandatory quality pass. */
+  currentRequiredQualityAnchors?: Array<{ start: number; end: number; text: string }> }) {
   if (input.before === input.after) return { kind: 'allow' as const, basis: 'no_change' as const }
   if (!cycle || !input.verificationStarted) return { kind: 'allow' as const, basis: 'original_writing' as const }
   const attempts = new Set(attemptedReviewCycleRefs(cycle).map(reviewCycleRefKey))
@@ -163,11 +165,13 @@ export function projectReviewCycleWrite(cycle: ReviewCycle | null, input: { befo
     return anchor && input.before.slice(anchor.start, anchor.end) === anchor.text ? [anchor] : []
   })
   const errors = input.currentErrorAnchors.filter(anchor => input.before.slice(anchor.start, anchor.end) === anchor.text)
+  const requiredQuality = (input.currentRequiredQualityAnchors ?? []).filter(anchor => input.before.slice(anchor.start, anchor.end) === anchor.text)
   const confined = (range: { start: number; end: number }, anchor: typeof errors[number]) => range.start >= anchor.start && range.end <= anchor.end
     && (range.start !== range.end || range.start > anchor.start && range.start < anchor.end)
   const ranges = reviewMutationRanges(input.before, input.after, input.ranges)
-  if (ranges.every(range => [...baselineAnchors, ...errors].some(anchor => confined(range, anchor)))) return {
-    kind: 'allow' as const, basis: ranges.some(range => errors.some(anchor => confined(range, anchor))) ? 'current_error' as const : 'baseline_obligation' as const }
+  if (ranges.every(range => [...baselineAnchors, ...errors, ...requiredQuality].some(anchor => confined(range, anchor)))) return {
+    kind: 'allow' as const, basis: ranges.some(range => requiredQuality.some(anchor => confined(range, anchor))) ? 'current_required_quality' as const
+      : ranges.some(range => errors.some(anchor => confined(range, anchor))) ? 'current_error' as const : 'baseline_obligation' as const }
   return { kind: 'decision_required' as const, code: 'REVIEW_CYCLE_DECISION_REQUIRED' as const }
 }
 
