@@ -11,6 +11,7 @@ import { runtimeJson } from './runtime-common.js'
 import { validateStoryContinuity, validatedContinuityCheckRounds } from './story-compiler.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { DataAccessError } from '../prisma.js'
+import { isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 type Subject = { userId: string; novelId: string; runId: string; callId: string }
@@ -63,8 +64,8 @@ export async function readOfflineContinuityRecovery(tx: Prisma.TransactionClient
   // returned-call time window, as the continued-review reader above does.
   const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
     targetType: 'story_compilation', targetId: compilation.id, action: { startsWith: 'agent3Continuity' }, createdAt: { gte: call.createdAt, lte: result.createdAt } }, orderBy: { id: 'asc' } })
-  if (paid.filter(row => row.action === 'agent3ContinuityCritic').length !== 1 || paid.some(row => row.billingStatus !== 'settled' || row.usageSource !== 'reported'
-    || row.requestTokens === null || !row.responseTokens || row.reservedCreditMilli !== 0 || object(row.billingEvidence).responseObserved !== true)) return null
+  if (paid.filter(row => row.action === 'agent3ContinuityCritic' && !isKnownRejectedTextRequestAttempt(row)).length !== 1 || paid.some(row => !isKnownRejectedTextRequestAttempt(row) && (row.billingStatus !== 'settled' || row.usageSource !== 'reported'
+    || row.requestTokens === null || !row.responseTokens || row.reservedCreditMilli !== 0 || object(row.billingEvidence).responseObserved !== true))) return null
   return { findings: inspected.findings, validationHash: runtimeJson(validation).hash, audit: { version: 1, parserVersion: 4,
     originalParserVersion: 3, classification: 'complete', admissionKey, sourceCallId: String(callPayload.callId), sourceRunId: call.runId,
     sourceResultId: result.id, usageIds: paid.map(row => row.id), rawHash: inspected.audit.contentHash, characterCount: inspected.audit.characterCount,

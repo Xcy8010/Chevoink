@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { reviewResponseFormatPayload, type ReviewResponseFormat } from './ai-response-format.js'
+import type { Prisma } from '@prisma/client'
 import { currentGoalExecution, withGoalExecutionContext, withoutGoalEffects } from './agent/goal-context.js'
 import { readGoalExecution } from './agent/goal-fence.js'
 import { assertGoalProviderAdmission, reserveGoalUsage, syncGoalLegacyUsage } from './agent/goal-budget.js'
 import { beginTextRequest, recordTextRequestFailure, type TextRequestRecord } from './text-request-trace.js'
-import { isKnownTextRequestBilling } from './agent/text-request-billing.js'
+import { isKnownTextRequestBilling, isKnownZeroTextRequestBilling } from './agent/text-request-billing.js'
 import { SseDataDecoder, readWithIdleTimeout } from './ai-sse.js'
 import { beginDurableChat, type DurableChatExecution } from './agent/runtime-provider.js'
 import { validateModelCursor } from './agent/runtime-model-cursor.js'
@@ -17,7 +18,7 @@ import { fetch as undiciFetch, Agent as UndiciAgent } from 'undici'
 
 import { prisma, DataAccessError } from './prisma.js'
 import { env } from '../config/env.js'
-import { ModelRouteRejected, routeRejectionMayRetry, withModelRoutePool } from './model-route-pool.js'
+import { invokeExactRouteWithRateLimitRetry, ModelRouteRejected, routeRejectionMayRetry, withModelRoutePool } from './model-route-pool.js'
 import { isProviderQuotaError, providerQuotaError } from './provider-quota-error.js'
 import { getToolModelRuntime } from './tool-model-config.js'
 import { assignedTaskModel, resolveTextActionTask } from './agent/model-assignment-context.js'
@@ -239,18 +240,23 @@ async function markUnobservedUsage(id: string | undefined, dispatched = true, au
 /** An HTTP status/token shape is only a candidate. Automatic replay requires
  * the exact original account row to have reached known, zero-charge billing;
  * recordUsage may have retained an observation with settlement still pending. */
-async function hasKnownZeroProviderRejection(id: string | undefined, userId: string): Promise<boolean> {
+async function hasKnownZeroProviderRejection(id: string | undefined, userId: string, status: number): Promise<boolean> {
   if (!id) return false
   const usage = await prisma.aiUsageLog.findUnique({ where: { id, userId }, select: {
     usageSource: true, billingStatus: true, requestTokens: true, responseTokens: true,
-    reservedCreditMilli: true, creditChargeMilli: true, promptCacheHitTokens: true, promptCacheMissTokens: true,
+    reservedCreditMilli: true, creditChargeMilli: true, promptCacheHitTokens: true, promptCacheMissTokens: true, billingEvidence: true,
   } }).catch(() => null)
-  if (!usage || usage.creditChargeMilli !== 0 || !isKnownTextRequestBilling(usage)
-    || usage.promptCacheHitTokens != null && usage.promptCacheHitTokens !== 0
-    || usage.promptCacheMissTokens != null && usage.promptCacheMissTokens !== 0) return false
-  return usage.billingStatus === 'provider_rejected'
-    || usage.usageSource === 'reported' && usage.requestTokens === 0 && usage.responseTokens === 0
-      && ['settled', 'exempt'].includes(usage.billingStatus ?? '')
+  if (!usage || !isKnownZeroTextRequestBilling(usage)) return false
+  if (usage.billingStatus === 'provider_rejected') return true
+  // Preserve the real HTTP rejection separately from successful empty 0/0
+  // output. Later review consumers must not infer this fact from price alone.
+  const evidence = usage.billingEvidence && typeof usage.billingEvidence === 'object' && !Array.isArray(usage.billingEvidence)
+    ? usage.billingEvidence as Record<string, unknown> : {}
+  if (evidence.responseObserved === true) return false
+  const recorded = await prisma.aiUsageLog.updateMany({ where: { id, userId, billingStatus: usage.billingStatus,
+    usageSource: 'reported', requestTokens: 0, responseTokens: 0, creditChargeMilli: 0, reservedCreditMilli: 0 },
+    data: { billingEvidence: { ...evidence, providerRejection: { status } } as Prisma.InputJsonValue } }).catch(() => null)
+  return recorded?.count === 1
 }
 
 async function saveOutputEvidence(id: string, inputEstimate: number, output: string) {
@@ -941,7 +947,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     } else await markUnobservedUsage(prepared?.id)
     if (quotaRejected) throw providerQuotaError(tier === 'custom')
     if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)
-      && (durable || await hasKnownZeroProviderRejection(prepared?.id, params.usageLog.userId))) {
+      && (durable || await hasKnownZeroProviderRejection(prepared?.id, params.usageLog.userId, response.status))) {
       throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
     }
     throw new DataAccessError(
@@ -1199,8 +1205,14 @@ async function generateGoalTextCompletion(systemPrompt: string, userPrompt: stri
   const modelRuntime = sourceRuntime.tier === 'custom' ? sourceRuntime : { ...sourceRuntime, multiplierBps: effectiveModelMultiplier({
     multiplierBps: sourceRuntime.multiplierBps, metadata: { freePromotion: sourceRuntime.freePromotion },
   }) }
-  if (review || options.authorizedRequest) return generateTextCompletionImpl(systemPrompt, userPrompt, {
+  if (options.authorizedRequest) return generateTextCompletionImpl(systemPrompt, userPrompt, {
     ...options, ...(review ? { multiplierBps: undefined } : {}), modelRuntime,
+  })
+  if (review) return invokeExactRouteWithRateLimitRetry({ messages: [], tools: [], model: modelRuntime.modelName ?? env.aiTextModel,
+    provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, providerApiKey: modelRuntime.apiKey,
+    signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route => {
+    return generateTextCompletionImpl(systemPrompt, userPrompt, { ...options, multiplierBps: undefined,
+      modelRuntime, signal: route.signal })
   })
   return withModelRoutePool({ messages: [], tools: [], model: modelRuntime.modelName ?? undefined,
     provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, providerApiKey: modelRuntime.apiKey,
@@ -1362,7 +1374,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
         data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } })
     }
     if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)
-      && await hasKnownZeroProviderRejection(prepared.id, options.userId)) {
+      && await hasKnownZeroProviderRejection(prepared.id, options.userId, response.status)) {
       throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
     }
     throw new DataAccessError(502, [408, 504].includes(response.status) ? 'AI_PROVIDER_TIMEOUT' : 'AI_PROVIDER_ERROR', typeof payload.error?.message === 'string' ? payload.error.message : '模型服务暂时不可用。')

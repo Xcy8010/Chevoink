@@ -8,6 +8,7 @@ vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error
 vi.mock('../../api/lib/data-access.js', () => ({ ensureNovelOwner: vi.fn(), createCoverAssetsData: vi.fn() }))
 vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: (value: string) => value, encryptSecret: (value: string) => value }))
 import { generateTextCompletion } from '../../api/lib/ai-service.js'
+import { ModelRouteRejected } from '../../api/lib/model-route-pool.js'
 import { priceTokenEvidence } from '../../api/lib/billing/reservation-policy.js'
 import type { TokenPrice } from '../../api/lib/billing/token-price.js'
 import type { ModelTierRuntime } from '../../api/lib/credits.js'
@@ -34,6 +35,23 @@ it('rechecks the durable claim after preparing usage and refuses HTTP when autho
   const policy = envelope(); policy.beforeDispatch.mockRejectedValue(new Error('claim no longer valid'))
   await expect(invoke(policy)).rejects.toThrow('claim no longer valid')
   expect(mocks.create).toHaveBeenCalledOnce(); expect(policy.beforeDispatch).toHaveBeenCalledOnce(); expect(fetcher).not.toHaveBeenCalled()
+  expect(mocks.charge).not.toHaveBeenCalled()
+})
+it('keeps a one-request authorization to one HTTP even when the rejection has known zero billing', async () => {
+  const usage = { id: 'new-only', usageSource: 'prepared', billingStatus: 'authorized_pending', requestTokens: null,
+    responseTokens: null, reservedCreditMilli: 123, creditChargeMilli: 0, promptCacheHitTokens: null, promptCacheMissTokens: null }
+  mocks.updateMany.mockImplementation(async ({ where, data }) => {
+    if (where.billingStatus && !(typeof where.billingStatus === 'string' ? where.billingStatus === usage.billingStatus
+      : where.billingStatus.in.includes(usage.billingStatus))) return { count: 0 }
+    Object.assign(usage, data); return { count: 1 }
+  })
+  mocks.find.mockImplementation(async () => ({ ...usage }))
+  const policy = envelope(), fetcher = vi.fn(async () => new Response('{"error":{"message":"rate limit"}}', { status: 429 }))
+  vi.stubGlobal('fetch', fetcher)
+  await expect(invoke(policy)).rejects.toBeInstanceOf(ModelRouteRejected)
+  expect(fetcher).toHaveBeenCalledOnce()
+  expect(policy.beforeDispatch).toHaveBeenCalledOnce()
+  expect(usage).toMatchObject({ billingStatus: 'provider_rejected', reservedCreditMilli: 0, creditChargeMilli: 0 })
   expect(mocks.charge).not.toHaveBeenCalled()
 })
 it.each(['missing-counts', 'over-cap', 'billing-error', 'truncated', 'evidence-db-error'] as const)('retains real response with one selected-model HTTP and no repeat: %s', async scenario => {

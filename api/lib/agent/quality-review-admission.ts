@@ -9,6 +9,7 @@ import { DataAccessError } from '../prisma.js'
 import { readHumanAdmission } from './goal-activation-authority.js'
 import { readGoalConsentSourceRun } from './goal-consent.js'
 import { runtimeJson } from './runtime-common.js'
+import { isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 export type QualityReviewAdmission = { id: string; at: Date }
@@ -96,11 +97,12 @@ async function readFailedInlineQualityRequest(tx: Prisma.TransactionClient,
     || claim.key !== runtimeJson({ taskId, chapterId: item.chapterId, revision: item.revision, admissionId: claim.admissionId }).hash) return null
   const first = await tx.agentRun.findFirstOrThrow({ where: { id: { in: ids } }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } })
   const target = [{ chapterId: item.chapterId }, { targetId: { in: [item.chapterId, report.id, ...(item.compilationId ? [item.compilationId] : [])] } }]
-  if (await tx.agentProviderAttempt.count({ where: { runId: { in: ids }, status: { in: ['prepared', 'dispatching', 'unknown'] } } })
-    || await tx.aiUsageLog.count({ where: { userId: subject.userId, novelId: subject.novelId,
+  const unsettled = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
       AND: [{ OR: [{ agentRunId: { in: ids } }, { action: { startsWith: 'agent3Humanity' }, createdAt: { gte: first.createdAt }, OR: target }] },
         { OR: [{ billingStatus: { not: 'settled' } }, { billingStatus: null },
-          { usageSource: { not: 'reported' } }, { usageSource: null }, { reservedCreditMilli: { gt: 0 } }] }] } })) return null
+          { usageSource: { not: 'reported' } }, { usageSource: null }, { reservedCreditMilli: { gt: 0 } }] }] } })
+  if (await tx.agentProviderAttempt.count({ where: { runId: { in: ids }, status: { in: ['prepared', 'dispatching', 'unknown'] } } })
+    || unsettled.some(row => !isKnownRejectedTextRequestAttempt(row))) return null
   const history = await tx.agentRunEvent.findMany({ where: { runId: { in: ids }, type: { in: ['tool.call', 'tool.result'] },
     createdAt: { lte: result.createdAt } }, orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }], take: 2001 })
   if (history.length >= 2001 || history.some(event => {
@@ -112,13 +114,19 @@ async function readFailedInlineQualityRequest(tx: Prisma.TransactionClient,
   })) return null
   const payments = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
     action: { startsWith: 'agent3Humanity' }, OR: target, createdAt: { gte: call.createdAt, lte: result.createdAt } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
-  const primary = payments.find(row => row.action === 'agent3HumanityCritic'), recovery = payments.find(row => row.action === 'agent3HumanityFormatRecovery')
-  if (payments.length !== 2 || !primary || !recovery || payments.some(row => row.usageSource !== 'reported' || row.billingStatus !== 'settled'
-    || row.agentRunId !== null && row.agentRunId !== call.runId || row.requestTokens === null || row.responseTokens === null || row.responseTokens <= 0
-    || object(row.billingEvidence).responseObserved !== true || row.reservedCreditMilli > 0
+  const semantic = payments.filter(row => !isKnownRejectedTextRequestAttempt(row))
+  const primaryAttempts = payments.filter(row => row.action === 'agent3HumanityCritic')
+  const recoveryAttempts = payments.filter(row => row.action === 'agent3HumanityFormatRecovery')
+  const primary = semantic.find(row => row.action === 'agent3HumanityCritic'), recovery = semantic.find(row => row.action === 'agent3HumanityFormatRecovery')
+  if (semantic.length !== 2 || !primary || !recovery || payments.length !== primaryAttempts.length + recoveryAttempts.length
+    || primaryAttempts.length > 2 || recoveryAttempts.length > 2 || payments.some(row => row.agentRunId !== null && row.agentRunId !== call.runId
+    || !isKnownRejectedTextRequestAttempt(row) && (row.usageSource !== 'reported' || row.billingStatus !== 'settled'
+    || row.requestTokens === null || row.responseTokens === null || row.responseTokens <= 0
+    || object(row.billingEvidence).responseObserved !== true || row.reservedCreditMilli > 0)
     || row.createdAt.getTime() + row.durationMs > result.createdAt.getTime())
     || primary.createdAt > report.createdAt || primary.createdAt.getTime() + primary.durationMs > report.createdAt.getTime()
-    || recovery.createdAt < claimedAt || claim.evidenceHash !== runtimeJson({ callId: item.callId, contentHash: audit.contentHash, usageIds: [primary.id] }).hash) return null
+    || primaryAttempts.some(row => row.createdAt > report.createdAt) || recoveryAttempts.some(row => row.createdAt < claimedAt)
+    || recovery.createdAt < claimedAt || claim.evidenceHash !== runtimeJson({ callId: item.callId, contentHash: audit.contentHash, usageIds: primaryAttempts.map(row => row.id) }).hash) return null
   return { status: 'terminal_failed_billing_known', sourceRunId: call.runId, sourceResultId: result.id, sourceReportId: report.id,
     usageIds: payments.map(row => row.id), admissionId: admission.id, currentRevision: chapter.revision, currentContentHash }
 }
@@ -183,8 +191,9 @@ export async function readSettledQualityReviews(tx: Prisma.TransactionClient,
         && object(end.payload).callId === object(event.payload).callId && end.seq > event.seq && end.seq < call.seq)))) continue
     const payments = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
       action: { startsWith: 'agent3Humanity' }, targetId: { in: [item.chapterId, report.id] }, createdAt: { gte: call.createdAt, lte: result.createdAt } } })
-    if (!payments.length || payments.some(payment => payment.usageSource !== 'reported' || payment.billingStatus !== 'settled'
-      || payment.requestTokens === null || payment.responseTokens === null || payment.responseTokens <= 0)) continue
+    if (!payments.some(payment => !isKnownRejectedTextRequestAttempt(payment)) || payments.some(payment => !isKnownRejectedTextRequestAttempt(payment)
+      && (payment.usageSource !== 'reported' || payment.billingStatus !== 'settled'
+      || payment.requestTokens === null || payment.responseTokens === null || payment.responseTokens <= 0))) continue
     settled.push(item)
   }
   return settled

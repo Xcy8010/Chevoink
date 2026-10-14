@@ -4,7 +4,7 @@ import { DataAccessError } from '../prisma.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { runtimeJson } from './runtime-common.js'
-import { isKnownTextRequestBilling } from './text-request-billing.js'
+import { isKnownTextRequestBilling, isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 import { inspectContinuityResponse } from './continuity-format-recovery.js'
 import { continuitySourceInput, resolveContinuitySources, type ContinuityBodies } from './continuity-review-context.js'
 import { parseQualityJsonObject } from './quality-evidence.js'
@@ -18,6 +18,13 @@ import { markLegacyContinuityAssessmentApplied } from './continuity-response-cor
 type Inspection = ReturnType<typeof inspectContinuityResponse>
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 const json = (raw: string) => ({ version: 1, encoding: 'json-string', content: JSON.stringify(raw), complete: true })
+export type LegacyContinuityStage = 'first' | 'output_recovery' | 'reassessment'
+export function legacyContinuityStageForAction(action: string): LegacyContinuityStage | null {
+  return action === 'agent3ContinuityCritic' ? 'first' : action === 'agent3ContinuityCriticSecondPass' ? 'reassessment'
+    : ['agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery'].includes(action) ? 'output_recovery' : null
+}
+const knownAssessmentBilling = (row: Parameters<typeof isKnownRejectedTextRequestAttempt>[0]) =>
+  isKnownRejectedTextRequestAttempt(row) || row.usageSource === 'reported' && isKnownTextRequestBilling(row)
 
 /** Indices come only from a complete parsed provider array, including invalid
  * fields. An unparseable response has no reconstructed candidate identities. */
@@ -140,9 +147,9 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
     const firstUnsent = await tx.agentArtifact.findFirst({ where: { runId: reservation.runId, artifactType: 'continuityReview',
       metadata: { path: ['firstAssessmentNotDispatchedKey'], equals: meta.continuityAssessmentRequestKey } } })
     const known = (!unseenSecond || !!unsent) && (ids.length > 0 || !!firstUnsent) && usage.length === new Set(ids).size
-      && usage.every(row => isKnownTextRequestBilling(row) && (row.usageSource === 'reported' || row.billingStatus === 'not_dispatched'))
+      && usage.every(row => knownAssessmentBilling(row) || isKnownTextRequestBilling(row) && row.billingStatus === 'not_dispatched')
     const explicitlyRetired = usage.length > 0 && usage.length === new Set(ids).size && (!unseenSecond || usage.some(row => retired.has(row.id)))
-      && usage.every(row => row.usageSource === 'reported' && isKnownTextRequestBilling(row) || retired.has(row.id))
+      && usage.every(row => knownAssessmentBilling(row) || retired.has(row.id))
     const last = observations.reduce((date, row) => row.createdAt > date ? row.createdAt : date, reservation.createdAt)
     if ((!known && !explicitlyRetired) || !admission || meta.admissionId === admission.id || admission.at <= last) return 'blocked' as const
   }
@@ -158,28 +165,36 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
     metadata: { path: ['assessmentKey'], equals: key } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
   const frames = observations.map(row => object(row.metadata)!)
   const primary = frames.filter(row => row.stage === 'first' || row.stage === 'output_recovery')
-  const first = primary.at(-1), response = object(first?.response)
+  const first = primary.filter(row => typeof object(row.response)?.content === 'string').at(-1), response = object(first?.response)
   if (!first || !response || typeof response.content !== 'string') throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原检查未取得可复用响应，未重放请求。')
-  const ids = primary.flatMap(row => Array.isArray(row.usageIds) ? row.usageIds.filter((id): id is string => typeof id === 'string') : [])
+  const ids = [...new Set(frames.flatMap(row => Array.isArray(row.usageIds) ? row.usageIds.filter((id): id is string => typeof id === 'string') : []))]
   const usage = await tx.aiUsageLog.findMany({ where: { id: { in: ids }, userId: ctx.userId, novelId: ctx.novelId,
     targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3ContinuityCritic' } } })
-  const known = ids.length > 0 && usage.length === new Set(ids).size && usage.every(row => row.usageSource === 'reported' && isKnownTextRequestBilling(row))
+  const known = ids.length > 0 && usage.length === ids.length && usage.every(knownAssessmentBilling)
+    && frames.every(frame => Array.isArray(frame.usageIds) && frame.usageIds.length > 0 && new Set(frame.usageIds).size === frame.usageIds.length && frame.usageIds.every(id => {
+      const row = usage.find(item => item.id === id)
+      return row && legacyContinuityStageForAction(row.action) === frame.stage
+        && (!isKnownRejectedTextRequestAttempt(row) || object(frame.response)?.content === null)
+    })) && (['first', 'output_recovery', 'reassessment'] as const).every(stage => usage.filter(row => legacyContinuityStageForAction(row.action) === stage
+      && !isKnownRejectedTextRequestAttempt(row)).length <= 1)
   const original = inspectContinuityResponse(JSON.parse(response.content) as string, input.bodies, response.transportComplete === true && response.finishReason === 'stop'
     && Array.isArray(response.toolCalls) && !response.toolCalls.length, 6)
-  const second = frames.find(row => row.stage === 'reassessment'), secondResponse = object(second?.response)
+  const secondFrames = frames.filter(row => row.stage === 'reassessment')
+  const second = secondFrames.filter(row => typeof object(row.response)?.content === 'string').at(-1), secondResponse = object(second?.response)
   let inspected = original
   if (secondResponse && typeof secondResponse.content === 'string' && secondResponse.transportComplete === true && secondResponse.finishReason === 'stop'
     && Array.isArray(secondResponse.toolCalls) && !secondResponse.toolCalls.length) {
-    const secondIds = Array.isArray(second!.usageIds) ? second!.usageIds as string[] : []
+    const secondIds = [...new Set(secondFrames.flatMap(row => Array.isArray(row.usageIds) ? row.usageIds as string[] : []))]
     const secondUsage = await tx.aiUsageLog.findMany({ where: { id: { in: secondIds }, userId: ctx.userId, novelId: ctx.novelId,
       targetType: input.targetType, targetId: input.targetId, action: 'agent3ContinuityCriticSecondPass' } })
-    if (secondUsage.length === 1 && secondIds.length === 1 && secondUsage.every(row => row.usageSource === 'reported' && isKnownTextRequestBilling(row))) {
+    if (secondUsage.length === new Set(secondIds).size && secondUsage.filter(row => !isKnownRejectedTextRequestAttempt(row)).length === 1
+      && secondUsage.every(knownAssessmentBilling)) {
       try { inspected = applyContinuityReassessment(original, JSON.parse(secondResponse.content) as string, input.bodies) } catch { /* Preserve invalid final response, never retry. */ }
     }
   }
   const claimed = await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['fullReassessmentKey'], equals: key } } })
   return { inspected, usageIds: ids, billingKnown: known, providerComplete: response.transportComplete === true && response.finishReason === 'stop'
-    && Array.isArray(response.toolCalls) && !response.toolCalls.length, slotUsed: primary.length > 1 || !!claimed }
+    && Array.isArray(response.toolCalls) && !response.toolCalls.length, slotUsed: primary.some(row => row.stage === 'output_recovery') || !!claimed }
 }
 
 /** Only the real report application transaction records this receipt. */
@@ -196,7 +211,15 @@ export async function markLegacyContinuityAssessmentApplication(tx: Prisma.Trans
   const observations = await tx.agentArtifact.findMany({ where: { runId: reservation.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentKey'], equals: key } } })
   const ids = observations.flatMap(row => { const value = object(row.metadata)?.usageIds; return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [] })
   const usage = await tx.aiUsageLog.findMany({ where: { id: { in: ids }, userId: ctx.userId, novelId: ctx.novelId, action: { startsWith: 'agent3ContinuityCritic' } } })
-  if (!ids.length || usage.length !== new Set(ids).size || usage.some(row => row.usageSource !== 'reported' || !isKnownTextRequestBilling(row))) return
+  if (!ids.length || usage.length !== new Set(ids).size || usage.some(row => !knownAssessmentBilling(row))) return
+  if (observations.some(observation => {
+    const meta = object(observation.metadata)
+    return !Array.isArray(meta?.usageIds) || meta.usageIds.some(id => {
+      const row = usage.find(item => item.id === id)
+      return !row || legacyContinuityStageForAction(row.action) !== meta.stage
+        || isKnownRejectedTextRequestAttempt(row) && object(meta.response)?.content !== null
+    })
+  })) return
   if (!await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentApplicationKey'], equals: key } } })) {
     await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性报告应用审计', content: '完整检查报告已应用到对应当前输入。',
       metadata: runtimeJson({ version: 1, assessmentApplicationKey: key, reservationId: reservation.id, usageIds: ids }).value } })
@@ -229,10 +252,15 @@ export async function readReusableLegacyContinuityAssessment(tx: Prisma.Transact
 /** Independent observation transaction: it never checks current text or abort,
  * and never invents accounting. This survives any later application failure. */
 export async function observeLegacyContinuityAssessment(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput,
-  response: { content: string | null; finishReason: string | null; toolCalls: unknown[]; transportComplete?: false }, usageIds: string[], stage: 'first' | 'output_recovery' | 'reassessment') {
+  response: { content: string | null; finishReason: string | null; toolCalls: unknown[]; transportComplete?: false }, usageIds: string[], requestedStage: LegacyContinuityStage | 'primary') {
   const usage = usageIds.length ? await tx.aiUsageLog.findMany({ where: { id: { in: usageIds }, userId: ctx.userId, novelId: ctx.novelId,
     targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3ContinuityCritic' } } }) : []
   if (usage.length !== new Set(usageIds).size) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '检查观察缺少真实归属账目。')
+  const stage = requestedStage === 'primary' ? legacyContinuityStageForAction(usage[0]?.action ?? '') : requestedStage
+  if (!stage || usage.some(row => legacyContinuityStageForAction(row.action) !== stage)
+    || response.content !== null && usage.filter(row => !isKnownRejectedTextRequestAttempt(row)).length !== 1) {
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '检查阶段与真实请求或响应归属不一致。')
+  }
   const key = runtimeJson({ assessmentKey: assessmentKey(ctx, input), stage, usageIds: [...usageIds].sort() }).hash
   const prior = await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentResponseKey'], equals: key } } })
   const frozenResponse = { content: response.content === null ? null : JSON.stringify(response.content), encoding: 'json-string',
@@ -255,12 +283,16 @@ export async function claimLegacyContinuityReassessment(tx: Prisma.TransactionCl
   ctx.signal.throwIfAborted(); await lockNovelActiveScope(tx, ctx.novelId); await assertAgentManuscriptCurrent(tx, ctx); await assertCurrent(tx)
   const usage = await tx.aiUsageLog.findMany({ where: { id: { in: usageIds }, userId: ctx.userId, novelId: ctx.novelId,
     targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3ContinuityCritic' } } })
-  if (usage.length !== 1 || usageIds.length !== 1 || usage.some(row => row.usageSource !== 'reported' || !isKnownTextRequestBilling(row))) return false
+  const semantic = usage.filter(row => !isKnownRejectedTextRequestAttempt(row))
+  if (usage.length !== new Set(usageIds).size || semantic.length !== 1 || usage.some(row => !knownAssessmentBilling(row)
+    || row.action !== 'agent3ContinuityCritic')) return false
   const key = assessmentKey(ctx, input)
   const first = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview', AND: [
     { metadata: { path: ['assessmentKey'], equals: key } }, { metadata: { path: ['stage'], equals: 'first' } }] } })
-  if (first.length !== 1 || object(object(first[0].metadata)?.audit)?.contentHash !== original.audit.contentHash
-    || runtimeJson(object(first[0].metadata)?.usageIds).hash !== runtimeJson(usageIds).hash) return false
+  const received = first.filter(row => typeof object(object(row.metadata)?.response)?.content === 'string')
+  const observedIds = [...new Set(first.flatMap(row => { const ids = object(row.metadata)?.usageIds; return Array.isArray(ids) ? ids : [] }))]
+  if (received.length !== 1 || object(object(received[0].metadata)?.audit)?.contentHash !== original.audit.contentHash
+    || runtimeJson([...observedIds].sort()).hash !== runtimeJson([...usageIds].sort()).hash) return false
   if (await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['fullReassessmentKey'], equals: key } } })) return false
   await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性复评请求审计', content: '本次原工具的一次完整复评已预约；不改写正文，不重复派发。',
     metadata: runtimeJson({ version: 1, fullReassessmentKey: key, callId: ctx.callId, input, original: original.audit, request, usageIds }).value } })
@@ -296,17 +328,34 @@ export async function observeLegacyContinuityReassessmentNotDispatched(tx: Prism
 }
 
 export async function bindLegacyContinuityRequest(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput,
-  usageId: string, stage: 'first' | 'output_recovery' | 'reassessment', assertCurrent: (tx: Prisma.TransactionClient) => Promise<void>) {
+  usageId: string, requestedStage: LegacyContinuityStage | 'primary', assertCurrent: (tx: Prisma.TransactionClient) => Promise<void>) {
+  await lockNovelActiveScope(tx, ctx.novelId)
   await assertCurrent(tx)
   const usage = await tx.aiUsageLog.findFirst({ where: { id: usageId, userId: ctx.userId, novelId: ctx.novelId, agentRunId: ctx.runId,
     targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3ContinuityCritic' } } })
-  if (!usage || (stage === 'first' ? usage.action !== 'agent3ContinuityCritic' : stage === 'reassessment' ? usage.action !== 'agent3ContinuityCriticSecondPass'
-    : !['agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery'].includes(usage.action))) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '检查账目不能绑定此真实请求。')
+  const stage = usage ? legacyContinuityStageForAction(usage.action) : null
+  if (!usage || !stage || (requestedStage === 'primary' ? stage === 'reassessment' : requestedStage !== stage)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '检查账目不能绑定此真实请求。')
   const key = assessmentKey(ctx, input), binding = runtimeJson({ key, usageId }).hash
+  const existing = await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentRequestBindingKey'], equals: binding } } })
+  if (existing) {
+    if (object(existing.metadata)?.stage !== stage) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '已绑定检查阶段不能替换。')
+    return stage
+  }
+  const links = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview', AND: [
+    { metadata: { path: ['assessmentRequestOwnerKey'], equals: key } }, { metadata: { path: ['stage'], equals: stage } }] }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+  const priorIds = [...new Set(links.flatMap(row => { const ids = object(row.metadata)?.usageIds; return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string' && id !== usageId) : [] }))]
+  if (priorIds.length) {
+    const prior = await tx.aiUsageLog.findMany({ where: { id: { in: priorIds }, userId: ctx.userId, novelId: ctx.novelId,
+      agentRunId: ctx.runId, targetType: input.targetType, targetId: input.targetId, action: usage.action } })
+    if (prior.length !== priorIds.length || priorIds.length > 1 || prior.some(row => !isKnownRejectedTextRequestAttempt(row))) {
+      throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '同一检查阶段的原请求尚未确认零费用拒绝，未再次派发。')
+    }
+  }
   if (!await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentRequestBindingKey'], equals: binding } } })) {
     await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性请求归属审计', content: '供应商派发前已绑定本工具的真实请求账目。',
       metadata: runtimeJson({ version: 1, assessmentRequestBindingKey: binding, assessmentRequestOwnerKey: key, stage, usageIds: [usageId], callId: ctx.callId }).value } })
   }
+  return stage
 }
 
 /** Called only after this live invocation positively observed no entry into

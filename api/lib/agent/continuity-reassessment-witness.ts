@@ -1,7 +1,7 @@
 import type { AiUsageLog, Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { runtimeJson } from './runtime-common.js'
-import { isKnownTextRequestBilling } from './text-request-billing.js'
+import { isKnownTextRequestBilling, isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 import { inspectContinuityResponse } from './continuity-format-recovery.js'
 import { continuityReassessmentRequest, legacyContinuityAssessmentKey } from './assessment-response-lifecycle.js'
 import { compilerContinuityCoverage } from './compiler-continuity-contract.js'
@@ -13,9 +13,13 @@ const object = (value: unknown): Record<string, unknown> => value && typeof valu
 export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClient, subject: { userId: string; novelId: string }, input: {
   runId: string; callId: string; chapterId: string; revision: number; compilationId?: string | null; callAt: Date; resultAt: Date; payments: AiUsageLog[];
 }) {
-  const primary = input.payments.filter(row => row.action === 'agent3ContinuityCritic')
-  const second = input.payments.filter(row => row.action === 'agent3ContinuityCriticSecondPass')
-  if (input.payments.length !== 2 || primary.length !== 1 || second.length !== 1 || primary[0].usageSource !== 'reported'
+  const primaryAttempts = input.payments.filter(row => row.action === 'agent3ContinuityCritic')
+  const secondAttempts = input.payments.filter(row => row.action === 'agent3ContinuityCriticSecondPass')
+  const primary = primaryAttempts.filter(row => !isKnownRejectedTextRequestAttempt(row))
+  const second = secondAttempts.filter(row => !isKnownRejectedTextRequestAttempt(row))
+  if (input.payments.length !== primaryAttempts.length + secondAttempts.length || primaryAttempts.length > 2 || secondAttempts.length > 2
+    || input.payments.some(row => !isKnownRejectedTextRequestAttempt(row) && (row.usageSource !== 'reported' || !isKnownTextRequestBilling(row)))
+    || primary.length !== 1 || second.length !== 1 || primary[0].usageSource !== 'reported'
     || !isKnownTextRequestBilling(primary[0]) || object(primary[0].billingEvidence).responseObserved !== true) return null
   const claims = await tx.agentArtifact.findMany({ where: { runId: input.runId, run: { userId: subject.userId, novelId: subject.novelId }, artifactType: 'continuityReview',
     createdAt: { gte: input.callAt, lte: input.resultAt }, metadata: { path: ['callId'], equals: input.callId } } })
@@ -27,9 +31,11 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
   if (!frozen.success || !Array.isArray(meta.usageIds) || !object(meta.request).system || !object(meta.request).content
     || frozen.data.targetId !== (frozen.data.targetType === 'chapter' ? input.chapterId : input.compilationId)
     || meta.fullReassessmentKey !== legacyContinuityAssessmentKey({ runId: input.runId, callId: input.callId }, frozen.data)
-    || runtimeJson(meta.usageIds).hash !== runtimeJson([primary[0].id]).hash
+    || runtimeJson([...meta.usageIds].sort()).hash !== runtimeJson(primaryAttempts.map(row => row.id).sort()).hash
     || input.payments.some(row => row.userId !== subject.userId || row.novelId !== subject.novelId || row.agentRunId !== input.runId || row.targetType !== frozen.data.targetType || row.targetId !== frozen.data.targetId)
-    || primary[0].createdAt > claim.createdAt || second[0].createdAt < claim.createdAt) return null
+    || primaryAttempts.some(row => row.createdAt > claim.createdAt) || secondAttempts.some(row => row.createdAt < claim.createdAt)
+    || primaryAttempts.some(row => isKnownRejectedTextRequestAttempt(row) && row.createdAt >= primary[0].createdAt)
+    || secondAttempts.some(row => isKnownRejectedTextRequestAttempt(row) && row.createdAt >= second[0].createdAt)) return null
   const original = object(meta.original), raw = object(original.rawResponse)
   if (original.parserVersion !== 6 || raw.encoding !== 'json-string' || raw.complete !== true || typeof raw.content !== 'string') return null
   let content: unknown
@@ -38,13 +44,21 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
   const inspected = inspectContinuityResponse(content, frozen.data.bodies, true, 6)
   if (inspected.complete || runtimeJson(inspected.audit).hash !== runtimeJson(original).hash
     || runtimeJson(meta.request).hash !== runtimeJson(continuityReassessmentRequest(frozen.data.system, frozen.data.content, inspected, frozen.data.bodies)).hash) return null
-  const observed = claims.filter(row => object(row.metadata).assessmentKey === meta.fullReassessmentKey && object(row.metadata).stage === 'first')
+  const firstFrames = claims.filter(row => object(row.metadata).assessmentKey === meta.fullReassessmentKey && object(row.metadata).stage === 'first')
+  const observed = firstFrames.filter(row => typeof object(object(row.metadata).response).content === 'string')
   if (observed.length !== 1 || !Array.isArray(object(observed[0].metadata).usageIds) || observed[0].createdAt > claim.createdAt || object(object(observed[0].metadata).audit).contentHash !== inspected.audit.contentHash
     || runtimeJson(object(observed[0].metadata).usageIds).hash !== runtimeJson([primary[0].id]).hash) return null
-  for (const [stage, payment] of [['first', primary[0]], ['reassessment', second[0]]] as const) {
-    const linked = claims.filter(row => object(row.metadata).assessmentRequestOwnerKey === meta.fullReassessmentKey && object(row.metadata).stage === stage)
-    if (linked.length !== 1 || runtimeJson({ ids: object(linked[0].metadata).usageIds }).hash !== runtimeJson({ ids: [payment.id] }).hash
-      || linked[0].createdAt < payment.createdAt || linked[0].createdAt > input.resultAt) return null
+  for (const [stage, payments] of [['first', primaryAttempts], ['reassessment', secondAttempts]] as const) {
+    const links = claims.filter(row => object(row.metadata).assessmentRequestOwnerKey === meta.fullReassessmentKey && object(row.metadata).stage === stage)
+    if (links.length !== payments.length) return null
+    for (const payment of payments) {
+      const linked = links.filter(row => runtimeJson({ ids: object(row.metadata).usageIds }).hash === runtimeJson({ ids: [payment.id] }).hash)
+      if (linked.length !== 1 || linked[0].createdAt < payment.createdAt || linked[0].createdAt > input.resultAt) return null
+      const frames = claims.filter(row => object(row.metadata).assessmentKey === meta.fullReassessmentKey && object(row.metadata).stage === stage
+        && runtimeJson(object(row.metadata).usageIds).hash === runtimeJson([payment.id]).hash)
+      if (frames.length !== 1 || frames[0].createdAt > input.resultAt
+        || isKnownRejectedTextRequestAttempt(payment) && object(object(frames[0].metadata).response).content !== null) return null
+    }
   }
   return { claim, primary: primary[0], second: second[0], input: frozen.data }
 }
@@ -94,8 +108,8 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
     const claims = reservations.filter(row => object(row.metadata).fullReassessmentKey === key)
     if (claims.length !== 1 || object(receipt[0].metadata).claimId !== claims[0].id || claims[0].createdAt > receipt[0].createdAt) return null
   }
-  if (full && (interval.filter(row => row.action === 'agent3ContinuityCritic' && row.usageSource === 'reported').length !== 1
-    || interval.some(row => row.action !== 'agent3ContinuityCritic' && (row.action !== 'agent3ContinuityCriticSecondPass' || row.billingStatus !== 'not_dispatched')))) return null
+  if (full && (interval.filter(row => row.action === 'agent3ContinuityCritic' && row.usageSource === 'reported' && !isKnownRejectedTextRequestAttempt(row)).length !== 1
+    || interval.some(row => !isKnownRejectedTextRequestAttempt(row) && row.action !== 'agent3ContinuityCritic' && (row.action !== 'agent3ContinuityCriticSecondPass' || row.billingStatus !== 'not_dispatched')))) return null
   if (!full && interval.some(row => row.billingStatus !== 'not_dispatched')) return null
   return { chapter, coverage, sourceCallId: callId, usageIds: ids }
 }

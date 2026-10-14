@@ -11,12 +11,163 @@ import { readQualityFormatRecovery, claimQualityFormatRecovery } from '../../api
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { prepareStoryCompilation, recordStoryCompilerWrite, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
+import { tokenPriceSchema } from '../../api/lib/billing/token-price.js'
+import { priceTokenEvidence } from '../../api/lib/billing/reservation-policy.js'
 
 // Legacy usage logs have their own user FK; clean only this fixture's real
 // billing rows after assertions, before the shared durable fixture removes user.
 const fixture: typeof durableFixture = (work, ...rest) => durableFixture(async f => {
   try { await work(f) } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
 }, ...rest)
+
+const retryRuntime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', provider: 'fixture', modelName: 'fixture',
+  baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', multiplierBps: 10000, reasoningEffort: 'low', reasoningEfforts: ['none', 'low'],
+  reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
+const qualityCompletion = (content: string) => new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }],
+  usage: { prompt_tokens: 10, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
+const qualityRateLimit = (usage?: object) => new Response(JSON.stringify({ error: { code: 'rate_limit_exceeded', message: 'RPM exceeded' },
+  ...(usage === undefined ? {} : { usage }) }), { status: 429 })
+
+// Only release the route retry's 60-second timer early. PostgreSQL transaction
+// timers, Date, review deadlines and AbortSignal deadlines remain real.
+function interceptQualityRetryWait() {
+  const realTimeout = globalThis.setTimeout, waits: number[] = []
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    if (ms !== 60_000) return realTimeout(callback, ms, ...args)
+    waits.push(ms)
+    return realTimeout(callback, 0, ...args)
+  }) as typeof setTimeout)
+  return waits
+}
+
+async function prepareRetryQuality(f: Parameters<Parameters<typeof fixture>[0]>[0]) {
+  vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
+  await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0, status: 'running' } })
+  const prepared = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '完整质量检查' })
+  const compilationId = prepared.compilation.id
+  await recordStoryCompilerWrite({ ...f, chapterId: f.chapterId, chapterOrderIndex: 1, chapterRevision: 1 })
+  await validateStoryContinuity({ ...f, compilationId, findings: [], expectedChapterRevision: 1, independentCheck: 'complete' })
+  const window = credits.getCreditWindow()
+  await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+  const ctx: ToolContext = { ...f, callId: 'rate-limit-quality', mode: 'build', creativeFreedom: 'stable', qualityMode: 'premium', modelRuntime: retryRuntime,
+    signal: new AbortController().signal, emit: () => {} }
+  return { ctx, compilationId }
+}
+
+describe.runIf(available)('actual quality tool zero-fee retry and format recovery in PostgreSQL', () => {
+  it.each(['primary-absent', 'primary-zero', 'recovery-absent', 'recovery-zero', 'both'] as const)(
+    '%s applies the complete format recovery and reuses it without additional HTTP', scenario => fixture(async f => {
+      const { ctx, compilationId } = await prepareRetryQuality(f)
+      const waits = interceptQualityRetryWait(), queue: Response[] = []
+      const primaryRejected = scenario.startsWith('primary') || scenario === 'both'
+      const recoveryRejected = scenario.startsWith('recovery') || scenario === 'both'
+      if (primaryRejected) queue.push(qualityRateLimit(scenario === 'primary-zero' ? { prompt_tokens: 0, completion_tokens: 0 } : undefined))
+      queue.push(qualityCompletion('broken JSON'))
+      if (recoveryRejected) queue.push(qualityRateLimit(scenario === 'recovery-zero' ? { prompt_tokens: 0, completion_tokens: 0 } : undefined))
+      queue.push(qualityCompletion('{"findings":[]}'))
+      const expectedRequests = queue.length
+      const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
+        const request = JSON.parse(String(init.body))
+        expect(request.model).toBe(retryRuntime.modelName)
+        expect(request.reasoning_effort).toBe('none')
+        expect(request.tools).toBeUndefined()
+        expect(request.messages[1].content).toContain('原文')
+        expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${retryRuntime.apiKey}`)
+        const next = queue.shift()
+        if (!next) throw new Error('unexpected extra HTTP request')
+        return next
+      })
+      vi.stubGlobal('fetch', fetcher)
+      const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      expect((await qualityAnalyzeTool.execute(ctx, { compilationId, chapterId: f.chapterId })).outcome).toBeUndefined()
+      expect(fetcher).toHaveBeenCalledTimes(expectedRequests)
+      expect(waits).toEqual(Array.from({ length: Number(primaryRejected) + Number(recoveryRejected) }, () => 60_000))
+      const paid = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, action: { startsWith: 'agent3Humanity' } }, orderBy: { createdAt: 'asc' } })
+      expect(paid).toHaveLength(expectedRequests)
+      expect(paid.filter(row => row.action === 'agent3HumanityCritic')).toHaveLength(primaryRejected ? 2 : 1)
+      expect(paid.filter(row => row.action === 'agent3HumanityFormatRecovery')).toHaveLength(recoveryRejected ? 2 : 1)
+      for (const payment of paid) {
+        expect(payment).toMatchObject({ modelName: retryRuntime.modelName, multiplierBps: retryRuntime.multiplierBps, reservedCreditMilli: 0 })
+        if (payment.billingStatus === 'provider_rejected') expect(payment).toMatchObject({ usageSource: 'prepared', requestTokens: null, responseTokens: null, creditChargeMilli: 0 })
+        else {
+          expect(payment).toMatchObject({ usageSource: 'reported', billingStatus: 'settled' })
+          expect(payment.creditChargeMilli).toBe(priceTokenEvidence(tokenPriceSchema.parse(payment.billingSnapshot), payment.requestTokens!, payment.responseTokens!, payment.promptCacheHitTokens))
+          if (payment.requestTokens === 0 && payment.responseTokens === 0) expect(payment.billingEvidence).toMatchObject({ providerRejection: { status: 429 } })
+        }
+      }
+      const reports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+      expect(reports).toHaveLength(2)
+      expect(reports[0]).toMatchObject({ status: 'failed', deterministicMetrics: { independentCheck: 'unavailable', formatRecovery: { state: 'claimed' },
+        criticResponse: { rawResponse: { encoding: 'json-string', content: JSON.stringify('broken JSON'), complete: true } } } })
+      expect(reports[1]).toMatchObject({ status: 'passed', deterministicMetrics: { independentCheck: 'complete', formatRecovery: { state: 'completed', reportId: reports[0].id },
+        criticResponse: { rawResponse: { encoding: 'json-string', content: JSON.stringify('{"findings":[]}'), complete: true } } } })
+      expect(await prisma.$transaction(tx => readQualityFormatRecovery(tx, ctx, { chapterId: f.chapterId }))).toBeNull()
+      await qualityAnalyzeTool.execute(ctx, { compilationId, chapterId: f.chapterId })
+      await qualityAnalyzeTool.execute({ ...ctx, callId: 'same-input-quality-reuse' }, { compilationId, chapterId: f.chapterId })
+      expect(fetcher).toHaveBeenCalledTimes(expectedRequests)
+      for (const payment of paid) expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: payment.id } })).toEqual(payment)
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+      expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).committedAt).toBeNull()
+    }))
+
+  it.each(['primary-empty', 'primary-partial', 'primary-unknown', 'primary-pending-settlement',
+    'recovery-empty', 'recovery-partial', 'recovery-unknown', 'recovery-pending-settlement'] as const)(
+    '%s retains all accounting and never retries or produces a ready report', scenario => fixture(async f => {
+      const { ctx, compilationId } = await prepareRetryQuality(f)
+      const waits = interceptQualityRetryWait(), recovery = scenario.startsWith('recovery'), failure = scenario.replace(/^(primary|recovery)-/, '')
+      const failedAction = recovery ? 'agent3HumanityFormatRecovery' : 'agent3HumanityCritic'
+      if (failure === 'pending-settlement') {
+        const consume = credits.consumeTokenCredits
+        vi.spyOn(credits, 'consumeTokenCredits').mockImplementation(async args => {
+          const payment = await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: args.usageLogId } })
+          if (payment.action === failedAction) throw new Error('fixture settlement unavailable')
+          return consume(args)
+        })
+      }
+      let requests = 0
+      const fetcher = vi.fn(async () => {
+        requests++
+        if (recovery && requests === 1) return qualityCompletion('broken JSON')
+        if (failure === 'unknown') throw new TypeError('fetch failed after dispatch')
+        return qualityRateLimit(failure === 'empty' ? {} : failure === 'partial' ? { prompt_tokens: 10 } : { prompt_tokens: 0, completion_tokens: 0 })
+      })
+      vi.stubGlobal('fetch', fetcher)
+      const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const result = await qualityAnalyzeTool.execute(ctx, { compilationId, chapterId: f.chapterId }).catch(error => ({ outcome: 'failed', failureCode: error.code ?? error.name }))
+      expect(result.outcome).toBe('failed')
+      expect(fetcher).toHaveBeenCalledTimes(recovery ? 2 : 1)
+      expect(waits).toEqual([])
+      const paid = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, action: { startsWith: 'agent3Humanity' } } })
+      expect(paid).toHaveLength(recovery ? 2 : 1)
+      for (const payment of paid) {
+        expect(payment.modelName).toBe(retryRuntime.modelName); expect(payment.multiplierBps).toBe(retryRuntime.multiplierBps)
+        if (payment.action === failedAction) {
+          expect(payment.billingStatus).toBe(failure === 'pending-settlement' ? 'pending_settlement' : 'pending_usage')
+          expect(payment.creditChargeMilli).toBe(0)
+          if (failure === 'partial') expect(payment).toMatchObject({ requestTokens: 10, responseTokens: null })
+          if (failure === 'pending-settlement') expect(payment).toMatchObject({ requestTokens: 0, responseTokens: 0 })
+        } else {
+          expect(payment).toMatchObject({ usageSource: 'reported', billingStatus: 'settled', requestTokens: 10, responseTokens: 5, reservedCreditMilli: 0 })
+          expect(payment.creditChargeMilli).toBe(priceTokenEvidence(tokenPriceSchema.parse(payment.billingSnapshot), 10, 5, payment.promptCacheHitTokens))
+        }
+      }
+      const reports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId } })
+      expect(reports.every(report => report.status === 'failed')).toBe(true)
+      for (const report of reports) expect(report.deterministicMetrics).not.toMatchObject({ independentCheck: 'complete' })
+      if (recovery) {
+        expect(reports).toHaveLength(1)
+        expect(reports[0].deterministicMetrics).toMatchObject({ formatRecovery: { state: 'claimed' } })
+      }
+      expect(await prisma.$transaction(tx => readQualityFormatRecovery(tx, ctx, { chapterId: f.chapterId }))).toBeNull()
+      // The original claimed recovery cannot reopen after an unknown result.
+      if (recovery) {
+        await qualityAnalyzeTool.execute({ ...ctx, callId: 'unknown-recovery-replay' }, { compilationId, chapterId: f.chapterId }).catch(() => {})
+        expect(fetcher).toHaveBeenCalledTimes(2)
+      }
+      for (const payment of paid) expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: payment.id } })).toEqual(payment)
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+    }))
+})
 
 describe.runIf(available)('settled legacy quality format recovery', () => {
   it.each(['live-valid', 'live-failed', 'old-valid', 'old-repair', 'old-unknown', 'old-stale', 'old-context', 'old-foreign', 'old-tampered', 'old-concurrent', 'old-reprepare', 'live-cancelled', 'live-mechanical'] as const)(

@@ -10,6 +10,7 @@ import { runtimeJson } from './runtime-common.js'
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { readContinuedReviewRecovery } from './continued-review-recovery.js'
 import { readOrphanQualityRecoveryProofs } from './quality-orphan-recovery.js'
+import { isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -106,11 +107,12 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, chap
     if (run.taskRootId || report.runId !== subject.runId || audit.callId !== live.callId || audit.contentHash !== live.contentHash
       || audit.characterCount !== live.characterCount || report.createdAt < live.startedAt || live.characterCount <= 0) return null
     const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, targetType: 'chapter', targetId: target,
-      action: { startsWith: 'agent3HumanityCritic' }, createdAt: { gte: live.startedAt, lte: report.createdAt } } })
-    if (paid.length < 1 || paid.length > 2 || paid.filter(item => item.action === 'agent3HumanityCritic').length !== 1
+      action: { startsWith: 'agent3HumanityCritic' }, createdAt: { gte: live.startedAt, lte: report.createdAt } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+    const semantic = paid.filter(item => !isKnownRejectedTextRequestAttempt(item))
+    if (paid.length < 1 || paid.length > 4 || semantic.length < 1 || semantic.length > 2 || semantic.filter(item => item.action === 'agent3HumanityCritic').length !== 1
       || paid.some(item => !['agent3HumanityCritic', 'agent3HumanityCriticOutputRecovery', 'agent3HumanityCriticEmptyRecovery'].includes(item.action)
-      || item.billingStatus !== 'settled' || item.usageSource !== 'reported'
-      || item.requestTokens === null || item.responseTokens === null || item.responseTokens <= 0)) return null
+      || !isKnownRejectedTextRequestAttempt(item) && (item.billingStatus !== 'settled' || item.usageSource !== 'reported'
+      || item.requestTokens === null || item.responseTokens === null || item.responseTokens <= 0))) return null
     evidenceHash = runtimeJson({ callId: live.callId, contentHash: live.contentHash, usageIds: paid.map(item => item.id) }).hash
   } else if (orphanProof) {
     evidenceHash = orphanProof.evidenceHash

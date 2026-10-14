@@ -8,7 +8,7 @@ import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.js'
 import { runtimeJson } from './runtime-common.js'
-import { isKnownTextRequestBilling } from './text-request-billing.js'
+import { isKnownTextRequestBilling, isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 import type { ToolContext } from './tools/types.js'
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.js'
@@ -41,7 +41,8 @@ async function knownCorrectionObservation(tx: Prisma.TransactionClient, ctx: Pic
   const usage = await tx.aiUsageLog.findMany({ where: { id: { in: ids }, userId: ctx.userId, novelId: ctx.novelId,
     action: 'agent3ContinuityEvidenceCorrection', targetType: String(frozen.targetType), targetId: String(frozen.targetId) } })
   if (ids.length !== meta.usageIds.length || new Set(ids).size !== ids.length || usage.length !== ids.length
-    || usage.some(row => row.usageSource !== 'reported' || !isKnownTextRequestBilling(row) || object(row.billingEvidence).responseObserved !== true)) return null
+    || usage.filter(row => !isKnownRejectedTextRequestAttempt(row)).length !== 1
+    || usage.some(row => !isKnownRejectedTextRequestAttempt(row) && (row.usageSource !== 'reported' || !isKnownTextRequestBilling(row) || object(row.billingEvidence).responseObserved !== true))) return null
   const providerComplete = meta.finishReason === 'stop' && meta.toolCallsPresent === false && raw.complete === true
   let inspected: Inspection | null = null
   const bodies = z.object({ previous: z.string().nullable(), current: z.string() }).safeParse(frozen.bodies)
@@ -65,7 +66,8 @@ async function authorRetiredCorrectionClaim(tx: Prisma.TransactionClient, ctx: T
     || object(results[0].payload).toolName !== 'continuity_validate' || results[0].seq <= calls[0].seq || results[0].createdAt >= admission.at) return false
   const usage = await tx.aiUsageLog.findMany({ where: { userId: ctx.userId, novelId: ctx.novelId, action: 'agent3ContinuityEvidenceCorrection',
     targetType: String(frozen.targetType), targetId: String(frozen.targetId), createdAt: { gte: claim.createdAt, lte: results[0].createdAt } } })
-  return usage.some(row => retiredIds.has(row.id)) && usage.every(row => row.usageSource === 'reported' && isKnownTextRequestBilling(row) || retiredIds.has(row.id))
+  return usage.some(row => retiredIds.has(row.id)) && usage.every(row => isKnownRejectedTextRequestAttempt(row)
+    || row.usageSource === 'reported' && isKnownTextRequestBilling(row) || retiredIds.has(row.id))
 }
 
 export async function readLegacyContinuityCorrectionGate(tx: Prisma.TransactionClient, ctx: ToolContext, input: {
@@ -96,12 +98,12 @@ export async function readLegacyContinuityCorrectionGate(tx: Prisma.TransactionC
     const ids = record.usageIds as string[]
     const usage = await tx.aiUsageLog.findMany({ where: { id: { in: ids }, userId: ctx.userId, novelId: ctx.novelId,
       chapterId: input.chapterId, action: { startsWith: 'agent3ContinuityCritic' } } })
-    const known = ids.length ? new Set(ids).size === ids.length && usage.length === ids.length && usage.every(row => row.usageSource === 'reported'
+    const known = ids.length ? new Set(ids).size === ids.length && usage.length === ids.length && usage.every(row => isKnownRejectedTextRequestAttempt(row) || row.usageSource === 'reported'
       && isKnownTextRequestBilling(row) && object(row.billingEvidence).responseObserved === true)
       : record.dispatchState === 'not_dispatched' && !await tx.aiUsageLog.count({ where: { userId: ctx.userId, novelId: ctx.novelId, chapterId: input.chapterId,
         action: { startsWith: 'agent3ContinuityCritic' }, createdAt: { gte: reservation.createdAt, lte: observed.createdAt } } })
     const explicitlyRetired = ids.length > 0 && usage.length === ids.length
-      && usage.every(row => row.usageSource === 'reported' && isKnownTextRequestBilling(row) || authorContinuedUsageIds.has(row.id))
+      && usage.every(row => isKnownRejectedTextRequestAttempt(row) || row.usageSource === 'reported' && isKnownTextRequestBilling(row) || authorContinuedUsageIds.has(row.id))
     if ((!known && !explicitlyRetired) || meta.continuityAssessmentAdmissionId === admission?.id) return { blocked: true, freshAdmissionId: null }
   }
   let pending = false
@@ -174,7 +176,8 @@ export async function markLegacyContinuityAssessmentApplied(tx: Prisma.Transacti
   if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string')) return
   const usage = await tx.aiUsageLog.findMany({ where: { id: { in: ids as string[] }, userId: ctx.userId, novelId: ctx.novelId,
     chapterId: String(object(reservation.metadata).chapterId), action: { startsWith: 'agent3ContinuityCritic' } } })
-  if (usage.length !== ids.length || usage.some(row => row.usageSource !== 'reported' || !isKnownTextRequestBilling(row) || object(row.billingEvidence).responseObserved !== true)) return
+  if (usage.length !== ids.length || !usage.some(row => !isKnownRejectedTextRequestAttempt(row))
+    || usage.some(row => !isKnownRejectedTextRequestAttempt(row) && (row.usageSource !== 'reported' || !isKnownTextRequestBilling(row) || object(row.billingEvidence).responseObserved !== true))) return
   if (await tx.agentArtifact.findFirst({ where: { runId: { in: runIds }, artifactType: 'continuityReview', metadata: { path: ['assessmentAppliedReservationId'], equals: reservation.id } } })) return
   await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性报告应用记录', content: '已将收到的新检查应用到对应报告。',
     metadata: runtimeJson({ version: 1, assessmentAppliedReservationId: reservation.id, assessmentObservationId: observations[0].id,
@@ -343,7 +346,8 @@ export async function claimLegacyContinuityCorrection(tx: Prisma.TransactionClie
   if (!input.usageIds.length || new Set(input.usageIds).size !== input.usageIds.length) return false
   const usage = await tx.aiUsageLog.findMany({ where: { id: { in: input.usageIds }, userId: ctx.userId, novelId: ctx.novelId,
     targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3ContinuityCritic' } } })
-  if (usage.length !== input.usageIds.length || usage.some(row => row.usageSource !== 'reported' || !isKnownTextRequestBilling(row))) return false
+  if (usage.length !== input.usageIds.length || !usage.some(row => !isKnownRejectedTextRequestAttempt(row))
+    || usage.some(row => !isKnownRejectedTextRequestAttempt(row) && (row.usageSource !== 'reported' || !isKnownTextRequestBilling(row)))) return false
   const key = correctionKey(originalTask.taskId, input.chapterId, input.revision, input.bodies, input.original.audit.contentHash, admission?.id ?? null)
   if (await tx.agentArtifact.findFirst({ where: { runId: { in: runIds }, artifactType: 'continuityReview', metadata: { path: ['evidenceCorrectionKey'], equals: key } } })) return false
   await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性引用诊断', summary: '原意见未确认',

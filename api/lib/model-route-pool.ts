@@ -86,7 +86,10 @@ function exactRouteCooldownKey(params: ChatWithToolsParams): string {
     params.model ?? env.aiTextModel, accountFingerprint].join('\u0000')
 }
 
-async function invokeExactRouteWithRateLimitRetry<T>(params: ChatWithToolsParams, invoke: (params: ChatWithToolsParams) => Promise<T>): Promise<T> {
+/** Fixed identity only; no configuration reads or alternate routes. Producers
+ * must establish zero-charge billing before issuing ModelRouteRejected. */
+export async function invokeExactRouteWithRateLimitRetry<T>(params: ChatWithToolsParams, invoke: (params: ChatWithToolsParams) => Promise<T>): Promise<T> {
+  if (params.durableExecution) return invoke(params)
   const signal = AbortSignal.any([...(params.signal ? [params.signal] : []), AbortSignal.timeout(360_000)])
   const key = exactRouteCooldownKey(params)
   if (exactRouteCooldowns.size > 512) exactRouteCooldowns.clear()

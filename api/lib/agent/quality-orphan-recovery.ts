@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { buildHumanityQualityContext, qualityReviewContextHash } from './humanity-quality.js'
 import { runtimeJson } from './runtime-common.js'
 import { hasReturnedQualityCorrection } from './quality-evidence.js'
+import { isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -64,12 +65,15 @@ export async function readOrphanQualityRecoveryProofs(tx: Prisma.TransactionClie
         createdAt: interval, id: { notIn: [source.id, final.id] } } }),
       tx.agentOperation.count({ where: { originRunId: { in: ids }, kind: 'provider', action: { startsWith: 'quality_' }, createdAt: interval } }),
     ])
-    const recoveries = paid.filter(usage => usage.action === 'agent3HumanityFormatRecovery')
-    const corrections = paid.filter(usage => usage.action === 'agent3HumanityEvidenceCorrection')
+    const semantic = paid.filter(usage => !isKnownRejectedTextRequestAttempt(usage))
+    const recoveryAttempts = paid.filter(usage => usage.action === 'agent3HumanityFormatRecovery')
+    const correctionAttempts = paid.filter(usage => usage.action === 'agent3HumanityEvidenceCorrection')
+    const recoveries = semantic.filter(usage => usage.action === 'agent3HumanityFormatRecovery')
+    const corrections = semantic.filter(usage => usage.action === 'agent3HumanityEvidenceCorrection')
     if (competingReports || operations || recoveries.length !== 1 || corrections.length > 1
-      || paid.length !== recoveries.length + corrections.length
+      || paid.length !== recoveryAttempts.length + correctionAttempts.length || recoveryAttempts.length > 2 || correctionAttempts.length > 2
       || corrections.length && (audit.classification !== 'source_invalid' || !hasReturnedQualityCorrection(audit) || corrections[0].createdAt < recoveries[0].createdAt)
-      || paid.some(usage => usage.usageSource !== 'reported' || usage.billingStatus !== 'settled'
+      || semantic.some(usage => usage.usageSource !== 'reported' || usage.billingStatus !== 'settled'
         || usage.requestTokens === null || usage.responseTokens === null || usage.responseTokens <= 0
         || object(usage.billingEvidence).responseObserved !== true)) continue
     trusted.add(final.id)

@@ -8,7 +8,7 @@ import { originalTaskRunIds } from './original-request.js'
 import { readWritingScope } from './writing-scope.js'
 import { runtimeJson } from './runtime-common.js'
 import { activeChapterScope } from '../data/internal.js'
-import { isKnownTextRequestBilling } from './text-request-billing.js'
+import { isKnownTextRequestBilling, isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 import { readKnownFailedContinuityCorrection } from './continuity-response-correction.js'
 import { readOwnedContinuityReassessment, readUnsentContinuityAdmission } from './continuity-reassessment-witness.js'
 
@@ -65,8 +65,8 @@ export async function readLegacyContinuityRecovery(tx: Prisma.TransactionClient,
       const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
         targetType: 'story_compilation', targetId: compilation.id, action: { startsWith: 'agent3Continuity' },
         createdAt: { gte: call.createdAt, lte: result.createdAt } } })
-      if (cap ? paid.length !== 0 : paid.filter(item => item.action === 'agent3ContinuityCritic').length !== 1
-        || paid.some(item => item.usageSource !== 'reported' || !isKnownTextRequestBilling(item))) continue
+      if (cap ? paid.length !== 0 : paid.filter(item => item.action === 'agent3ContinuityCritic' && !isKnownRejectedTextRequestAttempt(item)).length !== 1
+        || paid.some(item => !isKnownRejectedTextRequestAttempt(item) && (item.usageSource !== 'reported' || !isKnownTextRequestBilling(item)))) continue
       const key = `${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`
       empty.recovered.push(key)
       empty.markers.push(`continuity-recovery:protocol6:${runtimeJson({ taskId: original.taskId, compilationId: compilation.id, callId, code }).hash}`)
@@ -125,7 +125,7 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     const ids = compilations.filter(item => item.chapterId === chapter.id).map(item => item.id)
     const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
       OR: [{ targetType: 'story_compilation', targetId: { in: ids } }, { targetType: 'chapter', targetId: chapter.id }], action: { startsWith: 'agent3Continuity' } } })
-    const known = (item: typeof paid[number]) => item.usageSource === 'reported' && isKnownTextRequestBilling(item)
+    const known = (item: typeof paid[number]) => isKnownRejectedTextRequestAttempt(item) || item.usageSource === 'reported' && isKnownTextRequestBilling(item)
     if (paid.some(item => !known(item) && !retiredUsageIds.has(item.id))) continue
     const unfinishedMutation = events.some(event => {
       const payload = object(event.payload), args = object(payload.args)
@@ -190,8 +190,8 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     if (knownCorrection && correctionOnly.length !== knownCorrection.usage.length) continue
     if (correctionOnly.length && (!knownCorrection || knownCorrection.usage.length !== correctionOnly.length
       || correctionOnly.some(row => !knownCorrection.usage.some(item => item.id === row.id)))) continue
-    if ((!knownCorrection && receipts.filter(item => item.action === 'agent3ContinuityCritic').length !== 1)
-      || receipts.some(item => !known(item) || object(item.billingEvidence).responseObserved !== true
+    if ((!knownCorrection && receipts.filter(item => item.action === 'agent3ContinuityCritic' && !isKnownRejectedTextRequestAttempt(item)).length !== 1)
+      || receipts.some(item => !known(item) || !isKnownRejectedTextRequestAttempt(item) && object(item.billingEvidence).responseObserved !== true
         || !['agent3ContinuityCritic', 'agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery', 'agent3ContinuityEvidenceCorrection', 'agent3ContinuityCriticSecondPass'].includes(item.action))) continue
     const key = `continuity-author-recovery:${runtimeJson({ taskId: original.taskId, chapterId: chapter.id, contentHash: coverage.contentHash, admissionId: admission.id }).hash}`
     keys.push([`${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`, key])

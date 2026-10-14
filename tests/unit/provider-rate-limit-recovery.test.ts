@@ -19,16 +19,19 @@ import { ModelRouteRejected } from '../../api/lib/model-route-pool.js'
 type Usage = Record<string, unknown> & { id: string; userId: string; billingStatus: string }
 let rows: Map<string, Usage>
 const runtime = { tier: 'standard' as const, provider: 'fixture', modelName: 'selected-model', baseUrl: 'https://selected.test/v1',
-  apiKey: 'fixture-key', reasoningEffort: 'medium' as const, multiplierBps: 12000, visionEnabled: false, contextWindowTokens: null }
+  apiKey: 'fixture-key', reasoningEffort: 'medium' as const, reasoningEfforts: ['none', 'medium'] as const,
+  reasoningParameterMode: 'native' as const, thinkingEnabled: false, multiplierBps: 12000, visionEnabled: false, contextWindowTokens: null }
 const response = () => new Response('data: {"choices":[{"delta":{"content":"complete"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}\n\ndata: [DONE]\n\n',
   { headers: { 'content-type': 'text/event-stream' } })
 const rejection = (usage?: object) => new Response(JSON.stringify({ error: { code: 'rate_limit_exceeded', message: 'RPM exceeded' },
   ...(usage === undefined ? {} : { usage }) }), { status: 429 })
-function invoke(channel: 'chat' | 'auxiliary', userId: string) {
+function invoke(channel: 'chat' | 'auxiliary' | 'quality' | 'continuity', userId: string) {
   return channel === 'chat' ? chatWithTools({ messages: [{ role: 'user', content: 'synthetic' }], tools: [], provider: runtime.provider,
     model: runtime.modelName, providerBaseUrl: runtime.baseUrl, providerApiKey: runtime.apiKey, reasoningEffort: runtime.reasoningEffort,
     usageLog: { userId, action: 'rate-limit-fixture', modelTier: runtime.tier, multiplierBps: runtime.multiplierBps } })
-    : generateTextCompletion('system', 'synthetic', { userId, action: 'rate-limit-fixture', modelRuntime: runtime })
+    : generateTextCompletion('system', 'synthetic', { userId,
+      action: channel === 'quality' ? 'agent3HumanityCritic' : channel === 'continuity' ? 'agent3ContinuityCritic' : 'rate-limit-fixture',
+      modelRuntime: { ...runtime, reasoningEfforts: [...runtime.reasoningEfforts] } })
 }
 beforeEach(() => {
   vi.clearAllMocks(); rows = new Map()
@@ -62,7 +65,7 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('actual singleton rate-limit request accounting', () => {
-  for (const channel of ['chat', 'auxiliary'] as const) {
+  for (const channel of ['chat', 'auxiliary', 'quality', 'continuity'] as const) {
     it.each([undefined, { prompt_tokens: 0, completion_tokens: 0 }])(`${channel} retries only an actual known zero-fee rejection %j`, async usage => {
       vi.useFakeTimers()
       const fetcher = vi.fn().mockImplementationOnce(async () => rejection(usage)).mockImplementationOnce(async () => response())
@@ -73,6 +76,7 @@ describe('actual singleton rate-limit request accounting', () => {
       expect(rows.get('usage-1')).toMatchObject(usage === undefined
         ? { billingStatus: 'provider_rejected', requestTokens: null, responseTokens: null, reservedCreditMilli: 0, creditChargeMilli: 0 }
         : { billingStatus: 'settled', requestTokens: 0, responseTokens: 0, reservedCreditMilli: 0, creditChargeMilli: 0 })
+      if (usage !== undefined) expect(rows.get('usage-1')!.billingEvidence).toMatchObject({ responseObserved: false, providerRejection: { status: 429 } })
       await vi.advanceTimersByTimeAsync(1)
       const result = await pending
       expect(typeof result === 'string' ? result : result.content).toBe('complete')
@@ -84,6 +88,11 @@ describe('actual singleton rate-limit request accounting', () => {
       }
       expect([...rows.values()].every(row => row.multiplierBps === 12000)).toBe(true)
       expect(rows.get('usage-2')).toMatchObject({ billingStatus: 'settled', creditChargeMilli: 42 })
+      if (channel === 'quality' || channel === 'continuity') {
+        expect(mocks.findModel).not.toHaveBeenCalled()
+        expect(JSON.parse(fetcher.mock.calls[0][1].body).reasoning_effort).toBe('none')
+        expect(JSON.parse(fetcher.mock.calls[1][1].body).reasoning_effort).toBe('none')
+      }
     })
 
     it.each([{}, { prompt_cache_hit_tokens: 5 }, { total_tokens: 5 }, { prompt_tokens: 0 }, { completion_tokens: 0 },

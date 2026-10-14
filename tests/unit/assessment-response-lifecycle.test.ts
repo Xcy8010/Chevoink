@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { applyContinuityReassessment, continuityReassessmentCandidates, runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { applyContinuityReassessment, bindLegacyContinuityRequest, continuityReassessmentCandidates, readLegacyContinuityAssessment, runContinuityReassessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import type { AiUsageLog, Prisma } from '@prisma/client'
 import { readOwnedContinuityReassessment } from '../../api/lib/agent/continuity-reassessment-witness.js'
+import type { ToolContext } from '../../api/lib/agent/tools/types.js'
+import { isKnownRejectedTextRequestAttempt } from '../../api/lib/agent/text-request-billing.js'
 
 const bodies = { previous: '前章门锁着，之后门打开。', current: '本章人物走进已打开的门。' }
 const proof = [{ source: 'previous', segmentId: 'p0' }, { source: 'current', segmentId: 'c0' }]
@@ -10,6 +12,110 @@ const finding = { signal: 'object', severity: 'error', evidence: '前章“错�
 const raw = JSON.stringify({ findings: [finding] })
 const original = (content = raw) => inspectContinuityResponse(content, bodies, true, 6)
 const retract = () => ({ decisions: [{ index: 0, action: 'retract', reason: '原判断忽略前章后续已开门的事件，核对两章原文后撤回。', sourceEvidence: proof }], findings: [] })
+
+describe('legacy continuity request attempts retain their semantic stage', () => {
+  const ctx = { userId: 'owner', novelId: 'novel', runId: 'run', callId: 'call' } as ToolContext
+  const input: LegacyAssessmentInput = { chapterId: 'chapter', revision: 1, bodies, system: 'selected reviewer', content: 'frozen full input', targetType: 'chapter', targetId: 'chapter' }
+  const rejected = { id: 'rejected', action: 'agent3ContinuityCritic', usageSource: 'prepared', billingStatus: 'provider_rejected',
+    requestTokens: null, responseTokens: null, reservedCreditMilli: 0, creditChargeMilli: 0 }
+  const settled = { id: 'success', action: 'agent3ContinuityCritic', usageSource: 'reported', billingStatus: 'settled',
+    requestTokens: 12, responseTokens: 8, reservedCreditMilli: 0, creditChargeMilli: 1 }
+  it('binds the actual same-action retry to first rather than output recovery', async () => {
+    const create = vi.fn(async ({ data }: { data: { metadata: unknown } }) => ({ id: 'binding', ...data }))
+    const tx = { $queryRaw: vi.fn(async () => [{ id: ctx.novelId }]), aiUsageLog: { findFirst: vi.fn(async () => settled), findMany: vi.fn(async () => [rejected]) },
+      agentArtifact: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => [{ metadata: { stage: 'first', usageIds: [rejected.id] } }]), create } } as unknown as Prisma.TransactionClient
+    await bindLegacyContinuityRequest(tx, ctx, input, settled.id, 'primary', async () => {})
+    expect(create).toHaveBeenCalledOnce()
+    expect(create.mock.calls[0][0].data.metadata).toMatchObject({ stage: 'first', usageIds: [settled.id] })
+  })
+  it.each(['agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery'])('preserves the real recovery action %s', async action => {
+    const create = vi.fn(async ({ data }: { data: { metadata: unknown } }) => ({ id: 'binding', ...data }))
+    const tx = { $queryRaw: vi.fn(async () => [{ id: ctx.novelId }]), aiUsageLog: { findFirst: vi.fn(async () => ({ ...settled, action })) }, agentArtifact: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), create } } as unknown as Prisma.TransactionClient
+    await bindLegacyContinuityRequest(tx, ctx, input, settled.id, 'primary', async () => {})
+    expect(create.mock.calls[0][0].data.metadata).toMatchObject({ stage: 'output_recovery' })
+  })
+  it('rejects reassessment usage bound to a primary stage before saving ownership', async () => {
+    const create = vi.fn()
+    const tx = { $queryRaw: vi.fn(async () => [{ id: ctx.novelId }]), aiUsageLog: { findFirst: vi.fn(async () => ({ ...settled, action: 'agent3ContinuityCriticSecondPass' })) }, agentArtifact: { findFirst: vi.fn(), create } } as unknown as Prisma.TransactionClient
+    await expect(bindLegacyContinuityRequest(tx, ctx, input, settled.id, 'primary', async () => {})).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    expect(create).not.toHaveBeenCalled()
+  })
+  it.each(['unknown', 'pending-settlement', 'successful-zero', 'third-attempt'] as const)('does not bind another request after %s', async kind => {
+    const create = vi.fn()
+    const prior = kind === 'unknown' ? { ...rejected, usageSource: 'unknown', billingStatus: 'pending_usage' }
+      : kind === 'pending-settlement' ? { ...settled, id: rejected.id, billingStatus: 'pending_settlement', requestTokens: 0, responseTokens: 0, creditChargeMilli: 0 }
+        : kind === 'successful-zero' ? { ...settled, id: rejected.id, requestTokens: 0, responseTokens: 0, creditChargeMilli: 0 }
+          : rejected
+    const priors = kind === 'third-attempt' ? [prior, { ...rejected, id: 'another-rejection' }] : [prior]
+    const tx = { $queryRaw: vi.fn(async () => [{ id: ctx.novelId }]), aiUsageLog: { findFirst: vi.fn(async () => settled), findMany: vi.fn(async () => priors) },
+      agentArtifact: { findMany: vi.fn(async () => priors.map(row => ({ metadata: { usageIds: [row.id] } }))), findFirst: vi.fn(), create } } as unknown as Prisma.TransactionClient
+    await expect(bindLegacyContinuityRequest(tx, ctx, input, settled.id, 'primary', async () => {})).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+    expect(create).not.toHaveBeenCalled()
+  })
+  it.each(['first', 'output_recovery'] as const)('existing usage binding preserves its frozen stage %s', async stage => {
+    const create = vi.fn(), findMany = vi.fn()
+    const tx = { $queryRaw: vi.fn(async () => [{ id: ctx.novelId }]), aiUsageLog: { findFirst: vi.fn(async () => settled) },
+      agentArtifact: { findFirst: vi.fn(async () => ({ metadata: { stage } })), findMany, create } } as unknown as Prisma.TransactionClient
+    const result = bindLegacyContinuityRequest(tx, ctx, input, settled.id, 'primary', async () => {})
+    if (stage === 'first') await expect(result).resolves.toBe('first')
+    else await expect(result).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    expect(findMany).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled()
+  })
+  it('requires a fresh HTTP rejection witness to classify settled 0/0 as a rejected attempt', () => {
+    const zero = { ...settled, requestTokens: 0, responseTokens: 0, creditChargeMilli: 0 }
+    expect(isKnownRejectedTextRequestAttempt(zero)).toBe(false)
+    expect(isKnownRejectedTextRequestAttempt({ ...zero, billingEvidence: { responseObserved: true } })).toBe(false)
+    expect(isKnownRejectedTextRequestAttempt({ ...zero, billingEvidence: { providerRejection: { status: 429 } } })).toBe(true)
+    expect(isKnownRejectedTextRequestAttempt({ ...zero, billingEvidence: { providerRejection: { status: 200 } } })).toBe(false)
+    expect(isKnownRejectedTextRequestAttempt({ ...zero, billingEvidence: { responseObserved: true, providerRejection: { status: 429 } } })).toBe(false)
+    expect(isKnownRejectedTextRequestAttempt({ ...zero, billingStatus: 'pending_settlement', billingEvidence: { providerRejection: { status: 429 } } })).toBe(false)
+    expect(isKnownRejectedTextRequestAttempt({ ...zero, promptCacheHitTokens: 1, billingEvidence: { providerRejection: { status: 429 } } })).toBe(false)
+  })
+  const response = (content: string | null) => ({ content: content === null ? null : JSON.stringify(content), finishReason: content === null ? null : 'stop',
+    toolCalls: [], transportComplete: content !== null })
+  function reader(rows: Array<Record<string, unknown>>, frames: Array<Record<string, unknown>>) {
+    return { aiUsageLog: { findMany: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) => rows.filter(row => typeof row.id === 'string' && where.id.in.includes(row.id))) },
+      agentArtifact: { findMany: vi.fn(async () => frames.map((metadata, index) => ({ id: `observation-${index}`, metadata }))),
+        findFirst: vi.fn(async () => null) } } as unknown as Prisma.TransactionClient
+  }
+  it('reads the successful same-action response after a null rejected attempt without consuming the format slot', async () => {
+    const frames = [{ stage: 'first', usageIds: [rejected.id], response: response(null) },
+      { stage: 'first', usageIds: [settled.id], response: response('{"findings":[]}') }]
+    const result = await readLegacyContinuityAssessment(reader([rejected, settled], frames), ctx, input)
+    expect(result).toMatchObject({ billingKnown: true, providerComplete: true, slotUsed: false, inspected: { complete: true, findings: [] } })
+    expect(result.usageIds).toEqual([rejected.id, settled.id])
+  })
+  it('reuses a complete second pass after its own zero-fee rejection and retains all four request IDs', async () => {
+    const secondRejected = { ...rejected, id: 'second-rejected', action: 'agent3ContinuityCriticSecondPass' }
+    const secondSettled = { ...settled, id: 'second-success', action: 'agent3ContinuityCriticSecondPass' }
+    const frames = [{ stage: 'first', usageIds: [rejected.id], response: response(null) },
+      { stage: 'first', usageIds: [settled.id], response: response(raw) },
+      { stage: 'reassessment', usageIds: [secondRejected.id], response: response(null) },
+      { stage: 'reassessment', usageIds: [secondSettled.id], response: response(JSON.stringify(retract())) }]
+    const tx = reader([rejected, settled, secondRejected, secondSettled], frames)
+    vi.mocked(tx.agentArtifact.findFirst).mockResolvedValue({ id: 'claimed' } as never)
+    const result = await readLegacyContinuityAssessment(tx, ctx, input)
+    expect(result).toMatchObject({ billingKnown: true, providerComplete: true, slotUsed: true, inspected: { complete: true, findings: [] } })
+    expect(result.usageIds).toEqual([rejected.id, settled.id, secondRejected.id, secondSettled.id])
+  })
+  it('does not erase a successful unmarked 0/0 output recovery stage', async () => {
+    const zero = { ...settled, id: 'zero-response', action: 'agent3ContinuityCriticEmptyRecovery', requestTokens: 0, responseTokens: 0, creditChargeMilli: 0 }
+    const frames = [{ stage: 'first', usageIds: [settled.id], response: response(raw) },
+      { stage: 'output_recovery', usageIds: [zero.id], response: response('{"findings":[]}') }]
+    const result = await readLegacyContinuityAssessment(reader([settled, zero], frames), ctx, input)
+    expect(result).toMatchObject({ billingKnown: true, providerComplete: true, slotUsed: true, inspected: { complete: true, findings: [] } })
+  })
+  it.each(['unknown', 'partial', 'pending-settlement', 'charged-rejection'] as const)('does not certify %s prior attempts', async kind => {
+    const unsafe = { ...rejected, ...(kind === 'unknown' ? { usageSource: 'unknown', billingStatus: 'pending_usage', reservedCreditMilli: 3 }
+      : kind === 'partial' ? { usageSource: 'partial', billingStatus: 'pending_usage', requestTokens: 1 }
+        : kind === 'pending-settlement' ? { usageSource: 'reported', billingStatus: 'pending_settlement', requestTokens: 0, responseTokens: 0 }
+          : { creditChargeMilli: 1 }) }
+    const frames = [{ stage: 'first', usageIds: [unsafe.id], response: response(null) }, { stage: 'first', usageIds: [settled.id], response: response('{"findings":[]}') }]
+    const result = await readLegacyContinuityAssessment(reader([unsafe, settled], frames), ctx, input)
+    expect(result.billingKnown).toBe(false)
+    expect(result.usageIds).toEqual([unsafe.id, settled.id])
+  })
+})
 
 describe('one complete continuity reassessment', () => {
   it('limits the Prisma run filter to the owner even when the caller has a full tool context', async () => {

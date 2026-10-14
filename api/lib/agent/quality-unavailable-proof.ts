@@ -6,6 +6,7 @@ import { buildHumanityQualityContext, HUMANITY_CRITIC_VERSION, qualityReviewCont
 import { readOriginalTaskRequest } from './original-request.js'
 import { readOrphanQualityRecoveryProofs } from './quality-orphan-recovery.js'
 import { hasReturnedQualityCorrection } from './quality-evidence.js'
+import { isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 export const qualityUnavailableProofSchema = z.object({
@@ -134,10 +135,11 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
     chapterId: chapter.id, createdAt: interval }, select: { id: true } })
   const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, targetType: 'chapter', targetId: chapter.id,
     action: { startsWith: 'agent3Humanity' }, createdAt: interval } })
-  const critics = paid.filter(item => item.action === 'agent3HumanityCritic')
+  const semantic = paid.filter(item => !isKnownRejectedTextRequestAttempt(item))
+  const critics = semantic.filter(item => item.action === 'agent3HumanityCritic')
   if (options.allowFormatRecovery && audit?.classification === 'source_invalid'
     && paid.some(item => item.action === 'agent3HumanityEvidenceCorrection') && !hasReturnedQualityCorrection(audit)) return null
-  const recoveries = options.allowFormatRecovery ? paid.filter(item => item.action === 'agent3HumanityFormatRecovery') : []
+  const recoveries = options.allowFormatRecovery ? semantic.filter(item => item.action === 'agent3HumanityFormatRecovery') : []
   let sourceReportId: string | undefined
   if (recoveries.length) {
     if (recoveries.length !== 1 || critics.length > 1 || !audit) return null
@@ -152,7 +154,7 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
     sourceReportId = source.id
   } else if (critics.length !== 1) return null
   if (!reports.some(item => item.id === report.id) || reports.some(item => item.id !== report.id && item.id !== sourceReportId)) return null
-  if (paid.some(item => item.billingStatus !== 'settled' || item.usageSource !== 'reported'
+  if (semantic.some(item => item.billingStatus !== 'settled' || item.usageSource !== 'reported'
     || item.requestTokens === null || item.responseTokens === null || item.responseTokens <= 0)) return null
   return qualityUnavailableProofSchema.parse({ version: 1, code: 'QUALITY_REPORT_INCOMPLETE', source: 'legacy',
     witnessIds: [call.id, result.id, ...paid.map(item => item.id)], evidenceHash: jsonHash({ call, result, paid }) })
