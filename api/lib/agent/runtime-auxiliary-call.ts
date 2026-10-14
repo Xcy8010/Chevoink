@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { supportsReviewJsonObject } from '../ai-response-format.js'
 import { creditModelTierSchema } from '../../../shared/contracts/credits.js'
 import type { CreditModelTier, ModelReasoningEffort } from '../../../shared/contracts/credits.js'
 import { env } from '../../config/env.js'
@@ -21,6 +22,8 @@ export const auxiliaryRouteSchema = z.object({
   customModelId: z.string().min(1).nullable().optional(),
   reasoningEffort: reasoningEffortSchema.optional(),
   honorReasoningEffort: z.literal(true).optional(),
+  /** Absent on old routes: never retrofit their original request contract. */
+  responseFormat: z.literal('json_object').optional(),
   provider: z.string(), model: z.string(), baseUrl: z.string(), maxOutputTokens: z.number().int().positive(),
 }).strict().superRefine((value, ctx) => {
   if (value.tier === 'custom' && !value.customModelId) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['customModelId'], message: '自定义辅助模型缺少模型身份。' })
@@ -78,6 +81,7 @@ export function auxiliaryRouteForRuntime(runtime: NonNullable<ToolContext['model
     provider: runtime.provider,
     model: runtime.modelName ?? env.aiTextModel,
     baseUrl: runtime.baseUrl ?? env.aiTextBaseUrl,
+    ...(supportsReviewJsonObject(runtime.baseUrl ?? env.aiTextBaseUrl, runtime.modelName ?? env.aiTextModel) ? { responseFormat: 'json_object' as const } : {}),
     maxOutputTokens,
   })
 }
@@ -127,6 +131,7 @@ export async function callDurableAuxiliary(input: {
     providerBaseUrl: input.route.baseUrl, providerApiKey: runtime.apiKey, reasoningEffort: runtime.reasoningEffort, temperature, maxOutputTokens: input.route.maxOutputTokens, signal: input.signal,
     boundedReview: !input.route.honorReasoningEffort, thinkingEnabled: runtime.thinkingEnabled, reasoningParameterMode: runtime.reasoningParameterMode,
     reasoningEfforts: [...runtime.reasoningEfforts],
+    responseFormat: input.route.responseFormat,
     outputTokenParameter: resolveTextOutputTokenParameter(runtime.outputTokenParameter, { provider: input.route.provider, providerBaseUrl: input.route.baseUrl, model: input.route.model }, true),
     preparedAuxiliaryRequest: preparedRequest, durableExecution: execution, usageLog: { userId: lease.userId, agentRunId: lease.runId, action: step, modelTier: routeTier, multiplierBps: input.price.multiplierBps } })
 }

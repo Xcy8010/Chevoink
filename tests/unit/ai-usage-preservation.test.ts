@@ -43,6 +43,35 @@ function qualityRuntime(overrides: Partial<TextRuntime> = {}): TextRuntime {
 const qualityResponse = (finish = 'stop') => new Response(JSON.stringify({ choices: [{ message: { content: '{"findings":[]}' }, finish_reason: finish }],
   usage: { prompt_tokens: 100, completion_tokens: 20 } }))
 
+describe('review JSON request capability', () => {
+  it.each([
+    { baseUrl: 'https://api.xiaomimimo.com/v1', modelName: 'mimo-v2.6-flash', supported: true },
+    { baseUrl: 'https://api.xiaomimimo.com/v1/', modelName: 'mimo-v2.6-pro', supported: true },
+    { baseUrl: 'https://proxy.example/v1', modelName: 'mimo-v2.6-flash', supported: false },
+    { baseUrl: 'https://api.xiaomimimo.com/v1', modelName: 'unknown-model', supported: false },
+    { baseUrl: 'https://api.xiaomimimo.com/other', modelName: 'mimo-v2.6-flash', supported: false },
+    { baseUrl: 'https://api.xiaomimimo.com.evil.example/v1', modelName: 'mimo-v2.6-flash', supported: false },
+  ])('only sends JSON mode to a documented endpoint and model: $baseUrl/$modelName', async ({ baseUrl, modelName, supported }) => {
+    const fetcher = vi.fn(async () => qualityResponse())
+    vi.stubGlobal('fetch', fetcher)
+    await generateReviewCompletion('Return a JSON object with findings.', 'Synthetic chapter', {
+      userId: 'test', action: 'agent3HumanityCritic', modelRuntime: qualityRuntime({ baseUrl, modelName }),
+    })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body.response_format).toEqual(supported ? { type: 'json_object' } : undefined)
+    expect(body.model).toBe(modelName)
+    expect(fetcher).toHaveBeenCalledOnce()
+  })
+
+  it('does not constrain ordinary creative text on the same MiMo route', async () => {
+    const fetcher = vi.fn(async () => qualityResponse())
+    vi.stubGlobal('fetch', fetcher)
+    await generateTextCompletion('Write prose', 'Synthetic outline', { userId: 'test', action: 'chapterAssist',
+      modelRuntime: qualityRuntime({ baseUrl: 'https://api.xiaomimimo.com/v1', modelName: 'mimo-v2.6-flash' }) })
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))).not.toHaveProperty('response_format')
+  })
+})
+
 describe('actual failed text request terminal trace', () => {
   it.each(['rejected', 'rejected-receipt-db-failed', 'reported', 'partial', 'empty-usage', 'invalid-usage', 'unsent', 'unsent-db-failed', 'transport', 'timeout', 'abort-after', 'server-error', 'quota-no-counts'] as const)(
     '%s preserves accounting certainty separately from report failure', async scenario => {

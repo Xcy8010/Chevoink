@@ -2,11 +2,11 @@
 import { act, cleanup, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ProcessingHint } from '../../src/features/studio/agent/components/ProcessingHint'
+import { projectAgentAuthorParts } from '../../shared/agent-author-view'
 import { shouldShowProcessingHint } from '../../src/features/studio/agent/lib/panel-helpers'
 import type { AgentUIMessage } from '../../shared/contracts/index.js'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
-import { OUTPUT_SILENCE_MS, useModelStageFeedback, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
-import { projectAgentAuthorParts } from '../../shared/agent-author-view.js'
+import { OUTPUT_SILENCE_MS, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
 afterEach(() => { cleanup(); useAgentStore.getState().resetRun(); vi.useRealTimers() })
 
 it('cancels the fallback timer when goal control suppresses a stale running phase', () => {
@@ -51,37 +51,16 @@ it.each(['text.delta', 'reasoning.delta'] as const)('keeps truthful waiting feed
   act(() => apply({ ...base, seq: 1, type: 'message.start', role: 'assistant' }))
   act(() => apply({ ...base, seq: 2, type, delta: '调用 chapter_' }))
   expect(view.result.current).toBe(true)
-  expect(projectAgentAuthorParts(useAgentStore.getState().messages[0].parts).filter(part => part.type !== 'reasoning')).toEqual([])
+  expect(projectAgentAuthorParts(useAgentStore.getState().messages[0].parts, true).every(part => part.type === 'reasoning' && !part.text)).toBe(true)
   expect(useAgentStore.getState().lastVisibleOutput).toBeNull()
   act(() => apply({ ...base, seq: 3, type, delta: 'write，chapterId=private-id。\n\n' }))
   expect(view.result.current).toBe(true)
-  const parts = projectAgentAuthorParts(useAgentStore.getState().messages[0].parts)
-  expect(parts).toEqual([])
+  const parts = projectAgentAuthorParts(useAgentStore.getState().messages[0].parts, true)
+  expect(parts.every(part => (part.type === 'text' || part.type === 'reasoning') && part.text.trim() === '')).toBe(true)
+  expect(JSON.stringify(parts)).not.toMatch(/chapter_write|chapterId|private-id/)
   act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS))
   expect(view.result.current).toBe(true)
   expect(useAgentStore.getState().lastVisibleOutput).toBeNull()
-})
-
-it('shows one measured model stage, preserves unsaved drafts and hands off only on an actual call', () => {
-  useAgentStore.getState().resumeRun('r', 's')
-  const base = { runId: 'r', messageId: 'm', ts: new Date().toISOString() }
-  const apply = useAgentStore.getState().applyEvent
-  act(() => apply({ ...base, seq: 1, type: 'message.start', role: 'assistant' }))
-  const hook = renderHook(() => {
-    const messages = useAgentStore(state => state.messages)
-    return { visible: useProcessingHint(messages, 'r', 'running', false), label: useModelStageFeedback(messages, 'r', 'running', false) }
-  })
-  act(() => apply({ ...base, seq: 2, type: 'tool.delta', callId: 'write', toolName: 'chapter_write', title: '撰写本章', argsChars: 83 }))
-  expect(hook.result.current).toEqual({ visible: true, label: '正在生成操作参数 · 83 字符' })
-  expect(projectAgentAuthorParts(useAgentStore.getState().messages[0].parts)).toEqual([])
-  act(() => apply({ ...base, seq: 3, type: 'tool.delta', callId: 'write', argsChars: 94,
-    draft: { kind: 'chapter', toolName: 'chapter_write', content: '尚未保存的正文' } }))
-  expect(hook.result.current.label).toBe('正在生成正文草稿 · 7 字（未保存）')
-  expect(useAgentStore.getState().liveToolDrafts.write.content).toBe('尚未保存的正文')
-  act(() => apply({ ...base, seq: 4, type: 'tool.call', callId: 'write', toolName: 'chapter_write', title: '撰写本章', args: {} }))
-  expect(hook.result.current).toEqual({ visible: false, label: null })
-  act(() => apply({ ...base, seq: 5, type: 'run.paused', reason: 'user_stop' }))
-  expect(useAgentStore.getState().liveToolDrafts).toEqual({})
 })
 
 it('does not let old-run or whitespace events suppress waiting; replay does not extend the timer', () => {

@@ -95,7 +95,7 @@ async function dispatchLegacyContinuityCorrection(ctx: ToolContext, input: { ori
   let observed: { usageId: string; content: string; finishReason: string | null; toolCallsPresent: boolean; transportComplete?: false } | null = null
   try {
     const content = await withTextRequestTrace(trace, () => generateTextCompletion(input.system, input.content, {
-      ...input.options, action: 'agent3ContinuityEvidenceCorrection', maxOutputTokens: CONTINUITY_MAX_OUTPUT_TOKENS, boundedReview: true,
+      ...input.options, action: 'agent3ContinuityEvidenceCorrection', maxOutputTokens: CONTINUITY_MAX_OUTPUT_TOKENS, boundedReview: true, responseFormat: 'json_object',
       onObservedCompletion: observation => {
         observed = { usageId: observation.usageId, content: observation.content, finishReason: observation.finishReason,
           toolCallsPresent: observation.toolCalls.length > 0, transportComplete: observation.transportComplete }
@@ -184,7 +184,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
       let observed: Observation | null = null
       try {
         const content = await withTextRequestTrace(followupTrace, () => generateTextCompletion(request.system, request.content, {
-          ...input.options, agentRunId: ctx.runId, action: 'agent3ContinuityCriticSecondPass', maxOutputTokens: CONTINUITY_MAX_OUTPUT_TOKENS, boundedReview: true,
+          ...input.options, agentRunId: ctx.runId, action: 'agent3ContinuityCriticSecondPass', maxOutputTokens: CONTINUITY_MAX_OUTPUT_TOKENS, boundedReview: true, responseFormat: 'json_object',
           beforeProviderDispatch: usageId => prisma.$transaction(tx => bindLegacyContinuityRequest(tx, ctx, frozen, usageId, 'reassessment', input.assertCurrent)),
           onObservedCompletion: value => { observed = { ...value, toolCalls: [...value.toolCalls] }; input.options.onObservedCompletion?.(value) },
         }))

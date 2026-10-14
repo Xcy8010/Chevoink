@@ -1,4 +1,4 @@
-import { memo, useId, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   BookOpenText,
   Bot,
@@ -6,6 +6,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleAlert,
   Download,
   Eye,
@@ -1075,22 +1076,102 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
   )
 })
 
-function ThinkingPart({ text, identity, streaming }: { text: string; identity: string; streaming: boolean }) {
-  const [expanded, setExpanded] = useState(false)
-  const id = useId()
-  return <div className="text-xs text-[var(--text-secondary)]">
-    <button type="button" aria-expanded={expanded} aria-controls={id}
-      onClick={() => setExpanded(value => !value)} className="flex items-center gap-1.5 py-1">
-      <Brain className="h-3.5 w-3.5" />
-      {expanded ? '收起思考' : '展开思考'}
-      {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-    </button>
-    {expanded ? <div id={id} className="mt-1 border-l border-[var(--border-default)] pl-3">
-      {text.trim() ? <AgentMarkdownText text={text} streaming={false} identity={identity} />
-        : streaming ? <p>思考正在生成，完整段落到达后显示。</p> : null}
-    </div> : null}
-  </div>
-}
+const ReasoningPart = memo(function ReasoningPart({
+  part,
+  streaming,
+}: {
+  part: Extract<AgentMessagePart, { type: 'reasoning' }>
+  streaming: boolean
+}) {
+  // null = 默认收起；true/false = 用户本轮手动指定。
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null)
+  const showBody = manualOpen ?? false
+  const bodyRef = useRef<HTMLDivElement | null>(null)
+  // 是否跟随最新思考文本：默认跟随，用户在思考区内往上翻即暂停，重新滑回底部即恢复
+  const followRef = useRef(true)
+
+  // 思考结束时清掉手动状态，维持紧凑收起态。
+  useEffect(() => {
+    if (!streaming) {
+      setManualOpen(null)
+    }
+  }, [streaming])
+
+  useEffect(() => {
+    // 只在思考中跟随；思考结束后用户手动展开回看时，从头开始读而不是跳到末尾
+    if (!streaming || !showBody) {
+      return
+    }
+    const node = bodyRef.current
+    if (!node || !followRef.current) {
+      return
+    }
+    node.scrollTop = node.scrollHeight
+  }, [part.text, streaming, showBody])
+
+  const handleBodyScroll = useCallback(() => {
+    const node = bodyRef.current
+    if (!node) {
+      return
+    }
+    // 程序自动滚底后本就贴底，不会被误判成用户干预；内容没溢出时差值为 0，同样保持跟随
+    followRef.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 12
+  }, [])
+
+  const handleToggle = useCallback(() => {
+    setManualOpen((current) => {
+      const nextOpen = !(current ?? false)
+      // 收起时重置跟随，再次展开直接看最新思考
+      if (!nextOpen) {
+        followRef.current = true
+      }
+      return nextOpen
+    })
+  }, [])
+
+  const visibleText = part.text.trim()
+  const meaningfulLines = visibleText.split('\n').map((line) => line.trim()).filter(Boolean)
+  const summary = (streaming ? meaningfulLines.at(-1) : meaningfulLines[0]) ?? (streaming ? '正在分析…' : '已完成分析')
+
+  return (
+    <div className="relative overflow-hidden" data-reasoning-running={streaming || undefined}>
+      {streaming ? <span aria-hidden className="pointer-events-none absolute inset-y-0 -left-72 z-0 w-72 animate-[reasoning-sweep_2.6s_ease-out_infinite] bg-gradient-to-r from-transparent via-[color:var(--surface-muted)]/70 to-transparent motion-reduce:hidden" /> : null}
+      <button
+        type="button"
+        onClick={handleToggle}
+        className="relative z-10 flex h-8 w-full items-center gap-2 overflow-hidden text-left"
+      >
+        <Brain
+          className={cn(
+            'h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]',
+            streaming && 'animate-pulse',
+          )}
+        />
+        <span className="shrink-0 text-[11px] font-medium text-[var(--text-secondary)]">
+          {streaming ? '思考中' : '思考'}
+        </span>
+        <span className="h-0.5 w-0.5 shrink-0 rounded-full bg-[var(--text-tertiary)]" />
+        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-tertiary)]">{summary}</span>
+        {showBody ? (
+          <ChevronUp className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+        ) : (
+          <ChevronDown className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+        )}
+      </button>
+      {showBody ? (
+        /* 这里刻意不加 overscroll-contain：思考区滚到边界后手势要能继续传给外层对话列表，
+           否则手指落在思考区上时整个对话就滑不动了 */
+        <div
+          ref={bodyRef}
+          onScroll={handleBodyScroll}
+          className="max-h-44 overflow-y-auto whitespace-pre-wrap border-l border-[var(--border-subtle)] py-1 pl-[22px] text-xs leading-6 text-[var(--text-tertiary)] [-webkit-overflow-scrolling:auto]"
+        >
+          {part.text}
+        </div>
+      ) : null}
+    </div>
+  )
+})
 
 export const AgentMessageParts = memo(function AgentMessageParts({
   parts,
@@ -1162,15 +1243,14 @@ export const AgentMessageParts = memo(function AgentMessageParts({
           return <AgentMarkdownText key={index} text={part.text} streaming={streaming && isLast} identity={`${blockId ?? ''}:${index}`} />
         }
 
-        if (part.type === 'reasoning') {
-          return <ThinkingPart key={`thinking-${index}`} text={part.text} streaming={streaming} identity={`${blockId ?? ''}:thinking:${index}`} />
-        }
-
         // 折叠态：隐藏思考/动作，仅保留 text 结论
         if (collapsed && !(part.type === 'tool-call' && (part.status === 'failed' || part.status === 'denied'))) {
           return null
         }
 
+        if (part.type === 'reasoning') {
+          return <ReasoningPart key={index} part={part} streaming={streaming && isLast} />
+        }
 
         if (part.type === 'tool-call') {
           // 子 Agent 内部工具卡片已嵌套进容器渲染，平铺处跳过

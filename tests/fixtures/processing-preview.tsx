@@ -4,7 +4,7 @@ import type { AgentStreamEvent } from '../../shared/contracts'
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
 import { ProcessingHint } from '../../src/features/studio/agent/components/ProcessingHint'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
-import { useModelStageFeedback, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
+import { useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
 import '../../src/index.css'
 const stages = ['思考流', '生成参数', '正文草稿', '实际执行', '已保存', '真实错误', '暂停', '完成']
 function simulate(stage: string) {
@@ -38,12 +38,11 @@ export function Preview() {
   const phase = useAgentStore(state => state.phase)
   const active = phase === 'starting' || phase === 'running'
   const visible = useProcessingHint(messages, runId, phase, false)
-  const label = useModelStageFeedback(messages, runId, phase, false)
   return <main className="studio-workspace mx-auto min-h-screen max-w-3xl p-6 text-[var(--text-primary)]">
     <nav className="mb-8 flex flex-wrap gap-3">{stages.map(item => <button key={item} onClick={() => setStage(item)}>{item}</button>)}</nav>
     <p className="mb-6">继续撰写第二章 · 当前阶段：{stage}（离线模拟事件）</p>
     {messages.map(message => <AgentMessageParts key={message.id} parts={message.parts} streaming={active && stage === '思考流'} runActive={active} />)}
-    <div className="mt-4"><ProcessingHint visible={visible} label={label} /></div>
+    <div className="mt-4"><ProcessingHint visible={visible} /></div>
   </main>
 }
 createRoot(document.getElementById('root')!).render(<Preview />)

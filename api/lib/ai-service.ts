@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { reviewResponseFormatPayload, type ReviewResponseFormat } from './ai-response-format.js'
 import { currentGoalExecution, withGoalExecutionContext, withoutGoalEffects } from './agent/goal-context.js'
 import { readGoalExecution } from './agent/goal-fence.js'
 import { assertGoalProviderAdmission, reserveGoalUsage, syncGoalLegacyUsage } from './agent/goal-budget.js'
@@ -45,6 +46,8 @@ import {
 } from '../../shared/contracts/index.js'
 
 type TextCompletionOptions = {
+  /** Internal structured review contract; capability checked at the final route. */
+  responseFormat?: ReviewResponseFormat
   signal?: AbortSignal
   userId: string
   action: string
@@ -632,6 +635,8 @@ export function buildProviderToolChoice(input: ProviderReasoningInput, requested
 }
 
 export type ChatWithToolsParams = {
+  /** Internal structured auxiliary response contract, frozen with its route. */
+  responseFormat?: ReviewResponseFormat
   /** Internal critic/repair calls only; main creative turns retain author effort. */
   boundedReview?: boolean
   /** Server-resolved offer; reevaluate only before a new provider operation. */
@@ -806,6 +811,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     stream: true,
     stream_options: { include_usage: true },
     messages: toProviderMessages(params.messages),
+    ...(params.tools.length === 0 ? reviewResponseFormatPayload(params.responseFormat, params.providerBaseUrl ?? env.aiTextBaseUrl, model) : {}),
   }
 
   if (!frozenRequest) Object.assign(body, reviewReasoning ?? buildProviderReasoningPayload({
@@ -1248,6 +1254,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     },
     body: JSON.stringify({
       model: modelRuntime.modelName ?? env.aiTextModel,
+      ...reviewResponseFormatPayload(options.responseFormat, modelRuntime.baseUrl ?? env.aiTextBaseUrl, modelRuntime.modelName ?? env.aiTextModel),
       ...(modelRuntime.reasoningParameterMode ? {} : { temperature: options.temperature ?? 0.7 }),
       // 与主循环 chatWithTools、durable 质量路径一致：显式传入时下发输出上限，避免评审/修订输出失控膨胀；
       // MiMo 网关需用 max_completion_tokens（思考+回答共享预算），其余供应商保持 max_tokens

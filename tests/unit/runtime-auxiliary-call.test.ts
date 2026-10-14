@@ -58,6 +58,34 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('durable reviewer non-thinking policy without rewriting old paid requests', () => {
+  it.each(steps)('freezes JSON mode for new MiMo %s requests', async step => {
+    const mimo = { ...runtime, provider: 'Xiaomi', modelName: 'mimo-v2.6-flash', baseUrl: 'https://api.xiaomimimo.com/v1' }
+    mocks.runtime.mockResolvedValue(mimo)
+    const request = { ...input(step), route: auxiliaryRouteForRuntime(mimo, selection, 1024) }
+    expect(request.route.responseFormat).toBe('json_object')
+    await callDurableAuxiliary(request)
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body).toMatchObject({ model: mimo.modelName, response_format: { type: 'json_object' } })
+    expect(mocks.begin.mock.calls[0][0].request).toMatchObject({ body })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it.each(['unprepared', 'prepared'] as const)('preserves an old MiMo %s request without retrofitting JSON mode', async state => {
+    const mimo = { ...runtime, provider: 'Xiaomi', modelName: 'mimo-v2.6-flash', baseUrl: 'https://api.xiaomimimo.com/v1' }
+    mocks.runtime.mockResolvedValue(mimo)
+    const request = { ...input(), route: auxiliaryRouteForRuntime(mimo, selection, 1024) }
+    delete request.route.responseFormat
+    const body = { model: mimo.modelName, stream: true, messages: [{ role: 'user', content: 'Original request' }] }
+    if (state === 'prepared') {
+      const snapshot = { input: { request: { endpoint: mimo.baseUrl + '/chat/completions', body } } }
+      mocks.existing = { status: 'prepared', inputSnapshot: snapshot, inputHash: runtimeJson(snapshot).hash }
+    }
+    await callDurableAuxiliary(request)
+    const sent = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(sent).not.toHaveProperty('response_format')
+    if (state === 'prepared') expect(sent).toEqual(body)
+  })
+
   it.each([
     { source: 'builtin', provider: runtime.provider, baseUrl: runtime.baseUrl, model: runtime.modelName },
     { source: 'byok', provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-v4-flash' },
