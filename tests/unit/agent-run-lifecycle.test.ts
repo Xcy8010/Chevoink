@@ -15,6 +15,7 @@ import type { chatWithTools as chatType } from '../../api/lib/ai-service.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 import type { WritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 import { persistedContentHash } from '../../api/lib/agent/semantic-progress.js'
+import { toolFailureInputHash } from '../../api/lib/agent/tool-local-failure.js'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 const mocks = vi.hoisted(() => ({
@@ -377,20 +378,26 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(events().filter(event => (event.type === 'tool.call' || event.type === 'tool.result') && event.callId.startsWith('advisory-'))).toEqual([])
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
-  it('resumes the old schema-blocked next49 checkpoint through actual prerequisites and body without a budget or grace reset', async () => {
+  it.each(['canonical', 'encoded-restricted'] as const)('resumes the old schema-blocked next49 checkpoint through actual prerequisites and body without a budget or grace reset: %s', async encoding => {
+    const { storyCompilerPrepareTool } = await import('../../api/lib/agent/tools/story-compiler-tools.js')
     const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
     taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 49, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false,
       tailVolume: { version: 1, previousChapterId: 'previous48', previousRevision: 6, targetOrderIndex: 49 } }
     mocks.currentOriginal = { prompt: '写下一章', taskSpec }
-    const restriction = { action: 'chapter_create', target: 'c', code: 'TOOL_SCHEMA_INVALID', reason: '连续三次参数无效，该工具未完成；继续其他可执行工作。' }
+    const canonicalPrepare = { targetOrderIndex: 49, intentSummary: '承接前章推进本章目标', volumeDecision: { kind: 'continue', reason: '当前卷真实目标尚未收束' } }
+    const wirePrepare = { ...canonicalPrepare, volumeDecision: JSON.stringify(canonicalPrepare.volumeDecision) }
+    const restriction = { action: encoding === 'canonical' ? 'chapter_create' : 'story_compiler_prepare', target: 'c', code: 'TOOL_SCHEMA_INVALID',
+      reason: '连续三次参数无效，该工具未完成；继续其他可执行工作。',
+      ...(encoding === 'encoded-restricted' ? { inputHash: toolFailureInputHash('story_compiler_prepare', wirePrepare) } : {}) }
+    const stagnantBatches = encoding === 'canonical' ? 4 : 5
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
-      activeExecutionMs: 30529, stagnantBatches: 4, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      activeExecutionMs: 30529, stagnantBatches, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
       writeProgress: 0, writeBaseline: 0, readProgress: 2, readBaseline: 0, progressSignatures: [], toolRestrictions: [restriction] }
     mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 5, startedAt: new Date(checkpoint.runStartedAt),
       usage: { promptTokens: 324803, completionTokens: 4959, totalTokens: 329762, checkpoint } })
     const milestone = (phase: 'prepare' | 'scenes'): WritingWorkflowMilestone => ({ version: 1, userId: 'user', novelId: 'novel', runId: 'run', targetOrderIndex: 49, phase })
     const prepare = { ...tool('story_compiler_prepare', async () => ({ output: '第49章实际准备已保存', workflowMilestone: milestone('prepare') }), false),
-      parameters: z.object({ targetOrderIndex: z.literal(49), volumeDecision: z.object({ kind: z.literal('continue'), reason: z.string() }) }).strict() }
+      parameters: storyCompilerPrepareTool.parameters }
     const scene = tool('scene_task_build', async () => ({ output: '第49章实际场景已保存', workflowMilestone: milestone('scenes') }), false)
     const create = { ...tool('chapter_create', async () => ({ output: '新49已创建，复用现有卷' }), false), parameters: z.object({ title: z.string() }).strict() }
     const write = tool('chapter_write', async () => ({ output: '第49章真实正文已保存', display: { kind: 'chapterDiff', chapterId: 'new49', chapterTitle: '风眼',
@@ -399,14 +406,15 @@ describe('server assessment fallback in the real execution loop', () => {
     mocks.tools = [prepare, scene, create, write, commit]
     mocks.chat.mockImplementationOnce(async input => {
       expect(input.messages.map((message: { content?: unknown }) => message.content).join('\n')).toContain('已授权新建全书第49章')
-      expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 329762, checkpoint: { stagnantBatches: 4, tokenBudget: 500,
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 329762, checkpoint: { stagnantBatches, tokenBudget: 500,
         toolRestrictions: [{ ...restriction, inputHash: expect.any(String) }] } })
-      return response('', [call('correct-prepare', prepare.name, JSON.stringify({ targetOrderIndex: 49, volumeDecision: { kind: 'continue', reason: '当前卷真实目标尚未收束' } }))])
+      return response('', [call('correct-prepare', prepare.name, JSON.stringify(encoding === 'canonical' ? canonicalPrepare : wirePrepare))])
     })
     queue(response('', [call('scene', scene.name)]), response('', [call('create', create.name, '{"title":"风眼"}')]),
       response('', [call('write49', write.name, '{"chapterId":"new49"}')]), response('', [call('commit49', commit.name)]), response('已保存。'))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
     expect(prepare.execute).toHaveBeenCalledOnce()
+    expect(prepare.execute).toHaveBeenCalledWith(expect.anything(), canonicalPrepare)
     expect(create.execute).toHaveBeenCalledOnce()
     expect(create.execute).toHaveBeenCalledWith(expect.anything(), { title: '风眼' })
     expect(write.execute).toHaveBeenCalledWith(expect.anything(), { chapterId: 'new49' })

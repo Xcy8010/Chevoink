@@ -76,7 +76,7 @@ import { selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhas
 import { useMessageBlockExpansion } from './use-message-block-expansion'
 import { buildGoalResumeModel } from '../goal-command'
 import { formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMessages, skillPhaseLabel } from '../lib/panel-helpers'
-import { useProcessingHint } from '../useProcessingHint'
+import { useModelStageFeedback, useProcessingHint } from '../useProcessingHint'
 import { useAgentStream } from '../useAgentStream'
 import { resolveComposerModelEffort, useAgentModelPreference } from '../useAgentModelPreference'
 import { useAgentGoalStream } from '../useAgentGoalStream'
@@ -509,6 +509,7 @@ export function AgentPanel({
   )
   // 参数生成、工具间等待等阶段也需要动态反馈；不能因已经输出过正文而永久隐藏。
   const awaiting = useProcessingHint(messages, runId, panelPhase, Boolean(pendingApproval || pendingQuestion), activityRunActive)
+  const modelStageFeedback = useModelStageFeedback(messages, runId, panelPhase, Boolean(pendingApproval || pendingQuestion), activityRunActive)
 
   // AgentPanel stays mounted while authors switch works. Re-hydrate the per-work
   // freedom setting instead of carrying the previous work's value into the new one.
@@ -1717,7 +1718,7 @@ export function AgentPanel({
                 <span className="h-px flex-1 bg-[var(--border-subtle)]" />
               </div>
             ) : null}
-            {activityRunActive ? <ProcessingHint visible={awaiting} /> : null}
+            {activityRunActive ? <ProcessingHint visible={awaiting} label={modelStageFeedback} /> : null}
             {pendingApproval ? (
               <AgentPermissionCard approval={pendingApproval} onResolve={handleResolveApproval} />
             ) : null}

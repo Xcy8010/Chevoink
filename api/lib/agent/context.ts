@@ -27,7 +27,7 @@ import { searchStoryMemory } from './story-memory.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { buildStoryCompilerDigest } from './story-compiler.js'
 import { getLearnedStyleDigest } from './style-learning.js'
-import { estimateTextTokens } from './context-budget.js'
+import { estimateTextTokens, estimateChatMessagesTokens } from './context-budget.js'
 
 /**
  * Context Manager（plan/13 §4.4 / §4.5）。
@@ -436,6 +436,7 @@ export type AssembledAgentContext = {
   skillRoute: SkillRouteDecision | null
   availableSkillVersions: Array<{ id: string; version: string }>
   timings: Record<string, number>
+  inputEstimates?: Record<string, { messages: number; tokens: number }>
 }
 
 export async function assembleContext(input: AssembleContextInput): Promise<AssembledAgentContext> {
@@ -614,23 +615,26 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
 
   if (storyCompilerDigest) intentSections.push(`[本任务已保存编译状态；历史助手总结不证明阶段或完成]\n${storyCompilerDigest}`)
 
+  // Measure the exact assembled sections, without logging author text or IDs.
+  // Keep their order and contents unchanged: these are writing evidence, not
+  // expendable prompt padding. Provider usage remains authoritative for billing.
+  const sections: Record<string, ChatMessage[]> = {
+    system: [{ role: 'system', content: systemPrompt }],
+    goal: goalMessages,
+    history,
+    workspace: workspaceSnapshot ? [{ role: 'user', content: workspaceSnapshot }] : [],
+    todo: todoDigest ? [{ role: 'user', content: todoDigest }] : [],
+    task: [{ role: 'user', content: renderTaskSpec(input.taskSpec) }],
+    intent: [{ role: 'user', content: intentSections.join('\n\n') }],
+  }
+  const inputEstimates = Object.fromEntries(Object.entries(sections).map(([category, items]) =>
+    [category, { messages: items.length, tokens: estimateChatMessagesTokens(items) }]))
   timings.totalMs = performance.now() - started
   return {
     skillRoute,
     availableSkillVersions: (runtimeSkills ?? []).map(({ id, version }) => ({ id, version })),
     timings,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      ...goalMessages,
-      ...history,
-      // 动态快照紧跟在历史之后：system 不含逐轮变动内容，缓存前缀止于 system+history，
-      // 快照/todoDigest/taskSpec/意图都是每轮重建的尾部增量，不破坏已缓存的历史前缀
-      ...(workspaceSnapshot ? [{ role: 'user' as const, content: workspaceSnapshot }] : []),
-      // 待办快照紧跟在历史之后、用户指令之前：位置越靠近当前轮次权重越高，
-      // 避免被历史里旧任务的待办痕迹带偏（尤其是“继续”这类短指令）
-      ...(todoDigest ? [{ role: 'user' as const, content: todoDigest }] : []),
-      { role: 'user', content: renderTaskSpec(input.taskSpec) },
-      { role: 'user', content: intentSections.join('\n\n') },
-    ],
+    inputEstimates,
+    messages: Object.values(sections).flat(),
   }
 }

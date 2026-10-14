@@ -55,13 +55,15 @@
 
 ## Chevoink Agent 3.5
 
-Agent 3.5 researches, plans, writes and revises within one novel, loading skills by task and phase while retaining the complete author request, story facts and actual execution results. Work and IDE task windows show Chinese progress for reading, drafting, revision, checks and saving. Streaming, history, refresh and copy share the author presentation rules; reasoning required by the model protocol remains within execution.
+Agent 3.5 researches, plans, writes and revises within one novel, loading skills by task and phase while retaining the complete author request, story facts and actual execution results. Work and IDE task windows show Chinese progress for reading, drafting, revision, checks and saving. Actual model thinking supports streaming, folded display and history restoration; copying a reply includes only its answer text. Thinking display remains separate from the execution protocol, and action cards appear when tools actually execute.
 
 ### Writing boundaries and skills in 3.5
 
 - Editor selections and explicit local requests in natural language freeze the allowed range when a new task starts. Located requests use exact fragment edits; ambiguous requests ask for an exact passage or editor selection. A batch validates all edits before one revision-checked write. Recovery reuses receipts; a no-op creates no body revision.
 - Required checks must match the final current text after edits. Strict review records each actual application or a justified retention decision; factual errors and an author's requirement that every check pass remain separate gates. Ordinary author edits have separate limits from automatic repairs. Manual edits without a check obligation do not force an extra paid check.
 - The built-in skill pack and routing contract are **3.5.0**, with stable skill IDs. Work Skills displays the built-in version used by new tasks. Historical resources, saved task skill/router versions and paid receipts remain readable. Author and third-party skills retain their independent versions.
+- The shared tool boundary decodes complete JSON strings only where the declared input requires an object or array, then applies the original strict validation. Legitimate strings, unknown fields, permissions, chapter scope and frozen execution receipts retain their semantics; missing decisions or identities are never invented.
+- Anonymous context categories record estimated tokens and assembly time. Fixed tool definitions are estimated once per run, while author requirements, story background and review evidence remain intact. Actual model usage determines billing; estimates and visible thinking do not establish literary quality.
 - Sent model requests with unknown results stay pending reconciliation, without automatic resends or invented zero costs. Read-only state, successful saving, completed checks, limited delivery and fulfillment of the original goal are distinct results.
 
 These controls do not certify literary quality, real-provider speed or native-device acceptance. Provider pairs, blind review of complete manuscripts and diffs, and Android/Windows device acceptance still need their respective authorization and measurements. No zero-error or 99.99% reliability claim is made. Native shells load the same live site; this web release does not certify a new APK or Windows installer.

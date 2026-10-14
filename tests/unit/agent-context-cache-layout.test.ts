@@ -60,6 +60,7 @@ vi.mock('../../api/lib/agent/tools/todo-tools.js', async (importOriginal) => {
 const { prisma } = await import('../../api/lib/prisma.js')
 const { searchStoryMemory } = await import('../../api/lib/agent/story-memory.js')
 const { assembleContext, insertSubagentCatalog } = await import('../../api/lib/agent/context.js')
+const { estimateChatMessagesTokens } = await import('../../api/lib/agent/context-budget.js')
 const { getLearnedStyleDigest } = await import('../../api/lib/agent/style-learning.js')
 const { readChapterWritingBackground, readWritingPresentation } = await import('../../api/lib/agent/writing-request-context.js')
 const { buildStoryCompilerDigest } = await import('../../api/lib/agent/story-compiler.js')
@@ -160,6 +161,19 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(Object.values(result.timings).every(value => Number.isFinite(value) && value >= 0)).toBe(true)
     expect(JSON.stringify(result.messages)).not.toContain('checkpointMs')
     console.info('[synthetic-context-timing]', result.timings)
+  })
+  it('accounts for every assembled input section without recording story text or changing request order', async () => {
+    const input = buildInput()
+    const result = await assembleContext(input)
+    const estimates = result.inputEstimates!
+    expect(Object.keys(estimates)).toEqual(['system', 'goal', 'history', 'workspace', 'todo', 'task', 'intent'])
+    expect(Object.values(estimates).reduce((sum, item) => sum + item.messages, 0)).toBe(result.messages.length)
+    expect(Object.values(estimates).reduce((sum, item) => sum + item.tokens, 0)).toBe(estimateChatMessagesTokens(result.messages))
+    expect(JSON.stringify(estimates)).not.toMatch(/星海余烬|chapter-1|把第三章/)
+    expect(result.messages[0].role).toBe('system')
+    expect(String(result.messages.at(-1)?.content)).toContain(input.prompt)
+    expect(String(result.messages.at(-2)?.content)).toContain(input.taskSpec.goals[0])
+    expect(JSON.stringify(result.messages)).not.toContain('inputEstimates')
   })
   beforeEach(() => {
     vi.clearAllMocks()

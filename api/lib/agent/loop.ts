@@ -96,6 +96,7 @@ import {
   collapseEarlyToolRounds,
   compactEarlyToolPayloads,
   estimateChatMessagesTokens,
+  estimateChatMessageTokens,
   estimateToolDefinitionTokens,
   resolveAgentContextBudget,
   releaseCompletedReasoning,
@@ -1404,6 +1405,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       pinnedSkillIds: params.pinnedSkillIds ?? [],
     })
     console.info('[agent-context-timing]', { runId, ...assembledContext.timings })
+    console.info('[agent-context-input]', assembledContext.inputEstimates ?? {})
     const messages: ChatMessage[] = assembledContext.messages
     // The last assembled user message is the original goal input. Attach its
     // pixels before adding steering or orchestration messages to the tail.
@@ -1546,6 +1548,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const ceiling = params.toolAuthorityCeiling ?? (activationCeiling ? new Map(activationCeiling) : null)
     const tools = ceiling ? intersectToolAuthority(currentTools, params.mode, ceiling) : currentTools
     const openAITools = toOpenAITools(tools, taskSpec.scope)
+    // This run's published tool definitions are immutable. Reuse only their
+    // estimate; messages are measured afresh after steering/skill updates.
+    const toolDefinitionTokens = estimateToolDefinitionTokens(openAITools)
     const contextBudget = resolveAgentContextBudget(modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens, env.aiTextMaxOutputTokens)
 
     /**
@@ -1553,9 +1558,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
      * OpenAI-compatible models. It counts tool schemas, tool arguments,
      * reasoning and multimodal placeholders instead of only visible text.
      */
-    const prepareContextForRequest = (requestTools = openAITools, reason = 'turn') => {
-      const toolDefinitionTokens = estimateToolDefinitionTokens(requestTools)
-      const beforeTokens = estimateChatMessagesTokens(messages) + toolDefinitionTokens
+    const prepareContextForRequest = (beforeTokens: number, reason = 'turn') => {
       let afterTokens = beforeTokens
       let compactedToolArguments = 0
       let compactedToolOutputs = 0
@@ -1798,12 +1801,19 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (reminderIndex >= 0) {
         messages.splice(reminderIndex, 1)
       }
-      const estimatedRequestTokens = estimateChatMessagesTokens(messages) + estimateToolDefinitionTokens(openAITools)
+      const budgetStarted = performance.now()
+      let estimatedRequestTokens = estimateChatMessagesTokens(messages) + toolDefinitionTokens
       if (estimatedRequestTokens > contextBudget.warningTokens) {
         messages.push(contextReminder)
+        estimatedRequestTokens += estimateChatMessageTokens(contextReminder)
       }
       // 在发往供应商之前执行模型窗口感知的压缩；仍超限则安全收尾，不把必失败请求交给供应商。
-      const requestBudget = prepareContextForRequest(openAITools, 'turn')
+      const requestBudget = prepareContextForRequest(estimatedRequestTokens, 'turn')
+      console.info('[agent-request-context]', {
+        turn, messages: messages.length, tools: openAITools.length, toolTokens: toolDefinitionTokens,
+        beforeTokens: requestBudget.beforeTokens, afterTokens: requestBudget.afterTokens,
+        budgetMs: performance.now() - budgetStarted,
+      })
       if (!bootstrapCall && !requestBudget.fits) {
         await wrapUpAndFinish('当前任务上下文已达到所选模型的安全窗口上限。')
         return

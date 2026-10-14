@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
 
 /** 等待阶段的轻量动态反馈；支持多次入场，淡出不依赖 animationend 必达。 */
-export function ProcessingHint({ visible }: { visible: boolean }) {
+export function ProcessingHint({ visible, label = '正在处理...' }: { visible: boolean; label?: string | null }) {
   const [retained, setRetained] = useState(visible)
 
   useEffect(() => {
@@ -31,7 +31,7 @@ export function ProcessingHint({ visible }: { visible: boolean }) {
         }
       }}
     >
-      <span className={visible ? 'agent-processing-shimmer' : undefined}>正在处理...</span>
+      <span className={visible ? 'agent-processing-shimmer' : undefined}>{label ?? '正在处理...'}</span>
     </p>
   )
 }

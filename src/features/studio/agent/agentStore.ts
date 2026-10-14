@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { createAgentAuthorTextStream, projectAgentAuthorMessage, projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../../shared/agent-author-view.js'
+import { createAgentAuthorTextStream, projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
 
 import type {
@@ -429,7 +429,7 @@ function deriveSessionStateFromMessages(messages: AgentUIMessage[]): {
 
   for (const message of messages) {
     for (const part of message.parts) {
-      if (part.type !== 'tool-call') {
+      if (part.type !== 'tool-call' || part.preparing) {
         continue
       }
       if (part.status === 'success' && part.display?.kind === 'todoList' && message.runId === messages.at(-1)?.runId) {
@@ -449,7 +449,7 @@ function deriveSessionStateFromMessages(messages: AgentUIMessage[]): {
         before: extracted.before,
         after: extracted.after,
         summary: part.summary,
-        status: part.status === 'failed' ? 'failed' : 'done',
+        status: part.status === 'running' ? 'running' : part.status === 'success' ? 'done' : 'failed',
         accepted: Boolean(part.accepted || acceptedToolCalls.has(part.callId)),
       })
     }
@@ -458,13 +458,24 @@ function deriveSessionStateFromMessages(messages: AgentUIMessage[]): {
   return { workspaceActivities, todos }
 }
 
+// Preserve cumulative supplier thinking and transient drafts internally. Author
+// projection happens at render/copy boundaries, never destructively per delta.
+function projectStoredParts(parts: AgentMessagePart[]): AgentMessagePart[] {
+  return parts.flatMap(part => part.type === 'reasoning' || part.type === 'tool-call' && part.preparing
+    ? [part] : projectAgentAuthorParts([part]))
+}
+
+function projectStoredMessage(message: AgentUIMessage): AgentUIMessage {
+  return message.role === 'assistant' ? { ...message, parts: projectStoredParts(message.parts) } : message
+}
+
 function updateMessageParts(
   messages: AgentUIMessage[],
   messageId: string,
   update: (parts: AgentMessagePart[]) => AgentMessagePart[],
 ): AgentUIMessage[] {
   return messages.map((message) =>
-    message.id === messageId ? { ...message, parts: projectAgentAuthorParts(update(message.parts)) } : message,
+    message.id === messageId ? { ...message, parts: projectStoredParts(update(message.parts)) } : message,
   )
 }
 
@@ -670,7 +681,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   restoreMessages: (messages, sessionId = null, snapshot) => {
     authorTextStreams.clear()
-    const restored = decorateAcceptedMessages(messages.map(projectAgentAuthorMessage))
+    const restored = decorateAcceptedMessages(messages.map(projectStoredMessage))
     const derived = deriveSessionStateFromMessages(restored)
     const cached = sessionId ? sessionMessagesCache.get(sessionId) : undefined
     const todos = snapshot !== undefined ? snapshot?.items ?? [] : cached?.messages === messages ? cached.todos : derived.todos
@@ -734,7 +745,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   prependMessages: (incoming) =>
     set((state) => {
       const known = new Set(state.messages.map((message) => message.id))
-      const older = decorateAcceptedMessages(incoming.map(projectAgentAuthorMessage)).filter((message) => !known.has(message.id))
+      const older = decorateAcceptedMessages(incoming.map(projectStoredMessage)).filter((message) => !known.has(message.id))
       if (older.length === 0) {
         return {}
       }
@@ -1019,6 +1030,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       if (event.seq <= state.lastSeq && event.runId === state.runId) {
         return {}
       }
+      // A late stream from another run cannot change the current message,
+      // cursor or draft lifecycle, including preparation-end cleanup.
+      if (event.runId !== state.runId && ['message.start', 'text.delta', 'text.final', 'reasoning.delta', 'tool.call', 'tool.result', 'tool.delta', 'tool.deferred', 'tool.preparation.end', 'step.finish', 'run.paused', 'run.finished', 'error'].includes(event.type)) return {}
 
       const base = { lastSeq: event.seq }
 
@@ -1085,7 +1099,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             finalizedTextIds: state.finalizedTextIds.includes(event.messageId)
               ? state.finalizedTextIds : [...state.finalizedTextIds, event.messageId],
             messages: updateMessageParts(state.messages, event.messageId, parts => {
-              const withoutText = parts.filter(part => part.type !== 'text' && part.type !== 'reasoning')
+              const withoutText = parts.filter(part => part.type !== 'text')
               if (!text) return withoutText
               const previewIndex = withoutText.findIndex(part => part.type === 'tool-call' && part.preparing)
               const at = previewIndex < 0 ? withoutText.length : previewIndex
@@ -1094,9 +1108,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           }
         }
 
-        // Hidden supplier reasoning remains in server protocol/context only.
         case 'reasoning.delta':
-          return base
+          if (!isRunActive(state.phase)) return base
+          return { ...base, messages: updateMessageParts(state.messages, event.messageId,
+            parts => appendDelta(parts, 'reasoning', event.delta)) }
 
         case 'tool.call': {
           const isWrite = WORKSPACE_WRITE_TOOLS.has(event.toolName)
@@ -1190,8 +1205,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...base,
             ...(event.draft ? { liveToolDrafts: { ...state.liveToolDrafts, [event.callId]: event.draft } } : {}),
             messages: updateMessageParts(state.messages, event.messageId, (parts) => {
-              if (!existing && event.toolName && event.title) return [...parts, {
-                type: 'tool-call', callId: event.callId, toolName: event.toolName, title: getAgentToolPresentation(event.toolName).label,
+              const toolName = event.toolName ?? event.draft?.toolName
+              if (!existing && toolName) return [...parts, {
+                type: 'tool-call', callId: event.callId, toolName, title: getAgentToolPresentation(toolName).label,
                 args: null, status: 'running', preparing: true, progressChars: event.argsChars,
               }]
               return parts.map((part) =>
@@ -1366,6 +1382,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               ? {}
               : {
                   phase: 'failed' as const,
+                  liveToolDrafts: {},
                   messages: settleRunningToolParts(state.messages, '已中断'),
                   workspaceActivities: settleRunningActivities(state.workspaceActivities),
                   // 不可恢复错误可能没有后续的 run.finished，这里就把红点落下

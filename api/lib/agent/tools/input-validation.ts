@@ -1,6 +1,7 @@
 import type { AgentTool } from './types.js'
 import { z } from 'zod'
 import { coerceToolArgumentEnvelope } from './argument-coercion.js'
+import { decodeToolArgumentContainers } from './argument-container-decoding.js'
 
 /** Shared by live dispatch and durable pre-execution rejection. Pure only. */
 export function normalizeToolInput(tool: Pick<AgentTool, 'coerceArgs'> & Partial<Pick<AgentTool, 'parameters'>>, raw: unknown): unknown {
@@ -13,7 +14,8 @@ export function normalizeToolInput(tool: Pick<AgentTool, 'coerceArgs'> & Partial
   if (envelope && typeof envelope === 'object' && '_contextCompacted' in envelope && envelope._contextCompacted === true) {
     throw new Error('Historical context excerpt cannot be executed')
   }
-  const normalized = tool.coerceArgs ? tool.coerceArgs(envelope) : envelope
+  const coerced = tool.coerceArgs ? tool.coerceArgs(envelope) : envelope
+  const normalized = tool.parameters ? decodeToolArgumentContainers(tool.parameters, coerced) : coerced
   if (!(tool.parameters instanceof z.ZodObject) || !normalized || typeof normalized !== 'object' || Array.isArray(normalized)) return normalized
   const result = { ...normalized } as Record<string, unknown>
   for (const [key, value] of Object.entries(result)) {

@@ -1075,6 +1075,23 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
   )
 })
 
+function ThinkingPart({ text, identity, streaming }: { text: string; identity: string; streaming: boolean }) {
+  const [expanded, setExpanded] = useState(false)
+  const id = useId()
+  return <div className="text-xs text-[var(--text-secondary)]">
+    <button type="button" aria-expanded={expanded} aria-controls={id}
+      onClick={() => setExpanded(value => !value)} className="flex items-center gap-1.5 py-1">
+      <Brain className="h-3.5 w-3.5" />
+      {expanded ? '收起思考' : '展开思考'}
+      {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+    </button>
+    {expanded ? <div id={id} className="mt-1 border-l border-[var(--border-default)] pl-3">
+      {text.trim() ? <AgentMarkdownText text={text} streaming={false} identity={identity} />
+        : streaming ? <p>思考正在生成，完整段落到达后显示。</p> : null}
+    </div> : null}
+  </div>
+}
+
 export const AgentMessageParts = memo(function AgentMessageParts({
   parts,
   streaming,
@@ -1099,7 +1116,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   /** 折叠态下本消息正文是否可收起（块内非最后一条）：run 结束后过程进展正文折进摘要行 */
   textCollapsible?: boolean
 }) {
-  const authorParts = useMemo(() => projectAgentAuthorParts(parts), [parts])
+  const authorParts = useMemo(() => projectAgentAuthorParts(parts, streaming), [parts, streaming])
   const showSummary = !runActive && (summaryCount ?? 0) > 0
   const collapsed = !runActive && !summaryExpanded
   // 子 Agent 内部工具卡片归组：嵌套渲染进所属的 subagent_run 容器（codex/Zcode 模式）
@@ -1143,6 +1160,10 @@ export const AgentMessageParts = memo(function AgentMessageParts({
           if (collapsed && textCollapsible) return null
           // Activity belongs to run status, never an indefinitely blinking prose suffix.
           return <AgentMarkdownText key={index} text={part.text} streaming={streaming && isLast} identity={`${blockId ?? ''}:${index}`} />
+        }
+
+        if (part.type === 'reasoning') {
+          return <ThinkingPart key={`thinking-${index}`} text={part.text} streaming={streaming} identity={`${blockId ?? ''}:thinking:${index}`} />
         }
 
         // 折叠态：隐藏思考/动作，仅保留 text 结论
