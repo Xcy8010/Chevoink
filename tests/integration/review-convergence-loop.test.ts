@@ -24,7 +24,7 @@ const sha = (text: string) => createHash('sha256').update(text).digest('hex')
 const prompt = '修改第一章，只要标题和正文。'
 const initial = '门锁仍在。屋里没有灯。她没有回答。桌上有书。墙上有钟。窗边有椅。地上有箱。'
 const initialEvidence = ['门锁仍在', '屋里没有灯', '她没有回答', '桌上有书', '墙上有钟', '窗边有椅', '地上有箱']
-const mandatoryPrompt = '修改第一章，质量必须通过后才能交付。'
+const mandatoryPrompt = '修改第一章，只要标题和正文，质量必须通过后才能交付。'
 describe('mandatory quality pass through persisted current warning repair', () => {
   it.each([
     ['legacy', false], ['durable', false], ['legacy', true], ['durable', true],
@@ -36,6 +36,8 @@ describe('mandatory quality pass through persisted current warning repair', () =
     }
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
     const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, f))
+    expect(original.spec).toMatchObject({ intent: 'revise', scope: { writing: { kind: 'bounded', titleAndBodyOnly: true,
+      targets: [{ chapterId: f.chapterId, orderIndex: 1 }] } } })
     const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })
     const usageCount = await prisma.aiUsageLog.count({ where: { agentRunId: f.runId } })
     const body = `门锁仍在。屋里没有灯。灯光落在桌上。${duplicate ? '灯光落在桌上。' : ''}她没有回答。`
