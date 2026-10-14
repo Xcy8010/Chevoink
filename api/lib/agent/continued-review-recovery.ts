@@ -14,7 +14,7 @@ import { continuityCriticSystem } from './tools/story-compiler-tools.js'
 import { continuitySourceInput } from './continuity-review-context.js'
 import { COMPILER_CONTINUITY_PROTOCOL } from './compiler-continuity-contract.js'
 import { runtimeJson } from './runtime-common.js'
-import { isKnownTextRequestBilling } from './text-request-billing.js'
+import { isKnownTextRequestBilling, isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 import { readOwnedContinuityReassessment } from './continuity-reassessment-witness.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
@@ -127,8 +127,8 @@ export async function readContinuedReviewRepairHandoff(tx: Prisma.TransactionCli
   if (after !== chapter.content) return false
   const payments = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, providerType: 'text',
     action: { startsWith: 'agent3Humanity' }, createdAt: { gte: witness.at }, OR: [{ agentRunId: subject.runId }, { chapterId: item.chapterId }] } })
-  if (payments.filter(row => row.action === 'agent3HumanityCritic').length !== 1 || payments.some(row => row.agentRunId !== subject.runId
-    || row.usageSource !== 'reported' || !isKnownTextRequestBilling(row))) return false
+  if (payments.filter(row => row.action === 'agent3HumanityCritic' && !isKnownRejectedTextRequestAttempt(row)).length !== 1 || payments.some(row => row.agentRunId !== subject.runId
+    || !isKnownRejectedTextRequestAttempt(row) && (row.usageSource !== 'reported' || !isKnownTextRequestBilling(row)))) return false
   const bundle = await buildHumanityQualityContext(subject.userId, subject.novelId, item.chapterId, subject.runId, tx)
   const original = await readOriginalTaskRequest(tx, subject)
   if (bundle.chapter.revision !== chapter.revision || bundle.chapter.content !== chapter.content || hash(original.spec) !== witness.specHash
@@ -219,12 +219,14 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, pend
     const payments = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, providerType: 'text', action: { startsWith: family },
       createdAt: { gte: call.createdAt, lte: result.createdAt }, OR: [{ agentRunId: call.runId }, { chapterId: item.chapterId },
         { targetId: { in: [item.chapterId, ...(item.compilationId ? [item.compilationId] : [])] } }] }, orderBy: { id: 'asc' } })
-    const primaryCount = payments.filter(row => row.action === primaryAction).length
+    const semantic = payments.filter(row => !isKnownRejectedTextRequestAttempt(row))
+    const primaryCount = semantic.filter(row => row.action === primaryAction).length
     if (payments.some(row => row.action === 'agent3ContinuityCriticSecondPass') && !await readOwnedContinuityReassessment(tx, subject, {
       runId: call.runId, callId: item.callId, chapterId: item.chapterId, revision: item.revision, compilationId: item.compilationId,
       callAt: call.createdAt, resultAt: result.createdAt, payments,
     })) continue
-    const corrections = payments.filter(row => row.action === 'agent3ContinuityEvidenceCorrection')
+    const correctionAttempts = payments.filter(row => row.action === 'agent3ContinuityEvidenceCorrection')
+    const corrections = semantic.filter(row => row.action === 'agent3ContinuityEvidenceCorrection')
     if (corrections.length) {
       // A correction-only call reuses a confirmed earlier critic. Authenticate
       // that original request and the claim preceding this exact new request;
@@ -237,17 +239,17 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, pend
       const claim = claims[0], frozen = object(claim.metadata), originalIds = frozen.usageIds
       const targetType = item.compilationId ? 'story_compilation' : 'chapter', targetId = item.compilationId ?? item.chapterId
       if (frozen.version !== 1 || frozen.targetType !== targetType || frozen.targetId !== targetId
-        || corrections.some(row => row.targetType !== targetType || row.targetId !== targetId || row.createdAt < claim.createdAt)
+        || correctionAttempts.length > 2 || correctionAttempts.some(row => row.targetType !== targetType || row.targetId !== targetId || row.createdAt < claim.createdAt)
         || !Array.isArray(originalIds) || !originalIds.length || originalIds.some(id => typeof id !== 'string')
         || new Set(originalIds).size !== originalIds.length) continue
       const originalUsage = await tx.aiUsageLog.findMany({ where: { id: { in: originalIds as string[] }, userId: subject.userId,
         novelId: subject.novelId, targetType, targetId, createdAt: { lte: claim.createdAt } } })
-      if (originalUsage.length !== originalIds.length || originalUsage.filter(row => row.action === primaryAction).length !== 1
+      if (originalUsage.length !== originalIds.length || originalUsage.filter(row => row.action === primaryAction && !isKnownRejectedTextRequestAttempt(row)).length !== 1
         || originalUsage.some(row => ![primaryAction, `${primaryAction}OutputRecovery`, `${primaryAction}EmptyRecovery`].includes(row.action)
-          || row.agentRunId !== null && !ids.includes(row.agentRunId) || row.usageSource !== 'reported' || !isKnownTextRequestBilling(row)
-          || object(row.billingEvidence).responseObserved !== true)) continue
+          || row.agentRunId !== null && !ids.includes(row.agentRunId) || !isKnownRejectedTextRequestAttempt(row)
+          && (row.usageSource !== 'reported' || !isKnownTextRequestBilling(row) || object(row.billingEvidence).responseObserved !== true))) continue
     }
-    if ((primaryCount !== 1 && !(primaryCount === 0 && corrections.length === payments.length && corrections.length === 1)) || !payments.some(row => row.usageSource === 'unknown')
+    if ((primaryCount !== 1 && !(primaryCount === 0 && corrections.length === semantic.length && corrections.length === 1)) || !payments.some(row => row.usageSource === 'unknown')
       || payments.some(row => !actions.has(row.action) || row.agentRunId !== null && row.agentRunId !== call.runId
       || row.chapterId !== null && row.chapterId !== item.chapterId || row.durationMs < 0 || row.createdAt.getTime() + row.durationMs > result.createdAt.getTime())) continue
     const reports = item.toolName === 'quality_analyze' ? await tx.chapterQualityReport.findMany({ where: { userId: subject.userId, novelId: subject.novelId,

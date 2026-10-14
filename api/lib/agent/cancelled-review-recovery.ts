@@ -6,6 +6,7 @@ import { activeChapterScope } from '../data/internal.js'
 import { originalTaskRunIds, readOriginalTaskRequest } from './original-request.js'
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.js'
+import { isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const sensitive = ['continuity_validate', 'quality_analyze', 'chapter_write', 'chapter_edit_range', 'chapter_append']
@@ -81,9 +82,9 @@ export async function readRetiredReviewUsageIds(tx: Prisma.TransactionClient,
     const payments = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
       action: { startsWith: family }, createdAt: { gte: call.createdAt, lte: result.createdAt },
       OR: [{ chapterId: chapter.id }, { targetId: { in: [chapter.id, ...(typeof payload.compilationId === 'string' ? [payload.compilationId] : [])] } }, { agentRunId: call.runId }] } })
-    if (payments.length !== receipt.usageIds.length || payments.filter(row => row.action === primary).length !== 1
+    if (payments.length !== receipt.usageIds.length || payments.filter(row => row.action === primary && !isKnownRejectedTextRequestAttempt(row)).length !== 1
       || !payments.some(row => row.usageSource === 'unknown') || payments.some(row => !receipt.usageIds || !(receipt.usageIds as string[]).includes(row.id)
-        || !actions.has(row.action) || !exemptUsage(row) || row.agentRunId !== null && row.agentRunId !== call.runId)) continue
+        || !actions.has(row.action) || !exemptUsage(row) && !isKnownRejectedTextRequestAttempt(row) || row.agentRunId !== null && row.agentRunId !== call.runId)) continue
     for (const payment of payments) ids.add(payment.id)
   }
   return ids
@@ -134,9 +135,9 @@ export async function readCancelledReviewRetirements(tx: Prisma.TransactionClien
     const related = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, action: { startsWith: family },
       createdAt: { gte: first.createdAt }, OR: [{ chapterId: item.chapterId }, { targetId: { in: [item.chapterId, ...(item.compilationId ? [item.compilationId] : [])] } }, { agentRunId: { in: ids } }] } })
     const payments = related.filter(row => row.createdAt >= call.createdAt && row.createdAt <= result.createdAt)
-    if (!payments.length || payments.filter(row => row.action === primary).length !== 1 || payments.some(row => !actions.has(row.action)
-      || !exemptUsage(row) || row.agentRunId !== null && row.agentRunId !== call.runId) || !payments.some(row => row.usageSource === 'unknown')) continue
-    if (related.some(row => !payments.some(payment => payment.id === row.id) && !retiredUsageIds.has(row.id) && (row.usageSource !== 'reported'
+    if (!payments.length || payments.filter(row => row.action === primary && !isKnownRejectedTextRequestAttempt(row)).length !== 1 || payments.some(row => !actions.has(row.action)
+      || !exemptUsage(row) && !isKnownRejectedTextRequestAttempt(row) || row.agentRunId !== null && row.agentRunId !== call.runId) || !payments.some(row => row.usageSource === 'unknown')) continue
+    if (related.some(row => !payments.some(payment => payment.id === row.id) && !retiredUsageIds.has(row.id) && !isKnownRejectedTextRequestAttempt(row) && (row.usageSource !== 'reported'
       || row.billingStatus !== 'settled' || row.requestTokens === null || row.responseTokens === null || row.reservedCreditMilli !== 0))) continue
     const previous = history.find(row => payments.every(payment => retiredUsageIds.has(payment.id)) && row.type === 'review.reconciled' && object(row.payload).callId === item.callId
       && object(object(row.payload).receipt).status === 'cancelled_review_billing_exempt'

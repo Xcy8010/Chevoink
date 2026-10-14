@@ -9,7 +9,8 @@ describe.runIf(available)('author-exempt cancelled reviewer execution lock', () 
   it.each(['eligible', 'quality', 'new-body', 'audit-already-persisted', 'no-author', 'not-user-stop', 'wrong-summary', 'missing-result',
     'duplicate-call', 'wrong-chapter', 'wrong-compilation', 'out-of-scope', 'native', 'charged', 'reserved', 'possible-charge',
     'missing-snapshot', 'frozen-charge', 'wrong-tier', 'pending-billing', 'pending-settlement', 'repair-action', 'other-unknown', 'overlap',
-    'previous-retired', 'previous-retired-charged', 'previous-retired-missing-audit'] as const)(
+    'previous-retired', 'previous-retired-charged', 'previous-retired-missing-audit',
+    'rejected-extra', 'rejected-extra-persisted', 'rejected-extra-charged', 'rejected-extra-reserved'] as const)(
     '%s preserves unknown usage and only releases the cancelled exempt lock', scenario => fixture(async f => {
       try {
         const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '原授权章节复核' })
@@ -39,6 +40,14 @@ describe.runIf(available)('author-exempt cancelled reviewer execution lock', () 
           ...(scenario === 'missing-snapshot' ? {} : { billingSnapshot: { version: 'credits-v1-exact', multiplierBps: scenario === 'frozen-charge' ? 1 : 0,
             modelTier: scenario === 'wrong-tier' ? 'other' : 'speed' } }),
           durationMs: 0, createdAt: new Date(start.getTime() + 100) } })
+        const rejected = scenario.startsWith('rejected-extra') ? await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId,
+          agentRunId: f.runId, chapterId: f.chapterId, targetType: 'story_compilation', targetId: compilation.id,
+          providerType: 'text', providerMode: 'custom', modelName: 'isolated-no-provider', modelTier: 'speed', multiplierBps: 0,
+          action: `${family}Critic`, requestTokens: null, responseTokens: null, usageSource: 'prepared', billingStatus: 'provider_rejected',
+          creditChargeMilli: scenario === 'rejected-extra-charged' ? 1 : 0, reservedCreditMilli: scenario === 'rejected-extra-reserved' ? 1 : 0,
+          billingSnapshot: { version: 'credits-v1-exact', multiplierBps: 0, modelTier: 'speed' },
+          durationMs: 0, createdAt: new Date(start.getTime() + 50) } }) : null
+        const currentUsageIds = rejected ? [rejected.id, usage.id] : [usage.id]
         if (scenario === 'other-unknown') await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, chapterId: f.chapterId,
           targetType: 'chapter', targetId: f.chapterId, providerType: 'text', providerMode: 'custom', modelName: 'no-provider', action: `${family}Critic`, usageSource: 'unknown', billingStatus: 'pending_usage',
           durationMs: 0, createdAt: new Date(end.getTime() + 100) } })
@@ -67,18 +76,20 @@ describe.runIf(available)('author-exempt cancelled reviewer execution lock', () 
         const beforeUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
         const beforeCompilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
         const read = () => prisma.$transaction(tx => readCancelledReviewRetirements(tx, f, [pending]))
-        if (scenario === 'audit-already-persisted') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'review.reconciled',
+        const persisted = scenario === 'audit-already-persisted' || scenario === 'rejected-extra-persisted'
+        if (persisted) await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'review.reconciled',
           createdAt: new Date(end.getTime() + 1100), payload: { callId: pending.callId, chapterId: f.chapterId, revision: 1, compilationId: compilation.id,
             receipt: { status: 'cancelled_review_billing_exempt', usageOutcome: 'unknown_preserved', sourceRunId: f.runId, sourceCallId: pending.callId,
-              sourceResultId: result!.id, sourceStopEventId: stop.id, sourceReportId: null, usageIds: [usage.id], admissionId: `author-continue:${stop.id}`,
+              sourceResultId: result!.id, sourceStopEventId: stop.id, sourceReportId: null, usageIds: currentUsageIds, admissionId: `author-continue:${stop.id}`,
               currentRevision: 1, currentContentHash: createHash('sha256').update('原文').digest('hex') } } } })
         const recovered = await read()
-        expect(recovered).toHaveLength(['eligible', 'quality', 'new-body', 'audit-already-persisted', 'previous-retired'].includes(scenario) ? 1 : 0)
+        expect(recovered).toHaveLength(['eligible', 'quality', 'new-body', 'audit-already-persisted', 'previous-retired', 'rejected-extra', 'rejected-extra-persisted'].includes(scenario) ? 1 : 0)
         if (recovered.length) {
-          expect(recovered[0]).toMatchObject({ ...pending, persisted: scenario === 'audit-already-persisted', retirement: {
-            status: 'cancelled_review_billing_exempt', sourceCallId: pending.callId, sourceStopEventId: stop.id, usageIds: [usage.id], usageOutcome: 'unknown_preserved',
+          expect(recovered[0]).toMatchObject({ ...pending, persisted, retirement: {
+            status: 'cancelled_review_billing_exempt', sourceCallId: pending.callId, sourceStopEventId: stop.id, usageIds: rejected ? expect.arrayContaining(currentUsageIds) : currentUsageIds, usageOutcome: 'unknown_preserved',
             currentRevision: scenario === 'new-body' ? 2 : 1 } })
-          if (scenario === 'audit-already-persisted') expect(recovered[0].retirement.admissionId).toBe(`author-continue:${stop.id}`)
+          expect(recovered[0].retirement.usageIds).toHaveLength(currentUsageIds.length)
+          if (persisted) expect(recovered[0].retirement.admissionId).toBe(`author-continue:${stop.id}`)
           expect(await read()).toEqual(recovered)
         }
         expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(beforeUsage)

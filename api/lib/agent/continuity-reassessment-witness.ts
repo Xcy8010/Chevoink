@@ -18,7 +18,7 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
   const primary = primaryAttempts.filter(row => !isKnownRejectedTextRequestAttempt(row))
   const second = secondAttempts.filter(row => !isKnownRejectedTextRequestAttempt(row))
   if (input.payments.length !== primaryAttempts.length + secondAttempts.length || primaryAttempts.length > 2 || secondAttempts.length > 2
-    || input.payments.some(row => !isKnownRejectedTextRequestAttempt(row) && (row.usageSource !== 'reported' || !isKnownTextRequestBilling(row)))
+    || primaryAttempts.some(row => !isKnownRejectedTextRequestAttempt(row) && (row.usageSource !== 'reported' || !isKnownTextRequestBilling(row)))
     || primary.length !== 1 || second.length !== 1 || primary[0].usageSource !== 'reported'
     || !isKnownTextRequestBilling(primary[0]) || object(primary[0].billingEvidence).responseObserved !== true) return null
   const claims = await tx.agentArtifact.findMany({ where: { runId: input.runId, run: { userId: subject.userId, novelId: subject.novelId }, artifactType: 'continuityReview',
@@ -56,8 +56,14 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
       if (linked.length !== 1 || linked[0].createdAt < payment.createdAt || linked[0].createdAt > input.resultAt) return null
       const frames = claims.filter(row => object(row.metadata).assessmentKey === meta.fullReassessmentKey && object(row.metadata).stage === stage
         && runtimeJson(object(row.metadata).usageIds).hash === runtimeJson([payment.id]).hash)
-      if (frames.length !== 1 || frames[0].createdAt > input.resultAt
-        || isKnownRejectedTextRequestAttempt(payment) && object(object(frames[0].metadata).response).content !== null) return null
+      // Ownership of a second attempt is not evidence that its response or
+      // billing is known. Old interrupted attempts may have only the binding
+      // saved before HTTP; authenticated human Continue can retire that slot
+      // while keeping its real unknown fees. Application/reuse still require
+      // their separate complete-response and known-billing checks.
+      if (frames.length > 1 || stage === 'first' && frames.length !== 1
+        || frames.some(frame => frame.createdAt > input.resultAt)
+        || isKnownRejectedTextRequestAttempt(payment) && (frames.length !== 1 || object(object(frames[0].metadata).response).content !== null)) return null
     }
   }
   return { claim, primary: primary[0], second: second[0], input: frozen.data }

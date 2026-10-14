@@ -9,6 +9,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 describe.runIf(available)('ordinary author Continue preserves real unknown billing while retiring only its prior execution slot', () => {
   it.each(['quality', 'continuity', 'no-author', 'post-admission', 'correction', 'correction-no-claim', 'correction-unknown-source', 'correction-late-claim',
+    'correction-rejected-source', 'correction-charged-rejection-source', 'correction-reserved-rejection-source',
     'reassessment', 'reassessment-no-claim', 'reassessment-unknown-first', 'reassessment-late-claim', 'reassessment-extra-attempt'] as const)('%s uses authenticated PostgreSQL call/admission/input evidence', scenario => fixture(async f => {
     try {
       const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '原授权章节复核' })
@@ -34,6 +35,12 @@ describe.runIf(available)('ordinary author Continue preserves real unknown billi
         usageSource: 'unknown', billingStatus: 'pending_usage', creditChargeMilli: 0, reservedCreditMilli: 18023, durationMs: 0,
         billingSnapshot: { version: 'credits-v1-exact', modelTier: 'standard', multiplierBps: 12000 }, createdAt: new Date(startAt.getTime() + delta + 100) } })
       if (corrective) {
+        const rejectedSource = scenario.includes('rejected-source') || scenario.includes('rejection-source')
+        const rejected = rejectedSource ? await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId, chapterId: f.chapterId,
+          targetType: 'story_compilation', targetId: compilation.id, providerType: 'text', providerMode: 'custom', modelName: 'isolated-no-provider',
+          modelTier: 'standard', multiplierBps: 12000, action: 'agent3ContinuityCritic', requestTokens: null, responseTokens: null,
+          usageSource: 'prepared', billingStatus: 'provider_rejected', creditChargeMilli: scenario === 'correction-charged-rejection-source' ? 1 : 0,
+          reservedCreditMilli: scenario === 'correction-reserved-rejection-source' ? 1 : 0, durationMs: 0, createdAt: new Date(startAt.getTime() - 2100) } }) : null
         const original = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId, chapterId: f.chapterId,
           targetType: 'story_compilation', targetId: compilation.id, providerType: 'text', providerMode: 'custom', modelName: 'isolated-no-provider',
           modelTier: 'standard', multiplierBps: 12000, action: 'agent3ContinuityCritic', requestTokens: 100, responseTokens: 30,
@@ -42,7 +49,7 @@ describe.runIf(available)('ordinary author Continue preserves real unknown billi
         if (scenario !== 'correction-no-claim') await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview',
           title: '原引用纠正预约', content: '仅测试请求归属', createdAt: new Date(startAt.getTime() + (scenario === 'correction-late-claim' ? 200 : 50)),
           metadata: { version: 1, state: 'claimed', callId: pending.callId, chapterId: f.chapterId, revision: 1,
-            targetType: 'story_compilation', targetId: compilation.id, usageIds: [original.id] } } })
+            targetType: 'story_compilation', targetId: compilation.id, usageIds: rejected ? [rejected.id, original.id] : [original.id] } } })
       }
       let knownFirstId: string | undefined
       if (reassessed) {
@@ -70,9 +77,10 @@ describe.runIf(available)('ordinary author Continue preserves real unknown billi
           requestTokens: 100, responseTokens: 30, usageSource: 'reported', billingStatus: 'settled', durationMs: 10, createdAt: new Date(startAt.getTime() + 20) } })
       }
       const beforeUsage = await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usage.id } })
+      const beforeAllUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
       const beforeRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
       const recovered = await prisma.$transaction(tx => readContinuedReviewRecovery(tx, f, [pending]))
-      expect(recovered).toHaveLength(['quality', 'continuity', 'correction', 'reassessment'].includes(scenario) ? 1 : 0)
+      expect(recovered).toHaveLength(['quality', 'continuity', 'correction', 'correction-rejected-source', 'reassessment'].includes(scenario) ? 1 : 0)
       if (recovered.length) {
         const first = recovered[0]
         const allUsageIds = knownFirstId ? expect.arrayContaining([usage.id, knownFirstId]) : [usage.id]
@@ -86,6 +94,7 @@ describe.runIf(available)('ordinary author Continue preserves real unknown billi
         expect(await prisma.$transaction(tx => readAuthorContinuedReviewUsageIds(tx, f))).toEqual(new Set(knownFirstId ? [usage.id, knownFirstId] : [usage.id]))
       }
       expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usage.id } })).toEqual(beforeUsage)
+      expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(beforeAllUsage)
       expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toEqual(beforeRun)
     } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
   }))

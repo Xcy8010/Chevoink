@@ -200,6 +200,8 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
         }
         throw error
       } finally {
+        if (!followupTrace.records.length) await prisma.$transaction(tx => observeLegacyContinuityAssessment(tx, ctx, frozen,
+          { content: null, finishReason: null, toolCalls: [], transportComplete: false }, [], 'reassessment'))
         for (const record of followupTrace.records) {
           const response = followupObservations.find(value => value.usageId === record.usageId)
           await prisma.$transaction(tx => observeLegacyContinuityAssessment(tx, ctx, frozen,

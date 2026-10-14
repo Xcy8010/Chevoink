@@ -54,6 +54,61 @@ async function retryFixture(f: Parameters<Parameters<typeof fixture>[0]>[0], con
 }
 
 describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', () => {
+  it('requires authenticated human Continue to retire an unknown second pass after a known-zero primary retry, preserving every fee', () => fixture(async f => {
+    try {
+      const controller = new AbortController(), { ctx, compilation } = await retryFixture(f, controller)
+      const timers = interceptRetryWait(controller)
+      const callAt = new Date()
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', createdAt: callAt,
+        payload: { toolName: 'continuity_validate', callId: ctx.callId, args: { compilationId: compilation.id } } } })
+      let sends = 0
+      const fetcher = vi.fn(async () => {
+        sends++
+        if (sends === 1) return rateLimited()
+        if (sends === 2) return completion(JSON.stringify({ findings: [finding] }))
+        if (sends === 3) return new Response(new ReadableStream({
+          start(stream) { stream.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"{\\"decisions\\":["}}]}\n\n')) },
+          pull(stream) { stream.error(new TypeError('fetch failed during second pass response')) },
+        }), { headers: { 'content-type': 'text/event-stream' } })
+        return completion('{"findings":[]}')
+      })
+      vi.stubGlobal('fetch', fetcher)
+      const first = await continuityValidateTool.execute(ctx, { compilationId: compilation.id }).catch(error => ({ outcome: 'failed', failureCode: error.code ?? error.name }))
+      expect(first.outcome).toBe('failed')
+      expect(fetcher).toHaveBeenCalledTimes(3)
+      expect(timers.waits).toEqual([60_000]); expect(timers.errors).toEqual([])
+      const payments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, action: { startsWith: 'agent3ContinuityCritic' } }, orderBy: { createdAt: 'asc' } })
+      expect(payments).toHaveLength(3)
+      expect(payments[0]).toMatchObject({ action: 'agent3ContinuityCritic', usageSource: 'prepared', billingStatus: 'provider_rejected', reservedCreditMilli: 0, creditChargeMilli: 0 })
+      expect(payments[1]).toMatchObject({ action: 'agent3ContinuityCritic', usageSource: 'reported', billingStatus: 'settled', requestTokens: 12, responseTokens: 8, reservedCreditMilli: 0 })
+      expect(payments[1].creditChargeMilli).toBe(priceTokenEvidence(tokenPriceSchema.parse(payments[1].billingSnapshot), 12, 8, payments[1].promptCacheHitTokens))
+      expect(payments[2]).toMatchObject({ action: 'agent3ContinuityCriticSecondPass', usageSource: 'unknown', billingStatus: 'pending_usage', requestTokens: null, responseTokens: null, creditChargeMilli: 0 })
+      expect(payments[2].reservedCreditMilli).toBeGreaterThan(0)
+      await continuityValidateTool.execute({ ...ctx, callId: 'same-admission' }, { compilationId: compilation.id }).catch(() => {})
+      expect(fetcher).toHaveBeenCalledTimes(3)
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation).not.toMatchObject({ independentCheck: 'complete' })
+      const resultAt = new Date()
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.result', createdAt: resultAt,
+        payload: { toolName: 'continuity_validate', callId: ctx.callId, ok: false, failureCode: first.failureCode } } })
+      const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'run.paused', createdAt: new Date(resultAt.getTime() + 10), payload: {} } })
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4, type: 'run.started', createdAt: new Date(resultAt.getTime() + 20),
+        payload: { authorContinue: { eventId: pause.id, afterSeq: 3 } } } })
+      const fresh = { ...ctx, callId: 'new-human-admission' }
+      await continuityValidateTool.execute(fresh, { compilationId: compilation.id }).catch(() => {})
+      expect(fetcher).toHaveBeenCalledTimes(3)
+      const pending = { compilationId: compilation.id, chapterId: f.chapterId, revision: 1, toolName: 'continuity_validate' as const, callId: ctx.callId! }
+      const native = await prisma.$transaction(tx => readContinuedReviewRecovery(tx, f, [pending]))
+      expect(native).toHaveLength(1)
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'review.reconciled', createdAt: new Date(resultAt.getTime() + 30),
+        payload: JSON.parse(JSON.stringify({ ...pending, receipt: native[0].receipt })) } })
+      expect((await continuityValidateTool.execute(fresh, { compilationId: compilation.id })).outcome).not.toBe('failed')
+      await continuityValidateTool.execute(fresh, { compilationId: compilation.id })
+      expect(fetcher).toHaveBeenCalledTimes(4)
+      for (const payment of payments) expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: payment.id } })).toEqual(payment)
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(body)
+    } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+  }))
+
   it.each(['first-absent', 'first-zero', 'second-absent', 'second-zero', 'both', 'first-then-source-invalid', 'first-then-output-limit'] as const)(
     '%s preserves all attempts and applies/reuses the complete report without another HTTP request', scenario => fixture(async f => {
       try {
@@ -314,7 +369,7 @@ describe('complete continuity assessment lifecycle in actual PostgreSQL', () => 
           vi.spyOn(lifecycle, 'bindLegacyContinuityRequest').mockImplementation(async (...args) => {
             if (scenario === 'stale-second-bound' && args[4] === 'reassessment') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: body + '作者另行补充。', revision: { increment: 1 } } })
             const value = await bind(...args)
-            if (args[4] === (scenario === 'abort-first-bound' ? 'first' : 'reassessment')) controller.abort()
+            if (value === (scenario === 'abort-first-bound' ? 'first' : 'reassessment')) controller.abort()
             return value
           })
         }
