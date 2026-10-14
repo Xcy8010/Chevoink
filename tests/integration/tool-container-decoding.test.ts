@@ -104,7 +104,7 @@ describe('container wire decoding with native frozen operation recovery', () => 
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(source)
     expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).specSnapshot).toEqual(root.specSnapshot)
     expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).toEqual(budget)
-    expect(await prisma.agentProviderAttempt.count({ where: { taskRootId: f.rootId } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
     expect(normalizeToolInput(storyCompilerPrepareTool, wire)).toEqual(canonical)
   }, undefined, '写下一章', { freezeWriting: true }))
 })
