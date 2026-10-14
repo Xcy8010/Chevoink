@@ -437,6 +437,20 @@ describe('explicit zero provider usage is not missing usage', () => {
     } finally { capture.mockRestore(); heartbeat.mockRestore() }
   })
   it.each([429, 500, 503])('routes a rejected HTTP %s request to another configured account', async status => {
+    const ledger = new Map<string, Record<string, unknown>>()
+    mocks.create.mockImplementation(async ({ data }) => {
+      const row = { id: `route-usage-${ledger.size + 1}`, creditChargeMilli: 0, reservedCreditMilli: 123, ...data }
+      ledger.set(row.id, row); return { ...row }
+    })
+    mocks.update.mockImplementation(async ({ where, data }) => {
+      const row = ledger.get(where.id)!; Object.assign(row, data); return { ...row }
+    })
+    mocks.findUsage.mockImplementation(async ({ where }) => ledger.get(where.id) ?? null)
+    mocks.charge.mockImplementation(async ({ usageLogId, requestTokens, responseTokens }) => {
+      const chargedMilli = requestTokens === 0 && responseTokens === 0 ? 0 : 10
+      Object.assign(ledger.get(usageLogId)!, { billingStatus: 'settled', reservedCreditMilli: 0, creditChargeMilli: chargedMilli })
+      return { chargedMilli, remainingMilli: 1000, exhausted: false }
+    })
     const primary = { id: `primary-${status}`, tier: 'speed', provider: 'openai', modelName: 'fixture', baseUrl: 'https://primary.test/v1', apiKeyCiphertext: 'fixture-not-a-key', metadata: { routes: [{ id: `00000000-0000-4000-8000-000000000${status}`, label: 'backup', provider: 'openai', modelName: 'backup', baseUrl: 'https://backup.test/v1', apiKeyCiphertext: 'other-fixture-key', enabled: true }] } }
     mocks.findModel.mockResolvedValue(primary)
     mocks.runtime.mockResolvedValue({ tier: 'speed', apiKey: 'fixture-not-a-key', baseUrl: primary.baseUrl, provider: 'openai', reasoningEffort: 'high', multiplierBps: 10000, modelName: 'fixture' })
@@ -608,7 +622,8 @@ describe('explicit zero provider usage is not missing usage', () => {
   })
   it('releases a provider-rejected auxiliary request rather than holding the account', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"message":"rate limited"}}', { status: 429 })))
-    await expect(generateTextCompletion('system', 'user', { userId: 'test', action: 'test' })).rejects.toThrow('每分钟请求或 Token 限制')
+    await expect(generateTextCompletion('system', 'user', { userId: 'test', action: 'test' })).rejects.toThrow('rate limited')
+    expect(fetch).toHaveBeenCalledOnce() // No readable terminal ledger proof in this fixture.
     expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } }))
     expect(mocks.charge).not.toHaveBeenCalled()
   })
@@ -629,8 +644,9 @@ describe('explicit zero provider usage is not missing usage', () => {
   it('aborts auxiliary requests immediately without dispatching a retry or billing unknown usage as zero', async () => {
     const controller = new AbortController()
     const fetching = vi.fn(async (_url: unknown, init: RequestInit) => {
-      expect(init.signal).toBe(controller.signal)
+      expect(init.signal).toBeInstanceOf(AbortSignal)
       controller.abort()
+      expect(init.signal!.aborted).toBe(true)
       init.signal!.throwIfAborted()
       return new Response('{}')
     })

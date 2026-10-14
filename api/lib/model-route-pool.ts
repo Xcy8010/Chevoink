@@ -51,11 +51,13 @@ export class ModelRouteRejected extends DataAccessError {
   }
 }
 export const routeRetryableStatus = (status: number) => [429, 500, 502, 503, 504].includes(status)
+// Preliminary response-shape filter only. Non-durable producers must also
+// verify the actual persisted zero-charge billing row before issuing rejection.
 export const routeRejectionMayRetry = (status: number, prompt: number | undefined, completion: number | undefined) => routeRetryableStatus(status)
   && (prompt == null && completion == null || prompt === 0 && completion === 0)
 const cursors = new Map<string, number>()
 const cooldowns = new Map<string, number>()
-const byokCooldowns = new Map<string, number>()
+const exactRouteCooldowns = new Map<string, number>()
 type Route = { id: string; provider: string; modelName: string; baseUrl: string; apiKey: string }
 
 function waitForRetry(signal: AbortSignal, delayMs: number): Promise<void> {
@@ -76,33 +78,36 @@ function waitForRetry(signal: AbortSignal, delayMs: number): Promise<void> {
   })
 }
 
-function byokCooldownKey(params: ChatWithToolsParams): string {
-  // 不把 API Key 放入进程内映射或日志。所有者、端点和模型足以让同一 BYOK
-  // 配置在供应商限流窗口内串行等待。
-  const accountFingerprint = createHash('sha256').update(params.providerApiKey ?? '').digest('hex')
-  return [params.usageLog.userId, params.providerBaseUrl ?? '', params.model ?? '', accountFingerprint].join('\u0000')
+function exactRouteCooldownKey(params: ChatWithToolsParams): string {
+  // Share only this owner's exact effective provider/model/account cooldown;
+  // credentials never enter the mapping or logs in plaintext.
+  const accountFingerprint = createHash('sha256').update(params.providerApiKey ?? env.aiTextApiKey).digest('hex')
+  return [params.usageLog.userId, params.provider ?? env.aiTextProvider, params.providerBaseUrl ?? env.aiTextBaseUrl,
+    params.model ?? env.aiTextModel, accountFingerprint].join('\u0000')
 }
 
-async function invokeByokWithRateLimitRetry<T>(params: ChatWithToolsParams, invoke: (params: ChatWithToolsParams) => Promise<T>): Promise<T> {
+async function invokeExactRouteWithRateLimitRetry<T>(params: ChatWithToolsParams, invoke: (params: ChatWithToolsParams) => Promise<T>): Promise<T> {
   const signal = AbortSignal.any([...(params.signal ? [params.signal] : []), AbortSignal.timeout(360_000)])
-  const key = byokCooldownKey(params)
-  if (byokCooldowns.size > 512) byokCooldowns.clear()
-  const existingCooldown = byokCooldowns.get(key)
+  const key = exactRouteCooldownKey(params)
+  if (exactRouteCooldowns.size > 512) exactRouteCooldowns.clear()
+  const existingCooldown = exactRouteCooldowns.get(key)
   if (existingCooldown && existingCooldown > Date.now()) await waitForRetry(signal, existingCooldown - Date.now())
-  if (existingCooldown && byokCooldowns.get(key) === existingCooldown) byokCooldowns.delete(key)
+  if (existingCooldown && exactRouteCooldowns.get(key) === existingCooldown) exactRouteCooldowns.delete(key)
+  signal.throwIfAborted()
   try {
     return await invoke({ ...params, signal })
   } catch (error) {
     if (!(error instanceof ModelRouteRejected) || error.upstreamStatus !== 429 || signal.aborted) throw error
     const retryAt = Date.now() + error.cooldownMs
-    byokCooldowns.set(key, retryAt)
+    exactRouteCooldowns.set(key, retryAt)
     await waitForRetry(signal, error.cooldownMs)
-    if (byokCooldowns.get(key) === retryAt) byokCooldowns.delete(key)
+    if (exactRouteCooldowns.get(key) === retryAt) exactRouteCooldowns.delete(key)
+    signal.throwIfAborted()
     try {
       return await invoke({ ...params, signal })
     } catch (retryError) {
       if (retryError instanceof ModelRouteRejected && retryError.upstreamStatus === 429) {
-        byokCooldowns.set(key, Date.now() + retryError.cooldownMs)
+        exactRouteCooldowns.set(key, Date.now() + retryError.cooldownMs)
         throw new DataAccessError(502, 'AI_PROVIDER_ERROR', '模型服务仍受每分钟请求或 Token 限制。系统已等待后安全重试一次；未执行工具或重复扣费。请约一分钟后继续，或提高该供应商账号的 TPM/RPM 限额。')
       }
       throw retryError
@@ -115,16 +120,17 @@ async function invokeByokWithRateLimitRetry<T>(params: ChatWithToolsParams, invo
 export async function withModelRoutePool<T>(params: ChatWithToolsParams, invoke: (params: ChatWithToolsParams) => Promise<T>): Promise<T> {
   const tier = params.usageLog.modelTier
   if (!tier || params.durableExecution) return invoke(params)
-  // BYOK never switches models or accounts. A 429 without reported usage is
-  // safe to replay once after its explicit/default cooldown.
-  if (tier === 'custom') return invokeByokWithRateLimitRetry(params, invoke)
+  // A confirmed no-charge 429 can retry once on the exact same route, including
+  // single-route built-ins and explicitly bound auxiliary models/accounts.
+  if (tier === 'custom') return invokeExactRouteWithRateLimitRetry(params, invoke)
   const config = await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, tier, enabled: true } })
-  if (!config) return invoke(params)
+  if (!config) return invokeExactRouteWithRateLimitRetry(params, invoke)
   const configured = readModelRoutes(config.metadata).filter(route => route.enabled)
-  if (!configured.length) return invoke(params)
+  if (!configured.length) return invokeExactRouteWithRateLimitRetry(params, invoke)
   const primary = { id: config.id, provider: config.provider, modelName: config.modelName, baseUrl: config.baseUrl ?? env.aiTextBaseUrl, apiKey: config.apiKeyCiphertext ? decryptSecret(config.apiKeyCiphertext) : env.aiTextApiKey }
   // An auxiliary caller with an explicit different model must not be rerouted by its billing label.
-  if ((params.model ?? env.aiTextModel) !== primary.modelName || (params.providerBaseUrl ?? env.aiTextBaseUrl) !== primary.baseUrl || (params.providerApiKey ?? env.aiTextApiKey) !== primary.apiKey) return invoke(params)
+  if ((params.provider ?? env.aiTextProvider) !== primary.provider || (params.model ?? env.aiTextModel) !== primary.modelName
+    || (params.providerBaseUrl ?? env.aiTextBaseUrl) !== primary.baseUrl || (params.providerApiKey ?? env.aiTextApiKey) !== primary.apiKey) return invokeExactRouteWithRateLimitRetry(params, invoke)
   const routes: Route[] = [primary, ...configured.map(({ apiKeyCiphertext, ...route }) => ({ ...route, apiKey: decryptSecret(apiKeyCiphertext) }))]
   if (cursors.size > 64) cursors.clear()
   for (const [id, until] of cooldowns) if (until <= Date.now()) cooldowns.delete(id)

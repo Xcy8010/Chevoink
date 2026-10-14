@@ -39,7 +39,7 @@ beforeEach(() => {
   mocks.access.mockResolvedValue(undefined)
   mocks.begin.mockResolvedValue({ rejected: mocks.rejected })
 })
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('supplier quota error boundary', () => {
   it.each([{ code: 'insufficient_quota' }, { type: 'insufficient_quota' }, { code: 'quota_exceeded' },
@@ -66,12 +66,12 @@ describe('supplier quota error boundary', () => {
       await expect(invoke()).rejects.toMatchObject({ code: 'AI_PROVIDER_QUOTA_EXCEEDED' })
       expect(fetch).toHaveBeenCalledOnce()
     })
-    it(`${channel} leaves transient HTTP429 eligible for existing rate-limit recovery`, async () => {
+    it(`${channel} leaves an unconfirmed transient HTTP429 outside automatic recovery`, async () => {
       vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"code":"rate_limit_exceeded","message":"RPM exceeded"}}', { status: 429 })))
       const error = await invoke().catch(error => error)
-      expect(error).toBeInstanceOf(ModelRouteRejected)
-      expect(error.upstreamStatus).toBe(429)
+      expect(error).not.toBeInstanceOf(ModelRouteRejected)
       expect(error.code).toBe('AI_PROVIDER_ERROR')
+      expect(fetch).toHaveBeenCalledOnce()
     })
     it(`${channel} preserves reported HTTP error usage before quota classification`, async () => {
       vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { type: 'insufficient_quota' },

@@ -236,6 +236,23 @@ async function markUnobservedUsage(id: string | undefined, dispatched = true, au
   await syncGoalLegacyUsage(id)
 }
 
+/** An HTTP status/token shape is only a candidate. Automatic replay requires
+ * the exact original account row to have reached known, zero-charge billing;
+ * recordUsage may have retained an observation with settlement still pending. */
+async function hasKnownZeroProviderRejection(id: string | undefined, userId: string): Promise<boolean> {
+  if (!id) return false
+  const usage = await prisma.aiUsageLog.findUnique({ where: { id, userId }, select: {
+    usageSource: true, billingStatus: true, requestTokens: true, responseTokens: true,
+    reservedCreditMilli: true, creditChargeMilli: true, promptCacheHitTokens: true, promptCacheMissTokens: true,
+  } }).catch(() => null)
+  if (!usage || usage.creditChargeMilli !== 0 || !isKnownTextRequestBilling(usage)
+    || usage.promptCacheHitTokens != null && usage.promptCacheHitTokens !== 0
+    || usage.promptCacheMissTokens != null && usage.promptCacheMissTokens !== 0) return false
+  return usage.billingStatus === 'provider_rejected'
+    || usage.usageSource === 'reported' && usage.requestTokens === 0 && usage.responseTokens === 0
+      && ['settled', 'exempt'].includes(usage.billingStatus ?? '')
+}
+
 async function saveOutputEvidence(id: string, inputEstimate: number, output: string) {
   if (!output) return
   await prisma.aiUsageLog.updateMany({ where: { id, billingStatus: { in: ['prepared', 'authorized_pending'] } }, data: {
@@ -911,7 +928,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
       promptTokens: reportedPrompt ?? null, completionTokens: reportedCompletion ?? null,
       cacheHitTokens: cache.hit, cacheMissTokens: cache.miss,
     } } : {}) })
-    if (prepared && (reportedPrompt != null || reportedCompletion != null)) {
+    if (prepared && (reportedPrompt != null || reportedCompletion != null || cache.hit != null || cache.miss != null)) {
       await recordUsage({ ...params.usageLog, preparedUsageId: prepared.id, providerType: 'text', modelName: model,
         providerName: params.provider ?? env.aiTextProvider, requestTokens: reportedPrompt ?? null, responseTokens: reportedCompletion ?? null,
         promptCacheHitTokens: cache.hit, promptCacheMissTokens: cache.miss, durationMs: Date.now() - startedAt,
@@ -923,7 +940,10 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
       await syncGoalLegacyUsage(prepared.id)
     } else await markUnobservedUsage(prepared?.id)
     if (quotaRejected) throw providerQuotaError(tier === 'custom')
-    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)) throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
+    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)
+      && (durable || await hasKnownZeroProviderRejection(prepared?.id, params.usageLog.userId))) {
+      throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
+    }
     throw new DataAccessError(
       502,
       'AI_PROVIDER_ERROR',
@@ -1298,7 +1318,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     }
   }
   const completionCache = extractCacheTokens(payload.usage ?? {})
-  if (authorized && (validContent || reportedPrompt != null || reportedCompletion != null)
+  if (authorized && (validContent || reportedPrompt != null || reportedCompletion != null || completionCache.hit != null || completionCache.miss != null)
     && (reportedPrompt == null || reportedCompletion == null || reportedPrompt > authorized.inputTokenCeiling
       || reportedCompletion > options.maxOutputTokens! || priceTokenEvidence(authorized.price, reportedPrompt, reportedCompletion, completionCache.hit) > authorized.maxCreditMilli)) {
     // Preserve actual observations; neither a guessed zero nor an automatic
@@ -1313,7 +1333,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   }
   // CR02: a non-streaming empty/error response can still carry real usage.
   // Keep that observation, but do not estimate missing usage from an error body.
-  if (validContent || reportedPrompt != null || reportedCompletion != null) await recordUsage({
+  if (validContent || reportedPrompt != null || reportedCompletion != null || completionCache.hit != null || completionCache.miss != null) await recordUsage({
     preparedUsageId: prepared.id,
     usageSource: reportedPrompt != null && reportedCompletion != null ? 'reported' : validContent ? 'estimated' : 'unknown',
     userId: options.userId,
@@ -1341,7 +1361,10 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
       await prisma.aiUsageLog.updateMany({ where: { id: prepared.id, billingStatus: { in: ['prepared', 'authorized_pending'] } },
         data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } })
     }
-    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)) throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
+    if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)
+      && await hasKnownZeroProviderRejection(prepared.id, options.userId)) {
+      throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
+    }
     throw new DataAccessError(502, [408, 504].includes(response.status) ? 'AI_PROVIDER_TIMEOUT' : 'AI_PROVIDER_ERROR', typeof payload.error?.message === 'string' ? payload.error.message : '模型服务暂时不可用。')
   }
   if (typeof content !== 'string' || !content.trim()) {
