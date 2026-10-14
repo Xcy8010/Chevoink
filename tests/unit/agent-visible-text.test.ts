@@ -23,7 +23,7 @@ describe('author text classification before publication', () => {
     const projected = humanizeAgentVisibleText('拿到 compilationId=cmttleebg03h9wqox9lieracs，调用 scene_task_build 补齐场景。')
     expect(projected).not.toMatch(/compilationId|cmttleebg03h9wqox9lieracs|scene_task_build/)
     expect(projected).toBe('')
-    expect(humanizeAgentVisibleText('接下来我会调用 scene_task_build 补齐场景。')).toContain('准备本章')
+    expect(humanizeAgentVisibleText('接下来我会调用 scene_task_build 补齐场景。')).toContain('准备章节')
   })
   it('keeps full-turn execution guards independent when author parameters are withheld', () => {
     const raw = '调用参数：model=hidden，reasoningEffort=high。'

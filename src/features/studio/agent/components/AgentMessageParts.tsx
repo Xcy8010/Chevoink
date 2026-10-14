@@ -462,7 +462,7 @@ function PlatformNovelCard({
         <div className="border-t border-[var(--border-subtle)] py-2 pl-5">
           <p className="text-[11px] text-[var(--text-secondary)]">
             {display.published ? '已上架' : display.isOwn ? '我的·未公开' : '已下架'}
-            {display.chapterTitle ? ` · 本章：《${display.chapterTitle}》` : ''}
+            {display.chapterTitle ? ` · 章节：《${display.chapterTitle}》` : ''}
           </p>
           {display.tags.length > 0 ? (
             <p className="mt-1 text-[11px] text-[var(--text-secondary)]">

@@ -104,7 +104,7 @@ it('preserves real failure status and error code while projecting live activity 
   apply({ type: 'tool.result', messageId: 'a', callId: 'write', toolName: 'chapter_write', ok: false, summary: 'HTTP Error P2002' }, 2)
   const state = useAgentStore.getState()
   expect(state.workspaceActivities[0]).toMatchObject({ status: 'failed', summary: '本次操作未完成。请核对当前成果后重试，或调整要求。' })
-  expect(state.messages[0].parts[0]).toMatchObject({ status: 'failed', title: '撰写本章' })
+  expect(state.messages[0].parts[0]).toMatchObject({ status: 'failed', title: '撰写章节' })
   apply({ type: 'error', code: 'PROVIDER_FAILURE', message: 'HTTP Error P2002', recoverable: false }, 3)
   expect(useAgentStore.getState()).toMatchObject({ phase: 'failed', errorCode: 'PROVIDER_FAILURE', errorMessage: '本次操作未完成。请核对当前成果后重试，或调整要求。' })
 })
