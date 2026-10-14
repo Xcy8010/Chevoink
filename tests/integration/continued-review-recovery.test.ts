@@ -10,7 +10,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 describe.runIf(available)('ordinary author Continue preserves real unknown billing while retiring only its prior execution slot', () => {
   it.each(['quality', 'continuity', 'no-author', 'post-admission', 'correction', 'correction-no-claim', 'correction-unknown-source', 'correction-late-claim',
     'correction-rejected-source', 'correction-charged-rejection-source', 'correction-reserved-rejection-source',
-    'reassessment', 'reassessment-no-claim', 'reassessment-unknown-first', 'reassessment-late-claim', 'reassessment-extra-attempt'] as const)('%s uses authenticated PostgreSQL call/admission/input evidence', scenario => fixture(async f => {
+    'reassessment', 'reassessment-no-claim', 'reassessment-no-first-response', 'reassessment-unknown-first', 'reassessment-late-claim', 'reassessment-extra-attempt'] as const)('%s uses authenticated PostgreSQL call/admission/input evidence', scenario => fixture(async f => {
     try {
       const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '原授权章节复核' })
       await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0, status: 'running',
@@ -68,7 +68,11 @@ describe.runIf(available)('ordinary author Continue preserves real unknown billi
           createdAt: new Date(startAt.getTime() + 150), metadata: { version: 1, assessmentRequestOwnerKey: key, stage: 'reassessment', callId: pending.callId, usageIds: [usage.id] } } })
         await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview', title: '首次响应审计', content: '仅测试不可变观察',
           createdAt: new Date(startAt.getTime() + 40), metadata: runtimeJson({ version: 1, assessmentKey: key, stage: 'first', callId: pending.callId,
-            input, usageIds: [primary.id], audit: audit.audit }).value } })
+            assessmentResponseKey: runtimeJson({ assessmentKey: key, stage: 'first', usageIds: [primary.id] }).hash,
+            input, usageIds: [primary.id], audit: audit.audit,
+            ...(scenario === 'reassessment-no-first-response' ? {} : { response: { content: audit.audit.rawResponse.content, encoding: 'json-string',
+              finishReason: 'stop', toolCalls: [], transportComplete: true } }),
+          }).value } })
         if (scenario !== 'reassessment-no-claim') await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview', title: '完整复评预约', content: '仅测试一次真实预约',
           createdAt: new Date(startAt.getTime() + (scenario === 'reassessment-late-claim' ? 200 : 50)), metadata: runtimeJson({ version: 1, fullReassessmentKey: key, callId: pending.callId,
             input, original: audit.audit, request: continuityReassessmentRequest(input.system, input.content, audit, input.bodies), usageIds: [primary.id] }).value } })
