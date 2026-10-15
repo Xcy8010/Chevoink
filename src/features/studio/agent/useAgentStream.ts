@@ -95,9 +95,20 @@ export function useAgentStream(
   onActiveConnectionErrorRef.current = onActiveConnectionError
 
   // delta 批处理队列：每帧（页面后台时降级 100ms 定时器）冲刷一次
-  const pendingRef = useRef<AgentStreamEvent[]>([])
+  const pendingRef = useRef<Array<{ event: AgentStreamEvent; onEvent: typeof onEvent }>>([])
   const flushHandleRef = useRef<number | null>(null)
   const flushViaRafRef = useRef(false)
+
+  const deliver = useCallback((event: AgentStreamEvent, onConnectionEvent: typeof onEvent) => {
+    const before = useAgentStore.getState()
+    if (event.runId !== before.runId || !Number.isSafeInteger(event.seq) || event.seq <= before.lastSeq) return false
+    before.applyEvent(event)
+    const after = useAgentStore.getState()
+    // A rejected store event must not take a second path into chapter/plan state.
+    if (after.runId !== event.runId || after.lastSeq !== event.seq) return false
+    onConnectionEvent?.(event)
+    return true
+  }, [])
 
   const flushPending = useCallback(() => {
     if (flushHandleRef.current !== null) {
@@ -115,12 +126,19 @@ export function useAgentStream(
     const pending = pendingRef.current
     pendingRef.current = []
 
-    const { applyEvent } = useAgentStore.getState()
-    for (const event of mergePendingEvents(pending)) {
-      applyEvent(event)
-      onEventRef.current?.(event)
+    // Filter before concatenation: an old/duplicate delta must not hitchhike
+    // inside the text of a newer merged event.
+    const current = useAgentStore.getState()
+    let sequence = current.lastSeq
+    const accepted = pending.filter(({ event }) => {
+      if (event.runId !== current.runId || !Number.isSafeInteger(event.seq) || event.seq <= sequence) return false
+      sequence = event.seq
+      return true
+    })
+    for (const event of mergePendingEvents(accepted.map(item => item.event))) {
+      deliver(event, pending[0].onEvent)
     }
-  }, [])
+  }, [deliver])
 
   const scheduleFlush = useCallback(() => {
     if (flushHandleRef.current !== null) {
@@ -156,9 +174,12 @@ export function useAgentStream(
         withCredentials: true,
       })
       sourceRef.current = source
+      // Keep the host's original workspace epoch even if React renders a new
+      // novel/task callback before this connection's cleanup runs.
+      const onConnectionEvent = onEventRef.current
 
       const handleEvent = (raw: MessageEvent) => {
-        if (!raw.data) {
+        if (sourceRef.current !== source || !raw.data) {
           return
         }
 
@@ -168,20 +189,21 @@ export function useAgentStream(
         } catch {
           return
         }
+        if (event.runId !== runId) return
 
         // 高频 delta：只入队 + 预约下一帧冲刷，不直接触发全局状态更新
         if (isDeltaEvent(event)) {
-          pendingRef.current.push(event)
+          pendingRef.current.push({ event, onEvent: onConnectionEvent })
           scheduleFlush()
           return
         }
 
         // 低频事件：先冲刷队列再同步应用，保证事件顺序语义不变
         flushPending()
-        useAgentStore.getState().applyEvent(event)
-        onEventRef.current?.(event)
+        if (sourceRef.current !== source) return
+        const accepted = deliver(event, onConnectionEvent)
 
-        if (isTerminalEvent(event)) {
+        if (accepted && sourceRef.current === source && isTerminalEvent(event)) {
           disconnect()
         }
       }
@@ -205,7 +227,7 @@ export function useAgentStream(
         onActiveConnectionErrorRef.current?.(runId)
       }
     },
-    [disconnect, flushPending, scheduleFlush],
+    [disconnect, flushPending, scheduleFlush, deliver],
   )
 
   useEffect(() => disconnect, [disconnect])

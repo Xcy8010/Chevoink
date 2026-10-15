@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, type Dispatch, type SetStateAction, type MutableRefObject } from 'react'
-import type { Novel, StudioPayload } from '../../../../shared/contracts/index.js'
+import type { Chapter, Novel, StudioPayload } from '../../../../shared/contracts/index.js'
 import { createChapterDraft, updateChapterDraft } from '../api'
 import { buildChapterDraft } from '../lib/form-state'
 import { formatDateTime } from '../lib/agent-session'
@@ -9,10 +9,14 @@ import { registerDesktopSave } from '@/lib/desktop-lifecycle'
 
 type ChapterPersistence = {
   activeNovelId: string
+  scope?: string
   chapterDraft: ChapterDraftState | null
   chapterDirty: boolean
   chapterDraftStateRef: MutableRefObject<ChapterDraftState | null>
+  chapterDirtyStateRef?: MutableRefObject<boolean>
   pendingChapterReviewsRef: MutableRefObject<ChapterPendingReview[]>
+  setPendingChapterReviews?: Dispatch<SetStateAction<ChapterPendingReview[]>>
+  syncSavedChapter?: (chapter: Chapter) => void
   selectedChapterIdStateRef: MutableRefObject<string | null>
   promptConfirmPendingChapterReview: (label: string) => void
   setChapterSaveState: Dispatch<SetStateAction<SaveState>>
@@ -33,16 +37,22 @@ export function useChapterPersistence(options: ChapterPersistence) {
   latest.current = options
   const epoch = useRef(0)
   const chapterSavingRef = useRef(false)
-  const { activeNovelId, chapterDraft, chapterDirty, setChapterSaveState, setChapterSaveMessage } = options
+  const inflight = useRef<Promise<void> | null>(null)
+  const failure = useRef<{ owner: number; error: unknown } | null>(null)
+  const { activeNovelId, scope, chapterDraft, chapterDirty, setChapterSaveState, setChapterSaveMessage } = options
   useLayoutEffect(() => {
     const owner = ++epoch.current
     chapterSavingRef.current = false
+    inflight.current = null
+    failure.current = null
     return () => { epoch.current = owner + 1 }
-  }, [activeNovelId])
+  }, [activeNovelId, scope])
 
   const persistChapter = useCallback(
-    async (reason: 'manual' | 'auto' | 'apply') => {
-      const { activeNovelId, chapterDraftStateRef, pendingChapterReviewsRef, selectedChapterIdStateRef, promptConfirmPendingChapterReview, setChapterSaveState, setChapterSaveMessage, setChapters, setSelectedTreeItemId, setSelectedChapterId, setChapterDraft, setChapterDirty, setChapterLastSavedAt, setCurrentNovel, syncStudioPayload } = latest.current
+    (reason: 'manual' | 'auto' | 'apply' | 'switch'): Promise<void> => {
+      if (chapterSavingRef.current) return inflight.current ?? Promise.resolve()
+      const request = (async () => {
+      const { activeNovelId, chapterDraftStateRef, chapterDirtyStateRef, pendingChapterReviewsRef, setPendingChapterReviews, syncSavedChapter, selectedChapterIdStateRef, promptConfirmPendingChapterReview, setChapterSaveState, setChapterSaveMessage, setChapters, setSelectedTreeItemId, setSelectedChapterId, setChapterDraft, setChapterDirty, setChapterLastSavedAt, setCurrentNovel, syncStudioPayload } = latest.current
       const owner = epoch.current
       // 编辑器输入经 LocalFirstTextarea 防抖上报，闭包里的 chapterDraft 可能落后；
       // 保存时一律以最新 ref 为准，blur/自动保存都能拿到当前输入。
@@ -52,7 +62,7 @@ export function useChapterPersistence(options: ChapterPersistence) {
       }
 
       // 仅拦截待审查的那些章，其他章节正常保存
-      if (pendingChapterReviewsRef.current.some((item) => item.chapterId === draft.id)) {
+      if (reason !== 'switch' && pendingChapterReviewsRef.current.some((item) => item.chapterId === draft.id)) {
         if (reason !== 'auto') {
           promptConfirmPendingChapterReview('保存当前章节')
         }
@@ -64,6 +74,7 @@ export function useChapterPersistence(options: ChapterPersistence) {
           setChapterSaveState('error')
           setChapterSaveMessage('章节标题和正文都不能为空。')
         }
+        if (reason === 'switch') throw new Error('章节标题和正文都不能为空。')
         return
       }
 
@@ -71,6 +82,7 @@ export function useChapterPersistence(options: ChapterPersistence) {
         return
       }
       chapterSavingRef.current = true
+      failure.current = null
 
       setChapterSaveState('saving')
       setChapterSaveMessage(reason === 'auto' ? '正在自动保存草稿...' : '正在保存章节...')
@@ -91,6 +103,15 @@ export function useChapterPersistence(options: ChapterPersistence) {
           : await updateChapterDraft(activeNovelId, draft.id, payload)
 
         if (owner !== epoch.current) return
+        syncSavedChapter?.(savedChapter)
+        // Saving author edits does not decide the review. Keep its baseline, run and
+        // rollback ownership, advancing only the actual persisted after/revision.
+        if (reason === 'switch') {
+          const reviews = pendingChapterReviewsRef.current.map(review => review.chapterId === draft.id
+            ? { ...review, after: buildChapterDraft(savedChapter) } : review)
+          pendingChapterReviewsRef.current = reviews
+          setPendingChapterReviews?.(reviews)
+        }
         setChapters((current) =>
           replaceChapterItem(current, localDraftId, toChapterListItem(savedChapter)),
         )
@@ -112,10 +133,16 @@ export function useChapterPersistence(options: ChapterPersistence) {
         if (editsArrivedDuringSave && latestDraft) {
           // 网络请求期间用户仍可能继续输入。只接收服务端 revision/真实 id，绝不拿旧响应覆盖
           // 新输入；保留 dirty 让下一轮自动保存继续追上。
-          setChapterDraft({ ...latestDraft, id: savedChapter.id, revision: savedChapter.revision, localOnly: false })
+          const next = { ...latestDraft, id: savedChapter.id, revision: savedChapter.revision, localOnly: false }
+          chapterDraftStateRef.current = next
+          if (chapterDirtyStateRef) chapterDirtyStateRef.current = true
+          setChapterDraft(next)
           setChapterDirty(true)
         } else if (chapterStillOpen) {
-          setChapterDraft(buildChapterDraft(savedChapter))
+          const next = buildChapterDraft(savedChapter)
+          chapterDraftStateRef.current = next
+          if (chapterDirtyStateRef) chapterDirtyStateRef.current = false
+          setChapterDraft(next)
           setChapterDirty(false)
         }
         if (chapterStillOpen) {
@@ -168,14 +195,38 @@ export function useChapterPersistence(options: ChapterPersistence) {
         })
       } catch (error) {
         if (owner !== epoch.current) return
+        failure.current = { owner, error }
         setChapterSaveState('error')
         setChapterSaveMessage(error instanceof Error ? error.message : '章节保存失败，请稍后重试。')
+        if (reason === 'switch') throw error
       } finally {
         if (owner === epoch.current) chapterSavingRef.current = false
       }
+      })()
+      inflight.current = request
+      return request
     },
     [],
   )
+
+  const flushForSwitch = useCallback(async () => {
+    const owner = epoch.current
+    // Join the real request, including a blur/auto save already in flight.
+    if (chapterSavingRef.current) {
+      await inflight.current
+      if (failure.current?.owner === owner) throw failure.current.error
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (owner !== epoch.current) throw new Error('作品或任务已经切换。')
+      const current = latest.current
+      if (!(current.chapterDirtyStateRef?.current ?? current.chapterDirty)) return
+      await persistChapter('switch')
+    }
+    if (owner !== epoch.current) throw new Error('作品或任务已经切换。')
+    if (latest.current.chapterDirtyStateRef?.current ?? latest.current.chapterDirty) {
+      throw new Error('保存期间收到新输入，请稍后再切换作品。')
+    }
+  }, [persistChapter])
 
   useEffect(() => {
     if (!chapterDraft || !chapterDirty) {
@@ -201,5 +252,5 @@ export function useChapterPersistence(options: ChapterPersistence) {
     }
     return false
   }), [persistChapter])
-  return persistChapter
+  return Object.assign(persistChapter, { flushForSwitch })
 }

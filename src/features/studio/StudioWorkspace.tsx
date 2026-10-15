@@ -80,13 +80,14 @@ import { reconcilePlanSelection, stablePlanId } from './components/work-plan-sel
 import { consumeSessionDeepLink, initialTaskWindows, selectInitialTask, selectTaskFallback } from './lib/initial-task-selection'
 import { createCatalogActions } from './components/catalog-actions'
 import { useChapterPersistence } from './components/use-chapter-persistence'
+import { useWorkspaceNovelTransition } from './components/use-workspace-novel-transition'
 import { useWorkspaceLayout } from './components/use-workspace-layout'
 import { useCoverActions } from './components/use-cover-actions'
 import { usePlanSync } from './components/use-plan-sync'
 import { createPlanDocumentActions } from './components/plan-document-actions'
 import { createPlanReviewActions } from './components/plan-review-actions'
 import { openWorkDocument } from './components/work-viewer-events'
-import { adoptChapterResult, canApplyChapterSnapshot } from './components/chapter-stream-handoff'
+import { adoptChapterResult, canApplyChapterSnapshot, claimWorkspaceStreamEvent, isReviewStreamReplay, isStaleChapterReview, isWorkspaceStreamOwnerCurrent, type ReviewStreamCursor } from './components/chapter-stream-handoff'
 import { useChapterSnapshot } from './components/use-chapter-snapshot'
 
 export default function StudioWorkspace() {
@@ -274,15 +275,18 @@ export default function StudioWorkspace() {
   const workPanelScope = useWorkPanelState(taskUiScope,
     { rightOpen: workRightOpen, viewer: workViewer, inspectorTab: workInspectorTab, selectedTreeItemId, selectedChapterId },
     { setRightOpen: setWorkRightOpen, setViewer: setWorkViewer, setInspectorTab: setWorkInspectorTab, setSelectedTreeItemId, setSelectedChapterId })
-  const chapterStreamOwnerRef = useRef({ novelId: activeNovelId, scope: taskUiScope, sessionId: agentSessionId })
-  chapterStreamOwnerRef.current = { novelId: activeNovelId, scope: taskUiScope, sessionId: agentSessionId }
+  const chapterStreamOwner = useMemo(() => ({ novelId: activeNovelId, scope: taskUiScope, sessionId: agentSessionId,
+    epoch: workspaceOwnerRef.current.epoch }), [activeNovelId, taskUiScope, agentSessionId])
+  const chapterStreamOwnerRef = useRef(chapterStreamOwner)
+  chapterStreamOwnerRef.current = chapterStreamOwner
+  const workspaceStreamCursorsRef = useRef(new Map<string, ReviewStreamCursor>())
   const [agentRunState, setAgentRunState] = useState<AgentRunState>(createIdleAgentRunState)
   const [agentArtifacts, setAgentArtifacts] = useState<AgentArtifact[]>([])
   const [activeAgentArtifactId, setActiveAgentArtifactId] = useState<string | null>(null)
   // 计划文件夹云端副本：覆盖非活跃任务窗口/历史会话的计划，刷新后不丢失
   const [serverPlanFiles, setServerPlanFiles] = useState<WorkspacePlanFile[]>([])
   const [plansLoadedNovelId, setPlansLoadedNovelId] = useState<string | null>(null)
-  const { flushPlanServerSync, schedulePlanServerSync } = usePlanSync()
+  const { flushPlanServerSync, schedulePlanServerSync, awaitPlanServerSync } = usePlanSync()
   const agentRunAbortControllerRef = useRef<AbortController | null>(null)
   const coverGenerationWasActiveRef = useRef(false)
   const [editorSelection, setEditorSelection] = useState<EditorSelectionState>({
@@ -307,9 +311,13 @@ export default function StudioWorkspace() {
   }, [selectedChapterId])
   // 计划审查条（plan/14 方案F）：plan_save 更新既有计划后非阻塞事后审，新建计划不触发
   const [pendingPlanReview, setPendingPlanReview] = useState<PlanPendingReview | null>(null)
+  const pendingPlanReviewRef = useRef(pendingPlanReview)
+  pendingPlanReviewRef.current = pendingPlanReview
   const [pendingPlanReviewBusy, setPendingPlanReviewBusy] = useState(false)
+  const pendingReviewBusyRef = useRef(pendingChapterReviewBusy || pendingPlanReviewBusy)
+  pendingReviewBusyRef.current = pendingChapterReviewBusy || pendingPlanReviewBusy
   // 审查态持久化：刷新页面后恢复未定夺的审查条与 diff 视图（fix2b）
-  usePendingReviewStorage(activeNovelId, pendingChapterReviews, pendingPlanReview, setPendingChapterReviews, setPendingPlanReview)
+  const flushPendingReviews = usePendingReviewStorage(activeNovelId, pendingChapterReviews, pendingPlanReview, setPendingChapterReviews, setPendingPlanReview)
   const [workspaceDialog, setWorkspaceDialog] = useState<{
     title: string
     description: string
@@ -959,6 +967,7 @@ export default function StudioWorkspace() {
   currentNovelStateRef.current = currentNovel
   const novelFormStateRef = useRef(novelForm)
   novelFormStateRef.current = novelForm
+  const novelSaveSettledRef = useRef<Promise<{ error?: unknown }> | null>(null)
   const chapterDraftStateRef = useRef(chapterDraft)
   chapterDraftStateRef.current = chapterDraft
   const chapterDirtyRef = useRef(chapterDirty)
@@ -1022,6 +1031,8 @@ export default function StudioWorkspace() {
       const currentReview = pendingChapterReviewsRef.current.find(
         (item) => item.chapterId === display.chapterId,
       )
+      if (isReviewStreamReplay(currentReview?.lastAppliedEvent, event)
+        || isStaleChapterReview(display.revision, currentReview?.after.revision, draftMatches?.revision, chapterListItem?.revision)) return
 
       const afterState: ChapterDraftState = {
         id: display.chapterId,
@@ -1041,7 +1052,7 @@ export default function StudioWorkspace() {
       }
 
       const live = useAgentStore.getState()
-      adoptChapterResult({ event, origin: { novelId: activeNovelId, scope: taskUiScope, sessionId: agentSessionId },
+      adoptChapterResult({ event, origin: chapterStreamOwner,
         current: chapterStreamOwnerRef.current, activeSessionId: live.activeSessionId, activeRunId: live.runId,
         selectedChapterId: selectedChapterIdStateRef.current, dirty: chapterDirtyRef.current, draft: chapterDraftStateRef.current },
       afterState, { draftRef: chapterDraftStateRef, dirtyRef: chapterDirtyRef, setDraft: setChapterDraft,
@@ -1050,21 +1061,22 @@ export default function StudioWorkspace() {
       // 同一章节连续写入（如 chapter_write 后再 append）：保留最早的 before/回滚快照，仅推进 after；
       // 其他章节的审查态不受影响（fix：新章写入不再覆盖旧章未定夺的审查）
       if (currentReview) {
-        setPendingChapterReviews((current) =>
-          current.map((item) =>
+        const next = pendingChapterReviewsRef.current.map((item) =>
             item.chapterId === display.chapterId
               ? {
                   ...item,
                   after: afterState,
                   runId: event.runId,
+                  lastAppliedEvent: { runId: event.runId, seq: event.seq },
                   description: buildChapterReviewDescription(
                     item.before === null ? 'create' : 'replace',
                     display.chapterTitle,
                   ),
                 }
               : item,
-          ),
-        )
+          )
+        pendingChapterReviewsRef.current = next
+        setPendingChapterReviews(next)
         return
       }
 
@@ -1103,9 +1115,9 @@ export default function StudioWorkspace() {
             selectedChapterId: selectedChapterIdStateRef.current,
           }
 
-      setPendingChapterReviews((current) => [
-        ...current.filter((item) => item.chapterId !== display.chapterId),
-        buildPendingChapterReview({
+      const next = [
+        ...pendingChapterReviewsRef.current.filter((item) => item.chapterId !== display.chapterId),
+        { ...buildPendingChapterReview({
           before: isCreate
             ? null
             : { ...afterState, title: beforeTitle, content: display.before },
@@ -1116,10 +1128,12 @@ export default function StudioWorkspace() {
             display.chapterTitle,
           ),
           runId: event.runId,
-        }),
-      ])
+        }), lastAppliedEvent: { runId: event.runId, seq: event.seq } },
+      ]
+      pendingChapterReviewsRef.current = next
+      setPendingChapterReviews(next)
     },
-    [activeNovelId, taskUiScope, agentSessionId],
+    [chapterStreamOwner],
   )
 
   const refreshWorkspaceAfterAgentWrite = useCallback(async (throwOnError = false) => {
@@ -1187,6 +1201,10 @@ export default function StudioWorkspace() {
 
   const handleAgentStreamEvent = useCallback(
     (event: AgentStreamEvent) => {
+      const live = useAgentStore.getState()
+      if (!isWorkspaceStreamOwnerCurrent({ origin: chapterStreamOwner, current: chapterStreamOwnerRef.current,
+        activeSessionId: live.activeSessionId, activeRunId: live.runId, eventRunId: event.runId })) return
+      if (!claimWorkspaceStreamEvent(workspaceStreamCursorsRef.current, chapterStreamOwner, event)) return
       if (event.type === 'tool.result' && event.ok && event.display?.kind === 'sessionRename') {
         const renamed = event.display
         setAgentTaskWindows(current => current.map(item => item.sessionId === renamed.sessionId ? { ...item, title: renamed.title, customNamed: true } : item))
@@ -1241,6 +1259,9 @@ export default function StudioWorkspace() {
       // plan_save：把规划文档直接写进左侧「计划」文件夹并选中，无需用户手动存入
       if (event.type === 'tool.result' && event.ok && event.display?.kind === 'planFile') {
         const display = event.display
+        const existing = pendingPlanReviewRef.current?.backendArtifactId === display.artifactId ? pendingPlanReviewRef.current : null
+        if (isReviewStreamReplay(existing?.lastAppliedEvent, event)
+          || (existing?.runId === event.runId && existing.after === display.content && existing.title === display.title)) return
         const planArtifact: AgentArtifact = {
           id: `plan-${display.artifactId}`,
           task: 'plan-chapter',
@@ -1275,7 +1296,10 @@ export default function StudioWorkspace() {
           ...current.filter((plan) => plan.backendArtifactId !== display.artifactId),
         ])
         // 新建计划也挂审查条：空基线→全绿新增，撤销即从计划夹移除
-        setPendingPlanReview({
+        const review: PlanPendingReview = existing ? {
+          ...existing, title: display.title, after: display.content, runId: event.runId,
+          lastAppliedEvent: { runId: event.runId, seq: event.seq },
+        } : {
           id: `plan-review-${display.artifactId}-${Date.now()}`,
           backendArtifactId: display.artifactId,
           title: display.title,
@@ -1286,13 +1310,19 @@ export default function StudioWorkspace() {
           isCreate: true,
           runId: event.runId,
           createdAt: event.ts,
-        })
+          lastAppliedEvent: { runId: event.runId, seq: event.seq },
+        }
+        pendingPlanReviewRef.current = review
+        setPendingPlanReview(review)
         return
       }
 
       // plan_save 更新既有计划（planDiff）：先落库后审——同步新内容到计划夹，再挂出审查条供保留/撤销
       if (event.type === 'tool.result' && event.ok && event.display?.kind === 'planDiff') {
         const display = event.display
+        const existing = pendingPlanReviewRef.current?.backendArtifactId === display.artifactId ? pendingPlanReviewRef.current : null
+        if (isReviewStreamReplay(existing?.lastAppliedEvent, event)
+          || (existing?.runId === event.runId && existing.after === display.after && existing.title === display.title)) return
         const planArtifact: AgentArtifact = {
           id: `plan-${display.artifactId}`,
           task: 'plan-chapter',
@@ -1326,13 +1356,13 @@ export default function StudioWorkspace() {
           ...current.filter((plan) => plan.backendArtifactId !== display.artifactId),
         ])
         // 同一份计划连续修订：保留最早的 before，仅推进 after
-        setPendingPlanReview((current) =>
-          current && current.backendArtifactId === display.artifactId
+        const review: PlanPendingReview = existing
             ? {
-                ...current,
+                ...existing,
                 title: display.title,
                 after: display.after,
                 runId: event.runId,
+                lastAppliedEvent: { runId: event.runId, seq: event.seq },
                 description: `已更新计划《${display.title}》，确认是否保留本次修订`,
               }
             : {
@@ -1345,8 +1375,10 @@ export default function StudioWorkspace() {
                 description: `已更新计划《${display.title}》，确认是否保留本次修订`,
                 runId: event.runId,
                 createdAt: event.ts,
-              },
-        )
+                lastAppliedEvent: { runId: event.runId, seq: event.seq },
+              }
+        pendingPlanReviewRef.current = review
+        setPendingPlanReview(review)
         return
       }
 
@@ -1421,7 +1453,7 @@ export default function StudioWorkspace() {
         void refreshWorkspaceAfterAgentWrite()
       }
     },
-    [activeNovelId, captureAgentChapterReview, queryClient, refreshWorkspaceAfterAgentWrite],
+    [activeNovelId, chapterStreamOwner, captureAgentChapterReview, queryClient, refreshWorkspaceAfterAgentWrite],
   )
 
   useEffect(
@@ -1778,17 +1810,7 @@ export default function StudioWorkspace() {
   }, [chapters, savedPlanFiles, selectedChapterId, selectedTreeItemId, taskUiScope, workPanelScope, currentNovel?.id, activeNovelId, agentSessionsResolving, plansLoadedNovelId, activeAgentTaskWindow?.loaded, activeAgentTaskWindow?.sessionId])
 
   function handleSelectWorkspaceNovel(novelId: string) {
-    if (novelId === activeNovelId) {
-      return
-    }
-
-    if (pendingChapterReviews.length > 0) {
-      promptConfirmPendingChapterReview('切换作品')
-      return
-    }
-
-    resetWorkspaceDraftState()
-    navigate(`/studio/novel/${novelId}`)
+    void switchWorkspaceNovel(novelId)
   }
 
   function handleCreateWorkspaceNovel() {
@@ -1821,8 +1843,10 @@ export default function StudioWorkspace() {
     : '选择章节开始创作'
 
   function syncUpdatedNovelState(updatedNovel: Novel, message?: string) {
+    currentNovelStateRef.current = updatedNovel
+    novelFormStateRef.current = buildNovelFormState(updatedNovel)
     setCurrentNovel(updatedNovel)
-    setNovelForm(buildNovelFormState(updatedNovel))
+    setNovelForm(novelFormStateRef.current)
     setNovelDirty(false)
     setNovelSaveState('saved')
     setNovelLastSavedAt(updatedNovel.updatedAt)
@@ -1933,10 +1957,23 @@ export default function StudioWorkspace() {
       return updateNovelMeta(currentNovel.id, payload)
     },
     onMutate: ({ reason }) => {
+      let settle!: (result: { error?: unknown }) => void
+      const settled = new Promise<{ error?: unknown }>(resolve => { settle = resolve })
+      novelSaveSettledRef.current = settled
       setNovelSaveState('saving')
       setNovelMessage(reason === 'auto' ? '正在自动保存作品设置...' : '正在保存作品设置...')
+      return { owner: workspaceOwnerRef.current, form: novelFormStateRef.current, settled, settle }
     },
-    onSuccess: (updatedNovel, variables) => {
+    onSuccess: (updatedNovel, variables, context) => {
+      if (context?.owner !== workspaceOwnerRef.current) return
+      if (novelFormStateRef.current !== context.form) {
+        currentNovelStateRef.current = updatedNovel
+        setCurrentNovel(updatedNovel)
+        syncStudioPayload(current => current ? { ...current, novel: updatedNovel } : current)
+        setNovelDirty(true)
+        setNovelSaveState('pending')
+        return
+      }
       syncUpdatedNovelState(
         updatedNovel,
         variables.reason === 'publish'
@@ -1946,9 +1983,14 @@ export default function StudioWorkspace() {
             : `作品设置已保存于 ${formatDateTime(updatedNovel.updatedAt)}`,
       )
     },
-    onError: (error: Error) => {
+    onError: (error: Error, _variables, context) => {
+      if (context?.owner !== workspaceOwnerRef.current) return
       setNovelSaveState('error')
       setNovelMessage(error.message)
+    },
+    onSettled: (_data, error, _variables, context) => {
+      context?.settle(error ? { error } : {})
+      if (novelSaveSettledRef.current === context?.settled) novelSaveSettledRef.current = null
     },
   })
 
@@ -2118,7 +2160,7 @@ export default function StudioWorkspace() {
   })
 
   useEffect(() => {
-    if (!novelDirty || !novelForm || saveNovelMutation.isPending) {
+    if (!novelDirty || !novelForm || currentNovel?.id !== activeNovelId || saveNovelMutation.isPending) {
       return
     }
 
@@ -2129,7 +2171,7 @@ export default function StudioWorkspace() {
     return () => {
       window.clearTimeout(timeoutId)
     }
-  }, [novelDirty, novelForm, saveNovelMutation])
+  }, [novelDirty, novelForm, currentNovel?.id, activeNovelId, saveNovelMutation])
 
   function handleSaveNovel() {
     if (!novelForm || saveNovelMutation.isPending) {
@@ -2376,7 +2418,50 @@ export default function StudioWorkspace() {
   }
 
   const persistChapter = useChapterPersistence({
-    activeNovelId, chapterDraft, chapterDirty, chapterDraftStateRef, pendingChapterReviewsRef, selectedChapterIdStateRef, promptConfirmPendingChapterReview, setChapterSaveState, setChapterSaveMessage, setChapters, setSelectedTreeItemId, setSelectedChapterId, setChapterDraft, setChapterDirty, setChapterLastSavedAt, setCurrentNovel, syncStudioPayload,
+    activeNovelId, scope: taskUiScope, chapterDraft, chapterDirty, chapterDraftStateRef, chapterDirtyStateRef: chapterDirtyRef,
+    pendingChapterReviewsRef, setPendingChapterReviews,
+    syncSavedChapter: chapter => queryClient.setQueryData(['studio-chapter', activeNovelId, chapter.id], chapter),
+    selectedChapterIdStateRef, promptConfirmPendingChapterReview, setChapterSaveState, setChapterSaveMessage, setChapters, setSelectedTreeItemId, setSelectedChapterId, setChapterDraft, setChapterDirty, setChapterLastSavedAt, setCurrentNovel, syncStudioPayload,
+  })
+
+  const novelTransitionOwner = useMemo(() => ({ novelId: activeNovelId, scope: taskUiScope }), [activeNovelId, taskUiScope])
+  const switchWorkspaceNovel = useWorkspaceNovelTransition({
+    owner: novelTransitionOwner, novelId: activeNovelId,
+    save: async () => {
+      const owner = workspaceOwnerRef.current
+      const checkOwner = () => {
+        if (workspaceOwnerRef.current !== owner || currentNovelStateRef.current?.id !== owner.novelId || chapterStreamOwnerRef.current.scope !== novelTransitionOwner.scope) throw new Error('作品或任务已经切换，请稍后再试。')
+      }
+      checkOwner()
+      if (pendingReviewBusyRef.current) throw new Error('当前变更正在保存，请稍后再切换作品。')
+      await persistChapter.flushForSwitch()
+      checkOwner()
+      const settingsSave = novelSaveSettledRef.current
+      if (settingsSave) {
+        const result = await settingsSave
+        if (result.error) throw result.error
+        checkOwner()
+      }
+      if (isNovelFormDirty(currentNovelStateRef.current, novelFormStateRef.current)) {
+        await saveNovelMutation.mutateAsync({ reason: 'auto' })
+        checkOwner()
+      }
+      await awaitPlanServerSync()
+      checkOwner()
+      if (pendingReviewBusyRef.current || novelSaveSettledRef.current) throw new Error('当前变更正在保存，请稍后再切换作品。')
+      // Awaited saves may have received newer author input. Never discard it to navigate.
+      if (chapterDirtyRef.current || isNovelFormDirty(currentNovelStateRef.current, novelFormStateRef.current)) throw new Error('保存期间收到新输入，请稍后再切换作品。')
+      flushPendingReviews(pendingChapterReviewsRef.current)
+      // Keep outgoing task selection intact; the existing novel-change hydration
+      // clears editor state and restores the destination's own task/UI snapshots.
+    },
+    navigate: (nextNovelId, sessionId) => navigate(`/studio/novel/${nextNovelId}${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`),
+    onError: error => {
+      const message = error instanceof Error ? error.message : '保存失败，尚未切换作品。'
+      setChapterSaveState('error')
+      setChapterSaveMessage(message)
+      toast.error(message)
+    },
   })
 
   async function beforeVolumeChange(): Promise<boolean> {
@@ -3211,7 +3296,7 @@ export default function StudioWorkspace() {
       return
     }
 
-    navigate(`/studio/novel/${novelId}?session=new`)
+    void switchWorkspaceNovel(novelId, 'new')
   }
 
   /** 侧栏删除任务：移除任务窗口；删掉的是当前窗口时回落到最近一个有记录的任务，全删完了才补空白窗口 */
@@ -3257,7 +3342,7 @@ export default function StudioWorkspace() {
     void queryClient.invalidateQueries({ queryKey: ['agent', 'sessions'] })
 
     if (session.novelId !== activeNovelId) {
-      navigate(`/studio/novel/${session.novelId}?session=${encodeURIComponent(session.id)}`)
+      void switchWorkspaceNovel(session.novelId, session.id)
       return
     }
 
@@ -4060,7 +4145,7 @@ export default function StudioWorkspace() {
             onCreateTask={handleCreateAgentTaskWindow}
             onSelectTask={(taskId, taskNovelId) => {
               if (taskNovelId === activeNovelId) void handleSelectAgentTaskWindow(taskId)
-              else navigate(`/studio/novel/${taskNovelId}?session=${encodeURIComponent(taskId)}`)
+              else void switchWorkspaceNovel(taskNovelId, taskId)
             }}
             onRenameTask={(taskId, title) => void handleRenameAgentTaskWindow(taskId, title)}
             onCreateTaskInNovel={handleCreateTaskInNovel}

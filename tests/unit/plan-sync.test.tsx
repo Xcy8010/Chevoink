@@ -68,3 +68,24 @@ it('continues queued latest content after an older save fails', async () => {
   await act(async () => { failFirst(new Error('offline')); await Promise.resolve() })
   expect(update).toHaveBeenLastCalledWith('a', { title: 'A', content: 'latest' })
 })
+
+it('waits for the actual in-flight plan save and reports its original failure to a novel transition', async () => {
+  const error = new Error('计划保存网络失败')
+  let fail!: (error: Error) => void
+  update.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject }))
+  const { result } = renderHook(usePlanSync)
+  act(() => { result.current.schedulePlanServerSync('a', 'A', 'pending plan'); result.current.flushPlanServerSync() })
+  let completed = false
+  const waiting = result.current.awaitPlanServerSync().then(() => { completed = true }, failure => failure)
+  expect(completed).toBe(false)
+  await act(async () => { fail(error); expect(await waiting).toBe(error) })
+  expect(update).toHaveBeenCalledOnce()
+  expect(completed).toBe(false)
+})
+
+it('flushes the pending plan before resolving a successful transition', async () => {
+  const { result } = renderHook(usePlanSync)
+  act(() => result.current.schedulePlanServerSync('a', 'A', 'latest plan'))
+  await act(async () => { await result.current.awaitPlanServerSync() })
+  expect(update).toHaveBeenCalledExactlyOnceWith('a', { title: 'A', content: 'latest plan' })
+})

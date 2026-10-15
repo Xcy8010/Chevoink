@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { canAdoptChapterResult, canApplyChapterSnapshot } from '../../src/features/studio/components/chapter-stream-handoff'
+import { canAdoptChapterResult, canApplyChapterSnapshot, isWorkspaceStreamOwnerCurrent } from '../../src/features/studio/components/chapter-stream-handoff'
 import type { AgentStreamEvent } from '../../shared/contracts/index.js'
 
 const draft = { id: 'chapter', title: '章', content: '旧正文', summary: '', status: 'draft' as const, visibility: 'private' as const, orderIndex: 1, revision: 4, localOnly: false }
@@ -21,4 +21,15 @@ it('prevents stale refetches from regressing the saved handoff and preserves new
   expect(canApplyChapterSnapshot(saved, { ...saved, revision: 6 }, true)).toBe(false)
   expect(canApplyChapterSnapshot(saved, saved, false)).toBe(true)
   expect(canApplyChapterSnapshot(saved, { ...draft, id: 'other' }, false)).toBe(true)
+})
+
+it('rejects a late host review/plan callback from another novel/task/session/run or a previous A -> B -> A epoch', () => {
+  const origin = { ...owner, epoch: 2 }, current = { ...origin }
+  const input = { origin, current, activeSessionId: 'session', activeRunId: 'run', eventRunId: 'run' }
+  expect(isWorkspaceStreamOwnerCurrent(input)).toBe(true)
+  for (const stale of [{ ...current, novelId: 'b' }, { ...current, scope: 'other-task' }, { ...current, sessionId: 'other-session' }, { ...current, epoch: 4 }]) {
+    expect(isWorkspaceStreamOwnerCurrent({ ...input, current: stale })).toBe(false)
+  }
+  expect(isWorkspaceStreamOwnerCurrent({ ...input, eventRunId: 'old-run' })).toBe(false)
+  expect(isWorkspaceStreamOwnerCurrent({ ...input, activeSessionId: 'other-session' })).toBe(false)
 })

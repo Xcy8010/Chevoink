@@ -173,6 +173,7 @@ export type ChapterPendingReview = {
   rollbackSnapshot: AgentLocalRollbackSnapshot
   description: string
   createdAt: string
+  lastAppliedEvent?: { runId: string; seq: number }
 }
 
 /** Agent plan_save 更新既有计划后的待审查态：✓保留 / ✕回写更新前的标题与内容 */
@@ -189,6 +190,7 @@ export type PlanPendingReview = {
   isCreate?: boolean
   runId?: string | null
   createdAt: string
+  lastAppliedEvent?: { runId: string; seq: number }
 }
 
 export type EditorSelectionState = {

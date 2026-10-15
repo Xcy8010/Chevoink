@@ -8,7 +8,7 @@ export function usePlanSync() {
   const pending = useRef<{ artifactId: string; title: string; content: string } | null>(null)
   const inflight = useRef(new Set<Promise<void>>())
   const documentWrites = useRef(new Map<string, Promise<void>>())
-  const failed = useRef(new Set<string>())
+  const failed = useRef(new Map<string, unknown>())
   const flushPlanServerSync = useCallback(() => {
     if (timer.current !== null) {
       window.clearTimeout(timer.current)
@@ -23,8 +23,8 @@ export function usePlanSync() {
       const send = () => updateNovelPlanFile(payload.artifactId, { title: payload.title, content: payload.content })
       const request = (previous ? previous.then(send) : send()).then(() => {
         failed.current.delete(payload.artifactId)
-      }).catch(() => {
-        failed.current.add(payload.artifactId)
+      }).catch((error: unknown) => {
+        failed.current.set(payload.artifactId, error)
         // Preserve the existing retry-on-next-edit behavior.
       }).finally(() => {
         inflight.current.delete(request)
@@ -43,10 +43,16 @@ export function usePlanSync() {
       flushPlanServerSync()
     }, 800)
   }, [flushPlanServerSync])
+  const awaitPlanServerSync = useCallback(async () => {
+    flushPlanServerSync()
+    await Promise.all([...inflight.current])
+    if (failed.current.size) throw failed.current.values().next().value
+    if (pending.current || inflight.current.size) throw new Error('计划仍有新修改正在保存，请稍后再切换作品。')
+  }, [flushPlanServerSync])
   useEffect(() => registerDesktopSave(async () => {
     flushPlanServerSync()
     await Promise.all([...inflight.current])
     return !pending.current && inflight.current.size === 0 && failed.current.size === 0
   }), [flushPlanServerSync])
-  return { flushPlanServerSync, schedulePlanServerSync }
+  return { flushPlanServerSync, schedulePlanServerSync, awaitPlanServerSync }
 }
