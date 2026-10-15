@@ -1,7 +1,10 @@
 package com.chevoink.app;
 
 import android.content.res.Configuration;
+import android.app.Activity;
+import android.graphics.Color;
 import android.os.Build;
+import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewTreeObserver;
 import android.view.Window;
@@ -29,7 +32,68 @@ public class ImmersiveModePlugin extends Plugin {
     private WindowState normalState;
     private View observedDecor;
     private String lastInsets;
+    private Window appearanceWindow;
+    private BarAppearance desiredAppearance;
     private final ViewTreeObserver.OnGlobalLayoutListener layoutListener = this::publishInsets;
+
+    /** Appearance only: never changes bar visibility, decor fitting, cutouts or IME policy. */
+    @PluginMethod
+    public void setSystemBarAppearance(PluginCall call) {
+        String color = call.getString("color");
+        Boolean dark = call.getBoolean("dark");
+        if (!SystemBarAppearancePolicy.validColor(color) || dark == null) {
+            call.reject("Expected color #RRGGBB and boolean dark", "INVALID_APPEARANCE");
+            return;
+        }
+        Activity activity = getActivity();
+        if (activity == null) { call.reject("Activity unavailable", "UNAVAILABLE"); return; }
+        Window window = activity.getWindow();
+        activity.runOnUiThread(() -> {
+            if (!isCurrentWindow(activity, window)) { call.reject("Activity changed", "UNAVAILABLE"); return; }
+            if (!canSetOpaqueBars(window)) {
+                call.reject("This window requires edge-to-edge surface drawing", "UNSUPPORTED_LAYOUT");
+                return;
+            }
+            try {
+                BarAppearance next = new BarAppearance(Color.parseColor(color), dark);
+                next.apply(window);
+                appearanceWindow = window;
+                desiredAppearance = next;
+                call.resolve();
+            } catch (RuntimeException error) {
+                call.reject("System bar appearance failed", "APPEARANCE_FAILED", error);
+            }
+        });
+    }
+
+    private boolean isCurrentWindow(Activity activity, Window window) {
+        return getActivity() == activity && !activity.isFinishing() && !activity.isDestroyed()
+                && activity.getWindow() == window;
+    }
+
+    private boolean canSetOpaqueBars(Window window) {
+        TypedValue optOut = new TypedValue();
+        boolean optedOut = Build.VERSION.SDK_INT >= 35
+                && window.getContext().getTheme().resolveAttribute(android.R.attr.windowOptOutEdgeToEdgeEnforcement, optOut, true)
+                && optOut.data != 0;
+        return SystemBarAppearancePolicy.canColor(Build.VERSION.SDK_INT,
+                window.getContext().getApplicationInfo().targetSdkVersion, optedOut);
+    }
+
+    private void reapplyAppearance(Window window) {
+        if (appearanceWindow == window && desiredAppearance != null && canSetOpaqueBars(window)) {
+            desiredAppearance.apply(window);
+        }
+    }
+
+    private void scheduleAppearanceRefresh() {
+        Activity activity = getActivity();
+        Window window = activity.getWindow();
+        // Capacitor's core configuration handlers can update icon appearance too.
+        window.getDecorView().post(() -> {
+            if (isCurrentWindow(activity, window)) reapplyAppearance(window);
+        });
+    }
 
     @Override
     public void load() {
@@ -74,6 +138,7 @@ public class ImmersiveModePlugin extends Plugin {
                     normalState.restore(getActivity().getWindow());
                     normalState = null;
                 }
+                reapplyAppearance(getActivity().getWindow());
                 // An immediate result may precede layout; insetsChanged supplies settled geometry.
                 ViewCompat.requestApplyInsets(getActivity().getWindow().getDecorView());
                 call.resolve(readInsets());
@@ -148,12 +213,14 @@ public class ImmersiveModePlugin extends Plugin {
     protected void handleOnResume() {
         if (normalState != null) applyImmersive(getActivity().getWindow());
         ViewCompat.requestApplyInsets(getActivity().getWindow().getDecorView());
+        scheduleAppearanceRefresh();
     }
 
     @Override
     protected void handleOnConfigurationChanged(Configuration newConfig) {
         if (normalState != null) applyImmersive(getActivity().getWindow());
         ViewCompat.requestApplyInsets(getActivity().getWindow().getDecorView());
+        scheduleAppearanceRefresh();
     }
 
     @Override
@@ -162,9 +229,43 @@ public class ImmersiveModePlugin extends Plugin {
             observedDecor.getViewTreeObserver().removeOnGlobalLayoutListener(layoutListener);
         }
         observedDecor = null;
+        desiredAppearance = null;
+        appearanceWindow = null;
         if (normalState != null) {
             normalState.restore(getActivity().getWindow());
             normalState = null;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static final class BarAppearance {
+        final int color;
+        final boolean dark;
+        BarAppearance(int color, boolean dark) { this.color = color; this.dark = dark; }
+
+        void apply(Window window) {
+            int mask = WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
+                    | WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS;
+            int oldFlags = window.getAttributes().flags;
+            int oldStatus = window.getStatusBarColor();
+            int oldNavigation = window.getNavigationBarColor();
+            WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, window.getDecorView());
+            boolean oldLightStatus = controller.isAppearanceLightStatusBars();
+            boolean oldLightNavigation = controller.isAppearanceLightNavigationBars();
+            try {
+                window.setFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS, mask);
+                window.setStatusBarColor(color);
+                window.setNavigationBarColor(color);
+                controller.setAppearanceLightStatusBars(!dark);
+                controller.setAppearanceLightNavigationBars(!dark);
+            } catch (RuntimeException error) {
+                window.setFlags(oldFlags, mask);
+                window.setStatusBarColor(oldStatus);
+                window.setNavigationBarColor(oldNavigation);
+                controller.setAppearanceLightStatusBars(oldLightStatus);
+                controller.setAppearanceLightNavigationBars(oldLightNavigation);
+                throw error;
+            }
         }
     }
 
@@ -240,5 +341,16 @@ final class ImmersiveInsets {
     static int remaining(int safeInset, int nativeSpace, float density, boolean stableMeasurement) {
         int reserved = stableMeasurement ? 0 : Math.max(0, nativeSpace);
         return Math.round(Math.max(0, safeInset - reserved) / density);
+    }
+}
+
+/** Android 16 disables opt-out by TARGET SDK, not just the device API level. */
+final class SystemBarAppearancePolicy {
+    private SystemBarAppearancePolicy() {}
+    static boolean canColor(int deviceSdk, int targetSdk, boolean optOut) {
+        return deviceSdk < 35 || targetSdk < 35 || (optOut && (deviceSdk < 36 || targetSdk < 36));
+    }
+    static boolean validColor(String color) {
+        return color != null && color.matches("#[0-9a-fA-F]{6}");
     }
 }
