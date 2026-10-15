@@ -267,7 +267,6 @@ function StudioActivityDockSkeleton() {
 }
 
 /** 创作区骨架屏：按真实 Work 工作区分别适配桌面端与手机端 */
-const studioSkeletonMobileNav = ['exit', 'assistant', 'editor', 'chapters', 'more'] as const
 const studioSkeletonInspectorTabs = ['work', 'context', 'changes', 'memory', 'skills'] as const
 
 export function StudioSkeleton() {
@@ -278,19 +277,27 @@ export function StudioSkeleton() {
       aria-busy="true"
       aria-label="创作区加载中"
     >
-      {/* 手机端：复刻作品选择、一体化 Agent 顶栏、工作台与安全区底栏，避免加载完成时整页跳动。 */}
+      {/* 手机端：顶部双视图导航、实际任务控件与底部输入区。 */}
       <div className="flex min-h-0 flex-1 flex-col lg:hidden" data-studio-skeleton="mobile">
-        <div className="flex h-[52px] shrink-0 items-center gap-2 px-1" data-studio-region="mobile-header">
-          <Skeleton className="h-11 w-[44%] shrink-0 rounded-[16px]" />
-          <div className="flex min-w-0 flex-1 items-center gap-2 px-1.5">
-            <Skeleton className="h-5 w-5 shrink-0 rounded-full" />
-            <Skeleton className="h-3.5 min-w-0 flex-1" />
-            <Skeleton className="h-7 w-7 shrink-0 rounded-[8px]" />
-            <Skeleton className="h-7 w-7 shrink-0 rounded-[8px]" />
+        <div className="shrink-0 border-b border-[var(--border-subtle)] pl-[max(8px,var(--safe-left,0px))] pr-[max(8px,var(--safe-right,0px))] pt-[var(--safe-top,0px)]" data-studio-region="mobile-header">
+          <div className="grid h-14 grid-cols-[44px_minmax(0,1fr)_44px] items-center gap-2">
+            <div data-studio-nav-key="menu"><Skeleton className="h-11 w-11 rounded-xl" /></div>
+            <div className="flex items-center justify-center gap-1" data-studio-region="mobile-view-navigation">
+              <div data-studio-nav-key="assistant"><Skeleton className="h-11 w-16 rounded-xl" /></div>
+              <div data-studio-nav-key="editor"><Skeleton className="h-11 w-16 rounded-xl" /></div>
+            </div>
+            <div data-studio-nav-key="chapters"><Skeleton className="h-11 w-11 rounded-xl" /></div>
           </div>
         </div>
+        <div className="flex h-11 shrink-0 items-center gap-2 px-4" data-studio-region="mobile-task-header">
+          <Skeleton className="h-5 w-5 shrink-0 rounded-full" />
+          <Skeleton className="h-3.5 min-w-0 flex-1" />
+          <Skeleton className="h-11 w-11 shrink-0 rounded-xl" />
+          <Skeleton className="h-11 w-11 shrink-0 rounded-xl" />
+          <Skeleton className="h-11 w-11 shrink-0 rounded-xl" />
+        </div>
 
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 pb-2 pt-3" data-studio-region="mobile-conversation">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden pb-[calc(16px_+_var(--safe-bottom,0px))] pl-[calc(16px_+_var(--safe-left,0px))] pr-[calc(16px_+_var(--safe-right,0px))] pt-4" data-studio-region="mobile-conversation">
           <div className="min-h-0 flex-1 space-y-5 overflow-hidden py-2">
             <StudioMessageLines compact />
             <div className="ml-auto w-2/3 rounded-[22px] bg-[var(--surface-muted)] p-4">
@@ -307,17 +314,6 @@ export function StudioSkeleton() {
           <StudioComposerSkeleton region="mobile-composer" />
         </div>
 
-        <div
-          className="studio-bottom-nav flex shrink-0 items-stretch justify-around gap-1 border-t border-[var(--border-subtle)] bg-[var(--surface-default)] px-2 pb-[max(var(--safe-bottom),4px)] pt-1"
-          data-studio-region="mobile-bottom-nav"
-        >
-          {studioSkeletonMobileNav.map((item) => (
-            <div key={item} className="flex min-h-[52px] min-w-0 flex-1 flex-col items-center justify-center gap-1" data-studio-nav-item data-studio-nav-key={item}>
-              <Skeleton className="h-5 w-5 rounded-[6px]" />
-              <Skeleton className="h-2.5 w-8" />
-            </div>
-          ))}
-        </div>
       </div>
 
       {/* 桌面端：作品与任务融合侧栏固定在左侧，命令栏保留唯一折叠入口。 */}

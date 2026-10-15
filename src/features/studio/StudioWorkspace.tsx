@@ -1,15 +1,14 @@
-﻿import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ComponentProps } from 'react'
 import { hasComposerDraft, promoteComposerDraft } from './agent/composer-drafts'
 import { workspaceBodyChanges } from './agent/workspace-body-changes'
 import { shouldRetainAgentTaskWindow } from './lib/agent-session'
 import { useShellStore } from '@/store/useShellStore'
-import { BookOpen, BookOpenText, Brain, Bug, ChevronLeft, FileText, Flag, FolderDown, ImagePlus, Lightbulb, LogOut, MessageSquareText, MoreHorizontal, Network, PanelRightOpen, PenLine, RefreshCcw, Settings2, SlidersHorizontal, Trash2, Upload, Wrench } from 'lucide-react'
+import { BookOpen, BookOpenText, Brain, Bug, FileText, Flag, FolderDown, ImagePlus, Lightbulb, LogOut, MessageSquareText, Network, PanelRightOpen, PenLine, RefreshCcw, Settings2, SlidersHorizontal, Trash2, Upload, Wrench } from 'lucide-react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { plainChapterTitle } from '../../../shared/structure/chapter-title'
 
-import BottomSheet from '@/components/ui/BottomSheet'
 import Button from '@/components/ui/Button'
 import Surface from '@/components/ui/Surface'
 import { useToast } from '@/components/ui/toast-context'
@@ -42,6 +41,8 @@ import NovelCoverCropDialog from './components/NovelCoverCropDialog'
 import PublishNovelDialog from './components/PublishNovelDialog'
 import StudioCommandBar from './components/StudioCommandBar'
 import StudioMobileAccountCard from './components/StudioMobileAccountCard'
+import StudioMobileHeader from './components/StudioMobileHeader'
+import StudioMobileNavigation from './components/StudioMobileNavigation'
 import CreateNovelDialog from './components/CreateNovelDialog'
 import StudioWorkspaceSidebar from './components/StudioWorkspaceSidebar'
 import { AgentConversationRail } from './components/AgentTaskSidebar'
@@ -3880,41 +3881,18 @@ export default function StudioWorkspace() {
         data-visual-viewport={platformCapabilities.visualViewport ? 'supported' : 'fallback'}
       >
         <div className="flex min-h-0 flex-1 flex-col lg:hidden">
-          <div className="flex shrink-0 items-center gap-2 px-0.5 pb-2 pt-1">
-            {mobileView === 'cover' || mobileView === 'meta' || mobileView === 'memory' || mobileView === 'context' || mobileView === 'skills' ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setMobileView('assistant')}
-                  className="inline-flex h-11 shrink-0 items-center gap-1 rounded-full pl-1.5 pr-3 text-sm font-medium text-[var(--text-secondary)] transition-colors active:bg-[var(--surface-muted)]"
-                >
-                  <ChevronLeft className="h-5 w-5" />
-                  返回
-                </button>
-                <p className="min-w-0 flex-1 truncate text-center text-sm font-semibold text-[var(--text-primary)]">
-                  {mobileView === 'cover' ? '封面工坊' : mobileView === 'memory' ? '小说关系网' : mobileView === 'context' ? '记忆' : mobileView === 'skills' ? '作品技能' : '作品设置'}
-                </p>
-              </>
-            ) : (
-              <>
-                {/* 作品选择器占满剩余宽度，作品名尽量完整显示；右侧保存状态保持短标签 */}
-                <div className={cn('min-w-0 flex-1 transition-[max-width] duration-200', mobileView === 'assistant' && 'max-w-[44%]')}>
-                  <WorkspaceNovelSwitcher
-                    currentNovelId={currentNovel.id}
-                    currentNovelTitle={novelTitle}
-                    novels={novelOptions}
-                    busy={createNovelMutation.isPending}
-                    loading={myNovelsQuery.isLoading}
-                    onSelectNovel={handleSelectWorkspaceNovel}
-                    onCreateNovel={handleCreateWorkspaceNovel}
-                    fullWidth
-                  />
-                </div>
-              </>
-            )}
-          </div>
-
-          <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
+          <StudioMobileHeader
+            view={mobileView}
+            navigationOpen={mobileMoreOpen}
+            onOpenNavigation={() => setMobileMoreOpen(true)}
+            onBack={() => setMobileView('assistant')}
+            onSelectView={(view) => {
+              setMobileView(view)
+              if (view === 'assistant') setWorkspacePerspective('work')
+              if (view === 'editor' || view === 'chapters') setWorkspacePerspective('ide')
+            }}
+          />
+          <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col pb-[var(--safe-bottom,0px)] pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)]">
 
             {mobileView === 'editor' ? (
               <div className="flex min-h-0 flex-1 flex-col">
@@ -4002,68 +3980,29 @@ export default function StudioWorkspace() {
             ) : null}
           </div>
 
-          {/* 软键盘打开时由 index.css 的 html.keyboard-open .studio-bottom-nav 规则隐藏，
-              让 Agent 输入框自然落到收缩视口底部（键盘上方），底栏不再被顶起占位 */}
-          <nav className="studio-bottom-nav flex shrink-0 items-stretch justify-around gap-1 border-t border-[var(--border-subtle)] bg-[var(--surface-default)] px-2 pb-[max(var(--safe-bottom),4px)] pt-1">
-              {/* 退出创作区固定回首页：创作区常常是从章节/详情等多级页面进来的，回退一步会落回中间页 */}
-              <button
-                type="button"
-                onClick={() => navigate('/')}
-                className="flex min-h-[52px] min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-[14px] px-2 text-[11px] leading-4 text-[var(--text-tertiary)] transition-colors active:text-[var(--text-primary)]"
-              >
-                <LogOut className="h-5 w-5 rotate-180" />
-                退出
-              </button>
-              {(
-                [
-                  { key: 'assistant', label: '工作台', icon: MessageSquareText },
-                  { key: 'editor', label: '写作', icon: PenLine },
-                  { key: 'chapters', label: '卷章', icon: BookOpenText },
-                ] as Array<{ key: MobileView; label: string; icon: typeof PenLine }>
-              ).map(({ key, label, icon: Icon }) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => {
-                    setMobileView(key)
-                    if (key === 'assistant') setWorkspacePerspective('work')
-                    if (key === 'editor' || key === 'chapters') setWorkspacePerspective('ide')
-                  }}
-                  className={cn(
-                    'flex min-h-[52px] min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-[14px] px-2 text-[11px] leading-4 transition-colors',
-                    mobileView === key
-                      ? 'font-medium text-[var(--text-primary)]'
-                      : 'text-[var(--text-tertiary)] active:text-[var(--text-primary)]',
-                  )}
-                >
-                  <Icon className="h-5 w-5" />
-                  {label}
-                </button>
-              ))}
-              <button
-                type="button"
-                onClick={() => setMobileMoreOpen(true)}
-                className={cn(
-                  'flex min-h-[52px] min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-[14px] px-2 text-[11px] leading-4 transition-colors',
-                  mobileMoreOpen || mobileView === 'cover' || mobileView === 'meta' || mobileView === 'memory' || mobileView === 'context' || mobileView === 'skills'
-                    ? 'font-medium text-[var(--text-primary)]'
-                    : 'text-[var(--text-tertiary)] active:text-[var(--text-primary)]',
-                )}
-              >
-                <MoreHorizontal className="h-5 w-5" />
-                更多
-              </button>
-          </nav>
-
-          <BottomSheet
+          <StudioMobileNavigation
             open={mobileMoreOpen}
             onClose={() => setMobileMoreOpen(false)}
-            title={novelTitleMissing ? '未命名作品' : novelTitle}
+            novelSwitcher={
+              <WorkspaceNovelSwitcher
+                currentNovelId={currentNovel.id}
+                currentNovelTitle={novelTitle}
+                novels={novelOptions}
+                busy={createNovelMutation.isPending}
+                loading={myNovelsQuery.isLoading}
+                onSelectNovel={(id) => { setMobileMoreOpen(false); handleSelectWorkspaceNovel(id) }}
+                onCreateNovel={() => { setMobileMoreOpen(false); handleCreateWorkspaceNovel() }}
+                fullWidth
+              />
+            }
           >
             <StudioMobileAccountCard />
             <div className="space-y-0.5 px-3 pt-1">
               {(
                 [
+                  { key: 'assistant', sectionLabel: '导航', label: '工作台', icon: MessageSquareText, action: () => { setMobileView('assistant'); setWorkspacePerspective('work') } },
+                  { key: 'editor', label: '写作', icon: PenLine, action: () => { setMobileView('editor'); setWorkspacePerspective('ide') } },
+                  { key: 'chapters', label: '卷章', icon: BookOpenText, action: () => { setMobileView('chapters'); setWorkspacePerspective('ide') } },
                   { key: 'meta', sectionLabel: '本作品', label: novelTitleMissing ? '去命名作品' : '作品设置', icon: Settings2, action: () => setMobileView('meta') },
                   { key: 'cover', label: '封面工坊', icon: ImagePlus, action: () => setMobileView('cover') },
                   ...(featureFlags.memory2
@@ -4084,6 +4023,7 @@ export default function StudioWorkspace() {
                   { key: 'studio-settings', sectionLabel: '创作区', label: '创作区设置', icon: SlidersHorizontal, action: () => { setStudioSettingsSection('general'); setStudioSettingsOpen(true) } },
                   { key: 'feedback-suggestion', label: '提交建议', icon: Lightbulb, action: () => setFeedbackKind('suggestion') },
                   { key: 'feedback-bug', label: '问题反馈', icon: Bug, action: () => setFeedbackKind('bug') },
+                  { key: 'exit', label: '退出', icon: LogOut, action: () => navigate('/') },
                   // 删除条件与电脑端一致：仅草稿或已下架可删，已发布时仍可点击但只给 toast 提示
                   {
                     key: 'delete-novel',
@@ -4110,21 +4050,23 @@ export default function StudioWorkspace() {
                   <button
                     type="button"
                     disabled={disabled}
+                    aria-current={mobileView === key ? 'page' : undefined}
                     onClick={() => {
                       setMobileMoreOpen(false)
                       action()
                     }}
                     className={cn(
-                      'flex min-h-[48px] w-full items-center gap-3 rounded-[16px] px-3 text-left text-[15px] transition-colors disabled:opacity-45',
+                      'flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-left text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none disabled:opacity-45',
+                      mobileView === key && 'bg-[var(--surface-muted)] font-medium',
                       danger
-                        ? 'text-[rgb(153,27,27)] active:bg-[rgba(127,29,29,0.08)]'
+                        ? 'text-[var(--color-error)] active:bg-[var(--surface-muted)]'
                         : 'text-[var(--text-primary)] active:bg-[var(--surface-muted)]',
                     )}
                   >
                     <Icon
                       className={cn(
                         'h-5 w-5 shrink-0',
-                        danger ? 'text-[rgb(153,27,27)]' : 'text-[var(--text-secondary)]',
+                        danger ? 'text-[var(--color-error)]' : 'text-[var(--text-secondary)]',
                       )}
                     />
                     {label}
@@ -4132,7 +4074,7 @@ export default function StudioWorkspace() {
                 </Fragment>
               ))}
             </div>
-          </BottomSheet>
+          </StudioMobileNavigation>
         </div>
 
         <div className="hidden min-h-0 flex-1 lg:flex">

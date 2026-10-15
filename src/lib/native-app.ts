@@ -56,12 +56,64 @@ type NavigationBarPlugin = {
  * enter 返回沉浸态下页面需要避让的安全区（CSS px，含挖孔）。
  */
 type ImmersiveModePlugin = {
-  enter?: () => Promise<{ top: number; bottom: number }>
-  exit?: () => Promise<void>
+  enter?: () => Promise<ImmersiveInsets>
+  exit?: () => Promise<ImmersiveInsets | void>
+  getInsets?: () => Promise<ImmersiveInsets>
+  addListener?: (event: 'insetsChanged', listener: (insets: ImmersiveInsets) => void) => { remove: () => Promise<void> } | Promise<{ remove: () => Promise<void> }>
 }
 
 /** 沉浸态下页面需避让的安全区（CSS px） */
-export type ImmersiveInsets = { top: number; bottom: number }
+export type ImmersiveInsets = {
+  top: number
+  bottom: number
+  left?: number
+  right?: number
+  immersive?: boolean
+  measurement?: 'stable' | 'remaining'
+}
+
+const insetListeners = new Set<(insets: ImmersiveInsets) => void>()
+
+function validInsets(value: unknown): value is ImmersiveInsets {
+  if (!value || typeof value !== 'object') return false
+  const insets = value as ImmersiveInsets
+  return [insets.top, insets.bottom].every(number => typeof number === 'number' && Number.isFinite(number) && number >= 0)
+    && [insets.left, insets.right].every(number => number === undefined || Number.isFinite(number) && number >= 0)
+}
+
+function publishInsets(value: unknown) {
+  if (validInsets(value)) for (const listener of insetListeners) listener(value)
+}
+
+/** New shells report WebView-relative geometry; older APKs omit this capability. */
+export async function refreshNativeInsets(): Promise<void> {
+  if (!isNativeApp()) return
+  try { publishInsets(await nativePlugins()?.ImmersiveMode?.getInsets?.()) } catch { /* Activity transition or old bridge. */ }
+}
+
+export function observeNativeInsets(listener: (insets: ImmersiveInsets) => void): () => void {
+  if (!isNativeApp()) return () => {}
+  let disposed = false
+  let handle: { remove: () => Promise<void> } | undefined
+  insetListeners.add(listener)
+  const plugin = nativePlugins()?.ImmersiveMode
+  if (plugin?.getInsets && plugin.addListener) {
+    const addListener = plugin.addListener.bind(plugin)
+    // Capacitor's injected bridge returns a synchronous handle; JS proxies may
+    // return a Promise. Neither shape nor a synchronous throw may stop startup.
+    void Promise.resolve().then(() => addListener('insetsChanged', publishInsets)).then(async subscription => {
+      if (disposed) await subscription.remove()
+      else { handle = subscription; await refreshNativeInsets() }
+    }).catch(() => { if (!disposed) void refreshNativeInsets() })
+  } else {
+    void refreshNativeInsets()
+  }
+  return () => {
+    disposed = true
+    insetListeners.delete(listener)
+    void handle?.remove().catch(() => {})
+  }
+}
 
 /** 取原生桥注入的插件集合；浏览器或桥未就绪时返回 undefined。 */
 function nativePlugins():
@@ -120,7 +172,8 @@ export function enterNativeImmersive(): Promise<ImmersiveInsets | null> {
     const immersive = nativePlugins()?.ImmersiveMode
     if (!immersive?.enter) return null
     const insets = await immersive.enter()
-    return typeof insets?.top === 'number' && typeof insets?.bottom === 'number' ? insets : null
+    await refreshNativeInsets()
+    return validInsets(insets) ? insets : null
   })
 }
 
@@ -128,7 +181,8 @@ export function enterNativeImmersive(): Promise<ImmersiveInsets | null> {
 export function exitNativeImmersive(): Promise<void> {
   if (!supportsNativeImmersive()) return Promise.resolve()
   return enqueueImmersive(async () => {
-    await nativePlugins()?.ImmersiveMode?.exit?.()
+    publishInsets(await nativePlugins()?.ImmersiveMode?.exit?.())
+    await refreshNativeInsets()
   }).then(() => {
     restoreNativeSystemBarsToTheme()
   })

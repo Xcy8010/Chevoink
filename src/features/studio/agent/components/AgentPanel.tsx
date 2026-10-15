@@ -144,7 +144,7 @@ type AgentPanelProps = {
   composerInsetClassName?: string
   /** Work 宽屏存在独立任务停靠区时，内联待办/变更自动隐藏。 */
   activityPresentation?: 'inline' | 'responsive'
-  /** 手机工作台把 Agent 标题与任务按钮并入作品选择同一行。 */
+  /** 手机工作台在视图导航下保留紧凑的 Agent 任务控件行。 */
   mobileIntegratedHeader?: boolean
   /** 桌面端顶栏展示当前任务标题（替代 Chevoink Agent 标识位），空则回退「新任务」。 */
   taskTitle?: string | null
@@ -1363,9 +1363,9 @@ export function AgentPanel({
   return (
     <div className={cn('agent-conversation-panel relative flex h-full min-h-0 flex-col', workConversation.collapsed && 'work-agent-compact', className)}>
       {/* 状态栏 */}
-      {!hideHeader ? <div className={cn(
+      {!hideHeader ? <div data-agent-mobile-header={mobileIntegratedHeader || undefined} className={cn(
         'relative flex items-center gap-2 border-b border-[var(--border-subtle)] px-4 py-2.5',
-        mobileIntegratedHeader && 'absolute -top-[52px] left-[44%] right-0 z-30 h-[52px] gap-1 border-b-0 bg-[var(--app-bg)] px-1.5 py-1',
+        mobileIntegratedHeader && 'h-11 shrink-0 gap-1 bg-[var(--app-bg)] px-3 py-0',
       )}>
         {mobileIntegratedHeader ? (
           <>
@@ -1412,7 +1412,7 @@ export function AgentPanel({
         <button
           type="button"
           onClick={() => { setHistoryOpen(false); onOpenStudioSettings?.('operations') }}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md p-1 text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"
+          className={cn('inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md p-1 text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]', mobileIntegratedHeader && 'h-11 w-11 motion-reduce:transition-none')}
           aria-label="打开 Agent 操作中心"
           title="Agent 操作中心"
         >
@@ -1423,7 +1423,7 @@ export function AgentPanel({
           onClick={toggleHistory}
           className={cn(
             'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md p-1 transition-colors',
-            mobileIntegratedHeader && 'ml-auto',
+            mobileIntegratedHeader && 'ml-auto h-11 w-11 motion-reduce:transition-none',
             historyOpen
               ? 'bg-[var(--surface-muted)] text-[var(--text-primary)]'
               : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
@@ -1439,7 +1439,7 @@ export function AgentPanel({
             setHistoryOpen(false)
             onNewSession?.()
           }}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md p-1 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+          className={cn('inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md p-1 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]', mobileIntegratedHeader && 'h-11 w-11 motion-reduce:transition-none')}
           aria-label="新建任务对话"
           title="新建任务对话"
         >

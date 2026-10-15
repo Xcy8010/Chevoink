@@ -19,14 +19,7 @@ import { splitReaderParagraphs } from '@/features/discover/api'
 import { addToShelf } from '@/features/home/local-shelf'
 import { pushShelfAdd } from '@/features/home/reading-sync'
 import type { ReaderPayload } from '../../../../shared/contracts/index.js'
-import {
-  enterNativeImmersive,
-  exitNativeImmersive,
-  isDarkColor,
-  isNativeApp,
-  syncNativeSystemBars,
-} from '@/lib/native-app'
-import { setNativeImmersiveSafeArea } from '@/lib/safe-area'
+import { useNativeReaderImmersive } from '../useNativeReaderImmersive'
 import { cn } from '@/lib/utils'
 import AddShelfDialog from '../components/AddShelfDialog'
 import { markShelfPrompted, shouldPromptShelf } from '../components/shelf-prompt'
@@ -338,44 +331,7 @@ export default function ReaderMobile({ state }: ReaderMobileProps) {
     suppressEnterRef.current = false
   }
 
-  // 全屏沉浸（方案 20）：进入阅读区让 WebView 铺满整屏并隐藏系统栏，
-  // 顶/底安全区由 setNativeImmersiveSafeArea 注入的 --safe-top/--safe-bottom 避让。
-  // 旧 APK 没有 ImmersiveMode 插件，enter 返回 null → 保持既有染色形态，零布局改动。
-  // 退出时还原系统栏并把配色交回主题；串行队列保证交错调用不乱序。
-  const immersiveMountedRef = useRef(true)
-  useEffect(() => {
-    if (!isNativeApp()) return
-    immersiveMountedRef.current = true
-    void enterNativeImmersive().then((insets) => {
-      if (insets && immersiveMountedRef.current) setNativeImmersiveSafeArea(true, insets)
-    })
-    return () => {
-      immersiveMountedRef.current = false
-      setNativeImmersiveSafeArea(false)
-      void exitNativeImmersive()
-    }
-  }, [])
-  // 章节评论面板期间临时退出沉浸：评论输入依赖 adjustResize 的键盘避让，
-  // 沉浸态下窗口不 resize，键盘会盖住输入框（方案 20 第 6 节唯一风险点）。
-  // cleanup 里的 re-enter 需过卸载守卫：面板开着直接退出阅读区时不能再回沉浸态
-  // （unmount 时 React 按声明顺序执行 cleanup，上面的沉浸 effect 已先置 false）。
-  const commentsOpen = state.activePanel === 'comments'
-  useEffect(() => {
-    if (!isNativeApp() || !commentsOpen) return
-    setNativeImmersiveSafeArea(false)
-    void exitNativeImmersive()
-    return () => {
-      if (!immersiveMountedRef.current) return
-      void enterNativeImmersive().then((insets) => {
-        if (insets && immersiveMountedRef.current) setNativeImmersiveSafeArea(true, insets)
-      })
-    }
-  }, [commentsOpen])
-  // 状态栏染色跟随阅读底色：沉浸态下状态栏不可见，此调用无副作用；
-  // 但评论面板临时退出沉浸期间状态栏重新可见，需要它保持与阅读底色一致
-  useEffect(() => {
-    syncNativeSystemBars(tone.swatch, isDarkColor(tone.swatch))
-  }, [tone.swatch])
+  useNativeReaderImmersive(state.activePanel === 'comments', tone.swatch)
 
   // 翻页写回章内进度（语义：当前页/本章总页），退出时由防抖 Flush；
   // 换章过渡帧（占位数据还属上一章）不写，避免旧章页号污染新章进度
@@ -798,7 +754,7 @@ export default function ReaderMobile({ state }: ReaderMobileProps) {
             className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
             onClick={() => setControlsVisible((visible) => !visible)}
           >
-            <div className="mx-auto max-w-[680px] px-5 pb-32 pt-[calc(var(--safe-top)+76px)]">
+            <div className="mx-auto max-w-[680px] pb-32 pl-[calc(var(--safe-left,0px)+20px)] pr-[calc(var(--safe-right,0px)+20px)] pt-[calc(var(--safe-top)+76px)]">
               <ReaderArticle
                 state={state}
                 header="compact"
@@ -824,7 +780,7 @@ export default function ReaderMobile({ state }: ReaderMobileProps) {
             }}
           >
             <div
-              className="flex items-center gap-2 px-2 pb-2 pt-[calc(var(--safe-top)+8px)]"
+              className="flex items-center gap-2 pb-2 pl-[calc(var(--safe-left,0px)+8px)] pr-[calc(var(--safe-right,0px)+8px)] pt-[calc(var(--safe-top)+8px)]"
               style={{ color: tone.text }}
             >
               <button

@@ -751,7 +751,7 @@ export default function ReaderPagedView({
     <div
       ref={rootRef}
       className="absolute inset-0 overflow-hidden"
-      style={{ perspective: '1600px', touchAction: 'none' }}
+      style={{ perspective: '1600px', touchAction: 'none', left: 'var(--safe-left, 0px)', right: 'var(--safe-right, 0px)' }}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
