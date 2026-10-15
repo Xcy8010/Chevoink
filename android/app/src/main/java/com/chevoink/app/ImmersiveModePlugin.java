@@ -3,8 +3,11 @@ package com.chevoink.app;
 import android.content.res.Configuration;
 import android.app.Activity;
 import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.util.TypedValue;
+import android.util.Log;
 import android.view.View;
 import android.view.ViewTreeObserver;
 import android.view.Window;
@@ -56,7 +59,7 @@ public class ImmersiveModePlugin extends Plugin {
             }
             try {
                 BarAppearance next = new BarAppearance(Color.parseColor(color), dark);
-                next.apply(window);
+                next.apply(window, webViewParent());
                 appearanceWindow = window;
                 desiredAppearance = next;
                 call.resolve();
@@ -82,8 +85,16 @@ public class ImmersiveModePlugin extends Plugin {
 
     private void reapplyAppearance(Window window) {
         if (appearanceWindow == window && desiredAppearance != null && canSetOpaqueBars(window)) {
-            desiredAppearance.apply(window);
+            desiredAppearance.apply(window, webViewParent());
         }
+    }
+
+    private View webViewParent() {
+        View webView = getBridge().getWebView();
+        if (webView == null || !(webView.getParent() instanceof View)) {
+            throw new IllegalStateException("WebView canvas unavailable");
+        }
+        return (View) webView.getParent();
     }
 
     private void scheduleAppearanceRefresh() {
@@ -91,7 +102,10 @@ public class ImmersiveModePlugin extends Plugin {
         Window window = activity.getWindow();
         // Capacitor's core configuration handlers can update icon appearance too.
         window.getDecorView().post(() -> {
-            if (isCurrentWindow(activity, window)) reapplyAppearance(window);
+            if (isCurrentWindow(activity, window)) {
+                try { reapplyAppearance(window); }
+                catch (RuntimeException error) { Log.e("ImmersiveMode", "Appearance refresh failed; rollback attempted", error); }
+            }
         });
     }
 
@@ -111,7 +125,7 @@ public class ImmersiveModePlugin extends Plugin {
             try {
                 Window window = getActivity().getWindow();
                 // Repeated enter must not overwrite the normal state with the hidden state.
-                if (normalState == null) normalState = new WindowState(window);
+                if (normalState == null) normalState = new WindowState(window, webViewParent());
                 applyImmersive(window);
                 // Preserve old Web clients that only consume enter's top/bottom once.
                 call.resolve(readInsets(true));
@@ -243,7 +257,18 @@ public class ImmersiveModePlugin extends Plugin {
         final boolean dark;
         BarAppearance(int color, boolean dark) { this.color = color; this.dark = dark; }
 
-        void apply(Window window) {
+        void apply(Window window, View webViewParent) {
+            SystemBarAppearanceTransaction.apply(color, dark, new BarTarget(window),
+                    new CanvasTarget(window.getDecorView()), new CanvasTarget(webViewParent));
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static final class BarTarget implements SystemBarAppearanceTransaction.Part {
+        private final Window window;
+        BarTarget(Window window) { this.window = window; }
+
+        @Override public Runnable snapshot() {
             int mask = WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
                     | WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS;
             int oldFlags = window.getAttributes().flags;
@@ -252,19 +277,62 @@ public class ImmersiveModePlugin extends Plugin {
             WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, window.getDecorView());
             boolean oldLightStatus = controller.isAppearanceLightStatusBars();
             boolean oldLightNavigation = controller.isAppearanceLightNavigationBars();
-            try {
-                window.setFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS, mask);
-                window.setStatusBarColor(color);
-                window.setNavigationBarColor(color);
-                controller.setAppearanceLightStatusBars(!dark);
-                controller.setAppearanceLightNavigationBars(!dark);
-            } catch (RuntimeException error) {
-                window.setFlags(oldFlags, mask);
-                window.setStatusBarColor(oldStatus);
-                window.setNavigationBarColor(oldNavigation);
-                controller.setAppearanceLightStatusBars(oldLightStatus);
-                controller.setAppearanceLightNavigationBars(oldLightNavigation);
-                throw error;
+            return () -> {
+                Runnable[] restores = { () -> controller.setAppearanceLightNavigationBars(oldLightNavigation),
+                        () -> controller.setAppearanceLightStatusBars(oldLightStatus),
+                        () -> window.setNavigationBarColor(oldNavigation), () -> window.setStatusBarColor(oldStatus),
+                        () -> window.setFlags(oldFlags, mask) };
+                SystemBarAppearanceTransaction.restore(restores, restores.length, null);
+            };
+        }
+
+        @Override public void apply(int color, boolean dark) {
+            window.setFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS,
+                    WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS | WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS);
+            window.setStatusBarColor(color);
+            window.setNavigationBarColor(color);
+            WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, window.getDecorView());
+            controller.setAppearanceLightStatusBars(!dark);
+            controller.setAppearanceLightNavigationBars(!dark);
+        }
+    }
+
+    /** Never mutate an attached ColorDrawable: SystemBars may repaint it after capture. */
+    static final class CanvasTarget implements SystemBarAppearanceTransaction.Part {
+        private final View view;
+        CanvasTarget(View view) { this.view = view; }
+
+        @Override public Runnable snapshot() {
+            Drawable background = view.getBackground();
+            Drawable.ConstantState state = background == null ? null : background.getConstantState();
+            Drawable saved = state == null ? background : state.newDrawable(view.getResources()).mutate();
+            if (saved != null && background != null) {
+                saved.setBounds(background.getBounds());
+                saved.setState(background.getState().clone());
+                saved.setLevel(background.getLevel());
+            }
+            return () -> setBackgroundPreservingPadding(saved);
+        }
+
+        @Override public void apply(int color, boolean dark) {
+            setBackgroundPreservingPadding(new ColorDrawable(color));
+        }
+
+        private void setBackgroundPreservingPadding(Drawable background) {
+            int left = view.getPaddingLeft(), top = view.getPaddingTop();
+            int right = view.getPaddingRight(), bottom = view.getPaddingBottom();
+            boolean relative = view.isPaddingRelative();
+            int start = view.getPaddingStart(), end = view.getPaddingEnd();
+            try { view.setBackground(background); }
+            finally {
+                // setBackground can adopt a special drawable's own padding. Undo only
+                // that incidental change, preserving the CURRENT insets/IME padding.
+                if (view.getPaddingLeft() != left || view.getPaddingTop() != top
+                        || view.getPaddingRight() != right || view.getPaddingBottom() != bottom
+                        || view.isPaddingRelative() != relative) {
+                    if (relative) view.setPaddingRelative(start, top, end, bottom);
+                    else view.setPadding(left, top, right, bottom);
+                }
             }
         }
     }
@@ -284,8 +352,12 @@ public class ImmersiveModePlugin extends Plugin {
         final boolean lightStatusBars;
         final boolean lightNavigationBars;
         final int behavior;
+        final Runnable restoreCanvas;
+        final Window owner;
 
-        WindowState(Window window) {
+        WindowState(Window window, View webViewParent) {
+            owner = window;
+            restoreCanvas = SystemBarAppearanceTransaction.snapshot(new CanvasTarget(window.getDecorView()), new CanvasTarget(webViewParent));
             legacyLayoutFlags = window.getDecorView().getSystemUiVisibility() & LEGACY_LAYOUT_FLAGS;
             cutoutMode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
                     ? window.getAttributes().layoutInDisplayCutoutMode : 0;
@@ -302,6 +374,8 @@ public class ImmersiveModePlugin extends Plugin {
         }
 
         void restore(Window window) {
+            if (window != owner) return;
+            Runnable restoreWindow = () -> {
             // MainActivity explicitly establishes this normal layout on every creation.
             WindowCompat.setDecorFitsSystemWindows(window, true);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -326,6 +400,11 @@ public class ImmersiveModePlugin extends Plugin {
                 decor.setSystemUiVisibility((decor.getSystemUiVisibility() & ~LEGACY_LAYOUT_FLAGS) | legacyLayoutFlags);
             }
             ViewCompat.requestApplyInsets(window.getDecorView());
+            };
+            // A drawable failure must not prevent the established window-layout
+            // restoration, and a window error must not skip either canvas rollback.
+            Runnable[] restores = { restoreCanvas, restoreWindow };
+            SystemBarAppearanceTransaction.restore(restores, restores.length, null);
         }
     }
 }

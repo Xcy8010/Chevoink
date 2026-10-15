@@ -30,8 +30,8 @@ powershell -File scripts/prepare-android-source.ps1 -InstallDependencies
 powershell -File scripts/build-android-release.ps1
 ```
 
-当前候选：`android/app/build/outputs/apk/release/chevoink-v1.0.9.apk`（code 12）；验证后复制为
-`artifacts/android/chevoink-v1.0.9-<sha256前12位>.apk`。这些脚本不会上传或发布。
+当前候选：`android/app/build/outputs/apk/release/chevoink-v1.0.10.apk`（code 13）；验证后复制为
+`artifacts/android/chevoink-v1.0.10-<sha256前12位>.apk`。这些脚本不会上传或发布。
 旧 `app-release.apk` 是签名基线，不能覆盖。完整前置条件见 `release/ANDROID-HANDOFF.md`。
 
 1.0.8 修复阅读全屏切换的系统栏恢复，并按 WebView 实际剩余安全区处理挖孔、横竖屏及系统栏变化；
@@ -41,6 +41,10 @@ powershell -File scripts/build-android-release.ps1
 修复 Android 16 设备上 target35 + opt-out 窗口被旧 StatusBar 插件跳过染色的分支。
 当前仍为 target35；未来 target36 的强制 edge-to-edge 不在此颜色 API 的支持范围，调用会明确拒绝。
 已发布的 1.0.8 文件与标签保持不变。新包需单独完成设备验收与发布授权。
+
+1.0.10 将同一外观色同步到 decor 与实际 WebView 父容器的原生背景，处理阅读全屏时
+WebView 外露出的主题色区域。保存独立背景快照，恢复后重应用最新页面配色；外观事务失败时回滚所有已尝试的部分。
+不调整安全区、父容器 padding 策略、键盘或全屏规则。已发布 1.0.9 保留原样，候选未获发布授权。
 
 ## 签名配置（不入库）
 

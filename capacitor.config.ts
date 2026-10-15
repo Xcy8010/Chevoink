@@ -8,7 +8,7 @@ const config: CapacitorConfig = {
   // 版本号供 APP 内更新提示与线上 version.json 比对。
   // 发新壳版本必须三处一起改：这里、android/app/build.gradle 的 versionCode+versionName、
   // 线上 /download/version.json；漏改这里会导致装了新包仍被判定为旧版本、更新横幅不消失。
-  appendUserAgent: 'ChevoinkApp/1.0.9',
+  appendUserAgent: 'ChevoinkApp/1.0.10',
   server: {
     // Stage 1: remote mode - load the production site directly (same-origin cookies)
     url: 'https://chevoink.chevolink.com',
