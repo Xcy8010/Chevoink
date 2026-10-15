@@ -365,7 +365,7 @@ export default function EditorCanvas({
               type="button"
               onClick={() => setMobileMenuOpen((prev) => !prev)}
               aria-label="更多操作"
-              className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border-subtle)] text-[var(--text-secondary)] transition-colors active:bg-[var(--surface-muted)]"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] active:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none"
             >
               <MoreHorizontal className="h-4 w-4" />
             </button>

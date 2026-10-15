@@ -42,6 +42,14 @@ describe('mobile workspace header', () => {
     fireEvent.click(screen.getByRole('button', { name: '返回工作台' }))
     expect(back).toHaveBeenCalledOnce()
   })
+
+  it('announces the writing return destination when chapters were opened from writing', () => {
+    const back = vi.fn()
+    render(<StudioMobileHeader view="chapters" navigationOpen={false} onOpenNavigation={vi.fn()} onSelectView={vi.fn()} onBack={back} backLabel="返回写作" onExit={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: '返回工作台' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '返回写作' }))
+    expect(back).toHaveBeenCalledOnce()
+  })
 })
 
 function Harness({ onAction = () => {}, switcher, children }: { onAction?: () => void; switcher?: ReactNode; children?: ReactNode }) {

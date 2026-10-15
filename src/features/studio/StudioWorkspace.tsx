@@ -198,6 +198,9 @@ export default function StudioWorkspace() {
   const [novelLastSavedAt, setNovelLastSavedAt] = useState<string | null>(null)
   const [novelMessage, setNovelMessage] = useState('作品设置支持自动保存，也可以手动点击保存。')
   const [mobileView, setMobileView] = useState<MobileView>('assistant')
+  const mobilePrimaryViewRef = useRef<'assistant' | 'editor'>('assistant')
+  if (mobileView === 'assistant' || mobileView === 'editor') mobilePrimaryViewRef.current = mobileView
+  const mobileBackView = mobileView === 'chapters' ? mobilePrimaryViewRef.current : 'assistant'
   // 上下文详情弹窗（上下文记录/压缩记录/最终上下文）：由记忆面板占用卡「查看详情」打开
   const [contextDetailOpen, setContextDetailOpen] = useState(false)
   const {
@@ -345,14 +348,14 @@ export default function StudioWorkspace() {
       else if (activeChangeSetId) setActiveChangeSetId(null)
       else if (mobileMoreOpen) setMobileMoreOpen(false)
       else if (activeToolPanel) setActiveToolPanel(null)
-      else if (mobileView !== 'assistant') setMobileView('assistant')
+      else if (mobileView !== 'assistant') setMobileView(mobileBackView)
       else navigate('/')
     },
     onResume: () => {
       // SSE 以 seq 去重续传；这里只失效查询缓存，不重新启动 run，避免 APP 切后台造成重复写入。
       void queryClient.invalidateQueries({ queryKey: ['studio', activeNovelId] })
     },
-  }), [activeChangeSetId, activeNovelId, activeToolPanel, mobileMoreOpen, mobileView, navigate, queryClient, workspaceDialog])
+  }), [activeChangeSetId, activeNovelId, activeToolPanel, mobileBackView, mobileMoreOpen, mobileView, navigate, queryClient, workspaceDialog])
 
   useEffect(() => {
     if (!coverGenerationBusy) {
@@ -3970,7 +3973,8 @@ export default function StudioWorkspace() {
             view={mobileView}
             navigationOpen={mobileMoreOpen}
             onOpenNavigation={() => setMobileMoreOpen(true)}
-            onBack={() => setMobileView('assistant')}
+            onBack={() => setMobileView(mobileBackView)}
+            backLabel={mobileBackView === 'editor' ? '返回写作' : '返回工作台'}
             onExit={() => navigate('/')}
             onSelectView={(view) => {
               setMobileView(view)
@@ -3983,7 +3987,7 @@ export default function StudioWorkspace() {
             {mobileView === 'editor' ? (
               <div className="flex min-h-0 flex-1 flex-col">
                 <div data-studio-region="mobile-writing-navigation" className="flex min-h-11 shrink-0 items-center border-b border-[var(--border-subtle)] px-3">
-                  <button type="button" onClick={() => { setMobileView('chapters'); setWorkspacePerspective('ide') }} className="inline-flex min-h-11 min-w-0 items-center gap-2 text-xs text-[var(--text-secondary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)]">
+                  <button type="button" onClick={() => { setMobileView('chapters'); setWorkspacePerspective('ide') }} className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-md px-1 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] active:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none">
                     <BookOpenText aria-hidden="true" className="h-4 w-4 shrink-0" /><span>选择章节</span>
                   </button>
                   <span className="ml-3 min-w-0 truncate text-xs text-[var(--text-tertiary)]">{activeWorkspaceDocument?.title || activeChapterListItem?.title || '正文与卷章'}</span>

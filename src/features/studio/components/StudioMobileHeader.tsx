@@ -9,6 +9,7 @@ type Props = {
   onOpenNavigation: () => void
   onSelectView: (view: 'assistant' | 'editor' | 'chapters') => void
   onBack: () => void
+  backLabel?: string
   onExit: () => void
 }
 
@@ -16,7 +17,7 @@ const titles = {
   chapters: '卷章', cover: '封面工坊', meta: '作品设置', memory: '小说关系网', context: '记忆', skills: '作品技能',
 } as const
 
-export default function StudioMobileHeader({ view, navigationOpen, onOpenNavigation, onSelectView, onBack, onExit }: Props) {
+export default function StudioMobileHeader({ view, navigationOpen, onOpenNavigation, onSelectView, onBack, onExit, backLabel = '返回工作台' }: Props) {
   const systemSurfaceRef = useNativeSystemSurface<HTMLElement>()
   const primary = view === 'assistant' || view === 'editor'
   const buttonClass = 'inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] active:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none'
@@ -28,7 +29,7 @@ export default function StudioMobileHeader({ view, navigationOpen, onOpenNavigat
             <Menu className="h-5 w-5" />
           </button>
         ) : (
-          <button type="button" data-studio-mobile-primary-control aria-label="返回工作台" onClick={onBack} className={buttonClass}><ChevronLeft className="h-5 w-5" /></button>
+          <button type="button" data-studio-mobile-primary-control aria-label={backLabel} onClick={onBack} className={buttonClass}><ChevronLeft className="h-5 w-5" /></button>
         )}
         {primary ? (
           <nav aria-label="创作视图" className="flex h-full min-w-0 items-center justify-center gap-5">
