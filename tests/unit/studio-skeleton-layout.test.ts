@@ -62,7 +62,7 @@ describe('StudioSkeleton responsive layout', () => {
     expect(markup).not.toContain('mobile-bottom-nav')
     expect(markup).not.toContain('studio-bottom-nav')
     expect(markup).toContain('data-studio-nav-key="menu"')
-    expect(markup).toContain('data-studio-nav-key="chapters"')
+    expect(markup).toContain('data-studio-nav-key="exit"')
     expect(markup).toContain('pt-[var(--safe-top,0px)]')
     expect(markup).toContain('pb-[calc(16px_+_var(--safe-bottom,0px))]')
     expect(markup).toContain('pl-[calc(16px_+_var(--safe-left,0px))]')

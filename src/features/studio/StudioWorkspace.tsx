@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ComponentProps } from 'react'
 import { hasComposerDraft, promoteComposerDraft } from './agent/composer-drafts'
@@ -43,11 +43,11 @@ import StudioCommandBar from './components/StudioCommandBar'
 import StudioMobileAccountCard from './components/StudioMobileAccountCard'
 import StudioMobileHeader from './components/StudioMobileHeader'
 import StudioMobileNavigation from './components/StudioMobileNavigation'
+import StudioMobileMenu from './components/StudioMobileMenu'
 import CreateNovelDialog from './components/CreateNovelDialog'
 import StudioWorkspaceSidebar from './components/StudioWorkspaceSidebar'
 import { AgentConversationRail } from './components/AgentTaskSidebar'
 import StudioSettingsDialog, { type StudioSettingsSection } from './components/StudioSettingsDialog'
-import WorkspaceNovelSwitcher from './components/WorkspaceNovelSwitcher'
 import WorkPerspective from './components/WorkPerspective'
 import WorkInspector from './components/WorkInspector'
 import IdePerspective from './components/IdePerspective'
@@ -3886,6 +3886,7 @@ export default function StudioWorkspace() {
             navigationOpen={mobileMoreOpen}
             onOpenNavigation={() => setMobileMoreOpen(true)}
             onBack={() => setMobileView('assistant')}
+            onExit={() => navigate('/')}
             onSelectView={(view) => {
               setMobileView(view)
               if (view === 'assistant') setWorkspacePerspective('work')
@@ -3896,6 +3897,12 @@ export default function StudioWorkspace() {
 
             {mobileView === 'editor' ? (
               <div className="flex min-h-0 flex-1 flex-col">
+                <div data-studio-region="mobile-writing-navigation" className="flex min-h-11 shrink-0 items-center border-b border-[var(--border-subtle)] px-3">
+                  <button type="button" onClick={() => { setMobileView('chapters'); setWorkspacePerspective('ide') }} className="inline-flex min-h-11 min-w-0 items-center gap-2 text-xs text-[var(--text-secondary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)]">
+                    <BookOpenText aria-hidden="true" className="h-4 w-4 shrink-0" /><span>选择章节</span>
+                  </button>
+                  <span className="ml-3 min-w-0 truncate text-xs text-[var(--text-tertiary)]">{activeWorkspaceDocument?.title || activeChapterListItem?.title || '正文与卷章'}</span>
+                </div>
                 {renderEditor({ variant: 'mobile' })}
               </div>
             ) : null}
@@ -3980,26 +3987,18 @@ export default function StudioWorkspace() {
             ) : null}
           </div>
 
-          <StudioMobileNavigation
-            open={mobileMoreOpen}
-            onClose={() => setMobileMoreOpen(false)}
-            novelSwitcher={
-              <WorkspaceNovelSwitcher
-                currentNovelId={currentNovel.id}
-                currentNovelTitle={novelTitle}
-                novels={novelOptions}
-                busy={createNovelMutation.isPending}
-                loading={myNovelsQuery.isLoading}
-                onSelectNovel={(id) => { setMobileMoreOpen(false); handleSelectWorkspaceNovel(id) }}
-                onCreateNovel={() => { setMobileMoreOpen(false); handleCreateWorkspaceNovel() }}
-                fullWidth
-              />
-            }
-          >
-            <StudioMobileAccountCard />
-            <div className="space-y-0.5 px-3 pt-1">
-              {(
-                [
+          <StudioMobileNavigation open={mobileMoreOpen} onClose={() => setMobileMoreOpen(false)}>
+            <StudioMobileMenu
+              currentNovel={currentNovel}
+              novels={novelOptions}
+              loading={myNovelsQuery.isLoading}
+              busy={createNovelMutation.isPending}
+              view={mobileView}
+              onClose={() => setMobileMoreOpen(false)}
+              onSelectNovel={handleSelectWorkspaceNovel}
+              onCreateNovel={handleCreateWorkspaceNovel}
+              accountCard={<StudioMobileAccountCard />}
+              actions={[
                   { key: 'assistant', sectionLabel: '导航', label: '工作台', icon: MessageSquareText, action: () => { setMobileView('assistant'); setWorkspacePerspective('work') } },
                   { key: 'editor', label: '写作', icon: PenLine, action: () => { setMobileView('editor'); setWorkspacePerspective('ide') } },
                   { key: 'chapters', label: '卷章', icon: BookOpenText, action: () => { setMobileView('chapters'); setWorkspacePerspective('ide') } },
@@ -4033,47 +4032,8 @@ export default function StudioWorkspace() {
                     danger: true,
                     disabled: deleteNovelMutation.isPending,
                   },
-                ] as Array<{
-                  key: string
-                  /** 分组标题：该项之前插入一行小标题，作品级与创作区级操作不再平铺在一起 */
-                  sectionLabel?: string
-                  label: string
-                  icon: typeof PenLine
-                  action: () => void
-                  danger?: boolean
-                  disabled?: boolean
-                }>
-              ).map(({ key, sectionLabel, label, icon: Icon, action, danger, disabled }) => (
-                <Fragment key={key}>
-                  {sectionLabel ? <p className="px-3 pb-1 pt-2 text-[11px] font-medium text-[var(--text-tertiary)]">{sectionLabel}</p> : null}
-                  {danger ? <div className="my-1 border-t border-[var(--border-subtle)]" /> : null}
-                  <button
-                    type="button"
-                    disabled={disabled}
-                    aria-current={mobileView === key ? 'page' : undefined}
-                    onClick={() => {
-                      setMobileMoreOpen(false)
-                      action()
-                    }}
-                    className={cn(
-                      'flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-left text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none disabled:opacity-45',
-                      mobileView === key && 'bg-[var(--surface-muted)] font-medium',
-                      danger
-                        ? 'text-[var(--color-error)] active:bg-[var(--surface-muted)]'
-                        : 'text-[var(--text-primary)] active:bg-[var(--surface-muted)]',
-                    )}
-                  >
-                    <Icon
-                      className={cn(
-                        'h-5 w-5 shrink-0',
-                        danger ? 'text-[var(--color-error)]' : 'text-[var(--text-secondary)]',
-                      )}
-                    />
-                    {label}
-                  </button>
-                </Fragment>
-              ))}
-            </div>
+                ]}
+            />
           </StudioMobileNavigation>
         </div>
 

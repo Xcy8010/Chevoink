@@ -1727,6 +1727,7 @@ export function AgentPanel({
           </div>
         ) : (
           <AgentEmptyWelcome
+            mobile={mobileIntegratedHeader}
             novelName={novelName}
             initializingNovel={initializingNovel}
             seed={emptyStateSeed ?? sessionId ?? novelId}

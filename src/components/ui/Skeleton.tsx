@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils'
+import { useNativeSystemSurface } from '@/lib/useNativeSystemSurface'
 
 /** 骨架需匹配最终布局：从地址栏解析当前作品，读取其工作区视角（work/ide），SSR 无 window 时按 work 处理 */
 function resolveStudioPerspective(): 'work' | 'ide' {
@@ -270,6 +271,7 @@ function StudioActivityDockSkeleton() {
 const studioSkeletonInspectorTabs = ['work', 'context', 'changes', 'memory', 'skills'] as const
 
 export function StudioSkeleton() {
+  const mobileSystemSurfaceRef = useNativeSystemSurface<HTMLDivElement>()
   const perspective = resolveStudioPerspective()
   return (
     <div
@@ -279,14 +281,14 @@ export function StudioSkeleton() {
     >
       {/* 手机端：顶部双视图导航、实际任务控件与底部输入区。 */}
       <div className="flex min-h-0 flex-1 flex-col lg:hidden" data-studio-skeleton="mobile">
-        <div className="shrink-0 border-b border-[var(--border-subtle)] pl-[max(8px,var(--safe-left,0px))] pr-[max(8px,var(--safe-right,0px))] pt-[var(--safe-top,0px)]" data-studio-region="mobile-header">
+        <div ref={mobileSystemSurfaceRef} className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--app-bg)] pl-[max(8px,var(--safe-left,0px))] pr-[max(8px,var(--safe-right,0px))] pt-[var(--safe-top,0px)]" data-studio-region="mobile-header">
           <div className="grid h-14 grid-cols-[44px_minmax(0,1fr)_44px] items-center gap-2">
             <div data-studio-nav-key="menu"><Skeleton className="h-11 w-11 rounded-xl" /></div>
-            <div className="flex items-center justify-center gap-1" data-studio-region="mobile-view-navigation">
-              <div data-studio-nav-key="assistant"><Skeleton className="h-11 w-16 rounded-xl" /></div>
-              <div data-studio-nav-key="editor"><Skeleton className="h-11 w-16 rounded-xl" /></div>
+            <div className="flex items-center justify-center gap-5" data-studio-region="mobile-view-navigation">
+              <div data-studio-nav-key="assistant" className="flex h-14 flex-col items-center justify-center gap-3"><Skeleton className="h-3.5 w-12 rounded-sm" /><Skeleton className="h-0.5 w-5 rounded-sm" /></div>
+              <div data-studio-nav-key="editor"><Skeleton className="h-3.5 w-10 rounded-sm" /></div>
             </div>
-            <div data-studio-nav-key="chapters"><Skeleton className="h-11 w-11 rounded-xl" /></div>
+            <div data-studio-nav-key="exit"><Skeleton className="h-11 w-11 rounded-xl" /></div>
           </div>
         </div>
         <div className="flex h-11 shrink-0 items-center gap-2 px-4" data-studio-region="mobile-task-header">

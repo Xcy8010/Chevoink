@@ -6,7 +6,7 @@ import { DeviceProvider } from '@/components/layout/DeviceProvider'
 import { ToastProvider } from '@/components/ui/Toast'
 import UpdateBanner from '@/components/ui/UpdateBanner'
 import { hydrateReadingSync } from '@/features/home/reading-sync'
-import { syncNativeSystemBars } from '@/lib/native-app'
+import { restoreNativeSystemBarsToTheme } from '@/lib/native-app'
 import { useShellStore } from '@/store/useShellStore'
 import type { UserMePayload } from '../../shared/contracts'
 
@@ -33,9 +33,8 @@ export default function AppProviders({ children }: PropsWithChildren) {
     document.documentElement.classList.add(theme)
     // 清掉 index.html 引导脚本预置的内联背景色，交还给 CSS 变量接管，避免运行时切主题后残留旧色
     document.documentElement.style.backgroundColor = ''
-    // APP 壳内：把原生状态栏/导航栏染成当前主题背景色，使上下安全区跟随主题（浏览器为空操作）
-    const appBg = getComputedStyle(document.documentElement).getPropertyValue('--app-bg').trim()
-    syncNativeSystemBars(appBg, theme === 'dark')
+    // 读取当前页面实际配色，同步 APP 系统栏与浏览器 theme-color。
+    restoreNativeSystemBarsToTheme()
   }, [theme])
 
   useEffect(() => {

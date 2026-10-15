@@ -1,18 +1,19 @@
 import { useEffect, useRef } from 'react'
-import { enterNativeImmersive, exitNativeImmersive, isDarkColor, isNativeApp, syncNativeSystemBars } from '@/lib/native-app'
+import { enterNativeImmersive, exitNativeImmersive, isDarkColor, isNativeApp, registerNativeSystemSurface, restoreNativeSystemBarsToTheme } from '@/lib/native-app'
 import { setNativeImmersiveSafeArea } from '@/lib/safe-area'
 
 /** One lifecycle owns reading, comment-keyboard suspension and route cleanup. */
 export function useNativeReaderImmersive(commentsOpen: boolean, background: string) {
   const color = useRef(background)
   color.current = background
+  useEffect(() => registerNativeSystemSurface(() => ({ backgroundColor: color.current, dark: isDarkColor(color.current) })), [])
   useEffect(() => {
     if (!isNativeApp()) return
     let current = true
     if (commentsOpen) {
       setNativeImmersiveSafeArea(false)
       void exitNativeImmersive().then(() => {
-        if (current) syncNativeSystemBars(color.current, isDarkColor(color.current))
+        if (current) restoreNativeSystemBarsToTheme()
       })
     } else {
       void enterNativeImmersive().then(insets => {
@@ -28,6 +29,6 @@ export function useNativeReaderImmersive(commentsOpen: boolean, background: stri
   }, [commentsOpen])
 
   useEffect(() => {
-    syncNativeSystemBars(background, isDarkColor(background))
+    restoreNativeSystemBarsToTheme()
   }, [background])
 }

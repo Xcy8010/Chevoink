@@ -56,6 +56,7 @@ type NavigationBarPlugin = {
  * enter 返回沉浸态下页面需要避让的安全区（CSS px，含挖孔）。
  */
 type ImmersiveModePlugin = {
+  setSystemBarAppearance?: (options: { color: string; dark: boolean }) => Promise<void>
   enter?: () => Promise<ImmersiveInsets>
   exit?: () => Promise<ImmersiveInsets | void>
   getInsets?: () => Promise<ImmersiveInsets>
@@ -130,20 +131,112 @@ function nativePlugins():
  * 仅在 APP 壳内生效；浏览器为空操作。
  *
  * 注：安卓 15+ 默认强制 edge-to-edge 并禁用状态栏染色，本壳在主题里声明了
- * windowOptOutEdgeToEdgeEnforcement，因此 setBackgroundColor 仍然生效，
- * 且 WebView 天然被排布在状态栏下方（不需要 --safe-top 再避让一次）。
+ * windowOptOutEdgeToEdgeEnforcement。1.0.9 外观桥按 OS、target 与 opt-out 染色；
+ * 旧壳继续走 StatusBar fallback，其依赖在 Android 16+ 会跳过背景染色。
  *
  * @param backgroundColor 背景色（#RRGGBB，通常取自 CSS 变量 --app-bg）
  * @param dark 是否深色背景：深色→浅色图标；浅色→深色图标
  */
 export function syncNativeSystemBars(backgroundColor: string, dark: boolean): void {
   if (!isNativeApp() || !backgroundColor) return
+  queueNativeSystemSurface(() => ({ backgroundColor, dark }))
+}
+
+function queueNativeSystemSurface(resolve: () => NativeSystemSurfaceAppearance | null, force = false) {
+  if (!isNativeApp()) return
+  const revision = ++appearanceRevision
+  void enqueueImmersive(async () => {
+    if (revision !== appearanceRevision) return
+    const surface = resolve()
+    if (surface) {
+      syncBrowserThemeColor(surface)
+      await applyNativeSystemBars(surface, force)
+    }
+  })
+}
+
+export type NativeSystemSurfaceAppearance = { backgroundColor: string; dark: boolean }
+const systemSurfaces = new Map<symbol, () => NativeSystemSurfaceAppearance | null>()
+let appearanceRevision = 0
+let appliedAppearance = ''
+let appliedBridge: ReturnType<typeof nativePlugins>
+
+/** Register a mounted surface; a hidden surface returns null and yields to the next owner. */
+export function registerNativeSystemSurface(resolve: () => NativeSystemSurfaceAppearance | null): () => void {
+  const owner = Symbol('system-surface')
+  systemSurfaces.set(owner, resolve)
+  restoreNativeSystemBarsToTheme()
+  return () => {
+    systemSurfaces.delete(owner)
+    restoreNativeSystemBarsToTheme()
+    // Reader canvas cleanup can restore an old meta color later in the same commit.
+    // Re-read current owners after all cleanups; never replay the released owner's color.
+    queueMicrotask(restoreNativeSystemBarsToTheme)
+  }
+}
+
+/** CSS computed colors are RGB; native StatusBar accepts hex. Ignore translucent backgrounds. */
+export function normalizeSystemSurfaceColor(value: string): string | null {
+  const color = value.trim().toLowerCase()
+  if (/^#[\da-f]{6}$/.test(color)) return color
+  if (/^#[\da-f]{3}$/.test(color)) return `#${color.slice(1).split('').map(character => character + character).join('')}`
+  const rgb = color.match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)$/)
+  if (!rgb || (rgb[4] !== undefined && Number(rgb[4]) !== 1)) return null
+  const channels = rgb.slice(1, 4).map(Number)
+  if (channels.some(channel => !Number.isFinite(channel) || channel < 0 || channel > 255)) return null
+  return `#${channels.map(channel => Math.round(channel).toString(16).padStart(2, '0')).join('')}`
+}
+
+export function readNativeSystemSurface(element: HTMLElement): NativeSystemSurfaceAppearance | null {
+  const style = getComputedStyle(element)
+  const backgroundColor = normalizeSystemSurfaceColor(style.backgroundColor)
+    ?? normalizeSystemSurfaceColor(style.getPropertyValue('--app-bg'))
+  return backgroundColor ? { backgroundColor, dark: isDarkColor(backgroundColor) } : null
+}
+
+function currentSystemSurface(): NativeSystemSurfaceAppearance | null {
+  for (const resolve of Array.from(systemSurfaces.values()).reverse()) {
+    const surface = resolve()
+    if (surface) return surface
+  }
+  return typeof document === 'undefined' ? null : readNativeSystemSurface(document.documentElement)
+}
+
+function syncBrowserThemeColor(surface: NativeSystemSurfaceAppearance) {
+  if (typeof document !== 'undefined') {
+    const meta = document.head.querySelector('meta[name="theme-color"]')
+    if (meta?.getAttribute('content') !== surface.backgroundColor) meta?.setAttribute('content', surface.backgroundColor)
+  }
+}
+
+async function applyNativeSystemBars(surface: NativeSystemSurfaceAppearance, force = false) {
+  if (!isNativeApp()) return
   const plugins = nativePlugins()
   if (!plugins) return
-  const style = dark ? 'DARK' : 'LIGHT'
-  plugins.StatusBar?.setBackgroundColor?.({ color: backgroundColor }).catch(() => {})
-  plugins.StatusBar?.setStyle?.({ style }).catch(() => {})
-  plugins.NavigationBar?.setNavigationBarColor?.({ color: backgroundColor, darkButtons: !dark }).catch(() => {})
+  const capabilities = [plugins.ImmersiveMode?.setSystemBarAppearance, plugins.StatusBar?.setBackgroundColor, plugins.StatusBar?.setStyle, plugins.NavigationBar?.setNavigationBarColor]
+  if (!capabilities.some(method => typeof method === 'function')) return
+  const key = `${surface.backgroundColor}:${surface.dark}:${capabilities.map(method => typeof method === 'function').join(':')}`
+  if (!force && appliedBridge === plugins && appliedAppearance === key) return
+  if (plugins.ImmersiveMode?.setSystemBarAppearance) {
+    try {
+      await plugins.ImmersiveMode.setSystemBarAppearance({ color: surface.backgroundColor, dark: surface.dark })
+      appliedBridge = plugins
+      appliedAppearance = key
+      return
+    } catch { /* Old proxy shells or unsupported window policies retain the legacy path. */ }
+  }
+  const writes = [
+    () => plugins.StatusBar?.setBackgroundColor?.({ color: surface.backgroundColor }),
+    () => plugins.StatusBar?.setStyle?.({ style: surface.dark ? 'DARK' : 'LIGHT' }),
+    () => plugins.NavigationBar?.setNavigationBarColor?.({ color: surface.backgroundColor, darkButtons: !surface.dark }),
+  ]
+  const success = await Promise.all(writes.map(async write => {
+    try { await write(); return true } catch { return false }
+  }))
+  if (success.every(Boolean)) {
+    appliedBridge = plugins
+    appliedAppearance = key
+  }
 }
 
 // 进入/退出沉浸走同一条串行队列：评论面板临时退出、路由卸载还原等场景可能交错触发，
@@ -183,9 +276,14 @@ export function exitNativeImmersive(): Promise<void> {
   return enqueueImmersive(async () => {
     publishInsets(await nativePlugins()?.ImmersiveMode?.exit?.())
     await refreshNativeInsets()
-  }).then(() => {
-    restoreNativeSystemBarsToTheme()
-  })
+    // Native exit restores a saved window color. Resolve the CURRENT owner after
+    // that restoration, including a newer reader/studio/theme mounted while exit waited.
+    const surface = currentSystemSurface()
+    if (surface) {
+      syncBrowserThemeColor(surface)
+      await applyNativeSystemBars(surface, true)
+    }
+  }).then(() => {})
 }
 
 /**
@@ -203,10 +301,11 @@ export function isDarkColor(color: string): boolean {
   return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5
 }
 
-/** 把系统栏配色恢复成当前主题背景色（离开阅读区等自定义配色场景时调用） */
-export function restoreNativeSystemBarsToTheme(): void {
-  if (!isNativeApp() || typeof document === 'undefined') return
-  const appBg = getComputedStyle(document.documentElement).getPropertyValue('--app-bg').trim()
-  if (!appBg) return
-  syncNativeSystemBars(appBg, isDarkColor(appBg) || document.documentElement.classList.contains('dark'))
+/** Resolve the current mounted surface, then the root theme; shared by native and mobile browser chrome. */
+export function restoreNativeSystemBarsToTheme(options?: { forceNative?: boolean }): void {
+  const surface = currentSystemSurface()
+  if (!surface) return
+  syncBrowserThemeColor(surface)
+  // Resolve again when this queued write runs: layout/theme can change while native exit waits.
+  queueNativeSystemSurface(currentSystemSurface, options?.forceNative === true)
 }

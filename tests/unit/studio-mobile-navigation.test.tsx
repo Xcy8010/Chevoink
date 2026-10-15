@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useState, type ReactNode } from 'react'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import StudioMobileHeader from '@/features/studio/components/StudioMobileHeader'
 import StudioMobileNavigation from '@/features/studio/components/StudioMobileNavigation'
@@ -12,20 +12,23 @@ beforeEach(() => { vi.stubGlobal('innerWidth', 390) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.style.overflow = '' })
 
 describe('mobile workspace header', () => {
-  it('uses one navigation row with two views and the original chapter entry', () => {
+  it('keeps two views and exits through the header without invoking chapter selection', () => {
     const select = vi.fn()
     const open = vi.fn()
-    const view = render(<StudioMobileHeader view="assistant" navigationOpen={false} onOpenNavigation={open} onSelectView={select} onBack={vi.fn()} />)
+    const exit = vi.fn()
+    const view = render(<StudioMobileHeader view="assistant" navigationOpen={false} onOpenNavigation={open} onSelectView={select} onBack={vi.fn()} onExit={exit} />)
     const menu = screen.getByRole('button', { name: '打开创作区导航' })
     expect(menu.getAttribute('aria-expanded')).toBe('false')
     expect(screen.getByRole('button', { name: '工作台' }).getAttribute('aria-pressed')).toBe('true')
     expect(screen.getByRole('navigation', { name: '创作视图' }).querySelectorAll('button')).toHaveLength(2)
     fireEvent.click(menu)
     fireEvent.click(screen.getByRole('button', { name: '写作' }))
-    fireEvent.click(screen.getByRole('button', { name: '卷章' }))
+    fireEvent.click(screen.getByRole('button', { name: '退出创作区' }))
     expect(open).toHaveBeenCalledOnce()
-    expect(select.mock.calls).toEqual([['editor'], ['chapters']])
-    view.rerender(<StudioMobileHeader view="editor" navigationOpen onOpenNavigation={open} onSelectView={select} onBack={vi.fn()} />)
+    expect(select.mock.calls).toEqual([['editor']])
+    expect(exit).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('button', { name: '卷章' })).toBeNull()
+    view.rerender(<StudioMobileHeader view="editor" navigationOpen onOpenNavigation={open} onSelectView={select} onBack={vi.fn()} onExit={exit} />)
     expect(screen.getByRole('button', { name: '写作' }).getAttribute('aria-pressed')).toBe('true')
     expect(menu.getAttribute('aria-expanded')).toBe('true')
     expect(menu.className).toContain('h-11 w-11')
@@ -33,7 +36,7 @@ describe('mobile workspace header', () => {
 
   it.each<[MobileView, string]>([['chapters', '卷章'], ['cover', '封面工坊'], ['meta', '作品设置'], ['memory', '小说关系网'], ['context', '记忆'], ['skills', '作品技能']])('retains the %s auxiliary view and its return action', (view, title) => {
     const back = vi.fn()
-    render(<StudioMobileHeader view={view} navigationOpen={false} onOpenNavigation={vi.fn()} onSelectView={vi.fn()} onBack={back} />)
+    render(<StudioMobileHeader view={view} navigationOpen={false} onOpenNavigation={vi.fn()} onSelectView={vi.fn()} onBack={back} onExit={vi.fn()} />)
     expect(screen.getByRole('heading', { name: title })).toBeTruthy()
     expect(screen.queryByRole('navigation', { name: '创作视图' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '返回工作台' }))
@@ -63,6 +66,29 @@ function openNavigation() {
 }
 
 describe('controlled mobile workspace navigation', () => {
+  it('keeps the visual close transition mounted while removing it from interaction, then cleans up', () => {
+    vi.useFakeTimers()
+    try {
+      render(<Harness />)
+      openNavigation()
+      fireEvent.click(screen.getByRole('button', { name: '关闭导航遮罩' }))
+      expect(screen.queryByRole('dialog', { name: '创作区导航' })).toBeNull()
+      const closing = document.querySelector('.studio-mobile-navigation')
+      expect(closing?.getAttribute('data-state')).toBe('closed')
+      expect(closing?.hasAttribute('inert')).toBe(true)
+      act(() => vi.advanceTimersByTime(211))
+      expect(document.querySelector('.studio-mobile-navigation')).toBeNull()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('includes category summaries but excludes their collapsed actions from keyboard wrapping', () => {
+    render(<Harness><details><summary>分类</summary><button>隐藏操作</button></details></Harness>)
+    openNavigation()
+    const summary = screen.getByText('分类')
+    summary.focus()
+    fireEvent.keyDown(summary, { key: 'Tab' })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '关闭创作区导航' }))
+  })
   it('locks scroll, traps forward/backward focus, and restores focus/scroll on Escape', () => {
     document.body.style.overflow = 'clip'
     render(<Harness />)

@@ -1,5 +1,6 @@
 import { BookPlus, Compass, Layers3, Sparkles, UsersRound } from 'lucide-react'
 import { useMemo } from 'react'
+import { cn } from '@/lib/utils'
 
 import { useAgentStore } from '../agentStore'
 
@@ -8,6 +9,7 @@ type Props = {
   initializingNovel?: boolean
   seed: string
   showSuggestions?: boolean
+  mobile?: boolean
 }
 
 const NOVEL_GENRES = ['玄幻', '都市悬疑', '古代言情', '科幻', '仙侠', '历史架空', '现代言情', '末日生存']
@@ -56,7 +58,7 @@ function seededShuffle(values: string[], seed: string) {
   return result
 }
 
-export default function AgentEmptyWelcome({ novelName, initializingNovel = false, seed, showSuggestions = true }: Props) {
+export default function AgentEmptyWelcome({ novelName, initializingNovel = false, seed, showSuggestions = true, mobile = false }: Props) {
   const setComposerDraft = useAgentStore((state) => state.setComposerDraft)
   const suggestions = useMemo(() => {
     if (initializingNovel) {
@@ -67,13 +69,13 @@ export default function AgentEmptyWelcome({ novelName, initializingNovel = false
   }, [initializingNovel, seed])
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-[760px] flex-col items-center justify-center px-1 py-6 text-center sm:px-4">
+    <div data-agent-welcome={mobile ? 'mobile' : 'desktop'} className={cn('mx-auto flex w-full flex-col items-center px-1 text-center', mobile ? 'max-w-[440px] shrink-0 py-5' : 'h-full max-w-[760px] justify-center py-6 sm:px-4')}>
       <img
         src="/chevoink-agent.png"
         alt="Chevoink Agent"
-        className="h-12 w-12 rounded-[14px] object-contain sm:h-14 sm:w-14"
+        className={cn('rounded-[14px] object-contain', mobile ? 'h-10 w-10' : 'h-12 w-12 sm:h-14 sm:w-14')}
       />
-      <h2 className="mt-5 text-balance text-lg font-semibold tracking-[-0.02em] text-[var(--text-primary)] sm:text-[22px]">
+      <h2 className={cn('text-balance font-semibold tracking-[-0.02em] text-[var(--text-primary)]', mobile ? 'mt-4 text-lg' : 'mt-5 text-lg sm:text-[22px]')}>
         {initializingNovel
           ? '你可以让 Chevoink Agent 帮你做些什么？'
           : `你想让我们在《${novelName}》构建什么？`}
@@ -81,18 +83,18 @@ export default function AgentEmptyWelcome({ novelName, initializingNovel = false
       <p className="mt-2 max-w-[560px] text-xs leading-5 text-[var(--text-secondary)] sm:text-sm">
         {showSuggestions ? '选择一个方向作为起点，内容只会填入输入框，你可以继续修改后再发送。' : '在下方输入任务，Agent 会结合当前作品和已打开的章节继续工作。'}
       </p>
-      {showSuggestions ? <div className="mt-6 grid w-full grid-cols-1 gap-2.5 sm:grid-cols-2">
-        {suggestions.map((suggestion, index) => {
+      {showSuggestions ? <div className={cn('grid w-full', mobile ? 'mt-5 grid-cols-1 gap-2.5' : 'mt-6 grid-cols-1 gap-2.5 sm:grid-cols-2')}>
+        {(mobile ? suggestions.slice(0, 3) : suggestions).map((suggestion, index) => {
           const Icon = CARD_ICONS[index] ?? Sparkles
           return (
             <button
               key={suggestion}
               type="button"
               onClick={() => setComposerDraft(suggestion)}
-              className="group flex min-h-[74px] items-start gap-3 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] px-4 py-3 text-left transition-[border-color,background-color,transform] hover:-translate-y-px hover:border-[var(--border-strong)] hover:bg-[var(--surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-strong)]"
+              className={cn('group flex items-start rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] text-left transition-[border-color,background-color,transform] hover:border-[var(--border-strong)] hover:bg-[var(--surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-strong)] motion-reduce:transition-none', mobile ? 'min-h-14 min-w-0 items-center gap-3 rounded-[24px] px-4 py-3 active:scale-[0.99]' : 'min-h-[74px] gap-3 px-4 py-3 hover:-translate-y-px')}
             >
               <Icon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-tertiary)] transition-colors group-hover:text-[var(--text-primary)]" />
-              <span className="text-xs font-medium leading-5 text-[var(--text-primary)] sm:text-[13px]">{suggestion}</span>
+              <span className={cn('break-words text-xs font-medium text-[var(--text-primary)]', mobile ? 'leading-[1.65]' : 'leading-5 sm:text-[13px]')}>{suggestion}</span>
             </button>
           )
         })}
