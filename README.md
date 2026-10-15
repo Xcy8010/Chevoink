@@ -30,9 +30,12 @@ powershell -File scripts/prepare-android-source.ps1 -InstallDependencies
 powershell -File scripts/build-android-release.ps1
 ```
 
-当前产物：`android/app/build/outputs/apk/release/chevoink-v1.0.6.apk`；验证后复制为
-`artifacts/android/chevoink-v1.0.6-<sha256前12位>.apk`。这些脚本不会上传或发布。
+当前候选：`android/app/build/outputs/apk/release/chevoink-v1.0.8.apk`（code 11）；验证后复制为
+`artifacts/android/chevoink-v1.0.8-<sha256前12位>.apk`。这些脚本不会上传或发布。
 旧 `app-release.apk` 是签名基线，不能覆盖。完整前置条件见 `release/ANDROID-HANDOFF.md`。
+
+1.0.8 修复阅读全屏切换的系统栏恢复，并按 WebView 实际剩余安全区处理挖孔、横竖屏及系统栏变化；
+保留旧网页的 `enter` 高度字段。完整构建、签名和设备验收分别记录，不能由单元测试推定所有机型已通过。
 
 ## 签名配置（不入库）
 

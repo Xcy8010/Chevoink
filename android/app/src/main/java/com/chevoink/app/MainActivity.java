@@ -46,6 +46,8 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(ImmersiveModePlugin.class);
         registerPlugin(ChevoinkSpeechPlugin.class);
         super.onCreate(savedInstanceState);
+        // Normal pages reserve system-bar space; immersive reading temporarily opts out.
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
         getBridge().getWebView().setWebChromeClient(new SpeechWebChromeClient(getBridge()));
 
         // 阅读区要全屏沉浸（StatusBar.hide()）。系统默认行为是「任意触摸即恢复系统栏」，
