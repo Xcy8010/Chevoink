@@ -16,8 +16,8 @@ android {
         applicationId "com.chevoink.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 13
-        versionName "1.0.10"
+        versionCode 14
+        versionName "1.0.11"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -71,7 +71,7 @@ apply from: 'capacitor.build.gradle'
 // Keep the published v1.0.5.1 app-release.apk untouched for certificate comparison.
 android.applicationVariants.all { variant ->
     if (variant.buildType.name == 'release') {
-        variant.outputs.all { outputFileName = 'chevoink-v1.0.10.apk' }
+        variant.outputs.all { outputFileName = 'chevoink-v1.0.11.apk' }
     }
 }
 
@@ -109,7 +109,7 @@ tasks.register('verifyShellVersion') {
         if (!source.contains("appendUserAgent: '${expectedUa}'") || packaged.appendUserAgent != expectedUa) {
             throw new GradleException('Source, packaged UA and Android versionName must match. Sync the Capacitor config before building.')
         }
-        if (android.defaultConfig.versionCode <= 12) throw new GradleException('versionCode must exceed published code 12.')
+        if (android.defaultConfig.versionCode <= 13) throw new GradleException('versionCode must exceed published code 13.')
     }
 }
 tasks.configureEach { task ->

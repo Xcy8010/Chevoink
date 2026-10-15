@@ -215,12 +215,71 @@ public class ImmersiveModePlugin extends Plugin {
     }
 
     private void publishInsets() {
+        Activity activity = getActivity();
+        if (activity == null || activity.isFinishing() || activity.isDestroyed() || getBridge() == null) return;
+        Window window = activity.getWindow();
+        if (window == null || window.getDecorView() != observedDecor) return;
+        View decor = window.getDecorView();
+        View webView = getBridge().getWebView();
+        View parent = webView != null && webView.getParent() instanceof View ? (View) webView.getParent() : null;
+        // A global-layout callback is observation, not an explicit bridge call:
+        // detached/reparented/unfinished trees must not throw or publish stale geometry.
+        if (!geometryReady(decor, webView, parent)) return;
+        WindowInsetsCompat insets = ViewCompat.getRootWindowInsets(decor);
+        if (insets == null) return;
+        // The core SystemBars fallback may retain raw bar padding from the
+        // edge-to-edge reading layout after the window starts fitting again.
+        // Observe settled geometry without replacing its insets/IME listener.
+        if (normalState == null && Build.VERSION.SDK_INT >= 35
+                && "css".equals(getBridge().getConfig().getPluginConfiguration("SystemBars")
+                        .getString("insetsHandling", "css"))) {
+            // Padding schedules another layout. Do not label the old WebView
+            // rectangle as settled; the next global layout publishes it.
+            if (reconcileFittedPadding(decor, webView, parent, insets)) return;
+        }
         JSObject result = readInsets();
         String serialized = result.toString();
         if (!serialized.equals(lastInsets)) {
             lastInsets = serialized;
             notifyListeners("insetsChanged", result);
         }
+    }
+
+    /** Geometry is in physical pixels. Only core's identifiable bar padding is adjusted. */
+    static boolean reconcileFittedPadding(View decor, View webView, View parent, WindowInsetsCompat insets) {
+        if (insets == null || !geometryReady(decor, webView, parent)) return false;
+        Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+        int[] root = new int[2], content = new int[2];
+        decor.getLocationInWindow(root);
+        parent.getLocationInWindow(content);
+        int left = FittedSystemBarPadding.remaining(parent.getPaddingLeft(), bars.left, content[0] - root[0], false);
+        int top = FittedSystemBarPadding.remaining(parent.getPaddingTop(), bars.top, content[1] - root[1], false);
+        int right = FittedSystemBarPadding.remaining(parent.getPaddingRight(), bars.right,
+                root[0] + decor.getWidth() - content[0] - parent.getWidth(), false);
+        int bottom = FittedSystemBarPadding.remaining(parent.getPaddingBottom(), bars.bottom,
+                root[1] + decor.getHeight() - content[1] - parent.getHeight(), insets.isVisible(WindowInsetsCompat.Type.ime()));
+        if (left == parent.getPaddingLeft() && top == parent.getPaddingTop()
+                && right == parent.getPaddingRight() && bottom == parent.getPaddingBottom()) return false;
+        if (parent.isPaddingRelative()) {
+            boolean rtl = parent.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
+            parent.setPaddingRelative(rtl ? right : left, top, rtl ? left : right, bottom);
+        } else parent.setPadding(left, top, right, bottom);
+        return true;
+    }
+
+    static boolean geometryReady(View decor, View webView, View parent) {
+        if (decor == null || webView == null || parent == null || webView.getParent() != parent) return false;
+        for (View view : new View[] {decor, webView, parent}) {
+            if (!ViewCompat.isAttachedToWindow(view) || !ViewCompat.isLaidOut(view) || view.isLayoutRequested()
+                    || view.getWidth() <= 0 || view.getHeight() <= 0 || view.getWindowToken() == null
+                    || !view.getWindowToken().equals(decor.getWindowToken())) return false;
+        }
+        View ancestor = parent;
+        while (ancestor != decor) {
+            if (!(ancestor.getParent() instanceof View)) return false;
+            ancestor = (View) ancestor.getParent();
+        }
+        return true;
     }
 
     @Override
