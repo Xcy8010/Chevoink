@@ -1,0 +1,84 @@
+name: Cloud Production Deployment
+run-name: Deploy ${{ inputs.source_sha }} over ${{ inputs.expected_production_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact tested main SHA (must equal the selected main workflow revision)
+        required: true
+        type: string
+      expected_production_sha:
+        description: Exact currently active production SHA, verified before approval
+        required: true
+        type: string
+      ci_run_id:
+        description: Completed original CI run for source_sha (real PostgreSQL, zero skips)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: chevoink-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'Xcy8010/Chevoink' && github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    timeout-minutes: 40
+    environment:
+      name: production
+      url: https://chevoink.chevolink.com
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      EXPECTED_PRODUCTION_SHA: ${{ inputs.expected_production_sha }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Deterministic admission regression checks
+        run: node --test scripts/cloud-delivery.test.mjs
+      - name: Verify exact original CI and actual environment approval
+        run: node scripts/cloud-deploy-guard.mjs
+      - name: Deploy once through the maintained entrypoint
+        env:
+          PRODUCTION_SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          PRODUCTION_KNOWN_HOSTS: ${{ secrets.PRODUCTION_KNOWN_HOSTS }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (!$env:PRODUCTION_SSH_KEY -or !$env:PRODUCTION_KNOWN_HOSTS) { throw 'Protected production SSH inputs are missing.' }
+          $keyPath = Join-Path $env:RUNNER_TEMP 'chevoink-production-key'
+          $knownHosts = Join-Path $HOME '.ssh/known_hosts'
+          if (Test-Path -LiteralPath $keyPath) { throw 'Private key path already exists.' }
+          New-Item -ItemType Directory -Path (Split-Path $knownHosts) -Force | Out-Null
+          if (Test-Path -LiteralPath $knownHosts) { throw 'Runner known_hosts already exists; inspect runner state.' }
+          try {
+            [IO.File]::WriteAllText($keyPath, $env:PRODUCTION_SSH_KEY.Replace("`r", '').TrimEnd() + "`n")
+            & icacls.exe $keyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot restrict private key ACL.' }
+            [IO.File]::WriteAllText($knownHosts, $env:PRODUCTION_KNOWN_HOSTS.Replace("`r", '').TrimEnd() + "`n")
+            node scripts/cloud-deploy-guard.mjs
+            if ($LASTEXITCODE -ne 0) { throw 'Deployment admission changed.' }
+            ./scripts/deploy-production.ps1 -ExpectedCurrentRevision $env:EXPECTED_PRODUCTION_SHA -CiRunId $env:CI_RUN_ID -KeyPath $keyPath
+          } finally {
+            if (Test-Path -LiteralPath $keyPath) { Remove-Item -LiteralPath $keyPath -Force }
+            if (Test-Path -LiteralPath $knownHosts) { Remove-Item -LiteralPath $knownHosts -Force }
+          }
+      - name: Failure requires reconciliation
+        if: failure() || cancelled()
+        run: |
+          'Deployment is failed or unknown. Do not rerun: inspect the source-bound remote journal, actual process, source, and public health before any recovery.' >> $env:GITHUB_STEP_SUMMARY

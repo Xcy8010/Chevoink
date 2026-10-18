@@ -22,6 +22,7 @@ import searchRoutes from './routes/search.js'
 import topicsRoutes from './routes/topics.js'
 import usersRoutes from './routes/users.js'
 import creditsRoutes from './routes/credits.js'
+import localModelConnectorRoutes from './routes/local-model-connector.js'
 import { env } from './config/env.js'
 import { getSessionUserId, markSessionUnavailable, resolveSessionGate } from './lib/auth-session.js'
 import { getUploadsStaticDirectory } from './lib/avatar-storage.js'
@@ -45,8 +46,9 @@ const standardForm = express.urlencoded({ extended: true, limit: '40mb' })
 // Import payloads are parsed only AFTER authentication, using that router's
 // narrower JSON limit or its bounded raw-file stream (never Base64).
 const isImportRequest = (req: Request) => /^\/api\/novels\/[^/]+\/imports(?:\/|$)/i.test(req.path)
-app.use((req, res, next) => isImportRequest(req) ? next() : standardJson(req, res, next))
-app.use((req, res, next) => isImportRequest(req) ? next() : standardForm(req, res, next))
+const isConnectorRequest = (req: Request) => /^\/api\/local-model-connector(?:\/|$)/i.test(req.path)
+app.use((req, res, next) => isImportRequest(req) || isConnectorRequest(req) ? next() : standardJson(req, res, next))
+app.use((req, res, next) => isImportRequest(req) || isConnectorRequest(req) ? next() : standardForm(req, res, next))
 // Inspect aliases before public static decoding; every private read uses the same ACL.
 app.use('/api/uploads', agentAttachmentGateway)
 // 上传图片文件名含随机 ID、内容不可变，30 天强缓存安全（nginx 直服未命中时的兜底）
@@ -108,6 +110,7 @@ app.use('/api/search', searchRoutes)
 app.use('/api/topics', topicsRoutes)
 app.use('/api/users', usersRoutes)
 app.use('/api/credits', creditsRoutes)
+app.use('/api/local-model-connector', localModelConnectorRoutes)
 
 app.get('/api/health', (_req: Request, res: Response): void => {
   res.status(200).json({

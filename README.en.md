@@ -55,6 +55,8 @@
 
 ## Chevoink Agent 3.5
 
+Custom models can use an outbound local connector for local OpenAI-compatible relays, LM Studio and Ollama. The model computer must remain online; manuscripts and tools still use the cloud. See [local model setup](docs/LOCAL-MODELS.en.md) and [cloud development/delivery](docs/CLOUD-DEVELOPMENT.md). Android signing and production deployment require configured protected environments; workflow files do not grant publication authority.
+
 Agent 3.5 researches, plans, writes and revises within one novel, loading skills by task and phase while retaining the complete author request, story facts and actual execution results. Work and IDE task windows show Chinese progress for reading, drafting, revision, checks and saving. Actual model thinking supports streaming, folded display and history restoration; copying a reply includes only its answer text. Thinking display remains separate from the execution protocol, and action cards appear when tools actually execute.
 
 ### Writing boundaries and skills in 3.5

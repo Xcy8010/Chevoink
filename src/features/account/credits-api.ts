@@ -35,7 +35,7 @@ export function fetchCustomModels(): Promise<CustomModelsPayload> {
   return requestJson<CustomModelsPayload>('/api/credits/models')
 }
 
-export function createCustomModel(input: SaveCustomModelRequest): Promise<{ id: string }> {
+export function createCustomModel(input: SaveCustomModelRequest): Promise<{ id: string; connectorSetup?: import('../../../shared/local-model').LocalConnectorSetup }> {
   return requestJson('/api/credits/models', { method: 'POST', body: JSON.stringify(input) })
 }
 

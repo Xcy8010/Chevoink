@@ -6,7 +6,8 @@ vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(), reserv
 vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { aiUsageLog: { create: vi.fn(async () => ({ id: 'usage' })), findUnique: vi.fn(async () => null), update: vi.fn(async () => ({ id: 'usage' })), updateMany: vi.fn(async () => ({ count: 1 })) } } }))
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
   resolveTokenPrice: async () => ({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 }) }))
-import { buildProviderToolChoice, chatWithTools } from '../../api/lib/ai-service.js'
+import { buildProviderToolChoice, chatWithTools, generateTextCompletion } from '../../api/lib/ai-service.js'
+import * as localTransport from '../../api/lib/local-model-transport.js'
 import { buildProviderCompatibilitySnapshot, type ProviderCompatibilityRoute } from '../../api/lib/agent/provider-compatibility.js'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -22,6 +23,21 @@ function stream(text: string) {
 }
 const invoke = () => chatWithTools({ messages: [], tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
 describe('lossless tool argument transport', () => {
+  it('routes both Agent and auxiliary text through the owned local transport, retaining real reasoning and usage', async () => {
+    const ready = vi.spyOn(localTransport, 'assertLocalModelReady').mockResolvedValue()
+    const payload = 'data: {"choices":[{"delta":{"content":"ready","reasoning_content":"actual reasoning"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3}}\n\ndata: [DONE]\n\n'
+    const local = vi.spyOn(localTransport, 'localModelFetch').mockImplementation(async () => new Response(payload, { headers: { 'content-type': 'text/event-stream' } }))
+    const network = vi.fn(); vi.stubGlobal('fetch', network)
+    const runtime = { tier: 'custom' as const, multiplierBps: 0, provider: 'local-openai', modelName: 'model', baseUrl: 'http://127.0.0.1:7863/v1', apiKey: 'dedicated-key', reasoningEffort: 'none' as const, reasoningEfforts: ['none' as const], visionEnabled: false, contextWindowTokens: 16000 }
+    try {
+      const main = await chatWithTools({ messages: [], tools: [], provider: runtime.provider, providerBaseUrl: runtime.baseUrl, providerApiKey: runtime.apiKey, model: runtime.modelName,
+        usageLog: { userId: 'test', action: 'test', modelTier: 'custom', multiplierBps: 0 } })
+      expect(main.content).toBe('ready'); expect(main.reasoning).toBe('actual reasoning'); expect(main.usage.promptTokens).toBe(12)
+      expect(await generateTextCompletion('system', 'user', { userId: 'test', action: 'test', modelRuntime: runtime })).toBe('ready')
+      expect(local).toHaveBeenCalledTimes(2); expect(network).not.toHaveBeenCalled()
+      expect(local.mock.calls.every(([input]) => input.userId === 'test' && input.provider === 'local-openai')).toBe(true)
+    } finally { ready.mockRestore(); local.mockRestore() }
+  })
   it.each([
     { source: 'builtin', provider: 'Ant Ling', baseUrl: 'https://api.ant-ling.com/v1', model: 'Ling-3.0-flash' },
     { source: 'byok', provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-v4-flash' },

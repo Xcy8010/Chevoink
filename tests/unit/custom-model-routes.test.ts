@@ -3,12 +3,12 @@ import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  count: vi.fn(), create: vi.fn(), findFirst: vi.fn(), updateMany: vi.fn(), validate: vi.fn(),
+  count: vi.fn(), create: vi.fn(), findFirst: vi.fn(), updateMany: vi.fn(), validate: vi.fn(), owner: vi.fn(),
   encrypt: vi.fn((value: string) => `encrypted:${value}`), decrypt: vi.fn(() => 'stored-test-key'),
 }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } },
-  prisma: { aiModelConfig: { count: mocks.count, create: mocks.create, findFirst: mocks.findFirst, updateMany: mocks.updateMany } },
+  prisma: { aiModelConfig: { count: mocks.count, create: mocks.create, findFirst: mocks.findFirst, updateMany: mocks.updateMany }, user: { findUniqueOrThrow: mocks.owner } },
   normalizeDataAccessError: () => ({ status: 500, code: 'DATA_ACCESS_ERROR', message: 'internal' }),
 }))
 vi.mock('../../api/lib/auth-session.js', () => ({ requireSessionUserId: () => 'owner' }))
@@ -35,9 +35,32 @@ beforeEach(() => {
   mocks.findFirst.mockResolvedValue(target)
   mocks.updateMany.mockResolvedValue({ count: 1 })
   mocks.validate.mockResolvedValue(verified)
+  mocks.owner.mockResolvedValue({ tokenVersion: 7 })
 })
 
 describe('custom model routes capability validation', () => {
+  it('creates an unverified local profile without any model call or upstream API secret', async () => {
+    const response = await request(app).post('/credits/models').send({ ...body, provider: 'local-openai', baseUrl: 'http://127.0.0.1:7863/v1', apiKey: undefined }).expect(201)
+    expect(response.body.data.connectorSetup).toMatchObject({ version: 1, provider: 'local-openai', model: body.modelName, baseUrl: 'http://127.0.0.1:7863/v1' })
+    expect(response.body.data.connectorSetup.token).toMatch(/^chevoink-local-v1\./)
+    expect(mocks.create).toHaveBeenCalledWith({ data: expect.objectContaining({ ownerUserId: 'owner', enabled: false, multiplierBps: 0, metadata: expect.objectContaining({ connectorOwnerTokenVersion: 7, reasoningEfforts: ['none'] }) }) })
+    expect(mocks.validate).not.toHaveBeenCalled()
+    expect(mocks.encrypt).toHaveBeenCalledWith(response.body.data.connectorSetup.token)
+  })
+  it('never stores a local upstream key or permits metadata targets', async () => {
+    await request(app).post('/credits/models').send({ ...body, provider: 'local-openai', baseUrl: 'http://127.0.0.1:7863/v1' }).expect(400)
+    await request(app).post('/credits/models').send({ ...body, provider: 'local-openai', baseUrl: 'http://169.254.169.254', apiKey: undefined }).expect(400)
+    expect(mocks.create).not.toHaveBeenCalled(); expect(mocks.validate).not.toHaveBeenCalled()
+  })
+  it('validates the existing bound local profile before activation and blocks a route change', async () => {
+    mocks.findFirst.mockResolvedValue({ ...target, provider: 'local-openai', baseUrl: 'http://127.0.0.1:7863/v1' })
+    await request(app).patch('/credits/models/model-id').send({ enabled: true }).expect(200)
+    expect(mocks.validate).toHaveBeenCalledWith(expect.objectContaining({ provider: 'local-openai', userId: 'owner', apiKey: 'stored-test-key' }))
+    expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'model-id', ownerUserId: 'owner', updatedAt: target.updatedAt }, data: expect.objectContaining({ enabled: true }) }))
+    mocks.validate.mockClear(); mocks.updateMany.mockClear()
+    await request(app).patch('/credits/models/model-id').send({ modelName: 'new-model', enabled: true }).expect(409)
+    expect(mocks.validate).not.toHaveBeenCalled(); expect(mocks.updateMany).not.toHaveBeenCalled()
+  })
   it('persists server evidence rather than user-declared capabilities', async () => {
     const response = await request(app).post('/credits/models').send({ ...body, reasoningEfforts: ['max'], defaultReasoningEffort: 'max', visionEnabled: true,
       reasoningParameterMode: 'native', capabilities: { visionEnabled: true }, capabilityValidation: { text: 'verified' }, contextWindowTokens: 64000 }).expect(201)

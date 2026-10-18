@@ -1,0 +1,464 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:project-orchestrator:project-profile:1",
+  "title": "Project Orchestrator local evidence profile (not host config)",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "profile",
+    "status",
+    "reviewed_at",
+    "identity",
+    "architecture",
+    "components",
+    "capabilities",
+    "source_evidence",
+    "gates",
+    "no_gates_reason",
+    "conflicts",
+    "note"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "profile": {
+      "type": "string",
+      "description": "Legacy display label only; no value activates a project preset. New records use generic."
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "reviewed"
+      ]
+    },
+    "reviewed_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "github_repository",
+        "selection_source"
+      ],
+      "properties": {
+        "github_repository": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selection_source": {
+          "type": "string"
+        },
+        "repository_origin_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "architecture": {
+      "type": "object",
+      "required": [
+        "kind",
+        "evidence"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "ecosystem",
+          "manifest",
+          "architecture"
+        ],
+        "properties": {
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ecosystem": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "manifest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "architecture": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "data_contracts",
+        "stateful_ui",
+        "async_execution",
+        "ai_tooling",
+        "research_security",
+        "accounting",
+        "verification_release"
+      ],
+      "properties": {
+        "data_contracts": {
+          "type": "object",
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "present",
+                "absent"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "stateful_ui": {
+          "type": "object",
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "present",
+                "absent"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "async_execution": {
+          "type": "object",
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "present",
+                "absent"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "ai_tooling": {
+          "type": "object",
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "present",
+                "absent"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "research_security": {
+          "type": "object",
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "present",
+                "absent"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "accounting": {
+          "type": "object",
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "present",
+                "absent"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "verification_release": {
+          "type": "object",
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "present",
+                "absent"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "systems_artifacts": {
+          "type": "object",
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "present",
+                "absent"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "data_pipelines": {
+          "type": "object",
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "present",
+                "absent"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "infrastructure": {
+          "type": "object",
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "present",
+                "absent"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "source_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "sha256",
+          "purpose"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "purpose": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "command",
+          "cwd",
+          "source",
+          "environment",
+          "phase",
+          "required"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cwd": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "environment": {
+            "type": "string",
+            "minLength": 1
+          },
+          "phase": {
+            "enum": [
+              "slice",
+              "stage",
+              "release"
+            ]
+          },
+          "required": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "no_gates_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "note": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

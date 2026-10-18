@@ -13,6 +13,9 @@ import { DataAccessError, prisma } from '../lib/prisma.js'
 import { decryptSecret, encryptSecret } from '../lib/secret-box.js'
 import { parseBody } from '../lib/parse-body.js'
 import { validateCustomModelCapabilities } from '../lib/custom-model-validation.js'
+import { isLocalModelProvider, normalizeLocalModelUrl } from '../../shared/local-model.js'
+import { connectorKey, newConnectorToken } from '../lib/local-model-transport.js'
+import { localModelBroker } from '../lib/local-model-broker.js'
 
 const router = Router()
 
@@ -23,7 +26,7 @@ const customModelCreateSchema = z.object({
   displayName: z.string().trim().min(1).max(80),
   modelName: z.string().trim().min(1).max(160),
   baseUrl: z.string().trim().url().max(512),
-  apiKey: z.string().trim().min(8).max(2_000),
+  apiKey: z.string().trim().max(2_000).optional(),
   enabled: z.boolean().optional(),
   reasoningEfforts: z.array(modelReasoningEffortSchema).min(1).max(7).optional(),
   defaultReasoningEffort: modelReasoningEffortSchema.optional(),
@@ -39,7 +42,7 @@ async function validateModel(userId: string, res: Response, input: Parameters<ty
   const cancel = () => controller.abort()
   res.once('close', cancel)
   try {
-    const capabilities = await validateCustomModelCapabilities({ ...input, signal: controller.signal })
+    const capabilities = await validateCustomModelCapabilities({ ...input, userId, signal: controller.signal })
     if (controller.signal.aborted) throw new DataAccessError(409, 'CUSTOM_MODEL_VALIDATION_CANCELLED', '模型校验已取消。')
     return capabilities
   } finally {
@@ -120,6 +123,7 @@ router.get('/models', async (req: Request, res: Response): Promise<void> => {
         modelName: model.modelName,
         baseUrl: model.baseUrl,
         apiKeyConfigured: Boolean(model.apiKeyCiphertext),
+        ...(isLocalModelProvider(model.provider) ? { localConnector: { online: model.apiKeyCiphertext ? localModelBroker.online(connectorKey(decryptSecret(model.apiKeyCiphertext))) : false, verified: Boolean((model.metadata as Record<string, unknown> | null)?.capabilityValidation) } } : {}),
         enabled: model.enabled,
         createdAt: model.createdAt.toISOString(),
         updatedAt: model.updatedAt.toISOString(),
@@ -137,7 +141,20 @@ router.post('/models', async (req: Request, res: Response): Promise<void> => {
     const body = parseBody(customModelCreateSchema, req.body, '请完整填写自定义模型配置。')
     const count = await prisma.aiModelConfig.count({ where: { ownerUserId: userId } })
     if (count >= 10) throw new DataAccessError(409, 'CUSTOM_MODEL_LIMIT', '每个账户最多保存 10 个自定义模型。')
-    const capabilities = await validateModel(userId, res, body)
+    if (isLocalModelProvider(body.provider)) {
+      let baseUrl: string
+      try { baseUrl = normalizeLocalModelUrl(body.baseUrl) } catch { throw new DataAccessError(400, 'LOCAL_MODEL_URL_INVALID', '请填写本机或明确的局域网 IP 模型地址。') }
+      if (body.apiKey) throw new DataAccessError(400, 'LOCAL_MODEL_SECRET_LOCAL_ONLY', '本地模型 API Key 只填写在电脑上的连接配置中。')
+      const owner = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { tokenVersion: true } })
+      const id = randomUUID(), token = newConnectorToken(id)
+      await prisma.aiModelConfig.create({ data: { id, key: `user:${userId}:${id}`, ownerUserId: userId, provider: body.provider,
+        displayName: body.displayName, modelName: body.modelName, baseUrl, apiKeyCiphertext: encryptSecret(token), tier: null, multiplierBps: 0,
+        enabled: false, selectable: true, metadata: { connectorOwnerTokenVersion: owner.tokenVersion, reasoningEfforts: ['none'], defaultReasoningEffort: 'none', visionEnabled: false, contextWindowTokens: body.contextWindowTokens ?? 128000 } } })
+      res.status(201).json(buildSuccess(requestId, { id, connectorSetup: { version: 1, server: env.webUrl, token, provider: body.provider, model: body.modelName, baseUrl, contextWindowTokens: body.contextWindowTokens ?? 128000 } }))
+      return
+    }
+    if (!body.apiKey || body.apiKey.length < 8) throw new DataAccessError(400, 'CUSTOM_MODEL_REQUIRED', '请填写有效的 API Key。')
+    const capabilities = await validateModel(userId, res, { ...body, apiKey: body.apiKey })
     const model = await prisma.aiModelConfig.create({
       data: {
         ownerUserId: userId,
@@ -170,6 +187,24 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
     const body = parseBody(customModelUpdateSchema, req.body, '自定义模型配置格式不正确。')
     const target = await prisma.aiModelConfig.findFirst({ where: { id: req.params.modelId, ownerUserId: userId } })
     if (!target) throw new DataAccessError(404, 'CUSTOM_MODEL_NOT_FOUND', '自定义模型不存在。')
+    if (isLocalModelProvider(target.provider)) {
+      const localMetadata = target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata) ? target.metadata : {}
+      if (body.apiKey || body.provider && body.provider !== target.provider || body.baseUrl && normalizeLocalModelUrl(body.baseUrl) !== target.baseUrl || body.modelName && body.modelName !== target.modelName
+        || body.contextWindowTokens && body.contextWindowTokens !== localMetadata.contextWindowTokens) {
+        throw new DataAccessError(409, 'LOCAL_MODEL_RECREATE_REQUIRED', '修改本地服务或重新配对时，请添加新的本地模型配置；原任务仍保留原模型身份。')
+      }
+      const token = decryptSecret(target.apiKeyCiphertext!)
+      const capabilities = body.enabled === false ? undefined : await validateModel(userId, res, { provider: target.provider, modelName: target.modelName, baseUrl: target.baseUrl!, apiKey: token })
+      const metadata = target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata) ? target.metadata : {}
+      const updated = await prisma.aiModelConfig.updateMany({ where: { id: target.id, ownerUserId: userId, updatedAt: target.updatedAt }, data: {
+        displayName: body.displayName, enabled: body.enabled === false ? false : true,
+        metadata: { ...metadata, ...capabilities, ...(body.contextWindowTokens ? { contextWindowTokens: body.contextWindowTokens } : {}) },
+      } })
+      if (updated.count !== 1) throw new DataAccessError(409, 'CUSTOM_MODEL_CHANGED', '校验期间模型已变更，请重新打开配置后保存。')
+      if (body.enabled === false) localModelBroker.revoke(connectorKey(token))
+      res.json(buildSuccess(requestId, { ok: true })); return
+    }
+    if (body.provider && isLocalModelProvider(body.provider)) throw new DataAccessError(409, 'LOCAL_MODEL_RECREATE_REQUIRED', '请添加新的本地模型配置。')
     const currentCapabilities = parseModelCapabilities(target.metadata, target.provider)
     const apiKey = body.apiKey ?? (target.apiKeyCiphertext ? decryptSecret(target.apiKeyCiphertext) : null)
     if (!apiKey || !(body.baseUrl ?? target.baseUrl)) throw new DataAccessError(400, 'CUSTOM_MODEL_REQUIRED', '请填写模型地址和 API Key。')
@@ -204,6 +239,8 @@ router.delete('/models/:modelId', async (req: Request, res: Response): Promise<v
   const requestId = createRequestId()
   try {
     const userId = requireSessionUserId(req)
+    const target = await prisma.aiModelConfig.findFirst({ where: { id: req.params.modelId, ownerUserId: userId } })
+    if (target && isLocalModelProvider(target.provider) && target.apiKeyCiphertext) localModelBroker.revoke(connectorKey(decryptSecret(target.apiKeyCiphertext)))
     const deleted = await prisma.aiModelConfig.deleteMany({ where: { id: req.params.modelId, ownerUserId: userId } })
     if (deleted.count === 0) throw new DataAccessError(404, 'CUSTOM_MODEL_NOT_FOUND', '自定义模型不存在。')
     res.status(200).json(buildSuccess(requestId, { ok: true }))

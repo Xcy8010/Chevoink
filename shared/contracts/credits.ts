@@ -135,6 +135,7 @@ export type CustomModelView = {
   modelName: string
   baseUrl: string | null
   apiKeyConfigured: boolean
+  localConnector?: { online: boolean; verified: boolean }
   enabled: boolean
   reasoningEfforts: ModelReasoningEffort[]
   defaultReasoningEffort: ModelReasoningEffort

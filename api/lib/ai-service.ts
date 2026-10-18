@@ -15,6 +15,9 @@ import { resolveDurableTokenPrice, resolveTokenPrice } from './billing/resolve-t
 import { effectiveModelMultiplier, type ModelPromotion } from '../../shared/model-promotion.js'
 
 import { fetch as undiciFetch, Agent as UndiciAgent } from 'undici'
+import { isLocalModelProvider } from '../../shared/local-model.js'
+import { assertLocalModelReady, localModelFetch } from './local-model-transport.js'
+import { LocalModelTransportError } from './local-model-broker.js'
 
 import { prisma, DataAccessError } from './prisma.js'
 import { env } from '../config/env.js'
@@ -873,9 +876,13 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
       params.signal?.throwIfAborted()
       ensureTextProviderConfigured(params.providerApiKey)
       await assertCreditAccess(params.usageLog.userId, tier, false)
+      if (isLocalModelProvider(params.provider ?? '')) await assertLocalModelReady({ userId: params.usageLog.userId,
+        provider: params.provider!, baseUrl: params.providerBaseUrl!, apiKey: params.providerApiKey!, body: encodedBody, signal: params.signal })
     },
   }) : undefined
   if (durable?.replay) return durable.replay
+  if (!durable && isLocalModelProvider(params.provider ?? '')) await assertLocalModelReady({ userId: params.usageLog.userId,
+    provider: params.provider!, baseUrl: params.providerBaseUrl!, apiKey: params.providerApiKey!, body: encodedBody, signal: params.signal })
   params.signal?.throwIfAborted()
   const prepared = durable ? undefined : await prepareTextUsage({ ...params.usageLog, modelName: model,
     inputEstimate: estimateTokenCount(encodedBody), maxOutput: params.maxOutputTokens ?? env.aiTextMaxOutputTokens,
@@ -891,7 +898,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     await assertGoalProviderAdmission()
     params.signal?.throwIfAborted()
     providerDispatched = true
-    response = await fetch(endpoint, {
+    const requestInit = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -899,8 +906,11 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
       },
       body: encodedBody,
       signal: params.signal,
-    })
+    }
+    response = isLocalModelProvider(params.provider ?? '') ? await localModelFetch({ userId: params.usageLog.userId,
+      provider: params.provider!, baseUrl: params.providerBaseUrl!, apiKey: params.providerApiKey!, body: encodedBody, signal: params.signal }) : await fetch(endpoint, requestInit)
   } catch (error) {
+    if (error instanceof LocalModelTransportError && !error.dispatched) providerDispatched = false
     await durable?.interrupted(params.signal?.aborted ? 'aborted' : 'transport_error')
     await markUnobservedUsage(prepared?.id, providerDispatched)
     if (!params.signal?.aborted && error instanceof TypeError && error.message === 'terminated') {
@@ -1277,7 +1287,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   options.signal?.throwIfAborted()
   await assertGoalProviderAdmission()
   dispatched = true
-  const response = await fetch(endpoint, {
+  const requestInit = {
     signal: options.signal,
     method: 'POST',
     headers: {
@@ -1307,7 +1317,9 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
         { role: 'user', content: userPrompt },
       ],
     }),
-  })
+  }
+  const response = isLocalModelProvider(modelRuntime.provider) ? await localModelFetch({ userId: options.userId,
+    provider: modelRuntime.provider, baseUrl: modelRuntime.baseUrl!, apiKey: modelRuntime.apiKey!, body: requestInit.body, signal: options.signal }) : await fetch(endpoint, requestInit)
 
   const payload = await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized, options.onObservedCompletion)
   if (payload.reasoningTokens != null) console.info('[ai-reasoning-usage]', {
@@ -1385,6 +1397,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   if (payload.choices?.[0]?.finish_reason === 'length') throw new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', '模型输出达到上限，检查未完成。')
   return content.trim()
   } catch (error) {
+    if (error instanceof LocalModelTransportError && !error.dispatched) dispatched = false
     await markUnobservedUsage(prepared.id, dispatched, !!authorized)
     if (request.traced || error instanceof DataAccessError && ['AI_PROVIDER_OUTPUT_LIMIT', 'AI_PROVIDER_EMPTY_RESPONSE'].includes(error.code)) {
       // The provider promise has ended. Content validity and fee certainty are

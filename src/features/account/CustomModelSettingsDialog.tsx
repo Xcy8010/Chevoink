@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { isLocalModelProvider, type LocalConnectorSetup } from '../../../shared/local-model'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, KeyRound, LoaderCircle, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { createPortal } from 'react-dom'
@@ -27,6 +28,9 @@ const PROVIDERS: ProviderOption[] = [
   { id: 'mistral', label: 'Mistral AI', baseUrl: 'https://api.mistral.ai/v1', apiUrl: 'https://console.mistral.ai/api-keys/', billing: '按量计费：预充 credits 按 token 扣费' },
   { id: 'openrouter', label: 'OpenRouter（中转站）', baseUrl: 'https://openrouter.ai/api/v1', apiUrl: 'https://openrouter.ai/settings/keys', billing: '按量计费：预充 credits，聚合各家模型按模型分别定价，部分免费' },
   { id: 'bedrock', label: 'AWS Bedrock（中转站）', baseUrl: 'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1', apiUrl: 'https://console.aws.amazon.com/bedrock/home?region=us-east-1#/api-keys', billing: '按量计费：走 AWS 账户按 token 扣费，地域可改', editableBaseUrl: true },
+  { id: 'local-openai', label: '本机中转站（OpenAI 兼容）', baseUrl: 'http://127.0.0.1:7863/v1', apiUrl: '', billing: '平台不扣模型额度；中转站上游可能收费。需要运行本地连接器。', editableBaseUrl: true },
+  { id: 'local-lmstudio', label: 'LM Studio（本地）', baseUrl: 'http://127.0.0.1:1234/v1', apiUrl: '', billing: '平台不扣模型额度；推理由提供模型的电脑执行。', editableBaseUrl: true },
+  { id: 'local-ollama', label: 'Ollama（本地）', baseUrl: 'http://127.0.0.1:11434', apiUrl: '', billing: '平台不扣模型额度；推理由提供模型的电脑执行。', editableBaseUrl: true },
   { id: 'custom', label: '其他 OpenAI 兼容服务', baseUrl: '', apiUrl: '', billing: '视服务商而定：接入前自行确认计费方式', editableBaseUrl: true },
 ]
 
@@ -44,11 +48,13 @@ export function CustomModelSettingsContent({ active = true }: { active?: boolean
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
   const [error, setError] = useState('')
+  const [connectorSetup, setConnectorSetup] = useState<LocalConnectorSetup | null>(null)
   const editEpochRef = useRef(0)
 
-  useEffect(() => { if (!active) { editEpochRef.current += 1; setEditing(null); setDeletingId(null); setError('') } }, [active])
+  useEffect(() => { if (!active) { editEpochRef.current += 1; setEditing(null); setConnectorSetup(null); setDeletingId(null); setError('') } }, [active])
 
   const selectedProvider = PROVIDERS.find((provider) => provider.id === form.provider) ?? PROVIDERS[PROVIDERS.length - 1]
+  const local = isLocalModelProvider(form.provider)
 
   function beginEdit(model: CustomModelView | 'new') {
     editEpochRef.current += 1
@@ -62,13 +68,13 @@ export function CustomModelSettingsContent({ active = true }: { active?: boolean
       const provider = PROVIDERS.find((item) => item.id === attemptForm.provider) ?? PROVIDERS[PROVIDERS.length - 1]
       const baseUrl = attemptForm.provider === 'custom' || provider.editableBaseUrl ? attemptForm.baseUrl.trim() : provider.baseUrl
       if (!attemptForm.displayName.trim() || !attemptForm.modelName.trim() || !baseUrl) throw new Error('请完整填写名称、模型 ID 与服务地址。')
-      if (target === 'new' && !attemptForm.apiKey.trim()) throw new Error('新建配置必须填写 API Key。')
+      if (target === 'new' && !isLocalModelProvider(attemptForm.provider) && !attemptForm.apiKey.trim()) throw new Error('新建配置必须填写 API Key。')
       const contextWindowTokens = Number(attemptForm.contextWindowTokens)
       if (!Number.isInteger(contextWindowTokens) || contextWindowTokens < 16_000 || contextWindowTokens > 4_000_000) throw new Error('上下文窗口必须是 16,000–4,000,000 之间的整数。')
-      const payload = { provider: attemptForm.provider, displayName: attemptForm.displayName.trim(), modelName: attemptForm.modelName.trim(), baseUrl, contextWindowTokens, enabled: attemptForm.enabled, apiKey: attemptForm.apiKey.trim() || undefined }
+      const payload = { provider: attemptForm.provider, displayName: attemptForm.displayName.trim(), modelName: attemptForm.modelName.trim(), baseUrl, contextWindowTokens, enabled: attemptForm.enabled, apiKey: isLocalModelProvider(attemptForm.provider) ? undefined : attemptForm.apiKey.trim() || undefined }
       return target === 'new' ? createCustomModel(payload) : updateCustomModel(target.id, payload)
     },
-    onSuccess: async (_result, attempt) => { if (attempt.epoch !== editEpochRef.current) return; setEditing(null); await queryClient.invalidateQueries({ queryKey: ['credits', 'custom-models'] }) },
+    onSuccess: async (result, attempt) => { if (attempt.epoch !== editEpochRef.current) return; if ('connectorSetup' in result && result.connectorSetup) setConnectorSetup(result.connectorSetup); setEditing(null); await queryClient.invalidateQueries({ queryKey: ['credits', 'custom-models'] }) },
     onError: (reason, attempt) => { if (attempt?.epoch !== editEpochRef.current) return; setError(reason instanceof Error ? reason.message : '保存失败，请稍后重试。') },
   })
   const deleteMutation = useMutation({ mutationFn: deleteCustomModel, onSuccess: async () => { setDeletingId(null); await queryClient.invalidateQueries({ queryKey: ['credits', 'custom-models'] }) } })
@@ -84,6 +90,22 @@ export function CustomModelSettingsContent({ active = true }: { active?: boolean
     saveMutation.mutate({ epoch: editEpochRef.current, target: editing, form })
   }
 
+  if (connectorSetup) return <div className="space-y-4 text-sm leading-6">
+    <p>本地模型配置已保存，连接并校验后才能启用。</p>
+    <ol className="list-decimal space-y-2 pl-5">
+      <li>在提供模型的电脑上安装 Node.js 22，并下载连接器和连接配置。</li>
+      <li>如果中转站需要 API Key，在下载的配置文件中填写 apiKey；不需要时留空。密钥只保留在该电脑上。</li>
+      <li>在两个文件所在目录运行：<code>node chevoink-local-connector.mjs chevoink-connector.local.json</code>。</li>
+      <li>返回模型列表，编辑本模型，打开“启用此模型”后校验保存。校验会向该模型发送少量测试请求，上游可能收费。</li>
+    </ol>
+    <p className="text-xs text-[var(--text-secondary)]">连接配置含专用访问凭据，请勿上传、分享或提交 Git。删除该模型或退出所有登录设备后凭据失效。作品与工具仍由云端处理，使用模型时连接器所在电脑需要保持运行。</p>
+    <div className="flex flex-wrap gap-3">
+      <a href="/chevoink-local-connector.mjs" download className="underline">下载连接器</a>
+      <Button variant="secondary" onClick={() => { const url = URL.createObjectURL(new Blob([JSON.stringify({ ...connectorSetup, apiKey: '' }, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = 'chevoink-connector.local.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000) }}>下载连接配置</Button>
+      <Button variant="ghost" onClick={() => setConnectorSetup(null)}>返回模型列表</Button>
+    </div>
+  </div>
+
   if (editing) return <div className="pb-2">
     <button type="button" disabled={isSaving} onClick={leaveEdit} className="mb-5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50">← 返回模型列表</button>
     <div className="grid gap-4 sm:grid-cols-2">
@@ -92,15 +114,15 @@ export function CustomModelSettingsContent({ active = true }: { active?: boolean
       <label className="text-xs sm:col-span-2">模型 ID<TextInput disabled={isSaving} className="mt-1.5" name="custom-model-id" autoComplete="off" value={form.modelName} onChange={(event) => setForm((value) => ({ ...value, modelName: event.target.value }))} placeholder="由供应商提供的 model 名称" /></label>
       <label className="text-xs sm:col-span-2">上下文窗口（Tokens）<TextInput disabled={isSaving} className="mt-1.5" name="custom-model-context-window" autoComplete="off" type="number" min="16000" max="4000000" step="1000" value={form.contextWindowTokens} onChange={(event) => setForm((value) => ({ ...value, contextWindowTokens: event.target.value }))} placeholder="例如：128000" /><span className="mt-1.5 block text-[11px] leading-5 text-[var(--text-secondary)]">请按供应商模型文档填写。Agent 会据此提前压缩并为输出预留空间；填大可能触发供应商上下文错误。</span></label>
       {form.provider === 'custom' || selectedProvider.editableBaseUrl ? <label className="text-xs sm:col-span-2">Base URL<TextInput disabled={isSaving} className="mt-1.5" name="custom-model-endpoint" autoComplete="off" inputMode="url" data-lpignore="true" data-1p-ignore="true" value={form.baseUrl} onChange={(event) => setForm((value) => ({ ...value, baseUrl: event.target.value }))} placeholder="https://api.example.com/v1" /></label> : null}
-      <label className="text-xs sm:col-span-2">API Key<TextInput disabled={isSaving} className="mt-1.5" name="custom-model-secret" type="password" autoComplete="new-password" data-lpignore="true" data-1p-ignore="true" value={form.apiKey} onChange={(event) => setForm((value) => ({ ...value, apiKey: event.target.value }))} placeholder={editing === 'new' ? '填写 API Key' : '已配置；留空保持不变'} /></label>
+      {local ? <p className="text-xs leading-5 sm:col-span-2">本地模型 API Key 填写在下载的连接配置中，不上传到云端。首次保存会生成连接配置，暂不调用模型；连接后再启用并校验。</p> : <label className="text-xs sm:col-span-2">API Key<TextInput disabled={isSaving} className="mt-1.5" name="custom-model-secret" type="password" autoComplete="new-password" data-lpignore="true" data-1p-ignore="true" value={form.apiKey} onChange={(event) => setForm((value) => ({ ...value, apiKey: event.target.value }))} placeholder={editing === 'new' ? '填写 API Key' : '已配置；留空保持不变'} /></label>}
     </div>
     {/* 供应商服务地址与计费口径：作者选型前需要知道这家怎么收钱、请求发到哪里 */}
     <div className="mt-4 space-y-1 rounded-[12px] bg-[var(--surface-muted)] px-3.5 py-3 text-xs leading-5 text-[var(--text-secondary)]">
-      <p><span className="text-[var(--text-tertiary)]">服务地址：</span>{form.provider === 'custom' ? (form.baseUrl.trim() || '待填写 OpenAI 兼容地址') : selectedProvider.baseUrl}</p>
+      <p><span className="text-[var(--text-tertiary)]">服务地址：</span>{form.provider === 'custom' || local ? (form.baseUrl.trim() || '待填写 OpenAI 兼容地址') : selectedProvider.baseUrl}</p>
       <p><span className="text-[var(--text-tertiary)]">计费规则：</span>{selectedProvider.billing}</p>
     </div>
     <div className="mt-4 flex items-center justify-between gap-4"><div className="flex items-center gap-3"><Toggle disabled={isSaving} checked={form.enabled} onChange={(enabled) => setForm((value) => ({ ...value, enabled }))} label="启用此模型" /><span className="text-sm">启用此模型</span></div>{selectedProvider.apiUrl ? <a href={selectedProvider.apiUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">获取 API Key <ArrowUpRight className="h-3.5 w-3.5" /></a> : null}</div>
-    {error ? <p className="mt-4 text-xs text-rose-600">{error}</p> : null}<div className="mt-6 flex justify-end gap-2"><Button variant="ghost" disabled={isSaving} onClick={leaveEdit}>取消</Button><Button variant="secondary" disabled={isSaving} onClick={submitSave}>{isSaving ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}{isSaving ? '正在校验…' : '校验并保存'}</Button></div>
+    {error ? <p className="mt-4 text-xs text-rose-600">{error}</p> : null}<div className="mt-6 flex justify-end gap-2"><Button variant="ghost" disabled={isSaving} onClick={leaveEdit}>取消</Button><Button variant="secondary" disabled={isSaving} onClick={submitSave}>{isSaving ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}{isSaving ? local && editing === 'new' ? '正在保存…' : '正在校验…' : local && editing === 'new' ? '保存连接配置' : '校验并保存'}</Button></div>
   </div>
 
   return <div><div className="mb-4 flex items-center justify-between"><div><p className="text-sm font-medium">自定义模型</p><p className="mt-1 text-xs text-[var(--text-secondary)]">API Key 使用加密存储，保存后只允许替换。</p></div><Button variant="secondary" size="sm" disabled={isSaving} onClick={() => beginEdit('new')}><Plus className="h-4 w-4" />添加模型</Button></div>{query.isLoading ? <div className="flex justify-center py-12"><LoaderCircle className="h-5 w-5 animate-spin" /></div> : query.data?.models.length ? <div className="divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">{query.data.models.map((model) => <div key={model.id} className="flex items-center gap-3 py-4"><KeyRound className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{model.displayName}</p><p className="mt-0.5 truncate text-xs text-[var(--text-tertiary)]">{model.modelName} · {model.contextWindowTokens ? `${Math.round(model.contextWindowTokens / 1000)}K 上下文` : '默认上下文'} · {model.enabled ? '已启用' : '已停用'}</p></div>{deletingId === model.id ? <div className="flex items-center gap-1"><Button size="sm" variant="ghost" onClick={() => setDeletingId(null)}>取消</Button><Button size="sm" variant="primary" className="bg-rose-700 hover:bg-rose-800" disabled={deleteMutation.isPending || isSaving} onClick={() => deleteMutation.mutate(model.id)}>确认删除</Button></div> : <><button type="button" disabled={isSaving} onClick={() => beginEdit(model)} className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-50" aria-label="编辑"><Pencil className="h-3.5 w-3.5" /></button><button type="button" disabled={isSaving} onClick={() => setDeletingId(model.id)} className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[var(--text-tertiary)] hover:bg-[var(--surface-muted)] hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50" aria-label="删除"><Trash2 className="h-3.5 w-3.5" /></button></>}</div>)}</div> : <div className="rounded-[14px] border border-dashed border-[var(--border-strong)] py-12 text-center text-sm text-[var(--text-tertiary)]">还没有自定义模型</div>}</div>

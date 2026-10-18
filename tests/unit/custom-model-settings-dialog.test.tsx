@@ -41,6 +41,21 @@ beforeEach(() => {
 
 afterEach(() => cleanup())
 
+it('keeps local upstream credentials out of the cloud save and explains the unverified pairing step', async () => {
+  mocks.create.mockResolvedValue({ id: 'local-model', connectorSetup: { version: 1, server: 'https://example.test', token: 'dedicated-fixture-credential', provider: 'local-openai', model: 'local-model', baseUrl: 'http://127.0.0.1:7863/v1', contextWindowTokens: 128000 } })
+  setup()
+  fireEvent.click(await screen.findByRole('button', { name: '添加模型' }))
+  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'local-openai' } })
+  fireEvent.change(screen.getByRole('textbox', { name: '显示名称' }), { target: { value: '本机模型' } })
+  fireEvent.change(screen.getByRole('textbox', { name: '模型 ID' }), { target: { value: 'local-model' } })
+  expect(screen.queryByPlaceholderText('填写 API Key')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '保存连接配置' }))
+  await screen.findByRole('button', { name: '下载连接配置' })
+  expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ provider: 'local-openai', apiKey: undefined, baseUrl: 'http://127.0.0.1:7863/v1' }))
+  expect(screen.queryByText('dedicated-fixture-credential')).toBeNull()
+  expect(screen.getByText(/连接并校验后才能启用/)).toBeTruthy()
+})
+
 it('hides manually configured capabilities and sends only model identity settings', async () => {
   setup()
   fireEvent.click(await screen.findByRole('button', { name: '添加模型' }))

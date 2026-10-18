@@ -1,0 +1,91 @@
+name: Cloud Android Build
+run-name: Build Android ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full reviewed android-shell SHA containing the cloud build helper
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: chevoink-android-signing
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'Xcy8010/Chevoink' && github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    environment: android-signing
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: android
+    env:
+      ANDROID_SOURCE_SHA: ${{ inputs.source_sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout trusted main controller
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: controller
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: controller/.node-version
+      - name: Test trusted admission rules
+        working-directory: controller
+        run: node --test scripts/cloud-delivery.test.mjs
+      - name: Verify official source and actual approval from trusted main
+        working-directory: controller
+        run: node scripts/cloud-android-guard.mjs
+      - name: Checkout admitted Android candidate separately
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: android
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact candidate checkout before executing candidate files
+        run: |
+          $head = & git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:ANDROID_SOURCE_SHA) { throw 'Checked out Android source differs from the admitted SHA.' }
+      - name: Check admission and signing property regressions
+        run: ./scripts/cloud-build-android.Tests.ps1
+      - name: Verify Android ancestry and actual signing approval
+        run: ./scripts/cloud-build-android.ps1 -VerifyAdmissionOnly
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - name: Install required Android SDK packages
+        run: |
+          & sdkmanager.bat 'platforms;android-36' 'build-tools;36.0.0'
+          if ($LASTEXITCODE -ne 0) { throw 'Android SDK installation failed.' }
+      - name: Recreate generated source using maintained preparation script
+        run: ./scripts/prepare-android-source.ps1 -InstallDependencies
+      - name: Build using the original release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_BASELINE_APK_URL: ${{ vars.ANDROID_BASELINE_APK_URL }}
+        run: ./scripts/cloud-build-android.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-signed-${{ inputs.source_sha }}
+          path: |
+            android/cloud-output/*.apk
+            android/cloud-output/build-receipt.json
+          if-no-files-found: error
+          retention-days: 7

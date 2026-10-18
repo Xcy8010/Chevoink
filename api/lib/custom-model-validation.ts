@@ -4,6 +4,8 @@ import { Agent, fetch } from 'undici'
 import type { ModelReasoningEffort } from '../../shared/contracts/index.js'
 import { DataAccessError } from './prisma.js'
 import { parsePublicHttpUrl, publicEgressLookup, readBoundedPublicBody } from './public-http.js'
+import { isLocalModelProvider } from '../../shared/local-model.js'
+import { localModelFetch } from './local-model-transport.js'
 
 type CheckStatus = 'verified' | 'unsupported' | 'unconfirmed'
 export type CustomModelCapabilityValidation = {
@@ -51,16 +53,18 @@ export async function validateCustomModelCapabilities(input: {
   baseUrl: string
   apiKey: string
   signal?: AbortSignal
+  userId?: string
 }): Promise<CustomModelCapabilityValidation> {
   let endpoint: URL
   try {
-    const base = parsePublicHttpUrl(input.baseUrl)
+    const base = isLocalModelProvider(input.provider) ? new URL(input.baseUrl) : parsePublicHttpUrl(input.baseUrl)
     if (base.search || !input.modelName.trim() || !input.apiKey.trim() || /[\r\n]/.test(input.apiKey)) throw new Error('invalid')
     base.pathname = `${base.pathname.replace(/\/+$/, '')}/chat/completions`
     endpoint = base
   } catch { throw new DataAccessError(400, 'CUSTOM_MODEL_URL_INVALID', '请填写有效的公网 HTTPS 模型接口地址、模型名称和 API Key。') }
   const total = new AbortController()
-  const totalTimer = setTimeout(() => total.abort(), 50_000)
+  const local = isLocalModelProvider(input.provider)
+  const totalTimer = setTimeout(() => total.abort(), local ? 600_000 : 50_000)
   const signal = input.signal ? AbortSignal.any([input.signal, total.signal]) : total.signal
   const dispatcher = new Agent({ connections: 1, pipelining: 1, maxHeaderSize: 16384, allowH2: false,
     connect: { lookup: publicEgressLookup, timeout: 8000 }, headersTimeout: 12_000, bodyTimeout: 12_000 })
@@ -78,14 +82,16 @@ export async function validateCustomModelCapabilities(input: {
     if (requests >= 7) throw new DataAccessError(409, 'CUSTOM_MODEL_VALIDATION_LIMIT', '本次模型验证已达到请求上限，请稍后重试。')
     requests++
     const attempt = new AbortController()
-    const attemptTimer = setTimeout(() => attempt.abort(), 12_000)
+    const attemptTimer = setTimeout(() => attempt.abort(), local ? 300_000 : 12_000)
     const requestSignal = AbortSignal.any([signal, attempt.signal])
-    let response: Awaited<ReturnType<typeof fetch>> | undefined
+    let response: Awaited<ReturnType<typeof fetch>> | Response | undefined
     try {
-      response = await fetch(endpoint, { method: 'POST', dispatcher, redirect: 'manual', signal: requestSignal,
+      const bodyText = JSON.stringify({ model: input.modelName, stream: false, [outputTokenParameter]: 256,
+        ...(thinkingEnabled ? { thinking: { type: 'enabled' } } : {}), ...body })
+      response = local ? await localModelFetch({ userId: input.userId!, provider: input.provider, baseUrl: input.baseUrl,
+        apiKey: input.apiKey, body: bodyText, signal: requestSignal, validation: true }) : await fetch(endpoint, { method: 'POST', dispatcher, redirect: 'manual', signal: requestSignal,
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${input.apiKey}` },
-        body: JSON.stringify({ model: input.modelName, stream: false, [outputTokenParameter]: 256,
-          ...(thinkingEnabled ? { thinking: { type: 'enabled' } } : {}), ...body }) })
+        body: bodyText })
       if (response.status >= 300 && response.status < 400) throw new DataAccessError(400, 'CUSTOM_MODEL_REDIRECT_REJECTED', '模型接口发生重定向，请直接填写最终接口地址。')
       if ([401, 403].includes(response.status)) throw new DataAccessError(400, 'CUSTOM_MODEL_AUTH_FAILED', '模型认证失败，请检查 API Key、账号权限和模型访问权限。')
       if (response.status === 429) throw new DataAccessError(429, 'CUSTOM_MODEL_RATE_LIMITED', '模型账号暂时限流或额度不足，请稍后重试或检查供应商账号。')
@@ -156,6 +162,19 @@ export async function validateCustomModelCapabilities(input: {
         textVerified ||= nonceVerified
       }
       else if (![400, 422].includes(result.status) || !explicitlyUnsupported(result.payload, /reasoning[_ -]?effort/i)) throw invalidResponse()
+    }
+    // Local reviewers need a tested explicit non-thinking setting too. Keep
+    // public-provider protocol/evidence unchanged and the same seven-call cap.
+    if (local && reasoningEfforts.length && requests < 7) {
+      const result = await probe({ messages, reasoning_effort: 'none' })
+      const message = messageOf(result.payload).message
+      const details = object(object(result.payload.usage).completion_tokens_details)
+      if (result.status >= 200 && result.status < 300 && verifyText(result.payload)
+        && !message.reasoning_content && !message.reasoning && !(typeof details.reasoning_tokens === 'number' && details.reasoning_tokens > 0)) reasoningEfforts.push('none')
+      else if (![400, 422].includes(result.status) || !explicitlyUnsupported(result.payload, /reasoning[_ -]?effort/i)) {
+        // An observed reasoning response cannot certify non-thinking; existing
+        // accepted strengths remain usable, without granting reviewer proof.
+      }
     }
     const reasoningParameterMode = reasoningEfforts.length ? 'native' : 'omit'
     if (!textVerified) {

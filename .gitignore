@@ -76,3 +76,4 @@ desktop/windows/test-results/
 # Environment variants may contain production credentials; keep only templates
 .env.*
 !.env*.example
+*connector.local.json
