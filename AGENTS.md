@@ -4,6 +4,13 @@ Read `.agents/skills/project-orchestrator/SKILL.md` and the sections of
 `docs/DEVELOPMENT-STANDARDS.md` relevant to the task. Use repository-relative
 paths and the current checkout, not another machine's absolute paths.
 
+- Before substantive development and before any authorized commit, push or
+  merge, follow `docs/GIT-SYNC.md`: inspect the actual checkout and unfinished
+  Git operations, fetch the verified remote, and update only by a clean,
+  strictly-behind fast-forward to a known upstream. Stop automatic sync on
+  dirty state, divergence, conflicts, unknown upstream or fetch failure. Do not
+  automatically stash/reset/clean/force-push/rebase or resolve conflicts.
+  This policy is not an enforcing hook or authority to publish unrelated work.
 - The Web/API and current Windows desktop source live on `main`. Windows source
   is under `desktop/windows/`; historical `chevoink-windows` is not the current
   development baseline. Android source lives on `android-shell` in this same

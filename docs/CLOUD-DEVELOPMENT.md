@@ -2,6 +2,12 @@
 
 这些入口把开发、Android 构建和已测试 Web 提交的部署移到远程机器。它们不创建账号、上传密钥、发布 APK、修改生产权限或自动购买资源。代码落地不等于云端已经配置或上线。
 
+## 开工与交付前的 Git 同步
+
+Windows 本地与 Linux 云端遵循同一份[安全 Git 同步规则](./GIT-SYNC.md)，由仓库 `AGENTS.md` 和开发规范引导读取。检查当前 checkout、上游、全部未提交/未跟踪改动及未完成 merge/rebase 后，fetch 对应远端；仅干净且仅落后时按规则快进，不自动整合分叉或跨业务分支合并。不同任务的工作区彼此独立；GitHub 是交换点，电脑离线时无法检查其未推送工作。
+
+此约定通过任务读取规范生效，未安装强制 hook，不保证永不冲突。只更新这些文档不需要修改 `scripts/cloud-setup.mjs` 或交付工作流；setup 仍只准备依赖。云端需要取得含规则的已推送提交，旧任务需重新读取当前 checkout 的入口和规则。若环境的启动指令、固定源提交或缓存仍绑定旧规范，先核查实际配置和安装结果，再按授权刷新或重新发布；本规范不触发 setup、环境重新发布或另建任务。
+
 ## 开发环境
 
 ChatGPT 网页的当前入口是[设置 → Codex 云端 → 环境](https://chatgpt.com/settings/codex-cloud)中的“创建环境”；本次在 Edge 已实际定位该页面，GitHub 已连接，只选择 `Xcy8010/Chevoink`。旧 `/codex/settings/environments` 和 `/codex/cloud/settings/environments` 在本次账号中会跳回首页，不作为推荐入口。当前[官方云环境指南](https://learn.chatgpt.com/docs/environments/cloud-environments)说明创建、安装报告审查和发布流程；旧的单数 `cloud-environment` 文档适用于 Legacy 的 Code Review / Linear / GitHub 集成。

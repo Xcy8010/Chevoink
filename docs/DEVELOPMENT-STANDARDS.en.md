@@ -21,6 +21,10 @@ Version 2.0 · 2026-09-08. Applies to fixes, optimization, refactoring and new f
 7. Stage exact files. Never push secrets, user text, database dumps or private investigation/evaluation materials.
 8. Do not promise subjective scores, literary quality or absolute security from automation. Separate targets, measurements and missing acceptance.
 
+### 1.1 Safe local and cloud synchronization
+
+Before substantive development and before any actual commit, push or merge, follow the [safe Git synchronization policy](./GIT-SYNC.md). Inspect the actual task directory, branch, upstream, dirty/untracked state and unfinished Git operations, then fetch the verified GitHub remote and compare. Only a clean, strictly-behind branch with a known upstream and a successful fresh fetch permits `--ff-only`; otherwise stop automatic sync and report. Never automatically stash/reset/clean/force-push/rebase or resolve conflicts. Prefer a separate work branch per independent task. Cloud workspaces exchange through GitHub; an offline computer's unpushed work is not inspected. This is not an enforcing hook, a guarantee against conflicts or additional commit, merge or deployment authority.
+
 ## 2. Boundaries and refactoring
 
 - Keep the monolith and organize by responsibility, not by score-driven microservices or generic frameworks.
