@@ -7,6 +7,9 @@ import { buildError, buildSuccess, createRequestId } from '../lib/http.js'
 import { env } from '../config/env.js'
 import { downloadNovelImportSource } from '../lib/novel-import-service.js'
 import { importSuggestionQuoteSchema, importSuggestionSchema, listImportSuggestions, quoteImportSuggestion, requestImportSuggestion } from '../lib/novel-import/suggestions.js'
+import { importClassificationSelectionSchema, importClassificationRequestSchema } from '../../shared/contracts/novel-import-classification.js'
+import { listImportClassifications, quoteImportClassification, requestImportClassification } from '../lib/novel-import/classification.js'
+import { applyNovelImportClassification } from '../lib/novel-import-service.js'
 import { getNovelImportPreviewSummary, getNovelImportChapter, getNovelImportReport, downloadNovelImportImage, editNovelImportStructure, reviewNovelImportSources, getNovelImportRestorePreview, getNovelImportCapabilities } from '../lib/novel-import-service.js'
 
 // Mount before a broad JSON parser to permit bounded full-preview edits without
@@ -100,6 +103,10 @@ router.get('/:jobId/artifacts/:artifactId', (req, res) => {
   }).catch(error => sendError(res, error))
 })
 router.get('/:jobId/suggestions', route((req, human) => listImportSuggestions(human, id(req))))
+router.get('/:jobId/classifications', route((req, human) => listImportClassifications(human, id(req))))
+router.post('/:jobId/classifications/quote', route((req, human) => quoteImportClassification(human, id(req), importClassificationSelectionSchema.parse(req.body))))
+router.post('/:jobId/classifications', route((req, human) => requestImportClassification(human, id(req), importClassificationRequestSchema.parse(req.body))))
+router.post('/:jobId/classifications/apply', route((req, human) => applyNovelImportClassification(human, id(req), req.body)))
 router.post('/:jobId/suggestions/quote', route((req, human) => quoteImportSuggestion(human, id(req), importSuggestionQuoteSchema.parse(req.body))))
 router.post('/:jobId/suggestions', route((req, human) => requestImportSuggestion(human, id(req), importSuggestionSchema.parse(req.body))))
 router.get('/:jobId/source', (req, res) => {

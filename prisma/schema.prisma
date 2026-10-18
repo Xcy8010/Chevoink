@@ -339,6 +339,7 @@ enum PrivacyLevel {
 }
 
 model User {
+  novelImportClassifications NovelImportClassification[]
   novelImportJobs NovelImportJob[]
   novelImportIntents NovelImportIntent[]
   id                         String                  @id @default(cuid()) @db.VarChar(64)
@@ -466,6 +467,7 @@ model SmsVerificationCode {
 }
 
 model Novel {
+  importClassifications NovelImportClassification[]
   manuscriptRevision Int @default(0) @map("manuscript_revision")
   importJobs NovelImportJob[]
   importIntents NovelImportIntent[]
@@ -639,6 +641,7 @@ model NovelImportIntent {
 }
 
 model NovelImportJob {
+  classifications NovelImportClassification[]
   id String @id @db.VarChar(64)
   userId String @db.VarChar(64)
   novelId String @db.VarChar(64)
@@ -3062,6 +3065,35 @@ model Feedback {
 }
 
 // Import-local paid suggestions are single-dispatch and never rewrite source text.
+// Classification quotes/claims are separate from chapter boundary suggestions.
+model NovelImportClassification {
+  id String @id @db.VarChar(64)
+  jobId String @db.VarChar(64)
+  userId String @db.VarChar(64)
+  novelId String @db.VarChar(64)
+  manifestRevision Int
+  manifestHash String @db.VarChar(64)
+  snapshotHash String @db.VarChar(64)
+  fingerprint String @db.VarChar(64)
+  quote Json
+  status String @default("quoted") @db.VarChar(24)
+  result Json?
+  completedBatches Int @default(0)
+  dispatchedBatches Int @default(0)
+  errorCode String? @db.VarChar(128)
+  expiresAt DateTime
+  confirmedAt DateTime?
+  dispatchedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel Novel @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  @@unique([jobId, manifestRevision])
+  @@index([jobId, createdAt])
+  @@map("novel_import_classifications")
+}
+
 model NovelImportSuggestion {
   id String @id @db.VarChar(64)
   jobId String @db.VarChar(64)

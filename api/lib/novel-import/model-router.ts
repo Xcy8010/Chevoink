@@ -27,11 +27,14 @@ export async function resolveImportModelRoute(userId: string, selection: ImportM
   if (selection.kind === 'custom' && !selection.customModelId.trim()) {
     throw new DataAccessError(400, 'CUSTOM_MODEL_REQUIRED', '请选择本次导入使用的自定义模型。')
   }
-  const effort = selection.kind === 'custom' ? selection.reasoningEffort ?? 'low' : 'low'
+  const requestedEffort = selection.kind === 'custom' ? selection.reasoningEffort : 'low'
   // getModelTierRuntime enforces ownership, enabled state and supported efforts.
   // Do not catch its failure and retry against another paid provider.
   const runtime = await getModelTierRuntime(selection.kind === 'custom' ? 'custom' : 'basic',
-    userId, selection.kind === 'custom' ? selection.customModelId : undefined, effort)
+    userId, selection.kind === 'custom' ? selection.customModelId : undefined, requestedEffort)
+  // BYOK follows its configured supported default unless explicitly requested.
+  // Only the platform basic route mandates low; never send unsupported values.
+  const effort = requestedEffort ?? runtime.reasoningEffort
   if (runtime.reasoningEffort !== effort || !runtime.reasoningEfforts.includes(effort)) {
     throw new DataAccessError(409, 'IMPORT_REASONING_UNSUPPORTED', '此模型不支持本次识别的思考强度，请重新选择后确认。')
   }

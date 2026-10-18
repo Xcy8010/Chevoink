@@ -26,13 +26,16 @@ export type NovelImportModelSelection = z.infer<typeof novelImportModelSchema>
 export type NovelImportManifestEdit = z.infer<typeof novelImportManifestEditSchema>
 export interface NovelImportWarning { code: string; message: string; source?: unknown; blocking: boolean }
 /** 标题关键词路由出的计划/设定段落：不进章节桶，提交时分别写入计划文件夹与创作记忆。 */
-export interface NovelImportPlanDto { title: string; content: string }
-export interface NovelImportMemoryDto { memoryType: 'characterCard' | 'worldbuilding' | 'storyBible'; title: string; content: string }
+export interface NovelImportPlanDto { title: string; content: string; source?: z.infer<typeof novelImportSourceSchema> }
+export interface NovelImportMemoryDto { memoryType: 'characterCard' | 'worldbuilding' | 'storyBible'; title: string; content: string; source?: z.infer<typeof novelImportSourceSchema> }
 export interface NovelImportPreview {
   manifestRevision: number; manifestHash: string; sourceHash: string; parserVersion: string
   volumes: NovelImportVolume[]; metadata: z.infer<typeof novelImportMetadataSchema>
   metadataSelection: z.infer<typeof novelImportMetadataSchema>; warnings: NovelImportWarning[]; sourceChars: number
   plans?: NovelImportPlanDto[]; memories?: NovelImportMemoryDto[]
+  /** AI-uncertain sources stay in private preview history, never in destination buckets. */
+  classificationSkipped?: Array<{ title: string; content: string; source?: z.infer<typeof novelImportSourceSchema>; reason: string }>
+  appliedClassificationId?: string
 }
 export type NovelImportStatus = 'uploading' | 'uploaded' | 'parsing' | 'needs_review' | 'ready' | 'awaiting_confirmation' | 'succeeded' | 'failed' | 'cancelled' | 'expired'
 export interface NovelImportPreflight { intentId: string; targetHash: string; volumeCount: number; chapterCount: number; nonEmptyChapterCount: number; overwriteRequired: boolean; confirmationStep: number; expiresAt: string }

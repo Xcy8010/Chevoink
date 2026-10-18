@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Request } from 'express'
 import { Prisma, type NovelImportJob, type NovelImportIntent } from '@prisma/client'
 import { z } from 'zod'
-import { NOVEL_IMPORT_LIMITS, novelImportCommitSchema, novelImportRestoreSchema, novelImportManifestEditSchema, novelImportModelSchema, novelImportVolumeSchema, novelImportMetadataSchema, type NovelImportCapabilities, type NovelImportJobStatus, type NovelImportModelSelection, type NovelImportPreflight, type NovelImportPreview, type NovelImportReceipt, type NovelImportRestorePreview, type NovelImportRestoreReceipt } from '../../shared/contracts/novel-import.js'
+import { NOVEL_IMPORT_LIMITS, novelImportCommitSchema, novelImportRestoreSchema, novelImportManifestEditSchema, novelImportModelSchema, novelImportVolumeSchema, novelImportSourceSchema, novelImportMetadataSchema, type NovelImportCapabilities, type NovelImportJobStatus, type NovelImportModelSelection, type NovelImportPreflight, type NovelImportPreview, type NovelImportReceipt, type NovelImportRestorePreview, type NovelImportRestoreReceipt } from '../../shared/contracts/novel-import.js'
 import { prisma, DataAccessError } from './prisma.js'
 import { requireSessionUserId } from './auth-session.js'
 import { deleteUnreferencedImportBlob, discardImportBlob, importBytesHash, readImportBlob, storeImportJson, storeImportStream, validateImportFilename } from './novel-import-storage.js'
@@ -19,6 +19,8 @@ import { assertNovelImportPreviewComplete } from './novel-import/preview.js'
 import { NOVEL_IMPORT_PARSE_DEADLINE_MS, startNovelImportParseLease } from './novel-import/parse-lease.js'
 import { normalizeImportTitle } from './novel-import/content-routing.js'
 import { saveStoryMemory } from './agent/story-memory.js'
+import type { ImportClassificationSources, ImportClassificationResult } from '../../shared/contracts/novel-import-classification.js'
+import { applyImportClassification } from './novel-import/classification-apply.js'
 export { NOVEL_IMPORT_PARSE_DEADLINE_MS } from './novel-import/parse-lease.js'
 
 type Tx = Prisma.TransactionClient
@@ -238,7 +240,7 @@ export async function attachNovelImportSource(human: NovelImportHuman, jobId: st
 }
 
 const parsedVolumeSchema = novelImportVolumeSchema.extend({ chapters: z.array(novelImportVolumeSchema.shape.chapters.element.extend({ content: z.string().max(NOVEL_IMPORT_LIMITS.characters) })).max(NOVEL_IMPORT_LIMITS.chapters) })
-const parsedSchema = z.object({ volumes: z.array(parsedVolumeSchema).max(NOVEL_IMPORT_LIMITS.volumes), metadata: novelImportMetadataSchema, warnings: z.array(z.object({ code: z.string().max(128), message: z.string().max(4000), source: z.string().max(4096).optional(), blocking: z.boolean() })).max(5000), sourceChars: z.number().int().nonnegative().max(NOVEL_IMPORT_LIMITS.characters), parserVersion: z.string().min(1).max(128), plans: z.array(z.object({ title: z.string().trim().min(1).max(160), content: z.string().max(NOVEL_IMPORT_LIMITS.characters) }).strict()).max(200).optional(), memories: z.array(z.object({ memoryType: z.enum(['characterCard', 'worldbuilding', 'storyBible']), title: z.string().trim().min(1).max(160), content: z.string().max(NOVEL_IMPORT_LIMITS.characters) }).strict()).max(500).optional() })
+const parsedSchema = z.object({ volumes: z.array(parsedVolumeSchema).max(NOVEL_IMPORT_LIMITS.volumes), metadata: novelImportMetadataSchema, warnings: z.array(z.object({ code: z.string().max(128), message: z.string().max(4000), source: z.string().max(4096).optional(), blocking: z.boolean() })).max(5000), sourceChars: z.number().int().nonnegative().max(NOVEL_IMPORT_LIMITS.characters), parserVersion: z.string().min(1).max(128), plans: z.array(z.object({ title: z.string().trim().min(1).max(160), content: z.string().max(NOVEL_IMPORT_LIMITS.characters), source: novelImportSourceSchema.optional() }).strict()).max(200).optional(), memories: z.array(z.object({ memoryType: z.enum(['characterCard', 'worldbuilding', 'storyBible']), title: z.string().trim().min(1).max(160), content: z.string().max(NOVEL_IMPORT_LIMITS.characters), source: novelImportSourceSchema.optional() }).strict()).max(500).optional() })
 export function assertNovelImportContent(volumes: NovelImportPreview['volumes'], options: { allowOversizedChapters?: boolean; allowEmptyBody?: boolean } = {}) {
   const chapters = volumes.flatMap(v => v.chapters)
   if (chapters.length > NOVEL_IMPORT_LIMITS.chapters || chapters.reduce((n, c) => n + c.content.length, 0) > NOVEL_IMPORT_LIMITS.characters) fail('IMPORT_LIMIT_EXCEEDED', '卷章或正文超过导入上限。', 413)
@@ -261,11 +263,15 @@ async function cleanupPreviewBlob(storageKey: string): Promise<void> {
     await prisma.novelImportGarbage.createMany({ data: [{ storageKey }], skipDuplicates: true }).catch(() => undefined)
   }
 }
-async function persistPreview(scope: NovelImportScope, jobId: string, expected: NovelImportJob, preview: NovelImportEvidencePreview, lease?: string, signal?: AbortSignal) {
+async function persistPreview(scope: NovelImportScope, jobId: string, expected: NovelImportJob, preview: NovelImportEvidencePreview, lease?: string, signal?: AbortSignal, classificationId?: string) {
+  const assertClassification = async (tx: Tx) => {
+    if (classificationId && !await tx.novelImportClassification.findFirst({ where: { id: classificationId, jobId, ...scope, status: 'succeeded', manifestRevision: expected.manifestRevision, manifestHash: expected.manifestHash! } })) fail('IMPORT_CLASSIFICATION_STALE', '分类结果与当前来源不一致，未保存。')
+  }
   // The claim precedes serialization/filesystem work. Parallel stale saves can
   // neither allocate a blob nor consume an unbounded history revision.
   const claim = await novelImportTransaction(async tx => {
     const job = await ownedJob(tx, scope, jobId); live(job)
+    await assertClassification(tx)
     if (job.manifestRevision >= NOVEL_IMPORT_PREVIEW_LIMITS.revisions) fail('IMPORT_PREVIEW_LIMIT', '本任务已保存64个预览版本；请下载原文件后创建新任务。', 429)
     if (job.jobVersion !== expected.jobVersion || job.manifestRevision !== expected.manifestRevision || preview.manifestRevision !== job.manifestRevision + 1) fail('IMPORT_PREVIEW_CHANGED', '预览或任务已变化，请刷新。')
     if (await tx.novelImportGarbage.count() >= NOVEL_IMPORT_PREVIEW_LIMITS.pendingGarbage) fail('IMPORT_STORAGE_BUSY', '历史文件清理积压，请稍后再保存；当前预览已保留。', 429)
@@ -284,6 +290,7 @@ async function persistPreview(scope: NovelImportScope, jobId: string, expected: 
     const saved = blob
     const prunedKeys = await novelImportTransaction(async tx => {
       const job = await ownedJob(tx, scope, jobId); live(job)
+      await assertClassification(tx)
       signal?.throwIfAborted()
       if (job.jobVersion !== claim.jobVersion || job.manifestRevision !== claim.manifestRevision || job.leaseEpoch !== claim.leaseEpoch || job.leaseOwner !== claim.leaseOwner || !job.leaseUntil || job.leaseUntil <= new Date()) fail('IMPORT_PREVIEW_CHANGED', '预览或任务已变化，请刷新。')
       await tx.novelImportManifest.create({ data: { id: randomUUID(), jobId, revision: preview.manifestRevision, hash: saved.sha256, storageKey: saved.storageKey } })
@@ -323,6 +330,36 @@ export async function getNovelImportPreview(scope: NovelImportScope, jobId: stri
 export async function getNovelImportPreviewSummary(scope: NovelImportScope, jobId: string) {
   const { stored } = await readPreviewDocument(scope, jobId)
   return 'storageVersion' in stored ? stored.summary : summarizePreview(stored)
+}
+/** Complete, server-only source enumeration with explicitly bounded excerpts.
+ * Full content stays private and hash-bound; this does not claim full AI reading. */
+export async function getNovelImportClassificationSources(human: NovelImportHuman, jobId: string): Promise<ImportClassificationSources> {
+  humanOnly(human); enabled()
+  const job = await ownedJob(prisma, human, jobId); live(job)
+  if (!['ready', 'needs_review', 'awaiting_confirmation'].includes(job.status)) fail('IMPORT_STATE_INVALID', '请等待文件解析完成后再进行 AI 分类。')
+  const preview = await getNovelImportPreview(human, jobId)
+  const sources: ImportClassificationSources['sources'] = []
+  const textProof = (title: string, content: string) => ({ title, textHash: importBytesHash(content), characters: content.length, excerpt: { start: 0, text: content.slice(0, 512) } })
+  preview.volumes.forEach((volume, vi) => volume.chapters.forEach((chapter, ci) => sources.push({
+    sourceId: `chapter:${vi}:${ci}`, ...textProof(chapter.title, chapter.content), source: chapter.source,
+    location: { kind: 'chapter', volumeIndex: vi, chapterIndex: ci },
+  })))
+  preview.plans?.forEach((item, index) => sources.push({ sourceId: `plan:${index}`, ...textProof(item.title, item.content), ...(item.source ? { source: item.source } : {}), location: { kind: 'plan', index } }))
+  preview.memories?.forEach((item, index) => sources.push({ sourceId: `memory:${index}`, ...textProof(item.title, item.content), ...(item.source ? { source: item.source } : {}), location: { kind: 'memory', index } }))
+  preview.classificationSkipped?.forEach((item, index) => sources.push({ sourceId: `skipped:${index}`, ...textProof(item.title, item.content), ...(item.source ? { source: item.source } : {}), location: { kind: 'skipped', index } }))
+  const artifacts: ImportClassificationSources['artifacts'] = []
+  const excludedSources = (preview.decisions ?? []).filter(decision => decision.action === 'exclude')
+    .map(decision => preview.report?.items.find(item => item.id === decision.itemId)?.source).filter((source): source is string => !!source)
+  for (const image of preview.artifacts ?? []) {
+    if (excludedSources.some(source => image.source === source || ['#', '&', '!/'].some(separator => image.source.startsWith(source + separator)))) continue
+    const artifactId = image.url.split('/artifacts/')[1]
+    if (!artifactId || !/^[a-f0-9-]{36}$/.test(artifactId)) fail('IMPORT_IMAGE_INVALID', '图片没有有效的私有来源。')
+    const item = preview.report?.items.find(entry => entry.artifactId === image.id)
+    if (!item) fail('IMPORT_REPORT_INVALID', '图片不在当前来源报告内。')
+    sources.push({ sourceId: `artifact:${artifactId}`, ...textProof(image.source.split('/').at(-1)!.slice(0, 512), item.text ?? ''), source: { memberPath: image.source }, location: { kind: 'artifact', artifactId }, artifactId })
+    artifacts.push({ artifactId, sha256: image.sha256, coverCandidate: image.coverCandidate })
+  }
+  return { manifestRevision: preview.manifestRevision, manifestHash: preview.manifestHash, complete: true, sources, artifacts }
 }
 export async function getNovelImportChapter(scope: NovelImportScope, jobId: string, volumeIndex: number, chapterIndex: number, revision: number): Promise<NovelImportChapterDto> {
   const { job, stored } = await readPreviewDocument(scope, jobId)
@@ -375,7 +412,10 @@ async function runParse(scope: NovelImportScope, claim: { job: NovelImportJob; s
     controller.signal.throwIfAborted()
     const document = await parseConfiguredNovelImportDocument(bytes, claim.source.filename, { sourceId: claim.source.id, sourceHash: claim.source.sha256, encoding, signal: controller.signal, deadlineAt: claim.job.parseDeadlineAt!.getTime() })
     const result = document.parsed
-    const parsed = parsedSchema.parse({ ...result, volumes: result.volumes.map(volume => ({ ...volume, chapters: volume.chapters.map(chapter => ({ ...chapter, source: { memberPath: chapter.source } })) })) })
+    const parsed = parsedSchema.parse({ ...result,
+      plans: result.plans?.map(item => ({ ...item, ...(item.source ? { source: { memberPath: item.source } } : {}) })),
+      memories: result.memories?.map(item => ({ ...item, ...(item.source ? { source: { memberPath: item.source } } : {}) })),
+      volumes: result.volumes.map(volume => ({ ...volume, chapters: volume.chapters.map(chapter => ({ ...chapter, source: { memberPath: chapter.source } })) })) })
     if (parsed.volumes.some(v => v.chapters.some(c => c.content.length > NOVEL_IMPORT_LIMITS.chapterCharacters))) parsed.warnings.push({ code: 'IMPORT_CHAPTER_TOO_LONG', message: '单章超过10万字符，请在预览中拆分。', blocking: true })
     const currentTarget = await target(prisma, scope, false)
     if (!currentTarget.chapters.length && currentTarget.volumes.length) parsed.warnings.push({ code: 'IMPORT_EMPTY_VOLUMES_RETAINED', message: `将保留现有 ${currentTarget.volumes.length} 个空卷，并在其后导入新卷；不会删除或改名原空卷。`, blocking: false })
@@ -421,7 +461,7 @@ export async function editNovelImportStructure(human: NovelImportHuman, jobId: s
   if (!['ready', 'needs_review', 'awaiting_confirmation'].includes(job.status)) fail('IMPORT_STATE_INVALID', '请等待解析完成后修改。')
   const old = await getNovelImportPreview(human, jobId)
   const body = { ...applyStructureEdit(old, edit), manifestRevision: old.manifestRevision + 1 }
-  assertNovelImportContent(body.volumes, { allowOversizedChapters: true })
+  assertNovelImportContent(body.volumes, { allowOversizedChapters: true, allowEmptyBody: routedContentCount(body) > 0 })
   const preview = { ...body, manifestHash: hashNovelImportPreview(body) }
   await persistPreview(human, jobId, job, preview)
   return summarizePreview(preview)
@@ -435,6 +475,23 @@ export async function reviewNovelImportSources(human: NovelImportHuman, jobId: s
   const body = { ...applySourceReview(old, review), manifestRevision: old.manifestRevision + 1 }
   const preview = { ...body, manifestHash: hashNovelImportPreview(body) }
   await persistPreview(human, jobId, job, preview)
+  return summarizePreview(preview)
+}
+export async function applyNovelImportClassification(human: NovelImportHuman, jobId: string, input: unknown) {
+  humanOnly(human); enabled()
+  const edit = z.object({ classificationId: z.string().uuid(), manifestRevision: z.number().int().positive(), manifestHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(input)
+  const job = await ownedJob(prisma, human, jobId); live(job)
+  if (!['ready', 'needs_review', 'awaiting_confirmation'].includes(job.status)) fail('IMPORT_STATE_INVALID', '当前任务不能应用分类。')
+  const row = await prisma.novelImportClassification.findFirst({ where: { id: edit.classificationId, jobId, ...human, status: 'succeeded' } })
+  if (!row?.result || row.manifestRevision !== edit.manifestRevision || row.manifestHash !== edit.manifestHash) fail('IMPORT_CLASSIFICATION_STALE', '未找到此版本的成功分类记录，请查询结果。')
+  const old = await getNovelImportPreview(human, jobId)
+  // A lost save response can be replayed safely without a second paid request.
+  if (old.appliedClassificationId === row.id) return summarizePreview(old)
+  if (old.manifestRevision !== edit.manifestRevision || old.manifestHash !== edit.manifestHash) fail('IMPORT_PREVIEW_CHANGED', '预览已变化，旧分类不能应用。')
+  const routed = applyImportClassification(old, row.result as unknown as ImportClassificationResult)
+  const body = refreshPreviewWarnings({ ...routed, manifestRevision: old.manifestRevision + 1, appliedClassificationId: row.id, decisions: (old.decisions ?? []).filter(item => item.action === 'exclude') })
+  const preview = { ...body, manifestHash: hashNovelImportPreview(body) }
+  await persistPreview(human, jobId, job, preview, undefined, undefined, row.id)
   return summarizePreview(preview)
 }
 export async function rebaseNovelImport(human: NovelImportHuman, jobId: string, intentId: string) {
