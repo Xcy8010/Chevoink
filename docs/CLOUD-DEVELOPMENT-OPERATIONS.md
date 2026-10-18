@@ -10,6 +10,8 @@
 
 密钥不进入仓库、日志或 artifacts。生产 job 只申请 contents/read 与 actions/read；内置 `github.token` 用于只读 CI/审批 API，不需要带管理员权限的 PAT。临时私钥 ACL 收紧并在 finally 中删除；使用托管 Windows runner，不复用长期共享机器。
 
+临时私钥、Android keystore 和 properties 文件按实际 Windows 进程 SID 授予 `(R,D)`，去掉继承；finally 用直接文件删除，不依赖需要额外属性写权限的 `Remove-Item -Force`。`scripts/cloud-credential-acl.Tests.ps1` 在 Windows 上以无密钥文件执行实际创建、ACL收紧、读取及删除，覆盖三类文件；正常失败清理与托管 runner 强制销毁仍是不同保证。
+
 ## 审批与执行
 
 1. 确认候选 main 完整 SHA 及该 SHA 原始 `CI` 已全部成功：实际 PostgreSQL、零skip、完整分片、原覆盖率门槛与所有静态/build/audit。只接受原 `ci.yml` 的 main push run，不接受 PR、同名替代 workflow 或本地成功覆盖。
@@ -26,6 +28,8 @@ gh workflow run cloud-deploy.yml --repo Xcy8010/Chevoink --ref main -f source_sh
 工作流使用固定 `chevoink-production` 并发组，`cancel-in-progress: false`，不会因新 dispatch 自动取消正在变更生产的运行。GitHub仍可能替换排队中的 pending run；不要连续点击制造重复操作。远端现有 `flock` 继续保护同时从本地入口发起的操作。不要手动取消正在切换的 job；若发生中断，其结果必须按下节核对。[GitHub 并发规则](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
 
 审批后脚本再次核验实际审批与 live CI，随后仅调用一次维护入口。维护入口再次读取原 CI、打包 `git archive HEAD`、校验预期生产源码/进程、在旁边准备依赖与构建，再正常切换/重启。既有 migration helper 只接受字节相同 schema 或已审查的特定兼容索引迁移；此入口不扩大迁移权限。生产目标、schema 或恢复协议变化须单独审查。
+
+进程快照通过 `scripts/production-process-snapshot.mjs` 直接向已存在的 PM2 RPC socket 发送一次只读 `getMonitorData`，不执行 `pm2 jlist`、不导入 PM2 客户端，也不会自动启动 daemon。当前协议校验绑定实际核对的 PM2 **7.0.3**：Ubuntu身份/HOME/PM2_HOME、daemon PID/owner/runtime/命令/starttime、socket inode与daemon监听fd，在RPC前后必须一致；API还需匹配pm_id0、current路径、父daemon和固定Node。断连、超时或daemon缺失均停止，RPC最多3秒/8MiB；升级PM2需重新审查协议与身份契约。这个快照入口不负责恢复服务，原 stop/restart 顺序保持不变。
 
 成功需维护入口退出0，远端源码/marker/固定Node/PM2/API进程、内部生产 health、公开 health 与公开 index 摘要吻合。保留工作流运行链接和实际核验结果；UI/设备验收不是脚本成功的隐含结论。日志只作脱敏证据，不上传整个远端目录或 env。
 

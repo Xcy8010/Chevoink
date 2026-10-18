@@ -49,12 +49,7 @@ console.log('[chevoink] expected active source verified');
 JS
 }
 snapshot_process() {
-  pm2 jlist | node --input-type=module -e '
-import {readFileSync,realpathSync} from "node:fs";
-const matches=JSON.parse(readFileSync(0,"utf8")).filter(a=>a.name==="chevoink-api");
-const a=matches[0], e=a?.pm2_env;
-if(matches.length!==1 || a.pm_id!==0 || e.status!=="online" || e.pm_cwd!=="/opt/chevoink/app/current" || e.pm_exec_path!=="/opt/chevoink/app/current/api/server.ts" || realpathSync(`/proc/${a.pid}/exe`)!==realpathSync(process.env.CHEVOINK_NODE_BINARY)) throw Error("API identity mismatch");
-process.stdout.write(JSON.stringify({pid:a.pid,start:e.pm_uptime}));'
+  node scripts/production-process-snapshot.mjs
 }
 verify_baseline
 PROCESS_BEFORE=$(snapshot_process)

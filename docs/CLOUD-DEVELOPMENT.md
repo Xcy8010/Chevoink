@@ -4,6 +4,14 @@
 
 ## 开发环境
 
+ChatGPT 网页的当前入口是[设置 → Codex 云端 → 环境](https://chatgpt.com/settings/codex-cloud)中的“创建环境”；本次在 Edge 已实际定位该页面，GitHub 已连接，只选择 `Xcy8010/Chevoink`。旧 `/codex/settings/environments` 和 `/codex/cloud/settings/environments` 在本次账号中会跳回首页，不作为推荐入口。当前[官方云环境指南](https://learn.chatgpt.com/docs/environments/cloud-environments)说明创建、安装报告审查和发布流程；旧的单数 `cloud-environment` 文档适用于 Legacy 的 Code Review / Linear / GitHub 集成。
+
+本次用户已明确批准仅用于环境配置的“设置 Chevoink”会话（`01a14e41-339d-71b1-8e47-8a042e1c8031`）；环境已保留草稿，尚未发布。Prisma 下载域名 `binaries.prisma.sh` 的 HTTP403 由该配置会话处理，需应用网络配置后再验证安装结果；这不授权配置、重置或迁移数据库，也不授权自动另建开发任务。
+
+配置时指定默认开发分支 `main`，先读取仓库 `AGENTS.md`；Android 原生工作明确选择 `android-shell`，不把另一分支的原生代码混入 Web main。要求安装固定 Node **22.23.2 / npm 10.9.8**，执行下列维护 setup，生成 Prisma Client，禁止自动配置、重置或迁移数据库。安装过程中不提供生产 SSH、签名证书或作者模型凭证。发布环境前审查实际安装命令、结果、配置和未完成项；环境发布、创建开发任务和代码发布是不同操作，不自动另建任务。
+
+后续由用户在 GitHub 触发并批准构建/部署，生产和签名凭据留在受保护 GitHub environment，云端开发 agent 无需取得它们。完整真实 PostgreSQL 发布检查继续由原 CI 提供，安装报告不能替代同 SHA 发布证据。
+
 在自己的远程开发机克隆 `Xcy8010/Chevoink` 的 `main`，通过远程编辑器或 SSH 编辑。使用仓库 `.node-version` 与 `package.json` 固定的 Node **22.23.2 / npm 10.9.8**；不要复制本机 `node_modules`、`.env`、`.ssh`、Android keystore 或生产数据库。Windows、Linux、macOS 都可运行：
 
 ```sh
@@ -22,6 +30,8 @@ node scripts/cloud-setup.mjs --install
 Windows 继续使用主仓库已有 `Windows Desktop` 工作流（`desktop/windows/` 的当前 1.0.4 实现）。不要为云构建合并另一个旧的 Windows 1.0.2 分支，也不要把内部未签名安装包当作公开签名发布。
 
 Android 使用新增 `Cloud Android Build`，GitHub 托管的 `windows-2022`、Node 22.23.2、JDK21、Android36/build-tools36.0.0。两处分支保留相同工作流定义，但入口仅接受 `main` dispatch；构建源另用完整 `source_sha` 指定。只在 `android-shell` 增加 dispatch 文件不足以保证默认分支上的入口可发现。[GitHub 手动工作流规则](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch)
+
+SDK 初始化显式设置 `setup-android` 的 `packages: platform-tools`，随后单独安装 `platforms;android-36` 与 `build-tools;36.0.0`。该 action 的默认包列表包含 `tools`；首次云构建 `39112766527` 已在安装此不可用包时失败，尚未进入签名。此修正不改变许可证、审批、签名或重试策略。[官方 packages 输入](https://github.com/android-actions/setup-android/blob/v3/action.yml)
 
 先将 Android helper/工作流提交到 `android-shell`，再将主仓库的入口提交到 `main`；维护者审查后分别推送。两处工作流文件保持一致。通过 GitHub Actions 页面选择 `main`，输入包含 helper 的已审查 Android 完整 SHA；也可以显式执行：
 

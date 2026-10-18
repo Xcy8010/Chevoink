@@ -77,5 +77,7 @@ describe('exact reviewed production migration', () => {
     expect(script.indexOf('verify-release-migration.mjs before')).toBeLessThan(migrate)
     expect(script.indexOf('verify-release-migration.mjs after')).toBeGreaterThan(migrate)
     expect(script.indexOf('pm2 stop 0')).toBeGreaterThan(migrate)
+    expect(script).toContain('node scripts/production-process-snapshot.mjs')
+    expect(script).not.toContain('pm2 jlist')
   })
 })
