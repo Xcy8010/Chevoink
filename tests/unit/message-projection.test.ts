@@ -22,9 +22,9 @@ describe('message presentation projection', () => {
     const before = structuredClone(messages)
     const result = projectMessages(messages)
     expect([...result.blockInfoById]).toEqual([
-      ['a1', { firstId: 'a1', lastId: 'a2', ops: 0 }],
-      ['a2', { firstId: 'a1', lastId: 'a2', ops: 0 }],
-      ['a3', { firstId: 'a3', lastId: 'a3', ops: 0 }],
+      ['a1', { firstId: 'a1', lastId: 'a2', ops: 0, runIds: ['run'] }],
+      ['a2', { firstId: 'a1', lastId: 'a2', ops: 0, runIds: ['run'] }],
+      ['a3', { firstId: 'a3', lastId: 'a3', ops: 0, runIds: ['run'] }],
     ])
     expect(result.lastAssistantId).toBe('a3')
     expect(result.recentConversationText).toBe('answer')
@@ -61,7 +61,7 @@ describe('message presentation projection', () => {
       { ...message('a2', 'assistant', [{ type: 'text', text: 'final' }]), goalId: 'goal', runId: 'r2' },
     ]
     const result = projectMessages(messages)
-    const block = { firstId: 'a1', lastId: 'a2', ops: 0, goalId: 'goal' }
+    const block = { firstId: 'a1', lastId: 'a2', ops: 0, goalId: 'goal', runIds: ['r1', 'r2'] }
     expect([...result.blockInfoById]).toEqual([['a1', block], ['resume', block], ['a2', block]])
     expect(result.recentConversationText).toBe('final')
     expect(projectMessages(messages.slice(0, 3)).recentConversationText).toBe('')

@@ -23,6 +23,8 @@ import {
 
 import { buildApiUrl } from '@/app/api-base'
 import { cn } from '@/lib/utils'
+import { ProcessDuration } from './ProcessDuration'
+import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
 import ImageLightbox from '../../components/ImageLightbox'
 import { formatTaskRelativeTime } from '../../lib/relative-time'
 import type {
@@ -1179,6 +1181,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   runActive,
   blockId,
   summaryCount,
+  summaryTiming,
   summaryExpanded = false,
   onToggleSummary,
   textCollapsible = false,
@@ -1189,8 +1192,9 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   runActive: boolean
   /** 所属对话块（连续助手消息）的首条消息 id */
   blockId?: string
-  /** 整个对话块的操作总数（仅块内首条助手消息传值）：run 结束后显示唯一一行「已处理 n 个操作」 */
+  /** 整个对话块的操作总数，仅块内首条助手消息显示摘要和展开入口。 */
   summaryCount?: number
+  summaryTiming?: AgentRunTiming
   /** 摘要是否已展开（回看全部思考/动作） */
   summaryExpanded?: boolean
   onToggleSummary?: (blockId: string) => void
@@ -1198,7 +1202,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   textCollapsible?: boolean
 }) {
   const authorParts = useMemo(() => projectAgentAuthorParts(parts, streaming), [parts, streaming])
-  const showSummary = !runActive && (summaryCount ?? 0) > 0
+  const showSummary = summaryCount !== undefined && (summaryTiming !== undefined || !runActive && summaryCount > 0)
   const collapsed = !runActive && !summaryExpanded
   // 子 Agent 内部工具卡片归组：嵌套渲染进所属的 subagent_run 容器（codex/Zcode 模式）
   const subagentChildren = useMemo(() => {
@@ -1218,6 +1222,8 @@ export const AgentMessageParts = memo(function AgentMessageParts({
       {showSummary ? (
         <button
           type="button"
+          aria-label={`查看 ${summaryCount} 项操作`}
+          aria-expanded={!collapsed}
           onClick={() => {
             if (blockId) {
               onToggleSummary?.(blockId)
@@ -1225,12 +1231,13 @@ export const AgentMessageParts = memo(function AgentMessageParts({
           }}
           className="flex w-full animate-fade-in items-center gap-1 text-left"
         >
-          <span className="text-[11px] text-[var(--text-secondary)]">查看 {summaryCount} 项操作</span>
+          {summaryTiming ? <ProcessDuration timing={summaryTiming} /> : <span className="text-[11px] text-[var(--text-secondary)]">查看 {summaryCount} 项操作</span>}
           {collapsed ? (
             <ChevronRight className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
           ) : (
             <ChevronDown className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
           )}
+          {summaryTiming ? <span aria-hidden="true" className="ml-1 min-w-4 flex-1 border-t border-[var(--border-subtle)]" /> : null}
         </button>
       ) : null}
       {authorParts.map((part, index) => {

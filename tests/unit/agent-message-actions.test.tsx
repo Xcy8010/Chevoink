@@ -5,7 +5,7 @@ import { MessageTime, UserMessageActions } from '../../src/features/studio/agent
 import { useAgentStore, readSessionMessagesCache } from '../../src/features/studio/agent/agentStore'
 import type { AgentTodoItem, AgentUIMessage } from '../../shared/contracts/index.js'
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.useRealTimers() })
 
 it('权威待办覆盖旧消息，分页和会话缓存不会回退状态', () => {
   const old: AgentTodoItem[] = [{ id: 'a', content: '写章节', status: 'in_progress' }, { id: 'b', content: '重复工作', status: 'pending' }]
@@ -43,6 +43,7 @@ it('新任务清空旧待办并拒绝迟到快照和覆盖实时结果', () => {
 })
 
 it('renders all actions together with 24-hour local time and preserves callbacks', () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date(2026, 8, 9, 22))
   const onCopy = vi.fn(), onRollback = vi.fn(), onDelete = vi.fn()
   render(<UserMessageActions createdAt="2026-09-09T20:30:00" visible={false} copied={false} disabled={false} {...{ onCopy, onRollback, onDelete }} />)
   expect(screen.getByText('20:30').getAttribute('datetime')).toBe('2026-09-09T20:30:00')
@@ -52,6 +53,7 @@ it('renders all actions together with 24-hour local time and preserves callbacks
 })
 
 it('keeps destructive actions disabled during execution and touch actions visible', () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date(2026, 8, 9, 22))
   render(<UserMessageActions createdAt="2026-09-09T00:05:00" visible copied={false} disabled onCopy={vi.fn()} onRollback={vi.fn()} onDelete={vi.fn()} />)
   expect(screen.getByText('00:05')).toBeTruthy()
   expect((screen.getByRole('button', { name: '回退到此对话之前' }) as HTMLButtonElement).disabled).toBe(true)

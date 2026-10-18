@@ -16,6 +16,7 @@ import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { getActiveRunIdBySession, hasActiveRunInSession } from './active-runs.js'
 import { publishDurableEvents } from './runtime-event-projection.js'
 import { MAIN_RUN_FILTER, prepareChildGrantDeletion } from './runtime-child.js'
+import { loadMessageTimings } from './message-timing.js'
 
 const historyRunState = { select: { runtimeProtocolVersion: true, status: true, finishedAt: true, taskRoot: { select: { status: true } },
   goalExecution: { select: { goalId: true, trigger: true } },
@@ -211,17 +212,20 @@ export async function listLoopSessionMessages(
         })
       : []
 
+    const timings = await loadMessageTimings(userId, sessionId, [...pageRunIds, ...records.map(record => record.runId)])
     const pagedMessages: AgentUIMessage[] = []
     for (const record of records) {
       const stripped = visibleHistoryParts(record.parts as unknown as AgentMessagePart[], record.run)
       pagedMessages.push({
         id: record.id,
         runId: record.runId,
+        runTiming: timings.get(record.runId),
         ...historyGoalMetadata(record),
         role: record.role === 'assistant' ? 'assistant' : 'user',
         parts: await normalizeLegacyViewedImageUrls(userId, stripped),
         createdAt: record.createdAt.toISOString(),
-        completedAt: record.role === 'assistant' && record.run.status === 'completed' ? record.run.finishedAt?.toISOString() ?? null : null,
+        completedAt: record.role === 'assistant' ? timings.get(record.runId)?.completedAt
+          ?? (record.run.status === 'completed' ? record.run.finishedAt?.toISOString() ?? null : null) : null,
       })
     }
 
@@ -274,17 +278,20 @@ export async function listLoopSessionMessages(
     }
   }
 
+  const timings = await loadMessageTimings(userId, sessionId, records.map(record => record.runId))
   const messages: AgentUIMessage[] = []
   for (const record of records) {
     const stripped = visibleHistoryParts(record.parts as unknown as AgentMessagePart[], record.run)
     messages.push({
       id: record.id,
       runId: record.runId,
+      runTiming: timings.get(record.runId),
       ...historyGoalMetadata(record),
       role: record.role === 'assistant' ? 'assistant' : 'user',
       parts: await normalizeLegacyViewedImageUrls(userId, stripped),
       createdAt: record.createdAt.toISOString(),
-      completedAt: record.role === 'assistant' && record.run.status === 'completed' ? record.run.finishedAt?.toISOString() ?? null : null,
+      completedAt: record.role === 'assistant' ? timings.get(record.runId)?.completedAt
+        ?? (record.run.status === 'completed' ? record.run.finishedAt?.toISOString() ?? null : null) : null,
     })
   }
 

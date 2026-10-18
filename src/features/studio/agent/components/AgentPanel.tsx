@@ -82,7 +82,7 @@ import { resolveComposerModelEffort, useAgentModelPreference } from '../useAgent
 import { useAgentGoalStream } from '../useAgentGoalStream'
 import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
-import { projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
+import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
@@ -353,8 +353,9 @@ export function AgentPanel({
     let cancelled = false
     const version = useAgentStore.getState().todosVersion
     void fetchAgentSessionMessages(sessionId, { runLimit: 1 }).then(payload => {
-      if (cancelled || viewSession.current !== sessionId || !payload.todoSnapshot) return
-      useAgentStore.getState().reconcileTodoSnapshot(payload.todoSnapshot, sessionId, runId, version)
+      if (cancelled || viewSession.current !== sessionId) return
+      useAgentStore.getState().reconcileRunTimings(payload.messages, sessionId, runId)
+      if (payload.todoSnapshot) useAgentStore.getState().reconcileTodoSnapshot(payload.todoSnapshot, sessionId, runId, version)
     }).catch(() => { /* 保留直播进度，刷新历史时再次校准。 */ })
     return () => { cancelled = true }
   }, [sessionId, runId, todoSyncStage])
@@ -472,6 +473,7 @@ export function AgentPanel({
   const goalBar = useGoalBarVisibility(userId, sessionId, goalView.goal)
   const panelPhase = selectAgentPanelPhase(goalView, phase)
   const active = isRunActive(panelPhase)
+  const blockTimings = useMemo(() => projectBlockTimings(messages, blockInfoById, active ? runId : null), [messages, blockInfoById, active, runId])
   const activityRunActive = selectAgentActivityRunActive(goalView, phase)
   const creditSummaryQuery = useQuery({
     queryKey: ['credits', 'summary'],
@@ -1666,9 +1668,10 @@ export function AgentPanel({
                     runActive={messageRunActive}
                     blockId={block?.firstId}
                     summaryCount={isBlockFirst ? block?.ops : undefined}
+                    summaryTiming={isBlockFirst && block ? blockTimings.get(block.firstId) : undefined}
                     summaryExpanded={blockExpanded}
                     onToggleSummary={handleToggleBlockSummary}
-                    // 折叠态下过程进展正文一并收进「已处理 n 个操作」，只留块内最后一条（结尾总结）的正文
+                    // 折叠态下过程进展正文一并收进耗时摘要，只留块内最后一条（结尾总结）的正文
                     textCollapsible={textCollapsible}
                   />
                   {/* 结论操作条：每个对话块结尾均提供复制与创建分支（纯 icon，悬停 title 说明，流式进行中不显示） */}

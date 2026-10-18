@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { createAgentAuthorTextStream, projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
+import { advanceRunTiming, settleRunTiming } from '../../../../shared/agent-timing.js'
 
 import type {
   AgentAttachmentMeta,
@@ -278,6 +279,7 @@ type AgentStoreState = {
   beginRun: (runId: string, userPrompt: string, sessionId: string | null, attachments?: AgentAttachmentMeta[], runGoalId?: string | null) => void
   /** 续接服务端仍在进行的 run（刷新后恢复）：不追加用户消息，从 seq 0 重放事件重建直播 */
   resumeRun: (runId: string, sessionId: string | null, runGoalId?: string | null) => void
+  reconcileRunTimings: (messages: AgentUIMessage[], sessionId: string, runId: string) => void
   /** 记录刷新后从服务端派生的可续跑 run（拉历史消息时写入，续跑成功后清空） */
   noteResumeableRun: (runId: string | null) => void
   /** 刷新历史或终态事件提供作者结束事实，并优先采用其最终待办快照。 */
@@ -904,8 +906,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           pendingQuestion = null
           liveToolDrafts = {}
           messages = settleRunningToolParts(messages, '本轮已结束，未收到工具完成结果').map((message) =>
-            entry.status === 'completed' && message.role === 'assistant' && message.runId === entry.runId && entry.finishedAt
-              ? { ...message, completedAt: entry.finishedAt }
+            (message.runTiming?.sourceRunId ?? message.runId) === entry.runId
+              ? { ...message, ...(entry.status === 'completed' && message.role === 'assistant' && entry.finishedAt ? { completedAt: entry.finishedAt } : {}),
+                  runTiming: settleRunTiming(message.runTiming, entry.finishedAt, entry.status === 'paused') }
               : message,
           )
           workspaceActivities = settleRunningActivities(workspaceActivities)
@@ -1024,6 +1027,19 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       }
     }),
 
+  reconcileRunTimings: (history, sessionId, runId) => set(state => {
+    if (state.activeSessionId !== sessionId || state.runId !== runId) return {}
+    const timings = new Map(history.filter(message => message.runTiming).map(message => [message.runId, message.runTiming!]))
+    const scopes = new Map(history.filter(message => message.runTiming?.sourceRunId).map(message => [message.runTiming!.sourceRunId!, message.runTiming!]))
+    return { messages: state.messages.map(message => {
+      const incoming = timings.get(message.runId) ?? scopes.get(message.runId)
+      const current = message.runTiming
+      if (!incoming || incoming.sourceRunId && incoming.sourceRunId !== runId || current && current.sourceRunId === incoming.sourceRunId && (current.lastSeq > incoming.lastSeq
+        || current.lastSeq === incoming.lastSeq && current.status === 'finished' && incoming.status !== 'finished')) return message
+      return { ...message, runTiming: incoming }
+    }) }
+  }),
+
   applyEvent: (event) =>
     set((state) => {
       // 重放/重连去重：只接受更新的 seq
@@ -1032,9 +1048,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       }
       // A late stream from another run cannot change the current message,
       // cursor or draft lifecycle, including preparation-end cleanup.
-      if (event.runId !== state.runId && ['message.start', 'text.delta', 'text.final', 'reasoning.delta', 'tool.call', 'tool.result', 'tool.delta', 'tool.deferred', 'tool.preparation.end', 'step.finish', 'run.paused', 'run.finished', 'error'].includes(event.type)) return {}
+      if (event.runId !== state.runId && ['run.started', 'message.start', 'text.delta', 'text.final', 'reasoning.delta', 'tool.call', 'tool.result', 'tool.delta', 'tool.deferred', 'tool.preparation.end', 'step.finish', 'run.paused', 'run.finished', 'error'].includes(event.type)) return {}
 
-      const base = { lastSeq: event.seq }
+      const timingEvent = ['run.started', 'run.paused', 'run.finished'].includes(event.type) || event.type === 'error' && !event.recoverable
+      const timedMessages = timingEvent ? state.messages.map(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId
+        ? { ...message, runTiming: advanceRunTiming(message.runTiming, event) } : message) : state.messages
+      const base = { lastSeq: event.seq, ...(timingEvent ? { messages: timedMessages } : {}) }
 
       switch (event.type) {
         case 'goal.snapshot': {
@@ -1072,6 +1091,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                 goalId: event.runId === state.runId ? state.runGoalId : null,
                 parts: [],
                 createdAt: event.ts,
+                runTiming: state.messages.find(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId)?.runTiming,
               },
             ],
           }
@@ -1248,7 +1268,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           // Restore only this exact message/call, never another tool with the same name.
           const messages: AgentUIMessage[] = state.messages.some(message => message.id === event.messageId)
             ? state.messages : [...state.messages, { id: event.messageId, runId: event.runId, role: 'assistant',
-                goalId: event.runId === state.runId ? state.runGoalId : null, parts: [], createdAt: event.ts }]
+                goalId: event.runId === state.runId ? state.runGoalId : null, parts: [], createdAt: event.ts,
+                runTiming: state.messages.find(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId)?.runTiming }]
           const extracted = activityFromDisplay(event.display)
           const clearQuestion = state.pendingQuestion?.callId === event.callId
           const clearImport = event.toolName === 'novel_import' && state.messages.some(message => message.parts.some(part =>
@@ -1346,7 +1367,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             pendingApproval: null,
             pendingQuestion: null,
             liveToolDrafts: {},
-            messages: settleRunningToolParts(state.messages, '已停止'),
+            messages: settleRunningToolParts(timedMessages, '已停止'),
             workspaceActivities: settleRunningActivities(state.workspaceActivities),
             ...withoutRunningSession(state),
           }
@@ -1365,7 +1386,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             pendingApproval: null,
             pendingQuestion: null,
             liveToolDrafts: {},
-            messages: settleRunningToolParts(state.messages, '已中断').map(message => message.role === 'assistant' && message.runId === event.runId
+            messages: settleRunningToolParts(timedMessages, '已中断').map(message => message.role === 'assistant' && (message.runTiming?.sourceRunId ?? message.runId) === event.runId
               ? { ...message, completedAt: event.status === 'succeeded' ? event.ts : null } : message),
             workspaceActivities: settleRunningActivities(state.workspaceActivities),
             ...(event.authorEnded?.todoItems ? { todos: event.authorEnded.todoItems, todosVersion: state.todosVersion + 1 } : {}),
@@ -1383,7 +1404,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               : {
                   phase: 'failed' as const,
                   liveToolDrafts: {},
-                  messages: settleRunningToolParts(state.messages, '已中断'),
+                  messages: settleRunningToolParts(timedMessages, '已中断'),
                   workspaceActivities: settleRunningActivities(state.workspaceActivities),
                   // 不可恢复错误可能没有后续的 run.finished，这里就把红点落下
                   ...noteSessionSignal(state, 'failed'),

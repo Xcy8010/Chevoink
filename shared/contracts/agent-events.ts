@@ -514,6 +514,19 @@ export type AgentMessagePart =
       size?: number
     }
 
+/** Read-only display projection; not execution control or billing authority. */
+export type AgentRunTiming = {
+  /** A durable task can retain message identities across several runs. */
+  scopeId?: string
+  sourceRunId?: string
+  /** Actual successful completion of this execution scope, including resume. */
+  completedAt?: string | null
+  elapsedMs: number | null
+  activeSince: string | null
+  status: 'running' | 'paused' | 'finished' | 'unknown'
+  lastSeq: number
+}
+
 export interface AgentUIMessage {
   id: string
   runId: EntityId
@@ -522,6 +535,7 @@ export interface AgentUIMessage {
   createdAt: string
   /** Actual successful run completion; absent while running or on legacy data. */
   completedAt?: string | null
+  runTiming?: AgentRunTiming
   /** Persisted goal execution ownership; null denotes an ordinary run. */
   goalId?: EntityId | null
   /** A system-authored goal continuation prompt, including legacy goal_auto input. */

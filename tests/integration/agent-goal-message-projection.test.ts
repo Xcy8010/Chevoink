@@ -40,8 +40,16 @@ describe.skipIf(!dbAvailable)('goal history ownership (isolated test DB)', () =>
       const run = await prisma.agentRun.create({ data: {
         userId: user.id, novelId: novel.id, sessionId: session.id, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator',
         engine: 'loop', status: index === 0 ? 'paused' : 'completed', createdAt: new Date(start + index * 10000),
+        startedAt: new Date(start + index * 10000 + 100), finishedAt: index === 0 ? null : new Date(start + index * 10000 + 7100),
       } })
       runIds.push(run.id)
+      if (index < 3) {
+        const transitions = index === 0 ? [['run.started', 100], ['run.paused', 1100]] as const
+          : [['run.started', 100], ['run.paused', 1100], ['run.started', 5100], ['run.finished', 7100]] as const
+        await prisma.agentRunEvent.createMany({ data: transitions.map(([type, offset], sequence) => ({
+          runId: run.id, type, seq: sequence + 1, payload: { ts: new Date(start + index * 10000 + offset).toISOString() },
+        })) })
+      }
       if (trigger) await prisma.agentGoalExecution.create({ data: { goalId: goal.id, goalRevision: 1, epoch: 1n,
         runId: run.id, continuationIndex: index + 1, trigger, sourceEventId: randomUUID() } })
       // Index 1 is legacy auto input; index 2 is explicit system input followed
@@ -64,5 +72,9 @@ describe.skipIf(!dbAvailable)('goal history ownership (isolated test DB)', () =>
     expect(history.messages.filter(item => item.runId === runIds[3]).every(item => item.goalId === null)).toBe(true)
     expect(byId.get(messageIds[2])?.role).toBe('user')
     expect(history.messages.filter(item => item.role === 'assistant').every(item => item.goalContinuation === false)).toBe(true)
+    expect(history.messages.filter(item => item.runId === runIds[0]).every(item => item.runTiming?.elapsedMs === 1000 && item.runTiming.status === 'paused')).toBe(true)
+    expect(history.messages.filter(item => item.runId === runIds[1] || item.runId === runIds[2]).every(item => item.runTiming?.elapsedMs === 3000 && item.runTiming.status === 'finished')).toBe(true)
+    expect(history.messages.filter(item => item.runId === runIds[3]).every(item => item.runTiming?.elapsedMs === null)).toBe(true)
+    await expect(listLoopSessionMessages('unowned-test-user', session.id, { runLimit })).rejects.toMatchObject({ code: 'NOT_FOUND' })
   })
 })

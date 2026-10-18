@@ -1,12 +1,14 @@
 import { Check, Copy, Trash2, Undo2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { formatMessageTime } from '../lib/message-time'
+import { useLocalCalendarDay } from '../useLocalCalendarDay'
 
 export function MessageTime({ value, label, className }: { value?: string | null; label: string; className?: string }) {
-  if (!value) return null
+  useLocalCalendarDay()
+  const time = formatMessageTime(value)
+  if (!time || !value) return null
   const date = new Date(value)
-  if (!Number.isFinite(date.getTime())) return null
-  const time = date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
-  return <time dateTime={value} title={`${label}：${date.toLocaleDateString('zh-CN')} ${time}`} aria-label={`${label} ${time}`} className={cn('text-xs tabular-nums text-[var(--text-tertiary)]', className)}>{time}</time>
+  return <time dateTime={value} title={`${label}：${date.toLocaleString('zh-CN', { hour12: false })}`} aria-label={`${label} ${time}`} className={cn('text-xs tabular-nums text-[var(--text-tertiary)]', className)}>{time}</time>
 }
 
 /** One hover/focus target owns all actions; touch keeps the existing long press. */
