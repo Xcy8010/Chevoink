@@ -67,6 +67,8 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Install required Android SDK packages
         run: |
           & sdkmanager.bat 'platforms;android-36' 'build-tools;36.0.0'

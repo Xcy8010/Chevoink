@@ -63,8 +63,9 @@ try {
         })
     }
     try {
+        $credentialSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         [IO.File]::WriteAllBytes($keystore, [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
-        & icacls.exe $keystore /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
+        & icacls.exe $keystore /inheritance:r /grant:r "*${credentialSid}:(R,D)" | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Cannot restrict original keystore ACL.' }
         $lines = @(
             ('storeFile=' + (Escape-Property $keystore))
@@ -73,7 +74,7 @@ try {
             ('keyPassword=' + (Escape-Property $env:ANDROID_KEY_PASSWORD))
         )
         [IO.File]::WriteAllLines($properties, $lines, [Text.Encoding]::ASCII)
-        & icacls.exe $properties /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
+        & icacls.exe $properties /inheritance:r /grant:r "*${credentialSid}:(R,D)" | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Cannot restrict private signing properties ACL.' }
         New-Item -ItemType Directory -Path (Split-Path $baseline) -Force | Out-Null
         Invoke-WebRequest -Uri $env:ANDROID_BASELINE_APK_URL -OutFile $baseline -TimeoutSec 240
@@ -90,7 +91,7 @@ try {
         } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'build-receipt.json') -Encoding utf8
     } finally {
         foreach ($file in @($properties, $keystore)) {
-            if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
+            if (Test-Path -LiteralPath $file) { [IO.File]::Delete($file) }
         }
     }
 } finally { Pop-Location }
