@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { syncWorkspace, runCommand, isProjectRemote } from './workspace-sync.mjs'
 import { checkOfflineReadiness } from './offline-readiness.mjs'
 import { startWork } from './start-work.mjs'
+import { comparePrismaSchemas } from './prisma-schema-compare.mjs'
 
 function fixture(t) {
   const base = mkdtempSync(path.join(tmpdir(), 'chevoink sync 空间 ')), remote = path.join(base, 'remote.git')
@@ -187,6 +188,98 @@ test('a configured clean filter is stopped before git status can execute it on d
   assert.throws(() => readFileSync(path.join(f.root, 'forbidden-filter-side-effect')), { code: 'ENOENT' })
 })
 
+function standardLfs(f, global = false) {
+  for (const [key, value] of Object.entries({ clean: 'git-lfs clean -- %f', smudge: 'git-lfs smudge -- %f', process: 'git-lfs filter-process', required: 'true' })) {
+    f.git(['config', ...(global ? ['--global'] : []), `filter.lfs.${key}`, value])
+  }
+}
+test('standard duplicated LFS config with no filter attributes permits a fast-forward without invoking LFS or changing config', async t => {
+  const f = fixture(t), special = '-tab\t空间\nname.txt'
+  writeFileSync(path.join(f.seed, special), 'ordinary blob'); const target = f.advance()
+  standardLfs(f, true); standardLfs(f)
+  const original = f.git(['config', '--get-regexp', '^filter\\.']), bin = path.join(f.base, 'bin')
+  mkdirSync(bin); writeFileSync(path.join(bin, 'git-lfs'), '#!/bin/sh\ntouch filter-was-invoked\nexit 1\n'); chmodSync(path.join(bin, 'git-lfs'), 0o755)
+  const command = (program, args, options) => f.options.command(program, args, { ...options, env: { ...options.env, PATH: bin + path.delimiter + process.env.PATH } })
+  const result = await syncWorkspace({ ...f.options, command })
+  assert.equal(result.status, 'fast_forwarded'); assert.equal(f.head(), target)
+  assert.equal(result.snapshot.filterSafety.status, 'standard_lfs_unused'); assert.ok(result.snapshot.filterSafety.trackedPaths >= 2)
+  assert.equal(readFileSync(path.join(f.root, special), 'utf8'), 'ordinary blob'); assert.equal(f.git(['config', '--get-regexp', '^filter\\.']), original)
+  assert.throws(() => readFileSync(path.join(f.root, 'filter-was-invoked')), { code: 'ENOENT' })
+})
+for (const source of ['worktree', 'index', 'HEAD', 'info', 'global', 'macro', 'literal-unspecified']) {
+  test(`standard LFS is rejected before status when ${source} attributes assign a filter`, async t => {
+    const f = fixture(t), attributes = path.join(f.root, '.gitattributes')
+    if (source === 'info') writeFileSync(path.join(f.root, '.git/info/attributes'), '*.txt filter=lfs\n')
+    else if (source === 'global') { const file = path.join(f.base, 'attributes'); writeFileSync(file, '*.txt filter=lfs\n'); f.git(['config', 'core.attributesFile', file]) }
+    else {
+      writeFileSync(attributes, source === 'macro' ? '[attr]binary-lfs filter=lfs\n*.txt binary-lfs\n' : `*.txt filter=${source === 'literal-unspecified' ? 'unspecified' : 'lfs'}\n`)
+      if (['index', 'HEAD'].includes(source)) {
+        f.git(['add', '.gitattributes'])
+        if (source === 'HEAD') f.git(['commit', '-m', 'head attributes'])
+        writeFileSync(attributes, '# worktree does not select a filter\n')
+        if (source === 'HEAD') f.git(['add', '.gitattributes'])
+      }
+    }
+    standardLfs(f); const before = f.head(), result = await syncWorkspace(f.options)
+    assert.equal(result.reason, 'checkout_hook_or_filter_requires_manual_review'); assert.equal(result.snapshot.filterSafety.status, 'filter_attribute_present')
+    assert.equal(result.snapshot.dirty, null); assert.equal(f.head(), before)
+    assert.ok(!f.calls.some(args => args.includes('status') || args.includes('fetch') || args.includes('merge')))
+  })
+}
+test('a freshly fetched target introducing nested LFS attributes is rejected before merge', async t => {
+  const f = fixture(t), before = f.head()
+  mkdirSync(path.join(f.seed, 'assets')); writeFileSync(path.join(f.seed, 'assets/.gitattributes'), '*.bin filter=lfs\n')
+  writeFileSync(path.join(f.seed, 'assets/new.bin'), 'ordinary test blob'); f.advance(); standardLfs(f)
+  const result = await syncWorkspace(f.options)
+  assert.equal(result.remoteChecked, true); assert.equal(result.reason, 'checkout_hook_or_filter_requires_manual_review')
+  assert.equal(result.snapshot.filterSafety.status, 'filter_attribute_present'); assert.equal(f.head(), before)
+  assert.ok(!f.calls.some(args => args.includes('merge')))
+})
+for (const kind of ['custom-driver', 'changed-lfs-command']) {
+  test(`${kind} remains rejected even when no attribute currently uses a filter`, async t => {
+    const f = fixture(t); standardLfs(f)
+    f.git(['config', kind === 'custom-driver' ? 'filter.other.clean' : 'filter.lfs.process', 'touch must-not-run'])
+    const result = await syncWorkspace(f.options)
+    assert.equal(result.snapshot.filterSafety.status, 'nonstandard_filter_configuration')
+    assert.ok(!f.calls.some(args => args.includes('status') || args.includes('fetch') || args.includes('merge')))
+  })
+}
+for (const fault of ['timeout', 'unsupported-source', 'malformed-output']) {
+  test(`an ${fault} attribute proof fails closed without running status or fetching`, async t => {
+    const f = fixture(t); standardLfs(f)
+    const command = async (program, args, options) => args.includes('check-attr')
+      ? { code: fault === 'unsupported-source' ? 129 : 0, reason: fault === 'timeout' ? 'timeout' : '', stdout: fault === 'malformed-output' ? 'truncated' : '', stderr: '' }
+      : f.options.command(program, args, options)
+    const result = await syncWorkspace({ ...f.options, command })
+    assert.equal(result.status, 'blocked'); assert.equal(result.synced, false)
+    assert.ok(!f.calls.some(args => args.includes('status') || args.includes('fetch') || args.includes('merge')))
+  })
+}
+for (const fault of ['empty-success', 'duplicate-response']) {
+  test(`${fault} cannot substitute for a complete per-path attribute proof`, async t => {
+    const f = fixture(t)
+    writeFileSync(path.join(f.root, 'second.txt'), 'second'); f.git(['add', 'second.txt']); f.git(['commit', '-m', 'two paths']); standardLfs(f)
+    const command = async (program, args, options) => args.includes('check-attr') && !args.includes('--all')
+      ? { code: 0, reason: '', stdout: fault === 'empty-success' ? '' : 'source.txt\0filter\0unspecified\0source.txt\0filter\0unspecified\0', stderr: '' }
+      : f.options.command(program, args, options)
+    const result = await syncWorkspace({ ...f.options, command })
+    assert.equal(result.snapshot.filterSafety.status, 'attribute_evidence_unverified'); assert.equal(result.synced, false)
+    assert.ok(!f.calls.some(args => args.includes('status') || args.includes('fetch') || args.includes('merge')))
+  })
+}
+test('an actual child closing stdin early cannot report a successful complete read', async () => {
+  const result = await runCommand(process.execPath, ['-e', 'require("node:fs").closeSync(0); setTimeout(() => process.exit(0), 100)'],
+    { input: 'fixture'.repeat(512 * 1024), timeoutMs: 2000 })
+  assert.equal(result.reason, 'stdin_error')
+})
+test('unused standard LFS does not create an exception for private untracked files', async t => {
+  const f = fixture(t); f.advance(); standardLfs(f)
+  mkdirSync(path.join(f.root, '.codex')); const file = path.join(f.root, '.codex/keep-private.txt'); writeFileSync(file, 'keep this fixture untouched')
+  const before = f.head(), result = await syncWorkspace(f.options)
+  assert.equal(result.reason, 'worktree_not_clean'); assert.equal(f.head(), before)
+  assert.equal(readFileSync(file, 'utf8'), 'keep this fixture untouched'); assert.ok(!f.calls.some(args => args.includes('fetch') || args.includes('merge')))
+})
+
 function offlineFixture(t) {
   const root = mkdtempSync(path.join(tmpdir(), 'chevoink offline ')); t.after(() => rmSync(root, { recursive: true, force: true }))
   const write = (file, bytes) => { mkdirSync(path.dirname(path.join(root, file)), { recursive: true }); writeFileSync(path.join(root, file), bytes) }
@@ -226,7 +319,7 @@ for (const kind of ['wrong-node', 'missing-dependencies', 'lock-mismatch', 'brok
     if (kind === 'incomplete-source') rmSync(path.join(f.root, 'api/server.ts'))
     const result = await checkOfflineReadiness(options)
     assert.equal(result.readyForLocalChecks, false); assert.equal(result.readyForDatabaseWork, false)
-    if (kind === 'schema-drift') assert.ok(result.problems.includes('generated_prisma_schema_mismatch'))
+    if (kind === 'schema-drift') assert.ok(result.problems.includes('generated_prisma_schema_unverified'))
     if (kind === 'wrong-platform-engine') assert.ok(result.problems.includes('generated_prisma_platform_engine_missing'))
     assert.ok(f.calls.every(call => !call.args.some(arg => ['ci', 'install', 'generate', 'migrate', 'start', 'dev'].includes(arg))))
   })
@@ -242,4 +335,49 @@ test('DB configuration presence is not verified isolation and no secret value is
     assert.equal(call.options.env.Path, '/runtime'); assert.equal(call.options.env.SystemRoot, '/system')
     assert.equal(call.options.env.APP_ENV, undefined)
   }
+})
+
+const schemaBlocks = [
+  'generator client {\n  provider = "prisma-client-js"\n}\n',
+  'datasource db {\n  provider = "postgresql"\n  url = env("DATABASE_URL")\n}\n',
+  'enum Role {\n  user\n  admin\n}\n',
+  'model Author {\n  id Int @id\n  text String @default("a  b // { }")\n  posts Post[]\n}\n',
+  'model Post {\n  id Int @id\n  authorId Int\n  author Author @relation(fields: [authorId], references: [id])\n  @@index([authorId])\n}\n',
+]
+const sourceSchema = schemaBlocks.join('\n')
+const formattedSchema = '// generated formatting\n' + [schemaBlocks[0], schemaBlocks[1], schemaBlocks[4], schemaBlocks[2], schemaBlocks[3]].join('\n').replace(/^  /gm, '\t').replace(/ id Int /g, ' id     Int ')
+test('Prisma declaration proof ignores CRLF, alignment, comments and data-block order without importing Prisma', () => {
+  assert.deepEqual(comparePrismaSchemas(sourceSchema, formattedSchema.replace(/\n/g, '\r\n')), { status: 'equivalent', basis: 'declaration_tokens', blocks: 5 })
+})
+for (const [kind, changed] of [
+  ['string whitespace', sourceSchema.replace('a  b // { }', 'a b // { }')],
+  ['field type', sourceSchema.replace('authorId Int', 'authorId String')],
+  ['relation reference', sourceSchema.replace('references: [id]', 'references: [text]')],
+  ['enum order', sourceSchema.replace('  user\n  admin', '  admin\n  user')],
+  ['field order', sourceSchema.replace('  id Int @id\n  authorId Int', '  authorId Int\n  id Int @id')],
+  ['generator/datasource order', [schemaBlocks[1], schemaBlocks[0], ...schemaBlocks.slice(2)].join('\n')],
+  ['duplicate block', sourceSchema + schemaBlocks[3]],
+  ['unknown syntax', sourceSchema + 'namespace other {\n}\n'],
+  ['broken string', sourceSchema.replace('"a  b // { }"', '"unterminated')],
+  ['inline closing brace', sourceSchema.replace('  admin\n}', '  admin }')],
+  ['inline comment splitting a declaration', sourceSchema.replace('authorId Int', 'authorId /* comment */ Int')],
+  ['broken atomic list type', sourceSchema.replace('Post[]', 'Post[ ]')],
+  ['broken atomic attribute path', sourceSchema.replace('@@index', '@@index . invalid')],
+]) {
+  test(`Prisma ${kind} cannot establish readiness and is reported unverified rather than stale`, () => {
+    assert.equal(comparePrismaSchemas(sourceSchema, changed).status, 'unverified')
+  })
+}
+test('Prisma atomic native paths and Unsupported type syntax cannot be split by ignored whitespace', () => {
+  const schema = 'model Item {\n  id Int @id @db.Integer\n  value Unsupported("extension")\n}\n'
+  assert.equal(comparePrismaSchemas(schema, schema.replace('@db.Integer', '@db . Integer')).status, 'unverified')
+  assert.equal(comparePrismaSchemas(schema, schema.replace('Unsupported(', 'Unsupported (')).status, 'unverified')
+})
+test('offline readiness accepts formatting-only Prisma changes but keeps engine execution and database unverified', async t => {
+  const f = offlineFixture(t)
+  f.write('prisma/schema.prisma', sourceSchema); f.write('node_modules/.prisma/client/schema.prisma', formattedSchema)
+  const result = await checkOfflineReadiness(f.options)
+  assert.equal(result.prisma, true); assert.equal(result.readyForLocalChecks, true); assert.equal(result.prismaSchema.basis, 'declaration_tokens')
+  assert.equal(result.prismaEngineRuntimeVerified, false); assert.equal(result.database.verified, false)
+  assert.equal(f.calls.length, 2)
 })

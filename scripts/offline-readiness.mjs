@@ -3,6 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertCloudRuntime, cloudNpmCommand } from './cloud-setup.mjs'
 import { runCommand } from './workspace-sync.mjs'
+import { comparePrismaSchemas } from './prisma-schema-compare.mjs'
 
 export const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const json = file => JSON.parse(readFileSync(file, 'utf8'))
@@ -58,9 +59,9 @@ export async function checkOfflineReadiness({ root = workspaceRoot, command = ru
   } catch { report.problems.push('installed_dependencies_or_lock_missing') }
   try {
     const generated = path.join(root, 'node_modules/.prisma/client')
-    const normalize = bytes => bytes.replace(/\r\n/g, '\n')
-    const sameSchema = normalize(readFileSync(path.join(root, 'prisma/schema.prisma'), 'utf8'))
-      === normalize(readFileSync(path.join(generated, 'schema.prisma'), 'utf8'))
+    report.prismaSchema = comparePrismaSchemas(readFileSync(path.join(root, 'prisma/schema.prisma'), 'utf8'),
+      readFileSync(path.join(generated, 'schema.prisma'), 'utf8'))
+    const sameSchema = report.prismaSchema.status === 'equivalent'
     const engine = platform === 'win32' ? /^query_engine-windows\.dll\.node$/ : platform === 'darwin'
       ? /^libquery_engine-darwin.*\.dylib\.node$/ : platform === 'linux' ? /^libquery_engine-.*\.so\.node$/ : /$a/
     const files = readdirSync(generated)
@@ -68,7 +69,7 @@ export async function checkOfflineReadiness({ root = workspaceRoot, command = ru
     const enginePresent = files.some(file => engine.test(file))
     report.prisma = sameSchema && entriesPresent && enginePresent
     report.prismaEngineRuntimeVerified = false
-    if (!sameSchema) report.problems.push('generated_prisma_schema_mismatch')
+    if (!sameSchema) report.problems.push('generated_prisma_schema_unverified')
     if (!entriesPresent) report.problems.push('generated_prisma_entry_missing')
     if (!enginePresent) report.problems.push('generated_prisma_platform_engine_missing')
   } catch { report.problems.push('generated_prisma_client_missing') }

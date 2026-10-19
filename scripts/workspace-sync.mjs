@@ -1,12 +1,13 @@
 import { spawn } from 'node:child_process'
 import { lstatSync, realpathSync } from 'node:fs'
 import path from 'node:path'
+import { assessFilterSafety } from './workspace-attributes.mjs'
 
 /** Bounded child process; kill its own process tree, never a user-selected PID. */
-export function runCommand(program, args, { cwd, timeoutMs = 15000, env = process.env, shell = false } = {}) {
+export function runCommand(program, args, { cwd, timeoutMs = 15000, env = process.env, shell = false, input } = {}) {
   return new Promise(resolve => {
     let reason = '', finished = false, outputBytes = 0, stdout = '', stderr = '', fallback
-    const child = spawn(program, args, { cwd, env, shell, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(program, args, { cwd, env, shell, windowsHide: true, detached: process.platform !== 'win32', stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] })
     const finish = (code, errorCode = '') => {
       if (finished) return
       finished = true; clearTimeout(timer); clearTimeout(fallback)
@@ -34,6 +35,7 @@ export function runCommand(program, args, { cwd, timeoutMs = 15000, env = proces
     }
     child.on('error', error => finish(null, error.code || 'spawn_failed'))
     child.on('close', code => finish(code))
+    if (child.stdin) { child.stdin.on('error', () => stop('stdin_error')); child.stdin.end(input) }
   })
 }
 
@@ -55,21 +57,21 @@ const markers = ['MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD
 export async function syncWorkspace({ root, offline = false, timeoutMs = 15000, command = runCommand, validateRemote = isProjectRemote } = {}) {
   const result = { mode: offline ? 'offline' : 'online', status: 'blocked', remoteChecked: false, synced: false, exitCode: 1 }
   let mergeStarted = false
-  const git = async (args, allowed = [0]) => {
+  const git = async (args, allowed = [0], input) => {
     const output = await command('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', ...args],
-      { cwd: root, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never', SSH_ASKPASS_REQUIRE: 'never' } })
+      { cwd: root, timeoutMs, input, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never', SSH_ASKPASS_REQUIRE: 'never' } })
     if (output.reason || !allowed.includes(output.code)) throw Object.assign(new Error('git_read_failed'), { fault: output.reason || 'git_read_failed' })
     return output.stdout.trimEnd()
   }
-  const checkoutCommands = async () => {
+  const checkoutSafety = async (head, target) => {
     const customHooks = await git(['config', '--path', '--get', 'core.hooksPath'], [0, 1])
     for (const name of ['post-merge', 'reference-transaction']) {
       const hook = customHooks ? path.resolve(root, customHooks, name) : path.resolve(root, await git(['rev-parse', '--git-path', `hooks/${name}`]))
-      if (present(hook)) return true
+      if (present(hook)) return { safe: false, status: 'checkout_hook_present' }
     }
-    return Boolean(await git(['config', '--name-only', '--get-regexp', '^filter\\..*\\.(process|smudge|clean)$'], [0, 1]))
+    return assessFilterSafety(git, head, target)
   }
-  const snapshot = async () => {
+  const snapshot = async target => {
     const top = await git(['rev-parse', '--show-toplevel'])
     if (realpathSync(top) !== realpathSync(root)) throw new Error('repository_root_mismatch')
     const head = await git(['rev-parse', '--verify', 'HEAD'])
@@ -78,11 +80,11 @@ export async function syncWorkspace({ root, offline = false, timeoutMs = 15000, 
     for (const marker of markers) if (present(path.resolve(root, await git(['rev-parse', '--git-path', marker])))) operations.push(marker)
     // Status can itself invoke clean filters. Detect them before inspecting content;
     // fetch/merge can also invoke a reference-transaction hook.
-    const manualCheckout = await checkoutCommands()
+    const filterSafety = await checkoutSafety(head, target), manualCheckout = !filterSafety.safe
     const dirty = manualCheckout ? null : Boolean(await git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none']))
     const unmerged = Boolean(await git(['ls-files', '--unmerged']))
     const tracking = branch ? (await git(['for-each-ref', '--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)', `refs/heads/${branch}`])).split('\0') : []
-    return { root: top, head, branch, dirty, unmerged, operations, manualCheckout, remote: tracking[0] || '', remoteRef: tracking[1] || '', upstream: tracking[2] || '' }
+    return { root: top, head, branch, dirty, unmerged, operations, manualCheckout, filterSafety, remote: tracking[0] || '', remoteRef: tracking[1] || '', upstream: tracking[2] || '' }
   }
   const unsafe = current => !current.branch ? 'detached_head' : current.operations.length ? 'git_operation_in_progress'
     : current.unmerged ? 'unmerged_files' : current.manualCheckout ? 'checkout_hook_or_filter_requires_manual_review' : current.dirty ? 'worktree_not_clean' : ''
@@ -104,23 +106,24 @@ export async function syncWorkspace({ root, offline = false, timeoutMs = 15000, 
       return { ...result, status: 'fetch_failed', reason: fetched.reason || (denied ? 'authentication_or_access_denied' : 'remote_unavailable'), offlineChoice: '--offline' }
     }
     result.remoteChecked = true; result.checkedAt = new Date().toISOString()
-    const current = await snapshot(); result.snapshot = current
+    const target = await git(['rev-parse', '--verify', `${initial.upstream}^{commit}`])
+    const current = await snapshot(target); result.snapshot = current
+    if (current.manualCheckout) return { ...result, reason: 'checkout_hook_or_filter_requires_manual_review' }
     if (unsafe(current) || current.head !== initial.head || current.branch !== initial.branch || current.upstream !== initial.upstream
       || current.remote !== initial.remote || current.remoteRef !== initial.remoteRef || await remoteUrls(initial.remote) !== originalUrls) return { ...result, reason: 'workspace_changed_during_fetch' }
-    const target = await git(['rev-parse', '--verify', `${initial.upstream}^{commit}`])
     const [ahead, behind] = (await git(['rev-list', '--left-right', '--count', `${initial.head}...${target}`])).split(/\s+/).map(Number)
     if (!Number.isSafeInteger(ahead) || !Number.isSafeInteger(behind)) throw new Error('invalid_comparison')
     Object.assign(result, { ahead, behind, target })
     if (ahead) return { ...result, status: ahead && behind ? 'diverged' : 'local_ahead', reason: 'manual_review_required' }
     if (!behind) return { ...result, status: 'up_to_date', synced: true, exitCode: 0 }
-    const beforeMerge = await snapshot()
+    const beforeMerge = await snapshot(target)
     if (unsafe(beforeMerge) || beforeMerge.head !== initial.head || beforeMerge.branch !== initial.branch || beforeMerge.upstream !== initial.upstream
       || beforeMerge.remote !== initial.remote || beforeMerge.remoteRef !== initial.remoteRef || await remoteUrls(initial.remote) !== originalUrls
       || await git(['rev-parse', `${initial.upstream}^{commit}`]) !== target) return { ...result, reason: 'workspace_changed_before_fast_forward' }
     mergeStarted = true
     const merged = await command('git', ['-c', 'core.fsmonitor=false', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', 'merge', '--ff-only', '--no-autostash', '--no-edit', target],
       { cwd: root, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never', SSH_ASKPASS_REQUIRE: 'never' } })
-    const final = await snapshot(); result.snapshot = final
+    const final = await snapshot(target); result.snapshot = final
     if (merged.reason || merged.code !== 0 || unsafe(final) || final.head !== target || final.branch !== initial.branch
       || final.upstream !== initial.upstream || final.remote !== initial.remote || final.remoteRef !== initial.remoteRef || await remoteUrls(initial.remote) !== originalUrls) {
       return { ...result, status: 'merge_outcome_needs_review', reason: merged.reason || 'postcondition_failed' }
