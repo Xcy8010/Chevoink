@@ -424,7 +424,7 @@ export type AdminModelManagementPayload = {
     pricing?: import('./credits.js').CreditLedgerItem['pricing']
     tier: string | null
     sortOrder: number
-    modelKind: 'text' | 'image_generation' | 'vision' | 'web_search'
+    modelKind: 'text' | 'image_generation' | 'vision' | 'web_search' | 'web_fetch'
     provider: string
     displayName: string
     modelName: string

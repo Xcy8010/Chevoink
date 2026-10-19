@@ -11,6 +11,7 @@ import { normalizeToolInput } from './tools/input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './tools/types.js'
 import { assertGoalRevisionFence, readGoalExecution } from './goal-fence.js'
 import { assertQuestionWritingScope } from './writing-scope.js'
+import { recordWritingClarification } from './writing-clarification.js'
 import { DataAccessError } from '../prisma.js'
 import { recordToolFailure } from './runtime-operations.js'
 
@@ -39,10 +40,16 @@ export async function executeDurableQuestion(lease: RunLeaseToken, cursor: ToolE
     // Never carry a timeout decision into a later effect transaction: a valid
     // answer may have committed between those transactions.
     const finish = async (output: string, answer: string | null) => ({ receipt:
-      await commitOperationEffectInTransaction(tx, lease, prepared.operation.id, prepared.operation.inputHash, async () => runtimeJson({ toolResult: {
+      await commitOperationEffectInTransaction(tx, lease, prepared.operation.id, prepared.operation.inputHash, async () => {
+        ctx.signal.throwIfAborted()
+        const clarification = answer === null ? null : await recordWritingClarification(tx, ctx,
+          { callId: ctx.callId, ...effective, answer, source: 'durable_question', requestId: request!.id })
+        return runtimeJson({ toolResult: {
+        ...(clarification ? { semanticTransition: clarification } : {}),
         output, summary: answer === null ? '提问未获回答' : '作者已回答',
         display: { kind: 'question', ...effective, ...(answer === null ? { unanswered: true } : { answer }) },
-      } }).value) })
+      } }).value
+      }) })
     const key = `question:${prepared.operation.id}`
     let request = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: key } })
     if (!request && await tx.agentExecutionOutbox.count({ where: { taskRootId: lease.taskRootId, type: 'question.requested' } }) >= 3) return finish('本任务已使用三次提问。请基于已确认信息继续原授权内的工作；缺少关键决定的部分保持未完成，不猜测授权。', null)

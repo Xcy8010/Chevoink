@@ -10,6 +10,7 @@ import { runtimeJson } from './runtime-common.js'
 import { assertRunGoalFence } from './goal-fence.js'
 import { readWritingPresentation } from './writing-request-context.js'
 import { freezeLocalEditBoundary, originalLocalEditBoundary, requestedLocalEdit } from './local-edit-scope.js'
+import { eligibleEmptyWritingClarification, readWritingClarification } from './writing-clarification.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 type Writing = NonNullable<TaskSpec['scope']['writing']>
@@ -34,7 +35,7 @@ export function chapterNumber(text: string): number | null {
  * Spacing around 第/章/至/dashes is prose, not semantics: "前 20 章" must parse
  * exactly like "前20章"; otherwise the freeze silently retargets the run. */
 type RequestedWritingRange = { kind: 'first' | 'next' | 'range' | 'count' | 'unbounded' | 'list' | 'existing'; start?: number; count?: number; positions?: number[]; volume?: number; anchor?: 'editor' }
-const negativeScopeClause = /(?:不要|无需|不用|不必|禁止|不得|不能|(?<!分)别|不写|不改|不修改|do not|don't|must not)/iu
+const negativeScopeClause = /(?:不继续|不批量|不续写|不生成|不要|无需|不用|不必|禁止|不得|不能|(?<!分)别|不写|不改|不修改|do not|don't|must not)/iu
 function writingScopeClauses(prompt: string) {
   return prompt.replace(new RegExp(`(${numeric}\\s*(?:章)?)\\s*[，,]\\s*(?=第?\\s*${numeric})`, 'gu'), '$1、').split(/[，,。！？!?；;\n]+/u)
 }
@@ -128,8 +129,9 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   // A prompt that names chapters/volumes with numbers but fails to parse must not
   // silently freeze onto the editor's current chapter: that rewrote the author's
   // target ("前 20 章优化" froze to a single chapter). Surface needs_input instead.
-  const ambiguousRange = !range && /(?:第|前|后|余|剩|卷|章)/u.test(admissionPrompt)
-    && /[0-9零〇一二两三四五六七八九十百千]/u.test(admissionPrompt)
+  const ambiguousRange = !range && writingScopeClauses(admissionPrompt).some(clause => !negativeScopeClause.test(clause)
+    && /(?:第|前|后|余|剩|卷|章)/u.test(clause) && /(?:章|卷|chapter|volume)/iu.test(clause)
+    && /[0-9零〇一二两三四五六七八九十百千]/u.test(clause))
     && !(localRequest && !/(?:章|卷|chapter|volume)/iu.test(admissionPrompt))
   const chapters = await tx.chapter.findMany({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) },
     select: { id: true, revision: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
@@ -166,7 +168,7 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     // A broad positive interval cannot erase the author's explicit exceptions.
     // Resolve them against this same admission snapshot, never later rows.
     for (const clause of writingScopeClauses(admissionPrompt).filter(clause => negativeScopeClause.test(clause))) {
-      const exclusion = requestedWritingRange(clause.replace(/(?:不要|无需|不用|不必|禁止|不得|不能|别|do not|don't|must not)|不(?=写|改|修改)/giu, ''))
+      const exclusion = requestedWritingRange(clause.replace(/(?:不继续|不批量|不续写|不生成|不要|无需|不用|不必|禁止|不得|不能|别|do not|don't|must not)|不(?=写|改|修改)/giu, ''))
       if (!exclusion) {
         if (/(?:任何|所有|全部|已有)章节|全书|正文/u.test(clause) || /(?:第|章|卷)/u.test(clause) && new RegExp(numeric, 'u').test(clause)) writing.targets = []
         continue
@@ -201,7 +203,11 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     ? freezeLocalEditBoundary(admissionPrompt, writing, await tx.chapter.findMany({ where: { authorId: subject.userId,
       ...activeChapterScope(subject.novelId), id: { in: writing.targets.flatMap(target => target.chapterId ? [target.chapterId] : []) } },
       select: { id: true, revision: true, content: true } })) : undefined
-  return { ...spec, scope: { ...spec.scope, writing, ...(localEditBoundary ? { localEditBoundary } : {}) } }
+  const clarification = !chapters.length && !range && !ambiguousRange && !localRequest
+    && run.session.sandboxMode !== 'read_only' && !run.session.spawnedFromRunId
+    && eligibleEmptyWritingClarification({ ...spec, scope: { ...spec.scope, writing } }, admissionPrompt)
+  return { ...spec, scope: { ...spec.scope, writing, ...(clarification ? { writingClarificationProtocol: 1 as const } : {}),
+    ...(localEditBoundary ? { localEditBoundary } : {}) } }
 }
 
 const bindingSchema = z.object({ version: z.literal(1), taskId: z.string(), targets: z.array(z.object({ orderIndex: z.number().int().positive(), chapterId: z.string() }).strict()) }).strict()
@@ -236,9 +242,9 @@ export async function readNewDraftWritingAuthority(tx: Prisma.TransactionClient,
   if (!parsed.success || parsed.data.intent !== 'write' || parsed.data.scope.novelId !== subject.novelId
     || parsed.data.scope.selection || ['proposal_only', 'conversation_only'].includes(parsed.data.writingPacing ?? '')
     || prohibitsNewDraftRevision(original.prompt) || parsed.data.hardConstraints.some(item => prohibitsNewDraftRevision(item.text))) return null
-  const writing = parsed.data.scope.writing
-  if (writing?.kind !== 'bounded') return null
   const scope = await readWritingScope(tx, subject)
+  const writing = scope.writing
+  if (writing?.kind !== 'bounded') return null
   if (!writing.targets.some(target => target.chapterId === null && target.orderIndex === chapter.orderIndex
     && scope.bindings?.targets.some(binding => binding.orderIndex === target.orderIndex && binding.chapterId === chapter.id))) return null
   return { taskId: scope.taskId }
@@ -248,6 +254,8 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
   const spec = taskSpecSchema.safeParse(original.spec)
   let writing = spec.success ? spec.data.scope.writing : undefined
   const source = await tx.agentRun.findFirstOrThrow({ where: { id: original.sourceRunId, userId: subject.userId, novelId: subject.novelId } })
+  const clarification = spec.success ? await readWritingClarification(tx, subject, original, source, spec.data) : null
+  if (clarification) writing = clarification.writing
   if (!writing && original.prompt) {
     const range = requestedWritingRange(original.prompt)
     // No historical directory snapshot proves a list or an existing-book
@@ -287,7 +295,15 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
     || bindings.targets.some(item => !writing?.targets.some(target => target.orderIndex === item.orderIndex && (!target.chapterId || target.chapterId === item.chapterId))))) {
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '章节写入绑定损坏，不能扩大授权范围。')
   }
-  return { ...original, writing, bindings }
+  return { ...original, writing, bindings, clarification: clarification?.evidence ?? null }
+}
+
+/** A read projection for workflow observers; the frozen spec/hash is untouched. */
+export async function effectiveWritingTaskSpec(tx: Prisma.TransactionClient, subject: Subject, spec: TaskSpec): Promise<TaskSpec> {
+  if (spec.scope.writingClarificationProtocol !== 1) return spec
+  const scope = await readWritingScope(tx, subject)
+  return scope.clarification && scope.taskId === spec.id
+    ? { ...spec, scope: { ...spec.scope, writing: scope.writing } } : spec
 }
 
 /** Read only the authenticated original contract. Never mint on an old run. */

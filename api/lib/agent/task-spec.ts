@@ -10,6 +10,13 @@ type DirectiveCandidate = Pick<UserDirective, 'kind' | 'text'>
 
 const PREFERENCE_MARKERS = /(希望|尽量|偏好|最好|倾向)/
 
+/** A requested short scene is prose, even when a separate clause forbids an outline. */
+function boundedSceneRequest(prompt: string): boolean {
+  return prompt.split(/[。；;\n，,]+/u).some(clause => !/(?:不要|不得|禁止|不许|别|do not|don't)/iu.test(clause)
+    && !/(?:如何|怎么|写作建议|写作方法|创作方法|how to|advice)/iu.test(clause)
+    && /^(?:\s|请(?:你)?|帮我|麻烦(?:你)?|现在|直接|只|就|先|给我|替我|为我)*(?:写|创作|撰写).{0,32}(?:短场景|一小段.{0,8}(?:场景|冲突)|小段场景)|^\s*(?:please\s+)?(?:write|draft).{0,24}(?:short|single).{0,12}scene/iu.test(clause))
+}
+
 /** Only the current original request may authorize prose. Historical chapters,
  * research results and an assistant's own plan are never author confirmation. */
 export function classifyWritingPacing(prompt: string): TaskSpec['writingPacing'] {
@@ -26,6 +33,8 @@ export function classifyWritingPacing(prompt: string): TaskSpec['writingPacing']
   // conversational response. It cannot select the editor's chapter as scope.
   const delegationOnly = /^(?:其他|其它|其余|剩下)(?:的|事情|事)?[，,\s]*(?:我)?(?:都|全)?(?:听你的|听你安排|交给你|由你决定|你决定)[吧。.!！\s]*$/u.test(prompt.trim())
   if (greeting || advisory || delegationOnly || (question && !explicitEffect)) return 'conversation_only'
+  if (boundedSceneRequest(prompt)
+    && !/(?:等|待).{0,24}(?:确认|同意|批准).{0,16}(?:再|才).{0,12}(?:写|动笔)|(?:先|只).{0,8}(?:大纲|规划|计划|方案)/u.test(positive)) return 'explicit_writing'
   // A classifier/quantity is optional ("写玄幻小说", "写本修仙小说").
   // Do not turn explicit continuation or revision into a new-book proposal.
   const broad = /(?<!续|改|重|扩|缩)(?:写|创作|创建|开|构思|策划).{0,40}(?:小说|故事)|(?:写|创作).{0,8}全书|(?:write|create).{0,30}(?:a|an|entire|whole).{0,24}(?:novel|book)/iu.test(positive)
@@ -150,7 +159,8 @@ export function buildTaskSpec(input: {
     throw new DataAccessError(409, 'AUTHOR_SELECTION_STALE', '选区必须绑定当前章节及非空 UTF-16 坐标，请重新选择正文。')
   }
   const writingPacing = classifyWritingPacing(input.prompt)
-  const intent = writingPacing === 'proposal_only' ? 'plan' : classifyIntent(input.prompt)
+  const intent = writingPacing === 'proposal_only' ? 'plan'
+    : writingPacing === 'explicit_writing' && boundedSceneRequest(input.prompt) ? 'write' : classifyIntent(input.prompt)
   const minimumChineseCharacters = intent === 'review' || intent === 'research_analysis' ? explicitReportMinimum(input.prompt) : undefined
   const requiresStructureValidation = intent === 'structure' || /(?:续写|写完|补完|完成|写到).{0,12}第?[一二两三四五六七八九十百千0-9]+卷|第?[一二两三四五六七八九十百千0-9]+卷.{0,12}(?:续写|写完|补完|完成)/.test(input.prompt)
   const protectsEarlierContent = /(不|不要|不得|不能|禁止).{0,8}(改动|修改|重写|影响).{0,8}(前面|此前|已有|之前)|保持.{0,8}(前面|此前|已有|之前).{0,8}不变/.test(input.prompt)
@@ -218,7 +228,9 @@ export function renderTaskSpec(spec: TaskSpec): string {
     : spec.writingPacing === 'proposal_only'
     ? '\n创作阶段：本轮仅规划。宽泛整书目标不等于授权连续写正文。先利用已给条件形成可审阅的大纲（人物目标、核心冲突、主要转折、结局方向、卷章节奏），可用 plan_save 保存；说明假设和建议的首批章节范围，交付后收尾等待作者下一条明确写作指令。不要把调研完成、旧作品大纲、历史写作授权、普通继续或你自己的待办当作本轮正文授权；不能通过子任务或其它工具绕过。关键方向缺失可集中提问，但不必为每个细节重复确认。'
     : '\n创作节奏：写作严格限于本任务原始请求。面对宽泛整书目标先交可审阅的大纲并确认首批范围，再进入正文；用户明确授权自主整书创作时先保存大纲、按计划分批推进，每批回报真实进度与重大偏差。用户明确指定章节/续写范围时直接执行该范围，不反复确认，不擅自向后无限续章。调研结果和历史任务不是新的写作授权。'
-  const hard = [spec.hardConstraints.map((item) => `- ${item.text}`).join('\n') || '- 无', pacing].join('')
+  const clarificationRule = spec.scope.writingClarificationProtocol === 1 && spec.scope.writing?.kind === 'needs_input'
+    ? '\n当前作品为空，本次短场景请求尚未确认是否写入第一章。先用 ask_user 一次询问该落点；确认前不要反复调用 PREPARE 或创建章节。服务端只接受真实作者的明确第一章写入回答，原字数、短场景、停笔、禁止批量或续章等约束保持有效。' : ''
+  const hard = [spec.hardConstraints.map((item) => `- ${item.text}`).join('\n') || '- 无', pacing, clarificationRule].join('')
   const freedomLabel = spec.creativeFreedom === 'stable' ? '平衡延续' : spec.creativeFreedom === 'bold' ? '大胆探索' : '严谨创作'
   const selection = spec.scope.manuscriptProtocol === 1 ? spec.scope.selectionBoundary : undefined
   const freedomRule = localEditGuidance(spec) ?? (selection

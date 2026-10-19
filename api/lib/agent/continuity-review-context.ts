@@ -3,6 +3,24 @@ import { continuityFindingInputSchema } from '../../../shared/contracts/story-co
 
 export type ContinuityBodies = { previous: string | null; current: string }
 
+type ContinuityChapter = { id: string; title: string; revision: number; orderIndex: number; content: string }
+
+/** Offsets address the exact joined bodies; labels never become quoted prose. */
+export function continuityChapterProvenance(current: ContinuityChapter, preceding: ContinuityChapter[]) {
+  const describe = (chapter: ContinuityChapter, source: 'previous' | 'current', startOffset: number) => ({
+    chapterId: chapter.id, title: chapter.title, revision: chapter.revision, orderIndex: chapter.orderIndex,
+    source, startOffset, endOffset: startOffset + chapter.content.length, charCount: chapter.content.length,
+    contentHash: createHash('sha256').update(chapter.content).digest('hex'),
+  })
+  let offset = 0
+  const previous = [...preceding].sort((a, b) => a.orderIndex - b.orderIndex).map(chapter => {
+    const provenance = describe(chapter, 'previous', offset)
+    offset = provenance.endOffset + 2 // The standalone reader joins chapters with two newlines.
+    return provenance
+  })
+  return { scope: 'current_and_previous_3' as const, current: describe(current, 'current', 0), previous }
+}
+
 /** The editor references server-owned text, rather than transcribing it. */
 export function continuitySourceSegments(bodies: ContinuityBodies) {
   return (['previous', 'current'] as const).flatMap(source => {

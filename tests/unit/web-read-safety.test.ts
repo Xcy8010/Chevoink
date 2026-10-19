@@ -8,6 +8,7 @@ import iconv from 'iconv-lite'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 const transport = vi.hoisted(() => vi.fn())
+vi.mock('../../api/lib/tool-model-config.js', async original => ({ ...await original<object>(), getToolModelRuntime: vi.fn(async () => null) }))
 const stored = vi.hoisted(() => ({ page: null as import('../../api/lib/web-reader-service.js').WebReadResult | null,
   find: vi.fn(), failure: vi.fn(), recordFailure: vi.fn() }))
 // Transport/quality unit cases isolate storage; task ACL and immutable windows

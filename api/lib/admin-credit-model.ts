@@ -17,6 +17,8 @@ import { getActiveTokenPrices } from './billing/rate-cards.js'
 import { presentLedgerPrice } from './billing/ledger-presentation.js'
 import { presentModelRoutes, saveModelRoutes } from './model-route-pool.js'
 import type { ModelRouteInput } from '../../shared/contracts/model-routes.js'
+import { clearToolModelRuntimeCache } from './tool-model-config.js'
+import { webToolEndpoint } from './web-tool-provider.js'
 
 const MILLI = 1000
 
@@ -243,7 +245,10 @@ type ToolEnvironment = Pick<typeof env,
   'webSearchProvider' | 'webSearchBochaApiKeyConfigured'
 >
 
-export function toolEnvironmentFallback(modelKind: 'text' | 'image_generation' | 'vision' | 'web_search', config: ToolEnvironment = env) {
+export function toolEnvironmentFallback(modelKind: 'text' | 'image_generation' | 'vision' | 'web_search' | 'web_fetch', config: ToolEnvironment = env) {
+  // The direct reader remains available independently; it is not an enabled
+  // or configured hosted Fetch adapter in the admin catalog.
+  if (modelKind === 'web_fetch') return null
   if (modelKind === 'image_generation' && config.aiImageApiKeyConfigured) {
     return { provider: config.aiImageProvider, modelName: config.aiImageModel, baseUrl: config.aiImageBaseUrl, apiKeyConfigured: true }
   }
@@ -287,7 +292,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
       const row = usageMap.get(model.tier)
       const capabilities = parseModelCapabilities(model.metadata, model.provider)
       const metadata = model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata as Record<string, unknown> : {}
-      const modelKind = metadata.modelKind === 'image_generation' || metadata.modelKind === 'vision' || metadata.modelKind === 'web_search' ? metadata.modelKind : 'text'
+      const modelKind = metadata.modelKind === 'image_generation' || metadata.modelKind === 'vision' || metadata.modelKind === 'web_search' || metadata.modelKind === 'web_fetch' ? metadata.modelKind : 'text'
       const databaseReady = model.modelName !== 'unconfigured' && Boolean(model.baseUrl && model.apiKeyCiphertext)
       const fallback = databaseReady ? null : toolEnvironmentFallback(modelKind)
       const configurationReady = databaseReady || Boolean(fallback) || (model.tier === 'speed' && model.modelName !== 'unconfigured')
@@ -363,6 +368,11 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
     const nextHasApiKey = Boolean(input.apiKey?.trim() || model.apiKeyCiphertext)
     const nextEnabled = input.enabled ?? model.enabled
     const nextSelectable = input.selectable ?? model.selectable
+    if ((model.key === 'tool:web-search' || model.key === 'tool:web-fetch') && nextEnabled) {
+      try { webToolEndpoint({ provider: input.provider ?? model.provider, modelName: nextModelName,
+        baseUrl: nextBaseUrl ?? '', apiKey: nextHasApiKey ? 'configured' : '' }, model.key === 'tool:web-search' ? 'search' : 'fetch') }
+      catch { throw new DataAccessError(400, 'WEB_TOOL_CONFIG_INVALID', '网页工具需要受支持的供应商、独立工具端点与密钥；不能使用聊天接口地址。') }
+    }
     if (model.tier !== 'speed' && (nextEnabled || nextSelectable) && (nextModelName === 'unconfigured' || !nextBaseUrl || !nextHasApiKey)) {
       throw new DataAccessError(409, 'MODEL_CONFIG_INCOMPLETE', '该服务必须先完整配置模型 ID、Base URL 与 API Key，才能启用。')
     }
@@ -399,6 +409,7 @@ export async function updateAdminModel(adminId: string, modelId: string, input: 
     await lockCatalog(tx, adminId)
     await updateAdminModelWithTx(tx, modelId, input)
   })
+  clearToolModelRuntimeCache()
 }
 
 async function lockCatalog(tx: Prisma.TransactionClient, adminId: string) {

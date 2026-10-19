@@ -1,6 +1,6 @@
 import { readSettledQualityReviews } from './quality-review-admission.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
-import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation, shouldUseSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
+import { freezeWritingScope, effectiveWritingTaskSpec, readCompletedWritingDelivery, readSavedWritingPresentation, shouldUseSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery } from './review-request-recovery.js'
@@ -1167,7 +1167,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           currentReviewState.value = { ...review, progressEvidence: { ...review.progressEvidence, phases } }
         }
         return observeChapterReviewProgress(progressSignatures, currentReviewState.value?.progressEvidence,
-          { userId: params.userId, novelId: params.novelId, expectedOriginalTaskId: taskSpec.id, taskSpec })
+          { userId: params.userId, novelId: params.novelId, expectedOriginalTaskId: taskSpec.id,
+            taskSpec: await prisma.$transaction(tx => effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)) })
       } catch (error) {
         // A stale source is not progress. This optional observation must not
         // turn an otherwise recoverable manuscript state into a run failure.
@@ -1341,7 +1342,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       for (const milestone of savedMilestones) {
         const action = milestone.phase === 'prepare' ? 'story_compiler_prepare' : 'scene_task_build'
         recoveredWorkflowProgress = observeWritingWorkflowMilestone(progressSignatures, action, milestone,
-          { userId: params.userId, novelId: params.novelId, runId, taskSpec }) || recoveredWorkflowProgress
+          { userId: params.userId, novelId: params.novelId, runId,
+            taskSpec: await prisma.$transaction(tx => effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)) }) || recoveredWorkflowProgress
       }
       recoveredWorkflowProgress = await observePersistedReviewProgress() || recoveredWorkflowProgress
       if (recoveredWorkflowProgress) {
@@ -2536,7 +2538,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             `chapter:${outcome.requiredResult.targetId}`, outcome.requiredResult.contentHash))
           const readProgress = observeSemanticReadProgress(progressSignatures, call.name, outcome.observation, outcome.observedChapterRange)
           const workflowProgress = observeWritingWorkflowMilestone(progressSignatures, call.name, outcome.workflowMilestone,
-            { userId: params.userId, novelId: params.novelId, runId, taskSpec })
+            { userId: params.userId, novelId: params.novelId, runId, taskSpec: outcome.workflowMilestone
+              ? await prisma.$transaction(tx => effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)) : taskSpec })
           admission.record(admissionKey, outcome.observation, durableProgress || requiredProgress)
           if (durableProgress || requiredProgress || readProgress || workflowProgress) {
             batchProgress = true

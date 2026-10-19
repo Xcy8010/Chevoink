@@ -3,12 +3,15 @@ import { env } from '../config/env.js'
 import { decodeWebPageBuffer } from './html-extract.js'
 import { getPublicHttpBytes, parsePublicHttpUrl, publicEgressLookup, PublicHttpError, readBoundedPublicBody } from './public-http.js'
 import { assessReaderText, extractReaderHtml, extractReaderLinks, type ReaderQualityResult } from './web-reader-quality.js'
+import { getToolModelRuntime, ToolModelConfigurationError, type ToolModelRuntime } from './tool-model-config.js'
+import { requestWebTool, webToolEndpoint } from './web-tool-provider.js'
+import { extractMarkdownReaderLinks } from './web-reader-markdown.js'
 
 export const WEB_READER_MAX_BYTES = 2 * 1024 * 1024
 export type WebReadResult = Omit<ReaderQualityResult, 'status'> & {
   status: ReaderQualityResult['status'] | 'transient_error'
   finalUrl: string
-  provider: 'direct' | 'jina' | 'firecrawl'
+  provider: 'direct' | 'jina' | 'firecrawl' | 'deepseek'
   retryable: boolean
   retryAfter?: string | null
   contentKind: 'article' | 'metadata'
@@ -121,8 +124,60 @@ async function readHosted(url: URL, provider: 'jina' | 'firecrawl', external: Ab
   }
 }
 
-export async function readPublicWebPage(value: string, signal: AbortSignal): Promise<WebReadResult> {
+async function readDeepSeek(value: string, configured: ToolModelRuntime, external: AbortSignal): Promise<WebReadResult> {
+  const provider = 'deepseek' as const
+  const fail = (code: string, retryable = false, status: WebReadResult['status'] = 'unreadable'): WebReadResult =>
+    ({ ...failure(code, value), provider, retryable, status })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error('HOSTED_READER_TIMEOUT')), 12000)
+  const signal = AbortSignal.any([external, controller.signal])
+  try {
+    const endpoint = webToolEndpoint(configured, 'fetch')
+    const target = parsePublicHttpUrl(value, true)
+    if (target.hostname === 'sec.douban.com' && /^\/c(?:\/|$)/.test(target.pathname)) return fail('WEB_READ_BLOCKED', false, 'blocked')
+    if ([...target.searchParams.keys()].some(key => /token|secret|signature|credential|auth|api.?key/i.test(key))) return fail('WEB_READ_HOSTED_TARGET_RESTRICTED')
+    await checkHostedTarget(target, signal)
+    const request = await requestWebTool(endpoint, configured.apiKey, { url: target.href }, signal)
+    try {
+      const { response } = request
+      if (!response.ok) {
+        // Provider 404 means no extractable content, not proof the target is missing.
+        if (response.status === 403) return fail('WEB_READ_BLOCKED', false, 'blocked')
+        if (response.status === 404) return fail('WEB_READ_HOSTED_NO_CONTENT')
+        if ([400, 401, 402].includes(response.status)) return fail(`WEB_READ_PROVIDER_${response.status}`)
+        const retryable = [408, 429].includes(response.status) || response.status >= 500
+        return { ...fail(response.status === 429 ? 'WEB_READ_RATE_LIMITED' : 'WEB_READ_HOSTED_UNAVAILABLE', retryable,
+          retryable ? 'transient_error' : 'unreadable'), retryAfter: response.headers.get('retry-after') }
+      }
+      const payload: unknown = JSON.parse((await readBoundedPublicBody(response, WEB_READER_MAX_BYTES)).toString('utf8'))
+      if (!payload || typeof payload !== 'object' || !('title' in payload) || typeof payload.title !== 'string' ||
+        !('content' in payload) || typeof payload.content !== 'string') return fail('WEB_READ_PROVIDER_PROTOCOL_ERROR')
+      signal.throwIfAborted()
+      const quality = assessReaderText(payload.content.replace(/^#{1,6}\s+/gm, ''), payload.title.slice(0, 300))
+      const bookMetadata = /^(?:www\.)?fanqienovel\.com$/i.test(target.hostname) && /^\/(?:page|keyword)\//i.test(target.pathname)
+      return { ...quality, provider, retryable: false, finalUrl: target.href, contentKind: bookMetadata ? 'metadata' : 'article',
+        ...(quality.status === 'ok' ? { links: extractMarkdownReaderLinks(payload.content, target.href) } : {}) }
+    } finally { await request.close() }
+  } catch (error) {
+    external.throwIfAborted()
+    if (error instanceof ToolModelConfigurationError) return fail(error.code)
+    if (error instanceof SyntaxError) return fail('WEB_READ_PROVIDER_PROTOCOL_ERROR')
+    const denied = networkFailure(error, value)
+    if (['WEB_READ_UNSAFE_URL', 'WEB_READ_TOO_LARGE'].includes(denied.code)) return { ...denied, provider }
+    return fail('WEB_READ_HOSTED_UNAVAILABLE', true, 'transient_error')
+  } finally { clearTimeout(timer) }
+}
+
+export async function readPublicWebPage(value: string, signal: AbortSignal, configuredInput?: ToolModelRuntime | null): Promise<WebReadResult> {
   signal.throwIfAborted()
+  let configured: ToolModelRuntime | null
+  try { configured = configuredInput === undefined ? await getToolModelRuntime('tool:web-fetch') : configuredInput }
+  catch (error) {
+    if (error instanceof ToolModelConfigurationError) return failure(error.code, value)
+    throw error
+  }
+  signal.throwIfAborted()
+  if (configured) return readDeepSeek(value, configured, signal)
   let finalUrl = value
   try {
     const page = await getPublicHttpBytes(value, {

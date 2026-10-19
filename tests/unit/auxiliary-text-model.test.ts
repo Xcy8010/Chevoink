@@ -167,7 +167,7 @@ describe('auxiliary text model inheritance', () => {
       agentSession: { findFirst: vi.fn(async () => ({ spawnedFromRunId: null, spawnedFromSessionId: null })) },
       agentChildExecutionGrant: { findUnique: vi.fn(async () => null) } } as unknown as Prisma.TransactionClient
     vi.spyOn(prisma, '$transaction').mockImplementation(async work => (work as (tx: Prisma.TransactionClient) => Promise<unknown>)(tx))
-    mocks.report.mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 1, repairRound: 0, status: 'needs_repair', deterministicMetrics: { independentCheck: 'complete' }, findings: [
+    mocks.report.mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 1, chapter: { id: 'chapter', revision: 1, content: '她关上了门。' }, repairRound: 0, status: 'needs_repair', deterministicMetrics: { independentCheck: 'complete' }, findings: [
       { id: 'finding', signal: 'emotion_grounding', severity: 'warning', disposition: 'selected', startOffset: 0, endOffset: 6,
         evidenceExcerpt: '她关上了门。', explanation: '提示', suggestion: '待审' },
     ] })

@@ -245,6 +245,25 @@ describe('story compiler task identity', () => {
     expect(result.output).toContain('scene_task_build')
     expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
   })
+  it.each(['current', 'stale', 'missing'] as const)('PREPARE uses only the previous chapter current committed revision (%s)', async scenario => {
+    const find = db.chapter.findFirst.getMockImplementation()!
+    db.chapter.findFirst.mockImplementation(async query => query.where.orderIndex?.lt
+      ? { id: 'old31', title: '前章', orderIndex: 31, revision: 5, content: '修订后她留在渡口。' }
+      : find(query))
+    db.chapterBridge.findFirst.mockResolvedValue(scenario === 'missing' ? null : {
+      id: 'previous-bridge', toChapterId: 'old31', targetRevision: scenario === 'current' ? 5 : 4,
+      lastUnfinishedAction: '她进入仓库', location: '仓库', objectState: ['她持有钥匙'], knowledgeState: [], bodyState: [],
+      relationshipState: [], emotionAftermath: [], openLoops: ['仓库追逐'], hookDecision: '', delayedHookReason: '', storyTime: '', committedAt: new Date(1),
+    })
+    const result = await prepareStoryCompilation({ ...ctx, chapterId: undefined, mode: 'balanced', intentSummary: '写下一章' })
+    expect(db.chapterBridge.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: {
+      userId: 'u', novelId: 'n', toChapterId: 'old31', targetRevision: 5, committedAt: { not: null },
+    } }))
+    expect(result.compilation.bridge).toMatchObject({ fromChapterId: 'old31', sourceRevision: 5 })
+    expect(result.bridge).toMatchObject(scenario === 'current'
+      ? { location: '仓库', objectState: ['她持有钥匙'], lastUnfinishedAction: '她进入仓库' }
+      : { location: '', objectState: [], lastUnfinishedAction: '', openLoops: [] })
+  })
   it('inherits the CAS-consumed new-draft marker and counters when repreparing across the original parent/child lineage', async () => {
     const marker = { version: 1, taskId: 'task', chapterId: 'own32', compilationId: 'old-compiler', checkedRevision: 3 }
     db.storyCompilation.findMany.mockResolvedValue([{ validation: { checkRounds: 2, autoRepairRounds: 0, newDraftRevision: marker } }])

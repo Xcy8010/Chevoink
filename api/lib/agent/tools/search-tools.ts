@@ -2,9 +2,10 @@ import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import { env } from '../../../config/env.js'
 import { getToolModelRuntime } from '../../tool-model-config.js'
+import { webToolEndpoint } from '../../web-tool-provider.js'
 
 import { readPublicWebPage } from '../../web-reader-service.js'
-import { searchWeb, WebSearchError } from '../../web-search-service.js'
+import { assertWebSearchConfiguration, searchWeb, WebSearchError } from '../../web-search-service.js'
 import { consumeCredits, WEB_SEARCH_CALL_MILLI, recordSearchRefundIntent, getSearchRefundState, reconcileCreditRefunds } from '../../credits.js'
 import { DataAccessError } from '../../prisma.js'
 import type { WebSearchOutcome } from '../../web-search-service.js'
@@ -89,6 +90,7 @@ export const webSearchTool = defineTool({
     // credential fingerprint stays internal; no key is returned or logged.
     const normalizedQuery = normalizeSearchQuery(args.query)
     const configured = await getToolModelRuntime('tool:web-search')
+    assertWebSearchConfiguration(configured, args.query)
     ctx.signal.throwIfAborted()
     const cacheKey = createHash('sha256').update(JSON.stringify({ version: 1, userId: ctx.userId,
       query: normalizedQuery, count: args.maxResults, provider: env.webSearchProvider,
@@ -176,7 +178,7 @@ export const webSearchTool = defineTool({
       // Only expose bounded protocol facts, never upstream response bodies,
       // request IDs, credentials or arbitrary exception messages.
       const failures = error instanceof WebSearchError ? error.attempts.slice(0, 3).map(attempt => {
-        const provider = ['bocha', 'sogou', 'bing'].includes(attempt.provider) ? attempt.provider : '搜索服务'
+        const provider = ['bocha', 'deepseek', 'sogou', 'bing'].includes(attempt.provider) ? attempt.provider : '搜索服务'
         const status = attempt.httpStatus
         if (typeof status === 'number' && Number.isInteger(status) && status >= 400 && status <= 599) {
           return `${provider} 搜索接口 HTTP ${status}${status === 404 ? '（接口响应，不是小说正文地址的404）' : status === 429 ? '（限流）' : ''}`
@@ -278,7 +280,10 @@ export const webReadTool = defineTool({
         `此来源上次读取失败（${cachedFailure.code}），${cachedFailure.retryAt}前不重复访问。本次未发起网络请求、不计为新读取；保留已取得证据，可核对其他真实来源，不要换Reader或出口绕过访问限制。`)
     }
     const source = registered ?? await registerResearchSource(ctx, args.url!)
-    if (!await reserveResearchRequest(ctx, 'read', createHash('sha256').update(source.canonicalUrl).digest('hex'))) {
+    const configuredFetch = await getToolModelRuntime('tool:web-fetch')
+    if (configuredFetch) webToolEndpoint(configuredFetch, 'fetch')
+    if (!await reserveResearchRequest(ctx, 'read', createHash('sha256').update(JSON.stringify({ version: 2, url: source.canonicalUrl,
+      configuredFetch, fallback: env.webReaderFallback })).digest('hex'))) {
       throw new DataAccessError(429, 'WEB_READ_BUDGET', '网页读取预算已用尽，本次未读取。保留已获得的证据，说明剩余工作；不要继续重试或把缺失内容当作已读。')
     }
     if (ctx.signal.aborted) {
@@ -286,12 +291,20 @@ export const webReadTool = defineTool({
       ctx.signal.throwIfAborted()
     }
     await settleResearchRequest(ctx, 'consumed')
-    const result = await readPublicWebPage(source.canonicalUrl, ctx.signal)
+    const result = await readPublicWebPage(source.canonicalUrl, ctx.signal, configuredFetch)
     await recordResearchReadOutcome(ctx, result.status === 'ok')
     ctx.signal.throwIfAborted()
     if (result.status !== 'ok') {
       await recordResearchReadFailure(ctx, source.id, result)
       const messages: Record<string, string> = {
+        TOOL_CONFIG_INCOMPLETE: '网页抓取配置不完整，本次未请求供应商。',
+        WEB_TOOL_PROVIDER_UNSUPPORTED: '网页抓取供应商不受支持，本次未请求供应商。',
+        WEB_TOOL_ENDPOINT_INVALID: '网页抓取端点配置无效，不能使用聊天接口地址。',
+        WEB_READ_PROVIDER_PROTOCOL_ERROR: '网页抓取供应商返回的内容格式不符合约定。',
+        WEB_READ_HOSTED_NO_CONTENT: '抓取供应商没有取得可用正文；这不能证明目标页面不存在。',
+        WEB_READ_PROVIDER_400: '网页抓取供应商拒绝了请求，请管理员检查工具配置。',
+        WEB_READ_PROVIDER_401: '网页抓取供应商鉴权失败，请管理员检查该工具密钥。',
+        WEB_READ_PROVIDER_402: '网页抓取供应商余额不足，请管理员检查供应商账户。',
         WEB_READ_BLOCKED: '目标页面要求登录、付费、验证或拒绝访问；不得换代理或托管Reader绕过，请提供有权使用的材料。',
         WEB_READ_NOT_FOUND: '目标地址返回404或410，本次未取得页面；这不能证明作品不存在。请核对官方目录中的真实链接，不要反复请求同一地址。',
         WEB_READ_GARBLED: '正文包含大量不可读字形或乱码；不能猜字、分析情节或声称已经阅读全文。',

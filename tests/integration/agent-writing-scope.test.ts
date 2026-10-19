@@ -35,6 +35,12 @@ import { prepareStoryCompilation, validateStoryContinuity, commitChapterBridge }
 import { buildHumanityQualityContext, qualityReviewContextHash } from '../../api/lib/agent/humanity-quality.js'
 import { observeChapterReviewProgress } from '../../api/lib/agent/semantic-progress.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import { askUserTool } from '../../api/lib/agent/tools/interact-tools.js'
+import * as questionPermissions from '../../api/lib/agent/permissions.js'
+import { resolveLoopRunQuestion } from '../../api/lib/agent/run-service.js'
+import { resolveDurableQuestion } from '../../api/lib/agent/runtime-question.js'
+import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
+import { shortSceneRequest, firstChapterAnswer, placementQuestion } from '../support/writing-clarification-fixture.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -62,6 +68,112 @@ async function fixture(prompt: string, work: (ctx: ToolContext) => Promise<void>
     })
   }
 }
+describe.skipIf(!available)('authenticated empty-book clarification', () => {
+  async function admit(ctx: ToolContext) {
+    const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx,
+      buildTaskSpec({ ...ctx, prompt: shortSceneRequest, reviewProtocol: 1, localEditProtocol: 1 }), shortSceneRequest))
+    expect(spec).toMatchObject({ intent: 'write', writingPacing: 'explicit_writing',
+      scope: { writingClarificationProtocol: 1, writing: { kind: 'needs_input', targets: [] } } })
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } })
+    return spec
+  }
+  async function legacyAnswer(ctx: ToolContext, answer: string, cancel?: () => Promise<void>) {
+    const wait = questionPermissions.waitForQuestionAnswer
+    const spy = vi.spyOn(questionPermissions, 'waitForQuestionAnswer').mockImplementation((runId, callId, timeout, signal) => {
+      const pending = wait(runId, callId, timeout, signal)
+      const deliver = async () => {
+        if (cancel) await cancel()
+        await resolveLoopRunQuestion(ctx.userId, runId, callId, answer)
+      }
+      return Promise.all([pending, deliver()]).then(([result]) => result)
+    })
+    try { return await askUserTool.execute(ctx, placementQuestion) } finally { spy.mockRestore() }
+  }
+  it.each(['legacy', 'durable'] as const)('%s answers initialize exactly one chapter without changing origin hashes or review obligations', mode => fixture(shortSceneRequest, async ctx => {
+    await admit(ctx)
+    const frozenRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+    const originHash = runtimeJson({ spec: frozenRun.taskSpec, request: frozenRun.startRequest }).hash
+    await expect(prisma.$transaction(tx => assertWritingTarget(tx, ctx, { orderIndex: 1 }))).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    if (mode === 'legacy') {
+      const answered = await legacyAnswer(ctx, firstChapterAnswer)
+      expect(answered.semanticTransition).toBeDefined()
+    } else {
+      await prisma.agentRun.update({ where: { id: ctx.runId }, data: { status: 'queued' } })
+      const sourceMessageId = randomUUID()
+      await prisma.agentMessage.create({ data: { id: sourceMessageId, sessionId: ctx.sessionId, runId: ctx.runId, role: 'user', parts: [{ type: 'text', text: shortSceneRequest }] } })
+      const root = await initializeDurableTask({ userId: ctx.userId, runId: ctx.runId, sourceMessageId })
+      const lease = await acquireRunLease({ userId: ctx.userId, runId: ctx.runId, ownerId: 'clarification-fixture', claimId: randomUUID() })
+      const tools = [askUserTool]
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: tools.map(tool => ({ type: 'function' as const, function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
+        toolAuthority: [{ name: askUserTool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages: [{ role: 'user', content: shortSceneRequest }, { role: 'assistant', content: null,
+            toolCalls: [{ id: ctx.callId, name: 'ask_user', arguments: JSON.stringify(placementQuestion) }] }], successfulToolSignatures: [] } })
+      const waiting = await executeDurableToolStep(lease, ctx.signal)
+      if (waiting.kind !== 'waiting_question' || !waiting.requestId) throw new Error('Expected real persisted question')
+      const answer = { userId: ctx.userId, runId: ctx.runId, callId: ctx.callId, requestId: waiting.requestId, answer: firstChapterAnswer }
+      await resolveDurableQuestion(answer)
+      const answered = await executeDurableToolStep(lease, ctx.signal)
+      if (answered.kind !== 'tool') throw new Error('Expected answered tool receipt')
+      expect(answered.result.semanticTransition).toBeDefined()
+      const current = await loadExecutionState(ctx.userId, ctx.runId)
+      const evidence = await prisma.$transaction(tx => collectDurableToolEvidence(tx, root.id, current.frame.revision))
+      expect(BigInt(evidence.progressSequence)).toBeGreaterThan(0n)
+      await resolveDurableQuestion(answer)
+      expect(await prisma.$transaction(tx => collectDurableToolEvidence(tx, root.id, current.frame.revision))).toEqual(evidence)
+      const after = await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: root.id } })
+      expect(after.inputHash).toBe(root.inputHash)
+      expect(after.specSnapshot).toEqual(root.specSnapshot)
+    }
+    const scope = await readWritingScope(prisma, ctx)
+    expect(scope.writing?.targets).toEqual([{ orderIndex: 1, chapterId: null }])
+    expect((await readOriginalTaskRequest(prisma, ctx)).prompt).toBe(shortSceneRequest)
+    expect(scope.spec).toMatchObject({ scope: { writing: { kind: 'needs_input', targets: [] } } })
+    expect(await prisma.agentArtifact.count({ where: { runId: ctx.runId, metadata: { path: ['writingScopeClarification'], equals: true } } })).toBe(1)
+    await expect(prisma.$transaction(tx => assertWritingTarget(tx, ctx, { orderIndex: 2 }))).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    const prepared = await prepareStoryCompilation({ ...ctx, targetOrderIndex: 1, mode: 'balanced', intentSummary: shortSceneRequest })
+    await compiler.saveSceneTasks({ ...ctx, compilationId: prepared.compilation.id, tasks: [{ purpose: '取得入场资格', entryState: { location: '关卡门外', knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] },
+      goal: '通过门禁', obstacle: '守门人要抵押', choice: '交出铜牌', cost: '暂失铜牌', turn: '守门人开启门闩', exitState: { knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] },
+      styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
+    const body = '门闩横在林策胸前。他要赶上最后一场过关赛，守门人却伸出手，索要抵押。他把铜牌拍在桌上，示意对方查看背面的凹痕。守门人刮掉铜牌上的泥，终于让开。'.repeat(6)
+    const created = await chapterCreateTool.execute(ctx, { title: '过关赛', content: body })
+    const chapterId = created.observedState!.id
+    expect(await readNewDraftWritingAuthority(prisma, ctx, { id: chapterId, orderIndex: 1 })).toBeTruthy()
+    await expect(commitChapterBridge({ ...ctx, compilationId: prepared.compilation.id, chapterSummary: '过关', exitState: { knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '门闩', endingStructure: '放行' })).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    const current = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { chapter: true, bridge: true, sceneTasks: true } })
+    await validateStoryContinuity({ ...ctx, compilationId: current.id, expectedChapterRevision: current.chapter!.revision, findings: [], independentCheck: 'complete',
+      coverage: compilerContinuityCoverage({ chapter: current.chapter!, bridge: current.bridge, sceneTasks: current.sceneTasks, source: null }) })
+    await prisma.chapterQualityReport.create({ data: { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: current.id, chapterId,
+      chapterRevision: current.chapter!.revision, status: 'passed', deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(body).digest('hex') } } })
+    expect((await chapterBridgeCommitTool.execute(ctx, { compilationId: current.id })).outcome).not.toBe('failed')
+    expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(1)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).toMatchObject({ title: '过关赛', content: body })
+    const afterRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+    expect(runtimeJson({ spec: afterRun.taskSpec, request: afterRun.startRequest }).hash).toBe(originHash)
+    expect(await prisma.aiUsageLog.count({ where: { agentRunId: ctx.runId } })).toBe(0)
+  }))
+  it.each(['第一章不要写，先讨论设定', '第一章暂不确定', '第一章写入；但别保存', '第一章写入，再继续下一章', '第一章写入是否合适？'] as const)(
+    'negative author answer remains read-only with no amendment or progress: %s', answer => fixture(shortSceneRequest, async ctx => {
+      await admit(ctx)
+      expect((await legacyAnswer(ctx, answer)).semanticTransition).toBeUndefined()
+      expect(await prisma.agentArtifact.count({ where: { runId: ctx.runId, metadata: { path: ['writingScopeClarification'], equals: true } } })).toBe(0)
+      await expect(prisma.$transaction(tx => assertWritingTarget(tx, ctx, { orderIndex: 1 }))).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+      expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(0)
+    }))
+  it('an answered legacy card cannot reactivate a paused run', () => fixture(shortSceneRequest, async ctx => {
+    await admit(ctx)
+    await expect(legacyAnswer(ctx, firstChapterAnswer, async () => {
+      await prisma.agentRun.update({ where: { id: ctx.runId }, data: { status: 'paused' } })
+    })).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).status).toBe('paused')
+    expect(await prisma.agentArtifact.count({ where: { runId: ctx.runId, metadata: { path: ['writingScopeClarification'], equals: true } } })).toBe(0)
+    expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(0)
+  }))
+})
+
 describe.skipIf(!available)('atomic original chapter scope', () => {
   it.each(['legacy', 'durable-current', 'durable-previous-presentation'] as const)('recovers a mistaken source48 ID before preparing and writing frozen chapter49 via %s', mode => fixture('写下一章', async ctx => {
     const firstVolume = await prisma.volume.findFirstOrThrow({ where: { novelId: ctx.novelId, orderIndex: 1 } })

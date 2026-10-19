@@ -1,7 +1,8 @@
 import { env } from '../config/env.js'
 import { z } from 'zod'
 import { parsePublicHttpUrl, readBoundedPublicBody } from './public-http.js'
-import { getToolModelRuntime, type ToolModelRuntime } from './tool-model-config.js'
+import { getToolModelRuntime, ToolModelConfigurationError, type ToolModelRuntime } from './tool-model-config.js'
+import { requestWebTool, webToolEndpoint } from './web-tool-provider.js'
 
 /**
  * 联网搜索服务（Agent web_search 工具的后端）：
@@ -20,7 +21,7 @@ export type WebSearchResult = {
 }
 
 export type WebSearchOutcome = {
-  provider: 'bocha' | 'sogou' | 'bing'
+  provider: 'bocha' | 'deepseek' | 'sogou' | 'bing'
   results: WebSearchResult[]
   attempts?: SearchAttempt[]
 }
@@ -55,7 +56,18 @@ export class WebSearchError extends Error {
   }
 }
 
+export function assertWebSearchConfiguration(configured: ToolModelRuntime | null, query?: string): void {
+  if (configured) webToolEndpoint(configured, 'search')
+  if (!['auto', 'bocha', 'sogou', 'bing', 'disabled'].includes(env.webSearchProvider)) throw new ToolModelConfigurationError('WEB_SEARCH_PROVIDER_UNSUPPORTED')
+  if (configured?.provider.trim().toLowerCase() === 'deepseek' && query !== undefined &&
+    (!query.trim() || [...query].length > 128)) throw new WebSearchError('WEB_SEARCH_QUERY_INVALID')
+}
+
 const SNIPPET_MAX = 300
+const deepseekSearchSchema = z.object({ results: z.array(z.object({
+  title: z.string(), url: z.string(), snippet: z.string(), summary: z.string(), content: z.string(),
+  site_name: z.string().nullable().optional(),
+})).max(50) })
 const bochaResponseSchema = z.object({
   code: z.literal(200),
   data: z.object({ webPages: z.object({ value: z.array(z.object({
@@ -126,43 +138,55 @@ function withTimeout(external: AbortSignal | undefined, timeoutMs: number): { si
 }
 
 async function searchBocha(query: string, maxResults: number, signal: AbortSignal, configured: ToolModelRuntime | null, metadata: AttemptResponse): Promise<WebSearchResult[]> {
-  const response = await fetch(configured?.baseUrl ?? 'https://api.bochaai.com/v1/web-search', {
-    method: 'POST',
-    redirect: 'error',
-    headers: {
-      Authorization: `Bearer ${configured?.apiKey ?? env.webSearchBochaApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ query, count: maxResults, summary: true }),
-    signal,
-  })
+  const request = await requestWebTool(configured ? webToolEndpoint(configured, 'search') : 'https://api.bochaai.com/v1/web-search',
+    configured?.apiKey ?? env.webSearchBochaApiKey, { query, count: maxResults, summary: true }, signal)
+  const { response } = request
+  try {
 
-  captureSearchResponse(response, metadata)
+    captureSearchResponse(response, metadata)
 
-  if (!response.ok) {
-    return rejectSearchResponse(response, '博查')
-  }
+    if (!response.ok) {
+      return rejectSearchResponse(response, '博查')
+    }
 
-  const body = await readBoundedPublicBody(response, 2 * 1024 * 1024)
-  const raw: unknown = JSON.parse(body.toString('utf8'))
-  if (raw && typeof raw === 'object') {
-    if ('log_id' in raw && typeof raw.log_id === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(raw.log_id)) metadata.providerRequestId = raw.log_id
-    if ('code' in raw && (typeof raw.code === 'string' || typeof raw.code === 'number') && /^[a-zA-Z0-9_-]{1,32}$/.test(String(raw.code))) metadata.providerCode = String(raw.code)
-  }
-  const payload = bochaResponseSchema.safeParse(raw)
-  if (!payload.success) throw new WebSearchError('博查响应格式或业务状态异常')
-  const values = payload.data.data.webPages.value
+    const body = await readBoundedPublicBody(response, 2 * 1024 * 1024)
+    const raw: unknown = JSON.parse(body.toString('utf8'))
+    if (raw && typeof raw === 'object') {
+      if ('log_id' in raw && typeof raw.log_id === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(raw.log_id)) metadata.providerRequestId = raw.log_id
+      if ('code' in raw && (typeof raw.code === 'string' || typeof raw.code === 'number') && /^[a-zA-Z0-9_-]{1,32}$/.test(String(raw.code))) metadata.providerCode = String(raw.code)
+    }
+    const payload = bochaResponseSchema.safeParse(raw)
+    if (!payload.success) throw new WebSearchError('博查响应格式或业务状态异常')
+    const values = payload.data.data.webPages.value
 
-  const results = publicResults(values
-    .filter((item) => item.url && item.name)
-    .map((item) => ({
-      title: stripTags(item.name ?? ''),
-      url: item.url ?? '',
-      snippet: truncate(stripTags(item.summary || item.snippet || ''), SNIPPET_MAX),
-      source: item.siteName || hostOf(item.url ?? ''),
-    })), maxResults)
-  if (values.length && !results.length) throw new WebSearchError('博查未返回可用的公开来源')
-  return results
+    const results = publicResults(values
+      .filter((item) => item.url && item.name)
+      .map((item) => ({
+        title: stripTags(item.name ?? ''),
+        url: item.url ?? '',
+        snippet: truncate(stripTags(item.summary || item.snippet || ''), SNIPPET_MAX),
+        source: item.siteName || hostOf(item.url ?? ''),
+      })), maxResults)
+    if (values.length && !results.length) throw new WebSearchError('博查未返回可用的公开来源')
+    return results
+  } finally { await request.close() }
+}
+
+async function searchDeepSeek(query: string, maxResults: number, signal: AbortSignal, configured: ToolModelRuntime, metadata: AttemptResponse): Promise<WebSearchResult[]> {
+  const request = await requestWebTool(webToolEndpoint(configured, 'search'), configured.apiKey,
+    { query, count: maxResults, need_content: false }, signal)
+  try {
+    const { response } = request
+    captureSearchResponse(response, metadata)
+    if (!response.ok) return rejectSearchResponse(response, 'DeepSeek')
+    const raw: unknown = JSON.parse((await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8'))
+    const payload = deepseekSearchSchema.safeParse(raw)
+    if (!payload.success) throw new WebSearchError('DEEPSEEK_SEARCH_PROTOCOL_ERROR')
+    // Keep the original count until publicResults runs: unsafe-only results are
+    // a failed contract, never evidence of a genuinely empty search.
+    return payload.data.results.map(item => ({ title: stripTags(item.title), url: item.url,
+      snippet: truncate(stripTags(item.summary || item.snippet), SNIPPET_MAX), source: item.site_name || hostOf(item.url) }))
+  } finally { await request.close() }
 }
 
 /** 无 key 兜底：抓取搜狗结果页，按 vrwrap 块提取标题 + data-url 真实链接 + 摘要 */
@@ -302,14 +326,15 @@ export async function searchWeb(
 
   try {
     const configured = configuredInput === undefined ? await getToolModelRuntime('tool:web-search') : configuredInput
-    const preferBocha =
-      Boolean(configured) || env.webSearchProvider === 'bocha' || (env.webSearchProvider === 'auto' && env.webSearchBochaApiKeyConfigured)
+    assertWebSearchConfiguration(configured, query)
+    const primary = configured ? configured.provider.trim().toLowerCase() as 'bocha' | 'deepseek'
+      : env.webSearchProvider === 'bocha' || (env.webSearchProvider === 'auto' && env.webSearchBochaApiKeyConfigured) ? 'bocha' : null
 
     if (env.webSearchProvider === 'disabled') {
       throw new WebSearchError('联网搜索已禁用（WEB_SEARCH_PROVIDER=disabled）')
     }
 
-    const providers: WebSearchOutcome['provider'][] = preferBocha ? ['bocha', 'sogou', 'bing'] : ['sogou', 'bing']
+    const providers: WebSearchOutcome['provider'][] = primary ? [primary, 'sogou', 'bing'] : ['sogou', 'bing']
     let emptyProvider: WebSearchOutcome['provider'] | undefined
     for (const provider of providers) {
       merged.throwIfAborted()
@@ -318,7 +343,8 @@ export async function searchWeb(
       // A slow provider must leave time for fallback; all attempts still share the overall deadline.
       const local = withTimeout(merged, Math.max(1, Math.floor(env.webSearchTimeoutMs / 2)))
       try {
-        const raw = provider === 'bocha' ? await searchBocha(query, maxResults, local.signal, configured, metadata)
+        const raw = provider === 'deepseek' ? await searchDeepSeek(query, maxResults, local.signal, configured!, metadata)
+          : provider === 'bocha' ? await searchBocha(query, maxResults, local.signal, configured, metadata)
           : provider === 'sogou' ? await searchSogou(query, maxResults, local.signal, metadata)
             : await searchBing(query, maxResults, local.signal, metadata)
         local.signal.throwIfAborted()
@@ -340,6 +366,7 @@ export async function searchWeb(
     if (emptyProvider) return { provider: emptyProvider, results: [], attempts }
     throw new WebSearchError('所有搜索引擎均未返回有效响应', attempts)
   } catch (error) {
+    if (error instanceof ToolModelConfigurationError) throw new WebSearchError(error.code, attempts)
     // Preserve attempted-request evidence for cancellation settlement. A
     // pre-request cancellation still propagates unchanged and cannot refund.
     if (signal?.aborted && attempts.length) throw new WebSearchError('搜索已取消', attempts)

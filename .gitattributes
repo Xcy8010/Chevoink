@@ -4,3 +4,4 @@ public/voice-capture-worklet.js text eol=lf
 
 # Keep the reviewed production migration checksum identical across platforms.
 prisma/migrations/20261009010000_quality_finding_span_identity/migration.sql text eol=lf
+prisma/migrations/20261019120000_web_fetch_tool_config/migration.sql text eol=lf

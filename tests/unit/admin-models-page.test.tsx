@@ -11,6 +11,20 @@ const row = (id: string, tier: 'speed' | 'builtin_0123456789abcdef', displayName
 function mount() { const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } }); return render(<QueryClientProvider client={client}><AdminModelsPage /></QueryClientProvider>) }
 beforeEach(() => { vi.clearAllMocks(); mocks.get.mockResolvedValue({ models: [row('a', 'speed', '极速'), row('b', 'builtin_0123456789abcdef', '动态模型')], trend: [] }); mocks.create.mockResolvedValue({ id: 'new', tier: 'builtin_fedcba9876543210' }); mocks.reorder.mockResolvedValue({ ok: true }); mocks.update.mockResolvedValue({ ok: true }) })
 afterEach(cleanup)
+it('edits Fetch as an independent tool and submits its dedicated endpoint without changing the text catalog', async () => {
+  mocks.get.mockResolvedValue({ models: [{ ...row('fetch', 'speed', 'Fetch tool'), tier: 'tool_fetch', modelKind: 'web_fetch',
+    provider: 'deepseek', modelName: 'deepseek-fetch', baseUrl: 'https://api.deepseek.com', selectable: false, isDefault: false }], trend: [] })
+  mount()
+  const title = await screen.findByText('Fetch tool')
+  expect(screen.getByText('网页抓取')).toBeTruthy()
+  fireEvent.click(title.closest('section')!.querySelector('button')!)
+  expect(screen.getByText(/Search 与 Fetch 独立配置/)).toBeTruthy()
+  fireEvent.change(document.querySelector('[name="model-endpoint-fetch"]')!, { target: { value: 'https://api.deepseek.com/v1/tools/fetch' } })
+  fireEvent.click(document.querySelector('section.fixed button') ?? screen.getByRole('button', { name: '保存配置' }))
+  await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('fetch', expect.objectContaining({ provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1/tools/fetch', apiKey: undefined })))
+  expect(mocks.create).not.toHaveBeenCalled()
+  expect(mocks.reorder).not.toHaveBeenCalled()
+})
 it('reuses the editor for creation with a complete expected catalog order and no UI-only form fields', async () => {
   mount(); await screen.findByText('动态模型')
   fireEvent.click(screen.getByRole('button', { name: '添加内置模型' }))

@@ -1,8 +1,9 @@
 import { z } from 'zod'
 
 import { env } from '../../../config/env.js'
-import { prisma } from '../../prisma.js'
+import { DataAccessError, prisma } from '../../prisma.js'
 import { assertQuestionWritingScope } from '../writing-scope.js'
+import { recordWritingClarification } from '../writing-clarification.js'
 import { consumeQuestionBudget, waitForQuestionAnswer } from '../permissions.js'
 import { defineTool } from './types.js'
 
@@ -86,9 +87,9 @@ export const askUserTool = defineTool({
     }
 
     // 挂起等待作者回答（复用审批超时时长）；期间 run 标记为 awaiting_approval 供前端展示等待态
-    await prisma.agentRun
-      .update({ where: { id: ctx.runId }, data: { status: 'awaiting_approval' } })
-      .catch(() => {})
+    const waiting = await prisma.agentRun.updateMany({ where: { id: ctx.runId, userId: ctx.userId, novelId: ctx.novelId,
+      status: { in: ['queued', 'running'] } }, data: { status: 'awaiting_approval' } })
+    if (waiting.count !== 1) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '当前执行已停止，未发起新提问。')
 
     const { setGoalRunPhase } = await import('../goal-runtime.js')
     await setGoalRunPhase(ctx.userId, ctx.runId, 'awaiting_input')
@@ -103,10 +104,11 @@ export const askUserTool = defineTool({
     if (result.answer === null && goalContext) {
       return (await import('../goal-store.js')).goalError('GOAL_AUTHOR_INPUT_REQUIRED', '目标等待作者回答，未选择默认方向继续。')
     }
-    if (!ctx.signal.aborted) await setGoalRunPhase(ctx.userId, ctx.runId, 'executing')
-    await prisma.agentRun
-      .update({ where: { id: ctx.runId }, data: { status: 'running' } })
-      .catch(() => {})
+    ctx.signal.throwIfAborted()
+    const resumed = await prisma.agentRun.updateMany({ where: { id: ctx.runId, userId: ctx.userId, novelId: ctx.novelId,
+      status: 'awaiting_approval' }, data: { status: 'running' } })
+    if (resumed.count !== 1) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '提问后执行已停止，回答没有恢复旧任务。')
+    await setGoalRunPhase(ctx.userId, ctx.runId, 'executing')
 
     if (result.answer === null) {
       const reason = result.timedOut ? '作者长时间未回答' : '本次提问已取消'
@@ -122,8 +124,12 @@ export const askUserTool = defineTool({
       }
     }
 
+    ctx.signal.throwIfAborted()
+    const clarification = await prisma.$transaction(tx => recordWritingClarification(tx, ctx,
+      { callId: ctx.callId, ...args, answer: result.answer!, source: 'legacy_question' }))
     return {
-      output: `作者的回答：${result.answer}`,
+      ...(clarification ? { semanticTransition: clarification } : {}),
+      output: `作者的回答：${result.answer}${clarification ? '\n已确认写入第一章；按原请求完成该段后停笔，保留原有检查、权限与预算。' : ''}`,
       summary: `作者已回答：${result.answer.slice(0, 40)}${result.answer.length > 40 ? '…' : ''}`,
       display: {
         kind: 'question',

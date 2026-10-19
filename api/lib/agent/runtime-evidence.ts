@@ -1,6 +1,7 @@
 import { observeSemanticTransition, observeRequiredResult, semanticReadIdentity, observeSemanticReadProgress, observeWritingWorkflowMilestone, writingWorkflowMilestoneSchema } from './semantic-progress.js'
 import { taskSpecSchema } from '../../../shared/contracts/index.js'
 import { readOriginalTaskRequest } from './original-request.js'
+import { effectiveWritingTaskSpec } from './writing-scope.js'
 import { z } from 'zod'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame } from './runtime-state.js'
@@ -54,7 +55,8 @@ export async function collectDurableToolEvidence(tx: RuntimeTx, taskRootId: stri
         if (!spec.success || milestone.runId !== receipt.runId || milestone.userId !== root.userId || milestone.novelId !== root.novelId)
           return runtimeError('RUNTIME_RECEIPT_INVALID', '准备进度不属于当前原始任务。')
         if (original.taskId === taskRootId && !original.parentRunId && observeWritingWorkflowMilestone(observations, operation.action, milestone,
-          { userId: root.userId, novelId: root.novelId, runId: receipt.runId, taskSpec: spec.data })) progressSequence = String(event.sequence)
+          { userId: root.userId, novelId: root.novelId, runId: receipt.runId,
+            taskSpec: await effectiveWritingTaskSpec(tx, { userId: root.userId, novelId: root.novelId, runId: receipt.runId }, spec.data) })) progressSequence = String(event.sequence)
       }
       const progress = durableProgressSchema.safeParse(result.data.progress)
       if (progress.success && observeSemanticTransition(observations, `${progress.data.kind}:${operation.action === 'plan_save' ? 'plan' : progress.data.targetId}`, progress.data.beforeHash, progress.data.afterHash)) progressSequence = String(event.sequence)

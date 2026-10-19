@@ -248,6 +248,22 @@ describe('严谨创作自动落实质量建议', () => {
     expect(f.critic).toHaveBeenCalledOnce()
     expect(f.write).not.toHaveBeenCalled()
   })
+  it('provides the patcher the original intent and read-only context, bound at write time', async () => {
+    const f = fixture(true)
+    await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(f.model.mock.calls[0][1]).toContain(f.bundle.originalRequest!)
+    expect(f.model.mock.calls[0][1]).toContain('"before"')
+    expect(f.write).toHaveBeenCalledWith(expect.objectContaining({ expectedContextHash: humanityQuality.qualityReviewContextHash(f.bundle) }))
+  })
+  it('does not call a paid patcher after neighbor context changes during review', async () => {
+    const f = fixture(true)
+    vi.mocked(humanityQuality.buildHumanityQualityContext).mockResolvedValueOnce(f.bundle)
+      .mockResolvedValue({ ...f.bundle, originalRequest: '已经改变的作者要求。' })
+    const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_SOURCE_STALE' })
+    expect(f.model).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+  })
   it('separates a returned critic from its failed local finding save without claiming assessment success', async () => {
     const f = fixture(false)
     f.ctx.creativeFreedom = 'stable'

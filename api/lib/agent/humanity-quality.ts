@@ -34,6 +34,8 @@ import { locateQualityFindingSpans, validateQualityEvidenceSources, type Quality
 import { qualityAutoRepairPending, qualityReportMatchesContent, selectAutomaticQualityFindings } from './quality-report-contract.js'
 
 export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v5'
+/** v5 is the finding contract; this separately identifies the new prompt rules. */
+export const HUMANITY_PROMPT_PROTOCOL = 'humanity-context.v2'
 export const FROZEN_V4_HUMANITY_CRITIC_VERSION = 'humanity-critic.v4'
 export const PREVIOUS_HUMANITY_CRITIC_VERSION = 'humanity-critic.v3'
 export const LEGACY_HUMANITY_CRITIC_VERSION = 'humanity-critic.v2'
@@ -340,7 +342,7 @@ export async function buildHumanityQualityContext(userId: string, novelId: strin
     db.experienceAnchor.findMany({ where: { userId, novelId, status: 'confirmed' }, orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }], take: 30 }),
     db.chapter.findMany({
       where: { ...activeChapterScope(novelId), orderIndex: { lt: chapter.orderIndex } },
-      select: { title: true, content: true, orderIndex: true }, orderBy: { orderIndex: 'desc' }, take: 3,
+      select: { id: true, title: true, revision: true, content: true, orderIndex: true }, orderBy: { orderIndex: 'desc' }, take: 3,
     }),
     db.qualityFinding.groupBy({
       by: ['signal', 'authorFeedback'], where: { userId, novelId, authorFeedback: { not: null } }, _count: { _all: true }, orderBy: [{ signal: 'asc' }, { authorFeedback: 'asc' }],
@@ -367,6 +369,7 @@ export async function buildHumanityQualityContext(userId: string, novelId: strin
 
 export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>): string {
   return hashText(JSON.stringify({
+    contextProtocol: 2,
     chapter: { title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content, novel: bundle.chapter.novel },
     charter: bundle.charter, compiler: bundle.compilation ? { id: bundle.compilation.id, bridge: bundle.compilation.bridge, sceneTasks: bundle.compilation.sceneTasks } : null,
     profiles: bundle.profiles, anchors: bundle.anchors, recentChapters: bundle.recentChapters, feedback: bundle.feedback, originalRequest: bundle.originalRequest ?? null,
@@ -438,6 +441,7 @@ export async function persistHumanityQualityReport(input: {
   mode: StoryCompilerMode
   deterministicMetrics: Record<string, number | string[]>
   qualityContextHash?: string
+  criticPromptProtocol?: typeof HUMANITY_PROMPT_PROTOCOL
   /** Recovered pre-upgrade paid work retains the critic rules it actually used. */
   criticVersion?: typeof HUMANITY_CRITIC_VERSION | typeof FROZEN_V4_HUMANITY_CRITIC_VERSION | typeof PREVIOUS_HUMANITY_CRITIC_VERSION | typeof LEGACY_HUMANITY_CRITIC_VERSION
   sources?: QualityEvidenceSources
@@ -456,6 +460,9 @@ export async function persistHumanityQualityReport(input: {
   await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${input.chapterId} AND author_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
   const chapter = await getOwnedQualityChapter(input.userId, input.novelId, input.chapterId, tx)
   if (chapter.revision !== input.chapterRevision) throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '章节在质量检查期间已被修改，请基于最新版本重新检查。')
+  if (input.qualityContextHash && qualityReviewContextHash(await buildHumanityQualityContext(input.userId, input.novelId, input.chapterId, input.runId, tx)) !== input.qualityContextHash) {
+    throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '邻章、作者要求或质量参考在检查期间已变化，旧意见未保存为当前报告。')
+  }
 
   if (input.sources && !validateQualityEvidenceSources(input.sources, { userId: input.userId, novelId: input.novelId,
     chapterId: input.chapterId, chapterRevision: chapter.revision }, chapter.content)) throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '原文证据表与当前作者、作品、章节或版本不一致，未保存为完整报告。')
@@ -474,7 +481,7 @@ export async function persistHumanityQualityReport(input: {
       userId: input.userId, novelId: input.novelId, runId: input.runId, compilationId: input.compilationId,
       chapterId: input.chapterId, chapterRevision: chapter.revision, mode: input.mode,
       status: !complete ? 'failed' : actionableCount > 0 ? 'needs_repair' : 'passed', repairRound: 0,
-      deterministicMetrics: { ...input.deterministicMetrics, ...(input.qualityContextHash ? { qualityContextHash: input.qualityContextHash } : {}), independentCheck: complete ? 'complete' : 'unavailable', contentHash: hashText(chapter.content),
+      deterministicMetrics: { ...input.deterministicMetrics, ...(input.criticPromptProtocol ? { criticPromptProtocol: input.criticPromptProtocol } : {}), ...(input.qualityContextHash ? { qualityContextHash: input.qualityContextHash } : {}), independentCheck: complete ? 'complete' : 'unavailable', contentHash: hashText(chapter.content),
         ...(input.sources ? { evidenceSourceProtocol: input.sources.protocol, evidenceSourceIdentity: input.sources.identity,
           evidenceSourceTableHash: hashText(JSON.stringify(input.sources)) } : {}),
         unlocatedFindings, omittedFindings, criticFindingCount, droppedFindings: input.criticDropped ?? 0,
@@ -566,6 +573,7 @@ export async function applyQualityRepair(input: {
   reportId: string
   replacements: Array<{ findingId: string; replacement: string }>
   retainedFindings?: Array<{ source: 'quality'; reportId: string; findingId: string; reason: string }>
+  expectedContextHash?: string
   signal?: AbortSignal
 }, transaction?: Prisma.TransactionClient) {
   input = { ...input, replacements: input.replacements.map(item => ({ ...item })) }
@@ -614,6 +622,9 @@ export async function applyQualityRepair(input: {
       || current.status !== report.status || current.status === 'stale' || JSON.stringify(current.deterministicMetrics) !== JSON.stringify(report.deterministicMetrics)
       || fingerprint(current) !== fingerprint(report)) throw new DataAccessError(409, 'QUALITY_REPORT_STALE', '质量报告、作者选择或正文已变化，未应用旧修订。')
     input.signal?.throwIfAborted()
+    if (input.expectedContextHash && qualityReviewContextHash(await buildHumanityQualityContext(input.userId, input.novelId, report.chapterId, input.runId ?? undefined, tx)) !== input.expectedContextHash) {
+      throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '邻章、作者要求或修订参考已变化，未应用旧上下文生成的补丁。')
+    }
     const consumeReviewRevision = input.runId ? await assertChapterReviewRevision(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId }, report.chapter, {
       requireQualityChannel: true, mutation: 'replace', after,
       editRanges: patches.map(patch => ({ start: patch.finding.startOffset, end: patch.finding.endOffset, newText: patch.replacement })),

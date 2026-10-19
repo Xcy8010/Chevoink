@@ -835,7 +835,7 @@ export async function consumeCredits(input: ConsumeCreditInput): Promise<CreditC
 /** Only a proven search-service failure creates this obligation; provider cost
  * remains separate. This is deliberately not an arbitrary public refund API. */
 const searchRefundEvidenceSchema = z.object({ attempts: z.array(z.object({
-  provider: z.enum(['bocha', 'sogou', 'bing']), outcome: z.enum(['failed', 'aborted']), durationMs: z.number().int().nonnegative(),
+  provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing']), outcome: z.enum(['failed', 'aborted']), durationMs: z.number().int().nonnegative(),
   httpStatus: z.number().int().min(100).max(599).optional(),
   providerRequestId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/).optional(),
   providerCode: z.string().regex(/^[a-zA-Z0-9_-]{1,32}$/).optional(),

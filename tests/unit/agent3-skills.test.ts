@@ -10,6 +10,17 @@ import {
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 
 describe('Agent 3.0 Skill OS deterministic router', () => {
+  it.each(['减少AI味', '减少 AI 味', '减少 A I 痕迹', '降低机器味', '去除人工智能痕迹'])('equivalent style requests reserve the same specialist slot: %s', prompt => {
+    const decision = routeSkills({ mode: 'build', intent: 'write', freedom: 'balanced', phase: 'draft', prompt: `续写下一章，${prompt}。` })
+    expect(decision.selected.map(skill => skill.id)).toContain('cn-prose-specificity.v3')
+    expect(decision.reasonCodes).toContain('STYLE_RISK_HIGH')
+  })
+  it('does not rewrite frozen router policy or immutable skill resources', () => {
+    const decision = routeSkills({ mode: 'build', intent: 'write', freedom: 'balanced', routerVersion: '3.5.0', prompt: '续写下一章，减少 AI 味。' })
+    expect(decision.reasonCodes).not.toContain('STYLE_RISK_HIGH')
+    expect(decision.routerVersion).toBe('3.5.0')
+    expect(buildGeneralWritingDigest()).toContain('AI 痕迹规避')
+  })
   it('正文任务确定性装载场景和中文网文 Draft，并记录明确触发原因', () => {
     const decision = routeSkills({
       mode: 'build', intent: 'write', phase: 'draft', freedom: 'balanced',

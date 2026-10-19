@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Routine, compatible-schema release. Prepare off the live path. No idle wait,
 # task cancellation or automatic whole-script retry. Database changes are limited
-# to the exact reviewed quality-finding index migration below.
+# to one exact reviewed migration verified below.
 REVISION="${1:?candidate SHA}"
 ARCHIVE_HASH="${2:?archive digest}"
 BASELINE="${3:?expected active SHA}"
@@ -71,7 +71,7 @@ verify_baseline
 [[ "$(snapshot_process)" == "$PROCESS_BEFORE" ]]
 printf '{"revision":"%s","archiveSha256":"%s"}\n' "$REVISION" "$ARCHIVE_HASH" > "$STAGE/.chevoink-release.json"
 phase prepared
-if [[ "$MIGRATION_PLAN" == "20261009010000_quality_finding_span_identity" ]]; then
+if [[ "$MIGRATION_PLAN" == "20261009010000_quality_finding_span_identity" || "$MIGRATION_PLAN" == "20261019120000_web_fetch_tool_config" ]]; then
   DOTENV_CONFIG_QUIET=true node --import dotenv/config scripts/verify-release-migration.mjs before "$STAGE" "$CURRENT" "$STAGE/.release-migration-before.json"
   phase migrating
   npx prisma migrate deploy

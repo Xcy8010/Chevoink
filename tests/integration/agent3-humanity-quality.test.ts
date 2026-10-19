@@ -7,6 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import app from '../../api/app.js'
 import {
   analyzeDeterministicQuality,
+  buildHumanityQualityContext,
+  qualityReviewContextHash,
   applyQualityRepair,
   getQualityReport,
   persistHumanityQualityReport,
@@ -81,6 +83,33 @@ describe.skipIf(!dbAvailable)('Agent 3.0 人类感质量门（需 DB）', () => 
       await prisma.storyCompilation.delete({ where: { id: compilation.id } })
       await prisma.agentRun.deleteMany({ where: { id: resumeId } })
       await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: source.taskSpec ?? Prisma.DbNull } })
+    }
+  })
+
+  it('邻章修订使尚未保存的检查和已生成的局部补丁失效，正文与报告不被覆盖', async () => {
+    const volumeId = (await prisma.volume.findFirstOrThrow({ where: { novelId }, select: { id: true } })).id
+    const priorId = randomUUID(), targetId = randomUUID()
+    try {
+      for (const [id, orderIndex, content] of [[priorId, 100, '钥匙还在邻居手中。'], [targetId, 101, '她感到很担心。']] as const) {
+        await prisma.chapter.create({ data: { id, novelId, authorId: userId, volumeId, orderIndex, orderInVolume: orderIndex,
+          title: `合成上下文${orderIndex}`, content, revision: 1, wordCount: content.length, status: 'draft', visibility: 'private' } })
+      }
+      const bundle = await buildHumanityQualityContext(userId, novelId, targetId)
+      const contextHash = qualityReviewContextHash(bundle)
+      const input = { userId, novelId, chapterId: targetId, chapterRevision: 1, mode: 'balanced' as const,
+        qualityContextHash: contextHash, deterministicMetrics: {}, deterministicFindings: [], criticComplete: true,
+        criticFindings: [{ signal: 'emotion_grounding' as const, severity: 'advisory' as const, quote: '她感到很担心。',
+          explanation: '缺少当前选择依据。', suggestion: '只补最小行动依据。', confidence: 0.8 }] }
+      const report = await persistHumanityQualityReport(input)
+      await prisma.chapter.update({ where: { id: priorId }, data: { content: '她已经从邻居手中取回钥匙。', revision: { increment: 1 } } })
+      await expect(persistHumanityQualityReport(input)).rejects.toMatchObject({ code: 'QUALITY_SOURCE_STALE' })
+      await expect(applyQualityRepair({ userId, novelId, reportId: report.id, expectedContextHash: contextHash,
+        replacements: [{ findingId: report.findings[0].id, replacement: '她在门外等着邻居送来钥匙。' }] })).rejects.toMatchObject({ code: 'QUALITY_SOURCE_STALE' })
+      expect(await prisma.chapterQualityReport.count({ where: { chapterId: targetId } })).toBe(1)
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: targetId } })).toMatchObject({ revision: 1, content: '她感到很担心。' })
+      expect(await getQualityReport(userId, novelId, report.id)).toMatchObject({ repairRound: 0, chapterRevision: 1 })
+    } finally {
+      await prisma.chapter.deleteMany({ where: { id: { in: [priorId, targetId] } } })
     }
   })
 

@@ -146,7 +146,7 @@ export const GENRE_WRITING_CARDS: Record<string, WritingKnowledgeCard[]> = {
 }
 
 /** 按重要性取通用卡 top N，拼成常驻注入段（≤300 字目标） */
-export function buildGeneralWritingDigest(limit = 2): string {
+export function buildGeneralWritingDigest(limit = 3): string {
   const cards = [...GENERAL_WRITING_CARDS].sort((a, b) => b.importance - a.importance).slice(0, limit)
   return `写作软质量信号（仅在原文有证据时使用，作品自身风格优先）：\n${cards
     .map((card) => `[${card.topic}] ${card.content}`)

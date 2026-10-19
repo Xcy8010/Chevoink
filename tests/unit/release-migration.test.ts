@@ -2,7 +2,8 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex, assertMigrationState, migrationChecksum, migrationName, releaseMigrationPlan } from '../../scripts/verify-release-migration.mjs'
+import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex, assertMigrationState, migrationChecksum, migrationName, releaseMigrationPlan,
+  fetchMigrationName, fetchMigrationChecksum, fetchSeedEvidence, assertFetchSeed } from '../../scripts/verify-release-migration.mjs'
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), 'chevoink-release-migration-'))
@@ -23,6 +24,46 @@ function fixture() {
 }
 
 describe('exact reviewed production migration', () => {
+  const fetchFixture = () => {
+    const f = fixture()
+    mkdirSync(path.join(f.candidate, `prisma/migrations/${fetchMigrationName}`))
+    writeFileSync(path.join(f.candidate, `prisma/migrations/${fetchMigrationName}/migration.sql`), readFileSync(`prisma/migrations/${fetchMigrationName}/migration.sql`))
+    return f
+  }
+  it('permits the exact disabled Fetch seed only with unchanged schema and history', () => {
+    const f = fetchFixture()
+    expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(fetchMigrationName)
+    const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1 }
+    const seeded = { ...old, migration_name: fetchMigrationName, checksum: fetchMigrationChecksum }
+    const sums = [['old', 'b'.repeat(64)], [fetchMigrationName, fetchMigrationChecksum]]
+    expect(() => assertMigrationState([old], sums, 'before', undefined, fetchMigrationName)).not.toThrow()
+    expect(() => assertMigrationState([old, seeded], sums, 'after', [old], fetchMigrationName)).not.toThrow()
+    expect(() => assertMigrationState([old, { ...seeded, checksum: 'c'.repeat(64) }], sums, 'after', [old], fetchMigrationName)).toThrow()
+    expect(() => assertMigrationState([old], sums, 'after', [old], fetchMigrationName)).toThrow()
+  })
+  it.each(['schema', 'history', 'sql', 'extra'])('rejects unrelated %s with Fetch seed', kind => {
+    const f = fetchFixture()
+    if (kind === 'schema') writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), '// unrelated')
+    if (kind === 'history') writeFileSync(path.join(f.candidate, 'prisma/migrations/old/migration.sql'), 'SELECT 2;')
+    if (kind === 'sql') writeFileSync(path.join(f.candidate, `prisma/migrations/${fetchMigrationName}/migration.sql`), 'SELECT 2;')
+    if (kind === 'extra') writeFileSync(path.join(f.candidate, `prisma/migrations/${fetchMigrationName}/extra.sql`), 'SELECT 2;')
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+  })
+  it('requires disabled keyless insertion or exact preservation of a preexisting Fetch configuration', () => {
+    const row = { id: 'tool-web-fetch', key: 'tool:web-fetch', ownerUserId: null, provider: 'unconfigured', modelName: 'unconfigured',
+      baseUrl: null, apiKeyCiphertext: null, tier: 'tool_fetch', enabled: false, selectable: false, isDefault: false,
+      multiplierBps: 10000, metadata: { modelKind: 'web_fetch' } }
+    expect(() => assertFetchSeed(fetchSeedEvidence(row), null)).not.toThrow()
+    expect(() => assertFetchSeed(null, null)).toThrow()
+    for (const changed of [{ enabled: true }, { apiKeyCiphertext: 'secret' }, { ownerUserId: 'user' }, { selectable: true }]) {
+      const evidence = fetchSeedEvidence({ ...row, ...changed })
+      expect(() => assertFetchSeed(evidence, null)).toThrow()
+      expect(JSON.stringify(evidence)).not.toContain('secret')
+    }
+    const existing = fetchSeedEvidence({ ...row, enabled: true, apiKeyCiphertext: 'protected-existing-key' })
+    expect(() => assertFetchSeed(existing, existing)).not.toThrow()
+    expect(() => assertFetchSeed(fetchSeedEvidence(row), existing)).toThrow()
+  })
   it('keeps unchanged releases routine and permits only the exact index migration', () => {
     const f = fixture()
     expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe('routine')

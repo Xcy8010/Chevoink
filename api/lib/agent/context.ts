@@ -23,6 +23,7 @@ import {
   renderDirectiveDigest,
 } from './context-engine.js'
 import { renderTaskSpec } from './task-spec.js'
+import { effectiveWritingTaskSpec } from './writing-scope.js'
 import { searchStoryMemory } from './story-memory.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
 import { buildStoryCompilerDigest } from './story-compiler.js'
@@ -624,7 +625,9 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     history,
     workspace: workspaceSnapshot ? [{ role: 'user', content: workspaceSnapshot }] : [],
     todo: todoDigest ? [{ role: 'user', content: todoDigest }] : [],
-    task: [{ role: 'user', content: renderTaskSpec(input.taskSpec) }],
+    task: [{ role: 'user', content: renderTaskSpec(input.taskSpec.scope.writingClarificationProtocol === 1
+      ? await prisma.$transaction(tx => effectiveWritingTaskSpec(tx,
+        { userId: input.userId, novelId: input.novelId, runId: input.runId }, input.taskSpec)) : input.taskSpec) }],
     intent: [{ role: 'user', content: intentSections.join('\n\n') }],
   }
   const inputEstimates = Object.fromEntries(Object.entries(sections).map(([category, items]) =>

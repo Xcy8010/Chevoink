@@ -271,12 +271,15 @@ export async function prepareStoryCompilation(input: {
       select: { title: true, content: true },
     }),
   ])
-  const priorBridge = previousChapter
+  const priorBridgeCandidate = previousChapter
     ? await db.chapterBridge.findFirst({
-        where: { userId: input.userId, novelId: input.novelId, toChapterId: previousChapter.id, committedAt: { not: null } },
+        where: { userId: input.userId, novelId: input.novelId, toChapterId: previousChapter.id, targetRevision: previousChapter.revision, committedAt: { not: null } },
         orderBy: { committedAt: 'desc' },
       })
     : null
+  // A revision on the new bridge describes the prose actually used, not a
+  // fresh label for terminal state committed before that prose was edited.
+  const priorBridge = priorBridgeCandidate?.targetRevision === previousChapter?.revision ? priorBridgeCandidate : null
   const volumeContext = previousChapter ? await readWritingVolumeContext(db, input, target.targetOrderIndex) : null
   if (writing.writing?.tailVolume && !input.volumeDecision) {
     throw new DataAccessError(400, 'INVALID_ARGUMENTS', `请在PREPARE显式提交volumeDecision及理由，审视本卷目标是否收束；章数不能代替故事边界。当前卷上下文：${JSON.stringify(volumeContext)}`)
@@ -520,7 +523,7 @@ export async function readPersistedWritingWorkflowMilestones(input: {
   if (!parsed.success || parsed.data.runId !== input.runId || parsed.data.scope.novelId !== input.novelId
     || !['write', 'revise'].includes(parsed.data.intent) || parsed.data.scope.selection
     || ['proposal_only', 'conversation_only'].includes(parsed.data.writingPacing ?? '')
-    || parsed.data.scope.writing?.kind !== 'bounded') return []
+    || parsed.data.scope.writing?.kind !== 'bounded' && parsed.data.scope.writingClarificationProtocol !== 1) return []
   const main = { userId: input.userId, novelId: input.novelId, runtimeProtocolVersion: 0, taskRootId: null,
     incomingChildGrant: null, session: { userId: input.userId, novelId: input.novelId, spawnedFromRunId: null, spawnedFromSessionId: null } }
   const current = await db.agentRun.findFirst({ where: { ...main, id: input.runId, status: { in: ['queued', 'running', 'awaiting_approval'] } } })

@@ -33,7 +33,7 @@ const routeSchema = auxiliaryRouteSchema
 const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional() }).strict()
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema,
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema,
     sourceBodies: z.object({ previous: z.string().nullable(), current: z.string() }).optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
@@ -81,7 +81,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       const observed = await readObservedBaseline(tx, lease.taskRootId, cursor.expectedRevision, { kind: 'chapter', id: context.chapter.id })
       if (observed?.kind !== 'chapter' || observed.revision !== context.chapter.revision) return { kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '请先 chapter_read 读取目标正文；独立审阅无需准备章节写作。' }
       const cached = await readStandaloneContinuityReport(ctx, context.contextHash, typeof args.focus === 'string' ? args.focus : undefined, tx)
-      return { kind: 'check' as const, version: 8 as const, compiler: null, standaloneContextHash: context.contextHash, chapter: context.chapter, sourceBodies: { previous: context.precedingBodies, current: context.chapter.content }, sourceId: null,
+      return { kind: 'check' as const, version: 9 as const, compiler: null, standaloneContextHash: context.contextHash, chapter: context.chapter, sourceBodies: { previous: context.precedingBodies, current: context.chapter.content }, sourceId: null,
         coverage: { version: 1 as const, contentHash: runtimeJson({ content: context.chapter.content }).hash, charCount: context.chapter.content.length, sourceHash: null },
         criticSystem: continuityCriticSystem, criticInput: `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, typeof args.focus === 'string' ? args.focus : undefined)}`,
         repairSystem: repairPrompt, repair: false, cached: cached?.findings ?? null, route: null, price: null }
@@ -140,7 +140,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
   const assertCurrent = async (tx: RuntimeTx, frozen: Work) => {
     const compiler = frozen.compiler
     if (!compiler) {
-      const current = await buildStandaloneContinuityContext(ctx, frozen.chapter.id, tx)
+      const current = await buildStandaloneContinuityContext(ctx, frozen.chapter.id, tx, frozen.version >= 9 ? 3 : 2)
       if (current.contextHash !== frozen.standaloneContextHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '独立检查的正文或参考资料已变化，未应用旧结果。')
       return
     }
@@ -228,7 +228,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     const compiler = frozen.compiler
     if (!compiler) return commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
       if (!frozen.standaloneContextHash || frozen.repair) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立检查缺少只读上下文。')
-      const toolResult = await saveStandaloneContinuityReport(ctx, { chapter: frozen.chapter, contextHash: frozen.standaloneContextHash, criticInput: frozen.criticInput }, parsed, tx, typeof args.focus === 'string' ? args.focus : undefined, frozen.version >= 2, frozen.version >= 4, inspected?.audit)
+      const toolResult = await saveStandaloneContinuityReport(ctx, { chapter: frozen.chapter, contextHash: frozen.standaloneContextHash, criticInput: frozen.criticInput }, parsed, tx, typeof args.focus === 'string' ? args.focus : undefined, frozen.version >= 2, frozen.version >= 4, inspected?.audit, frozen.version >= 9 ? 3 : 2)
       return runtimeJson({ toolResult, memoryJobId: null }).value
     })
     return commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {

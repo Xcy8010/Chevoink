@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({ search: vi.fn(), charge: vi.fn(), configuratio
 vi.mock('../../api/lib/web-search-service.js', async original => ({ ...await original<object>(), searchWeb: mocks.search }))
 vi.mock('../../api/lib/credits.js', () => ({ consumeCredits: mocks.charge, WEB_SEARCH_CALL_MILLI: 2000,
   recordSearchRefundIntent: mocks.refund, getSearchRefundState: mocks.refundState, reconcileCreditRefunds: mocks.reconcile }))
-vi.mock('../../api/lib/tool-model-config.js', () => ({ getToolModelRuntime: mocks.configuration }))
+vi.mock('../../api/lib/tool-model-config.js', async original => ({ ...await original<object>(), getToolModelRuntime: mocks.configuration }))
 vi.mock('../../api/lib/agent/research-sources.js', async original => ({
   ...await original<typeof import('../../api/lib/agent/research-sources.js')>(),
   reserveResearchRequest: vi.fn(async () => true),
@@ -27,6 +27,15 @@ const context = (): ToolContext => ({ userId: 'fixture', novelId: 'fixture', cha
   runId: randomUUID(), callId: randomUUID(), mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: vi.fn() })
 
 describe('search URL handoff to the model', () => {
+  it('rejects an invalid configured provider before reserving, charging or dispatching', async () => {
+    const { reserveResearchRequest } = await import('../../api/lib/agent/research-sources.js')
+    vi.mocked(reserveResearchRequest).mockClear()
+    mocks.configuration.mockResolvedValue({ provider: 'unknown', modelName: 'web', baseUrl: 'https://search.example.com', apiKey: 'private-fixture' })
+    await expect(webSearchTool.execute(context(), { query: 'public query', maxResults: 2 })).rejects.toMatchObject({ code: 'WEB_TOOL_PROVIDER_UNSUPPORTED' })
+    expect(reserveResearchRequest).not.toHaveBeenCalled()
+    expect(mocks.charge).not.toHaveBeenCalled()
+    expect(mocks.search).not.toHaveBeenCalled()
+  })
   it('reuses a persisted same-task search after process-local cache loss without charging again', async () => {
     const { findResearchSearchOutcome, saveResearchSearchOutcome } = await import('../../api/lib/agent/research-sources.js')
     vi.mocked(findResearchSearchOutcome).mockResolvedValueOnce({ provider: 'bocha', results: [] })
@@ -92,9 +101,9 @@ describe('search URL handoff to the model', () => {
     await webSearchTool.execute({ ...ctx, callId: randomUUID() }, { query: '小说 目录', maxResults: 2 })
     expect(mocks.search).toHaveBeenCalledOnce()
     expect(mocks.charge).toHaveBeenCalledOnce()
-    if (changed === 'provider') env.webSearchProvider = `${originalProvider}-changed`
+    if (changed === 'provider') env.webSearchProvider = originalProvider === 'bing' ? 'auto' : 'bing'
     if (changed === 'configuration') env.webSearchBochaApiKey = 'fixture-rotated-not-real'
-    if (changed === 'admin-configuration') mocks.configuration.mockResolvedValue({ provider: 'bocha', modelName: 'web', baseUrl: 'https://search.invalid', apiKey: 'fixture-not-real' })
+    if (changed === 'admin-configuration') mocks.configuration.mockResolvedValue({ provider: 'bocha', modelName: 'web', baseUrl: 'https://search.example.com/v1/web-search', apiKey: 'fixture-not-real' })
     await webSearchTool.execute({ ...ctx, callId: randomUUID(), userId: changed === 'user' ? 'other-fixture' : ctx.userId },
       { query: '小说 目录', maxResults: changed === 'count' ? 8 : 2 })
     expect(mocks.search).toHaveBeenCalledTimes(2)

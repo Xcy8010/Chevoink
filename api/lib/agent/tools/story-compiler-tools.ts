@@ -15,7 +15,7 @@ import { createTextRequestTrace, withTextRequestTrace, textRequestsFinished } fr
 import { readOfflineContinuityRecovery, applyOfflineContinuityRecovery } from '../continuity-offline-recovery.js'
 import { runtimeJson } from '../runtime-common.js'
 import { persistedContentHash } from '../semantic-progress.js'
-import { continuityFindingText, continuitySourceInput, resolveContinuitySources, continuityRecheckInput, unconfirmedContinuityOutput, type ContinuityBodies } from '../continuity-review-context.js'
+import { continuityChapterProvenance, continuityFindingText, continuitySourceInput, resolveContinuitySources, continuityRecheckInput, unconfirmedContinuityOutput, type ContinuityBodies } from '../continuity-review-context.js'
 import { unlocatedContinuityEvidence } from '../continuity-finding-authority.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
@@ -685,7 +685,7 @@ export const chapterBridgeGetTool = defineTool({
 })
 
 /** 独立审阅只读取当前正文和真实前章，不创建场景任务、不接管旧任务的提交状态。 */
-export async function buildStandaloneContinuityContext(ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId' | 'chapterId'>, chapterId?: string, db: Prisma.TransactionClient = prisma) {
+export async function buildStandaloneContinuityContext(ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId' | 'chapterId'>, chapterId?: string, db: Prisma.TransactionClient = prisma, protocol: 2 | 3 = 3) {
   const targetId = await resolveQualityChapterTarget({ ...ctx, chapterId, fallbackChapterId: ctx.chapterId }, db)
   if (!targetId) throw new DataAccessError(400, 'CHAPTER_NOT_FOUND', '请从 chapter_read 或作品目录取得真实 chapterId；无需准备章节写作。')
   const chapter = await db.chapter.findFirst({ where: { id: targetId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) },
@@ -695,17 +695,20 @@ export async function buildStandaloneContinuityContext(ctx: Pick<ToolContext, 'u
   const preceding = await db.chapter.findMany({ where: { authorId: ctx.userId, ...activeChapterScope(ctx.novelId), orderIndex: { lt: chapter.orderIndex } },
     orderBy: { orderIndex: 'desc' }, take: 3, select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
   const charter = await db.storyCharter.findUnique({ where: { novelId: ctx.novelId } })
-  const contextHash = createHash('sha256').update(JSON.stringify({ chapter, preceding, charter })).digest('hex')
+  const contextHash = createHash('sha256').update(JSON.stringify({ ...(protocol >= 3 ? { protocol } : {}), chapter, preceding, charter })).digest('hex')
   const precedingBodies = [...preceding].reverse().map(item => item.content).join('\n\n')
+  const sourceProvenance = continuityChapterProvenance(chapter, preceding)
   const criticInput = `独立连续性审阅；没有场景计划不构成错误，不要求补建编译或提交章节桥。仅审阅所给正文与前三章范围，不能声称验证未提供的全书。\n作品约定（不是已经发生的事实）：${JSON.stringify(charter)}\n目标章节 chapterId=${chapter.id}，《${chapter.title}》@r${chapter.revision}\n${continuitySourceInput({ previous: precedingBodies, current: chapter.content })}`
-  return { chapter, contextHash, criticInput, precedingBodies }
+  return { chapter, contextHash, criticInput: protocol >= 3
+    ? `${criticInput}\n章节来源边界（UTF-16 offset，previous 按章节顺序拼接，空白分隔不是正文事实）：${JSON.stringify(sourceProvenance)}`
+    : criticInput, precedingBodies, sourceProvenance }
 }
 
-function standaloneReviewKey(contextHash: string, focus?: string, protocol = 2) {
+function standaloneReviewKey(contextHash: string, focus?: string, protocol = 3) {
   return createHash('sha256').update(JSON.stringify({ protocol, contextHash, focus: focus ?? '' })).digest('hex')
 }
 
-export async function readStandaloneContinuityReport(ctx: ToolContext, contextHash: string, focus?: string, db: Prisma.TransactionClient = prisma, protocol = 2) {
+export async function readStandaloneContinuityReport(ctx: ToolContext, contextHash: string, focus?: string, db: Prisma.TransactionClient = prisma, protocol = 3) {
   const artifact = await db.agentArtifact.findFirst({ where: { runId: ctx.runId, run: { userId: ctx.userId, novelId: ctx.novelId }, artifactType: 'continuityReview',
     metadata: { path: ['standaloneKey'], equals: standaloneReviewKey(contextHash, focus, protocol) } }, orderBy: { createdAt: 'desc' } })
   if (!artifact) return null
@@ -713,28 +716,29 @@ export async function readStandaloneContinuityReport(ctx: ToolContext, contextHa
   return metadata.success ? { artifact, findings: metadata.data.findings } : null
 }
 
-export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true, requirePair = true, criticResponse?: ReturnType<typeof inspectContinuityResponse>['audit']): Promise<import('./types.js').ToolResult> {
+export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true, requirePair = true, criticResponse?: ReturnType<typeof inspectContinuityResponse>['audit'], contextProtocol: 2 | 3 = 3): Promise<import('./types.js').ToolResult> {
   ctx.signal.throwIfAborted()
   await assertAgentManuscriptCurrent(db, ctx)
   await db.$queryRaw`SELECT id FROM chapters WHERE id = ${context.chapter.id} FOR UPDATE`
-  const current = await buildStandaloneContinuityContext(ctx, context.chapter.id, db)
+  const current = await buildStandaloneContinuityContext(ctx, context.chapter.id, db, contextProtocol)
   if (current.contextHash !== context.contextHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、前章或作品约定已变化，本次报告未保存为当前版本结果；请重新读取。')
   ctx.signal.throwIfAborted()
   if (!parsed.structured || criticResponse && criticResponse.parserVersion >= 5 && criticResponse.classification !== 'complete') {
     if (criticResponse) await db.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: `${context.chapter.title} · 连续性诊断`,
       content: unconfirmedContinuityOutput, summary: '独立连续性复核未完成', metadata: runtimeJson({ independentCheck: 'unavailable', chapterId: context.chapter.id,
-        revision: context.chapter.revision, contextHash: context.contextHash, criticResponse }).value } })
+        revision: context.chapter.revision, contextHash: context.contextHash, ...(contextProtocol >= 3 ? { sourceProvenance: current.sourceProvenance } : {}), criticResponse }).value } })
     return { outcome: 'failed', failureCode: criticResponse?.classification === 'source_invalid' ? 'CONTINUITY_EVIDENCE_UNLOCATED' : 'CONTINUITY_REPORT_INCOMPLETE',
       summary: '独立连续性复核未完成', output: unconfirmedContinuityOutput }
   }
-  const cached = await readStandaloneContinuityReport(ctx, context.contextHash, focus, db, requirePair ? 2 : 1)
+  const cacheProtocol = contextProtocol >= 3 ? 3 : requirePair ? 2 : 1
+  const cached = await readStandaloneContinuityReport(ctx, context.contextHash, focus, db, cacheProtocol)
   const findings = cached?.findings ?? parsed.findings
   const unlocated = findings.some(item => unlocatedContinuityEvidence(item, { previous: current.precedingBodies, current: current.chapter.content }, true, allowSingleQuotes, requirePair))
   const errors = findings.filter(item => item.severity === 'error').length
   const warnings = findings.length - errors
   const output = `独立连续性检查《${context.chapter.title}》@r${context.chapter.revision}：${unlocated ? '候选未确认。' : `${errors} 错误、${warnings} 警告。`}${unlocated ? '引用未在对应正文中定位，结论未确认，不能判定通过或据此改稿。' : '仅完成审阅，正文未修改，不需要补建编译或提交章节桥。'}${unlocated ? '' : `\n${findings.map(item => `[${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`}`
   const artifact = cached?.artifact ?? await db.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: `${context.chapter.title} · 连续性检查`, content: output,
-    summary: unlocated ? '候选未确认' : `${errors} 错误、${warnings} 警告`, metadata: { standaloneContinuity: true, independentCheck: unlocated ? 'unavailable' : 'complete', standaloneKey: standaloneReviewKey(context.contextHash, focus, requirePair ? 2 : 1), chapterId: context.chapter.id, revision: context.chapter.revision, contextHash: context.contextHash, findings, ...(criticResponse ? { criticResponse } : {}) } } })
+    summary: unlocated ? '候选未确认' : `${errors} 错误、${warnings} 警告`, metadata: { standaloneContinuity: true, independentCheck: unlocated ? 'unavailable' : 'complete', standaloneKey: standaloneReviewKey(context.contextHash, focus, cacheProtocol), chapterId: context.chapter.id, revision: context.chapter.revision, contextHash: context.contextHash, ...(contextProtocol >= 3 ? { sourceProvenance: current.sourceProvenance } : {}), findings, ...(criticResponse ? { criticResponse } : {}) } } })
   ctx.signal.throwIfAborted()
   if (!unlocated && criticResponse) {
     await markLegacyContinuityCorrectionApplied(db, ctx, { originalHash: criticResponse.contentHash,
@@ -1079,7 +1083,7 @@ export const chapterBridgeCommitTool = defineTool({
   name: 'chapter_bridge_commit',
   title: '提交章节终态',
   description:
-    'Story Compiler 的 COMMIT 步骤。用于提交当前已保存正文的终态；写作交付必须具有当前版本完整的连续性与质量检查，只有原始作者请求可明确跳过检查。缺少、失败或旧检查会返回下一步所需工具，不代表已完成。检查完成但有需处置意见时，用 retainedFindings 引用当前报告并逐项说明保留原因；chapter_bridge_get 提供精确引用模板。无待处置意见时所有参数都可省略：服务端会从当前 run/chapter 的活跃编译、最后一个 Scene Task 和章节状态安全补全，模型不得为补参数重复读取正文。重复调用会幂等返回。',
+    'Story Compiler 的 COMMIT 步骤。用于提交当前已保存正文的终态；写作交付必须具有当前版本完整的连续性与质量检查，只有原始作者请求可明确跳过检查。缺少、失败或旧检查会返回下一步所需工具，不代表已完成。检查完成但有需处置意见时，用 retainedFindings 引用当前报告并逐项说明保留原因；chapter_bridge_get 提供精确引用模板。无待处置意见时所有参数都可省略：服务端从当前 run/chapter 的活跃编译及已保存正文补齐摘录；未显式提供的 exitState 保持未知，绝不把场景计划当成已发生事实。重复调用会幂等返回。',
   parameters: z.object({
     compilationId: z.string().min(1).optional(),
     retainedFindings,
@@ -1135,26 +1139,19 @@ export const chapterBridgeCommitTool = defineTool({
       chapterId: compilation.chapterId, createdAt: { gt: compilation.createdAt } }, select: { id: true } })) {
       return { outcome: 'failed' as const, failureCode: 'COMPILATION_STAGE_CONFLICT', output: '该章节已有本任务后续准备的编译身份，旧编译不能覆盖它。请读取当前任务章节桥，保留已保存的正文、场景与检查记录。', summary: '章节编译已被后续准备替代' }
     }
-    const firstTask = compilation.sceneTasks[0]
-    const lastTask = compilation.sceneTasks.at(-1)
-    // 终态状态逐层容错补全：模型传参/历史落库形状异常时降级到编译态推导，再降级到空状态，绝不让 COMMIT 因参数形状执行失败
-    const derivedState = {
-      action: lastTask?.turn || '', location: compilation.bridge.location, storyTime: compilation.bridge.storyTime,
-      knowledge: asStrings(compilation.bridge.knowledgeState), emotion: asStrings(compilation.bridge.emotionAftermath), body: asStrings(compilation.bridge.bodyState),
-      objects: asStrings(compilation.bridge.objectState), relationships: asStrings(compilation.bridge.relationshipState), openLoops: asStrings(compilation.bridge.openLoops),
-    }
-    const exitParse = storyStateSchema.safeParse(args.exitState ?? lastTask?.exitState ?? derivedState)
-    const derivedParse = exitParse.success ? null : storyStateSchema.safeParse(derivedState)
-    const lastExit = exitParse.success ? exitParse.data : (derivedParse?.success ? derivedParse.data : storyStateSchema.parse({}))
+    // Scene tasks describe intent; only explicit terminal state may become facts.
+    // Omitted state remains unknown, including after a revision diverged from BEAT.
+    const lastExit = storyStateSchema.parse(args.exitState ?? {})
+    const paragraphs = compilation.chapter.content.split(/\n\s*\n/u).map(text => text.trim()).filter(Boolean)
     const terminal = {
       compilationId: compilation.id,
-      chapterSummary: args.chapterSummary?.trim() || compilation.sceneTasks.map((task) => `${task.purpose}；${task.turn}`).join('；').slice(0, 2000) || `${compilation.chapter.title}正文已完成。`,
+      chapterSummary: args.chapterSummary?.trim() || `正文摘录：${compilation.chapter.content.slice(0, 1995)}`,
       exitState: lastExit,
-      lastUnfinishedAction: args.lastUnfinishedAction ?? lastExit.openLoops[0] ?? '',
-      hookDecision: args.hookDecision ?? lastExit.openLoops[0] ?? '',
+      lastUnfinishedAction: args.lastUnfinishedAction ?? '',
+      hookDecision: args.hookDecision ?? '',
       delayedHookReason: args.delayedHookReason ?? '',
-      openingStructure: args.openingStructure?.trim() || `从${(firstTask ? storyStateSchema.safeParse(firstTask.entryState) : null)?.data?.action || firstTask?.purpose || '前章终态'}进入`,
-      endingStructure: args.endingStructure?.trim() || `以${lastTask?.turn || lastExit.action || '当前状态变化'}收束`,
+      openingStructure: args.openingStructure?.trim() || `开篇摘录：${(paragraphs[0] ?? compilation.chapter.content).slice(0, 295)}`,
+      endingStructure: args.endingStructure?.trim() || `结尾摘录：${(paragraphs.at(-1) ?? compilation.chapter.content).slice(-295)}`,
     }
     try {
       const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...terminal, retainedFindings: args.retainedFindings,

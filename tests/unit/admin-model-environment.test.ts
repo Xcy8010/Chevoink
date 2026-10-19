@@ -15,6 +15,9 @@ const baseEnvironment = {
 }
 
 describe('admin built-in tool model environment fallback', () => {
+  it('reports direct Fetch separately without borrowing Search or chat credentials', () => {
+    expect(toolEnvironmentFallback('web_fetch', baseEnvironment)).toBeNull()
+  })
   it('reports image and vision tools as configured when their runtime keys are configured', () => {
     expect(toolEnvironmentFallback('image_generation', { ...baseEnvironment, aiImageApiKeyConfigured: true })).toMatchObject({ modelName: 'image-model', apiKeyConfigured: true })
     expect(toolEnvironmentFallback('vision', { ...baseEnvironment, aiVisionApiKeyConfigured: true })).toMatchObject({ modelName: 'vision-model', apiKeyConfigured: true })

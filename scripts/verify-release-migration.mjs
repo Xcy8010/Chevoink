@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url'
 
 export const migrationName = '20261009010000_quality_finding_span_identity'
 export const migrationChecksum = '27b78febf135faf99d4d611adf60e1f597e92befb6c961c7a5970153d8a7f21e'
+export const fetchMigrationName = '20261019120000_web_fetch_tool_config'
+export const fetchMigrationChecksum = '2e318f4b0a2004efdccfad7ad7a3962c4e8346a3da1e58c144aa1646dd034191'
+const reviewed = new Map([[migrationName, migrationChecksum], [fetchMigrationName, fetchMigrationChecksum]])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -20,7 +23,7 @@ function files(root, relative = '') {
   })
 }
 
-/** Ordinary releases stay byte-identical. This single reviewed exception cannot
+/** Ordinary releases stay byte-identical. These exact reviewed exceptions cannot
  * authorize unrelated schema edits, historical checksum changes or extra SQL. */
 export function releaseMigrationPlan(candidate, baseline) {
   const next = readFileSync(path.join(candidate, 'prisma/schema.prisma'), 'utf8')
@@ -28,6 +31,10 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const fetchTarget = `${fetchMigrationName}/migration.sql`
+  if (next === previous && !oldFiles.some(([name]) => name === fetchTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== fetchTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === fetchTarget)?.[1] === fetchMigrationChecksum) return fetchMigrationName
   if (previous.split(oldDeclaration).length !== 2 || next !== previous.replace(oldDeclaration, newDeclaration)) throw Error('Unapproved schema change')
   const target = `${migrationName}/migration.sql`
   if (oldFiles.some(([name]) => name === target)
@@ -36,19 +43,20 @@ export function releaseMigrationPlan(candidate, baseline) {
   return migrationName
 }
 
-export function assertMigrationState(rows, checksums, phase, before) {
+export function assertMigrationState(rows, checksums, phase, before, plan = migrationName) {
+  if (!reviewed.has(plan)) throw Error('Unapproved migration plan')
   if (!['before', 'after'].includes(phase)) throw Error('Invalid migration verification phase')
   const expected = new Map(checksums)
-  if (phase === 'before') expected.delete(migrationName)
+  if (phase === 'before') expected.delete(plan)
   if (rows.length !== expected.size) throw Error('Unexpected pending, duplicate or additional migration')
-  if (phase === 'after') assertMigrationState(before, checksums, 'before')
+  if (phase === 'after') assertMigrationState(before, checksums, 'before', undefined, plan)
   const previous = new Map((before ?? []).map(row => [row.migration_name, row]))
   for (const row of rows) {
     if (!expected.has(row.migration_name) || !/^[a-f0-9]{64}$/.test(row.checksum)
       || !row.finished_at || row.rolled_back_at || !Number.isInteger(row.applied_steps_count) || row.applied_steps_count < 1) throw Error('Migration history is not fully verified')
     if (phase === 'after') {
-      if (row.migration_name === migrationName) {
-        if (row.checksum !== migrationChecksum) throw Error('New migration checksum mismatch')
+      if (row.migration_name === plan) {
+        if (row.checksum !== reviewed.get(plan)) throw Error('New migration checksum mismatch')
       } else {
         const old = previous.get(row.migration_name)
         if (!old || row.checksum !== old.checksum || new Date(row.finished_at).toISOString() !== new Date(old.finished_at).toISOString()
@@ -58,6 +66,18 @@ export function assertMigrationState(rows, checksums, phase, before) {
     expected.delete(row.migration_name)
   }
   if (expected.size) throw Error('Historical migration is pending')
+}
+
+/** Only a digest of an existing row enters evidence, never its credential. */
+export function fetchSeedEvidence(row) {
+  return row ? { hash: digest(JSON.stringify(row)), disabledSeed: row.id === 'tool-web-fetch' && row.key === 'tool:web-fetch'
+    && row.ownerUserId === null && row.provider === 'unconfigured' && row.modelName === 'unconfigured'
+    && row.baseUrl === null && row.apiKeyCiphertext === null && row.tier === 'tool_fetch'
+    && row.enabled === false && row.selectable === false && row.isDefault === false
+    && row.multiplierBps === 10000 && row.metadata?.modelKind === 'web_fetch' } : null
+}
+export function assertFetchSeed(after, before) {
+  if (!after || (before ? after.hash !== before.hash : !after.disabledSeed)) throw Error('Fetch seed changed existing configuration or is not disabled/keyless')
 }
 
 export function assertMigrationEnvironment(environment, shared) {
@@ -84,7 +104,7 @@ async function main() {
   const [phase, candidate, baseline, receipt] = process.argv.slice(2)
   const plan = releaseMigrationPlan(candidate, baseline)
   if (phase === 'plan') { process.stdout.write(`${plan}\n`); return }
-  if (!['before', 'after'].includes(phase) || plan !== migrationName || !receipt) throw Error('No authorized migration verification')
+  if (!['before', 'after'].includes(phase) || !reviewed.has(plan) || !receipt) throw Error('No authorized migration verification')
   const sharedPath = '/opt/chevoink/shared/app.env'
   if (realpathSync(path.join(candidate, '.env')) !== sharedPath) throw Error('Shared production environment path mismatch')
   const { parse } = await import('dotenv')
@@ -100,9 +120,14 @@ async function main() {
       const checksums = files(path.join(candidate, 'prisma/migrations')).filter(([name]) => name.endsWith('/migration.sql'))
         .map(([name, hash]) => [name.slice(0, -'/migration.sql'.length), hash])
       const before = phase === 'after' ? JSON.parse(readFileSync(path.join(candidate, '.release-migration-before.json'), 'utf8')) : null
-      if (before && (before.migration !== migrationName || before.checksum !== migrationChecksum || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
+      if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
-      assertMigrationState(rows, checksums, phase, before?.migrations)
+      assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === fetchMigrationName) {
+        const seed = fetchSeedEvidence(await tx.aiModelConfig.findUnique({ where: { key: 'tool:web-fetch' } }))
+        if (phase === 'after') assertFetchSeed(seed, before.seed)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, seed }
+      }
       const indexes = await tx.$queryRawUnsafe(`SELECT c.relname AS name, t.relname AS table_name, i.indisunique AS is_unique,
         i.indisvalid AS is_valid, i.indisready AS is_ready, i.indpred IS NOT NULL AS has_predicate, i.indexprs IS NOT NULL AS has_expression,
         ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)

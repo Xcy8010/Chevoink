@@ -281,7 +281,7 @@ export const historicalBuiltinCatalog: AgentSkill[] = [
 
 export const BUILTIN_SKILL_PACK_VERSION = '3.5.0'
 // 3.5 binds a run's resource versions across phase loads; ranking stays the same.
-export const SKILL_ROUTER_VERSION = '3.5.0'
+export const SKILL_ROUTER_VERSION = '3.6.0'
 const RELEASE_GUIDANCE = '本任务的完整原始作者要求与服务端冻结边界优先。局部修改先读取当前正文，再用唯一原文片段精确修订，不借整章覆盖扩大范围；定位不足先补充证据。正文改变后完成本任务要求的当前版本检查。严格审查逐项实际应用或记录有依据的保留理由；保存、检查完成和任务交付分别按真实结果汇报。'
 
 /** Current release; historical resources above are never edited in place. */
@@ -363,9 +363,12 @@ export function routeSkills(input: {
   pinnedSkillIds?: ReadonlySet<string>
 }): SkillRouteDecision {
   const phase = input.phase ?? inferSkillPhase(input.intent)
-  const normalizedPrompt = input.prompt.trim()
   const catalog = input.catalog ?? skillCatalog
   const routerVersion = input.routerVersion ?? SKILL_ROUTER_VERSION
+  const normalizedPrompt = input.prompt.trim()
+  // Only current built-in routing normalizes equivalent author language. Saved
+  // runs and user-authored trigger expressions keep their original semantics.
+  const builtinPrompt = routerVersion === '3.6.0' ? normalizedPrompt.replace(/(?:A\s*I\s*(?:味|痕迹|感)|人工智能\s*(?:味|痕迹)|机器味)/giu, 'AI味') : normalizedPrompt
   const isEnabled = (skill: AgentSkill): boolean => input.enabledSkillIds?.has(skill.id) ?? true
 
   const pinnedCandidates: SkillRouteCandidate[] = input.pinnedSkillIds?.size
@@ -388,9 +391,9 @@ export function routeSkills(input: {
 
   const scored = catalog
     .filter((skill) => !pinnedIds.has(skill.id) && isEnabled(skill) && skill.status === 'active' && skill.intents.includes(input.intent) && modeMatches(skill, input.mode, phase) &&
-      skill.phases.includes(phase) && !blockedByNegative(skill, normalizedPrompt))
+      skill.phases.includes(phase) && !blockedByNegative(skill, skill.owner === 'chevoink' ? builtinPrompt : normalizedPrompt))
     .map((skill) => {
-      const matchedTriggers = skill.triggers.filter((trigger) => trigger.pattern.test(normalizedPrompt))
+      const matchedTriggers = skill.triggers.filter((trigger) => trigger.pattern.test(skill.owner === 'chevoink' ? builtinPrompt : normalizedPrompt))
       const reasonCodes = [...new Set(matchedTriggers.map((trigger) => trigger.reasonCode))]
       const score = baseIntentScore(skill, input.intent) + matchedTriggers.reduce((total, trigger) => total + trigger.weight, 0) + skill.priority / 100
       return { skill, score, reasonCodes }

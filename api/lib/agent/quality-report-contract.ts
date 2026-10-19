@@ -7,6 +7,7 @@ type RepairFinding = { severity: string; startOffset: number; endOffset: number;
 export const REPAIR_BLOCK_CODES = new Set([
   'QUALITY_REPAIR_LIMIT',
   'QUALITY_REPORT_STALE',
+  'QUALITY_SOURCE_STALE',
   'QUALITY_EVIDENCE_STALE',
   'QUALITY_PATCH_OVERLAP',
   'QUALITY_FINDING_SCOPE_INVALID',

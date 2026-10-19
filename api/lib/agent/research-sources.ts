@@ -244,7 +244,7 @@ export async function recordResearchReadOutcome(scope: Scope & { callId: string 
   })
 }
 
-const searchOutcomeSchema = z.object({ provider: z.enum(['bocha', 'sogou', 'bing']),
+const searchOutcomeSchema = z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing']),
   results: z.array(z.object({ title: z.string(), url: z.string().max(8192), snippet: z.string(), source: z.string() })).max(8) })
 
 /** Persist only bounded public results, not provider credentials or trace IDs. */
@@ -350,7 +350,9 @@ const failureSchema = z.object({
     'WEB_READ_INSUFFICIENT', 'WEB_READ_UNAVAILABLE', 'WEB_READ_HOSTED_UNAVAILABLE',
     'WEB_READ_TOO_LARGE', 'WEB_READ_UNSAFE_URL', 'WEB_READ_UNSUPPORTED_TYPE', 'WEB_READ_HTTP_ERROR',
     'WEB_READ_SOURCE_ERROR', 'WEB_READ_PROTOCOL_ERROR', 'WEB_READ_PARSE_ERROR',
-    'WEB_READ_COMPLEX_DOCUMENT', 'WEB_READ_HOSTED_TARGET_RESTRICTED']),
+    'WEB_READ_COMPLEX_DOCUMENT', 'WEB_READ_HOSTED_TARGET_RESTRICTED',
+    'WEB_READ_PROVIDER_PROTOCOL_ERROR', 'WEB_READ_HOSTED_NO_CONTENT', 'WEB_READ_PROVIDER_400', 'WEB_READ_PROVIDER_401', 'WEB_READ_PROVIDER_402',
+    'TOOL_CONFIG_INCOMPLETE', 'TOOL_CONFIG_UNAVAILABLE', 'WEB_TOOL_PROVIDER_UNSUPPORTED', 'WEB_TOOL_ENDPOINT_INVALID']),
   retryAt: z.string().datetime(),
 }).strict()
 

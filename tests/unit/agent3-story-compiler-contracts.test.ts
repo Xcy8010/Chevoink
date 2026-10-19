@@ -78,6 +78,23 @@ describe('严谨创作落实连续性警告', () => {
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     expect(f.repair).not.toHaveBeenCalled()
   })
+  it.each([false, true])('commits explicit terminal facts or unknown state rather than a scene plan (explicit=%s)', async explicit => {
+    const f = fixture(true)
+    Object.assign(f.chapter, { revision: 2, content: '她留在渡口。\n\n钥匙已经交还船夫。' })
+    Object.assign(f.compilation.bridge, { location: '旧仓库', objectState: ['她持有钥匙'], openLoops: ['计划进仓库'] })
+    Object.assign(f.compilation.sceneTasks[0], { purpose: '进入仓库', turn: '她用钥匙开门',
+      entryState: { action: '走向仓库' }, exitState: storyStateSchema.parse({ location: '仓库内', objects: ['她持有钥匙'], openLoops: ['门后追逐'] }) })
+    const actualState = storyStateSchema.parse({ location: '渡口', objects: ['钥匙归船夫'] })
+    const commit = vi.spyOn(compiler, 'commitChapterBridge').mockResolvedValue({ compilationId: 'comp', chapterId: 'c', chapterRevision: 2, skippedMemoryCount: 0, retainedIssueCount: 0 })
+    await chapterBridgeCommitTool.execute(f.ctx, { compilationId: 'comp', ...(explicit ? { exitState: actualState } : {}) })
+    expect(commit).toHaveBeenCalledWith(expect.objectContaining({ expectedChapterRevision: 2,
+      expectedContentHash: createHash('sha256').update(f.chapter.content).digest('hex'),
+      exitState: explicit ? actualState : storyStateSchema.parse({}), chapterSummary: `正文摘录：${f.chapter.content}`,
+      openingStructure: '开篇摘录：她留在渡口。', endingStructure: '结尾摘录：钥匙已经交还船夫。', lastUnfinishedAction: '', hookDecision: '' }), undefined)
+    expect(f.write).not.toHaveBeenCalled()
+    expect(f.critic).not.toHaveBeenCalled()
+    expect(f.repair).not.toHaveBeenCalled()
+  })
   it('complete wrapped legacy findings are parsed locally without another model call', async () => {
     const f = fixture(false)
     const findings = [{ signal: 'object', severity: 'warning', evidence: '原文承接需留意', suggestion: '交作者审阅', sourceEvidence: [{ source: 'current', quote: '原文' }] }]
@@ -260,6 +277,8 @@ describe('严谨创作落实连续性警告', () => {
     const report = { id: 'q', chapterId: 'c', chapterRevision: 1, chapter, repairRound: scenario === 'repair-limit' ? 1 : 0,
       findings: [{ id: 'finding', signal: 'emotion_grounding', disposition: 'selected', severity: 'warning', startOffset: 0, endOffset: 2,
         evidenceHash: createHash('sha256').update('原文').digest('hex'), evidenceExcerpt: '原文', explanation: '说明', suggestion: '局部修订' }] }
+    vi.spyOn(quality, 'buildHumanityQualityContext').mockResolvedValue({ chapter: { ...chapter, novel: { tagNames: [] } },
+      charter: null, compilation: null, profiles: [], anchors: [], recentChapters: [], feedback: [], originalRequest: prompt, chapterWritingBackground: [] } as unknown as Awaited<ReturnType<typeof quality.buildHumanityQualityContext>>)
     vi.spyOn(prisma.chapterQualityReport, 'findFirst').mockImplementation(async args => args?.where?.id === 'q'
       && args.where.userId === 'u' && args.where.novelId === 'n' ? report as never : null)
     vi.spyOn(prisma.qualityFinding, 'updateMany').mockResolvedValue({ count: 1 })
@@ -270,13 +289,13 @@ describe('严谨创作落实连续性警告', () => {
     if (scenario === 'cancelled') f.ctx.signal = AbortSignal.abort()
     const work = qualityRevisionApplyTool.execute(f.ctx, { reportId: 'q' })
     if (scenario === 'cancelled') await expect(work).rejects.toBeDefined()
-    else if (scenario === 'stale-revision') await expect(work).rejects.toMatchObject({ code: 'QUALITY_REPORT_STALE' })
+    else if (scenario === 'stale-revision') await expect(work).rejects.toMatchObject({ code: 'QUALITY_SOURCE_STALE' })
     else if (scenario === 'repair-limit') await expect(work).rejects.toMatchObject({ code: 'QUALITY_REPAIR_LIMIT' })
     else if (scenario === 'no-author-grant') await expect(work).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
     else await work
     expect(f.write).not.toHaveBeenCalled()
     expect(chapter.content).toBe('原文')
-    expect(f.repair).toHaveBeenCalledTimes(scenario === 'duplicate-patch' ? 2 : ['protected', 'no-author-grant'].includes(scenario) ? 0 : 1)
+    expect(f.repair).toHaveBeenCalledTimes(scenario === 'duplicate-patch' ? 2 : ['protected', 'no-author-grant', 'stale-revision'].includes(scenario) ? 0 : 1)
   })
 })
 
