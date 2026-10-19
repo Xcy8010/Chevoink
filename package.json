@@ -10,6 +10,9 @@
   },
   "packageManager": "npm@10.9.8",
   "scripts": {
+    "work:start": "node scripts/start-work.mjs",
+    "work:offline": "node scripts/start-work.mjs --offline",
+    "work:check": "node scripts/offline-readiness.mjs",
     "client:dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "build:client": "vite build",

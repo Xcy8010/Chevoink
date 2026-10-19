@@ -6,6 +6,8 @@
 
 Windows 本地与 Linux 云端遵循同一份[安全 Git 同步规则](./GIT-SYNC.md)，由仓库 `AGENTS.md` 和开发规范引导读取。检查当前 checkout、上游、全部未提交/未跟踪改动及未完成 merge/rebase 后，fetch 对应远端；仅干净且仅落后时按规则快进，不自动整合分叉或跨业务分支合并。不同任务的工作区彼此独立；GitHub 是交换点，电脑离线时无法检查其未推送工作。
 
+一次性入口为 `node scripts/start-work.mjs`；明确离线为 `node scripts/start-work.mjs --offline`，只查本地准备为 `node scripts/offline-readiness.mjs`。详见[开工同步与离线检查](./START-WORK.md)，含 Windows 入口、停止条件、退出码和断网前准备。它不自动安装到另一台电脑、不在后台持续 pull，也不启动应用或连接数据库。
+
 此约定通过任务读取规范生效，未安装强制 hook，不保证永不冲突。只更新这些文档不需要修改 `scripts/cloud-setup.mjs` 或交付工作流；setup 仍只准备依赖。云端需要取得含规则的已推送提交，旧任务需重新读取当前 checkout 的入口和规则。若环境的启动指令、固定源提交或缓存仍绑定旧规范，先核查实际配置和安装结果，再按授权刷新或重新发布；本规范不触发 setup、环境重新发布或另建任务。
 
 ## 开发环境

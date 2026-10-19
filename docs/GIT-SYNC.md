@@ -4,6 +4,8 @@
 
 ## 中文
 
+可使用一次性的[开工同步与离线检查入口](./START-WORK.md)：`node scripts/start-work.mjs`。入口实现下面的保守快进检查；明确离线使用 `--offline`，仅查本地准备使用 `node scripts/offline-readiness.mjs`。它不会自动安装为 hook、后台服务或操作另一台电脑，也不代替当前操作授权。
+
 ### 开工与交付前检查
 
 1. 每次实质开发前，在**当前任务实际工作目录**确认仓库根目录、Git 目录、HEAD、分支、上游及对应 GitHub 远端。核对仓库身份，区分任务分支、开发基线和发布目标；不使用另一台机器的绝对路径，不把另一个 checkout 当作当前任务。输出远端信息时隐去 URL 中的凭据。
@@ -54,6 +56,8 @@ git rev-parse HEAD
 ## English
 
 This policy applies to local Windows and cloud Linux tasks. It is an agent instruction, not an installed enforcing hook or a promise of conflict-free work. It grants no unrelated commit, push, merge, native publication or deployment authority.
+
+The one-shot [opening sync and offline checker](./START-WORK.md), `node scripts/start-work.mjs`, implements the conservative checks below. Choose `--offline` explicitly, or run `node scripts/offline-readiness.mjs` for local prerequisites only. It installs no hook/background service, operates no other computer and grants no additional authority.
 
 1. Before substantive development, inspect the actual task directory, repository root, Git directory, HEAD, branch, upstream and corresponding GitHub remote. Distinguish task branch, development baseline and release target; use the current checkout and redact credentials in remote URLs.
 2. Inspect staged, unstaged, untracked and unmerged changes, plus `MERGE_HEAD`, `rebase-merge`, `rebase-apply` and unfinished cherry-pick/revert operations in the resolved Git directory. Do not hide, stage, delete or move private files merely to claim a clean workspace.

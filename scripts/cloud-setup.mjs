@@ -9,14 +9,17 @@ export function assertCloudRuntime(nodeVersion, npmVersion, pinnedNode, engines)
     throw new Error(`Use repository Node ${pinnedNode} and npm ${engines.npm} (found Node ${nodeVersion}, npm ${npmVersion}); setup does not upgrade runtimes or lockfiles`)
   }
 }
-function npm(args) {
+export function cloudNpmCommand(args) {
   // Prefer npm bundled with this Node, including portable Windows installs
   // without .cmd shims. Only fixed arguments are passed to the fallback shim.
   const bundled = path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')
-  if (existsSync(bundled)) return execFileSync(process.execPath, [bundled, ...args],
-    { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-  return execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args,
-    { cwd: root, shell: process.platform === 'win32', encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+  if (existsSync(bundled)) return { program: process.execPath, args: [bundled, ...args], shell: false }
+  return { program: process.platform === 'win32' ? 'npm.cmd' : 'npm', args, shell: process.platform === 'win32' }
+}
+function npm(args) {
+  const command = cloudNpmCommand(args)
+  return execFileSync(command.program, command.args,
+    { cwd: root, shell: command.shell, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
 }
 function main() {
   const args = process.argv.slice(2)
