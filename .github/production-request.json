@@ -1,4 +1,7 @@
 {
   "schemaVersion": 1,
-  "action": "none"
+  "action": "inspect",
+  "sourceSha": "cae3789169343d860c023d1e6fc899b8dc2ace3e",
+  "ciRunId": "39256069474",
+  "requestId": "9fe8419b-6978-4456-a346-106b9bc5bbd7"
 }
