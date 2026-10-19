@@ -17,6 +17,7 @@ import { readQualityUnavailableProof } from './quality-unavailable-proof.js'
 import { inspectContinuityResponse } from './continuity-format-recovery.js'
 import { continuityEvidenceCorrectionInput, continuityEvidenceCorrectionSystem } from './continuity-response-correction.js'
 import { continuityReassessmentRequest } from './assessment-response-lifecycle.js'
+import { terminalCandidateSchema } from './terminal-state-review.js'
 
 const steps = {
   continuity_critic: { parent: 'continuity_validate', previous: null },
@@ -180,7 +181,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         }
       }
       if (captured.step === 'continuity_reassessment') {
-        const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(8), z.literal(9)]), criticSystem: z.string(), criticInput: z.string(),
+        const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(8), z.literal(9), z.literal(10)]), criticSystem: z.string(), criticInput: z.string(), terminalCandidate: terminalCandidateSchema.optional(),
           sourceBodies: z.object({ previous: z.string().nullable(), current: z.string() }) }) }) }).safeParse(parent.inputSnapshot)
         const usage = result.usageReceipt, response = parsedResult.data.result
         if (!work.success || usage?.source !== 'reported' || usage.settlementStatus !== 'settled' || usage.promptTokens === null || usage.completionTokens === null
@@ -188,7 +189,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
           return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '首个连续性回复尚无完整已结算结果，不能派发完整复评。')
         }
         const frozen = work.data.input.work
-        const inspected = inspectContinuityResponse(response.content, frozen.sourceBodies, true, 6)
+        const inspected = inspectContinuityResponse(response.content, frozen.sourceBodies, true, 6, frozen.version >= 10 ? frozen.terminalCandidate : undefined)
         const expected = continuityReassessmentRequest(frozen.criticSystem, frozen.criticInput, inspected, frozen.sourceBodies)
         const request = isolatedRequest.parse(captured.request)
         const claim = await tx.agentArtifact.findFirst({ where: { runId: lease.runId, artifactType: 'continuityReview',

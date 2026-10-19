@@ -187,7 +187,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         expect(saved.validation).toMatchObject({ independentCheck: scenario === 'old5-relocated' ? 'unavailable' : 'complete', checkRounds: 1,
           continuityCriticResponse: { parserVersion: scenario === 'relocated' ? 6 : scenario === 'old7-relocated' ? 5 : scenario === 'old6-relocated' ? 4 : 3, classification: scenario === 'old5-relocated' ? 'findings_invalid' : 'complete' } })
         const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' }, include: { effectReceipt: true } })
-        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'relocated' ? 8 : scenario === 'old7-relocated' ? 7 : scenario === 'old6-relocated' ? 6 : 5 } } })
+        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'relocated' ? 10 : scenario === 'old7-relocated' ? 7 : scenario === 'old6-relocated' ? 6 : 5 } } })
         expect(parent.effectReceipt).not.toBeNull()
         expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(1)
         if (scenario !== 'old5-relocated') expect(saved.validation).toMatchObject({ findings: [{ evidence: '原判断', suggestion: '原建议', sourceEvidence: [{ source: 'current', quote: '唯一引用。' }] }],
