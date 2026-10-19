@@ -11,9 +11,14 @@ import { startWork } from './start-work.mjs'
 function fixture(t) {
   const base = mkdtempSync(path.join(tmpdir(), 'chevoink sync 空间 ')), remote = path.join(base, 'remote.git')
   const seed = path.join(base, 'seed'), root = path.join(base, 'work'), hooks = path.join(base, 'hooks')
-  mkdirSync(hooks); t.after(() => rmSync(base, { recursive: true, force: true }))
+  const gitConfig = path.join(base, 'gitconfig')
+  mkdirSync(hooks); writeFileSync(gitConfig, ''); t.after(() => rmSync(base, { recursive: true, force: true }))
+  // Only temporary fixture children use this config. Host-global filters (for
+  // example runner Git LFS) must not contaminate independent test repositories;
+  // the real entrypoint and local hook/filter rejection tests retain all guards.
+  const gitEnvironment = (env = process.env) => ({ ...env, GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: '1' })
   const git = (args, cwd = root, allowFailure = false) => {
-    try { return execFileSync('git', ['-c', `core.hooksPath=${hooks}`, '-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd() }
+    try { return execFileSync('git', ['-c', `core.hooksPath=${hooks}`, '-c', 'commit.gpgsign=false', ...args], { cwd, env: gitEnvironment(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd() }
     catch (error) { if (allowFailure) return error.status; throw error }
   }
   git(['init', '--bare', '--initial-branch=main', remote], base)
@@ -25,7 +30,7 @@ function fixture(t) {
   const head = () => git(['rev-parse', 'HEAD'])
   const advance = () => { writeFileSync(path.join(seed, 'source.txt'), 'remote\n'); git(['add', '.'], seed); git(['commit', '-m', 'remote change'], seed); git(['push', 'origin', 'main'], seed); return git(['rev-parse', 'HEAD'], seed) }
   const calls = []
-  const command = async (program, args, options) => { calls.push(args); return runCommand(program, args, options) }
+  const command = async (program, args, options) => { calls.push(args); return runCommand(program, args, { ...options, env: gitEnvironment(options.env) }) }
   return { root, remote, seed, hooks, base, git, head, advance, calls, options: { root, command, validateRemote: value => value === remote } }
 }
 
