@@ -22,7 +22,7 @@ export async function readProductionRun(runId, options, request) {
 
 function logRecords(log, prefix) {
   if (typeof log !== 'string' || log.length > 8 * 1024 * 1024) fail()
-  return log.replace(/\u001b\[[0-9;]*m/g, '').split('\n').flatMap(line => {
+  return log.replace(/\u001b\[[0-9;]*m/g, '').split(/\r?\n/).flatMap(line => {
     // Ignore printed source/command snippets. Accept an actual timestamped log record.
     const body = /^\d{4}-\d\d-\d\dT\S+Z (.*)$/.exec(line)?.[1]
     return body?.startsWith(prefix + ' ') ? [JSON.parse(body.slice(prefix.length + 1))] : []

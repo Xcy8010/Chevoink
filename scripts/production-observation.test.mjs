@@ -156,6 +156,26 @@ test('readback distinguishes inspection from a complete publication and binds re
     assert.equal(readProductionReceipt(f.run, f.job, f.log(), f.options).revision, mode === 'inspect' ? baseline : sourceSha)
   }
 })
+test('raw Windows job logs accept CRLF receipt records with seven-digit timestamps without adapter normalization', () => {
+  // Actual Windows log framing; all run identities, payloads and times are synthetic.
+  for (const mode of ['inspect', 'deploy']) {
+    const f = runFixture(mode)
+    const commands = '2026-10-19T12:00:00.1234567Z ##[group]Run observation\r\n'
+      + '2026-10-19T12:00:00.1234567Z Write-Host "CHEVOINK_PRODUCTION_RECEIPT $receiptJson"\r\n'
+    const log = commands + f.log().replace(/\n/g, '\r\n') + '2026-10-19T12:00:12.1234567Z ##[endgroup]\r\n'
+    assert.equal(readProductionReceipt(f.run, f.job, log, f.options).revision, mode === 'inspect' ? baseline : sourceSha)
+    const mixed = log.replace('##[group]Run observation\r\n', '##[group]Run observation\n')
+      .replace(' CHEVOINK_PRODUCTION_RECEIPT ', ' \u001b[32mCHEVOINK_PRODUCTION_RECEIPT ')
+    assert.equal(readProductionReceipt(f.run, f.job, mixed, f.options).revision, mode === 'inspect' ? baseline : sourceSha)
+  }
+})
+test('Windows command snippets or untimestamped text cannot substitute for an actual receipt', () => {
+  const f = runFixture()
+  for (const log of ['2026-10-19T12:00:11.1234567Z Write-Host "CHEVOINK_PRODUCTION_RECEIPT ' + JSON.stringify(f.before) + '"\r\n',
+    'CHEVOINK_PRODUCTION_RECEIPT ' + JSON.stringify(f.before) + '\r\n', f.log().replace(/\n/g, '\r\n').replace(/}\r\n$/, '\r\n')]) {
+    assert.throws(() => readProductionReceipt(f.run, f.job, log, f.options))
+  }
+})
 for (const scenario of ['expired', 'future', 'wrong-run', 'wrong-request', 'wrong-repo', 'foreign-source', 'requested-source', 'requested-ci', 'rerun', 'failed', 'no-time', 'wrong-job', 'duplicate-proof', 'missing-proof']) {
   test(`readback rejects ${scenario} instead of reporting a current production baseline`, () => {
     const f = runFixture()
@@ -173,6 +193,7 @@ for (const scenario of ['expired', 'future', 'wrong-run', 'wrong-request', 'wron
     if (scenario === 'wrong-job') f.job.name = 'untrusted'
     const log = scenario === 'duplicate-proof' ? f.log() + f.log() : scenario === 'missing-proof' ? '' : f.log()
     assert.throws(() => readProductionReceipt(f.run, f.job, log, f.options))
+    assert.throws(() => readProductionReceipt(f.run, f.job, log.replace(/\n/g, '\r\n'), f.options))
   })
 }
 for (const scenario of ['archive', 'baseline', 'journal', 'health', 'source', 'publication-request', 'publication-ci']) {
@@ -186,6 +207,7 @@ for (const scenario of ['archive', 'baseline', 'journal', 'health', 'source', 'p
     if (scenario === 'publication-request') f.publication.requestId = 'other'
     if (scenario === 'publication-ci') f.publication.ciRunId = '13'
     assert.throws(() => readProductionReceipt(f.run, f.job, f.log(), f.options))
+    assert.throws(() => readProductionReceipt(f.run, f.job, f.log().replace(/\n/g, '\r\n'), f.options))
   })
 }
 test('readback adapter uses only existing authenticated GitHub run/job/log reads', async () => {
