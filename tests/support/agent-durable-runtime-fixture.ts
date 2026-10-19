@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
+import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
@@ -40,16 +41,22 @@ export async function fixture(work: (f: {
     const root = await initializeDurableTask({ userId, runId, sourceMessageId, tokenBudget })
     await work({ userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, runId, sourceMessageId, spec, rootId: root.id })
   } finally {
-    // Exact fixture ownership only. New roots cascade after their original runs are removed.
-    await prisma.creditRateCardEvent.deleteMany({ where: { card: { createdBy: userId } } })
-    await prisma.creditRateCard.deleteMany({ where: { createdBy: userId } })
-    await prisma.agentArtifact.deleteMany({ where: { run: { userId } } })
-    await prisma.projectMemoryEntry.deleteMany({ where: { novel: { authorId: userId } } })
-    await prisma.agentRun.deleteMany({ where: { userId } })
-    await prisma.agentSession.deleteMany({ where: { userId } })
-    await prisma.chapter.deleteMany({ where: { authorId: userId } })
-    await prisma.novel.deleteMany({ where: { authorId: userId } })
-    await prisma.user.delete({ where: { id: userId } })
+    await prisma.$transaction(async tx => {
+      // Serialize with derived memory writes before sweeping exact fixture ownership.
+      const novels = await tx.novel.findMany({ where: { authorId: userId }, select: { id: true }, orderBy: { id: 'asc' } })
+      for (const novel of novels) await lockNovelActiveScope(tx, novel.id)
+      await tx.memoryExtractionJob.deleteMany({ where: { novel: { authorId: userId } } })
+      await tx.creditRateCardEvent.deleteMany({ where: { card: { createdBy: userId } } })
+      await tx.creditRateCard.deleteMany({ where: { createdBy: userId } })
+      await tx.agentArtifact.deleteMany({ where: { run: { userId } } })
+      await tx.projectMemoryEntry.deleteMany({ where: { novel: { authorId: userId } } })
+      // New roots cascade after their original runs are removed.
+      await tx.agentRun.deleteMany({ where: { userId } })
+      await tx.agentSession.deleteMany({ where: { userId } })
+      await tx.chapter.deleteMany({ where: { authorId: userId } })
+      await tx.novel.deleteMany({ where: { authorId: userId } })
+      await tx.user.delete({ where: { id: userId } })
+    })
   }
 }
 
