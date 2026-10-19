@@ -242,6 +242,8 @@ export async function readNewDraftWritingAuthority(tx: Prisma.TransactionClient,
   if (!parsed.success || parsed.data.intent !== 'write' || parsed.data.scope.novelId !== subject.novelId
     || parsed.data.scope.selection || ['proposal_only', 'conversation_only'].includes(parsed.data.writingPacing ?? '')
     || prohibitsNewDraftRevision(original.prompt) || parsed.data.hardConstraints.some(item => prohibitsNewDraftRevision(item.text))) return null
+  const frozen = parsed.data.scope.writing
+  if (frozen?.kind !== 'bounded' && !(frozen?.kind === 'needs_input' && parsed.data.scope.writingClarificationProtocol === 1)) return null
   const scope = await readWritingScope(tx, subject)
   const writing = scope.writing
   if (writing?.kind !== 'bounded') return null

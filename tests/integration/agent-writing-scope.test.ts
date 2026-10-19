@@ -60,6 +60,7 @@ async function fixture(prompt: string, work: (ctx: ToolContext) => Promise<void>
       await lockNovelActiveScope(tx, novelId)
       await tx.memoryExtractionJob.deleteMany({ where: { novelId, novel: { authorId: userId } } })
       await tx.projectMemoryEntry.deleteMany({ where: { novelId, novel: { authorId: userId } } })
+      await tx.agentArtifact.deleteMany({ where: { run: { userId, novelId } } })
       await tx.agentRun.deleteMany({ where: { userId } })
       await tx.agentSession.deleteMany({ where: { userId } })
       await tx.chapter.deleteMany({ where: { authorId: userId } })

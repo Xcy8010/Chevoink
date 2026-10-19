@@ -356,7 +356,7 @@ describe('one atomic factual correction in the original new draft', () => {
     await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
     expect(f.db.storyCompilation.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({ runId: { in: ['original-run', 'child-run'] }, chapterId: 'new41' }) }))
   })
-  it.each(['existing', 'missing-binding', 'foreign-binding', 'wrong-slot', 'wrong-novel', 'wrong-intent', 'proposal', 'selection', 'no-frozen-scope',
+  it.each(['existing', 'missing-binding', 'foreign-binding', 'wrong-slot', 'wrong-novel', 'wrong-intent', 'proposal', 'selection', 'no-frozen-scope', 'marker-without-frozen-scope',
     'warning', 'stale', 'failed', 'wrong-chapter', 'coverage', 'scenes', 'source', 'committed', 'completed', 'later-failure', 'later-prepare', 'no-body', 'paid-repair-reserved'] as const)(
     'denies %s evidence without consuming a correction', async scenario => {
       const f = fixture()
@@ -369,6 +369,7 @@ describe('one atomic factual correction in the original new draft', () => {
       if (scenario === 'proposal') f.spec.writingPacing = 'proposal_only'
       if (scenario === 'selection') f.spec.scope.selection = { chapterId: f.chapter.id, start: 0, end: 1 }
       if (scenario === 'no-frozen-scope') delete f.spec.scope.writing
+      if (scenario === 'marker-without-frozen-scope') { delete f.spec.scope.writing; f.spec.scope.writingClarificationProtocol = 1 }
       if (scenario === 'warning') { f.validation.errorCount = 0; f.validation.findings[0].severity = 'warning' }
       if (scenario === 'stale') f.validation.checkedRevision--
       if (scenario === 'failed') f.validation.independentCheck = 'unavailable'

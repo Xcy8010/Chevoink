@@ -77,6 +77,8 @@ describe('authenticated first-chapter scope clarification', () => {
     const milestone = { version: 1 as const, ...f.subject, targetOrderIndex: 1, phase: 'prepare' as const }
     expect(observeWritingWorkflowMilestone(seen, 'story_compiler_prepare', milestone,
       { ...f.subject, taskSpec: await scope.effectiveWritingTaskSpec(f.tx, f.subject, f.spec) })).toBe(true)
+    Object.assign(f.run, { writingBindings: { version: 1, taskId: f.spec.id, targets: [{ orderIndex: 1, chapterId: 'new-first' }] } })
+    expect(await scope.readNewDraftWritingAuthority(f.tx, f.subject, { id: 'new-first', orderIndex: 1 })).toEqual({ taskId: f.spec.id })
     await expect(scope.assertWritingTarget(f.tx, f.subject, { orderIndex: 2 })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
   })
   it.each(['第一章不要写，先讨论设定', '第一章暂不确定', '第一章，写入；但别保存', '第一章写入，但取消这个决定',
