@@ -1,8 +1,68 @@
 // A conservative lexical proof, not a Prisma validator or engine invocation.
-// Keep declaration boundaries, literal bytes and all tokens within each block;
-// ignore only comments, horizontal formatting and named top-level block order.
+// Keep declaration boundaries, literal bytes and tokens within each declaration.
+// Only proven independent model constraints may change order inside a block.
 const identifier = /^[A-Za-z_][A-Za-z0-9_-]*$/
 const kinds = new Set(['model', 'enum', 'type', 'view', 'datasource', 'generator'])
+
+function modelRows(rows) {
+  if (!rows.some(row => row[0] === '@@' && ['unique', 'index'].includes(row[1]))) return rows
+  const fields = new Set(), constraints = new Set(), names = new Set(), maps = new Set(), anchors = new Set()
+  let attributesStarted = false
+  for (const row of rows) {
+    if (row[0] === '@@') { attributesStarted = true; continue }
+    if (attributesStarted || fields.has(row[0])) throw new Error('ambiguous_model_fields')
+    fields.add(row[0])
+  }
+  const sortable = row => row[0] === '@@' && ['unique', 'index'].includes(row[1])
+  for (const row of rows.filter(row => row[0] === '@@')) {
+    if (!sortable(row)) {
+      // Existing opaque declarations stay in place; never sort across them.
+      if (!['id', 'map', 'schema', 'ignore'].includes(row[1]) || anchors.has(row[1])) throw new Error('unsupported_model_attribute')
+      anchors.add(row[1]); continue
+    }
+    // Deliberately bounded: a nonempty list of distinct local bare field names,
+    // followed only by string name (unique only) / map arguments. No expression,
+    // field options, dotted paths, unknown arguments or duplicate identities.
+    const values = row.filter(value => value !== '\n'), referenced = []
+    let i = 3
+    if (values[2] !== '(' || values[i++] !== '[') throw new Error('unsupported_model_constraint')
+    while (true) {
+      const field = values[i++]
+      if (!identifier.test(field) || !fields.has(field) || referenced.includes(field)) throw new Error('ambiguous_constraint_field')
+      referenced.push(field)
+      if (values[i] !== ',') break
+      i++
+    }
+    if (values[i++] !== ']') throw new Error('unsupported_constraint_fields')
+    const args = new Set()
+    while (values[i] === ',') {
+      i++
+      const name = values[i++], literal = values[i + 1]
+      if (!['name', 'map'].includes(name) || name === 'name' && row[1] !== 'unique' || args.has(name)
+        || values[i++] !== ':' || !literal?.startsWith('"')) throw new Error('unsupported_constraint_argument')
+      i++
+      const value = JSON.parse(literal), identities = name === 'name' ? names : maps
+      if (!value || identities.has(value)) throw new Error('ambiguous_constraint_identity')
+      args.add(name); identities.add(value)
+    }
+    if (values[i++] !== ')' || i !== values.length) throw new Error('non_standalone_constraint')
+    const key = JSON.stringify([row[1], referenced])
+    if (constraints.has(key)) throw new Error('duplicate_model_constraint')
+    constraints.add(key)
+  }
+  const result = []
+  for (let i = 0; i < rows.length;) {
+    if (!sortable(rows[i])) { result.push(rows[i++]); continue }
+    const start = i
+    while (i < rows.length && sortable(rows[i])) i++
+    result.push(...rows.slice(start, i).sort((a, b) => {
+      const left = JSON.stringify(a), right = JSON.stringify(b)
+      return left < right ? -1 : left > right ? 1 : 0
+    }))
+  }
+  return result
+}
+
 function declarations(text) {
   if (text.length > 2 * 1024 * 1024) throw new Error('schema_limit')
   const tokens = [], token = /"(?:[^"\\\u0000-\u001f]|\\[^\r\n])*"|Unsupported\(|[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*|-?\d+(?:\.\d+)?|\[\]|@@|[{}[\]()@=?:,.!]|\n/y
@@ -56,9 +116,10 @@ function declarations(text) {
       row.push(value)
     }
     if (!closed) throw new Error('unclosed_block')
-    blocks.set(key, rows)
+    const canonicalRows = kind === 'model' ? modelRows(rows) : rows
+    blocks.set(key, canonicalRows)
     const group = config ? configuration : definitions
-    group.push([key, rows])
+    group.push([key, canonicalRows])
   }
   if (!blocks.size) throw new Error('no_declarations')
   return { configuration, definitions: definitions.sort(([left], [right]) => left.localeCompare(right)), blocks: blocks.size }

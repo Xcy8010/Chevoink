@@ -382,3 +382,126 @@ test('offline readiness accepts formatting-only Prisma changes but keeps engine 
   assert.equal(result.prismaEngineRuntimeVerified, false); assert.equal(result.database.verified, false)
   assert.equal(f.calls.length, 2)
 })
+
+const modelConstraints = [
+  '@@unique([tenantId, ordinal], name: "tenantOrdinal", map: "uq_tenant_ordinal")',
+  '@@index([tenantId])',
+  '@@index([title, ordinal], map: "ix_title_ordinal")',
+]
+const constraintModel = (constraints = modelConstraints, kind = 'model', name = 'Entry') => `${kind} ${name} {
+  id Int @id
+  tenantId Int
+  ordinal Int
+  title String
+  ${constraints.join('\n  ')}
+  @@map("entries")
+}\n`
+const constraintSchema = constraintModel()
+const reorderedConstraintSchema = constraintModel([modelConstraints[2], modelConstraints[0], modelConstraints[1]])
+
+test('Prisma model constraint proof accepts all standalone unique/index permutations in both directions', () => {
+  for (const order of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) {
+    const changed = '// formatting\n' + constraintModel(order.map(i => modelConstraints[i])).replace(/^  /gm, '\t')
+    for (const [left, right] of [[constraintSchema, changed], [changed, constraintSchema]]) {
+      assert.deepEqual(comparePrismaSchemas(left, right), { status: 'equivalent', basis: 'declaration_tokens', blocks: 1 })
+    }
+  }
+})
+test('Prisma model constraint proof handles independent permutations in five minimal project-shaped models', () => {
+  const names = ['AgentSession', 'ContextCheckpoint', 'NovelImportArtifact', 'NovelImportIntent', 'NovelImportJob']
+  const rows = ['@@unique([tenantId, ordinal])', '@@index([tenantId])', '@@index([title, ordinal])']
+  const model = (name, constraints) => constraintModel(constraints, 'model', name).replace('@@map("entries")', `@@map("${name.toLowerCase()}")`)
+  const left = names.map(name => model(name, rows)).join('\n')
+  const right = names.reverse().map(name => model(name, [...rows].reverse())).join('\n')
+  assert.deepEqual(comparePrismaSchemas(left, right), { status: 'equivalent', basis: 'declaration_tokens', blocks: 5 })
+})
+test('Prisma model constraint proof preserves multiline row tokens and fixed id/map anchors', () => {
+  const rows = [modelConstraints[0].replace('[tenantId, ordinal]', '[\n    tenantId,\n    ordinal\n  ]'), modelConstraints[1]]
+  const left = constraintModel(['@@id([tenantId, ordinal])', ...rows]).replace('  id Int @id\n', '  id Int\n')
+  const right = constraintModel(['@@id([tenantId, ordinal])', ...rows.reverse()]).replace('  id Int @id\n', '  id Int\n')
+  assert.equal(comparePrismaSchemas(left, right).status, 'equivalent')
+})
+
+for (const [kind, changed] of [
+  ['constraint removal', reorderedConstraintSchema.replace('  @@index([tenantId])\n', '')],
+  ['constraint addition', reorderedConstraintSchema.replace('  @@map', '  @@index([ordinal])\n  @@map')],
+  ['unique/index kind', reorderedConstraintSchema.replace('@@index([tenantId])', '@@unique([tenantId])')],
+  ['composite index field order', reorderedConstraintSchema.replace('[title, ordinal]', '[ordinal, title]')],
+  ['composite unique field order', reorderedConstraintSchema.replace('[tenantId, ordinal]', '[ordinal, tenantId]')],
+  ['parameter order', reorderedConstraintSchema.replace('name: "tenantOrdinal", map: "uq_tenant_ordinal"', 'map: "uq_tenant_ordinal", name: "tenantOrdinal"')],
+  ['literal content', reorderedConstraintSchema.replace('ix_title_ordinal', 'ix_title_ordinal_changed')],
+  ['literal whitespace', reorderedConstraintSchema.replace('ix_title_ordinal', 'ix  title_ordinal')],
+  ['literal escape bytes', reorderedConstraintSchema.replace('ix_title_ordinal', 'ix_title_ordin\\u0061l')],
+  ['client name', reorderedConstraintSchema.replace('tenantOrdinal', 'otherName')],
+  ['field order', reorderedConstraintSchema.replace('  tenantId Int\n  ordinal Int', '  ordinal Int\n  tenantId Int')],
+  ['field type', reorderedConstraintSchema.replace('  ordinal Int', '  ordinal String')],
+  ['field attribute', reorderedConstraintSchema.replace('  title String', '  title String @unique')],
+  ['map anchor position', constraintModel([modelConstraints[0], '@@map("entries")', ...modelConstraints.slice(1)]).replace(/  @@map\("entries"\)\n}\n$/, '}\n')],
+  ['enum value order', 'enum State {\n  second\n  first\n}\n' + reorderedConstraintSchema],
+  ['configuration order', 'datasource db {\n  provider = "postgresql"\n}\ngenerator client {\n  provider = "prisma-client-js"\n}\n' + reorderedConstraintSchema],
+]) {
+  test(`Prisma model constraint ${kind} stays unverified after declaration permutation`, () => {
+    let original = constraintSchema
+    if (kind === 'enum value order') original = 'enum State {\n  first\n  second\n}\n' + original
+    if (kind === 'configuration order') original = 'generator client {\n  provider = "prisma-client-js"\n}\ndatasource db {\n  provider = "postgresql"\n}\n' + original
+    assert.equal(comparePrismaSchemas(original, changed).status, 'unverified')
+    assert.equal(comparePrismaSchemas(changed, original).status, 'unverified')
+  })
+}
+
+for (const [kind, rows] of [
+  ['identical duplicate', [modelConstraints[0], modelConstraints[1], modelConstraints[1]]],
+  ['duplicate field signature with another map', ['@@index([tenantId], map: "one")', '@@index([tenantId], map: "two")']],
+  ['duplicate map identity', ['@@unique([tenantId], map: "same")', '@@index([title], map: "same")']],
+  ['escaped duplicate map identity', ['@@unique([tenantId], map: "same")', '@@index([title], map: "s\\u0061me")']],
+  ['duplicate client name', ['@@unique([tenantId], name: "same")', '@@unique([title], name: "same")']],
+  ['duplicate argument', ['@@unique([tenantId], map: "one", map: "two")', modelConstraints[1]]],
+  ['repeated field', ['@@unique([tenantId, tenantId])', modelConstraints[1]]],
+  ['unknown field', ['@@unique([missing])', modelConstraints[1]]],
+  ['empty field list', ['@@unique([])', modelConstraints[1]]],
+  ['dotted field path', ['@@unique([title.part])', modelConstraints[1]]],
+  ['field expression', ['@@unique([lower(title)])', modelConstraints[1]]],
+  ['field option', ['@@unique([title(sort: Desc)])', modelConstraints[1]]],
+  ['unknown argument', ['@@unique([title], future: true)', modelConstraints[1]]],
+  ['nonliteral map', ['@@unique([title], map: env("NAME"))', modelConstraints[1]]],
+  ['empty map', ['@@unique([title], map: "")', modelConstraints[1]]],
+  ['index client name', ['@@index([title], name: "unsupported")', modelConstraints[1]]],
+  ['two declarations in one row', [modelConstraints[0] + ' ' + modelConstraints[2], modelConstraints[1]]],
+  ['unknown model attribute', ['@@future([id])', modelConstraints[0], modelConstraints[1]]],
+  ['duplicate fixed attribute', ['@@map("other")', modelConstraints[0], modelConstraints[1]]],
+  ['field after constraint', [modelConstraints[0], 'extra String', modelConstraints[1]]],
+  ['duplicate local field', ['title String', modelConstraints[0], modelConstraints[1]]],
+]) {
+  test(`Prisma model constraint ${kind} fails closed even when both sides contain it`, () => {
+    const left = constraintModel(rows), right = constraintModel([...rows].reverse())
+    assert.deepEqual(comparePrismaSchemas(left, right), { status: 'unverified', reason: 'unsupported_or_ambiguous_schema' })
+    assert.equal(comparePrismaSchemas(left, '// formatting only\n' + left).status, 'unverified')
+  })
+}
+for (const kind of ['type', 'view', 'enum']) {
+  test(`Prisma model constraint normalization never applies inside ${kind} blocks`, () => {
+    assert.equal(comparePrismaSchemas(constraintModel(modelConstraints, kind), constraintModel([...modelConstraints].reverse(), kind)).status, 'unverified')
+  })
+}
+test('offline readiness model constraint permutations pass only the static schema prerequisite', async t => {
+  const f = offlineFixture(t)
+  f.write('prisma/schema.prisma', constraintSchema); f.write('node_modules/.prisma/client/schema.prisma', reorderedConstraintSchema)
+  const result = await checkOfflineReadiness(f.options)
+  assert.equal(result.prisma, true); assert.equal(result.readyForLocalChecks, true)
+  assert.equal(result.prismaSchema.basis, 'declaration_tokens')
+  assert.equal(result.prismaEngineRuntimeVerified, false); assert.equal(result.database.verified, false); assert.equal(result.readyForDatabaseWork, false)
+  assert.equal(f.calls.length, 2)
+  assert.ok(f.calls.every(call => call.args.includes('--version') || call.args.includes('ls')))
+})
+test('offline readiness model constraint drift and duplicates keep readiness false', async t => {
+  const f = offlineFixture(t)
+  f.write('prisma/schema.prisma', constraintSchema)
+  for (const generated of [reorderedConstraintSchema.replace('[title, ordinal]', '[ordinal, title]'),
+    constraintModel([modelConstraints[0], modelConstraints[1], modelConstraints[1]])]) {
+    f.write('node_modules/.prisma/client/schema.prisma', generated)
+    const result = await checkOfflineReadiness(f.options)
+    assert.equal(result.prisma, false); assert.equal(result.readyForLocalChecks, false)
+    assert.equal(result.prismaSchema.status, 'unverified'); assert.ok(result.problems.includes('generated_prisma_schema_unverified'))
+    assert.equal(result.readyForDatabaseWork, false)
+  }
+})
