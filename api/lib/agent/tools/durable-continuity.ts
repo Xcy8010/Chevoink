@@ -26,14 +26,15 @@ import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '..
 import { runContinuityEvidenceCorrection } from '../continuity-response-correction.js'
 import { runContinuityReassessment } from '../assessment-response-lifecycle.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
+import { readTerminalCandidate, terminalCandidateSchema, terminalReviewInput, terminalReviewFailure } from '../terminal-state-review.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const chapterSchema = z.object({ id: z.string(), title: z.string(), revision: z.number().int().positive(), content: z.string(), orderIndex: z.number().int() }).strict()
 const routeSchema = auxiliaryRouteSchema
-const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional() }).strict()
+const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional(), terminalHash: hash.optional() }).strict()
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema,
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
     sourceBodies: z.object({ previous: z.string().nullable(), current: z.string() }).optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
@@ -77,6 +78,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     const chapterOnlyPipeline = !args.compilationId && typeof args.chapterId === 'string' && !!baseline
       && await isWritingTaskContinuityCompiler(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: baseline.id, chapterId: args.chapterId })
     if (!args.compilationId && (!baseline || args.chapterId && !chapterOnlyPipeline)) {
+      if (args.terminalState) return { kind: 'rejected' as const, code: 'COMPILATION_NOT_FOUND', message: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
       const context = await buildStandaloneContinuityContext(ctx, typeof args.chapterId === 'string' ? args.chapterId : undefined, tx)
       const observed = await readObservedBaseline(tx, lease.taskRootId, cursor.expectedRevision, { kind: 'chapter', id: context.chapter.id })
       if (observed?.kind !== 'chapter' || observed.revision !== context.chapter.revision) return { kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '请先 chapter_read 读取目标正文；独立审阅无需准备章节写作。' }
@@ -100,20 +102,21 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       || sourceId && source?.revision !== compilation.bridge.sourceRevision) return {
       kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '正文为空、场景数量不合法或前章版本变化；先修复章节桥前置状态，不启动正文修订。',
     }
+    const terminalCandidate = args.terminalState ? terminalCandidateSchema.parse(args.terminalState) : readTerminalCandidate(compilation.validation)
     const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
-      source, focus: typeof args.focus === 'string' ? args.focus : undefined })
+      source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate })
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
     const reusable = cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
     const repair = false
     validatedContinuityCheckRounds(compilation.validation, !reusable)
     const originalRequest = await readOriginalTaskRequest(tx, ctx)
-    return { kind: 'check' as const, version: 8 as const, compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content }, sourceId, coverage,
+    return { kind: 'check' as const, version: 10 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content }, sourceId, coverage,
       criticSystem: continuityCriticSystem, repairSystem: repairPrompt,
       criticInput: [`章节：《${compilation.chapter.title}》`,
         `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
         `章节桥（待核对摘要，不能代替前章原文）：${JSON.stringify(continuityStoryInput(compilation.bridge))}`, `生成场景任务草案（目标/代价/转折不是历史事实）：${JSON.stringify(continuityStoryInput(compilation.sceneTasks))}`,
         continuityReviewTail(compilation.validation, compilation.chapter.revision, repair, typeof args.focus === 'string' ? args.focus : undefined, compilation.chapter.content),
-        continuitySourceInput({ previous: source?.content ?? null, current: compilation.chapter.content })].join('\n'),
+        continuitySourceInput({ previous: source?.content ?? null, current: compilation.chapter.content }), terminalReviewInput(terminalCandidate)].join('\n'),
       repair,
       cached: reusable ? cached.data.findings : null, route: null, price: null }
   }).catch(error => {
@@ -165,7 +168,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     let parsed = frozen.cached ? { structured: true, findings: frozen.cached } : critic?.finishReason === 'stop' && !critic.toolCalls.length
       ? parseIndependentContinuityResult(critic.content, frozen.version >= 3 ? 2 : 1, frozen.version >= 4 ? frozen.sourceBodies : undefined) : { structured: false, findings: [] }
     let inspected = frozen.version >= 5 && critic && frozen.sourceBodies
-      ? inspectContinuityResponse(critic.content, frozen.sourceBodies, critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3) : null
+      ? inspectContinuityResponse(critic.content, frozen.sourceBodies, critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, frozen.version >= 10 ? frozen.terminalCandidate : undefined) : null
     if (frozen.version === 7 && inspected && frozen.sourceBodies && inspected.audit.classification === 'source_invalid') {
       const billingKnown = await withRunLease(lease, async tx => {
         const previous = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:continuity_critic` } } })
@@ -243,7 +246,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
         kind: 'continuity', callId: ctx.callId,
       })
       const report = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compiler.id, findings: parsed.findings,
-        expectedChapterRevision: frozen.chapter.revision, independentCheck: parsed.structured ? 'complete' : 'unavailable', coverage: frozen.coverage, focus: typeof args.focus === 'string' ? args.focus : undefined, signal: ctx.signal }, tx)
+        expectedChapterRevision: frozen.chapter.revision, independentCheck: parsed.structured ? 'complete' : 'unavailable', coverage: frozen.coverage, terminalCandidate: frozen.terminalCandidate, focus: typeof args.focus === 'string' ? args.focus : undefined, signal: ctx.signal }, tx)
       // durable 在提交事务里累计已完成的检查，零错误也不恢复次数。
       const nextCheckRounds = report.checkRounds + (frozen.cached ? 0 : 1)
       if (nextCheckRounds !== report.checkRounds || inspected) await tx.storyCompilation.update({ where: { id: compiler.id }, data: {
@@ -252,12 +255,13 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
           ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }).value,
       } })
       const repairGuidance = parsed.structured && report.independentCheck === 'complete' && report.errorCount > 0 ? await readChapterReviewRevisionGuidance(tx, ctx, frozen.chapter) : ''
-      const toolResult: ToolResult = !parsed.structured || report.independentCheck !== 'complete'
+      const terminalFailure = terminalReviewFailure({ ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.chapter.content)
+      const toolResult: ToolResult = terminalFailure ?? (!parsed.structured || report.independentCheck !== 'complete'
         ? { outcome: 'failed', failureCode: inspected?.audit.classification === 'source_invalid' ? 'CONTINUITY_EVIDENCE_UNLOCATED' : !parsed.structured ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED', summary: '独立连续性复核未完成',
           output: unconfirmedContinuityOutput }
         : { summary: `连续性检查${frozen.cached ? '（复用）' : ''} · ${report.errorCount} 错误 ${report.warningCount} 警告`,
           output: `检查意见已保存，正文未改动；${repairGuidance || '仅警告不授权改写正文，保留剩余意见交作者决定，不追求零警告。'}${frozen.cached ? '复用当前正文与来源的检查，不重复调用模型。' : ''}\n留置绑定 reportId=${continuityDecisionBinding(compiler.id, frozen.chapter.revision, { ...report, coverage: frozen.coverage })}；findingId 使用从0开始的编号。\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`,
-          display: { kind: 'storyCompiler', compilationId: compiler.id, phase: 'check', title: '连续性检查', detail: `${report.errorCount} 错误 · ${report.warningCount} 警告`, errorCount: report.errorCount, warningCount: report.warningCount, items: report.findings.map(item => item.evidence) } }
+          display: { kind: 'storyCompiler', compilationId: compiler.id, phase: 'check', title: '连续性检查', detail: `${report.errorCount} 错误 · ${report.warningCount} 警告`, errorCount: report.errorCount, warningCount: report.warningCount, items: report.findings.map(item => item.evidence) } })
       const stateHash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, compiler.id)
       if (!stateHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查后的编译状态缺失。')
       ctx.signal.throwIfAborted()

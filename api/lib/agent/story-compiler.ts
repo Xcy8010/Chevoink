@@ -22,6 +22,7 @@ import { qualityReportMatchesContent } from './quality-report-contract.js'
 import { taskSpecSchema, sceneTaskInputSchema } from '../../../shared/contracts/index.js'
 import { requiresNextChapterDelivery } from './completion-guard.js'
 import { runtimeJson } from './runtime-common.js'
+import { currentTerminalReview, readTerminalCandidate, terminalCandidateSchema, terminalClaims, type TerminalCandidate } from './terminal-state-review.js'
 import type { WritingWorkflowMilestone } from './semantic-progress.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches, continuityStoryInput, type CompilerContinuityCoverage } from './compiler-continuity-contract.js'
@@ -669,6 +670,7 @@ export async function validateStoryContinuity(input: {
   expectedChapterRevision?: number
   independentCheck?: 'complete' | 'unavailable'
   coverage?: CompilerContinuityCoverage
+  terminalCandidate?: TerminalCandidate
   focus?: string
   signal?: AbortSignal
 }, transaction?: Prisma.TransactionClient): Promise<{ checkedChapterId: string; checkedRevision: number; checkedAt: string; independentCheck: 'complete' | 'unavailable'; findings: ContinuityFindingInput[]; errorCount: number; warningCount: number; autoRepairRounds: number; checkRounds: number }> {
@@ -701,7 +703,7 @@ export async function validateStoryContinuity(input: {
   }
   const reviewSource = compilation.bridge.fromChapterId ? await db.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId, ...activeChapterScope(input.novelId) },
     select: { id: true, revision: true, content: true } }) : null
-  const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus }, input.coverage?.protocolVersion === 6 ? 6 : 7)
+  const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus, terminalCandidate: input.terminalCandidate }, input.coverage?.protocolVersion === 6 ? 6 : 7)
   if (input.coverage && !compilerContinuityCoverageMatches(input.coverage, currentCoverage)) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、章节桥、场景或检查范围已变化，旧检查不能绑定当前编译。')
   const deterministic: ContinuityFindingInput[] = []
   if (compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4) {
@@ -758,6 +760,7 @@ export async function validateStoryContinuity(input: {
     checkedContent: compilation.chapter.content,
     ...(unlocated.length || input.independentCheck !== 'complete' ? { previousAssessment: continuityRecheckBaseline(compilation.validation) } : {}),
     coverage: currentCoverage,
+    ...(input.terminalCandidate ? { terminalCandidate: input.terminalCandidate } : {}),
     reviewFocus: input.focus ?? '',
     findings,
     errorCount: findings.filter((item) => item.severity === 'error').length,
@@ -891,12 +894,24 @@ export async function commitChapterBridge(input: {
     ...(readiness.requiredDecisions ?? []).map(item => `${item.source}:${item.reportId}:${item.findingId}`),
     ...(readiness.retainedDecisions ?? []).map(item => `${item.source}:${item.reportId}:${item.findingId}`),
   ]).size
+  // Empty state is explicitly unknown. Asserted state must be exactly the
+  // independent critic's candidate, bound to this body's full coverage.
+  const proposedTerminal = terminalCandidateSchema.parse({ exitState: input.exitState, lastUnfinishedAction: input.lastUnfinishedAction })
+  const reviewedCandidate = readTerminalCandidate(compilation.validation)
+  const terminalReview = currentTerminalReview(compilation.validation, chapter.content)
+  if (reviewedCandidate || terminalClaims(proposedTerminal).length) {
+    if (!currentContinuityReview.assessment || !reviewedCandidate || !terminalReview?.supported
+      || runtimeJson(reviewedCandidate).hash !== runtimeJson(proposedTerminal).hash) {
+      throw new DataAccessError(409, 'TERMINAL_STATE_REVIEW_REQUIRED', '终态包含尚未由当前正文独立核验的事实，或与检查候选不同。正文与原终态保留；调用 continuity_validate，terminalState={exitState,lastUnfinishedAction} 传入准确候选，核对逐项正文证据后再提交。计划、推测、否定或仅转述不能作为实况；不要静默清空已知状态绕过核验。')
+    }
+  }
   const latestCompilation = await db.storyCompilation.findFirst({ where: { id: compilation.id, userId: input.userId, novelId: input.novelId } })
   if (!latestCompilation) throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', '意见决策后编译已变化，终态未提交。')
   const terminalContext = latestCompilation.preparedContext && typeof latestCompilation.preparedContext === 'object' && !Array.isArray(latestCompilation.preparedContext) ? latestCompilation.preparedContext as Record<string, Prisma.JsonValue> : {}
   const terminalContentHash = runtimeJson({ content: chapter.content }).hash
   const sameTerminal = compilation.status === 'completed' && !!compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision
-  if (sameTerminal && terminalContext.terminalContentHash === terminalContentHash) {
+  const terminalCandidateHash = runtimeJson(proposedTerminal).hash
+  if (sameTerminal && terminalContext.terminalContentHash === terminalContentHash && terminalContext.terminalCandidateHash === terminalCandidateHash) {
     return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount }
   }
   const now = new Date()
@@ -918,7 +933,7 @@ export async function commitChapterBridge(input: {
         committedAt: now,
       }
   const assessment = currentContinuityReview.assessment
-  const terminalReviewProof = assessment ? { version: 1,
+  const terminalReviewProof = assessment ? { version: 2,
     checkedBridge: continuityStoryInput(currentContinuityReview.checkedBridge),
     terminalStateHash: terminalReviewStateHash({ ...compilation.bridge, ...bridgeData }, orderedScenes),
   } : undefined
@@ -927,7 +942,7 @@ export async function commitChapterBridge(input: {
     db.sceneTask.updateMany({ where: { compilationId: compilation.id }, data: { status: 'completed' } }),
     db.storyCompilation.update({
       where: { id: compilation.id },
-      data: { stage: 'commit', status: 'completed', completedAt: now, preparedContext: { ...terminalContext, terminalContentHash,
+      data: { stage: 'commit', status: 'completed', completedAt: now, preparedContext: { ...terminalContext, terminalContentHash, terminalCandidateHash,
         ...(terminalReviewProof ? { terminalReviewProof: terminalReviewProof as Prisma.InputJsonValue } : {}) } },
     }),
   ])

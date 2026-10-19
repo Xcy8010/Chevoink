@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto'
+import { saveSyntheticTerminalReview } from '../support/terminal-review-fixture.js'
+import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { describe, expect, it } from 'vitest'
 import { fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { assertChapterManuscriptRevision, readChapterReviewReadiness, recordChapterReviewDecisions, readChapterReviewWriteAdmission } from '../../api/lib/agent/chapter-review-guard.js'
-import { prepareStoryCompilation, recordStoryCompilerWrite, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { prepareStoryCompilation, recordStoryCompilerWrite, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
 import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
 import { readReviewCycle } from '../../api/lib/agent/review-cycle.js'
 import { projectCurrentReviewNextStep } from '../../api/lib/agent/review-dispatch.js'
@@ -35,7 +37,7 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
       styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
     const assess = async (compilationId: string, evidence: string, signal = 'emotion_grounding') => {
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })
-      await validateStoryContinuity({ ...f, compilationId, findings: [], independentCheck: 'complete', expectedChapterRevision: chapter.revision })
+      await saveSyntheticTerminalReview(f, compilationId, terminalCandidateSchema.parse({ exitState: { action: '等待回应', location: '门口' }, lastUnfinishedAction: '等待她回应' }))
       await prisma.chapterQualityReport.create({ data: { ...{ userId: f.userId, novelId: f.novelId, runId: f.runId }, compilationId,
         chapterId, chapterRevision: chapter.revision, status: 'needs_repair', deterministicMetrics: { independentCheck: 'complete', contentHash: sha(chapter.content) },
         findings: { create: [{ userId: f.userId, novelId: f.novelId, signal, source: 'critic', severity: 'advisory',

@@ -15,6 +15,7 @@ import { hasReadOnlyRevisionAssessment, localEditGuidance, localRevisionAuthorit
 import { beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, readReviewCycle, reviewCycleFinding, reviewCycleRefKey,
   type ReviewCycleFinding } from './review-cycle.js'
 import { observedReviewCycleVerification, prepareReviewCycleTransition } from './review-cycle-store.js'
+import { readTerminalCandidate } from './terminal-state-review.js'
 
 import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
 
@@ -125,7 +126,7 @@ export function readCurrentCompilerContinuity(compilation: {
     ? compilation.validation as Record<string, unknown> : null
   const scenes = [...compilation.sceneTasks].sort((a, b) => a.ordinal - b.ordinal)
   const coverageFor = (bridge: unknown) => compilerContinuityCoverage({ chapter, bridge, sceneTasks: scenes, source,
-    focus: typeof validation?.reviewFocus === 'string' ? validation.reviewFocus : undefined })
+    focus: typeof validation?.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate: readTerminalCandidate(validation) })
   const coverage = coverageFor(compilation.bridge)
   const assessment = currentCompilerContinuityAssessment(validation, chapter, coverage)
   if (assessment) return { assessment, coverage, checkedBridge: compilation.bridge }
@@ -135,7 +136,7 @@ export function readCurrentCompilerContinuity(compilation: {
     ? context.terminalReviewProof as Record<string, unknown> : null
   const proofCurrent = compilation.status === 'completed' && compilation.stage === 'commit' && compilation.bridge.targetRevision === chapter.revision
     && !!compilation.bridge.committedAt && context?.terminalContentHash === runtimeJson({ content: chapter.content }).hash
-    && proof?.version === 1 && !!proof.checkedBridge && typeof proof.checkedBridge === 'object' && !Array.isArray(proof.checkedBridge)
+    && proof?.version === 2 && !!proof.checkedBridge && typeof proof.checkedBridge === 'object' && !Array.isArray(proof.checkedBridge)
     && proof.terminalStateHash === terminalReviewStateHash(compilation.bridge, scenes)
   const proofCoverage = proofCurrent ? coverageFor(proof!.checkedBridge) : null
   const proofAssessment = proofCoverage ? currentCompilerContinuityAssessment(validation, chapter, proofCoverage) : null
@@ -748,7 +749,7 @@ export async function assertChapterReviewRevision(
         select: { id: true, revision: true, content: true } }) : null
       const sourceCurrent = !latest.bridge.fromChapterId || source?.revision === latest.bridge.sourceRevision
       if (sourceCurrent && compilerContinuityCoverageMatches(validation.coverage, compilerContinuityCoverage({ chapter: current,
-        bridge: latest.bridge, sceneTasks: latest.sceneTasks, source, focus: typeof validation.reviewFocus === 'string' ? validation.reviewFocus : undefined }))) {
+        bridge: latest.bridge, sceneTasks: latest.sceneTasks, source, focus: typeof validation.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate: readTerminalCandidate(validation) }))) {
         await assertMergedMutation(latest)
         // This closure is server-created and bound to the same transaction.
         // Call ONLY after its body CAS succeeds; failed CAS must not consume it.

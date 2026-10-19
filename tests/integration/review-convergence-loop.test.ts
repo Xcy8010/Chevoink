@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { saveSyntheticTerminalReview } from '../support/terminal-review-fixture.js'
+import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { describe, expect, it, vi } from 'vitest'
 import { fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
@@ -49,7 +51,7 @@ describe('mandatory quality pass through persisted current warning repair', () =
       styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
     const assess = async (severity?: 'advisory' | 'warning', evidence = '屋里没有灯。', last = false) => {
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-      await validateStoryContinuity({ ...f, compilationId, findings: [], independentCheck: 'complete', expectedChapterRevision: chapter.revision })
+      await saveSyntheticTerminalReview(f, compilationId, terminalCandidateSchema.parse({ exitState: { action: '等待回应', location: '门口' }, lastUnfinishedAction: '等待回应' }))
       const sources = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: f.chapterId,
         chapterRevision: chapter.revision }, chapter.content)
       const selected = sources.entries.filter(entry => entry.text === evidence)
@@ -157,7 +159,7 @@ describe('legacy review convergence through actual loop and terminal delivery', 
       styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
     const assess = async (evidence: string[], severity = 'advisory') => {
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-      await validateStoryContinuity({ ...f, compilationId: prepared.compilation.id, findings: [], independentCheck: 'complete', expectedChapterRevision: chapter.revision })
+      await saveSyntheticTerminalReview(f, prepared.compilation.id, terminalCandidateSchema.parse({ exitState: { action: '等待回应', location: '门口' }, lastUnfinishedAction: '等待回应' }))
       return prisma.chapterQualityReport.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId,
         compilationId: prepared.compilation.id, chapterId: f.chapterId, chapterRevision: chapter.revision, status: 'needs_repair',
         deterministicMetrics: { independentCheck: 'complete', contentHash: sha(chapter.content) }, findings: { create: evidence.map(text => ({
@@ -208,7 +210,7 @@ describe('legacy review convergence through actual loop and terminal delivery', 
       throw new Error('synthetic caller rollback after authorized real CAS')
     })).rejects.toThrow('synthetic caller rollback after authorized real CAS')
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).revision).toBe(13)
-    await validateStoryContinuity({ ...f, compilationId: prepared.compilation.id, findings: [], independentCheck: 'complete', expectedChapterRevision: 13 })
+    await saveSyntheticTerminalReview(f, prepared.compilation.id, terminalCandidateSchema.parse({ exitState: { action: '等待回应', location: '门口' }, lastUnfinishedAction: '等待回应' }))
     for (const proposal of proposals) expect(await preflightChapterReviewWrite(ctx, proposal.name, proposal.args)).toMatchObject({ kind: 'decision_required' })
     // Direct adapter execution cannot bypass the read-only loop decision.
     for (const [index, tool] of [chapterEditRangeTool, chapterWriteTool, chapterAppendTool].entries()) {

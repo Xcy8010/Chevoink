@@ -4,6 +4,8 @@ import { continuityFindingInputSchema, type ContinuityFindingInput } from '../..
 import { parseQualityJsonObject } from './quality-evidence.js'
 import { resolveContinuitySources, type ContinuityBodies, type ContinuitySourceRelocation } from './continuity-review-context.js'
 import { unlocatedContinuityEvidence } from './continuity-finding-authority.js'
+import { inspectTerminalReview, type TerminalCandidate } from './terminal-state-review.js'
+import { runtimeJson } from './runtime-common.js'
 
 const sourceReferenceSchema = z.object({ source: z.enum(['previous', 'current']), segmentId: z.string().min(1).optional(), quote: z.string().min(2).max(360).optional() })
   .refine(value => value.segmentId !== undefined || value.quote !== undefined)
@@ -25,7 +27,7 @@ function normalize(value: unknown, bodies: ContinuityBodies | undefined, parserV
 }
 
 /** Mechanical envelope compatibility; no new model call or missing-content reconstruction. */
-export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies, responseComplete = true, parserVersion: 3 | 4 | 5 | 6 = 3) {
+export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies, responseComplete = true, parserVersion: 3 | 4 | 5 | 6 = 3, terminalCandidate?: TerminalCandidate) {
   const sourceRelocations: ContinuitySourceRelocation[] = []
   let classification = responseComplete ? 'json_invalid' : 'response_incomplete'
   let record: Record<string, unknown> | null = null
@@ -93,7 +95,9 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
     }
   }
   if (raw.length > MAX_AUDIT_CHARS) classification = 'response_too_large'
+  if (classification === 'complete' && terminalCandidate && (!bodies || !inspectTerminalReview(terminalCandidate, bodies.current, raw, responseComplete))) classification = 'terminal_invalid'
   const audit = { version: 1, parserVersion, classification, unwrapped, ...(parserVersion >= 4 ? { sourceRelocations } : {}),
+    ...(terminalCandidate ? { terminalCandidate, terminalContentHash: bodies ? runtimeJson({ content: bodies.current }).hash : null } : {}),
     ...(parserVersion >= 5 ? { candidateFindings, invalidSourceReferences } : {}), contentHash: createHash('sha256').update(raw).digest('hex'),
     characterCount: raw.length, rawResponse: { version: 1, encoding: 'json-string', content: JSON.stringify(raw.slice(0, MAX_AUDIT_CHARS)), complete: raw.length <= MAX_AUDIT_CHARS } }
   return { structured, findings, complete: structured && classification === 'complete', candidateFindings, invalidSourceReferences, audit }

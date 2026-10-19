@@ -1,11 +1,12 @@
 import { runtimeJson } from './runtime-common.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
+import type { TerminalCandidate } from './terminal-state-review.js'
 
 // Bump when the critic's required coverage or interpretation changes.
 export const COMPILER_CONTINUITY_PROTOCOL = 7
 
 export type CompilerContinuityCoverage = {
-  version: 1; contentHash: string; charCount: number; sourceHash: string | null; reviewHash?: string; protocolVersion?: number
+  version: 1; contentHash: string; charCount: number; sourceHash: string | null; reviewHash?: string; protocolVersion?: number; terminalHash?: string
 }
 
 /** Bookkeeping is not critic input; story state, scene intent and focus are. */
@@ -18,13 +19,14 @@ export function continuityStoryInput(value: unknown): unknown {
 
 export function compilerContinuityCoverage(input: {
   chapter: { id: string; revision: number; content: string; orderIndex: number; title?: string }
-  bridge: unknown; sceneTasks: unknown[]; source: unknown | null; focus?: string
+  bridge: unknown; sceneTasks: unknown[]; source: unknown | null; focus?: string; terminalCandidate?: TerminalCandidate
 }, protocol: 6 | 7 = COMPILER_CONTINUITY_PROTOCOL): CompilerContinuityCoverage {
   const contentHash = runtimeJson({ content: input.chapter.content }).hash
   const sourceHash = input.source ? runtimeJson(input.source).hash : null
-  return { version: 1, protocolVersion: protocol, contentHash, charCount: input.chapter.content.length, sourceHash,
+  const terminalHash = input.terminalCandidate ? runtimeJson(input.terminalCandidate).hash : undefined
+  return { version: 1, protocolVersion: protocol, contentHash, charCount: input.chapter.content.length, sourceHash, ...(terminalHash ? { terminalHash } : {}),
     reviewHash: runtimeJson({ protocol, chapter: { id: input.chapter.id, title: input.chapter.title ?? '', revision: input.chapter.revision, orderIndex: input.chapter.orderIndex, contentHash },
-      bridge: continuityStoryInput(input.bridge), scenes: continuityStoryInput(input.sceneTasks), sourceHash, focus: input.focus ?? '' }).hash }
+      bridge: continuityStoryInput(input.bridge), scenes: continuityStoryInput(input.sceneTasks), sourceHash, focus: input.focus ?? '', ...(terminalHash ? { terminalHash } : {}) }).hash }
 }
 
 export function compilerContinuityCoverageMatches(actual: unknown, expected: CompilerContinuityCoverage): boolean {
@@ -34,6 +36,7 @@ export function compilerContinuityCoverageMatches(actual: unknown, expected: Com
     && value.protocolVersion === expected.protocolVersion
     && value.version === expected.version && value.contentHash === expected.contentHash
     && value.charCount === expected.charCount && value.sourceHash === expected.sourceHash
+    && value.terminalHash === expected.terminalHash
 }
 
 /** Recovering paid work must not dispatch a new repair under an older protocol. */

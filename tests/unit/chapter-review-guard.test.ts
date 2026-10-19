@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as original from '../../api/lib/agent/original-request.js'
@@ -218,8 +219,13 @@ describe('one atomic factual correction in the original new draft', () => {
     Object.assign(report.findings[0], { id: 'finding-middle', evidenceExcerpt: '中句。', startOffset: 3, endOffset: 6 })
     return { ...f, report }
   }
-  it('admits one atomic batch while an incidental full rewrite cannot count untouched middle evidence', async () => {
+  it.each([false, true])('admits one atomic batch while an incidental full rewrite cannot count untouched middle evidence (terminal candidate=%s)', async withTerminal => {
     const f = mixedFixture()
+    if (withTerminal) {
+      const terminalCandidate = terminalCandidateSchema.parse({ exitState: {} })
+      Object.assign(f.validation, { terminalCandidate })
+      f.validation.coverage = compilerContinuityCoverage({ chapter: f.chapter, bridge: f.compilation.bridge, sceneTasks: f.compilation.sceneTasks, source: null, terminalCandidate })
+    }
     await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '丙句。中句。丁句。' }))
       .rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()

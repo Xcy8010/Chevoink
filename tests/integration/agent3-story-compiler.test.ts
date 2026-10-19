@@ -1,5 +1,6 @@
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { createHash, randomInt, randomUUID } from 'node:crypto'
+import { saveSyntheticTerminalReview } from '../support/terminal-review-fixture.js'
 import { saveStoryMemory, deleteStoryMemoryEntry } from '../../api/lib/agent/story-memory.js'
 
 import request from 'supertest'
@@ -247,13 +248,15 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       importance: 70, confidence: 1, status: 'confirmed',
       evidence: { sourceType: 'chapter', sourceId: chapter2.id, revision: chapter2.revision, confidence: 1 } })
     await deleteStoryMemoryEntry(userId, deletedMemory.id, 1)
-    const result = await commitChapterBridge({
+    const terminal = {
       userId, novelId, compilationId: compilation.id,
       chapterSummary: '顾棠现身并证明自己知道铜钥匙细节，林舟压住怀疑与她暂时同行。',
       exitState: { action: '林舟与顾棠一起下塔', location: '雨塔楼梯', storyTime: '当夜', knowledge: ['林舟知道顾棠见过同类钥匙'], emotion: ['怀疑加深但暂时压住'], body: [], objects: ['铜钥匙在林舟袖中'], relationships: ['林舟与顾棠暂时合作'], openLoops: ['顾棠在哪里见过铜钥匙'] },
       lastUnfinishedAction: '两人正在下塔，尚未抵达一层', hookDecision: '下一章立即承接楼梯上的异常回声', delayedHookReason: '',
       openingStructure: '动作承接开篇', endingStructure: '同行动作未完成收尾',
-    })
+    }
+    await saveSyntheticTerminalReview({ userId, novelId }, compilation.id, terminal)
+    const result = await commitChapterBridge(terminal)
     expect(result.skippedMemoryCount).toBe(1)
     expect(await prisma.projectMemoryEntry.findUniqueOrThrow({ where: { id: deletedMemory.id } })).toMatchObject({ status: 'invalid' })
     expect(await prisma.projectMemoryEntry.count({ where: { novelId, memoryType: 'chapterSummary', title: chapter2.title } })).toBe(1)

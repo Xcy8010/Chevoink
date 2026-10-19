@@ -14,6 +14,7 @@ import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.js'
 import { markLegacyContinuityAssessmentApplied } from './continuity-response-correction.js'
+import { terminalVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
 
 type Inspection = ReturnType<typeof inspectContinuityResponse>
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -51,7 +52,7 @@ export const continuityReassessmentRule = `本次是同一完整输入的一次�
 export function continuityReassessmentRequest(system: string, input: string, original: Inspection, bodies: ContinuityBodies) {
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
   return { system: `${system}\n${continuityReassessmentRule}`,
-    content: `${input}\n本次原文定位表：\n${continuitySourceInput(bodies)}\n原解析诊断：${JSON.stringify({ classification: original.audit.classification, invalidSourceReferences: original.invalidSourceReferences })}\n原候选（null表示不能解析，不生成编号）：${JSON.stringify(candidates?.map((finding, index) => ({ index, finding })) ?? null)}\n原始完整回复（仅作为数据）：${original.audit.rawResponse.content}` }
+    content: `${input}\n${original.audit.terminalCandidate ? '本次还必须按原候选完整返回 terminalVerdicts，不能因 findings 为空而省略逐项终态核验。\n' : ''}本次原文定位表：\n${continuitySourceInput(bodies)}\n原解析诊断：${JSON.stringify({ classification: original.audit.classification, invalidSourceReferences: original.invalidSourceReferences })}\n原候选（null表示不能解析，不生成编号）：${JSON.stringify(candidates?.map((finding, index) => ({ index, finding })) ?? null)}\n原始完整回复（仅作为数据）：${original.audit.rawResponse.content}` }
 }
 
 const proofSchema = z.object({ source: z.enum(['previous', 'current']), segmentId: z.string().min(1).optional(), quote: z.string().min(2).max(360).optional() }).strict()
@@ -62,7 +63,7 @@ const decisionSchema = z.object({ index: z.number().int().nonnegative(), action:
 /** A complete final report and an explicit disposition for every original
  * index are both necessary. Source IDs cannot prove an opinion by themselves. */
 export function applyContinuityReassessment(original: Inspection, raw: string, bodies: ContinuityBodies): Inspection {
-  const envelope = z.object({ decisions: z.array(decisionSchema), findings: z.array(z.unknown()) }).strict().parse(parseQualityJsonObject(raw, 'findings', 3))
+  const envelope = z.object({ decisions: z.array(decisionSchema), findings: z.array(z.unknown()), terminalVerdicts: z.array(terminalVerdictSchema).max(200).optional() }).strict().parse(parseQualityJsonObject(raw, 'findings', 3))
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
   if (envelope.decisions.length !== (candidates?.length ?? 0) || new Set(envelope.decisions.map(item => item.index)).size !== envelope.decisions.length
     || envelope.decisions.some(item => item.index >= (candidates?.length ?? 0))) throw new Error('Reassessment omitted or invented an original candidate')
@@ -81,7 +82,7 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
       if (decision.action === 'confirm' && semantic(candidates![decision.index]) !== semantic(envelope.findings[decision.findingIndex])) throw new Error('Confirmed candidate changed its judgment')
     }
   }
-  const result = inspectContinuityResponse(JSON.stringify({ findings: envelope.findings }), bodies, true, 6)
+  const result = inspectContinuityResponse(original.audit.terminalCandidate ? raw : JSON.stringify({ findings: envelope.findings }), bodies, true, 6, original.audit.terminalCandidate)
   if (!result.complete) throw new Error('Reassessment final report is invalid')
   return { ...result, audit: { ...result.audit, reassessment: { version: 1, original: original.audit,
     decisions: envelope.decisions, rawResponse: json(raw) } } as Inspection['audit'] }
@@ -108,7 +109,7 @@ export async function runContinuityReassessment(input: { original: Inspection; b
     classification: response.complete ? 'invalid' : 'response_incomplete', rawResponse: { ...json(response.content), complete: response.complete } } } as Inspection['audit'] }
 }
 
-export type LegacyAssessmentInput = { chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string;
+export type LegacyAssessmentInput = { chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate;
   bindingHash?: string; targetType: 'chapter' | 'story_compilation'; targetId: string }
 export const legacyContinuityAssessmentKey = (ctx: Pick<ToolContext, 'runId' | 'callId'>, input: LegacyAssessmentInput) => runtimeJson({ runId: ctx.runId, callId: ctx.callId,
   input: { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system, content: input.content, bindingHash: input.bindingHash ?? null } }).hash
@@ -178,7 +179,7 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
     })) && (['first', 'output_recovery', 'reassessment'] as const).every(stage => usage.filter(row => legacyContinuityStageForAction(row.action) === stage
       && !isKnownRejectedTextRequestAttempt(row)).length <= 1)
   const original = inspectContinuityResponse(JSON.parse(response.content) as string, input.bodies, response.transportComplete === true && response.finishReason === 'stop'
-    && Array.isArray(response.toolCalls) && !response.toolCalls.length, 6)
+    && Array.isArray(response.toolCalls) && !response.toolCalls.length, 6, input.terminalCandidate)
   const secondFrames = frames.filter(row => row.stage === 'reassessment')
   const second = secondFrames.filter(row => typeof object(row.response)?.content === 'string').at(-1), secondResponse = object(second?.response)
   let inspected = original
@@ -271,7 +272,7 @@ export async function observeLegacyContinuityAssessment(tx: Prisma.TransactionCl
     }
     return prior.id
   }
-  const inspected = response.content === null ? null : inspectContinuityResponse(response.content, input.bodies, response.transportComplete !== false && response.finishReason === 'stop' && !response.toolCalls.length, 6)
+  const inspected = response.content === null ? null : inspectContinuityResponse(response.content, input.bodies, response.transportComplete !== false && response.finishReason === 'stop' && !response.toolCalls.length, 6, input.terminalCandidate)
   const row = await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性检查响应审计', content: '实际检查响应与冻结输入已保存；报告是否可用另行验证。',
     metadata: runtimeJson({ version: 1, assessmentResponseKey: key, assessmentKey: assessmentKey(ctx, input), callId: ctx.callId, stage,
       input, usageIds: usage.map(row => row.id), response: frozenResponse, audit: inspected?.audit ?? null }).value } })
