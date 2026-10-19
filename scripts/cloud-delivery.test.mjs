@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { readFileSync } from 'node:fs'
-import { assertCloudIdentity, assertEnvironmentApproval, verifyCloudDeployment } from './cloud-deploy-guard.mjs'
+import { assertCloudIdentity, assertEnvironmentApproval, verifyCloudDeployment, verifyCloudObservation } from './cloud-deploy-guard.mjs'
 import { assertCloudRuntime } from './cloud-setup.mjs'
 import { verifyCloudAndroid } from './cloud-android-guard.mjs'
 
@@ -52,6 +52,26 @@ test('uses live maintained CI admission and rejects forged names, wrong SHA or e
   }
   await assert.rejects(verifyCloudDeployment(env, sha, async () => { throw new Error('API unavailable') }), /API unavailable/)
 })
+test('inspection requires exact trusted main, original CI and human approval without authorizing deployment', async () => {
+  const inspection = { ...env, PRODUCTION_ACTION: 'inspect', PRODUCTION_REQUEST_ID: '12345678-1234-1234-1234-123456789abc', EXPECTED_PRODUCTION_SHA: '' }
+  const calls = []
+  const request = async endpoint => { calls.push(endpoint); return reader()(endpoint) }
+  const result = await verifyCloudObservation(inspection, sha, request)
+  assert.equal(result.inspectionOnly, true)
+  assert.equal(result.ciRunId, '12')
+  assert.equal(calls.length, 5)
+  await assert.rejects(verifyCloudDeployment(inspection, sha, request))
+  for (const patch of [{ PRODUCTION_ACTION: 'anything' }, { PRODUCTION_REQUEST_ID: '' }, { CI_RUN_ID: '' }, { GITHUB_RUN_ATTEMPT: '2' }, { GITHUB_EVENT_NAME: 'issues' }, { EXPECTED_PRODUCTION_SHA: 'main' }]) {
+    await assert.rejects(verifyCloudObservation({ ...inspection, ...patch }, sha, request))
+  }
+  await assert.rejects(verifyCloudObservation(inspection, sha, async endpoint => endpoint.endsWith('/production') ? protectedEnvironment : []))
+  await assert.rejects(verifyCloudObservation(inspection, sha, reader({ head_sha: 'b'.repeat(40) })))
+  await assert.rejects(verifyCloudObservation({ ...inspection, PRODUCTION_ACTION: 'deploy' }, sha, reader()))
+  const deploy = { ...inspection, PRODUCTION_ACTION: 'deploy', CI_RUN_ID: '12', EXPECTED_PRODUCTION_SHA: 'b'.repeat(40) }
+  assert.equal((await verifyCloudObservation(deploy, sha, reader())).ciRunId, '12')
+  await assert.rejects(verifyCloudObservation({ ...deploy, CI_RUN_ID: '' }, sha, reader()))
+  await assert.rejects(verifyCloudObservation(deploy, sha, reader({ head_sha: 'b'.repeat(40) })))
+})
 test('workflow preserves single production concurrency, strict SSH and maintained entrypoint', () => {
   const workflow = readFileSync(new URL('../.github/workflows/cloud-deploy.yml', import.meta.url), 'utf8')
   assert.match(workflow, /group: chevoink-production\s+cancel-in-progress: false/)
@@ -61,6 +81,15 @@ test('workflow preserves single production concurrency, strict SSH and maintaine
   assert.match(workflow, /WindowsIdentity\]::GetCurrent\(\)\.User.Value/)
   assert.match(workflow, /\*\$\{credentialSid\}:\(R,D\)/)
   assert.match(workflow, /\[IO.File\]::Delete\(\$keyPath\)/)
+  assert.match(workflow, /push:\s+branches: \[main\]\s+paths: \[.github\/production-request\.json\]/)
+  assert.match(workflow, /needs: admit\s+if: needs.admit.outputs.eligible == 'true'/)
+  assert.match(workflow, /ref: \$\{\{ needs.admit.outputs.source_sha \}\}/)
+  assert.doesNotMatch(workflow, /workflow_dispatch:/)
+  assert.match(workflow, /if \(\$env:PRODUCTION_ACTION -eq 'deploy'\)/)
+  assert.doesNotMatch(workflow, /\$env:EXPECTED_PRODUCTION_SHA = \$observed.revision/)
+  assert.match(workflow, /\$observed.revision -ne \$env:EXPECTED_PRODUCTION_SHA/)
+  assert.match(workflow, /cloud-output\/preflight.json\s+cloud-output\/deployment.json\s+cloud-output\/postflight.json/)
+  assert.doesNotMatch(workflow, /workflow_run:|issues:|actions: write|secrets: inherit|path: cloud-output\/\*/)
   const deploy = readFileSync(new URL('./deploy-production.ps1', import.meta.url), 'utf8')
   assert.match(deploy, /'StrictHostKeyChecking=yes'/)
   const ci = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')

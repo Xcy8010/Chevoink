@@ -1,21 +1,10 @@
 name: Cloud Production Deployment
-run-name: Deploy ${{ inputs.source_sha }} over ${{ inputs.expected_production_sha }}
+run-name: ${{ github.event.head_commit.message }}
 
 on:
-  workflow_dispatch:
-    inputs:
-      source_sha:
-        description: Exact tested main SHA (must equal the selected main workflow revision)
-        required: true
-        type: string
-      expected_production_sha:
-        description: Exact currently active production SHA, verified before approval
-        required: true
-        type: string
-      ci_run_id:
-        description: Completed original CI run for source_sha (real PostgreSQL, zero skips)
-        required: true
-        type: string
+  push:
+    branches: [main]
+    paths: [.github/production-request.json]
 
 permissions:
   contents: read
@@ -26,8 +15,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  admit:
+    if: github.repository == 'Xcy8010/Chevoink' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      eligible: ${{ steps.request.outputs.eligible }}
+      source_sha: ${{ steps.request.outputs.source_sha }}
+      ci_run_id: ${{ steps.request.outputs.ci_run_id }}
+      request_id: ${{ steps.request.outputs.request_id }}
+      action: ${{ steps.request.outputs.action }}
+      expected_revision: ${{ steps.request.outputs.expected_revision }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Admit only an explicit request bound to original tested source
+        id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/production-request.mjs --admit
   deploy:
-    if: github.repository == 'Xcy8010/Chevoink' && github.ref == 'refs/heads/main'
+    needs: admit
+    if: needs.admit.outputs.eligible == 'true'
     runs-on: windows-2022
     timeout-minutes: 40
     environment:
@@ -38,13 +53,16 @@ jobs:
         shell: pwsh
     env:
       GH_TOKEN: ${{ github.token }}
-      SOURCE_SHA: ${{ inputs.source_sha }}
-      EXPECTED_PRODUCTION_SHA: ${{ inputs.expected_production_sha }}
-      CI_RUN_ID: ${{ inputs.ci_run_id }}
+      SOURCE_SHA: ${{ needs.admit.outputs.source_sha }}
+      EXPECTED_PRODUCTION_SHA: ${{ needs.admit.outputs.expected_revision }}
+      CI_RUN_ID: ${{ needs.admit.outputs.ci_run_id }}
+      PRODUCTION_ACTION: ${{ needs.admit.outputs.action }}
+      PRODUCTION_REQUEST_ID: ${{ needs.admit.outputs.request_id }}
+      PRODUCTION_REQUEST_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.admit.outputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -53,8 +71,8 @@ jobs:
       - name: Deterministic admission regression checks
         run: node --test scripts/cloud-delivery.test.mjs
       - name: Verify exact original CI and actual environment approval
-        run: node scripts/cloud-deploy-guard.mjs
-      - name: Deploy once through the maintained entrypoint
+        run: node scripts/cloud-deploy-guard.mjs --observe
+      - name: Observe production and optionally deploy once through the maintained entrypoint
         env:
           PRODUCTION_SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
           PRODUCTION_KNOWN_HOSTS: ${{ secrets.PRODUCTION_KNOWN_HOSTS }}
@@ -68,17 +86,43 @@ jobs:
           New-Item -ItemType Directory -Path (Split-Path $knownHosts) -Force | Out-Null
           if (Test-Path -LiteralPath $knownHosts) { throw 'Runner known_hosts already exists; inspect runner state.' }
           try {
+            node scripts/cloud-deploy-guard.mjs --observe
+            if ($LASTEXITCODE -ne 0) { throw 'Deployment admission changed before credentials are written or used.' }
             [IO.File]::WriteAllText($keyPath, $env:PRODUCTION_SSH_KEY.Replace("`r", '').TrimEnd() + "`n")
             & icacls.exe $keyPath /inheritance:r /grant:r "*${credentialSid}:(R,D)" | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'Cannot restrict private key ACL.' }
             [IO.File]::WriteAllText($knownHosts, $env:PRODUCTION_KNOWN_HOSTS.Replace("`r", '').TrimEnd() + "`n")
-            node scripts/cloud-deploy-guard.mjs
+            node scripts/cloud-deploy-guard.mjs --observe
             if ($LASTEXITCODE -ne 0) { throw 'Deployment admission changed.' }
-            ./scripts/deploy-production.ps1 -ExpectedCurrentRevision $env:EXPECTED_PRODUCTION_SHA -CiRunId $env:CI_RUN_ID -KeyPath $keyPath
+            New-Item -ItemType Directory -Path 'cloud-output' | Out-Null
+            $inspection = @('scripts/inspect-production.mjs', '--source-sha', $env:SOURCE_SHA, '--request-sha', $env:PRODUCTION_REQUEST_SHA, '--ci-run-id', $env:CI_RUN_ID, '--run-id', $env:GITHUB_RUN_ID, '--request-id', $env:PRODUCTION_REQUEST_ID, '--key-path', $keyPath, '--out', 'cloud-output/preflight.json')
+            if ($env:EXPECTED_PRODUCTION_SHA) { $inspection += @('--expected-revision', $env:EXPECTED_PRODUCTION_SHA) }
+            node @inspection
+            if ($LASTEXITCODE -ne 0) { throw 'Fresh production observation failed; no deployment was attempted.' }
+            $observed = Get-Content -LiteralPath 'cloud-output/preflight.json' -Raw | ConvertFrom-Json
+            if ($env:PRODUCTION_ACTION -eq 'deploy') {
+              if (!$env:EXPECTED_PRODUCTION_SHA -or $observed.revision -ne $env:EXPECTED_PRODUCTION_SHA) { throw 'Actual production differs from the explicitly approved baseline.' }
+              node scripts/cloud-deploy-guard.mjs
+              if ($LASTEXITCODE -ne 0) { throw 'Exact deployment admission changed.' }
+              ./scripts/deploy-production.ps1 -ExpectedCurrentRevision $env:EXPECTED_PRODUCTION_SHA -CiRunId $env:CI_RUN_ID -KeyPath $keyPath -ReceiptPath 'cloud-output/deployment.json' -OperationId $env:GITHUB_RUN_ID -RequestId $env:PRODUCTION_REQUEST_ID -RequestSha $env:PRODUCTION_REQUEST_SHA
+              node scripts/inspect-production.mjs --source-sha $env:SOURCE_SHA --request-sha $env:PRODUCTION_REQUEST_SHA --ci-run-id $env:CI_RUN_ID --run-id $env:GITHUB_RUN_ID --request-id $env:PRODUCTION_REQUEST_ID --key-path $keyPath --phase postflight --expected-revision $env:SOURCE_SHA --out cloud-output/postflight.json
+              if ($LASTEXITCODE -ne 0) { throw 'Deployment outcome needs reconciliation; do not replay the deployment.' }
+            }
           } finally {
             if (Test-Path -LiteralPath $keyPath) { [IO.File]::Delete($keyPath) }
             if (Test-Path -LiteralPath $knownHosts) { Remove-Item -LiteralPath $knownHosts -Force }
           }
+      - name: Retain only sanitized point-in-time production receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            cloud-output/preflight.json
+            cloud-output/deployment.json
+            cloud-output/postflight.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Failure requires reconciliation
         if: failure() || cancelled()
         run: |

@@ -6,6 +6,10 @@ param(
   [Parameter(Mandatory = $true)][string]$ExpectedCurrentRevision,
   [string]$CiRunId,
   [string]$SourceAddress,
+  [string]$ReceiptPath,
+  [string]$OperationId,
+  [string]$RequestId,
+  [string]$RequestSha,
   [switch]$SkipLocalChecks
 )
 
@@ -27,6 +31,10 @@ if ($HostName -ne '124.223.188.123' -or $UserName -ne 'ubuntu' -or $PublicUrl -n
 if ($ExpectedCurrentRevision -notmatch '^[a-f0-9]{40}$') { throw 'An exact expected current SHA is required.' }
 if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) { throw 'SSH key is missing.' }
 if ($SourceAddress -and $SourceAddress -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw 'Invalid SSH source address.' }
+if (($ReceiptPath -and $OperationId -notmatch '^[1-9]\d*$') -or ($OperationId -and !$ReceiptPath)) { throw 'Receipt requires the exact operation ID and a new output path.' }
+if ($ReceiptPath -and $RequestId -notmatch '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$') { throw 'Receipt requires the originating request UUID.' }
+if ($ReceiptPath -and $RequestSha -notmatch '^[a-f0-9]{40}$') { throw 'Receipt requires the originating request commit.' }
+if ($ReceiptPath -and (Test-Path -LiteralPath $ReceiptPath)) { throw 'Receipt path already exists; do not reuse old evidence.' }
 Push-Location $ProjectRoot
 try {
   $revision = (Invoke-Checked git @('rev-parse', '--verify', 'HEAD')).Trim()
@@ -67,6 +75,13 @@ try {
   $publicIndexHash = (Get-FileHash -LiteralPath (Join-Path $packageDirectory 'public-index.html') -Algorithm SHA256).Hash.ToLowerInvariant()
   $remoteIndexHash = ((Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", 'sha256sum /var/www/chevoink/current/index.html'))) -split '\s+')[0]
   if ($publicIndexHash -ne $remoteIndexHash) { throw 'Public index differs from the deployed entry page.' }
+  if ($ReceiptPath) {
+    $receipt = @{ schemaVersion = 1; runId = $OperationId; requestId = $RequestId; requestSha = $RequestSha; revision = $revision; baseline = $ExpectedCurrentRevision;
+      ciRunId = $CiRunId; archiveSha256 = $package.archiveSha256; publicIndexSha256 = $publicIndexHash; verifiedAt = [DateTime]::UtcNow.ToString('o') }
+    $receiptJson = $receipt | ConvertTo-Json -Depth 8 -Compress
+    [IO.File]::WriteAllText([IO.Path]::GetFullPath($ReceiptPath), $receiptJson + "`n")
+    Write-Host "CHEVOINK_DEPLOYMENT_RECEIPT $receiptJson"
+  }
   Write-Host "Deployment verified: $revision; package/evidence retained at $packageDirectory"
 }
 finally { Pop-Location }

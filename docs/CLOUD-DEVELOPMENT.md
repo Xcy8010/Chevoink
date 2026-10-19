@@ -67,7 +67,7 @@ gh workflow run cloud-android.yml --repo Xcy8010/Chevoink --ref main -f source_s
 
 ## 精确 SHA 的生产 Web 部署
 
-新增 `Cloud Production Deployment` 为手动入口，参见 [生产操作与恢复](./CLOUD-DEVELOPMENT-OPERATIONS.md)。只能从 `main` 首次 dispatch，`source_sha` 必须等于本次工作流源 SHA；不能用一个工作流提交部署另一个未经绑定的源目录。若 main 已前进，重新确认目标提交与相应 CI，或对 main 做经过审查的前向修复/回退提交并等待其完整 CI。
+`Cloud Production Deployment` 监听main固定 `.github/production-request.json` 的push；普通源码push不会进入生产流程。已测候选C与请求提交R分离：C..R只能改变请求文件，执行与归档均使用通过原完整CI的C。先人工批准inspect获得实际B，再用新的明确C/B请求人工批准deploy；准入与执行均严格核对B，不自动覆盖基线。详见[生产操作与恢复](./CLOUD-DEVELOPMENT-OPERATIONS.md)中的独立审批前核验与未知结果规则。
 
 开始前需完成生产环境保护、严格 known_hosts 和原 SSH key 的配置；本次实现未执行这些账号操作，也未运行任何生产部署。
 

@@ -79,6 +79,9 @@ jobs:
       - name: 文档隔离工作器协议测试（不代表原生 OCR 验收）
         run: python3 -m unittest discover -s workers/document-import/tests -p 'test_*.py' -v
 
+      - name: 云端发布准入与只读观察回归（不连接生产）
+        run: node --test scripts/cloud-delivery.test.mjs scripts/production-observation.test.mjs
+
       - name: 生成 Agent 3.0 确定性评测快照
         run: |
           DOTENV_CONFIG_QUIET=true npm --silent run agent3:eval > agent3-eval-report.json

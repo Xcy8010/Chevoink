@@ -117,7 +117,7 @@ export async function snapshotProductionProcess({ identity = () => readDaemonIde
   if (JSON.stringify(before) !== JSON.stringify(after)) fail('Daemon identity changed during RPC')
   return verifyApiProcess(processes, after, io)
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (import.meta.url.startsWith('file:') && process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     if (process.platform !== 'linux') fail('Production snapshot requires Linux')
     console.log(JSON.stringify(await snapshotProductionProcess()))
