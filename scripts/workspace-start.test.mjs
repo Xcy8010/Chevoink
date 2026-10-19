@@ -194,7 +194,8 @@ function standardLfs(f, global = false) {
   }
 }
 test('standard duplicated LFS config with no filter attributes permits a fast-forward without invoking LFS or changing config', async t => {
-  const f = fixture(t), special = '-tab\t空间\nname.txt'
+  // Windows forbids control characters; POSIX still exercises tab/newline paths.
+  const f = fixture(t), special = process.platform === 'win32' ? '-space 空间 name.txt' : '-tab\t空间\nname.txt'
   writeFileSync(path.join(f.seed, special), 'ordinary blob'); const target = f.advance()
   standardLfs(f, true); standardLfs(f)
   const original = f.git(['config', '--get-regexp', '^filter\\.']), bin = path.join(f.base, 'bin')
