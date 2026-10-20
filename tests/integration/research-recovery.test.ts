@@ -20,6 +20,9 @@ const runFields = { mode: 'act' as const, engine: 'loop', action: 'workspaceAgen
 const official: WebSearchResult = { title: '河谷纪事最新章节在线阅读_林青', url: 'https://fiction.example.com/page/123', snippet: '作者：林青，公开作品目录。', source: 'fiction.example.com' }
 const unrelated: WebSearchResult = { title: '河（汉字）', url: 'https://dictionary.example.com/item/he', snippet: '汉字释义。', source: 'dictionary.example.com' }
 const query = 'site:fiction.example.com 河谷纪事 林青'
+const handoffCount = (scopeKey: string) => prisma.agentArtifact.count({ where: {
+  id: hash([scopeKey, 'research-read-handoff-v1']), artifactType: 'contextCheckpoint',
+} })
 
 async function fixture(work: (fixture: Fixture) => Promise<void>, overrides: Partial<TaskSpec> = {}) {
   const user = await prisma.user.create({ data: { nickname: 'research-recovery-fixture', passwordHash: 'test-only' } })
@@ -33,6 +36,26 @@ async function fixture(work: (fixture: Fixture) => Promise<void>, overrides: Par
     await prisma.agentRun.create({ data: { id: runId, userId: user.id, novelId: novel.id, sessionId: session.id,
       ...runFields, taskSpec: JSON.parse(JSON.stringify(spec)) } })
     await work({ scope, spec, scopeKey: hash([user.id, session.id, novel.id, spec.id]) })
+    const requests = await prisma.agentResearchRequest.findMany({ where: { ownerRun: { userId: user.id } }, select: { kind: true, status: true, units: true } })
+    expect(requests.every(request => ['search', 'read'].includes(request.kind))).toBe(true)
+    expect(requests.every(request => ['baseline', 'reserved', 'consumed', 'released'].includes(request.status))).toBe(true)
+    // Recovery checkpoints must not masquerade as network requests or insert
+    // zero-unit non-baseline rows into the frozen quota/accounting table.
+    expect(requests.filter(request => request.status !== 'baseline').every(request => request.units === 1)).toBe(true)
+    const artifacts = await prisma.agentArtifact.findMany({ where: { run: { userId: user.id } } })
+    const reports = artifacts.filter(artifact => artifact.artifactType === 'researchReport')
+    const checkpoints = artifacts.filter(artifact => artifact.artifactType === 'contextCheckpoint')
+    expect(artifacts.length).toBe(reports.length + checkpoints.length)
+    for (const kind of ['researchReadHandoff', 'researchLimitationDelivery']) {
+      expect(checkpoints.filter(checkpoint => (checkpoint.metadata as { kind?: string })?.kind === kind).length).toBeLessThanOrEqual(1)
+    }
+    for (const checkpoint of checkpoints) {
+      expect(checkpoint.content).toBe('')
+      expect(checkpoint.metadata).toMatchObject({ version: 1, scopeKey: hash([user.id, session.id, novel.id, spec.id]), taskKey: spec.id })
+      const metadata = checkpoint.metadata as { kind: string; status: string }
+      expect(['researchReadHandoff', 'researchLimitationDelivery']).toContain(metadata.kind)
+      expect(['pending', 'consumed']).toContain(metadata.status)
+    }
     expect(await prisma.creditLedgerEntry.count({ where: { userId: user.id } })).toBe(0)
     expect(await prisma.chapter.count({ where: { novelId: novel.id } })).toBe(0)
   } finally {
@@ -78,18 +101,20 @@ async function persistUnknown(scope: Scope, state: 'reserved-read' | 'unknown-re
 
 describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL and synthetic evidence', () => {
   it('hands the fourth search exact official source to an ordinary read once without adding quota', async () => {
-    await fixture(async ({ scope, scopeKey }) => {
+    await fixture(async ({ scope, scopeKey, spec }) => {
       const fourth = await fourthSearch(scope)
       const before = await prisma.agentResearchRequest.count({ where: { scopeKey, kind: { in: ['search', 'read'] } } })
       const claimed = await claimResearchReadHandoff(scope, [fourth.callId])
       expect(claimed).toEqual({ sourceId: fourth.sources[0].id, receiptId: hash([scopeKey, 'research-read-handoff-v1']) })
       expect(await claimResearchReadHandoff(scope, [fourth.callId])).toBeNull()
-      const receipt = await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: claimed!.receiptId } })
-      expect(receipt).toMatchObject({ kind: 'handoff', units: 0, requestLimit: 1, status: 'pending', ownerRunId: scope.runId })
+      const receipt = await prisma.agentArtifact.findUniqueOrThrow({ where: { id: claimed!.receiptId } })
+      expect(receipt).toMatchObject({ artifactType: 'contextCheckpoint', content: '', runId: scope.runId,
+        metadata: { kind: 'researchReadHandoff', version: 1, scopeKey, taskKey: spec.id, status: 'pending',
+          sourceId: fourth.sources[0].id, searchId: hash([scopeKey, scope.runId, fourth.callId]) } })
       expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: { in: ['search', 'read'] } } })).toBe(before)
       expect(await takeResearchReadHandoff(scope)).toEqual(claimed)
       expect(await takeResearchReadHandoff(scope)).toBeNull()
-      expect(await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: claimed!.receiptId } })).toMatchObject({ status: 'consumed' })
+      expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: claimed!.receiptId } })).toMatchObject({ metadata: { status: 'consumed' } })
       await consumeRead(scope, 'first ordinary admitted read')
       const baseline = await prisma.agentResearchRequest.findFirstOrThrow({ where: { scopeKey, kind: 'read', status: 'baseline' } })
       expect(baseline).toMatchObject({ requestLimit: 8, units: 0 })
@@ -101,7 +126,7 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       const fourth = await fourthSearch(scope)
       const claims = await Promise.all(Array.from({ length: 5 }, () => claimResearchReadHandoff(scope, [fourth.callId])))
       expect(claims.filter(Boolean)).toHaveLength(1)
-      expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'handoff' } })).toBe(1)
+      expect(await handoffCount(scopeKey)).toBe(1)
       await consumeRead(scope, 'original read')
       await prisma.agentRun.update({ where: { id: scope.runId }, data: { status: 'paused' } })
       const resumed = { ...scope, runId: randomUUID() }
@@ -116,7 +141,9 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       expect(await reserveResearchRequest({ ...resumed, callId: randomUUID() }, 'search', hash('sixth search'))).toBe(false)
       for (let index = 1; index < 8; index++) await consumeRead(resumed, `remaining-${index}`)
       expect(await reserveResearchRequest({ ...resumed, callId: randomUUID() }, 'read', hash('ninth read'))).toBe(false)
-      expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'handoff' } })).toBe(1)
+      expect(await handoffCount(scopeKey)).toBe(1)
+      expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: claims.find(Boolean)!.receiptId } }))
+        .toMatchObject({ runId: scope.runId, metadata: { status: 'consumed' } })
     })
   })
 
@@ -127,7 +154,7 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       expect(await claimResearchReadHandoff(scope, [current.callId])).toBeNull()
       expect(await claimResearchReadHandoff(scope, [])).toBeNull()
       expect(await claimResearchReadHandoff(scope, [randomUUID()])).toBeNull()
-      expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'handoff' } })).toBe(0)
+      expect(await handoffCount(scopeKey)).toBe(0)
     })
   })
 
@@ -138,7 +165,7 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
     { label: 'identity-only task', overrides: { researchTarget: { ...target, textAnalysisRequired: false } } },
     { label: 'unknown official scope', overrides: { researchTarget: { title: target.title, author: target.author } } },
   ])('does not grant recovery authority to $label', async ({ overrides }) => {
-    await fixture(async ({ scope, scopeKey }) => {
+    await fixture(async ({ scope, scopeKey, spec }) => {
       // Persist a historical successful search explicitly. The no-network task
       // is not allowed to obtain a new reserve merely to arrange this fixture.
       const source = await registerResearchSource(scope, official.url, official.title)
@@ -147,13 +174,13 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
         scopeKey, kind: 'search', requestKey: hash(query), requestLimit: 5, status: 'consumed', savedOutcome: { provider: 'deepseek', query, results: [official] } } })
       expect(source.id).toBeTruthy()
       expect(await claimResearchReadHandoff(scope, [callId])).toBeNull()
-      expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'handoff' } })).toBe(0)
+      expect(await handoffCount(scopeKey)).toBe(0)
       const receiptId = hash([scopeKey, 'research-read-handoff-v1'])
-      await prisma.agentResearchRequest.create({ data: { id: receiptId, ownerRunId: scope.runId, scopeKey,
-        kind: 'handoff', units: 0, requestKey: hash(source.id), requestLimit: 1, status: 'pending',
-        savedOutcome: { version: 1, sourceId: source.id, searchId: hash([scopeKey, scope.runId, callId]) } } })
+      await prisma.agentArtifact.create({ data: { id: receiptId, runId: scope.runId, artifactType: 'contextCheckpoint', title: '研究来源交接', content: '',
+        metadata: { kind: 'researchReadHandoff', version: 1, scopeKey, taskKey: spec.id, status: 'pending',
+          sourceId: source.id, searchId: hash([scopeKey, scope.runId, callId]) } } })
       expect(await takeResearchReadHandoff(scope)).toBeNull()
-      expect(await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: receiptId } })).toMatchObject({ status: 'pending' })
+      expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: receiptId } })).toMatchObject({ metadata: { status: 'pending' } })
     }, overrides)
   })
 
@@ -168,7 +195,7 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       expect(await claimResearchReadHandoff(scope, [fourth.callId])).toBeNull()
       expect(await takeResearchReadHandoff(scope)).toBeNull()
       expect(await saveResearchLimitationDelivery(scope, 'paused')).toBeNull()
-      expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'handoff' } })).toBe(0)
+      expect(await handoffCount(scopeKey)).toBe(0)
       expect(await prisma.agentArtifact.count({ where: { runId: scope.runId } })).toBe(0)
     })
   })
@@ -181,7 +208,7 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
     await fixture(async ({ scope, scopeKey }) => {
       const fourth = await fourthSearch(scope, [candidate])
       expect(await claimResearchReadHandoff(scope, [fourth.callId])).toBeNull()
-      expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'handoff' } })).toBe(0)
+      expect(await handoffCount(scopeKey)).toBe(0)
     })
   })
 
@@ -190,14 +217,14 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       const fourth = await fourthSearch(scope)
       for (let index = 0; index < 8; index++) await consumeRead(scope, `used-${index}`)
       expect(await claimResearchReadHandoff(scope, [fourth.callId])).toBeNull()
-      expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'handoff' } })).toBe(0)
+      expect(await handoffCount(scopeKey)).toBe(0)
     })
     await fixture(async ({ scope, scopeKey }) => {
       const fourth = await fourthSearch(scope)
       await consumeRead(scope, 'failure-1', false)
       await consumeRead(scope, 'failure-2', false)
       expect(await claimResearchReadHandoff(scope, [fourth.callId])).toBeNull()
-      expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'handoff' } })).toBe(0)
+      expect(await handoffCount(scopeKey)).toBe(0)
     })
   })
 
@@ -225,7 +252,7 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       const before = await prisma.agentResearchRequest.count({ where: { scopeKey } })
       expect(await takeResearchReadHandoff(resumed)).toBeNull()
       expect(await prisma.agentResearchRequest.count({ where: { scopeKey } })).toBe(before)
-      expect(await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: pending!.receiptId } })).toMatchObject({ status: 'pending', units: 0 })
+      expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: pending!.receiptId } })).toMatchObject({ artifactType: 'contextCheckpoint', content: '', metadata: { status: 'pending' } })
     })
   })
 
@@ -237,9 +264,49 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       if (reason === 'quota') for (let index = 0; index < 8; index++) await consumeRead(scope, `used-${index}`)
       else { await consumeRead(scope, 'first-failure', false); await consumeRead(scope, 'second-failure', false) }
       expect(await takeResearchReadHandoff(scope)).toBeNull()
-      expect(await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: pending!.receiptId } })).toMatchObject({ status: 'pending' })
+      expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: pending!.receiptId } })).toMatchObject({ metadata: { status: 'pending' } })
     })
   })
+
+  it.each(['artifact-type', 'nonempty-content', 'metadata-version', 'metadata-scope', 'cross-session-owner'] as const)(
+    'rejects a malformed handoff checkpoint with %s without modifying it or dispatching a read', async violation => {
+      await fixture(async ({ scope, scopeKey, spec }) => {
+        const fourth = await fourthSearch(scope)
+        const claimed = await claimResearchReadHandoff(scope, [fourth.callId])
+        expect(claimed).not.toBeNull()
+        const marker = await prisma.agentArtifact.findUniqueOrThrow({ where: { id: claimed!.receiptId } })
+        const metadata = marker.metadata as { kind: string; version: number; scopeKey: string; taskKey: string;
+          status: string; sourceId: string; searchId: string }
+        let ownerRunId = scope.runId
+        if (violation === 'cross-session-owner') {
+          const otherSession = await prisma.agentSession.create({ data: { userId: scope.userId, novelId: scope.novelId, title: '其他会话' } })
+          ownerRunId = randomUUID()
+          await prisma.agentRun.create({ data: { id: ownerRunId, userId: scope.userId, novelId: scope.novelId, sessionId: otherSession.id,
+            ...runFields, taskSpec: JSON.parse(JSON.stringify({ ...spec, runId: ownerRunId })) } })
+        }
+        await prisma.agentArtifact.update({ where: { id: marker.id }, data: {
+          artifactType: violation === 'artifact-type' ? 'researchReport' : marker.artifactType,
+          content: violation === 'nonempty-content' ? '非协议空载体，不得按服务端交接凭证消费。' : '', runId: ownerRunId,
+          metadata: violation === 'metadata-version' ? { ...metadata, version: 2 }
+            : violation === 'metadata-scope' ? { ...metadata, scopeKey: hash('another scope') } : metadata,
+        } })
+        try {
+          const malformed = await prisma.agentArtifact.findUniqueOrThrow({ where: { id: marker.id } })
+          const beforeRequests = await prisma.agentResearchRequest.findMany({ where: { scopeKey }, orderBy: { id: 'asc' } })
+          await expect(takeResearchReadHandoff(scope)).rejects.toMatchObject({ code: 'RESEARCH_CHECKPOINT_INVALID' })
+          expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: marker.id } })).toEqual(malformed)
+          expect(await prisma.agentResearchRequest.findMany({ where: { scopeKey }, orderBy: { id: 'asc' } })).toEqual(beforeRequests)
+          expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'read' } })).toBe(0)
+          expect(await prisma.webToolCall.count({ where: { run: { userId: scope.userId } } })).toBe(0)
+          expect(await prisma.creditLedgerEntry.count({ where: { userId: scope.userId } })).toBe(0)
+        } finally {
+          // Remove this intentional non-protocol fixture before the shared
+          // postconditions inspect legitimately created checkpoint carriers.
+          await prisma.agentArtifact.delete({ where: { id: marker.id } })
+        }
+      })
+    },
+  )
 
   it('distinguishes metadata from a verified chapter and preserves the saved author report and section identity', async () => {
     await fixture(async ({ scope, scopeKey }) => {
@@ -257,16 +324,17 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       expect(partial).toContain('尚无可供写法分析的已核验原作正文')
       const first = await readResearchReportForDelivery(scope)
       expect(first).toMatchObject({ title: '原作者保存的研究报告', evidence: { targetAnalysisSupported: false } })
-      const marker = await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: hash([scopeKey, 'research-limitation-delivery-v1']) } })
-      expect(marker).toMatchObject({ kind: 'limitation', units: 0, requestLimit: 1, status: 'consumed' })
-      const sectionId = (marker.savedOutcome as { sectionId: string }).sectionId
+      const marker = await prisma.agentArtifact.findUniqueOrThrow({ where: { id: hash([scopeKey, 'research-limitation-delivery-v1']) } })
+      expect(marker).toMatchObject({ artifactType: 'contextCheckpoint', content: '', runId: scope.runId,
+        metadata: { kind: 'researchLimitationDelivery', version: 1, scopeKey, status: 'consumed' } })
+      const sectionId = (marker.metadata as { sectionId: string }).sectionId
       expect(sectionId).toMatch(/^system-limitation-[0-9a-f-]{36}$/u)
       expect(first.sections).toEqual([{ id: sectionId, order: 99 }, { id: 'author-notes', order: 100 }])
       const state = await prisma.agentArtifact.findUniqueOrThrow({ where: { id: first.artifactId! } })
       expect((state.metadata as { sections: unknown[] }).sections).toContainEqual(authorSection)
       expect(await saveResearchLimitationDelivery(scope, '未取得分析所需的原作正文。')).toBe(partial)
       expect((await readResearchReportForDelivery(scope)).revision).toBe(first.revision)
-      expect((await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: marker.id } })).savedOutcome).toEqual({ sectionId })
+      expect((await prisma.agentArtifact.findUniqueOrThrow({ where: { id: marker.id } })).metadata).toEqual(marker.metadata)
 
       const chapterSource = await registerResearchSource(scope, 'https://fiction.example.com/reader/987', '河谷纪事第1章 清晨')
       const chapterHtml = `<script type="application/ld+json">${JSON.stringify({ '@type': 'Chapter', articleBody: text, isPartOf: { '@type': 'Book', name: target.title, author: target.author } })}</script>`
@@ -283,6 +351,8 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       expect(withChapter).toContain('未标记完成')
       expect((await readResearchReportForDelivery(scope)).sections).toHaveLength(3)
       expect(await prisma.agentArtifact.count({ where: { runId: scope.runId, artifactType: 'researchReport' } })).toBe(1)
+      expect(await prisma.agentArtifact.count({ where: { runId: scope.runId, artifactType: 'contextCheckpoint' } })).toBe(1)
+      expect(await prisma.agentArtifact.count({ where: { runId: scope.runId } })).toBe(2)
     })
   })
 
@@ -293,8 +363,8 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       await saveResearchReportSection(scope, { reportId: 'main', title: '作者命名的既有报告', expectedRevision: 0, section: authorSection })
       const firstDelivery = await saveResearchLimitationDelivery(scope, '当前没有可核验目标正文。')
       expect(firstDelivery).toContain(authorSection.content)
-      const marker = await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: hash([scopeKey, 'research-limitation-delivery-v1']) } })
-      const sectionId = (marker.savedOutcome as { sectionId: string }).sectionId
+      const marker = await prisma.agentArtifact.findUniqueOrThrow({ where: { id: hash([scopeKey, 'research-limitation-delivery-v1']) } })
+      const sectionId = (marker.metadata as { sectionId: string }).sectionId
       expect(sectionId).toMatch(/^system-limitation-[0-9a-f-]{36}$/u)
       expect(sectionId).not.toBe(authorSection.id)
       const first = await readResearchReportForDelivery(scope)
@@ -306,11 +376,13 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       expect(updated.sections).toEqual(first.sections)
       expect(updated.content).toContain(authorSection.content)
       expect(updated.content).toContain('新的失败原因仍须写入原系统所属区块。')
-      expect((await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: marker.id } })).savedOutcome).toEqual({ sectionId })
-      expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'limitation' } })).toBe(1)
+      expect((await prisma.agentArtifact.findUniqueOrThrow({ where: { id: marker.id } })).metadata).toEqual(marker.metadata)
+      expect(await prisma.agentArtifact.count({ where: { id: marker.id, artifactType: 'contextCheckpoint' } })).toBe(1)
       const updatedArtifact = await prisma.agentArtifact.findUniqueOrThrow({ where: { id: first.artifactId! } })
       expect((updatedArtifact.metadata as { sections: unknown[] }).sections).toContainEqual(authorSection)
       expect(await prisma.agentArtifact.count({ where: { runId: scope.runId, artifactType: 'researchReport' } })).toBe(1)
+      expect(await prisma.agentArtifact.count({ where: { runId: scope.runId, artifactType: 'contextCheckpoint' } })).toBe(1)
+      expect(await prisma.agentArtifact.count({ where: { runId: scope.runId } })).toBe(2)
     })
   })
 })

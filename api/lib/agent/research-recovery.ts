@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { createHash, randomUUID } from 'node:crypto'
+import { z } from 'zod'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { prisma, DataAccessError } from '../prisma.js'
 import { evaluateResearchSearchCandidates } from '../research-search-quality.js'
@@ -7,6 +8,25 @@ import { readResearchReportForDelivery, saveResearchReportSection } from './rese
 
 type Scope = { userId: string; novelId: string; sessionId: string; runId: string }
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+const markerScope = { version: z.literal(1), scopeKey: z.string().regex(/^[a-f0-9]{64}$/u), taskKey: z.string().min(1) }
+const markerSchema = z.discriminatedUnion('kind', [
+  z.object({ ...markerScope, kind: z.literal('researchReadHandoff'), status: z.enum(['pending', 'consumed']), sourceId: z.string().min(1), searchId: z.string().min(1) }).strict(),
+  z.object({ ...markerScope, kind: z.literal('researchLimitationDelivery'), status: z.literal('consumed'), sectionId: z.string().regex(/^system-limitation-[a-f0-9-]{36}$/u) }).strict(),
+])
+
+/** Execution checkpoints are separate from the request budget ledger. Their
+ * existing artifact type needs no schema change and cannot grant request units. */
+async function readMarker(tx: Prisma.TransactionClient, scope: Scope, id: string, scopeKey: string, taskKey: string) {
+  const record = await tx.agentArtifact.findUnique({ where: { id }, include: { run: { select: { userId: true, novelId: true, sessionId: true } } } })
+  if (!record) return null
+  const state = markerSchema.safeParse(record.metadata)
+  if (record.artifactType !== 'contextCheckpoint' || record.content !== '' || record.run.userId !== scope.userId
+    || record.run.novelId !== scope.novelId || record.run.sessionId !== scope.sessionId || !state.success
+    || state.data.scopeKey !== scopeKey || state.data.taskKey !== taskKey) {
+    throw new DataAccessError(409, 'RESEARCH_CHECKPOINT_INVALID', '研究执行检查点归属或版本待核对，未派发请求或覆盖报告。')
+  }
+  return { record, state: state.data }
+}
 async function context(tx: Prisma.TransactionClient, scope: Scope) {
   const run = await tx.agentRun.findFirst({ where: { id: scope.runId, userId: scope.userId, sessionId: scope.sessionId,
     novelId: scope.novelId, novel: { authorId: scope.userId } } })
@@ -52,15 +72,14 @@ export async function takeResearchReadHandoff(scope: Scope): Promise<{ sourceId:
       || !spec.researchTarget.sourceHosts?.length) return null
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${scopeKey}, 0))::text`
     const id = hash([scopeKey, 'research-read-handoff-v1'])
-    const pending = await tx.agentResearchRequest.findUnique({ where: { id } })
-    if (pending?.status !== 'pending' || !pending.savedOutcome || typeof pending.savedOutcome !== 'object'
-      || Array.isArray(pending.savedOutcome) || typeof pending.savedOutcome.sourceId !== 'string') return null
+    const pending = await readMarker(tx, scope, id, scopeKey, taskKey)
+    if (pending?.state.kind !== 'researchReadHandoff' || pending.state.status !== 'pending') return null
     if (!await readAvailable(tx, scope, taskKey, scopeKey, spec.researchBudget === 'extended')) return null
-    const source = await tx.agentResearchSource.findFirst({ where: { id: pending.savedOutcome.sourceId, taskKey,
+    const source = await tx.agentResearchSource.findFirst({ where: { id: pending.state.sourceId, taskKey,
       ownerRun: { userId: scope.userId, sessionId: scope.sessionId, novelId: scope.novelId },
       versions: { none: {} }, readFailure: { equals: Prisma.DbNull } } })
     if (!source) return null
-    await tx.agentResearchRequest.update({ where: { id }, data: { status: 'consumed' } })
+    await tx.agentArtifact.update({ where: { id }, data: { metadata: { ...pending.state, status: 'consumed' } } })
     return { sourceId: source.id, receiptId: id }
   })
 }
@@ -76,7 +95,7 @@ export async function claimResearchReadHandoff(scope: Scope, searchCallIds: read
       || !spec.researchTarget.sourceHosts?.length) return null
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${scopeKey}, 0))::text`
     const id = hash([scopeKey, 'research-read-handoff-v1'])
-    if (await tx.agentResearchRequest.findUnique({ where: { id } })) return null
+    if (await readMarker(tx, scope, id, scopeKey, taskKey)) return null
     if (!await readAvailable(tx, scope, taskKey, scopeKey, spec.researchBudget === 'extended')) return null
     const searches = await tx.agentResearchRequest.findMany({ where: { scopeKey, kind: 'search', status: 'consumed',
       id: { in: searchCallIds.map(callId => hash([scopeKey, scope.runId, callId])) },
@@ -93,9 +112,8 @@ export async function claimResearchReadHandoff(scope: Scope, searchCallIds: read
           title: candidate.title.slice(0, 300), ownerRun: { userId: scope.userId, sessionId: scope.sessionId, novelId: scope.novelId },
           versions: { none: {} }, readFailure: { equals: Prisma.DbNull } } })
         if (!source) continue
-        await tx.agentResearchRequest.create({ data: { id, ownerRunId: scope.runId, scopeKey, kind: 'handoff', units: 0,
-          requestKey: hash([spec.researchTarget, search.id, candidate]), requestLimit: 1, status: 'pending',
-          savedOutcome: { version: 1, sourceId: source.id, searchId: search.id } } })
+        await tx.agentArtifact.create({ data: { id, runId: scope.runId, artifactType: 'contextCheckpoint', title: '研究来源交接检查点', content: '',
+          metadata: { version: 1, kind: 'researchReadHandoff', scopeKey, taskKey, status: 'pending', sourceId: source.id, searchId: search.id } } })
         return { sourceId: source.id, receiptId: id }
       }
     }
@@ -111,13 +129,13 @@ export async function saveResearchLimitationDelivery(scope: Scope, reason: strin
     if (run.status !== 'running' || spec?.researchDiscoveryProtocol !== 1 || spec.intent !== 'research_analysis') return null
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${scopeKey}, 0))::text`
     const deliveryId = hash([scopeKey, 'research-limitation-delivery-v1'])
-    let delivery = await tx.agentResearchRequest.findUnique({ where: { id: deliveryId } })
-    if (!delivery) delivery = await tx.agentResearchRequest.create({ data: { id: deliveryId, ownerRunId: scope.runId,
-      scopeKey, kind: 'limitation', units: 0, requestLimit: 1, requestKey: deliveryId, status: 'consumed',
-      savedOutcome: { sectionId: `system-limitation-${randomUUID()}` } } })
-    const savedDelivery = delivery.savedOutcome
-    if (!savedDelivery || typeof savedDelivery !== 'object' || Array.isArray(savedDelivery)
-      || typeof savedDelivery.sectionId !== 'string') throw new DataAccessError(409, 'RESEARCH_REPORT_INVALID', '限制说明的归属回执待核对，原报告未修改。')
+    let delivery = await readMarker(tx, scope, deliveryId, scopeKey, taskKey)
+    if (!delivery) {
+      await tx.agentArtifact.create({ data: { id: deliveryId, runId: scope.runId, artifactType: 'contextCheckpoint', title: '研究限制交付检查点', content: '',
+        metadata: { version: 1, kind: 'researchLimitationDelivery', scopeKey, taskKey, status: 'consumed', sectionId: `system-limitation-${randomUUID()}` } } })
+      delivery = await readMarker(tx, scope, deliveryId, scopeKey, taskKey)
+    }
+    if (delivery?.state.kind !== 'researchLimitationDelivery') throw new DataAccessError(409, 'RESEARCH_REPORT_INVALID', '限制说明的归属回执待核对，原报告未修改。')
     const owned = { taskKey, ownerRun: { userId: scope.userId, sessionId: scope.sessionId, novelId: scope.novelId } }
     const sourceCount = await tx.agentResearchSource.count({ where: owned })
     const failures = await tx.agentResearchSource.count({ where: { ...owned, readFailure: { not: Prisma.DbNull } } })
@@ -134,10 +152,10 @@ export async function saveResearchLimitationDelivery(scope: Scope, reason: strin
     const emptySearches = requests.filter(item => { const saved = item.savedOutcome
       return item.kind === 'search' && item.status === 'consumed' && saved && typeof saved === 'object'
         && !Array.isArray(saved) && Array.isArray(saved.results) && saved.results.length === 0 }).length
-    const handoff = await tx.agentResearchRequest.findUnique({ where: { id: hash([scopeKey, 'research-read-handoff-v1']) } })
+    const handoff = await readMarker(tx, scope, hash([scopeKey, 'research-read-handoff-v1']), scopeKey, taskKey)
     return { title: spec.researchTarget?.title, usedSearch: used('search'), usedRead: used('read'), reads, failures, savedVersions, metadataVersions,
-      sectionId: savedDelivery.sectionId,
-      emptySearches, handoff: handoff?.status, sourceCount, targetHosts: spec.researchTarget?.sourceHosts ?? [],
+      sectionId: delivery.state.sectionId,
+      emptySearches, handoff: handoff?.state.status, sourceCount, targetHosts: spec.researchTarget?.sourceHosts ?? [],
       reasonKind: reads > 0 ? 'partial_evidence' : failures > 0 ? 'source_unavailable' : 'no_relevant_evidence' }
   })
   if (!facts) return null
