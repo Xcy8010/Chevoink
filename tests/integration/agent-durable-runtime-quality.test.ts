@@ -559,6 +559,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         if (scenario === 'late-resume') await pauseDurableTask(f.userId, lease.runId)
         const recovering = ['format-valid', 'format-valid-repair', 'format-recovery-unknown', 'format-recovery-stale', 'format-recovery-rollback'].includes(scenario)
         const content = scenario === 'format-35' && requests === 1 ? '{"findings":[{"sentence_homology","severity":"advisory"}]}'
+          : scenario === 'v9-quality-resume' ? '{"findings":[]}'
           : scenario === 'complete-35' || scenario === 'format-35' ? JSON.stringify({ findings: Array.from({ length: 35 }, (_, index) => ({ signal: 'emotion_grounding', severity: 'advisory', quote: '原文', explanation: `独立意见${index}`, suggestion: `真实建议${index}`, confidence: 0.9 })) })
           : scenario === 'synthetic-mechanical' || scenario === 'v5-parser-mechanical' || scenario === 'v6-parser-mechanical' || scenario === 'v7-parser-mechanical' ? '说明：[仅合成文字噪声\n{"findings":[],}\n备注：[非报告文字'
           : scenario === 'synthetic-partial' ? JSON.stringify({ findings: [{ signal: 'emotion_grounding', severity: 'advisory', quote: '原文', explanation: '真实意见', suggestion: '保留待审' }, null] })
@@ -784,11 +785,16 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         const bundle = await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId)
         const oldReport = await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: f.chapterId } })
         expect(oldReport.deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v2', qualityContextHash: qualityReviewContextHash(bundle, 'humanity-context.v2') })
-        expect(await step()).toMatchObject({ result: { summary: '人类感质量检查' } })
+        const freshCheck = await step()
+        expect(freshCheck).toMatchObject({ result: { summary: '人类感质量检查' } })
+        if (freshCheck.kind !== 'tool') throw new Error('Expected fresh current quality check')
+        expect(freshCheck.result.outcome).toBeUndefined()
         expect(requests).toBe(2)
+        expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'quality_critic' } })).toBe(2)
+        expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: { in: ['quality_format_recovery', 'quality_repair', 'quality_repair_retry'] } } })).toBe(0)
         const nextReports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId }, orderBy: { createdAt: 'asc' } })
         expect(nextReports).toHaveLength(2)
-        expect(nextReports[1].deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v3', qualityContextHash: qualityReviewContextHash(bundle) })
+        expect(nextReports[1]).toMatchObject({ status: 'passed', deterministicMetrics: { criticPromptProtocol: 'humanity-context.v3', qualityContextHash: qualityReviewContextHash(bundle) } })
         expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: admittedLegacy!.id }, select: { id: true, inputHash: true, inputSnapshot: true } })).toEqual(admittedLegacy)
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: before, revision: 1 })
         return
