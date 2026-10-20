@@ -8,56 +8,80 @@ import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { acquireRunLease } from '../../api/lib/agent/runtime-lease.js'
 import type { ProviderUsageObservation } from '../../api/lib/agent/runtime-operations.js'
 import { handleTestDatabaseUnavailable } from './database-availability.js'
+import { createDurableFixtureTasks, type DurableTestLifecycle, type DurableTestPhase } from './durable-test-lifecycle.js'
 
 export const available = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 afterAll(async () => { await prisma.$disconnect() })
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
+const fixtureTasks = createDurableFixtureTasks()
+afterEach(async () => {
+  try { await fixtureTasks.drain() }
+  finally { vi.unstubAllGlobals(); vi.restoreAllMocks() }
+})
 
-export async function fixture(work: (f: {
+export function fixture(work: (f: {
   userId: string; novelId: string; sessionId: string; chapterId: string; runId: string; sourceMessageId: string;
   spec: ReturnType<typeof buildTaskSpec>; rootId: string;
-}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { freezeWriting?: boolean; continuityEvidenceProtocol?: 1; terminalEvidenceProtocol?: 1 | 2 }) {
-  const user = await prisma.user.create({ data: { nickname: 'durable-runtime-fixture', passwordHash: 'test-only-unusable' } })
-  const userId = user.id
-  try {
-    const novel = await prisma.novel.create({ data: { authorId: userId, title: '持久执行测试', slug: randomUUID(), summary: '' } })
-    // Most protocol cases deliberately admit all tools; policy narrowing has
-    // separate cases below and must not rely on an implicit default approval.
-    const session = await prisma.agentSession.create({ data: { userId, novelId: novel.id, title: '测试',
-      toolPolicy: { network: 'allow', contentWrite: 'allow', bulkWrite: 'allow', publish: 'allow', destructive: 'allow' } } })
-    const volume = await prisma.volume.create({ data: { novelId: novel.id, title: '卷', orderIndex: 1 } })
-    const chapter = await prisma.chapter.create({ data: { authorId: userId, novelId: novel.id, volumeId: volume.id, title: '原章', content: '原文', orderIndex: 1, orderInVolume: 1, wordCount: 2 } })
-    const runId = randomUUID(), sourceMessageId = randomUUID()
-    let spec = buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt, continuityEvidenceProtocol: options?.continuityEvidenceProtocol, terminalEvidenceProtocol: options?.terminalEvidenceProtocol })
-    await prisma.agentRun.create({ data: {
-      id: runId, userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, status: 'queued',
-      mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', taskSpec: JSON.parse(JSON.stringify(spec)),
-    } })
-    await prisma.agentMessage.create({ data: { id: sourceMessageId, runId, sessionId: session.id, role: 'user', parts: [{ type: 'text', text: prompt }] } })
-    if (options?.freezeWriting) {
-      spec = await prisma.$transaction(tx => freezeWritingScope(tx, { userId, novelId: novel.id, runId }, spec, prompt))
-      await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } })
+}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { freezeWriting?: boolean; continuityEvidenceProtocol?: 1; terminalEvidenceProtocol?: 1 | 2; lifecycle?: DurableTestLifecycle }) {
+  const lifecycle = options?.lifecycle
+  let cleanupFailed = false
+  const active = <T>(work: () => PromiseLike<T>) => lifecycle ? lifecycle.active(work) : Promise.resolve(work())
+  const phase = <T>(name: DurableTestPhase, work: () => PromiseLike<T>) => lifecycle ? lifecycle.phase(name, work) : Promise.resolve(work())
+  const execute = async () => {
+    let cleanupUserId: string | undefined
+    try {
+      const data = await phase('fixture.setup', async () => {
+        const user = await active(async () => {
+          const created = await prisma.user.create({ data: { nickname: 'durable-runtime-fixture', passwordHash: 'test-only-unusable' } })
+          // Capture the committed owner before active's post-await abort check.
+          cleanupUserId = created.id
+          return created
+        })
+        const userId = user.id
+        const novel = await active(() => prisma.novel.create({ data: { authorId: userId, title: '持久执行测试', slug: randomUUID(), summary: '' } }))
+        // Most protocol cases deliberately admit all tools; policy narrowing has
+        // separate cases below and must not rely on an implicit default approval.
+        const session = await active(() => prisma.agentSession.create({ data: { userId, novelId: novel.id, title: '测试',
+          toolPolicy: { network: 'allow', contentWrite: 'allow', bulkWrite: 'allow', publish: 'allow', destructive: 'allow' } } }))
+        const volume = await active(() => prisma.volume.create({ data: { novelId: novel.id, title: '卷', orderIndex: 1 } }))
+        const chapter = await active(() => prisma.chapter.create({ data: { authorId: userId, novelId: novel.id, volumeId: volume.id, title: '原章', content: '原文', orderIndex: 1, orderInVolume: 1, wordCount: 2 } }))
+        const runId = randomUUID(), sourceMessageId = randomUUID()
+        let spec = buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt, continuityEvidenceProtocol: options?.continuityEvidenceProtocol, terminalEvidenceProtocol: options?.terminalEvidenceProtocol })
+        await active(() => prisma.agentRun.create({ data: {
+          id: runId, userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, status: 'queued',
+          mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', taskSpec: JSON.parse(JSON.stringify(spec)),
+        } }))
+        await active(() => prisma.agentMessage.create({ data: { id: sourceMessageId, runId, sessionId: session.id, role: 'user', parts: [{ type: 'text', text: prompt }] } }))
+        if (options?.freezeWriting) {
+          spec = await active(() => prisma.$transaction(tx => freezeWritingScope(tx, { userId, novelId: novel.id, runId }, spec, prompt)))
+          await active(() => prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } }))
+        }
+        const root = await active(() => initializeDurableTask({ userId, runId, sourceMessageId, tokenBudget }))
+        return { userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, runId, sourceMessageId, spec, rootId: root.id }
+      })
+      await phase('fixture.work', () => work(data))
+    } finally {
+      try {
+        if (cleanupUserId) await phase('fixture.cleanup', () => prisma.$transaction(async tx => {
+          const userId = cleanupUserId!
+          // Serialize with derived memory writes before sweeping exact fixture ownership.
+          const novels = await tx.novel.findMany({ where: { authorId: userId }, select: { id: true }, orderBy: { id: 'asc' } })
+          for (const novel of novels) await lockNovelActiveScope(tx, novel.id)
+          await tx.memoryExtractionJob.deleteMany({ where: { novel: { authorId: userId } } })
+          await tx.creditRateCardEvent.deleteMany({ where: { card: { createdBy: userId } } })
+          await tx.creditRateCard.deleteMany({ where: { createdBy: userId } })
+          await tx.agentArtifact.deleteMany({ where: { run: { userId } } })
+          await tx.projectMemoryEntry.deleteMany({ where: { novel: { authorId: userId } } })
+          // New roots cascade after their original runs are removed.
+          await tx.agentRun.deleteMany({ where: { userId } })
+          await tx.agentSession.deleteMany({ where: { userId } })
+          await tx.chapter.deleteMany({ where: { authorId: userId } })
+          await tx.novel.deleteMany({ where: { authorId: userId } })
+          await tx.user.delete({ where: { id: userId } })
+        })).catch(error => { cleanupFailed = true; throw error })
+      } finally { lifecycle?.dispose() }
     }
-    const root = await initializeDurableTask({ userId, runId, sourceMessageId, tokenBudget })
-    await work({ userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, runId, sourceMessageId, spec, rootId: root.id })
-  } finally {
-    await prisma.$transaction(async tx => {
-      // Serialize with derived memory writes before sweeping exact fixture ownership.
-      const novels = await tx.novel.findMany({ where: { authorId: userId }, select: { id: true }, orderBy: { id: 'asc' } })
-      for (const novel of novels) await lockNovelActiveScope(tx, novel.id)
-      await tx.memoryExtractionJob.deleteMany({ where: { novel: { authorId: userId } } })
-      await tx.creditRateCardEvent.deleteMany({ where: { card: { createdBy: userId } } })
-      await tx.creditRateCard.deleteMany({ where: { createdBy: userId } })
-      await tx.agentArtifact.deleteMany({ where: { run: { userId } } })
-      await tx.projectMemoryEntry.deleteMany({ where: { novel: { authorId: userId } } })
-      // New roots cascade after their original runs are removed.
-      await tx.agentRun.deleteMany({ where: { userId } })
-      await tx.agentSession.deleteMany({ where: { userId } })
-      await tx.chapter.deleteMany({ where: { authorId: userId } })
-      await tx.novel.deleteMany({ where: { authorId: userId } })
-      await tx.user.delete({ where: { id: userId } })
-    })
   }
+  return lifecycle ? fixtureTasks.track(execute, error => cleanupFailed || lifecycle.signal.aborted && error !== lifecycle.signal.reason) : execute()
 }
 
 export const claim = (f: { userId: string; runId: string }, ownerId = 'worker-a') => acquireRunLease({ ...f, ownerId, claimId: randomUUID() })
