@@ -132,19 +132,23 @@ describe.skipIf(!available)('Search / Fetch billing with isolated PostgreSQL (si
     })
   })
 
-  it('keeps a durable refund obligation through a temporary sweep failure and rejects a mismatched receipt', async () => {
+  it('keeps a durable refund obligation through a recoverable wallet failure and rejects a mismatched receipt', async () => {
     await fixture(async ctx => {
       await executeWebToolCall(ctx, 'fetch', request, true, async () => success, classify)
       const debit = (await ledger(ctx))[0]
       const receipt = await prisma.webToolCall.findFirstOrThrow({ where: { runId: ctx.runId } })
       // Simulate a known cancellation discovered after completion; no supplier redispatch.
       await prisma.creditRefundIntent.create({ data: { originalEntryId: debit.id, reason: 'web_tool_no_billable_result', evidence: { callId: receipt.id, outcome: 'aborted' } } })
-      const update = vi.spyOn(prisma.creditRefundIntent, 'findMany')
-      update.mockRejectedValueOnce(new Error('temporary database outage'))
-      await expect(reconcileCreditRefunds({ userId: ctx.userId })).rejects.toThrow('temporary database outage')
-      update.mockRestore()
+      // Cross-window refunds restore to bonus. Exhaust its integer capacity in
+      // this fixture only, exercising a real rolled-back wallet settlement.
+      await prisma.creditLedgerEntry.update({ where: { id: debit.id }, data: { createdAt: new Date(Date.now() - 2 * 86400000) } })
+      await prisma.creditAccount.update({ where: { userId: ctx.userId }, data: { dailyUsedMilli: 0, bonusBalanceMilli: 2147483647 } })
+      expect(await reconcileCreditRefunds({ userId: ctx.userId })).toEqual({ examined: 1, settled: 0 })
       expect((await prisma.creditRefundIntent.findUniqueOrThrow({ where: { originalEntryId: debit.id } })).settledAt).toBeNull()
-      await prisma.creditRefundIntent.update({ where: { originalEntryId: debit.id }, data: { evidence: { callId: 'a'.repeat(64), outcome: 'aborted' } } })
+      expect((await prisma.creditAccount.findUniqueOrThrow({ where: { userId: ctx.userId } })).bonusBalanceMilli).toBe(2147483647)
+      expect(await ledger(ctx)).toHaveLength(1)
+      await prisma.creditAccount.update({ where: { userId: ctx.userId }, data: { bonusBalanceMilli: 0 } })
+      await prisma.creditRefundIntent.update({ where: { originalEntryId: debit.id }, data: { nextAttemptAt: new Date(), evidence: { callId: 'a'.repeat(64), outcome: 'aborted' } } })
       expect(await reconcileCreditRefunds({ userId: ctx.userId })).toEqual({ examined: 1, settled: 0 })
       expect(await ledger(ctx)).toHaveLength(1)
       await prisma.creditRefundIntent.update({ where: { originalEntryId: debit.id }, data: { nextAttemptAt: new Date(), evidence: { callId: receipt.id, outcome: 'aborted' } } })
