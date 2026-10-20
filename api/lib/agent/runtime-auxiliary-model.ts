@@ -42,7 +42,7 @@ const isolatedRequest = z.object({ body: z.object({
 /** 缓存报告只能替代首个修订步骤的 Critic 前置；仍核验原任务、报告哈希和正文版本。 */
 export async function hasFrozenRepairReport(tx: Prisma.TransactionClient, lease: RunLeaseToken, snapshot: unknown, step: AuxiliaryModelStep) {
   if (step !== 'quality_repair' && step !== 'continuity_repair') return false
-  const parsed = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9)]), repair: z.literal(true),
+  const parsed = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10)]), repair: z.literal(true),
     compiler: compilerObservationSchema.nullable(), chapter: z.object({ id: z.string(), revision: z.number(), content: z.string() }),
     cached: z.unknown(), coverage: z.unknown().optional(), sources: qualityEvidenceSourcesSchema.optional() }) }) }).safeParse(snapshot)
   if (!parsed.success) return false
@@ -106,7 +106,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
     if (grant.permission === 'ask' || grant.alwaysConfirm) await assertToolApproval(tx, lease, source.snapshotHash, original.callId, parent.action, call.arguments, original.normalization.normalizedArgsHash)
     let frozenFormatClaim = false
     if (captured.step === 'quality_format_recovery') {
-      const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9)]), parserVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+      const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10)]), parserVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
         deadlineAt: z.number().int().positive(), formatRecovery: qualityFormatRecoverySchema.nullable(), sources: qualityEvidenceSourcesSchema,
         chapter: z.object({ id: z.string(), revision: z.number(), content: z.string() }) }) }) }).safeParse(parent.inputSnapshot)
       if (!work.success || work.data.input.work.parserVersion !== (work.data.input.work.version >= 8 ? 3 : work.data.input.work.version >= 6 ? 2 : 1) || Date.now() >= work.data.input.work.deadlineAt) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原冻结质量协议不允许追加格式恢复或已达原等待上限。')
@@ -132,7 +132,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
       }
     }
     if (contract.previous && !frozenFormatClaim && !await hasFrozenRepairReport(tx, lease, parent.inputSnapshot, captured.step)) {
-      const restored = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9)]),
+      const restored = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10)]),
         parserVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]), formatRecovery: qualityFormatRecoverySchema }) }) }).safeParse(parent.inputSnapshot)
       // A restored old failed report has no new quality_critic child. Its
       // subsequent evidence/repair stages bind this same parent's confirmed

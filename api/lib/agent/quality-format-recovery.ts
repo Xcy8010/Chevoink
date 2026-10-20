@@ -62,7 +62,7 @@ export async function hasQualityFormatRecoveryClaim(tx: Prisma.TransactionClient
     if (item.parentOperationId === exceptOperationId) return false
     const work = object(object(item.parent?.inputSnapshot).input).work
     const chapter = object(object(work).chapter)
-    return object(work).kind === 'check' && [5, 6, 7, 8, 9].includes(Number(object(work).version))
+    return object(work).kind === 'check' && [5, 6, 7, 8, 9, 10].includes(Number(object(work).version))
       && chapter.id === chapterId && chapter.revision === chapterRevision
       && (!admission || item.createdAt >= admission.at || item.status !== 'succeeded' || item.parent?.status !== 'succeeded')
   })
@@ -86,8 +86,8 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, chap
     ? (await readOrphanQualityRecoveryProofs(tx, subject, ids, original.taskId, target, bundle.chapter.revision)).get(report.id) : null
   if (!orphanProof && (!report.runId || !ids.includes(report.runId))) return null
   const metrics = object(report.deterministicMetrics), audit = object(metrics.criticResponse)
-  const contextHash = qualityReviewContextHash(bundle)
-  if (report.chapterRevision !== bundle.chapter.revision || metrics.qualityContextHash !== contextHash
+  const contextHash = metrics.qualityContextHash
+  if (report.chapterRevision !== bundle.chapter.revision || typeof contextHash !== 'string' || !/^[a-f0-9]{64}$/.test(contextHash)
     || metrics.contentHash !== hashText(bundle.chapter.content) || metrics.independentCheck !== 'unavailable'
     || !formatClasses.has(String(audit.classification))) return null
   const key = runtimeJson({ taskId: original.taskId, chapterId: target, revision: bundle.chapter.revision,
@@ -104,6 +104,7 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, chap
     || await tx.agentProviderAttempt.count({ where: { runId: { in: ids }, status: { in: ['dispatching', 'unknown'] } } })) return null
   let evidenceHash: string
   if (live) {
+    if (contextHash !== qualityReviewContextHash(bundle)) return null
     if (run.taskRootId || report.runId !== subject.runId || audit.callId !== live.callId || audit.contentHash !== live.contentHash
       || audit.characterCount !== live.characterCount || report.createdAt < live.startedAt || live.characterCount <= 0) return null
     const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, targetType: 'chapter', targetId: target,
@@ -115,6 +116,7 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, chap
       || item.requestTokens === null || item.responseTokens === null || item.responseTokens <= 0))) return null
     evidenceHash = runtimeJson({ callId: live.callId, contentHash: live.contentHash, usageIds: paid.map(item => item.id) }).hash
   } else if (orphanProof) {
+    if (contextHash !== qualityReviewContextHash(bundle)) return null
     evidenceHash = orphanProof.evidenceHash
   } else {
     const hydrated = await tx.chapterQualityReport.findUniqueOrThrow({ where: { id: report.id }, include: { findings: true } })
@@ -187,7 +189,12 @@ export async function claimDurableQualityFormatRecovery(tx: Prisma.TransactionCl
   if (claim.operationId === operationId && claim.key === expected.key && claim.evidenceHash === expected.evidenceHash) {
     const original = await readOriginalTaskRequest(tx, subject)
     const current = await buildHumanityQualityContext(subject.userId, subject.novelId, expected.chapterId, subject.runId, tx)
-    return original.taskId === expected.taskId && current.chapter.revision === expected.chapterRevision && qualityReviewContextHash(current) === expected.contextHash
+    const owner = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
+    const report = source && await tx.chapterQualityReport.findUnique({ where: { id: source.id }, include: { findings: true } })
+    const proof = owner && report && await readQualityUnavailableProof(tx, subject, await originalTaskRunIds(tx, subject, original), report,
+      current.chapter, owner.taskRootId, { allowFormatRecovery: true })
+    return original.taskId === expected.taskId && current.chapter.revision === expected.chapterRevision
+      && object(source?.deterministicMetrics).qualityContextHash === expected.contextHash && proof?.evidenceHash === expected.evidenceHash
   }
   if (!await claimQualityFormatRecovery(tx, subject, expected)) return false
   const report = await tx.chapterQualityReport.findUniqueOrThrow({ where: { id: expected.reportId } })

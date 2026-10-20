@@ -306,7 +306,9 @@ export const qualityAnalyzeTool = defineTool({
       return finishQualityReview(ctx, hydrated, '', true, bundle.compilation?.status !== 'completed')
     }
     let formatRecovery: QualityFormatRecovery | null = null
-    if (existing?.status === 'failed' && matchingContext && existing.chapterRevision === bundle.chapter.revision
+    const sameFailedContext = existing?.status === 'failed' && !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics)
+      && (matchingContext || cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, 'humanity-context.v2'))
+    if (sameFailedContext && existing.chapterRevision === bundle.chapter.revision
       && !await prisma.$transaction(tx => hasReconciledQualityRequest(tx, ctx, existing))) {
       formatRecovery = await prisma.$transaction(tx => readQualityFormatRecovery(tx, ctx, { chapterId }))
       if (!formatRecovery || !await prisma.$transaction(tx => claimQualityFormatRecovery(tx, ctx, formatRecovery!))) return {

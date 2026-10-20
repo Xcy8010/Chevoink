@@ -118,9 +118,11 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     const existingReport = await getLatestQualityReport(ctx.userId, ctx.novelId, chapterId, tx, bundle.compilation?.id ?? null)
     const cacheMetrics = existingReport?.deterministicMetrics
     const matchingContext = !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics) && cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle)
-    const formatRecovery = existingReport?.status === 'failed' && matchingContext && existingReport.chapterRevision === bundle.chapter.revision
+    const sameFailedContext = existingReport?.status === 'failed' && !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics)
+      && (matchingContext || cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, 'humanity-context.v2'))
+    const formatRecovery = sameFailedContext && existingReport.chapterRevision === bundle.chapter.revision
       ? await readQualityFormatRecovery(tx, ctx, { chapterId }) : null
-    if (existingReport?.status === 'failed' && matchingContext && existingReport.chapterRevision === bundle.chapter.revision && !formatRecovery) {
+    if (sameFailedContext && existingReport.chapterRevision === bundle.chapter.revision && !formatRecovery) {
       return reject('QUALITY_REPORT_INCOMPLETE', '本输入的一次格式恢复不可用或已经使用，未重复检查。原报告与正文保留，检查未完成，请暂停并展示原因。')
     }
     const cached = existingReport && existingReport.compilationId === (bundle.compilation?.id ?? null) && existingReport.criticVersion === HUMANITY_CRITIC_VERSION

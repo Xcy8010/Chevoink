@@ -48,7 +48,7 @@ const selectedRuntime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed
   reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
 
 describe.runIf(available)('native paid failed quality response and limited delivery proof', () => {
-  it.each(['continuity-complete', 'continuity-capped', 'response-outbox', 'settlement', 'usage-observation', 'charge-association', 'continuity-error'] as const)('%s requires the authentic saved body, response and settled payment chain', async scenario => fixture(async f => {
+  it.each(['continuity-complete', 'continuity-capped', 'response-outbox', 'settlement', 'usage-observation', 'charge-association', 'continuity-error', 'protocol-marker', 'unknown-work-version'] as const)('%s requires the authentic saved body, response and settled payment chain', async scenario => fixture(async f => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const lease = await claim(f)
     const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '修改本章' })
@@ -139,7 +139,18 @@ describe.runIf(available)('native paid failed quality response and limited deliv
     if (scenario === 'settlement') await prisma.agentProviderUsageReceipt.update({ where: { attemptId: attempt.id }, data: { settlementStatus: 'pending' } })
     if (scenario === 'usage-observation') await prisma.agentProviderUsageReceipt.update({ where: { attemptId: attempt.id }, data: { observationHash: 'f'.repeat(64) } })
     if (scenario === 'charge-association') await prisma.creditLedgerEntry.update({ where: { idempotencyKey: `operation:${critic.id}` }, data: { referenceId: randomUUID() } })
-    if (proof && ['response-outbox', 'settlement', 'usage-observation', 'charge-association'].includes(scenario)) {
+    if (scenario === 'protocol-marker') {
+      report.deterministicMetrics = { ...report.deterministicMetrics as Prisma.JsonObject, criticPromptProtocol: 'humanity-context.v3' }
+      await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { deterministicMetrics: report.deterministicMetrics } })
+    }
+    if (scenario === 'unknown-work-version') {
+      const parent = await prisma.agentOperation.findUniqueOrThrow({ where: { id: critic.parentOperationId! } })
+      const snapshot = JSON.parse(JSON.stringify(parent.inputSnapshot)) as { input: { work: { version: number } } }
+      snapshot.input.work.version = 11
+      const sealed = runtimeJson(snapshot)
+      await prisma.agentOperation.update({ where: { id: parent.id }, data: { inputSnapshot: sealed.value, inputHash: sealed.hash } })
+    }
+    if (proof && ['response-outbox', 'settlement', 'usage-observation', 'charge-association', 'protocol-marker', 'unknown-work-version'].includes(scenario)) {
       expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
       expect(await prisma.$transaction(tx => readQualityUnavailableProof(tx, subject, [f.runId], report, chapter, f.rootId))).toBeNull()
       expect(await prisma.$transaction(tx => readQualityFormatRecovery(tx, subject, { chapterId: chapter.id }))).toBeNull()
@@ -466,7 +477,7 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
 })
 
 describe.runIf(available)('durable quality actual tool chain', () => {
-  it.each(['format-35', 'complete-35', 'source-id', 'invalid-source-id', 'success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale', 'v9-quality-resume', 'v2-quality-resume', 'v2-quality-stale', 'json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-valid', 'format-valid-repair', 'format-recovery-unknown', 'format-recovery-stale', 'format-recovery-rollback', 'format-expired', 'old-format-full-chain', 'format-reprepare', 'synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical', 'v6-parser-mechanical', 'v7-parser-mechanical'] as const)('%s preserves paid results and atomic business effects', async scenario => {
+  it.each(['format-35', 'complete-35', 'source-id', 'invalid-source-id', 'success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale', 'v9-quality-resume', 'v2-quality-resume', 'v2-quality-stale', 'json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-valid', 'format-valid-repair', 'format-recovery-unknown', 'format-recovery-stale', 'format-recovery-rollback', 'format-expired', 'old-format-full-chain', 'v9-format-full-chain', 'format-reprepare', 'synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical', 'v6-parser-mechanical', 'v7-parser-mechanical'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const authorRequest = '改写当前章为都市异能爽文第一章。主角陆望，31岁，夜班设备维护员。1800字，低谷仅一段；觉醒后识别旧镜头的价值；停在买主报价前；只输出标题与正文。'
     const checkingOriginal = scenario === 'original-request' || scenario === 'original-request-resume'
@@ -486,7 +497,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
       await saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进场景', entryState: state, goal: '寻找线索', obstacle: '门已上锁', choice: '绕路', cost: '耗费时间', turn: '发现脚印', exitState: state,
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
-      if (scenario === 'old-format-full-chain') {
+      if (['old-format-full-chain', 'v9-format-full-chain'].includes(scenario)) {
         await recordStoryCompilerWrite({ ...f, chapterId: f.chapterId, chapterOrderIndex: 1, chapterRevision: 1 })
         await validateStoryContinuity({ ...f, compilationId, expectedChapterRevision: 1, independentCheck: 'complete', findings: [] })
       }
@@ -551,7 +562,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
           : scenario === 'complete-35' || scenario === 'format-35' ? JSON.stringify({ findings: Array.from({ length: 35 }, (_, index) => ({ signal: 'emotion_grounding', severity: 'advisory', quote: '原文', explanation: `独立意见${index}`, suggestion: `真实建议${index}`, confidence: 0.9 })) })
           : scenario === 'synthetic-mechanical' || scenario === 'v5-parser-mechanical' || scenario === 'v6-parser-mechanical' || scenario === 'v7-parser-mechanical' ? '说明：[仅合成文字噪声\n{"findings":[],}\n备注：[非报告文字'
           : scenario === 'synthetic-partial' ? JSON.stringify({ findings: [{ signal: 'emotion_grounding', severity: 'advisory', quote: '原文', explanation: '真实意见', suggestion: '保留待审' }, null] })
-          : scenario === 'old-format-full-chain' ? requests === 1 ? 'broken JSON'
+          : ['old-format-full-chain', 'v9-format-full-chain'].includes(scenario) ? requests === 1 ? 'broken JSON'
           : requests === 2 ? JSON.stringify({ findings: [{ signal: 'emotion_grounding', severity: 'warning', quote: '原文', explanation: '缺少具体动作', suggestion: '落实动作', confidence: 0.9 }] })
             : requests === 3 ? '{"patches":[{"key":"emotion_grounding:0:2","replacement":"新文"}]}' : '{"findings":[]}'
           : recovering ? requests === 1 ? 'broken JSON'
@@ -590,7 +601,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         })
         await expect(step()).rejects.toThrow('fixture historical v5 admitted')
       }
-      if (scenario === 'old-format-full-chain') {
+      if (['old-format-full-chain', 'v9-format-full-chain'].includes(scenario)) {
         const originalPrepare = toolCursor.prepareToolCursorOperation
         vi.spyOn(toolCursor, 'prepareToolCursorOperation').mockImplementationOnce(async (token, cursor, input, tx) => {
           const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
@@ -617,7 +628,35 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         await append([{ id: 'recovery-bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) },
           { id: 'restore-quality', name: 'quality_analyze', arguments: JSON.stringify({ compilationId }) }])
         await step()
-        expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('自动修订') } })
+        if (scenario === 'v9-format-full-chain') {
+          const originalPrepare = toolCursor.prepareToolCursorOperation
+          let frozenRecovery: { id: string; inputHash: string; inputSnapshot: Prisma.JsonValue } | undefined
+          vi.spyOn(toolCursor, 'prepareToolCursorOperation').mockImplementationOnce(async (token, cursor, input, tx) => {
+            const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
+            expect(snapshot.work.formatRecovery).toMatchObject({ contextHash: qualityReviewContextHash(await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId), 'humanity-context.v2') })
+            snapshot.work.version = 9
+            snapshot.work.criticSystem = '合成升级前冻结的完整审校规则。只输出 findings JSON。'
+            snapshot.work.repairSystem = '合成升级前冻结的局改规则。只替换 evidence。'
+            const prepared = await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
+            frozenRecovery = { id: prepared.operation.id, inputHash: prepared.operation.inputHash, inputSnapshot: prepared.operation.inputSnapshot }
+            return prepared
+          })
+          const originalEffect = runtimeOperations.commitOperationEffect
+          vi.spyOn(runtimeOperations, 'commitOperationEffect').mockImplementationOnce((token, id, digest, work) => originalEffect(token, id, digest, async tx => {
+            await work(tx); throw new Error('fixture paid v9 recovery interrupted before effect')
+          }))
+          await expect(step()).rejects.toThrow('fixture paid v9 recovery interrupted before effect')
+          const paidCount = fetchMock.mock.calls.length
+          const sourceAfterPayment = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: oldReport.id } })
+          expect(sourceAfterPayment.deterministicMetrics).toMatchObject({ formatRecovery: { operationId: frozenRecovery!.id, contextHash: qualityReviewContextHash(await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId), 'humanity-context.v2') } })
+          expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('自动修订') } })
+          expect(fetchMock).toHaveBeenCalledTimes(paidCount)
+          expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: frozenRecovery!.id }, select: { id: true, inputHash: true, inputSnapshot: true } })).toEqual(frozenRecovery)
+          const sourceAfterReplay = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: oldReport.id } })
+          expect(sourceAfterReplay.deterministicMetrics).toEqual(sourceAfterPayment.deterministicMetrics)
+        } else {
+          expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('自动修订') } })
+        }
         const recovered = await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: f.chapterId, status: 'repaired' }, include: { findings: true } })
         expect(recovered).toMatchObject({ chapterRevision: 2, repairRound: 1, deterministicMetrics: { formatRecovery: { reportId: oldReport.id, state: 'completed' } } })
         expect(recovered.findings[0].disposition).toBe('repaired')
@@ -832,7 +871,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       if (['synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario)) {
         const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
-        expect(operation.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'v5-parser-mechanical' ? 5 : 9, parserVersion: scenario === 'v5-parser-mechanical' ? 1 : 3 } } })
+        expect(operation.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'v5-parser-mechanical' ? 5 : 10, parserVersion: scenario === 'v5-parser-mechanical' ? 1 : 3 } } })
         expect(reports[0].deterministicMetrics).toMatchObject({ independentCheck: scenario === 'synthetic-mechanical' ? 'complete' : 'unavailable',
           criticResponse: { classification: scenario === 'synthetic-mechanical' ? 'complete' : scenario === 'synthetic-partial' ? 'findings_invalid' : 'incomplete_json' } })
         if (scenario === 'synthetic-partial') expect(reports[0].findings.filter(item => item.source === 'critic')).toHaveLength(1)
@@ -895,6 +934,9 @@ describe.runIf(available)('frozen cached quality repair authorization', () => {
       prisma.$transaction(tx => hasFrozenRepairReport(tx, lease, { input: { work: candidate } }, step))
     expect(await check(work)).toBe(true)
     for (const version of [1, 2, 3]) expect(await check({ ...work, version, sources: undefined })).toBe(true)
+    const currentSources = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, chapterRevision: 1 }, '原文')
+    for (const version of [9, 10]) expect(await check({ ...work, version, sources: currentSources })).toBe(true)
+    expect(await check({ ...work, version: 11, sources: currentSources })).toBe(false)
     expect(await check({ ...work, sources: { ...sources, identity: { ...sources.identity, userId: randomUUID() } } })).toBe(false)
     expect(await check({ ...work, sources: { ...sources, identity: { ...sources.identity, chapterRevision: 2 } } })).toBe(false)
     expect(await check({ ...work, chapter: { ...work.chapter, content: '另文' } })).toBe(false)

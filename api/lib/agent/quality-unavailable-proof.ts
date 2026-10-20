@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { runtimeJson } from './runtime-common.js'
-import { buildHumanityQualityContext, HUMANITY_CRITIC_VERSION, qualityReviewContextHash } from './humanity-quality.js'
+import { buildHumanityQualityContext, HUMANITY_CRITIC_VERSION, HUMANITY_PROMPT_PROTOCOL, qualityReviewContextHash } from './humanity-quality.js'
 import { readOriginalTaskRequest } from './original-request.js'
 import { readOrphanQualityRecoveryProofs } from './quality-orphan-recovery.js'
 import { hasReturnedQualityCorrection } from './quality-evidence.js'
@@ -29,7 +29,7 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
     || report.chapterId !== chapter.id || report.chapterRevision !== chapter.revision || !report.compilationId
     || metrics.independentCheck !== 'unavailable' || metrics.contentHash !== createHash('sha256').update(chapter.content).digest('hex')) return null
   const context = await buildHumanityQualityContext(subject.userId, subject.novelId, chapter.id, report.runId, tx)
-  if (context.compilation?.id !== report.compilationId || metrics.qualityContextHash !== qualityReviewContextHash(context)) return null
+  if (context.compilation?.id !== report.compilationId) return null
   const audit = metrics.criticResponse === undefined ? null : object(metrics.criticResponse)
   const validFailure = (code: unknown) => code === 'QUALITY_REPORT_INCOMPLETE'
     || options.allowFormatRecovery && audit?.classification === 'source_invalid' && code === 'QUALITY_EVIDENCE_UNLOCATED'
@@ -58,6 +58,13 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
     if (jsonHash(operation.inputSnapshot) !== operation.inputHash || jsonHash(receipt.result) !== receipt.resultHash || receipt.runId !== report.runId
       || frozen.kind !== 'check' || frozenChapter.id !== chapter.id || frozenChapter.revision !== chapter.revision
       || frozenChapter.content !== chapter.content || compiler.id !== report.compilationId) return null
+    // A failed source's protocol comes from its authenticated original work,
+    // never from today's reviewer or an unverified report marker. This grants
+    // recovery eligibility only; passed caches still require the current hash.
+    if (!Number.isInteger(frozen.version) || Number(frozen.version) < 1 || Number(frozen.version) > 10) return null
+    const sourceProtocol = Number(frozen.version) >= 10 ? HUMANITY_PROMPT_PROTOCOL : 'humanity-context.v2'
+    if (metrics.qualityContextHash !== qualityReviewContextHash(context, sourceProtocol)
+      || metrics.criticPromptProtocol !== undefined && metrics.criticPromptProtocol !== sourceProtocol) return null
     const paid = operation.children.flatMap(child => child.attempts.map(attempt => ({ child, attempt })))
     if (options.allowFormatRecovery && audit?.classification === 'source_invalid'
       && paid.some(item => item.child.action === 'quality_evidence_correction') && !hasReturnedQualityCorrection(audit)) return null
@@ -105,6 +112,11 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
       witnessIds: [operation.id, ...paid.map(item => item.attempt.id), ...witnesses.flatMap(item => [item.responseEvent.id, item.settlement.id, item.charge.id])],
       evidenceHash: jsonHash({ operation, receipt, paid, witnesses }) })
   }
+  // Legacy has no immutable work version. Only its explicit saved protocol may
+  // select old rules; unmarked receipts retain the existing current-only check.
+  const legacyProtocol = metrics.criticPromptProtocol === 'humanity-context.v2' ? 'humanity-context.v2' : HUMANITY_PROMPT_PROTOCOL
+  if (metrics.criticPromptProtocol !== undefined && !['humanity-context.v2', HUMANITY_PROMPT_PROTOCOL].includes(String(metrics.criticPromptProtocol))
+    || metrics.qualityContextHash !== qualityReviewContextHash(context, legacyProtocol)) return null
   const events = await tx.agentRunEvent.findMany({ where: { runId: report.runId, type: { in: ['tool.call', 'tool.result'] } }, orderBy: { seq: 'asc' }, take: 2001 })
   if (events.length >= 2001) return null
   const pairs = events.flatMap(result => {
