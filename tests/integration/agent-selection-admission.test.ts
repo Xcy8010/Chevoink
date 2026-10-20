@@ -20,6 +20,7 @@ import { getToolsForMode } from '../../api/lib/agent/tools/registry.js'
 import { restrictToolsToTask, snapshotToolAuthority, intersectToolAuthority } from '../../api/lib/agent/tool-authority.js'
 import { freezeWritingScope, readWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { chapterRevisionPrompt } from '../support/writing-target-prompt.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -150,7 +151,7 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
       await expect(chapterEditRangeTool.execute({ ...f, runId, mode: 'build', callId: 'reading-is-not-writing',
         creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
       { chapterId: f.chapterId, oldText: '首段原文。', newText: '不应执行。' })).rejects.toMatchObject({
-        code: prompt.startsWith('引用') ? 'SCOPE_NEEDS_INPUT' : 'AUTHOR_LOCAL_SCOPE',
+        code: 'SCOPE_NEEDS_INPUT',
       })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
@@ -252,7 +253,7 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
       await expect(chapterEditRangeTool.execute({ ...f, runId: result.runId, mode: 'build', callId: 'assessment-denied',
         creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
       { chapterId: f.chapterId, oldText: '第二段原文。', newText: '模型改写。' })).rejects.toMatchObject({
-        code: prompt.includes('整章') ? 'REPAIR_NOT_AUTHORIZED' : 'AUTHOR_LOCAL_SCOPE',
+        code: 'REPAIR_NOT_AUTHORIZED',
       })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
       expect(await prisma.chapterQualityReport.count({ where: { runId: result.runId } })).toBe(0)
@@ -260,8 +261,14 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
   it('does not reinterpret an unmarked original whole-chapter request as a fresh assessment contract', () => fixture(async f => {
     await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '首段。\n第二段原文。\n末段。' } })
     const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '检查是否需要修改整章' })
-    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
-    delete spec.scope.localEditProtocol
+    // Build the actual historical contract shape. Removing one field from a
+    // v2 integrity-protected projection is corruption, not an old admission.
+    const legacy = buildTaskSpec({ runId: result.runId, novelId: f.novelId, chapterId: f.chapterId,
+      prompt: '检查是否需要修改整章', reviewProtocol: 1 })
+    await prisma.agentRun.update({ where: { id: result.runId }, data: { taskSpec: legacy } })
+    const spec = await prisma.$transaction(tx => freezeWritingScope(tx, { ...f, runId: result.runId }, legacy, '检查是否需要修改整章', 1))
+    expect(spec.scope.writingTargetProtocol).toBe(1)
+    expect(spec.scope.writingInterpretation).toBeUndefined()
     await prisma.agentRun.update({ where: { id: result.runId }, data: { status: 'running', taskSpec: spec } })
     await chapterEditRangeTool.execute({ ...f, runId: result.runId, mode: 'build', callId: 'old-contract-unchanged',
       creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },

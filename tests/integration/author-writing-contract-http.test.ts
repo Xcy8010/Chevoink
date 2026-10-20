@@ -31,7 +31,7 @@ const requests = [
   '先通读前两章；对第二卷第2章的正文进行局部修订，不修改前3章，不新建章节。',
 ]
 
-async function fixture(prompt: string, work: (ctx: ToolContext, before: Awaited<ReturnType<typeof prisma.chapter.findMany>>) => Promise<void>, duplicate = false) {
+async function fixture(prompt: string, work: (ctx: ToolContext, before: Awaited<ReturnType<typeof prisma.chapter.findMany>>) => Promise<void>, duplicate = false, targetBody = body) {
   const userId = randomUUID(), novelId = randomUUID(), sessionId = randomUUID()
   try {
     vi.stubGlobal('fetch', vi.fn(() => { throw Error('No Provider allowed in synthetic admission test') }))
@@ -42,7 +42,7 @@ async function fixture(prompt: string, work: (ctx: ToolContext, before: Awaited<
     for (const orderIndex of [1, 2, 3, 4]) await prisma.chapter.create({ data: { novelId, authorId: userId,
       volumeId: volumes[orderIndex <= 2 ? 0 : 1].id, title: `合成章${orderIndex}`, orderIndex,
       orderInVolume: orderIndex <= 2 ? orderIndex : orderIndex - 2, revision: 4,
-      content: orderIndex === 4 ? body + (duplicate ? '又向右转。' : '') : `前章合成正文${orderIndex}。` } })
+      content: orderIndex === 4 ? targetBody + (duplicate ? '又向右转。' : '') : `前章合成正文${orderIndex}。` } })
     const before = await prisma.chapter.findMany({ where: { novelId }, orderBy: { orderIndex: 'asc' } })
     await prisma.agentSession.create({ data: { id: sessionId, novelId, userId, title: '合成局部任务' } })
     const response = await request(app).post('/api/agent/runs')
@@ -108,6 +108,16 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
     expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
   }))
+  it.each(['只补写第4章第二段', '只补齐第4章第二段', '请只补写第4章当前正文的第二段'])(
+    'keeps write-family paragraph work local through actual HTTP admission: %s', prompt => fixture(prompt, async (ctx, before) => {
+      const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
+      expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'bounded', regions: [{ chapterId: before[3].id, start: 4, end: 7 }] })
+      await expect(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不得扩大为整章替换。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+      expect((await chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '第二段', newText: '第二段修正' })).outcome).not.toBe('failed')
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })).content).toBe('第一段\n第二段修正\n第三段')
+      expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
+    }, false, '第一段\n第二段\n第三段'))
   it('keeps the chapter identity when only its local quotation is ambiguous', () => fixture(requests[0] + concerns, async (ctx, before) => {
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     expect(spec).toMatchObject({ ambiguity: 'must_ask', scope: { writing: { kind: 'bounded', targets: [{ chapterId: before[3].id }] },

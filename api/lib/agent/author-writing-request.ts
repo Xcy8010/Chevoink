@@ -23,10 +23,10 @@ const numberPattern = `(?:${numeric})`
 const join = '(?:、|及|与|和|至|到|[-–—−~～〜－])'
 const chapterPattern = `(?:第\\s*)?${numberPattern}\\s*(?:章)?(?:\\s*${join}\\s*(?:第\\s*)?${numberPattern}\\s*(?:章)?)*\\s*章`
 const numbered = new RegExp(`^(?:第\\s*)?(${numberPattern})\\s*章$`, 'u')
-const revisionWords = '修订|修正|修改|改写|重写|扩写|缩写|修复|纠正|纠错|润色|优化|调整|替换|插入|删除|删掉|删去|精简|补充|增加|整改|补足|解决|不动|改(?!名|价|变|卷)'
+const revisionWords = '修订|修正|修改|改写|重写|扩写|缩写|修复|纠正|纠错|润色|优化|调整|替换|改为|改成|插入|删除|删掉|删去|精简|补充|增加|整改|补足|解决|不动|改(?!名|价|变|卷)'
 const preservationWords = '保持不变|保持原样|保留原样|保留|保持|不变'
 const writeWords = '续写|创作|起草|补写|补完|补齐|写完|完成|写入|落稿|新建|创建|建章|写'
-const reviewWords = '检查|审查|审阅|核对|核实|评估|分析|复检|复核|校验'
+const reviewWords = '检查|审查|审阅|核对|核实|评估|分析|判断|检视|看看|复检|复核|校验'
 const readWords = '读取|阅读|读完|参考|参照|根据|对照|呼应|回顾|借鉴|比照|通读|引用|读'
 const operationPattern = new RegExp(`${revisionWords}|${preservationWords}|${writeWords}|${reviewWords}|${readWords}|\\b(?:write|draft|finish|complete|revise|edit|repair|rewrite|polish|fix|replace|insert|delete|shorten|expand|check|review|assess|evaluate|read|consult|reference)\\b`, 'iu')
 const operationsIn = (text: string) => [...text.matchAll(new RegExp(operationPattern.source, 'giu'))]
@@ -38,6 +38,8 @@ const reviewPattern = new RegExp(`^(?:${reviewWords}|check|review|assess|evaluat
 const factBefore = /提到|写道|写着|记载|描述|讲述|表示|说过|却|例如|举例|原文[:：]|(?:主角|角色|人物).{0,8}(?:尝试|打算|决定)|\b(?:said|says|mentions?|describes?)\b/iu
 const advice = /如何|怎样|怎么|建议|方案|思路|方法|说明|讲解|\b(?:how|advice|suggestions?)\b/iu
 const connective = /并且|然后|接着|同时|但是|不过|而且|并|但|且|再|\b(?:and|then|but)\b/iu
+const conditionalRevisionModifier = /(?:按(?:照)?(?:需要|必要性|需)|视(?:需要|情况)|必要时|如有必要|如需|if\s+(?:needed|necessary)|as\s+needed)\s*$/iu
+const editorAfterRelation = /(?:当前(?:这)?(?:章|章节)|正在编辑(?:的)?(?:这章|章节|章))(?:之|以)?后|\bafter\s+(?:the\s+)?(?:current|currently edited)\s+chapter\b/giu
 
 /** UTF-16 coordinates stay identical to the author's input. A quotation never
  * becomes a whitespace join that can synthesize a new number or operation. */
@@ -131,7 +133,7 @@ function extractTargets(clause: AuthorClause): AuthorWritingTarget[] {
   add(/当前(?:这)?(?:一)?(?:章|章节)|(?:这|该|本)(?:一)?章|正在编辑(?:的)?章节|current chapter/giu, 'same_target', () => null)
   add(/全书|整本(?:书|小说)|所有(?:已有|现有)?章节|全部(?:已有|现有)?章节|whole book|all chapters/giu,
     'global', () => ({ kind: 'existing', start: 1 }))
-  add(new RegExp(`(?:第\\s*${numberPattern}\\s*段|首段|末段|最后一段|那句话|这句话|这句|一句|几句|这段|这一段|该段|片段|局部|选区|paragraph\\s*\\d+|sentence|passage)`, 'giu'), 'local', () => null)
+  add(new RegExp(`(?:第\\s*${numberPattern}\\s*段|首段|末段|最后一段|开头|结尾|段落|句子|对白|对话|那句话|这句话|这句|一句|几句|这段|这一段|那段|某段|该段|片段|局部|选区|paragraph\\s*\\d+|sentence|passage|opening|beginning|ending|dialogue)`, 'giu'), 'local', () => null)
   add(/正文|草稿|稿件|prose|chapter\s*\d+/giu, 'prose', text => {
     const value = text.match(/chapter\s*(\d+)/iu)
     return value ? chapterRange(`第${value[1]}章`) : null
@@ -177,6 +179,10 @@ function assessmentPredicates(text: string, matches: RegExpMatchArray[]): Map<nu
       // governor. A plain "需要/need" is only assessment under a review verb.
       const interrogative = /是否|需不需要|有没有|有无|要不要|应不应该|该不该|能不能|可不可以|可否|能否|是不是|\bwhether\b/iu.test(marker[0])
       if (!governor && !interrogative) continue
+      // "按必要性修订" is a condition on execution. A review may still
+      // govern an outer whether-question about that condition, but the bare
+      // necessity noun is not itself an assessment complement.
+      if (!interrogative && conditionalRevisionModifier.test(text.slice(0, operationStart))) continue
       if (markerStart > operationStart && matches[index + 1]?.index !== undefined && matches[index + 1].index! < markerStart) continue
       const between = text.slice(Math.min(markerStart + marker[0].length, operationStart + operation[0].length), Math.max(markerStart, operationStart))
       if (hasDirectiveBoundary(between)) continue
@@ -227,6 +233,7 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
       const kind = revisionPattern.test(match[0]) || protecting ? 'revise' : reviewPattern.test(match[0]) ? 'review' : readPattern.test(match[0]) ? 'read' : 'write'
       const left = previous?.span.end ?? clause.start, right = clause.start + (matches[index + 1]?.index ?? text.length)
       const before = lexical.masked.slice(clause.start, start), between = lexical.masked.slice(left, start), after = lexical.masked.slice(end, right)
+      const conditionalRevision = kind === 'revise' && conditionalRevisionModifier.test(between)
       const negative = /(?:不要|不得|不许|不能|禁止|无需|无须|不用|不必|不应(?:该)?|不可|不再|不准|不允许|严禁|勿|(?<!分)别|never|(?:do|must|should|may|can|will)\s+not|don['’]t|cannot)\s*(?:(?!并|但|然后|接着|随后|而且|\b(?:and|then|but)\b).)*$/iu.exec(between)
       const directNegative = /不\s*$/u.test(between) || match[0] === '不动'
       const inheritedNegative = previous?.polarity === 'negative' && !connective.test(between)
@@ -260,15 +267,27 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
         && previous?.kind === 'review' && previous.accepted && /并|后|再|and|then/iu.test(between)) bound = [...bound, ...previous.targetIndices]
       if (!bound.length && kind === 'review' && previous && ['review_wrapper', 'review_subject'].includes(previous.reason)) bound = [...previous.targetIndices]
       const precedingClause = lexical.clauses[clauseIndex - 1]
-      if (!bound.length && !previous && precedingClause?.sentence === clause.sentence
-        && !operationPattern.test(precedingClause.masked)) {
-        bound = targets.flatMap((target, targetIndex) => target.clauseSpan.start === precedingClause.start && !target.contextual ? [targetIndex] : [])
+      if (!previous && precedingClause?.sentence === clause.sentence && !operationPattern.test(precedingClause.masked)
+        && !factBefore.test(precedingClause.masked) && !advice.test(precedingClause.masked)) {
+        const prior = targets.flatMap((target, targetIndex) => target.clauseSpan.start === precedingClause.start && !target.contextual ? [targetIndex] : [])
+        const objectEnd = precedingClause.start + precedingClause.masked.trimEnd().length
+        const namedScope = prior.some(targetIndex => targets[targetIndex].range)
+          && prior.some(targetIndex => targets[targetIndex].span.end === objectEnd)
+        if (!bound.length || namedScope && bound.every(targetIndex => !targets[targetIndex].range
+          && ['local', 'prose'].includes(targets[targetIndex].kind))) bound = [...bound, ...prior]
       }
+      if (kind === 'write' && [...text.matchAll(new RegExp(editorAfterRelation.source, 'giu'))].some(relation =>
+        clause.start + relation.index! >= left && clause.start + relation.index! + relation[0].length <= right)) {
+        for (const targetIndex of bound) if (targets[targetIndex].range?.kind === 'next') {
+          targets[targetIndex].range = { ...targets[targetIndex].range!, anchor: 'editor' }
+        }
+      }
+      const replacesSource = /^(?:替换|改为|改成|replace)$/iu.test(match[0]) || /^\s*(?:为|成)/u.test(after)
       const sourceQuotes = kind !== 'revise' ? [] : lexical.quoted.filter(quote => quote.kind === 'quotation'
         && (protecting && precedingClause?.sentence === clause.sentence && !precedingClause.masked.trim()
           && quote.start >= precedingClause.start && quote.end <= precedingClause.end
           || quote.start >= clause.start && quote.end <= clause.end && (protecting && quote.end <= start && /^\s*$/u.test(lexical.masked.slice(quote.end, start))
-          || (/替换|replace/iu.test(match[0])
+          || (replacesSource
           ? quote.end <= start && /^\s*$/u.test(lexical.masked.slice(quote.end, start)) && /(?:把|将|replace)\s*$/iu.test(lexical.masked.slice(clause.start, quote.start))
           : quote.start >= end && quote.end <= right && /^\s*(?:(?:这|那|该|此|以下|下列|选中|所选)(?:的)?\s*)?(?:(?:句子?|段落?|文本|文字|正文|原文|内容)(?:的)?\s*)?[:：]?\s*$/u.test(lexical.masked.slice(end, quote.start))))))
       for (const quote of sourceQuotes) {
@@ -284,7 +303,9 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
       else if (factBefore.test(before) || /(?:已经|早已|曾经|已)\s*$/u.test(before) || /^\s*过/u.test(after)) reason = 'factual_statement'
       else if (advice.test(before) || /的(?:建议|方案|思路|方法|报告|情况)\s*$/u.test(after)) reason = 'advice'
       else if (/只读|仅供阅读|read.only/iu.test(before)) reason = 'read_only'
-      else if (/[:：]/u.test(before) && operations.some(operation => operation.clauseSpan.start === clause.start && operation.kind === 'read')
+      else if (/[:：]/u.test(before) && operations.some(operation => operation.clauseSpan.start === clause.start
+        && (operation.kind === 'read' || operation.kind === 'review'
+          && /这句|这段|原文|文字|提示|示例|引文/u.test(lexical.masked.slice(operation.span.end, start))))
         || /引用原文|阅读提示|读取这句|阅读这句/u.test(before)) reason = 'reference_data'
       else if (assessed.has(index)) reason = 'assessment_predicate'
       else if (protecting) reason = 'protected'
@@ -292,8 +313,8 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
       else if (kind === 'write' && /完成|finish|complete/iu.test(match[0]) && matches.slice(index + 1).some(next => reviewPattern.test(next[0]))
         && !/并|然后|后|再/u.test(after)) reason = 'review_wrapper'
       else if ((kind === 'write' || kind === 'revise') && nextMatch && reviewPattern.test(nextMatch[0])
-        && !/并|与|和|然后|后|再|\b(?:and|then)\b/iu.test(after)) reason = 'review_subject'
-      else if ((kind === 'write' || kind === 'revise') && !bound.length && !quoteEdit && !explicitLocal) reason = 'no_manuscript_object'
+        && !conditionalRevision && !/并|与|和|然后|后|再|\b(?:and|then)\b/iu.test(after)) reason = 'review_subject'
+      else if ((kind === 'write' || kind === 'revise') && !bound.length && !quoteEdit && !explicitLocal && !conditionalRevision) reason = 'no_manuscript_object'
       else if (kind === 'revise' && !quoteEdit && bound.length && bound.every(targetIndex => targets[targetIndex].span.end <= start)
         && after.trim() && !clauseTargets.some(targetIndex => ['prose', 'local'].includes(targets[targetIndex].kind))
         && !bound.some(targetIndex => targets[targetIndex].kind === 'global')

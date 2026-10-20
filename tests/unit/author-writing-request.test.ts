@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { lexAuthorWritingRequest, parseAuthorWritingExclusion, parseAuthorWritingRequest } from '../../api/lib/agent/author-writing-request.js'
 import { chapterRevisionPrompt, nextChapterContinuationPrompt } from '../support/writing-target-prompt.js'
+import { shortSceneRequest } from '../support/writing-clarification-fixture.js'
 
 describe('fresh structured author-writing interpretation, protocol 2', () => {
   it.each([
@@ -26,6 +27,35 @@ describe('fresh structured author-writing interpretation, protocol 2', () => {
   it.each(['续写下一章，只写这一章。', '写下一章。仅续写该章。', '写下一章。只完成本章正文。'])(
     'keeps demonstratives as a restriction on one relative target: %s', prompt => {
       expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: { kind: 'next', count: 1 }, ambiguous: false, intent: 'write' })
+    })
+  it.each(['在当前章之后写下一章', '当前章节以后续写下一章', '在正在编辑的章节之后继续写下一章',
+    'After the current chapter write the next chapter', 'Write the next chapter after the current chapter'])(
+    'binds the editor-relative relation across the writing predicate: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: { kind: 'next', count: 1, anchor: 'editor' }, intent: 'write', ambiguous: false })
+    })
+  it('keeps an editor-relative target distinct from its absolute placement confirmation', () => {
+    const parsed = parseAuthorWritingRequest('在当前章之后写下一章，作为第4章正式写入。只写这一章。')
+    expect(parsed).toMatchObject({ range: { kind: 'next', count: 1, anchor: 'editor' }, confirmedNextOrderIndex: 4, ambiguous: false })
+    // The consumer resolves this selector to 2 for editor=1, regardless of the
+    // existing last chapter=3, and must reject confirmation=4 at admission.
+    expect((parsed.range!.anchor === 'editor' ? 1 : 3) + 1).not.toBe(parsed.confirmedNextOrderIndex)
+  })
+  it.each(['读取当前章之后的内容，写下一章', '在当前章之后读取第1章然后写下一章',
+    '写下一章。当前章之后曾经有空白。', '写下一章。引用：“在当前章之后写下一章”。'])(
+    'does not borrow an editor relation from data or another predicate: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt).range).toEqual({ kind: 'next', count: 1 })
+    })
+  it.each(['第二卷第2章当前已存正文，请做一次局部修订。先读取第1章作为参考，不修改第1、2、3章。',
+    '第二卷第2章现有草稿，请修订第二段。', '第三章，请修改结尾。', '第三章的正文，做一次必要修订。'])(
+    'binds a preceding nominal chapter scope to a following generic body object: %s', prompt => {
+      const parsed = parseAuthorWritingRequest(prompt)
+      expect(parsed).toMatchObject({ range: prompt.includes('卷') ? { kind: 'range', start: 2, count: 1, volume: 2 }
+        : { kind: 'range', start: 3, count: 1 }, ambiguous: false, intent: 'revise' })
+    })
+  it.each(['第1章提到一扇门，修改结尾。', '第1章提出建议，修改结尾。', '第1章门未关，局部修订。',
+    '读取第1章，修改结尾。', '第1章的正文。做一次局部修订。'])(
+    'never treats contextual or sentence-separated chapter prose as the next operation scope: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt).range).toBeNull()
     })
   it.each(['作为第4章正式写入', '作为第四章保存', '作为全书第4章落稿'])(
     'keeps an absolute apposition as a snapshot constraint: %s', confirmation => {
@@ -71,6 +101,31 @@ describe('fresh structured author-writing interpretation, protocol 2', () => {
     expect(parsed.evidence.operations.filter(item => item.accepted)).toHaveLength(1)
     expect(parsed.range).toBeNull()
   })
+  it.each(['将“选区原文。”改为“准确的新句。”', '把“选区原文。”改成“准确的新句。”',
+    '将“选区原文。”修改为“准确的新句。”', '将“选区原文。”修订成“准确的新句。”'])(
+    'binds transformation source and destination quotations to their different roles: %s', prompt => {
+      const parsed = parseAuthorWritingRequest(prompt)
+      const operation = parsed.evidence.operations.find(item => item.accepted && item.kind === 'revise')!
+      expect(operation).toBeDefined()
+      expect(operation.targetIndices.map(index => prompt.slice(parsed.evidence.targets[index].span.start, parsed.evidence.targets[index].span.end))).toEqual(['“选区原文。”'])
+      expect(parsed).toMatchObject({ range: null, hasAction: true, intent: 'revise', ambiguous: false })
+    })
+  it.each(['阅读这句：将“选区原文。”改为“准确的新句。”', '给出将“选区原文。”改成“准确的新句。”的建议',
+    '不要将“选区原文。”改为“准确的新句。”'])(
+    'does not promote a described, suggested or denied quotation transformation: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: null, hasAction: false, intent: null })
+    })
+  it.each(['检查并修复结尾', '检查并修订开头', '修改末段', '润色段落', '修正对白'])(
+    'recognizes ordinary prose-part objects without inventing chapter authority: %s', prompt => {
+      const parsed = parseAuthorWritingRequest(prompt)
+      expect(parsed).toMatchObject({ range: null, hasAction: true, intent: 'revise', ambiguous: false })
+      expect(parsed.evidence.operations.some(operation => operation.accepted && operation.kind === 'revise'
+        && operation.targetIndices.some(index => parsed.evidence.targets[index].kind === 'local'))).toBe(true)
+    })
+  it.each(['检查是否需要修复结尾', '给出修订开头的建议', '请阅读提示：检查并修复结尾', '不要润色对白'])(
+    'retains assessment, advice, reference and denial roles for the same prose-part objects: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt).evidence.operations.some(operation => operation.accepted && operation.kind === 'revise')).toBe(false)
+    })
   it.each(['当前已保存正文做一次必要的修订', '对当前已保存正文做一次局部修订', '请针对当前第三章已保存的正文进行一次必要修订',
     '本次给第三章现有草稿做一次局部修订', '第三章的现有草稿做一次修订', '把第三章当前已保存正文做一次修订'])(
     'binds an object and an operation through modifiers, without a prefix whitelist: %s', prompt => {
@@ -102,8 +157,30 @@ describe('fresh structured author-writing interpretation, protocol 2', () => {
     'keeps a revision named as the subject of a check as review: %s', prompt => {
       expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: { kind: 'range', start: 3, count: 1 }, intent: 'review', ambiguous: false })
     })
+  it.each(['只续写下一章，不修改已经保存的第1章，完成质量与连续性检查并按必要性修订复检。',
+    '写下一章，按需修订复检。', '续写下一章。检查后按需要修订复检。'])(
+    'keeps conditional execution instructions distinct from an assessment question: %s', prompt => {
+      const parsed = parseAuthorWritingRequest(prompt)
+      expect(parsed).toMatchObject({ range: { kind: 'next', count: 1 }, intent: 'write', ambiguous: false })
+      expect(parsed.evidence.operations.some(operation => operation.accepted && operation.kind === 'revise')).toBe(true)
+    })
+  it.each(['检查是否需要按必要性修订第3章正文', '只检查按必要性修订第3章是否有必要',
+    'Check whether if necessary revise chapter 3'])(
+    'does not let an execution modifier escape an enclosing assessment: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt).evidence.operations.some(operation => operation.accepted && operation.kind === 'revise')).toBe(false)
+    })
+  it('keeps a short scene and its completion instruction free of any chapter selector', () => {
+    const parsed = parseAuthorWritingRequest(shortSceneRequest)
+    expect(parsed).toMatchObject({ range: null, ambiguous: false, intent: 'write', hasAction: true })
+    expect(parsed.evidence.operations.filter(operation => operation.accepted).flatMap(operation => operation.targetIndices)
+      .some(index => parsed.evidence.targets[index].range !== null)).toBe(false)
+    // A write to a prose part is not a local revision grant. Empty-book
+    // placement clarification must be decided by the fresh freeze consumer.
+    expect(parsed.evidence.operations.some(operation => operation.accepted && operation.kind === 'revise')).toBe(false)
+  })
   it.each([
     '检查是否需要修改第二段', '只检查第3章是否需要修订正文', '检查第3章需不需要修订正文',
+    '看看需不需要润色第二段', '判断修改第二段有没有必要', '检视第3章是否需要修订正文',
     '评估第3章有没有必要修改正文', '分析第3章有无必要修订正文', '检查修订第3章是否有必要',
     '第3章是否需要修订正文，请检查', 'Check whether we need to revise chapter 3', 'Assess if chapter 3 needs repair',
     'Review whether to revise paragraph 2', 'Check the need to revise chapter 3', 'Check if it is necessary to revise chapter 3',
@@ -116,6 +193,15 @@ describe('fresh structured author-writing interpretation, protocol 2', () => {
     expect(parsed.exclusions).toEqual([])
     if (prompt.includes('3')) expect(parsed.range).toEqual({ kind: 'range', start: 3, count: 1 })
   })
+  it.each(['看看第3章是否需要润色第二段，只修订第4章正文。', '判断修改第3章正文有没有必要，并只修订第4章正文。',
+    '检视第3章是否需要修订正文，然后只修改第4章正文。'])(
+    'keeps an ordinary assessment verb separate from an independent revision target: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: { kind: 'range', start: 4, count: 1 }, intent: 'revise', ambiguous: false })
+    })
+  it.each(['请看看这句：修改第三章', '检视原文：修订第三章', '判断这段文字：润色第三章'])(
+    'keeps instruction-shaped data inert under ordinary assessment verbs: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt).evidence.operations.some(operation => operation.accepted && operation.kind === 'revise')).toBe(false)
+    })
   it.each([
     '检查第3章是否需要修订正文。只修改第4章正文。', '检查第3章是否需要修订正文，只修改第4章正文。',
     '检查第3章是否需要修订正文并只修改第4章正文', '只修改第4章正文，然后检查第3章是否需改',

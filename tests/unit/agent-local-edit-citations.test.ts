@@ -79,6 +79,11 @@ describe('fresh issue quotations bound to separate local islands', () => {
     expect(requestedLocalEdit('评估第二段有没有必要润色', 2)).toBeNull()
     expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '检查是否需要修改第二段', authorWritingProtocol: 2 }).intent).toBe('review')
   })
+  it.each(['只补写第3章第二段', '只补齐第3章第二段', '请只补写第3章当前正文的第二段'])(
+    'retains a local saved-body fence for write-family operations: %s', request => {
+      const boundary = freezeLocalEditBoundary(request, writing, [{ ...chapter, content: '第一段\n第二段\n第三段' }], 2)
+      expect(boundary).toMatchObject({ kind: 'bounded', regions: [{ chapterId: chapter.id, start: 4, end: 7 }] })
+    })
   it('uses the frozen intent and resolved chapter identity after a volume-qualified admission', () => {
     const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt, authorWritingProtocol: 2, localEditProtocol: 1 })
     spec.scope.writingTargetProtocol = 2

@@ -55,7 +55,7 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   }
   if (!['write', 'revise', 'review'].includes(spec.intent) || spec.writingPacing === 'proposal_only' || spec.writingPacing === 'conversation_only') return spec
   const admissionPrompt = original.prompt ?? prompt
-  const localRequest = spec.scope.localEditProtocol === 1 ? requestedLocalEdit(admissionPrompt, targetProtocol === 2 ? 2 : 1) : null
+  let localRequest = spec.scope.localEditProtocol === 1 ? requestedLocalEdit(admissionPrompt, targetProtocol === 2 ? 2 : 1) : null
   const interpretation = targetProtocol === 2 ? parseAuthorWritingRequest(admissionPrompt) : null
   const negativeOperations = interpretation?.evidence.operations.filter(operation => operation.polarity === 'negative' && operation.reason === 'negated') ?? []
   const creationDenied = negativeOperations.some(operation => operation.kind === 'write'
@@ -76,6 +76,12 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     && !(localRequest && !/(?:章|卷|chapter|volume)/iu.test(admissionPrompt))
   const chapters = await tx.chapter.findMany({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) },
     select: { id: true, revision: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
+  // An empty book has no saved body to edit. A new-scene write/finish operation
+  // without a chapter target may ask for first-chapter placement; it does not
+  // manufacture an old-body window from "finish this passage and stop".
+  // Existing chapter/paragraph writes retain their local fence.
+  if (interpretation && !chapters.length && !range && !ambiguousRange && spec.intent === 'write'
+    && !interpretation.evidence.operations.some(operation => operation.accepted && operation.polarity === 'affirmative' && operation.kind === 'revise')) localRequest = null
   const run = await tx.agentRun.findFirstOrThrow({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId }, select: { chapterId: true, session: { select: { sandboxMode: true, spawnedFromRunId: true } } } })
   const base = { version: 1 as const, titleAndBodyOnly: /(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|only.{0,20}title.{0,12}(?:body|text)/iu.test(admissionPrompt),
     repairAuthorized: interpretation ? interpretation.evidence.operations.some(operation => operation.accepted && operation.polarity === 'affirmative' && operation.kind === 'revise') : hasOriginalRepairAuthority(admissionPrompt) }

@@ -49,6 +49,21 @@ describe('authenticated first-chapter scope clarification', () => {
     expect(renderTaskSpec(frozen)).toContain('先用 ask_user 一次询问该落点')
     expect(f.create).not.toHaveBeenCalled()
   })
+  it('keeps fresh protocol2 scene creation eligible for an authenticated first-chapter answer', async () => {
+    const f = fixture()
+    const fresh = buildTaskSpec({ ...f.subject, prompt: shortSceneRequest, authorWritingProtocol: 2,
+      reviewProtocol: 1, localEditProtocol: 1 })
+    const frozen = await scope.freezeWritingScope(f.tx, f.subject, fresh, shortSceneRequest, 2)
+    expect(frozen).toMatchObject({ intent: 'write', scope: { writingTargetProtocol: 2, writingClarificationProtocol: 1,
+      writing: { kind: 'needs_input', targets: [] }, writingInterpretation: { intent: 'write' } } })
+    expect(frozen.scope.localEditBoundary).toBeUndefined()
+    expect(f.create).not.toHaveBeenCalled()
+    // The production admission is persisted as JSON before its answer receipt.
+    f.admission.spec = JSON.parse(JSON.stringify(frozen)) as typeof frozen
+    expect(await recordWritingClarification(f.tx, f.subject, f.answer)).toBeTruthy()
+    expect((await scope.readWritingScope(f.tx, f.subject)).writing).toMatchObject({ kind: 'bounded', targets: [{ orderIndex: 1, chapterId: null }] })
+    expect(f.admission.spec).toEqual(frozen)
+  })
   it('keeps an explicit first-chapter grant when a separate clause forbids continuation', async () => {
     const f = fixture(), prompt = '写第一章，不继续下一章。'
     f.admission.prompt = prompt
