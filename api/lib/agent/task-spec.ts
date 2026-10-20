@@ -242,6 +242,7 @@ export function buildTaskSpec(input: {
   manuscriptProtocol?: 1
   reviewProtocol?: 1
   continuityEvidenceProtocol?: 1
+  terminalEvidenceProtocol?: 1
   localEditProtocol?: 1
   /** Internal fresh human admission only; not exposed in a request schema. */
   researchAdmission?: 1
@@ -292,6 +293,7 @@ export function buildTaskSpec(input: {
     scope: { novelId: input.novelId, chapterIds, selection, ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
       ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}),
       ...(input.continuityEvidenceProtocol ? { continuityEvidenceProtocol: input.continuityEvidenceProtocol } : {}),
+      ...(input.terminalEvidenceProtocol ? { terminalEvidenceProtocol: input.terminalEvidenceProtocol } : {}),
       ...(input.localEditProtocol ? { localEditProtocol: input.localEditProtocol } : {}) },
     goals: [input.prompt.trim().slice(0, 1000) || '继续完成上一轮任务'],
     hardConstraints: directives

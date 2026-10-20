@@ -1,4 +1,5 @@
 import { readCompilerContinuitySource } from './compiler-continuity-source.js'
+import { terminalEvidenceContext } from './terminal-evidence-context.js'
 import { continuityRecheckBaseline } from './continuity-review-context.js'
 import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision } from './writing-scope.js'
 import { classifyContinuityFindingAuthority, unlocatedContinuityEvidence } from './continuity-finding-authority.js'
@@ -703,7 +704,7 @@ export async function validateStoryContinuity(input: {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '独立检查期间正文已变化，旧结果不能验证新revision。请重新检查当前正文。')
   }
   const protocol = input.coverage?.protocolVersion ?? 8
-  if (protocol !== 6 && protocol !== 7 && protocol !== 8 && protocol !== 9) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '未知连续性协议，不能升级或应用旧检查。')
+  if (protocol !== 6 && protocol !== 7 && protocol !== 8 && protocol !== 9 && protocol !== 10) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '未知连续性协议，不能升级或应用旧检查。')
   const reviewSource = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, protocol)
   const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus, terminalCandidate: input.terminalCandidate }, protocol)
   if (input.coverage && !compilerContinuityCoverageMatches(input.coverage, currentCoverage)) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、章节桥、场景或检查范围已变化，旧检查不能绑定当前编译。')
@@ -897,7 +898,8 @@ export async function commitChapterBridge(input: {
   // independent critic's candidate, bound to this body's full coverage.
   const proposedTerminal = terminalCandidateSchema.parse({ exitState: input.exitState, lastUnfinishedAction: input.lastUnfinishedAction })
   const reviewedCandidate = readTerminalCandidate(compilation.validation)
-  const terminalReview = currentTerminalReview(compilation.validation, chapter.content)
+  const terminalReview = currentTerminalReview(compilation.validation, chapter.content,
+    currentContinuityReview.coverage.protocolVersion === 10 ? terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source) : undefined)
   if (reviewedCandidate || terminalClaims(proposedTerminal).length) {
     if (!currentContinuityReview.assessment || !reviewedCandidate || !terminalReview?.supported
       || runtimeJson(reviewedCandidate).hash !== runtimeJson(proposedTerminal).hash) {

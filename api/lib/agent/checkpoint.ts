@@ -47,6 +47,8 @@ export const CHECKPOINT_TURN_SLICE = 50
  * 这是持久化计数的 schema 硬上限，实际额度由 env.AGENT_RUN_MANUAL_RESUME_MAX 决定（默认 2）。
  */
 export const CHECKPOINT_MANUAL_RESUME_HARD_MAX = 10
+export const authorInputRequiredSchema = z.object({ version: z.literal(1), callId: z.string().min(1),
+  kind: z.enum(['writing_scope', 'local_edit_scope']) }).strict()
 
 /** Internal metadata inside the existing run usage JSON, not a new UI/API field. */
 const runCheckpointFields = {
@@ -67,6 +69,9 @@ const runCheckpointFields = {
   // One persisted conversion identity, never replenished by resume. It allows
   // one authenticated diagnostic read before correcting legacy locator input.
   inputProtocolRecovery: z.object({ protocol: z.literal(2), key: z.string().regex(/^[a-f0-9]{64}$/u) }).strict().optional(),
+  // A completed question without the author's required scope decision parks
+  // locally. This is not new authority and cannot be cleared by Continue.
+  authorInputRequired: authorInputRequiredSchema.optional(),
   pendingReviews: z.array(z.object({ compilationId: z.string().min(1).nullable(), chapterId: z.string().min(1),
     revision: z.number().int().positive(), toolName: z.enum(['continuity_validate', 'quality_analyze']), callId: z.string().min(1),
   }).strict()).optional(),

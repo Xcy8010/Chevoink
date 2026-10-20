@@ -19,6 +19,7 @@ vi.mock('../../api/lib/agent/goal-activation-supervisor.js', () => ({ reconcileG
 vi.mock('../../api/lib/agent/runtime-resume.js', () => ({ resumeDurableTask: mocks.resumeDurable }))
 vi.mock('../../api/lib/agent/review-resume-readiness.js', () => ({ readReviewReceiptWait: mocks.receiptWait }))
 import { continueActivatedGoalRun, continueLoopRun } from '../../api/lib/agent/run-service.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 const run = { id: 'run19', sessionId: 's', userId: 'u', novelId: 'n', chapterId: 'c19', status: 'paused', engine: 'loop', mode: 'build', inputSummary: 'truncated', modelTier: 'speed', reasoningEffort: 'high', customModelId: null }
 beforeEach(() => {
   vi.resetAllMocks()
@@ -57,6 +58,21 @@ function activatedFixture(durable = false) {
   return goal
 }
 describe('continue API exact target', () => {
+  it.each(['frozen-scope', 'checkpoint'] as const)('keeps required author input waiting before credits, model, cursor and executor admission: %s', async source => {
+    const taskSpec = buildTaskSpec({ runId: run.id, novelId: 'n', chapterId: null, prompt: '写一个短场景' })
+    taskSpec.scope.writing = { version: 1, kind: source === 'frozen-scope' ? 'needs_input' : 'bounded',
+      targets: source === 'frozen-scope' ? [] : [{ orderIndex: 1, chapterId: 'c19' }], repairAuthorized: false, titleAndBodyOnly: false }
+    const usage = { promptTokens: 20, completionTokens: 5, totalTokens: 25, checkpoint: { version: 2, controlPolicy: 'until_completion',
+      origin: 'system_default', runStartedAt: 1000, activeExecutionMs: 10, stagnantBatches: 0, resumeCount: 0, compactionCount: 0,
+      maxTurns: 50, tokenBudget: 1000, writeProgress: 0, writeBaseline: 0, readProgress: 0, readBaseline: 0,
+      progressSignatures: [], authorInputRequired: { version: 1, callId: 'original-question', kind: 'writing_scope' } } }
+    const original = { ...run, taskSpec, ...(source === 'checkpoint' ? { usage } : {}) }, before = structuredClone(original)
+    mocks.find.mockReset().mockImplementation(async args => args.where.id ? original : { id: run.id })
+    await expect(continueLoopRun('u', run.id)).rejects.toMatchObject({ code: 'AUTHOR_INPUT_REQUIRED', status: 409 })
+    expect(mocks.creditAccess).not.toHaveBeenCalled(); expect(mocks.tierRuntime).not.toHaveBeenCalled()
+    expect(mocks.execute).not.toHaveBeenCalled(); expect(mocks.prepare).not.toHaveBeenCalled(); expect(mocks.runUpdate).not.toHaveBeenCalled()
+    expect(original).toEqual(before)
+  })
   it('keeps an activated goal continuation behind its original goal, manuscript and normal credit admission', async () => {
     const goal = activatedFixture()
     const original = { ...run, usage: { checkpoint: { pendingReviews: [{ callId: 'pending' }] } } }

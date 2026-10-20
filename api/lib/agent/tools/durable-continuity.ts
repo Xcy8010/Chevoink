@@ -29,6 +29,7 @@ import { runContinuityEvidenceCorrection } from '../continuity-response-correcti
 import { runContinuityReassessment } from '../assessment-response-lifecycle.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { readTerminalCandidate, terminalCandidateSchema, terminalReviewInput, terminalReviewFailure } from '../terminal-state-review.js'
+import { hasTerminalEvidenceProtocol, terminalEvidenceContext, terminalEvidenceContextSchema, continuitySemanticRule } from '../terminal-evidence-context.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const chapterSchema = z.object({ id: z.string(), title: z.string(), revision: z.number().int().positive(), content: z.string(), orderIndex: z.number().int() }).strict()
@@ -36,8 +37,8 @@ const routeSchema = auxiliaryRouteSchema
 const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional(), terminalHash: hash.optional() }).strict()
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
-    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string() }).optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
+    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
 type Work = Extract<z.infer<typeof workSchema>, { kind: 'check' }>
@@ -79,7 +80,8 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     }
     const originalRequest = await readOriginalTaskRequest(tx, ctx)
     const sourceAuthority = hasContinuitySourceAuthority(originalRequest.spec)
-    const criticSystem = sourceAuthority ? `${continuityCriticSystem}\n${continuitySourceAuthorityRule}` : continuityCriticSystem
+    const terminalProtocol = hasTerminalEvidenceProtocol(originalRequest.spec)
+    let criticSystem = sourceAuthority ? `${continuityCriticSystem}\n${continuitySourceAuthorityRule}` : continuityCriticSystem
     const chapterOnlyPipeline = !args.compilationId && typeof args.chapterId === 'string' && !!baseline
       && await isWritingTaskContinuityCompiler(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: baseline.id, chapterId: args.chapterId })
     if (!args.compilationId && (!baseline || args.chapterId && !chapterOnlyPipeline)) {
@@ -109,13 +111,15 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '正文为空、场景数量不合法或前章版本变化；先修复章节桥前置状态，不启动正文修订。',
     }
     const terminalCandidate = args.terminalState ? terminalCandidateSchema.parse(args.terminalState) : readTerminalCandidate(compilation.validation)
+    const terminalEvidence = terminalProtocol ? terminalEvidenceContext(compilation.chapter, source) : undefined
+    if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
     const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
-      source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, sourceAuthority ? 9 : 8)
+      source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
     const reusable = cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
     const repair = false
     validatedContinuityCheckRounds(compilation.validation, !reusable)
-    return { kind: 'check' as const, version: sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content }, sourceId, coverage,
+    return { kind: 'check' as const, version: terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
       ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),
       criticSystem, repairSystem: repairPrompt,
       criticInput: [`章节：《${compilation.chapter.title}》`,
@@ -123,7 +127,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
         ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: compilation.chapter.id, revision: compilation.chapter.revision, orderIndex: compilation.chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
         `章节桥（待核对摘要，不能代替前章原文）：${JSON.stringify(continuityStoryInput(compilation.bridge))}`, `生成场景任务草案（目标/代价/转折不是历史事实）：${JSON.stringify(continuityStoryInput(compilation.sceneTasks))}`,
         continuityReviewTail(compilation.validation, compilation.chapter.revision, repair, typeof args.focus === 'string' ? args.focus : undefined, compilation.chapter.content),
-        compilerContinuitySourceScope(source), continuitySourceInput({ previous: source?.content ?? null, current: compilation.chapter.content }), terminalReviewInput(terminalCandidate)].join('\n'),
+        compilerContinuitySourceScope(source), continuitySourceInput({ previous: source?.content ?? null, current: compilation.chapter.content }), terminalReviewInput(terminalCandidate, terminalEvidence)].join('\n'),
       repair,
       cached: reusable ? cached.data.findings : null, route: null, price: null }
   }).catch(error => {
@@ -176,7 +180,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     let parsed = frozen.cached ? { structured: true, findings: frozen.cached } : critic?.finishReason === 'stop' && !critic.toolCalls.length
       ? parseIndependentContinuityResult(critic.content, frozen.version >= 3 ? 2 : 1, frozen.version >= 4 ? frozen.sourceBodies : undefined) : { structured: false, findings: [] }
     let inspected = frozen.version >= 5 && critic && frozen.sourceBodies
-      ? inspectContinuityResponse(critic.content, frozen.sourceBodies, critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.version >= 12 ? 7 : frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, frozen.version >= 10 ? frozen.terminalCandidate : undefined, frozen.version >= 12 ? frozen.sourceScope : undefined) : null
+      ? inspectContinuityResponse(critic.content, frozen.sourceBodies, critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.version >= 13 ? 8 : frozen.version >= 12 ? 7 : frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, frozen.version >= 10 ? frozen.terminalCandidate : undefined, frozen.version >= 12 ? frozen.sourceScope : undefined) : null
     if (frozen.version === 7 && inspected && frozen.sourceBodies && inspected.audit.classification === 'source_invalid') {
       const billingKnown = await withRunLease(lease, async tx => {
         const previous = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:continuity_critic` } } })
@@ -263,7 +267,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
           ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }).value,
       } })
       const repairGuidance = parsed.structured && report.independentCheck === 'complete' && report.errorCount > 0 ? await readChapterReviewRevisionGuidance(tx, ctx, frozen.chapter) : ''
-      const terminalFailure = terminalReviewFailure({ ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.chapter.content)
+      const terminalFailure = terminalReviewFailure({ ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.chapter.content, frozen.sourceBodies?.terminalEvidence)
       const toolResult: ToolResult = terminalFailure ?? (!parsed.structured || report.independentCheck !== 'complete'
         ? { outcome: 'failed', failureCode: inspected?.audit.classification === 'source_invalid' ? 'CONTINUITY_EVIDENCE_UNLOCATED' : !parsed.structured ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED', summary: '独立连续性复核未完成',
           output: unconfirmedContinuityOutput }

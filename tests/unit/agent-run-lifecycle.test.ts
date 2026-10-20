@@ -3058,6 +3058,41 @@ describe('ordinary chapter summary presentation', () => {
 })
 
 describe('author-directed task ending in the real execution loop', () => {
+  it.each([false, true])('keeps typed Continue local for a frozen unresolved target, including old checkpoints without a marker (marker=%s)', async marker => {
+    const spec = buildTaskSpec({ runId: 'original', novelId: 'novel', chapterId: null, prompt: '写一个短场景' })
+    spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: false, titleAndBodyOnly: false }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'unknown_legacy', runStartedAt: 1000,
+      activeExecutionMs: 50, stagnantBatches: 0, resumeCount: 0, compactionCount: 0, maxTurns: 50, tokenBudget: 1000,
+      writeProgress: 0, writeBaseline: 0, readProgress: 0, readBaseline: 0, progressSignatures: [],
+      ...(marker ? { authorInputRequired: { version: 1, callId: 'original-question', kind: 'writing_scope' } } : {}) }
+    const previous = { id: 'original', taskSpec: spec, usage: { promptTokens: 20, completionTokens: 5, totalTokens: 25, checkpoint },
+      currentTurn: 2, status: 'paused', runtimeProtocolVersion: 0, taskRootId: null, startedAt: new Date(1000),
+      events: [{ type: 'run.started', createdAt: new Date(1000) }, { type: 'run.paused', createdAt: new Date(1050) }] }
+    mocks.previous.mockResolvedValueOnce(previous)
+    mocks.priorRuns.mockResolvedValue([previous])
+    mocks.original.mockResolvedValue({ parts: [{ type: 'text', text: '写一个短场景' }] })
+    await run('继续')
+    expect(mocks.chat).not.toHaveBeenCalled()
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { inheritedTokens: 25, inheritedTurns: 2 } })
+    if (marker) expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { authorInputRequired: { callId: 'original-question' } } })
+  })
+  it('persists an unanswered scope question and pauses locally before any same-batch action or paid follow-up', async () => {
+    const write = tool('chapter_write', async () => ({ output: 'must not execute' }), false)
+    mocks.tools = [tool('ask_user', async () => ({ failureCode: 'AUTHOR_INPUT_REQUIRED', output: '等待作者明确范围', summary: '等待作者输入',
+      display: { kind: 'question', question: '目标章节？', options: [{ label: '第一章' }, { label: '稍后' }], unanswered: true } })), write]
+    queue(response('', [call('original-question', 'ask_user'), call('late-write', 'chapter_write')]))
+    await run('写一小段')
+    expect(mocks.chat).toHaveBeenCalledOnce(); expect(write.execute).not.toHaveBeenCalled()
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+    expect(events().find(event => event.type === 'tool.result' && event.callId === 'original-question')).toMatchObject({ ok: true, display: { unanswered: true } })
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { authorInputRequired: { version: 1, kind: 'writing_scope', callId: 'original-question' } } })
+    expect(mocks.runs.get('run')?.status).toBe('paused')
+    const persisted = (mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>).flatMap(([input]) => input.create?.parts ?? [])
+    expect(persisted.find(part => part.type === 'tool-call' && part.callId === 'original-question')).toMatchObject({
+      status: 'success', display: { kind: 'question', unanswered: true },
+    })
+  })
   function answerTool(answer: string) {
     return tool('ask_user', async () => ({ output: `作者的回答：${answer}`, display: { kind: 'question', question: '如何处理剩余工作？', options: [{ label: '继续' }, { label: '结束' }], answer } }))
   }

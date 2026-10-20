@@ -51,6 +51,8 @@ import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { runtimeJson } from '../runtime-common.js'
 import { copiesQualityNeighborClause, qualityRepairSurroundings, renderQualityNeighbors } from '../quality-neighbor-context.js'
 import { persistedContentHash } from '../semantic-progress.js'
+import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../../text-request-trace.js'
+import { persistQualityRepairAttemptAudit, type QualityRepairAttemptAudit } from '../quality-repair-audit.js'
 
 const READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const WRITE = { plan: 'deny', build: 'allow', review: 'allow' } as const
@@ -215,33 +217,93 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
   const selectedById = new Map(selected.map((finding) => [finding.id, finding]))
   const patches = new Map<string, { findingId: string; replacement: string }>()
   const unsafe = new Set<string>()
+  let trigger: QualityRepairAttemptAudit['trigger'] = 'initial'
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const remaining = selected.filter((finding) => !patches.has(finding.id) && !unsafe.has(finding.id))
     if (remaining.length === 0) break
     // Only a normally returned response may enter format recovery. A timeout
     // or transport error can carry unknown billed usage; never dispatch again.
-    const response = await generateTextCompletion(
+    ctx.signal.throwIfAborted()
+    const action = attempt === 0 ? 'agent3HumanityRevision' : 'agent3HumanityRevisionRetry'
+    const trace = createTextRequestTrace()
+    const audit: QualityRepairAttemptAudit = { version: 1, kind: 'quality_repair_attempt', runId: ctx.runId, callId: ctx.callId,
+      reportId: report.id, chapterId: report.chapterId, sourceRevision: report.chapterRevision, contextHash: expectedContextHash,
+      attempt: attempt === 0 ? 1 : 2, action, trigger, state: 'prepared', classifications: [], requests: [] }
+    // Commit the bounded attempt identity before dispatch. It is diagnostic
+    // evidence, not a charge receipt or permission to retry a prepared request.
+    await persistQualityRepairAttemptAudit(ctx, audit)
+    let response: string
+    try {
+      ctx.signal.throwIfAborted()
+      response = await withTextRequestTrace(trace, () => generateTextCompletion(
         `你是与 Writer/Critic 上下文隔离的局部修订编辑。只替换每条 evidence 本身，不扩写相邻内容，不改变事实、情节结果、人物知识或作者刻意的口语与断句。删除优先于同义词替换；补写只补建议中缺失的具体动作、选择或后果。解释负担与事实必要性分开：保留危机条件、期限、后果及读者未知规则，可在 evidence 内用视角内感知、短念头或有交际必要的台词承载，不强制转对白，不改机器人程序声口、人物辨析或有意对比。建议若指向 evidence 外，只保留原证据，不借 before/after 修改邻文。punctuation_misuse 只移除误用符号，保留人物直接话语和逐字引文。replacement 可以为空。严格只输出 JSON：{"patches":[{"findingId":"原 id","replacement":"只替换证据范围的文本"}]}。必须为每个输入 id 返回且只返回一次。`,
         `${buildQualityRepairContext(bundle)}\n待修订证据（只有 evidence 可替换，before/after 不可改写）：\n${JSON.stringify(remaining.map(finding => ({ findingId: finding.id, signal: finding.signal,
           evidence: finding.evidenceExcerpt, explanation: finding.explanation, suggestion: finding.suggestion,
           ...qualityRepairSurroundings(report.chapter.content, finding.startOffset, finding.endOffset) })))}`,
         { modelRuntime: repairRuntime, explicitModelSelection: true, responseFormat: 'json_object',
-          signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, agentRunId: ctx.runId, action: attempt === 0 ? 'agent3HumanityRevision' : 'agent3HumanityRevisionRetry', novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
-      )
+          signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, agentRunId: ctx.runId, action, novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
+      ))
+    } catch (error) {
+      const code = error instanceof DataAccessError ? error.code : 'UNCONFIRMED'
+      const known = ['AI_PROVIDER_TIMEOUT', 'AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_INCOMPLETE', 'AI_PROVIDER_ERROR',
+        'AI_PROVIDER_QUOTA_EXCEEDED', 'AI_PROVIDER_AUTH_ERROR', 'AI_PROVIDER_OUTPUT_LIMIT', 'AI_PROVIDER_EMPTY_RESPONSE']
+      audit.state = 'request_error'
+      audit.errorCode = ctx.signal.aborted ? 'CANCELLED' : known.includes(code) ? code as QualityRepairAttemptAudit['errorCode'] : 'UNCONFIRMED'
+      audit.classifications = [ctx.signal.aborted ? 'cancelled' : ['AI_PROVIDER_TIMEOUT', 'AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_INCOMPLETE'].includes(code)
+        ? 'transport_unknown' : code === 'UNCONFIRMED' ? 'unconfirmed_error' : 'provider_error']
+      audit.requests = trace.records.map(record => ({ ...record }))
+      try { await persistQualityRepairAttemptAudit(ctx, audit) } catch {
+        // The prepared witness remains. Never replace the original unknown
+        // provider result with an audit-save error or dispatch a second request.
+        console.warn('[quality-repair-audit]', { runId: ctx.runId, callId: ctx.callId, attempt: attempt + 1, state: 'save_unconfirmed' })
+      }
+      throw error
+    }
+    audit.state = 'returned'
+    audit.response = { contentHash: createHash('sha256').update(response).digest('hex'), characterCount: response.length }
+    audit.requests = trace.records.map(record => ({ ...record }))
+    let envelope: unknown
     try {
-      const parsedAttempt = repairEnvelopeSchema.parse(parseQualityJsonObject(response, 'patches', 2))
-      for (const patch of parsedAttempt.patches) {
+      envelope = parseQualityJsonObject(response, 'patches', 2)
+    } catch {
+      audit.classifications = ['parse_error']
+      trigger = 'parse_error'
+    }
+    const parsedAttempt = envelope === undefined ? null : repairEnvelopeSchema.safeParse(envelope)
+    if (parsedAttempt && !parsedAttempt.success) {
+      audit.classifications = ['schema_error']
+      trigger = 'schema_error'
+    }
+    if (parsedAttempt?.success) {
+      const counts = { requested: remaining.length, returned: parsedAttempt.data.patches.length,
+        accepted: 0, missing: 0, duplicate: 0, unknown: 0, noOp: 0, unsafe: 0 }
+      const requested = new Set(remaining.map(finding => finding.id))
+      for (const finding of remaining) if (!parsedAttempt.data.patches.some(patch => patch.findingId === finding.id)) counts.missing++
+      for (const patch of parsedAttempt.data.patches) {
         const finding = selectedById.get(patch.findingId)
-        if (finding && parsedAttempt.patches.filter(item => item.findingId === patch.findingId).length === 1
-          && copiesQualityNeighborClause(report.chapter.content, finding.startOffset, finding.endOffset, patch.replacement)) {
+        if (!finding || !requested.has(patch.findingId)) { counts.unknown++; continue }
+        if (parsedAttempt.data.patches.filter(item => item.findingId === patch.findingId).length !== 1) { counts.duplicate++; continue }
+        if (copiesQualityNeighborClause(report.chapter.content, finding.startOffset, finding.endOffset, patch.replacement)) {
+          counts.unsafe++
           unsafe.add(finding.id)
           continue
         }
-        if (finding && parsedAttempt.patches.filter(item => item.findingId === patch.findingId).length === 1
-          && patch.replacement !== report.chapter.content.slice(finding.startOffset, finding.endOffset)) patches.set(patch.findingId, patch)
+        if (patch.replacement === report.chapter.content.slice(finding.startOffset, finding.endOffset)) { counts.noOp++; continue }
+        counts.accepted++
+        patches.set(patch.findingId, patch)
       }
-    } catch {
-      // 第一次格式不完整时由第二次只重试缺失项；两次都失败才让工具明确失败。
+      audit.counts = counts
+      audit.classifications = [
+        ...(counts.duplicate || counts.unknown ? ['schema_error' as const] : []),
+        ...(counts.missing ? ['missing_patch' as const] : []), ...(counts.noOp ? ['no_op' as const] : []),
+        ...(counts.unsafe ? ['unsafe_patch' as const] : []), ...(counts.accepted ? ['valid_patch' as const] : []),
+      ]
+      const retryClasses = audit.classifications.filter(kind => ['schema_error', 'missing_patch', 'no_op'].includes(kind))
+      trigger = retryClasses.length === 1 ? retryClasses[0] as QualityRepairAttemptAudit['trigger'] : 'mixed_unresolved'
+    }
+    await persistQualityRepairAttemptAudit(ctx, audit)
+    if (trace.records.length && !textRequestsFinished(trace)) {
+      throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '修订响应已收到，但原请求用量或费用尚未确认；已保留诊断与原调用，不派发第二次修订或应用正文。')
     }
   }
   const replacements = [...patches.values()]

@@ -23,6 +23,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 const runtime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
   baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-only', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'],
   reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
+const semanticChecks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'not_applicable', reason: '本用例仅核对钥匙可用性，未出现方向或到达主张。', findingIndexes: [] }))
 const safeBody = '她在库门外等候。库门仍然关闭。'
 const obsolete = '她用旧钥匙开门'
 const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
@@ -87,8 +88,9 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
             ...(scenario === 'history-confirm-rejected' ? { findingIndex: 0 } : {}) }
           const misattributed = { ...invalid, evidence: '第3章仍写“钥匙已经熔毁”，同时写“库门仍然关闭”，同一时刻互斥。',
             sourceEvidence: [{ source: 'previous', segmentId: 'p0', quote: '钥匙已经熔毁' }, { source: 'current', segmentId: 'c0', quote: '库门仍然关闭' }] }
-          const content = sends > 2 ? '{"findings":[]}' : sends === 1 ? JSON.stringify({ findings: [scenario === 'real-conflict' ? actual : scenario === 'previous-misattributed' ? misattributed : invalid] })
+          const oldContent = sends > 2 ? '{"findings":[]}' : sends === 1 ? JSON.stringify({ findings: [scenario === 'real-conflict' ? actual : scenario === 'previous-misattributed' ? misattributed : invalid] })
             : JSON.stringify({ decisions: [decision], findings: scenario === 'history-confirm-rejected' ? [invalid] : [] })
+          const content = JSON.stringify({ ...JSON.parse(oldContent), semanticChecks })
           return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }],
             usage: { prompt_tokens: 24, completion_tokens: 12 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
         }))
@@ -101,7 +103,7 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
         expect(sends).toBe(scenario === 'real-conflict' || scenario === 'changed-during-provider' ? 1 : 2)
         const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
         if (scenario !== 'changed-during-provider') expect(saved.validation).toMatchObject({
-          checkedRevision: 4, coverage: { protocolVersion: 9 }, continuityCriticResponse: { parserVersion: 7 },
+          checkedRevision: 4, coverage: { protocolVersion: 10 }, continuityCriticResponse: { parserVersion: 8 },
           independentCheck: scenario === 'history-confirm-rejected' ? 'unavailable' : 'complete',
           ...(scenario === 'real-conflict' ? { errorCount: 1 } : ['history-retracted', 'previous-misattributed'].includes(scenario) ? { errorCount: 0 } : {}),
         })
@@ -140,7 +142,7 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
           expect(sends).toBe(3)
           const recovered = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
           expect(recovered.validation).toMatchObject({ independentCheck: 'complete', checkedRevision: 4, errorCount: 0,
-            coverage: { protocolVersion: 9 }, continuityCriticResponse: { parserVersion: 7, sourceScope: { currentOrderIndex: 3 } } })
+            coverage: { protocolVersion: 10 }, continuityCriticResponse: { parserVersion: 8, sourceScope: { currentOrderIndex: 3 } } })
           await continuityValidateTool.execute({ ...ctx, callId: 'continued-repeat' }, { compilationId: compilation.id })
           expect(sends).toBe(3)
           expect(await prisma.aiUsageLog.count({ where: { agentRunId: runId } })).toBe(3)

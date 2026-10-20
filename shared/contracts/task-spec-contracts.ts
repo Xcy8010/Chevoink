@@ -28,6 +28,7 @@ export const taskScopeSchema = z.object({
   writingTargetProtocol: z.literal(1).optional(),
   /** New human admission requires factual claims anchored in the current manuscript. */
   continuityEvidenceProtocol: z.literal(1).optional(),
+  terminalEvidenceProtocol: z.literal(1).optional(),
   /** Fresh empty-book admission may bind one explicit first-chapter answer. */
   writingClarificationProtocol: z.literal(1).optional(),
   localEditBoundary: z.object({ version: z.literal(1), kind: z.enum(['bounded', 'needs_input']),

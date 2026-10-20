@@ -14,7 +14,7 @@ import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.js'
 import { markLegacyContinuityAssessmentApplied } from './continuity-response-correction.js'
-import { terminalVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
+import { terminalVerdictSchema, inheritedTerminalVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
 import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './continuity-source-authority.js'
 
 type Inspection = ReturnType<typeof inspectContinuityResponse>
@@ -64,7 +64,10 @@ const decisionSchema = z.object({ index: z.number().int().nonnegative(), action:
 /** A complete final report and an explicit disposition for every original
  * index are both necessary. Source IDs cannot prove an opinion by themselves. */
 export function applyContinuityReassessment(original: Inspection, raw: string, bodies: ContinuityBodies): Inspection {
-  const envelope = z.object({ decisions: z.array(decisionSchema), findings: z.array(z.unknown()), terminalVerdicts: z.array(terminalVerdictSchema).max(200).optional() }).strict().parse(parseQualityJsonObject(raw, 'findings', 3))
+  const envelope = z.object({ decisions: z.array(decisionSchema), findings: z.array(z.unknown()),
+    terminalVerdicts: z.array(original.audit.parserVersion === 8 ? inheritedTerminalVerdictSchema : terminalVerdictSchema).max(200).optional(),
+    ...(original.audit.parserVersion === 8 ? { semanticChecks: z.unknown() } : {}),
+  }).strict().parse(parseQualityJsonObject(raw, 'findings', 3))
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
   if (envelope.decisions.length !== (candidates?.length ?? 0) || new Set(envelope.decisions.map(item => item.index)).size !== envelope.decisions.length
     || envelope.decisions.some(item => item.index >= (candidates?.length ?? 0))) throw new Error('Reassessment omitted or invented an original candidate')
@@ -88,7 +91,7 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
       if (decision.action === 'confirm' && semantic(candidates![decision.index]) !== semantic(envelope.findings[decision.findingIndex])) throw new Error('Confirmed candidate changed its judgment')
     }
   }
-  const result = inspectContinuityResponse(original.audit.terminalCandidate ? raw : JSON.stringify({ findings: envelope.findings }), bodies, true, original.audit.parserVersion >= 7 ? 7 : 6, original.audit.terminalCandidate, original.audit.sourceScope)
+  const result = inspectContinuityResponse(original.audit.terminalCandidate || original.audit.parserVersion === 8 ? raw : JSON.stringify({ findings: envelope.findings }), bodies, true, original.audit.parserVersion === 8 ? 8 : original.audit.parserVersion >= 7 ? 7 : 6, original.audit.terminalCandidate, original.audit.sourceScope)
   if (!result.complete) throw new Error('Reassessment final report is invalid')
   return { ...result, audit: { ...result.audit, reassessment: { version: 1, original: original.audit,
     decisions: envelope.decisions, rawResponse: json(raw) } } as Inspection['audit'] }
@@ -116,7 +119,7 @@ export async function runContinuityReassessment(input: { original: Inspection; b
 }
 
 export type LegacyAssessmentInput = { chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate;
-  parserVersion?: 7; sourceScope?: ContinuitySourceScope; bindingHash?: string; targetType: 'chapter' | 'story_compilation'; targetId: string }
+  parserVersion?: 7 | 8; sourceScope?: ContinuitySourceScope; bindingHash?: string; targetType: 'chapter' | 'story_compilation'; targetId: string }
 export const legacyContinuityAssessmentKey = (ctx: Pick<ToolContext, 'runId' | 'callId'>, input: LegacyAssessmentInput) => runtimeJson({ runId: ctx.runId, callId: ctx.callId,
   input: { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system, content: input.content, bindingHash: input.bindingHash ?? null,
     ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}) } }).hash

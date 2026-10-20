@@ -5,6 +5,8 @@ import * as aiService from '../../api/lib/ai-service.js'
 import * as review from '../../api/lib/agent/review-completion.js'
 import * as auxiliaryRuntime from '../../api/lib/agent/runtime-auxiliary-call.js'
 import * as formatRecovery from '../../api/lib/agent/quality-format-recovery.js'
+import * as repairAudit from '../../api/lib/agent/quality-repair-audit.js'
+import { beginTextRequest } from '../../api/lib/text-request-trace.js'
 import { selectAutomaticQualityFindings, qualityAutoRepairPending } from '../../api/lib/agent/quality-report-contract.js'
 
 // 自动修订的准入守卫在事务里读真实表；本组用例只验证工具语义，按模块隔离守卫。
@@ -170,6 +172,7 @@ describe('严谨创作自动落实质量建议', () => {
   afterEach(() => vi.restoreAllMocks())
   const digest = (content: string) => createHash('sha256').update(content).digest('hex')
   function fixture(cached: boolean, behavior = 'apply') {
+    const audit = vi.spyOn(repairAudit, 'persistQualityRepairAttemptAudit').mockImplementation(async () => {})
     guard.probe.mockReset().mockResolvedValue({ open: true })
     guard.readiness.mockReset().mockResolvedValue(null)
     guard.decisions.mockReset().mockReturnValue('当前报告须逐项写明保留原因。')
@@ -216,7 +219,7 @@ describe('严谨创作自动落实质量建议', () => {
     })
     const ctx: ToolContext = { userId: 'u', novelId: 'n', chapterId: 'c', sessionId: 's', runId: 'r', callId: 'q', mode: 'build',
       creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {} }
-    return { ctx, report, critic, reserve, model, write, bundle }
+    return { ctx, report, critic, reserve, model, write, bundle, audit }
   }
   it.each([true, false])('final verification retains new stylistic advice without another paid patch (cached=%s)', async cached => {
     const f = fixture(cached)
@@ -274,6 +277,7 @@ describe('严谨创作自动落实质量建议', () => {
     expect(result.semanticTransition).toBeUndefined()
     expect(result.output).toContain('正文未修改')
     expect(f.report.findings[0].disposition).toBe('pending')
+    expect(f.audit.mock.calls.at(-1)![1]).toMatchObject({ state: 'returned', classifications: ['unsafe_patch'], counts: { unsafe: 1, accepted: 0 } })
   })
   it('attributes the critic and every bounded repair attempt to the executing run', async () => {
     const f = fixture(false, 'duplicate')
@@ -286,6 +290,49 @@ describe('严谨创作自动落实质量建议', () => {
       expect.objectContaining({ agentRunId: 'r', action: 'agent3HumanityRevisionRetry', targetId: 'q' }),
     ])
     expect(f.write).not.toHaveBeenCalled()
+  })
+  it.each(['parse_error', 'schema_error', 'missing_patch', 'no_op'] as const)('audits both returned repair responses and the exact %s retry cause without storing private text', async classification => {
+    const f = fixture(true)
+    const raw = classification === 'parse_error' ? '{"patches":[' : classification === 'schema_error' ? '{"patches":[{"findingId":1}]}'
+      : JSON.stringify({ patches: [{ findingId: 'f0', replacement: classification === 'no_op' ? '证据0。' : '已补动作。' }] })
+    f.model.mockResolvedValueOnce(raw)
+    await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(f.model).toHaveBeenCalledTimes(2)
+    const audits = f.audit.mock.calls.map(([, audit]) => structuredClone(audit))
+    const first = audits.find(audit => audit.attempt === 1 && audit.state === 'returned')!
+    const second = audits.find(audit => audit.attempt === 2 && audit.state === 'returned')!
+    expect(first.classifications).toContain(classification)
+    expect(first.response).toEqual({ contentHash: digest(raw), characterCount: raw.length })
+    expect(second.trigger).toBe(classification === 'no_op' ? 'mixed_unresolved' : classification)
+    expect(second).toMatchObject({ runId: 'r', callId: 'q', reportId: 'q', sourceRevision: 1, action: 'agent3HumanityRevisionRetry' })
+    expect(JSON.stringify(audits)).not.toContain(f.bundle.originalRequest!)
+    expect(JSON.stringify(audits)).not.toContain('已补动作')
+    expect(JSON.stringify(audits)).not.toContain('fixture-only')
+  })
+  it('records unknown transport with its original billing reference and rethrows the identical error without retry', async () => {
+    const f = fixture(true), error = new DataAccessError(504, 'AI_PROVIDER_TIMEOUT', 'private provider payload must not be stored')
+    f.model.mockImplementation(async () => { const { record } = beginTextRequest('original-usage'); record.status = 'unknown'; throw error })
+    await expect(qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })).rejects.toBe(error)
+    expect(f.model).toHaveBeenCalledOnce(); expect(f.write).not.toHaveBeenCalled()
+    const audit = f.audit.mock.calls.at(-1)![1]
+    expect(audit).toMatchObject({ state: 'request_error', classifications: ['transport_unknown'], errorCode: 'AI_PROVIDER_TIMEOUT',
+      requests: [{ usageId: 'original-usage', status: 'unknown', billingKnown: false }] })
+    expect(JSON.stringify(audit)).not.toContain(error.message)
+  })
+  it('retains a returned format failure with unknown billing without dispatching a second paid request or changing prose', async () => {
+    const f = fixture(true)
+    f.model.mockImplementation(async () => { const { record } = beginTextRequest('unsettled-original'); record.status = 'unknown'; return '{"patches":[' })
+    await expect(qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })).rejects.toMatchObject({ code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
+    expect(f.model).toHaveBeenCalledOnce(); expect(f.write).not.toHaveBeenCalled()
+    expect(f.audit.mock.calls.at(-1)![1]).toMatchObject({ state: 'returned', classifications: ['parse_error'],
+      requests: [{ usageId: 'unsettled-original', status: 'unknown', billingKnown: false }] })
+  })
+  it('keeps a transport error and its prepared witness when saving the final audit also fails', async () => {
+    const f = fixture(true), error = new DataAccessError(502, 'AI_PROVIDER_TRANSPORT', 'private payload')
+    f.audit.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('audit database unavailable'))
+    f.model.mockRejectedValue(error)
+    await expect(qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })).rejects.toBe(error)
+    expect(f.model).toHaveBeenCalledOnce(); expect(f.write).not.toHaveBeenCalled(); expect(f.audit).toHaveBeenCalledTimes(2)
   })
   it('does not call a paid patcher after neighbor context changes during review', async () => {
     const f = fixture(true)

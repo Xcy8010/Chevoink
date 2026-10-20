@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
+import type { TerminalEvidenceContext } from './terminal-evidence-context.js'
 
-export type ContinuityBodies = { previous: string | null; current: string }
+export type ContinuityBodies = { previous: string | null; current: string; terminalEvidence?: TerminalEvidenceContext }
 
 type ContinuityChapter = { id: string; title: string; revision: number; orderIndex: number; content: string }
 

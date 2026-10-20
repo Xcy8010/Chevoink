@@ -7,7 +7,7 @@ import { qualityNeighborContext } from './quality-neighbor-context.js'
  * v6/v7 retain exactly the original single-source shape and body. */
 export async function readCompilerContinuitySource(db: Prisma.TransactionClient,
   subject: { userId: string; novelId: string }, chapter: { orderIndex: number },
-  sourceId: string | null, protocol: 6 | 7 | 8 | 9 = 8) {
+  sourceId: string | null, protocol: 6 | 7 | 8 | 9 | 10 = 8) {
   const bridgeSource = sourceId ? await db.chapter.findFirst({
     where: { id: sourceId, authorId: subject.userId, ...activeChapterScope(subject.novelId) },
     select: { id: true, revision: true, content: true },

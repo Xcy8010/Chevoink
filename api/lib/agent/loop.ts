@@ -567,6 +567,7 @@ export async function handleToolCall(
 
     return {
       observation: wrapToolOutput(tool.name, result.output),
+      ...(call.name === 'ask_user' && result.failureCode === 'AUTHOR_INPUT_REQUIRED' ? { failureCode: result.failureCode } : {}),
       unresolvedTextRequest: requestTrace.records.length > 0 && !textRequestsFinished(requestTrace),
       workflowMilestone: ctx.inlineChild ? undefined : result.workflowMilestone,
       reviewDecisionFeedback: ctx.inlineChild ? undefined : result.reviewDecisionFeedback,
@@ -849,6 +850,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const pendingReviews = new Map<string, PendingReviewCall>()
   const toolRestrictions: ToolRestriction[] = []
   let inputProtocolRecovery: RunCheckpointState['inputProtocolRecovery']
+  let authorInputRequired: RunCheckpointState['authorInputRequired']
   let compatibilityReadTargets: Set<string> | null = null
   const restrictTool = (action: string, args: unknown, code: string, reason: string, reviewInput?: ToolRestriction['reviewInput']) => {
     const target = toolRestrictionTarget(args, getLastTouchedChapter(runId) ?? params.chapterId)
@@ -917,6 +919,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     ...(pendingReviews.size ? { pendingReviews: [...pendingReviews.values()] } : {}),
     ...(toolRestrictions.length ? { toolRestrictions } : {}),
     ...(inputProtocolRecovery ? { inputProtocolRecovery } : {}),
+    ...(authorInputRequired ? { authorInputRequired } : {}),
     inheritedTokens, inheritedTurns, inheritedExecutionMs, manualResumeCount,
     ...(reviewHandoffCount > 0 ? { reviewHandoffCount } : {}),
   })
@@ -933,6 +936,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   )
   const restoreCheckpointLimits = (checkpoint: RunCheckpointState) => {
     restoreReviewEvidence(checkpoint)
+    authorInputRequired = checkpoint.authorInputRequired
     runStartedAt = Math.min(runStartedAt, checkpoint.runStartedAt)
     resumeCount = checkpoint.resumeCount
     compactionCount = checkpoint.compactionCount
@@ -1155,6 +1159,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         taskSpec: taskSpec as unknown as object, usage: { ...usage, checkpoint: checkpointSnapshot() },
       } })
     } else await persistCheckpoint()
+    const needsScopeDecision = continuingTask && (taskSpec.scope.writing?.kind === 'needs_input' || taskSpec.scope.localEditBoundary?.kind === 'needs_input')
+      ? await prisma.$transaction(async tx => {
+        const effective = await effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)
+        return effective.scope.writing?.kind === 'needs_input' || effective.scope.localEditBoundary?.kind === 'needs_input'
+      }) : false
+    if (authorInputRequired || needsScopeDecision) {
+      const notice = '原任务仍等待作者明确目标章节与范围，请在输入框发送明确的新指令；普通继续不会补全授权，旧提问不自动恢复。'
+      await announceStopReason(notice)
+      await finalizeRun(runId, bus, 'paused', usage, turn, notice, undefined, false,
+        undefined, undefined, undefined, false, undefined, 'needs_input')
+      return
+    }
     const currentReviewState: { value: ChapterReviewReadiness | null } = { value: null }
     const observePersistedReviewProgress = async () => {
       currentReviewState.value = null
@@ -2624,11 +2640,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           && !outcome.part.display.unanswered && outcome.part.display.answer && isExplicitAuthorEnd(outcome.part.display.answer, outcome.part.display.options)) {
           authorEndRequested = true
         }
+        if (call.name === 'ask_user' && outcome.failureCode === 'AUTHOR_INPUT_REQUIRED') {
+          authorInputRequired = { version: 1, callId: call.id,
+            kind: taskSpec.scope.localEditBoundary?.kind === 'needs_input' ? 'local_edit_scope' : 'writing_scope' }
+        }
         parts.push(outcome.part)
         // 子 Agent 内嵌执行产生的内部工具卡片随父消息一并直播与落库，刷新后仍可展开查看
         if (outcome.extraParts?.length) parts.push(...outcome.extraParts)
         messages.push({ role: 'tool', toolCallId: call.id, content: outcome.observation })
-        if (forceWrapUpReason || authorEndRequested || reviewStopReason) {
+        if (forceWrapUpReason || authorEndRequested || reviewStopReason || authorInputRequired) {
           break
         }
       }
@@ -2643,6 +2663,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
       await persistCheckpoint()
       bus.emit({ type: 'step.finish', turn, usage: result.usage })
+
+      if (authorInputRequired) {
+        forceWrapUpLocal = true
+        await wrapUpAndFinish('等待作者明确目标章节与范围；提问已保存，未选择默认方案。请在输入框发送明确的新指令，普通继续不能补全原任务授权。')
+        return
+      }
 
       if (pendingReviews.size) {
         // Finish the batch's already admitted safe independent observations,

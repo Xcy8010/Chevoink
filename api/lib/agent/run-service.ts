@@ -1,4 +1,5 @@
-import { freezeWritingScope } from './writing-scope.js'
+import { freezeWritingScope, readWritingScope } from './writing-scope.js'
+import { savedRunUsageSchema } from './checkpoint.js'
 import { syncBuiltinSkillCatalog } from './skills/service.js'
 import { readAuthorEnded } from './author-ended.js'
 import { readRunOutcome } from './run-outcome.js'
@@ -486,7 +487,7 @@ export async function startLoopRunLocked(
       // contracts and durable continuation never refresh frozen resources.
       await syncBuiltinSkillCatalog(tx)
       const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
-        prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1,
+        prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 1,
         researchAdmission, networkAdmission, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
       if (researchAdmission && fresh.intent === 'research_analysis') {
         // Freeze identity/budget before async bootstrap, without writing grants.
@@ -995,6 +996,20 @@ async function continueLoopRunLocked(
     return { runId: resumed.run.id, sessionId: run.sessionId, runGoalId: activation?.goalId ?? null, status: resumed.run.status, streamUrl: `/api/agent/runs/${resumed.run.id}/stream` }
   }
   assertLegacyRuntimeCompatible(run)
+
+  // A timeout is not an author decision. Reject before credit/model/event
+  // admission; neither Continue nor a new model may widen the frozen grant.
+  const savedUsage = savedRunUsageSchema.safeParse(run.usage)
+  const frozen = taskSpecSchema.safeParse(run.taskSpec)
+  let authorInputRequired = savedUsage.success && Boolean(savedUsage.data.checkpoint?.authorInputRequired)
+  if (frozen.success && (frozen.data.scope.writing?.kind === 'needs_input' || frozen.data.scope.localEditBoundary?.kind === 'needs_input')) {
+    const effective = frozen.data.scope.writingClarificationProtocol === 1
+      ? await prisma.$transaction(tx => readWritingScope(tx, { userId, novelId: run.novelId, runId })) : null
+    authorInputRequired ||= frozen.data.scope.localEditBoundary?.kind === 'needs_input'
+      || (effective?.writing ?? frozen.data.scope.writing)?.kind === 'needs_input'
+  }
+  if (authorInputRequired) throw new DataAccessError(409, 'AUTHOR_INPUT_REQUIRED',
+    '原任务仍等待作者明确目标章节与范围，不能选择默认方案继续。请在输入框发送明确的新指令；原合同、用量与已保存内容保留，超时旧提问不会自动恢复。')
 
   if (run.engine !== 'loop') {
     throw new DataAccessError(400, 'VALIDATION_ERROR', '仅循环引擎任务支持续跑。')

@@ -7,6 +7,7 @@ import { unlocatedContinuityEvidence } from './continuity-finding-authority.js'
 import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './continuity-source-authority.js'
 import { inspectTerminalReview, type TerminalCandidate } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
+import { validContinuitySemanticChecks } from './terminal-evidence-context.js'
 
 const sourceReferenceSchema = z.object({ source: z.enum(['previous', 'current']), segmentId: z.string().min(1).optional(), quote: z.string().min(2).max(360).optional() })
   .refine(value => value.segmentId !== undefined || value.quote !== undefined)
@@ -28,7 +29,7 @@ function normalize(value: unknown, bodies: ContinuityBodies | undefined, parserV
 }
 
 /** Mechanical envelope compatibility; no new model call or missing-content reconstruction. */
-export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies, responseComplete = true, parserVersion: 3 | 4 | 5 | 6 | 7 = 3, terminalCandidate?: TerminalCandidate, sourceScope?: ContinuitySourceScope) {
+export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies, responseComplete = true, parserVersion: 3 | 4 | 5 | 6 | 7 | 8 = 3, terminalCandidate?: TerminalCandidate, sourceScope?: ContinuitySourceScope) {
   const sourceRelocations: ContinuitySourceRelocation[] = []
   let classification = responseComplete ? 'json_invalid' : 'response_incomplete'
   let record: Record<string, unknown> | null = null
@@ -99,9 +100,11 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
     }
   }
   if (raw.length > MAX_AUDIT_CHARS) classification = 'response_too_large'
-  if (classification === 'complete' && terminalCandidate && (!bodies || !inspectTerminalReview(terminalCandidate, bodies.current, raw, responseComplete))) classification = 'terminal_invalid'
+  if (classification === 'complete' && parserVersion === 8 && (!bodies?.terminalEvidence || !validContinuitySemanticChecks(record?.semanticChecks, findings))) classification = 'semantic_invalid'
+  if (classification === 'complete' && terminalCandidate && (!bodies || !inspectTerminalReview(terminalCandidate, bodies.current, raw, responseComplete, parserVersion === 8 ? bodies.terminalEvidence : undefined))) classification = 'terminal_invalid'
   const audit = { version: 1, parserVersion, classification, unwrapped, ...(parserVersion >= 4 ? { sourceRelocations } : {}),
     ...(parserVersion >= 7 && sourceScope ? { sourceScope } : {}),
+    ...(parserVersion === 8 && bodies?.terminalEvidence ? { terminalEvidence: bodies.terminalEvidence } : {}),
     ...(terminalCandidate ? { terminalCandidate, terminalContentHash: bodies ? runtimeJson({ content: bodies.current }).hash : null } : {}),
     ...(parserVersion >= 5 ? { candidateFindings, invalidSourceReferences } : {}), contentHash: createHash('sha256').update(raw).digest('hex'),
     characterCount: raw.length, rawResponse: { version: 1, encoding: 'json-string', content: JSON.stringify(raw.slice(0, MAX_AUDIT_CHARS)), complete: raw.length <= MAX_AUDIT_CHARS } }

@@ -1,8 +1,9 @@
 import { z } from 'zod'
+import { taskSpecSchema } from '../../../../shared/contracts/index.js'
 
 import { env } from '../../../config/env.js'
 import { DataAccessError, prisma } from '../../prisma.js'
-import { assertQuestionWritingScope } from '../writing-scope.js'
+import { assertQuestionWritingScope, readWritingScope } from '../writing-scope.js'
 import { recordWritingClarification } from '../writing-clarification.js'
 import { consumeQuestionBudget, waitForQuestionAnswer } from '../permissions.js'
 import { defineTool } from './types.js'
@@ -77,8 +78,18 @@ export const askUserTool = defineTool({
   readOnly: true,
   async execute(ctx, args) {
     await prisma.$transaction(tx => assertQuestionWritingScope(tx, ctx, args.question, args.options))
+    const scope = await prisma.$transaction(tx => readWritingScope(tx, ctx))
+    const spec = taskSpecSchema.safeParse(scope.spec)
+    const authorRequired = scope.writing?.kind === 'needs_input' || spec.success && spec.data.scope.localEditBoundary?.kind === 'needs_input'
+    const waitingForAuthor = () => ({
+      failureCode: 'AUTHOR_INPUT_REQUIRED',
+      output: '本任务缺少必须由作者明确的目标或范围，已保存提问并等待输入。未选择默认方案，也不会继续调用模型。此提问已结束等待；请在输入框发送写明目标章节与范围的新指令，原合同、用量与已保存正文保持原值。',
+      summary: '等待作者明确目标与范围',
+      display: { kind: 'question' as const, question: args.question, options: args.options, unanswered: true },
+    })
     // 提问预算：超出额度直接回填，不再挂起，防止反复追问
     if (!consumeQuestionBudget(ctx.runId)) {
+      if (authorRequired) return waitingForAuthor()
       return {
         output:
           '本次任务的提问次数已用完（每次任务最多 3 次）。请基于已有回答与上下文选择最合理的方案直接完成任务，不要再提问；已有产物走修订而不是重新生成。',
@@ -105,6 +116,7 @@ export const askUserTool = defineTool({
       return (await import('../goal-store.js')).goalError('GOAL_AUTHOR_INPUT_REQUIRED', '目标等待作者回答，未选择默认方向继续。')
     }
     ctx.signal.throwIfAborted()
+    if (result.answer === null && authorRequired) return waitingForAuthor()
     const resumed = await prisma.agentRun.updateMany({ where: { id: ctx.runId, userId: ctx.userId, novelId: ctx.novelId,
       status: 'awaiting_approval' }, data: { status: 'running' } })
     if (resumed.count !== 1) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '提问后执行已停止，回答没有恢复旧任务。')
@@ -127,6 +139,10 @@ export const askUserTool = defineTool({
     ctx.signal.throwIfAborted()
     const clarification = await prisma.$transaction(tx => recordWritingClarification(tx, ctx,
       { callId: ctx.callId, ...args, answer: result.answer!, source: 'legacy_question' }))
+    if (authorRequired && !clarification) return { ...waitingForAuthor(),
+      output: '作者回答已收到，但原冻结合同仍缺少可证明的目标或范围，未静默扩大权限。请在输入框发送写明目标章节与范围的新指令；原合同、用量与已保存正文保持原值。',
+      display: { kind: 'question' as const, question: args.question, options: args.options, answer: result.answer },
+    }
     return {
       ...(clarification ? { semanticTransition: clarification } : {}),
       output: `作者的回答：${result.answer}${clarification ? '\n已确认写入第一章；按原请求完成该段后停笔，保留原有检查、权限与预算。' : ''}`,
