@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { buildHumanityQualityContext } from '../../api/lib/agent/humanity-quality.js'
 import { qualityReviewContextHash } from '../../api/lib/agent/humanity-quality.js'
-import { qualityWorkContextProjection, qualityWorkCriticVersion, qualityWorkParseObject } from '../../api/lib/agent/tools/durable-quality.js'
+import { qualityWorkContextProjection, qualityWorkCriticVersion, qualityWorkParseObject, qualityWorkPromptProtocol } from '../../api/lib/agent/tools/durable-quality.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildCriticInput, buildCriticSystem, qualityFormatRecoveryPrompt } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 
@@ -12,6 +12,17 @@ const bundle = { chapter: { id: 'chapter', title: '旧物摊', content: '沈桐�
   chapterWritingBackground: [{ sourceRunId: 'original', compilationId: 'old-compiler', prompt: '沈桐29岁，仓库调度员；1600–1900字；开篇低谷1–2段；问价前停笔。' }] } as unknown as Bundle
 
 describe('frozen quality work across deployments', () => {
+  it('new work identifies contextual prose without relabeling an already frozen v9 request', () => {
+    expect(qualityWorkPromptProtocol(10)).toBe('humanity-context.v3')
+    expect(qualityWorkPromptProtocol(9)).toBe('humanity-context.v2')
+    expect(qualityWorkPromptProtocol(8)).toBeUndefined()
+    expect(qualityReviewContextHash(bundle, 'humanity-context.v2')).not.toBe(qualityReviewContextHash(bundle))
+    const old = { version: 9, criticSystem: '冻结旧规则', repairSystem: '冻结旧局改', criticInput: '旧输入', parserVersion: 3 }
+    const hash = runtimeJson(old).hash
+    expect(qualityWorkContextProjection(bundle, 10)).toEqual(bundle)
+    expect(runtimeJson(old).hash).toBe(hash)
+    expect(old).not.toHaveProperty('criticPromptProtocol')
+  })
   it('review-cycle bookkeeping cannot invalidate a complete current quality report', () => {
     const current = { ...bundle, compilation: { ...bundle.compilation!, preparedContext: { reviewCycle: { version: 1,
       scope: { taskId: 'task', chapterId: 'chapter' }, transitions: [{ after: { revision: 1 } }] } } } }

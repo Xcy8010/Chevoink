@@ -113,6 +113,8 @@ ${WRITING_REQUEST_GUIDANCE}
 只报告有正文证据且存在最小修法的问题。优先选择本次原文证据表的 sourceId，服务器据此取得原文与精确位置；不要复制或改写 quote。sourceId 仅证明原文位置，不证明意见正确，不允许借编号扩写相邻范围。同句重复时仍选对应位置的编号。没有合适编号时才使用 quote，必须从正文连续复制、逐字一致且全文唯一，不得改写、缩写或拼接；若同时给 sourceId 和 quote，quote 必须与该编号原文逐字一致。
 不得把词汇本身当问题：熵、量子、铁锈味、华丽句、口语、断句、留白、无悬念收束都可能合理。只有题材/人物/场景功能/局部频率/上下文铺垫共同提供证据时才提示。
 正常对话里的新报价、条件、拒绝与接受，以及动作的先后变化，都在推进情节，不能仅因描述同一对象就报 explanation_echo；只有后续旁白重述相同含义且没有新增作用才报。情绪可以由已有行动隐含，不要求每个动作后追加身体反应或内心解释。复检以修订后的完整语境判定，已解决的问题不换说法重报，不为凑维度增加可有可无的润色。
+同句与跨句都检查 explanation_echo：动作、倒计时或处境已经让读者推知情绪时，追加命名其原因是否仍提供新信息、人物辨析或叙述作用？不能只因出现释因句式报错。把“事实必要”与“当前表达必要”分开；有新增危机条件、期限或后果时，不能断言没有新信息或建议整句删除。若仍有解释负担，说明哪些事实必须保留，以及如何仅在证据内减少负担；可选择视角内感知、短念头或有真实交际目的的台词，不强制转对白。机器人依规复述、读者未知的规则、人物纠正误解、有意否定对照与作者合理直述均可有功能；没有具体冗余关系不报。审美分歧保留 advisory，不以固定字数、句式或解释次数作裁判。
+证据必须包含拟删除或改写的对象。前句只用于说明语境、实际问题在后句时，选择后句的 sourceId；确需一起改才引用包含两句的连续唯一 quote。不得锚前句却建议修改锚外的后句，不能以“并入邻句”越过证据范围。explanation 说明可推断依据与剩余作用，suggestion 明确保留的新事实和最小改法；若当前表达有必要则不凑意见。
 不得要求每章固定钩子、固定对白比例或固定节奏；不得把作者的不规则声音清洗成统一白开水。
 emotion_grounding 按“触发→解释→身体或注意→冲动→选择→后果”检查，但正文不必写全链，只要最有力的两三环成立即可。
 severity 只能是 advisory 或 warning；审美意见绝不报 error。找不到问题返回空数组。最多24项，同一问题仅报告一次；quote最多360字符，explanation与suggestion各用一两句短句（最多1000字符）。完整检查全部维度，但不要复述无问题正文或输出审查过程，直接交付结构化结论，避免输出被截断。
@@ -163,7 +165,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
     try {
       const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, report.compilationId ?? undefined))
       if (review?.chapterId === report.chapterId && verificationQualityAdviceRequiresDecision(review, selected)) return { reviewCompleted: true,
-        output: `质量报告 ${report.id}已保存。当前属于最终核验的质量建议，保留正文并逐项决定，不自动开启新一轮润色。不要为这些纯建议再调用正文写入工具；下一步按当前精确引用填写 retainedFindings 的 source、reportId、findingId、reason，再提交章节终态。真实错误或尚未尝试原始义务仍按原证据与原权限处理，留置不能替代硬通过要求。${review ? chapterReviewDecisionGuidance(review) : decisionGuidance}${bindingSuffix}`,
+        output: `质量报告 ${report.id}已保存。当前属于最终核验的质量建议，保留正文并逐项决定，不自动开启新一轮润色。不要为这些纯建议再调用正文写入工具；下一步按当前精确引用填写 retainedFindings 的 source、reportId、findingId、reason，再提交章节终态。涉及解释负担时，保留理由分别说明事实为何必要、当前表达为何仍合适，并考虑保留事实而减少负担的方案；只说信息不能丢不足以论证原说法，当前阶段也不因此获得改文权限。真实错误或尚未尝试原始义务仍按原证据与原权限处理，留置不能替代硬通过要求。${review ? chapterReviewDecisionGuidance(review) : decisionGuidance}${bindingSuffix}`,
         summary: '质量核验 · 意见待决定', display: reportDisplay(report) }
       // 付费前只读探测：同一次合并修订的准入由守卫统一判定（新稿质量通道或原始修复
       // 授权），被拒时不预约、不调用修订模型，正文与报告保持原样。
@@ -216,7 +218,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
     // Only a normally returned response may enter format recovery. A timeout
     // or transport error can carry unknown billed usage; never dispatch again.
     const response = await generateTextCompletion(
-        `你是与 Writer/Critic 上下文隔离的局部修订编辑。只替换每条 evidence 本身，不扩写相邻内容，不改变事实、情节结果、人物知识或作者刻意的口语与断句。删除优先于同义词替换；补写只补建议中缺失的具体动作、选择或后果。punctuation_misuse 只移除误用符号，保留人物直接话语和逐字引文。replacement 可以为空。严格只输出 JSON：{"patches":[{"findingId":"原 id","replacement":"只替换证据范围的文本"}]}。必须为每个输入 id 返回且只返回一次。`,
+        `你是与 Writer/Critic 上下文隔离的局部修订编辑。只替换每条 evidence 本身，不扩写相邻内容，不改变事实、情节结果、人物知识或作者刻意的口语与断句。删除优先于同义词替换；补写只补建议中缺失的具体动作、选择或后果。解释负担与事实必要性分开：保留危机条件、期限、后果及读者未知规则，可在 evidence 内用视角内感知、短念头或有交际必要的台词承载，不强制转对白，不改机器人程序声口、人物辨析或有意对比。建议若指向 evidence 外，只保留原证据，不借 before/after 修改邻文。punctuation_misuse 只移除误用符号，保留人物直接话语和逐字引文。replacement 可以为空。严格只输出 JSON：{"patches":[{"findingId":"原 id","replacement":"只替换证据范围的文本"}]}。必须为每个输入 id 返回且只返回一次。`,
         `${buildQualityRepairContext(bundle)}\n待修订证据（只有 evidence 可替换，before/after 不可改写）：\n${JSON.stringify(remaining.map(finding => ({ findingId: finding.id, signal: finding.signal,
           evidence: finding.evidenceExcerpt, explanation: finding.explanation, suggestion: finding.suggestion,
           ...qualityRepairSurroundings(report.chapter.content, finding.startOffset, finding.endOffset) })))}`,

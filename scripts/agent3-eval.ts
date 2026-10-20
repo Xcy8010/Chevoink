@@ -5,6 +5,7 @@ import { CN_FICTION_EVAL_SCENARIOS, CN_FICTION_EVAL_VERSION } from '../tests/age
 import { evaluateSkillRouting } from '../tests/agent-evals/cn-fiction-metrics.js'
 import { evaluateFiftyChapterBridge } from '../tests/agent-evals/chapter-bridge-metrics.js'
 import { evaluateDeterministicHumanityGate } from '../tests/agent-evals/humanity-quality-metrics.js'
+import { HUMANITY_CONTEXT_CORPUS_VERSION, HUMANITY_CONTEXT_SCENARIOS } from '../tests/agent-evals/humanity-context-scenarios.js'
 import { evaluateCraftLibraryBaseline } from '../tests/agent-evals/craft-library-metrics.js'
 import { getAgentToolManifest } from '../api/lib/agent/tools/registry.js'
 import { getDurableToolAdapterNames } from '../api/lib/agent/runtime-tool-step.js'
@@ -35,6 +36,8 @@ const report = {
   routing: evaluateSkillRouting(CN_FICTION_EVAL_SCENARIOS),
   chapterBridge: evaluateFiftyChapterBridge(),
   humanityQuality: evaluateDeterministicHumanityGate(),
+  humanityContext: { evidenceKind: 'synthetic_editorial_case_inventory', version: HUMANITY_CONTEXT_CORPUS_VERSION,
+    cases: HUMANITY_CONTEXT_SCENARIOS, literaryQualityMeasured: false, paidCalls: 0 },
   craftLibrary: evaluateCraftLibraryBaseline(),
   reliableCreation: {
     evidenceKind: 'deterministic_contract_inventory',

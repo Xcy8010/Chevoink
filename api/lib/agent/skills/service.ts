@@ -15,7 +15,7 @@ import type {
 } from '../../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { customSkillToRuntime, buildCustomSkillArtifacts } from './custom.js'
-import { historicalBuiltinCatalog, routeSkills, skillCatalog, SKILL_ROUTER_VERSION, type AgentSkill } from './index.js'
+import { frozenV350BuiltinCatalog, historicalBuiltinCatalog, routeSkills, skillCatalog, SKILL_ROUTER_VERSION, type AgentSkill } from './index.js'
 import { getSkillUsage } from './receipts.js'
 
 const BUILTIN_SOURCE = 'builtin'
@@ -86,7 +86,7 @@ export async function syncBuiltinSkillCatalog(tx?: Prisma.TransactionClient): Pr
   if (tx) { for (const operation of definitionOperations) await operation }
   else await prisma.$transaction(definitionOperations)
 
-  const versionOperations = [...historicalBuiltinCatalog, ...skillCatalog].map((skill) => client.agentSkillVersion.upsert({
+  const versionOperations = [...historicalBuiltinCatalog, ...frozenV350BuiltinCatalog, ...skillCatalog].map((skill) => client.agentSkillVersion.upsert({
     where: { skillId_version: { skillId: skill.id, version: skill.version } },
     create: {
       skillId: skill.id,
@@ -622,7 +622,8 @@ export async function resolveRuntimeSkillContext(userId: string, novelId: string
   })
   const installationBySkill = new Map(installations.map((installation) => [installation.skillId, installation]))
   const routerVersion = durable ? durable.configuration.skillRouterVersion ?? '3.1.0' : saved?.routerVersion ?? SKILL_ROUTER_VERSION
-  const builtinCatalog = routerVersion !== SKILL_ROUTER_VERSION ? historicalBuiltinCatalog : skillCatalog
+  const builtinCatalog = routerVersion === '3.6.0' ? frozenV350BuiltinCatalog
+    : routerVersion !== SKILL_ROUTER_VERSION ? historicalBuiltinCatalog : skillCatalog
   const pinned = new Map([...readSelected(saved?.loaded ?? []), ...readSelected(saved?.selected ?? [])].map(item => [item.id, item.version]))
   for (const item of durable?.configuration.pinnedSkillVersions ?? []) pinned.set(item.id, item.version)
   const runtime: AgentSkill[] = []

@@ -85,7 +85,7 @@ describe('Agent 3.0 Skill OS deterministic router', () => {
   })
 
   it('旧会话中的 2.0 Skill id 可以安全迁移到 3.0 资源', () => {
-    expect(loadSkill('scene-craft.v2', 'draft', 'bold')).toContain('cn-scene-task.v3@3.5.0')
+    expect(loadSkill('scene-craft.v2', 'draft', 'bold')).toContain('cn-scene-task.v3@3.6.0')
     expect(loadSkill('prose-specificity.v2', 'draft', 'balanced')).toContain('首次写作')
   })
 
@@ -109,7 +109,7 @@ describe('Agent 3.0 Skill OS deterministic router', () => {
 
   it('内置 Skill 均有版本、许可、负触发和上下文预算', () => {
     expect(skillCatalog.length).toBeGreaterThanOrEqual(10)
-    expect(skillCatalog.every((skill) => skill.version === '3.5.0')).toBe(true)
+    expect(skillCatalog.every((skill) => skill.version === '3.6.0')).toBe(true)
     expect(skillCatalog.every((skill) => skill.negativeTriggers.length > 0)).toBe(true)
     expect(skillCatalog.every((skill) => skill.tokenBudget > 0)).toBe(true)
     const adapted = skillCatalog.filter((skill) => skill.license !== 'internal')

@@ -35,7 +35,7 @@ import { qualityAutoRepairPending, qualityReportMatchesContent, selectAutomaticQ
 
 export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v5'
 /** v5 is the finding contract; this separately identifies the new prompt rules. */
-export const HUMANITY_PROMPT_PROTOCOL = 'humanity-context.v2'
+export const HUMANITY_PROMPT_PROTOCOL = 'humanity-context.v3'
 export const FROZEN_V4_HUMANITY_CRITIC_VERSION = 'humanity-critic.v4'
 export const PREVIOUS_HUMANITY_CRITIC_VERSION = 'humanity-critic.v3'
 export const LEGACY_HUMANITY_CRITIC_VERSION = 'humanity-critic.v2'
@@ -367,9 +367,9 @@ export async function buildHumanityQualityContext(userId: string, novelId: strin
     chapterWritingBackground: runId ? await readChapterWritingBackground(db, { userId, novelId, runId }, chapterId) : [] }
 }
 
-export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>): string {
+export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>, promptProtocol: typeof HUMANITY_PROMPT_PROTOCOL | 'humanity-context.v2' = HUMANITY_PROMPT_PROTOCOL): string {
   return hashText(JSON.stringify({
-    contextProtocol: 2,
+    ...(promptProtocol === 'humanity-context.v2' ? { contextProtocol: 2 } : { contextProtocol: 3, criticPromptProtocol: promptProtocol }),
     chapter: { title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content, novel: bundle.chapter.novel },
     charter: bundle.charter, compiler: bundle.compilation ? { id: bundle.compilation.id, bridge: bundle.compilation.bridge, sceneTasks: bundle.compilation.sceneTasks } : null,
     profiles: bundle.profiles, anchors: bundle.anchors, recentChapters: bundle.recentChapters, feedback: bundle.feedback, originalRequest: bundle.originalRequest ?? null,
@@ -441,7 +441,7 @@ export async function persistHumanityQualityReport(input: {
   mode: StoryCompilerMode
   deterministicMetrics: Record<string, number | string[]>
   qualityContextHash?: string
-  criticPromptProtocol?: typeof HUMANITY_PROMPT_PROTOCOL
+  criticPromptProtocol?: typeof HUMANITY_PROMPT_PROTOCOL | 'humanity-context.v2'
   /** Recovered pre-upgrade paid work retains the critic rules it actually used. */
   criticVersion?: typeof HUMANITY_CRITIC_VERSION | typeof FROZEN_V4_HUMANITY_CRITIC_VERSION | typeof PREVIOUS_HUMANITY_CRITIC_VERSION | typeof LEGACY_HUMANITY_CRITIC_VERSION
   sources?: QualityEvidenceSources

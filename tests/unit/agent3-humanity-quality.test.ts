@@ -226,6 +226,7 @@ describe('严谨创作自动落实质量建议', () => {
     expect(result.output).toContain('不要为这些纯建议再调用正文写入工具')
     expect(result.output).toContain('source、reportId、findingId、reason')
     expect(result.output).toContain('逐项写明保留原因')
+    expect(result.output).toContain('事实为何必要、当前表达为何仍合适')
     expect(f.reserve).not.toHaveBeenCalled()
     expect(f.model).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
@@ -346,6 +347,22 @@ describe('严谨创作自动落实质量建议', () => {
     expect(f.critic).toHaveBeenCalledOnce()
     expect(f.critic.mock.calls[0][1]).toContain(JSON.stringify(f.bundle.originalRequest))
     expect(f.critic.mock.calls[0][1]).not.toContain('首章收益与情绪强度')
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it('invalidates pre-context-v3 cache even for identical prose and author context, without repairing or editing it', async () => {
+    const f = fixture(true)
+    f.ctx.creativeFreedom = 'stable'
+    const b = f.bundle
+    const oldHash = digest(JSON.stringify({ contextProtocol: 2,
+      chapter: { title: b.chapter.title, revision: b.chapter.revision, content: b.chapter.content, novel: b.chapter.novel },
+      charter: b.charter, compiler: null, profiles: b.profiles, anchors: b.anchors, recentChapters: b.recentChapters,
+      feedback: b.feedback, originalRequest: b.originalRequest, chapterWritingBackground: b.chapterWritingBackground }))
+    f.report.deterministicMetrics = { ...f.report.deterministicMetrics as Prisma.JsonObject, qualityContextHash: oldHash, criticPromptProtocol: 'humanity-context.v2' }
+    expect(humanityQuality.qualityReviewContextHash(b)).not.toBe(oldHash)
+    await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(f.critic).toHaveBeenCalledOnce()
+    expect(humanityQuality.persistHumanityQualityReport).toHaveBeenCalledWith(expect.objectContaining({ criticPromptProtocol: 'humanity-context.v3' }))
+    expect(f.model).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
   })
   it('sends historical same-chapter specifications and invalidates old cache when that reference changes, without repair', async () => {

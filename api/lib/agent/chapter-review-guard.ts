@@ -324,7 +324,9 @@ export function chapterReviewDecisionTransition(before: ChapterReviewReadiness, 
 }
 
 export function chapterReviewDecisionGuidance(readiness: ChapterReviewReadiness) {
-  return currentReviewNextStepGuidance(projectCurrentReviewNextStep(readiness))
+  const expression = readiness.requiredDecisions?.some(item => item.source === 'quality')
+    ? ' 涉及解释负担时，保留理由应分别考虑事实必要性与当前表达必要性，比较保留事实而减少负担的方案；不能只用信息必要来证明原说法必要，也不因此重开改文。' : ''
+  return currentReviewNextStepGuidance(projectCurrentReviewNextStep(readiness)) + expression
 }
 
 /** Shared exact-reference validation for manuscript and terminal decisions. */

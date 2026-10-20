@@ -23,6 +23,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { buildQualityEvidenceSources, inspectCriticResponse } from '../../api/lib/agent/quality-evidence.js'
+import { HUMANITY_CONTEXT_SCENARIOS } from '../agent-evals/humanity-context-scenarios.js'
 
 const dbAvailable = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 
@@ -54,6 +55,35 @@ describe.skipIf(!dbAvailable)('Agent 3.0 人类感质量门（需 DB）', () => 
     await prisma.chapter.create({ data: { id: chapterId, novelId, authorId: userId, volumeId, orderIndex: 1, orderInVolume: 1, title: '第一章 钥匙', content, wordCount: content.length, revision: 1, status: 'draft', visibility: 'private' } })
     const session = await prisma.agentSession.create({ data: { userId, novelId, title: 'P3 质量测试' } })
     runId = (await prisma.agentRun.create({ data: { sessionId: session.id, userId, novelId, chapterId, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', engine: 'loop' } })).id
+  })
+
+  it('applies a crisis-expression patch to its actual evidence while preserving new facts and neighboring prose', async () => {
+    const sample = HUMANITY_CONTEXT_SCENARIOS[1]
+    const targetId = randomUUID()
+    const volumeId = (await prisma.volume.findFirstOrThrow({ where: { novelId }, select: { id: true } })).id
+    const suffix = '\n走廊里的灯仍亮着。'
+    const content = sample.content + suffix
+    try {
+      await prisma.chapter.create({ data: { id: targetId, novelId, authorId: userId, volumeId, orderIndex: 9001, orderInVolume: 9001,
+        title: '合成危机短景', content, wordCount: content.length, revision: 1, status: 'draft', visibility: 'private' } })
+      const sources = buildQualityEvidenceSources({ userId, novelId, chapterId: targetId, chapterRevision: 1 }, content)
+      const sourceId = sources.entries.find(entry => entry.text === sample.target)!.id
+      const parsed = inspectCriticResponse(JSON.stringify({ findings: [{ sourceId, signal: 'explanation_echo', severity: 'advisory',
+        explanation: sample.rationale, suggestion: '仅减少最后的释因，保留自锁与六天救援事实。', confidence: 0.6 }] }), sources, true, 3)
+      expect(parsed.complete).toBe(true)
+      const report = await persistHumanityQualityReport({ userId, novelId, chapterId: targetId, chapterRevision: 1, mode: 'premium',
+        sources, criticPromptProtocol: 'humanity-context.v3', deterministicMetrics: {}, deterministicFindings: [], criticFindings: parsed.findings, criticComplete: true })
+      expect(report.status).toBe('passed')
+      expect(report.findings[0]).toMatchObject({ startOffset: content.indexOf(sample.target), evidenceExcerpt: sample.target, severity: 'advisory' })
+      await selectQualityFindings(userId, novelId, report.id, [report.findings[0].id])
+      const replacement = '氧气耗尽，舱门自锁。救援艇还要六天。'
+      const changed = await applyQualityRepair({ userId, novelId, reportId: report.id, replacements: [{ findingId: report.findings[0].id, replacement }] })
+      expect(changed.updated.content).toBe(content.replace(sample.target, replacement))
+      expect(changed.updated.content.endsWith(suffix)).toBe(true)
+      for (const fact of sample.preserve) expect(changed.updated.content).toContain(fact)
+      expect(changed.updated.revision).toBe(2)
+      expect((await getQualityReport(userId, novelId, report.id)).findings[0].disposition).toBe('repaired')
+    } finally { await prisma.chapter.deleteMany({ where: { id: targetId, novelId, authorId: userId } }) }
   })
 
   it('原合同续跑可读取编译；同会话的新任务不能继承编译权限', async () => {
