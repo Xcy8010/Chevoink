@@ -1,4 +1,4 @@
-import { chapterRevisionPrompt } from '../support/writing-target-prompt.js'
+import { chapterRevisionPrompt, nextChapterContinuationPrompt } from '../support/writing-target-prompt.js'
 import { describe, expect, it } from 'vitest'
 import { parseWritingTargets, requestedWritingRange } from '../../api/lib/agent/writing-target-admission.js'
 import { legacyWritingRange } from '../../api/lib/agent/writing-target-range.js'
@@ -6,6 +6,70 @@ import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { chapterRevisionAuthorityText, prohibitsNewDraftRevision } from '../../api/lib/agent/writing-scope.js'
 
 describe('fresh action-bound chapter targets', () => {
+  it.each([
+    '续写下一章，只写这一章。',
+    '写下一章。仅续写该章。',
+    '写下一章。只完成本章正文。',
+  ])('keeps a same-chapter restriction from becoming another counted grant: %s', prompt => {
+    expect(parseWritingTargets(prompt)).toMatchObject({ range: { kind: 'next', count: 1 }, ambiguous: false })
+  })
+  it.each(['作为第4章正式写入', '作为第四章保存', '作为全书第4章落稿'])(
+    'retains an appositive ordinal for admission snapshot verification: %s', confirmation => {
+      expect(parseWritingTargets(`续写下一章，${confirmation}。只写这一章。`)).toMatchObject({
+        range: { kind: 'next', count: 1 }, confirmedNextOrderIndex: 4, ambiguous: false,
+      })
+    })
+  it('retains the complete synthetic continuation contract and prior-chapter exclusions', () => {
+    expect(parseWritingTargets(nextChapterContinuationPrompt)).toMatchObject({ range: { kind: 'next', count: 1 },
+      confirmedNextOrderIndex: 4, ambiguous: false, exclusions: ['不修改已经保存的第1、2、3章'] })
+    expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: nextChapterContinuationPrompt }).intent).toBe('write')
+    expect(parseWritingTargets('修改第4章。只写这一章。')).toMatchObject({ range: { kind: 'range', start: 4, count: 1 }, ambiguous: false })
+    expect(parseWritingTargets('只写这一章')).toMatchObject({ range: null, ambiguous: false, hasAction: true })
+    expect(legacyWritingRange('续写下一章，只写这一章')).toEqual({ kind: 'next', count: 1 })
+  })
+  it.each(['不批量修改前文', '不要统一替换所有章节', '不全局改名'])(
+    'does not turn denied global work into the continuation intent: %s', denied => {
+      expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: `续写下一章。${denied}。完成连续性检查。` }).intent).toBe('write')
+    })
+  it.each(['全书统一修改人名', '批量替换所有章节的称呼', '全局改名'])(
+    'retains affirmative global transformation intent: %s', prompt => {
+      expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt }).intent).toBe('global_transform')
+    })
+  it.each(['对所有章节，修改主角姓名。', '全书统一，把主角姓名修改为李明。'])(
+    'preserves adjacent affirmative global scope/action and its changeset gate: %s', prompt => {
+      expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt })).toMatchObject({ intent: 'global_transform',
+        expectedOutputs: [{ kind: 'changeset' }], postconditions: [{ code: 'CHANGESET_VERIFIED' }] })
+    })
+  it.each([
+    '续写下一章，只写这一章，不修改第1、2、3章。',
+    '续写下一章，作为第四章保存。仅写该章，不修改已经保存的第1、2、3章。',
+    '全书，不要统一修改，续写下一章。',
+  ])('does not derive revision/global transformation from a denied effect: %s', prompt => {
+    expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt }).intent).toBe('write')
+  })
+  it.each(['\n', '。', '；'])(
+    'keeps a reading scope across a hard boundary out of the later mutation: %s', boundary => {
+      expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: `先通读全书${boundary}仅修改第3章。` }))
+        .toMatchObject({ intent: 'revise', expectedOutputs: [{ kind: 'text' }], postconditions: [] })
+    })
+  it.each([
+    '写第4章。续写下一章。只写这一章。',
+    '写第4至5章。只写这一章。',
+    '写三章。仅写该章。',
+    '写第3章。作为第4章正式写入。',
+    '续写下一章。作为第4章正式写入。作为第5章保存。',
+    '续写下一章。作为第2卷第4章正式写入。',
+    '续写下一章。作为第4章和第5章正式写入。',
+  ])('rejects independent, conflicting or unsupported placement constraints: %s', prompt => {
+    expect(parseWritingTargets(prompt)).toMatchObject({ range: null, ambiguous: true })
+  })
+  it.each([
+    '请读取这句：“续写下一章，只写这一章，作为第4章正式写入”。',
+    '不要续写下一章，不要作为第4章正式写入。',
+    '请阅读：作为第4章正式写入。',
+  ])('never promotes quoted, reading or denied apposition into writing: %s', prompt => {
+    expect(parseWritingTargets(prompt)).toMatchObject({ range: null, hasAction: false })
+  })
   it.each([
     '仅修改第3章。请先读取前两章。不修改第1、2章。',
     '仅修改第3章。请先读取前两章。',

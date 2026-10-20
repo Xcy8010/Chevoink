@@ -1,4 +1,4 @@
-import { legacyWritingRange, numeric, negativeScopeClause, type RequestedWritingRange } from './writing-target-range.js'
+import { chapterNumber, legacyWritingRange, numeric, negativeScopeClause, type RequestedWritingRange } from './writing-target-range.js'
 
 const mutation = /(?:修订|修正|修改|改写|重写|扩写|缩写|修复|纠正|纠错|润色|优化|调整|替换|插入|删除|删掉|精简|补充|增加|整改|续写|创作|起草|补写|补完|补齐|写完|完成|写|改|补足|解决)|\b(?:write|draft|finish|complete|revise|edit|repair|rewrite|polish|fix|replace|insert|delete|shorten|expand)\b/iu
 const review = /(?:检查|审查|审阅|核对|核实|评估|分析)|\b(?:check|review|assess|evaluate)\b/iu
@@ -8,6 +8,9 @@ const chapterMention = new RegExp(`(?:第|前)?\\s*${numeric}\\s*(?:章|卷)|cha
 const actionStart = /(?:完成当前|必要的|\s|帮我|请你|继续|接着|然后|开始|直接|自动|自主|自行|全权|分别|明确|授权|允许|可以|针对|按照|进行|审查|审阅|检查|本次|这次|现在|请|你|先|再|只|仅|现|对|把|将|从|自|在|做|并|且)/gu
 const factual = /(?:提到|写道|写着|却|曾|原文|描述|记载|表示|说过|讲述|发生|已经|已完成|已修订|已修改|修改过)/u
 const advice = /(?:如何|怎样|怎么|建议|方案|思路|方法|报告|情况)|\b(?:how|advice|suggestions?|plan|report)\b/iu
+// A demonstrative names the same chapter, never another newly counted chapter.
+const singleChapterReference = /^\s*(?:请)?(?:只|仅)(?:写|续写|完成)(?:这|该|本)(?:一)?章(?:正文)?\s*$/u
+const nextOrdinalConfirmation = new RegExp(`^\\s*(?:请)?作为(?:全书)?第\\s*(${numeric})\\s*章(?:正式)?(?:写入|保存|落稿)\\s*$`, 'u')
 
 /** Quoted manuscript text and titles are data, including any chapter ordinals
  * or imperative-looking words inside them. Never unwrap them into authority. */
@@ -89,15 +92,37 @@ export function parseWritingTargets(prompt: string) {
   // They must not become a second mutation target or override its ordinal.
   const mutationEffects = effects.filter(item => item.kind === 'mutation')
   const selected = mutationEffects.length ? mutationEffects : effects
-  const parsed = selected.map(item => ({ ...targetClause(item.clause), kind: item.kind }))
+  const references = selected.filter(item => singleChapterReference.test(item.clause))
+  const parsed = selected.filter(item => !singleChapterReference.test(item.clause))
+    .map(item => ({ ...targetClause(item.clause), kind: item.kind }))
     .map(item => ({ ...item, range: legacyWritingRange(item.clause) }))
   const ranges = parsed.flatMap(item => item.range ? [item.range] : [])
   const range = mergeRanges(ranges)
-  const ambiguous = ranges.length > 0 && !range
+  let ambiguous = ranges.length > 0 && !range
     || parsed.some(item => item.ambiguous || !item.range && chapterMention.test(item.clause))
+  if (references.length && range && (range.kind === 'unbounded' || range.kind === 'existing'
+    || (range.kind === 'list' ? range.positions?.length : range.count) !== 1)) ambiguous = true
+  // An appositive ordinal constrains an existing writing action; it is not an
+  // independent extra chapter. Relative identity is proved at fresh admission
+  // against its directory/editor snapshot, never guessed in this pure parser.
+  const confirmations = mutationEffects.length ? clauses.filter(clause => /^\s*(?:请)?作为(?:全书)?第/u.test(clause)
+    && /(?:写入|保存|落稿)/u.test(clause)).map(clause => {
+    const match = clause.match(nextOrdinalConfirmation)
+    return match ? chapterNumber(match[1]) : null
+  }) : []
+  let confirmedNextOrderIndex: number | undefined
+  if (confirmations.length) {
+    const ordinal = confirmations[0]
+    if (!ordinal || confirmations.some(value => value !== ordinal)) ambiguous = true
+    else if (range?.kind === 'next') confirmedNextOrderIndex = ordinal
+    else if (!range || range.volume || (range.kind === 'list'
+      ? range.positions?.length !== 1 || range.positions[0] !== ordinal
+      : !['first', 'range'].includes(range.kind) || range.count !== 1 || range.start !== ordinal)) ambiguous = true
+  }
   const exclusions = clauses.filter(clause => denied(clause)
     && /(?:不(?:要|得|许|能|必)?|禁止|无需|不用|别).{0,12}(?:修改|修订|修正|修复|改写|写|改|动|润色|优化|重写)|(?:do not|don't|must not).{0,16}(?:write|edit|revise|repair|rewrite|polish|fix)/iu.test(clause))
-  return { range: ambiguous ? null : range, ambiguous, hasAction: effects.length > 0, exclusions }
+  return { range: ambiguous ? null : range, ambiguous, hasAction: effects.length > 0, exclusions,
+    ...(confirmedNextOrderIndex !== undefined ? { confirmedNextOrderIndex } : {}) }
 }
 
 /** Fresh admission only. Historical missing contracts use legacyWritingRange. */

@@ -21,9 +21,34 @@ function actionClauses(prompt: string): string[] {
     })
 }
 
+function affirmativeClause(clause: string): string | null {
+  const value = clause.replace(/(?:不要|无需|不用|不必)(?:再)?(?:询问我|问我|确认|征求同意)/gu, '')
+  return /(?:不要|不需要|无需|不用|不必|禁止|不得|不能|不许|别|不(?=创建|创作|写|改|修|保存|生成|新建|润色|读)|不(?:再)?(?:批量|统一|全局)|do not|don't|must not|never)/iu.test(value) ? null : value
+}
+
 function affirmativeClauses(prompt: string): string[] {
-  return actionClauses(prompt).map(clause => clause.replace(/(?:不要|无需|不用|不必)(?:再)?(?:询问我|问我|确认|征求同意)/gu, ''))
-    .filter(clause => !/(?:不要|不需要|无需|不用|不必|禁止|不得|不能|不许|别|不(?=创建|创作|写|改|修|保存|生成|新建|润色|读)|do not|don't|must not|never)/iu.test(clause))
+  return actionClauses(prompt).flatMap(clause => {
+    const value = affirmativeClause(clause)
+    return value === null ? [] : [value]
+  })
+}
+
+/** Adjacent positive scope/action clauses may govern one operation. A denied
+ * clause is a boundary, never omitted so its neighbours can form new authority. */
+function affirmativeClauseGroups(prompt: string): string[] {
+  const groups: string[] = []
+  for (const sentence of prompt.split(/[。！？!?；;\r\n\u2028\u2029]+/u)) {
+    let group: string[] = []
+    for (const clause of actionClauses(sentence)) {
+      const value = /(?:只读|read.only)/iu.test(clause) ? null : affirmativeClause(clause)
+      if (value === null) {
+        if (group.length) groups.push(group.join('，'))
+        group = []
+      } else group.push(value)
+    }
+    if (group.length) groups.push(group.join('，'))
+  }
+  return groups
 }
 
 /** Search location and evidence constraints do not revoke network access. */
@@ -173,7 +198,7 @@ function classifyIntent(prompt: string, researchAdmission = false): TaskIntent {
     && /(?:写|续写|改写|修改|润色|创建|新建|发布|删除).{0,16}(?:章|正文|小说|作品|卷)|(?:保存|写入|存入).{0,24}(?:计划|文件)|(?:write|create|edit|publish).{0,20}(?:chapter|novel)/iu.test(clause))
   if ((requestsResearch || researchAdmission && externalCraftResearch(prompt)) && !requestsWriting
     && !(researchAdmission && affirmativeMutation(prompt))) return 'research_analysis'
-  if (/(全书|所有章节|批量|统一).{0,16}(改名|替换|修改|变更)|全局改/.test(prompt)) return 'global_transform'
+  if (affirmativeClauseGroups(prompt).some(clause => /(全书|所有章节|批量|统一).{0,16}(改名|替换|修改|变更)|全局改/.test(clause))) return 'global_transform'
   if (/(卷|章节).{0,12}(移动|排序|顺序|拆分|合并|插入)|新增.*卷/.test(prompt)) return 'structure'
   if (/(检查|审阅|评估|分析|找问题|一致性)|\b(?:check|review|assess|evaluate|analy[sz]e)\b/iu.test(prompt)) {
     // Required checks are subordinate to an explicit chapter write/revision.
@@ -191,8 +216,8 @@ function classifyIntent(prompt: string, researchAdmission = false): TaskIntent {
     return writesChapter ? 'write' : 'review'
   }
   if (/(规划|大纲|计划|设计剧情)/.test(prompt)) return 'plan'
-  if (/(改写|润色|扩写|缩写|修改|调整)/.test(prompt)
-    || affirmativeClauses(prompt).some(clause => /(?:修订|修正).{0,16}(?:章|正文)|(?:章|正文).{0,16}(?:修订|修正)/u.test(clause))) return 'revise'
+  if (affirmativeClauses(prompt).some(clause => !/(?:只读|read.only)/iu.test(clause)
+    && /(改写|润色|扩写|缩写|修改|调整)|(?:修订|修正).{0,16}(?:章|正文)|(?:章|正文).{0,16}(?:修订|修正)/u.test(clause))) return 'revise'
   return 'write'
 }
 

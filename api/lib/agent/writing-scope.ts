@@ -92,6 +92,10 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     const target = chapters.find(item => item.id === run.chapterId)
     writing = { ...base, kind: target ? 'bounded' : 'needs_input', targets: target ? [{ orderIndex: target.orderIndex, chapterId: target.id }] : [] }
   } else writing = { ...base, kind: 'needs_input', targets: [] }
+  if (parsed?.confirmedNextOrderIndex !== undefined && (writing.kind !== 'bounded' || writing.targets.length !== 1
+    || writing.targets[0].orderIndex !== parsed.confirmedNextOrderIndex)) {
+    writing = { ...base, kind: 'needs_input', targets: [] }
+  }
   if (writing.kind === 'bounded') {
     // A broad positive interval cannot erase the author's explicit exceptions.
     // Resolve them against this same admission snapshot, never later rows.
