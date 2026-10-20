@@ -9,7 +9,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import { buildSessionTokens } from '../../api/lib/auth-session.js'
 import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
 import { chapterEditRangeTool, chapterWriteTool, chapterAppendTool, chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
-import { storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { chapterBridgeGetTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { freezeWritingScope, readWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { taskSpecSchema } from '../../shared/contracts/index.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
@@ -74,6 +74,15 @@ const prepare = (ctx: ToolContext) => storyCompilerPrepareTool.execute(ctx, { ta
   intentSummary: '只对第四个已存合成章作作者指出的局部修订', volumeDecision: { kind: 'continue', reason: '原卷原章' } })
 
 describe.skipIf(!available)('unified fresh HTTP author contract with actual PostgreSQL writes', () => {
+  it('reads an unprepared task as an explicit empty state without adopting a historical compilation', () => fixture(requests[0] + concerns, async (ctx, before) => {
+    expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ summary: '本任务尚未建立章节桥' })
+    expect((await chapterBridgeGetTool.execute(ctx, {})).outcome).not.toBe('failed')
+    expect(await chapterBridgeGetTool.execute(ctx, { compilationId: 'missing-explicit-id' }))
+      .toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_NOT_FOUND' })
+    expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
+    expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+    expect((await prepare(ctx)).outcome).not.toBe('failed')
+  }))
   it.each(requests)('binds a qualified chapter and two local islands without touching read-context chapters: %s', start => fixture(start + concerns, async (ctx, before) => {
     const original = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     expect(original).toMatchObject({ intent: 'revise', scope: { writingTargetProtocol: 2,
@@ -107,6 +116,33 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
     await expect(action).rejects.toMatchObject({ code: kind === 'create' ? 'AUTHOR_CHAPTER_SCOPE' : 'AUTHOR_LOCAL_SCOPE' })
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
     expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
+  }))
+  it.each(['“向左走。”', '甲说：“向左走。”乙听后却向右转。'])(
+    'authenticates copied context while permitting only its actual frozen-island change: %s', oldText => fixture(requests[0] + concerns, async (ctx, before) => {
+      await prepare(ctx)
+      expect((await chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText, newText: oldText.replace('左', '右') })).outcome).not.toBe('failed')
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })).content).toBe(body.replace('左', '右'))
+      expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(c => c.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
+    }))
+  it('permits insertion and deletion inside a frozen quote without granting its enclosing punctuation', () => fixture(requests[0] + concerns, async (ctx, before) => {
+    for (const [oldText, newText] of [['“向左走。”', '“请向左走。”'], ['“请向左走。”', '“向左走。”']]) {
+      expect((await chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText, newText })).outcome).not.toBe('failed')
+    }
+    const current = await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })
+    expect(current).toMatchObject({ content: body, revision: before[3].revision + 2 })
+    await expect(chapterEditRangeTool.execute(ctx, { chapterId: current.id, oldText: '“向左走。”', newText: '「向左走。」' }))
+      .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: current.id } })).toEqual(current)
+    expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(c => c.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
+  }))
+  it.each(['insert', 'replace'] as const)('applies adjacent original anchors with one canonical local effect: %s', kind => fixture(requests[0] + concerns, async (ctx, before) => {
+    expect((await chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, patches: [
+      { oldText: '甲说：“向', newText: '甲说：“向请' },
+      { oldText: '左走。”乙听后却向右转', newText: `${kind === 'insert' ? '右左' : '右'}走。”乙听后却向右转` },
+    ] })).outcome).not.toBe('failed')
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })).content)
+      .toBe(body.replace('向左走', kind === 'insert' ? '向请右左走' : '向请右走'))
+    expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(c => c.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
   }))
   it.each(['只补写第4章第二段', '只补齐第4章第二段', '请只补写第4章当前正文的第二段'])(
     'keeps write-family paragraph work local through actual HTTP admission: %s', prompt => fixture(prompt, async (ctx, before) => {

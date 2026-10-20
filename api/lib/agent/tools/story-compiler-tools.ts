@@ -663,6 +663,13 @@ export const chapterBridgeGetTool = defineTool({
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { title: true, revision: true, content: true } }, qualityReports: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1, include: { findings: true } } },
     })
+    // An implicit lookup before this task prepares anything has an ordinary
+    // empty state. Explicit IDs and a broken existing bridge remain failures;
+    // this never reads/adopts another task's compilation.
+    if (!compilation && !args.compilationId) return {
+      output: `当前任务尚未建立 Chapter Bridge。${await missingCompilationGuidance(db, ctx, scope)}`,
+      summary: '本任务尚未建立章节桥',
+    }
     if (!compilation?.bridge) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND',
       output: `当前任务没有可读取的指定 Chapter Bridge，compilationId 不能使用章节或任务合同编号。${compilation ? '编译缺少章节桥，身份异常需核对，不能重建绕过。' : await missingCompilationGuidance(db, ctx, scope)}`, summary: '未找到章节编译状态' }
     const bridge = compilation.bridge

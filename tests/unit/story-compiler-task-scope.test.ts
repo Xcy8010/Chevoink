@@ -299,6 +299,13 @@ describe('story compiler task identity', () => {
     expect(db.storyCompilation.findFirst.mock.calls.some(([query]) => query.where.id === 'foreign-compilation'
       && JSON.stringify(query.where.run) === JSON.stringify(scope.run))).toBe(true)
   })
+  it('returns an empty implicit bridge lookup without creating or adopting a compilation', async () => {
+    expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ summary: '本任务尚未建立章节桥' })
+    expect((await chapterBridgeGetTool.execute(ctx, {})).outcome).not.toBe('failed')
+    expect(db.storyCompilation.create).not.toHaveBeenCalled()
+    db.storyCompilation.findFirst.mockResolvedValue({ id: 'broken', bridge: null })
+    expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_NOT_FOUND' })
+  })
   it('marks a missing cross-task continuity compilation as failed instead of showing tool success', async () => {
     expect(await continuityValidateTool.execute(ctx, { compilationId: 'foreign' })).toMatchObject({ outcome: 'failed', summary: '本任务连续性检查未执行' })
     expect(db.storyCompilation.create).not.toHaveBeenCalled()

@@ -40,5 +40,29 @@ export function composeChapterEdit(before: string, args: {
   }
   let after = before
   for (const range of [...ranges].reverse()) after = after.slice(0, range.start) + range.newText + after.slice(range.end)
-  return { after, ranges }
+  // Anchors prove where the request applies; authorization concerns the
+  // actual replacement. Copied unchanged quotation marks/context are not
+  // writes outside a frozen region. Validate all original anchors/overlaps
+  // above before removing their equal edges, in both runtime adapters.
+  const effects = ranges.map(range => {
+    const oldText = before.slice(range.start, range.end), replacement = range.newText
+    // A no-op still authenticates its original target, including its scope.
+    if (oldText === replacement) return range
+    let prefix = 0, oldEnd = oldText.length, newEnd = replacement.length
+    while (prefix < oldEnd && prefix < newEnd && oldText[prefix] === replacement[prefix]) prefix++
+    while (oldEnd > prefix && newEnd > prefix && oldText[oldEnd - 1] === replacement[newEnd - 1]) { oldEnd--; newEnd-- }
+    return { start: range.start + prefix, end: range.start + oldEnd, newText: replacement.slice(prefix, newEnd) }
+  })
+  const canonical: typeof effects = []
+  for (const effect of effects) {
+    const prior = canonical.at(-1)
+    // Adjacent original anchors can shrink to the same insertion address,
+    // including an insertion immediately before a replacement. Coalesce in
+    // original order so every descending-offset consumer reproduces `after`.
+    if (prior && prior.start === effect.start && prior.end === prior.start) {
+      prior.end = effect.end
+      prior.newText += effect.newText
+    } else canonical.push(effect)
+  }
+  return { after, ranges: canonical }
 }

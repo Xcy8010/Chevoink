@@ -400,7 +400,7 @@ async function assertLocalBodyEffect(tx: Prisma.TransactionClient, subject: Subj
     const ranges = options.editRanges
     const ordered = [...ranges ?? []].sort((a, b) => a.start - b.start)
     if (!spans || !ranges?.length || ranges.length > 8 || options.after === undefined || ranges.some(range =>
-      !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) || range.end <= range.start
+      !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) || range.end < range.start
       || !spans.some(span => range.start >= span.start && range.end <= span.end))
       || ordered.some((range, index) => index > 0 && range.start < ordered[index - 1].end)) {
       throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '补丁超出作者问题引文的独立范围，或原文间隔已变化；全部正文变更未执行。')
@@ -419,7 +419,7 @@ async function assertLocalBodyEffect(tx: Prisma.TransactionClient, subject: Subj
   }
   const ranges = options.editRanges
   if (!ranges?.length || options.after === undefined || ranges.some(range => !Number.isSafeInteger(range.start)
-    || !Number.isSafeInteger(range.end) || range.start < boundary.start || range.end <= range.start || range.end > end
+    || !Number.isSafeInteger(range.end) || range.start < boundary.start || range.end < range.start || range.end > end
     || range.start === 0 && range.end === before.length)) {
     throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '本批补丁超出冻结局部范围或整体覆盖正文，全部变更未执行。')
   }

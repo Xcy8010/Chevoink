@@ -509,7 +509,7 @@ export const chapterEditRangeTool = defineTool({
     }
 
     const after = edit.after
-    const candidate = edit.ranges.map(range => range.newText).join('\n')
+    const candidate = (args.patches ?? [args]).map(patch => patch.newText).join('\n')
 
     if (isAgent2FeatureEnabled('craftLibrary', ctx.userId) && candidate.trim().length >= 80) {
       await assertCraftOutputSafe({
