@@ -118,6 +118,24 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })).content).toBe('第一段\n第二段修正\n第三段')
       expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
     }, false, '第一段\n第二段\n第三段'))
+  it('uses only the authenticated source quote for a real local transform', () => fixture(
+    '第二卷第2章正文，将“源短句”改为“新短句”。', async (ctx, before) => {
+      const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
+      expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'bounded', regions: [{ chapterId: before[3].id, start: 3, end: 6 }] })
+      await expect(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不得扩大为全章。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      expect((await chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '源短句', newText: '新短句' })).outcome).not.toBe('failed')
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })).content).toBe('前段。新短句尾。后段。')
+      expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
+    }, false, '前段。源短句尾。后段。'))
+  it.each(['禁止修订“源短句”。', '“源短句”，保持不变。', '“短句尾”，保持不变。', '不要修改第二段。'])(
+    'preserves local protection during a real source transform: %s', protection => fixture(
+      '第二卷第2章正文，将“源短句”改为“新短句”。' + protection, async (ctx, before) => {
+        const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
+        expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
+        await expect(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '源短句', newText: '新短句' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+        expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+        expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
+      }, false, '前段。源短句尾。后段。'))
   it('keeps the chapter identity when only its local quotation is ambiguous', () => fixture(requests[0] + concerns, async (ctx, before) => {
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     expect(spec).toMatchObject({ ambiguity: 'must_ask', scope: { writing: { kind: 'bounded', targets: [{ chapterId: before[3].id }] },

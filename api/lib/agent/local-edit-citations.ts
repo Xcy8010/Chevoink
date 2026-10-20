@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
-import { lexAuthorWritingRequest, parseAuthorWritingRequest } from './author-writing-request.js'
+import { lexAuthorWritingRequest, parseAuthorWritingRequest, type AuthorWritingRequest } from './author-writing-request.js'
 import { runtimeJson } from './runtime-common.js'
 
 type Boundary = NonNullable<TaskSpec['scope']['localEditBoundary']>
@@ -10,6 +10,25 @@ const issue = /(?:确认|发现|存在|出现|有).{0,24}(?:问题|矛盾|冲突
 const currentSource = /本章|当前(?:章|这章|正文)|该章/u
 const uncertainSource = /前章|前文|旧稿|原先|历史|曾经|参考|例如|举例|假设|如果|是否|有没有|有无|需不需要|没有.{0,12}(?:问题|矛盾|冲突|错误)|并无/u
 const localScope = /局部|片段|句子|这句话|这句|一句|几句|这段|这一段|那段|该段|某段|段落|对白|对话|开头|结尾|首段|末段|paragraph|passage|sentence/iu
+
+/** Resolve protection using the same AST and saved body as the positive
+ * locator. Unknown or repeated local protections cannot silently disappear. */
+export function localEditProtectionRanges(prompt: string, content: string, parsed: AuthorWritingRequest = parseAuthorWritingRequest(prompt)) {
+  const regions: Array<{ start: number; end: number }> = []
+  for (const operation of parsed.evidence.operations.filter(operation => operation.polarity === 'negative'
+    && ['negated', 'protected'].includes(operation.reason) && ['revise', 'write'].includes(operation.kind))) {
+    for (const index of operation.targetIndices) {
+      const target = parsed.evidence.targets[index]
+      if (target.kind !== 'local') continue
+      const quote = parsed.evidence.quoted.find(item => item.kind === 'quotation' && item.start === target.span.start && item.end === target.span.end)
+      if (!quote) return null
+      const text = prompt.slice(quote.start + 1, quote.end - 1), start = content.indexOf(text)
+      if (!text || start < 0 || content.indexOf(text, start + 1) >= 0) return null
+      regions.push({ start, end: start + text.length })
+    }
+  }
+  return regions
+}
 
 /** An outer author action gives issue quotations locator status. Text inside
  * quotations never supplies an action, a target, or an exception to a denial. */
@@ -25,18 +44,8 @@ export function freezeIssueQuoteBoundary(prompt: string, writing: TaskSpec['scop
   const chapter = chapters.find(item => item.id === writing.targets[0].chapterId)
   if (!chapter) return denied
   const lexed = lexAuthorWritingRequest(prompt)
-  const protections = parsed.evidence.operations.filter(operation => operation.polarity === 'negative'
-    && ['negated', 'protected'].includes(operation.reason) && ['revise', 'write'].includes(operation.kind))
-  const protectedQuotes: string[] = []
-  for (const operation of protections) for (const index of operation.targetIndices) {
-    const target = parsed.evidence.targets[index]
-    if (target.kind !== 'local') continue
-    const quote = lexed.quoted.find(item => item.kind === 'quotation' && item.start === target.span.start && item.end === target.span.end)
-    // An unresolved local protection must never disappear when its positive
-    // issue happens to have usable quotes elsewhere in the request.
-    if (!quote) return denied
-    protectedQuotes.push(prompt.slice(quote.start + 1, quote.end - 1))
-  }
+  const protections = localEditProtectionRanges(prompt, chapter.content, parsed)
+  if (!protections) return denied
   const sentences = new Map<number, typeof lexed.clauses>()
   for (const clause of lexed.clauses) sentences.set(clause.sentence, [...(sentences.get(clause.sentence) ?? []), clause])
   const inner = (quote: typeof lexed.quoted[number]) => prompt.slice(quote.start + 1, quote.end - 1)
@@ -49,7 +58,7 @@ export function freezeIssueQuoteBoundary(prompt: string, writing: TaskSpec['scop
     if (/(?:不|未|无|不是|并非).{0,8}(?:确认|发现|存在|出现)|(?:不要|禁止|不得).{0,24}(?:修|改)|[?？]/u.test(masked)) continue
     for (const quote of lexed.quoted.filter(item => item.kind === 'quotation' && item.start >= start && item.end <= end)) {
       const text = inner(quote)
-      if (!text || text.length > 512 || protectedQuotes.some(protectedQuote => protectedQuote.includes(text) || text.includes(protectedQuote))) return denied
+      if (!text || text.length > 512) return denied
       anchors.push({ text, start: quote.start, end: quote.end, issueStart: start, issueEnd: end })
     }
   }
@@ -61,6 +70,7 @@ export function freezeIssueQuoteBoundary(prompt: string, writing: TaskSpec['scop
     if (start < 0 || chapter.content.indexOf(anchor.text, start + 1) >= 0) return denied
     if (regions.some(region => region.start === start && region.text === anchor.text)) continue
     const end = start + anchor.text.length
+    if (protections.some(region => start < region.end && region.start < end)) return denied
     if (start === 0 && end === chapter.content.length) return denied
     regions.push({ chapterId: chapter.id, revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash,
       start, end, prefix: chapter.content.slice(0, start), suffix: chapter.content.slice(end), text: anchor.text,

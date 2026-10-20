@@ -2,7 +2,7 @@ import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/task-sp
 import { DataAccessError } from '../prisma.js'
 import { runtimeJson } from './runtime-common.js'
 import { parseAuthorWritingRequest } from './author-writing-request.js'
-import { freezeIssueQuoteBoundary, validIssueQuoteBoundary } from './local-edit-citations.js'
+import { freezeIssueQuoteBoundary, localEditProtectionRanges, validIssueQuoteBoundary } from './local-edit-citations.js'
 import { assertFrozenWritingContract } from './writing-contract.js'
 
 type Locator = { kind: 'quote'; text: string } | { kind: 'paragraph'; position: number | 'last' } | { kind: 'unknown' }
@@ -51,9 +51,10 @@ export function requestedLocalEdit(prompt: string, protocol: 1 | 2 = 1): Locator
     && !exclusiveLocal.test(clause))) return null
   const directQuotes = interpretation?.evidence.quoted.filter(quote => quote.kind === 'quotation'
     && interpretation.evidence.operations.some(operation => operation.accepted && operation.kind === 'revise'
-      && operation.polarity === 'affirmative' && operation.span.end <= quote.start
-      && quote.end <= operation.clauseSpan.end
-      && /^(?:\s|的|这句|句子|片段)*$/u.test(prompt.slice(operation.span.end, quote.start)))) ?? []
+      && operation.polarity === 'affirmative' && operation.targetIndices.some(index => {
+        const target = interpretation.evidence.targets[index]
+        return target.kind === 'local' && target.span.start === quote.start && target.span.end === quote.end
+      }))) ?? []
   const explicitQuote = directQuotes.length > 0 || new RegExp(`(?:把|将)\\s*【引文】.{0,12}(?:改成|改为|替换|修改|改写|润色)|${quoteEditPrefix}【引文】`, 'u').test(actionable.join('，'))
   const constrained = actionable.some(clause => local.test(clause)
     && (!whole.test(clause) || /(?:只|仅|局部|的|中|only)/iu.test(clause))) || explicitQuote
@@ -64,7 +65,7 @@ export function requestedLocalEdit(prompt: string, protocol: 1 | 2 = 1): Locator
     || actionable.some(clause => whole.test(clause))
     || clauses.some(clause => negative.test(clause) && (local.test(clause) || /正文|任何修改|prose|any edits?/iu.test(clause)))) return { kind: 'unknown' }
   if (explicitQuote) {
-    const sourceQuotes = [...prompt.matchAll(new RegExp(`(?:(?:把|将)\\s*|${quoteEditPrefix})(?:“([^”]+)”|「([^」]+)」|『([^』]+)』|"([^"\\n]+)")`, 'gu'))]
+    const sourceQuotes = interpretation ? [] : [...prompt.matchAll(new RegExp(`(?:(?:把|将)\\s*|${quoteEditPrefix})(?:“([^”]+)”|「([^」]+)」|『([^』]+)』|"([^"\\n]+)")`, 'gu'))]
     const sources = [...new Set([...sourceQuotes.map(match => match[1] ?? match[2] ?? match[3] ?? match[4]),
       ...directQuotes.map(quote => prompt.slice(quote.start + 1, quote.end - 1))])]
     return sources.length === 1 ? { kind: 'quote', text: sources[0] } : { kind: 'unknown' }
@@ -111,6 +112,10 @@ export function freezeLocalEditBoundary(prompt: string, writing: TaskSpec['scope
     }
     // Local prose must never be a disguised full-body replacement.
     if (start === 0 && end === chapter.content.length) return denied
+    if (protocol === 2) {
+      const protections = localEditProtectionRanges(prompt, chapter.content)
+      if (!protections || protections.some(region => start < region.end && region.start < end)) return denied
+    }
     regions.push({ chapterId: chapter.id, revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash,
       start, end, prefix: chapter.content.slice(0, start), suffix: chapter.content.slice(end) })
   }

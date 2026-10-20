@@ -84,6 +84,30 @@ describe('fresh issue quotations bound to separate local islands', () => {
       const boundary = freezeLocalEditBoundary(request, writing, [{ ...chapter, content: '第一段\n第二段\n第三段' }], 2)
       expect(boundary).toMatchObject({ kind: 'bounded', regions: [{ chapterId: chapter.id, start: 4, end: 7 }] })
     })
+  it.each(['将“选区原文。”改为“准确的新句。”', '把“选区原文。”改成“准确的新句。”',
+    '将“选区原文。”修改为“准确的新句。”', '将“选区原文。”修订成“准确的新句。”'])(
+    'uses the AST source object rather than a transformation replacement as the local quote: %s', request => {
+      expect(requestedLocalEdit(request, 2)).toEqual({ kind: 'quote', text: '选区原文。' })
+      expect(freezeLocalEditBoundary(request, writing, [{ ...chapter, content: '前😀段。选区原文。后段。' }], 2))
+        .toMatchObject({ kind: 'bounded', regions: [{ chapterId: chapter.id, start: 5, end: 10, prefix: '前😀段。', suffix: '后段。' }] })
+      expect(freezeLocalEditBoundary(request, writing, [{ ...chapter, content: '前段。准确的新句。后段。' }], 2))
+        .toMatchObject({ kind: 'needs_input', regions: [] })
+      expect(freezeLocalEditBoundary(request, writing, [{ ...chapter, content: '选区原文。中间。选区原文。' }], 2))
+        .toMatchObject({ kind: 'needs_input', regions: [] })
+    })
+  it.each(['禁止修订“源短句”。', '“源短句”，保持不变。', '不调整“短句尾”。', '不要修改第二段。'])(
+    'never lets a direct source locator bypass a protected or unresolved local span: %s', protection => {
+      expect(freezeLocalEditBoundary('将“源短句”改为“新短句”。' + protection, writing,
+        [{ ...chapter, content: '前段。源短句尾。后段。' }], 2)).toMatchObject({ kind: 'needs_input', regions: [] })
+    })
+  it('keeps disjoint protections but rejects protected quotes inside paragraph or issue windows', () => {
+    expect(freezeLocalEditBoundary('将“源短句”改为“新短句”。“前段”，保持不变。', writing,
+      [{ ...chapter, content: '前段。源短句尾。后段。' }], 2)).toMatchObject({ kind: 'bounded' })
+    expect(freezeLocalEditBoundary('修订第二段。“原句”，保持不变。', writing,
+      [{ ...chapter, content: '第一段\n原句及其他文字\n第三段' }], 2)).toMatchObject({ kind: 'needs_input', regions: [] })
+    expect(freezeLocalEditBoundary('局部修订第3章。已确认本章有问题：“源短句”。“短句尾”，保持不变。', writing,
+      [{ ...chapter, content: '前段。源短句尾。后段。' }], 2)).toMatchObject({ kind: 'needs_input', regions: [] })
+  })
   it('uses the frozen intent and resolved chapter identity after a volume-qualified admission', () => {
     const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt, authorWritingProtocol: 2, localEditProtocol: 1 })
     spec.scope.writingTargetProtocol = 2
