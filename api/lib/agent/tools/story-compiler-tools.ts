@@ -485,7 +485,7 @@ export const sceneTaskBuildTool = defineTool({
   name: 'scene_task_build',
   title: '构建场景任务',
   description:
-    'Story Compiler 的 BEAT 步骤。一次提交本章完整的 1–4 个场景，不是正文。先遵从完整原请求的类型、情绪承诺、身份、剧情、篇幅与精确停笔位置；不能为场景模板扩写成交或打脸。cost 记录已设定代价或实际后果，可写无额外损失或本次收益，不强加能力惩罚；low rhetoric 控制修饰密度，不压低情绪。每个 purpose/goal/obstacle/choice/cost/turn 用一句短句（建议 60 字内）；entryState/exitState 只填本场景变化的字段，每个状态列表建议最多 3 项，勿复制人物档案。省略未变化状态、styleBudget、alternatives 和 compilationId 可显著缩短参数，服务端解析当前编译并补齐流程元数据。顶层直接传 tasks 数组，禁止套 arguments 信封或为了补元数据重复调用。',
+    'Story Compiler 的 BEAT 步骤。一次提交本章完整的 1–4 个场景，不是正文。先遵从完整原请求的类型、情绪承诺、身份、剧情、篇幅与精确停笔位置；不能为场景模板扩写成交或打脸。cost 记录已设定代价或实际后果，可写无额外损失或本次收益，不强加能力惩罚；low rhetoric 控制修饰密度，不压低情绪。每个 purpose/goal/obstacle/choice/cost/turn 用一句短句（建议 60 字内）；entryState/exitState 只填本场景变化的字段，每个状态列表建议最多 3 项，勿复制人物档案。省略未变化状态、styleBudget、alternatives 和 compilationId 可显著缩短参数，服务端解析当前编译并补齐流程元数据。顶层直接传 tasks 数组，禁止套 arguments 信封或为了补元数据重复调用。先构造一个完整 JSON 对象，勿把 tasks 数组编码为字符串或混入正文；将下例短句替换为本章真实场景。最小原生参数示例：{"tasks":[{"purpose":"概述本场景作用","goal":"人物当前目标","obstacle":"本场景阻力","choice":"人物本场景选择","cost":"已设定代价或本次实际结果","turn":"本场景状态变化"}]}',
   parameters: z.object({
     compilationId: z.string().min(1).optional(),
     tasks: z.array(sceneTaskInputSchema.extend({

@@ -344,7 +344,9 @@ export async function startLoopRunLocked(
   if (steering) await assertManagedAttachmentsAccess(steering.attachments, userId)
 
   const modelAssignments = input.modelAssignments ?? await freezeModelAssignments(userId, input.novelId)
-  const purposeSpec = buildTaskSpec({ runId: 'model-purpose', novelId: input.novelId, chapterId: input.chapterId, prompt: input.prompt, selection: input.selection })
+  const researchAdmission = options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
+    && !input.selection && options.concurrencyScope !== 'orchestration' ? 1 as const : undefined
+  const purposeSpec = buildTaskSpec({ runId: 'model-purpose', novelId: input.novelId, chapterId: input.chapterId, prompt: input.prompt, selection: input.selection, researchAdmission })
   const writingPurpose = ['write', 'revise'].includes(purposeSpec.intent) && !['proposal_only', 'conversation_only'].includes(purposeSpec.writingPacing ?? '')
   const assigned = admissionModelOverride(input, modelAssignments, writingPurpose)
   if (assigned) {
@@ -484,8 +486,11 @@ export async function startLoopRunLocked(
       await syncBuiltinSkillCatalog(tx)
       const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
         prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1,
-        creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
-      if (input.selection || ['write', 'revise', 'review'].includes(fresh.intent) && !['proposal_only', 'conversation_only'].includes(fresh.writingPacing ?? '')) {
+        researchAdmission, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
+      if (researchAdmission && fresh.intent === 'research_analysis') {
+        // Freeze identity/budget before async bootstrap, without writing grants.
+        created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(fresh)) as Prisma.InputJsonValue } })
+      } else if (input.selection || ['write', 'revise', 'review'].includes(fresh.intent) && !['proposal_only', 'conversation_only'].includes(fresh.writingPacing ?? '')) {
         // Preserve the original protected-body snapshot normally captured by
         // async initialization when freezing this fresh contract at admission.
         if (fresh.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')) {

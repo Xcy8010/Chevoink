@@ -71,6 +71,46 @@ describe.skipIf(!available)('J4 private versioned research sources', () => {
     }
   })
 
+  it('keeps fresh compound research limits across resume without resetting requests', async () => {
+    const user = await prisma.user.create({ data: { nickname: 'craft-budget-fixture', passwordHash: 'test-only' } })
+    try {
+      const novel = await prisma.novel.create({ data: { authorId: user.id, title: '研究额度', slug: randomUUID(), summary: '' } })
+      const session = await prisma.agentSession.create({ data: { userId: user.id, novelId: novel.id, title: '研究' } })
+      const runId = randomUUID()
+      const spec = buildTaskSpec({ runId, novelId: novel.id, prompt: '联网搜一篇番茄小说，总结写作手法和思路', researchAdmission: 1 })
+      expect(spec).toMatchObject({ intent: 'research_analysis', researchBudget: 'extended' })
+      const base = { userId: user.id, novelId: novel.id, sessionId: session.id, mode: 'act' as const,
+        action: 'workspaceAgent' as const, agentType: 'writingOrchestrator' as const, status: 'running' as const }
+      await prisma.agentRun.create({ data: { ...base, id: runId, taskSpec: JSON.parse(JSON.stringify(spec)) } })
+      const original = { ...base, runId }
+      for (const kind of ['search', 'read'] as const) {
+        const request = { ...original, callId: randomUUID() }
+        expect(await reserveResearchRequest(request, kind, `first-${kind}`)).toBe(true)
+        await settleResearchRequest(request, 'consumed')
+        if (kind === 'read') await recordResearchReadOutcome(request, true)
+      }
+      await prisma.agentRun.update({ where: { id: runId }, data: { status: 'paused' } })
+      const resumedId = randomUUID()
+      await prisma.agentRun.create({ data: { ...base, id: resumedId, taskSpec: JSON.parse(JSON.stringify({ ...spec, runId: resumedId })) } })
+      const resumed = { ...original, runId: resumedId }
+      for (const [kind, limit] of [['search', 5], ['read', 8]] as const) {
+        for (let index = 1; index < limit; index += 1) {
+          const request = { ...resumed, callId: randomUUID() }
+          expect(await reserveResearchRequest(request, kind, `${kind}-${index}`)).toBe(true)
+          await settleResearchRequest(request, 'consumed')
+          if (kind === 'read') await recordResearchReadOutcome(request, true)
+        }
+        expect(await reserveResearchRequest({ ...resumed, callId: randomUUID() }, kind, `${kind}-exhausted`)).toBe(false)
+      }
+      expect(await prisma.chapter.count({ where: { novelId: novel.id } })).toBe(0)
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: user.id } })).toBe(0)
+    } finally {
+      await prisma.agentRun.deleteMany({ where: { userId: user.id } })
+      await prisma.agentSession.deleteMany({ where: { userId: user.id } })
+      await prisma.novel.deleteMany({ where: { authorId: user.id } })
+      await prisma.user.delete({ where: { id: user.id } })
+    }
+  })
   it('freezes small research budgets, stops consecutive failures across resume, and isolates the next task', async () => {
     const user = await prisma.user.create({ data: { nickname: 'budget-fixture', passwordHash: 'test-only' } })
     try {

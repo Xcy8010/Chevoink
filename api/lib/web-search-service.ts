@@ -146,7 +146,9 @@ async function searchBocha(query: string, maxResults: number, signal: AbortSigna
     captureSearchResponse(response, metadata)
 
     if (!response.ok) {
-      return rejectSearchResponse(response, '博查')
+      // Observe rejection before finally awaits dispatcher shutdown. Returning
+      // the pending promise here can surface an unhandled rejection meanwhile.
+      return await rejectSearchResponse(response, '博查')
     }
 
     const body = await readBoundedPublicBody(response, 2 * 1024 * 1024)
@@ -178,7 +180,7 @@ async function searchDeepSeek(query: string, maxResults: number, signal: AbortSi
   try {
     const { response } = request
     captureSearchResponse(response, metadata)
-    if (!response.ok) return rejectSearchResponse(response, 'DeepSeek')
+    if (!response.ok) return await rejectSearchResponse(response, 'DeepSeek')
     const raw: unknown = JSON.parse((await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8'))
     const payload = deepseekSearchSchema.safeParse(raw)
     if (!payload.success) throw new WebSearchError('DEEPSEEK_SEARCH_PROTOCOL_ERROR')

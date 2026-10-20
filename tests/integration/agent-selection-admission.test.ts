@@ -12,6 +12,8 @@ import { isTestDatabaseRequired } from '../support/database-availability.js'
 import { taskSpecSchema } from '../../shared/contracts/index.js'
 import * as skillService from '../../api/lib/agent/skills/service.js'
 import { chapterEditRangeTool, chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { getToolsForMode } from '../../api/lib/agent/tools/registry.js'
+import { restrictToolsToTask } from '../../api/lib/agent/tool-authority.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -37,6 +39,22 @@ async function fixture(work: (subject: { userId: string; novelId: string; sessio
   }
 }
 describe.skipIf(!available)('fresh selected server admission transaction', () => {
+  it.each([true, false])('freezes compound external research only for fresh HTTP author admission: %s', human => fixture(async f => {
+    const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '联网搜一篇番茄小说，分析并总结它的写作手法和思路' }, human ? { humanOrigin: 'http' } : {})
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
+    expect(spec).toMatchObject({ runId: result.runId, intent: human ? 'research_analysis' : 'review', researchBudget: human ? 'extended' : 'standard' })
+    if (human) expect(spec.scope.writing).toBeUndefined()
+    expect(spec.authorization).toBeUndefined()
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+    expect(execution).toHaveBeenCalledWith(expect.objectContaining({ runId: result.runId }))
+    const admitted = restrictToolsToTask(getToolsForMode('build'), spec).map(tool => tool.name)
+    if (human) {
+      expect(admitted).toEqual(expect.arrayContaining(['web_search', 'web_read', 'research_report_save']))
+      for (const name of ['chapter_write', 'chapter_create', 'chapter_edit_range', 'chapter_append', 'plan_save', 'task_spawn']) expect(admitted).not.toContain(name)
+    } else expect(admitted).not.toContain('research_report_save')
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+  }))
   it.each(['检查是否需要修改第二段', '看看需不需要润色第二段', '判断修改第二段有没有必要',
     '评估是否需要重写第二段', '评估第二段有没有必要润色', 'Check whether to edit paragraph 2',
     'Assess if paragraph 2 needs polishing', 'Evaluate if we should rewrite paragraph 2', '检查是否需要修改整章'])(

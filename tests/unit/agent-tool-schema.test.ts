@@ -4,12 +4,24 @@ import { toOpenAIParameters, withObjectType, originalToolParameterSchemas } from
 import { getToolsForMode, toOpenAITools } from '../../api/lib/agent/tools/registry.js'
 import { novelImportArguments } from '../../api/lib/agent/tools/import-tools.js'
 import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
-import { chapterBridgeCommitTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { chapterBridgeCommitTool, storyCompilerPrepareTool, sceneTaskBuildTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
 
 // 回归：novel_import 顶层 discriminatedUnion 转换后没有 type，DeepSeek 按 type null 拒绝，
 // 导致线上继续任务时报 Invalid schema for function 'novel_import'。
 describe('tool schema provider contract', () => {
+  it('publishes a complete compact native scene example accepted without generated state facts', () => {
+    const example = sceneTaskBuildTool.description.split('最小原生参数示例：')[1]
+    const input = JSON.parse(example)
+    expect(Array.isArray(input.tasks)).toBe(true)
+    expect(input.tasks).toHaveLength(1)
+    expect(input.tasks[0]).not.toHaveProperty('content')
+    const parsed = sceneTaskBuildTool.parameters.parse(normalizeToolInput(sceneTaskBuildTool, input))
+    expect(parsed.tasks[0].entryState.knowledge).toEqual([])
+    expect(parsed.tasks[0].exitState.objects).toEqual([])
+    expect(parsed.tasks[0].purpose).toBe(input.tasks[0].purpose)
+  })
   it('preserves exact old frozen commit schema and reveals decision-only only to newly marked tasks', () => {
     const full = toOpenAIParameters(chapterBridgeCommitTool.parameters)
     const old = { ...full, properties: Object.fromEntries(Object.entries(full.properties as object).filter(([key]) => key !== 'decisionOnly')) }

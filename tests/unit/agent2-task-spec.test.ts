@@ -1,6 +1,40 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildTaskSpec, extractDirectiveCandidates, narrowLegacyResearchTask } from '../../api/lib/agent/task-spec.js'
+import { buildTaskSpec, extractDirectiveCandidates, narrowLegacyResearchTask, renderTaskSpec } from '../../api/lib/agent/task-spec.js'
+
+describe('fresh external craft research admission', () => {
+  const prompt = '联网搜一篇番茄小说，总结写作手法和思路'
+  it.each([prompt, '搜索一本小说，分析叙事节奏', '上网查阅《样本》，总结人物塑造',
+    '搜索一本小说，总结叙事节奏，只给当前段落的润色建议', '搜索一本小说，总结叙事节奏，不要修改当前段落',
+    'Search for a novel and summarize its writing techniques'])('freezes bounded research for a fresh human request: %s', text => {
+    const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt: text, researchAdmission: 1 })
+    expect(spec).toMatchObject({ intent: 'research_analysis', researchBudget: 'extended', expectedOutputs: [{ kind: 'validation_report' }] })
+    expect(spec.scope.writing).toBeUndefined()
+    const guidance = renderTaskSpec(spec)
+    expect(guidance).toContain('最多5次搜索、8次页面获取')
+    expect(guidance).toContain('不把平台首页当作品页')
+    expect(guidance).toContain('没有读到章节正文')
+    expect(guidance).toContain('连续两次读取失败后停止')
+  })
+  it.each(['番茄能力要完整达标', '番茄小说写作手法', '不要联网搜索小说，只谈写作手法',
+    '不要联网，搜索小说并总结写作手法', 'Search for a novel, do not analyze its writing techniques'])('does not mint extended access from missing/negated research evidence: %s', text => {
+    expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: text, researchAdmission: 1 }).researchBudget).toBe('standard')
+  })
+  it.each([`${prompt}，然后写第一章`, `${prompt}，接着修改当前章节`, `${prompt}，把报告保存到计划文件`,
+    '搜索一本小说，总结叙事节奏，然后润色当前段落', '搜索一本小说，总结写作手法，再改写当前句子',
+    '联网搜一本小说总结叙事节奏，然后替换这句对白', '搜索一本小说的叙事节奏，然后创建计划文件',
+    'Search for a novel and summarize its writing techniques, then polish the current paragraph'])('preserves an explicit mixed writing/persistence workflow: %s', text => {
+    expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: text, researchAdmission: 1 }).intent).not.toBe('research_analysis')
+  })
+  it('keeps old fallback/resume classification, identity, budget and grants unchanged', () => {
+    const old = buildTaskSpec({ runId: 'old-run', novelId: 'n', prompt })
+    expect(old).toMatchObject({ intent: 'write', researchBudget: 'standard' })
+    expect(narrowLegacyResearchTask(old, prompt)).toBe(old)
+    const admitted = buildTaskSpec({ runId: 'new-run', novelId: 'n', prompt, researchAdmission: 1 })
+    expect(narrowLegacyResearchTask(admitted, prompt)).toBe(admitted)
+    expect(admitted.id).not.toBe(old.id)
+  })
+})
 
 describe('explicit report length requirement', () => {
   it('keeps a report minimum alongside unrelated prohibitions', () => {

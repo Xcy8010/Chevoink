@@ -99,7 +99,22 @@ export function extractDirectiveCandidates(prompt: string): DirectiveCandidate[]
   return result
 }
 
-function classifyIntent(prompt: string): TaskIntent {
+/** Source discovery and chapter samples require a bounded research task.
+ * Only fresh human admission may opt in, never a legacy resume/bootstrap. */
+function externalCraftResearch(prompt: string): boolean {
+  const clauses = prompt.split(/[。！？!?；;\n，,]+/u)
+  if (clauses.some(clause => /(?:不要|无需|不用|禁止|不得|不许|别|do not|don't|never).{0,12}(?:联网|上网|搜索|检索|搜|search|browse|fetch)/iu.test(clause))) return false
+  const positiveClauses = clauses.filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不许|别|do not|don't|never)/iu.test(clause))
+  // Do not turn mixed local revision or explicit persistence into readonly
+  // research. Keep this stricter exclusion local to the new admission rule.
+  if (positiveClauses.some(clause => /(?:写(?!作)|续写|改写|修改|修复|润色|重写|扩写|缩写|替换|删除|插入|保存|写入|存入|创建|新建|发布|生成).{0,24}(?:章|正文|段|句|对白|对话|剧情|计划|报告|文件|小说|作品|卷)|\b(?:write|create|edit|revise|polish|rewrite|save|delete|publish)\b.{0,40}\b(?:chapter|prose|paragraph|sentence|dialogue|plan|report|file|novel)\b/iu.test(clause))) return false
+  const positive = positiveClauses.join('；')
+  return /联网|上网|搜索|检索|搜.{0,12}(?:小说|作品|书)|查找|查阅|\b(?:search|browse|look up|fetch)\b/iu.test(positive)
+    && /小说|这本书|本书|作品|《[^》]+》|\b(?:novel|book)\b/iu.test(positive)
+    && /写作(?:手法|技巧|思路|方法)|叙事|人物塑造|悬念|结构|节奏|\b(?:writing|narrative|storytelling)\s+(?:techniques?|craft|style|approach)/iu.test(positive)
+}
+
+function classifyIntent(prompt: string, researchAdmission = false): TaskIntent {
   // Separate a research-only request from the existing review-and-repair
   // workflow. Mixed requests retain their existing workflow until explicit
   // phase permissions are resolved; do not silently discard requested writes.
@@ -107,7 +122,7 @@ function classifyIntent(prompt: string): TaskIntent {
   const requestsResearch = /拆书|拆解|调研|解读|读后评估|(?:阅读|分析).{0,16}(?:小说|这本书|本书|作品)|(?:research|analy[sz]e|dissect).{0,32}(?:novel|book)/iu.test(prompt)
   const requestsWriting = clauses.some(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|只读|不写|不改|do not|don't)/iu.test(clause)
     && /(?:写|续写|改写|修改|润色|创建|新建|发布|删除).{0,16}(?:章|正文|小说|作品|卷)|(?:保存|写入|存入).{0,24}(?:计划|文件)|(?:write|create|edit|publish).{0,20}(?:chapter|novel)/iu.test(clause))
-  if (requestsResearch && !requestsWriting) return 'research_analysis'
+  if ((requestsResearch || researchAdmission && externalCraftResearch(prompt)) && !requestsWriting) return 'research_analysis'
   if (/(全书|所有章节|批量|统一).{0,16}(改名|替换|修改|变更)|全局改/.test(prompt)) return 'global_transform'
   if (/(卷|章节).{0,12}(移动|排序|顺序|拆分|合并|插入)|新增.*卷/.test(prompt)) return 'structure'
   if (/(检查|审阅|评估|分析|找问题|一致性)|\b(?:check|review|assess|evaluate|analy[sz]e)\b/iu.test(prompt)) {
@@ -151,6 +166,8 @@ export function buildTaskSpec(input: {
   manuscriptProtocol?: 1
   reviewProtocol?: 1
   localEditProtocol?: 1
+  /** Internal fresh human admission only; not exposed in a request schema. */
+  researchAdmission?: 1
   creativeFreedom?: CreativeFreedom
   qualityMode?: StoryCompilerMode
 }): TaskSpec {
@@ -160,7 +177,7 @@ export function buildTaskSpec(input: {
   }
   const writingPacing = classifyWritingPacing(input.prompt)
   const intent = writingPacing === 'proposal_only' ? 'plan'
-    : writingPacing === 'explicit_writing' && boundedSceneRequest(input.prompt) ? 'write' : classifyIntent(input.prompt)
+    : writingPacing === 'explicit_writing' && boundedSceneRequest(input.prompt) ? 'write' : classifyIntent(input.prompt, input.researchAdmission === 1)
   const minimumChineseCharacters = intent === 'review' || intent === 'research_analysis' ? explicitReportMinimum(input.prompt) : undefined
   const requiresStructureValidation = intent === 'structure' || /(?:续写|写完|补完|完成|写到).{0,12}第?[一二两三四五六七八九十百千0-9]+卷|第?[一二两三四五六七八九十百千0-9]+卷.{0,12}(?:续写|写完|补完|完成)/.test(input.prompt)
   const protectsEarlierContent = /(不|不要|不得|不能|禁止).{0,8}(改动|修改|重写|影响).{0,8}(前面|此前|已有|之前)|保持.{0,8}(前面|此前|已有|之前).{0,8}不变/.test(input.prompt)
@@ -183,7 +200,8 @@ export function buildTaskSpec(input: {
     intent,
     controlPolicy: 'until_completion',
     ...(writingPacing ? { writingPacing } : {}),
-    researchBudget: /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt) ? 'extended' : 'standard',
+    researchBudget: intent === 'research_analysis' && input.researchAdmission === 1 && externalCraftResearch(input.prompt)
+      || /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt) ? 'extended' : 'standard',
     scope: { novelId: input.novelId, chapterIds, selection, ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
       ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}),
       ...(input.localEditProtocol ? { localEditProtocol: input.localEditProtocol } : {}) },
@@ -221,7 +239,7 @@ export function buildTaskSpec(input: {
 export function renderTaskSpec(spec: TaskSpec): string {
   if (spec.intent === 'research_analysis') {
     const budget = spec.researchBudget === 'extended' ? '最多5次搜索、8次页面获取' : '最多2次搜索、2次页面获取'
-    return `[系统] 本轮只读研究契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n只读取资料并交付分析；不得创建或改写章节、卷、作品、记忆、封面或派生写作窗口，历史写作指令不构成本轮授权。正文不可读或覆盖不足必须说明缺失，不能虚称全书读完。按照用户要求完整输出报告，不套用写作任务的简短收尾规则。复杂任务可维护本轮真实待办，无待办不补建已完成清单。\n联网预算：${budget}，缓存续读不消耗获取额度；连续两次读取失败后停止新增联网，保留已有证据并说明限制。普通分析不自行扩展到影视化、销量或结局争议。用户指定外部平台作品时直接搜索官方来源，不先搜索本平台作品库。优先官方作品页，再沿真实章节链接读取；书评、新闻、简介只能作为对应类型的资料，不是原著正文。\n预期交付：${spec.expectedOutputs.map(item => item.description).join('；')}。`
+    return `[系统] 本轮只读研究契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n只读取资料并交付分析；不得创建或改写章节、卷、作品、记忆、封面或派生写作窗口，历史写作指令不构成本轮授权。正文不可读或覆盖不足必须说明缺失，不能虚称全书读完。按照用户要求完整输出报告，不套用写作任务的简短收尾规则。复杂任务可维护本轮真实待办，无待办不补建已完成清单。\n联网预算：${budget}，缓存续读不消耗获取额度；连续两次读取失败后停止新增联网，保留已有证据并说明限制。普通分析不自行扩展到影视化、销量或结局争议。用户指定外部平台作品时直接搜索官方来源，不先搜索本平台作品库。\n取证顺序：1）用作品名/作者及官方域名定向搜索；未指定书时先选定一本有公开章节的作品，核实官方作品页的书名和作者，不把平台首页当作品页。2）沿搜索或已读目录实际返回的章节链接获取公开正文，不猜链接。3）按返回的contentRef/revision和范围续读样本，记录章节、来源URL、实际覆盖与短引文。4）仅依据读到的正文分析写作手法、叙事选择与效果，明确样本局限。书评、新闻、简介、视频和搜索摘要只能作为各自类型资料，不能替代原著正文；没有读到章节正文时交付缺失说明，不能编造作品手法。8页额度、目录或链接清单都不等于全书阅读完成。\n预期交付：${spec.expectedOutputs.map(item => item.description).join('；')}。`
   }
   const pacing = spec.writingPacing === 'conversation_only'
     ? '\n本轮是普通对话：直接回应当前任务的原始问候或问题；作品上下文只作背景，不代表写作授权，不继续其他窗口的创作、待办或历史计划。任务中止后仍回应该原始问题，不能将“继续”解释为继续写作品。'

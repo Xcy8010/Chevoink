@@ -8,6 +8,21 @@ function pending(overrides: Partial<ChapterReviewReadiness> = {}): ChapterReview
     requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'compile' } }], ...overrides }
 }
 describe('server review fallback', () => {
+  it('directs final pure advice to exact retention instead of inviting another manuscript proposal', () => {
+    const ref = { source: 'quality' as const, reportId: 'q', findingId: 'f' }
+    const state = pending({ ready: true, quality: 'complete', requiredTools: [], decisionPending: true, requiredDecisions: [ref],
+      reviewCycle: { version: 1, phase: 'verification', baselineRevision: 3, edited: true, verificationStarted: true,
+        attemptedBaselineCount: 1, transitionCount: 1, findings: [{ ...ref, relation: 'new_advisory', baselineRef: null }] } })
+    const guidance = currentReviewNextStepGuidance(projectCurrentReviewNextStep(state))
+    expect(guidance).toContain('不调用 chapter_edit_range、chapter_write 或 chapter_append 追改')
+    expect(guidance).toContain('source、reportId、findingId、reason')
+    expect(guidance).toContain('只有另有精确原始义务或当前真实错误证据时')
+    expect(guidance).not.toContain('在原授权内精确应用或')
+    expect(currentReviewNextStepGuidance(projectCurrentReviewNextStep({ ...state, selectionOnly: true }))).toContain('不得使用 chapter_write')
+    const required = currentReviewNextStepGuidance(projectCurrentReviewNextStep({ ...state, mustPassPending: true, qualityErrorCount: 1 }))
+    expect(required).toContain('不能替代硬通过要求')
+    expect(required).toContain('按证据合法修改后复核')
+  })
   it('unifies legacy projection and projects complete current strict refs separately from automatic candidates', () => {
     expect(projectCurrentReviewNextStep(pending())).toMatchObject({ state: 'check_required', phase: 'assessment' })
     const refs = Array.from({ length: 10 }, (_, i) => ({ source: 'quality' as const, reportId: 'q', findingId: `f${i}` }))

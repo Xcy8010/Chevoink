@@ -223,6 +223,8 @@ describe('严谨创作自动落实质量建议', () => {
     guard.readiness.mockResolvedValue({ chapterId: 'c', ready: true, reviewCycle: { edited: true }, qualityPassRequired: false, mustPassPending: false })
     const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(result.output).toContain('当前属于最终核验的质量建议')
+    expect(result.output).toContain('不要为这些纯建议再调用正文写入工具')
+    expect(result.output).toContain('source、reportId、findingId、reason')
     expect(result.output).toContain('逐项写明保留原因')
     expect(f.reserve).not.toHaveBeenCalled()
     expect(f.model).not.toHaveBeenCalled()

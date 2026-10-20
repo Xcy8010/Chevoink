@@ -5,6 +5,11 @@ import { webSearchTool } from '../../api/lib/agent/tools/search-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 const mocks = vi.hoisted(() => ({ search: vi.fn(), charge: vi.fn(), configuration: vi.fn(), refund: vi.fn(), refundState: vi.fn(), reconcile: vi.fn() }))
+// Provider POSTs use package fetch/Agent; fallback HTML uses global fetch.
+// Keep both entrypoints inside the same offline response fixtures.
+vi.mock('undici', async original => ({ ...await original<typeof import('undici')>(),
+  fetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args),
+}))
 vi.mock('../../api/lib/billing/web-tool-calls.js', () => ({
   findWebToolCallOutcome: vi.fn(async () => null), saveWebToolCacheOutcome: vi.fn(async () => {}),
   executeWebToolCall: mocks.charge, refundCancelledWebToolCall: mocks.refund,

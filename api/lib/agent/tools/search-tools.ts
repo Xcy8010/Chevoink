@@ -80,7 +80,7 @@ export const webSearchTool = defineTool({
   name: 'web_search',
   title: '联网搜索',
   description:
-    '当作者明确要求联网搜索/查资料或需要核对外部事实时使用；作品内部设定用memory_search。普通任务最多2次搜索，明确深度研究最多5次，以本轮冻结预算为准。先定位官方作品页并核对书名、作者；摘要不足再用web_read读最相关1-2个来源。不要为了耗尽预算扩展销量、影视化等未要求的话题；失败、无新证据或预算用尽后停止联网并说明缺失。',
+    '当作者明确要求联网搜索/查资料或需要核对外部事实时使用；作品内部设定用memory_search。普通任务最多2次搜索，深度研究或明确联网取样分析写作手法的研究任务最多5次，以本轮冻结预算为准。先用书名/作者与官方域名定向定位作品页；未指定书时先选一本有公开章节的作品。平台首页不是作品页，摘要不是正文；沿返回的真实章节链接用web_read取样。不为耗尽预算扩展未要求的话题；无新证据或预算用尽后停止并说明缺失。',
   parameters: webSearchParameters,
   permission: { plan: 'allow', build: 'allow', review: 'allow' },
   readOnly: true,
@@ -244,7 +244,7 @@ export const webReadTool = defineTool({
   name: 'web_read',
   title: '网页深读',
   description:
-    '读取公开网页并核验质量，单次返回最多6000字符；用contentRef、revision、offset续读缓存，不重复获取或收费。普通任务最多获取2页，明确深度研究最多8页；连续两次失败即停止新增联网。官方作品页是简介/目录，不是章节正文；书评和新闻也不是原著。仅沿真实链接读取，不猜地址；登录、付费、验证、乱码时如实停止，不得声称读完。',
+    '读取公开网页并核验质量，单次返回最多6000字符；用contentRef、revision、offset续读缓存，不重复获取或收费。普通任务最多获取2页，深度研究或明确联网取样分析写作手法的研究任务最多8页，以冻结预算为准；连续两次失败即停止新增联网。官方作品页是简介/目录，平台首页、书评、新闻、视频、摘要均不能当章节正文。只沿真实链接读取；记录实际章节、范围和来源，没有正文不编造手法，样本不等于全书。登录、付费、验证、乱码时如实停止。',
   parameters: webReadParameters,
   permission: { plan: 'allow', build: 'allow', review: 'allow' },
   readOnly: true,
