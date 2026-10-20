@@ -8,9 +8,14 @@ import iconv from 'iconv-lite'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 const transport = vi.hoisted(() => vi.fn())
+vi.mock('../../api/lib/billing/web-tool-calls.js', () => ({
+  findWebToolCallOutcome: vi.fn(async () => null), saveWebToolCacheOutcome: vi.fn(async () => {}),
+  executeWebToolCall: vi.fn(async (_ctx, _kind, _request, _paid, dispatch) => dispatch()),
+  refundCancelledWebToolCall: vi.fn(async () => {}),
+}))
 vi.mock('../../api/lib/tool-model-config.js', async original => ({ ...await original<object>(), getToolModelRuntime: vi.fn(async () => null) }))
 const stored = vi.hoisted(() => ({ page: null as import('../../api/lib/web-reader-service.js').WebReadResult | null,
-  find: vi.fn(), failure: vi.fn(), recordFailure: vi.fn() }))
+  find: vi.fn(), failure: vi.fn(), recordFailure: vi.fn(), save: vi.fn() }))
 // Transport/quality unit cases isolate storage; task ACL and immutable windows
 // are exercised against real PostgreSQL in agent-research-sources.test.ts.
 vi.mock('../../api/lib/agent/research-sources.js', async original => ({
@@ -28,6 +33,7 @@ vi.mock('../../api/lib/agent/research-sources.js', async original => ({
   getResearchReadFailure: stored.failure,
   recordResearchReadFailure: stored.recordFailure,
   saveResearchContent: async (_scope: unknown, _source: string, page: import('../../api/lib/web-reader-service.js').WebReadResult) => {
+    await stored.save()
     stored.page = page
     return { id: 'fixture-content', revision: 'a'.repeat(64) }
   },
@@ -52,6 +58,7 @@ async function fixtureLookup(_host: string, options?: number | dns.LookupOptions
 }
 beforeEach(() => {
   stored.find.mockReset().mockResolvedValue(null)
+  stored.save.mockReset()
   stored.failure.mockReset().mockResolvedValue(null)
   stored.recordFailure.mockReset().mockResolvedValue(undefined)
   env.webReaderFallback = 'off'
@@ -62,6 +69,15 @@ beforeEach(() => {
 afterEach(() => { env.webReaderFallback = originalFallback; env.webReaderFirecrawlApiKey = originalFirecrawlKey; vi.restoreAllMocks(); vi.unstubAllGlobals(); transport.mockReset() })
 
 describe('web_read trustworthy outcomes', () => {
+  it('refunds a cancellation arriving after fetch completes while saved content is being persisted', async () => {
+    const { refundCancelledWebToolCall } = await import('../../api/lib/billing/web-tool-calls.js')
+    const controller = new AbortController()
+    const context = { ...ctx(), signal: controller.signal }
+    transport.mockResolvedValueOnce(new Response(article.repeat(15), { headers: { 'content-type': 'text/plain; charset=utf-8' } }))
+    stored.save.mockImplementationOnce(async () => { controller.abort(new Error('late fetch stop')) })
+    await expect(webReadTool.execute(context, { url: 'https://example.com/chapter' })).rejects.toThrow('late fetch stop')
+    expect(refundCancelledWebToolCall).toHaveBeenCalledWith(context, 'fetch', { url: 'https://example.com/chapter', sourceId: null, refresh: false })
+  })
   it('recognizes a Douban security redirect and never sends it to a hosted reader', async () => {
     env.webReaderFallback = 'jina'
     transport.mockResolvedValueOnce(new Response('', { status: 302, headers: { location: 'https://sec.douban.com/c?r=article' } }))

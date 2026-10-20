@@ -1250,6 +1250,34 @@ model CreditRefundIntent {
   @@map("credit_refund_intents")
 }
 
+/// Frozen fixed-price dispatch receipt. Unresolved requests must never be redispatched.
+model WebToolCall {
+  id            String @id @db.VarChar(64)
+  runId         String @map("run_id") @db.VarChar(64)
+  requestHash   String @map("request_hash") @db.VarChar(64)
+  kind          String @db.VarChar(16)
+  amountMilli   Int @map("amount_milli")
+  multiplierBps Int @map("multiplier_bps")
+  status        String @default("dispatched") @db.VarChar(24)
+  outcome       Json?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  run           AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@map("web_tool_calls")
+}
+
+/// Only original public multipliers, no credentials or configuration snapshots.
+model WebToolPriceMigration {
+  key                 String @id @db.VarChar(64)
+  previousMultiplier  Int @map("previous_multiplier")
+  previousUpdatedAt   DateTime @map("previous_updated_at")
+  appliedAt           DateTime @map("applied_at")
+
+  @@map("web_tool_price_migration_20261020")
+}
+
 model ReferralCode {
   userId      String               @id @map("user_id") @db.VarChar(64)
   code        String               @unique @db.VarChar(24)
@@ -1709,6 +1737,7 @@ model AgentRun {
   artifacts          AgentArtifact[]
   researchSources    AgentResearchSource[]
   researchRequests   AgentResearchRequest[]
+  webToolCalls       WebToolCall[]
   memoryEntries      ProjectMemoryEntry[]
   messages           AgentMessage[]
   events             AgentRunEvent[]

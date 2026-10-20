@@ -19,6 +19,7 @@ import { presentModelRoutes, saveModelRoutes } from './model-route-pool.js'
 import type { ModelRouteInput } from '../../shared/contracts/model-routes.js'
 import { clearToolModelRuntimeCache } from './tool-model-config.js'
 import { webToolEndpoint } from './web-tool-provider.js'
+import { webToolChargeMilli } from '../../shared/web-tool-pricing.js'
 
 const MILLI = 1000
 
@@ -303,6 +304,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
         id: model.id, tier: model.tier, sortOrder: model.sortOrder, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
         modelName: fallback?.modelName ?? model.modelName, baseUrl: fallback?.baseUrl ?? model.baseUrl, multiplier: effectiveModelMultiplier(model) / 10_000,
         freePromotion: readModelPromotion(model.metadata),
+        ...(modelKind === 'web_search' || modelKind === 'web_fetch' ? { perCallCredits: webToolChargeMilli(model.multiplierBps) / MILLI } : {}),
         enabled: model.enabled || Boolean(fallback), selectable: model.selectable, isDefault: model.isDefault,
         apiKeyConfigured: Boolean(model.apiKeyCiphertext) || Boolean(fallback?.apiKeyConfigured), requestCount: row?._count._all ?? 0,
         requestTokens: row?._sum.requestTokens ?? 0, responseTokens: row?._sum.responseTokens ?? 0,

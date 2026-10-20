@@ -2,7 +2,7 @@ import type { CreditLedgerItem } from '../../../shared/contracts'
 
 /** Credits 记录来源文案：与后端 ledger sourceType 一一对应 */
 export const SOURCE_LABELS: Record<string, string> = {
-  model_tokens: '文本模型', image_generation: '生图模型', web_search: '联网搜索', view_image: '查看图片',
+  model_tokens: '文本模型', image_generation: '生图模型', web_search: '联网搜索', web_fetch: '网页抓取', view_image: '查看图片',
   referral_inviter: '邀请奖励', referral_invitee: '受邀奖励', admin_reset: '管理员重置', admin_reset_all: '管理员全体重置',
 }
 

@@ -111,6 +111,7 @@ export default function AccountBillingPage() {
           <header>
             <h1 className="text-2xl font-semibold tracking-[-.02em]">我的账单</h1>
             <p className="mt-2 text-sm text-[var(--text-secondary)]">Credits 消耗与获得按 UTC+8 自然月汇总，展开月份可查看逐条明细。</p>
+            <p className="mt-2 text-xs leading-5 text-[var(--text-secondary)]">联网搜索与供应商网页抓取分别按成功请求计费：每次基础 2 Credits × 各自工具倍率。缓存复用、网页直读、失败、超时及空搜索不收工具费；预扣会退回。模型阅读结果的 Token 按所选模型另计。</p>
           </header>
           <section className="mt-8 grid gap-4 sm:grid-cols-3">
             <article className="rounded-[16px] border border-[#e9e9e6] bg-white p-5 dark:border-[var(--border-subtle)] dark:bg-[var(--surface-default)]">

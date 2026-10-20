@@ -38,7 +38,7 @@ async function fixture(work: (context: GoalExecutionContext) => Promise<void>, e
 }
 
 describe.skipIf(!dbAvailable)('goal fixed-fee ledger integration', () => {
-  it.each(['image_generation', 'web_search'])('counts %s once and refunds after cancellation without reopening the goal', async sourceType => {
+  it.each(['image_generation', 'web_search', 'web_fetch'])('counts %s once and refunds after cancellation without reopening the goal', async sourceType => {
     await fixture(async context => {
       const key = `goal-fixed:${randomUUID()}`
       const input = { userId: context.userId, amountMilli: 2000, kind: 'usage', sourceType, idempotencyKey: key }

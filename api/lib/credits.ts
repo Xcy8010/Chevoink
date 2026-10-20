@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 
 import { Prisma, type CreditLedgerEntry, type CreditAccount, type CreditSystemSetting } from '@prisma/client'
 import { z } from 'zod'
+import { webToolRefundEvidenceSchema } from './billing/web-tool-refund.js'
 import { effectiveModelMultiplier, readModelPromotion } from '../../shared/model-promotion.js'
 
 import { isBuiltInModelTier, isServerModelTier, taskSpecSchema } from '../../shared/contracts/index.js'
@@ -901,7 +902,16 @@ export async function reconcileCreditRefunds(input: { limit?: number; userId?: s
         && searchRefundEvidenceSchema.safeParse(intent.evidence).success
       const validImage = intent.reason === 'image_generation_unavailable' && intent.originalEntry.sourceType === 'image_generation'
         && imageRefundEvidenceSchema.safeParse(intent.evidence).success
-      if (!validSearch && !validImage) throw new Error('Unsupported refund intent')
+      const webEvidence = webToolRefundEvidenceSchema.safeParse(intent.evidence)
+      const metadata = intent.originalEntry.metadata
+      const webReceipt = intent.reason === 'web_tool_no_billable_result' && webEvidence.success
+        ? await prisma.webToolCall.findUnique({ where: { id: webEvidence.data.callId } }) : null
+      const validWebTool = webReceipt && webReceipt.status !== 'dispatched'
+        && intent.originalEntry.sourceType === `web_${webReceipt.kind}` && webReceipt.runId === intent.originalEntry.referenceId
+        && webReceipt.amountMilli === -intent.originalEntry.deltaMilli && webReceipt.multiplierBps === intent.originalEntry.multiplierBps
+        && metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+        && metadata.webToolCallId === webReceipt.id && metadata.requestHash === webReceipt.requestHash
+      if (!validSearch && !validImage && !validWebTool) throw new Error('Unsupported refund intent')
       await refundCreditCharge(intent.originalEntry.userId, intent.originalEntry.idempotencyKey, intent.reason)
       settled++
     } catch {

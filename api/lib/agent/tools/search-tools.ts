@@ -6,11 +6,11 @@ import { webToolEndpoint } from '../../web-tool-provider.js'
 
 import { readPublicWebPage } from '../../web-reader-service.js'
 import { assertWebSearchConfiguration, searchWeb, WebSearchError } from '../../web-search-service.js'
-import { consumeCredits, WEB_SEARCH_CALL_MILLI, recordSearchRefundIntent, getSearchRefundState, reconcileCreditRefunds } from '../../credits.js'
+import { getSearchRefundState } from '../../credits.js'
+import { executeWebToolCall, findWebToolCallOutcome, saveWebToolCacheOutcome, refundCancelledWebToolCall } from '../../billing/web-tool-calls.js'
 import { DataAccessError } from '../../prisma.js'
 import type { WebSearchOutcome } from '../../web-search-service.js'
 import { getCachedWebSearch, setCachedWebSearch } from '../permissions.js'
-import { withoutGoalEffects } from '../goal-context.js'
 import { defineTool } from './types.js'
 import type { ToolContext } from './types.js'
 import { registerResearchSource, registerResearchSources, resolveResearchSource, saveResearchContent, readResearchContent,
@@ -89,20 +89,23 @@ export const webSearchTool = defineTool({
     // Count and provider/configuration changes are different searches. The
     // credential fingerprint stays internal; no key is returned or logged.
     const normalizedQuery = normalizeSearchQuery(args.query)
-    const configured = await getToolModelRuntime('tool:web-search')
-    assertWebSearchConfiguration(configured, args.query)
+    const request = { query: normalizedQuery, count: args.maxResults }
+    const previous = await findWebToolCallOutcome<WebSearchOutcome>(ctx, 'search', request)
+    const configured = previous ? null : await getToolModelRuntime('tool:web-search')
+    if (!previous) assertWebSearchConfiguration(configured, args.query)
     ctx.signal.throwIfAborted()
     const cacheKey = createHash('sha256').update(JSON.stringify({ version: 1, userId: ctx.userId,
       query: normalizedQuery, count: args.maxResults, provider: env.webSearchProvider,
       bochaConfigured: env.webSearchBochaApiKeyConfigured, bochaKey: env.webSearchBochaApiKey, configured })).digest('hex')
-    const cached = (getCachedWebSearch(ctx.runId, cacheKey) as WebSearchOutcome | undefined)
+    const cached = previous ?? (getCachedWebSearch(ctx.runId, cacheKey) as WebSearchOutcome | undefined)
       ?? await findResearchSearchOutcome(ctx, cacheKey)
     const chargeKey = `web-search:${ctx.runId}:${ctx.callId}`
-    if (env.webSearchProvider === 'disabled') return { outcome: 'failed', output: '联网搜索已禁用，本次未请求、未收费。', summary: '联网搜索已禁用' }
+    if (!previous && env.webSearchProvider === 'disabled') return { outcome: 'failed', output: '联网搜索已禁用，本次未请求、未收费。', summary: '联网搜索已禁用' }
     if (!cached && await getSearchRefundState(ctx.userId, chargeKey)) {
       return { outcome: 'failed', output: '此搜索调用已经失败并进入退款流程，未重复请求或扣费。请核对来源或提供有权使用的材料。', summary: '原搜索失败，未重复执行' }
     }
     ctx.signal.throwIfAborted()
+    if (cached && !previous) await saveWebToolCacheOutcome(ctx, 'search', request, cached)
 
     // 搜索预算：超出额度直接回填，防止循环滥用
     if (!cached && !await reserveResearchRequest(ctx, 'search', cacheKey)) {
@@ -118,21 +121,14 @@ export const webSearchTool = defineTool({
       if (!cached) await settleResearchRequest(ctx, 'released')
       ctx.signal.throwIfAborted()
     }
+    let dispatched = false
     try {
-      if (!cached) {
-        await consumeCredits({
-          userId: ctx.userId,
-          amountMilli: WEB_SEARCH_CALL_MILLI,
-          kind: 'usage',
-          sourceType: 'web_search',
-          idempotencyKey: chargeKey,
-          referenceId: ctx.runId,
-          modelTier: 'speed',
-          metadata: { query: normalizedQuery },
-        })
-        await settleResearchRequest(ctx, 'consumed')
-      }
-      const outcome = cached ?? (await searchWeb(args.query, args.maxResults, ctx.signal, configured))
+      const paidProvider = Boolean(configured) || env.webSearchProvider === 'bocha'
+        || (env.webSearchProvider === 'auto' && env.webSearchBochaApiKeyConfigured)
+      const outcome = cached ?? await executeWebToolCall(ctx, 'search', request, paidProvider,
+        async () => { dispatched = true; await settleResearchRequest(ctx, 'consumed'); return searchWeb(args.query, args.maxResults, ctx.signal, configured) },
+        result => result.results.length === 0 ? 'empty'
+          : result.provider === 'bocha' || result.provider === 'deepseek' ? 'billable' : 'fallback')
       if (!cached) await saveResearchSearchOutcome(ctx, outcome)
       ctx.signal.throwIfAborted()
 
@@ -163,16 +159,13 @@ export const webSearchTool = defineTool({
         display: { kind: 'webSearch', query: args.query, provider: outcome.provider, results: outcome.results },
       }
     } catch (error) {
+      if (dispatched && ctx.signal.aborted) await refundCancelledWebToolCall(ctx, 'search', request)
+      if (!cached && ctx.signal.aborted) await settleResearchRequest(ctx, 'released')
       // Wallet integrity/idempotency errors use CREDIT_, quota errors use
       // CREDITS_. Neither is a supplier outage or grounds for an automatic refund.
       if (error instanceof DataAccessError && /^CREDITS?_/.test(error.code)) {
         if (!cached) await settleResearchRequest(ctx, 'released')
         throw error
-      }
-      if (!cached && error instanceof WebSearchError && error.attempts.length && error.attempts.every(attempt => ['failed', 'aborted'].includes(attempt.outcome))) {
-        await withoutGoalEffects(() => recordSearchRefundIntent(ctx.userId, chargeKey, { attempts: error.attempts }))
-        // Intent survives any settlement failure; the bounded server sweep retries it.
-        await withoutGoalEffects(() => reconcileCreditRefunds({ userId: ctx.userId, limit: 10 })).catch(() => undefined)
       }
       ctx.signal.throwIfAborted()
       // Only expose bounded protocol facts, never upstream response bodies,
@@ -262,63 +255,82 @@ export const webReadTool = defineTool({
       ctx.signal.throwIfAborted()
       return presentSavedResearchWindow(ctx, page, args.linksOffset !== undefined)
     }
-    const registered = args.sourceId ? await resolveResearchSource(ctx, args.sourceId) : await findResearchSource(ctx, args.url!)
-    if (!registered && args.url) await assertResearchUrlProvenance(ctx, args.url)
-    if (registered && !args.refresh) {
-      const saved = await findSavedResearchContent(ctx, registered.id)
-      if (saved) {
-        ctx.signal.throwIfAborted()
-        const visible = await presentSavedResearchWindow(ctx, await readResearchContent(ctx, { contentRef: saved.id, revision: saved.revision, limit: WEB_READ_TEXT_MAX }))
-        visible.output = '复用本任务已保存版本，本次未重新联网；如确需检查更新才使用refresh=true。\n' + visible.output
-        return visible
+    const request = { url: args.url ?? null, sourceId: args.sourceId ?? null, refresh: args.refresh ?? false }
+    let dispatched = false
+    try {
+      const previous = await findWebToolCallOutcome<Awaited<ReturnType<typeof readPublicWebPage>> | { cachedContentRef: string; cachedRevision: string }>(ctx, 'fetch', request)
+      if (previous && 'cachedContentRef' in previous) {
+        return presentSavedResearchWindow(ctx, await readResearchContent(ctx, { contentRef: previous.cachedContentRef, revision: previous.cachedRevision, limit: WEB_READ_TEXT_MAX }))
       }
-    }
-    const cachedFailure = registered ? await getResearchReadFailure(ctx, registered.id) : null
-    ctx.signal.throwIfAborted()
-    if (cachedFailure) {
-      throw new DataAccessError(429, cachedFailure.code,
-        `此来源上次读取失败（${cachedFailure.code}），${cachedFailure.retryAt}前不重复访问。本次未发起网络请求、不计为新读取；保留已取得证据，可核对其他真实来源，不要换Reader或出口绕过访问限制。`)
-    }
-    const source = registered ?? await registerResearchSource(ctx, args.url!)
-    const configuredFetch = await getToolModelRuntime('tool:web-fetch')
-    if (configuredFetch) webToolEndpoint(configuredFetch, 'fetch')
-    if (!await reserveResearchRequest(ctx, 'read', createHash('sha256').update(JSON.stringify({ version: 2, url: source.canonicalUrl,
-      configuredFetch, fallback: env.webReaderFallback })).digest('hex'))) {
-      throw new DataAccessError(429, 'WEB_READ_BUDGET', '网页读取预算已用尽，本次未读取。保留已获得的证据，说明剩余工作；不要继续重试或把缺失内容当作已读。')
-    }
-    if (ctx.signal.aborted) {
-      await settleResearchRequest(ctx, 'released')
+      const registered = args.sourceId ? await resolveResearchSource(ctx, args.sourceId) : await findResearchSource(ctx, args.url!)
+      if (!registered && args.url) await assertResearchUrlProvenance(ctx, args.url)
+      if (!previous && registered && !args.refresh) {
+        const saved = await findSavedResearchContent(ctx, registered.id)
+        if (saved) {
+          ctx.signal.throwIfAborted()
+          await saveWebToolCacheOutcome(ctx, 'fetch', request, { cachedContentRef: saved.id, cachedRevision: saved.revision })
+          const visible = await presentSavedResearchWindow(ctx, await readResearchContent(ctx, { contentRef: saved.id, revision: saved.revision, limit: WEB_READ_TEXT_MAX }))
+          visible.output = '复用本任务已保存版本，本次未重新联网；如确需检查更新才使用refresh=true。\n' + visible.output
+          return visible
+        }
+      }
+      const cachedFailure = !previous && registered ? await getResearchReadFailure(ctx, registered.id) : null
       ctx.signal.throwIfAborted()
-    }
-    await settleResearchRequest(ctx, 'consumed')
-    const result = await readPublicWebPage(source.canonicalUrl, ctx.signal, configuredFetch)
-    await recordResearchReadOutcome(ctx, result.status === 'ok')
-    ctx.signal.throwIfAborted()
-    if (result.status !== 'ok') {
-      await recordResearchReadFailure(ctx, source.id, result)
-      const messages: Record<string, string> = {
-        TOOL_CONFIG_INCOMPLETE: '网页抓取配置不完整，本次未请求供应商。',
-        WEB_TOOL_PROVIDER_UNSUPPORTED: '网页抓取供应商不受支持，本次未请求供应商。',
-        WEB_TOOL_ENDPOINT_INVALID: '网页抓取端点配置无效，不能使用聊天接口地址。',
-        WEB_READ_PROVIDER_PROTOCOL_ERROR: '网页抓取供应商返回的内容格式不符合约定。',
-        WEB_READ_HOSTED_NO_CONTENT: '抓取供应商没有取得可用正文；这不能证明目标页面不存在。',
-        WEB_READ_PROVIDER_400: '网页抓取供应商拒绝了请求，请管理员检查工具配置。',
-        WEB_READ_PROVIDER_401: '网页抓取供应商鉴权失败，请管理员检查该工具密钥。',
-        WEB_READ_PROVIDER_402: '网页抓取供应商余额不足，请管理员检查供应商账户。',
-        WEB_READ_BLOCKED: '目标页面要求登录、付费、验证或拒绝访问；不得换代理或托管Reader绕过，请提供有权使用的材料。',
-        WEB_READ_NOT_FOUND: '目标地址返回404或410，本次未取得页面；这不能证明作品不存在。请核对官方目录中的真实链接，不要反复请求同一地址。',
-        WEB_READ_GARBLED: '正文包含大量不可读字形或乱码；不能猜字、分析情节或声称已经阅读全文。',
-        WEB_READ_INSUFFICIENT: '未提取到足够正文，可能仅有目录或页面框架；不能把导航、简介当作章节正文。',
-        WEB_READ_TOO_LARGE: '页面超过安全读取上限；已停止下载，请使用正常分页或有权提供的文件。',
-        WEB_READ_UNSAFE_URL: '地址未通过公网出网校验，本次未取得正文；不要尝试编码、别名或其他路径绕过。',
-        WEB_READ_RATE_LIMITED: '目标站点限流，请稍后按站点要求重试，不轮换出口绕过。',
-        WEB_READ_HOSTED_UNAVAILABLE: '托管Reader本次未取得合格正文；这不代表目标章节不存在。',
-        WEB_READ_HOSTED_TARGET_RESTRICTED: '目标链接可能携带私有签名或凭据，不能自动发送给第三方Reader。',
+      if (cachedFailure) {
+        throw new DataAccessError(429, cachedFailure.code,
+          `此来源上次读取失败（${cachedFailure.code}），${cachedFailure.retryAt}前不重复访问。本次未发起网络请求、不计为新读取；保留已取得证据，可核对其他真实来源，不要换Reader或出口绕过访问限制。`)
       }
-      throw new DataAccessError(result.retryable ? 503 : 422, result.code,
-        `[${result.code}] ${messages[result.code] ?? '本次读取未得到可验证的正文。'} 不得凭既有知识补造目标书情节或将本页计为已读。`)
+      const source = registered ?? await registerResearchSource(ctx, args.url!)
+      const configuredFetch = previous ? null : await getToolModelRuntime('tool:web-fetch')
+      if (configuredFetch) webToolEndpoint(configuredFetch, 'fetch')
+      if (!previous && !await reserveResearchRequest(ctx, 'read', createHash('sha256').update(JSON.stringify({ version: 2, url: source.canonicalUrl,
+        configuredFetch, fallback: env.webReaderFallback })).digest('hex'))) {
+        throw new DataAccessError(429, 'WEB_READ_BUDGET', '网页读取预算已用尽，本次未读取。保留已获得的证据，说明剩余工作；不要继续重试或把缺失内容当作已读。')
+      }
+      if (ctx.signal.aborted) {
+        await settleResearchRequest(ctx, 'released')
+        ctx.signal.throwIfAborted()
+      }
+      let result = previous
+      try {
+        result ??= await executeWebToolCall(ctx, 'fetch', request, Boolean(configuredFetch),
+          async () => { dispatched = true; await settleResearchRequest(ctx, 'consumed'); return readPublicWebPage(source.canonicalUrl, ctx.signal, configuredFetch) },
+          page => page.status !== 'ok' || !page.text.trim() ? 'failed' : page.provider === 'deepseek' ? 'billable' : 'fallback')
+      } catch (error) {
+        if (ctx.signal.aborted || (error instanceof DataAccessError && /^CREDITS?_/.test(error.code))) await settleResearchRequest(ctx, 'released')
+        throw error
+      }
+      if (!previous) await recordResearchReadOutcome(ctx, result.status === 'ok')
+      ctx.signal.throwIfAborted()
+      if (result.status !== 'ok') {
+        await recordResearchReadFailure(ctx, source.id, result)
+        const messages: Record<string, string> = {
+          TOOL_CONFIG_INCOMPLETE: '网页抓取配置不完整，本次未请求供应商。',
+          WEB_TOOL_PROVIDER_UNSUPPORTED: '网页抓取供应商不受支持，本次未请求供应商。',
+          WEB_TOOL_ENDPOINT_INVALID: '网页抓取端点配置无效，不能使用聊天接口地址。',
+          WEB_READ_PROVIDER_PROTOCOL_ERROR: '网页抓取供应商返回的内容格式不符合约定。',
+          WEB_READ_HOSTED_NO_CONTENT: '抓取供应商没有取得可用正文；这不能证明目标页面不存在。',
+          WEB_READ_PROVIDER_400: '网页抓取供应商拒绝了请求，请管理员检查工具配置。',
+          WEB_READ_PROVIDER_401: '网页抓取供应商鉴权失败，请管理员检查该工具密钥。',
+          WEB_READ_PROVIDER_402: '网页抓取供应商余额不足，请管理员检查供应商账户。',
+          WEB_READ_BLOCKED: '目标页面要求登录、付费、验证或拒绝访问；不得换代理或托管Reader绕过，请提供有权使用的材料。',
+          WEB_READ_NOT_FOUND: '目标地址返回404或410，本次未取得页面；这不能证明作品不存在。请核对官方目录中的真实链接，不要反复请求同一地址。',
+          WEB_READ_GARBLED: '正文包含大量不可读字形或乱码；不能猜字、分析情节或声称已经阅读全文。',
+          WEB_READ_INSUFFICIENT: '未提取到足够正文，可能仅有目录或页面框架；不能把导航、简介当作章节正文。',
+          WEB_READ_TOO_LARGE: '页面超过安全读取上限；已停止下载，请使用正常分页或有权提供的文件。',
+          WEB_READ_UNSAFE_URL: '地址未通过公网出网校验，本次未取得正文；不要尝试编码、别名或其他路径绕过。',
+          WEB_READ_RATE_LIMITED: '目标站点限流，请稍后按站点要求重试，不轮换出口绕过。',
+          WEB_READ_HOSTED_UNAVAILABLE: '托管Reader本次未取得合格正文；这不代表目标章节不存在。',
+          WEB_READ_HOSTED_TARGET_RESTRICTED: '目标链接可能携带私有签名或凭据，不能自动发送给第三方Reader。',
+        }
+        throw new DataAccessError(result.retryable ? 503 : 422, result.code,
+          `[${result.code}] ${messages[result.code] ?? '本次读取未得到可验证的正文。'} 不得凭既有知识补造目标书情节或将本页计为已读。`)
+      }
+      const saved = await saveResearchContent(ctx, source.id, result)
+      return await presentSavedResearchWindow(ctx, await readResearchContent(ctx, { contentRef: saved.id, revision: saved.revision, limit: WEB_READ_TEXT_MAX }))
+    } catch (error) {
+      if (dispatched && ctx.signal.aborted) await refundCancelledWebToolCall(ctx, 'fetch', request)
+      throw error
     }
-    const saved = await saveResearchContent(ctx, source.id, result)
-    return presentSavedResearchWindow(ctx, await readResearchContent(ctx, { contentRef: saved.id, revision: saved.revision, limit: WEB_READ_TEXT_MAX }))
   },
 })

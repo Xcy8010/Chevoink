@@ -5,6 +5,10 @@ import { webSearchTool } from '../../api/lib/agent/tools/search-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 const mocks = vi.hoisted(() => ({ search: vi.fn(), charge: vi.fn(), configuration: vi.fn(), refund: vi.fn(), refundState: vi.fn(), reconcile: vi.fn() }))
+vi.mock('../../api/lib/billing/web-tool-calls.js', () => ({
+  findWebToolCallOutcome: vi.fn(async () => null), saveWebToolCacheOutcome: vi.fn(async () => {}),
+  executeWebToolCall: mocks.charge, refundCancelledWebToolCall: mocks.refund,
+}))
 vi.mock('../../api/lib/web-search-service.js', async original => ({ ...await original<object>(), searchWeb: mocks.search }))
 vi.mock('../../api/lib/credits.js', () => ({ consumeCredits: mocks.charge, WEB_SEARCH_CALL_MILLI: 2000,
   recordSearchRefundIntent: mocks.refund, getSearchRefundState: mocks.refundState, reconcileCreditRefunds: mocks.reconcile }))
@@ -20,7 +24,7 @@ vi.mock('../../api/lib/agent/research-sources.js', async original => ({
 
 const originalProvider = env.webSearchProvider
 const originalKey = env.webSearchBochaApiKey
-beforeEach(() => { mocks.search.mockReset(); mocks.charge.mockReset(); mocks.configuration.mockReset().mockResolvedValue(null)
+beforeEach(() => { mocks.search.mockReset(); mocks.charge.mockReset().mockImplementation(async (_ctx, _kind, _request, _paid, dispatch) => dispatch()); mocks.configuration.mockReset().mockResolvedValue(null)
   mocks.refund.mockReset().mockResolvedValue({}); mocks.refundState.mockReset().mockResolvedValue(null); mocks.reconcile.mockReset().mockResolvedValue({ examined: 1, settled: 1 }) })
 afterEach(() => { env.webSearchProvider = originalProvider; env.webSearchBochaApiKey = originalKey; vi.unstubAllGlobals() })
 const context = (): ToolContext => ({ userId: 'fixture', novelId: 'fixture', chapterId: null, sessionId: 'fixture',
@@ -74,21 +78,21 @@ describe('search URL handoff to the model', () => {
     expect(mocks.search).not.toHaveBeenCalled()
     expect(mocks.refund).not.toHaveBeenCalled()
   })
-  it('keeps one charge for genuine empty results and creates a durable refund only for whole-service failure', async () => {
+  it('classifies empty results as free and deduplicates them while retaining the legacy refund replay guard', async () => {
     const ctx = context()
     mocks.search.mockResolvedValue({ provider: 'bocha', results: [] })
     await webSearchTool.execute(ctx, { query: '空查询', maxResults: 2 })
     await webSearchTool.execute({ ...ctx, callId: randomUUID() }, { query: '空查询', maxResults: 2 })
     expect(mocks.charge).toHaveBeenCalledOnce()
     expect(mocks.search).toHaveBeenCalledOnce()
-    expect(mocks.refund).not.toHaveBeenCalled()
+    expect(mocks.charge.mock.calls[0][5]({ provider: 'bocha', results: [] })).toBe('empty')
     const { WebSearchError } = await vi.importActual<typeof import('../../api/lib/web-search-service.js')>('../../api/lib/web-search-service.js')
     const attempts = [{ provider: 'bocha' as const, outcome: 'failed' as const, durationMs: 12 }]
     const failedCtx = { ...ctx, callId: randomUUID() }
     mocks.search.mockRejectedValue(new WebSearchError('unavailable', attempts))
     mocks.reconcile.mockRejectedValue(new Error('database temporarily unavailable'))
     await expect(webSearchTool.execute(failedCtx, { query: '不同查询', maxResults: 2 })).resolves.toHaveProperty('outcome', 'failed')
-    expect(mocks.refund).toHaveBeenCalledWith(ctx.userId, `web-search:${ctx.runId}:${failedCtx.callId}`, { attempts })
+    expect(mocks.charge).toHaveBeenLastCalledWith(failedCtx, 'search', { query: '不同查询', count: 2 }, expect.any(Boolean), expect.any(Function), expect.any(Function))
     mocks.refundState.mockResolvedValue('pending')
     await webSearchTool.execute(failedCtx, { query: '不同查询', maxResults: 2 })
     expect(mocks.search).toHaveBeenCalledTimes(2)
@@ -132,7 +136,7 @@ describe('search URL handoff to the model', () => {
     expect(mocks.search).toHaveBeenCalledOnce()
     expect(mocks.charge).toHaveBeenCalledOnce()
   })
-  it('persists refund evidence before propagating an attempted-search cancellation', async () => {
+  it('delegates attempted-search cancellation to the durable billing boundary and propagates the stop', async () => {
     const { WebSearchError } = await vi.importActual<typeof import('../../api/lib/web-search-service.js')>('../../api/lib/web-search-service.js')
     const controller = new AbortController()
     const ctx = { ...context(), signal: controller.signal }
@@ -142,14 +146,21 @@ describe('search URL handoff to the model', () => {
       throw new WebSearchError('搜索已取消', attempts)
     })
     await expect(webSearchTool.execute(ctx, { query: '目录', maxResults: 2 })).rejects.toThrow('author stopped')
-    expect(mocks.refund).toHaveBeenCalledWith(ctx.userId, `web-search:${ctx.runId}:${ctx.callId}`, { attempts })
-    expect(mocks.reconcile).toHaveBeenCalledOnce()
+    expect(mocks.charge).toHaveBeenCalledWith(ctx, 'search', { query: '目录', count: 2 }, expect.any(Boolean), expect.any(Function), expect.any(Function))
     expect(mocks.search).toHaveBeenCalledOnce()
+  })
+  it('refunds cancellation arriving after billing completes while research persistence is pending', async () => {
+    const { saveResearchSearchOutcome } = await import('../../api/lib/agent/research-sources.js')
+    const controller = new AbortController()
+    const ctx = { ...context(), signal: controller.signal }
+    mocks.search.mockResolvedValue({ provider: 'bocha', results: [] })
+    vi.mocked(saveResearchSearchOutcome).mockImplementationOnce(async () => { controller.abort(new Error('late stop')) })
+    await expect(webSearchTool.execute(ctx, { query: 'late cancellation', maxResults: 2 })).rejects.toThrow('late stop')
+    expect(mocks.refund).toHaveBeenCalledWith(ctx, 'search', { query: 'late cancellation', count: 2 })
   })
   it('delivers the same complete URL to observation and UI without guessing or dropping query parameters', async () => {
     const result = { title: '作品目录', url: 'https://example.com/chapter?id=19&page=2', source: 'example.com', snippet: '公开目录信息。' }
     mocks.search.mockResolvedValue({ provider: 'bocha', results: [result] })
-    mocks.charge.mockResolvedValue({ chargedMilli: 2000, remainingMilli: 10000, exhausted: false })
     const context: ToolContext = { userId: 'fixture', novelId: 'fixture', chapterId: null, sessionId: 'fixture',
       runId: randomUUID(), callId: randomUUID(), mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: vi.fn() }
     const output = await webSearchTool.execute(context, { query: '公开目录', maxResults: 6 })

@@ -9,7 +9,7 @@ import { readGoalExecutionControl } from './goal-execution-control.js'
 import { executionLimitReached } from './execution-control.js'
 
 const bindingSchema = z.object({ goalId: z.string(), runId: z.string() }).strict()
-export const isGoalFixedCharge = (sourceType: string) => sourceType === 'image_generation' || sourceType === 'web_search'
+export const isGoalFixedCharge = (sourceType: string) => sourceType === 'image_generation' || sourceType === 'web_search' || sourceType === 'web_fetch'
 
 /** Fixed fees use their real wallet receipt, independently of provider token
  * observations. The wallet and goal total commit together; no second debit. */
