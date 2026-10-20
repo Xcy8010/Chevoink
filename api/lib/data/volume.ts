@@ -94,28 +94,33 @@ async function rewriteChapterLayout(
   byVolume: Map<string, ChapterPlacement[]>,
 ) {
   const flattened = volumes.flatMap((volume) => byVolume.get(volume.id) ?? [])
+  const originals = new Map(flattened.map((chapter) => [chapter.id, chapter]))
+  const changedRows = buildStructureOrderRows(
+    volumes.map((volume) => ({ id: volume.id, chapterIds: (byVolume.get(volume.id) ?? []).map((item) => item.id) })),
+  ).flatMap((row) => {
+    const chapter = originals.get(row.chapterId)
+    if (!chapter) throw new Error(`chapter missing from structure layout: ${row.chapterId}`)
+    return chapter.volumeId !== row.volumeId || chapter.orderInVolume !== row.orderInVolume || chapter.orderIndex !== row.orderIndex
+      ? [{ row, chapter }]
+      : []
+  })
   // A newly created chapter already occupies a negative slot. Reordering must
   // use a disjoint range, including BOTH global and per-volume unique indexes.
   const temporaryFloor = flattened.reduce((minimum, chapter) => Math.min(minimum, chapter.orderIndex, chapter.orderInVolume), 0)
-  for (let index = 0; index < flattened.length; index += 1) {
-    await updateActiveChapter(tx, { id: flattened[index].id, revision: flattened[index].revision },
+  // Unchanged chapters already occupy their final slots. Only displaced rows
+  // need temporary slots; touching the others would change their updatedAt.
+  for (let index = 0; index < changedRows.length; index += 1) {
+    const { chapter } = changedRows[index]
+    await updateActiveChapter(tx, { id: chapter.id, revision: chapter.revision },
       { orderIndex: temporaryFloor - index - 1, orderInVolume: temporaryFloor - index - 1 })
   }
 
-  const rows = buildStructureOrderRows(
-    volumes.map((volume) => ({ id: volume.id, chapterIds: (byVolume.get(volume.id) ?? []).map((item) => item.id) })),
-  )
-  const originals = new Map(flattened.map((chapter) => [chapter.id, chapter]))
-  for (const row of rows) {
-    const chapter = originals.get(row.chapterId)
-    if (!chapter) throw new Error(`chapter missing from structure layout: ${row.chapterId}`)
-    const changed =
-      chapter.volumeId !== row.volumeId || chapter.orderInVolume !== row.orderInVolume || chapter.orderIndex !== row.orderIndex
+  for (const { row, chapter } of changedRows) {
     await updateActiveChapter(tx, { id: chapter.id, revision: chapter.revision }, {
       volumeId: row.volumeId,
       orderInVolume: row.orderInVolume,
       orderIndex: row.orderIndex,
-      revision: changed ? { increment: 1 } : undefined,
+      revision: { increment: 1 },
     })
   }
 }
