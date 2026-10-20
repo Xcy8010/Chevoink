@@ -108,6 +108,25 @@ describe('fresh issue quotations bound to separate local islands', () => {
     expect(freezeLocalEditBoundary('局部修订第3章。已确认本章有问题：“源短句”。“短句尾”，保持不变。', writing,
       [{ ...chapter, content: '前段。源短句尾。后段。' }], 2)).toMatchObject({ kind: 'needs_input', regions: [] })
   })
+  it.each(['修订“原短句', '修订"原短句', "修订'原短句", '修订“外“内”尾',
+    '修订第3章的“原短句', '修改第3章“原短句', '修订第3章。将“原短句'])(
+    'does not truncate an unclosed source quote into a different saved-body grant: %s', request => {
+      expect(freezeLocalEditBoundary(request, writing, [{ ...chapter, content: '前段。原短。外“内”。后段。' }], 2))
+        .toMatchObject({ kind: 'needs_input', regions: [] })
+    })
+  it.each(['修订“尾”。禁止修订“保护句尾', '修订“尾”。禁止修订"保护句尾',
+    "修订“尾”。禁止修订'保护句尾", '局部修订第3章。已确认本章有问题：“原短句'])(
+    'does not lose the final protected or issue character when its quote is unclosed: %s', request => {
+      expect(freezeLocalEditBoundary(request, writing, [{ ...chapter, content: '前段。保护句尾。原短。后段。' }], 2))
+        .toMatchObject({ kind: 'needs_input', regions: [] })
+    })
+  it.each(['修订第3章的“原短句”', '修订第3章参考文案中的“原短句”',
+    '替换第3章中的“原短句”', '第3章中的“原短句”替换',
+    '修订第3章。禁止修订“原短句”。', '修改第3章。“原短句”，保持不变。'])(
+    'does not discard an unresolved or protected local object and fall back to a chapter-wide grant: %s', request => {
+      expect(freezeLocalEditBoundary(request, writing, [{ ...chapter, content: '前段。原短句。后段。' }], 2))
+        .toMatchObject({ kind: 'needs_input', regions: [] })
+    })
   it('uses the frozen intent and resolved chapter identity after a volume-qualified admission', () => {
     const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt, authorWritingProtocol: 2, localEditProtocol: 1 })
     spec.scope.writingTargetProtocol = 2

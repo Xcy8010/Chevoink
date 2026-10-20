@@ -331,6 +331,52 @@ describe('fresh structured author-writing interpretation, protocol 2', () => {
     'keeps escaped, nested and ASCII quotation data inert: %s', prompt => {
       expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: null, hasAction: false, intent: null })
     })
+  it.each(['“原短句”', '「原短句」', '『原短句』', '‘原短句’', "'原短句'", '"原短句"',
+    '“外“内”尾”', '“外「内」尾”', '"外\\"内\\"尾"'])(
+    'proves complete source quotation boundaries at their actual UTF-16 delimiters: %s', raw => {
+      const prompt = `😀修订${raw}`, parsed = parseAuthorWritingRequest(prompt), quote = parsed.evidence.quoted[0]
+      expect(quote).toMatchObject({ start: 4, end: prompt.length, closed: true, contentStart: 5, contentEnd: prompt.length - 1 })
+      expect(prompt.slice(quote.contentStart, quote.contentEnd)).toBe(raw.slice(1, -1))
+      expect(parsed).toMatchObject({ range: null, hasAction: true, ambiguous: false, intent: 'revise' })
+      const source = parsed.evidence.targets[parsed.evidence.operations.find(operation => operation.accepted)!.targetIndices[0]]
+      expect(source.span).toEqual({ start: quote.start, end: quote.end })
+    })
+  it.each(['“原短句', '「原短句', '『原短句', '‘原短句', "'原短句", '"原短句',
+    '“外“内”尾', '“外「内」尾', '“外「内”尾', '"外\\"内\\"尾'])(
+    'never truncates an unclosed source quotation into a positive locator: %s', raw => {
+      const prompt = `修订${raw}`, parsed = parseAuthorWritingRequest(prompt), quote = parsed.evidence.quoted[0]
+      expect(quote).toMatchObject({ start: 2, end: prompt.length, closed: false, contentStart: 3, contentEnd: prompt.length })
+      expect(prompt.slice(quote.contentStart, quote.contentEnd)).toBe(raw.slice(1))
+      expect(parsed).toMatchObject({ range: null, hasAction: false, ambiguous: true, reasons: ['unclosed_source_quote'] })
+      expect(parsed.evidence.operations[0]).toMatchObject({ accepted: false, reason: 'unclosed_source_quote' })
+      expect(parsed.evidence.targets[parsed.evidence.operations[0].targetIndices[0]].span).toEqual({ start: quote.start, end: quote.end })
+    })
+  it.each(['“保护句尾', '「保护句尾', '『保护句尾', '‘保护句尾', "'保护句尾", '"保护句尾',
+    '“外“内”尾', '“外「内”尾', '"保护\\"句尾'])(
+    'retains an unclosed prohibition or protection as a diagnostic negative local object: %s', raw => {
+      for (const verb of ['禁止修订', '保留']) {
+        const prompt = `修订“尾”。${verb}${raw}`, parsed = parseAuthorWritingRequest(prompt)
+        const quote = parsed.evidence.quoted.at(-1)!
+        expect(quote).toMatchObject({ closed: false, end: prompt.length, contentEnd: prompt.length })
+        expect(prompt.slice(quote.contentStart, quote.contentEnd)).toBe(raw.slice(1))
+        const negative = parsed.evidence.operations.find(operation => operation.polarity === 'negative')!
+        expect(negative).toMatchObject({ accepted: false, kind: 'revise', reason: verb === '保留' ? 'protected' : 'negated' })
+        expect(negative.targetIndices.map(index => parsed.evidence.targets[index]).some(target => target.kind === 'local'
+          && target.span.start === quote.start && target.span.end === quote.end)).toBe(true)
+      }
+    })
+  it('keeps a malformed positive quote from inheriting a valid whole-chapter grant', () => {
+    const parsed = parseAuthorWritingRequest('修订第3章正文。修订“外“内”尾')
+    expect(parsed).toMatchObject({ range: null, ambiguous: true, reasons: ['unclosed_source_quote'] })
+    expect(parsed.evidence.operations.at(-1)).toMatchObject({ accepted: false, reason: 'unclosed_source_quote' })
+  })
+  it.each(['《合成书名》', '《合成书名', '```合成代码```', '```合成代码', '`合成代码`', '`合成代码'])(
+    'tracks content delimiters for titles and code without guessing a closing width: %s', raw => {
+      const quote = lexAuthorWritingRequest(raw).quoted[0], width = raw.startsWith('```') ? 3 : 1
+      const complete = raw.startsWith('《') ? raw.endsWith('》') : raw.length > width && raw.endsWith(raw.slice(0, width))
+      expect(quote).toMatchObject({ closed: complete, contentStart: width, contentEnd: raw.length - (complete ? width : 0) })
+      expect(raw.slice(quote.contentStart, quote.contentEnd)).toBe('合成' + (raw.startsWith('《') ? '书名' : '代码'))
+    })
   it('rejects operation overflow explicitly without persisting an oversized or partial grant', () => {
     const bounded = parseAuthorWritingRequest('修订第3章。'.repeat(1000))
     expect(bounded).toMatchObject({ range: { kind: 'range', start: 3, count: 1 }, ambiguous: false, hasAction: true })
@@ -355,4 +401,18 @@ describe('fresh structured author-writing interpretation, protocol 2', () => {
     expect(parseAuthorWritingRequest('请你'.repeat(2000) + '说明修改第3章')).toMatchObject({ hasAction: false, range: null })
     expect(parseAuthorWritingRequest('当前章节'.repeat(2000) + '中人物修改日期')).toMatchObject({ hasAction: false, range: null })
   })
+  it.each(['修订第3章的“原短句', '修改第3章“原短句', '修订第3章当前已存正文中的“原短句',
+    '修订第3章。将“原短句', '修订第3章。把“原短句', '修订第3章，“不完整对象',
+    '修订第3章。禁止修订“保护句尾', '修订第3章。禁止修改第3章的“保护句尾',
+    '修订第3章参考文案中的“原短句', '修订第3章中的参考原文“原短句',
+    '修订“尾”。禁止修订参考原文“保护句尾', '修订第3章并读取“不完整引用'])(
+    'does not drop an unresolved quotation role and keep a chapter-wide grant: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: null, ambiguous: true, reasons: expect.arrayContaining(['unclosed_source_quote']) })
+    })
+  it.each(['修订第3章。读取“参考数据未闭合', '修改第3章。检查“只读检查对象未闭合', '请阅读：“修改第3章'])(
+    'keeps a proven readonly quotation object from becoming author source authority: %s', prompt => {
+      const parsed = parseAuthorWritingRequest(prompt)
+      expect(parsed.reasons).not.toContain('unclosed_source_quote')
+      expect(parsed.evidence.operations.filter(operation => operation.accepted && operation.kind === 'revise')).toHaveLength(prompt.startsWith('请阅读') ? 0 : 1)
+    })
 })

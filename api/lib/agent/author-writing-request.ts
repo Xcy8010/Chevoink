@@ -2,7 +2,8 @@ import { chapterNumber, numeric, type RequestedWritingRange } from './writing-ta
 
 export type AuthorSpan = { start: number; end: number }
 export type AuthorClause = AuthorSpan & { text: string; masked: string; sentence: number }
-export type AuthorQuotedSpan = AuthorSpan & { kind: 'quotation' | 'title' | 'code'; role: 'unknown' }
+export type AuthorQuotedSpan = AuthorSpan & { kind: 'quotation' | 'title' | 'code'; role: 'unknown';
+  closed: boolean; contentStart: number; contentEnd: number }
 export type AuthorWritingTarget = { span: AuthorSpan; clauseSpan: AuthorSpan;
   kind: 'ordinal' | 'count' | 'relative' | 'same_target' | 'global' | 'local' | 'prose'; range: RequestedWritingRange | null;
   invalid?: boolean; contextual?: boolean }
@@ -50,17 +51,27 @@ export function lexAuthorWritingRequest(prompt: string): { masked: string; claus
     const opener = prompt.startsWith('```', index) ? '```' : prompt[index]
     const closer = opener === '```' ? opener : pairs[opener]
     if (!closer || opener === "'" && /[a-z0-9]/iu.test(prompt[index - 1] ?? '')) continue
-    let end = prompt.length, depth = 1, escaped = false
+    let end = prompt.length, contentEnd = prompt.length, closed = false, escaped = false
+    const stack = [{ opener, closer }]
     for (let at = index + opener.length; at < prompt.length; at++) {
       // Escaped ASCII delimiters and nested paired quotes remain inert data.
       if (escaped) { escaped = false; continue }
       if (prompt[at] === '\\') { escaped = true; continue }
-      if (prompt.startsWith(closer, at)) {
-        if (--depth === 0) { end = at + closer.length; break }
-        at += closer.length - 1
-      } else if (opener !== closer && prompt.startsWith(opener, at)) { depth++; at += opener.length - 1 }
+      const current = stack.at(-1)!
+      if (prompt.startsWith(current.closer, at)) {
+        stack.pop()
+        if (!stack.length) { closed = true; contentEnd = at; end = at + current.closer.length; break }
+        at += current.closer.length - 1
+      } else if (!current.opener.includes('`')) {
+        const nested = prompt.startsWith('```', at) ? '```' : prompt[at]
+        const nestedCloser = nested === '```' ? nested : pairs[nested]
+        if (nestedCloser && !(nested === "'" && /[a-z0-9]/iu.test(prompt[at - 1] ?? ''))) {
+          stack.push({ opener: nested, closer: nestedCloser }); at += nested.length - 1
+        }
+      }
     }
-    quoted.push({ start: index, end, kind: opener.includes('`') ? 'code' : opener === '《' ? 'title' : 'quotation', role: 'unknown' })
+    quoted.push({ start: index, end, kind: opener.includes('`') ? 'code' : opener === '《' ? 'title' : 'quotation', role: 'unknown',
+      closed, contentStart: index + opener.length, contentEnd })
     for (let at = index; at < end; at++) chars[at] = ' '
     index = end - 1
   }
@@ -283,7 +294,7 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
         }
       }
       const replacesSource = /^(?:替换|改为|改成|replace)$/iu.test(match[0]) || /^\s*(?:为|成)/u.test(after)
-      const sourceQuotes = kind !== 'revise' ? [] : lexical.quoted.filter(quote => quote.kind === 'quotation'
+      const sourceQuotes = kind !== 'revise' ? [] : lexical.quoted.filter(quote => (quote.kind === 'quotation' || !quote.closed)
         && (protecting && precedingClause?.sentence === clause.sentence && !precedingClause.masked.trim()
           && quote.start >= precedingClause.start && quote.end <= precedingClause.end
           || quote.start >= clause.start && quote.end <= clause.end && (protecting && quote.end <= start && /^\s*$/u.test(lexical.masked.slice(quote.end, start))
@@ -310,6 +321,7 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
       else if (assessed.has(index)) reason = 'assessment_predicate'
       else if (protecting) reason = 'protected'
       else if (polarity === 'negative') reason = 'negated'
+      else if (sourceQuotes.some(quote => !quote.closed)) reason = 'unclosed_source_quote'
       else if (kind === 'write' && /完成|finish|complete/iu.test(match[0]) && matches.slice(index + 1).some(next => reviewPattern.test(next[0]))
         && !/并|然后|后|再/u.test(after)) reason = 'review_wrapper'
       else if ((kind === 'write' || kind === 'revise') && nextMatch && reviewPattern.test(nextMatch[0])
@@ -320,6 +332,7 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
         && !bound.some(targetIndex => targets[targetIndex].kind === 'global')
         && !/[:：]|正文|草稿|稿件|问题/u.test(before + after)) reason = 'unbound_postposed_operation'
       if (reason === 'negated' && ['write', 'revise'].includes(kind)) exclusions.push(clause.text.trim())
+      if (reason === 'unclosed_source_quote') reasons.add(reason)
       const accepted = polarity === 'affirmative' && ['author_operation'].includes(reason)
       const operation: AuthorWritingOperation = { span: { start, end }, clauseSpan: spanOf(clause), kind, polarity, accepted, reason, targetIndices: bound }
       const governorIndex = assessed.get(index)
@@ -340,6 +353,44 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
         }
       }
     }
+  }
+  // Incomplete payloads cannot disappear merely because a chapter selector or
+  // an unfinished transformation sits between the verb and quotation. Only a
+  // proven read/review object is inert data; unknown roles keep the request
+  // ambiguous instead of leaving behind a whole-chapter mutation grant.
+  for (const quote of lexical.quoted.filter(quote => !quote.closed)) {
+    const clause = lexical.clauses.find(clause => clause.start <= quote.start && quote.end <= clause.end)
+    const owners = operations.filter(operation => operation.span.end <= quote.start
+      && operation.clauseSpan.start === clause?.start)
+    const owner = owners.at(-1)
+    const hasMutationPredicate = owners.some(operation => ['revise', 'write'].includes(operation.kind))
+    if (owner && !hasMutationPredicate && (owner.kind === 'read' || owner.kind === 'review'
+      || ['reference_data', 'factual_statement', 'advice', 'assessment_predicate', 'read_only'].includes(owner.reason))) continue
+    if (owner && ['revise', 'write'].includes(owner.kind)) {
+      let index = targets.findIndex(target => target.kind === 'local' && target.span.start === quote.start && target.span.end === quote.end)
+      if (index < 0) index = targets.push({ span: { start: quote.start, end: quote.end },
+        clauseSpan: spanOf(clause!), kind: 'local', range: null }) - 1
+      if (!owner.targetIndices.includes(index)) owner.targetIndices.push(index)
+      if (owner.polarity === 'negative') { reasons.add('unclosed_source_quote'); continue }
+      owner.accepted = false
+      owner.reason = 'unclosed_source_quote'
+    }
+    reasons.add('unclosed_source_quote')
+  }
+  for (const quote of lexical.quoted.filter(quote => quote.closed && quote.kind === 'quotation')) {
+    const clause = lexical.clauses.find(clause => clause.start <= quote.start && quote.end <= clause.end)
+    const prior = operations.filter(operation => operation.span.end <= quote.start && operation.clauseSpan.start === clause?.start)
+    if (prior.at(-1) && !prior.some(operation => ['revise', 'write'].includes(operation.kind))
+      && ['read', 'review'].includes(prior.at(-1)!.kind)) continue
+    const mutations = operations.filter(operation => operation.accepted && operation.kind === 'revise'
+      && operation.clauseSpan.start === clause?.start)
+    if (!mutations.length || operations.some(operation => operation.targetIndices.some(index =>
+      targets[index].span.start === quote.start && targets[index].span.end === quote.end))) continue
+    const owner = mutations.at(-1)!
+    const operator = prompt.slice(owner.span.start, owner.span.end)
+    const replacement = quote.start >= owner.span.end && (/^(?:改为|改成)$/iu.test(operator)
+      || /^(?:修改|修订|改|替换|edit|revise|replace)$/iu.test(operator) && /^\s*(?:为|成|with)\s*$/iu.test(prompt.slice(owner.span.end, quote.start)))
+    if (!replacement) reasons.add('unresolved_source_quote')
   }
   const mutations = operations.filter(operation => operation.accepted && (operation.kind === 'write' || operation.kind === 'revise'))
   const selected = mutations.length ? mutations : operations.filter(operation => operation.accepted && operation.kind === 'review')

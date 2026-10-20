@@ -136,6 +136,29 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
         expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
         expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
       }, false, '前段。源短句尾。后段。'))
+  it.each(['修订“原短句', '修订"原短句', "修订'原短句", '修订“外“内”尾',
+    '修订第4章的“原短句', '修改第4章“原短句', '修订第4章。将“原短句',
+    '修订第4章参考文案中的“原短句', '修订第4章中的参考原文“原短句', '修订“尾”。禁止修订参考原文“保护句尾',
+    '修订“尾”。禁止修订“保护句尾', '修订“尾”。禁止修订"保护句尾', "修订“尾”。禁止修订'保护句尾"])(
+    'rejects unclosed source or protection without a shortened saved-body grant: %s', request => fixture(
+      '第二卷第2章正文，' + request, async (ctx, before) => {
+        const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
+        expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
+        await expect(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: request.includes('保护') ? '尾' : request.includes('外') ? '外“内”' : '原短', newText: '不应执行' }))
+          .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+        expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+        expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
+      }, false, '前段。原短。外“内”。保护句尾。后段。'))
+  it.each(['修订第4章的“原短句”', '修订第4章参考文案中的“原短句”',
+    '替换第4章中的“原短句”', '第4章中的“原短句”替换',
+    '修订第4章。禁止修订“原短句”。', '修改第4章。“原短句”，保持不变。'])(
+    'never discards an unresolved or protected source and retains whole-chapter authority: %s', request => fixture(
+      '第二卷第2章正文，' + request, async (ctx, before) => {
+        const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
+        expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
+        await expect(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不能退为整章授权。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+        expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+      }, false, '前段。原短句。后段。'))
   it('keeps the chapter identity when only its local quotation is ambiguous', () => fixture(requests[0] + concerns, async (ctx, before) => {
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     expect(spec).toMatchObject({ ambiguity: 'must_ask', scope: { writing: { kind: 'bounded', targets: [{ chapterId: before[3].id }] },

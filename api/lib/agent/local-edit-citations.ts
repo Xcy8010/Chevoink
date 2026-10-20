@@ -21,8 +21,8 @@ export function localEditProtectionRanges(prompt: string, content: string, parse
       const target = parsed.evidence.targets[index]
       if (target.kind !== 'local') continue
       const quote = parsed.evidence.quoted.find(item => item.kind === 'quotation' && item.start === target.span.start && item.end === target.span.end)
-      if (!quote) return null
-      const text = prompt.slice(quote.start + 1, quote.end - 1), start = content.indexOf(text)
+      if (!quote?.closed) return null
+      const text = prompt.slice(quote.contentStart, quote.contentEnd), start = content.indexOf(text)
       if (!text || start < 0 || content.indexOf(text, start + 1) >= 0) return null
       regions.push({ start, end: start + text.length })
     }
@@ -48,7 +48,7 @@ export function freezeIssueQuoteBoundary(prompt: string, writing: TaskSpec['scop
   if (!protections) return denied
   const sentences = new Map<number, typeof lexed.clauses>()
   for (const clause of lexed.clauses) sentences.set(clause.sentence, [...(sentences.get(clause.sentence) ?? []), clause])
-  const inner = (quote: typeof lexed.quoted[number]) => prompt.slice(quote.start + 1, quote.end - 1)
+  const inner = (quote: typeof lexed.quoted[number]) => prompt.slice(quote.contentStart, quote.contentEnd)
   const anchors: Array<{ text: string; start: number; end: number; issueStart: number; issueEnd: number }> = []
   for (const clauses of sentences.values()) {
     const start = clauses[0].start, end = clauses.at(-1)!.end
@@ -57,6 +57,7 @@ export function freezeIssueQuoteBoundary(prompt: string, writing: TaskSpec['scop
     // Negated or interrogative issue statements cannot become mutable spans.
     if (/(?:不|未|无|不是|并非).{0,8}(?:确认|发现|存在|出现)|(?:不要|禁止|不得).{0,24}(?:修|改)|[?？]/u.test(masked)) continue
     for (const quote of lexed.quoted.filter(item => item.kind === 'quotation' && item.start >= start && item.end <= end)) {
+      if (!quote.closed) return denied
       const text = inner(quote)
       if (!text || text.length > 512) return denied
       anchors.push({ text, start: quote.start, end: quote.end, issueStart: start, issueEnd: end })

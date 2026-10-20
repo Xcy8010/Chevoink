@@ -26,6 +26,7 @@ export function hasReadOnlyRevisionAssessment(prompt: string | null): boolean {
 export function requestedLocalEdit(prompt: string, protocol: 1 | 2 = 1): Locator | null {
   const unquoted = prompt.replace(quotePattern, '【引文】')
   const interpretation = protocol === 2 ? parseAuthorWritingRequest(prompt) : null
+  if (interpretation?.reasons.some(reason => ['unclosed_source_quote', 'unresolved_source_quote'].includes(reason))) return { kind: 'unknown' }
   // A fresh assessment has no body effect to locate. Its frozen review intent
   // denies mutation; an unknown edit window must not block the requested read.
   if (interpretation?.intent === 'review' && !interpretation.evidence.operations.some(operation =>
@@ -58,7 +59,10 @@ export function requestedLocalEdit(prompt: string, protocol: 1 | 2 = 1): Locator
   const explicitQuote = directQuotes.length > 0 || new RegExp(`(?:把|将)\\s*【引文】.{0,12}(?:改成|改为|替换|修改|改写|润色)|${quoteEditPrefix}【引文】`, 'u').test(actionable.join('，'))
   const constrained = actionable.some(clause => local.test(clause)
     && (!whole.test(clause) || /(?:只|仅|局部|的|中|only)/iu.test(clause))) || explicitQuote
-  if (!constrained) return null
+  if (!constrained) return interpretation && interpretation.evidence.operations.some(operation => operation.accepted
+    && ['write', 'revise'].includes(operation.kind)) && interpretation.evidence.operations.some(operation => operation.polarity === 'negative'
+    && ['negated', 'protected'].includes(operation.reason) && operation.targetIndices.some(index => interpretation.evidence.targets[index].kind === 'local'))
+    ? { kind: 'unknown' } : null
   if (/(?:以外|之外|除了|上下文|except|outside)/iu.test(actionable.join('，'))) return { kind: 'unknown' }
   // Conflicting/mixed scope is not an invitation to guess a broad grant.
   if (positive.some(clause => whole.test(clause) && /(?:写|创作|完成|write|draft)/iu.test(clause))
@@ -67,7 +71,7 @@ export function requestedLocalEdit(prompt: string, protocol: 1 | 2 = 1): Locator
   if (explicitQuote) {
     const sourceQuotes = interpretation ? [] : [...prompt.matchAll(new RegExp(`(?:(?:把|将)\\s*|${quoteEditPrefix})(?:“([^”]+)”|「([^」]+)」|『([^』]+)』|"([^"\\n]+)")`, 'gu'))]
     const sources = [...new Set([...sourceQuotes.map(match => match[1] ?? match[2] ?? match[3] ?? match[4]),
-      ...directQuotes.map(quote => prompt.slice(quote.start + 1, quote.end - 1))])]
+      ...directQuotes.filter(quote => quote.closed).map(quote => prompt.slice(quote.contentStart, quote.contentEnd))])]
     return sources.length === 1 ? { kind: 'quote', text: sources[0] } : { kind: 'unknown' }
   }
   const text = actionable.join('，')
