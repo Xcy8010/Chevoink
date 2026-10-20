@@ -146,7 +146,7 @@ describe.runIf(available)('native paid failed quality response and limited deliv
     if (scenario === 'unknown-work-version') {
       const parent = await prisma.agentOperation.findUniqueOrThrow({ where: { id: critic.parentOperationId! } })
       const snapshot = JSON.parse(JSON.stringify(parent.inputSnapshot)) as { input: { work: { version: number } } }
-      snapshot.input.work.version = 11
+      snapshot.input.work.version = 12
       const sealed = runtimeJson(snapshot)
       await prisma.agentOperation.update({ where: { id: parent.id }, data: { inputSnapshot: sealed.value, inputHash: sealed.hash } })
     }
@@ -593,7 +593,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         vi.spyOn(toolCursor, 'prepareToolCursorOperation').mockImplementationOnce(async (token, cursor, input, tx) => {
           const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
           snapshot.work.version = scenario === 'v7-parser-mechanical' ? 7 : scenario === 'v6-parser-mechanical' ? 6 : 5
-          if (scenario !== 'v7-parser-mechanical') freezeLegacySources(snapshot.work)
+          freezeLegacySources(snapshot.work, scenario === 'v7-parser-mechanical' ? 6 : 5)
           snapshot.work.parserVersion = scenario === 'v5-parser-mechanical' ? 1 : 2
           if (scenario === 'v5-parser-mechanical') delete snapshot.work.repairSourceReferences
           const prepared = await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
@@ -607,7 +607,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         vi.spyOn(toolCursor, 'prepareToolCursorOperation').mockImplementationOnce(async (token, cursor, input, tx) => {
           const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
           snapshot.work.version = 4
-      freezeLegacySources(snapshot.work)
+          freezeLegacySources(snapshot.work)
           snapshot.work.parserVersion = 1
           delete snapshot.work.repairSourceReferences
           delete snapshot.work.formatRecovery
@@ -636,6 +636,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
             const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
             expect(snapshot.work.formatRecovery).toMatchObject({ contextHash: qualityReviewContextHash(await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId), 'humanity-context.v2') })
             snapshot.work.version = 9
+            freezeLegacySources(snapshot.work, 6)
             snapshot.work.criticSystem = '合成升级前冻结的完整审校规则。只输出 findings JSON。'
             snapshot.work.repairSystem = '合成升级前冻结的局改规则。只替换 evidence。'
             const prepared = await originalPrepare(token, cursor, { ...input, operationInput: runtimeJson(snapshot).value }, tx)
@@ -877,7 +878,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       if (['synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario)) {
         const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
-        expect(operation.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'v5-parser-mechanical' ? 5 : 10, parserVersion: scenario === 'v5-parser-mechanical' ? 1 : 3 } } })
+        expect(operation.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'v5-parser-mechanical' ? 5 : 11, parserVersion: scenario === 'v5-parser-mechanical' ? 1 : 3 } } })
         expect(reports[0].deterministicMetrics).toMatchObject({ independentCheck: scenario === 'synthetic-mechanical' ? 'complete' : 'unavailable',
           criticResponse: { classification: scenario === 'synthetic-mechanical' ? 'complete' : scenario === 'synthetic-partial' ? 'findings_invalid' : 'incomplete_json' } })
         if (scenario === 'synthetic-partial') expect(reports[0].findings.filter(item => item.source === 'critic')).toHaveLength(1)
