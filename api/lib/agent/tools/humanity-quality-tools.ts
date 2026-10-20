@@ -221,7 +221,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
           evidence: finding.evidenceExcerpt, explanation: finding.explanation, suggestion: finding.suggestion,
           ...qualityRepairSurroundings(report.chapter.content, finding.startOffset, finding.endOffset) })))}`,
         { modelRuntime: repairRuntime, explicitModelSelection: true, responseFormat: 'json_object',
-          signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, action: attempt === 0 ? 'agent3HumanityRevision' : 'agent3HumanityRevisionRetry', novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
+          signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, agentRunId: ctx.runId, action: attempt === 0 ? 'agent3HumanityRevision' : 'agent3HumanityRevisionRetry', novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
       )
     try {
       const parsedAttempt = repairEnvelopeSchema.parse(parseQualityJsonObject(response, 'patches', 2))
@@ -329,7 +329,7 @@ export const qualityAnalyzeTool = defineTool({
     const startedAt = new Date()
     const reviewSignal = AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)])
     const resolved = { runtime: await resolveReviewModelRuntime({ ...ctx, task: 'quality' }) }
-    const responseOptions = { modelRuntime: resolved.runtime, explicitModelSelection: true, signal: reviewSignal, userId: ctx.userId,
+    const responseOptions = { modelRuntime: resolved.runtime, explicitModelSelection: true, signal: reviewSignal, userId: ctx.userId, agentRunId: ctx.runId,
       action: formatRecovery ? 'agent3HumanityFormatRecovery' : 'agent3HumanityCritic', novelId: ctx.novelId, chapterId,
       targetType: 'chapter', targetId: chapterId, temperature: 0.15, reasoningEffort: resolved.runtime.reasoningEffort }
     const assertCurrent = async () => {

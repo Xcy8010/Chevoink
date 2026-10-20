@@ -2290,9 +2290,24 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(committed).toBe(true)
     expect(commit.execute).toHaveBeenCalledOnce()
     expect(mocks.chapters[0].content).toBe(before)
+    const { syncNovelMemoryProjection } = await import('../../api/lib/agent/story-memory.js')
+    expect(syncNovelMemoryProjection).toHaveBeenCalledWith('user', 'novel', { runId: 'run' })
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     const handoffContext = mocks.chat.mock.calls[1][0].messages
     expect(handoffContext).toContainEqual(expect.objectContaining({ role: 'tool', toolCallId: 'allowed-commit', content: expect.stringContaining('正文与终态已核验提交') }))
+  })
+  it('rejects missing retention report IDs with a recoverable exact-reference instruction', async () => {
+    const { chapterBridgeCommitTool } = await import('../../api/lib/agent/tools/story-compiler-tools.js')
+    const commit = { ...chapterBridgeCommitTool, execute: vi.fn(async () => ({ output: '已提交' })) }
+    const result = await handleToolCall(call('missing-report', commit.name, JSON.stringify({ retainedFindings: [
+      { source: 'quality', findingId: 'finding', reason: '保留原事实' },
+    ] })), [commit], context(), { emit: mocks.emit }, 'message', 'run')
+    expect(result).toMatchObject({ failureCode: 'TOOL_SCHEMA_INVALID', part: { status: 'failed' } })
+    expect(result.observation).toContain('source、reportId、findingId、reason')
+    expect(result.observation).toContain('chapter_bridge_get')
+    expect(result.observation).toContain('不猜编号或删除留置项')
+    expect(commit.execute).not.toHaveBeenCalled()
+    expect(events()).toContainEqual(expect.objectContaining({ failureCode: 'TOOL_SCHEMA_INVALID', invalidFields: ['retainedFindings.0.reportId'] }))
   })
   it('does not pause or zero a run when resume admission loses its state fence', async () => {
     mocks.update.mockRejectedValueOnce(new DataAccessError(409, 'TASK_AUTHORIZATION_RUNTIME_UPGRADE_REQUIRED', '任务状态已变化'))

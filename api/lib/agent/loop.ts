@@ -471,8 +471,10 @@ export async function handleToolCall(
       .join('；')
     // 附带当前章节 ID：缺 chapterId 是最高发的校验失败，直接喂给模型避免它盲猜或多耗一轮去查
     const writingHint = frozenWritingToolGuidance(call.name, ctx.writingScope)
+    const retentionHint = invalidFields.some(path => /^retainedFindings\.\d+\.reportId$/u.test(path))
+      ? 'retainedFindings 每项都必须包含 source、reportId、findingId、reason；findingId 不能代替 reportId。先用 chapter_bridge_get 核对当前报告的精确引用模板，不猜编号或删除留置项来绕过。' : ''
     const chapterHint = !writingHint && !['chapter_create', 'story_compiler_prepare'].includes(call.name) && ctx.chapterId ? `作者当前正在编辑的章节 chapterId=${ctx.chapterId}。` : ''
-    return fail('参数校验失败', `工具 ${call.name} 参数校验失败：${issues}。${chapterHint}${writingHint}本次调用完全没有执行。纠正所列字段后再调用，不重复相同无效输入，也不能将回复里的正文当作已经保存。`, 'failed')
+    return fail('参数校验失败', `工具 ${call.name} 参数校验失败：${issues}。${retentionHint}${chapterHint}${writingHint}本次调用完全没有执行。纠正所列字段后再调用，不重复相同无效输入，也不能将回复里的正文当作已经保存。`, 'failed')
   }
 
   // 协作作用域约束：检查派生授权和目标归属，不拦截无关章节写入。
@@ -745,7 +747,7 @@ async function finalizeLegacyRun(
       compactSessionContext(finalizedRun.userId, finalizedRun.sessionId, false).catch((error) => {
         console.error('[agent-loop] 对话结束后自动整理上下文失败', runId, error)
       }),
-      taskSpecSchema.safeParse(finalizedRun.taskSpec).data?.intent === 'research_analysis' ? Promise.resolve() : syncNovelMemoryProjection(finalizedRun.userId, finalizedRun.novelId).catch((error) => {
+      taskSpecSchema.safeParse(finalizedRun.taskSpec).data?.intent === 'research_analysis' ? Promise.resolve() : syncNovelMemoryProjection(finalizedRun.userId, finalizedRun.novelId, { runId }).catch((error) => {
         console.error('[agent-loop] 对话结束后自动更新作品记忆失败', runId, error)
       }),
     ])
@@ -1370,6 +1372,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     // 首次对话且仍是默认标题时异步自动命名（仅一次，不阻塞循环）
     if (!params.resume && !ownedGoalExecution) {
       void autoNameSession({
+        runId,
         signal: controller.signal,
         modelRuntime,
         sessionId: params.sessionId,

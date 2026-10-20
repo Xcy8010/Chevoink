@@ -48,6 +48,7 @@ function generatedSessionTitle(raw: string, prompt: string): string | null {
 }
 
 export async function autoNameSession(input: {
+  runId?: string
   sessionId: string
   userId: string
   novelId: string
@@ -72,6 +73,7 @@ export async function autoNameSession(input: {
         input.prompt.length <= 500 ? input.prompt : `${input.prompt.slice(0, 200)}\n${input.prompt.slice(-299)}`,
         {
           userId: input.userId,
+          agentRunId: input.runId,
           signal: input.signal,
           modelRuntime: auxiliaryTextModel(input.modelRuntime),
           action: 'agentSessionAutoName',

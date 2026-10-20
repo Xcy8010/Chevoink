@@ -64,7 +64,7 @@ function TaskUsage({ runId, onClose }: { runId: string; onClose: () => void }) {
       {summary.pendingRefund > 0 && <p className="text-sm">待退款 {formatCreditAmount(summary.pendingRefund)} Credits（尚未计入已退）</p>}
       {(summary.pendingModelSettlements ?? 0) > 0 && <p className="text-sm">{summary.pendingModelSettlements} 次模型调用待核实或结算，未计入已扣额度，不代表免费。</p>}
       <p className="mt-1 text-xs text-[var(--text-tertiary)]">账单截至 {formatDateTime(summary.asOf)}；供应商成本不等于用户扣费。
-        {summary.unresolvedProviderAttempts === null ? '旧任务无完整供应商对账记录。' : summary.unresolvedProviderAttempts > 0 ? `仍有 ${summary.unresolvedProviderAttempts} 次调用待核实，金额并非最终结算。` : ''}</p>
+        {summary.unresolvedProviderAttempts === null ? '此任务未记录完整供应商调用对账。' : summary.unresolvedProviderAttempts > 0 ? `仍有 ${summary.unresolvedProviderAttempts} 次调用待核实，金额并非最终结算。` : ''}</p>
       <ul>{query.data!.pages.flatMap(page => page.ledger).map(item => <LedgerRow key={item.id} item={item} />)}</ul>
       {summary.ledger.length === 0 && <p className="py-3 text-sm">暂无已记录的费用。</p>}
       {query.hasNextPage && <Button disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>{query.isFetchingNextPage ? '加载中…' : '加载更多任务记录'}</Button>}

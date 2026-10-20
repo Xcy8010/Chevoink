@@ -254,6 +254,19 @@ describe('严谨创作自动落实质量建议', () => {
     expect(f.model.mock.calls[0][1]).toContain(f.bundle.originalRequest!)
     expect(f.model.mock.calls[0][1]).toContain('"before"')
     expect(f.write).toHaveBeenCalledWith(expect.objectContaining({ expectedContextHash: humanityQuality.qualityReviewContextHash(f.bundle) }))
+    expect(f.model.mock.calls[0][2]).toMatchObject({ userId: 'u', novelId: 'n', agentRunId: 'r', action: 'agent3HumanityRevision', targetId: 'q' })
+  })
+  it('attributes the critic and every bounded repair attempt to the executing run', async () => {
+    const f = fixture(false, 'duplicate')
+    await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(f.critic).toHaveBeenCalledOnce()
+    expect(f.critic.mock.calls[0][2]).toMatchObject({ agentRunId: 'r', targetType: 'chapter', targetId: 'c' })
+    expect(f.model).toHaveBeenCalledTimes(2)
+    expect(f.model.mock.calls.map(call => call[2])).toEqual([
+      expect.objectContaining({ agentRunId: 'r', action: 'agent3HumanityRevision', targetId: 'q' }),
+      expect.objectContaining({ agentRunId: 'r', action: 'agent3HumanityRevisionRetry', targetId: 'q' }),
+    ])
+    expect(f.write).not.toHaveBeenCalled()
   })
   it('does not call a paid patcher after neighbor context changes during review', async () => {
     const f = fixture(true)

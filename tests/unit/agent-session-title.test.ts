@@ -10,7 +10,7 @@ vi.mock('../../api/lib/prisma.js', () => ({ prisma: { agentSession: { findFirst:
 
 import { autoNameSession, fallbackSessionTitle, isDefaultSessionTitle } from '../../api/lib/agent/session-title.js'
 
-const input = { sessionId: 's', userId: 'u', novelId: 'n', prompt: '续写第一章，只要标题和正文' }
+const input = { runId: 'r', sessionId: 's', userId: 'u', novelId: 'n', prompt: '续写第一章，只要标题和正文' }
 const reference = '## 第一章 压酱油瓶的那枚铜钱\n林辰这天走过巷口。\n请续写第二章，只要正文。'
 
 beforeEach(() => {
@@ -34,7 +34,7 @@ describe('Studio task naming', () => {
     await autoNameSession(input)
     expect(mocks.session?.title).toBe('续写第一章正文')
     expect(mocks.generate).toHaveBeenCalledTimes(1)
-    expect(mocks.generate.mock.calls[0]?.[2]).toMatchObject({ userId: 'u', action: 'agentSessionAutoName', novelId: 'n', targetType: 'agentSession', targetId: 's', temperature: 0.3 })
+    expect(mocks.generate.mock.calls[0]?.[2]).toMatchObject({ userId: 'u', agentRunId: 'r', action: 'agentSessionAutoName', novelId: 'n', targetType: 'agentSession', targetId: 's', temperature: 0.3 })
     expect(mocks.update).toHaveBeenCalledWith({ where: { id: 's', userId: 'u', novelId: 'n', title: '新任务' }, data: { title: '续写第一章正文' } })
   })
 

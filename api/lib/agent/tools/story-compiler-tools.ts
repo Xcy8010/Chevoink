@@ -1093,7 +1093,7 @@ export const chapterBridgeCommitTool = defineTool({
   name: 'chapter_bridge_commit',
   title: '提交章节终态',
   description:
-    'Story Compiler 的 COMMIT 步骤。提交当前已保存正文的终态；写作交付须具有原合同要求的当前版本检查。实际状态须先在 continuity_validate 的 terminalState 中独立核验，提交不得新增或改写候选事实。参数省略时复用已核验候选；无候选时状态保持未知，绝不复制场景计划。缺少、失败或旧检查返回所需下一步，不代表完成。有需处置意见时用 retainedFindings 引用当前报告并说明原因；留置不能豁免终态事实证据。chapter_bridge_get 提供精确意见引用模板。摘要和首尾结构可从已保存正文补齐。相同正文与候选重复调用幂等返回。',
+    'Story Compiler 的 COMMIT 步骤。提交当前已保存正文的终态；写作交付须具有原合同要求的当前版本检查。实际状态须先在 continuity_validate 的 terminalState 中独立核验，提交不得新增或改写候选事实。参数省略时复用已核验候选；无候选时状态保持未知，绝不复制场景计划。缺少、失败或旧检查返回所需下一步，不代表完成。有需处置意见时用 retainedFindings 引用当前报告并说明原因；每项必须完整填写 source、reportId、findingId、reason，不能只传 findingId 或猜测 reportId。chapter_bridge_get 提供当前精确引用模板。留置不能豁免终态事实证据。摘要和首尾结构可从已保存正文补齐。相同正文与候选重复调用幂等返回。',
   parameters: z.object({
     compilationId: z.string().min(1).optional(),
     retainedFindings,

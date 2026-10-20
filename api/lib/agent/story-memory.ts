@@ -670,6 +670,7 @@ async function buildMemoryGraphOnce(
   novelId: string,
   force: boolean,
   onProgress?: (done: number, total: number) => void,
+  agentRunId?: string,
 ) {
   const novel = await prisma.novel.findFirst({
     where: { id: novelId, authorId: userId },
@@ -712,7 +713,7 @@ async function buildMemoryGraphOnce(
         const raw = await generateTextCompletion(
           system,
           user,
-          { modelRuntime, userId, novelId, action: 'agentMemoryGraphBuild', targetType: 'novel', targetId: novelId, temperature: 0.1, reasoningEffort: 'low' },
+          { modelRuntime, userId, novelId, agentRunId, action: 'agentMemoryGraphBuild', targetType: 'novel', targetId: novelId, temperature: 0.1, reasoningEffort: 'low' },
         )
         return aiGraphEnvelopeSchema.parse(parseJsonObject(raw))
       } catch (error) {
@@ -780,11 +781,11 @@ export async function getMemoryGraphJob(userId: string, novelId: string, jobId: 
 
 /** 同一作品的桌面/手机隐藏视图可能同时请求同步；服务端合并为一条事务链，避免重复重建关系。 */
 const memoryGraphBuildInFlight = new Map<string, Promise<Awaited<ReturnType<typeof buildMemoryGraphOnce>>>>()
-export function syncNovelMemoryProjection(userId: string, novelId: string, options: { force?: boolean } = {}) {
+export function syncNovelMemoryProjection(userId: string, novelId: string, options: { force?: boolean; runId?: string } = {}) {
   const key = `${userId}:${novelId}:${options.force ? 'force' : 'auto'}`
   const running = memoryGraphBuildInFlight.get(key)
   if (running) return running
-  const task = buildMemoryGraphOnce(userId, novelId, options.force === true)
+  const task = buildMemoryGraphOnce(userId, novelId, options.force === true, undefined, options.runId)
   memoryGraphBuildInFlight.set(key, task)
   const release = () => {
     if (memoryGraphBuildInFlight.get(key) === task) memoryGraphBuildInFlight.delete(key)
