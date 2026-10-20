@@ -906,11 +906,17 @@ export async function reconcileCreditRefunds(input: { limit?: number; userId?: s
       const metadata = intent.originalEntry.metadata
       const webReceipt = intent.reason === 'web_tool_no_billable_result' && webEvidence.success
         ? await prisma.webToolCall.findUnique({ where: { id: webEvidence.data.callId } }) : null
-      const validWebTool = webReceipt && webReceipt.status !== 'dispatched'
+      // The intent and original immutable debit survive task deletion; its
+      // dispatch receipt may have cascaded with the run. Do not lose that debt.
+      const boundWebTool = intent.reason === 'web_tool_no_billable_result' && webEvidence.success
+        && intent.originalEntry.kind === 'usage' && ['web_search', 'web_fetch'].includes(intent.originalEntry.sourceType)
+        && intent.originalEntry.deltaMilli < 0 && metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+        && metadata.webToolCallId === webEvidence.data.callId && metadata.baseMilli === 2000
+        && typeof metadata.requestHash === 'string' && /^[a-f0-9]{64}$/.test(metadata.requestHash)
+      const validWebTool = boundWebTool && (!webReceipt || (webReceipt.status !== 'dispatched'
         && intent.originalEntry.sourceType === `web_${webReceipt.kind}` && webReceipt.runId === intent.originalEntry.referenceId
         && webReceipt.amountMilli === -intent.originalEntry.deltaMilli && webReceipt.multiplierBps === intent.originalEntry.multiplierBps
-        && metadata && typeof metadata === 'object' && !Array.isArray(metadata)
-        && metadata.webToolCallId === webReceipt.id && metadata.requestHash === webReceipt.requestHash
+        && metadata.requestHash === webReceipt.requestHash))
       if (!validSearch && !validImage && !validWebTool) throw new Error('Unsupported refund intent')
       await refundCreditCharge(intent.originalEntry.userId, intent.originalEntry.idempotencyKey, intent.reason)
       settled++

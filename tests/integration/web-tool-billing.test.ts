@@ -201,6 +201,20 @@ describe.skipIf(!available)('Search / Fetch billing with isolated PostgreSQL (si
       expect(await findWebToolCallOutcome(ctx, kind, request)).toEqual(success)
     })
   })
+  it('settles an already-durable refund after its author deletes the owning task and dispatch receipt', async () => {
+    await fixture(async ctx => {
+      await executeWebToolCall(ctx, 'search', request, true, async () => success, classify)
+      const debit = (await ledger(ctx))[0]
+      const receipt = await prisma.webToolCall.findFirstOrThrow({ where: { runId: ctx.runId } })
+      await prisma.creditRefundIntent.create({ data: { originalEntryId: debit.id, reason: 'web_tool_no_billable_result', evidence: { callId: receipt.id, outcome: 'aborted' } } })
+      await prisma.agentRun.delete({ where: { id: ctx.runId } })
+      expect(await prisma.webToolCall.count({ where: { id: receipt.id } })).toBe(0)
+      expect(await reconcileCreditRefunds({ userId: ctx.userId })).toEqual({ examined: 1, settled: 1 })
+      await reconcileCreditRefunds({ userId: ctx.userId })
+      expect((await ledger(ctx)).map(row => row.kind).sort()).toEqual(['refund', 'usage'])
+      expect((await ledger(ctx)).reduce((sum, row) => sum + row.deltaMilli, 0)).toBe(0)
+    })
+  })
 
   it('preserves free cache receipt across process cache loss, and direct fallback cannot become a paid Fetch', async () => {
     await fixture(async ctx => {
