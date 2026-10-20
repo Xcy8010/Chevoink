@@ -79,18 +79,20 @@ async function fixture(mode: 'legacy' | 'durable', work: (ctx: ToolContext, spec
 describe.skipIf(!available)('versioned original author selection effect', () => {
   it.each((['legacy', 'durable'] as const).flatMap(mode => (['selection', 'local'] as const).map(scope => ({ mode, scope }))))(
     'coalesces same-address net changes for $scope via $mode', ({ mode, scope }) => fixture(mode, async (ctx, _spec, invoke) => {
+      const initialRevision = (await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).revision
       await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, patches: [{ oldText: '选', newText: '选新' }, { oldText: '段甲', newText: '增段甲' }] })
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).content).toBe(body.replace('选段甲', '选新增段甲'))
       await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, patches: [{ oldText: '新', newText: '新添' }, { oldText: '增', newText: '换' }] })
-      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toMatchObject({ content: body.replace('选段甲', '选新添换段甲'), revision: 2 })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toMatchObject({ content: body.replace('选段甲', '选新添换段甲'), revision: initialRevision + 2 })
     }, false, scope === 'local' ? '只润色第一章第二段' : undefined))
   it.each(['legacy', 'durable'] as const)('uses actual effects for copied context and boundary insertions via %s', mode => fixture(mode, async (ctx, _spec, invoke) => {
+    const initialRevision = (await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).revision
     await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, oldText: body, newText: body.replace('选段甲', '选段乙') })
     const first = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
     expect(first.content).toBe(body.replace('选段甲', '选段乙'))
     await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, oldText: '选段乙。重复。', newText: '新选段乙。重复。' })
     const current = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
-    expect(current).toMatchObject({ content: body.replace('选段甲', '新选段乙'), revision: 2 })
+    expect(current).toMatchObject({ content: body.replace('选段甲', '新选段乙'), revision: initialRevision + 2 })
     await expect(invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, oldText: current.content,
       newText: current.content.replace('前😀段', '改动前段').replace('选段乙', '选段丙') })).rejects.toMatchObject({ code: 'AUTHOR_SELECTION_SCOPE' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(current)
