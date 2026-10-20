@@ -1,4 +1,5 @@
 import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
+import { createHash } from 'node:crypto'
 import { DataAccessError } from '../prisma.js'
 import { runtimeJson } from './runtime-common.js'
 import { parseAuthorWritingRequest } from './author-writing-request.js'
@@ -93,6 +94,25 @@ export function requestedLocalEdit(prompt: string, protocol: 1 | 2 = 1): Locator
 
 export function freezeLocalEditBoundary(prompt: string, writing: TaskSpec['scope']['writing'],
   chapters: Array<{ id: string; revision: number; content: string }>, protocol: 1 | 2 = 1): NonNullable<TaskSpec['scope']['localEditBoundary']> | undefined {
+  const parsed = protocol === 2 ? parseAuthorWritingRequest(prompt) : null
+  const phase = parsed?.conditionalLocalRepair
+  if (phase && writing?.kind === 'bounded' && !parsed.ambiguous) {
+    const regions = []
+    for (const target of writing.targets) {
+      const chapter = chapters.find(item => item.id === target.chapterId)
+      const protections = chapter && localEditProtectionRanges(prompt, chapter.content, parsed)
+      if (!chapter?.content.trim() || !protections) return { version: 1, kind: 'needs_input', regions: [] }
+      regions.push({ chapterId: chapter.id, revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash,
+        start: 0, end: chapter.content.length, prefix: '', suffix: '',
+        protectedText: protections.map(span => chapter.content.slice(span.start, span.end)),
+        maxBodyLength: chapter.content.length + Math.max(32, Math.min(1024, chapter.content.length)) })
+    }
+    if (!regions.length) return { version: 1, kind: 'needs_input', regions: [] }
+    return { version: 3, kind: 'review_bound', regions, source: { requestHash: createHash('sha256').update(prompt).digest('hex'),
+      reviews: phase.reviewOperationIndices.map(index => parsed.evidence.operations[index].span),
+      repairs: phase.repairs.map(repair => ({ ...parsed.evidence.operations[repair.operationIndex].span,
+        condition: { kind: repair.condition.kind, ...repair.condition.span } })) } }
+  }
   const locator = requestedLocalEdit(prompt, protocol)
   if (!locator) return undefined
   const denied = { version: 1 as const, kind: 'needs_input' as const, regions: [] }
@@ -135,8 +155,8 @@ export function originalLocalEditBoundary(value: unknown) {
   // A marker on a nonlocal fresh contract has no boundary. A malformed stored
   // field must never degrade to a whole-chapter grant.
   if (!parsed.success || scope.localEditBoundary !== undefined && !boundary
-    || boundary && (boundary.kind === 'bounded' ? !boundary.regions.length : boundary.regions.length > 0)
-    || boundary && (boundary.version === 2 ? !validIssueQuoteBoundary(boundary)
+    || boundary && (boundary.kind !== 'needs_input' ? !boundary.regions.length : boundary.regions.length > 0)
+    || boundary && boundary.version !== 3 && (boundary.version === 2 ? !validIssueQuoteBoundary(boundary)
       : new Set(boundary.regions.map(region => region.chapterId)).size !== boundary.regions.length
       || boundary.regions.some(region => region.end <= region.start || region.prefix.length !== region.start
         || !region.prefix.length && !region.suffix.length))) {
@@ -160,6 +180,7 @@ export function localEditGuidance(spec: unknown): string | null {
   const intersection = taskSpecSchema.parse(spec).scope.selectionBoundary ? '同时保留编辑器冻结选区约束，仅可修改两个范围的交集。' : ''
   return (boundary.kind === 'needs_input'
     ? '原局部请求尚无可证明的精确范围，正文未获写入授权。请通过既有反馈入口请作者补充准确原文片段或编辑器选区，并重新发起任务；模型摘要、继续或子任务不能补授权。'
+    : boundary.version === 3 ? '目标章节已经确认。先准备并读取本章，完成当前正文的必要连续性与人类感检查；没有确证问题时无需改文，直接按真实报告提交。只有当前任务、当前版本完整检查中逐字定位的真实问题才允许 chapter_edit_range 局部修订，每批最多8处；使用逐字唯一 oldText，保留其他正文。整章覆盖、追加、改名、新建和自动 critic 改文不获授权。修改后重新检查并提交，报告、重新准备和子任务不能扩大范围或重置原长度上限。'
     : '原任务只授权冻结的局部正文范围。读取当前正文，用 chapter_edit_range 的逐字唯一 oldText 连续修改，每批最多8处，保留冻结范围外原文。不得整章覆盖、坐标猜定位、追加、改名、创建、变更集或自动 critic 修订。最后修改后完成当前版本必要报告；报告与子任务不能扩大范围。') + intersection
 }
 

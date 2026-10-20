@@ -113,6 +113,6 @@ export function originalRepairAuthority(original: { prompt: string | null; spec:
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者操作解释与请求不匹配，不能重新猜测修订授权。')
   }
   assertFrozenWritingContract(parsed.data)
-  return parsed.data.scope.writing?.kind !== 'needs_input' && !!parsed.data.scope.writing?.repairAuthorized
+  return parsed.data.scope.localEditBoundary?.version !== 3 && parsed.data.scope.writing?.kind !== 'needs_input' && !!parsed.data.scope.writing?.repairAuthorized
     && parsed.data.scope.writingInterpretation.operations.some(operation => operation.kind === 'revise' && operation.polarity === 'affirmative')
 }

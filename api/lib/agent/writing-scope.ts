@@ -57,14 +57,17 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   const admissionPrompt = original.prompt ?? prompt
   let localRequest = spec.scope.localEditProtocol === 1 ? requestedLocalEdit(admissionPrompt, targetProtocol === 2 ? 2 : 1) : null
   const interpretation = targetProtocol === 2 ? parseAuthorWritingRequest(admissionPrompt) : null
+  if (spec.scope.localEditProtocol === 1 && interpretation?.conditionalLocalRepair) localRequest ??= { kind: 'unknown' }
   const negativeOperations = interpretation?.evidence.operations.filter(operation => operation.polarity === 'negative' && operation.reason === 'negated') ?? []
   const creationDenied = negativeOperations.some(operation => operation.kind === 'write'
     && !operation.targetIndices.some(index => interpretation!.evidence.targets[index].range)
     && /^(?:新建|创建|建章|续写|create)$/iu.test(admissionPrompt.slice(operation.span.start, operation.span.end)))
-  const revisionDenied = negativeOperations.some(operation => operation.kind === 'revise'
-    && (!operation.targetIndices.length && !admissionPrompt.slice(operation.span.end, operation.clauseSpan.end).trim()
+  const revisionDenied = interpretation?.evidence.operations.some(operation => operation.polarity === 'negative'
+    && ['negated', 'protected'].includes(operation.reason) && operation.kind === 'revise'
+    && (operation.targetIndices.some(index => interpretation.evidence.targets[index].kind === 'same_target')
+      || operation.reason === 'negated' && !operation.targetIndices.length && !admissionPrompt.slice(operation.span.end, operation.clauseSpan.end).trim()
       || !operation.targetIndices.some(index => interpretation!.evidence.targets[index].range)
-        && operation.targetIndices.some(index => ['prose', 'same_target'].includes(interpretation!.evidence.targets[index].kind))))
+        && operation.targetIndices.some(index => interpretation!.evidence.targets[index].kind === 'prose'))) ?? false
   const parsed = interpretation ?? (targetProtocol === 1 ? parseWritingTargets(admissionPrompt) : null)
   const range = parsed ? parsed.range : legacyWritingRange(admissionPrompt)
   // A prompt that names chapters/volumes with numbers but fails to parse must not
@@ -171,6 +174,8 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     ? freezeLocalEditBoundary(admissionPrompt, writing, await tx.chapter.findMany({ where: { authorId: subject.userId,
       ...activeChapterScope(subject.novelId), id: { in: writing.targets.flatMap(target => target.chapterId ? [target.chapterId] : []) } },
       select: { id: true, revision: true, content: true } }), targetProtocol === 2 ? 2 : 1) : undefined
+  // Finding-conditioned repair is a distinct phase, not a broad repair grant.
+  if (localEditBoundary?.version === 3) writing.repairAuthorized = false
   const clarification = !chapters.length && !range && !ambiguousRange && !localRequest
     && run.session.sandboxMode !== 'read_only' && !run.session.spawnedFromRunId
     && eligibleEmptyWritingClarification({ ...spec, scope: { ...spec.scope, writing } }, admissionPrompt)
@@ -265,7 +270,9 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
     || spec.data.scope.writingInterpretation.requestHash !== createHash('sha256').update(original.prompt).digest('hex')
     || spec.data.scope.writingInterpretation.operations.some(operation => operation.end <= operation.start || operation.end > original.prompt!.length)
     || spec.data.scope.localEditBoundary?.version === 2 && spec.data.scope.localEditBoundary.regions.some(region =>
-      region.source.issueEnd > original.prompt!.length || original.prompt!.slice(region.source.quoteStart + 1, region.source.quoteEnd - 1) !== region.text))) {
+      region.source.issueEnd > original.prompt!.length || original.prompt!.slice(region.source.quoteStart + 1, region.source.quoteEnd - 1) !== region.text)
+    || spec.data.scope.localEditBoundary?.version === 3 && [...spec.data.scope.localEditBoundary.source.reviews,
+      ...spec.data.scope.localEditBoundary.source.repairs.flatMap(repair => [repair, repair.condition])].some(span => span.end > original.prompt!.length))) {
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者请求的章节解释凭证缺失或不匹配，不能重新解析补授权。')
   }
   if (spec.success) assertFrozenWritingContract(spec.data)
@@ -352,9 +359,9 @@ export async function assertSelectionBodyEffect(tx: Prisma.TransactionClient, su
   chapter: { id: string; revision: number }, options: { mutation?: 'range' | 'replace' | 'append'; after?: string;
     editRanges?: Array<{ start: number; end: number; newText: string }> }, automatic = false) {
   const spec = (await readOriginalTaskRequest(tx, subject)).spec
-  await assertLocalBodyEffect(tx, subject, chapter, options, automatic, spec)
+  const conditional = await assertLocalBodyEffect(tx, subject, chapter, options, automatic, spec)
   const boundary = originalSelectionBoundary(spec)
-  if (!boundary) return
+  if (!boundary) return conditional
   if (chapter.id !== boundary.chapterId || automatic || options.mutation && options.mutation !== 'range') {
     throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '原选区只授权精确片段工具；整章写入、追加或自动整章修订不能扩大范围。')
   }
@@ -380,6 +387,7 @@ export async function assertSelectionBodyEffect(tx: Prisma.TransactionClient, su
     || options.after.length < boundary.prefix.length + boundary.suffix.length) {
     throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '补丁与实际正文效果不一致，全部正文变更未执行。')
   }
+  return conditional
 }
 
 async function assertLocalBodyEffect(tx: Prisma.TransactionClient, subject: Subject, chapter: { id: string; revision: number },
@@ -387,6 +395,15 @@ async function assertLocalBodyEffect(tx: Prisma.TransactionClient, subject: Subj
   automatic: boolean, spec: unknown) {
   const local = originalLocalEditBoundary(spec)
   if (!local) return
+  if (local.version === 3) {
+    // Automatic whole-body repair is withheld before dispatch/reservation. The
+    // ordinary exact-range tool will obtain current persisted finding proof.
+    if (automatic) throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '条件修订先完成检查，再对当前报告的确证问题作精确局部修订；未调用自动改文。')
+    if (!options.mutation) return
+    const { assertReviewBoundEdit } = await import('./review-bound-edit.js')
+    await assertReviewBoundEdit(tx, subject, chapter, local, options)
+    return true as const
+  }
   if (!options.mutation && !automatic) return // readonly report/guidance remains possible
   const boundary = local.regions.find(region => region.chapterId === chapter.id)
   if (local.kind === 'needs_input' || !boundary || automatic || options.mutation !== 'range') {
@@ -459,7 +476,7 @@ export async function assertWritingTarget(tx: Prisma.TransactionClient, subject:
   if (taskSpecSchema.safeParse(scope.spec).data?.scope.writingTargetProtocol === 2 && local?.kind === 'needs_input') {
     throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '目标章节已确认，但局部原文范围尚未唯一定位；本次未执行写作准备或正文变更。')
   }
-  if (local && target.effect && (local.kind !== 'bounded' || !local.regions.some(region => region.chapterId === target.chapterId)
+  if (local && target.effect && (local.kind === 'needs_input' || !local.regions.some(region => region.chapterId === target.chapterId)
     || target.effect !== 'range')) {
     throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '原局部请求不能整体覆盖、追加、改名、创建或借其他工具改动正文；定位不明须补准确原文或选区后重新发起任务。')
   }
@@ -602,6 +619,7 @@ export function frozenWritingRevisionAuthority(value: unknown, chapterId: string
   const spec = parsed.data, interpretation = spec.scope.writingInterpretation, writing = spec.scope.writing
   assertFrozenWritingContract(spec)
   if (!interpretation || !writing || interpretation.revisionDenied || spec.scope.localEditBoundary?.kind === 'needs_input'
+    || spec.scope.localEditBoundary?.version === 3
     || interpretation.excludedChapterIds.includes(chapterId)) return false
   if (writing.kind === 'needs_input') return provenNewDraft && spec.scope.writingClarificationProtocol === 1 && spec.intent === 'write'
   const action = interpretation.operations.some(operation => operation.polarity === 'affirmative'

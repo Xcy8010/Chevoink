@@ -10,8 +10,11 @@ export type AuthorWritingTarget = { span: AuthorSpan; clauseSpan: AuthorSpan;
 export type AuthorWritingOperation = { span: AuthorSpan; clauseSpan: AuthorSpan;
   kind: 'write' | 'revise' | 'review' | 'read' | 'placement'; polarity: 'affirmative' | 'negative';
   accepted: boolean; reason: string; targetIndices: number[] }
+export type AuthorConditionalLocalRepair = { targetIndices: number[]; reviewOperationIndices: number[];
+  repairs: Array<{ operationIndex: number; condition: { kind: 'review_findings' | 'necessity'; span: AuthorSpan } }> }
 export type AuthorWritingRequest = { protocol: 2; range: RequestedWritingRange | null; ambiguous: boolean; hasAction: boolean;
   exclusions: string[]; confirmedNextOrderIndex?: number; intent: 'write' | 'revise' | 'review' | null;
+  conditionalLocalRepair?: AuthorConditionalLocalRepair;
   evidence: { clauses: AuthorClause[]; quoted: AuthorQuotedSpan[]; operations: AuthorWritingOperation[]; targets: AuthorWritingTarget[] };
   reasons: string[] }
 
@@ -82,14 +85,15 @@ export function lexAuthorWritingRequest(prompt: string): { masked: string; claus
       clauses.push({ start, end, text: prompt.slice(start, end), masked: masked.slice(start, end), sentence })
     }
   }
-  for (const match of masked.matchAll(/[，,。！？!?；;\r\n]+/gu)) {
+  for (const match of masked.matchAll(/[，,。.！？!?；;\r\n]+/gu)) {
     const at = match.index!, delimiter = match[0]
+    if (delimiter === '.' && /[0-9]/u.test(masked[at - 1] ?? '') && /[0-9]/u.test(masked[at + 1] ?? '')) continue
     // A bare numbered list tail inherits the same operation and polarity.
     if (/^[，,]$/u.test(delimiter)
       && new RegExp(`${numberPattern}\\s*(?:章)?\\s*$`, 'u').test(masked.slice(start, at))
       && new RegExp(`^\\s*(?:第\\s*)?${numberPattern}\\s*(?:章|[、，,及与和])`, 'u').test(masked.slice(at + 1))) continue
     append(at); start = at + delimiter.length
-    if (/[。！？!?；;\r\n]/u.test(delimiter)) sentence++
+    if (/[。.！？!?；;\r\n]/u.test(delimiter)) sentence++
   }
   append(masked.length)
   return { masked, clauses, quoted }
@@ -204,6 +208,127 @@ function assessmentPredicates(text: string, matches: RegExpMatchArray[]): Map<nu
     }
   }
   return result
+}
+
+const singleton = (range: RequestedWritingRange) => ['first', 'range', 'next'].includes(range.kind) && range.count === 1
+  || range.kind === 'list' && range.positions?.length === 1
+const rangeKey = (range: RequestedWritingRange) => JSON.stringify(range.kind === 'list' && range.positions?.length === 1
+  ? { kind: 'range', start: range.positions[0], count: 1, ...(range.volume ? { volume: range.volume } : {}) }
+  : range.kind === 'first' ? { kind: 'range', start: 1, count: 1, ...(range.volume ? { volume: range.volume } : {}) } : range)
+
+/** A read object is an address, never a mutation. A primary author scope takes
+ * precedence over earlier reads, but a later non-reference read can introduce
+ * a conflicting domain. Reference material and instruction-shaped data stay inert. */
+function bindSameTargetObjects(masked: string, operations: AuthorWritingOperation[], targets: AuthorWritingTarget[], reasons: Set<string>) {
+  const ranged = (operation: AuthorWritingOperation) => operation.targetIndices.filter(index => targets[index].range && !targets[index].contextual && !targets[index].invalid)
+  const readable = (operation: AuthorWritingOperation) => {
+    if (operation.kind !== 'read' || operation.polarity !== 'affirmative' || operation.reason !== 'reference'
+      || !/^(?:读取|阅读|读完|通读|读|read)$/iu.test(masked.slice(operation.span.start, operation.span.end))) return false
+    const before = masked.slice(operation.clauseSpan.start, operation.span.start)
+    const object = masked.slice(operation.span.end, operation.clauseSpan.end)
+    return !factBefore.test(before) && !advice.test(before) && !/(?:只|仅)\s*$|read.only/iu.test(before)
+      && !/(?:这句|这段|原文|文字|提示|示例|引文|文本)\s*[:：]|作(?:为)?参考|用作参考|供参考|for\s+reference|as\s+(?:a\s+)?reference/iu.test(object)
+  }
+  for (const [operationIndex, operation] of operations.entries()) {
+    if (!(operation.accepted || operation.polarity === 'negative' && operation.reason === 'negated')
+      || !['write', 'revise', 'review'].includes(operation.kind)
+      || !operation.targetIndices.some(index => targets[index].kind === 'same_target') || ranged(operation).length) continue
+    const prior = operations.slice(0, operationIndex)
+    const mutations = prior.filter(item => item.accepted && ['write', 'revise'].includes(item.kind) && ranged(item).length)
+    const primary = mutations.length ? mutations : prior.filter(item => item.accepted && item.kind === 'review' && ranged(item).length)
+    const latestPrimary = primary.at(-1)
+    const primaryTargets = primary.flatMap(ranged)
+    const singlePrimary = primaryTargets.length > 0 && new Set(primaryTargets.map(index => rangeKey(targets[index].range!))).size === 1
+      && primaryTargets.every(index => singleton(targets[index].range!))
+    const supportingCoverage = (item: AuthorWritingOperation) => {
+      const scopes = ranged(item)
+      if (!singlePrimary || !scopes.length || scopes.some(index => targets[index].kind !== 'count')) return false
+      const first = Math.min(...scopes.map(index => targets[index].span.start))
+      // Coordinated unnumbered prose + counted background is reading coverage,
+      // not a newly named chapter focus. Explicit ordinal objects still conflict.
+      return item.targetIndices.some(index => targets[index].kind === 'prose' && !targets[index].range && targets[index].span.end <= first
+        && /^(?:\s|、|,|，|和|与|及|以及|and)+$/iu.test(masked.slice(targets[index].span.end, first)))
+    }
+    const recentReads = prior.filter(item => readable(item) && (!latestPrimary || item.span.start >= latestPrimary.span.end) && !supportingCoverage(item))
+    const candidates = [...primary, ...recentReads].flatMap(ranged)
+    const unique = [...new Map(candidates.map(index => [rangeKey(targets[index].range!), index])).values()]
+    if (unique.length > 1 || unique.some(index => !singleton(targets[index].range!))) {
+      reasons.add('ambiguous_target_reference')
+    } else if (unique.length === 1) operation.targetIndices.push(unique[0])
+  }
+}
+
+type RepairCondition = AuthorConditionalLocalRepair['repairs'][number]['condition']
+/** Conditions are local grammatical governors, not a prompt-wide keyword flag.
+ * Unknown subjects/events do not match this bounded review-result grammar. */
+function repairCondition(operation: AuthorWritingOperation, clauses: AuthorClause[], targets: AuthorWritingTarget[]): RepairCondition | null {
+  const clauseIndex = clauses.findIndex(clause => clause.start === operation.clauseSpan.start), clause = clauses[clauseIndex]
+  if (!clause) return null
+  const previous = clauses[clauseIndex - 1]
+  const adjacent = previous?.sentence === clause.sentence ? previous : undefined
+  const governed = adjacent && /^(?:\s*)(?:如|若|倘若|一旦|当|只有|仅当|等|待|if\b|when\b|unless\b|provided\b)|(?:批准|同意|许可|approval|permission|consent)|(?:后|时|以后)\s*$/iu.test(adjacent.masked)
+  const candidates = governed && adjacent ? [adjacent] : [clause, ...(adjacent ? [adjacent] : [])]
+  const issue = /(?:如(?:果)?|若|倘若|一旦|if|when)\s*(?:(?:本次|本轮|当前|the|this)\s*)?(?:(?:质量|连续性|独立|完整)\s*)?(?:(?:检查|审查|复检|复核|核对|报告|review|check|assessment)(?:结果|报告)?\s*)?(?:有|发现|查出|检出|存在|确认|证实|finds?|reveals?|identifies?|there\s+(?:is|are))\s*(?:(?:确证|确认|已证实|明确|真实|实际|可验证|confirmed|verified|actual)\s*)?(?:问题|错误|矛盾|冲突|缺陷|issues?|errors?|conflicts?|problems?)(?:时|后|的话)?/iu
+  const necessity = /必要时|如有必要|如需|按(?:照)?(?:需要|必要性|需)|视需要|if\s+(?:needed|necessary)|as\s+needed/iu
+  const directiveTail = (source: AuthorClause, start: number, end: number) => {
+    let tail = source.masked.slice(start - source.start, end - source.start)
+    for (const target of targets.filter(target => target.span.start >= start && target.span.end <= end).sort((a, b) => b.span.start - a.span.start)) {
+      const offset = target.span.start - start
+      tail = tail.slice(0, offset) + ' '.repeat(target.span.end - target.span.start) + tail.slice(offset + target.span.end - target.span.start)
+    }
+    return /^(?:\s|就|则|才|仅|只|请|对|在|做|进行|的|必要|位置|部分|处|一次|一遍|一轮|only|then|please)*$/iu.test(tail)
+  }
+  for (const source of candidates) {
+    const end = source === clause ? operation.span.start : source.end
+    const text = source.masked.slice(0, end - source.start)
+    for (const [pattern, kind] of [[issue, 'review_findings'], [necessity, 'necessity']] as const) {
+      const match = pattern.exec(text)
+      if (!match) continue
+      const start = source.start + match.index, conditionEnd = start + match[0].length
+      // An if-condition cannot be a fragment of an external subject, another
+      // condition, an assessment question, or an instruction-shaped payload.
+      if (text.slice(0, match.index).trim()) continue
+      if (!directiveTail(source, conditionEnd, end)) continue
+      if (source !== clause) {
+        const prefix = clause.masked.slice(0, operation.span.start - clause.start), modifier = necessity.exec(prefix)
+        const directiveStart = modifier && !prefix.slice(0, modifier.index).trim() ? clause.start + modifier.index + modifier[0].length : clause.start
+        if (!directiveTail(clause, directiveStart, operation.span.start)) continue
+      }
+      return { kind, span: { start, end: conditionEnd } }
+    }
+  }
+  return null
+}
+
+/** This projection describes an ordered request, not a writable body range.
+ * Consumers still need a fresh chapter identity and persisted finding anchors. */
+function conditionalLocalRepair(operations: AuthorWritingOperation[], targets: AuthorWritingTarget[], clauses: AuthorClause[]): AuthorConditionalLocalRepair | undefined {
+  const mutations = operations.flatMap((operation, index) => operation.accepted && ['write', 'revise'].includes(operation.kind) ? [index] : [])
+  if (!mutations.length || mutations.some(index => operations[index].kind !== 'revise')) return undefined
+  const domain = (operation: AuthorWritingOperation) => {
+    const ranged = operation.targetIndices.filter(index => targets[index].range)
+    if (ranged.length) {
+      const keys = [...new Set(ranged.map(index => rangeKey(targets[index].range!)))]
+      return keys.length === 1 && ranged.every(index => singleton(targets[index].range!)) ? { key: keys[0], indices: ranged } : null
+    }
+    const same = operation.targetIndices.filter(index => targets[index].kind === 'same_target')
+    return same.length ? { key: 'same_target', indices: same } : null
+  }
+  const repairs: AuthorConditionalLocalRepair['repairs'] = [], reviewIndices = new Set<number>(), targetIndices = new Set<number>()
+  let key: string | undefined
+  for (const operationIndex of mutations) {
+    const operation = operations[operationIndex], scope = domain(operation), condition = repairCondition(operation, clauses, targets)
+    if (!scope || !condition || key !== undefined && scope.key !== key
+      || !operation.targetIndices.some(index => targets[index].kind === 'local')) return undefined
+    const reviews = operations.flatMap((review, index) => index < operationIndex && review.accepted && review.kind === 'review'
+      && domain(review)?.key === scope.key ? [index] : [])
+    if (!reviews.length) return undefined
+    key = scope.key
+    scope.indices.forEach(index => targetIndices.add(index))
+    reviews.forEach(index => reviewIndices.add(index))
+    repairs.push({ operationIndex, condition })
+  }
+  return { targetIndices: [...targetIndices], reviewOperationIndices: [...reviewIndices], repairs }
 }
 
 /** Fresh-author protocol 2 only. This interpreter does not read a manuscript,
@@ -392,6 +517,7 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
       || /^(?:修改|修订|改|替换|edit|revise|replace)$/iu.test(operator) && /^\s*(?:为|成|with)\s*$/iu.test(prompt.slice(owner.span.end, quote.start)))
     if (!replacement) reasons.add('unresolved_source_quote')
   }
+  bindSameTargetObjects(lexical.masked, operations, targets, reasons)
   const mutations = operations.filter(operation => operation.accepted && (operation.kind === 'write' || operation.kind === 'revise'))
   const selected = mutations.length ? mutations : operations.filter(operation => operation.accepted && operation.kind === 'review')
   for (const operation of selected) {
@@ -422,8 +548,10 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
   const writing = mutations.some(operation => operation.kind === 'write' && operation.targetIndices.some(index => targets[index].range?.kind === 'next'))
   const intent = writing ? 'write' : mutations.some(operation => operation.kind === 'revise') ? 'revise'
     : mutations.length ? 'write' : selected.length ? 'review' : null
+  const workflow = reasons.size ? undefined : conditionalLocalRepair(operations, targets, lexical.clauses)
   return { protocol: 2, range: reasons.size ? null : range, ambiguous: reasons.size > 0, hasAction: selected.length > 0,
     exclusions: [...new Set(exclusions)], ...(confirmedNextOrderIndex !== undefined ? { confirmedNextOrderIndex } : {}), intent,
+    ...(workflow ? { conditionalLocalRepair: workflow } : {}),
     evidence: { clauses: lexical.clauses, quoted: lexical.quoted, operations, targets }, reasons: [...reasons].slice(0, 32) }
 }
 

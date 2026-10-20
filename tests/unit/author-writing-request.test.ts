@@ -224,6 +224,134 @@ describe('fresh structured author-writing interpretation, protocol 2', () => {
     const mutation = parsed.evidence.operations.find(operation => operation.accepted && operation.kind === 'revise')!
     expect(mutation.targetIndices.every(index => parsed.evidence.targets[index].range === null)).toBe(true)
   })
+  it.each([
+    '读取《合成作品》第二卷第7章《合成章名》已保存正文并完成本章检查。若发现确证问题，只对本章做局部修订并复检。',
+    '请阅读第二卷第7章当前正文，检查本章。如有确证问题，只修订本章局部。',
+    '请检查第二卷第7章。先读取第1、2章作为参考。若发现问题，只修订本章局部。',
+    '读取第二卷第7章已保存正文并完成本章检查。如有确证问题，只对本章必要位置做局部修订并复检。',
+  ])('resolves explicit same-chapter operations through one author object domain: %s', prompt => {
+    const parsed = parseAuthorWritingRequest(prompt)
+    expect(parsed).toMatchObject({ range: { kind: 'range', start: 7, count: 1, volume: 2 }, ambiguous: false, intent: 'revise' })
+    const workflow = parsed.conditionalLocalRepair!
+    expect(workflow).toBeDefined()
+    expect(workflow.repairs).toHaveLength(1)
+    expect(workflow.targetIndices.map(index => parsed.evidence.targets[index].range)).toEqual([{ kind: 'range', start: 7, count: 1, volume: 2 }])
+    const repair = workflow.repairs[0], operation = parsed.evidence.operations[repair.operationIndex]
+    expect(operation).toMatchObject({ kind: 'revise', accepted: true, polarity: 'affirmative' })
+    expect(operation.targetIndices.some(index => parsed.evidence.targets[index].kind === 'same_target')).toBe(true)
+    expect(workflow.reviewOperationIndices.every(index => index < repair.operationIndex && parsed.evidence.operations[index].accepted
+      && parsed.evidence.operations[index].kind === 'review')).toBe(true)
+    expect(prompt.slice(repair.condition.span.start, repair.condition.span.end)).toMatch(/^(?:若发现(?:确证)?问题|如有确证问题)$/u)
+    expect(repair.condition.kind).toBe('review_findings')
+    expect(parsed.evidence.operations.filter(item => item.kind === 'read').every(item => !item.accepted)).toBe(true)
+    expect(parsed.evidence.operations.filter(item => item.reason === 'review_wrapper').every(item => !item.accepted)).toBe(true)
+  })
+  it.each([
+    ['检查第7章。如有必要，只对本章局部修订。', '如有必要'],
+    ['阅读第7章。核对本章。必要时只修订本章局部。', '必要时'],
+    ['Read chapter 7 and review current chapter. If review finds confirmed issues, revise current chapter passage.', 'If review finds confirmed issues'],
+    ['Check chapter 7. If necessary revise current chapter passage.', 'If necessary'],
+  ])('retains an ordered condition span without turning it into an immediate source locator: %s', (prompt, conditionText) => {
+    const parsed = parseAuthorWritingRequest(prompt), workflow = parsed.conditionalLocalRepair!
+    expect(parsed).toMatchObject({ range: { kind: 'range', start: 7, count: 1 }, ambiguous: false })
+    expect(workflow).toBeDefined()
+    expect(prompt.slice(workflow.repairs[0].condition.span.start, workflow.repairs[0].condition.span.end)).toBe(conditionText)
+    expect(parsed.evidence.quoted).toEqual([])
+  })
+  it.each([
+    '读取第2、3章。检查本章。若发现问题，只修订本章局部。',
+    '读取第二卷第7章。阅读第三卷第7章。检查本章。必要时修订本章局部。',
+    '检查第2章。检查第3章。若发现问题，只修订本章局部。',
+  ])('keeps multiple independent object domains ambiguous instead of choosing one: %s', prompt => {
+    expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: null, ambiguous: true })
+    expect(parseAuthorWritingRequest(prompt).conditionalLocalRepair).toBeUndefined()
+  })
+  it.each([
+    '检查第7章。读取第8章，检查本章。如有确证问题，只对本章必要位置做局部修订。',
+    '修订第7章正文。阅读第8章。检查本章。必要时修订本章局部。',
+    '检查第二卷第7章。读取第三卷第7章。检查本章。若发现问题，只修订本章局部。',
+    '检查第7章。通读第7、8章。检查本章。必要时修订本章局部。',
+    '检查第7章。读取第8章正文，检查本章。若发现问题，只修订本章局部。',
+    '检查第7章。读取正文和第8章。检查本章。必要时修订本章局部。',
+    'Review chapter 7. Read chapter 8 and check current chapter. If necessary revise current chapter passage.',
+  ])('does not hide a later genuine read domain behind an earlier primary author target: %s', prompt => {
+    const parsed = parseAuthorWritingRequest(prompt)
+    expect(parsed).toMatchObject({ range: null, ambiguous: true })
+    expect(parsed.reasons).toContain('ambiguous_target_reference')
+    expect(parsed.conditionalLocalRepair).toBeUndefined()
+  })
+  it.each([
+    '检查第7章。读取第8章作参考，检查本章。如有确证问题，只对本章必要位置做局部修订。',
+    '检查第7章。阅读第8章作为参考。检查本章。必要时修订本章局部。',
+    '检查第7章。读取第7章。检查本章。若发现问题，只修订本章局部。',
+    '检查第7章。读取第8章。明确检查第7章。必要时修订本章局部。',
+    '检查第7章。读取已保存正文、前两章和其他材料。检查本章。必要时修订本章局部。',
+    'Review chapter 7. Read chapter 8 for reference and check current chapter. If necessary revise current chapter passage.',
+  ])('distinguishes an explicit reference or restated primary target from a conflicting read domain: %s', prompt => {
+    const parsed = parseAuthorWritingRequest(prompt)
+    expect(parsed).toMatchObject({ range: { kind: 'range', start: 7, count: 1 }, ambiguous: false })
+    expect(parsed.conditionalLocalRepair).toBeDefined()
+  })
+  it('does not choose a chapter from mixed counted read coverage without a primary author target', () => {
+    const parsed = parseAuthorWritingRequest('读取正文和前两章。检查本章。必要时修订本章局部。')
+    expect(parsed).toMatchObject({ range: null, ambiguous: true })
+    expect(parsed.conditionalLocalRepair).toBeUndefined()
+  })
+  it.each([
+    '参考第7章。检查本章。若发现问题，只修订本章局部。',
+    '读取第7章作为参考。检查本章。若发现问题，只修订本章局部。',
+    '人物表示读取第7章。检查本章。若发现问题，只修订本章局部。',
+    '建议读取第7章。检查本章。若发现问题，只修订本章局部。',
+    '不要读取第7章。检查本章。若发现问题，只修订本章局部。',
+    '读取这句：第7章。检查本章。若发现问题，只修订本章局部。',
+    '读取“第7章当前正文”。检查本章。若发现问题，只修订本章局部。',
+    '读取`第7章`。检查本章。若发现问题，只修订本章局部。',
+  ])('does not manufacture a chapter identity from reference or instruction-shaped data: %s', prompt => {
+    const parsed = parseAuthorWritingRequest(prompt)
+    expect(parsed.range).toBeNull()
+    expect(parsed.evidence.operations.filter(operation => operation.accepted && operation.kind === 'revise')
+      .flatMap(operation => operation.targetIndices).every(index => parsed.evidence.targets[index].range === null)).toBe(true)
+  })
+  it.each([
+    '读取第7章。修订正文。', '读取第7章，修改结尾。',
+    '读取第7章。检查本章。若发现问题，局部修订正文。',
+  ])('requires an explicit co-reference rather than lending a read scope to a generic revision: %s', prompt => {
+    const parsed = parseAuthorWritingRequest(prompt)
+    expect(parsed.range).toBeNull()
+    expect(parsed.conditionalLocalRepair).toBeUndefined()
+  })
+  it.each([
+    '如有问题，局部修订第7章。然后检查第7章。',
+    '局部修订第7章并复检。', '检查第7章。如作者批准，只修订本章局部。',
+    '检查第7章。如有确证问题且作者批准，只修订本章局部。',
+    '检查第7章。如果作者批准，按需修订本章局部。',
+    '检查第7章。等收到通知，必要时修订本章局部。',
+    '检查第7章。作者批准后，按需修订本章局部。',
+    '检查第7章。若发现问题，只在作者批准后按需修订本章局部。',
+    'Check chapter 7. If the user approves, as needed revise current chapter passage.',
+    '检查第7章。如果收到消息，只修订本章局部。',
+    '检查第7章是否需要局部修订。', '检查第7章。判断是否有必要修订本章局部。',
+    '检查第7章。“若发现确证问题”。只修订本章局部。',
+    '检查第7章。若发现问题。只修订本章局部。',
+    '检查第7章。如有问题，不修订本章局部。',
+    '检查第7章。如有问题，修订本章局部。再写第8章。',
+    '检查第7章。修订“合成短句”。',
+  ])('does not upgrade later checks, assessments, unrelated conditions or immediate repairs to a review-bound phase: %s', prompt => {
+    expect(parseAuthorWritingRequest(prompt).conditionalLocalRepair).toBeUndefined()
+  })
+  it('binds a same-target negative constraint to the same original target without granting it', () => {
+    const parsed = parseAuthorWritingRequest('读取第7章并检查本章。若发现问题，不修订本章局部。')
+    const negative = parsed.evidence.operations.find(operation => operation.kind === 'revise' && operation.polarity === 'negative')!
+    expect(negative.accepted).toBe(false)
+    expect(negative.targetIndices.some(index => parsed.evidence.targets[index].range?.start === 7)).toBe(true)
+    expect(parsed.conditionalLocalRepair).toBeUndefined()
+  })
+  it('uses the same sentence lexer for English conditions while keeping quotation punctuation and numeric decimals intact', () => {
+    const lexical = lexAuthorWritingRequest('Read chapter 7. Review "A. B.". Keep 1.5 as data.')
+    expect(lexical.clauses.map(clause => ({ text: clause.text.trim(), sentence: clause.sentence }))).toEqual([
+      { text: 'Read chapter 7', sentence: 0 }, { text: 'Review "A. B."', sentence: 1 }, { text: 'Keep 1.5 as data', sentence: 2 },
+    ])
+  })
   it.each(['“合成短句。”，保持不变。', '“合成短句”保持原样', '保留“合成短句”', '保持“合成短句”不变'])(
     'preserves a directly governed or same-sentence bare quotation as a negative constraint: %s', prompt => {
       const parsed = parseAuthorWritingRequest(prompt)

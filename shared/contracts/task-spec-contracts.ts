@@ -14,6 +14,17 @@ const localEditBoundarySchema = z.discriminatedUnion('version', [
       quoteStart: z.number().int().nonnegative(), quoteEnd: z.number().int().positive(),
       issueStart: z.number().int().nonnegative(), issueEnd: z.number().int().positive() }).strict(),
   }).strict()).max(8) }).strict(),
+  // A review is executable before its findings exist. This is a baseline and
+  // policy, never a pre-authorized whole-body editing interval.
+  z.object({ version: z.literal(3), kind: z.literal('review_bound'),
+    regions: z.array(localEditRegionSchema.extend({ protectedText: z.array(z.string().min(1)),
+      maxBodyLength: z.number().int().positive() }).strict()).min(1).max(1000),
+    source: z.object({ requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+      reviews: z.array(z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).strict()).min(1),
+      repairs: z.array(z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive(),
+        condition: z.object({ kind: z.enum(['review_findings', 'necessity']), start: z.number().int().nonnegative(), end: z.number().int().positive() }).strict() }).strict()).min(1),
+    }).strict(),
+  }).strict(),
 ])
 
 /** Agent 2.0 任务契约：把自然语言请求冻结为可验证、可恢复的运行时输入。 */
@@ -147,6 +158,22 @@ export const taskSpecSchema = z.object({
     || spec.scope.localEditProtocol !== 1 || !spec.scope.writingInterpretation
     || spec.scope.localEditBoundary.regions.some(region => region.source.requestHash !== spec.scope.writingInterpretation!.requestHash))) {
     ctx.addIssue({ code: 'custom', path: ['scope', 'localEditBoundary'], message: 'Issue quotations require the same frozen author interpretation' })
+  }
+  const conditional = spec.scope.localEditBoundary
+  if (conditional?.version === 3 && (spec.scope.writingTargetProtocol !== 2 || spec.scope.localEditProtocol !== 1
+    || !spec.scope.writingInterpretation || conditional.source.requestHash !== spec.scope.writingInterpretation.requestHash
+    || spec.scope.writing?.kind !== 'bounded' || spec.scope.writing.repairAuthorized
+    || conditional.regions.length !== spec.scope.writing.targets.length
+    || conditional.regions.some(region => !spec.scope.writing!.targets.some(target => target.chapterId === region.chapterId)
+      || region.start !== 0 || region.end <= 0 || region.prefix !== '' || region.suffix !== '' || region.maxBodyLength < region.end)
+    || new Set(conditional.regions.map(region => region.chapterId)).size !== conditional.regions.length
+    || conditional.source.reviews.some(span => span.end <= span.start || !spec.scope.writingInterpretation!.operations.some(op =>
+      op.kind === 'review' && op.polarity === 'affirmative' && op.start === span.start && op.end === span.end))
+    || conditional.source.repairs.some(span => span.end <= span.start || span.condition.end <= span.condition.start
+      || span.condition.end > span.start || !conditional.source.reviews.some(review => review.end <= span.condition.start)
+      || !spec.scope.writingInterpretation!.operations.some(op => op.kind === 'revise' && op.polarity === 'affirmative'
+        && op.start === span.start && op.end === span.end)))) {
+    ctx.addIssue({ code: 'custom', path: ['scope', 'localEditBoundary'], message: 'Conditional repair requires its bounded original review policy' })
   }
 })
 

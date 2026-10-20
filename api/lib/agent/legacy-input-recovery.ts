@@ -84,7 +84,7 @@ export async function readLegacyAnchorInputRecovery(tx: Prisma.TransactionClient
     }
     if (!candidates.size) return null
     const selection = originalSelectionBoundary(frozen.data), local = originalLocalEditBoundary(frozen.data)
-    if (local?.kind === 'needs_input') return null
+    if (local?.kind === 'needs_input' || local?.version === 3) return null
     const witnesses: Array<Record<string, unknown>> = []
     const sourceMessageIds: string[] = [], chapterIds: string[] = []
     for (const [chapterId, card] of [...candidates].sort(([a], [b]) => a.localeCompare(b))) {

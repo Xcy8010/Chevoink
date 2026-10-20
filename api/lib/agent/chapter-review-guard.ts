@@ -19,6 +19,7 @@ import { observedReviewCycleVerification, prepareReviewCycleTransition } from '.
 import { readTerminalCandidate } from './terminal-state-review.js'
 
 import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
+import type { ReviewBoundEvidence } from './review-bound-edit.js'
 
 export type ChapterReviewDecision = { source: 'continuity' | 'quality'; reportId: string; findingId: string }
 export type RetainedChapterReviewDecision = ChapterReviewDecision & { reason: string }
@@ -47,6 +48,8 @@ export type ChapterReviewRevisionOptions = {
   pendingQuality?: { compilationId: string; candidates: number }
 }
 export type ChapterReviewReadiness = {
+  /** Server-only mutation proof projection; ordinary read tools never request it. */
+  reviewBoundEvidence?: ReviewBoundEvidence
   reviewCycle?: ReturnType<typeof projectReviewCycle>
   reviewCycleFindings?: ReviewCycleFinding[]
   reviewProtocol?: 1
@@ -148,7 +151,8 @@ export function readCurrentCompilerContinuity(compilation: {
 /** A pure persisted-state read: no paid calls, reservations, repairs or counters.
  * Callers dispatch only the returned tools through the ordinary tool journal. */
 export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
-  subject: { userId: string; novelId: string; runId: string }, compilationId?: string): Promise<ChapterReviewReadiness | null> {
+  subject: { userId: string; novelId: string; runId: string }, compilationId?: string,
+  options?: { reviewBoundEvidence: true }): Promise<ChapterReviewReadiness | null> {
   const original = await readOriginalTaskRequest(tx, subject)
   const runIds = await originalTaskRunIds(tx, subject, original)
   const compilation = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds },
@@ -288,7 +292,33 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   if (requirements.quality && quality === 'complete' && qualityContextCurrent) phases.push('quality')
   if (!requiredTools.length && !decisionPending && requiredDecisions.length > 0
     && (!requirements.quality || qualityContextCurrent)) phases.push('decision')
+  const repairAnchors: ReviewBoundEvidence['anchors'] = []
+  if (options?.reviewBoundEvidence && !requiredTools.length && (!requirements.quality || qualityContextCurrent)) {
+    // Only structured CURRENT source quotes confer edit authority. Narrative
+    // explanations, previous-source quotes and generic cycle anchors do not.
+    if (assessment && validation && Array.isArray(validation.findings)) for (const [index, item] of validation.findings.entries()) {
+      const finding = continuityFindingInputSchema.parse(item)
+      if (finding.severity !== 'error') continue // plan calibration cannot authorize prose edits
+      if (retainedDecisions.some(ref => ref.source === 'continuity' && ref.reportId === continuityBinding && ref.findingId === String(index))) continue
+      for (const evidence of finding.sourceEvidence ?? []) {
+        if (evidence.source !== 'current') continue
+        const start = chapter.content.indexOf(evidence.quote)
+        if (start >= 0 && chapter.content.indexOf(evidence.quote, start + 1) < 0) repairAnchors.push({ start, end: start + evidence.quote.length,
+          text: evidence.quote, source: 'continuity', reportId: continuityBinding, findingId: String(index) })
+      }
+    }
+    if (quality === 'complete' && qualityContextCurrent) for (const finding of report!.findings) {
+      if (finding.disposition === 'repaired' || finding.authorFeedback === 'rejected'
+        || retainedDecisions.some(ref => ref.source === 'quality' && ref.reportId === report!.id && ref.findingId === finding.id)) continue
+      const { startOffset: start, endOffset: end, evidenceExcerpt: text } = finding
+      if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 0 && end > start && end <= chapter.content.length
+        && text && chapter.content.slice(start, end) === text && finding.evidenceHash === createHash('sha256').update(text).digest('hex')) {
+        repairAnchors.push({ start, end, text, source: 'quality', reportId: report!.id, findingId: finding.id })
+      }
+    }
+  }
   return { ready: !requiredTools.length, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id,
+    ...(options?.reviewBoundEvidence ? { reviewBoundEvidence: { contentHash, anchors: repairAnchors, cycle: savedCycle } } : {}),
     ...(reviewProtocol ? { reviewProtocol, completeStrictReview,
       selectionOnly: !!originalSelectionBoundary(original.spec) || !!originalLocalEditBoundary(original.spec) } : {}),
     chapterId: chapter.id, revision: chapter.revision, continuity, quality, requiredTools, decisionPending, reviewCycle, reviewCycleFindings: cycleFindings,
@@ -477,7 +507,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number },
   options: ChapterReviewRevisionOptions) {
   await lockNovelActiveScope(tx, subject.novelId)
-  await assertSelectionBodyEffect(tx, subject, chapter, options)
+  const conditionalAuthority = await assertSelectionBodyEffect(tx, subject, chapter, options)
   const original = await readOriginalTaskRequest(tx, subject)
   const runIds = await originalTaskRunIds(tx, subject, original)
   await tx.$queryRaw(Prisma.sql`SELECT id FROM story_compilations WHERE user_id = ${subject.userId}
@@ -508,10 +538,10 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   const newReview = !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope) && (spec.scope as Record<string, unknown>).reviewProtocol === 1
   const frozenAuthority = frozenWritingRevisionAuthority(original.spec, current.id, !!authority)
   const authorityText = (text: string | null) => chapterRevisionAuthorityText(localRevisionAuthorityText(text, original.spec), original.spec, current.id)
-  const prohibited = frozenAuthority !== undefined ? !frozenAuthority : prohibitsNewDraftRevision(authorityText(original.prompt)) || Array.isArray(spec?.hardConstraints) && spec.hardConstraints.some(item =>
+  const prohibited = conditionalAuthority ? false : frozenAuthority !== undefined ? !frozenAuthority : prohibitsNewDraftRevision(authorityText(original.prompt)) || Array.isArray(spec?.hardConstraints) && spec.hardConstraints.some(item =>
     !!item && typeof item === 'object' && 'text' in item && typeof item.text === 'string'
       && prohibitsNewDraftRevision(authorityText(item.text)))
-  const localAuthority = originalLocalEditBoundary(original.spec)?.kind === 'bounded'
+  const localAuthority = conditionalAuthority || originalLocalEditBoundary(original.spec)?.kind === 'bounded'
   const freshAssessment = frozenAuthority === undefined && !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope)
     && (spec.scope as Record<string, unknown>).localEditProtocol === 1 && hasReadOnlyRevisionAssessment(original.prompt)
   if (prohibited || freshAssessment || (!authority && !localAuthority && (reviewed || newReview && spec?.intent === 'review')
@@ -864,6 +894,9 @@ export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
 export async function readChapterReviewRevisionGuidance(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number }) {
   try {
+    const original = await readOriginalTaskRequest(tx, subject)
+    const conditional = originalLocalEditBoundary(original.spec)
+    if (conditional?.version === 3 && conditional.regions.some(region => region.chapterId === chapter.id)) return localEditGuidance(original.spec)!
     await assertChapterManuscriptRevision(tx, subject, chapter, {})
     const local = localEditGuidance((await readOriginalTaskRequest(tx, subject)).spec)
     if (local) return local

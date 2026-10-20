@@ -436,7 +436,7 @@ export const storyCompilerPrepareTool = defineTool({
   name: 'story_compiler_prepare',
   title: '准备章节写作',
   description:
-    '新增完整章节、从章尾继续写较长场景、或按计划重写整章前的 PREPARE 步骤：召回 Story Charter、待兑现承诺、前章终态、故事记忆和近期首尾结构，并建立可追踪 Chapter Bridge。局部选区润色/纠错、改标题、调整元数据时禁止调用。新章节尚未创建时传目标全书序号，已有章节传 chapterId。',
+    '章节写作及需要最终检查、提交章节桥的既有章修订所需 PREPARE 步骤：召回 Story Charter、待兑现承诺、前章终态、故事记忆和近期首尾结构，并建立可追踪 Chapter Bridge。条件局部修订先按已保存正文建立本次检查所需场景，不创造新情节或扩大写入范围。无需章节桥的独立选区润色、改标题、调整元数据时禁止调用。新章节尚未创建时传目标全书序号，已有章节传 chapterId。',
   parameters: z.object({
     chapterId: z.string().min(1).optional(),
     targetOrderIndex: z.number().int().min(1).optional(),

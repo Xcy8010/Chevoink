@@ -10,6 +10,7 @@ import * as original from '../../api/lib/agent/original-request.js'
 import { nextReviewDispatch, reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
 import * as lock from '../../api/lib/data/novel-write-lock.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
+import * as humanity from '../../api/lib/agent/humanity-quality.js'
 
 afterEach(() => vi.restoreAllMocks())
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
@@ -50,6 +51,39 @@ function fixture(prompt = '写下一章') {
 }
 
 describe('persisted current review readiness', () => {
+  it.each(['current', 'repaired', 'rejected', 'wrong-hash', 'wrong-offset', 'stale-context', 'latest-failed', 'stale-revision'])(
+    'projects conditional quality edit evidence only from an owned complete current report: %s', async scenario => {
+      const f = fixture('修改第44章。完成连续性与人类感检查。')
+      Object.assign(f.report.deterministicMetrics, { qualityContextHash: 'current-context' })
+      vi.spyOn(humanity, 'buildHumanityQualityContext').mockResolvedValue({} as never)
+      vi.spyOn(humanity, 'qualityReviewContextHash').mockReturnValue(scenario === 'stale-context' ? 'changed-context' : 'current-context')
+      const text = '门已经锁好', start = f.chapter.content.indexOf(text)
+      const finding = { id: 'proven', signal: 'description_load', severity: 'warning', disposition: 'pending', authorFeedback: null,
+        startOffset: start, endOffset: start + text.length, evidenceExcerpt: text, evidenceHash: sha(text), explanation: '合成复核', suggestion: '合成局部建议' }
+      if (scenario === 'repaired') finding.disposition = 'repaired'
+      if (scenario === 'rejected') Object.assign(finding, { authorFeedback: 'rejected' })
+      if (scenario === 'wrong-hash') finding.evidenceHash = sha('其他原文')
+      if (scenario === 'wrong-offset') finding.startOffset++
+      if (scenario === 'latest-failed') f.report.status = 'failed'
+      if (scenario === 'stale-revision') f.report.chapterRevision--
+      f.report.findings = [finding] as never
+      const result = await readChapterReviewReadiness(f.tx, f.subject, undefined, { reviewBoundEvidence: true })
+      expect(result?.reviewBoundEvidence?.anchors).toHaveLength(scenario === 'current' ? 1 : 0)
+      expect((await readChapterReviewReadiness(f.tx, f.subject))?.reviewBoundEvidence).toBeUndefined()
+      expect(f.db.storyCompilation.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ runId: { in: ['original', 'resumed'] } }) }))
+      expect(f.db.chapterQualityReport.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ chapterId: f.chapter.id, compilationId: f.compilation.id, runId: { in: ['original', 'resumed'] } }) }))
+    })
+  it.each(['current', 'previous', 'narrative-only', 'unlocated', 'failed-coverage', 'plan-calibration'])(
+    'uses structured current continuity quotes without a narrative/previous-source fallback: %s', async scenario => {
+      const f = fixture('修改第44章。无需人类感检查。')
+      const text = '门已经锁好'
+      Object.assign(f.compilation.validation, { findings: [{ signal: 'location_time', severity: scenario === 'plan-calibration' ? 'warning' : 'error', evidence: `本章“${text}”需复核`, suggestion: '核对',
+        ...(scenario === 'narrative-only' ? {} : { sourceEvidence: [{ source: scenario === 'previous' ? 'previous' : 'current', quote: scenario === 'unlocated' ? '不存在原文' : text }] }) }],
+        errorCount: scenario === 'plan-calibration' ? 0 : 1, warningCount: scenario === 'plan-calibration' ? 1 : 0 })
+      if (scenario === 'failed-coverage') f.chapter.title += '新标题'
+      const result = await readChapterReviewReadiness(f.tx, f.subject, undefined, { reviewBoundEvidence: true })
+      expect(result?.reviewBoundEvidence?.anchors).toHaveLength(scenario === 'current' ? 1 : 0)
+    })
   it('keeps old automatic-window interpretation while fresh strict requires every actual unhandled report ref', async () => {
     const f = fixture()
     const findings = Array.from({ length: 10 }, (_, i) => ({ id: `f${i}`, source: 'critic', signal: 'emotion_grounding', severity: 'advisory',
