@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { assertOriginalRepairAuthority } from '../original-request.js'
+import { assertSelectionBodyEffect } from '../writing-scope.js'
 import { z } from 'zod'
 
 import { env } from '../../../config/env.js'
@@ -585,6 +586,10 @@ export const qualityRevisionApplyTool = defineTool({
     if (ctx.protectedChapterIds?.has(report.chapterId)) return { output: '作者要求保持前文不变，该章节被保护，禁止质量修订。' }
     const selected = report.findings.filter((finding) => finding.disposition === 'selected')
     if (selected.length === 0) return { output: '报告中没有已选择的 finding，请先调用 quality_findings_select。' }
+    // This compatibility entrypoint must reject known local/selection fences
+    // before generating a paid whole-body candidate or any repair audit.
+    await prisma.$transaction(tx => assertSelectionBodyEffect(tx, ctx,
+      { id: report.chapterId, revision: report.chapterRevision }, { mutation: 'replace' }, true))
     const repaired = await applySelectedQualityRepairs(ctx, report, selected)
     if (!repaired) return { output: '局部修订器本次未返回可验证补丁，正文保持不变，可稍后重试。', summary: '局部质量修订 · 正文未改动', display: reportDisplay(report) }
     return {

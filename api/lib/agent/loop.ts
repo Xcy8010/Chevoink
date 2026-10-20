@@ -1159,13 +1159,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         taskSpec: taskSpec as unknown as object, usage: { ...usage, checkpoint: checkpointSnapshot() },
       } })
     } else await persistCheckpoint()
-    const needsScopeDecision = continuingTask && (taskSpec.scope.writing?.kind === 'needs_input' || taskSpec.scope.localEditBoundary?.kind === 'needs_input')
+    const checkAuthorScope = continuingTask || taskSpec.scope.writingTargetProtocol === 2 && taskSpec.scope.writingClarificationProtocol !== 1
+    const needsScopeDecision = checkAuthorScope && (taskSpec.scope.writing?.kind === 'needs_input' || taskSpec.scope.localEditBoundary?.kind === 'needs_input')
       ? await prisma.$transaction(async tx => {
         const effective = await effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)
         return effective.scope.writing?.kind === 'needs_input' || effective.scope.localEditBoundary?.kind === 'needs_input'
       }) : false
     if (authorInputRequired || needsScopeDecision) {
-      const notice = '原任务仍等待作者明确目标章节与范围，请在输入框发送明确的新指令；普通继续不会补全授权，旧提问不自动恢复。'
+      const notice = taskSpec.scope.writingTargetProtocol === 2 && !continuingTask
+        ? taskSpec.scope.writing?.kind === 'bounded' && taskSpec.scope.localEditBoundary?.kind === 'needs_input'
+          ? '目标章节已确认，但局部改动范围尚不能从已保存正文唯一定位。请补充准确原文片段或编辑器选区后重新发起任务；本次未改正文，也未调用模型。'
+          : '本次请求的章节目标存在缺失或冲突，请明确要处理的章节后重新发起任务；本次未改正文，也未调用模型。'
+        : '原任务仍等待作者明确目标章节与范围，请在输入框发送明确的新指令；普通继续不会补全授权，旧提问不自动恢复。'
       await announceStopReason(notice)
       await finalizeRun(runId, bus, 'paused', usage, turn, notice, undefined, false,
         undefined, undefined, undefined, false, undefined, 'needs_input')

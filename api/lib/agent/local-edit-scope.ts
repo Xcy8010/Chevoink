@@ -1,6 +1,9 @@
 import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
 import { DataAccessError } from '../prisma.js'
 import { runtimeJson } from './runtime-common.js'
+import { parseAuthorWritingRequest } from './author-writing-request.js'
+import { freezeIssueQuoteBoundary, validIssueQuoteBoundary } from './local-edit-citations.js'
+import { assertFrozenWritingContract } from './writing-contract.js'
 
 type Locator = { kind: 'quote'; text: string } | { kind: 'paragraph'; position: number | 'last' } | { kind: 'unknown' }
 const edit = /(?:修改|改写|重写|润色|优化|调整|修复|修正|替换|改成|改为|扩写|缩写|精简|删掉|删去|删除|补充|补|增加|插入|改(?!名|价|变|卷)|revise|rewrite|edit|modify|polish|replace|fix|change|expand|shorten|delete|remove|insert|add)/iu
@@ -20,14 +23,24 @@ export function hasReadOnlyRevisionAssessment(prompt: string | null): boolean {
 
 /** Only actionable author wording counts. Quoted instructions, examples,
  * questions and readonly recommendations cannot authorize a local mutation. */
-export function requestedLocalEdit(prompt: string): Locator | null {
+export function requestedLocalEdit(prompt: string, protocol: 1 | 2 = 1): Locator | null {
   const unquoted = prompt.replace(quotePattern, '【引文】')
-  if (hasReadOnlyRevisionAssessment(prompt) && local.test(unquoted)) return { kind: 'unknown' }
-  const clauses = unquoted.split(/[。！？!?；;\n，,]+/u)
+  const interpretation = protocol === 2 ? parseAuthorWritingRequest(prompt) : null
+  // A fresh assessment has no body effect to locate. Its frozen review intent
+  // denies mutation; an unknown edit window must not block the requested read.
+  if (interpretation?.intent === 'review' && !interpretation.evidence.operations.some(operation =>
+    operation.accepted && operation.polarity === 'affirmative' && ['revise', 'write'].includes(operation.kind))) return null
+  if (hasReadOnlyRevisionAssessment(prompt) && local.test(unquoted)
+    && (!interpretation || !interpretation.evidence.operations.some(operation => operation.accepted && operation.polarity === 'affirmative' && operation.kind === 'revise'))) return { kind: 'unknown' }
+  const clauses = interpretation ? interpretation.evidence.clauses.map(clause => clause.text.replace(quotePattern, '【引文】'))
+    : unquoted.split(/[。！？!?；;\n，,]+/u)
   const positive = clauses.filter(clause => !negative.test(clause)
     && !/^\s*(?:请)?(?:如何|怎么|是否|例如|举例|引用|参考|[他她]说过|how to|example)/iu.test(clause)
     && !/^\s*(?:请)?(?:给出|提供|列出|说明|输出|提出).*(?:建议|方案|思路|报告)/iu.test(clause))
-  const actionable = positive.filter(clause => edit.test(clause))
+  const actionable = interpretation ? interpretation.evidence.clauses.filter(clause => interpretation.evidence.operations.some(operation =>
+    operation.accepted && operation.polarity === 'affirmative' && ['revise', 'write'].includes(operation.kind)
+    && operation.clauseSpan.start === clause.start && operation.clauseSpan.end === clause.end))
+    .map(clause => clause.text.replace(quotePattern, '【引文】')) : positive.filter(clause => edit.test(clause))
   // A clear whole-chapter grant with a quality emphasis is still whole-chapter
   // work. An exclusive local limit or ordered local-then-whole ask is different.
   const wholeGrant = actionable.some(clause => whole.test(clause) && !local.test(clause))
@@ -36,7 +49,12 @@ export function requestedLocalEdit(prompt: string): Locator | null {
   if (createsChapter && localActions.length && localActions.every(clause => !exclusiveLocal.test(clause))) return null
   if (wholeGrant && localActions.length && localActions.every(clause => /(?:重点|尤其|特别注意|着重|focus|especially)/iu.test(clause)
     && !exclusiveLocal.test(clause))) return null
-  const explicitQuote = new RegExp(`(?:把|将)\\s*【引文】.{0,12}(?:改成|改为|替换|修改|改写|润色)|${quoteEditPrefix}【引文】`, 'u').test(actionable.join('，'))
+  const directQuotes = interpretation?.evidence.quoted.filter(quote => quote.kind === 'quotation'
+    && interpretation.evidence.operations.some(operation => operation.accepted && operation.kind === 'revise'
+      && operation.polarity === 'affirmative' && operation.span.end <= quote.start
+      && quote.end <= operation.clauseSpan.end
+      && /^(?:\s|的|这句|句子|片段)*$/u.test(prompt.slice(operation.span.end, quote.start)))) ?? []
+  const explicitQuote = directQuotes.length > 0 || new RegExp(`(?:把|将)\\s*【引文】.{0,12}(?:改成|改为|替换|修改|改写|润色)|${quoteEditPrefix}【引文】`, 'u').test(actionable.join('，'))
   const constrained = actionable.some(clause => local.test(clause)
     && (!whole.test(clause) || /(?:只|仅|局部|的|中|only)/iu.test(clause))) || explicitQuote
   if (!constrained) return null
@@ -47,7 +65,9 @@ export function requestedLocalEdit(prompt: string): Locator | null {
     || clauses.some(clause => negative.test(clause) && (local.test(clause) || /正文|任何修改|prose|any edits?/iu.test(clause)))) return { kind: 'unknown' }
   if (explicitQuote) {
     const sourceQuotes = [...prompt.matchAll(new RegExp(`(?:(?:把|将)\\s*|${quoteEditPrefix})(?:“([^”]+)”|「([^」]+)」|『([^』]+)』|"([^"\\n]+)")`, 'gu'))]
-    return sourceQuotes.length === 1 ? { kind: 'quote', text: sourceQuotes[0][1] ?? sourceQuotes[0][2] ?? sourceQuotes[0][3] ?? sourceQuotes[0][4] } : { kind: 'unknown' }
+    const sources = [...new Set([...sourceQuotes.map(match => match[1] ?? match[2] ?? match[3] ?? match[4]),
+      ...directQuotes.map(quote => prompt.slice(quote.start + 1, quote.end - 1))])]
+    return sources.length === 1 ? { kind: 'quote', text: sources[0] } : { kind: 'unknown' }
   }
   const text = actionable.join('，')
   const paragraphs = [...text.matchAll(/首段|末段|最后一段|第\s*([一二两三四五六七八九十百0-9]+)\s*段|first paragraph|last paragraph|paragraph\s*(\d+)/giu)]
@@ -67,12 +87,13 @@ export function requestedLocalEdit(prompt: string): Locator | null {
 }
 
 export function freezeLocalEditBoundary(prompt: string, writing: TaskSpec['scope']['writing'],
-  chapters: Array<{ id: string; revision: number; content: string }>): NonNullable<TaskSpec['scope']['localEditBoundary']> | undefined {
-  const locator = requestedLocalEdit(prompt)
+  chapters: Array<{ id: string; revision: number; content: string }>, protocol: 1 | 2 = 1): NonNullable<TaskSpec['scope']['localEditBoundary']> | undefined {
+  const locator = requestedLocalEdit(prompt, protocol)
   if (!locator) return undefined
   const denied = { version: 1 as const, kind: 'needs_input' as const, regions: [] }
-  if (locator.kind === 'unknown' || writing?.kind !== 'bounded' || !writing.targets.length) return denied
-  const regions: NonNullable<TaskSpec['scope']['localEditBoundary']>['regions'] = []
+  if (locator.kind === 'unknown') return protocol === 2 ? freezeIssueQuoteBoundary(prompt, writing, chapters) ?? denied : denied
+  if (writing?.kind !== 'bounded' || !writing.targets.length) return denied
+  const regions: Extract<NonNullable<TaskSpec['scope']['localEditBoundary']>, { version: 1 }>['regions'] = []
   for (const target of writing.targets) {
     const chapter = chapters.find(item => item.id === target.chapterId)
     if (!chapter) return denied
@@ -106,11 +127,13 @@ export function originalLocalEditBoundary(value: unknown) {
   // field must never degrade to a whole-chapter grant.
   if (!parsed.success || scope.localEditBoundary !== undefined && !boundary
     || boundary && (boundary.kind === 'bounded' ? !boundary.regions.length : boundary.regions.length > 0)
-    || boundary && (new Set(boundary.regions.map(region => region.chapterId)).size !== boundary.regions.length
+    || boundary && (boundary.version === 2 ? !validIssueQuoteBoundary(boundary)
+      : new Set(boundary.regions.map(region => region.chapterId)).size !== boundary.regions.length
       || boundary.regions.some(region => region.end <= region.start || region.prefix.length !== region.start
         || !region.prefix.length && !region.suffix.length))) {
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原局部编辑授权快照损坏，不能扩大正文范围。')
   }
+  assertFrozenWritingContract(parsed.data)
   return boundary ?? null
 }
 

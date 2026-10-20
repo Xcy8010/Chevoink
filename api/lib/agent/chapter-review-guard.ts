@@ -5,7 +5,7 @@ import { currentReviewNextStepGuidance, projectCurrentReviewNextStep } from './r
 import { DataAccessError } from '../prisma.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { continuityCheckRounds, continuityRepairRounds } from './story-compiler.js'
-import { readOriginalTaskRequest, originalTaskRunIds, hasOriginalRepairAuthority } from './original-request.js'
+import { readOriginalTaskRequest, originalTaskRunIds, originalRepairAuthority } from './original-request.js'
 import { activeChapterScope } from '../data/internal.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches, currentCompilerContinuityAssessment, completeCompilerContinuityAssessment, continuityStoryInput, storedContinuityProtocol } from './compiler-continuity-contract.js'
 import { qualityReportCheckedCurrentContent, selectAutomaticQualityFindings, qualityAutoRepairPending } from './quality-report-contract.js'
@@ -485,7 +485,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   const compilations = await tx.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
     chapterId: chapter.id, runId: { in: runIds } }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-  const { readNewDraftRevision, readNewDraftWritingAuthority, prohibitsNewDraftRevision, chapterRevisionAuthorityText } = await import('./writing-scope.js')
+  const { readNewDraftRevision, readNewDraftWritingAuthority, prohibitsNewDraftRevision, chapterRevisionAuthorityText, frozenWritingRevisionAuthority } = await import('./writing-scope.js')
   // Validate old receipts even though they are no longer a normal-write quota.
   const receipts = compilations.map(item => readNewDraftRevision(item.validation))
   const current = await tx.chapter.findFirst({ where: { id: chapter.id, revision: chapter.revision, authorId: subject.userId,
@@ -506,15 +506,16 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
     || !!item.validation && typeof item.validation === 'object' && !Array.isArray(item.validation) && typeof item.validation.checkedRevision === 'number')
   const spec = original.spec && typeof original.spec === 'object' && !Array.isArray(original.spec) ? original.spec as Record<string, unknown> : null
   const newReview = !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope) && (spec.scope as Record<string, unknown>).reviewProtocol === 1
+  const frozenAuthority = frozenWritingRevisionAuthority(original.spec, current.id, !!authority)
   const authorityText = (text: string | null) => chapterRevisionAuthorityText(localRevisionAuthorityText(text, original.spec), original.spec, current.id)
-  const prohibited = prohibitsNewDraftRevision(authorityText(original.prompt)) || Array.isArray(spec?.hardConstraints) && spec.hardConstraints.some(item =>
+  const prohibited = frozenAuthority !== undefined ? !frozenAuthority : prohibitsNewDraftRevision(authorityText(original.prompt)) || Array.isArray(spec?.hardConstraints) && spec.hardConstraints.some(item =>
     !!item && typeof item === 'object' && 'text' in item && typeof item.text === 'string'
       && prohibitsNewDraftRevision(authorityText(item.text)))
   const localAuthority = originalLocalEditBoundary(original.spec)?.kind === 'bounded'
-  const freshAssessment = !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope)
+  const freshAssessment = frozenAuthority === undefined && !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope)
     && (spec.scope as Record<string, unknown>).localEditProtocol === 1 && hasReadOnlyRevisionAssessment(original.prompt)
   if (prohibited || freshAssessment || (!authority && !localAuthority && (reviewed || newReview && spec?.intent === 'review')
-    && !hasOriginalRepairAuthority(original.prompt))) {
+    && frozenAuthority !== true && !originalRepairAuthority(original))) {
     throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原始作者请求未授权改写该正文；检查报告不能扩大写入权限。')
   }
   const latest = compilations.find(item => ['active', 'completed'].includes(item.status) && item.bridge)
@@ -621,7 +622,7 @@ export async function assertChapterReviewRevision(
     const value = item.validation
     return value && typeof value === 'object' && !Array.isArray(value) ? [value] : []
   })
-  if (options?.requireCurrentContinuity && !options.mutation && !hasOriginalRepairAuthority(original.prompt)) {
+  if (options?.requireCurrentContinuity && !options.mutation && !originalRepairAuthority(original)) {
     const current = await tx.chapter.findFirst({ where: { id: chapter.id, revision: chapter.revision, authorId: subject.userId,
       ...activeChapterScope(subject.novelId) }, select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
     const authority = current?.content.trim() ? await readNewDraftWritingAuthority(tx, subject, current) : null
@@ -636,7 +637,7 @@ export async function assertChapterReviewRevision(
   }
   const reviewed = reports.length > 0 || validations.some(value => continuityCheckRounds(value) > 0 || typeof value.checkedRevision === 'number')
   if (!reviewed) return
-  if (!hasOriginalRepairAuthority(original.prompt)) {
+  if (!originalRepairAuthority(original)) {
     const current = await tx.chapter.findFirst({ where: { id: chapter.id, revision: chapter.revision,
       authorId: subject.userId, ...activeChapterScope(subject.novelId) }, select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
     const authority = current?.content.trim() ? await readNewDraftWritingAuthority(tx, subject, current) : null
@@ -822,7 +823,7 @@ export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
   try {
     await assertChapterReviewRevision(tx, subject, chapter, options)
     const original = await readOriginalTaskRequest(tx, subject)
-    if (!hasOriginalRepairAuthority(original.prompt)) {
+    if (!originalRepairAuthority(original)) {
       // Closure evidence narrows automatic reachability only. It never adds
       // mutation authority, nor rejects a child merely for having a parent.
       const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId },

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { DataAccessError } from '../prisma.js'
 import { localEditGuidance } from './local-edit-scope.js'
+import { parseAuthorWritingRequest } from './author-writing-request.js'
 
 import type { TaskIntent, TaskSpec, UserDirective } from '../../../shared/contracts/index.js'
 import type { CreativeFreedom } from '../../../shared/contracts/index.js'
@@ -248,6 +249,8 @@ export function buildTaskSpec(input: {
   researchAdmission?: 1
   /** Fresh HTTP boundary; separate from research budget opt-in. */
   networkAdmission?: 1
+  /** Genuine fresh HTTP authority; legacy build/recovery retains its classifier. */
+  authorWritingProtocol?: 2
   creativeFreedom?: CreativeFreedom
   qualityMode?: StoryCompilerMode
 }): TaskSpec {
@@ -259,8 +262,11 @@ export function buildTaskSpec(input: {
   const networkDenied = (input.networkAdmission === 1 || input.researchAdmission === 1) && explicitlyDeniesNetwork(input.prompt)
   const researchReadDenied = input.researchAdmission === 1 && explicitlyDeniesResearchRead(input.prompt)
   const writingPacing = freshResearch ? undefined : classifyWritingPacing(input.prompt)
-  const intent = freshResearch ? 'research_analysis' : writingPacing === 'proposal_only' ? 'plan'
+  const inferredIntent = freshResearch ? 'research_analysis' : writingPacing === 'proposal_only' ? 'plan'
     : writingPacing === 'explicit_writing' && boundedSceneRequest(input.prompt) ? 'write' : classifyIntent(input.prompt, input.researchAdmission === 1)
+  const writingRequest = input.authorWritingProtocol === 2 ? parseAuthorWritingRequest(input.prompt) : null
+  const intent = writingRequest?.intent && ['write', 'revise', 'review'].includes(inferredIntent)
+    && writingPacing !== 'conversation_only' ? writingRequest.intent : inferredIntent
   const minimumChineseCharacters = intent === 'review' || intent === 'research_analysis' ? explicitReportMinimum(input.prompt) : undefined
   const requiresStructureValidation = intent === 'structure' || /(?:续写|写完|补完|完成|写到).{0,12}第?[一二两三四五六七八九十百千0-9]+卷|第?[一二两三四五六七八九十百千0-9]+卷.{0,12}(?:续写|写完|补完|完成)/.test(input.prompt)
   const protectsEarlierContent = /(不|不要|不得|不能|禁止).{0,8}(改动|修改|重写|影响).{0,8}(前面|此前|已有|之前)|保持.{0,8}(前面|此前|已有|之前).{0,8}不变/.test(input.prompt)

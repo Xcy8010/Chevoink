@@ -3058,6 +3058,29 @@ describe('ordinary chapter summary presentation', () => {
 })
 
 describe('author-directed task ending in the real execution loop', () => {
+  it.each([false, true])('pauses fresh unresolved protocol2 admission before chat, naming or tool execution, local=%s', async local => {
+    const prompt = local ? '局部修订第1章的某句话。' : '修订一章，目标尚未明确。'
+    const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, authorWritingProtocol: 2, localEditProtocol: 1 })
+    spec.scope.writingTargetProtocol = 2
+    spec.scope.writingInterpretation = { version: 2, requestHash: 'a'.repeat(64), scopeHash: '0'.repeat(64), intent: 'revise',
+      revisionDenied: false, creationDenied: false,
+      reasons: [local ? 'LOCAL_ANCHOR_UNRESOLVED' : 'TARGET_UNRESOLVED'],
+      operations: [{ start: 0, end: 2, kind: 'revise', polarity: 'affirmative' }], excludedChapterIds: [] }
+    spec.scope.writing = { version: 1, kind: local ? 'bounded' : 'needs_input', targets: local ? [{ orderIndex: 1, chapterId: 'c' }] : [],
+      repairAuthorized: true, titleAndBodyOnly: false }
+    if (local) spec.scope.localEditBoundary = { version: 1, kind: 'needs_input', regions: [] }
+    spec.scope.writingInterpretation.requestHash = (await import('node:crypto')).createHash('sha256').update(prompt).digest('hex')
+    spec.scope.writingInterpretation.scopeHash = (await import('../../api/lib/agent/writing-contract.js')).frozenWritingScopeHash(spec.scope)
+    mocks.currentOriginal = { prompt, taskSpec: spec }
+    const write = tool('chapter_write', async () => ({ output: 'must not execute' }), false)
+    mocks.tools = [write]
+    await run(prompt)
+    expect(mocks.chat).not.toHaveBeenCalled()
+    expect(write.execute).not.toHaveBeenCalled()
+    expect((await import('../../api/lib/agent/session-title.js')).autoNameSession).not.toHaveBeenCalled()
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', currentTurn: 0, usage: { totalTokens: 0 } })
+  })
   it.each([false, true])('keeps typed Continue local for a frozen unresolved target, including old checkpoints without a marker (marker=%s)', async marker => {
     const spec = buildTaskSpec({ runId: 'original', novelId: 'novel', chapterId: null, prompt: '写一个短场景' })
     spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: false, titleAndBodyOnly: false }

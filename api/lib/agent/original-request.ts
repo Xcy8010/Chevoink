@@ -1,4 +1,7 @@
 import type { Prisma } from '@prisma/client'
+import { createHash } from 'node:crypto'
+import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
+import { assertFrozenWritingContract } from './writing-contract.js'
 import { DataAccessError } from '../prisma.js'
 import { runtimeJson } from './runtime-common.js'
 
@@ -94,7 +97,22 @@ export function hasOriginalRepairAuthority(prompt: string | null): boolean {
 }
 
 export async function assertOriginalRepairAuthority(tx: Prisma.TransactionClient, subject: Subject) {
-  if (!hasOriginalRepairAuthority((await readOriginalTaskRequest(tx, subject)).prompt)) {
+  if (!originalRepairAuthority(await readOriginalTaskRequest(tx, subject))) {
     throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原始请求未授权检查后改写正文；保留报告与当前正文。')
   }
+}
+
+/** Fresh author interpretation is the authority; recovery never substitutes a
+ * truncated goal or a second lexical classifier for its frozen decision. */
+export function originalRepairAuthority(original: { prompt: string | null; spec: unknown }): boolean {
+  const raw = record(original.spec), scope = record(raw?.scope)
+  if (scope?.writingTargetProtocol !== 2) return hasOriginalRepairAuthority(original.prompt)
+  const parsed = taskSpecSchema.safeParse(original.spec)
+  if (!parsed.success || !original.prompt || !parsed.data.scope.writingInterpretation
+    || parsed.data.scope.writingInterpretation.requestHash !== createHash('sha256').update(original.prompt).digest('hex')) {
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者操作解释与请求不匹配，不能重新猜测修订授权。')
+  }
+  assertFrozenWritingContract(parsed.data)
+  return parsed.data.scope.writing?.kind !== 'needs_input' && !!parsed.data.scope.writing?.repairAuthorized
+    && parsed.data.scope.writingInterpretation.operations.some(operation => operation.kind === 'revise' && operation.polarity === 'affirmative')
 }

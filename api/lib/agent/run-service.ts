@@ -488,7 +488,7 @@ export async function startLoopRunLocked(
       await syncBuiltinSkillCatalog(tx)
       const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
         prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2,
-        researchAdmission, networkAdmission, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
+        researchAdmission, networkAdmission, authorWritingProtocol: 2, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
       if (researchAdmission && fresh.intent === 'research_analysis') {
         // Freeze identity/budget before async bootstrap, without writing grants.
         created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(fresh)) as Prisma.InputJsonValue } })
@@ -499,7 +499,7 @@ export async function startLoopRunLocked(
           const chapters = await tx.chapter.findMany({ where: { ...activeChapterScope(session.novelId), authorId: userId }, select: { id: true } })
           fresh.scope.chapterIds = chapters.map(chapter => chapter.id)
         }
-        const frozen = await freezeWritingScope(tx, { userId, novelId: session.novelId, runId: created.id }, fresh, input.prompt, 1)
+        const frozen = await freezeWritingScope(tx, { userId, novelId: session.novelId, runId: created.id }, fresh, input.prompt, 2)
         created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(frozen)) as Prisma.InputJsonValue } })
       } else if (fresh.networkAccess === 'denied') {
         created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(fresh)) as Prisma.InputJsonValue } })

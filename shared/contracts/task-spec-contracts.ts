@@ -3,6 +3,19 @@ import { storyCompilerModeSchema } from './story-compiler-contracts.js'
 import { taskAuthorizationSchema } from './task-authorization.js'
 import { writingTailVolumeCapabilitySchema } from './writing-volume-contracts.js'
 
+const localEditRegionSchema = z.object({ chapterId: z.string().min(1), revision: z.number().int().positive(),
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/), start: z.number().int().nonnegative(), end: z.number().int().positive(),
+  prefix: z.string(), suffix: z.string() }).strict()
+const localEditBoundarySchema = z.discriminatedUnion('version', [
+  z.object({ version: z.literal(1), kind: z.enum(['bounded', 'needs_input']), regions: z.array(localEditRegionSchema) }).strict(),
+  z.object({ version: z.literal(2), kind: z.enum(['bounded', 'needs_input']), regions: z.array(localEditRegionSchema.extend({
+    text: z.string().min(1).max(512), maxNewChars: z.number().int().positive().max(1024),
+    source: z.object({ kind: z.literal('author_issue_quote'), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+      quoteStart: z.number().int().nonnegative(), quoteEnd: z.number().int().positive(),
+      issueStart: z.number().int().nonnegative(), issueEnd: z.number().int().positive() }).strict(),
+  }).strict()).max(8) }).strict(),
+])
+
 /** Agent 2.0 任务契约：把自然语言请求冻结为可验证、可恢复的运行时输入。 */
 export const taskIntentSchema = z.enum([
   'write',
@@ -25,16 +38,21 @@ export const taskScopeSchema = z.object({
   /** Genuine fresh admission only: natural-language locality is server frozen. */
   localEditProtocol: z.literal(1).optional(),
   /** Fresh admission binds chapter targets to their requested action, never reference prose. */
-  writingTargetProtocol: z.literal(1).optional(),
+  writingTargetProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
+  /** Fresh parser result, bound once to original human input; never re-derived on recovery. */
+  writingInterpretation: z.object({ version: z.literal(2), requestHash: z.string().regex(/^[a-f0-9]{64}$/), scopeHash: z.string().regex(/^[a-f0-9]{64}$/),
+    intent: z.enum(['write', 'revise', 'review']).nullable(), reasons: z.array(z.string().min(1)).max(32),
+    revisionDenied: z.boolean(), creationDenied: z.boolean(),
+    operations: z.array(z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive(),
+      kind: z.enum(['write', 'revise', 'review']), polarity: z.enum(['affirmative', 'negative']) }).strict()).max(1000),
+    excludedChapterIds: z.array(z.string().min(1)).max(1000),
+  }).strict().optional(),
   /** New human admission requires factual claims anchored in the current manuscript. */
   continuityEvidenceProtocol: z.literal(1).optional(),
   terminalEvidenceProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   /** Fresh empty-book admission may bind one explicit first-chapter answer. */
   writingClarificationProtocol: z.literal(1).optional(),
-  localEditBoundary: z.object({ version: z.literal(1), kind: z.enum(['bounded', 'needs_input']),
-    regions: z.array(z.object({ chapterId: z.string().min(1), revision: z.number().int().positive(),
-      contentHash: z.string().regex(/^[a-f0-9]{64}$/), start: z.number().int().nonnegative(), end: z.number().int().positive(),
-      prefix: z.string(), suffix: z.string() }).strict()) }).strict().optional(),
+  localEditBoundary: localEditBoundarySchema.optional(),
   selectionBoundary: z.object({ version: z.literal(1), chapterId: z.string().min(1),
     revision: z.number().int().positive(), contentHash: z.string().regex(/^[a-f0-9]{64}$/),
     start: z.number().int().nonnegative(), end: z.number().int().nonnegative(),
@@ -121,6 +139,14 @@ export const taskSpecSchema = z.object({
   if (spec.authorization && (spec.authorization.binding.taskRootId !== spec.id
     || spec.authorization.binding.novelId !== spec.scope.novelId)) {
     ctx.addIssue({ code: 'custom', path: ['authorization', 'binding'], message: 'Authorization must bind this task and novel' })
+  }
+  if (spec.scope.writingTargetProtocol === 2 && (!spec.scope.writingInterpretation || !spec.scope.writing)) {
+    ctx.addIssue({ code: 'custom', path: ['scope', 'writingInterpretation'], message: 'Fresh author scope requires its complete frozen projection' })
+  }
+  if (spec.scope.localEditBoundary?.version === 2 && (spec.scope.writingTargetProtocol !== 2
+    || spec.scope.localEditProtocol !== 1 || !spec.scope.writingInterpretation
+    || spec.scope.localEditBoundary.regions.some(region => region.source.requestHash !== spec.scope.writingInterpretation!.requestHash))) {
+    ctx.addIssue({ code: 'custom', path: ['scope', 'localEditBoundary'], message: 'Issue quotations require the same frozen author interpretation' })
   }
 })
 

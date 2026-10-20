@@ -45,6 +45,25 @@ beforeEach(() => {
 })
 
 describe('auxiliary text model inheritance', () => {
+  it('rejects an explicit compatibility repair at the local fence before a paid request or audit', async () => {
+    const prompt = '只修改第二段，其他正文保持不变。'
+    const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, localEditProtocol: 1 })
+    spec.scope.localEditBoundary = { version: 1, kind: 'bounded', regions: [{ chapterId: 'chapter', revision: 1,
+      contentHash: 'a'.repeat(64), start: 2, end: 8, prefix: '前。', suffix: '后。' }] }
+    const run = { id: 'run', userId: 'user', novelId: 'novel', sessionId: 'session', taskRootId: null,
+      startRequest: { prompt }, taskSpec: spec }
+    const tx = { agentRun: { findFirst: vi.fn(async () => run), findFirstOrThrow: vi.fn(async () => run) },
+      agentSession: { findFirst: vi.fn(async () => ({ spawnedFromRunId: null, spawnedFromSessionId: null })) },
+      agentChildExecutionGrant: { findUnique: vi.fn(async () => null) } } as unknown as Prisma.TransactionClient
+    vi.spyOn(prisma, '$transaction').mockImplementation(async work => (work as (tx: Prisma.TransactionClient) => Promise<unknown>)(tx))
+    mocks.report.mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 1,
+      findings: [{ id: 'finding', disposition: 'selected' }] })
+    await expect(qualityRevisionApplyTool.execute(context(runtime('speed', 10000)), { reportId: 'report' }))
+      .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    expect(mocks.complete).not.toHaveBeenCalled()
+    expect(mocks.persist).not.toHaveBeenCalled()
+    expect(repairAudit.persistQualityRepairAttemptAudit).not.toHaveBeenCalled()
+  })
   it('a needs-attention report cannot be described as quality passed or permission to clear every warning', async () => {
     mocks.complete.mockResolvedValue('{"findings":[]}')
     mocks.report.mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 4, repairRound: 0, status: 'needs_repair',

@@ -66,7 +66,7 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
     const runId = response.body.data.runId as string
     const row = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
     const spec = taskSpecSchema.parse(row.taskSpec)
-    expect(spec).toMatchObject({ intent: 'revise', scope: { writingTargetProtocol: 1, continuityEvidenceProtocol: 1,
+    expect(spec).toMatchObject({ intent: 'revise', scope: { writingTargetProtocol: 2, continuityEvidenceProtocol: 1,
       writing: { kind: 'bounded', repairAuthorized: true, targets: [{ orderIndex: 3, chapterId: ids[2] }] } } })
     expect(spec.scope.writing?.targets).toHaveLength(1)
     expect(await prisma.chapter.findMany({ where: { novelId: f.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)

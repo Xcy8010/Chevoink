@@ -16,6 +16,7 @@ import { taskSpecSchema } from '../../shared/contracts/index.js'
 import { verifyTestDatabase } from '../support/database-preflight.js'
 import { isTestDatabaseRequired } from '../support/database-availability.js'
 import { nextChapterContinuationPrompt } from '../support/writing-target-prompt.js'
+import { frozenWritingScopeHash } from '../../api/lib/agent/writing-contract.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -72,7 +73,7 @@ describe.skipIf(!available)('fresh HTTP same next-chapter identity and actual PG
     '续写下一章，作为第四章保存。仅写该章，不修改已经保存的第1、2、3章。',
   ])('prepares and creates exactly chapter4 without asking again or touching prior chapters: %s', prompt => fixture(prompt, async (ctx, before) => {
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
-    expect(spec).toMatchObject({ intent: 'write', scope: { writingTargetProtocol: 1,
+    expect(spec).toMatchObject({ intent: 'write', scope: { writingTargetProtocol: 2,
       writing: { kind: 'bounded', targets: [{ orderIndex: 4, chapterId: null }] } } })
     expect(spec.scope.writing?.targets).toHaveLength(1)
     expect((await prepare(ctx)).outcome).not.toBe('failed')
@@ -112,6 +113,7 @@ describe.skipIf(!available)('fresh HTTP same next-chapter identity and actual PG
   it.each([true, false])('never reparses a frozen needs-input run on continuation, new marker=%s', marker => fixture(nextChapterContinuationPrompt, async (ctx, before) => {
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: true, titleAndBodyOnly: false }
+    if (spec.scope.writingInterpretation) spec.scope.writingInterpretation.scopeHash = frozenWritingScopeHash(spec.scope)
     if (!marker) delete spec.scope.writingTargetProtocol
     await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: spec, status: 'awaiting_approval' } })
     expect(await prisma.$transaction(tx => freezeWritingScope(tx, ctx, spec, nextChapterContinuationPrompt, 1))).toEqual(spec)
