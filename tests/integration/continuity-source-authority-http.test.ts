@@ -157,6 +157,7 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
         await prisma.memoryExtractionJob.deleteMany({ where: { novelId } })
         await prisma.projectMemoryEntry.deleteMany({ where: { novelId } })
         await prisma.aiUsageLog.deleteMany({ where: { userId } })
+        await prisma.agentArtifact.deleteMany({ where: { run: { userId, novelId } } })
         await prisma.agentRun.deleteMany({ where: { userId } })
         await prisma.agentSession.deleteMany({ where: { userId } })
         await prisma.chapter.deleteMany({ where: { authorId: userId } })
