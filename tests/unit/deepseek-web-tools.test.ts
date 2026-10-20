@@ -176,3 +176,30 @@ describe('independent DeepSeek Fetch contract', () => {
       .toEqual([{ url: 'https://example.com/reader/real', title: 'real' }])
   })
 })
+
+describe('observed directory links and search HTML', () => {
+  it('retains real same-origin directory anchors while metadata remains unverified', async () => {
+    const directory = `<html><title>河谷纪事目录</title><body><p>${article}</p><a href="/reader/123">第1章 清晨</a><a href="/reader/123">第1章 清晨</a><a href="/">首页</a><a href="https://other.example/reader/2">外站</a><a href="javascript:alert(1)">危险</a></body></html>`
+    transport.mockResolvedValueOnce(new Response(directory, { headers: { 'content-type': 'text/html' } }))
+      .mockResolvedValueOnce(Response.json({ title: '河谷纪事', content: `${article}\n[泛化标题](/reader/123)` }))
+    const value = await readPublicWebPage('https://fanqienovel.com/page/9', new AbortController().signal, config, { title: '河谷纪事' })
+    expect(value).toMatchObject({ status: 'ok', contentKind: 'metadata', evidence: { identity: { status: 'unknown' }, integrity: { status: 'unverified' } }, links: [{ title: '第1章 清晨', url: 'https://fanqienovel.com/reader/123' }] })
+    expect(transport).toHaveBeenCalledTimes(2)
+  })
+  it('keeps the actual first chapter when provider links fill the bounded directory', async () => {
+    transport.mockResolvedValueOnce(new Response(`<html><title>河谷纪事目录</title><body><p>${article}</p><a href="/reader/first">第1章 清晨</a></body></html>`, { headers: { 'content-type': 'text/html' } }))
+      .mockResolvedValueOnce(Response.json({ title: '河谷纪事', content: `${article}\n${Array.from({ length: 4096 }, (_, i) => `[第${i + 2}章](/reader/${i})`).join('\n')}` }))
+    const result = await readPublicWebPage('https://fanqienovel.com/page/9', new AbortController().signal, config, { title: '河谷纪事' })
+    expect(result.links).toHaveLength(4096)
+    expect(result.links?.[0]).toEqual({ title: '第1章 清晨', url: 'https://fanqienovel.com/reader/first' })
+    expect(result).toMatchObject({ contentKind: 'metadata', evidence: { identity: { status: 'unknown' }, integrity: { status: 'unverified' } } })
+    expect(transport).toHaveBeenCalledTimes(2)
+  })
+  it('parses observed DOM data-url without following relative tracking links', async () => {
+    env.webSearchProvider = 'sogou'
+    transport.mockResolvedValue(new Response(`<div data-url='https://books.example/page/9?a=1&amp;b=2' class='vrwrap extra'><h3 class='vr-title new'><a class='x' href='/link?opaque=1'>河谷纪事完整版在线免费阅读</a></h3><div class='str-text extra'>目录简介</div></div><div class='vrwrap'><h3 class='vr-title'><a href='/link?opaque=2'>仅跟踪</a></h3></div><div class='vrwrap' data-url='http://127.0.0.1/private'><h3 class='vr-title'><a href='/link?opaque=3'>不安全</a></h3></div>`))
+    const value = await searchWeb('河谷纪事', 6, undefined, null)
+    expect(value.results).toEqual([{ title: '河谷纪事完整版在线免费阅读', url: 'https://books.example/page/9?a=1&b=2', snippet: '目录简介', source: 'books.example' }])
+    expect(transport).toHaveBeenCalledOnce()
+  })
+})

@@ -573,7 +573,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
     const saved = (mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[]; reviewAttempts: string[] } }).checkpoint
     expect(saved.pendingReviews ?? []).toEqual([])
-    expect(saved.reviewAttempts).toContain('comp:c:4:continuity_validate:protocol7')
+    expect(saved.reviewAttempts).toContain('comp:c:4:continuity_validate:protocol8')
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: {
       stagnantBatches: 9, readProgress: 3, writeProgress: 3, tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
   })
@@ -588,7 +588,7 @@ describe('server assessment fallback in the real execution loop', () => {
     mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 23, startedAt: new Date(checkpoint.runStartedAt),
       usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint } })
     const key = 'continuity-author-recovery:' + 'c'.repeat(64)
-    if (scenario !== 'no-author') mocks.continuedContinuity.mockResolvedValue([['comp:c:4:continuity_validate:protocol7', key]])
+    if (scenario !== 'no-author') mocks.continuedContinuity.mockResolvedValue([['comp:c:4:continuity_validate:protocol8', key]])
     if (scenario !== 'no-proof') mocks.offlineContinuity.mockResolvedValue({ chapter: { id: 'c', revision: 4, content: '原文' }, coverage: { contentHash: 'b'.repeat(64) },
       validationHash: 'd'.repeat(64), audit: { admissionKey: key } } as never)
     let state = readiness('incomplete', 'stale', 4)
@@ -3346,7 +3346,7 @@ describe('independent persisted review phases with unresolved usage', () => {
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: { stagnantBatches: 0, readProgress: 3, writeProgress: 3,
       tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: f.checkpoint.inputProtocolRecovery, progressSignatures: expect.arrayContaining([f.signature('continuity')]),
       pendingReviews: [{ callId: 'unknown-quality', toolName: 'quality_analyze', revision: 4, chapterId: 'c', compilationId: 'comp' }],
-      reviewAttempts: expect.arrayContaining(['old-unconfirmed-attempt', 'comp:c:4:quality_analyze', 'comp:c:4:continuity_validate:protocol7']) } })
+      reviewAttempts: expect.arrayContaining(['old-unconfirmed-attempt', 'comp:c:4:quality_analyze', 'comp:c:4:continuity_validate:protocol8']) } })
     const finals = events().filter(event => event.type === 'text.final').map(event => event.type === 'text.final' ? event.text : '').join('\n')
     expect(finals).toContain('质量检查仍有未确认的请求'); expect(finals).toContain('当前连续性检查结果已独立保存')
     expect(finals).not.toContain('连续多轮没有推进')

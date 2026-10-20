@@ -48,7 +48,7 @@ function resultPageType(url: URL, title: string): ResearchSearchCandidate['pageT
   if (url.pathname === '/' || !url.pathname) return 'homepage'
   if (/(?:^|\/)(?:reader|read|chapter|chapters)(?:\/|[-_.]|$)/iu.test(url.pathname)) return 'chapter'
   if (/(?:^|\.)(?:baike|wapbaike|wikipedia)\./iu.test(url.hostname)
-    || /(?:^|\/)(?:article|articles|news|bbs|review|reviews|item|kol)(?:\/|[-_.]|$)/iu.test(url.pathname)
+    || /(?:^|\/)(?:article|articles|news|bbs|review|reviews|comment|comments|item|kol)(?:\/|[-_.]|$)/iu.test(url.pathname)
     || /^(?:\[?(?:推荐|推薦|书评|書評)|新闻[:：|]|网文独家|更新少却|番茄大神)/u.test(title)) return 'secondary'
   if (/第[零〇一二三四五六七八九十百千万\d]+章|\bchapter\s+\d+/iu.test(title)) return 'chapter'
   if (/(?:^|\/)(?:page|book|books|novel|novels)(?:\/|[-_.]|$)/iu.test(url.pathname)
@@ -64,7 +64,12 @@ function titleMatch(title: string, snippet: string, target: ResearchSearchTarget
   if (text.startsWith(wanted)) {
     const suffix = text.slice(wanted.length)
     const labeled = suffix.replace(/^\s*[-_|]\s*/u, '')
+    const wrapperParts = labeled.split(/\s*[_|－-]\s*/u)
+    const readingWrapper = /^(?:完整版)?(?:在线免费阅读|全文阅读|在线阅读|免费阅读)$/u.test(wrapperParts[0])
+      && wrapperParts.slice(1).every(part => part === `${wanted}小说`
+        || /^(?:[\p{Script=Han}a-z]{1,16}小说官网|官方网站|官网|official website)$/u.test(part) && !/同人|衍生|番外|续篇|续传/u.test(part))
     if (!derivativeSuffix.test(suffix) && (/^(?:第[零〇一二三四五六七八九十百千万\d]+章|最新章节|全文阅读|在线免费阅读|在线阅读|免费阅读)/iu.test(suffix)
+      || readingWrapper
       || (target.author && labeled.startsWith(normalized(target.author)))
       || /^(?:作者[:：]|官网|官方网站|official\b)/iu.test(labeled))) return 'exact'
   }

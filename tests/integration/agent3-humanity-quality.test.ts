@@ -72,7 +72,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 人类感质量门（需 DB）', () => 
         explanation: sample.rationale, suggestion: '仅减少最后的释因，保留自锁与六天救援事实。', confidence: 0.6 }] }), sources, true, 3)
       expect(parsed.complete).toBe(true)
       const report = await persistHumanityQualityReport({ userId, novelId, chapterId: targetId, chapterRevision: 1, mode: 'premium',
-        sources, criticPromptProtocol: 'humanity-context.v3', deterministicMetrics: {}, deterministicFindings: [], criticFindings: parsed.findings, criticComplete: true })
+        sources, criticPromptProtocol: 'humanity-context.v4', deterministicMetrics: {}, deterministicFindings: [], criticFindings: parsed.findings, criticComplete: true })
       expect(report.status).toBe('passed')
       expect(report.findings[0]).toMatchObject({ startOffset: content.indexOf(sample.target), evidenceExcerpt: sample.target, severity: 'advisory' })
       await selectQualityFindings(userId, novelId, report.id, [report.findings[0].id])

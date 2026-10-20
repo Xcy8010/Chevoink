@@ -4,6 +4,7 @@ import type { Prisma } from '@prisma/client'
 import { prisma } from '../../api/lib/prisma.js'
 import { DataAccessError } from '../../api/lib/prisma.js'
 import * as readiness from '../../api/lib/agent/chapter-review-guard.js'
+import * as continuedEvidence from '../../api/lib/agent/continued-continuity-evidence.js'
 import * as compiler from '../../api/lib/agent/story-compiler.js'
 import * as quality from '../../api/lib/agent/humanity-quality.js'
 import * as review from '../../api/lib/agent/review-completion.js'
@@ -40,6 +41,7 @@ describe('严谨创作落实连续性警告', () => {
       ? null : compilation as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findFirst>>)
     vi.spyOn(prisma.storyCompilation, 'findMany').mockResolvedValue([compilation] as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findMany>>)
     vi.spyOn(quality, 'qualityCompilationScope').mockResolvedValue({ run: { id: 'r' } })
+    const sourceQuery = vi.spyOn(prisma.chapter, 'findMany').mockResolvedValue([])
     const qualityReport = vi.spyOn(quality, 'getLatestQualityReport').mockResolvedValue(null)
     vi.spyOn(compiler, 'reserveContinuityCheck').mockResolvedValue(true)
     const reserve = vi.spyOn(compiler, 'reserveContinuityRepair').mockImplementation(async () => {
@@ -55,7 +57,7 @@ describe('严谨创作落实连续性警告', () => {
       findFirstOrThrow: vi.fn().mockResolvedValue({ id: 'r', novelId: 'n', sessionId: 's', taskRootId: null, startRequest: {} }) },
       agentRunEvent: { findMany: vi.fn().mockResolvedValue([]) },
       agentArtifact: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'audit' }) },
-      chapter: { findFirst: vi.fn((...args: Parameters<typeof prisma.chapter.findFirst>) => prisma.chapter.findFirst(...args)), updateMany: write, findUniqueOrThrow: vi.fn().mockResolvedValue({ ...chapter, revision: 2 }) },
+      chapter: { findMany: vi.fn((...args: Parameters<typeof prisma.chapter.findMany>) => prisma.chapter.findMany(...args)), findFirst: vi.fn((...args: Parameters<typeof prisma.chapter.findFirst>) => prisma.chapter.findFirst(...args)), updateMany: write, findUniqueOrThrow: vi.fn().mockResolvedValue({ ...chapter, revision: 2 }) },
       storyCompilation: { findFirst: findCompilation, findUniqueOrThrow: vi.fn(async () => compilation),
         update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => { Object.assign(compilation, data); return compilation }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }) } } as unknown as Prisma.TransactionClient
@@ -66,7 +68,7 @@ describe('严谨创作落实连续性警告', () => {
     const ctx: ToolContext = { userId: 'u', novelId: 'n', runId: 'r', sessionId: 's', callId: 'check', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {},
       modelRuntime: { tier: 'speed', provider: 'selected-fixture', modelName: 'selected', baseUrl: 'https://selected.invalid', apiKey: 'fixture-only',
         multiplierBps: 10000, reasoningEffort: 'high', reasoningEfforts: ['none', 'high'], thinkingEnabled: true, reasoningParameterMode: 'native', visionEnabled: false, contextWindowTokens: 64000 } }
-    return { ctx, chapter, compilation, validation, qualityReport, reserve, critic, repair, write, findCompilation, tx }
+    return { ctx, chapter, compilation, validation, qualityReport, reserve, critic, repair, write, findCompilation, tx, sourceQuery }
   }
   it.each([false, true])('0错误3警告仅保存检查意见并复用，不自动修订，缓存=%s', async cached => {
     const f = fixture(cached)
@@ -116,6 +118,7 @@ describe('严谨创作落实连续性警告', () => {
     const f = fixture(false)
     Object.assign(f.compilation.bridge, { fromChapterId: 'source', sourceRevision: 2 })
     vi.spyOn(prisma.chapter, 'findFirst').mockResolvedValue({ id: 'source', revision: 2, content: '合成前章：营火只为制造声势。他随后走向河边。' } as never)
+    f.sourceQuery.mockResolvedValue([{ id: 'source', title: '前章', orderIndex: 0, revision: 2, content: '合成前章：营火只为制造声势。他随后走向河边。' }] as never)
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     expect(f.critic.mock.calls[0][1]).toContain('"source":"previous","segmentId":"p0","quote":"合成前章：营火只为制造声势。他随后走向河边。"')
     expect(f.critic.mock.calls[0][1]).toContain('桥接摘要，需对照原文核实')
@@ -145,6 +148,19 @@ describe('严谨创作落实连续性警告', () => {
       coverage: compilerContinuityCoverage({ chapter: f.chapter, bridge: f.compilation.bridge, sceneTasks: f.compilation.sceneTasks, source: null }) })
     expect(vi.mocked(compiler.validateStoryContinuity).mock.calls[0][0].signal).toBe(f.ctx.signal)
     expect(f.critic).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it.each([6, 7] as const)('a real author continuation of protocol %s buys a full current assessment, never relabels old findings', async protocol => {
+    const f = fixture(false)
+    const oldCoverage = compilerContinuityCoverage({ chapter: f.chapter, bridge: f.compilation.bridge, sceneTasks: f.compilation.sceneTasks, source: null }, protocol)
+    vi.spyOn(continuedEvidence, 'readContinuedContinuityEvidence').mockResolvedValue({ coverage: oldCoverage, admissionKey: 'verified-author-admission',
+      inspected: { findings: [{ evidence: 'old-only-opinion' }] } } as never)
+    await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
+    expect(f.critic).toHaveBeenCalledOnce()
+    const result = vi.mocked(compiler.validateStoryContinuity).mock.calls[0][0]
+    expect(result.coverage).toMatchObject({ protocolVersion: 8 })
+    expect(JSON.stringify(result.findings)).not.toContain('old-only-opinion')
+    expect(f.repair).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
   })
   it('a legacy CHECK after nine recorded checks still dispatches one critic without a manuscript or paid repair', async () => {

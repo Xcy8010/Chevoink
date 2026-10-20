@@ -33,7 +33,7 @@ import type { AgentTool, ToolContext, ToolResult } from './types.js'
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10)]), compiler: compilerObservationSchema.nullable(),
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11)]), compiler: compilerObservationSchema.nullable(),
     repairContext: z.string().optional(),
     parserVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
     repairSourceReferences: z.literal(true).optional(),
@@ -47,17 +47,17 @@ const workSchema = z.discriminatedUnion('kind', [
 type Work = Extract<z.infer<typeof workSchema>, { kind: 'check' }>
 /** Deployment never rewrites frozen paid work or its prompt. Project only the
  * fields that existed at admission, and preserve that review's actual version. */
-export function qualityWorkContextProjection(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>, version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10) {
+export function qualityWorkContextProjection(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>, version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11) {
   const projected = version < 9 ? { ...bundle, recentChapters: bundle.recentChapters.map(({ title, content, orderIndex }) => ({ title, content, orderIndex })) } : bundle
   const { chapterWritingBackground: _background, ...v2 } = projected
   const { originalRequest: _request, ...v1 } = v2
   return version === 1 ? v1 : version === 2 ? v2 : projected
 }
-export function qualityWorkCriticVersion(version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10) {
+export function qualityWorkCriticVersion(version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11) {
   return version === 1 ? LEGACY_HUMANITY_CRITIC_VERSION : version === 2 ? PREVIOUS_HUMANITY_CRITIC_VERSION : version === 3 ? FROZEN_V4_HUMANITY_CRITIC_VERSION : HUMANITY_CRITIC_VERSION
 }
 export function qualityWorkPromptProtocol(version: number) {
-  return version >= 10 ? HUMANITY_PROMPT_PROTOCOL : version === 9 ? 'humanity-context.v2' : undefined
+  return version >= 11 ? HUMANITY_PROMPT_PROTOCOL : version === 10 ? 'humanity-context.v3' : version === 9 ? 'humanity-context.v2' : undefined
 }
 /** Preserve the actual parser frozen paid work used before this deployment. */
 export function qualityWorkParseObject(text: string, envelope: 'findings' | 'corrections' | 'patches', parserVersion?: 1 | 2 | 3): unknown {
@@ -119,7 +119,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     const cacheMetrics = existingReport?.deterministicMetrics
     const matchingContext = !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics) && cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle)
     const sameFailedContext = existingReport?.status === 'failed' && !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics)
-      && (matchingContext || cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, 'humanity-context.v2'))
+      && (matchingContext || ['humanity-context.v2', 'humanity-context.v3'].some(protocol => cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, protocol as 'humanity-context.v2' | 'humanity-context.v3')))
     const formatRecovery = sameFailedContext && existingReport.chapterRevision === bundle.chapter.revision
       ? await readQualityFormatRecovery(tx, ctx, { chapterId }) : null
     if (sameFailedContext && existingReport.chapterRevision === bundle.chapter.revision && !formatRecovery) {
@@ -129,7 +129,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
       && matchingContext && !qualityReportHasDroppedFindings(cacheMetrics) && qualityReportCheckedCurrentContent(existingReport, bundle.chapter.revision, bundle.chapter.content)
       ? { id: existingReport.id, hash: jsonHash(await getQualityReport(ctx.userId, ctx.novelId, existingReport.id, tx)) } : null
     const sources = buildQualityEvidenceSources({ userId: ctx.userId, novelId: ctx.novelId, chapterId, chapterRevision: bundle.chapter.revision }, bundle.chapter.content)
-    return { kind: 'check' as const, version: 10 as const, parserVersion: 3 as const, repairSourceReferences: true as const, formatRecovery, deadlineAt: Date.now() + env.aiTextTimeoutMs, sources, compiler: bundle.compilation ? baseline : null,
+    return { kind: 'check' as const, version: 11 as const, parserVersion: 3 as const, repairSourceReferences: true as const, formatRecovery, deadlineAt: Date.now() + env.aiTextTimeoutMs, sources, compiler: bundle.compilation ? baseline : null,
       chapter: { id: chapterId, title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content }, contextHash: jsonHash(bundle),
       recentContents: bundle.recentChapters.map(item => item.content), feedback: bundle.feedback,
       mode: state.configuration.qualityMode, repair: comp?.status !== 'completed' && writable && state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId)
@@ -169,7 +169,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
   }
   const execute = async (frozen: Work) => {
     if (frozen.version >= 9 && frozen.repairContext === undefined) return runtimeError('RUNTIME_RECEIPT_INVALID', '质量修订缺少冻结参考上下文。')
-    if (frozen.version >= 4 && frozen.sources?.protocol !== (frozen.version >= 7 ? 6 : 5)) return runtimeError('RUNTIME_RECEIPT_INVALID', '冻结质量协议与原文证据表不一致。')
+    if (frozen.version >= 4 && frozen.sources?.protocol !== (frozen.version >= 11 ? 7 : frozen.version >= 7 ? 6 : 5)) return runtimeError('RUNTIME_RECEIPT_INVALID', '冻结质量协议与原文证据表不一致。')
     if (frozen.version < 6 && ((frozen.parserVersion ?? 1) >= 2 || frozen.repairSourceReferences)) return runtimeError('RUNTIME_RECEIPT_INVALID', '旧冻结质量协议不能升级解析器或引用恢复阶段。')
     if (frozen.version >= 5 && (!frozen.deadlineAt || frozen.parserVersion !== (frozen.version >= 8 ? 3 : frozen.version >= 6 ? 2 : 1) || frozen.formatRecovery === undefined)) return runtimeError('RUNTIME_RECEIPT_INVALID', '新质量协议缺少原格式恢复合同或等待上限。')
     if (frozen.formatRecovery && !await withRunLease(lease, tx => claimDurableQualityFormatRecovery(tx, ctx, frozen.formatRecovery!, operation.id))) {
@@ -328,8 +328,8 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
             operationId: operation.id, state: report.status === 'failed' ? 'failed' : 'completed', ...(firstDiagnostic ? { initialDiagnostic: firstDiagnostic } : {}) } } : {}),
           ...(canRepair && selected.length ? { autoRepairAttempted: true,
             ...(!repaired ? { autoRepairRetainedReason: repairNote || '本次有界修订未得到可安全应用的实际文本改变，全部候选保留待审；同一报告不追加自动修订。' } : {}) } : {}),
-          ...(repaired ? { repairedQualityContextHash: qualityReviewContextHash(await buildHumanityQualityContext(ctx.userId, ctx.novelId, frozen.chapter.id, ctx.runId, tx), frozen.version >= 10 ? HUMANITY_PROMPT_PROTOCOL : 'humanity-context.v2') }
-            : { qualityContextHash: qualityReviewContextHash(await buildHumanityQualityContext(ctx.userId, ctx.novelId, frozen.chapter.id, ctx.runId, tx), frozen.version >= 10 ? HUMANITY_PROMPT_PROTOCOL : 'humanity-context.v2') }) } } })
+          ...(repaired ? { repairedQualityContextHash: qualityReviewContextHash(await buildHumanityQualityContext(ctx.userId, ctx.novelId, frozen.chapter.id, ctx.runId, tx), qualityWorkPromptProtocol(frozen.version) ?? 'humanity-context.v2') }
+            : { qualityContextHash: qualityReviewContextHash(await buildHumanityQualityContext(ctx.userId, ctx.novelId, frozen.chapter.id, ctx.runId, tx), qualityWorkPromptProtocol(frozen.version) ?? 'humanity-context.v2') }) } } })
       }
       const remaining = report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
       const writerGuidance = remaining ? await readChapterReviewRevisionGuidance(tx, ctx, { id: report.chapterId, revision: report.chapterRevision }) : ''

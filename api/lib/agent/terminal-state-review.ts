@@ -84,5 +84,5 @@ export function terminalReviewFailure(validation: unknown, content: string) {
   return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', summary: '终态候选尚未获正文证实',
     output: `正文与候选均保留，终态未提交；不把连续性 findings 为空当作终态通过。${review
       ? `逐项核验：${JSON.stringify(review.verdicts.map(item => ({ path: item.path, verdict: item.verdict, evidence: item.evidence })))}`
-      : '独立响应缺少完整逐项判定或有效 current 原文编号，不能补造证据。'}核对真实正文后，以 terminalState={exitState,lastUnfinishedAction} 提交准确候选重检；不得把计划、推断或转述改称实况，也不要清空已知状态绕过核验。` }
+      : '独立响应缺少完整逐项判定或有效 current 原文编号，不能补造证据。'}核对真实正文后，调用 continuity_validate，以 terminalState={exitState,lastUnfinishedAction} 传入完整准确候选重检。候选任何改动（含删除未知项）都须重新核验；重检通过后才可 chapter_bridge_commit，提交同一候选或省略状态复用。不得把计划、推断或转述改称实况，也不要清空已知状态绕过核验。` }
 }

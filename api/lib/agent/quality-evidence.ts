@@ -17,7 +17,7 @@ const qualityEvidenceIdentitySchema = z.object({
   chapterRevision: z.number().int().positive(),
 }).strict()
 export const qualityEvidenceSourcesSchema = z.object({
-  version: z.literal(1), protocol: z.union([z.literal(5), z.literal(6)]), identity: qualityEvidenceIdentitySchema,
+  version: z.literal(1), protocol: z.union([z.literal(5), z.literal(6), z.literal(7)]), identity: qualityEvidenceIdentitySchema,
   contentHash: z.string().regex(/^[a-f0-9]{64}$/),
   entries: z.array(z.object({ id: z.string().regex(/^q[a-f0-9]{64}$/), start: z.number().int().nonnegative(),
     end: z.number().int().positive(), text: z.string().min(1).max(360) }).strict()),
@@ -270,7 +270,7 @@ export function inspectCorrectableCriticResponse(raw: string | null, sources: Qu
 /** A deterministic UTF-16 source table; every character is retained, including
  * whitespace and repeated sentences. IDs bind the complete review identity,
  * manuscript hash, protocol and exact half-open offsets. */
-export function buildQualityEvidenceSources(identity: QualityEvidenceIdentity, content: string, protocol: 5 | 6 = 6): QualityEvidenceSources {
+export function buildQualityEvidenceSources(identity: QualityEvidenceIdentity, content: string, protocol: 5 | 6 | 7 = 7): QualityEvidenceSources {
   const parsed = qualityEvidenceIdentitySchema.parse(identity)
   const contentHash = sha256(content)
   const binding = JSON.stringify({ protocol, ...parsed, contentHash })
@@ -282,6 +282,11 @@ export function buildQualityEvidenceSources(identity: QualityEvidenceIdentity, c
     const candidate = content.slice(start, end)
     const boundary = /[。！？!?\n]/u.exec(candidate)
     if (boundary) end = start + boundary.index + boundary[0].length
+    // v5/v6 keep their frozen offsets. New slices retain adjacent sentence
+    // punctuation and closing delimiters, without exceeding the quote limit.
+    if (protocol >= 7 && boundary && boundary[0] !== '\n') {
+      while (end < content.length && end < start + 360 && /[。！？!?」』”’"')）\]】》〉]/u.test(content[end])) end++
+    }
     if (end < content.length && /[\uD800-\uDBFF]/u.test(content[end - 1]) && /[\uDC00-\uDFFF]/u.test(content[end])) end -= 1
     const text = content.slice(start, end)
     entries.push({ id: `q${sha256(`${binding}:${start}:${end}`)}`, start, end, text })
@@ -298,13 +303,13 @@ export function validateQualityEvidenceSources(sources: unknown, identity: Quali
 }
 
 export function renderQualityEvidenceSources(sources: QualityEvidenceSources): string {
-  return `原文证据表（只引用本次提供的 sourceId；编号只证明位置，不能证明意见正确）：\n${sources.entries.filter(item => item.text.trim()).map(item => `${sources.protocol === 6 ? item.id.slice(0, 13) : item.id} ${JSON.stringify(item.text)}`).join('\n')}`
+  return `原文证据表（只引用本次提供的 sourceId；编号只证明位置，不能证明意见正确${sources.protocol >= 7 ? '；每行是定位切片，不是原文段落，边界可能由长度限制产生；标点与引号须对照完整正文判断' : ''}）：\n${sources.entries.filter(item => item.text.trim()).map(item => `${sources.protocol >= 6 ? item.id.slice(0, 13) : item.id} ${JSON.stringify(item.text)}`).join('\n')}`
 }
 
 function sourceForFinding(content: string, finding: { quote?: string; sourceId?: string }, sources?: QualityEvidenceSources) {
   if (!finding.sourceId || !sources || !validateQualityEvidenceSources(sources, sources.identity, content)) return null
   const matches = sources.entries.filter(item => item.id === finding.sourceId
-    || (sources.protocol === 6 && /^q[a-f0-9]{12}$/.test(finding.sourceId!) && item.id.slice(0, 13) === finding.sourceId))
+    || (sources.protocol >= 6 && /^q[a-f0-9]{12}$/.test(finding.sourceId!) && item.id.slice(0, 13) === finding.sourceId))
   const entry = matches.length === 1 ? matches[0] : undefined
   // A model supplying both representations cannot choose an inconsistent quote.
   return entry && entry.text.trim() && (finding.quote === undefined || finding.quote === entry.text) ? entry : null

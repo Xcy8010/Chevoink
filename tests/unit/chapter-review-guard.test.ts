@@ -18,7 +18,7 @@ describe('review driven manuscript mutation admission', () => {
     vi.spyOn(lock, 'lockNovelActiveScope').mockResolvedValue(undefined)
     vi.spyOn(original, 'readOriginalTaskRequest').mockResolvedValue({ prompt, spec: null, taskId: 'task', sourceRunId: 'original-run', parentRunId: null })
     vi.spyOn(original, 'originalTaskRunIds').mockResolvedValue(['original-run', 'resumed-run'])
-    const db = { $queryRaw: vi.fn().mockResolvedValue([]), chapter: { findFirst: vi.fn().mockResolvedValue(null) },
+    const db = { $queryRaw: vi.fn().mockResolvedValue([]), chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null) },
       storyCompilation: { findMany: vi.fn().mockResolvedValue(validation ? [{ validation }] : []) },
       chapterQualityReport: { findMany: vi.fn().mockResolvedValue(reports) } } as unknown as Prisma.TransactionClient
     return { db, subject: { userId: 'u', novelId: 'n', runId: 'resumed-run' }, chapter: { id: 'c', revision: 4 } }
@@ -94,7 +94,7 @@ describe('one atomic factual correction in the original new draft', () => {
     const source = { writingBindings: binding }
     const db = { $queryRaw: vi.fn().mockResolvedValue([]), agentRun: { findFirstOrThrow: vi.fn().mockResolvedValue(source),
       findFirst: vi.fn().mockResolvedValue({ mode: 'act', taskRootId: null, session: { userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: null } }) },
-      chapter: { findFirst: vi.fn().mockResolvedValue(chapter) }, chapterQualityReport: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn() },
+      chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(chapter) }, chapterQualityReport: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn() },
       storyCompilation: { findMany: vi.fn().mockImplementation(async () => rows), findFirst: vi.fn().mockResolvedValue(compilation),
         findFirstOrThrow: vi.fn().mockResolvedValue(compilation), update: vi.fn().mockImplementation(async ({ data }) => Object.assign(compilation, data)) },
     }

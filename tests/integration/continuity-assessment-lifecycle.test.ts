@@ -3,7 +3,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import * as credits from '../../api/lib/credits.js'
 import { tokenPriceSchema } from '../../api/lib/billing/token-price.js'
 import { priceTokenEvidence } from '../../api/lib/billing/reservation-policy.js'
-import { prepareStoryCompilation, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
+import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import { continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { readContinuedContinuityRecovery } from '../../api/lib/agent/legacy-continuity-recovery.js'
 import { readContinuedReviewRecovery } from '../../api/lib/agent/continued-review-recovery.js'
@@ -11,6 +11,11 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { fixture } from '../support/agent-durable-runtime-fixture.js'
 import * as lifecycle from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { readOwnedContinuityReassessment } from '../../api/lib/agent/continuity-reassessment-witness.js'
+import { generateReviewCompletion } from '../../api/lib/agent/review-completion.js'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { readContinuedContinuityEvidence } from '../../api/lib/agent/continued-continuity-evidence.js'
 
 const runtime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1',
   apiKey: 'fixture-only', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
@@ -39,9 +44,9 @@ function interceptRetryWait(controller: AbortController, onWait: () => Promise<v
   return { waits, errors }
 }
 
-async function retryFixture(f: Parameters<Parameters<typeof fixture>[0]>[0], controller: AbortController) {
+async function retryFixture(f: Parameters<Parameters<typeof fixture>[0]>[0], controller: AbortController, orderIndex = 1) {
   await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0, status: 'running' } })
-  await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: body, wordCount: body.length } })
+  await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: body, wordCount: body.length, orderIndex, orderInVolume: orderIndex } })
   const { compilation } = await prepareStoryCompilation({ ...f, mode: 'balanced', intentSummary: '限流后完整复核' })
   const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
   await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: '过门', entryState: state, goal: '进门', obstacle: '门锁', choice: '等待', cost: '时间', turn: '门打开', exitState: state,
@@ -54,6 +59,85 @@ async function retryFixture(f: Parameters<Parameters<typeof fixture>[0]>[0], con
 }
 
 describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', () => {
+  it.each(['settled-with-continue', 'unknown-same-admission'] as const)(
+    'protocol 7 to 8 preserves actual reservations and billing: %s', scenario => fixture(async f => {
+      try {
+        const { ctx, compilation } = await retryFixture(f, new AbortController(), 4)
+        const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+        const previous = await Promise.all([1, 2, 3].map(orderIndex => prisma.chapter.create({ data: {
+          authorId: f.userId, novelId: f.novelId, volumeId: chapter.volumeId, orderIndex, orderInVolume: orderIndex,
+          title: `前文${orderIndex}`, content: `前文${orderIndex}约束：补充燃料前不能重新点灯。`, revision: 1,
+        } })))
+        await prisma.chapterBridge.update({ where: { compilationId: compilation.id }, data: { fromChapterId: previous[2].id, sourceRevision: 1 } })
+        const current = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
+        const source = { id: previous[2].id, revision: 1, content: previous[2].content }
+        const coverage = compilerContinuityCoverage({ chapter, bridge: current.bridge, sceneTasks: current.sceneTasks, source }, 7)
+        const oldInput: lifecycle.LegacyAssessmentInput = { chapterId: chapter.id, revision: chapter.revision,
+          bodies: { previous: source.content, current: body }, bindingHash: runtimeJson(coverage).hash,
+          system: '合成升级前单章检查。只输出 findings JSON。', content: source.content + '\n' + body,
+          targetType: 'story_compilation', targetId: compilation.id }
+        const assertCurrent = async () => { expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(body) }
+        const callAt = new Date()
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', createdAt: callAt,
+          payload: { toolName: 'continuity_validate', callId: ctx.callId, args: { compilationId: compilation.id } } } })
+        expect(await prisma.$transaction(tx => lifecycle.reserveLegacyContinuityAssessment(tx, ctx, oldInput, assertCurrent))).toBe('new')
+        const raw = JSON.stringify({ findings: [{ ...finding, sourceEvidence: [{ source: 'current', segmentId: 'c999', quote: '根本不存在的旧引用' }] }] })
+        const fetcher = vi.fn(async () => {
+          if (scenario === 'unknown-same-admission') throw new TypeError('synthetic transport failed after dispatch')
+          return completion(raw)
+        })
+        vi.stubGlobal('fetch', fetcher)
+        await generateReviewCompletion(oldInput.system, oldInput.content, { modelRuntime: runtime, explicitModelSelection: true,
+          userId: f.userId, novelId: f.novelId, chapterId: chapter.id, agentRunId: f.runId, action: 'agent3ContinuityCritic',
+          targetType: 'story_compilation', targetId: compilation.id, signal: ctx.signal,
+          beforeProviderDispatch: async id => { await prisma.$transaction(tx => lifecycle.bindLegacyContinuityRequest(tx, ctx, oldInput, id, 'primary', assertCurrent)) },
+        }).catch(error => { if (scenario !== 'unknown-same-admission') throw error })
+        const payments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })
+        expect(payments).toHaveLength(1)
+        const known = scenario === 'settled-with-continue'
+        expect(payments[0]).toMatchObject({ billingStatus: known ? 'settled' : 'pending_usage', usageSource: known ? 'reported' : 'unknown' })
+        await prisma.$transaction(tx => lifecycle.observeLegacyContinuityAssessment(tx, ctx, oldInput,
+          { content: known ? raw : null, finishReason: known ? 'stop' : null, toolCalls: [], transportComplete: known }, [payments[0].id], 'primary'))
+        const old = await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: chapter.revision,
+          independentCheck: 'unavailable', coverage, findings: [] })
+        if (known) {
+          const audit = inspectContinuityResponse(raw, oldInput.bodies, true, 5).audit
+          expect(audit.classification).toBe('source_invalid')
+          await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...old, continuityCriticResponse: audit }).value } })
+        }
+        const resultAt = new Date(Date.now() + 10)
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.result', createdAt: resultAt, payload: {
+          toolName: 'continuity_validate', callId: ctx.callId, ok: false, failureCode: known ? 'CONTINUITY_EVIDENCE_UNLOCATED' : 'AI_PROVIDER_UNKNOWN',
+        } } })
+        if (known) {
+          const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'run.paused', createdAt: new Date(resultAt.getTime() + 10), payload: {} } })
+          await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4, type: 'run.started', createdAt: new Date(resultAt.getTime() + 20), payload: { authorContinue: { eventId: pause.id, afterSeq: 3 } } } })
+        }
+        fetcher.mockImplementation(async (_url?: unknown, init?: RequestInit) => {
+          const input = JSON.parse(String(init?.body))
+          for (const row of previous) expect(input.messages[1].content).toContain(row.content)
+          return completion('{"findings":[]}')
+        })
+        const fresh = { ...ctx, callId: 'protocol8-author-check' }
+        if (known) expect(await prisma.$transaction(tx => readContinuedContinuityEvidence(tx, fresh, { compilationId: compilation.id })))
+          .toMatchObject({ coverage: { protocolVersion: 7 } })
+        const result = await continuityValidateTool.execute(fresh, { compilationId: compilation.id }).catch(error => ({ outcome: 'failed', failureCode: error.code }))
+        expect(result.outcome === 'failed').toBe(!known)
+        if (!known) expect(result).toMatchObject({ failureCode: 'CONTINUITY_REPORT_INCOMPLETE' })
+        expect(fetcher).toHaveBeenCalledTimes(known ? 2 : 1)
+        const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+        expect(saved.validation).toMatchObject({ independentCheck: known ? 'complete' : 'unavailable', coverage: { protocolVersion: known ? 8 : 7 }, ...(known ? { errorCount: 0 } : {}) })
+        const reservations = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview' } })
+        const allPayments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+        await continuityValidateTool.execute(fresh, { compilationId: compilation.id }).catch(() => {})
+        expect(fetcher).toHaveBeenCalledTimes(known ? 2 : 1)
+        expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(allPayments)
+        expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview' } })).toBe(reservations.length)
+        expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: payments[0].id } })).toEqual(payments[0])
+        expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(body)
+      } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+    }))
+
   it('requires authenticated human Continue to retire an unknown second pass after a known-zero primary retry, preserving every fee', () => fixture(async f => {
     try {
       const controller = new AbortController(), { ctx, compilation } = await retryFixture(f, controller)

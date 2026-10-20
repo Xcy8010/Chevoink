@@ -116,7 +116,7 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
   const keys: Array<[string, string]> = []
   for (const compilation of compilations) {
     const validation = object(compilation.validation), coverage = object(validation.coverage)
-    if (compilation.status !== 'active' || !compilation.chapterId || validation.independentCheck !== 'unavailable' || ![6, COMPILER_CONTINUITY_PROTOCOL].includes(Number(coverage.protocolVersion))) continue
+    if (compilation.status !== 'active' || !compilation.chapterId || validation.independentCheck !== 'unavailable' || ![6, 7, COMPILER_CONTINUITY_PROTOCOL].includes(Number(coverage.protocolVersion))) continue
     const chapter = await tx.chapter.findFirst({ where: { id: compilation.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true, orderIndex: true } })
     if (!chapter || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
       || coverage.contentHash !== runtimeJson({ content: chapter.content }).hash

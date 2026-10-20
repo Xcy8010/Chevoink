@@ -1,3 +1,4 @@
+import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import type { AiUsageLog, Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { runtimeJson } from './runtime-common.js'
@@ -79,8 +80,7 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
     runId: { in: input.runIds }, status: 'active', chapter: { authorId: subject.userId, ...activeChapterScope(subject.novelId) } },
     include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: true } })
   if (!compilation?.chapter || !compilation.bridge) return null
-  const chapter = compilation.chapter, source = compilation.bridge.fromChapterId ? await tx.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId,
-    ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } }) : null
+  const chapter = compilation.chapter, source = await readCompilerContinuitySource(tx, subject, compilation.chapter, compilation.bridge.fromChapterId)
   if (compilation.bridge.fromChapterId && source?.revision !== compilation.bridge.sourceRevision) return null
   const calls = await tx.agentRunEvent.findMany({ where: { runId: { in: input.runIds }, type: 'tool.call' }, orderBy: [{ createdAt: 'desc' }, { seq: 'desc' }] })
   const call = calls.find(row => {
@@ -99,8 +99,19 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   const reservation = reservations.filter(row => typeof object(row.metadata).continuityAssessmentRequestKey === 'string')
   if (reservation.length !== 1) return null
   const meta = object(reservation[0].metadata), frozen = object(meta.input), bodies = object(frozen.bodies), key = meta.continuityAssessmentRequestKey
+  let sourceMatches = bodies.previous === (source?.content ?? null) && frozen.bindingHash === runtimeJson(coverage).hash
+  if (!sourceMatches) {
+    // A proven non-dispatch may have frozen the previous single-source
+    // protocol. Verify those exact bytes; the returned NEW admission still
+    // binds today's range, never upgrades an old received judgment.
+    const previousSource = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, 7)
+    const previousCoverage = compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
+      source: previousSource, focus: typeof args.focus === 'string' ? args.focus : undefined,
+      terminalCandidate: args.terminalState ? terminalCandidateSchema.parse(args.terminalState) : readTerminalCandidate(compilation.validation) }, 7)
+    sourceMatches = bodies.previous === (previousSource?.content ?? null) && frozen.bindingHash === runtimeJson(previousCoverage).hash
+  }
   if (meta.admissionId === input.admission.id || frozen.chapterId !== chapter.id || frozen.revision !== chapter.revision || bodies.current !== chapter.content
-    || bodies.previous !== (source?.content ?? null) || frozen.bindingHash !== runtimeJson(coverage).hash
+    || !sourceMatches
     || frozen.targetType !== 'story_compilation' || frozen.targetId !== compilation.id) return null
   const receipt = reservations.filter(row => object(row.metadata).firstAssessmentNotDispatchedKey === key || object(row.metadata).fullReassessmentNotDispatchedKey === key)
   if (receipt.length !== 1 || receipt[0].createdAt < call.createdAt || receipt[0].createdAt > results[0].createdAt) return null

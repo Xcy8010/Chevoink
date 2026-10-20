@@ -13,6 +13,7 @@ const bundle = { chapter: { id: 'chapter', title: '旧物摊', content: '沈桐�
 
 describe('frozen quality work across deployments', () => {
   it('new work identifies contextual prose without relabeling an already frozen v9 request', () => {
+    expect(qualityWorkPromptProtocol(11)).toBe('humanity-context.v4')
     expect(qualityWorkPromptProtocol(10)).toBe('humanity-context.v3')
     expect(qualityWorkPromptProtocol(9)).toBe('humanity-context.v2')
     expect(qualityWorkPromptProtocol(8)).toBeUndefined()

@@ -143,6 +143,7 @@ async function readDeepSeek(value: string, configured: ToolModelRuntime, externa
     // solves a challenge, decodes protected glyphs or changes network identity.
     let sourceHtml: string | undefined
     let sourceFinalUrl = target.href
+    let sourceLinks: Array<{ url: string; title: string }> = []
     if (expectedTarget) {
       try {
         const source = await getPublicHttpBytes(target.href, { signal, timeoutMs: 5000, maxBytes: WEB_READER_MAX_BYTES,
@@ -156,6 +157,7 @@ async function readDeepSeek(value: string, configured: ToolModelRuntime, externa
           if (['WEB_READ_GARBLED', 'WEB_READ_BLOCKED', 'WEB_READ_NOT_FOUND'].includes(sourceQuality.code)) {
             return { ...sourceQuality, provider: 'direct', finalUrl: source.finalUrl, contentKind: 'article', retryable: false }
           }
+          sourceLinks = extractReaderLinks(sourceHtml, source.finalUrl)
           const sourceEvidence = assessReaderEvidence(sourceQuality.text, sourceQuality.title, expectedTarget, sourceHtml, source.finalUrl)
           if (sourceQuality.status === 'ok' && sourceEvidence.identity.status === 'verified'
             && sourceEvidence.identity.pageType === 'chapter' && sourceEvidence.integrity.status === 'source_compared') {
@@ -194,9 +196,11 @@ async function readDeepSeek(value: string, configured: ToolModelRuntime, externa
           evidence, provider, retryable: false, finalUrl: target.href, contentKind: 'article' }
       }
       const bookMetadata = /^(?:www\.)?fanqienovel\.com$/i.test(target.hostname) && /^\/(?:page|keyword)\//i.test(target.pathname)
+      const sourceLinkUrls = new Set(sourceLinks.map(link => link.url))
       return { ...quality, provider, retryable: false, finalUrl: target.href, contentKind: bookMetadata ? 'metadata' : 'article',
         evidence,
-        ...(quality.status === 'ok' ? { links: extractMarkdownReaderLinks(payload.content, target.href) } : {}) }
+        ...(quality.status === 'ok' ? { links: [...sourceLinks, ...extractMarkdownReaderLinks(payload.content, target.href)
+          .filter(link => !sourceLinkUrls.has(link.url))].slice(0, 4096) } : {}) }
     } finally { await request.close() }
   } catch (error) {
     external.throwIfAborted()

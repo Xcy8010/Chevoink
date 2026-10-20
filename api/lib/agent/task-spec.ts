@@ -181,7 +181,7 @@ function classifyIntent(prompt: string, researchAdmission = false): TaskIntent {
     const chapterEffects = clauses.flatMap(clause => clause.split(/(?:但是|但|不过|\bbut\b|并(?:且)?(?=不要|不得|不能|禁止)|\band\s+(?=do not|don't|must not))/iu)).map(clause => clause
       .replace(/(?:不要|不得|不许|不能|禁止|别)(?:再)?(?:跳过|省略|略过).{0,12}(?:检查|审查|评估|校验|检测)/gu, '')
       .replace(/(?:do not|don't|must not|never)\s+(?:skip|omit|bypass)\b.{0,32}\b(?:checks?|reviews?|validation)\b/giu, ''))
-      .filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|(?<!分)别|只读|不写|不改|do not|don't|must not|never|read.only)/iu.test(clause))
+      .filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|(?<!分)别|只读|不写|不改|不修改|不修订|do not|don't|must not|never|read.only)/iu.test(clause))
       .map(clause => clause
         .replace(/(?:提出|给出|提供|列出|说明|输出|讲解).{0,32}(?:建议|方案|思路|方法|报告)/gu, '')
         .replace(/(?:改写|修改|修复|优化|润色)(?:的)?(?:建议|方案|思路|方法)/gu, ''))

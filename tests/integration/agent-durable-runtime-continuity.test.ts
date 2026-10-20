@@ -212,7 +212,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         continuityCriticResponse: { parserVersion: 6, classification: 'source_invalid', candidateFindings: [{ severity: 'error', evidence: "前章原文：'原文' / 当前正文：'前文'" }] } })
       if (scenario === 'history-over-three' || scenario === 'single-quotes') {
         const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' } })
-        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 10, coverage: { protocolVersion: 7 } } } })
+        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 11, coverage: { protocolVersion: 8 } } } })
       }
       if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source'].includes(scenario)) expect(saved.validation).toBeNull()
       else expect(saved.validation).toMatchObject({ checkedRevision: 1, independentCheck: failed ? 'unavailable' : 'complete', coverage: { charCount: before.length, contentHash: runtimeJson({ content: before }).hash } })

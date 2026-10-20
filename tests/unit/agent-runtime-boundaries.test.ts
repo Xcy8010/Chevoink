@@ -33,6 +33,7 @@ vi.mock('../../api/lib/agent/runtime-common.js', () => ({
   },
   runtimeJson: (value: unknown) => ({ value, hash: JSON.stringify(value) }),
 }))
+vi.mock('../../api/lib/agent/runtime-parent-contention.js', () => ({ readAttemptContentionScope: vi.fn().mockResolvedValue(null) }))
 vi.mock('../../api/lib/agent/runtime-lease.js', () => ({ withRunLease: mocks.withRunLease }))
 vi.mock('../../api/lib/agent/runtime-budget.js', () => ({ assertProviderBudget: vi.fn() }))
 vi.mock('../../api/lib/agent/runtime-state.js', () => ({ assertPendingProviderState: vi.fn() }))

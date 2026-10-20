@@ -1,3 +1,4 @@
+import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { retainedFindings } from './chapter-arguments.js'
 import { readTerminalCandidate, terminalCandidateSchema, terminalReviewInput, currentTerminalReview, terminalReviewFailure, type TerminalCandidate } from '../terminal-state-review.js'
 import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
@@ -882,7 +883,7 @@ export const continuityValidateTool = defineTool({
     })
     const frozenReviewInput = reviewInput(compilation)
     const bridge = compilation.bridge
-    const sourceChapter = bridge.fromChapterId ? await prisma.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { id: true, revision: true, content: true } }) : null
+    const sourceChapter = await readCompilerContinuitySource(prisma, ctx, chapter, bridge.fromChapterId)
     const terminalCandidate = args.terminalState ?? readTerminalCandidate(compilation.validation)
     const coverage = compilerContinuityCoverage({ chapter, bridge, sceneTasks: compilation.sceneTasks, source: sourceChapter, focus: args.focus, terminalCandidate })
     const sourceUnchanged = !bridge.fromChapterId || sourceChapter?.revision === bridge.sourceRevision
@@ -927,7 +928,7 @@ export const continuityValidateTool = defineTool({
         }
         const guidance = report.errorCount ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
         return { summary: `离线复用连续性检查 · ${report.errorCount} 错误 ${report.warningCount} 警告`,
-          output: `原完整检查响应已按同来源唯一原文纠正定位并复用；正文未改动，未调用模型、未增加检查次数。${guidance || '警告保留待审，不自动改正文。'}\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...report, coverage })}；findingId 使用从0开始的编号。\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`,
+          output: `原完整检查响应已按同来源唯一原文纠正定位并复用；正文未改动，未调用模型、未增加检查次数。${guidance || '警告保留待审，不自动改正文。'}\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, report)}；findingId 使用从0开始的编号。\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`,
           display: { kind: 'storyCompiler', compilationId: compilation.id, phase: report.errorCount ? 'repair' : 'check', title: '连续性检查', detail: `${report.errorCount} 错误 · ${report.warningCount} 警告 · 离线复用`, errorCount: report.errorCount, warningCount: report.warningCount,
             items: report.findings.map(item => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`) } }
       }
@@ -943,7 +944,7 @@ export const continuityValidateTool = defineTool({
         if (bridge.fromChapterId) await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${bridge.fromChapterId} FOR SHARE`
         const current = await tx.storyCompilation.findUnique({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } },
           chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } } })
-        const source = bridge.fromChapterId ? await tx.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { id: true, revision: true, content: true } }) : null
+        const source = await readCompilerContinuitySource(tx, ctx, chapter, bridge.fromChapterId)
         if (reviewInput(current) !== frozenReviewInput || runtimeJson({ validation: current?.validation }).hash !== runtimeJson({ validation: compilation.validation }).hash
           || runtimeJson({ source }).hash !== runtimeJson({ source: sourceChapter }).hash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '已收到的纠正报告上下文变化，未离线应用。')
         const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id,
@@ -963,6 +964,10 @@ export const continuityValidateTool = defineTool({
         output: `已应用此前收到且已结算的引用纠正，正文未修改，未再次调用模型。\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...report, coverage })}；findingId 使用从0开始编号。\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` }
     }
     let continued = terminalCandidate ? null : await prisma.$transaction(tx => readContinuedContinuityEvidence(tx, ctx, { compilationId: compilation.id, focus: args.focus }))
+    // A confirmed author continuation can request a fresh full assessment, but
+    // an old single-source response cannot be relabeled as the new range.
+    // Existing correction and assessment reservations still fence unknown work.
+    if (continued && !compilerContinuityCoverageMatches(continued.coverage, coverage)) continued = null
     const priorFailedState = z.object({ independentCheck: z.literal('unavailable'), checkedRevision: z.literal(chapter.revision),
       continuityCriticResponse: z.object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) }) }).safeParse(compilation.validation)
     const correctionGate = priorFailedState.success
@@ -999,6 +1004,7 @@ export const continuityValidateTool = defineTool({
         `近期首尾：${asStrings(bridge.recentOpenings).join(' / ')}；${asStrings(bridge.recentEndings).join(' / ')}`,
         `生成 Scene Task 草案（目标/代价/转折不是历史事实）：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. 目标=${task.goal}；阻力=${task.obstacle}；选择=${task.choice}；代价=${task.cost}；转折=${task.turn}`).join('\n')}`,
         continuityReviewTail(compilation.validation, chapter.revision, allowRepair, args.focus, chapter.content),
+        compilerContinuitySourceScope(sourceChapter),
         continuitySourceInput({ previous: sourceChapter?.content ?? null, current: chapter.content }),
         terminalReviewInput(terminalCandidate),
       ].filter(Boolean).join('\n')
@@ -1009,8 +1015,8 @@ export const continuityValidateTool = defineTool({
           chapter: { authorId: ctx.userId, ...activeChapterScope(ctx.novelId) } },
         include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
       })
-      const source = bridge.fromChapterId ? await db.chapter.findFirst({ where: { id: bridge.fromChapterId, ...activeChapterScope(ctx.novelId) }, select: { revision: true, content: true } }) : null
-      if (reviewInput(current) !== frozenReviewInput || source?.revision !== sourceChapter?.revision || source?.content !== sourceChapter?.content) {
+      const source = await readCompilerContinuitySource(db, ctx, chapter, bridge.fromChapterId)
+      if (reviewInput(current) !== frozenReviewInput || runtimeJson({ source }).hash !== runtimeJson({ source: sourceChapter }).hash) {
         throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文或章节桥已变化，未应用或重发旧版本连续性检查，请读取当前版本。')
       }
       if (continued && runtimeJson(current?.validation).hash !== continued.validationHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原失败报告已变化，未纠正或应用旧意见。')
@@ -1101,11 +1107,17 @@ export const chapterBridgeCommitTool = defineTool({
     decisionOnly: z.literal(true).optional(),
     chapterSummary: z.string().min(1).max(2000).optional(),
     exitState: storyStateSchema.optional(),
+    terminalState: terminalCandidateSchema.optional(),
     lastUnfinishedAction: z.string().max(1000).optional(),
     hookDecision: z.string().max(1000).optional(),
     delayedHookReason: z.string().max(1000).optional(),
     openingStructure: z.string().min(1).max(300).optional(),
     endingStructure: z.string().min(1).max(300).optional(),
+  }).superRefine((value, ctx) => {
+    if (value.terminalState && (value.exitState && runtimeJson(value.exitState).hash !== runtimeJson(value.terminalState.exitState).hash
+      || value.lastUnfinishedAction !== undefined && value.lastUnfinishedAction !== value.terminalState.lastUnfinishedAction)) {
+      ctx.addIssue({ code: 'custom', path: ['terminalState'], message: 'terminalState 与顶层终态参数冲突；请传入同一完整候选，修改后先 continuity_validate。' })
+    }
   }),
   coerceArgs(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
@@ -1153,13 +1165,13 @@ export const chapterBridgeCommitTool = defineTool({
     // Scene tasks describe intent; only explicit terminal state may become facts.
     // Omitted state remains unknown, including after a revision diverged from BEAT.
     const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content)
-    const lastExit = storyStateSchema.parse(args.exitState ?? reviewedTerminal?.candidate.exitState ?? {})
+    const lastExit = storyStateSchema.parse(args.exitState ?? args.terminalState?.exitState ?? reviewedTerminal?.candidate.exitState ?? {})
     const paragraphs = compilation.chapter.content.split(/\n\s*\n/u).map(text => text.trim()).filter(Boolean)
     const terminal = {
       compilationId: compilation.id,
       chapterSummary: args.chapterSummary?.trim() || `正文摘录：${compilation.chapter.content.slice(0, 1995)}`,
       exitState: lastExit,
-      lastUnfinishedAction: args.lastUnfinishedAction ?? reviewedTerminal?.candidate.lastUnfinishedAction ?? '',
+      lastUnfinishedAction: args.lastUnfinishedAction ?? args.terminalState?.lastUnfinishedAction ?? reviewedTerminal?.candidate.lastUnfinishedAction ?? '',
       hookDecision: args.hookDecision ?? '',
       delayedHookReason: args.delayedHookReason ?? '',
       openingStructure: args.openingStructure?.trim() || `开篇摘录：${(paragraphs[0] ?? compilation.chapter.content).slice(0, 295)}`,

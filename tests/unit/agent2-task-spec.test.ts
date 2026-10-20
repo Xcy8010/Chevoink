@@ -149,3 +149,13 @@ describe('Agent 2.0 P3 TaskSpec', () => {
     ]))
   })
 })
+
+describe('negative chapter protection during continuation', () => {
+  it.each(['不修改已经保存的第1、2章', '不修订前两章', '不要修改前两章'])('preserves writing intent: %s', protection => {
+    const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt: `只续写下一章，${protection}，完成质量检查并按必要性修订复检。`, researchAdmission: 1 })
+    expect(spec.intent).toBe('write')
+  })
+  it('keeps an affirmative existing-chapter revision as a revision', () => {
+    expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '修改第二章并检查连续性；不修改第一章' }).intent).toBe('revise')
+  })
+})

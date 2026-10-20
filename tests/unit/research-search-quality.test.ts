@@ -157,3 +157,15 @@ describe('constrained provider selection preserves billing and transport facts',
     expect(transport).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('anchored reading-title wrappers', () => {
+  it.each(['河谷纪事完整版在线免费阅读', '河谷纪事完整版在线免费阅读_河谷纪事小说_番茄小说官网'])('admits discovery only for %s', title => {
+    expect(evaluateResearchSearchCandidates('河谷纪事', [result(title, 'https://fanqienovel.com/page/123')], { title: '河谷纪事', sourceHosts: ['fanqienovel.com'] }).eligibleCount).toBe(1)
+  })
+  it.each(['河谷纪事完整版在线免费阅读_同人番外', '河谷纪事完整版在线免费阅读_其他书名', '河谷纪事完整版在线免费阅读指南', '河谷纪事：同人完整版在线免费阅读'])('rejects ambiguous wrapper %s', title => {
+    expect(evaluateResearchSearchCandidates('河谷纪事', [result(title, 'https://fanqienovel.com/page/123')], { title: '河谷纪事' }).eligibleCount).toBe(0)
+  })
+  it('does not make a titled comment into an original chapter', () => {
+    expect(evaluateResearchSearchCandidates('河谷纪事', [result('《河谷纪事》第1章', 'https://fanqienovel.com/comment/123')], { title: '河谷纪事' }).candidates[0]).toMatchObject({ eligible: false, pageType: 'secondary' })
+  })
+})

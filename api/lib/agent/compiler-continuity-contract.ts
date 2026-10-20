@@ -3,7 +3,7 @@ import { continuityFindingInputSchema } from '../../../shared/contracts/story-co
 import type { TerminalCandidate } from './terminal-state-review.js'
 
 // Bump when the critic's required coverage or interpretation changes.
-export const COMPILER_CONTINUITY_PROTOCOL = 7
+export const COMPILER_CONTINUITY_PROTOCOL = 8
 
 export type CompilerContinuityCoverage = {
   version: 1; contentHash: string; charCount: number; sourceHash: string | null; reviewHash?: string; protocolVersion?: number; terminalHash?: string
@@ -20,7 +20,7 @@ export function continuityStoryInput(value: unknown): unknown {
 export function compilerContinuityCoverage(input: {
   chapter: { id: string; revision: number; content: string; orderIndex: number; title?: string }
   bridge: unknown; sceneTasks: unknown[]; source: unknown | null; focus?: string; terminalCandidate?: TerminalCandidate
-}, protocol: 6 | 7 = COMPILER_CONTINUITY_PROTOCOL): CompilerContinuityCoverage {
+}, protocol: 6 | 7 | 8 = COMPILER_CONTINUITY_PROTOCOL): CompilerContinuityCoverage {
   const contentHash = runtimeJson({ content: input.chapter.content }).hash
   const sourceHash = input.source ? runtimeJson(input.source).hash : null
   const terminalHash = input.terminalCandidate ? runtimeJson(input.terminalCandidate).hash : undefined

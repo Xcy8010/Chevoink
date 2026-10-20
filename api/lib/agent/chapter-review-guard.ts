@@ -1,3 +1,4 @@
+import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { createHash } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { currentReviewNextStepGuidance, projectCurrentReviewNextStep } from './review-dispatch.js'
@@ -157,8 +158,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   const chapter = await tx.chapter.findFirst({ where: { id: compilation.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) },
     select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
   if (!chapter?.content.trim()) return null
-  const source = compilation.bridge.fromChapterId ? await tx.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId,
-    ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } }) : null
+  const source = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId)
   if (compilation.bridge.fromChapterId && source?.revision !== compilation.bridge.sourceRevision) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '章节桥来源版本已变化，保留原编译与正文，不能自动重建或沿用旧检查交付。')
   }
@@ -521,8 +521,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   if (options.after !== undefined) await assertChapterReviewWriteAdmission(tx, subject, { chapterId: current.id,
     revision: current.revision, after: options.after, editRanges: options.editRanges, ...(latest ? { compilationId: latest.id } : {}) })
   if (options.retainedFindings?.length) {
-    const source = latest?.bridge?.fromChapterId ? await tx.chapter.findFirst({ where: { id: latest.bridge.fromChapterId,
-      ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } }) : null
+    const source = latest?.bridge ? await readCompilerContinuitySource(tx, subject, current, latest.bridge.fromChapterId) : null
     const continuity = latest?.bridge && (!latest.bridge.fromChapterId || source?.revision === latest.bridge.sourceRevision)
       ? readCurrentCompilerContinuity({ ...latest, bridge: latest.bridge }, current, source).assessment : null
     const qualityComplete = !!quality && qualityReportCheckedCurrentContent(quality, current.revision, current.content)
@@ -628,8 +627,7 @@ export async function assertChapterReviewRevision(
     if (authority && current && originalChapterReviewRequirements(original).continuity) {
       const bound = compilations.find(item => item.id === options.pendingQuality?.compilationId && item.status === 'active'
         && item.bridge && !item.bridge.committedAt)
-      const source = bound?.bridge?.fromChapterId ? await tx.chapter.findFirst({ where: { id: bound.bridge.fromChapterId,
-        ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } }) : null
+      const source = bound?.bridge ? await readCompilerContinuitySource(tx, subject, current, bound.bridge.fromChapterId) : null
       const complete = bound?.bridge && (!bound.bridge.fromChapterId || source?.revision === bound.bridge.sourceRevision)
         && readCurrentCompilerContinuity({ ...bound, bridge: bound.bridge }, current, source).assessment
       if (!complete) throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '质量报告照常保存；同一编译的当前正文尚未完成原要求连续性检查，不预约或付费自动修订。先完成 continuity_validate，再根据全部当前报告合并一次尚未执行的授权修订；累计检查与用量记录保留。')
@@ -673,8 +671,7 @@ export async function assertChapterReviewRevision(
     const assertMergedMutation = async (bound: typeof compilations[number]) => {
       if (!options?.mutation || !current || !authority) return
       const requirements = originalChapterReviewRequirements(original)
-      const source = bound.bridge?.fromChapterId ? await tx.chapter.findFirst({ where: { id: bound.bridge.fromChapterId,
-        ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } }) : null
+      const source = bound?.bridge ? await readCompilerContinuitySource(tx, subject, current, bound.bridge.fromChapterId) : null
       const continuity = bound.bridge && (!bound.bridge.fromChapterId || source?.revision === bound.bridge.sourceRevision)
         ? readCurrentCompilerContinuity({ ...bound, bridge: bound.bridge }, current, source).assessment : null
       const qualityComplete = latestQuality?.compilationId === bound.id
@@ -747,8 +744,7 @@ export async function assertChapterReviewRevision(
       && validation?.independentCheck === 'complete' && validation.checkedChapterId === current.id
       && validation.checkedRevision === current.revision && errorCount > 0 && validation.errorCount === errorCount
       && findings?.every(item => item.success)) {
-      const source = latest.bridge.fromChapterId ? await tx.chapter.findFirst({ where: { id: latest.bridge.fromChapterId, ...activeChapterScope(subject.novelId) },
-        select: { id: true, revision: true, content: true } }) : null
+      const source = await readCompilerContinuitySource(tx, subject, current, latest.bridge.fromChapterId)
       const sourceCurrent = !latest.bridge.fromChapterId || source?.revision === latest.bridge.sourceRevision
       if (sourceCurrent && compilerContinuityCoverageMatches(validation.coverage, compilerContinuityCoverage({ chapter: current,
         bridge: latest.bridge, sceneTasks: latest.sceneTasks, source, focus: typeof validation.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate: readTerminalCandidate(validation) }))) {

@@ -254,45 +254,35 @@ async function searchSogou(query: string, maxResults: number, signal: AbortSigna
 
   const html = (await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8')
   captureSearchHtml(html, metadata, query)
-  // vrwrap 块：容错切法——从 <div class="vrwrap" 起取到下一个 vrwrap/vrTitle 前的内容
-  const blockStarts = [...html.matchAll(/<div class="vrwrap"[\s\S]*?(?=<div class="vrwrap"|$)/g)]
+  // Parse observed DOM attributes, including class lists and single-quoted
+  // HTML. Relative tracking links alone are not a discovered destination.
+  const { document } = parseHTML(html)
+  const blocks = [...document.querySelectorAll('.vrwrap')]
   const results: WebSearchResult[] = []
-
-  for (const block of blockStarts) {
-    if (results.length >= maxResults) {
-      break
+  for (const block of blocks) {
+    if (results.length >= maxResults) break
+    const anchor = block.querySelector('h3.vr-title a[href]')
+    const title = anchor?.textContent?.replace(/\s+/gu, ' ').trim() ?? ''
+    if (!title || /https?:\/\//u.test(title) || title.includes(' › ')) continue
+    const destinations = [block.getAttribute('data-url'), ...[...block.querySelectorAll('[data-url]')].map(node => node.getAttribute('data-url')), anchor?.getAttribute('href')]
+    let href: string | undefined
+    for (const destination of destinations) {
+      if (!destination || !/^https?:\/\//iu.test(destination)) continue
+      try {
+        const parsed = parsePublicHttpUrl(destination, true)
+        if (/(?:^|\.)sogou\.com$/iu.test(parsed.hostname)) continue
+        href = parsed.href
+        break
+      } catch { /* Malformed or private destinations never become sources. */ }
     }
-    // 标题：vr-title h3 内第一个锚点；真实 URL 优先取块级 data-url（/link 跳转需 JS 环境无法后端跟随）
-    const titleMatch = block[0].match(/<h3[^>]*class="vr-title"[^>]*>[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
-    if (!titleMatch) {
-      continue
-    }
-    const title = stripTags(titleMatch[2])
-    if (!title || /https?:\/\//.test(title) || title.includes(' › ')) {
-      continue
-    }
-    const dataUrlMatch = block[0].match(/data-url="(https?:\/\/[^"]+)"/)
-    const anchorHref = titleMatch[1]
-    // 真实 URL 优先 data-url；无则用锚点绝对外链（/link 跳转链无法后端跟随，跳过）
-    const href = dataUrlMatch?.[1] ?? (/^https?:\/\/[^/]*sogou\.com/.test(anchorHref) ? '' : anchorHref)
-    if (!href.startsWith('http')) {
-      continue
-    }
-    // 摘要：块内 str-text/text-layout 类段落，兜底取任意 <p>
-    const snippetMatch =
-      block[0].match(/<(?:p|div)[^>]*class="[^"]*(?:str-text|text-layout|space-txt)[^"]*"[^>]*>([\s\S]*?)<\/(?:p|div)>/) ??
-      block[0].match(/<p[^>]*>([\s\S]*?)<\/p>/)
-    results.push({
-      title,
-      url: href,
-      snippet: truncate(stripTags(snippetMatch?.[1] ?? ''), SNIPPET_MAX),
-      source: hostOf(href),
-    })
+    if (!href) continue
+    const snippet = block.querySelector('.str-text,.text-layout,.space-txt,p')?.textContent?.replace(/\s+/gu, ' ').trim() ?? ''
+    results.push({ title, url: href, snippet: truncate(snippet, SNIPPET_MAX), source: hostOf(href) })
   }
 
-  if (metadata.queryHash) metadata.parseCode = results.length ? 'SOGOU_RESULTS_PARSED' : blockStarts.length ? 'SOGOU_NO_USABLE_LINKS' : 'SOGOU_NO_RESULT_BLOCKS'
+  if (metadata.queryHash) metadata.parseCode = results.length ? 'SOGOU_RESULTS_PARSED' : blocks.length ? 'SOGOU_NO_USABLE_LINKS' : 'SOGOU_NO_RESULT_BLOCKS'
   if (results.length === 0) {
-    throw new WebSearchError('搜狗结果解析为空（可能触发反爬或结构变化）')
+    throw new WebSearchError('搜狗页面未发现可用公开结果链接')
   }
 
   return results

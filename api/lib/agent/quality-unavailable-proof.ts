@@ -61,8 +61,8 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
     // A failed source's protocol comes from its authenticated original work,
     // never from today's reviewer or an unverified report marker. This grants
     // recovery eligibility only; passed caches still require the current hash.
-    if (!Number.isInteger(frozen.version) || Number(frozen.version) < 1 || Number(frozen.version) > 10) return null
-    const sourceProtocol = Number(frozen.version) >= 10 ? HUMANITY_PROMPT_PROTOCOL : 'humanity-context.v2'
+    if (!Number.isInteger(frozen.version) || Number(frozen.version) < 1 || Number(frozen.version) > 11) return null
+    const sourceProtocol = Number(frozen.version) >= 11 ? HUMANITY_PROMPT_PROTOCOL : Number(frozen.version) === 10 ? 'humanity-context.v3' : 'humanity-context.v2'
     if (metrics.qualityContextHash !== qualityReviewContextHash(context, sourceProtocol)
       || metrics.criticPromptProtocol !== undefined && metrics.criticPromptProtocol !== sourceProtocol) return null
     const paid = operation.children.flatMap(child => child.attempts.map(attempt => ({ child, attempt })))
@@ -114,8 +114,8 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
   }
   // Legacy has no immutable work version. Only its explicit saved protocol may
   // select old rules; unmarked receipts retain the existing current-only check.
-  const legacyProtocol = metrics.criticPromptProtocol === 'humanity-context.v2' ? 'humanity-context.v2' : HUMANITY_PROMPT_PROTOCOL
-  if (metrics.criticPromptProtocol !== undefined && !['humanity-context.v2', HUMANITY_PROMPT_PROTOCOL].includes(String(metrics.criticPromptProtocol))
+  const legacyProtocol = metrics.criticPromptProtocol === 'humanity-context.v2' ? 'humanity-context.v2' : metrics.criticPromptProtocol === 'humanity-context.v3' ? 'humanity-context.v3' : HUMANITY_PROMPT_PROTOCOL
+  if (metrics.criticPromptProtocol !== undefined && !['humanity-context.v2', 'humanity-context.v3', HUMANITY_PROMPT_PROTOCOL].includes(String(metrics.criticPromptProtocol))
     || metrics.qualityContextHash !== qualityReviewContextHash(context, legacyProtocol)) return null
   const events = await tx.agentRunEvent.findMany({ where: { runId: report.runId, type: { in: ['tool.call', 'tool.result'] } }, orderBy: { seq: 'asc' }, take: 2001 })
   if (events.length >= 2001) return null

@@ -315,7 +315,7 @@ export const qualityAnalyzeTool = defineTool({
     }
     let formatRecovery: QualityFormatRecovery | null = null
     const sameFailedContext = existing?.status === 'failed' && !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics)
-      && (matchingContext || cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, 'humanity-context.v2'))
+      && (matchingContext || ['humanity-context.v2', 'humanity-context.v3'].some(protocol => cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, protocol as 'humanity-context.v2' | 'humanity-context.v3')))
     if (sameFailedContext && existing.chapterRevision === bundle.chapter.revision
       && !await prisma.$transaction(tx => hasReconciledQualityRequest(tx, ctx, existing))) {
       formatRecovery = await prisma.$transaction(tx => readQualityFormatRecovery(tx, ctx, { chapterId }))

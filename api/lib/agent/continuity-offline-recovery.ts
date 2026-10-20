@@ -1,3 +1,4 @@
+import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { taskSpecSchema } from '../../../shared/contracts/index.js'
@@ -30,9 +31,11 @@ export async function readOfflineContinuityRecovery(tx: Prisma.TransactionClient
     include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } } })
   if (!compilation?.chapter || !compilation.bridge || !compilation.chapter.content.trim() || compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4) return null
   const chapter = compilation.chapter, validation = object(compilation.validation), audit = object(validation.continuityCriticResponse), rawAudit = object(audit.rawResponse)
-  const source = compilation.bridge.fromChapterId ? await tx.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } }) : null
+  const protocol = object(validation.coverage).protocolVersion
+  if (protocol !== 6 && protocol !== 7 && protocol !== 8) return null
+  const source = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, protocol)
   if (compilation.bridge.fromChapterId && source?.revision !== compilation.bridge.sourceRevision) return null
-  const coverage = compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source, focus: input.focus })
+  const coverage = compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source, focus: input.focus }, protocol)
   if (validation.independentCheck !== 'unavailable' || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
     || !compilerContinuityCoverageMatches(validation.coverage, coverage) || validation.reviewFocus !== (input.focus ?? '')
     || validation.continuityFormatRecovery || audit.version !== 1 || audit.parserVersion !== 3 || audit.classification !== 'findings_invalid'

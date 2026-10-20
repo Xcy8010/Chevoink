@@ -84,3 +84,8 @@ describe('original writing authority', () => {
     expect(questionExpandsWritingScope('需要封面吗？', [{ label: '生成封面' }], writing, '写第一章')).toBe(true)
   })
 })
+
+describe('explicit necessary revision wording', () => {
+  it.each(['写下一章，按必要性修订复检', '检查本章并修订错误', '请修订当前章'])('admits the stated repair: %s', prompt => expect(hasOriginalRepairAuthority(prompt)).toBe(true))
+  it.each(['不修订当前章', '不要修订，给出检查报告', '如何修订这章', '仅提供修订建议', '修订方案', '说明修订情况'])('does not manufacture repair from %s', prompt => expect(hasOriginalRepairAuthority(prompt)).toBe(false))
+})

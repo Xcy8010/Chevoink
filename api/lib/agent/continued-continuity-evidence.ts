@@ -1,3 +1,4 @@
+import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { readContinuedContinuityRecovery } from './legacy-continuity-recovery.js'
@@ -22,10 +23,11 @@ export async function readContinuedContinuityEvidence(tx: Prisma.TransactionClie
   if (!compilation?.chapter || !compilation.bridge) return null
   const chapter = compilation.chapter
   const validation = object(compilation.validation), audit = object(validation.continuityCriticResponse), rawAudit = object(audit.rawResponse)
-  const source = compilation.bridge.fromChapterId ? await tx.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId, authorId: ctx.userId,
-    ...activeChapterScope(ctx.novelId) }, select: { id: true, revision: true, content: true } }) : null
+  const protocol = object(validation.coverage).protocolVersion
+  if (protocol !== 6 && protocol !== 7 && protocol !== 8) return null
+  const source = await readCompilerContinuitySource(tx, ctx, chapter, compilation.bridge.fromChapterId, protocol)
   if (compilation.bridge.fromChapterId && source?.revision !== compilation.bridge.sourceRevision) return null
-  const coverage = compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source, focus: input.focus })
+  const coverage = compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source, focus: input.focus }, protocol)
   if (validation.independentCheck !== 'unavailable' || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
     || !compilerContinuityCoverageMatches(validation.coverage, coverage) || validation.reviewFocus !== (input.focus ?? '')
     || ![3, 4, 5].includes(Number(audit.parserVersion)) || rawAudit.complete !== true || rawAudit.encoding !== 'json-string'

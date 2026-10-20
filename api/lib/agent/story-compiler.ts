@@ -1,3 +1,4 @@
+import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { continuityRecheckBaseline } from './continuity-review-context.js'
 import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision } from './writing-scope.js'
 import { classifyContinuityFindingAuthority, unlocatedContinuityEvidence } from './continuity-finding-authority.js'
@@ -701,9 +702,10 @@ export async function validateStoryContinuity(input: {
   if (input.expectedChapterRevision !== undefined && compilation.chapter.revision !== input.expectedChapterRevision) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '独立检查期间正文已变化，旧结果不能验证新revision。请重新检查当前正文。')
   }
-  const reviewSource = compilation.bridge.fromChapterId ? await db.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId, ...activeChapterScope(input.novelId) },
-    select: { id: true, revision: true, content: true } }) : null
-  const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus, terminalCandidate: input.terminalCandidate }, input.coverage?.protocolVersion === 6 ? 6 : 7)
+  const protocol = input.coverage?.protocolVersion ?? 8
+  if (protocol !== 6 && protocol !== 7 && protocol !== 8) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '未知连续性协议，不能升级或应用旧检查。')
+  const reviewSource = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, protocol)
+  const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus, terminalCandidate: input.terminalCandidate }, protocol)
   if (input.coverage && !compilerContinuityCoverageMatches(input.coverage, currentCoverage)) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、章节桥、场景或检查范围已变化，旧检查不能绑定当前编译。')
   const deterministic: ContinuityFindingInput[] = []
   if (compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4) {
@@ -828,10 +830,7 @@ export async function commitChapterBridge(input: {
     || input.expectedContentHash !== undefined && createHash('sha256').update(chapter.content).digest('hex') !== input.expectedContentHash) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文在终态推导后变化，未提交旧版本终态。')
   }
-  const source = compilation.bridge.fromChapterId ? await (async () => {
-    await db.$queryRaw`SELECT id FROM chapters WHERE id = ${compilation.bridge!.fromChapterId} FOR SHARE`
-    return db.chapter.findFirst({ where: { id: compilation.bridge!.fromChapterId!, ...activeChapterScope(input.novelId) }, select: { id: true, revision: true, content: true } })
-  })() : null
+  const source = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId)
   if (compilation.bridge.fromChapterId && (!source || source.revision !== compilation.bridge.sourceRevision)) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '桥接来源章节已变化，不能沿用旧来源提交终态。')
   }

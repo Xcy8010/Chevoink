@@ -13,7 +13,7 @@ import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 
 describe.runIf(available)('terminal facts through the durable provider and commit adapters', () => {
-  it.each(['supported', 'missing-verdict-reassessment', 'attributed', 'changed-candidate'] as const)('%s uses the frozen candidate and existing request boundary', async scenario => fixture(async f => {
+  it.each(['supported', 'missing-verdict-reassessment', 'attributed', 'changed-candidate', 'nested-supported', 'nested-changed'] as const)('%s uses the frozen candidate and existing request boundary', async scenario => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const lease = await claim(f)
     const content = scenario === 'attributed' ? '“林舟右掌骨裂。”敌人散布着这条未经证实的传言。' : '医师确认林舟右掌骨裂，尚未愈合。'
@@ -36,7 +36,7 @@ describe.runIf(available)('terminal facts through the durable provider and commi
         messages: [{ role: 'user', content: '修订本章' }, { role: 'assistant', content: null, toolCalls: [
           { id: 'bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) },
           { id: 'check', name: 'continuity_validate', arguments: JSON.stringify({ compilationId, terminalState: candidate }) },
-          { id: 'commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId, ...(scenario === 'changed-candidate' ? changed : {}) }) },
+          { id: 'commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId, ...(scenario === 'changed-candidate' ? changed : scenario === 'nested-changed' ? { terminalState: changed } : scenario === 'nested-supported' ? { terminalState: candidate } : {}) }) },
         ] }] } })
     const window = credits.getCreditWindow()
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
@@ -60,7 +60,7 @@ describe.runIf(available)('terminal facts through the durable provider and commi
     await step()
     const check = await step()
     expect(check).toMatchObject({ kind: 'tool' })
-    const denied = scenario === 'attributed' || scenario === 'changed-candidate'
+    const denied = scenario === 'attributed' || scenario === 'changed-candidate' || scenario === 'nested-changed'
     expect(await step()).toMatchObject({ kind: 'tool', result: denied ? { outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' } : { summary: '提交章节桥与当前故事终态' } })
     expect(calls).toBe(scenario === 'missing-verdict-reassessment' ? 2 : 1)
     const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId }, include: { bridge: true, sceneTasks: true } })

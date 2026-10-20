@@ -43,7 +43,7 @@ function fixture(prompt = '完成第一章，只输出标题与正文。', title
       evidenceExcerpt: string; startOffset: number; endOffset: number; explanation: string; suggestion: string }> }
   const db = { $queryRaw: vi.fn(async () => [{ id: 'novel' }]),
     agentRun: { findFirstOrThrow: vi.fn(async () => ({ writingBindings: null })) },
-    chapter: { findFirst: vi.fn(async () => chapter) }, storyCompilation: { findFirst: vi.fn(async () => terminal), findMany: vi.fn(async () => [terminal]) },
+    chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn(async () => chapter) }, storyCompilation: { findFirst: vi.fn(async () => terminal), findMany: vi.fn(async () => [terminal]) },
     chapterQualityReport: { findFirst: vi.fn(async () => quality), findMany: vi.fn(async () => [quality]) },
     agentTaskRoot: { findUniqueOrThrow: vi.fn(async () => ({ id: 'root', novelId: 'novel' })) },
     agentOperation: { count: vi.fn(async () => 0) }, agentProviderAttempt: { count: vi.fn(async () => 0) },

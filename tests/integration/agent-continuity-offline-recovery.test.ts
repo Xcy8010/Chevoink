@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { readOfflineContinuityRecovery, applyOfflineContinuityRecovery } from '../../api/lib/agent/continuity-offline-recovery.js'
@@ -26,7 +27,7 @@ describe.runIf(available)('owned returned continuity bytes on genuine legacy aut
         await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: '推进场景', entryState: state, goal: '找门', obstacle: '门锁', choice: '等候', cost: '时间', turn: '开门', exitState: state,
           styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
         const current = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
-        const source = { id: previous.id, revision: previous.revision, content: previous.content }
+        const source = await readCompilerContinuitySource(prisma, f, chapter, current.bridge.fromChapterId)
         const coverage = compilerContinuityCoverage({ chapter, bridge: current.bridge, sceneTasks: current.sceneTasks, source })
         const raw = JSON.stringify({ findings: Array.from({ length: 4 }, (_, index) => ({ signal: 'object', severity: 'error', evidence: '原判断' + index, suggestion: '原建议' + index,
           sourceEvidence: [{ source: 'previous', segmentId: 'p0', quote: '前章唯一证据' }, { source: 'current', segmentId: index === 1 ? 'c5' : 'c6', quote: '当前唯一引文\n含"转义"。' }] })) })

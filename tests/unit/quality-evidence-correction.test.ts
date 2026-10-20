@@ -409,3 +409,28 @@ describe('quality parser v3 separates complete judgments from prompt count guida
     expect(inspectCriticResponse(raw, undefined, true, 3).complete).toBe(false)
   })
 })
+
+describe('v7 closing delimiters and frozen source compatibility', () => {
+  it.each(['「门开了。」她说。', '“她说：‘门开了！’”随后沉默。', '（门开了？）屋里无人。', '"Stop!" He turned.'])('retains adjacent closing punctuation in %s', body => {
+    const sources = buildQualityEvidenceSources(sourceIdentity, body)
+    expect(sources.protocol).toBe(7)
+    expect(sources.entries[0].text).toMatch(/[」”）"]$/u)
+    expect(sources.entries.map(row => row.text).join('')).toBe(body)
+    expect(renderQualityEvidenceSources(sources)).toContain('不是原文段落')
+    expect(validateQualityEvidenceSources(sources, sourceIdentity, body)).toBe(true)
+  })
+  it('never invents a missing quote or exceeds a bounded Unicode span', () => {
+    for (const body of ['「门开了。她说。', '「' + '甲'.repeat(358) + '。」😀随后沉默。']) {
+      const sources = buildQualityEvidenceSources(sourceIdentity, body)
+      expect(sources.entries.map(row => row.text).join('')).toBe(body)
+      for (const row of sources.entries) { expect(row.text.length).toBeLessThanOrEqual(360); expect(row.text).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u) }
+    }
+  })
+  it.each([5, 6] as const)('rebuilds frozen protocol %s without new offsets or claims', protocol => {
+    const body = '「门开了。」她说。', frozen = buildQualityEvidenceSources(sourceIdentity, body, protocol)
+    expect(frozen.entries[0]).toMatchObject({ start: 0, end: 5, text: '「门开了。' })
+    expect(validateQualityEvidenceSources(frozen, sourceIdentity, body)).toBe(true)
+    expect(frozen.entries[0].id).not.toBe(buildQualityEvidenceSources(sourceIdentity, body).entries[0].id)
+    expect(renderQualityEvidenceSources(frozen)).not.toContain('不是原文段落')
+  })
+})

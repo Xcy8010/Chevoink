@@ -48,7 +48,7 @@ describe('current mandatory quality warning write admission', () => {
       evidenceExcerpt: text, evidenceHash: sha(text), startOffset: start, endOffset: start + text.length, explanation: '意见', suggestion: '修订' }
     const report = { id: 'current-q', status: 'needs_repair', chapterRevision: 7, findings: [warning],
       deterministicMetrics: { independentCheck: 'complete', contentHash: sha(manuscript) } }
-    const db = { chapter: { findFirst: vi.fn().mockResolvedValue(chapter) }, storyCompilation: { findFirst: vi.fn().mockResolvedValue(compilation) },
+    const db = { chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(chapter) }, storyCompilation: { findFirst: vi.fn().mockResolvedValue(compilation) },
       chapterQualityReport: { findFirst: vi.fn().mockResolvedValue(report) } }
     const tx = db as unknown as Prisma.TransactionClient
     const subject = { userId: scope.userId, novelId: scope.novelId, runId: 'r' }

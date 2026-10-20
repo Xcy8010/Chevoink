@@ -140,7 +140,7 @@ describe.runIf(available)('native paid failed quality response and limited deliv
     if (scenario === 'usage-observation') await prisma.agentProviderUsageReceipt.update({ where: { attemptId: attempt.id }, data: { observationHash: 'f'.repeat(64) } })
     if (scenario === 'charge-association') await prisma.creditLedgerEntry.update({ where: { idempotencyKey: `operation:${critic.id}` }, data: { referenceId: randomUUID() } })
     if (scenario === 'protocol-marker') {
-      report.deterministicMetrics = { ...report.deterministicMetrics as Prisma.JsonObject, criticPromptProtocol: 'humanity-context.v3' }
+      report.deterministicMetrics = { ...report.deterministicMetrics as Prisma.JsonObject, criticPromptProtocol: 'humanity-context.v4' }
       await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { deterministicMetrics: report.deterministicMetrics } })
     }
     if (scenario === 'unknown-work-version') {
@@ -704,7 +704,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         vi.spyOn(toolCursor, 'prepareToolCursorOperation').mockImplementationOnce(async (token, cursor, input, tx) => {
           const snapshot = JSON.parse(JSON.stringify(input.operationInput)) as { work: Record<string, unknown> }
           const legacy = qualityWorkContextProjection(await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId), oldWorkVersion!)
-          if (oldWorkVersion! >= 4 && oldWorkVersion! < 9) freezeLegacySources(snapshot.work)
+          if (oldWorkVersion! >= 4) freezeLegacySources(snapshot.work, oldWorkVersion! >= 7 ? 6 : 5)
           snapshot.work = { ...snapshot.work, version: oldWorkVersion, contextHash: runtimeJson(JSON.parse(JSON.stringify(legacy))).hash,
             criticInput: '合成升级前冻结的完整正文与点评输入', criticSystem: '合成升级前的只读点评规则；只输出 findings JSON。' }
           if (oldWorkVersion! < 9) {
@@ -794,7 +794,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: { in: ['quality_format_recovery', 'quality_repair', 'quality_repair_retry'] } } })).toBe(0)
         const nextReports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId }, orderBy: { createdAt: 'asc' } })
         expect(nextReports).toHaveLength(2)
-        expect(nextReports[1]).toMatchObject({ status: 'passed', deterministicMetrics: { criticPromptProtocol: 'humanity-context.v3', qualityContextHash: qualityReviewContextHash(bundle) } })
+        expect(nextReports[1]).toMatchObject({ status: 'passed', deterministicMetrics: { criticPromptProtocol: 'humanity-context.v4', qualityContextHash: qualityReviewContextHash(bundle) } })
         expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: admittedLegacy!.id }, select: { id: true, inputHash: true, inputSnapshot: true } })).toEqual(admittedLegacy)
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: before, revision: 1 })
         return
@@ -902,8 +902,8 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(JSON.stringify(result)).not.toContain('rawResponse')
         expect(await prisma.$transaction(tx => readQualityFormatRecovery(tx, { userId: f.userId, novelId: f.novelId, runId: lease.runId }, { chapterId: f.chapterId }))).toBeNull()
         const savedWork = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
-        expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 10, parserVersion: 3, repairContext: expect.any(String), deadlineAt: expect.any(Number) } } })
-        expect(reports[0].deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v3' })
+        expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 11, parserVersion: 3, repairContext: expect.any(String), deadlineAt: expect.any(Number) } } })
+        expect(reports[0].deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v4' })
         const recoveryOp = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: savedWork.id, action: 'quality_format_recovery' }, include: { attempts: { include: { usageReceipt: true } } } })
         expect(recoveryOp.attempts).toHaveLength(1)
         expect(recoveryOp.attempts[0].usageReceipt).toMatchObject({ source: 'reported', settlementStatus: 'settled' })
@@ -941,8 +941,8 @@ describe.runIf(available)('frozen cached quality repair authorization', () => {
     expect(await check(work)).toBe(true)
     for (const version of [1, 2, 3]) expect(await check({ ...work, version, sources: undefined })).toBe(true)
     const currentSources = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, chapterRevision: 1 }, '原文')
-    for (const version of [9, 10]) expect(await check({ ...work, version, sources: currentSources })).toBe(true)
-    expect(await check({ ...work, version: 11, sources: currentSources })).toBe(false)
+    for (const version of [9, 10, 11]) expect(await check({ ...work, version, sources: currentSources })).toBe(true)
+    expect(await check({ ...work, version: 12, sources: currentSources })).toBe(false)
     expect(await check({ ...work, sources: { ...sources, identity: { ...sources.identity, userId: randomUUID() } } })).toBe(false)
     expect(await check({ ...work, sources: { ...sources, identity: { ...sources.identity, chapterRevision: 2 } } })).toBe(false)
     expect(await check({ ...work, chapter: { ...work.chapter, content: '另文' } })).toBe(false)
@@ -1161,9 +1161,9 @@ describe.runIf(available)('既有章节独立检查', () => {
 
 // Reconstruct the historical table and prompt at admission; changing only the
 // work version would manufacture an impossible old work with new references.
-function freezeLegacySources(work: Record<string, unknown>) {
+function freezeLegacySources(work: Record<string, unknown>, protocol: 5 | 6 = 5) {
   const sources = work.sources as QualityEvidenceSources
-  const old = buildQualityEvidenceSources(sources.identity, sources.entries.map(entry => entry.text).join(''), 5)
+  const old = buildQualityEvidenceSources(sources.identity, sources.entries.map(entry => entry.text).join(''), protocol)
   work.criticInput = String(work.criticInput).replace(renderQualityEvidenceSources(sources), renderQualityEvidenceSources(old))
   work.sources = old
 }

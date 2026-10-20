@@ -43,6 +43,20 @@ async function fixture(work: (subject: { userId: string; novelId: string; sessio
   }
 }
 describe.skipIf(!available)('fresh selected server admission transaction', () => {
+  it('freezes continuation and necessary repair while protecting existing chapters through HTTP', () => fixture(async f => {
+    const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const response = await request(app).post('/api/agent/runs')
+      .set('Cookie', `chevoink_session=${buildSessionTokens(f.userId, 0).accessToken}`)
+      .send({ ...f, prompt: '只续写下一章，不修改已经保存的第1章，完成质量与连续性检查并按必要性修订复检。', mode: 'build' })
+    expect(response.status).toBe(200)
+    const runId = response.body.data.runId as string
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec)
+    expect(spec).toMatchObject({ intent: 'write', scope: { writing: { kind: 'bounded', repairAuthorized: true, targets: [{ orderIndex: 2, chapterId: null }] } } })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+    expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(1)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+  }))
+
   it.each([
     '只读联网研究，不创建章节、不写小说正文、不改任何稿件，请优先研究番茄小说《样本》，不要在官网首页泛泛搜索，不要只凭简介、搜索摘要或同人文字推断原作，先核官方身份并读公开样本按证据分析',
     '只搜索《样本》官方作者与作品页，读取两章公开正文并按证据分析',
