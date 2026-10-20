@@ -9,7 +9,7 @@ import { compilerContinuityCoverage } from './compiler-continuity-contract.js'
 import { activeChapterScope } from '../data/internal.js'
 import { terminalCandidateSchema, readTerminalCandidate } from './terminal-state-review.js'
 import { continuitySourceScopeSchema } from './continuity-source-authority.js'
-import { terminalEvidenceContextSchema } from './terminal-evidence-context.js'
+import { terminalEvidenceContextSchema, terminalEvidenceContext } from './terminal-evidence-context.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 /** Authenticate only this exact two-request tool interval. A matching action
@@ -82,7 +82,8 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
     runId: { in: input.runIds }, status: 'active', chapter: { authorId: subject.userId, ...activeChapterScope(subject.novelId) } },
     include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: true } })
   if (!compilation?.chapter || !compilation.bridge) return null
-  const chapter = compilation.chapter, source = await readCompilerContinuitySource(tx, subject, compilation.chapter, compilation.bridge.fromChapterId)
+  const chapter = compilation.chapter
+  let source = await readCompilerContinuitySource(tx, subject, compilation.chapter, compilation.bridge.fromChapterId)
   if (compilation.bridge.fromChapterId && source?.revision !== compilation.bridge.sourceRevision) return null
   const calls = await tx.agentRunEvent.findMany({ where: { runId: { in: input.runIds }, type: 'tool.call' }, orderBy: [{ createdAt: 'desc' }, { seq: 'desc' }] })
   const call = calls.find(row => {
@@ -101,9 +102,12 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   const reservation = reservations.filter(row => typeof object(row.metadata).continuityAssessmentRequestKey === 'string')
   if (reservation.length !== 1) return null
   const meta = object(reservation[0].metadata), frozen = object(meta.input), bodies = object(frozen.bodies), key = meta.continuityAssessmentRequestKey
-  const coverage = compilerContinuityCoverage(coverageInput, frozen.parserVersion === 8 ? 10 : frozen.parserVersion === 7 ? 9 : 8)
+  const chainProtocol = frozen.parserVersion === 8 && object(bodies.terminalEvidence).protocol === 2
+  if (chainProtocol) source = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, 11)
+  const coverage = compilerContinuityCoverage({ ...coverageInput, source }, chainProtocol ? 11 : frozen.parserVersion === 8 ? 10 : frozen.parserVersion === 7 ? 9 : 8)
   let sourceMatches = bodies.previous === (source?.content ?? null) && frozen.bindingHash === runtimeJson(coverage).hash
-  if (!sourceMatches) {
+  if (chainProtocol) sourceMatches &&= runtimeJson(bodies.terminalEvidence).hash === runtimeJson(terminalEvidenceContext(chapter, source, 2)).hash
+  if (!sourceMatches && !chainProtocol) {
     // A proven non-dispatch may have frozen the previous single-source
     // protocol. Verify those exact bytes; the returned NEW admission still
     // binds today's range, never upgrades an old received judgment.

@@ -1,13 +1,14 @@
 import type { Prisma } from '@prisma/client'
 import { activeChapterScope } from '../data/internal.js'
 import { qualityNeighborContext } from './quality-neighbor-context.js'
+import { readTerminalInheritance } from './terminal-inheritance-chain.js'
 
 /** Re-select the range on every check: inserting, archiving or reordering a
  * neighbor must invalidate the old proof, even when its frozen IDs still exist.
  * v6/v7 retain exactly the original single-source shape and body. */
 export async function readCompilerContinuitySource(db: Prisma.TransactionClient,
   subject: { userId: string; novelId: string }, chapter: { orderIndex: number },
-  sourceId: string | null, protocol: 6 | 7 | 8 | 9 | 10 = 8) {
+  sourceId: string | null, protocol: 6 | 7 | 8 | 9 | 10 | 11 = 8) {
   const bridgeSource = sourceId ? await db.chapter.findFirst({
     where: { id: sourceId, authorId: subject.userId, ...activeChapterScope(subject.novelId) },
     select: { id: true, revision: true, content: true },
@@ -29,7 +30,9 @@ export async function readCompilerContinuitySource(db: Prisma.TransactionClient,
   return { id: bridgeSource?.id ?? '', revision: bridgeSource?.revision ?? 0,
     content: neighbors.map(row => row.content).join('\n\n'),
     scope: 'current_and_previous_3_bounded' as const, targetOrderIndex: chapter.orderIndex,
-    preceding, bridgeSource }
+    preceding, bridgeSource,
+    ...(protocol === 11 ? { terminalInheritance: neighbors.length
+      ? await readTerminalInheritance(db, subject, rows.find(row => row.id === neighbors.at(-1)!.id)!) : [] } : {}) }
 }
 
 export function compilerContinuitySourceScope(source: Awaited<ReturnType<typeof readCompilerContinuitySource>>) {

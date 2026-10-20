@@ -183,7 +183,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         }
       }
       if (captured.step === 'continuity_reassessment') {
-        const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13)]), criticSystem: z.string(), criticInput: z.string(), terminalCandidate: terminalCandidateSchema.optional(), sourceScope: continuitySourceScopeSchema.optional(),
+        const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14)]), criticSystem: z.string(), criticInput: z.string(), terminalCandidate: terminalCandidateSchema.optional(), sourceScope: continuitySourceScopeSchema.optional(),
           sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }) }) }) }).safeParse(parent.inputSnapshot)
         const usage = result.usageReceipt, response = parsedResult.data.result
         if (!work.success || usage?.source !== 'reported' || usage.settlementStatus !== 'settled' || usage.promptTokens === null || usage.completionTokens === null
@@ -192,7 +192,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         }
         const frozen = work.data.input.work
         if (frozen.version >= 12 && !frozen.sourceScope) return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性来源边界缺失，不能追加复评。')
-        if (frozen.version === 13 && !frozen.sourceBodies.terminalEvidence) return runtimeError('RUNTIME_RECEIPT_INVALID', '终态继承缺少原冻结证据范围，不能追加复评。')
+        if (frozen.version >= 13 && (!frozen.sourceBodies.terminalEvidence || frozen.version === 14 && frozen.sourceBodies.terminalEvidence.protocol !== 2)) return runtimeError('RUNTIME_RECEIPT_INVALID', '终态继承缺少原冻结证据范围，不能追加复评。')
         const inspected = inspectContinuityResponse(response.content, frozen.sourceBodies, true, frozen.version >= 13 ? 8 : frozen.version >= 12 ? 7 : 6, frozen.version >= 10 ? frozen.terminalCandidate : undefined, frozen.version >= 12 ? frozen.sourceScope : undefined)
         const expected = continuityReassessmentRequest(frozen.criticSystem, frozen.criticInput, inspected, frozen.sourceBodies)
         const request = isolatedRequest.parse(captured.request)

@@ -57,8 +57,12 @@ describe.skipIf(!dbAvailable)('queue database transactions (isolated test DB)', 
     expect(execution).toHaveBeenCalledTimes(1)
   })
   it.each(['queued', 'running', 'awaiting_approval'] as const)('counts stored %s work in new-start and continue limits', async status => {
-    const input = { sessionId, novelId, mode: 'build' as const, prompt: '保留当前任务' }
+    // This concurrency fixture has an explicit frozen target. Missing author
+    // decisions have their own admission tests and must not mask RUN_LIMIT.
+    const input = { sessionId, novelId, mode: 'build' as const, prompt: '写第一章正文' }
     const original = await startLoopRun(userId, input)
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: original.runId } })).taskSpec)
+      .toMatchObject({ scope: { writing: { kind: 'bounded', targets: [{ orderIndex: 1, chapterId: null }] } } })
     await prisma.agentRun.update({ where: { id: original.runId }, data: { status: 'paused' } })
     const other = await prisma.agentSession.create({ data: { userId, novelId, title: '其他会话' } })
     for (let index = 0; index < env.agentUserMaxConcurrent; index++) {
@@ -77,12 +81,14 @@ describe.skipIf(!dbAvailable)('queue database transactions (isolated test DB)', 
     const volume = await prisma.volume.create({ data: { novelId, title: '第一卷', orderIndex: 1 } })
     const chapter = await prisma.chapter.create({ data: { novelId, authorId: userId, volumeId: volume.id, title: '原选区章节',
       orderIndex: 1, orderInVolume: 1, content: prefix + selected + '后文' } })
-    const input = { sessionId, novelId, chapterId: chapter.id, mode: 'build' as const, prompt: '只处理选中的原文',
+    const input = { sessionId, novelId, chapterId: chapter.id, mode: 'build' as const, prompt: '修改第一章正文中选中的原文',
       selection: { text: selected, start: prefix.length, end: prefix.length + selected.length }, creativeFreedom: 'stable' as const,
       qualityMode: 'balanced' as const, pinnedSkillIds: ['skill-a'], agentProfile: 'continuity' as const, tokenBudget: 1200 }
     const result = await startLoopRun(userId, input)
     const stored = await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })
     expect(stored.startRequest).toEqual(input)
+    expect(stored.taskSpec).toMatchObject({ scope: { writing: { kind: 'bounded', targets: [{ orderIndex: 1, chapterId: chapter.id }] },
+      selectionBoundary: { chapterId: chapter.id, start: input.selection.start, end: input.selection.end } } })
     expect(await prisma.agentQueuedRequest.count({ where: { runId: result.runId } })).toBe(0)
     await prisma.agentRun.update({ where: { id: result.runId }, data: { status: 'paused' } })
     await continueLoopRun(userId, result.runId)
@@ -134,10 +140,12 @@ describe.skipIf(!dbAvailable)('queue database transactions (isolated test DB)', 
     expect(await prisma.agentQueuedRequest.count({ where: { id } })).toBe(0)
   })
   it('resumes full queued input even if a crash preceded the first user message', async () => {
-    const prompt = '原始完整要求'.repeat(120)
+    const prompt = '写第一章正文。' + '原始完整要求'.repeat(120)
     const id = await enqueue(prompt)
     await dispatchQueuedRequests()
     const runId = (await prisma.agentQueuedRequest.findUniqueOrThrow({ where: { id } })).runId!
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec)
+      .toMatchObject({ scope: { writing: { kind: 'bounded', targets: [{ orderIndex: 1, chapterId: null }] } } })
     await prisma.agentRun.update({ where: { id: runId }, data: { status: 'failed' } })
     await continueLoopRun(userId, runId)
     expect(execution).toHaveBeenLastCalledWith(expect.objectContaining({ prompt, creativeFreedom: 'bold', qualityMode: 'premium', pinnedSkillIds: ['skill-a'], resume: true }))

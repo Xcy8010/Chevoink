@@ -58,6 +58,19 @@ function activatedFixture(durable = false) {
   return goal
 }
 describe('continue API exact target', () => {
+  it.each(['scope', 'message', 'malformed'] as const)('rejects %s input corruption before treating an unresolved frozen target as clarification', async kind => {
+    const input = { sessionId: 's', novelId: 'n', chapterId: 'c19', mode: 'build', prompt: '本次第19章要求' }
+    const taskSpec = buildTaskSpec({ runId: run.id, novelId: 'n', chapterId: null, prompt: input.prompt })
+    taskSpec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: false, titleAndBodyOnly: false }
+    const original = { ...run, taskSpec, startRequest: kind === 'scope' ? { ...input, novelId: 'other-novel' }
+      : kind === 'malformed' ? { prompt: input.prompt } : input }, before = structuredClone(original)
+    mocks.find.mockReset().mockImplementation(async args => args.where.id ? original : { id: run.id })
+    mocks.message.mockResolvedValue({ parts: [{ type: 'text', text: kind === 'message' ? '旧任务要求' : input.prompt }] })
+    await expect(continueLoopRun('u', run.id)).rejects.toMatchObject({ code: 'RUN_INPUT_MISMATCH', status: 409 })
+    expect(mocks.creditAccess).not.toHaveBeenCalled(); expect(mocks.tierRuntime).not.toHaveBeenCalled()
+    expect(mocks.execute).not.toHaveBeenCalled(); expect(mocks.prepare).not.toHaveBeenCalled(); expect(mocks.runUpdate).not.toHaveBeenCalled()
+    expect(original).toEqual(before)
+  })
   it.each(['frozen-scope', 'checkpoint'] as const)('keeps required author input waiting before credits, model, cursor and executor admission: %s', async source => {
     const taskSpec = buildTaskSpec({ runId: run.id, novelId: 'n', chapterId: null, prompt: '写一个短场景' })
     taskSpec.scope.writing = { version: 1, kind: source === 'frozen-scope' ? 'needs_input' : 'bounded',

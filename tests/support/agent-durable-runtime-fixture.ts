@@ -16,7 +16,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 export async function fixture(work: (f: {
   userId: string; novelId: string; sessionId: string; chapterId: string; runId: string; sourceMessageId: string;
   spec: ReturnType<typeof buildTaskSpec>; rootId: string;
-}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { freezeWriting?: boolean; continuityEvidenceProtocol?: 1; terminalEvidenceProtocol?: 1 }) {
+}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { freezeWriting?: boolean; continuityEvidenceProtocol?: 1; terminalEvidenceProtocol?: 1 | 2 }) {
   const user = await prisma.user.create({ data: { nickname: 'durable-runtime-fixture', passwordHash: 'test-only-unusable' } })
   const userId = user.id
   try {

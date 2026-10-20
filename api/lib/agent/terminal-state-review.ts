@@ -16,7 +16,7 @@ export const terminalVerdictSchema = z.object({ path: z.string().max(100),
 }).strict()
 export const inheritedTerminalVerdictSchema = terminalVerdictSchema.omit({ segmentIds: true }).extend({
   basis: z.enum(['current', 'inherited']),
-  sourceEvidence: z.array(z.object({ segmentId: z.string().regex(/^[cp][0-9]+$/), quote: z.string().min(2).max(300) }).strict()).max(8),
+  sourceEvidence: z.array(z.object({ segmentId: z.string().regex(/^[cpt][0-9]+$/), quote: z.string().min(2).max(300) }).strict()).max(8),
   inheritance: z.object({ priorEndState: z.enum(['established', 'uncertain']), currentState: z.enum(['unchanged', 'changed', 'uncertain']) }).strict().optional(),
 }).strict()
 
@@ -31,7 +31,8 @@ export function terminalClaims(candidate: TerminalCandidate) {
 
 export function terminalReviewInput(candidate?: TerminalCandidate, context?: TerminalEvidenceContext) {
   if (!candidate) return ''
-  if (context) return `待提交终态候选（主写者主张，不是证据）：${JSON.stringify(terminalClaims(candidate))}\n服务端终态证据范围：${JSON.stringify(context)}\n除 findings 和 semanticChecks 外，输出 terminalVerdicts，每个 path 恰好一项：{path,verdict,basis,sourceEvidence:[{segmentId,quote}],inheritance?}。verdict 为 supported、unknown、planned、negated、attributed。当前新增或改变事实 basis=current，只能引用本章 cN 及逐字短 quote；核对完整对象、持有者、方向、时刻及章末是否仍成立，不能以“朝某处走”证明已到达。basis=inherited 只能引用服务端 previous.segments 中紧邻前章 pN 及逐字短 quote，并给 inheritance={priorEndState:"established",currentState:"unchanged"}：独立核对前章末实际成立，且本章全文未解除、转移或否定。只能继承 knowledge、body、objects、relationships、openLoops 中持续事实；位置、动作、时间、情绪和 lastUnfinishedAction 不能凭未提及延续。旧桥遗漏但前章正文明确支持的未解决事项可继承，不要求本章重述；较早章、桥摘要、Scene Task、作者要求、计划、传言或猜测不能当事实。证据不足用 unknown 等相应判定，保留未知主张，不删除或清空来凑通过。无候选 terminalVerdicts=[]。`
+  if (context?.protocol === 1) return `待提交终态候选（主写者主张，不是证据）：${JSON.stringify(terminalClaims(candidate))}\n服务端终态证据范围：${JSON.stringify(context)}\n除 findings 和 semanticChecks 外，输出 terminalVerdicts，每个 path 恰好一项：{path,verdict,basis,sourceEvidence:[{segmentId,quote}],inheritance?}。verdict 为 supported、unknown、planned、negated、attributed。当前新增或改变事实 basis=current，只能引用本章 cN 及逐字短 quote；核对完整对象、持有者、方向、时刻及章末是否仍成立，不能以“朝某处走”证明已到达。basis=inherited 只能引用服务端 previous.segments 中紧邻前章 pN 及逐字短 quote，并给 inheritance={priorEndState:"established",currentState:"unchanged"}：独立核对前章末实际成立，且本章全文未解除、转移或否定。只能继承 knowledge、body、objects、relationships、openLoops 中持续事实；位置、动作、时间、情绪和 lastUnfinishedAction 不能凭未提及延续。旧桥遗漏但前章正文明确支持的未解决事项可继承，不要求本章重述；较早章、桥摘要、Scene Task、作者要求、计划、传言或猜测不能当事实。证据不足用 unknown 等相应判定，保留未知主张，不删除或清空来凑通过。无候选 terminalVerdicts=[]。`
+  if (context) return `待提交终态候选（主写者主张，不是证据）：${JSON.stringify(terminalClaims(candidate))}\n服务端终态证据范围：${JSON.stringify(context)}\n除 findings 和 semanticChecks 外，输出 terminalVerdicts，每个 path 恰好一项：{path,verdict,basis,sourceEvidence:[{segmentId,quote}],inheritance?}。verdict 为 supported、unknown、planned、negated、attributed。当前新增或改变事实 basis=current，只能引用本章 cN 及逐字短 quote；核对完整对象、持有者、方向、时刻及章末是否仍成立，不能以“朝某处走”证明已到达。basis=inherited 只能引用服务端 previous.segments 中紧邻前章 pN 或 previous.carried 中已提交证明 tN 及逐字短 quote；tN 只支持其 field 与完整 claim 精确相同的事实，证明链已由服务端重新核对原始正文锚点和各中间章，最多16级，断链或超限只能 unknown，并给 inheritance={priorEndState:"established",currentState:"unchanged"}：独立核对前章末实际成立（直接正文或服务端已核验的提交证明链），且本章全文未解除、转移或否定。只能继承 knowledge、body、objects、relationships、openLoops 中持续事实；位置、动作、时间、情绪和 lastUnfinishedAction 不能凭未提及延续。旧桥遗漏但前章正文明确支持的未解决事项可继承，不要求本章重述；较早章、桥摘要、Scene Task、作者要求、计划、传言或猜测不能当事实。证据不足用 unknown 等相应判定，保留未知主张，不删除或清空来凑通过。无候选 terminalVerdicts=[]。`
   return `待提交终态候选（仅是主写者的主张，绝非证据）：${JSON.stringify(terminalClaims(candidate))}\n除 findings 外必须输出 terminalVerdicts 数组，每个 path 恰好一项：{path,verdict,segmentIds}。verdict=supported 仅表示当前正文明确支持同一人物/物品、同一时刻的该完整状态；segmentIds 只选服务端 current 原文编号 c0、c1 等，不写 quote、不编造编号。计划/将来/假设用 planned，含糊推断或未记载用 unknown，正文否定该主张用 negated，仅他人传言/引用而未确证用 attributed。疼痛不等于骨裂，人物怀疑不等于人物知道；前章事实或 Scene Task 不能代替当前章终态。负面主张本身若被原文明确支持可 supported。某状态先发生后被解除，不是章末仍成立。未知项保留原主张及未确认判定，不静默删除或将空数组当全部通过。无候选事实时 terminalVerdicts=[]。`
 }
 
@@ -48,14 +49,23 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
       : context ? null : z.array(terminalVerdictSchema).max(200).safeParse(record.terminalVerdicts)
     if (!parsed?.success) return null
     const claims = terminalClaims(candidate), verdicts = parsed.data
-    const segments = [...continuitySourceSegments({ previous: null, current: content }), ...(context?.previous?.segments ?? [])]
+    const segments = [...continuitySourceSegments({ previous: null, current: content }), ...(context?.previous?.segments ?? []),
+      ...(context?.previous?.carried ?? []).map(fact => ({ segmentId: fact.segmentId, quote: fact.anchors.map(anchor => anchor.quote).join('\n') }))]
     if (inherited?.success && inherited.data.some(item => {
       const supported = item.verdict === 'supported'
       if (item.basis === 'inherited' && (!/^exitState\.(knowledge|body|objects|relationships|openLoops)\./u.test(item.path)
         || supported && (item.inheritance?.priorEndState !== 'established' || item.inheritance.currentState !== 'unchanged'))) return true
       if (item.basis === 'current' && item.inheritance !== undefined) return true
-      return item.sourceEvidence.some(ref => !ref.segmentId.startsWith(item.basis === 'current' ? 'c' : 'p')
-        || !segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote)))
+      return item.sourceEvidence.some(ref => {
+        if (item.basis === 'current' ? !ref.segmentId.startsWith('c') : !/^[pt]/u.test(ref.segmentId)) return true
+        if (ref.segmentId.startsWith('t')) {
+          const fact = context?.previous?.carried?.find(part => part.segmentId === ref.segmentId)
+          if (context?.protocol !== 2 || item.sourceEvidence.length !== 1 || !fact || supported && fact.depth >= 16
+            || fact.field !== item.path.split('.')[1] || fact.claim !== claims.find(claim => claim.path === item.path)?.claim
+            || !fact.anchors.some(anchor => anchor.quote.includes(ref.quote))) return true
+        }
+        return !segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote))
+      })
     })) return null
     if (verdicts.length !== claims.length || new Set(verdicts.map(item => item.path)).size !== verdicts.length
       || verdicts.some(item => !claims.some(claim => claim.path === item.path)
@@ -66,6 +76,10 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
       candidateHash: runtimeJson(candidate).hash, responseHash: runtimeJson({ raw }).hash,
       supported: verdicts.every(item => item.verdict === 'supported'),
       verdicts: verdicts.map(item => ({ ...item, evidence: item.segmentIds.map(id => {
+        if (id.startsWith('t')) {
+          const fact = context!.previous!.carried!.find(part => part.segmentId === id)!
+          return { segmentId: id, proofHash: fact.proofHash, anchors: fact.anchors }
+        }
         const segment = segments.find(part => part.segmentId === id)!
         const start = Number(id.slice(1)) * 300
         return { segmentId: id, start, end: start + segment.quote.length, hash: runtimeJson({ text: segment.quote }).hash }

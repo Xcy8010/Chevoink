@@ -23,6 +23,7 @@ import { qualityAnalyzeTool, qualityRevisionApplyTool } from '../../api/lib/agen
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { DataAccessError, prisma } from '../../api/lib/prisma.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import * as repairAudit from '../../api/lib/agent/quality-repair-audit.js'
 afterEach(() => vi.restoreAllMocks())
 
 function runtime(tier: 'lite' | 'custom' | 'speed', multiplierBps = 0): NonNullable<ToolContext['modelRuntime']> {
@@ -34,6 +35,9 @@ function context(modelRuntime: ToolContext['modelRuntime']): ToolContext {
     creativeFreedom: 'bold', qualityMode: 'balanced', modelRuntime, signal: new AbortController().signal, emit: vi.fn() }
 }
 beforeEach(() => {
+  // This suite owns selected-model inheritance. Real audit persistence and its
+  // ownership/replay fences are exercised by the dedicated audit suites.
+  vi.spyOn(repairAudit, 'persistQualityRepairAttemptAudit').mockResolvedValue(undefined)
   vi.spyOn(prisma, '$transaction').mockImplementation(async work => (work as (tx: Prisma.TransactionClient) => Promise<unknown>)({} as Prisma.TransactionClient))
   mocks.complete.mockReset()
   mocks.persist.mockReset().mockResolvedValue({ id: 'report', compilationId: null })
@@ -180,7 +184,7 @@ describe('auxiliary text model inheritance', () => {
     expect(mocks.complete.mock.calls.map(call => call[2].action)).toEqual(['agent3HumanityCritic', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry'])
     expect(checked.summary).toContain('修订未应用')
     expect(checked.snapshot).toBeUndefined()
-    const result = await qualityRevisionApplyTool.execute(context(selected), { reportId: 'report' })
+    const result = await qualityRevisionApplyTool.execute({ ...context(selected), callId: 'manual-repair-call' }, { reportId: 'report' })
     expect(mocks.complete.mock.calls.map(call => call[2].action)).toEqual(['agent3HumanityCritic', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry'])
     for (const call of mocks.complete.mock.calls) expect(call[2].modelRuntime).toBe(selected)
     expect(result.output).toContain('正文保持不变')

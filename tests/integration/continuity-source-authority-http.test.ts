@@ -103,7 +103,7 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
         expect(sends).toBe(scenario === 'real-conflict' || scenario === 'changed-during-provider' ? 1 : 2)
         const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
         if (scenario !== 'changed-during-provider') expect(saved.validation).toMatchObject({
-          checkedRevision: 4, coverage: { protocolVersion: 10 }, continuityCriticResponse: { parserVersion: 8 },
+          checkedRevision: 4, coverage: { protocolVersion: 11 }, continuityCriticResponse: { parserVersion: 8 },
           independentCheck: scenario === 'history-confirm-rejected' ? 'unavailable' : 'complete',
           ...(scenario === 'real-conflict' ? { errorCount: 1 } : ['history-retracted', 'previous-misattributed'].includes(scenario) ? { errorCount: 0 } : {}),
         })
@@ -142,7 +142,7 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
           expect(sends).toBe(3)
           const recovered = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
           expect(recovered.validation).toMatchObject({ independentCheck: 'complete', checkedRevision: 4, errorCount: 0,
-            coverage: { protocolVersion: 10 }, continuityCriticResponse: { parserVersion: 8, sourceScope: { currentOrderIndex: 3 } } })
+            coverage: { protocolVersion: 11 }, continuityCriticResponse: { parserVersion: 8, sourceScope: { currentOrderIndex: 3 } } })
           await continuityValidateTool.execute({ ...ctx, callId: 'continued-repeat' }, { compilationId: compilation.id })
           expect(sends).toBe(3)
           expect(await prisma.aiUsageLog.count({ where: { agentRunId: runId } })).toBe(3)

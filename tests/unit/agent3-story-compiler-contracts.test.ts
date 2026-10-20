@@ -25,6 +25,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
 import { qualityRevisionApplyTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
+import * as repairAudit from '../../api/lib/agent/quality-repair-audit.js'
 
 describe('严谨创作落实连续性警告', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -281,6 +282,9 @@ describe('严谨创作落实连续性警告', () => {
   })
   it.each(['protected', 'cancelled', 'stale-revision', 'repair-limit', 'duplicate-patch', 'no-author-grant'] as const)('显式质量修订保留 %s 边界及正文', async scenario => {
     const f = fixture(false)
+    // This fixture tests actual prose guards; audit storage has independent
+    // transactional ownership/replay tests and is not an old sourceTx delegate.
+    const audit = vi.spyOn(repairAudit, 'persistQualityRepairAttemptAudit').mockResolvedValue(undefined)
     const prompt = scenario === 'no-author-grant' ? '只检查当前章节，不要改写正文。' : '修复当前章节中已选择的质量问题。'
     const run = { id: 'r', userId: 'u', novelId: 'n', sessionId: 's', taskRootId: null, startRequest: { prompt },
       taskSpec: buildTaskSpec({ runId: 'r', novelId: 'n', chapterId: 'c', prompt }) }
@@ -304,14 +308,15 @@ describe('严谨创作落实连续性警告', () => {
     if (scenario === 'protected') f.ctx.protectedChapterIds = new Set(['c'])
     if (scenario === 'cancelled') f.ctx.signal = AbortSignal.abort()
     const work = qualityRevisionApplyTool.execute(f.ctx, { reportId: 'q' })
-    if (scenario === 'cancelled') await expect(work).rejects.toBeDefined()
+    if (scenario === 'cancelled') await expect(work).rejects.toMatchObject({ name: 'AbortError' })
     else if (scenario === 'stale-revision') await expect(work).rejects.toMatchObject({ code: 'QUALITY_SOURCE_STALE' })
     else if (scenario === 'repair-limit') await expect(work).rejects.toMatchObject({ code: 'QUALITY_REPAIR_LIMIT' })
     else if (scenario === 'no-author-grant') await expect(work).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
     else await work
     expect(f.write).not.toHaveBeenCalled()
     expect(chapter.content).toBe('原文')
-    expect(f.repair).toHaveBeenCalledTimes(scenario === 'duplicate-patch' ? 2 : ['protected', 'no-author-grant', 'stale-revision'].includes(scenario) ? 0 : 1)
+    expect(f.repair).toHaveBeenCalledTimes(scenario === 'duplicate-patch' ? 2 : ['protected', 'cancelled', 'no-author-grant', 'stale-revision'].includes(scenario) ? 0 : 1)
+    if (scenario === 'cancelled') expect(audit).not.toHaveBeenCalled()
   })
 })
 

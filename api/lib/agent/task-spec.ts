@@ -242,7 +242,7 @@ export function buildTaskSpec(input: {
   manuscriptProtocol?: 1
   reviewProtocol?: 1
   continuityEvidenceProtocol?: 1
-  terminalEvidenceProtocol?: 1
+  terminalEvidenceProtocol?: 1 | 2
   localEditProtocol?: 1
   /** Internal fresh human admission only; not exposed in a request schema. */
   researchAdmission?: 1

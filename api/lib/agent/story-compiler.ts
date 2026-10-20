@@ -1,5 +1,6 @@
 import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { terminalEvidenceContext } from './terminal-evidence-context.js'
+import { buildTerminalFactProofs } from './terminal-inheritance-chain.js'
 import { continuityRecheckBaseline } from './continuity-review-context.js'
 import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision } from './writing-scope.js'
 import { classifyContinuityFindingAuthority, unlocatedContinuityEvidence } from './continuity-finding-authority.js'
@@ -27,7 +28,7 @@ import { runtimeJson } from './runtime-common.js'
 import { currentTerminalReview, readTerminalCandidate, terminalCandidateSchema, terminalClaims, type TerminalCandidate } from './terminal-state-review.js'
 import type { WritingWorkflowMilestone } from './semantic-progress.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
-import { compilerContinuityCoverage, compilerContinuityCoverageMatches, continuityStoryInput, type CompilerContinuityCoverage } from './compiler-continuity-contract.js'
+import { compilerContinuityCoverage, compilerContinuityCoverageMatches, continuityStoryInput, storedContinuityProtocol, type CompilerContinuityCoverage } from './compiler-continuity-contract.js'
 import { readWritingVolumeContext, assertWritingVolumeBoundary, isWritingVolumeTargetOrderIndex } from './writing-volume.js'
 import { writingVolumeDecisionSchema, type WritingVolumeDecision } from '../../../shared/contracts/writing-volume-contracts.js'
 import { readReviewCycle, markReviewCycleVerification } from './review-cycle.js'
@@ -704,7 +705,7 @@ export async function validateStoryContinuity(input: {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '独立检查期间正文已变化，旧结果不能验证新revision。请重新检查当前正文。')
   }
   const protocol = input.coverage?.protocolVersion ?? 8
-  if (protocol !== 6 && protocol !== 7 && protocol !== 8 && protocol !== 9 && protocol !== 10) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '未知连续性协议，不能升级或应用旧检查。')
+  if (protocol !== 6 && protocol !== 7 && protocol !== 8 && protocol !== 9 && protocol !== 10 && protocol !== 11) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '未知连续性协议，不能升级或应用旧检查。')
   const reviewSource = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, protocol)
   const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus, terminalCandidate: input.terminalCandidate }, protocol)
   if (input.coverage && !compilerContinuityCoverageMatches(input.coverage, currentCoverage)) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、章节桥、场景或检查范围已变化，旧检查不能绑定当前编译。')
@@ -831,7 +832,7 @@ export async function commitChapterBridge(input: {
     || input.expectedContentHash !== undefined && createHash('sha256').update(chapter.content).digest('hex') !== input.expectedContentHash) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文在终态推导后变化，未提交旧版本终态。')
   }
-  const source = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId)
+  const source = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, storedContinuityProtocol(compilation.validation))
   if (compilation.bridge.fromChapterId && (!source || source.revision !== compilation.bridge.sourceRevision)) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '桥接来源章节已变化，不能沿用旧来源提交终态。')
   }
@@ -899,7 +900,7 @@ export async function commitChapterBridge(input: {
   const proposedTerminal = terminalCandidateSchema.parse({ exitState: input.exitState, lastUnfinishedAction: input.lastUnfinishedAction })
   const reviewedCandidate = readTerminalCandidate(compilation.validation)
   const terminalReview = currentTerminalReview(compilation.validation, chapter.content,
-    currentContinuityReview.coverage.protocolVersion === 10 ? terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source) : undefined)
+    (currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 ? terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, currentContinuityReview.coverage.protocolVersion === 11 ? 2 : 1) : undefined)
   if (reviewedCandidate || terminalClaims(proposedTerminal).length) {
     if (!currentContinuityReview.assessment || !reviewedCandidate || !terminalReview?.supported
       || runtimeJson(reviewedCandidate).hash !== runtimeJson(proposedTerminal).hash) {
@@ -912,9 +913,6 @@ export async function commitChapterBridge(input: {
   const terminalContentHash = runtimeJson({ content: chapter.content }).hash
   const sameTerminal = compilation.status === 'completed' && !!compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision
   const terminalCandidateHash = runtimeJson(proposedTerminal).hash
-  if (sameTerminal && terminalContext.terminalContentHash === terminalContentHash && terminalContext.terminalCandidateHash === terminalCandidateHash) {
-    return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount }
-  }
   const now = new Date()
   const bridgeData = {
         targetRevision: compilation.chapter.revision,
@@ -938,12 +936,23 @@ export async function commitChapterBridge(input: {
     checkedBridge: continuityStoryInput(currentContinuityReview.checkedBridge),
     terminalStateHash: terminalReviewStateHash({ ...compilation.bridge, ...bridgeData }, orderedScenes),
   } : undefined
+  const terminalFactProofs = currentContinuityReview.coverage.protocolVersion === 11 && terminalReview?.supported
+    ? buildTerminalFactProofs({ compilationId: compilation.id, chapter: { ...compilation.chapter, ...chapter }, validation: compilation.validation,
+      stateHash: terminalReviewStateHash(sameTerminal ? compilation.bridge : { ...compilation.bridge, ...bridgeData }, orderedScenes),
+      evidence: terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, 2), review: terminalReview }) : undefined
+  if (sameTerminal && terminalContext.terminalContentHash === terminalContentHash && terminalContext.terminalCandidateHash === terminalCandidateHash) {
+    if (terminalFactProofs && runtimeJson({ facts: terminalContext.terminalFactProofs ?? null }).hash !== runtimeJson({ facts: terminalFactProofs }).hash) {
+      await db.storyCompilation.update({ where: { id: compilation.id }, data: { preparedContext: runtimeJson({ ...terminalContext, terminalFactProofs }).value } })
+    }
+    return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount }
+  }
   await Promise.all([
     db.chapterBridge.update({ where: { id: compilation.bridge.id }, data: bridgeData }),
     db.sceneTask.updateMany({ where: { compilationId: compilation.id }, data: { status: 'completed' } }),
     db.storyCompilation.update({
       where: { id: compilation.id },
       data: { stage: 'commit', status: 'completed', completedAt: now, preparedContext: { ...terminalContext, terminalContentHash, terminalCandidateHash,
+        ...(terminalFactProofs ? { terminalFactProofs: runtimeJson(terminalFactProofs).value } : {}),
         ...(terminalReviewProof ? { terminalReviewProof: terminalReviewProof as Prisma.InputJsonValue } : {}) } },
     }),
   ])

@@ -4,12 +4,24 @@ import { runtimeJson } from './runtime-common.js'
 import type { readCompilerContinuitySource } from './compiler-continuity-source.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
+export const terminalFactNodeSchema = z.object({ compilationId: z.string(), chapterId: z.string(), revision: z.number().int(),
+  orderIndex: z.number().int(), bodyHash: hash, candidateHash: hash, validationHash: hash, stateHash: hash,
+  path: z.string(), previousChapterId: z.string().nullable(),
+}).strict()
+export const terminalCarriedFactSchema = z.object({ segmentId: z.string().regex(/^t[0-9]+$/), field: z.string(), claim: z.string(),
+  proofHash: hash, depth: z.number().int().min(1).max(16),
+  nodes: z.array(terminalFactNodeSchema).min(1).max(16),
+  anchors: z.array(z.object({ chapterId: z.string(), revision: z.number().int(), contentHash: hash,
+    start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), quote: z.string().min(2).max(300) }).strict()).min(1).max(8),
+}).strict()
+export type TerminalCarriedFact = z.infer<typeof terminalCarriedFactSchema>
 export const terminalEvidenceContextSchema = z.object({
-  protocol: z.literal(1),
+  protocol: z.union([z.literal(1), z.literal(2)]),
   current: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash }).strict(),
   previous: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash,
     start: z.number().int(), end: z.number().int(), joinedStart: z.number().int(), joinedEnd: z.number().int(),
     segments: z.array(z.object({ segmentId: z.string().regex(/^p[0-9]+$/), start: z.number().int(), end: z.number().int(), quote: z.string(), hash }).strict()),
+    carried: z.array(terminalCarriedFactSchema).max(200).optional(),
   }).strict().nullable(),
 }).strict()
 export type TerminalEvidenceContext = z.infer<typeof terminalEvidenceContextSchema>
@@ -17,18 +29,23 @@ export type TerminalEvidenceContext = z.infer<typeof terminalEvidenceContextSche
 /** Only a fresh HTTP admission opts in. Saved contracts are never upgraded. */
 export function hasTerminalEvidenceProtocol(spec: unknown): boolean {
   const value = spec as { scope?: { terminalEvidenceProtocol?: unknown } } | null
-  return value?.scope?.terminalEvidenceProtocol === 1
+  return value?.scope?.terminalEvidenceProtocol === 1 || value?.scope?.terminalEvidenceProtocol === 2
+}
+export function terminalEvidenceVersion(spec: unknown): 1 | 2 | undefined {
+  const value = spec as { scope?: { terminalEvidenceProtocol?: unknown } } | null
+  return value?.scope?.terminalEvidenceProtocol === 2 ? 2 : value?.scope?.terminalEvidenceProtocol === 1 ? 1 : undefined
 }
 
 /** Derive proof addresses from the actual active predecessor, not a bridge
  * summary. A 300-character span crossing chapter boundaries cannot inherit. */
 export function terminalEvidenceContext(chapter: { id: string; revision: number; orderIndex: number; content: string },
-  source: Awaited<ReturnType<typeof readCompilerContinuitySource>>): TerminalEvidenceContext {
+  source: Awaited<ReturnType<typeof readCompilerContinuitySource>>, version: 1 | 2 = source && 'terminalInheritance' in source ? 2 : 1): TerminalEvidenceContext {
   const previous = source && 'preceding' in source ? source.preceding.at(-1) : undefined
-  return { protocol: 1, current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
+  return { protocol: version, current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
     contentHash: runtimeJson({ content: chapter.content }).hash }, previous: previous ? {
     id: previous.id, revision: previous.revision, orderIndex: previous.orderIndex, contentHash: previous.contentHash,
     start: previous.start, end: previous.end, joinedStart: previous.joinedStart, joinedEnd: previous.joinedEnd,
+    ...('terminalInheritance' in source! ? { carried: source.terminalInheritance } : {}),
     segments: continuitySourceSegments({ previous: source!.content, current: '' }).filter(part => {
       const start = Number(part.segmentId.slice(1)) * 300
       return start >= previous.joinedStart && start + part.quote.length <= previous.joinedEnd
