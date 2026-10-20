@@ -7,7 +7,12 @@ export const migrationName = '20261009010000_quality_finding_span_identity'
 export const migrationChecksum = '27b78febf135faf99d4d611adf60e1f597e92befb6c961c7a5970153d8a7f21e'
 export const fetchMigrationName = '20261019120000_web_fetch_tool_config'
 export const fetchMigrationChecksum = '2e318f4b0a2004efdccfad7ad7a3962c4e8346a3da1e58c144aa1646dd034191'
-const reviewed = new Map([[migrationName, migrationChecksum], [fetchMigrationName, fetchMigrationChecksum]])
+export const webToolBillingMigrationName = '20261020120000_web_tool_billing'
+export const webToolBillingMigrationChecksum = 'f7797fe83d78f72a07c9c6e4b8a6cc17ff758db54b1709776f9b1dd35b7933f0'
+const billingBaselineSchema = 'e7752d3afe61d9e6172404cf5ea93cec78087dab274743804f3a90fd2b01d774'
+const billingCandidateSchema = 'f981e01401a19d5a18e0c28556a12cb2fb0b35eefe6a9be2975980da2ddf5afa'
+const reviewed = new Map([[migrationName, migrationChecksum], [fetchMigrationName, fetchMigrationChecksum],
+  [webToolBillingMigrationName, webToolBillingMigrationChecksum]])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -31,6 +36,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const billingTarget = `${webToolBillingMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === billingBaselineSchema
+    && digest(next.replaceAll('\r\n', '\n')) === billingCandidateSchema
+    && !oldFiles.some(([name]) => name === billingTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== billingTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === billingTarget)?.[1] === webToolBillingMigrationChecksum) return webToolBillingMigrationName
   const fetchTarget = `${fetchMigrationName}/migration.sql`
   if (next === previous && !oldFiles.some(([name]) => name === fetchTarget)
     && JSON.stringify(currentFiles.filter(([name]) => name !== fetchTarget)) === JSON.stringify(oldFiles)
@@ -80,6 +91,23 @@ export function assertFetchSeed(after, before) {
   if (!after || (before ? after.hash !== before.hash : !after.disabledSeed)) throw Error('Fetch seed changed existing configuration or is not disabled/keyless')
 }
 
+/** Protected catalog hashes are computed inside PostgreSQL; no secret columns leave the DB. */
+export function assertWebToolBillingState(after, before) {
+  const keys = ['tool:web-fetch', 'tool:web-search']
+  if (JSON.stringify(before.targets.map(row => row.key)) !== JSON.stringify(keys)
+    || JSON.stringify(after.targets.map(row => row.key)) !== JSON.stringify(keys)
+    || JSON.stringify(after.others) !== JSON.stringify(before.others)
+    || after.calls !== 0 || after.audit.length !== keys.length) throw Error('Web tool migration scope mismatch')
+  for (const row of after.targets) {
+    const original = before.targets.find(item => item.key === row.key)
+    const audit = after.audit.find(item => item.key === row.key)
+    if (!/^[a-f0-9]{32}$/.test(row.protectedHash) || row.protectedHash !== original.protectedHash || row.multiplierBps !== 10000
+      || !audit || audit.previousMultiplier !== original.multiplierBps
+      || new Date(audit.previousUpdatedAt).toISOString() !== new Date(original.updatedAt).toISOString()
+      || new Date(row.updatedAt).toISOString() !== new Date(audit.appliedAt).toISOString()) throw Error('Web tool price or protected configuration changed')
+  }
+}
+
 export function assertMigrationEnvironment(environment, shared) {
   if (environment.APP_ENV !== 'production' || shared.APP_ENV !== 'production'
     || !shared.DATABASE_URL || environment.DATABASE_URL !== shared.DATABASE_URL) throw Error('Production migration environment mismatch')
@@ -127,6 +155,25 @@ async function main() {
         const seed = fetchSeedEvidence(await tx.aiModelConfig.findUnique({ where: { key: 'tool:web-fetch' } }))
         if (phase === 'after') assertFetchSeed(seed, before.seed)
         return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, seed }
+      }
+      if (plan === webToolBillingMigrationName) {
+        const targets = await tx.$queryRawUnsafe(`SELECT c.key, c.multiplier_bps AS "multiplierBps", c.updated_at AS "updatedAt",
+          md5((to_jsonb(c) - 'multiplier_bps' - 'updated_at')::text) AS "protectedHash"
+          FROM ai_model_configs c WHERE c.owner_user_id IS NULL AND c.key IN ('tool:web-search','tool:web-fetch') ORDER BY c.key`)
+        const [others] = await tx.$queryRawUnsafe(`SELECT count(*)::int AS count,
+          md5(coalesce(string_agg(md5(to_jsonb(c)::text), '' ORDER BY c.id), '')) AS hash FROM ai_model_configs c
+          WHERE NOT (c.owner_user_id IS NULL AND c.key IN ('tool:web-search','tool:web-fetch'))`)
+        let catalog = { targets, others }
+        if (phase === 'before') {
+          const [tables] = await tx.$queryRawUnsafe("SELECT to_regclass('web_tool_calls')::text AS calls, to_regclass('web_tool_price_migration_20261020')::text AS audit")
+          if (targets.length !== 2 || tables.calls || tables.audit) throw Error('Web tool migration baseline mismatch')
+        } else {
+          const audit = await tx.$queryRawUnsafe('SELECT key, previous_multiplier AS "previousMultiplier", previous_updated_at AS "previousUpdatedAt", applied_at AS "appliedAt" FROM web_tool_price_migration_20261020 ORDER BY key')
+          const [count] = await tx.$queryRawUnsafe('SELECT count(*)::int AS calls FROM web_tool_calls')
+          catalog = { ...catalog, audit, calls: count.calls }
+          assertWebToolBillingState(catalog, before.catalog)
+        }
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, catalog }
       }
       const indexes = await tx.$queryRawUnsafe(`SELECT c.relname AS name, t.relname AS table_name, i.indisunique AS is_unique,
         i.indisvalid AS is_valid, i.indisready AS is_ready, i.indpred IS NOT NULL AS has_predicate, i.indexprs IS NOT NULL AS has_expression,

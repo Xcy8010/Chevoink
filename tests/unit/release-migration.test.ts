@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex, assertMigrationState, migrationChecksum, migrationName, releaseMigrationPlan,
-  fetchMigrationName, fetchMigrationChecksum, fetchSeedEvidence, assertFetchSeed } from '../../scripts/verify-release-migration.mjs'
+  fetchMigrationName, fetchMigrationChecksum, fetchSeedEvidence, assertFetchSeed,
+  webToolBillingMigrationName, webToolBillingMigrationChecksum, assertWebToolBillingState } from '../../scripts/verify-release-migration.mjs'
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), 'chevoink-release-migration-'))
@@ -24,6 +25,49 @@ function fixture() {
 }
 
 describe('exact reviewed production migration', () => {
+  const billingFixture = () => {
+    const f = fixture()
+    const schema = readFileSync('prisma/schema.prisma', 'utf8').replaceAll('\r\n', '\n')
+    const begin = schema.indexOf('/// Frozen fixed-price dispatch receipt.')
+    const end = schema.indexOf('model ReferralCode {', begin)
+    expect(begin).toBeGreaterThan(0)
+    const baseline = (schema.slice(0, begin) + schema.slice(end)).replace('  webToolCalls       WebToolCall[]\n', '')
+    writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), baseline)
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), schema)
+    mkdirSync(path.join(f.candidate, `prisma/migrations/${webToolBillingMigrationName}`))
+    writeFileSync(path.join(f.candidate, `prisma/migrations/${webToolBillingMigrationName}/migration.sql`), readFileSync(`prisma/migrations/${webToolBillingMigrationName}/migration.sql`))
+    return f
+  }
+  it('permits only the frozen billing schema and exact SQL with unchanged historical files', () => {
+    const f = billingFixture()
+    expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(webToolBillingMigrationName)
+    const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1 }
+    const sums = [['old', 'b'.repeat(64)], [webToolBillingMigrationName, webToolBillingMigrationChecksum]]
+    const completed = { ...old, migration_name: webToolBillingMigrationName, checksum: webToolBillingMigrationChecksum }
+    expect(() => assertMigrationState([old], sums, 'before', undefined, webToolBillingMigrationName)).not.toThrow()
+    expect(() => assertMigrationState([old, completed], sums, 'after', [old], webToolBillingMigrationName)).not.toThrow()
+    expect(() => assertMigrationState([old, { ...completed, checksum: 'c'.repeat(64) }], sums, 'after', [old], webToolBillingMigrationName)).toThrow()
+  })
+  it.each(['schema', 'baseline', 'history', 'sql', 'extra'])('rejects unrelated %s in billing release', kind => {
+    const f = billingFixture()
+    if (kind === 'schema') writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), '// unrelated')
+    if (kind === 'baseline') writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), '// unrelated')
+    if (kind === 'history') writeFileSync(path.join(f.candidate, 'prisma/migrations/old/migration.sql'), 'SELECT 2;')
+    if (kind === 'sql') writeFileSync(path.join(f.candidate, `prisma/migrations/${webToolBillingMigrationName}/migration.sql`), 'SELECT 2;')
+    if (kind === 'extra') writeFileSync(path.join(f.candidate, `prisma/migrations/${webToolBillingMigrationName}/extra.sql`), 'SELECT 2;')
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+  })
+  it('requires two initial 1.0 prices, protected config preservation, exact audit and no unrelated catalog changes', () => {
+    const before = { targets: ['tool:web-fetch', 'tool:web-search'].map(key => ({ key, multiplierBps: 20000, protectedHash: 'a'.repeat(32), updatedAt: '2026-01-01T00:00:00Z' })), others: { count: 5, hash: 'b'.repeat(32) } }
+    const after = { targets: before.targets.map(row => ({ ...row, multiplierBps: 10000, updatedAt: '2026-10-20T00:00:00Z' })), others: before.others, calls: 0,
+      audit: before.targets.map(row => ({ key: row.key, previousMultiplier: row.multiplierBps, previousUpdatedAt: row.updatedAt, appliedAt: '2026-10-20T00:00:00Z' })) }
+    expect(() => assertWebToolBillingState(after, before)).not.toThrow()
+    for (const changed of [{ ...after, others: { count: 4, hash: 'c'.repeat(32) } }, { ...after, calls: 1 }, { ...after, audit: [] },
+      { ...after, targets: [{ ...after.targets[0], multiplierBps: 20000 }, after.targets[1]] },
+      { ...after, targets: [{ ...after.targets[0], protectedHash: 'd'.repeat(32) }, after.targets[1]] }]) {
+      expect(() => assertWebToolBillingState(changed, before)).toThrow()
+    }
+  })
   const fetchFixture = () => {
     const f = fixture()
     mkdirSync(path.join(f.candidate, `prisma/migrations/${fetchMigrationName}`))
