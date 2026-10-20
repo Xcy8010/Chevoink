@@ -216,6 +216,7 @@ export function buildTaskSpec(input: {
   /** Fresh server admission only; resume/fallback never opts old runs in. */
   manuscriptProtocol?: 1
   reviewProtocol?: 1
+  continuityEvidenceProtocol?: 1
   localEditProtocol?: 1
   /** Internal fresh human admission only; not exposed in a request schema. */
   researchAdmission?: 1
@@ -265,6 +266,7 @@ export function buildTaskSpec(input: {
       || /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt)) ? 'extended' : 'standard',
     scope: { novelId: input.novelId, chapterIds, selection, ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
       ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}),
+      ...(input.continuityEvidenceProtocol ? { continuityEvidenceProtocol: input.continuityEvidenceProtocol } : {}),
       ...(input.localEditProtocol ? { localEditProtocol: input.localEditProtocol } : {}) },
     goals: [input.prompt.trim().slice(0, 1000) || '继续完成上一轮任务'],
     hardConstraints: directives

@@ -15,6 +15,7 @@ import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.js'
 import { markLegacyContinuityAssessmentApplied } from './continuity-response-correction.js'
 import { terminalVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
+import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './continuity-source-authority.js'
 
 type Inspection = ReturnType<typeof inspectContinuityResponse>
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -72,9 +73,14 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
     return runtimeJson({ signal: item?.signal, severity: item?.severity, evidence: item?.evidence, suggestion: item?.suggestion }).hash
   }
   for (const decision of envelope.decisions) {
+    if (original.audit.parserVersion >= 7 && (decision.sourceEvidence.some(ref => !ref.quote)
+      || !decision.sourceEvidence.some(ref => ref.source === 'current'))) throw new Error('Reassessment disposition requires current manuscript quotations')
     const proof = resolveContinuitySources({ signal: 'object', severity: 'warning', evidence: '复评原文依据', suggestion: '核对实际事件', sourceEvidence: decision.sourceEvidence }, bodies, 4)
     const bound = continuityFindingInputSchema.parse(proof)
     if (bound.sourceEvidence?.some(ref => !(bodies[ref.source] ?? '').includes(ref.quote))) throw new Error('Reassessment disposition has invalid source proof')
+    if (original.audit.parserVersion >= 7 && invalidContinuitySourceClaim({ ...bound, evidence: decision.reason }, bodies, decision.sourceEvidence, original.audit.sourceScope)) {
+      throw new Error('Reassessment disposition quotes unsupported manuscript evidence')
+    }
     if (decision.action === 'retract') {
       if (decision.findingIndex !== undefined) throw new Error('Retracted candidate cannot become a final finding')
     } else {
@@ -82,7 +88,7 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
       if (decision.action === 'confirm' && semantic(candidates![decision.index]) !== semantic(envelope.findings[decision.findingIndex])) throw new Error('Confirmed candidate changed its judgment')
     }
   }
-  const result = inspectContinuityResponse(original.audit.terminalCandidate ? raw : JSON.stringify({ findings: envelope.findings }), bodies, true, 6, original.audit.terminalCandidate)
+  const result = inspectContinuityResponse(original.audit.terminalCandidate ? raw : JSON.stringify({ findings: envelope.findings }), bodies, true, original.audit.parserVersion >= 7 ? 7 : 6, original.audit.terminalCandidate, original.audit.sourceScope)
   if (!result.complete) throw new Error('Reassessment final report is invalid')
   return { ...result, audit: { ...result.audit, reassessment: { version: 1, original: original.audit,
     decisions: envelope.decisions, rawResponse: json(raw) } } as Inspection['audit'] }
@@ -110,9 +116,10 @@ export async function runContinuityReassessment(input: { original: Inspection; b
 }
 
 export type LegacyAssessmentInput = { chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate;
-  bindingHash?: string; targetType: 'chapter' | 'story_compilation'; targetId: string }
+  parserVersion?: 7; sourceScope?: ContinuitySourceScope; bindingHash?: string; targetType: 'chapter' | 'story_compilation'; targetId: string }
 export const legacyContinuityAssessmentKey = (ctx: Pick<ToolContext, 'runId' | 'callId'>, input: LegacyAssessmentInput) => runtimeJson({ runId: ctx.runId, callId: ctx.callId,
-  input: { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system, content: input.content, bindingHash: input.bindingHash ?? null } }).hash
+  input: { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system, content: input.content, bindingHash: input.bindingHash ?? null,
+    ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}) } }).hash
 const assessmentKey = legacyContinuityAssessmentKey
 
 /** One actual tool-call reservation. A new selector, body or worker restart
@@ -179,7 +186,7 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
     })) && (['first', 'output_recovery', 'reassessment'] as const).every(stage => usage.filter(row => legacyContinuityStageForAction(row.action) === stage
       && !isKnownRejectedTextRequestAttempt(row)).length <= 1)
   const original = inspectContinuityResponse(JSON.parse(response.content) as string, input.bodies, response.transportComplete === true && response.finishReason === 'stop'
-    && Array.isArray(response.toolCalls) && !response.toolCalls.length, 6, input.terminalCandidate)
+    && Array.isArray(response.toolCalls) && !response.toolCalls.length, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope)
   const secondFrames = frames.filter(row => row.stage === 'reassessment')
   const second = secondFrames.filter(row => typeof object(row.response)?.content === 'string').at(-1), secondResponse = object(second?.response)
   let inspected = original
@@ -272,7 +279,7 @@ export async function observeLegacyContinuityAssessment(tx: Prisma.TransactionCl
     }
     return prior.id
   }
-  const inspected = response.content === null ? null : inspectContinuityResponse(response.content, input.bodies, response.transportComplete !== false && response.finishReason === 'stop' && !response.toolCalls.length, 6, input.terminalCandidate)
+  const inspected = response.content === null ? null : inspectContinuityResponse(response.content, input.bodies, response.transportComplete !== false && response.finishReason === 'stop' && !response.toolCalls.length, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope)
   const row = await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性检查响应审计', content: '实际检查响应与冻结输入已保存；报告是否可用另行验证。',
     metadata: runtimeJson({ version: 1, assessmentResponseKey: key, assessmentKey: assessmentKey(ctx, input), callId: ctx.callId, stage,
       input, usageIds: usage.map(row => row.id), response: frozenResponse, audit: inspected?.audit ?? null }).value } })

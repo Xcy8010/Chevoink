@@ -2,7 +2,8 @@ import { runtimeJson } from './runtime-common.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import type { TerminalCandidate } from './terminal-state-review.js'
 
-// Bump when the critic's required coverage or interpretation changes.
+// Keep the frozen legacy default. Fresh source-authority admissions explicitly
+// select protocol 9; resumes must not upgrade an old paid interpretation.
 export const COMPILER_CONTINUITY_PROTOCOL = 8
 
 export type CompilerContinuityCoverage = {
@@ -20,7 +21,7 @@ export function continuityStoryInput(value: unknown): unknown {
 export function compilerContinuityCoverage(input: {
   chapter: { id: string; revision: number; content: string; orderIndex: number; title?: string }
   bridge: unknown; sceneTasks: unknown[]; source: unknown | null; focus?: string; terminalCandidate?: TerminalCandidate
-}, protocol: 6 | 7 | 8 = COMPILER_CONTINUITY_PROTOCOL): CompilerContinuityCoverage {
+}, protocol: 6 | 7 | 8 | 9 = COMPILER_CONTINUITY_PROTOCOL): CompilerContinuityCoverage {
   const contentHash = runtimeJson({ content: input.chapter.content }).hash
   const sourceHash = input.source ? runtimeJson(input.source).hash : null
   const terminalHash = input.terminalCandidate ? runtimeJson(input.terminalCandidate).hash : undefined
@@ -41,7 +42,15 @@ export function compilerContinuityCoverageMatches(actual: unknown, expected: Com
 
 /** Recovering paid work must not dispatch a new repair under an older protocol. */
 export function hasCurrentCompilerContinuityProtocol(coverage: CompilerContinuityCoverage): boolean {
-  return coverage.protocolVersion === COMPILER_CONTINUITY_PROTOCOL && typeof coverage.reviewHash === 'string' && /^[a-f0-9]{64}$/.test(coverage.reviewHash)
+  return [COMPILER_CONTINUITY_PROTOCOL, 9].includes(coverage.protocolVersion ?? 0) && typeof coverage.reviewHash === 'string' && /^[a-f0-9]{64}$/.test(coverage.reviewHash)
+}
+
+/** Preserve old paid assessments; protocol 9 is frozen only by new admission. */
+export function storedContinuityProtocol(validation: unknown): 8 | 9 {
+  const value = validation && typeof validation === 'object' && !Array.isArray(validation) ? validation as Record<string, unknown> : null
+  const coverage = value?.coverage
+  return coverage && typeof coverage === 'object' && !Array.isArray(coverage)
+    && (coverage as Record<string, unknown>).protocolVersion === 9 ? 9 : 8
 }
 
 /** COMPLETE requires a valid findings envelope, not just a status string. */

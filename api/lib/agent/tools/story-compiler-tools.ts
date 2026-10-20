@@ -4,6 +4,7 @@ import { readTerminalCandidate, terminalCandidateSchema, terminalReviewInput, cu
 import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
 import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '../continuity-format-recovery.js'
+import { hasContinuitySourceAuthority, continuitySourceAuthorityRule, continuityAuthorRequirements, compilerEvidenceScope, type ContinuitySourceScope } from '../continuity-source-authority.js'
 import { runContinuityEvidenceCorrection, claimLegacyContinuityCorrection, readLegacyContinuityCorrectionGate,
   claimContinuedContinuityAssessment, recordLegacyContinuityCorrectionObservation, recordLegacyContinuityAssessmentObservation } from '../continuity-response-correction.js'
 import { readReusableLegacyContinuityCorrection, markLegacyContinuityCorrectionApplied, markLegacyContinuityAssessmentApplied } from '../continuity-response-correction.js'
@@ -116,6 +117,7 @@ async function dispatchLegacyContinuityCorrection(ctx: ToolContext, input: { ori
 
 export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate;
+  parserVersion?: 7; sourceScope?: ContinuitySourceScope;
   options: Parameters<typeof generateReviewCompletion>[2]; assertCurrent: (db?: Prisma.TransactionClient) => Promise<void>;
   bindingHash?: string;
   assessmentAdmissionId?: string;
@@ -124,6 +126,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   let observedContent: string | undefined
   let observedComplete: boolean | undefined
   const frozen: LegacyAssessmentInput = { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system,
+    ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}),
     ...(input.terminalCandidate ? { terminalCandidate: input.terminalCandidate } : {}),
     content: input.content, ...(input.bindingHash ? { bindingHash: input.bindingHash } : {}),
     targetType: input.options.targetType as 'chapter' | 'story_compilation', targetId: input.options.targetId! }
@@ -177,7 +180,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
       admissionId: input.assessmentAdmissionId!, usageIds: trace.records.map(record => record.usageId), observedContent, observedComplete }))
   }
   const last = observations.at(-1)
-  const original = replay?.inspected ?? inspectContinuityResponse(last?.content ?? raw, input.bodies, true, 6, input.terminalCandidate)
+  const original = replay?.inspected ?? inspectContinuityResponse(last?.content ?? raw, input.bodies, true, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope)
   const assessed = await runContinuityReassessment({ original, bodies: input.bodies, system: input.system, content: input.content,
     billingKnown: replay?.billingKnown ?? textRequestsFinished(trace), providerComplete: replay?.providerComplete ?? (!!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length),
     slotUsed: replay?.slotUsed ?? [...stages.values()].some(stage => stage === 'output_recovery'), signal: ctx.signal,
@@ -689,7 +692,7 @@ export const chapterBridgeGetTool = defineTool({
 })
 
 /** 独立审阅只读取当前正文和真实前章，不创建场景任务、不接管旧任务的提交状态。 */
-export async function buildStandaloneContinuityContext(ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId' | 'chapterId'>, chapterId?: string, db: Prisma.TransactionClient = prisma, protocol: 2 | 3 = 3) {
+export async function buildStandaloneContinuityContext(ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId' | 'chapterId'>, chapterId?: string, db: Prisma.TransactionClient = prisma, protocol: 2 | 3 | 4 = 3) {
   const targetId = await resolveQualityChapterTarget({ ...ctx, chapterId, fallbackChapterId: ctx.chapterId }, db)
   if (!targetId) throw new DataAccessError(400, 'CHAPTER_NOT_FOUND', '请从 chapter_read 或作品目录取得真实 chapterId；无需准备章节写作。')
   const chapter = await db.chapter.findFirst({ where: { id: targetId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) },
@@ -705,7 +708,8 @@ export async function buildStandaloneContinuityContext(ctx: Pick<ToolContext, 'u
   const criticInput = `独立连续性审阅；没有场景计划不构成错误，不要求补建编译或提交章节桥。仅审阅所给正文与前三章范围，不能声称验证未提供的全书。\n作品约定（不是已经发生的事实）：${JSON.stringify(charter)}\n目标章节 chapterId=${chapter.id}，《${chapter.title}》@r${chapter.revision}\n${continuitySourceInput({ previous: precedingBodies, current: chapter.content })}`
   return { chapter, contextHash, criticInput: protocol >= 3
     ? `${criticInput}\n章节来源边界（UTF-16 offset，previous 按章节顺序拼接，空白分隔不是正文事实）：${JSON.stringify(sourceProvenance)}`
-    : criticInput, precedingBodies, sourceProvenance }
+    : criticInput, precedingBodies, sourceProvenance,
+    sourceScope: { currentOrderIndex: chapter.orderIndex, previous: sourceProvenance.previous.map(({ orderIndex, startOffset, endOffset }) => ({ orderIndex, startOffset, endOffset })) } }
 }
 
 function standaloneReviewKey(contextHash: string, focus?: string, protocol = 3) {
@@ -720,7 +724,7 @@ export async function readStandaloneContinuityReport(ctx: ToolContext, contextHa
   return metadata.success ? { artifact, findings: metadata.data.findings } : null
 }
 
-export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true, requirePair = true, criticResponse?: ReturnType<typeof inspectContinuityResponse>['audit'], contextProtocol: 2 | 3 = 3): Promise<import('./types.js').ToolResult> {
+export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true, requirePair = true, criticResponse?: ReturnType<typeof inspectContinuityResponse>['audit'], contextProtocol: 2 | 3 | 4 = criticResponse?.parserVersion === 7 ? 4 : 3): Promise<import('./types.js').ToolResult> {
   ctx.signal.throwIfAborted()
   await assertAgentManuscriptCurrent(db, ctx)
   await db.$queryRaw`SELECT id FROM chapters WHERE id = ${context.chapter.id} FOR UPDATE`
@@ -808,6 +812,9 @@ export const continuityValidateTool = defineTool({
   readOnly: true,
   async execute(ctx, args) {
     if (ctx.offlineContinuityOnly) return executeOfflineContinuityOnly(ctx, args)
+    const originalRequest = await readOriginalTaskRequest(prisma, ctx)
+    const sourceAuthority = hasContinuitySourceAuthority(originalRequest.spec)
+    const criticSystem = sourceAuthority ? `${continuityCriticSystem}\n${continuitySourceAuthorityRule}` : continuityCriticSystem
     const compilation = await prisma.storyCompilation.findFirst({
       where: {
         userId: ctx.userId,
@@ -825,11 +832,12 @@ export const continuityValidateTool = defineTool({
       && await isWritingTaskContinuityCompiler(prisma, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, chapterId: args.chapterId })
     if (!args.compilationId && (!compilation || args.chapterId && !chapterOnlyPipeline)) {
       if (args.terminalState) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
-      const context = await buildStandaloneContinuityContext(ctx, args.chapterId)
+      const context = await buildStandaloneContinuityContext(ctx, args.chapterId, prisma, sourceAuthority ? 4 : 3)
       const cached = await readStandaloneContinuityReport(ctx, context.contextHash, args.focus)
-      if (cached) return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, { structured: true, findings: cached.findings }, tx, args.focus))
+      if (cached) return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, { structured: true, findings: cached.findings }, tx, args.focus, true, true, undefined, sourceAuthority ? 4 : 3))
       const assessmentInput: LegacyAssessmentInput = { chapterId: context.chapter.id, revision: context.chapter.revision,
-        bodies: { previous: context.precedingBodies, current: context.chapter.content }, system: continuityCriticSystem,
+        bodies: { previous: context.precedingBodies, current: context.chapter.content }, system: criticSystem,
+        ...(sourceAuthority ? { parserVersion: 7 as const, sourceScope: context.sourceScope } : {}),
         content: `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, args.focus)}`,
         bindingHash: standaloneContinuityBindingHash(context.contextHash, args.focus), targetType: 'chapter', targetId: context.chapter.id }
       // A received complete reassessment can survive a failed report transaction.
@@ -856,7 +864,7 @@ export const continuityValidateTool = defineTool({
         outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED', summary: '独立连续性复核未完成', output: unconfirmedContinuityOutput,
       }
       const assertCurrent = async (db: Prisma.TransactionClient = prisma) => {
-        if ((await buildStandaloneContinuityContext(ctx, context.chapter.id, db)).contextHash !== context.contextHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查资料已变化，请读取当前版本。')
+        if ((await buildStandaloneContinuityContext(ctx, context.chapter.id, db, sourceAuthority ? 4 : 3)).contextHash !== context.contextHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查资料已变化，请读取当前版本。')
       }
       if (standaloneGate.freshAdmissionId && !await prisma.$transaction(tx => claimContinuedContinuityAssessment(tx, ctx,
         { chapterId: context.chapter.id, revision: context.chapter.revision, bodies: { previous: context.precedingBodies, current: context.chapter.content },
@@ -885,7 +893,7 @@ export const continuityValidateTool = defineTool({
     const bridge = compilation.bridge
     const sourceChapter = await readCompilerContinuitySource(prisma, ctx, chapter, bridge.fromChapterId)
     const terminalCandidate = args.terminalState ?? readTerminalCandidate(compilation.validation)
-    const coverage = compilerContinuityCoverage({ chapter, bridge, sceneTasks: compilation.sceneTasks, source: sourceChapter, focus: args.focus, terminalCandidate })
+    const coverage = compilerContinuityCoverage({ chapter, bridge, sceneTasks: compilation.sceneTasks, source: sourceChapter, focus: args.focus, terminalCandidate }, sourceAuthority ? 9 : 8)
     const sourceUnchanged = !bridge.fromChapterId || sourceChapter?.revision === bridge.sourceRevision
     if (!sourceUnchanged || !chapter.content.trim() || compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4) {
       return { outcome: 'failed' as const, summary: '连续性检查前置未满足',
@@ -989,9 +997,9 @@ export const continuityValidateTool = defineTool({
       }
     }
     const allowRepair = false
-    const originalRequest = await readOriginalTaskRequest(prisma, ctx)
     const criticInput = [
-        `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
+        sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
+        ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
         `章节：${chapter.title}`,
         `前章未完成动作（桥接摘要，需对照原文核实）：${bridge.lastUnfinishedAction || '无'}`,
         `连续时空：${bridge.storyTime || '未标注'} / ${bridge.location || '未标注'}`,
@@ -1040,7 +1048,7 @@ export const continuityValidateTool = defineTool({
           signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityEvidenceCorrection', novelId: ctx.novelId, chapterId: chapter.id,
           targetType: 'story_compilation', targetId: compilation.id, temperature: 0, reasoningEffort: reviewRuntime.reasoningEffort,
         } }) }) : await runLegacyContinuityReview(ctx, { chapterId: chapter.id, revision: chapter.revision, bodies,
-      system: continuityCriticSystem, content: criticInput, terminalCandidate,
+      system: criticSystem, content: criticInput, terminalCandidate, ...(sourceAuthority ? { parserVersion: 7 as const, sourceScope: compilerEvidenceScope(chapter, sourceChapter) } : {}),
       options: { modelRuntime: reviewRuntime, explicitModelSelection: true, signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0, reasoningEffort: reviewRuntime.reasoningEffort }, assertCurrent, bindingHash: runtimeJson(coverage).hash,
       assessmentAdmissionId: correctionGate.freshAdmissionId ?? undefined })
     ctx.signal.throwIfAborted()

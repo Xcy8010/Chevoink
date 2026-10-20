@@ -1,6 +1,6 @@
 import { readSettledQualityReviews } from './quality-review-admission.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
-import { freezeWritingScope, effectiveWritingTaskSpec, readCompletedWritingDelivery, readSavedWritingPresentation, shouldUseSavedWritingPresentation, assertCompletedWritingDelivery } from './writing-scope.js'
+import { freezeWritingScope, effectiveWritingTaskSpec, readCompletedWritingDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery } from './review-request-recovery.js'
@@ -668,6 +668,9 @@ async function finalizeLegacyRun(
   // It is published with the confirmed failure, never ahead of its transaction.
   const failureNotice = status === 'failed' && withFailureNotice && errorMessage
     ? { messageId: randomUUID(), text: errorMessage } : undefined
+  const writingDisplayText = writingDelivery?.expected.presentationKind === 'completed_wrap_up'
+    ? completedWritingPresentationText(writingDelivery.expected, writingDelivery.displayText ?? '')
+    : writingDelivery?.displayText ?? writingDelivery?.expected.text
 
   const terminalBody = status === 'paused'
     ? { type: 'run.paused' as const, reason: pauseReason }
@@ -688,7 +691,7 @@ async function finalizeLegacyRun(
       const existing = await tx.agentMessage.findUnique({ where: { id: writingDelivery.messageId } })
       if (existing && (existing.runId !== runId || existing.sessionId !== sessionId || existing.role !== 'assistant')) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '交付消息不属于本任务。')
       const parts = (writingDelivery.parts ?? (existing?.parts as unknown as AgentMessagePart[] | undefined) ?? []).filter(part => part.type !== 'text')
-      const displayedParts = JSON.parse(JSON.stringify([...parts, { type: 'text' as const, text: writingDelivery.displayText ?? writingDelivery.expected.text }])) as Prisma.InputJsonValue
+      const displayedParts = JSON.parse(JSON.stringify([...parts, { type: 'text' as const, text: writingDisplayText! }])) as Prisma.InputJsonValue
       await tx.agentMessage.upsert({ where: { id: writingDelivery.messageId }, create: { id: writingDelivery.messageId, runId, sessionId,
         role: 'assistant', parts: displayedParts }, update: { parts: displayedParts } })
     }
@@ -711,7 +714,7 @@ async function finalizeLegacyRun(
       select: { userId: true, sessionId: true, novelId: true, taskSpec: true },
     })
   }, writingDelivery ? [...(writingDelivery.replaceCandidate ? [] : [{ type: 'message.start' as const, messageId: writingDelivery.messageId, role: 'assistant' as const }]),
-    { type: 'text.final', messageId: writingDelivery.messageId, text: writingDelivery.displayText ?? writingDelivery.expected.text, asReasoning: false }] : failureNotice ? [
+    { type: 'text.final', messageId: writingDelivery.messageId, text: writingDisplayText!, asReasoning: false }] : failureNotice ? [
     { type: 'message.start', messageId: failureNotice.messageId, role: 'assistant' },
     { type: 'text.final', messageId: failureNotice.messageId, text: failureNotice.text, asReasoning: false },
   ] : limitedDelivery ? [
@@ -1855,6 +1858,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // 从源头杜绝「先播英文、轮末再修正成中文」的二次闪变（作者明确不要二次修正观感）
       const visibleTextStreamer = createVisibleTextStreamer()
       const visibleReasoningStreamer = createVisibleTextStreamer()
+      let writingTextHeld = requiresCompletedWritingPresentation(taskSpec)
+      let writingTextBuffer = ''
+      const releaseWritingToolText = () => {
+        writingTextHeld = false
+        if (writingTextBuffer) bus.emit({ type: 'text.delta', messageId, delta: writingTextBuffer })
+        writingTextBuffer = ''
+      }
       // Execution safeguards retain their original incremental input. Author
       // classification may hold a paragraph and must never delay detection.
       const executionTextDetector = createExecutionTextDetector()
@@ -1885,7 +1895,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             handleRepeatHit(repeatDetector.push(executionTextDetector.push(chunk.delta)))
             const textIncrement = visibleTextStreamer.push(chunk.delta)
             if (textIncrement) {
-              bus.emit({ type: 'text.delta', messageId, delta: textIncrement })
+              if (writingTextHeld) writingTextBuffer += textIncrement
+              else bus.emit({ type: 'text.delta', messageId, delta: textIncrement })
             }
           } else if (chunk.type === 'reasoning-delta') {
             if (liveTurn) liveTurn.streamedReasoning += chunk.delta
@@ -1896,6 +1907,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               bus.emit({ type: 'reasoning.delta', messageId, delta: reasoningIncrement })
             }
           } else if (chunk.type === 'tool-call-start') {
+            releaseWritingToolText()
             lastActivityAt = Date.now()
             if (chunk.id) {
               announcedToolNames.set(chunk.id, chunk.name)
@@ -1952,6 +1964,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }))
         : []
       const effectiveToolCalls = result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
+      if (effectiveToolCalls.length) releaseWritingToolText()
       let automaticReviewTriggered = false
       let mergedReviewReminder: string | undefined
       const offlineContinuityCalls = new Map<string, NonNullable<ToolContext['offlineContinuityOnly']>>()
@@ -2035,7 +2048,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // 只有模型原生 reasoning 才进思考信道，执行旁白不再改道思考区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
-      if (result.content || automaticReviewTriggered) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
+      const deferWritingCompletionText = !automaticReviewTriggered && effectiveToolCalls.length === 0 && requiresCompletedWritingPresentation(taskSpec)
+      if ((result.content || automaticReviewTriggered) && !deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
 
       const parts: AgentMessagePart[] = []
       if (liveTurn) liveTurn.parts = parts
@@ -2176,6 +2190,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         // completion unless the requested next chapter is already committed.
         const reviewBlockedWrapUp = reviewHandoffCount > 0 && !(nextChapterRequired && !chapterIncomplete)
         const prematureFinish = otherPremature || reviewBlockedWrapUp
+        if (prematureFinish && deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
         if (reviewBlockedWrapUp && !otherPremature) {
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
           bus.emit({ type: 'step.finish', turn, usage: result.usage })
@@ -2194,9 +2209,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           continue
         }
 
-        const savedCandidate = !prematureFinish && !report?.content ? await prisma.$transaction(tx => readSavedWritingPresentation(tx,
+        const savedCandidate = !prematureFinish && !report?.content && requiresCompletedWritingPresentation(taskSpec) ? await prisma.$transaction(tx => readCompletedWritingPresentation(tx,
           { userId: params.userId, novelId: params.novelId, runId })) : null
-        const savedPresentation = shouldUseSavedWritingPresentation(savedCandidate, cleanContent) ? savedCandidate : null
+        if (!prematureFinish && !report?.content && requiresCompletedWritingPresentation(taskSpec) && !savedCandidate) {
+          await persistMessage(messageId, runId, params.sessionId, 'assistant', parts.filter(part => part.type !== 'text'))
+          bus.emit({ type: 'step.finish', turn, usage: result.usage })
+          await finalizeFailedWithNotice('当前授权章节尚无与最新正文和检查报告一致的提交回执，不能确认完成；已保存内容保留。')
+          return
+        }
         if (!prematureFinish && targetEvidenceMissing && taskSpec.researchDiscoveryProtocol === 1) {
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts.filter(part => part.type !== 'text'))
           bus.emit({ type: 'step.finish', turn, usage: result.usage })
@@ -2219,8 +2239,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
           bus.emit({ type: 'text.final', messageId, text: delivered, asReasoning: false })
         } else if (savedCandidate) {
-          lastAssistantText = savedPresentation?.text ?? authorContent
+          lastAssistantText = completedWritingPresentationText(savedCandidate, authorContent)
         } else {
+          if (deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
         }
         bus.emit({ type: 'step.finish', turn, usage: result.usage })

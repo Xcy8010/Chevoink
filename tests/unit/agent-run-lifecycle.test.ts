@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   openAITools: vi.fn(() => []),
   update: vi.fn<(input: { data: Record<string, unknown> }) => Promise<{ taskSpec: TaskSpec | null; usage?: unknown; currentTurn?: number; startedAt?: Date; events?: Array<{ type: string; createdAt: Date }> }>>(async () => ({ taskSpec: null })), owner: vi.fn(async () => ({ userId: 'user' })), previous: vi.fn<(input?: { where?: Record<string, unknown> }) => Promise<unknown>>(async () => null),
   committedChapter: vi.fn(async () => false),
+  realWritingCompletion: false,
   savedWorkflow: vi.fn(async (): Promise<WritingWorkflowMilestone[]> => []),
   todos: vi.fn(async (): Promise<AgentTodoItem[]> => []),
   priorRuns: vi.fn(),
@@ -231,6 +232,31 @@ vi.mock('../../api/lib/agent/legacy-continuity-recovery.js', () => ({ readLegacy
 vi.mock('../../api/lib/agent/legacy-input-recovery.js', () => ({ readLegacyAnchorInputRecovery: mocks.legacyAnchorRecovery }))
 vi.mock('../../api/lib/agent/continuity-offline-recovery.js', () => ({ readOfflineContinuityRecovery: mocks.offlineContinuity }))
 vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChapter: mocks.committedChapter }))
+// Most cases isolate dispatch/recovery and already model a successful compiler
+// commit with committedChapter. Give that explicit fixture its corresponding
+// read-only delivery receipt. The presentation/CAS cases below use the actual
+// writing-scope reader and assertion; PostgreSQL covers persisted rows too.
+vi.mock('../../api/lib/agent/writing-scope.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../api/lib/agent/writing-scope.js')>()
+  return { ...actual,
+    readCompletedWritingPresentation: async (...args: Parameters<typeof actual.readCompletedWritingPresentation>) => {
+      if (mocks.realWritingCompletion) return actual.readCompletedWritingPresentation(...args)
+      if (!await mocks.committedChapter()) return null
+      const chapter = mocks.chapters[0]
+      return { chapters: [{ ...chapter, contentHash: 'a'.repeat(64), completion: { compilationId: 'loop-only-committed-fixture',
+        qualityReportId: 'loop-only-report', commitHash: 'b'.repeat(64), reviewHash: 'c'.repeat(64), continuity: 'complete', quality: 'complete',
+        continuityErrors: 0, qualityErrors: 0, openFindings: 0 } }], titleAndBodyOnly: false, presentation: null,
+      presentationKind: 'completed_wrap_up', text: `已保存《${chapter.title}》。` }
+    },
+    assertCompletedWritingDelivery: async (...args: Parameters<typeof actual.assertCompletedWritingDelivery>) => {
+      if (args[2].chapters[0].completion.compilationId === 'loop-only-committed-fixture') {
+        if (!await mocks.committedChapter()) throw new Error('Synthetic committed receipt became stale')
+        return
+      }
+      return actual.assertCompletedWritingDelivery(...args)
+    },
+  }
+})
 vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportForDelivery: mocks.report }))
 vi.mock('../../api/lib/agent/research-recovery.js', () => ({ claimResearchReadHandoff: mocks.researchClaim,
   takeResearchReadHandoff: mocks.researchTake, saveResearchLimitationDelivery: mocks.researchPartial }))
@@ -334,6 +360,7 @@ beforeEach(() => {
   seedAdmission('检查当前章节', 'c')
   mocks.todos.mockResolvedValue([])
   mocks.committedChapter.mockResolvedValue(false)
+  mocks.realWritingCompletion = false
   mocks.savedWorkflow.mockReset().mockResolvedValue([])
   mocks.previous.mockResolvedValue(null)
   mocks.priorRuns.mockReset()
@@ -1843,11 +1870,12 @@ describe('original task context on resume', () => {
     }) }))
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
-  it('does not require a research artifact for ordinary chapter tasks', async () => {
+  it('requires a real chapter commit, not a research artifact or a verbal completion', async () => {
     queue(response('已完成。'))
     await run('写第十九章。')
     expect(mocks.report).not.toHaveBeenCalled()
-    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(events().filter(event => event.type === 'text.final')).not.toContainEqual(expect.objectContaining({ text: '已完成。' }))
   })
   it('delivers a persisted limitation report without certifying target analysis or regenerating it', async () => {
     const content = '# 来源核验\n\n未取得可验证的原作正文。'
@@ -2861,8 +2889,8 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
         chapter.revision++
         return { output: '已保存', display: { kind: 'chapterDiff', chapterId: chapter.id, chapterTitle: chapter.title,
           before, after: chapter.content, appliedDirectly: true, revision: chapter.revision } }
-      }, false)]
-      queue(response('', [call('write', 'chapter_write')], 600), response('本章修订完成。', [], 600))
+      }, false), tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '合成当前稿已完成检查并提交' } }, false)]
+      queue(response('', [call('write', 'chapter_write'), call('commit', 'chapter_bridge_commit')], 600), response('本章修订完成。', [], 600))
       await run('修订当前章节正文', 500)
       expect(mocks.chat).toHaveBeenCalledTimes(2)
       expect(events().filter(event => event.type === 'text.final' && event.text.includes('已到检查点'))).toHaveLength(0)
@@ -2937,13 +2965,16 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
 
 
 describe('ordinary chapter summary presentation', () => {
-  it.each([false, true])('preserves natural summary and revalidates real saved-only chapter proof; changedBeforeTerminal=%s', async changedBeforeTerminal => {
+  it.each(['current', 'stale-summary', 'revision-race', 'report-race', 'missing-commit'] as const)('binds summary and replay to current committed proof: %s', async scenario => {
+    mocks.realWritingCompletion = true
     const { prisma } = await import('../../api/lib/prisma.js')
     const { withHumanAdmission } = await import('../../api/lib/agent/goal-activation-authority.js')
     const { runtimeJson } = await import('../../api/lib/agent/runtime-common.js')
-    const { readSavedWritingPresentation, freezeWritingScope } = await import('../../api/lib/agent/writing-scope.js')
+    const { readSavedWritingPresentation, readCompletedWritingPresentation, completedWritingPresentationText, freezeWritingScope } = await import('../../api/lib/agent/writing-scope.js')
     const prompt = '写第一章。只保存到章节。'
-    const summary = '《十五块的碗》已经写好，保留了旧碗与铜钱的细节，结尾让人物的选择自然落地。'
+    const summary = scenario === 'stale-summary'
+      ? '正文改为「铜钱清脆地落在地上」。\n\n结尾让人物的选择自然落地。'
+      : '《十五块的碗》已经写好，保留了旧碗与铜钱的细节，结尾让人物的选择自然落地。'
     const chapter = mocks.chapters[0]
     chapter.title = '十五块的碗'
     chapter.content = '天亮之前，他把旧碗放回柜上。铜钱压在碗底，门外的脚步声渐渐远去。'
@@ -2961,15 +2992,17 @@ describe('ordinary chapter summary presentation', () => {
     let changed = false
     query.mockImplementation(async (...args) => {
       const sql = (args[0] as TemplateStringsArray).join('?')
-      if (changedBeforeTerminal && !changed && mocks.chat.mock.calls.length && sql.includes('FROM agent_runs') && sql.includes('FOR UPDATE')) {
+      if (['revision-race', 'report-race'].includes(scenario) && !changed && mocks.chat.mock.calls.length && sql.includes('FROM agent_runs') && sql.includes('FOR UPDATE')) {
         changed = true
-        chapter.revision += 1
-        chapter.content += '作者在交付时补了一句。'
+        if (scenario === 'revision-race') {
+          chapter.revision += 1
+          chapter.content += '作者在交付时补了一句。'
+        } else mocks.reviewReadiness.mockResolvedValue({ ...readiness('complete', 'complete', chapter.revision), qualityReportId: 'replacement-report' })
       }
       return previousQuery!(...args)
     })
     messages.mockResolvedValue([{ id: 'author-message', runId: 'run', sessionId: 'session', role: 'user', parts: [{ type: 'text', text: prompt }] }] as never)
-    compilations.mockResolvedValue({ id: 'comp', userId: 'user', novelId: 'novel', runId: 'run', chapterId: 'c', status: 'completed', stage: 'commit',
+    compilations.mockResolvedValue({ id: 'comp', userId: 'user', novelId: 'novel', runId: 'run', chapterId: 'c', status: scenario === 'missing-commit' ? 'active' : 'completed', stage: 'commit',
       preparedContext: { terminalContentHash: runtimeJson({ content: chapter.content }).hash },
       bridge: { toChapterId: 'c', targetRevision: chapter.revision, committedAt: new Date(), fromChapterId: null } } as never)
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'complete', chapter.revision))
@@ -2980,16 +3013,19 @@ describe('ordinary chapter summary presentation', () => {
       return response(summary)
     })
     try {
+      const capture = await prisma.$transaction(tx => readCompletedWritingPresentation(tx, { userId: 'user', novelId: 'novel', runId: 'run' }))
+      const displayed = capture ? completedWritingPresentationText(capture, summary) : null
       await executeRealAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt })
       const { readWritingPresentation } = await import('../../api/lib/agent/writing-request-context.js')
       expect(await prisma.$transaction(tx => readWritingPresentation(tx, { userId: 'user', novelId: 'novel', runId: 'run' }, [{ chapterId: 'c', orderIndex: 1 }]))).toMatchObject({ mode: 'saved_only' })
       const { readWritingScope } = await import('../../api/lib/agent/writing-scope.js')
       expect(await prisma.$transaction(tx => readWritingScope(tx, { userId: 'user', novelId: 'novel', runId: 'run' }))).toMatchObject({ writing: { kind: 'bounded', targets: [{ chapterId: 'c', orderIndex: 1 }] } })
-      if (changedBeforeTerminal) {
-        expect(changed).toBe(true)
+      if (['revision-race', 'report-race', 'missing-commit'].includes(scenario)) {
+        expect(changed).toBe(scenario !== 'missing-commit')
         expect(events()).not.toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded' }))
         expect(mocks.runs.get('run')?.status).not.toBe('completed')
         expect(mocks.update.mock.calls.some(([input]) => input.data.status === 'completed')).toBe(false)
+        expect(events().filter(event => event.type === 'text.final')).not.toContainEqual(expect.objectContaining({ text: summary }))
         return
       }
       // Prove the real saved-only branch was eligible, rather than passing because its DB fixture was absent.
@@ -3004,12 +3040,14 @@ describe('ordinary chapter summary presentation', () => {
       expect(messageId).toBeTruthy()
       const finals = events().filter(event => event.type === 'text.final')
       expect(finals.length).toBeGreaterThan(0)
-      for (const final of finals) expect(final).toMatchObject({ messageId, text: summary })
-      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: summary })
-      expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', outputSummary: summary })
+      for (const final of finals) expect(final).toMatchObject({ messageId, text: displayed })
+      expect(JSON.stringify(finals)).not.toContain('铜钱清脆地落在地上')
+      expect(displayed).toContain('结尾让人物的选择自然落地。')
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: displayed })
+      expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', outputSummary: displayed })
       const persisted = mocks.persist.mock.calls as unknown as Array<[{ create?: { role?: string; parts?: AgentMessagePart[] }; update?: { parts?: AgentMessagePart[] } }]>
       expect(persisted.filter(([input]) => input.create?.role === 'assistant').at(-1)?.[0]).toMatchObject({
-        create: { parts: [{ type: 'text', text: summary }] }, update: { parts: [{ type: 'text', text: summary }] },
+        create: { parts: [{ type: 'text', text: displayed }] }, update: { parts: [{ type: 'text', text: displayed }] },
       })
     } finally {
       messages.mockImplementation(previousMessages!)

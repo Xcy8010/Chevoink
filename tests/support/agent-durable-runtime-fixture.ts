@@ -16,7 +16,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 export async function fixture(work: (f: {
   userId: string; novelId: string; sessionId: string; chapterId: string; runId: string; sourceMessageId: string;
   spec: ReturnType<typeof buildTaskSpec>; rootId: string;
-}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { freezeWriting?: boolean }) {
+}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { freezeWriting?: boolean; continuityEvidenceProtocol?: 1 }) {
   const user = await prisma.user.create({ data: { nickname: 'durable-runtime-fixture', passwordHash: 'test-only-unusable' } })
   const userId = user.id
   try {
@@ -28,7 +28,7 @@ export async function fixture(work: (f: {
     const volume = await prisma.volume.create({ data: { novelId: novel.id, title: '卷', orderIndex: 1 } })
     const chapter = await prisma.chapter.create({ data: { authorId: userId, novelId: novel.id, volumeId: volume.id, title: '原章', content: '原文', orderIndex: 1, orderInVolume: 1, wordCount: 2 } })
     const runId = randomUUID(), sourceMessageId = randomUUID()
-    let spec = buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt })
+    let spec = buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt, continuityEvidenceProtocol: options?.continuityEvidenceProtocol })
     await prisma.agentRun.create({ data: {
       id: runId, userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, status: 'queued',
       mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', taskSpec: JSON.parse(JSON.stringify(spec)),

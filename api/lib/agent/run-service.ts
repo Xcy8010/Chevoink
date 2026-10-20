@@ -486,7 +486,7 @@ export async function startLoopRunLocked(
       // contracts and durable continuation never refresh frozen resources.
       await syncBuiltinSkillCatalog(tx)
       const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
-        prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1,
+        prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1,
         researchAdmission, networkAdmission, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
       if (researchAdmission && fresh.intent === 'research_analysis') {
         // Freeze identity/budget before async bootstrap, without writing grants.

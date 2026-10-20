@@ -26,6 +26,8 @@ export const taskScopeSchema = z.object({
   localEditProtocol: z.literal(1).optional(),
   /** Fresh admission binds chapter targets to their requested action, never reference prose. */
   writingTargetProtocol: z.literal(1).optional(),
+  /** New human admission requires factual claims anchored in the current manuscript. */
+  continuityEvidenceProtocol: z.literal(1).optional(),
   /** Fresh empty-book admission may bind one explicit first-chapter answer. */
   writingClarificationProtocol: z.literal(1).optional(),
   localEditBoundary: z.object({ version: z.literal(1), kind: z.enum(['bounded', 'needs_input']),

@@ -11,6 +11,7 @@ import { activeChapterScope } from '../data/internal.js'
 import { isKnownTextRequestBilling, isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 import { readKnownFailedContinuityCorrection } from './continuity-response-correction.js'
 import { readOwnedContinuityReassessment, readUnsentContinuityAdmission } from './continuity-reassessment-witness.js'
+import { hasContinuitySourceAuthority } from './continuity-source-authority.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const capCodes = new Set(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED'])
@@ -116,7 +117,8 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
   const keys: Array<[string, string]> = []
   for (const compilation of compilations) {
     const validation = object(compilation.validation), coverage = object(validation.coverage)
-    if (compilation.status !== 'active' || !compilation.chapterId || validation.independentCheck !== 'unavailable' || ![6, 7, COMPILER_CONTINUITY_PROTOCOL].includes(Number(coverage.protocolVersion))) continue
+    if (compilation.status !== 'active' || !compilation.chapterId || validation.independentCheck !== 'unavailable'
+      || ![6, 7, COMPILER_CONTINUITY_PROTOCOL, ...(hasContinuitySourceAuthority(original.spec) ? [9] : [])].includes(Number(coverage.protocolVersion))) continue
     const chapter = await tx.chapter.findFirst({ where: { id: compilation.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true, orderIndex: true } })
     if (!chapter || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
       || coverage.contentHash !== runtimeJson({ content: chapter.content }).hash

@@ -703,7 +703,7 @@ export async function validateStoryContinuity(input: {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '独立检查期间正文已变化，旧结果不能验证新revision。请重新检查当前正文。')
   }
   const protocol = input.coverage?.protocolVersion ?? 8
-  if (protocol !== 6 && protocol !== 7 && protocol !== 8) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '未知连续性协议，不能升级或应用旧检查。')
+  if (protocol !== 6 && protocol !== 7 && protocol !== 8 && protocol !== 9) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '未知连续性协议，不能升级或应用旧检查。')
   const reviewSource = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, protocol)
   const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus, terminalCandidate: input.terminalCandidate }, protocol)
   if (input.coverage && !compilerContinuityCoverageMatches(input.coverage, currentCoverage)) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、章节桥、场景或检查范围已变化，旧检查不能绑定当前编译。')

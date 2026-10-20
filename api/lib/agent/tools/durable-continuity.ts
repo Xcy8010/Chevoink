@@ -3,6 +3,7 @@ import { continuityFindingText, continuitySourceInput, unconfirmedContinuityOutp
 import { z } from 'zod'
 import { readChapterReviewRevisionGuidance, continuityDecisionBinding } from '../chapter-review-guard.js'
 import { readOriginalTaskRequest } from '../original-request.js'
+import { hasContinuitySourceAuthority, continuitySourceAuthorityRule, continuityAuthorRequirements, compilerEvidenceScope, continuitySourceScopeSchema } from '../continuity-source-authority.js'
 import { DataAccessError } from '../../prisma.js'
 import { activeChapterScope } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
@@ -35,8 +36,8 @@ const routeSchema = auxiliaryRouteSchema
 const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional(), terminalHash: hash.optional() }).strict()
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
-    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string() }).optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
+    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string() }).optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
 type Work = Extract<z.infer<typeof workSchema>, { kind: 'check' }>
@@ -76,17 +77,21 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       if (!saved.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性检查缺少原业务快照，不能用当前正文补造。')
       return saved.data.input.work
     }
+    const originalRequest = await readOriginalTaskRequest(tx, ctx)
+    const sourceAuthority = hasContinuitySourceAuthority(originalRequest.spec)
+    const criticSystem = sourceAuthority ? `${continuityCriticSystem}\n${continuitySourceAuthorityRule}` : continuityCriticSystem
     const chapterOnlyPipeline = !args.compilationId && typeof args.chapterId === 'string' && !!baseline
       && await isWritingTaskContinuityCompiler(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: baseline.id, chapterId: args.chapterId })
     if (!args.compilationId && (!baseline || args.chapterId && !chapterOnlyPipeline)) {
       if (args.terminalState) return { kind: 'rejected' as const, code: 'COMPILATION_NOT_FOUND', message: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
-      const context = await buildStandaloneContinuityContext(ctx, typeof args.chapterId === 'string' ? args.chapterId : undefined, tx)
+      const context = await buildStandaloneContinuityContext(ctx, typeof args.chapterId === 'string' ? args.chapterId : undefined, tx, sourceAuthority ? 4 : 3)
       const observed = await readObservedBaseline(tx, lease.taskRootId, cursor.expectedRevision, { kind: 'chapter', id: context.chapter.id })
       if (observed?.kind !== 'chapter' || observed.revision !== context.chapter.revision) return { kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '请先 chapter_read 读取目标正文；独立审阅无需准备章节写作。' }
       const cached = await readStandaloneContinuityReport(ctx, context.contextHash, typeof args.focus === 'string' ? args.focus : undefined, tx)
-      return { kind: 'check' as const, version: 9 as const, compiler: null, standaloneContextHash: context.contextHash, chapter: context.chapter, sourceBodies: { previous: context.precedingBodies, current: context.chapter.content }, sourceId: null,
+      return { kind: 'check' as const, version: sourceAuthority ? 12 as const : 9 as const, compiler: null, standaloneContextHash: context.contextHash, chapter: context.chapter, sourceBodies: { previous: context.precedingBodies, current: context.chapter.content }, sourceId: null,
+        ...(sourceAuthority ? { sourceScope: context.sourceScope } : {}),
         coverage: { version: 1 as const, contentHash: runtimeJson({ content: context.chapter.content }).hash, charCount: context.chapter.content.length, sourceHash: null },
-        criticSystem: continuityCriticSystem, criticInput: `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, typeof args.focus === 'string' ? args.focus : undefined)}`,
+        criticSystem, criticInput: `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, typeof args.focus === 'string' ? args.focus : undefined)}`,
         repairSystem: repairPrompt, repair: false, cached: cached?.findings ?? null, route: null, price: null }
     }
     if (!baseline) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_REQUIRED', message: '指定编译缺少本任务观察。独立审阅请省略 compilationId、传 chapter_read 返回的 chapterId，无需重建编译。' }
@@ -105,16 +110,17 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     }
     const terminalCandidate = args.terminalState ? terminalCandidateSchema.parse(args.terminalState) : readTerminalCandidate(compilation.validation)
     const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
-      source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate })
+      source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, sourceAuthority ? 9 : 8)
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
     const reusable = cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
     const repair = false
     validatedContinuityCheckRounds(compilation.validation, !reusable)
-    const originalRequest = await readOriginalTaskRequest(tx, ctx)
-    return { kind: 'check' as const, version: 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content }, sourceId, coverage,
-      criticSystem: continuityCriticSystem, repairSystem: repairPrompt,
+    return { kind: 'check' as const, version: sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content }, sourceId, coverage,
+      ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),
+      criticSystem, repairSystem: repairPrompt,
       criticInput: [`章节：《${compilation.chapter.title}》`,
-        `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
+        sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
+        ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: compilation.chapter.id, revision: compilation.chapter.revision, orderIndex: compilation.chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
         `章节桥（待核对摘要，不能代替前章原文）：${JSON.stringify(continuityStoryInput(compilation.bridge))}`, `生成场景任务草案（目标/代价/转折不是历史事实）：${JSON.stringify(continuityStoryInput(compilation.sceneTasks))}`,
         continuityReviewTail(compilation.validation, compilation.chapter.revision, repair, typeof args.focus === 'string' ? args.focus : undefined, compilation.chapter.content),
         compilerContinuitySourceScope(source), continuitySourceInput({ previous: source?.content ?? null, current: compilation.chapter.content }), terminalReviewInput(terminalCandidate)].join('\n'),
@@ -144,7 +150,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
   const assertCurrent = async (tx: RuntimeTx, frozen: Work) => {
     const compiler = frozen.compiler
     if (!compiler) {
-      const current = await buildStandaloneContinuityContext(ctx, frozen.chapter.id, tx, frozen.version >= 9 ? 3 : 2)
+      const current = await buildStandaloneContinuityContext(ctx, frozen.chapter.id, tx, frozen.version >= 12 ? 4 : frozen.version >= 9 ? 3 : 2)
       if (current.contextHash !== frozen.standaloneContextHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '独立检查的正文或参考资料已变化，未应用旧结果。')
       return
     }
@@ -154,6 +160,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     if (!chapter || runtimeJson(chapter).hash !== runtimeJson(frozen.chapter).hash || (source ? runtimeJson(source).hash : null) !== frozen.coverage.sourceHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间正文或来源章节已变化，未应用旧结果。请读取当前正文和章节桥后重查。')
   }
   const execute = async (frozen: Work) => {
+    if (frozen.version >= 12 && !frozen.sourceScope) return failure('RUNTIME_RECEIPT_INVALID', '连续性检查缺少冻结来源边界，不能补造。')
     if (frozen.version >= 4 && !frozen.sourceBodies) return failure('RUNTIME_RECEIPT_INVALID', '连续性检查缺少冻结原文，不能补造引用。')
     if (frozen.compiler && !hasCurrentCompilerContinuityProtocol(frozen.coverage)
       && !(frozen.version === 3 && frozen.coverage.protocolVersion === 6 && typeof frozen.coverage.reviewHash === 'string')) return failure('CONTINUITY_INPUT_STALE',
@@ -169,7 +176,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     let parsed = frozen.cached ? { structured: true, findings: frozen.cached } : critic?.finishReason === 'stop' && !critic.toolCalls.length
       ? parseIndependentContinuityResult(critic.content, frozen.version >= 3 ? 2 : 1, frozen.version >= 4 ? frozen.sourceBodies : undefined) : { structured: false, findings: [] }
     let inspected = frozen.version >= 5 && critic && frozen.sourceBodies
-      ? inspectContinuityResponse(critic.content, frozen.sourceBodies, critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, frozen.version >= 10 ? frozen.terminalCandidate : undefined) : null
+      ? inspectContinuityResponse(critic.content, frozen.sourceBodies, critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.version >= 12 ? 7 : frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, frozen.version >= 10 ? frozen.terminalCandidate : undefined, frozen.version >= 12 ? frozen.sourceScope : undefined) : null
     if (frozen.version === 7 && inspected && frozen.sourceBodies && inspected.audit.classification === 'source_invalid') {
       const billingKnown = await withRunLease(lease, async tx => {
         const previous = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:continuity_critic` } } })
@@ -232,7 +239,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     const compiler = frozen.compiler
     if (!compiler) return commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
       if (!frozen.standaloneContextHash || frozen.repair) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立检查缺少只读上下文。')
-      const toolResult = await saveStandaloneContinuityReport(ctx, { chapter: frozen.chapter, contextHash: frozen.standaloneContextHash, criticInput: frozen.criticInput }, parsed, tx, typeof args.focus === 'string' ? args.focus : undefined, frozen.version >= 2, frozen.version >= 4, inspected?.audit, frozen.version >= 9 ? 3 : 2)
+      const toolResult = await saveStandaloneContinuityReport(ctx, { chapter: frozen.chapter, contextHash: frozen.standaloneContextHash, criticInput: frozen.criticInput }, parsed, tx, typeof args.focus === 'string' ? args.focus : undefined, frozen.version >= 2, frozen.version >= 4, inspected?.audit, frozen.version >= 12 ? 4 : frozen.version >= 9 ? 3 : 2)
       return runtimeJson({ toolResult, memoryJobId: null }).value
     })
     return commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {

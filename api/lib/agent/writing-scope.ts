@@ -12,7 +12,7 @@ import { readWritingPresentation } from './writing-request-context.js'
 import { freezeLocalEditBoundary, originalLocalEditBoundary, requestedLocalEdit } from './local-edit-scope.js'
 import { eligibleEmptyWritingClarification, readWritingClarification } from './writing-clarification.js'
 
-import { numeric, rangeDash, negativeScopeClause, writingScopeClauses, legacyWritingRange } from './writing-target-range.js'
+import { chapterNumber, numeric, rangeDash, negativeScopeClause, writingScopeClauses, legacyWritingRange } from './writing-target-range.js'
 import { parseWritingTargets, writingExclusionRange } from './writing-target-admission.js'
 export { chapterNumber } from './writing-target-range.js'
 export { requestedWritingRange } from './writing-target-admission.js'
@@ -487,6 +487,163 @@ export async function readSavedWritingPresentation(tx: Prisma.TransactionClient,
   return readChapterDelivery(tx, subject, 'completed_saved_only')
 }
 
+/** Ordinary completion has already been decided by the loop. Its presentation
+ * still needs the current persisted commit, even for a short model summary. */
+export async function readCompletedWritingPresentation(tx: Prisma.TransactionClient, subject: Subject) {
+  return readChapterDelivery(tx, subject, 'completed_wrap_up')
+}
+
+export function requiresCompletedWritingPresentation(spec: TaskSpec): boolean {
+  return ['write', 'revise'].includes(spec.intent) && spec.scope.writing?.kind === 'bounded'
+    && !['proposal_only', 'conversation_only'].includes(spec.writingPacing ?? '')
+    // Legacy intent defaults may say write for a plain summary or observation.
+    // They do not create a manuscript completion obligation by themselves.
+    && (spec.scope.writing.repairAuthorized || parseWritingTargets(spec.goals.join('\n')).hasAction
+      && /写|修订|修改|改写|重写|润色|优化|完善|补写|\b(?:write|revise|rewrite|edit|polish|draft)\b/iu.test(spec.goals.join('\n')))
+}
+
+type PresentationDelivery = NonNullable<Awaited<ReturnType<typeof readCompletedWritingPresentation>>>
+type PresentationChapter = PresentationDelivery['chapters'][number]
+type WritingQuotation = { start: number; end: number; value: string; closed: boolean }
+const writingQuotePairs: Record<string, string> = { '“': '”', '‘': '’', '「': '」', '『': '』', '《': '》', '"': '"', "'": "'", '`': '`' }
+
+function writingQuotations(text: string): WritingQuotation[] {
+  const result: WritingQuotation[] = [], stack: Array<{ start: number; close: string }> = []
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]
+    if ((char === '"' || char === "'" || char === '`') && text[index - 1] === '\\') continue
+    if (char === stack.at(-1)?.close) {
+      const quote = stack.pop()!
+      result.push({ start: quote.start, end: index + 1, value: text.slice(quote.start + 1, index), closed: true })
+    } else if (writingQuotePairs[char] && !(char === "'" && /[a-z0-9]/iu.test(text[index - 1] ?? '') && /[a-z0-9]/iu.test(text[index + 1] ?? ''))) {
+      stack.push({ start: index, close: writingQuotePairs[char] })
+    }
+  }
+  for (const quote of stack) result.push({ start: quote.start, end: text.length, value: text.slice(quote.start + 1), closed: false })
+  return result.sort((a, b) => a.start - b.start || b.end - a.end)
+}
+
+function summarySentences(text: string): string[] {
+  const quotes = writingQuotations(text), result: string[] = []
+  let start = 0, quoteIndex = 0
+  for (let index = 0; index < text.length; index++) {
+    while (quotes[quoteIndex]?.end <= index) quoteIndex++
+    if (quotes[quoteIndex]?.start <= index) { index = quotes[quoteIndex].end - 1; continue }
+    if (/[。！？!?\n]/u.test(text[index])) {
+      result.push(text.slice(start, index + 1))
+      start = index + 1
+    }
+  }
+  if (start < text.length) result.push(text.slice(start))
+  return result
+}
+
+function writingChapterMentions(sentence: string, quotes: WritingQuotation[], chapters: PresentationChapter[]) {
+  const mentions: Array<{ start: number; end: number; chapters: PresentationChapter[] }> = []
+  const numbered = new RegExp(`第\\s*(${numeric}(?:\\s*[、,，和及]\\s*第?\\s*${numeric})*)\\s*章`, 'gu')
+  for (const match of sentence.matchAll(numbered)) {
+    if (quotes.some(quote => match.index! > quote.start && match.index! < quote.end)) continue
+    const positions = match[1].split(/\s*[、,，和及]\s*第?\s*/u).map(chapterNumber)
+    const selected = chapters.filter(chapter => positions.includes(chapter.orderIndex))
+    mentions.push({ start: match.index!, end: match.index! + match[0].length,
+      chapters: selected.length === positions.length ? selected : [] })
+  }
+  for (const quote of quotes) {
+    const selected = chapters.filter(chapter => quote.value === chapter.title || quote.value === chapter.id)
+    if (selected.length) mentions.push({ start: quote.start, end: quote.end, chapters: selected })
+  }
+  return mentions.sort((a, b) => a.start - b.start)
+}
+
+function writingSentenceScope(sentence: string, position: number, mentions: ReturnType<typeof writingChapterMentions>, fallback: PresentationChapter[]) {
+  const breaks = [...sentence.matchAll(/[,，;；。！？!?\n]/gu)].map(match => match.index!)
+  const start = breaks.filter(index => index < position).at(-1) ?? -1
+  const end = breaks.find(index => index > position) ?? sentence.length
+  const local = mentions.filter(mention => mention.end > start && mention.start < end)
+  const preceding = local.filter(mention => mention.end <= position).at(-1)
+  if (preceding) return preceding.chapters
+  if (local.length === 1) return local[0].chapters
+  if (local.length > 1) return []
+  return mentions.filter(mention => mention.end <= position).at(-1)?.chapters ?? fallback
+}
+
+function writingStyleLabel(sentence: string, quote: WritingQuotation): boolean {
+  const before = sentence.slice(0, quote.start).replace(/[*_]/gu, '')
+  if (!/(?:风格|节奏|叙事|氛围|审美)标签\s*(?:是|为|[:：])\s*$/u.test(before)) return false
+  const labels = new Set(['留白', '悬念', '收束', '克制', '紧凑', '轻快', '冷峻', '舒缓', '张力', '简洁', '凝练', '细腻', '明快', '沉静', '朴实', '含蓄', '节制', '抒情', '写实', '幽默', '温暖'])
+  return quote.value.split(/\s*(?:与|和|、|\/|\+)\s*/u).every(label => labels.has(label))
+}
+
+/** All substantive quotations need a current source. Only an explicitly named
+ * style-label grammar is commentary; short words are never a citation waiver. */
+function currentWritingSummarySentence(sentence: string, delivery: PresentationDelivery, inherited: PresentationChapter[]): boolean {
+  const quotes = writingQuotations(sentence), mentions = writingChapterMentions(sentence, quotes, delivery.chapters)
+  const scope = (position: number) => writingSentenceScope(sentence, position, mentions, inherited)
+  const revisions = [...sentence.matchAll(/\br(?:evision)?\s*(\d+)\b|(?:修订版本|当前版本)\s*[:：]?\s*(\d+)/giu)]
+    .filter(match => !quotes.some(quote => quote.start < match.index! && match.index! < quote.end
+      && !/^r(?:evision)?\s*\d+$/iu.test(quote.value)))
+  if (revisions.some(match => !scope(match.index!).length || !scope(match.index!).every(chapter => chapter.revision === Number(match[1] ?? match[2])))) return false
+  if (/(?:通过|零错误|0\s*错误|0\s*条意见)/u.test(sentence) && /(?:检查|连续性|人类感|写作质量)/u.test(sentence)) {
+    const continuity = /连续性/u.test(sentence), quality = /人类感|写作质量/u.test(sentence)
+    if (inherited.some(({ completion }) => (!quality || continuity) && (completion.continuity !== 'complete' || completion.continuityErrors > 0)
+      || (!continuity || quality) && (completion.quality !== 'complete' || completion.qualityErrors > 0)
+      || /0\s*条意见/u.test(sentence) && completion.openFindings !== 0)) return false
+  }
+  if (/^\s*>/u.test(sentence)) return scope(0).some(chapter => chapter.content.normalize('NFC').includes(sentence.replace(/^\s*>\s?/gmu, '').trim().normalize('NFC')))
+  for (const quote of quotes) {
+    if (!quote.value.trim()) continue
+    if (!quote.closed) return false
+    const chapters = scope(quote.start)
+    if (chapters.some(chapter => quote.value.trim() === chapter.content.trim())) return false
+    const references = new Set(chapters.flatMap(chapter => [chapter.title, chapter.id, `r${chapter.revision}`, chapter.completion.compilationId,
+      ...(chapter.completion.qualityReportId ? [chapter.completion.qualityReportId] : [])]))
+    if (references.has(quote.value) || chapters.some(chapter => chapter.content.normalize('NFC').includes(quote.value.normalize('NFC')))) continue
+    if (!writingStyleLabel(sentence, quote)) return false
+  }
+  return true
+}
+
+/** A model-declared manuscript block is replaced by the saved body below, never
+ * appended as an unchecked second draft. Explicit summary sections survive. */
+function withoutModelManuscriptBlocks(text: string): string {
+  const lines: string[] = []
+  let manuscript = false
+  const introduction = /^(?:(?:以下|下面)(?:是|为)?|这是|附上|展示)?\s*(?:(?:修改|修订|改写|调整|编辑|完善|补写)(?:后(?:的)?)?|已(?:保存|提交)(?:的)?|当前|最新|最终|新版)?\s*(?:正文|原文|章节正文|正文全文|全文|修订稿|成稿)(?:如下|是|为|内容)?\s*(?:[:：]|$)/u
+  const commentary = /^(?:修改总结|修订总结|改动总结|修改说明|修订说明|改动说明|完成情况|检查结果|核验结果|总结|说明|备注)\s*(?:[:：]|$)/u
+  for (const line of text.split('\n')) {
+    const heading = line.replace(/^\s*(?:#{1,6}\s*)?/u, '').replace(/\*\*|__/gu, '').trim()
+    const introductionMatch = introduction.exec(heading)
+    // Inline literal quotations are checked as quotations, including their
+    // line breaks; they must not swallow a later independent summary.
+    if (introductionMatch && !writingQuotePairs[heading.slice(introductionMatch[0].length).trim()[0]]) { manuscript = true; continue }
+    if (manuscript && commentary.test(heading)) manuscript = false
+    if (!manuscript) lines.push(line)
+  }
+  return lines.join('\n')
+}
+
+/** Only final presentation changes here. The manuscript, original request and
+ * review findings remain untouched, and supported natural summaries survive. */
+export function completedWritingPresentationText(delivery: PresentationDelivery, candidateText: string): string {
+  const receipt = `${delivery.chapters.map(chapter => `已保存《${chapter.title}》（r${chapter.revision}）`).join('；')}，章节终态已提交。`
+  const showFullText = delivery.presentation?.mode === 'full_text'
+    || !delivery.presentation && delivery.titleAndBodyOnly
+  let summary = withoutModelManuscriptBlocks(candidateText.split(receipt).join('')).trim()
+  for (const chapter of delivery.chapters) {
+    summary = summary.split(`${chapter.title}\n\n${chapter.content}`).join('')
+    if (summary.trim() === chapter.content.trim()) summary = ''
+  }
+  let inherited = delivery.chapters
+  summary = summarySentences(summary).filter(sentence => {
+    const mentions = writingChapterMentions(sentence, writingQuotations(sentence), delivery.chapters)
+    const supported = currentWritingSummarySentence(sentence, delivery, inherited)
+    if (mentions.length) inherited = mentions.at(-1)!.chapters
+    return supported
+  }).join('').trim()
+  if (showFullText && delivery.titleAndBodyOnly) return delivery.text
+  return [showFullText ? delivery.text : '', summary, receipt].filter(Boolean).join('\n\n')
+}
+
 /** A no-repeat preference withdraws chapter prose, not the author's wrap-up. */
 export function shouldUseSavedWritingPresentation(delivery: Awaited<ReturnType<typeof readSavedWritingPresentation>>, candidateText: string): boolean {
   return Boolean(delivery && (!candidateText.trim() || delivery.chapters.some(chapter => candidateText.includes(chapter.content))))
@@ -504,12 +661,12 @@ export function savedChapterPresentationProof(subject: Subject, delivery: NonNul
     chapters: delivery.chapters.map(({ id, title, revision, contentHash }) => ({ id, title, revision, contentHash })), text: delivery.text })
 }
 
-async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subject, presentationKind: 'auto' | 'completed_saved_only') {
+async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subject, presentationKind: 'auto' | 'completed_saved_only' | 'completed_wrap_up') {
   await lockNovelActiveScope(tx, subject.novelId)
   const scope = await readWritingScope(tx, subject)
   if (scope.writing?.kind !== 'bounded' || !scope.writing.targets.length
     || (presentationKind === 'auto' && !scope.writing.titleAndBodyOnly)
-    || !allowsChapterOnlyCompletion(scope.prompt, presentationKind === 'auto')) return null
+    || (presentationKind !== 'completed_wrap_up' && !allowsChapterOnlyCompletion(scope.prompt, presentationKind === 'auto'))) return null
   const targets = scope.writing.targets.map(target => ({ ...target, chapterId: target.chapterId ?? scope.bindings?.targets.find(item => item.orderIndex === target.orderIndex)?.chapterId }))
   const presentation = await readWritingPresentation(tx, subject, targets)
   if (presentationKind === 'completed_saved_only' && presentation?.mode !== 'saved_only') return null
@@ -538,7 +695,11 @@ async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subjec
     if (!readiness?.ready) return null
     if (hasPendingChapterReviewDecision(readiness)) return null
     if (length && (chapter.content.trim().length < Number(length[1]) || chapter.content.trim().length > Number(length[2]))) return null
-    chapters.push({ ...chapter, contentHash: runtimeJson({ content: chapter.content }).hash })
+    chapters.push({ ...chapter, contentHash: runtimeJson({ content: chapter.content }).hash,
+      completion: { compilationId: terminal.id, qualityReportId: readiness.qualityReportId,
+        commitHash: runtimeJson(JSON.parse(JSON.stringify(terminal))).hash, reviewHash: runtimeJson(readiness).hash,
+        continuity: readiness.continuity, quality: readiness.quality, continuityErrors: readiness.continuityErrorCount,
+        qualityErrors: readiness.qualityErrorCount, openFindings: readiness.reviewCycleFindings?.length ?? null } })
   }
   const showFullText = presentation ? presentation.mode === 'full_text' : scope.writing.titleAndBodyOnly
   return { chapters, titleAndBodyOnly: scope.writing.titleAndBodyOnly, presentation, presentationKind,

@@ -66,7 +66,7 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
     const runId = response.body.data.runId as string
     const row = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
     const spec = taskSpecSchema.parse(row.taskSpec)
-    expect(spec).toMatchObject({ intent: 'revise', scope: { writingTargetProtocol: 1,
+    expect(spec).toMatchObject({ intent: 'revise', scope: { writingTargetProtocol: 1, continuityEvidenceProtocol: 1,
       writing: { kind: 'bounded', repairAuthorized: true, targets: [{ orderIndex: 3, chapterId: ids[2] }] } } })
     expect(spec.scope.writing?.targets).toHaveLength(1)
     expect(await prisma.chapter.findMany({ where: { novelId: f.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
@@ -98,6 +98,7 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
     const result = await startLoopRun(f.userId, { ...f, prompt: '修改第一章', mode: 'build' })
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
     delete spec.scope.writingTargetProtocol
+    delete spec.scope.continuityEvidenceProtocol
     spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: true, titleAndBodyOnly: false }
     await prisma.agentRun.update({ where: { id: result.runId }, data: { status: 'running', taskSpec: spec } })
     expect(await prisma.$transaction(tx => freezeWritingScope(tx, { ...f, runId: result.runId }, spec, '修改第一章', 1))).toEqual(spec)

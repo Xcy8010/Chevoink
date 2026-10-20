@@ -7,7 +7,7 @@ import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { continuityCheckRounds, continuityRepairRounds } from './story-compiler.js'
 import { readOriginalTaskRequest, originalTaskRunIds, hasOriginalRepairAuthority } from './original-request.js'
 import { activeChapterScope } from '../data/internal.js'
-import { compilerContinuityCoverage, compilerContinuityCoverageMatches, currentCompilerContinuityAssessment, completeCompilerContinuityAssessment, continuityStoryInput } from './compiler-continuity-contract.js'
+import { compilerContinuityCoverage, compilerContinuityCoverageMatches, currentCompilerContinuityAssessment, completeCompilerContinuityAssessment, continuityStoryInput, storedContinuityProtocol } from './compiler-continuity-contract.js'
 import { qualityReportCheckedCurrentContent, selectAutomaticQualityFindings, qualityAutoRepairPending } from './quality-report-contract.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import { runtimeJson } from './runtime-common.js'
@@ -127,7 +127,7 @@ export function readCurrentCompilerContinuity(compilation: {
     ? compilation.validation as Record<string, unknown> : null
   const scenes = [...compilation.sceneTasks].sort((a, b) => a.ordinal - b.ordinal)
   const coverageFor = (bridge: unknown) => compilerContinuityCoverage({ chapter, bridge, sceneTasks: scenes, source,
-    focus: typeof validation?.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate: readTerminalCandidate(validation) })
+    focus: typeof validation?.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate: readTerminalCandidate(validation) }, storedContinuityProtocol(validation))
   const coverage = coverageFor(compilation.bridge)
   const assessment = currentCompilerContinuityAssessment(validation, chapter, coverage)
   if (assessment) return { assessment, coverage, checkedBridge: compilation.bridge }
@@ -748,7 +748,7 @@ export async function assertChapterReviewRevision(
       const source = await readCompilerContinuitySource(tx, subject, current, latest.bridge.fromChapterId)
       const sourceCurrent = !latest.bridge.fromChapterId || source?.revision === latest.bridge.sourceRevision
       if (sourceCurrent && compilerContinuityCoverageMatches(validation.coverage, compilerContinuityCoverage({ chapter: current,
-        bridge: latest.bridge, sceneTasks: latest.sceneTasks, source, focus: typeof validation.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate: readTerminalCandidate(validation) }))) {
+        bridge: latest.bridge, sceneTasks: latest.sceneTasks, source, focus: typeof validation.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate: readTerminalCandidate(validation) }, storedContinuityProtocol(validation)))) {
         await assertMergedMutation(latest)
         // This closure is server-created and bound to the same transaction.
         // Call ONLY after its body CAS succeeds; failed CAS must not consume it.

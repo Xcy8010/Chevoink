@@ -8,6 +8,7 @@ import { continuityReassessmentRequest, legacyContinuityAssessmentKey } from './
 import { compilerContinuityCoverage } from './compiler-continuity-contract.js'
 import { activeChapterScope } from '../data/internal.js'
 import { terminalCandidateSchema, readTerminalCandidate } from './terminal-state-review.js'
+import { continuitySourceScopeSchema } from './continuity-source-authority.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 /** Authenticate only this exact two-request tool interval. A matching action
@@ -29,7 +30,7 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
   if (full.length !== 1) return null
   const claim = full[0], meta = object(claim.metadata)
   const frozen = z.object({ chapterId: z.literal(input.chapterId), revision: z.literal(input.revision), bodies: z.object({ previous: z.string().nullable(), current: z.string() }),
-    system: z.string(), content: z.string(), bindingHash: z.string().optional(), terminalCandidate: terminalCandidateSchema.optional(), targetType: z.enum(['chapter', 'story_compilation']), targetId: z.string() }).strict().safeParse(meta.input)
+    system: z.string(), content: z.string(), parserVersion: z.literal(7).optional(), sourceScope: continuitySourceScopeSchema.optional(), bindingHash: z.string().optional(), terminalCandidate: terminalCandidateSchema.optional(), targetType: z.enum(['chapter', 'story_compilation']), targetId: z.string() }).strict().safeParse(meta.input)
   if (!frozen.success || !Array.isArray(meta.usageIds) || !object(meta.request).system || !object(meta.request).content
     || frozen.data.targetId !== (frozen.data.targetType === 'chapter' ? input.chapterId : input.compilationId)
     || meta.fullReassessmentKey !== legacyContinuityAssessmentKey({ runId: input.runId, callId: input.callId }, frozen.data)
@@ -39,11 +40,11 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
     || primaryAttempts.some(row => isKnownRejectedTextRequestAttempt(row) && row.createdAt >= primary[0].createdAt)
     || secondAttempts.some(row => isKnownRejectedTextRequestAttempt(row) && row.createdAt >= second[0].createdAt)) return null
   const original = object(meta.original), raw = object(original.rawResponse)
-  if (original.parserVersion !== 6 || raw.encoding !== 'json-string' || raw.complete !== true || typeof raw.content !== 'string') return null
+  if (original.parserVersion !== (frozen.data.parserVersion ?? 6) || raw.encoding !== 'json-string' || raw.complete !== true || typeof raw.content !== 'string') return null
   let content: unknown
   try { content = JSON.parse(raw.content) } catch { return null }
   if (typeof content !== 'string') return null
-  const inspected = inspectContinuityResponse(content, frozen.data.bodies, true, 6, frozen.data.terminalCandidate)
+  const inspected = inspectContinuityResponse(content, frozen.data.bodies, true, frozen.data.parserVersion ?? 6, frozen.data.terminalCandidate, frozen.data.sourceScope)
   if (inspected.complete || runtimeJson(inspected.audit).hash !== runtimeJson(original).hash
     || runtimeJson(meta.request).hash !== runtimeJson(continuityReassessmentRequest(frozen.data.system, frozen.data.content, inspected, frozen.data.bodies)).hash) return null
   const firstFrames = claims.filter(row => object(row.metadata).assessmentKey === meta.fullReassessmentKey && object(row.metadata).stage === 'first')
@@ -93,12 +94,13 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   const results = await tx.agentRunEvent.findMany({ where: { runId: call.runId, type: 'tool.result', payload: { path: ['callId'], equals: callId } } })
   if (results.length !== 1 || object(results[0].payload).ok !== false || object(results[0].payload).toolName !== 'continuity_validate'
     || results[0].createdAt >= input.admission.at || results[0].seq <= call.seq) return null
-  const coverage = compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source, focus: typeof args.focus === 'string' ? args.focus : undefined,
-    terminalCandidate: args.terminalState ? terminalCandidateSchema.parse(args.terminalState) : readTerminalCandidate(compilation.validation) })
+  const coverageInput = { chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source, focus: typeof args.focus === 'string' ? args.focus : undefined,
+    terminalCandidate: args.terminalState ? terminalCandidateSchema.parse(args.terminalState) : readTerminalCandidate(compilation.validation) }
   const reservations = await tx.agentArtifact.findMany({ where: { runId: call.runId, artifactType: 'continuityReview', metadata: { path: ['callId'], equals: callId } } })
   const reservation = reservations.filter(row => typeof object(row.metadata).continuityAssessmentRequestKey === 'string')
   if (reservation.length !== 1) return null
   const meta = object(reservation[0].metadata), frozen = object(meta.input), bodies = object(frozen.bodies), key = meta.continuityAssessmentRequestKey
+  const coverage = compilerContinuityCoverage(coverageInput, frozen.parserVersion === 7 ? 9 : 8)
   let sourceMatches = bodies.previous === (source?.content ?? null) && frozen.bindingHash === runtimeJson(coverage).hash
   if (!sourceMatches) {
     // A proven non-dispatch may have frozen the previous single-source

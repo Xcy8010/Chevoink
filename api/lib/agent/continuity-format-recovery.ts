@@ -4,6 +4,7 @@ import { continuityFindingInputSchema, type ContinuityFindingInput } from '../..
 import { parseQualityJsonObject } from './quality-evidence.js'
 import { resolveContinuitySources, type ContinuityBodies, type ContinuitySourceRelocation } from './continuity-review-context.js'
 import { unlocatedContinuityEvidence } from './continuity-finding-authority.js'
+import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './continuity-source-authority.js'
 import { inspectTerminalReview, type TerminalCandidate } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
 
@@ -27,7 +28,7 @@ function normalize(value: unknown, bodies: ContinuityBodies | undefined, parserV
 }
 
 /** Mechanical envelope compatibility; no new model call or missing-content reconstruction. */
-export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies, responseComplete = true, parserVersion: 3 | 4 | 5 | 6 = 3, terminalCandidate?: TerminalCandidate) {
+export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies, responseComplete = true, parserVersion: 3 | 4 | 5 | 6 | 7 = 3, terminalCandidate?: TerminalCandidate, sourceScope?: ContinuitySourceScope) {
   const sourceRelocations: ContinuitySourceRelocation[] = []
   let classification = responseComplete ? 'json_invalid' : 'response_incomplete'
   let record: Record<string, unknown> | null = null
@@ -68,6 +69,9 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
           })
           const resolved = bodies ? resolveContinuitySources(item, bodies, 4, sourceRelocations, index) : item
           const parsed = continuityFindingInputSchema.safeParse(resolved)
+          if (parserVersion >= 7 && bodies && parsed.success && invalidContinuitySourceClaim(parsed.data, bodies, item.sourceEvidence, sourceScope)) {
+            invalidSourceReferences.push({ findingIndex: index, referenceIndex: -1, source: 'current' })
+          }
           // An invented quote inside the judgment cannot be fixed without
           // rewriting that judgment, which an evidence-only call cannot do.
           if (bodies && unlocatedContinuityEvidence({ ...item, sourceEvidence: undefined }, bodies, false, true, false)) {
@@ -97,6 +101,7 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
   if (raw.length > MAX_AUDIT_CHARS) classification = 'response_too_large'
   if (classification === 'complete' && terminalCandidate && (!bodies || !inspectTerminalReview(terminalCandidate, bodies.current, raw, responseComplete))) classification = 'terminal_invalid'
   const audit = { version: 1, parserVersion, classification, unwrapped, ...(parserVersion >= 4 ? { sourceRelocations } : {}),
+    ...(parserVersion >= 7 && sourceScope ? { sourceScope } : {}),
     ...(terminalCandidate ? { terminalCandidate, terminalContentHash: bodies ? runtimeJson({ content: bodies.current }).hash : null } : {}),
     ...(parserVersion >= 5 ? { candidateFindings, invalidSourceReferences } : {}), contentHash: createHash('sha256').update(raw).digest('hex'),
     characterCount: raw.length, rawResponse: { version: 1, encoding: 'json-string', content: JSON.stringify(raw.slice(0, MAX_AUDIT_CHARS)), complete: raw.length <= MAX_AUDIT_CHARS } }
