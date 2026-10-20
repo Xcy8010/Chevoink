@@ -169,7 +169,8 @@ describe('import archival: bounded creative data scope', () => {
   })
 
   it('uses active default/placement/layout/hash and count-checked two-phase ordering', async () => {
-    db.chapter.findMany.mockResolvedValue([chapter])
+    // Exercise an actual displacement, not a layout that is already normalized.
+    db.chapter.findMany.mockResolvedValue([{ ...chapter, orderIndex: 2, orderInVolume: 2 }])
     expect(await ensureDefaultVolume(tx, 'n')).toBe(volume)
     await resolveChapterPlacement(tx, 'n', 'v')
     await normalizeNovelStructure(tx, 'n')
@@ -181,6 +182,11 @@ describe('import archival: bounded creative data scope', () => {
     expect(db.chapter.updateMany.mock.calls[0][0].data).toEqual({ orderIndex: -1, orderInVolume: -1 })
     expect(db.chapter.updateMany.mock.calls[1][0].data).toMatchObject({ orderIndex: 1, orderInVolume: 1, volumeId: 'v' })
     for (const [query] of db.chapter.updateMany.mock.calls) expect(query.where.AND[1]).toEqual(activeChapterScope())
+    expect(db.chapter.updateMany.mock.calls[1][0].data.revision).toEqual({ increment: 1 })
+    db.chapter.updateMany.mockClear()
+    db.chapter.findMany.mockResolvedValue([chapter])
+    await normalizeNovelStructure(tx, 'n')
+    expect(db.chapter.updateMany).not.toHaveBeenCalled()
   })
 
   it('fails ordering immediately if an observed row becomes archived', async () => {
