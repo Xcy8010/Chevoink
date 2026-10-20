@@ -3,6 +3,11 @@ import { z } from 'zod'
 import { parsePublicHttpUrl, readBoundedPublicBody } from './public-http.js'
 import { getToolModelRuntime, ToolModelConfigurationError, type ToolModelRuntime } from './tool-model-config.js'
 import { requestWebTool, webToolEndpoint } from './web-tool-provider.js'
+import { parseHTML } from 'linkedom'
+import { evaluateResearchSearchCandidates, searchQueryHash, type ResearchSearchEvaluation, type ResearchSearchTarget } from './research-search-quality.js'
+
+export { evaluateResearchSearchCandidates } from './research-search-quality.js'
+export type { ResearchSearchEvaluation, ResearchSearchTarget } from './research-search-quality.js'
 
 /**
  * 联网搜索服务（Agent web_search 工具的后端）：
@@ -24,6 +29,7 @@ export type WebSearchOutcome = {
   provider: 'bocha' | 'deepseek' | 'sogou' | 'bing'
   results: WebSearchResult[]
   attempts?: SearchAttempt[]
+  quality?: ResearchSearchEvaluation
 }
 
 type SearchAttempt = {
@@ -33,13 +39,46 @@ type SearchAttempt = {
   httpStatus?: number
   providerRequestId?: string
   providerCode?: string
+  queryHash?: string
+  resultCount?: number
+  eligibleCount?: number
+  constraintCodes?: string[]
+  parseCode?: string
+  responseFinalUrl?: { origin: string; path?: string; pathHash?: string; queryHash?: string }
+  queryEcho?: { state: 'matches' | 'differs' | 'absent'; hash?: string }
 }
 
-type AttemptResponse = Pick<SearchAttempt, 'httpStatus' | 'providerRequestId' | 'providerCode'>
-function captureSearchResponse(response: { status: number; headers: { get(name: string): string | null } }, metadata: AttemptResponse) {
+type AttemptResponse = Pick<SearchAttempt, 'httpStatus' | 'providerRequestId' | 'providerCode' | 'queryHash' | 'parseCode' | 'responseFinalUrl' | 'queryEcho'>
+function captureSearchResponse(response: { status: number; url?: string; headers: { get(name: string): string | null } }, metadata: AttemptResponse) {
   metadata.httpStatus = response.status
   const requestId = response.headers.get('x-request-id') ?? response.headers.get('request-id')
   if (requestId && /^[a-zA-Z0-9_.:-]{1,128}$/.test(requestId)) metadata.providerRequestId = requestId
+  if (metadata.queryHash && response.url) {
+    try {
+      const url = new URL(response.url)
+      if (url.protocol === 'https:' || url.protocol === 'http:') {
+        // Redirect diagnostics retain no credentials, query strings or arbitrary
+        // path tokens. Known search paths are useful; other paths stay hashed.
+        metadata.responseFinalUrl = { origin: url.origin,
+          ...(/^\/(?:search|web|v1\/(?:tools\/search|web-search))\/?$/u.test(url.pathname) ? { path: url.pathname } : { pathHash: searchQueryHash(url.pathname) }),
+          ...(url.search ? { queryHash: searchQueryHash(url.searchParams.get('q') ?? url.searchParams.get('query') ?? url.search) } : {}) }
+      }
+    } catch { /* A malformed response URL is not exposed as provider prose. */ }
+  }
+}
+
+function captureSearchHtml(html: string, metadata: AttemptResponse, query: string) {
+  if (!metadata.queryHash) return
+  metadata.queryEcho = { state: 'absent' }
+  try {
+    const { document } = parseHTML(html.slice(0, 256_000))
+    const input = document.querySelector('input[name="q"],input[name="query"],textarea[name="q"],textarea[name="query"]')
+    const echo = input?.getAttribute('value') ?? input?.textContent
+    if (echo && echo.length <= 8192) {
+      const normalize = (value: string) => value.normalize('NFC').replace(/\s+/gu, ' ').trim()
+      metadata.queryEcho = { state: normalize(echo) === normalize(query) ? 'matches' : 'differs', hash: searchQueryHash(echo) }
+    }
+  } catch { /* Echo absence is diagnostic, not an invented transport error. */ }
 }
 
 async function rejectSearchResponse(response: { status: number; body: { cancel(): Promise<unknown> } | null }, provider: string): Promise<never> {
@@ -152,12 +191,14 @@ async function searchBocha(query: string, maxResults: number, signal: AbortSigna
     }
 
     const body = await readBoundedPublicBody(response, 2 * 1024 * 1024)
+    if (metadata.queryHash) metadata.parseCode = 'BOCHA_INVALID_JSON'
     const raw: unknown = JSON.parse(body.toString('utf8'))
     if (raw && typeof raw === 'object') {
       if ('log_id' in raw && typeof raw.log_id === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(raw.log_id)) metadata.providerRequestId = raw.log_id
       if ('code' in raw && (typeof raw.code === 'string' || typeof raw.code === 'number') && /^[a-zA-Z0-9_-]{1,32}$/.test(String(raw.code))) metadata.providerCode = String(raw.code)
     }
     const payload = bochaResponseSchema.safeParse(raw)
+    if (metadata.queryHash) metadata.parseCode = payload.success ? 'BOCHA_RESULTS_SCHEMA_OK' : 'BOCHA_SCHEMA_REJECTED'
     if (!payload.success) throw new WebSearchError('博查响应格式或业务状态异常')
     const values = payload.data.data.webPages.value
 
@@ -181,8 +222,10 @@ async function searchDeepSeek(query: string, maxResults: number, signal: AbortSi
     const { response } = request
     captureSearchResponse(response, metadata)
     if (!response.ok) return await rejectSearchResponse(response, 'DeepSeek')
+    if (metadata.queryHash) metadata.parseCode = 'DEEPSEEK_INVALID_JSON'
     const raw: unknown = JSON.parse((await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8'))
     const payload = deepseekSearchSchema.safeParse(raw)
+    if (metadata.queryHash) metadata.parseCode = payload.success ? 'DEEPSEEK_RESULTS_SCHEMA_OK' : 'DEEPSEEK_SCHEMA_REJECTED'
     if (!payload.success) throw new WebSearchError('DEEPSEEK_SEARCH_PROTOCOL_ERROR')
     // Keep the original count until publicResults runs: unsafe-only results are
     // a failed contract, never evidence of a genuinely empty search.
@@ -210,6 +253,7 @@ async function searchSogou(query: string, maxResults: number, signal: AbortSigna
   }
 
   const html = (await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8')
+  captureSearchHtml(html, metadata, query)
   // vrwrap 块：容错切法——从 <div class="vrwrap" 起取到下一个 vrwrap/vrTitle 前的内容
   const blockStarts = [...html.matchAll(/<div class="vrwrap"[\s\S]*?(?=<div class="vrwrap"|$)/g)]
   const results: WebSearchResult[] = []
@@ -246,6 +290,7 @@ async function searchSogou(query: string, maxResults: number, signal: AbortSigna
     })
   }
 
+  if (metadata.queryHash) metadata.parseCode = results.length ? 'SOGOU_RESULTS_PARSED' : blockStarts.length ? 'SOGOU_NO_USABLE_LINKS' : 'SOGOU_NO_RESULT_BLOCKS'
   if (results.length === 0) {
     throw new WebSearchError('搜狗结果解析为空（可能触发反爬或结构变化）')
   }
@@ -272,6 +317,7 @@ async function searchBing(query: string, maxResults: number, signal: AbortSignal
   }
 
   const html = (await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8')
+  captureSearchHtml(html, metadata, query)
   const blocks = [...html.matchAll(/<li class="b_algo"[\s\S]*?<\/li>/g)]
   const results: WebSearchResult[] = []
 
@@ -303,6 +349,7 @@ async function searchBing(query: string, maxResults: number, signal: AbortSignal
     })
   }
 
+  if (metadata.queryHash) metadata.parseCode = results.length ? 'BING_RESULTS_PARSED' : blocks.length ? 'BING_NO_USABLE_LINKS' : 'BING_NO_RESULT_BLOCKS'
   if (results.length === 0) {
     throw new WebSearchError('Bing 结果解析为空（可能触发反爬或结构变化）')
   }
@@ -319,6 +366,7 @@ export async function searchWeb(
   maxResults: number,
   signal?: AbortSignal,
   configuredInput?: ToolModelRuntime | null,
+  expectedTarget?: ResearchSearchTarget,
 ): Promise<WebSearchOutcome> {
   if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 8) {
     throw new WebSearchError('搜索结果数量必须为 1–8')
@@ -337,11 +385,13 @@ export async function searchWeb(
     }
 
     const providers: WebSearchOutcome['provider'][] = primary ? [primary, 'sogou', 'bing'] : ['sogou', 'bing']
+    const constrained = evaluateResearchSearchCandidates(query, [], expectedTarget).hasHardConstraints
+    let constrainedResult: Pick<WebSearchOutcome, 'provider' | 'results' | 'quality'> | undefined
     let emptyProvider: WebSearchOutcome['provider'] | undefined
     for (const provider of providers) {
       merged.throwIfAborted()
       const started = Date.now()
-      const metadata: AttemptResponse = {}
+      const metadata: AttemptResponse = constrained ? { queryHash: searchQueryHash(query) } : {}
       // A slow provider must leave time for fallback; all attempts still share the overall deadline.
       const local = withTimeout(merged, Math.max(1, Math.floor(env.webSearchTimeoutMs / 2)))
       try {
@@ -351,13 +401,27 @@ export async function searchWeb(
             : await searchBing(query, maxResults, local.signal, metadata)
         local.signal.throwIfAborted()
         const results = publicResults(raw, maxResults)
-        if (raw.length && !results.length) throw new WebSearchError('搜索未返回可用的公开来源')
-        attempts.push({ provider, outcome: results.length ? 'results' : 'empty', durationMs: Date.now() - started, ...metadata })
-        if (results.length) return { provider, results, attempts }
+        if (raw.length && !results.length) {
+          if (constrained) metadata.parseCode = 'PUBLIC_SOURCE_FILTER_REJECTED'
+          throw new WebSearchError('搜索未返回可用的公开来源')
+        }
+        const quality = constrained ? evaluateResearchSearchCandidates(query, results, expectedTarget) : undefined
+        attempts.push({ provider, outcome: results.length ? 'results' : 'empty', durationMs: Date.now() - started, ...metadata,
+          ...(quality ? { resultCount: results.length, eligibleCount: quality.eligibleCount,
+            constraintCodes: [...new Set(quality.candidates.flatMap(candidate => candidate.reasons))] } : {}) })
+        if (results.length) {
+          if (!quality || quality.eligibleCount > 0) return { provider, results, attempts, ...(quality ? { quality } : {}) }
+          // A valid, irrelevant paid response stays a real result. Free fallback
+          // can improve discovery within this call, but never turn it into an
+          // empty/error refund if every provider lacks a qualified candidate.
+          constrainedResult ??= { provider, results, quality }
+          continue
+        }
         emptyProvider = provider
       } catch (error) {
         attempts.push({ provider, outcome: merged.aborted ? 'aborted' : 'failed', durationMs: Date.now() - started, ...metadata })
         if (merged.aborted) {
+          if (!signal?.aborted && constrainedResult) return { ...constrainedResult, attempts }
           if (!signal?.aborted && emptyProvider) return { provider: emptyProvider, results: [], attempts }
           throw error
         }
@@ -365,6 +429,7 @@ export async function searchWeb(
         local.cleanup()
       }
     }
+    if (constrainedResult) return { ...constrainedResult, attempts }
     if (emptyProvider) return { provider: emptyProvider, results: [], attempts }
     throw new WebSearchError('所有搜索引擎均未返回有效响应', attempts)
   } catch (error) {

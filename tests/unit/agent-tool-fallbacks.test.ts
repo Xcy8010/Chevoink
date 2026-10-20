@@ -45,6 +45,9 @@ describe('Agent 工具协议与结构化输出兜底', () => {
     expect(continuityCriticSystem).toContain('一个事实只报一次')
     expect(continuityCriticSystem).toContain('sourceEvidence')
     expect(continuityCriticSystem).toContain('现金与银行余额不同不等于矛盾')
+    expect(continuityCriticSystem).toContain('跨时刻核查原文已确立的持续约束')
+    expect(continuityCriticSystem).toContain('实际满足解除条件')
+    expect(continuityCriticSystem).toContain('故事行动或已设规则中成立')
   })
   it('parses complete continuity envelopes mechanically without hiding damaged reports', () => {
     expect(parseIndependentContinuityResult('报告：{"findings":[],}')).toEqual({ structured: true, findings: [] })

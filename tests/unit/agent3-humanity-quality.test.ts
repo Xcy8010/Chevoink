@@ -253,11 +253,27 @@ describe('严谨创作自动落实质量建议', () => {
   })
   it('provides the patcher the original intent and read-only context, bound at write time', async () => {
     const f = fixture(true)
-    await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(result.semanticTransition).toMatchObject({ targetId: 'chapter:c', beforeHash: expect.stringMatching(/^[a-f0-9]{64}$/u), afterHash: expect.stringMatching(/^[a-f0-9]{64}$/u) })
+    expect(result.semanticTransition?.beforeHash).not.toBe(result.semanticTransition?.afterHash)
     expect(f.model.mock.calls[0][1]).toContain(f.bundle.originalRequest!)
     expect(f.model.mock.calls[0][1]).toContain('"before"')
     expect(f.write).toHaveBeenCalledWith(expect.objectContaining({ expectedContextHash: humanityQuality.qualityReviewContextHash(f.bundle) }))
     expect(f.model.mock.calls[0][2]).toMatchObject({ userId: 'u', novelId: 'n', agentRunId: 'r', action: 'agent3HumanityRevision', targetId: 'q' })
+  })
+  it('retains a patch that copies read-only neighbor prose without another paid repair attempt', async () => {
+    const f = fixture(true)
+    const before = '控制阀位于平台的西北角。', evidence = '她转身看了一眼。'
+    f.report.chapter.content = before + evidence
+    f.report.findings = [{ ...f.report.findings[0], startOffset: before.length, endOffset: before.length + evidence.length, evidenceExcerpt: evidence }]
+    f.report.deterministicMetrics = { ...f.report.deterministicMetrics as Prisma.JsonObject, contentHash: digest(f.report.chapter.content), qualityContextHash: humanityQuality.qualityReviewContextHash(f.bundle) }
+    f.model.mockResolvedValue(JSON.stringify({ patches: [{ findingId: f.report.findings[0].id, replacement: '控制阀位于平台的西北角，她低头看了一眼。' }] }))
+    const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(f.model).toHaveBeenCalledOnce()
+    expect(f.write).not.toHaveBeenCalled()
+    expect(result.semanticTransition).toBeUndefined()
+    expect(result.output).toContain('正文未修改')
+    expect(f.report.findings[0].disposition).toBe('pending')
   })
   it('attributes the critic and every bounded repair attempt to the executing run', async () => {
     const f = fixture(false, 'duplicate')

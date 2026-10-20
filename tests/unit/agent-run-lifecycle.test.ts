@@ -27,6 +27,9 @@ const mocks = vi.hoisted(() => ({
   todos: vi.fn(async (): Promise<AgentTodoItem[]> => []),
   priorRuns: vi.fn(),
   report: vi.fn(async (): Promise<{ chineseCharacters: number; content: string; evidence?: { targetAnalysisSupported?: boolean } }> => ({ chineseCharacters: 0, content: '' })),
+  researchClaim: vi.fn(async (): Promise<{ sourceId: string; receiptId: string } | null> => null),
+  researchTake: vi.fn(async (): Promise<{ sourceId: string; receiptId: string } | null> => null),
+  researchPartial: vi.fn(async (): Promise<string | null> => '研究尚未完成：未完成有正文依据的写法分析。'),
   original: vi.fn<() => Promise<{ parts: Array<{ type: string; text: string }> } | null>>(async () => ({ parts: [{ type: 'text', text: '核对原任务的剩余工作。' }] })),
   tools: [] as AgentTool[],
   hiddenTools: [] as AgentTool[],
@@ -229,6 +232,8 @@ vi.mock('../../api/lib/agent/legacy-input-recovery.js', () => ({ readLegacyAncho
 vi.mock('../../api/lib/agent/continuity-offline-recovery.js', () => ({ readOfflineContinuityRecovery: mocks.offlineContinuity }))
 vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChapter: mocks.committedChapter }))
 vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportForDelivery: mocks.report }))
+vi.mock('../../api/lib/agent/research-recovery.js', () => ({ claimResearchReadHandoff: mocks.researchClaim,
+  takeResearchReadHandoff: mocks.researchTake, saveResearchLimitationDelivery: mocks.researchPartial }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
 vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: () => ({ emit: mocks.emit, emitTransient: mocks.emit, persist: mocks.journal,
   commitTerminal: async (body: AgentStreamEventBody, work: (tx: Record<string, unknown>) => Promise<unknown>,
@@ -291,6 +296,9 @@ beforeEach(() => {
   mocks.journal.mockReset().mockResolvedValue(undefined)
   mocks.report.mockReset()
   mocks.report.mockResolvedValue({ chineseCharacters: 0, content: '' })
+  mocks.researchClaim.mockReset().mockResolvedValue(null)
+  mocks.researchTake.mockReset().mockResolvedValue(null)
+  mocks.researchPartial.mockReset().mockResolvedValue('研究尚未完成：未完成有正文依据的写法分析。')
   mocks.original.mockReset()
   mocks.original.mockImplementation(async () => ({ parts: [{ type: 'text', text: mocks.sourcePrompt ?? mocks.admissionPrompt }] }))
   mocks.update.mockReset()
@@ -1859,7 +1867,49 @@ describe('original task context on resume', () => {
     await run(prompt)
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: expect.stringContaining('未完成有正文依据的写法分析') }))
-    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused' })
+  })
+  it('hands the fourth authenticated candidate to one normal admitted read before the stagnation stop', async () => {
+    const prompt = '联网研究番茄小说《样本》的写作手法并读取公开正文'
+    mocks.update.mockResolvedValueOnce({ taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, researchAdmission: 1 }) })
+    const handoff = { sourceId: 'source', receiptId: 'handoff' }
+    mocks.researchClaim.mockResolvedValueOnce(handoff)
+    mocks.researchTake.mockResolvedValueOnce(null).mockResolvedValueOnce(handoff)
+    const read = tool('web_read', async () => ({ output: '取得已保存的可核验正文证据。' }))
+    mocks.tools = [tool('web_search', async () => ({ output: '搜索候选，尚非正文。' })), read]
+    queue(...Array.from({ length: 4 }, (_, index) => response('', [call(`search-${index}`, 'web_search', JSON.stringify({ query: index }))])), response('材料不足。'))
+    await run(prompt)
+    expect(mocks.researchClaim).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run' }), ['search-3'])
+    expect(read.execute).toHaveBeenCalledOnce()
+    expect(read.execute).toHaveBeenCalledWith(expect.objectContaining({ callId: 'research-read-handoff' }), { sourceId: 'source' })
+    expect(mocks.chat).toHaveBeenCalledTimes(5)
+    expect(mocks.researchPartial).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused' })
+  })
+  it('parks four distinct irrelevant searches with a deterministic partial report and no paid wrap-up', async () => {
+    const prompt = '联网研究番茄小说《样本》的写作手法并读取公开正文'
+    mocks.update.mockResolvedValueOnce({ taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, researchAdmission: 1 }) })
+    const read = tool('web_read', async () => ({ output: 'must not dispatch' }))
+    mocks.tools = [tool('web_search', async () => ({ output: '未找到符合约束的来源。' })), read]
+    queue(...Array.from({ length: 4 }, (_, index) => response('', [call(`search-${index}`, 'web_search', JSON.stringify({ query: index }))])))
+    await run(prompt)
+    expect(mocks.chat).toHaveBeenCalledTimes(4)
+    expect(read.execute).not.toHaveBeenCalled()
+    expect(mocks.researchPartial).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused' })
+  })
+  it('invalidates an old chapter-read signature after a server-verified automatic quality repair', async () => {
+    let text = '旧版本正文。'
+    const read = tool('chapter_read', async () => ({ output: text }))
+    mocks.tools = [read, tool('quality_analyze', async () => { const before = text; text = '新版本正文。'; return { output: '质量修订已保存。',
+      semanticTransition: { targetId: 'chapter:c', beforeHash: persistedContentHash(before), afterHash: persistedContentHash(text) } } })]
+    queue(response('', [call('r1')]), response('', [call('repair', 'quality_analyze')]), response('', [call('r2')]), response('检查已完成。'))
+    await run('检查当前章节')
+    expect(read.execute).toHaveBeenCalledTimes(2)
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'r2', ok: true }))
   })
   it('does not demand body evidence for explicitly bibliographic research', async () => {
     const prompt = '联网研究《样本》的作者与出版信息，不读取正文'

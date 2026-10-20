@@ -49,7 +49,8 @@ import { resolveDurableAuxiliaryRuntime, resolveReviewModelRuntime } from '../ru
 import { readQualityFormatRecovery, claimQualityFormatRecovery, claimCurrentQualityFormatRecovery, bindQualityFormatRecovery, hasReconciledQualityRequest, type QualityFormatRecovery } from '../quality-format-recovery.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { runtimeJson } from '../runtime-common.js'
-import { qualityRepairSurroundings, renderQualityNeighbors } from '../quality-neighbor-context.js'
+import { copiesQualityNeighborClause, qualityRepairSurroundings, renderQualityNeighbors } from '../quality-neighbor-context.js'
+import { persistedContentHash } from '../semantic-progress.js'
 
 const READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const WRITE = { plan: 'deny', build: 'allow', review: 'allow' } as const
@@ -180,6 +181,7 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
           return {
             output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。修订回执已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 和 quality_analyze 只读复核当前版本，旧 critic 结论不证明修订后正文已检查。${remaining ? decisionGuidance : ''}${bindingSuffix}`,
             summary: `人类感质量检查 · r${checkedRevision} 已检查，修订 ${repaired.patchCount} 处至 r${repaired.result.updated.revision}，需复检`, display: reportDisplay(repaired.report),
+            semanticTransition: { targetId: `chapter:${repaired.result.updated.id}`, beforeHash: persistedContentHash(repaired.result.before), afterHash: persistedContentHash(repaired.result.after) },
             snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },
           }
         }
@@ -212,8 +214,9 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
   const repairRuntime = frozenQuality?.runtime ?? await resolveReviewModelRuntime({ ...ctx, task: 'quality' })
   const selectedById = new Map(selected.map((finding) => [finding.id, finding]))
   const patches = new Map<string, { findingId: string; replacement: string }>()
+  const unsafe = new Set<string>()
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const remaining = selected.filter((finding) => !patches.has(finding.id))
+    const remaining = selected.filter((finding) => !patches.has(finding.id) && !unsafe.has(finding.id))
     if (remaining.length === 0) break
     // Only a normally returned response may enter format recovery. A timeout
     // or transport error can carry unknown billed usage; never dispatch again.
@@ -229,6 +232,11 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
       const parsedAttempt = repairEnvelopeSchema.parse(parseQualityJsonObject(response, 'patches', 2))
       for (const patch of parsedAttempt.patches) {
         const finding = selectedById.get(patch.findingId)
+        if (finding && parsedAttempt.patches.filter(item => item.findingId === patch.findingId).length === 1
+          && copiesQualityNeighborClause(report.chapter.content, finding.startOffset, finding.endOffset, patch.replacement)) {
+          unsafe.add(finding.id)
+          continue
+        }
         if (finding && parsedAttempt.patches.filter(item => item.findingId === patch.findingId).length === 1
           && patch.replacement !== report.chapter.content.slice(finding.startOffset, finding.endOffset)) patches.set(patch.findingId, patch)
       }

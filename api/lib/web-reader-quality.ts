@@ -30,7 +30,7 @@ export type ReaderQualityResult = {
   quality: ReaderQuality
 }
 
-export type ReaderTarget = { title: string; author?: string }
+export type ReaderTarget = { title: string; author?: string; sourceHosts?: readonly string[] }
 export type ReaderEvidence = {
   version: 1
   identity: { status: 'verified' | 'mismatch' | 'unknown'; title?: string; author?: string; pageType: 'chapter' | 'book' | 'unknown'; basis: 'structured_metadata' | 'page_title' | 'none' }
@@ -47,7 +47,7 @@ const identityValue = (value: string) => value.normalize('NFC').trim().replace(/
 
 /** Metadata is source evidence, not authority. Never equate a title prefix,
  * common hostname or a search snippet with the requested original work. */
-export function assessReaderEvidence(text: string, pageTitle: string, target?: ReaderTarget, sourceHtml?: string): ReaderEvidence {
+export function assessReaderEvidence(text: string, pageTitle: string, target?: ReaderTarget, sourceHtml?: string, sourceUrl?: string): ReaderEvidence {
   let title: string | undefined, author: string | undefined
   let basis: ReaderEvidence['identity']['basis'] = 'none'
   let pageType: ReaderEvidence['identity']['pageType'] = 'unknown'
@@ -104,7 +104,11 @@ export function assessReaderEvidence(text: string, pageTitle: string, target?: R
   }
   if (title) title = identityValue(title).slice(0, 300)
   if (author) author = identityValue(author).slice(0, 300)
-  const mismatch = Boolean(target && ((title && title !== identityValue(target.title)) || (target.author && author && author !== identityValue(target.author))))
+  const sourceMismatch = Boolean(target?.sourceHosts?.length && !target.sourceHosts.some(host => {
+    try { const actual = new URL(sourceUrl ?? '').hostname.toLowerCase()
+      return actual === host || actual.endsWith(`.${host}`) } catch { return false }
+  }))
+  const mismatch = sourceMismatch || Boolean(target && ((title && title !== identityValue(target.title)) || (target.author && author && author !== identityValue(target.author))))
   const verified = Boolean(target && title === identityValue(target.title) && author && (!target.author || author === identityValue(target.author)) && basis === 'structured_metadata')
   const integrity: ReaderEvidence['integrity'] = { status: 'unverified', code: 'SOURCE_COMPLETENESS_UNVERIFIED', extractedHash: textHash(text) }
   if (reference) {

@@ -216,6 +216,9 @@ export async function reserveResearchRequest(scope: Scope & { callId: string }, 
       throw new DataAccessError(403, 'RESEARCH_NETWORK_DENIED', '原始请求明确禁止联网，本次未预约、未请求供应商、未收工具费。')
     }
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
+    if (kind === 'read' && frozen.success && frozen.data.researchReadAccess === 'denied') {
+      throw new DataAccessError(403, 'RESEARCH_READ_DENIED', '原始请求只允许搜索，未预约、未读取网页、未收读取费。')
+    }
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${scopeKey}, 0))::text`
     const id = hash(JSON.stringify([scopeKey, scope.runId, scope.callId]))
     const previous = await tx.agentResearchRequest.findUnique({ where: { id } })
@@ -272,12 +275,13 @@ export async function recordResearchReadOutcome(scope: Scope & { callId: string 
 }
 
 const searchOutcomeSchema = z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing']),
+  query: z.string().max(120).optional(),
   results: z.array(z.object({ title: z.string(), url: z.string().max(8192), snippet: z.string(), source: z.string() })).max(8) })
 
 /** Persist only bounded public results, not provider credentials or trace IDs. */
-export async function saveResearchSearchOutcome(scope: Scope & { callId: string }, outcome: unknown) {
+export async function saveResearchSearchOutcome(scope: Scope & { callId: string }, outcome: unknown, query?: string) {
   const parsed = searchOutcomeSchema.parse(outcome)
-  const savedOutcome = { provider: parsed.provider, results: parsed.results.map(result => ({
+  const savedOutcome = { provider: parsed.provider, ...(query ? { query: query.slice(0, 120) } : {}), results: parsed.results.map(result => ({
     title: result.title.slice(0, 300), url: canonicalResearchUrl(result.url), snippet: result.snippet.slice(0, 300), source: result.source.slice(0, 300),
   })) }
   return prisma.$transaction(async tx => {

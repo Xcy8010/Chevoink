@@ -60,6 +60,13 @@ describe('source-grounded work identity and extraction integrity', () => {
   it('matches exact structured book and author, independently from readable body quality', () => {
     expect(assessReaderEvidence(original, '河谷纪事第1章 清晨', target, html())).toMatchObject({ identity: { status: 'verified', title: target.title, author: target.author, pageType: 'chapter' }, integrity: { status: 'source_compared', code: 'SOURCE_TEXT_MATCH' } })
   })
+  it('uses the final source host, including redirects, before certifying a frozen official source', () => {
+    const scoped = { ...target, sourceHosts: ['publisher.example'] }
+    for (const url of [undefined, 'https://other.example/chapter/1', 'https://publisher.example.evil.example/chapter/1']) {
+      expect(assessReaderEvidence(original, target.title, scoped, html(), url).identity.status).toBe('mismatch')
+    }
+    expect(assessReaderEvidence(original, target.title, scoped, html(), 'https://www.publisher.example/chapter/1').identity.status).toBe('verified')
+  })
   it.each(['河谷纪事：番外', '河谷纪事青龙', '另一部作品'])('rejects the original-name prefix as identity proof: %s', title => {
     expect(assessReaderEvidence(original, `${title}第1章`, target, html(title)).identity.status).toBe('mismatch')
     expect(assessReaderText(original).status).toBe('ok')

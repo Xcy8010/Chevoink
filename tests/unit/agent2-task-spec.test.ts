@@ -3,6 +3,26 @@ import { describe, expect, it } from 'vitest'
 import { buildTaskSpec, extractDirectiveCandidates, narrowLegacyResearchTask, renderTaskSpec } from '../../api/lib/agent/task-spec.js'
 
 describe('fresh external craft research admission', () => {
+  it.each(['先只搜索番茄小说页面链接，不读正文，也不要自动打开链接', '禁止读取正文', '只返回搜索链接', "don't open links"])(
+    'freezes search-only scope before automatic recovery: %s', restriction => {
+      const spec = buildTaskSpec({ runId: 'r', novelId: 'n', researchAdmission: 1, prompt: `联网研究《样本》的写作手法，${restriction}` })
+      expect(spec.researchReadAccess).toBe('denied')
+      expect(renderTaskSpec(spec)).toContain('不提供或执行web_read')
+    })
+  it('freezes explicit source domains while preserving ordinary read permission and old contracts', () => {
+    const prompt = '联网研究《样本》的写作手法，搜索番茄小说并读取公开正文'
+    const spec = buildTaskSpec({ runId: 'r', novelId: 'n', researchAdmission: 1, prompt })
+    expect(spec.researchTarget?.sourceHosts).toEqual(['fanqienovel.com'])
+    expect(spec.researchDiscoveryProtocol).toBe(1)
+    expect(spec.researchReadAccess).toBeUndefined()
+    expect(buildTaskSpec({ runId: 'old', novelId: 'n', prompt }).researchDiscoveryProtocol).toBeUndefined()
+  })
+  it('does not interpret a read-then-analyze quality requirement as a read ban', () => {
+    const spec = buildTaskSpec({ runId: 'r', novelId: 'n', researchAdmission: 1,
+      prompt: '联网研究《样本》的写作手法，不要读取正文后就停止，还要分析叙事效果；site:-invalid.example' })
+    expect(spec.researchReadAccess).toBeUndefined()
+    expect(spec.researchTarget?.sourceHosts).toBeUndefined()
+  })
   it.each(['、', '，', '；', '\n'])('bounds direct negative actions at %j without losing research', separator => {
     const prompt = ['只读联网研究', '不创建章节', '不写小说正文', '不改任何稿件', '请优先研究番茄小说《样本》',
       '不要在官网首页泛泛搜索', '不要只凭简介、搜索摘要或同人文字推断原作', '先核官方身份并读取两章公开正文按证据分析'].join(separator)

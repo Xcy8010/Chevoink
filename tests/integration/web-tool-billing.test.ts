@@ -4,8 +4,19 @@ import { afterAll, describe, expect, it, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
 import { executeWebToolCall, findWebToolCallOutcome, saveWebToolCacheOutcome, refundCancelledWebToolCall } from '../../api/lib/billing/web-tool-calls.js'
 import { getCreditWindow, reconcileCreditRefunds, reserveTokenCredits } from '../../api/lib/credits.js'
+import { webSearchTool } from '../../api/lib/agent/tools/search-tools.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { env } from '../../api/config/env.js'
+import type { WebSearchOutcome, WebSearchResult } from '../../api/lib/web-search-service.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
+
+// Only supplier transport/configuration is mocked. The tool, request budgets,
+// durable receipt, wallet settlement and refund reconciliation use real PG.
+const searchTransport = vi.hoisted(() => vi.fn())
+const searchConfiguration = vi.hoisted(() => vi.fn())
+vi.mock('undici', async original => ({ ...await original<typeof import('undici')>(), fetch: (...args: unknown[]) => searchTransport(...args) }))
+vi.mock('../../api/lib/tool-model-config.js', async original => ({ ...await original<typeof import('../../api/lib/tool-model-config.js')>(), getToolModelRuntime: searchConfiguration }))
 
 const available = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 afterAll(async () => { await prisma.$disconnect() })
@@ -36,6 +47,59 @@ async function fixture(work: (ctx: ToolContext) => Promise<void>, balance = 1000
 const ledger = (ctx: ToolContext) => prisma.creditLedgerEntry.findMany({ where: { userId: ctx.userId }, orderBy: { createdAt: 'asc' } })
 
 describe.skipIf(!available)('Search / Fetch billing with isolated PostgreSQL (simulated supplier)', () => {
+  it.each(['eligible-free-fallback', 'all-ineligible'] as const)('settles actual constrained search tool %s without repricing or replaying a supplier', async branch => {
+    const originalProvider = env.webSearchProvider
+    env.webSearchProvider = 'auto'
+    const target = { title: '河谷纪事', author: '林青', sourceHosts: ['fiction.example.com'], textAnalysisRequired: true }
+    const query = 'site:fiction.example.com 河谷纪事 林青'
+    const official: WebSearchResult = { title: '河谷纪事最新章节在线阅读_林青', url: 'https://fiction.example.com/page/123', snippet: '作者：林青，作品目录。', source: 'fiction.example.com' }
+    const secondary: WebSearchResult = { title: '林青《河谷纪事》创作访谈', url: 'https://news.example.com/article/1', snippet: '访谈文章，不是目标原作章节。', source: 'news.example.com' }
+    const irrelevant: WebSearchResult = { title: '河（汉字）', url: 'https://dictionary.example.com/item/he', snippet: '汉字释义。', source: 'dictionary.example.com' }
+    const freeResult = branch === 'eligible-free-fallback' ? official : irrelevant
+    searchConfiguration.mockReset().mockResolvedValue({ provider: 'deepseek', modelName: 'deepseek-search', baseUrl: 'https://api.deepseek.com', apiKey: 'offline-supplier-fixture' })
+    searchTransport.mockReset().mockResolvedValueOnce(Response.json({ results: [{ ...secondary, summary: secondary.snippet, content: '', site_name: secondary.source }] }))
+      .mockResolvedValueOnce(new Response(`<div class="vrwrap" data-url="${freeResult.url}"><h3 class="vr-title"><a href="${freeResult.url}">${freeResult.title}</a></h3><p>${freeResult.snippet}</p></div>`))
+    if (branch === 'all-ineligible') searchTransport.mockResolvedValueOnce(new Response(`<li class="b_algo"><h2><a href="${irrelevant.url}">${irrelevant.title}</a></h2><p>${irrelevant.snippet}</p></li>`))
+    vi.stubGlobal('fetch', searchTransport)
+    try {
+      await fixture(async ctx => {
+        const spec = { ...buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt: '只读联网研究《河谷纪事》并分析公开样本', researchAdmission: 1 }),
+          researchTarget: target, researchDiscoveryProtocol: 1 }
+        await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } })
+        const first = await webSearchTool.execute(ctx, { query, maxResults: 6 })
+        expect(first.outcome).toBeUndefined()
+        expect(first.display).toMatchObject({ kind: 'webSearch', provider: branch === 'eligible-free-fallback' ? 'sogou' : 'deepseek' })
+        const receipt = await prisma.webToolCall.findFirstOrThrow({ where: { runId: ctx.runId, kind: 'search' } })
+        expect(receipt).toMatchObject({ status: 'completed' })
+        expect(receipt.amountMilli).toBeGreaterThan(0)
+        const saved = receipt.outcome as unknown as WebSearchOutcome
+        expect(saved).toMatchObject({ provider: branch === 'eligible-free-fallback' ? 'sogou' : 'deepseek',
+          quality: { eligibleCount: branch === 'eligible-free-fallback' ? 1 : 0 } })
+        expect(saved.attempts?.[0]).toMatchObject({ provider: 'deepseek', outcome: 'results', resultCount: 1, eligibleCount: 0 })
+        expect(saved.results[0].url).toBe(branch === 'eligible-free-fallback' ? official.url : secondary.url)
+        expect(saved.attempts).toHaveLength(branch === 'eligible-free-fallback' ? 2 : 3)
+        const again = await webSearchTool.execute(ctx, { query, maxResults: 6 })
+        expect(again.output).toBe(first.output)
+        await Promise.all([reconcileCreditRefunds({ userId: ctx.userId }), reconcileCreditRefunds({ userId: ctx.userId })])
+        const entries = await ledger(ctx)
+        expect(entries.filter(entry => entry.kind === 'usage')).toHaveLength(1)
+        expect(entries.filter(entry => entry.kind === 'refund')).toHaveLength(branch === 'eligible-free-fallback' ? 1 : 0)
+        expect(entries.reduce((sum, entry) => sum + entry.deltaMilli, 0)).toBe(branch === 'eligible-free-fallback' ? 0 : -receipt.amountMilli)
+        expect(await prisma.creditRefundIntent.count({ where: { originalEntry: { userId: ctx.userId } } })).toBe(branch === 'eligible-free-fallback' ? 1 : 0)
+        expect((await prisma.creditAccount.findUniqueOrThrow({ where: { userId: ctx.userId } })).dailyUsedMilli).toBe(branch === 'eligible-free-fallback' ? 0 : receipt.amountMilli)
+        expect(await prisma.webToolCall.count({ where: { runId: ctx.runId } })).toBe(1)
+        expect(await prisma.agentResearchRequest.count({ where: { ownerRunId: ctx.runId, kind: 'search', status: 'consumed' } })).toBe(1)
+        expect(searchTransport).toHaveBeenCalledTimes(branch === 'eligible-free-fallback' ? 2 : 3)
+        expect(searchTransport.mock.calls.filter(([url]) => String(url).includes('/v1/tools/search'))).toHaveLength(1)
+        expect(JSON.stringify(receipt.outcome)).not.toContain('offline-supplier-fixture')
+      })
+    } finally {
+      env.webSearchProvider = originalProvider
+      searchConfiguration.mockReset()
+      searchTransport.mockReset()
+      vi.unstubAllGlobals()
+    }
+  })
   it('refunds an observed incomplete Fetch once and replays its evidence without another supplier request', async () => {
     await fixture(async ctx => {
       const failure = { provider: 'deepseek', status: 'unreadable', code: 'WEB_READ_INCOMPLETE', text: '',

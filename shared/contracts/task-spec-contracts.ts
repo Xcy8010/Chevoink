@@ -90,9 +90,14 @@ export const taskSpecSchema = z.object({
   researchBudget: z.enum(['standard', 'extended']).optional(),
   /** Fresh server-derived denial; absent legacy contracts keep their ceiling. */
   networkAccess: z.literal('denied').optional(),
+  /** Search-only scope is distinct from a complete network prohibition. */
+  researchReadAccess: z.literal('denied').optional(),
+  /** Fresh server policy for bounded source discovery/reading and limitation receipts. */
+  researchDiscoveryProtocol: z.literal(1).optional(),
   /** Exact external work named by the fresh author, never a model-selected prefix. */
   researchTarget: z.object({ title: z.string().trim().min(1).max(120), author: z.string().trim().min(1).max(120).optional(),
-    textAnalysisRequired: z.boolean().optional() }).strict().optional(),
+    textAnalysisRequired: z.boolean().optional(),
+    sourceHosts: z.array(z.string().min(1).max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/iu)).min(1).max(8).optional() }).strict().optional(),
   /** Server-frozen creative scope; a broad book request is a proposal, not permission to serialize indefinitely. */
   writingPacing: z.enum(['proposal_only', 'explicit_writing', 'conversation_only']).optional(),
   scope: taskScopeSchema,

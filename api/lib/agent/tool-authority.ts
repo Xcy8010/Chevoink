@@ -11,6 +11,7 @@ export type ToolAuthority = ReadonlyMap<string, Readonly<{
 /** Narrow both the model's schemas and the executor's admission ceiling. */
 export function restrictToolsToTask(tools: AgentTool[], task: TaskSpec): AgentTool[] {
   if (task.networkAccess === 'denied') tools = tools.filter(tool => tool.name !== 'web_search' && tool.name !== 'web_read')
+  if (task.researchReadAccess === 'denied') tools = tools.filter(tool => tool.name !== 'web_read')
   if (task.writingPacing === 'conversation_only') return tools.filter(tool => tool.readOnly || ['ask_user', 'goal_report', 'goal_enable', 'agent_configure', 'model_assign'].includes(tool.name))
   if (task.writingPacing === 'proposal_only') {
     // This ceiling is snapshotted and inherited by children and resume. A model

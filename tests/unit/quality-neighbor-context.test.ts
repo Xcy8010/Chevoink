@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { qualityNeighborContext, qualityRepairSurroundings, QUALITY_NEIGHBOR_MAX_CHARS } from '../../api/lib/agent/quality-neighbor-context.js'
+import { copiesQualityNeighborClause, qualityNeighborContext, qualityRepairSurroundings, QUALITY_NEIGHBOR_MAX_CHARS } from '../../api/lib/agent/quality-neighbor-context.js'
 import { buildCriticInput, buildQualityRepairContext } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { qualityReviewContextHash, type buildHumanityQualityContext } from '../../api/lib/agent/humanity-quality.js'
 import { qualityWorkContextProjection } from '../../api/lib/agent/tools/durable-quality.js'
@@ -12,6 +12,14 @@ const bundle = { chapter: { id: 'now', title: '等候', revision: 1, content: '�
   originalRequest: '停在门打开前，保留克制口吻。', chapterWritingBackground: [] } as unknown as Bundle
 
 describe('bounded humanity neighbors and repair intent', () => {
+  it('refuses a patch that repeats a read-only neighbor clause with changed punctuation', () => {
+    const left = '阀门位于平台的西北角。', original = '她转身查看仪表。', right = '表针终于停了下来。'
+    const content = left + original + right
+    expect(copiesQualityNeighborClause(content, left.length, left.length + original.length, '阀门位于平台的西北角，她低头查看仪表。')).toBe(true)
+    expect(copiesQualityNeighborClause(content, left.length, left.length + original.length, '她扶住阀门，低头查看仪表。')).toBe(false)
+    expect(copiesQualityNeighborClause(content, 0, left.length, '阀门位于平台的西北角，她看了一眼。')).toBe(false)
+    expect(copiesQualityNeighborClause('门开了。她转身。', 4, 8, '她看着门开了。')).toBe(false)
+  })
   it('selects latest three then presents chronological identities and complete normal prose', () => {
     const rows = [1, 4, 2, 3].map(orderIndex => ({ ...neighbor, id: `c${orderIndex}`, orderIndex }))
     expect(qualityNeighborContext(rows).map(row => row.id)).toEqual(['c2', 'c3', 'c4'])

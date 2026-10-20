@@ -819,6 +819,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const consumedReviewDecisionFeedback = new Set<string>()
   let blockedRepeat = 0
   let stagnantBatches = 0
+  let researchReadBootstrap: { sourceId: string; receiptId: string } | null = null
+  let researchHandoffChecked = false
   const argumentFailures = new Map<string, number>()
   const toolProviderFailures = new Map<string, number>()
   const recoveryFailures = new Map<string, number>()
@@ -1677,13 +1679,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     /** A local unavailable tool cannot manufacture whole-task failure. Work that
      * cannot yet be delivered is parked honestly, with its original obligations. */
     const wrapUpAndFinish = async (reasonText: string): Promise<void> => {
-      const text = `${reasonText}已保存的内容保留，本次工作尚未完成。`
+      controller.signal.throwIfAborted()
+      const researchPartial = taskSpec.researchDiscoveryProtocol === 1 && taskSpec.intent === 'research_analysis'
+        ? await (await import('./research-recovery.js')).saveResearchLimitationDelivery({ userId: params.userId,
+          novelId: params.novelId, sessionId: params.sessionId, runId }, reasonText) : null
+      controller.signal.throwIfAborted()
+      const text = researchPartial ?? `${reasonText}已保存的内容保留，本次工作尚未完成。`
       const messageId = randomUUID()
       bus.emit({ type: 'message.start', messageId, role: 'assistant' })
       bus.emit({ type: 'text.final', messageId, text, asReasoning: false })
       await persistMessage(messageId, runId, params.sessionId, 'assistant', [{ type: 'text', text }])
-      await finalizeRun(runId, bus, forceWrapUpLocal ? 'paused' : 'failed', usage, turn, text.slice(0, 300), reasonText, false,
-        undefined, undefined, undefined, false, undefined, forceWrapUpLocal ? 'needs_input' : 'user_stop')
+      await finalizeRun(runId, bus, forceWrapUpLocal || researchPartial ? 'paused' : 'failed', usage, turn, text.slice(0, 300), reasonText, false,
+        undefined, undefined, undefined, false, undefined, forceWrapUpLocal || researchPartial ? 'needs_input' : 'user_stop')
     }
 
     const finishPersistedWritingIfComplete = async (beforeFinish?: () => Promise<void>) => {
@@ -1719,6 +1726,16 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (controller.signal.aborted) throw new DOMException('run aborted', 'AbortError')
       if (await finishPersistedWritingIfComplete()) return
       let bootstrapCall: ToolCallRequest | undefined
+      if ((!researchHandoffChecked || researchReadBootstrap) && taskSpec.researchDiscoveryProtocol === 1
+        && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied'
+        && tools.some(tool => tool.name === 'web_read')) {
+        researchHandoffChecked = true
+        const handoff = await (await import('./research-recovery.js')).takeResearchReadHandoff({ userId: params.userId,
+          novelId: params.novelId, sessionId: params.sessionId, runId })
+        if (handoff) bootstrapCall = { id: `research-read-${handoff.receiptId}`, name: 'web_read',
+          arguments: JSON.stringify({ sourceId: handoff.sourceId }) }
+        researchReadBootstrap = null
+      }
       let bootstrapItem: ContinuedReviewRecovery | undefined
       let continuityBootstrap: typeof continuedContinuityBootstrap[number] | undefined
       while (continuedReviewBootstrap.length && !bootstrapCall) {
@@ -2180,6 +2197,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const savedCandidate = !prematureFinish && !report?.content ? await prisma.$transaction(tx => readSavedWritingPresentation(tx,
           { userId: params.userId, novelId: params.novelId, runId })) : null
         const savedPresentation = shouldUseSavedWritingPresentation(savedCandidate, cleanContent) ? savedCandidate : null
+        if (!prematureFinish && targetEvidenceMissing && taskSpec.researchDiscoveryProtocol === 1) {
+          await persistMessage(messageId, runId, params.sessionId, 'assistant', parts.filter(part => part.type !== 'text'))
+          bus.emit({ type: 'step.finish', turn, usage: result.usage })
+          liveTurn = null
+          await wrapUpAndFinish(researchLimitation)
+          return
+        }
         if (!prematureFinish && (report?.content || targetEvidenceMissing)) {
           // Deliver the exact persisted report through the existing text UI;
           // a short model wrap-up cannot hide it or trigger paid regeneration.
@@ -2539,7 +2563,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const contentProgress = observeLegacyContentProgress(progressSignatures, outcome.part)
             || Boolean(controlledRepair && observeSemanticTransition(progressSignatures, `chapter:${controlledRepair.chapterId}`, controlledRepair.beforeHash, controlledRepair.afterHash))
           const transition = outcome.semanticTransition
-          const structureProgress = Boolean(transition && observeSemanticTransition(progressSignatures, `structure:${transition.targetId}`, transition.beforeHash, transition.afterHash))
+          const structureProgress = Boolean(transition && observeSemanticTransition(progressSignatures,
+            transition.targetId.startsWith('chapter:') ? transition.targetId : `structure:${transition.targetId}`, transition.beforeHash, transition.afterHash))
           const durableProgress = contentProgress || structureProgress
           const requiredProgress = Boolean(outcome.requiredResult && observeRequiredResult(progressSignatures,
             `chapter:${outcome.requiredResult.targetId}`, outcome.requiredResult.contentHash))
@@ -2692,6 +2717,17 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const compatibilityRead = compatibilityReadTargets !== null && compatibilityReadObserved
       compatibilityReadTargets = null
       if (compatibilityRead && !batchProgress) messages.push({ role: 'user', content: '[系统] 已核对旧定位失败目标的真实正文。输入协议兼容读取机会已持久记账，仅此一次；历史失败、检查次数和预算保留。下一步按当前正文纠正具体定位参数并执行原目标内修订，不要重复读取或照原失败参数重试。' })
+      if (!forceWrapUpReason && blockedRepeat < 4 && stagnantBatches >= 4 && taskSpec.researchDiscoveryProtocol === 1
+        && taskSpec.intent === 'research_analysis' && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied'
+        && tools.some(tool => tool.name === 'web_read')) {
+        const handoff = await (await import('./research-recovery.js')).claimResearchReadHandoff({ userId: params.userId,
+          novelId: params.novelId, sessionId: params.sessionId, runId }, effectiveToolCalls.filter(call => call.name === 'web_search').map(call => call.id))
+        if (handoff) {
+          researchReadBootstrap = handoff
+          await persistCheckpoint()
+          continue
+        }
+      }
       if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead && !feedbackRead)) {
         const sameIncompleteReview = incompleteReview && review && !review.ready
           && review.chapterId === incompleteReview.chapterId && review.revision === incompleteReview.revision

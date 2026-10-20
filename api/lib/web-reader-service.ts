@@ -142,11 +142,13 @@ async function readDeepSeek(value: string, configured: ToolModelRuntime, externa
     // not a reader/provider retry: it uses the same bounded call and never
     // solves a challenge, decodes protected glyphs or changes network identity.
     let sourceHtml: string | undefined
+    let sourceFinalUrl = target.href
     if (expectedTarget) {
       try {
         const source = await getPublicHttpBytes(target.href, { signal, timeoutMs: 5000, maxBytes: WEB_READER_MAX_BYTES,
           allowHttp: true, maxRedirects: 5, acceptedContentTypes: ['text/html', 'application/xhtml+xml', 'text/plain'] })
         const sourceUrl = new URL(source.finalUrl)
+          sourceFinalUrl = source.finalUrl
         if (sourceUrl.hostname === 'sec.douban.com' && /^\/c(?:\/|$)/.test(sourceUrl.pathname)) return failure('WEB_READ_BLOCKED', source.finalUrl, 'blocked')
         if (source.contentType.startsWith('text/html') || source.contentType.startsWith('application/xhtml+xml')) {
           sourceHtml = decodeWebPageBuffer(source.bytes, source.contentType)
@@ -154,7 +156,7 @@ async function readDeepSeek(value: string, configured: ToolModelRuntime, externa
           if (['WEB_READ_GARBLED', 'WEB_READ_BLOCKED', 'WEB_READ_NOT_FOUND'].includes(sourceQuality.code)) {
             return { ...sourceQuality, provider: 'direct', finalUrl: source.finalUrl, contentKind: 'article', retryable: false }
           }
-          const sourceEvidence = assessReaderEvidence(sourceQuality.text, sourceQuality.title, expectedTarget, sourceHtml)
+          const sourceEvidence = assessReaderEvidence(sourceQuality.text, sourceQuality.title, expectedTarget, sourceHtml, source.finalUrl)
           if (sourceQuality.status === 'ok' && sourceEvidence.identity.status === 'verified'
             && sourceEvidence.identity.pageType === 'chapter' && sourceEvidence.integrity.status === 'source_compared') {
             return { ...sourceQuality, provider: 'direct', finalUrl: source.finalUrl, contentKind: 'article', retryable: false,
@@ -186,7 +188,7 @@ async function readDeepSeek(value: string, configured: ToolModelRuntime, externa
         !('content' in payload) || typeof payload.content !== 'string') return fail('WEB_READ_PROVIDER_PROTOCOL_ERROR')
       signal.throwIfAborted()
       const quality = assessReaderText(payload.content.replace(/^#{1,6}\s+/gm, ''), payload.title.slice(0, 300))
-      const evidence = assessReaderEvidence(quality.text, quality.title, expectedTarget, sourceHtml)
+      const evidence = assessReaderEvidence(quality.text, quality.title, expectedTarget, sourceHtml, sourceFinalUrl)
       if (quality.status === 'ok' && evidence.integrity.status === 'damaged') {
         return { ...quality, status: 'unreadable', code: 'WEB_READ_INCOMPLETE', text: '', quality: { ...quality.quality, readable: false },
           evidence, provider, retryable: false, finalUrl: target.href, contentKind: 'article' }
@@ -246,7 +248,7 @@ export async function readPublicWebPage(value: string, signal: AbortSignal, conf
     const pageUrl = new URL(finalUrl)
     const bookMetadata = /^(?:www\.)?fanqienovel\.com$/i.test(pageUrl.hostname) && /^\/(?:page|keyword)\//i.test(pageUrl.pathname)
     const direct: WebReadResult = { ...outcome, finalUrl, provider: 'direct', retryable: false, contentKind: isJson || bookMetadata ? 'metadata' : 'article',
-      evidence: assessReaderEvidence(outcome.text, outcome.title, expectedTarget, !isJson && !page.contentType.startsWith('text/plain') ? raw : undefined),
+      evidence: assessReaderEvidence(outcome.text, outcome.title, expectedTarget, !isJson && !page.contentType.startsWith('text/plain') ? raw : undefined, finalUrl),
       ...(!isJson && outcome.status === 'ok' ? { links: extractReaderLinks(raw, finalUrl) } : {}) }
     // No fallback for access gates, soft 404, garbled fonts or oversized documents.
     // Only the existing opt-in JS-shell path may ask a configured vendor.
@@ -258,7 +260,7 @@ export async function readPublicWebPage(value: string, signal: AbortSignal, conf
     try {
       const hosted = await readHosted(target, mode, signal)
       return { ...hosted, ...(hosted.code === 'WEB_READ_RATE_LIMITED' ? { status: 'transient_error' as const } : {}),
-        evidence: assessReaderEvidence(hosted.text, hosted.title, expectedTarget, raw),
+        evidence: assessReaderEvidence(hosted.text, hosted.title, expectedTarget, raw, finalUrl),
         provider: mode, finalUrl, retryable: hosted.code === 'WEB_READ_RATE_LIMITED', contentKind: bookMetadata ? 'metadata' : 'article',
         ...(hosted.status === 'ok' ? { links: extractReaderLinks(raw, finalUrl) } : {}) }
     } catch (error) {
