@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { parseWritingTargets, requestedWritingRange } from '../../api/lib/agent/writing-target-admission.js'
 import { legacyWritingRange } from '../../api/lib/agent/writing-target-range.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { chapterRevisionAuthorityText, prohibitsNewDraftRevision } from '../../api/lib/agent/writing-scope.js'
 
 describe('fresh action-bound chapter targets', () => {
   it.each([
@@ -70,4 +71,27 @@ describe('fresh action-bound chapter targets', () => {
     'does not classify forbidden revision as the requested effect: %s', prompt => {
       expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt }).intent).toBe('write')
     })
+  it('keeps long non-action prefixes bounded without ambiguous repeated-token matching', () => {
+    expect(parseWritingTargets('请你'.repeat(2000) + '说明修改第3章')).toMatchObject({ range: null, hasAction: false })
+    expect(parseWritingTargets('当前章节'.repeat(2000) + '中人物修改日期')).toMatchObject({ range: null, hasAction: false })
+  })
+  it('applies numbered exclusions only to their frozen chapter at the revision guard', () => {
+    const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt: chapterRevisionPrompt })
+    spec.scope.writingTargetProtocol = 1
+    spec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 3, chapterId: 'third' }],
+      repairAuthorized: true, titleAndBodyOnly: false }
+    expect(prohibitsNewDraftRevision(chapterRevisionPrompt)).toBe(true)
+    expect(prohibitsNewDraftRevision(chapterRevisionAuthorityText(chapterRevisionPrompt, spec, 'third'))).toBe(false)
+    for (const prompt of ['不改第3章', '不改正文', '不改第1章和任何正文', '不改第1章或本章', '不改第二卷第一章']) {
+      expect(chapterRevisionAuthorityText(prompt, spec, 'third')).toBe(prompt)
+      expect(prohibitsNewDraftRevision(chapterRevisionAuthorityText(prompt, spec, 'third'))).toBe(true)
+    }
+    // This helper must not reinterpret the historical relative-word classifier.
+    const relative = '不改第1章或当前章'
+    expect(chapterRevisionAuthorityText(relative, spec, 'third')).toBe(relative)
+    expect(prohibitsNewDraftRevision(chapterRevisionAuthorityText(relative, spec, 'third'))).toBe(prohibitsNewDraftRevision(relative))
+    expect(chapterRevisionAuthorityText('不改第1章', spec, 'unbound')).toBe('不改第1章')
+    delete spec.scope.writingTargetProtocol
+    expect(chapterRevisionAuthorityText(chapterRevisionPrompt, spec, 'third')).toBe(chapterRevisionPrompt)
+  })
 })

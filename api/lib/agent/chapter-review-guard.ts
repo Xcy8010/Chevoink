@@ -485,7 +485,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   const compilations = await tx.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
     chapterId: chapter.id, runId: { in: runIds } }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-  const { readNewDraftRevision, readNewDraftWritingAuthority, prohibitsNewDraftRevision } = await import('./writing-scope.js')
+  const { readNewDraftRevision, readNewDraftWritingAuthority, prohibitsNewDraftRevision, chapterRevisionAuthorityText } = await import('./writing-scope.js')
   // Validate old receipts even though they are no longer a normal-write quota.
   const receipts = compilations.map(item => readNewDraftRevision(item.validation))
   const current = await tx.chapter.findFirst({ where: { id: chapter.id, revision: chapter.revision, authorId: subject.userId,
@@ -506,9 +506,10 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
     || !!item.validation && typeof item.validation === 'object' && !Array.isArray(item.validation) && typeof item.validation.checkedRevision === 'number')
   const spec = original.spec && typeof original.spec === 'object' && !Array.isArray(original.spec) ? original.spec as Record<string, unknown> : null
   const newReview = !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope) && (spec.scope as Record<string, unknown>).reviewProtocol === 1
-  const prohibited = prohibitsNewDraftRevision(localRevisionAuthorityText(original.prompt, original.spec)) || Array.isArray(spec?.hardConstraints) && spec.hardConstraints.some(item =>
+  const authorityText = (text: string | null) => chapterRevisionAuthorityText(localRevisionAuthorityText(text, original.spec), original.spec, current.id)
+  const prohibited = prohibitsNewDraftRevision(authorityText(original.prompt)) || Array.isArray(spec?.hardConstraints) && spec.hardConstraints.some(item =>
     !!item && typeof item === 'object' && 'text' in item && typeof item.text === 'string'
-      && prohibitsNewDraftRevision(localRevisionAuthorityText(item.text, original.spec)))
+      && prohibitsNewDraftRevision(authorityText(item.text)))
   const localAuthority = originalLocalEditBoundary(original.spec)?.kind === 'bounded'
   const freshAssessment = !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope)
     && (spec.scope as Record<string, unknown>).localEditProtocol === 1 && hasReadOnlyRevisionAssessment(original.prompt)

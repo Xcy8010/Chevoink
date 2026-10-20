@@ -13,7 +13,7 @@ import { freezeLocalEditBoundary, originalLocalEditBoundary, requestedLocalEdit 
 import { eligibleEmptyWritingClarification, readWritingClarification } from './writing-clarification.js'
 
 import { numeric, rangeDash, negativeScopeClause, writingScopeClauses, legacyWritingRange } from './writing-target-range.js'
-import { parseWritingTargets } from './writing-target-admission.js'
+import { parseWritingTargets, writingExclusionRange } from './writing-target-admission.js'
 export { chapterNumber } from './writing-target-range.js'
 export { requestedWritingRange } from './writing-target-admission.js'
 
@@ -96,8 +96,8 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     // A broad positive interval cannot erase the author's explicit exceptions.
     // Resolve them against this same admission snapshot, never later rows.
     for (const clause of parsed?.exclusions ?? writingScopeClauses(admissionPrompt).filter(clause => negativeScopeClause.test(clause))) {
-      const positive = parsed ? clause.replace(/不(?=修订|修正|修复|动|润色|优化)/gu, '') : clause
-      const exclusion = legacyWritingRange(positive.replace(/(?:不继续|不批量|不续写|不生成|不要|无需|不用|不必|禁止|不得|不能|别|do not|don't|must not)|不(?=写|改|修改)/giu, ''))
+      const exclusion = parsed ? writingExclusionRange(clause)
+        : legacyWritingRange(clause.replace(/(?:不继续|不批量|不续写|不生成|不要|无需|不用|不必|禁止|不得|不能|别|do not|don't|must not)|不(?=写|改|修改)/giu, ''))
       if (!exclusion) {
         if (/(?:任何|所有|全部|已有)章节|全书|正文/u.test(clause) || /(?:第|章|卷)/u.test(clause) && new RegExp(numeric, 'u').test(clause)) writing.targets = []
         continue
@@ -160,6 +160,31 @@ export function prohibitsNewDraftRevision(prompt: string | null): boolean {
     && /(?:改|修复|修正|纠正|纠错|润色|重写|repair|revis|rewrit|polish|fix\b|edit|modify|chang)/iu.test(clause)
     && (!/(?:前文|前章|已有|先前|previous|earlier|existing)/iu.test(clause)
       || /(?:本章|新章|新稿|初稿|全文|全书|this chapter|new chapter|draft)/iu.test(clause)))
+}
+
+/** A fresh frozen target must not inherit a different chapter's prohibition.
+ * This only removes a provably disjoint numbered exclusion. Global, relative,
+ * volume-relative or unresolvable prohibitions retain the old guard behavior. */
+export function chapterRevisionAuthorityText(text: string | null, value: unknown, chapterId: string): string | null {
+  if (!text) return text
+  const parsed = taskSpecSchema.safeParse(value)
+  if (!parsed.success || parsed.data.scope.writingTargetProtocol !== 1 || parsed.data.scope.writing?.kind !== 'bounded') return text
+  const target = parsed.data.scope.writing.targets.find(item => item.chapterId === chapterId)
+  if (!target || target.volumeId) return text
+  const numberedOnly = new RegExp(`^\\s*(?:请|在)?(?:不(?:要|得|能|许)?|禁止|无需|不用|别)(?:修改|修订|修正|修复|改写|重写|写|改|动|润色|优化)(?:已经保存的|已保存的|既有的|已有的)?\\s*(?:前\\s*${numeric}\\s*章|首章|第?\\s*${numeric}\\s*(?:章)?(?:\\s*(?:、|及|与|和|至|到|${rangeDash})\\s*第?\\s*${numeric}\\s*(?:章)?)*\\s*章)(?:的(?:正文|内容))?(?:的前提下)?\\s*$`, 'u')
+  return writingScopeClauses(text).filter(clause => {
+    // Do not erase a simultaneous global/relative prohibition such as
+    // "不改第1章或当前章" or "不改第1章和任何正文".
+    if (!numberedOnly.test(clause)) return true
+    const exclusions = parseWritingTargets(clause).exclusions
+    if (exclusions.length !== 1) return true
+    const exclusion = writingExclusionRange(exclusions[0])
+    if (!exclusion || exclusion.volume || !['first', 'range', 'list'].includes(exclusion.kind)) return true
+    // The admission already froze exclusions against the same chapter IDs.
+    // A contradictory target remains forbidden rather than being repaired here.
+    return exclusion.kind === 'list' ? !!exclusion.positions?.includes(target.orderIndex)
+      : target.orderIndex >= (exclusion.start ?? 1) && target.orderIndex < (exclusion.start ?? 1) + (exclusion.count ?? 1)
+  }).join('，')
 }
 
 /** A canonical binding is minted atomically by chapter_create. Legacy inferred

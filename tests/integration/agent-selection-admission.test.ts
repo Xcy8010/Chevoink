@@ -108,7 +108,7 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
     expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
   }))
 
-  it.each(['不修订第2章', '不动第2章'])('honors an explicit exclusion inside a broader fresh HTTP range: %s', exclusion => fixture(async f => {
+  it.each(['不修订第2章', '不动第2章', '不改第2章'])('honors an explicit exclusion inside a broader fresh HTTP range: %s', exclusion => fixture(async f => {
     const first = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     const secondId = randomUUID(), thirdId = randomUUID()
     for (const [id, position] of [[secondId, 2], [thirdId, 3]] as const) await prisma.chapter.create({ data: {
@@ -127,6 +127,10 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
       creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
     { chapterId: secondId, oldText: before.content, newText: '越过否定限制。' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: secondId } })).toEqual(before)
+    await chapterEditRangeTool.execute({ ...f, runId, mode: 'build', callId: 'allowed-third-chapter',
+      creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
+    { chapterId: thirdId, oldText: '排除范围测试原文。', newText: '第三章已按授权修正。' })
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: thirdId } })).content).toBe('第三章已按授权修正。')
     expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
   }))
 

@@ -5,7 +5,7 @@ const review = /(?:检查|审查|审阅|核对|核实|评估|分析)|\b(?:check|
 const reference = /(?:读取|阅读|读完|读|参考|参照|根据|对照|呼应|回顾|借鉴|比照)|\b(?:read|consult|reference)\b/iu
 const denied = (clause: string) => negativeScopeClause.test(clause) || /(?:不修订|不修正|不修复|不动|不润色|不优化|never\b)/iu.test(clause)
 const chapterMention = new RegExp(`(?:第|前)?\\s*${numeric}\\s*(?:章|卷)|chapter\\s*\\d+`, 'iu')
-const actionStart = /^(?:\s|请|你|帮我|请你|先|再|继续|接着|然后|开始|只|仅|直接|自动|自主|自行|全权|分别|现|明确|授权|允许|可以|针对|对|把|将|从|自|在|按照|必要的|做|进行|完成当前|审查|审阅|检查|并|且|本次|这次|现在)*$/u
+const actionStart = /(?:完成当前|必要的|\s|帮我|请你|继续|接着|然后|开始|直接|自动|自主|自行|全权|分别|明确|授权|允许|可以|针对|按照|进行|审查|审阅|检查|本次|这次|现在|请|你|先|再|只|仅|现|对|把|将|从|自|在|做|并|且)/gu
 const factual = /(?:提到|写道|写着|却|曾|原文|描述|记载|表示|说过|讲述|发生|已经|已完成|已修订|已修改|修改过)/u
 const advice = /(?:如何|怎样|怎么|建议|方案|思路|方法|报告|情况)|\b(?:how|advice|suggestions?|plan|report)\b/iu
 
@@ -51,8 +51,8 @@ function effect(clause: string): 'mutation' | 'review' | null {
   // Target-first instructions are valid, but a bare story statement containing
   // "写/改" is not. A named chapter plus imperative repair is explicit.
   const targetPrefix = before.replace(new RegExp(`(?:第|前)?\\s*${numeric}\\s*(?:章|卷)?|首章|[、及与和至到—–~～-]`, 'gu'), '')
-  if (!actionStart.test(before)
-    && !/^(?:\s|请|帮我|仅|只|先|继续|开始|当前|本|这|下一|正在编辑|的|章|章节|段|句|首|末|最后|开头|结尾|片段|选区|这里|此处|正文|全书|整本|做|进行|必要|针对|对|把|将|从|自|在|之后|以后|后|自动|自主|分别)*$/u.test(targetPrefix)
+  if (before.replace(actionStart, '') !== ''
+    && targetPrefix.replace(/(?:正在编辑|\s|帮我|继续|开始|当前|下一|章节|最后|开头|结尾|片段|选区|这里|此处|正文|全书|整本|进行|必要|针对|之后|以后|自动|自主|分别|请|仅|只|先|本|这|的|章|段|句|首|末|做|对|把|将|从|自|在|后)/gu, '') !== ''
     && !(chapterMention.test(before) && /问题帮我\s*$/u.test(before))
     && !/^\s*(?:please\s+)?$/iu.test(before)) return null
   return chosen.kind
@@ -103,4 +103,11 @@ export function parseWritingTargets(prompt: string) {
 /** Fresh admission only. Historical missing contracts use legacyWritingRange. */
 export function requestedWritingRange(prompt: string) {
   return parseWritingTargets(prompt).range
+}
+
+/** Only explicit new-protocol exclusions use the extended denial vocabulary. */
+export function writingExclusionRange(clause: string) {
+  return legacyWritingRange(clause
+    .replace(/不(?=修订|修正|修复|动|润色|优化)/gu, '')
+    .replace(/(?:不继续|不批量|不续写|不生成|不要|无需|不用|不必|禁止|不得|不能|别|do not|don't|must not)|不(?=写|改|修改)/giu, ''))
 }
