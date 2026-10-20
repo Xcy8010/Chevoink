@@ -12,88 +12,15 @@ import { readWritingPresentation } from './writing-request-context.js'
 import { freezeLocalEditBoundary, originalLocalEditBoundary, requestedLocalEdit } from './local-edit-scope.js'
 import { eligibleEmptyWritingClarification, readWritingClarification } from './writing-clarification.js'
 
+import { numeric, rangeDash, negativeScopeClause, writingScopeClauses, legacyWritingRange } from './writing-target-range.js'
+import { parseWritingTargets } from './writing-target-admission.js'
+export { chapterNumber } from './writing-target-range.js'
+export { requestedWritingRange } from './writing-target-admission.js'
+
 type Subject = { userId: string; novelId: string; runId: string }
 type Writing = NonNullable<TaskSpec['scope']['writing']>
-const numeric = '[零〇一二两三四五六七八九十百千0-9]+'
-/** Chapter separators in prose: hyphen, en/em dash, minus, tilde and fullwidth variants. */
-const rangeDash = '[-–—−~～〜－]'
-/** A spoken chapter count is small; longer digit runs glued to 章 are ordinals ("把189章写完"), not counts. */
-const shortCount = '\\d{1,2}|[一二两三四五六七八九十百千]+'
-export function chapterNumber(text: string): number | null {
-  if (/^\d+$/u.test(text)) { const value = Number(text); return Number.isSafeInteger(value) && value > 0 ? value : null }
-  const digits: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
-  let sum = 0, pending = 0
-  for (const char of text) {
-    if (digits[char]) pending = digits[char]
-    else if (char === '十' || char === '百' || char === '千') { sum += (pending || 1) * ({ 十: 10, 百: 100, 千: 1000 }[char]); pending = 0 }
-    else if (char !== '零' && char !== '〇') return null
-  }
-  return sum + pending || null
-}
 
-/** Pure extraction uses the whole admission request; generated goals are not authority.
- * Spacing around 第/章/至/dashes is prose, not semantics: "前 20 章" must parse
- * exactly like "前20章"; otherwise the freeze silently retargets the run. */
-type RequestedWritingRange = { kind: 'first' | 'next' | 'range' | 'count' | 'unbounded' | 'list' | 'existing'; start?: number; count?: number; positions?: number[]; volume?: number; anchor?: 'editor' }
-const negativeScopeClause = /(?:不继续|不批量|不续写|不生成|不要|无需|不用|不必|禁止|不得|不能|(?<!分)别|不写|不改|不修改|do not|don't|must not)/iu
-function writingScopeClauses(prompt: string) {
-  return prompt.replace(new RegExp(`(${numeric}\\s*(?:章)?)\\s*[，,]\\s*(?=第?\\s*${numeric})`, 'gu'), '$1、').split(/[，,。！？!?；;\n]+/u)
-}
-export function requestedWritingRange(prompt: string): RequestedWritingRange | null {
-  // Commas between chapter numbers are list separators, not new clauses. Keep
-  // a negated list together so its later numbers cannot become positive scope.
-  const positive = writingScopeClauses(prompt).filter(clause => !negativeScopeClause.test(clause)).join('，')
-  const volumeMatch = positive.match(new RegExp(`第\\s*(${numeric})\\s*卷`, 'u'))
-  const volume = volumeMatch ? chapterNumber(volumeMatch[1]) : null
-  // Multiple volumes need a separately explicit mapping; a chapter ordinal is
-  // never a global ordinal when a volume was requested.
-  if (volumeMatch && (!volume || [...positive.matchAll(new RegExp(`第\\s*(${numeric})\\s*卷`, 'gu'))].length > 1)) return null
-  const chapterPrompt = volumeMatch ? positive.slice(positive.indexOf(volumeMatch[0]) + volumeMatch[0].length) : positive
-  const volumeScope = volume ? { volume } : {}
-  const throughLast = chapterPrompt.match(new RegExp(`(?:从|自)\\s*(?:首章|第\\s*(${numeric})\\s*章)[^。；\\n]{0,24}(?:到|至)(?:\\s*(?:目前|现有|当前))?\\s*(?:最后(?:一)?(?:章|章节)?|末章)`, 'u'))
-  const existing = Boolean(throughLast)
-    || /(?:全书|整本(?:书|小说)|所有(?:已有|现有)?章节|全部(?:已有|现有)?章节)/u.test(chapterPrompt) && !new RegExp(`第\\s*${numeric}\\s*(?:章|[、，,])`, 'u').test(chapterPrompt)
-    || Boolean(volume && !/章/u.test(chapterPrompt))
-  // Preserve an explicit serialization grant; an existing-manuscript repair
-  // interval still snapshots its rows even when the author says "自动".
-  if (existing && !throughLast && !volume && /(?:自动|自主|自行|全权).{0,16}(?:写完|完成全书|创作全书|逐章写)|(?:write|finish).{0,24}(?:autonomously|automatically)/iu.test(positive)) return { kind: 'unbounded' }
-  if (existing && /(?:改|优化|修复|修正|润色|审查|审阅|检查|评估|分析)/u.test(positive)) {
-    const start = throughLast?.[1] ? chapterNumber(throughLast[1]) : 1
-    return start ? { kind: 'existing', start, ...volumeScope } : null
-  }
-  // An open-ended chapter interval cannot fall through to its first ordinal.
-  if (existing) return null
-  const list = chapterPrompt.match(new RegExp(`第?\\s*${numeric}\\s*(?:章)?(?:\\s*(?:、|，|,|和|及|与)\\s*第?\\s*${numeric}\\s*(?:章)?)*\\s*(?:、|，|,|和|及|与)\\s*第?\\s*${numeric}\\s*章`, 'u'))
-  if (list && /章/u.test(list[0])) {
-    const positions = [...new Set([...list[0].matchAll(new RegExp(numeric, 'gu'))].map(item => chapterNumber(item[0])))]
-    if (positions.every((position): position is number => position !== null) && positions.length <= 1000) return { kind: 'list', positions, ...volumeScope }
-    return null
-  }
-  const range = chapterPrompt.match(new RegExp(`第?\\s*(${numeric})\\s*(?:章)?\\s*(?:至|到|${rangeDash})\\s*第?\\s*(${numeric})\\s*章`, 'u'))
-  if (range) { const start = chapterNumber(range[1]), end = chapterNumber(range[2]); return start && end && end >= start && end - start < 1000 ? { kind: 'range', start, count: end - start + 1, ...volumeScope } : null }
-  if (volume) {
-    const chapter = chapterPrompt.match(new RegExp(`第\\s*(${numeric})\\s*章`, 'u'))
-    const start = chapter ? chapterNumber(chapter[1]) : null
-    return start ? { kind: 'range', start, count: 1, volume } : null
-  }
-  if (/(?:下\s*[一1]\s*章|next chapter)/iu.test(positive)) return { kind: 'next', count: 1,
-    ...(/(?:当前(?:这)?(?:章|章节)|正在编辑(?:的)?(?:这章|章节|章))(?:之|以)?后|after\s+(?:the\s+)?(?:current|currently edited)\s+chapter/iu.test(positive) ? { anchor: 'editor' as const } : {}) }
-  const firstCount = positive.match(new RegExp(`前\\s*(${numeric})\\s*章`, 'u'))
-  if (firstCount) { const count = chapterNumber(firstCount[1]); if (count && count <= 1000) return { kind: 'range', start: 1, count } }
-  if (/(?:首章|第\s*[一1]\s*章|first chapter)/iu.test(positive)) return { kind: 'first', start: 1, count: 1 }
-  const ordinal = positive.match(new RegExp(`第\\s*(${numeric})\\s*章|chapter\\s*(\\d+)`, 'iu'))
-  if (ordinal) { const start = chapterNumber(ordinal[1] ?? ordinal[2]); if (start) return { kind: 'range', start, count: 1 } }
-  // (?<!\d) keeps "写189章" from parsing as a count of the trailing digits;
-  // long digit runs belong to the bare-ordinal branch below.
-  const countMatch = positive.match(new RegExp(`(?:写|创作|完成|起草).{0,6}(?<!\\d)(${shortCount})\\s*章`, 'u'))
-  if (countMatch) { const count = chapterNumber(countMatch[1]); if (count && count <= 1000) return { kind: 'count', count } }
-  const bareOrdinal = positive.match(new RegExp(`(?<!\\d)(\\d{1,4})\\s*章\\s*(?:都|全部|全|一起)?\\s*(?:写完|写|完成|创作|优化|修改|润色|处理|续写|补齐|改|补)`, 'u'))
-  if (bareOrdinal) { const start = chapterNumber(bareOrdinal[1]); if (start) return { kind: 'range', start, count: 1 } }
-  if (/(?:自动|自主|自行|全权).{0,16}(?:写完|完成全书|创作全书|逐章写)|(?:write|finish).{0,24}(?:autonomously|automatically)/iu.test(positive)) return { kind: 'unbounded' }
-  return null
-}
-
-export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: Subject, spec: TaskSpec, prompt: string): Promise<TaskSpec> {
+export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: Subject, spec: TaskSpec, prompt: string, targetProtocol?: 1): Promise<TaskSpec> {
   await lockNovelActiveScope(tx, subject.novelId)
   const original = await readOriginalTaskRequest(tx, subject)
   if (original.parentRunId) {
@@ -125,11 +52,12 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   if (!['write', 'revise', 'review'].includes(spec.intent) || spec.writingPacing === 'proposal_only' || spec.writingPacing === 'conversation_only') return spec
   const admissionPrompt = original.prompt ?? prompt
   const localRequest = spec.scope.localEditProtocol === 1 ? requestedLocalEdit(admissionPrompt) : null
-  const range = requestedWritingRange(admissionPrompt)
+  const parsed = targetProtocol === 1 ? parseWritingTargets(admissionPrompt) : null
+  const range = parsed ? parsed.range : legacyWritingRange(admissionPrompt)
   // A prompt that names chapters/volumes with numbers but fails to parse must not
   // silently freeze onto the editor's current chapter: that rewrote the author's
   // target ("前 20 章优化" froze to a single chapter). Surface needs_input instead.
-  const ambiguousRange = !range && writingScopeClauses(admissionPrompt).some(clause => !negativeScopeClause.test(clause)
+  const ambiguousRange = parsed ? parsed.ambiguous : !range && writingScopeClauses(admissionPrompt).some(clause => !negativeScopeClause.test(clause)
     && /(?:第|前|后|余|剩|卷|章)/u.test(clause) && /(?:章|卷|chapter|volume)/iu.test(clause)
     && /[0-9零〇一二两三四五六七八九十百千]/u.test(clause))
     && !(localRequest && !/(?:章|卷|chapter|volume)/iu.test(admissionPrompt))
@@ -160,15 +88,16 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
       } else targets.push({ orderIndex: position, chapterId: chapters.find(item => item.orderIndex === position)?.id ?? null })
     }
     writing = { ...base, kind: targets.length ? 'bounded' : 'needs_input', targets }
-  } else if (run.chapterId && !ambiguousRange) {
+  } else if (run.chapterId && !ambiguousRange && (!parsed || parsed.hasAction)) {
     const target = chapters.find(item => item.id === run.chapterId)
     writing = { ...base, kind: target ? 'bounded' : 'needs_input', targets: target ? [{ orderIndex: target.orderIndex, chapterId: target.id }] : [] }
   } else writing = { ...base, kind: 'needs_input', targets: [] }
   if (writing.kind === 'bounded') {
     // A broad positive interval cannot erase the author's explicit exceptions.
     // Resolve them against this same admission snapshot, never later rows.
-    for (const clause of writingScopeClauses(admissionPrompt).filter(clause => negativeScopeClause.test(clause))) {
-      const exclusion = requestedWritingRange(clause.replace(/(?:不继续|不批量|不续写|不生成|不要|无需|不用|不必|禁止|不得|不能|别|do not|don't|must not)|不(?=写|改|修改)/giu, ''))
+    for (const clause of parsed?.exclusions ?? writingScopeClauses(admissionPrompt).filter(clause => negativeScopeClause.test(clause))) {
+      const positive = parsed ? clause.replace(/不(?=修订|修正|修复|动|润色|优化)/gu, '') : clause
+      const exclusion = legacyWritingRange(positive.replace(/(?:不继续|不批量|不续写|不生成|不要|无需|不用|不必|禁止|不得|不能|别|do not|don't|must not)|不(?=写|改|修改)/giu, ''))
       if (!exclusion) {
         if (/(?:任何|所有|全部|已有)章节|全书|正文/u.test(clause) || /(?:第|章|卷)/u.test(clause) && new RegExp(numeric, 'u').test(clause)) writing.targets = []
         continue
@@ -206,7 +135,7 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   const clarification = !chapters.length && !range && !ambiguousRange && !localRequest
     && run.session.sandboxMode !== 'read_only' && !run.session.spawnedFromRunId
     && eligibleEmptyWritingClarification({ ...spec, scope: { ...spec.scope, writing } }, admissionPrompt)
-  return { ...spec, scope: { ...spec.scope, writing, ...(clarification ? { writingClarificationProtocol: 1 as const } : {}),
+  return { ...spec, scope: { ...spec.scope, writing, ...(targetProtocol === 1 ? { writingTargetProtocol: 1 as const } : {}), ...(clarification ? { writingClarificationProtocol: 1 as const } : {}),
     ...(localEditBoundary ? { localEditBoundary } : {}) } }
 }
 
@@ -259,7 +188,7 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
   const clarification = spec.success ? await readWritingClarification(tx, subject, original, source, spec.data) : null
   if (clarification) writing = clarification.writing
   if (!writing && original.prompt) {
-    const range = requestedWritingRange(original.prompt)
+    const range = legacyWritingRange(original.prompt)
     // No historical directory snapshot proves a list or an existing-book
     // interval. Resume cannot reconstruct it from the current editor or rows.
     if (range?.kind === 'list' || range?.kind === 'existing') writing = { version: 1, kind: 'needs_input', targets: [], titleAndBodyOnly: false, repairAuthorized: hasOriginalRepairAuthority(original.prompt) }
@@ -507,7 +436,7 @@ export function questionExpandsWritingScope(question: string, options: Array<{ l
 /** Auto-delivery is limited to a chapter artifact request. Explicit additional
  * human-requested work keeps the ordinary completion checks in control. */
 export function allowsChapterOnlyCompletion(prompt: string | null, requireExclusiveFormat = true): boolean {
-  if (!prompt || !requestedWritingRange(prompt) || (requireExclusiveFormat && !/(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|only.{0,20}title.{0,12}(?:body|text)/iu.test(prompt))) return false
+  if (!prompt || !legacyWritingRange(prompt) || (requireExclusiveFormat && !/(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|only.{0,20}title.{0,12}(?:body|text)/iu.test(prompt))) return false
   const positive = prompt.split(/[。！？!?；;\n，,]+/u).filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|do not|don't)/iu.test(clause))
   if (!positive.some(clause => /(?:写|完成|修改|润色|起草|write|draft|revise)/iu.test(clause))) return false
   // A second independent action makes the output contract non-exclusive; do

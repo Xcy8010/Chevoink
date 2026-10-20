@@ -498,7 +498,7 @@ export async function startLoopRunLocked(
           const chapters = await tx.chapter.findMany({ where: { ...activeChapterScope(session.novelId), authorId: userId }, select: { id: true } })
           fresh.scope.chapterIds = chapters.map(chapter => chapter.id)
         }
-        const frozen = await freezeWritingScope(tx, { userId, novelId: session.novelId, runId: created.id }, fresh, input.prompt)
+        const frozen = await freezeWritingScope(tx, { userId, novelId: session.novelId, runId: created.id }, fresh, input.prompt, 1)
         created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(frozen)) as Prisma.InputJsonValue } })
       } else if (fresh.networkAccess === 'denied') {
         created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(fresh)) as Prisma.InputJsonValue } })

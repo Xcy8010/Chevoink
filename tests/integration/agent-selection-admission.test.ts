@@ -18,6 +18,8 @@ import * as skillService from '../../api/lib/agent/skills/service.js'
 import { chapterEditRangeTool, chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { getToolsForMode } from '../../api/lib/agent/tools/registry.js'
 import { restrictToolsToTask, snapshotToolAuthority, intersectToolAuthority } from '../../api/lib/agent/tool-authority.js'
+import { freezeWritingScope, readWritingScope } from '../../api/lib/agent/writing-scope.js'
+import { chapterRevisionPrompt } from '../support/writing-target-prompt.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -43,6 +45,112 @@ async function fixture(work: (subject: { userId: string; novelId: string; sessio
   }
 }
 describe.skipIf(!available)('fresh selected server admission transaction', () => {
+  it.each([
+    chapterRevisionPrompt,
+    '仅修改第3章。请先读取前两章。不修改第1、2章。',
+    '仅修改第3章。请先读取前两章。',
+    '请先读取第1章。仅修订第3章。',
+    '仅修正第3章。第1章提到一封信。不要跳过检查。',
+    '修改第3章时参考第1章。',
+  ])('binds fresh HTTP chapter effects independently of reading and factual references: %s', prompt => fixture(async f => {
+    const first = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const ids = [first.id, randomUUID(), randomUUID()]
+    for (const position of [2, 3]) await prisma.chapter.create({ data: { id: ids[position - 1], novelId: f.novelId,
+      authorId: f.userId, volumeId: first.volumeId, title: `第${position}章`, content: `第${position}章测试正文。`, revision: 3,
+      orderIndex: position, orderInVolume: position } })
+    const before = await prisma.chapter.findMany({ where: { novelId: f.novelId }, orderBy: { orderIndex: 'asc' } })
+    const response = await request(app).post('/api/agent/runs')
+      .set('Cookie', `chevoink_session=${buildSessionTokens(f.userId, 0).accessToken}`)
+      .send({ ...f, chapterId: ids[2], prompt, mode: 'build' })
+    expect(response.status).toBe(200)
+    const runId = response.body.data.runId as string
+    const row = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
+    const spec = taskSpecSchema.parse(row.taskSpec)
+    expect(spec).toMatchObject({ intent: 'revise', scope: { writingTargetProtocol: 1,
+      writing: { kind: 'bounded', repairAuthorized: true, targets: [{ orderIndex: 3, chapterId: ids[2] }] } } })
+    expect(spec.scope.writing?.targets).toHaveLength(1)
+    expect(await prisma.chapter.findMany({ where: { novelId: f.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+    await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
+    const context = { ...f, runId, mode: 'build' as const, creativeFreedom: 'balanced' as const, qualityMode: 'balanced' as const,
+      emit: () => {}, signal: new AbortController().signal }
+    for (const chapter of before.slice(0, 2)) {
+      await expect(chapterEditRangeTool.execute({ ...context, callId: `deny-range-${chapter.id}` },
+        { chapterId: chapter.id, oldText: chapter.content, newText: '未授权替换。' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+      await expect(chapterWriteTool.execute({ ...context, callId: `deny-write-${chapter.id}` },
+        { chapterId: chapter.id, content: '未授权覆盖。' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    }
+    await chapterEditRangeTool.execute({ ...context, callId: 'authorized-third-chapter' },
+      { chapterId: ids[2], oldText: before[2].content, newText: '第三章作者授权修正。' })
+    expect(await prisma.chapter.findMany({ where: { id: { in: ids.slice(0, 2) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 2))
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: ids[2] } })).content).toBe('第三章作者授权修正。')
+    expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(3)
+    expect(await prisma.webToolCall.count({ where: { runId } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    // A frozen contract stays byte-equivalent even if the caller supplies a new
+    // prompt or invokes the fresh parser again. Resume is not a new grant.
+    const frozen = await prisma.$transaction(tx => freezeWritingScope(tx, { ...f, runId }, spec, '修改所有章节', 1))
+    expect(frozen).toEqual(spec)
+    const saved = await prisma.$transaction(tx => readWritingScope(tx, { ...f, runId }))
+    expect(saved.writing).toEqual(spec.scope.writing)
+  }))
+
+  it('retains old needs-input contracts without promoting them to fresh admission', () => fixture(async f => {
+    const result = await startLoopRun(f.userId, { ...f, prompt: '修改第一章', mode: 'build' })
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
+    delete spec.scope.writingTargetProtocol
+    spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: true, titleAndBodyOnly: false }
+    await prisma.agentRun.update({ where: { id: result.runId }, data: { status: 'running', taskSpec: spec } })
+    expect(await prisma.$transaction(tx => freezeWritingScope(tx, { ...f, runId: result.runId }, spec, '修改第一章', 1))).toEqual(spec)
+    await expect(chapterEditRangeTool.execute({ ...f, runId: result.runId, mode: 'build', callId: 'old-frozen-denied',
+      creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
+    { chapterId: f.chapterId, oldText: '选区原文。', newText: '不能扩大旧授权。' })).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('前😀段。选区原文。后段。')
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+  }))
+
+  it.each(['不修订第2章', '不动第2章'])('honors an explicit exclusion inside a broader fresh HTTP range: %s', exclusion => fixture(async f => {
+    const first = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const secondId = randomUUID(), thirdId = randomUUID()
+    for (const [id, position] of [[secondId, 2], [thirdId, 3]] as const) await prisma.chapter.create({ data: {
+      id, novelId: f.novelId, authorId: f.userId, volumeId: first.volumeId, title: `第${position}章`, content: '排除范围测试原文。',
+      revision: 2, orderIndex: position, orderInVolume: position } })
+    const response = await request(app).post('/api/agent/runs')
+      .set('Cookie', `chevoink_session=${buildSessionTokens(f.userId, 0).accessToken}`)
+      .send({ ...f, prompt: `修改第1至3章。${exclusion}。`, mode: 'build' })
+    expect(response.status).toBe(200)
+    const runId = response.body.data.runId as string
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec)
+    expect(spec.scope.writing?.targets).toEqual([{ orderIndex: 1, chapterId: first.id }, { orderIndex: 3, chapterId: thirdId }])
+    await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
+    const before = await prisma.chapter.findUniqueOrThrow({ where: { id: secondId } })
+    await expect(chapterEditRangeTool.execute({ ...f, runId, mode: 'build', callId: 'excluded-second-chapter',
+      creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
+    { chapterId: secondId, oldText: before.content, newText: '越过否定限制。' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: secondId } })).toEqual(before)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+  }))
+
+  it.each(['请阅读这句：修改当前章节。', '请读取这句文字：修改第3章。', '引用原文：修改第3章。', '请阅读提示：修改首段。'])(
+    'never promotes data after a reading introducer into an HTTP writing grant: %s', prompt => fixture(async f => {
+      await prisma.chapter.update({ where: { id: f.chapterId }, data: { orderIndex: 3, orderInVolume: 3, content: '首段原文。\n后段原文。' } })
+      const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const response = await request(app).post('/api/agent/runs')
+        .set('Cookie', `chevoink_session=${buildSessionTokens(f.userId, 0).accessToken}`)
+        .send({ ...f, prompt, mode: 'build' })
+      expect(response.status).toBe(200)
+      const runId = response.body.data.runId as string
+      const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec)
+      expect(spec.scope.writing).toMatchObject({ kind: 'needs_input', targets: [] })
+      await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
+      await expect(chapterEditRangeTool.execute({ ...f, runId, mode: 'build', callId: 'reading-is-not-writing',
+        creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
+      { chapterId: f.chapterId, oldText: '首段原文。', newText: '不应执行。' })).rejects.toMatchObject({
+        code: prompt.startsWith('引用') ? 'SCOPE_NEEDS_INPUT' : 'AUTHOR_LOCAL_SCOPE',
+      })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    }))
+
   it('freezes continuation and necessary repair while protecting existing chapters through HTTP', () => fixture(async f => {
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     const response = await request(app).post('/api/agent/runs')

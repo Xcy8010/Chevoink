@@ -181,17 +181,18 @@ function classifyIntent(prompt: string, researchAdmission = false): TaskIntent {
     const chapterEffects = clauses.flatMap(clause => clause.split(/(?:但是|但|不过|\bbut\b|并(?:且)?(?=不要|不得|不能|禁止)|\band\s+(?=do not|don't|must not))/iu)).map(clause => clause
       .replace(/(?:不要|不得|不许|不能|禁止|别)(?:再)?(?:跳过|省略|略过).{0,12}(?:检查|审查|评估|校验|检测)/gu, '')
       .replace(/(?:do not|don't|must not|never)\s+(?:skip|omit|bypass)\b.{0,32}\b(?:checks?|reviews?|validation)\b/giu, ''))
-      .filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|(?<!分)别|只读|不写|不改|不修改|不修订|do not|don't|must not|never|read.only)/iu.test(clause))
+      .filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|(?<!分)别|只读|不写|不改|不修改|不修订|不修正|do not|don't|must not|never|read.only)/iu.test(clause))
       .map(clause => clause
         .replace(/(?:提出|给出|提供|列出|说明|输出|讲解).{0,32}(?:建议|方案|思路|方法|报告)/gu, '')
-        .replace(/(?:改写|修改|修复|优化|润色)(?:的)?(?:建议|方案|思路|方法)/gu, ''))
-    const revisesChapter = chapterEffects.some(clause => /(?:改写|修改|修复|优化|润色|重写|扩写|缩写).{0,16}(?:章|正文)|(?:章|正文).{0,16}(?:改写|修改|修复|优化|润色|重写)|\b(?:revise|edit|repair|rewrite|polish|fix)\b(?:(?!\b(?:advice|report|suggestion)\b).){0,40}\b(?:chapter|prose)\b/iu.test(clause))
+        .replace(/(?:改写|修改|修复|修订|修正|优化|润色)(?:的)?(?:建议|方案|思路|方法)/gu, ''))
+    const revisesChapter = chapterEffects.some(clause => /(?:改写|修改|修复|修订|修正|优化|润色|重写|扩写|缩写).{0,16}(?:章|正文)|(?:章|正文).{0,16}(?:改写|修改|修复|修订|修正|优化|润色|重写)|\b(?:revise|edit|repair|rewrite|polish|fix)\b(?:(?!\b(?:advice|report|suggestion)\b).){0,40}\b(?:chapter|prose)\b/iu.test(clause))
     if (revisesChapter) return 'revise'
     const writesChapter = chapterEffects.some(clause => /(?:写|续写|创作|起草).{0,16}(?:章节|章(?!节)|正文)(?!(?:的)?(?:(?:检查|审阅|质量|分析|评估).{0,8})?报告)|(?:完成|写完|补完|补齐).{0,8}(?:章节|章(?!节)|正文)(?!(?:的)?(?:质量|连续性|一致性|事实)?(?:检查|审查|评估|分析|校验|检测|报告))|\b(?:write|draft|finish|complete)\b(?:(?!\b(?:review|check|report|assessment|evaluation)\b).){0,40}\b(?:chapter|prose)\b(?!(?:['’]s)?\s+(?:quality\s+)?(?:review|check|report)\b)/iu.test(clause))
     return writesChapter ? 'write' : 'review'
   }
   if (/(规划|大纲|计划|设计剧情)/.test(prompt)) return 'plan'
-  if (/(改写|润色|扩写|缩写|修改|调整)/.test(prompt)) return 'revise'
+  if (/(改写|润色|扩写|缩写|修改|调整)/.test(prompt)
+    || affirmativeClauses(prompt).some(clause => /(?:修订|修正).{0,16}(?:章|正文)|(?:章|正文).{0,16}(?:修订|修正)/u.test(clause))) return 'revise'
   return 'write'
 }
 
