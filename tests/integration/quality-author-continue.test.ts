@@ -314,7 +314,7 @@ describe.runIf(available)('author admissions after settled quality format failur
     expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ deterministicMetrics: { droppedFindings: dropped ? 1 : 0 } })
   }))
 
-  it('a real unknown format-only payment with null agentRunId blocks the next human continue without a replay', async () => fixture(async f => {
+  it.each(['linked', 'legacy-null'] as const)('a real unknown format-only payment (%s) blocks the next human continue without a replay', async attribution => fixture(async f => {
     const h = await legacyHarness(f)
     const fetchMock = provider(request => { if (request === 3) throw new Error('synthetic unknown format transport'); return 'synthetic malformed report' })
     expect(await h.check()).toMatchObject({ outcome: 'failed' })
@@ -322,8 +322,12 @@ describe.runIf(available)('author admissions after settled quality format failur
     await h.resume(firstPause)
     expect(await h.check()).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_REPORT_INCOMPLETE' })
     expect(fetchMock).toHaveBeenCalledTimes(3)
-    const unknown = await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId, billingStatus: 'pending_usage', action: 'agent3HumanityFormatRecovery' } })
-    expect(unknown).toMatchObject({ usageSource: 'unknown', agentRunId: null })
+    let unknown = await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId, billingStatus: 'pending_usage', action: 'agent3HumanityFormatRecovery' } })
+    expect(unknown).toMatchObject({ usageSource: 'unknown', agentRunId: f.runId })
+    // Current requests retain their executing identity. Preserve explicit old
+    // null-attribution coverage using only this generated fixture's usage row.
+    if (attribution === 'legacy-null') unknown = await prisma.aiUsageLog.update({ where: { id: unknown.id, userId: f.userId }, data: { agentRunId: null } })
+    expect(unknown.agentRunId).toBe(attribution === 'legacy-null' ? null : f.runId)
     const nextPause = await h.pause()
     await h.resume(nextPause)
     expect(await h.admission()).toMatchObject({ id: `author-continue:${nextPause.id}` })

@@ -36,13 +36,13 @@ type SearchAttempt = {
 }
 
 type AttemptResponse = Pick<SearchAttempt, 'httpStatus' | 'providerRequestId' | 'providerCode'>
-function captureSearchResponse(response: Response, metadata: AttemptResponse) {
+function captureSearchResponse(response: { status: number; headers: { get(name: string): string | null } }, metadata: AttemptResponse) {
   metadata.httpStatus = response.status
   const requestId = response.headers.get('x-request-id') ?? response.headers.get('request-id')
   if (requestId && /^[a-zA-Z0-9_.:-]{1,128}$/.test(requestId)) metadata.providerRequestId = requestId
 }
 
-async function rejectSearchResponse(response: Response, provider: string): Promise<never> {
+async function rejectSearchResponse(response: { status: number; body: { cancel(): Promise<unknown> } | null }, provider: string): Promise<never> {
   // A rejected HTTP response may still stream a large body. Do not leave it
   // occupying the connection while the next fallback request starts.
   try { await response.body?.cancel() } catch { /* Preserve the HTTP failure. */ }

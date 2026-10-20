@@ -1,4 +1,4 @@
-import { Agent } from 'undici'
+import { Agent, fetch as fetchWebTool, type Response as WebToolResponse } from 'undici'
 import { parsePublicHttpUrl, publicEgressLookup } from './public-http.js'
 import { ToolModelConfigurationError, type ToolModelRuntime } from './tool-model-config.js'
 
@@ -24,15 +24,17 @@ export function webToolEndpoint(config: ToolModelRuntime, operation: WebToolOper
 }
 
 /** Socket DNS is checked and pinned; credentials cannot follow a redirect. */
-export async function requestWebTool(endpoint: string, apiKey: string, body: unknown, signal: AbortSignal): Promise<{ response: Response; close: () => Promise<void> }> {
+export async function requestWebTool(endpoint: string, apiKey: string, body: unknown, signal: AbortSignal): Promise<{ response: WebToolResponse; close: () => Promise<void> }> {
   parsePublicHttpUrl(endpoint)
   signal.throwIfAborted()
   const dispatcher = new Agent({ connections: 1, maxHeaderSize: 16384, allowH2: false, connect: { lookup: publicEgressLookup, timeout: 8000 } })
   try {
-    const response = await fetch(endpoint, {
+    // Keep fetch and its dispatcher on the same Undici protocol. Node 22's
+    // built-in fetch embeds Undici 6; the installed Agent uses Undici 8.
+    const response = await fetchWebTool(endpoint, {
       dispatcher, method: 'POST', redirect: 'error', signal,
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    } as RequestInit & { dispatcher: Agent })
+    })
     return { response, close: async () => {
       try { if (response.body && !response.body.locked) await response.body.cancel() } finally { await dispatcher.destroy() }
     } }

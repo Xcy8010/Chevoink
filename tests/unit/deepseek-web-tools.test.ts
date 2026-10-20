@@ -10,7 +10,10 @@ import type { ToolModelRuntime } from '../../api/lib/tool-model-config.js'
 const config: ToolModelRuntime = { provider: 'deepseek', modelName: 'deepseek-search', baseUrl: 'https://api.deepseek.com', apiKey: 'offline-fixture-secret' }
 const article = 'A well formed article about reading contracts and preserving source evidence. '.repeat(12)
 const item = { title: 'Source title', url: 'https://example.com/book?id=19', snippet: 'Short display snippet', summary: 'Long model summary', content: '', site_name: 'Example' }
-const transport = vi.fn()
+const transport = vi.hoisted(() => vi.fn())
+vi.mock('undici', async importOriginal => ({ ...await importOriginal<typeof import('undici')>(),
+  fetch: (...args: unknown[]) => transport(...args),
+}))
 const originalProvider = env.webSearchProvider
 beforeEach(() => {
   env.webSearchProvider = 'auto'
