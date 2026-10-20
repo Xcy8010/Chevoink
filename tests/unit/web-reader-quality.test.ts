@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import iconv from 'iconv-lite'
-import { assessReaderText, extractReaderHtml, extractReaderLinks } from '../../api/lib/web-reader-quality.js'
+import { assessReaderText, assessReaderEvidence, extractReaderHtml, extractReaderLinks } from '../../api/lib/web-reader-quality.js'
 import { decodeWebPageBuffer } from '../../api/lib/html-extract.js'
 
 const body = '山谷里的村民清晨出发，沿着河岸查看新修的水渠。他们记录水位与天气，并讨论下一阶段的耕种计划。'
@@ -50,5 +50,42 @@ describe('reader content quality without navigation false positives', () => {
   it('uses meta charset when HTTP charset is missing', () => {
     const html = `<meta charset="gbk"><article>${body}</article>`
     expect(decodeWebPageBuffer(iconv.encode(html, 'gbk'), 'text/html')).toBe(html)
+  })
+})
+
+describe('source-grounded work identity and extraction integrity', () => {
+  const target = { title: '河谷纪事', author: '林青' }
+  const original = Array.from({ length: 18 }, (_, index) => `第${index + 1}次观察记录了清晨水位，村民沿着岸边逐一核对木桩编号，随后带着不同的意见返回村庄。`).join('\n\n')
+  const html = (title = target.title, author = target.author, text = original) => `<html><head><script type="application/ld+json">${JSON.stringify({ '@type': 'Chapter', articleBody: text, isPartOf: { '@type': 'Book', name: title, author: { '@type': 'Person', name: author } } })}</script></head><body><article>${text}</article></body></html>`
+  it('matches exact structured book and author, independently from readable body quality', () => {
+    expect(assessReaderEvidence(original, '河谷纪事第1章 清晨', target, html())).toMatchObject({ identity: { status: 'verified', title: target.title, author: target.author, pageType: 'chapter' }, integrity: { status: 'source_compared', code: 'SOURCE_TEXT_MATCH' } })
+  })
+  it.each(['河谷纪事：番外', '河谷纪事青龙', '另一部作品'])('rejects the original-name prefix as identity proof: %s', title => {
+    expect(assessReaderEvidence(original, `${title}第1章`, target, html(title)).identity.status).toBe('mismatch')
+    expect(assessReaderText(original).status).toBe('ok')
+  })
+  it('does not accept a different author or an uncorroborated chapter title', () => {
+    expect(assessReaderEvidence(original, '河谷纪事第1章', target, html(target.title, '其他作者')).identity.status).toBe('mismatch')
+    expect(assessReaderEvidence(original, '河谷纪事第1章', target).identity.status).toBe('unknown')
+  })
+  it('does not mistake book metadata for a chapter page', () => {
+    const source = `<script type="application/ld+json">${JSON.stringify({ '@type': 'Book', name: target.title, author: target.author })}</script><article>${original}</article>`
+    expect(assessReaderEvidence(original, target.title, target, source).identity).toMatchObject({ status: 'verified', pageType: 'book' })
+  })
+  it('proves deletion of ordinary characters without relying on PUA or whitespace ratios', () => {
+    const damaged = original.replaceAll('逐一核对', '')
+    expect(assessReaderText(damaged)).toMatchObject({ status: 'ok', quality: { privateUseRatio: 0, replacementRatio: 0 } })
+    expect(assessReaderEvidence(damaged, '河谷纪事第1章', target, html()).integrity).toMatchObject({ status: 'damaged', code: 'SOURCE_TEXT_DELETION' })
+  })
+  it('permits normal spaces, paragraph formatting, Markdown and source-bounded excerpts', () => {
+    for (const text of [original.replaceAll('，', '，  '), original.split('\n\n').map(paragraph => `**${paragraph}**`).join('\n\n'), original.slice(50, -50)]) {
+      expect(assessReaderEvidence(text, '河谷纪事第1章', target, html()).integrity.status).toBe('source_compared')
+    }
+    const english = 'The village recorded the water level each morning and carefully compared the resulting evidence. '.repeat(5)
+    expect(assessReaderEvidence(english, 'Chapter 1', undefined, html(target.title, target.author, english)).integrity.status).toBe('source_compared')
+  })
+  it('preserves unknown completeness when no source comparison is available', () => {
+    expect(assessReaderEvidence(original, '河谷纪事第1章', target).integrity.status).toBe('unverified')
+    expect(assessReaderText('中 文 留 白\n'.repeat(40)).status).toBe('ok')
   })
 })

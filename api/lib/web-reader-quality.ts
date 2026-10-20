@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
 import { Readability } from '@mozilla/readability'
 import { parseHTML } from 'linkedom'
+import { fromMarkdown } from 'mdast-util-from-markdown'
 import { parsePublicHttpUrl } from './public-http.js'
 
 /** Follow only actual same-site anchors. Never synthesize reader/chapter IDs. */
@@ -26,6 +28,112 @@ export type ReaderQualityResult = {
   text: string
   title: string
   quality: ReaderQuality
+}
+
+export type ReaderTarget = { title: string; author?: string }
+export type ReaderEvidence = {
+  version: 1
+  identity: { status: 'verified' | 'mismatch' | 'unknown'; title?: string; author?: string; pageType: 'chapter' | 'book' | 'unknown'; basis: 'structured_metadata' | 'page_title' | 'none' }
+  integrity: { status: 'source_compared' | 'unverified' | 'damaged'; code: string; extractedHash: string; referenceHash?: string }
+}
+
+const textHash = (value: string) => createHash('sha256').update(value).digest('hex')
+const compact = (value: string) => {
+  type Node = { type: string; value?: string; children?: Node[] }
+  const visible = (node: Node): string => node.type === 'definition' ? '' : node.value ?? node.children?.map(visible).join('') ?? ''
+  return visible(fromMarkdown(value)).normalize('NFC').replace(/\s+/gu, '')
+}
+const identityValue = (value: string) => value.normalize('NFC').trim().replace(/^《|》$/gu, '').trim()
+
+/** Metadata is source evidence, not authority. Never equate a title prefix,
+ * common hostname or a search snippet with the requested original work. */
+export function assessReaderEvidence(text: string, pageTitle: string, target?: ReaderTarget, sourceHtml?: string): ReaderEvidence {
+  let title: string | undefined, author: string | undefined
+  let basis: ReaderEvidence['identity']['basis'] = 'none'
+  let pageType: ReaderEvidence['identity']['pageType'] = 'unknown'
+  let reference: string | undefined
+  let structuredReference = false
+  if (sourceHtml) {
+    const { document } = parseHTML(sourceHtml)
+    const meta = (names: string[]) => {
+      for (const node of document.querySelectorAll('meta[content]')) {
+        if (names.includes((node.getAttribute('property') ?? node.getAttribute('name') ?? '').toLowerCase())) return node.getAttribute('content')?.trim()
+      }
+      return undefined
+    }
+    title = meta(['og:novel:book_name', 'og:book_name', 'book:name'])
+    author = meta(['og:novel:author', 'book:author', 'author'])
+    const authorName = (value: unknown): string | undefined => typeof value === 'string' ? value : value && typeof value === 'object' && 'name' in value && typeof value.name === 'string' ? value.name : undefined
+    const inspect = (value: unknown, depth = 0): void => {
+      if (!value || typeof value !== 'object' || depth > 5) return
+      if (Array.isArray(value)) { for (const item of value.slice(0, 100)) inspect(item, depth + 1); return }
+      const entry = value as Record<string, unknown>
+      const types = Array.isArray(entry['@type']) ? entry['@type'] : [entry['@type']]
+      if (types.some(type => type === 'Book' || type === 'Novel')) {
+        if (typeof entry.name === 'string') title ??= entry.name
+        author ??= authorName(Array.isArray(entry.author) ? entry.author[0] : entry.author)
+        if (depth === 0) pageType = 'book'
+      }
+      if (types.some(type => type === 'Chapter' || type === 'Article' || type === 'NewsArticle' || type === 'BlogPosting')) {
+        if (typeof entry.articleBody === 'string' && !reference) { reference = entry.articleBody; structuredReference = true }
+        if (types.includes('Chapter')) pageType = 'chapter'
+        inspect(entry.isPartOf, depth + 1)
+      }
+      inspect(entry['@graph'], depth + 1)
+      inspect(entry.mainEntity, depth + 1)
+    }
+    for (const node of document.querySelectorAll('script[type="application/ld+json"]')) {
+      if ((node.textContent?.length ?? 0) > 256_000) continue
+      try { inspect(JSON.parse(node.textContent ?? '')) } catch { /* Invalid metadata cannot verify identity. */ }
+    }
+    if (title) { basis = 'structured_metadata'; if (pageType === 'unknown') pageType = 'book' }
+    // Only an explicit article body can corroborate extraction. Whole-page
+    // navigation, recommendations and hidden text are never a reference body.
+    if (!reference && document.querySelector('article,[role="main"]')) {
+      const extracted = extractReaderHtml(sourceHtml, false)
+      if (extracted.status === 'ok' || extracted.code === 'WEB_READ_GARBLED') {
+        reference = extracted.status === 'ok' ? extracted.text : undefined
+      }
+    }
+  }
+  {
+    // A chapter page title can disprove a prefix match; without author metadata
+    // it still cannot positively certify an original work.
+    const chapter = pageTitle.match(/^(.{1,160}?)(?:第[零〇一二三四五六七八九十百千万\d]+章|\s*[-|–]\s*Chapter\s+\d)/iu)
+    if (chapter) { pageType = 'chapter'; if (!title) { title = chapter[1]; basis = 'page_title' } }
+  }
+  if (title) title = identityValue(title).slice(0, 300)
+  if (author) author = identityValue(author).slice(0, 300)
+  const mismatch = Boolean(target && ((title && title !== identityValue(target.title)) || (target.author && author && author !== identityValue(target.author))))
+  const verified = Boolean(target && title === identityValue(target.title) && author && (!target.author || author === identityValue(target.author)) && basis === 'structured_metadata')
+  const integrity: ReaderEvidence['integrity'] = { status: 'unverified', code: 'SOURCE_COMPLETENESS_UNVERIFIED', extractedHash: textHash(text) }
+  if (reference) {
+    const extracted = compact(text), original = compact(reference)
+    integrity.referenceHash = textHash(reference)
+    if (original.includes(extracted) || extracted.includes(original)) { integrity.status = 'source_compared'; integrity.code = 'SOURCE_TEXT_MATCH' }
+    else if (extracted.length >= 150) {
+      const deletionOnly = (span: string, sample: string) => {
+        const chars = Array.from(sample)
+        let cursor = 0
+        for (const char of span) if (char === chars[cursor]) cursor++
+        return cursor === chars.length && span.length - sample.length >= 8
+      }
+      if (structuredReference && deletionOnly(original, extracted)) {
+        integrity.status = 'damaged'; integrity.code = 'SOURCE_TEXT_DELETION'
+      }
+      // Prove internal deletion only between matching, unique 24-character
+      // boundaries. Formatting, a removed heading or a short excerpt is not loss.
+      const prefix = extracted.slice(0, 24), suffix = extracted.slice(-24)
+      const start = original.indexOf(prefix), end = original.indexOf(suffix, start + 24)
+      if (start >= 0 && end >= start && original.indexOf(prefix, start + 1) < 0 && original.indexOf(suffix, end + 1) < 0) {
+        const span = original.slice(start, end + suffix.length)
+        if (deletionOnly(span, extracted)) {
+          integrity.status = 'damaged'; integrity.code = 'SOURCE_TEXT_DELETION'
+        }
+      }
+    }
+  }
+  return { version: 1, identity: { status: mismatch ? 'mismatch' : verified ? 'verified' : 'unknown', ...(title ? { title } : {}), ...(author ? { author } : {}), pageType, basis }, integrity }
 }
 
 const normalize = (text: string) => text.replace(/\r\n?/g, '\n').replace(/[\t \u00a0]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim()

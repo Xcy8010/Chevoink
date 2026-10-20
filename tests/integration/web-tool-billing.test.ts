@@ -36,6 +36,24 @@ async function fixture(work: (ctx: ToolContext) => Promise<void>, balance = 1000
 const ledger = (ctx: ToolContext) => prisma.creditLedgerEntry.findMany({ where: { userId: ctx.userId }, orderBy: { createdAt: 'asc' } })
 
 describe.skipIf(!available)('Search / Fetch billing with isolated PostgreSQL (simulated supplier)', () => {
+  it('refunds an observed incomplete Fetch once and replays its evidence without another supplier request', async () => {
+    await fixture(async ctx => {
+      const failure = { provider: 'deepseek', status: 'unreadable', code: 'WEB_READ_INCOMPLETE', text: '',
+        evidence: { version: 1, integrity: { status: 'damaged', code: 'SOURCE_TEXT_DELETION', extractedHash: 'a'.repeat(64), referenceHash: 'b'.repeat(64) } } }
+      const dispatch = vi.fn(async () => failure)
+      const fetchRequest = { url: 'https://example.com/chapter/1', sourceId: null, refresh: false }
+      expect(await executeWebToolCall(ctx, 'fetch', fetchRequest, true, dispatch, () => 'failed')).toEqual(failure)
+      expect(await findWebToolCallOutcome(ctx, 'fetch', fetchRequest)).toEqual(failure)
+      await Promise.all([reconcileCreditRefunds({ userId: ctx.userId }), reconcileCreditRefunds({ userId: ctx.userId })])
+      expect(dispatch).toHaveBeenCalledOnce()
+      const entries = await ledger(ctx)
+      expect(entries).toHaveLength(2)
+      expect(entries.reduce((sum, entry) => sum + entry.deltaMilli, 0)).toBe(0)
+      expect(await prisma.creditRefundIntent.count({ where: { originalEntry: { userId: ctx.userId } } })).toBe(1)
+      await expect(executeWebToolCall(ctx, 'fetch', fetchRequest, true, dispatch, () => 'failed')).rejects.toMatchObject({ code: 'CREDIT_WEB_TOOL_PENDING' })
+      expect(dispatch).toHaveBeenCalledOnce()
+    })
+  })
   it('migrates exactly two multipliers, retains configuration and audit, and fences rollback after later admin edits', async () => {
     const schema = `billing_migration_${randomUUID().replaceAll('-', '')}`
     const sql = readFileSync(new URL('../../prisma/migrations/20261020120000_web_tool_billing/migration.sql', import.meta.url), 'utf8')

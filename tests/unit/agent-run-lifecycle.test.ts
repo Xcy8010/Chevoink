@@ -26,7 +26,7 @@ const mocks = vi.hoisted(() => ({
   savedWorkflow: vi.fn(async (): Promise<WritingWorkflowMilestone[]> => []),
   todos: vi.fn(async (): Promise<AgentTodoItem[]> => []),
   priorRuns: vi.fn(),
-  report: vi.fn(async () => ({ chineseCharacters: 0, content: '' })),
+  report: vi.fn(async (): Promise<{ chineseCharacters: number; content: string; evidence?: { targetAnalysisSupported?: boolean } }> => ({ chineseCharacters: 0, content: '' })),
   original: vi.fn<() => Promise<{ parts: Array<{ type: string; text: string }> } | null>>(async () => ({ parts: [{ type: 'text', text: '核对原任务的剩余工作。' }] })),
   tools: [] as AgentTool[],
   hiddenTools: [] as AgentTool[],
@@ -1839,6 +1839,34 @@ describe('original task context on resume', () => {
     queue(response('已完成。'))
     await run('写第十九章。')
     expect(mocks.report).not.toHaveBeenCalled()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+  it('delivers a persisted limitation report without certifying target analysis or regenerating it', async () => {
+    const content = '# 来源核验\n\n未取得可验证的原作正文。'
+    mocks.report.mockResolvedValue({ chineseCharacters: 30, content, evidence: { targetAnalysisSupported: false } })
+    queue(response('分析已完整完成。'))
+    await run('搜索并拆解这本小说。')
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: expect.stringContaining('未完成有正文依据的写法分析') }))
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: expect.stringContaining(content) }))
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+  })
+  it('does not certify a named body-analysis task when no report was saved', async () => {
+    const prompt = '联网研究《样本》的写作手法并读取公开正文'
+    const task = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, researchAdmission: 1 })
+    mocks.update.mockResolvedValueOnce({ taskSpec: task })
+    queue(response('我已经完整分析了原作。'))
+    await run(prompt)
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: expect.stringContaining('未完成有正文依据的写法分析') }))
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+  })
+  it('does not demand body evidence for explicitly bibliographic research', async () => {
+    const prompt = '联网研究《样本》的作者与出版信息，不读取正文'
+    mocks.update.mockResolvedValueOnce({ taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, researchAdmission: 1 }) })
+    mocks.report.mockResolvedValue({ chineseCharacters: 20, content: '已核实的作者书目信息。', evidence: { targetAnalysisSupported: false } })
+    queue(response('书目信息已核实。'))
+    await run(prompt)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
   it('narrows a legacy misclassified research run on explicit resume and persists the same task identity', async () => {

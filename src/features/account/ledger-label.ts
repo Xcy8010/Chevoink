@@ -12,7 +12,8 @@ export const TIER_LABELS: Record<string, string> = {
 }
 
 export function ledgerLabel(item: CreditLedgerItem): string {
-  if (item.kind === 'refund') return '失败调用返还'
+  if (item.kind === 'refund') return item.sourceType === 'web_search' ? '搜索费用返还'
+    : item.sourceType === 'web_fetch' ? '抓取费用返还' : '失败调用返还'
   if (item.sourceType === 'model_tokens') return item.modelLabel || TIER_LABELS[item.modelTier ?? ''] || SOURCE_LABELS.model_tokens
   return SOURCE_LABELS[item.sourceType] ?? item.sourceType
 }

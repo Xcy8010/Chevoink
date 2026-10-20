@@ -2129,6 +2129,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId,
         }) : null
         const reportIncomplete = Boolean(report && report.chineseCharacters < reportMinimum)
+        const requiresTargetText = taskSpec.researchTarget && taskSpec.researchTarget.textAnalysisRequired !== false
+        const targetEvidenceMissing = requiresTargetText ? report?.evidence?.targetAnalysisSupported !== true
+          : taskSpec.researchTarget?.textAnalysisRequired === false ? false : report?.evidence?.targetAnalysisSupported === false
+        const researchLimitation = '未取得身份与完整性均可核验的目标原作正文，本次仅交付来源核验与受限说明，未完成有正文依据的写法分析。'
         const reportReminder = reportIncomplete
           ? `\n本任务报告main已保存${report!.chineseCharacters}个汉字，要求至少${reportMinimum}个。先用research_report_read核对区块与revision，再用research_report_save只保存缺失或待修订区块；不得重写整份或凑字。来源读取失败时先核对搜索实际返回的URL、错误分类及页面真实链接，在既有预算内尝试可用来源，不编造地址、不重复请求已失败且未变化的来源。记录未取得的资料与受限原因，不能把简介或乱码当正文，也不能宣称已读全书；仅在确实需要用户提供信息时使用ask_user，不把上传小说作为排查404的前提。` : ''
         if (pendingReviews.size) {
@@ -2176,13 +2180,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const savedCandidate = !prematureFinish && !report?.content ? await prisma.$transaction(tx => readSavedWritingPresentation(tx,
           { userId: params.userId, novelId: params.novelId, runId })) : null
         const savedPresentation = shouldUseSavedWritingPresentation(savedCandidate, cleanContent) ? savedCandidate : null
-        if (!prematureFinish && report?.content) {
+        if (!prematureFinish && (report?.content || targetEvidenceMissing)) {
           // Deliver the exact persisted report through the existing text UI;
           // a short model wrap-up cannot hide it or trigger paid regeneration.
-          const evidence = report.evidence
+          const evidence = report?.evidence
           const evidenceNote = evidence && evidence.discoveredPages > 0
             ? `> 联网资料范围：发现 ${evidence.discoveredPages} 个来源，保存可读文章的来源 ${evidence.readablePages} 个，保存目录/简介的来源 ${evidence.metadataPages} 个，仍有读取失败记录的来源 ${evidence.failedSources} 个；报告引用 ${evidence.citedVersions} 个已保存页面版本。正文窗口按版本去重后共 ${evidence.providedCharacters ?? 0} 个 UTF-16 字符位置，表示工具已准备的内容范围，不等于已分析范围。各类来源可能重叠；这些数字不包含附件，不代表已读章节数或全书覆盖，未核实全书阅读完整性。\n\n` : ''
-          const delivered = evidenceNote + humanizeAgentVisibleText(stripAgentProtocolArtifacts(report.content))
+          const delivered = (targetEvidenceMissing ? `> ${researchLimitation}\n\n` : '') + evidenceNote + humanizeAgentVisibleText(stripAgentProtocolArtifacts(report?.content ?? ''))
           for (let index = parts.length - 1; index >= 0; index -= 1) {
             if (parts[index].type === 'text') parts.splice(index, 1)
           }
@@ -2196,11 +2200,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
         }
         bus.emit({ type: 'step.finish', turn, usage: result.usage })
-        await finalizeRun(runId, bus, prematureFinish ? 'failed' : 'succeeded', usage, turn, lastAssistantText.slice(0, 300), prematureFinish
+        await finalizeRun(runId, bus, prematureFinish || targetEvidenceMissing ? 'failed' : 'succeeded', usage, turn, lastAssistantText.slice(0, 300), prematureFinish
           ? reviewBlockedWrapUp
             ? '修订被安全检查停止后连续多轮没有推进；已保存的正文与报告保留，未判定检查通过。如作者希望继续处理剩余意见，请在输入框重新发送一条明确指令（写明要处理的章节），系统将按新任务受理。'
             : '连续多轮没有推进剩余工作，已保存进度并安全停止；任务未完成。'
-          : undefined,
+          : targetEvidenceMissing ? researchLimitation : undefined,
           true, undefined, undefined, savedCandidate ? { messageId, subject: { userId: params.userId, novelId: params.novelId, runId }, expected: savedCandidate,
             signal: controller.signal, parts, replaceCandidate: true, displayText: lastAssistantText } : undefined)
         return
@@ -2639,7 +2643,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const reportMinimum = Math.max(0, ...taskSpec.expectedOutputs.filter(item => item.required).map(item => item.minimumChineseCharacters ?? 0))
         const fulfilled = chapterRequired
           ? await (await import('./humanity-quality.js')).hasCommittedTaskChapter(prisma, params.userId, params.novelId, runId)
-          : reportRequired ? Boolean(report?.content && report.chineseCharacters >= reportMinimum)
+          : reportRequired ? Boolean(report?.content && report.chineseCharacters >= reportMinimum
+            && (taskSpec.researchTarget?.textAnalysisRequired === false || (taskSpec.researchTarget
+              ? report.evidence?.targetAnalysisSupported === true : report.evidence?.targetAnalysisSupported !== false)))
             : expectsPlanSave && planSavePerformed
         const notice = fulfilled
           ? '本任务成果已保存并核验。已按作者要求结束，剩余待办不再执行，未将其标为完成。'

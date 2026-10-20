@@ -88,6 +88,11 @@ export const taskSpecSchema = z.object({
   controlPolicy: z.literal('until_completion').optional(),
   /** Frozen from the original request, never selected by a search tool. */
   researchBudget: z.enum(['standard', 'extended']).optional(),
+  /** Fresh server-derived denial; absent legacy contracts keep their ceiling. */
+  networkAccess: z.literal('denied').optional(),
+  /** Exact external work named by the fresh author, never a model-selected prefix. */
+  researchTarget: z.object({ title: z.string().trim().min(1).max(120), author: z.string().trim().min(1).max(120).optional(),
+    textAnalysisRequired: z.boolean().optional() }).strict().optional(),
   /** Server-frozen creative scope; a broad book request is a proposal, not permission to serialize indefinitely. */
   writingPacing: z.enum(['proposal_only', 'explicit_writing', 'conversation_only']).optional(),
   scope: taskScopeSchema,

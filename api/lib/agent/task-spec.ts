@@ -10,6 +10,49 @@ type DirectiveCandidate = Pick<UserDirective, 'kind' | 'text'>
 
 const PREFERENCE_MARKERS = /(希望|尽量|偏好|最好|倾向)/
 
+// Match actions within clauses, never across a forbidden write into a later
+// research target. A list separator also bounds direct 不写/不改 actions.
+function actionClauses(prompt: string): string[] {
+  return prompt.split(/[。！？!?；;\n，,]+|(?:但是|然后|接着|但|\bbut\b)|(?=请(?:你)?(?:优先)?(?:研究|搜索|读取))/iu)
+    .flatMap(clause => {
+      const items = clause.split('、')
+      const prohibition = items[0].match(/(?:不要|不需要|无需|不用|不必|禁止|不得|不能|不许|别|不)(?=创建|创作|写|改|修|润色|生成|保存|读取|读|只凭)/u)?.[0]
+      return items.map((item, index) => index > 0 && prohibition ? prohibition + item : item)
+    })
+}
+
+function affirmativeClauses(prompt: string): string[] {
+  return actionClauses(prompt).map(clause => clause.replace(/(?:不要|无需|不用|不必)(?:再)?(?:询问我|问我|确认|征求同意)/gu, ''))
+    .filter(clause => !/(?:不要|不需要|无需|不用|不必|禁止|不得|不能|不许|别|不(?=创建|创作|写|改|修|保存|生成|新建|润色|读)|do not|don't|must not|never)/iu.test(clause))
+}
+
+/** Search location and evidence constraints do not revoke network access. */
+function explicitlyDeniesNetwork(prompt: string): boolean {
+  if (/(?:不要|不需要|无需|不用|不必|禁止|不得|不能|不许|别|不)(?:再|进行|使用|调用)?(?:任何)?(?:联网|上网)/u.test(prompt)) return true
+  return actionClauses(prompt).some(clause => /(?:不要|无需|不用|不必|禁止|不得|不能|不许|别|不)(?:再|进行)?(?:联网|上网)|(?:不要|无需|不用|不必|禁止|不得|不能|不许|别|不)(?:使用|调用|访问)(?:任何)?(?:网络|互联网|联网工具|外部网站)|(?:不要|无需|不用|不必|禁止|不得|不能|不许|别|不)(?:搜索|检索|抓取|读取)(?:任何)?(?:外部|网上|网络)(?:资料|信息|来源|网页)?|^\s*(?:本次|这次|请|只需|完全|全程|现在|先|暂时|你|本轮|都|\s)*(?:不要|禁止|不得|别)(?:搜索|检索|抓取|浏览)(?:了|网页|网站|网络)?\s*$|\b(?:do not|don't|must not|never)\s+(?:go online|(?:use|access)\s+(?:the\s+)?(?:internet|network|web)|(?:search|browse|fetch)(?:\s+(?:the\s+)?(?:web|internet|external sources?))?)\s*[.!]?$/iu.test(clause.trim()))
+}
+
+function affirmativeMutation(prompt: string): boolean {
+  return affirmativeClauses(prompt).some(clause => {
+    const effect = clause.replace(/(?:只给|给出|提供|列出|说明|分析|讨论).{0,32}(?:建议|方法|思路|方案|意见)/gu, '')
+      .replace(/(?:改写|修改|修复|优化|润色)(?:的)?(?:建议|方法|思路|方案)/gu, '')
+    return /(?:写(?!作)|续写|改写|修改|修复|润色|重写|扩写|缩写|替换|删除|插入|保存|写入|存入|创建|新建|发布|生成).{0,24}(?:章|正文|段|句|对白|对话|剧情|计划|报告|文件|小说|作品|稿|卷)|\b(?:write|create|edit|revise|polish|rewrite|save|delete|publish)\b.{0,40}\b(?:chapter|prose|paragraph|sentence|dialogue|plan|report|file|novel)\b/iu.test(effect)
+  })
+}
+
+function namedResearchTarget(prompt: string): TaskSpec['researchTarget'] {
+  const titles = [...new Set([...prompt.matchAll(/《([^》\n]{1,120})》/gu)].map(match => match[1].trim()))]
+  if (titles.length !== 1 || !titles[0]) return undefined
+  const author = prompt.match(/作者(?:是|为|[:：])\s*([^\s，,。；;、()（）《》：:]{1,120})/u)?.[1]
+  const positive = affirmativeClauses(prompt).join('\n').replace(/《[^》]*》/gu, '')
+  // Missing a craft keyword cannot waive evidence. Only an explicit, solely
+  // bibliographic objective can finish without chapter-text support.
+  const bibliographyOnly = /作者|书目|出版信息|出版时间|出版情况|ISBN|\b(?:author|bibliograph|publication)\b/iu.test(positive)
+    && !/分析|解读|拆解|比较|总结|手法|正文|原文|修辞|主题|段落|情节|人物|叙事|章节|样本|写作|\b(?:analy[sz]|craft|chapter|text|narrative)/iu.test(positive)
+  const textAnalysisRequired = !bibliographyOnly
+  return { title: titles[0], ...(author ? { author } : {}), textAnalysisRequired }
+}
+
 /** A requested short scene is prose, even when a separate clause forbids an outline. */
 function boundedSceneRequest(prompt: string): boolean {
   return prompt.split(/[。；;\n，,]+/u).some(clause => !/(?:不要|不得|禁止|不许|别|do not|don't)/iu.test(clause)
@@ -20,9 +63,7 @@ function boundedSceneRequest(prompt: string): boolean {
 /** Only the current original request may authorize prose. Historical chapters,
  * research results and an assistant's own plan are never author confirmation. */
 export function classifyWritingPacing(prompt: string): TaskSpec['writingPacing'] {
-  const clauses = prompt.split(/[。！？!?；;\n，,]+/u)
-  const positive = clauses.map(clause => clause.replace(/(?:不要|无需|不用|不必)(?:再)?(?:询问我|问我|确认|征求同意)/gu, ''))
-    .filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|别|do not|don't)/iu.test(clause)).join('，')
+  const positive = affirmativeClauses(prompt).join('\n')
   const greeting = /^(?:你好|您好|嗨|哈喽|hello|hi|hey|在吗|谢谢|早上好|晚上好|你是谁|你能做什么)[\s，,。.!！?？～~]*$/iu.test(prompt.trim())
   const question = /^(?:请问|告诉我|解释|介绍|什么是|为什么|如何|怎么|怎样|能否解释|你觉得|你认为|(?:我)?(?:想|想要|希望)(?:了解|知道|学习)|what\b|why\b|how\b|explain\b)/iu.test(prompt.trim())
   const explicitEffect = /(?:帮我|替我|为我|请你|然后|再)(?:直接)?(?:写|修改|改写|续写|创建|删除|保存|更新|润色|重写|生成)/u.test(positive)
@@ -102,16 +143,14 @@ export function extractDirectiveCandidates(prompt: string): DirectiveCandidate[]
 /** Source discovery and chapter samples require a bounded research task.
  * Only fresh human admission may opt in, never a legacy resume/bootstrap. */
 function externalCraftResearch(prompt: string): boolean {
-  const clauses = prompt.split(/[。！？!?；;\n，,]+/u)
-  if (clauses.some(clause => /(?:不要|无需|不用|禁止|不得|不许|别|do not|don't|never).{0,12}(?:联网|上网|搜索|检索|搜|search|browse|fetch)/iu.test(clause))) return false
-  const positiveClauses = clauses.filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不许|别|do not|don't|never)/iu.test(clause))
+  if (explicitlyDeniesNetwork(prompt)) return false
   // Do not turn mixed local revision or explicit persistence into readonly
   // research. Keep this stricter exclusion local to the new admission rule.
-  if (positiveClauses.some(clause => /(?:写(?!作)|续写|改写|修改|修复|润色|重写|扩写|缩写|替换|删除|插入|保存|写入|存入|创建|新建|发布|生成).{0,24}(?:章|正文|段|句|对白|对话|剧情|计划|报告|文件|小说|作品|卷)|\b(?:write|create|edit|revise|polish|rewrite|save|delete|publish)\b.{0,40}\b(?:chapter|prose|paragraph|sentence|dialogue|plan|report|file|novel)\b/iu.test(clause))) return false
-  const positive = positiveClauses.join('；')
+  if (affirmativeMutation(prompt)) return false
+  const positive = affirmativeClauses(prompt).join('\n')
   return /联网|上网|搜索|检索|搜.{0,12}(?:小说|作品|书)|查找|查阅|\b(?:search|browse|look up|fetch)\b/iu.test(positive)
     && /小说|这本书|本书|作品|《[^》]+》|\b(?:novel|book)\b/iu.test(positive)
-    && /写作(?:手法|技巧|思路|方法)|叙事|人物塑造|悬念|结构|节奏|\b(?:writing|narrative|storytelling)\s+(?:techniques?|craft|style|approach)/iu.test(positive)
+    && /写作(?:手法|技巧|思路|方法)|叙事|人物塑造|悬念|结构|节奏|研究|按证据分析|公开(?:章节|正文|样本)|\b(?:writing|narrative|storytelling)\s+(?:techniques?|craft|style|approach)|\b(?:research|evidence|public chapters?)\b/iu.test(positive)
 }
 
 function classifyIntent(prompt: string, researchAdmission = false): TaskIntent {
@@ -122,7 +161,8 @@ function classifyIntent(prompt: string, researchAdmission = false): TaskIntent {
   const requestsResearch = /拆书|拆解|调研|解读|读后评估|(?:阅读|分析).{0,16}(?:小说|这本书|本书|作品)|(?:research|analy[sz]e|dissect).{0,32}(?:novel|book)/iu.test(prompt)
   const requestsWriting = clauses.some(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|只读|不写|不改|do not|don't)/iu.test(clause)
     && /(?:写|续写|改写|修改|润色|创建|新建|发布|删除).{0,16}(?:章|正文|小说|作品|卷)|(?:保存|写入|存入).{0,24}(?:计划|文件)|(?:write|create|edit|publish).{0,20}(?:chapter|novel)/iu.test(clause))
-  if ((requestsResearch || researchAdmission && externalCraftResearch(prompt)) && !requestsWriting) return 'research_analysis'
+  if ((requestsResearch || researchAdmission && externalCraftResearch(prompt)) && !requestsWriting
+    && !(researchAdmission && affirmativeMutation(prompt))) return 'research_analysis'
   if (/(全书|所有章节|批量|统一).{0,16}(改名|替换|修改|变更)|全局改/.test(prompt)) return 'global_transform'
   if (/(卷|章节).{0,12}(移动|排序|顺序|拆分|合并|插入)|新增.*卷/.test(prompt)) return 'structure'
   if (/(检查|审阅|评估|分析|找问题|一致性)|\b(?:check|review|assess|evaluate|analy[sz]e)\b/iu.test(prompt)) {
@@ -168,6 +208,8 @@ export function buildTaskSpec(input: {
   localEditProtocol?: 1
   /** Internal fresh human admission only; not exposed in a request schema. */
   researchAdmission?: 1
+  /** Fresh HTTP boundary; separate from research budget opt-in. */
+  networkAdmission?: 1
   creativeFreedom?: CreativeFreedom
   qualityMode?: StoryCompilerMode
 }): TaskSpec {
@@ -175,8 +217,10 @@ export function buildTaskSpec(input: {
     || !Number.isSafeInteger(input.selection.end) || input.selection.start! < 0 || input.selection.end! <= input.selection.start!)) {
     throw new DataAccessError(409, 'AUTHOR_SELECTION_STALE', '选区必须绑定当前章节及非空 UTF-16 坐标，请重新选择正文。')
   }
-  const writingPacing = classifyWritingPacing(input.prompt)
-  const intent = writingPacing === 'proposal_only' ? 'plan'
+  const freshResearch = input.researchAdmission === 1 && externalCraftResearch(input.prompt)
+  const networkDenied = (input.networkAdmission === 1 || input.researchAdmission === 1) && explicitlyDeniesNetwork(input.prompt)
+  const writingPacing = freshResearch ? undefined : classifyWritingPacing(input.prompt)
+  const intent = freshResearch ? 'research_analysis' : writingPacing === 'proposal_only' ? 'plan'
     : writingPacing === 'explicit_writing' && boundedSceneRequest(input.prompt) ? 'write' : classifyIntent(input.prompt, input.researchAdmission === 1)
   const minimumChineseCharacters = intent === 'review' || intent === 'research_analysis' ? explicitReportMinimum(input.prompt) : undefined
   const requiresStructureValidation = intent === 'structure' || /(?:续写|写完|补完|完成|写到).{0,12}第?[一二两三四五六七八九十百千0-9]+卷|第?[一二两三四五六七八九十百千0-9]+卷.{0,12}(?:续写|写完|补完|完成)/.test(input.prompt)
@@ -200,8 +244,10 @@ export function buildTaskSpec(input: {
     intent,
     controlPolicy: 'until_completion',
     ...(writingPacing ? { writingPacing } : {}),
-    researchBudget: intent === 'research_analysis' && input.researchAdmission === 1 && externalCraftResearch(input.prompt)
-      || /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt) ? 'extended' : 'standard',
+    ...(networkDenied ? { networkAccess: 'denied' as const } : {}),
+    ...(freshResearch && namedResearchTarget(input.prompt) ? { researchTarget: namedResearchTarget(input.prompt) } : {}),
+    researchBudget: !networkDenied && (freshResearch
+      || /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt)) ? 'extended' : 'standard',
     scope: { novelId: input.novelId, chapterIds, selection, ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
       ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}),
       ...(input.localEditProtocol ? { localEditProtocol: input.localEditProtocol } : {}) },
@@ -237,8 +283,14 @@ export function buildTaskSpec(input: {
 }
 
 export function renderTaskSpec(spec: TaskSpec): string {
+  const networkRule = spec.networkAccess === 'denied'
+    ? '[系统] 原始请求明确禁止联网：本任务不提供或执行搜索、网页获取，不预约、不请求供应商、不收工具费。只使用已有获准材料并说明证据限制。\n' : ''
+  return networkRule + renderTaskSpecBody(spec)
+}
+
+function renderTaskSpecBody(spec: TaskSpec): string {
   if (spec.intent === 'research_analysis') {
-    const budget = spec.researchBudget === 'extended' ? '最多5次搜索、8次页面获取' : '最多2次搜索、2次页面获取'
+    const budget = spec.networkAccess === 'denied' ? '禁止新增联网' : spec.researchBudget === 'extended' ? '最多5次搜索、8次页面获取' : '最多2次搜索、2次页面获取'
     return `[系统] 本轮只读研究契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n只读取资料并交付分析；不得创建或改写章节、卷、作品、记忆、封面或派生写作窗口，历史写作指令不构成本轮授权。正文不可读或覆盖不足必须说明缺失，不能虚称全书读完。按照用户要求完整输出报告，不套用写作任务的简短收尾规则。复杂任务可维护本轮真实待办，无待办不补建已完成清单。\n联网预算：${budget}，缓存续读不消耗获取额度；连续两次读取失败后停止新增联网，保留已有证据并说明限制。普通分析不自行扩展到影视化、销量或结局争议。用户指定外部平台作品时直接搜索官方来源，不先搜索本平台作品库。\n取证顺序：1）用作品名/作者及官方域名定向搜索；未指定书时先选定一本有公开章节的作品，核实官方作品页的书名和作者，不把平台首页当作品页。2）沿搜索或已读目录实际返回的章节链接获取公开正文，不猜链接。3）按返回的contentRef/revision和范围续读样本，记录章节、来源URL、实际覆盖与短引文。4）仅依据读到的正文分析写作手法、叙事选择与效果，明确样本局限。书评、新闻、简介、视频和搜索摘要只能作为各自类型资料，不能替代原著正文；没有读到章节正文时交付缺失说明，不能编造作品手法。8页额度、目录或链接清单都不等于全书阅读完成。\n预期交付：${spec.expectedOutputs.map(item => item.description).join('；')}。`
   }
   const pacing = spec.writingPacing === 'conversation_only'

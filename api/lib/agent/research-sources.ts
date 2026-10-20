@@ -22,9 +22,17 @@ function checkedSavedLinks(value: unknown, finalUrl: string) {
 }
 
 const reportCitationSchema = z.object({ contentRef: z.string().min(1).max(64), revision: z.string().regex(/^[a-f0-9]{64}$/),
-  start: z.number().int().nonnegative(), end: z.number().int().positive(), excerptHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
+  start: z.number().int().nonnegative(), end: z.number().int().positive(), excerptHash: z.string().regex(/^[a-f0-9]{64}$/),
+  purpose: z.enum(['target_text', 'source_identity', 'limitation']).optional() }).strict()
+const readerEvidenceSchema = z.object({ version: z.literal(1),
+  identity: z.object({ status: z.enum(['verified', 'mismatch', 'unknown']), title: z.string().max(300).optional(), author: z.string().max(300).optional(),
+    pageType: z.enum(['chapter', 'book', 'unknown']), basis: z.enum(['structured_metadata', 'page_title', 'none']) }).strict(),
+  integrity: z.object({ status: z.enum(['source_compared', 'unverified', 'damaged']), code: z.string().max(64),
+    extractedHash: z.string().regex(/^[a-f0-9]{64}$/), referenceHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(),
+}).strict()
 const reportSectionSchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), order: z.number().int().min(0).max(100),
-  content: z.string().min(1).max(60_000), citations: z.array(reportCitationSchema).max(100) }).strict()
+  content: z.string().min(1).max(60_000), evidenceKind: z.enum(['analysis', 'source_identity', 'limitation']).optional(),
+  citations: z.array(reportCitationSchema).max(100) }).strict()
 const reportStateSchema = z.object({ kind: z.literal('researchReport'), taskKey: z.string(), revision: z.number().int().positive(),
   sections: z.array(reportSectionSchema).max(100) }).strict()
 export const researchReportSaveParameters = z.object({ reportId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).default('main'),
@@ -71,6 +79,10 @@ export async function saveResearchReportSection(scope: Scope, input: {
         semanticTransition: { targetId, beforeHash, afterHash: beforeHash } }
     }
     if ((state?.revision ?? 0) !== parsed.expectedRevision) throw new DataAccessError(409, 'RESEARCH_REPORT_CONFLICT', '报告已更新，请读取当前版本后仅修订目标区块。')
+    if (spec.researchTarget && (parsed.section.evidenceKind ?? 'analysis') === 'analysis'
+      && !parsed.section.citations.some(citation => (citation.purpose ?? 'target_text') === 'target_text')) {
+      throw new DataAccessError(422, 'RESEARCH_TARGET_EVIDENCE_REQUIRED', '指定原作的分析区块必须引用已核验目标正文；仅核对书目或说明材料缺失时明确evidenceKind，不能标为已完成正文分析。')
+    }
     for (const citation of parsed.section.citations) {
       const content = await tx.agentResearchContent.findUnique({ where: { id: citation.contentRef } })
       if (!content) return denied()
@@ -79,6 +91,14 @@ export async function saveResearchReportSection(scope: Scope, input: {
         || citation.end > content.text.length || citation.end - citation.start > 6000
         || hash(content.text.slice(citation.start, citation.end)) !== citation.excerptHash) {
         throw new DataAccessError(409, 'RESEARCH_CITATION_INVALID', '引用与保存的原文版本或范围不一致。')
+      }
+      if (spec.researchTarget && (citation.purpose ?? 'target_text') === 'target_text') {
+        const metadata = content.quality && typeof content.quality === 'object' && !Array.isArray(content.quality) ? content.quality : null
+        const evidence = readerEvidenceSchema.safeParse(metadata?.evidence)
+        if (content.contentKind !== 'article' || !evidence.success || evidence.data.identity.status !== 'verified' || evidence.data.identity.pageType !== 'chapter'
+          || evidence.data.integrity.status !== 'source_compared') {
+          throw new DataAccessError(422, 'RESEARCH_TARGET_EVIDENCE_REQUIRED', '目标正文引用尚未核对原作书名、作者及同源正文完整性；不得把错书、简介或未核验提取当作原作证据。仅用于身份核验或说明缺失的引用须明确purpose。')
+        }
       }
     }
     const sections = [...(state?.sections.filter(section => section.id !== parsed.section.id) ?? []), parsed.section]
@@ -114,7 +134,8 @@ async function loadResearchReport(scope: Scope, input: ReportReadInput, complete
     offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(6000).default(6000),
     expectedRevision: z.number().int().nonnegative().optional() }).parse(input)
   return prisma.$transaction(async tx => {
-    const { taskKey } = await ownedTask(tx, scope)
+    const { taskKey, run } = await ownedTask(tx, scope)
+    const spec = taskSpecSchema.safeParse(run.taskSpec)
     const id = hash(JSON.stringify(['research-report', scope.userId, scope.sessionId, taskKey, parsed.reportId]))
     const report = await tx.agentArtifact.findFirst({ where: { id, artifactType: 'researchReport',
       run: { userId: scope.userId, sessionId: scope.sessionId, novelId: scope.novelId } } })
@@ -143,7 +164,9 @@ async function loadResearchReport(scope: Scope, input: ReportReadInput, complete
     ]).then(([discoveredPages, readablePages, metadataPages, failedSources, windows]) => ({ discoveredPages, readablePages, metadataPages, failedSources,
       providedCharacters: windows.reduce((sum, window) => sum + mergeResearchRanges(window.providedRanges, Number.MAX_SAFE_INTEGER)
         .reduce((count, range) => count + range.end - range.start, 0), 0),
-      citedVersions: new Set(state.sections.flatMap(section => section.citations.map(citation => `${citation.contentRef}:${citation.revision}`))).size })) : undefined
+      citedVersions: new Set(state.sections.flatMap(section => section.citations.map(citation => `${citation.contentRef}:${citation.revision}`))).size,
+      ...(spec.success && spec.data.researchTarget ? { targetAnalysisSupported: state.sections.some(section => (section.evidenceKind ?? 'analysis') === 'analysis'
+        && section.citations.some(citation => (citation.purpose ?? 'target_text') === 'target_text')) } : {}) })) : undefined
     return { reportId: parsed.reportId, artifactId: report.id, title: report.title, revision: state.revision,
       sections: state.sections.map(section => ({ id: section.id, order: section.order })),
       content: report.content.slice(parsed.offset, end), offset: parsed.offset, totalChars: report.content.length,
@@ -188,6 +211,10 @@ export async function reserveResearchRequest(scope: Scope & { callId: string }, 
   return prisma.$transaction(async tx => {
     const { taskKey, run } = await ownedTask(tx, scope)
     if (run.status !== 'running') throw new DataAccessError(409, 'RESEARCH_RUN_NOT_ACTIVE', '任务已停止，未发起联网请求。')
+    const frozen = taskSpecSchema.safeParse(run.taskSpec)
+    if (frozen.success && frozen.data.networkAccess === 'denied') {
+      throw new DataAccessError(403, 'RESEARCH_NETWORK_DENIED', '原始请求明确禁止联网，本次未预约、未请求供应商、未收工具费。')
+    }
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${scopeKey}, 0))::text`
     const id = hash(JSON.stringify([scopeKey, scope.runId, scope.callId]))
@@ -324,6 +351,15 @@ export async function resolveResearchSource(scope: Scope, sourceId: string) {
   return prisma.$transaction(tx => ownedSource(tx, scope, sourceId))
 }
 
+/** The model cannot replace the original task's named work or author. */
+export async function getResearchReadTarget(scope: Scope) {
+  return prisma.$transaction(async tx => {
+    const { run } = await ownedTask(tx, scope)
+    const spec = taskSpecSchema.safeParse(run.taskSpec)
+    return spec.success ? spec.data.researchTarget : undefined
+  })
+}
+
 /** A continuation reads its saved snapshot unless an explicit refresh is
  * requested. No network request, quota reset, or cross-task content cache. */
 export async function findSavedResearchContent(scope: Scope, sourceId: string) {
@@ -347,7 +383,7 @@ export async function findResearchSource(scope: Scope, value: string) {
 
 const failureSchema = z.object({
   code: z.enum(['WEB_READ_NOT_FOUND', 'WEB_READ_BLOCKED', 'WEB_READ_GARBLED', 'WEB_READ_RATE_LIMITED',
-    'WEB_READ_INSUFFICIENT', 'WEB_READ_UNAVAILABLE', 'WEB_READ_HOSTED_UNAVAILABLE',
+    'WEB_READ_INSUFFICIENT', 'WEB_READ_INCOMPLETE', 'WEB_READ_UNAVAILABLE', 'WEB_READ_HOSTED_UNAVAILABLE',
     'WEB_READ_TOO_LARGE', 'WEB_READ_UNSAFE_URL', 'WEB_READ_UNSUPPORTED_TYPE', 'WEB_READ_HTTP_ERROR',
     'WEB_READ_SOURCE_ERROR', 'WEB_READ_PROTOCOL_ERROR', 'WEB_READ_PARSE_ERROR',
     'WEB_READ_COMPLEX_DOCUMENT', 'WEB_READ_HOSTED_TARGET_RESTRICTED',
@@ -400,14 +436,18 @@ export async function saveResearchContent(scope: Scope, sourceId: string, result
   if (Buffer.byteLength(result.text, 'utf8') > 2 * 1024 * 1024) throw new DataAccessError(413, 'RESEARCH_CONTENT_TOO_LARGE', '提取内容超过保存上限。')
   const finalUrl = canonicalResearchUrl(result.finalUrl)
   const links = checkedSavedLinks(result.links, finalUrl)
+  const evidence = result.evidence ? readerEvidenceSchema.parse(result.evidence) : undefined
+  if (evidence && (evidence.integrity.status === 'damaged' || evidence.integrity.extractedHash !== hash(result.text))) {
+    throw new DataAccessError(422, 'RESEARCH_CONTENT_UNREADABLE', '正文完整性证据与提取内容不一致，未保存为已获取内容。')
+  }
   const contentHash = hash(result.text)
-  const revision = hash(JSON.stringify([contentHash, finalUrl, result.contentKind, links]))
+  const revision = hash(JSON.stringify([contentHash, finalUrl, result.contentKind, links, ...(evidence ? [evidence] : [])]))
   return prisma.$transaction(async tx => {
     await ownedSource(tx, scope, sourceId)
     await tx.agentResearchSource.update({ where: { id: sourceId }, data: { readFailure: Prisma.DbNull } })
     return tx.agentResearchContent.upsert({ where: { sourceId_revision: { sourceId, revision } }, update: {}, create: {
       id: randomUUID(), sourceId, revision, contentHash, finalUrl, provider: result.provider,
-      contentKind: result.contentKind, text: result.text, quality: { ...checked.quality, links, revisionVersion: 2 },
+      contentKind: result.contentKind, text: result.text, quality: { ...checked.quality, links, ...(evidence ? { evidence } : {}), revisionVersion: evidence ? 3 : 2 },
     } })
   })
 }
@@ -431,9 +471,10 @@ export async function readResearchContent(scope: Scope, input: { contentRef: str
     const quality = content.quality
     const metadata = quality && typeof quality === 'object' && !Array.isArray(quality) ? quality : null
     const links = checkedSavedLinks(metadata?.links, content.finalUrl)
+    const evidence = metadata?.revisionVersion === 3 ? readerEvidenceSchema.parse(metadata.evidence) : undefined
     const revisionParts = [content.contentHash, content.finalUrl, content.contentKind]
     if (input.revision !== content.revision || hash(content.text) !== content.contentHash
-      || hash(JSON.stringify(metadata?.revisionVersion === 2 ? [...revisionParts, links] : revisionParts)) !== content.revision) {
+      || hash(JSON.stringify(metadata?.revisionVersion === 3 ? [...revisionParts, links, evidence] : metadata?.revisionVersion === 2 ? [...revisionParts, links] : revisionParts)) !== content.revision) {
       throw new DataAccessError(409, 'RESEARCH_REVISION_MISMATCH', '正文版本不一致，不能用其他版本替换引用。')
     }
     if (offset > content.text.length) throw new DataAccessError(400, 'RESEARCH_RANGE_INVALID', '正文窗口超出保存范围。')
@@ -447,6 +488,7 @@ export async function readResearchContent(scope: Scope, input: { contentRef: str
       linksNextOffset: linksOffset + 8 < links.length ? linksOffset + 8 : null,
       excerptHash: hash(content.text.slice(start, end)),
       finalUrl: content.finalUrl, contentKind: content.contentKind, provider: content.provider,
+      evidence,
       text: content.text.slice(start, end), returnedRange: { start, end, total: content.text.length },
       match: matchAt === null ? null : { start: matchAt, end: matchAt + input.find!.length },
       rangeUnit: 'utf16' as const, truncated: end < content.text.length, nextCursor: end < content.text.length ? String(end) : null }

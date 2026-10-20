@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import type { AgentWorkspaceToolPermission } from '../../shared/contracts/index.js'
 import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent } from '../../api/lib/agent/agents.js'
-import { snapshotToolAuthority, intersectToolAuthority } from '../../api/lib/agent/tool-authority.js'
+import { snapshotToolAuthority, intersectToolAuthority, restrictToolsToTask } from '../../api/lib/agent/tool-authority.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { taskSpecSchema } from '../../shared/contracts/task-spec-contracts.js'
 import type { AgentTool } from '../../api/lib/agent/tools/types.js'
 
 function candidate(permission: AgentWorkspaceToolPermission = 'allow'): AgentTool {
@@ -13,6 +15,15 @@ function candidate(permission: AgentWorkspaceToolPermission = 'allow'): AgentToo
 }
 
 describe('server tool authority intersection', () => {
+  it.each(['写一本小说，不要联网', '不要联网，只研究《样本》', '你好，不要联网'])(
+    'denies network before pacing early returns and keeps both model/executor ceilings across resume: %s', prompt => {
+      const tools = ['web_search', 'web_read', 'chapter_read'].map(name => ({ ...candidate(), name, readOnly: true }))
+      const frozen = taskSpecSchema.parse(JSON.parse(JSON.stringify(buildTaskSpec({ runId: 'r', novelId: 'n', prompt, researchAdmission: 1 }))))
+      const admitted = restrictToolsToTask(tools, frozen)
+      expect(admitted.map(tool => tool.name)).toEqual(['chapter_read'])
+      expect(intersectToolAuthority(tools, 'review', snapshotToolAuthority(admitted, 'build')).map(tool => tool.name)).toEqual(['chapter_read'])
+      expect(restrictToolsToTask(tools, { ...frozen, networkAccess: undefined }).map(tool => tool.name)).toContain('web_search')
+    })
   const permissions: AgentWorkspaceToolPermission[] = ['allow', 'ask', 'deny']
   it.each(permissions.flatMap(parent => permissions.map(child => ({ parent, child }))))(
     'keeps the stricter parent=$parent and child=$child permission', ({ parent, child }) => {

@@ -9,13 +9,65 @@ import { canonicalResearchUrl, registerResearchSource, resolveResearchSource, sa
   reserveResearchRequest, settleResearchRequest, recordResearchWindow, recordResearchReadOutcome,
   findResearchSearchOutcome, saveResearchSearchOutcome,
   saveResearchReportSection, readResearchReport, readResearchReportForDelivery, assertResearchUrlProvenance, findSavedResearchContent } from '../../api/lib/agent/research-sources.js'
-import { assessReaderText } from '../../api/lib/web-reader-quality.js'
+import { assessReaderText, assessReaderEvidence } from '../../api/lib/web-reader-quality.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 
 const available = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(handleTestDatabaseUnavailable)
 afterAll(async () => { await prisma.$disconnect() })
 
 describe.skipIf(!available)('J4 private versioned research sources', () => {
+  it('binds named-work citations to versioned identity and integrity, while preserving an explicitly limited report', async () => {
+    const user = await prisma.user.create({ data: { nickname: 'source-identity-fixture', passwordHash: 'test-only' } })
+    try {
+      const novel = await prisma.novel.create({ data: { authorId: user.id, title: '身份核验', slug: randomUUID(), summary: '' } })
+      const session = await prisma.agentSession.create({ data: { userId: user.id, novelId: novel.id, title: '研究' } })
+      const runId = randomUUID(), target = { title: '河谷纪事', author: '林青' }
+      const spec = { ...buildTaskSpec({ runId, novelId: novel.id, prompt: '只读联网研究《河谷纪事》，核对作者并读取公开章节按证据分析', researchAdmission: 1 }), researchTarget: target }
+      await prisma.agentRun.create({ data: { id: runId, userId: user.id, novelId: novel.id, sessionId: session.id, mode: 'act', engine: 'loop',
+        action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'running', taskSpec: JSON.parse(JSON.stringify(spec)) } })
+      const scope = { userId: user.id, novelId: novel.id, sessionId: session.id, runId }
+      const text = '清晨村民沿着河岸检查水位，记录木桩上留下的痕迹，再返回村庄讨论修渠的方向。'.repeat(12)
+      const sourceHtml = (name: string) => `<script type="application/ld+json">${JSON.stringify({ '@type': 'Chapter', articleBody: text, isPartOf: { '@type': 'Book', name, author: target.author } })}</script>`
+      const savePage = async (suffix: string, name: string, verified: boolean, contentKind: 'article' | 'metadata' = 'article') => {
+        const source = await registerResearchSource(scope, `https://example.com/${suffix}`, name)
+        return saveResearchContent(scope, source.id, { ...assessReaderText(text, `${name}第1章`), finalUrl: source.canonicalUrl,
+          provider: 'deepseek', retryable: false, contentKind,
+          evidence: assessReaderEvidence(text, `${name}第1章`, target, verified ? sourceHtml(name) : undefined) })
+      }
+      const derivative = await savePage('derivative', '河谷纪事：番外', true)
+      const unknown = await savePage('unknown', target.title, false)
+      const metadata = await savePage('book', target.title, true, 'metadata')
+      const actual = await savePage('chapter', target.title, true)
+      const citation = (page: typeof actual) => ({ contentRef: page.id, revision: page.revision, start: 0, end: 50,
+        excerptHash: createHash('sha256').update(text.slice(0, 50)).digest('hex') })
+      const input = { reportId: 'main', title: '原作研究', expectedRevision: 0,
+        section: { id: 'opening', order: 0, content: '分析必须绑定真实目标正文。', citations: [] as ReturnType<typeof citation>[] } }
+      await expect(saveResearchReportSection(scope, input)).rejects.toMatchObject({ code: 'RESEARCH_TARGET_EVIDENCE_REQUIRED' })
+      for (const page of [derivative, unknown, metadata]) {
+        await expect(saveResearchReportSection(scope, { ...input, section: { ...input.section, citations: [citation(page)] } }))
+          .rejects.toMatchObject({ code: 'RESEARCH_TARGET_EVIDENCE_REQUIRED' })
+      }
+      await saveResearchReportSection(scope, { ...input, section: { ...input.section, evidenceKind: 'limitation',
+        content: '现有衍生来源不能作为原作正文依据。', citations: [{ ...citation(derivative), purpose: 'limitation' }] } })
+      expect(await readResearchReportForDelivery(scope)).toMatchObject({ evidence: { targetAnalysisSupported: false } })
+      const window = await readResearchContent(scope, { contentRef: actual.id, revision: actual.revision })
+      expect(window.text).toBe(text)
+      expect(window.evidence).toMatchObject({ identity: { status: 'verified', title: target.title, author: target.author }, integrity: { status: 'source_compared' } })
+      expect(window.contentHash).toBe(createHash('sha256').update(text).digest('hex'))
+      await saveResearchReportSection(scope, { ...input, expectedRevision: 1, section: { ...input.section, citations: [citation(actual)] } })
+      expect(await readResearchReportForDelivery(scope)).toMatchObject({ evidence: { targetAnalysisSupported: true } })
+      await prisma.agentResearchContent.update({ where: { id: actual.id }, data: { quality: { ...(actual.quality as object), evidence: { ...window.evidence!, identity: { ...window.evidence!.identity, title: '被篡改的作品' } } } } })
+      await expect(readResearchContent(scope, { contentRef: actual.id, revision: actual.revision })).rejects.toMatchObject({ code: 'RESEARCH_REVISION_MISMATCH' })
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: user.id } })).toBe(0)
+      expect(await prisma.chapter.count({ where: { novelId: novel.id } })).toBe(0)
+    } finally {
+      await prisma.agentArtifact.deleteMany({ where: { run: { userId: user.id } } })
+      await prisma.agentRun.deleteMany({ where: { userId: user.id } })
+      await prisma.agentSession.deleteMany({ where: { userId: user.id } })
+      await prisma.novel.deleteMany({ where: { authorId: user.id } })
+      await prisma.user.delete({ where: { id: user.id } })
+    }
+  })
   it('six actual ordered report section writes keep legacy progress alive, while noop and A/B cycles do not', async () => {
     const user = await prisma.user.create({ data: { nickname: 'semantic-report-fixture', passwordHash: 'test-only' } })
     try {

@@ -25,6 +25,7 @@ vi.mock('../../api/lib/agent/research-sources.js', async original => ({
   recordResearchReadOutcome: vi.fn(async () => {}),
   recordResearchWindow: vi.fn(async () => {}),
   assertResearchUrlProvenance: vi.fn(async () => {}),
+  getResearchReadTarget: vi.fn(async () => undefined),
   findSavedResearchContent: vi.fn(async () => null),
   registerResearchSources: async (_scope: unknown, links: Array<{ url: string; title: string }>) => links.map((link, index) => ({ id: `link-${index}`, canonicalUrl: link.url })),
   registerResearchSource: async (_scope: unknown, url: string) => ({ id: 'fixture-source', canonicalUrl: url }),
@@ -41,6 +42,7 @@ vi.mock('../../api/lib/agent/research-sources.js', async original => ({
     const page = stored.page!
     return { sourceId: 'fixture-source', contentRef: 'fixture-content', revision: 'a'.repeat(64),
       finalUrl: page.finalUrl, provider: page.provider, contentKind: page.contentKind, links: page.links ?? [], text: page.text.slice(0, 6000),
+      evidence: page.evidence,
       returnedRange: { start: 0, end: Math.min(page.text.length, 6000), total: page.text.length },
       truncated: page.text.length > 6000, nextCursor: page.text.length > 6000 ? '6000' : null }
   },

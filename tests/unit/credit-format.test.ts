@@ -10,6 +10,8 @@ describe('user-visible Credits formatting', () => {
     expect(ledgerLabel(entry)).toBe('动态名称')
     expect(ledgerLabel({ ...entry, modelLabel: undefined })).toBe('文本模型')
     expect(ledgerLabel({ ...entry, kind: 'refund' })).toBe('失败调用返还')
+    expect(ledgerLabel({ ...entry, kind: 'refund', sourceType: 'web_search' })).toBe('搜索费用返还')
+    expect(ledgerLabel({ ...entry, kind: 'refund', sourceType: 'web_fetch' })).toBe('抓取费用返还')
   })
   it('never exposes fractional Credits', () => {
     expect(roundCreditAmount(12.49)).toBe(12)

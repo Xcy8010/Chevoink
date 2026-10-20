@@ -344,9 +344,10 @@ export async function startLoopRunLocked(
   if (steering) await assertManagedAttachmentsAccess(steering.attachments, userId)
 
   const modelAssignments = input.modelAssignments ?? await freezeModelAssignments(userId, input.novelId)
-  const researchAdmission = options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
-    && !input.selection && options.concurrencyScope !== 'orchestration' ? 1 as const : undefined
-  const purposeSpec = buildTaskSpec({ runId: 'model-purpose', novelId: input.novelId, chapterId: input.chapterId, prompt: input.prompt, selection: input.selection, researchAdmission })
+  const networkAdmission = options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
+    && options.concurrencyScope !== 'orchestration' ? 1 as const : undefined
+  const researchAdmission = !input.selection ? networkAdmission : undefined
+  const purposeSpec = buildTaskSpec({ runId: 'model-purpose', novelId: input.novelId, chapterId: input.chapterId, prompt: input.prompt, selection: input.selection, researchAdmission, networkAdmission })
   const writingPurpose = ['write', 'revise'].includes(purposeSpec.intent) && !['proposal_only', 'conversation_only'].includes(purposeSpec.writingPacing ?? '')
   const assigned = admissionModelOverride(input, modelAssignments, writingPurpose)
   if (assigned) {
@@ -486,7 +487,7 @@ export async function startLoopRunLocked(
       await syncBuiltinSkillCatalog(tx)
       const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
         prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1,
-        researchAdmission, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
+        researchAdmission, networkAdmission, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
       if (researchAdmission && fresh.intent === 'research_analysis') {
         // Freeze identity/budget before async bootstrap, without writing grants.
         created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(fresh)) as Prisma.InputJsonValue } })
@@ -499,6 +500,8 @@ export async function startLoopRunLocked(
         }
         const frozen = await freezeWritingScope(tx, { userId, novelId: session.novelId, runId: created.id }, fresh, input.prompt)
         created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(frozen)) as Prisma.InputJsonValue } })
+      } else if (fresh.networkAccess === 'denied') {
+        created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(fresh)) as Prisma.InputJsonValue } })
       }
     }
     if (steering) await tx.agentMessage.create({ data: { id: steeringMessageId!, runId: created.id, sessionId: session.id, role: 'user', parts: [

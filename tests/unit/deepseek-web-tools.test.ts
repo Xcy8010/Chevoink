@@ -79,6 +79,42 @@ describe('DeepSeek Search JSON contract', () => {
 })
 
 describe('independent DeepSeek Fetch contract', () => {
+  it('rejects source-proven deletion before persistence without another provider or guessed repair', async () => {
+    const target = { title: '河谷纪事', author: '林青' }
+    const original = Array.from({ length: 18 }, (_, index) => `第${index + 1}次清晨观察记录了水位，村民逐一核对木桩编号，随后带着不同意见返回村庄。`).join('\n\n')
+    const metadata = { '@type': 'Chapter', articleBody: original, isPartOf: { '@type': 'Book', name: target.title, author: target.author } }
+    transport.mockResolvedValueOnce(new Response(`<script type="application/ld+json">${JSON.stringify(metadata)}</script><script src="app.js"></script>`, { headers: { 'content-type': 'text/html' } }))
+      .mockResolvedValueOnce(Response.json({ title: `${target.title}第1章`, content: original.replaceAll('逐一核对', '') }))
+    const result = await readPublicWebPage('https://example.com/chapter/1', new AbortController().signal, config, target)
+    expect(result).toMatchObject({ status: 'unreadable', code: 'WEB_READ_INCOMPLETE', text: '', quality: { readable: false },
+      evidence: { identity: { status: 'verified' }, integrity: { status: 'damaged', code: 'SOURCE_TEXT_DELETION' } } })
+    expect(transport).toHaveBeenCalledTimes(2)
+    expect(transport.mock.calls.filter(([url]) => String(url).includes('/tools/fetch'))).toHaveLength(1)
+    expect(JSON.stringify(result)).not.toContain(config.apiKey)
+  })
+  it('uses already-readable verified public chapter text without buying a provider extraction', async () => {
+    const target = { title: '河谷纪事', author: '林青' }
+    const metadata = { '@type': 'Chapter', articleBody: article, isPartOf: { '@type': 'Book', name: target.title, author: target.author } }
+    transport.mockResolvedValue(new Response(`<title>河谷纪事第1章</title><script type="application/ld+json">${JSON.stringify(metadata)}</script><article><h1>清晨</h1><p>${article}</p></article>`, { headers: { 'content-type': 'text/html' } }))
+    expect(await readPublicWebPage('https://example.com/chapter/1', new AbortController().signal, config, target))
+      .toMatchObject({ status: 'ok', provider: 'direct', evidence: { identity: { status: 'verified', pageType: 'chapter' }, integrity: { status: 'source_compared' } } })
+    expect(transport).toHaveBeenCalledOnce()
+    expect(transport.mock.calls[0][1].headers).not.toHaveProperty('Authorization')
+  })
+  it('stops on an ordinary direct-source access gate before purchasing a provider extraction', async () => {
+    transport.mockResolvedValue(new Response('denied', { status: 403 }))
+    expect(await readPublicWebPage('https://example.com/chapter/1', new AbortController().signal, config, { title: '河谷纪事' }))
+      .toMatchObject({ status: 'blocked', provider: 'direct', code: 'WEB_READ_BLOCKED' })
+    expect(transport).toHaveBeenCalledOnce()
+    expect(transport.mock.calls[0][1].headers).not.toHaveProperty('Authorization')
+  })
+  it('honors direct-source rate limiting and Retry-After before any paid provider dispatch', async () => {
+    transport.mockResolvedValue(new Response('limited', { status: 429, headers: { 'retry-after': '120' } }))
+    expect(await readPublicWebPage('https://example.com/chapter/1', new AbortController().signal, config, { title: '河谷纪事' }))
+      .toMatchObject({ status: 'transient_error', provider: 'direct', code: 'WEB_READ_RATE_LIMITED', retryable: true, retryAfter: '120' })
+    expect(transport).toHaveBeenCalledOnce()
+    expect(transport.mock.calls[0][1].headers).not.toHaveProperty('Authorization')
+  })
   it('sends only the target URL, extracts real links and preserves metadata classification', async () => {
     transport.mockResolvedValue(Response.json({ title: 'Book details', content: `# Book details\n\n${article}\n[Chapter 1](/reader/987)\n[Private](http://127.0.0.1/private)\n[Other](https://other.example/chapter)` }))
     const result = await readPublicWebPage('https://fanqienovel.com/page/123', new AbortController().signal, { ...config, modelName: 'deepseek-fetch' })

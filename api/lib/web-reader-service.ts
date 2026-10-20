@@ -2,7 +2,7 @@ import { Agent, fetch } from 'undici'
 import { env } from '../config/env.js'
 import { decodeWebPageBuffer } from './html-extract.js'
 import { getPublicHttpBytes, parsePublicHttpUrl, publicEgressLookup, PublicHttpError, readBoundedPublicBody } from './public-http.js'
-import { assessReaderText, extractReaderHtml, extractReaderLinks, type ReaderQualityResult } from './web-reader-quality.js'
+import { assessReaderText, assessReaderEvidence, extractReaderHtml, extractReaderLinks, type ReaderQualityResult, type ReaderEvidence, type ReaderTarget } from './web-reader-quality.js'
 import { getToolModelRuntime, ToolModelConfigurationError, type ToolModelRuntime } from './tool-model-config.js'
 import { requestWebTool, webToolEndpoint } from './web-tool-provider.js'
 import { extractMarkdownReaderLinks } from './web-reader-markdown.js'
@@ -16,6 +16,7 @@ export type WebReadResult = Omit<ReaderQualityResult, 'status'> & {
   retryAfter?: string | null
   contentKind: 'article' | 'metadata'
   links?: Array<{ url: string; title: string }>
+  evidence?: ReaderEvidence
 }
 
 function failure(code: string, finalUrl: string, status: ReaderQualityResult['status'] = 'unreadable'): WebReadResult {
@@ -124,7 +125,7 @@ async function readHosted(url: URL, provider: 'jina' | 'firecrawl', external: Ab
   }
 }
 
-async function readDeepSeek(value: string, configured: ToolModelRuntime, external: AbortSignal): Promise<WebReadResult> {
+async function readDeepSeek(value: string, configured: ToolModelRuntime, external: AbortSignal, expectedTarget?: ReaderTarget): Promise<WebReadResult> {
   const provider = 'deepseek' as const
   const fail = (code: string, retryable = false, status: WebReadResult['status'] = 'unreadable'): WebReadResult =>
     ({ ...failure(code, value), provider, retryable, status })
@@ -137,6 +138,37 @@ async function readDeepSeek(value: string, configured: ToolModelRuntime, externa
     if (target.hostname === 'sec.douban.com' && /^\/c(?:\/|$)/.test(target.pathname)) return fail('WEB_READ_BLOCKED', false, 'blocked')
     if ([...target.searchParams.keys()].some(key => /token|secret|signature|credential|auth|api.?key/i.test(key))) return fail('WEB_READ_HOSTED_TARGET_RESTRICTED')
     await checkHostedTarget(target, signal)
+    // One ordinary public GET may corroborate a named-work extraction. This is
+    // not a reader/provider retry: it uses the same bounded call and never
+    // solves a challenge, decodes protected glyphs or changes network identity.
+    let sourceHtml: string | undefined
+    if (expectedTarget) {
+      try {
+        const source = await getPublicHttpBytes(target.href, { signal, timeoutMs: 5000, maxBytes: WEB_READER_MAX_BYTES,
+          allowHttp: true, maxRedirects: 5, acceptedContentTypes: ['text/html', 'application/xhtml+xml', 'text/plain'] })
+        const sourceUrl = new URL(source.finalUrl)
+        if (sourceUrl.hostname === 'sec.douban.com' && /^\/c(?:\/|$)/.test(sourceUrl.pathname)) return failure('WEB_READ_BLOCKED', source.finalUrl, 'blocked')
+        if (source.contentType.startsWith('text/html') || source.contentType.startsWith('application/xhtml+xml')) {
+          sourceHtml = decodeWebPageBuffer(source.bytes, source.contentType)
+          const sourceQuality = extractReaderHtml(sourceHtml, false)
+          if (['WEB_READ_GARBLED', 'WEB_READ_BLOCKED', 'WEB_READ_NOT_FOUND'].includes(sourceQuality.code)) {
+            return { ...sourceQuality, provider: 'direct', finalUrl: source.finalUrl, contentKind: 'article', retryable: false }
+          }
+          const sourceEvidence = assessReaderEvidence(sourceQuality.text, sourceQuality.title, expectedTarget, sourceHtml)
+          if (sourceQuality.status === 'ok' && sourceEvidence.identity.status === 'verified'
+            && sourceEvidence.identity.pageType === 'chapter' && sourceEvidence.integrity.status === 'source_compared') {
+            return { ...sourceQuality, provider: 'direct', finalUrl: source.finalUrl, contentKind: 'article', retryable: false,
+              evidence: sourceEvidence, links: extractReaderLinks(sourceHtml, source.finalUrl) }
+          }
+        }
+      } catch (error) {
+        signal.throwIfAborted()
+        const sourceFailure = networkFailure(error, target.href)
+        if (['blocked', 'not_found'].includes(sourceFailure.status) || ['WEB_READ_TOO_LARGE', 'WEB_READ_RATE_LIMITED'].includes(sourceFailure.code)) return sourceFailure
+        // An unavailable direct representation proves neither absence nor
+        // corruption. Keep provider evidence explicitly unverified.
+      }
+    }
     const request = await requestWebTool(endpoint, configured.apiKey, { url: target.href }, signal)
     try {
       const { response } = request
@@ -154,8 +186,14 @@ async function readDeepSeek(value: string, configured: ToolModelRuntime, externa
         !('content' in payload) || typeof payload.content !== 'string') return fail('WEB_READ_PROVIDER_PROTOCOL_ERROR')
       signal.throwIfAborted()
       const quality = assessReaderText(payload.content.replace(/^#{1,6}\s+/gm, ''), payload.title.slice(0, 300))
+      const evidence = assessReaderEvidence(quality.text, quality.title, expectedTarget, sourceHtml)
+      if (quality.status === 'ok' && evidence.integrity.status === 'damaged') {
+        return { ...quality, status: 'unreadable', code: 'WEB_READ_INCOMPLETE', text: '', quality: { ...quality.quality, readable: false },
+          evidence, provider, retryable: false, finalUrl: target.href, contentKind: 'article' }
+      }
       const bookMetadata = /^(?:www\.)?fanqienovel\.com$/i.test(target.hostname) && /^\/(?:page|keyword)\//i.test(target.pathname)
       return { ...quality, provider, retryable: false, finalUrl: target.href, contentKind: bookMetadata ? 'metadata' : 'article',
+        evidence,
         ...(quality.status === 'ok' ? { links: extractMarkdownReaderLinks(payload.content, target.href) } : {}) }
     } finally { await request.close() }
   } catch (error) {
@@ -168,7 +206,7 @@ async function readDeepSeek(value: string, configured: ToolModelRuntime, externa
   } finally { clearTimeout(timer) }
 }
 
-export async function readPublicWebPage(value: string, signal: AbortSignal, configuredInput?: ToolModelRuntime | null): Promise<WebReadResult> {
+export async function readPublicWebPage(value: string, signal: AbortSignal, configuredInput?: ToolModelRuntime | null, expectedTarget?: ReaderTarget): Promise<WebReadResult> {
   signal.throwIfAborted()
   let configured: ToolModelRuntime | null
   try { configured = configuredInput === undefined ? await getToolModelRuntime('tool:web-fetch') : configuredInput }
@@ -177,7 +215,7 @@ export async function readPublicWebPage(value: string, signal: AbortSignal, conf
     throw error
   }
   signal.throwIfAborted()
-  if (configured) return readDeepSeek(value, configured, signal)
+  if (configured) return readDeepSeek(value, configured, signal, expectedTarget)
   let finalUrl = value
   try {
     const page = await getPublicHttpBytes(value, {
@@ -208,6 +246,7 @@ export async function readPublicWebPage(value: string, signal: AbortSignal, conf
     const pageUrl = new URL(finalUrl)
     const bookMetadata = /^(?:www\.)?fanqienovel\.com$/i.test(pageUrl.hostname) && /^\/(?:page|keyword)\//i.test(pageUrl.pathname)
     const direct: WebReadResult = { ...outcome, finalUrl, provider: 'direct', retryable: false, contentKind: isJson || bookMetadata ? 'metadata' : 'article',
+      evidence: assessReaderEvidence(outcome.text, outcome.title, expectedTarget, !isJson && !page.contentType.startsWith('text/plain') ? raw : undefined),
       ...(!isJson && outcome.status === 'ok' ? { links: extractReaderLinks(raw, finalUrl) } : {}) }
     // No fallback for access gates, soft 404, garbled fonts or oversized documents.
     // Only the existing opt-in JS-shell path may ask a configured vendor.
@@ -219,6 +258,7 @@ export async function readPublicWebPage(value: string, signal: AbortSignal, conf
     try {
       const hosted = await readHosted(target, mode, signal)
       return { ...hosted, ...(hosted.code === 'WEB_READ_RATE_LIMITED' ? { status: 'transient_error' as const } : {}),
+        evidence: assessReaderEvidence(hosted.text, hosted.title, expectedTarget, raw),
         provider: mode, finalUrl, retryable: hosted.code === 'WEB_READ_RATE_LIMITED', contentKind: bookMetadata ? 'metadata' : 'article',
         ...(hosted.status === 'ok' ? { links: extractReaderLinks(raw, finalUrl) } : {}) }
     } catch (error) {

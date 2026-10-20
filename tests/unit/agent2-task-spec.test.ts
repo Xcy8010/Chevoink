@@ -3,6 +3,36 @@ import { describe, expect, it } from 'vitest'
 import { buildTaskSpec, extractDirectiveCandidates, narrowLegacyResearchTask, renderTaskSpec } from '../../api/lib/agent/task-spec.js'
 
 describe('fresh external craft research admission', () => {
+  it.each(['、', '，', '；', '\n'])('bounds direct negative actions at %j without losing research', separator => {
+    const prompt = ['只读联网研究', '不创建章节', '不写小说正文', '不改任何稿件', '请优先研究番茄小说《样本》',
+      '不要在官网首页泛泛搜索', '不要只凭简介、搜索摘要或同人文字推断原作', '先核官方身份并读取两章公开正文按证据分析'].join(separator)
+    const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt, researchAdmission: 1 })
+    expect(spec).toMatchObject({ intent: 'research_analysis', researchBudget: 'extended', researchTarget: { title: '样本' } })
+    expect(spec.writingPacing).toBeUndefined()
+    expect(spec.networkAccess).toBeUndefined()
+  })
+  it.each(['不要创建章节，不要写小说正文，禁止修改稿件', '禁止创建、修改章节', '禁止创建、写入小说正文', '只给润色建议，不修改正文', "Do not create chapters; don't write prose; never edit a novel"])(
+    'does not read negative writing as a proposal: %s', restriction => {
+      const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt: `${restriction}；搜索《样本》官方作者与作品页，读取两章公开正文并按证据分析`, researchAdmission: 1 })
+      expect(spec.intent).toBe('research_analysis')
+      expect(spec.writingPacing).toBeUndefined()
+    })
+  it.each(['本次不联网', '不需要联网', '请不要进行任何联网搜索', '不要使用联网搜索', '不要联网', '禁止上网', '不要搜索外部资料', '不要搜索', "Don't browse the web", 'Do not use the internet'])(
+    'freezes a real network denial despite contradictory research: %s', restriction => {
+      const prompt = `${restriction}，深度研究《样本》并搜索公开章节`
+      const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt, researchAdmission: 1 })
+      expect(spec).toMatchObject({ networkAccess: 'denied', researchBudget: 'standard' })
+      expect(renderTaskSpec(spec)).toContain('不预约、不请求供应商、不收工具费')
+      expect(buildTaskSpec({ runId: 'old', novelId: 'n', prompt }).networkAccess).toBeUndefined()
+    })
+  it('freezes only an explicit single title/author and keeps ambiguous targets unknown', () => {
+    const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '联网研究《样本》（作者：测试作者），读取公开正文', researchAdmission: 1 })
+    expect(spec.researchTarget).toEqual({ title: '样本', author: '测试作者', textAnalysisRequired: true })
+    expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '联网研究《样本》的作者与出版信息，不读取正文', researchAdmission: 1 }).researchTarget)
+      .toEqual({ title: '样本', textAnalysisRequired: false })
+    expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '联网研究《样本》，分析原文里的修辞与主题', researchAdmission: 1 }).researchTarget?.textAnalysisRequired).toBe(true)
+    expect(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '联网研究《甲》与《乙》的叙事', researchAdmission: 1 }).researchTarget).toBeUndefined()
+  })
   const prompt = '联网搜一篇番茄小说，总结写作手法和思路'
   it.each([prompt, '搜索一本小说，分析叙事节奏', '上网查阅《样本》，总结人物塑造',
     '搜索一本小说，总结叙事节奏，只给当前段落的润色建议', '搜索一本小说，总结叙事节奏，不要修改当前段落',

@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto'
+import request from 'supertest'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 const execution = vi.hoisted(() => vi.fn(async () => {}))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: execution }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(async () => {}), getModelTierRuntime: vi.fn(async () => ({ reasoningEffort: 'high' })) }))
 vi.mock('../../api/lib/agent/writing-experiments.js', () => ({ recordSevenDayContinuation: vi.fn(async () => {}) }))
 import { prisma } from '../../api/lib/prisma.js'
+import app from '../../api/app.js'
+import { buildSessionTokens } from '../../api/lib/auth-session.js'
+import { reserveResearchRequest, settleResearchRequest } from '../../api/lib/agent/research-sources.js'
 import { startLoopRun } from '../../api/lib/agent/run-service.js'
 import { enqueueRequest } from '../../api/lib/agent/request-queue.js'
 import { verifyTestDatabase } from '../support/database-preflight.js'
@@ -13,7 +17,7 @@ import { taskSpecSchema } from '../../shared/contracts/index.js'
 import * as skillService from '../../api/lib/agent/skills/service.js'
 import { chapterEditRangeTool, chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { getToolsForMode } from '../../api/lib/agent/tools/registry.js'
-import { restrictToolsToTask } from '../../api/lib/agent/tool-authority.js'
+import { restrictToolsToTask, snapshotToolAuthority, intersectToolAuthority } from '../../api/lib/agent/tool-authority.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -39,6 +43,58 @@ async function fixture(work: (subject: { userId: string; novelId: string; sessio
   }
 }
 describe.skipIf(!available)('fresh selected server admission transaction', () => {
+  it.each([
+    '只读联网研究，不创建章节、不写小说正文、不改任何稿件，请优先研究番茄小说《样本》，不要在官网首页泛泛搜索，不要只凭简介、搜索摘要或同人文字推断原作，先核官方身份并读公开样本按证据分析',
+    '只搜索《样本》官方作者与作品页，读取两章公开正文并按证据分析',
+  ])('persists a real HTTP research contract before async bootstrap and freezes 5/8: %s', prompt => fixture(async f => {
+    const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const response = await request(app).post('/api/agent/runs')
+      .set('Cookie', `chevoink_session=${buildSessionTokens(f.userId, 0).accessToken}`)
+      .send({ ...f, prompt, mode: 'build' })
+    expect(response.status).toBe(200)
+    const runId = response.body.data.runId as string
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec)
+    expect(spec).toMatchObject({ runId, intent: 'research_analysis', researchBudget: 'extended', researchTarget: { title: '样本' } })
+    expect(spec.writingPacing).toBeUndefined()
+    expect(spec.scope.writing).toBeUndefined()
+    const names = restrictToolsToTask(getToolsForMode('build'), spec).map(tool => tool.name)
+    expect(names).toEqual(expect.arrayContaining(['web_search', 'web_read', 'research_report_save']))
+    expect(names).not.toContain('chapter_write')
+    await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
+    for (const [kind, limit] of [['search', 5], ['read', 8]] as const) {
+      for (let index = 0; index < limit; index++) {
+        const scope = { ...f, runId, callId: `${kind}-${index}` }
+        expect(await reserveResearchRequest(scope, kind, `request-${index}`)).toBe(true)
+        await settleResearchRequest(scope, 'consumed')
+      }
+      expect(await reserveResearchRequest({ ...f, runId, callId: `${kind}-denied` }, kind, 'over-limit')).toBe(false)
+    }
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+    expect(await prisma.webToolCall.count({ where: { runId } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+  }))
+  it.each(['本次不联网，深度研究《样本》并搜索公开章节', '写一本小说，不要联网', '你好，不要联网'])(
+    'persists explicit HTTP denial before async execution, rejecting both paths without reservations/fees: %s', prompt => fixture(async f => {
+      const response = await request(app).post('/api/agent/runs')
+        .set('Cookie', `chevoink_session=${buildSessionTokens(f.userId, 0).accessToken}`)
+        .send({ ...f, prompt, mode: 'build' })
+      expect(response.status).toBe(200)
+      const runId = response.body.data.runId as string
+      const row = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
+      const spec = taskSpecSchema.parse(row.taskSpec)
+      expect(spec).toMatchObject({ networkAccess: 'denied', researchBudget: 'standard' })
+      const tools = getToolsForMode('build'), visible = restrictToolsToTask(tools, spec)
+      const executable = intersectToolAuthority(tools, 'review', snapshotToolAuthority(visible, 'build')).map(tool => tool.name)
+      expect(executable).toContain('chapter_read')
+      for (const name of ['web_search', 'web_read']) expect(executable).not.toContain(name)
+      await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
+      for (const kind of ['search', 'read'] as const) await expect(reserveResearchRequest({ ...f, runId, callId: kind }, kind, 'denied'))
+        .rejects.toMatchObject({ code: 'RESEARCH_NETWORK_DENIED' })
+      expect(await prisma.agentResearchRequest.count({ where: { ownerRunId: runId } })).toBe(0)
+      expect(await prisma.webToolCall.count({ where: { runId } })).toBe(0)
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+      expect(taskSpecSchema.parse(JSON.parse(JSON.stringify(row.taskSpec))).networkAccess).toBe('denied')
+    }))
   it.each([true, false])('freezes compound external research only for fresh HTTP author admission: %s', human => fixture(async f => {
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '联网搜一篇番茄小说，分析并总结它的写作手法和思路' }, human ? { humanOrigin: 'http' } : {})
