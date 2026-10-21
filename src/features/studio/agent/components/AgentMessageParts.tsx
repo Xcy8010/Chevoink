@@ -930,7 +930,7 @@ const ToolCallCard = memo(function ToolCallCard({
   const headerContent = <>
     {writeTool ? <FileText className="h-3.5 w-3.5 shrink-0 text-sky-500" /> : <Wrench className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />}
     <span className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--text-primary)]">{part.title}</span>
-    {preparing ? <span className="shrink-0 text-[10px] text-[var(--text-secondary)]">准备中…</span> : null}
+    {preparing ? <span className="agent-tool-running-label shrink-0 text-[10px] text-[var(--text-secondary)]">准备中…</span> : null}
     {running ? <span className="agent-tool-running-label shrink-0 text-[10px] font-medium text-[var(--text-secondary)]">{runningLabel}</span> : null}
     {durationLabel ? <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-secondary)]">{durationLabel}</span> : null}
     {writeTool && !running && !preparing ? <span className={cn(
@@ -948,10 +948,10 @@ const ToolCallCard = memo(function ToolCallCard({
       data-agent-call-id={part.callId}
       className={cn(
         'relative overflow-hidden border-b border-[var(--border-subtle)] bg-transparent transition-colors',
-        running && 'agent-tool-running',
+        (running || preparing) && 'agent-tool-running',
       )}
     >
-      {running ? (
+      {running || preparing ? (
         <span aria-hidden className="agent-tool-progress pointer-events-none absolute inset-x-0 bottom-0 h-px bg-[var(--text-secondary)]/55" />
       ) : null}
       {workflowDisplay
@@ -1201,7 +1201,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   /** 折叠态下本消息正文是否可收起（块内非最后一条）：run 结束后过程进展正文折进摘要行 */
   textCollapsible?: boolean
 }) {
-  const authorParts = useMemo(() => projectAgentAuthorParts(parts, streaming), [parts, streaming])
+  const authorParts = useMemo(() => projectAgentAuthorParts(parts, streaming, { includePreparing: runActive }), [parts, streaming, runActive])
   const showSummary = summaryCount !== undefined && (summaryTiming !== undefined || !runActive && summaryCount > 0)
   const collapsed = !runActive && !summaryExpanded
   // 子 Agent 内部工具卡片归组：嵌套渲染进所属的 subagent_run 容器（codex/Zcode 模式）

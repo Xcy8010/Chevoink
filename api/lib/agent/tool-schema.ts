@@ -63,9 +63,13 @@ export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'des
   const previousTerminal = tool.name === 'continuity_validate' && terminalState?.properties
     ? { ...current, properties: { ...properties, terminalState: { ...terminalState,
       properties: Object.fromEntries(Object.entries(terminalState.properties).filter(([key]) => key !== 'inheritedProofs')) } } } : null
+  const withoutTopLevelProofs = (schema: Record<string, unknown>) => ({ ...schema,
+    properties: Object.fromEntries(Object.entries(schema.properties as Record<string, unknown>).filter(([key]) => key !== 'inheritedProofs')) })
+  const previousProofSelection = tool.name === 'continuity_validate' && properties?.inheritedProofs
+    ? [withoutTopLevelProofs(current), ...(previousTerminal ? [withoutTopLevelProofs(previousTerminal)] : [])] : []
   const previousResearch = tool.name === 'research_report_save' && properties?.title
     ? { ...current, properties: { ...properties, title: Object.fromEntries(Object.entries(properties.title).filter(([key]) => key !== 'description')) },
       required: Object.keys(properties).filter(key => key === 'title' || (current.required as string[] ?? []).includes(key)) } : null
   return [current, toOpenAIToolPresentation(tool, scope).parameters, ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : []),
-    ...(previousTerminal ? [previousTerminal] : []), ...(previousResearch ? [previousResearch] : [])]
+    ...(previousProofSelection.length ? previousProofSelection : previousTerminal ? [previousTerminal] : []), ...(previousResearch ? [previousResearch] : [])]
 }

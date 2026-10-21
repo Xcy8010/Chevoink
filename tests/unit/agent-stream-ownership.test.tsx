@@ -54,6 +54,20 @@ it('forwards only store-accepted events and a foreign or duplicate terminal cann
   expect(received).toHaveBeenCalledTimes(2); expect(source.close).toHaveBeenCalledOnce()
 })
 
+it.each(['foreign-run','user-role'] as const)('does not forward rejected tool ownership to workspace callbacks: %s',kind=>{
+  const parts=[],message={id:'message-a',runId:kind==='foreign-run'?'old-run':'run-a',role:kind==='user-role'?'user' as const:'assistant' as const,parts,createdAt:'2026-10-15T00:00:00Z'}
+  useAgentStore.setState({messages:[message],liveToolDrafts:{},workspaceActivities:[]})
+  const received=vi.fn(),hook=renderHook(()=>useAgentStream(received))
+  act(()=>hook.result.current.connect('run-a'))
+  const source=Source.opened[0],base={runId:'run-a',messageId:'message-a',callId:'write-a',ts:message.createdAt,toolName:'chapter_write'}
+  act(()=>source.send({...base,seq:1,type:'tool.delta',argsChars:20,draft:{kind:'chapter',toolName:'chapter_write',targetId:'chapter-a',content:'Rejected preview'}}))
+  act(()=>source.send({...base,seq:2,type:'tool.call',title:'写入正文',args:{chapterId:'chapter-a'}}))
+  act(()=>source.send(resultEvent(3)))
+  expect(received).not.toHaveBeenCalled()
+  expect(useAgentStore.getState()).toMatchObject({lastSeq:0,messages:[message],liveToolDrafts:{},workspaceActivities:[]})
+  expect(source.close).not.toHaveBeenCalled()
+})
+
 it('retains the original host epoch when callbacks change before the old connection cleanup', () => {
   const received = vi.fn()
   const hook = renderHook(({ current }: { current: ChapterStreamOwner }) => {

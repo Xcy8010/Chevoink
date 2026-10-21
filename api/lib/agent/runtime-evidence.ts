@@ -54,7 +54,7 @@ export async function collectDurableToolEvidence(tx: RuntimeTx, taskRootId: stri
         const original = await readOriginalTaskRequest(tx, { userId: root.userId, novelId: root.novelId, runId: receipt.runId })
         const spec = taskSpecSchema.safeParse(original.spec)
         if (operation.action !== 'continuity_validate' || !spec.success || review.taskId !== original.taskId || review.userId !== root.userId || review.novelId !== root.novelId
-          || review.phases.some(phase => phase !== 'continuity' && phase !== 'terminal')) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查进度不属于当前原始任务或实际检查阶段。')
+          || review.phases.some(phase => phase !== 'continuity' && phase !== 'terminal' && phase !== 'terminal_supported')) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查进度不属于当前原始任务或实际检查阶段。')
         if (original.taskId === taskRootId && !original.parentRunId && observeChapterReviewProgress(observations, review, { userId: root.userId, novelId: root.novelId, expectedOriginalTaskId: original.taskId,
           taskSpec: await effectiveWritingTaskSpec(tx, { userId: root.userId, novelId: root.novelId, runId: receipt.runId }, spec.data) })) progressSequence = String(event.sequence)
       }

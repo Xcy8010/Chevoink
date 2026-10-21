@@ -29,7 +29,7 @@ import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '..
 import { runContinuityEvidenceCorrection } from '../continuity-response-correction.js'
 import { runContinuityReassessment } from '../assessment-response-lifecycle.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
-import { readTerminalCandidate, resolveTerminalCandidate, terminalCandidateInputSchema, terminalCandidateSchema, terminalReviewInput, terminalReviewFailure } from '../terminal-state-review.js'
+import { readTerminalCandidate, resolveTerminalCandidate, reviewTerminalSelection, terminalCandidateInputSchema, terminalCandidateSchema, terminalReviewInput, terminalReviewFailure } from '../terminal-state-review.js'
 import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, terminalEvidenceContextSchema, terminalVerdictAuditVersion, continuitySemanticRule } from '../terminal-evidence-context.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
@@ -38,7 +38,7 @@ const routeSchema = auxiliaryRouteSchema
 const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional(), terminalHash: hash.optional() }).strict()
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
     sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
@@ -87,7 +87,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     const chapterOnlyPipeline = !args.compilationId && typeof args.chapterId === 'string' && !!baseline
       && await isWritingTaskContinuityCompiler(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: baseline.id, chapterId: args.chapterId })
     if (!args.compilationId && (!baseline || args.chapterId && !chapterOnlyPipeline)) {
-      if (args.terminalState) return { kind: 'rejected' as const, code: 'COMPILATION_NOT_FOUND', message: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
+      if (args.terminalState || args.inheritedProofs !== undefined) return { kind: 'rejected' as const, code: 'COMPILATION_NOT_FOUND', message: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
       const context = await buildStandaloneContinuityContext(ctx, typeof args.chapterId === 'string' ? args.chapterId : undefined, tx, sourceAuthority ? 4 : 3)
       const observed = await readObservedBaseline(tx, lease.taskRootId, cursor.expectedRevision, { kind: 'chapter', id: context.chapter.id })
       if (observed?.kind !== 'chapter' || observed.revision !== context.chapter.revision) return { kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '请先 chapter_read 读取目标正文；独立审阅无需准备章节写作。' }
@@ -112,7 +112,9 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       || sourceId && source?.revision !== compilation.bridge.sourceRevision) return {
       kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '正文为空、场景数量不合法或前章版本变化；先修复章节桥前置状态，不启动正文修订。',
     }
-    const selectedTerminal = args.terminalState ? resolveTerminalCandidate(terminalCandidateInputSchema.parse(args.terminalState),
+    const selectionInput = reviewTerminalSelection(args.terminalState ? terminalCandidateInputSchema.parse(args.terminalState) : undefined,
+      readTerminalCandidate(compilation.validation), args.inheritedProofs as string[] | undefined)
+    const selectedTerminal = selectionInput ? resolveTerminalCandidate(selectionInput,
       source && 'preceding' in source && 'terminalInheritance' in source ? source.terminalInheritance : [], terminalVersion) : undefined
     if (selectedTerminal && !selectedTerminal.ok) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: selectedTerminal.reason }
     const terminalCandidate = (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
@@ -127,9 +129,9 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     if (!reusable && terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) terminalEvidence = { ...terminalEvidence,
       factCoverage: terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, 2)! }
     const repair = false
-    if (!reusable && terminalVersion === 2 && terminalEvidence) terminalEvidence.verdictProtocol = 2
+    if (!reusable && terminalVersion === 2 && terminalEvidence) terminalEvidence.verdictProtocol = 3
     validatedContinuityCheckRounds(compilation.validation, !reusable)
-    return { kind: 'check' as const, version: terminalVersion === 2 ? 15 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
+    return { kind: 'check' as const, version: terminalVersion === 2 ? 16 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
       ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),
       criticSystem, repairSystem: repairPrompt,
       criticInput: [`章节：《${compilation.chapter.title}》`,
@@ -290,10 +292,10 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       const stateHash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, compiler.id)
       if (!stateHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查后的编译状态缺失。')
       ctx.signal.throwIfAborted()
-      if (toolResult.outcome !== 'failed' && frozen.sourceBodies?.terminalEvidence?.verdictProtocol === 2) {
+      if (toolResult.outcome !== 'failed' && frozen.sourceBodies?.terminalEvidence?.verdictProtocol !== undefined) {
         const readiness = await readChapterReviewReadiness(tx, ctx, compiler.id)
         if (readiness?.progressEvidence) toolResult.reviewProgress = { ...readiness.progressEvidence,
-          phases: readiness.progressEvidence.phases.filter(phase => phase === 'continuity' || phase === 'terminal') }
+          phases: readiness.progressEvidence.phases.filter(phase => phase === 'continuity' || phase === 'terminal' || phase === 'terminal_supported') }
       }
       return runtimeJson({ compilerState: { id: compiler.id, hash: stateHash }, toolResult, memoryJobId: null }).value
     })

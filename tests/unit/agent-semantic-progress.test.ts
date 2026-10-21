@@ -6,7 +6,7 @@ it('gives a complete terminal assessment its own finite handling phase after pro
   const taskSpec = buildTaskSpec({ runId: 'original', novelId: 'novel', chapterId: 'chapter', prompt: '修改本章' })
   taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 5, chapterId: 'chapter' }], titleAndBodyOnly: false, repairAuthorized: true }
   const subject = { userId: 'owner', novelId: 'novel', expectedOriginalTaskId: taskSpec.id, taskSpec }
-  const evidence = { taskId: taskSpec.id, userId: 'owner', novelId: 'novel', chapterId: 'chapter', orderIndex: 5, contentHash: 'a'.repeat(64), phases: ['continuity', 'quality'] as Array<'continuity' | 'quality' | 'terminal'> }
+  const evidence = { taskId: taskSpec.id, userId: 'owner', novelId: 'novel', chapterId: 'chapter', orderIndex: 5, contentHash: 'a'.repeat(64), phases: ['continuity', 'quality'] as Array<'continuity' | 'quality' | 'terminal' | 'terminal_supported'> }
   const seen = new Set<string>()
   expect(observeChapterReviewProgress(seen, evidence, subject)).toBe(true)
   let stagnant = 7
@@ -18,6 +18,13 @@ it('gives a complete terminal assessment its own finite handling phase after pro
     { ...terminal, reportId: `new-${index}`, revision: 100 + index, candidate: `changed wording ${index}` } as typeof terminal, subject))
   expect(stagnant).toBe(4)
   expect(restored).toEqual(seen)
+  const verified = { ...terminal, phases: [...terminal.phases, 'terminal_supported'] as typeof evidence.phases }
+  stagnant = nextStagnantBatch(stagnant, observeChapterReviewProgress(restored, verified, subject))
+  expect(stagnant).toBe(0)
+  for (let index = 0; index < 4; index++) stagnant = nextStagnantBatch(stagnant, observeChapterReviewProgress(restored, verified, subject))
+  expect(stagnant).toBe(4)
+  expect(observeChapterReviewProgress(restored, terminal, subject)).toBe(false)
+  expect(observeChapterReviewProgress(new Set(restored), verified, subject)).toBe(false)
   expect(observeChapterReviewProgress(seen, { ...terminal, taskId: 'foreign' }, subject)).toBe(false)
   expect(observeChapterReviewProgress(seen, { ...terminal, chapterId: 'foreign' }, subject)).toBe(false)
 })

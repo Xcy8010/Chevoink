@@ -356,7 +356,10 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
           ?? factCoverage?.obligations.map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' })) ?? [])] }
     // Complete assessment is distinct from candidate support. Give the writer
     // its first terminal judgment even if prose continuity was already seen.
-    if (terminal) readiness.progressEvidence!.phases.push('terminal')
+    if (terminal) {
+      readiness.progressEvidence!.phases.push('terminal')
+      if (terminal.supported && (terminal.verdicts.length > 0 || (terminal.factCoverage?.dispositions.length ?? 0) > 0)) readiness.progressEvidence!.phases.push('terminal_supported')
+    }
   }
   return readiness
 }

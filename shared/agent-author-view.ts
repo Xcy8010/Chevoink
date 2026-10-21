@@ -127,7 +127,7 @@ export function createAgentAuthorTextStream() {
   }
 }
 
-export function projectAgentAuthorParts(parts: readonly AgentMessagePart[], streamingReasoning = false): AgentMessagePart[] {
+export function projectAgentAuthorParts(parts: readonly AgentMessagePart[], streamingReasoning = false, options?: { includePreparing?: boolean }): AgentMessagePart[] {
   const visible: AgentMessagePart[] = []
   for (const part of parts) {
     if (part.type === 'text' || part.type === 'reasoning') {
@@ -140,7 +140,7 @@ export function projectAgentAuthorParts(parts: readonly AgentMessagePart[], stre
       }
     } else if (part.type === 'tool-call') {
       // Argument generation is a model stage, not an execution witness.
-      if (part.preparing) continue
+      if (part.preparing && !options?.includePreparing) continue
       const title = getAgentToolPresentation(part.toolName).label
       const summary = part.summary ? projectAgentToolSummary(part.summary, part.status) : undefined
       visible.push(title === part.title && summary === part.summary ? part

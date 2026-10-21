@@ -8,6 +8,33 @@ describe('Agent 写入审查生命周期', () => {
     useAgentStore.getState().resetRun()
     useAgentStore.getState().resumeRun('run-review', 'session-review')
   })
+  it.each(['tool.delta','tool.call'] as const)('重连缺message.start时由%s首帧补同run单卡，预览不成为写入',type=>{
+    const store=()=>useAgentStore.getState(),apply=store().applyEvent
+    const base={runId:'run-review',messageId:'reconnected',callId:'write',ts:new Date().toISOString()}
+    apply(type==='tool.delta'?{...base,seq:1,type,toolName:'chapter_write',argsChars:0}
+      :{...base,seq:1,type,toolName:'chapter_write',title:'写入正文',args:{}})
+    expect(store().messages).toHaveLength(1)
+    expect(store().messages[0]).toMatchObject({id:base.messageId,runId:base.runId,role:'assistant',parts:[{callId:'write',preparing:type==='tool.delta',status:'running'}]})
+    expect(store().workspaceActivities).toHaveLength(type==='tool.delta'?0:1)
+    apply({...base,seq:2,type:'tool.call',toolName:'chapter_write',title:'写入正文',args:{}})
+    apply({...base,seq:3,type:'tool.result',toolName:'chapter_write',ok:true,summary:'已保存'})
+    apply({...base,seq:4,type:'tool.delta',toolName:'chapter_write',argsChars:50})
+    expect(store().messages[0].parts).toHaveLength(1)
+    expect(store().messages[0].parts[0]).toMatchObject({callId:'write',preparing:false,status:'success'})
+    expect(store().workspaceActivities).toHaveLength(1)
+    expect(store().liveToolDrafts).toEqual({})
+  })
+  it('同messageId但不同run归属不可补建或覆盖工具卡',()=>{
+    const store=()=>useAgentStore.getState(),message={id:'collision',runId:'old',role:'assistant' as const,parts:[],createdAt:new Date().toISOString()}
+    useAgentStore.setState({messages:[message]})
+    const base={runId:'run-review',messageId:message.id,callId:'write',ts:message.createdAt,toolName:'chapter_write'}
+    store().applyEvent({...base,seq:1,type:'tool.delta',argsChars:0})
+    store().applyEvent({...base,seq:2,type:'tool.call',title:'写入正文',args:{}})
+    store().applyEvent({...base,seq:3,type:'tool.result',ok:true,summary:'已保存'})
+    expect(store().messages).toEqual([message])
+    expect(store().workspaceActivities).toEqual([])
+    expect(store().lastSeq).toBe(0)
+  })
 
   it('继续后重复读取并暂停仍保留已保存变更和历史，不把定位预览当已写正文', () => {
     const store = () => useAgentStore.getState()

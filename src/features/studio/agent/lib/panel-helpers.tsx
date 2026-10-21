@@ -60,8 +60,8 @@ export function shouldShowProcessingHint(
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (message.role === 'assistant' && message.runId === runId) {
-      // 真正执行中的工具已有进度动画，不叠加一行通用提示。
-      if (message.parts.some(part => part.type === 'tool-call' && !part.preparing && !part.subagentCallId && part.status === 'running')) return false
+      // 实时准备卡与执行卡均有进度动画；准备标签不声称已执行或保存。
+      if (message.parts.some(part => part.type === 'tool-call' && !part.subagentCallId && part.status === 'running')) return false
     }
   }
   // 未定稿的思考不代表画面仍在更新：供应商可能正静默生成工具参数。

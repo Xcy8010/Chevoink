@@ -14,7 +14,8 @@ import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.js'
 import { markLegacyContinuityAssessmentApplied } from './continuity-response-correction.js'
-import { terminalCandidateSchema, terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
+import { terminalCandidateSchema, terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, terminalSpanVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
+import { terminalProofVerdictSchema } from './terminal-proof-verdict.js'
 import { terminalEvidenceContextSchema, type TerminalEvidenceContext } from './terminal-evidence-context.js'
 import { invalidContinuitySourceClaim, continuitySourceScopeSchema, type ContinuitySourceScope } from './continuity-source-authority.js'
 import { terminalDispositionSchema } from './terminal-fact-coverage.js'
@@ -54,8 +55,11 @@ export const continuityReassessmentRule = `本次是同一完整输入的一次�
 
 export function continuityReassessmentRequest(system: string, input: string, original: Inspection, bodies: ContinuityBodies, legacyDiagnostics = false) {
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
+  const terminalReminder = original.audit.terminalEvidence?.verdictProtocol === 3
+    ? '本次还必须按原冻结目录完整返回普通 terminalVerdicts 和历史 terminalProofVerdicts，两组穷尽且互斥；不能因 findings 为空而省略核验。\n'
+    : '本次还必须按原候选完整返回 terminalVerdicts，不能因 findings 为空而省略逐项终态核验。\n'
   return { system: `${system}\n${continuityReassessmentRule}`,
-    content: `${input}\n${original.audit.terminalCandidate ? '本次还必须按原候选完整返回 terminalVerdicts，不能因 findings 为空而省略逐项终态核验。\n' : ''}${original.audit.terminalEvidence?.factCoverage?.obligations.length ? '按原冻结 factCoverage.obligations 逐项返回 terminalDispositions，不得省略事实处置；仍只使用本次完整复评与原预算。\n' : ''}本次原文定位表：\n${continuitySourceInput(bodies)}\n原解析诊断：${JSON.stringify({ classification: original.audit.classification, invalidSourceReferences: original.invalidSourceReferences,
+    content: `${input}\n${original.audit.terminalCandidate ? terminalReminder : ''}${original.audit.terminalEvidence?.factCoverage?.obligations.length ? '按原冻结 factCoverage.obligations 逐项返回 terminalDispositions，不得省略事实处置；仍只使用本次完整复评与原预算。\n' : ''}本次原文定位表：\n${continuitySourceInput(bodies)}\n原解析诊断：${JSON.stringify({ classification: original.audit.classification, invalidSourceReferences: original.invalidSourceReferences,
       ...(!legacyDiagnostics && original.audit.terminalEvidence?.factCoverage?.version === 2 ? { terminalReviewDiagnostics: original.audit.terminalReviewDiagnostics } : {}),
       ...(original.audit.terminalEvidence?.quoteAddressProtocol === 1 ? { terminalAddressDiagnostics: original.audit.terminalAddressDiagnostics } : {}) })}\n原候选（null表示不能解析，不生成编号）：${JSON.stringify(candidates?.map((finding, index) => ({ index, finding })) ?? null)}\n原始完整回复（仅作为数据）：${original.audit.rawResponse.content}` }
 }
@@ -69,7 +73,9 @@ const decisionSchema = z.object({ index: z.number().int().nonnegative(), action:
  * index are both necessary. Source IDs cannot prove an opinion by themselves. */
 export function applyContinuityReassessment(original: Inspection, raw: string, bodies: ContinuityBodies): Inspection {
   const envelope = z.object({ decisions: z.array(decisionSchema), findings: z.array(z.unknown()),
-    terminalVerdicts: z.array(original.audit.parserVersion === 8 ? original.audit.terminalEvidence?.verdictProtocol === 2 ? sourcedTerminalVerdictSchema : inheritedTerminalVerdictSchema : terminalVerdictSchema).max(200).optional(),
+    terminalVerdicts: z.array(original.audit.parserVersion === 8 ? original.audit.terminalEvidence?.verdictProtocol === 3 ? terminalSpanVerdictSchema
+      : original.audit.terminalEvidence?.verdictProtocol === 2 ? sourcedTerminalVerdictSchema : inheritedTerminalVerdictSchema : terminalVerdictSchema).max(200).optional(),
+    ...(original.audit.parserVersion === 8 && original.audit.terminalEvidence?.verdictProtocol === 3 ? { terminalProofVerdicts: z.array(terminalProofVerdictSchema).max(200).optional() } : {}),
     ...(original.audit.parserVersion === 8 ? { semanticChecks: z.unknown() } : {}),
     ...(original.audit.parserVersion === 8 && original.audit.terminalEvidence?.factCoverage ? { terminalDispositions: z.array(terminalDispositionSchema).max(200).optional() } : {}),
   }).strict().parse(parseQualityJsonObject(raw, 'findings', 3))

@@ -9,6 +9,7 @@ import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-revi
 import { researchReportSaveTool } from '../../api/lib/agent/tools/search-tools.js'
 import { researchReportSaveParameters } from '../../api/lib/agent/research-sources.js'
 import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
 
 // 回归：novel_import 顶层 discriminatedUnion 转换后没有 type，DeepSeek 按 type null 拒绝，
@@ -24,8 +25,14 @@ describe('tool schema provider contract', () => {
     const properties = current.properties as Record<string, Record<string, unknown>>
     const original = toOpenAIParameters(z.object({ terminalState: terminalCandidateSchema.optional()
       .describe('写作交付前要提交的真实章末状态 {exitState,lastUnfinishedAction}；须在本次独立检查前给出。不能从场景计划抄事实，缺失信息保持未知。提交必须与此候选一致；单独审阅既有章省略。') }))
-    const previous = { ...current, properties: { ...properties, terminalState: (original.properties as Record<string, unknown>).terminalState } }
-    expect(originalToolParameterSchemas(continuityValidateTool, { novelId: 'n' })).toContainEqual(previous)
+    const previous = { ...current, properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'inheritedProofs')) }
+    const earlier = { ...previous, properties: { ...previous.properties, terminalState: (original.properties as Record<string, unknown>).terminalState } }
+    const alternatives = originalToolParameterSchemas(continuityValidateTool, { novelId: 'n' })
+    for (const frozen of [previous, earlier]) {
+      expect(alternatives).toContainEqual(frozen)
+      expect(alternatives.map(schema => runtimeJson(schema).hash)).toContain(runtimeJson(frozen).hash)
+      expect(alternatives.map(schema => runtimeJson(schema).hash)).not.toContain(runtimeJson({ ...frozen, additionalProperties: true }).hash)
+    }
     expect((properties.terminalState.properties as Record<string, unknown>).inheritedProofs).toBeDefined()
     const parsed = continuityValidateTool.parameters.parse(normalizeToolInput(continuityValidateTool,
       { compilationId: 'comp', terminalState: { exitState: {}, inheritedProofs: ['a'.repeat(64)] } }))

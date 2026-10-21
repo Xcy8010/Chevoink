@@ -7,7 +7,7 @@ import { inspectContinuityResponse } from './continuity-format-recovery.js'
 import { continuityReassessmentRequest, legacyContinuityAssessmentKey } from './assessment-response-lifecycle.js'
 import { compilerContinuityCoverage } from './compiler-continuity-contract.js'
 import { activeChapterScope } from '../data/internal.js'
-import { terminalCandidateSchema, readTerminalCandidate } from './terminal-state-review.js'
+import { terminalCandidateSchema, terminalCandidateInputSchema, readTerminalCandidate, reviewTerminalSelection, resolveTerminalCandidate } from './terminal-state-review.js'
 import { continuitySourceScopeSchema } from './continuity-source-authority.js'
 import { terminalEvidenceContextSchema, terminalEvidenceContext, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
 import { terminalCoverageInput } from './terminal-fact-coverage.js'
@@ -112,8 +112,6 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   const results = await tx.agentRunEvent.findMany({ where: { runId: call.runId, type: 'tool.result', payload: { path: ['callId'], equals: callId } } })
   if (results.length !== 1 || object(results[0].payload).ok !== false || object(results[0].payload).toolName !== 'continuity_validate'
     || results[0].createdAt >= input.admission.at || results[0].seq <= call.seq) return null
-  const coverageInput = { chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source, focus: typeof args.focus === 'string' ? args.focus : undefined,
-    terminalCandidate: args.terminalState ? terminalCandidateSchema.parse(args.terminalState) : readTerminalCandidate(compilation.validation) }
   const reservations = await tx.agentArtifact.findMany({ where: { runId: call.runId, artifactType: 'continuityReview', metadata: { path: ['callId'], equals: callId } } })
   const reservation = reservations.filter(row => typeof object(row.metadata).continuityAssessmentRequestKey === 'string')
   if (reservation.length !== 1) return null
@@ -121,14 +119,25 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   const chainProtocol = frozen.parserVersion === 8 && object(bodies.terminalEvidence).protocol === 2
   if (chainProtocol) source = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, 11)
   const original = chainProtocol ? await readOriginalTaskRequest(tx, { ...subject, runId: call.runId }) : null
+  const explicit = terminalCandidateInputSchema.optional().safeParse(args.terminalState)
+  const proofs = terminalCandidateInputSchema.shape.inheritedProofs.safeParse(args.inheritedProofs)
+  if (!explicit.success || !proofs.success) return null
+  const savedCandidate = readTerminalCandidate(compilation.validation)
+  const selection = reviewTerminalSelection(explicit.data, savedCandidate, proofs.data)
+  const resolved = selection ? resolveTerminalCandidate(selection,
+    source && 'terminalInheritance' in source ? source.terminalInheritance : [], chainProtocol ? 2 : undefined) : undefined
+  if (resolved && !resolved.ok) return null
+  const coverageInput = { chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source, focus: typeof args.focus === 'string' ? args.focus : undefined,
+    terminalCandidate: resolved?.ok ? resolved.candidate : savedCandidate }
   coverageInput.terminalCandidate ??= terminalCoverageInput(original?.spec, compilation.preparedContext, chapter)?.obligations.length
     ? terminalCandidateSchema.parse({ exitState: {} }) : undefined
+  if (runtimeJson({ candidate: frozen.terminalCandidate ?? null }).hash !== runtimeJson({ candidate: coverageInput.terminalCandidate ?? null }).hash) return null
   const coverage = compilerContinuityCoverage({ ...coverageInput, source }, chainProtocol ? 11 : frozen.parserVersion === 8 ? 10 : frozen.parserVersion === 7 ? 9 : 8)
   let sourceMatches = bodies.previous === (source?.content ?? null) && frozen.bindingHash === runtimeJson(coverage).hash
   if (chainProtocol) {
     sourceMatches &&= runtimeJson(bodies.terminalEvidence).hash === runtimeJson(terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original?.spec),
       terminalCoverageInput(original?.spec, compilation.preparedContext, chapter, coverageInput.terminalCandidate,
-        object(object(bodies.terminalEvidence).factCoverage).version === 2 ? 2 : 1), object(bodies.terminalEvidence).verdictProtocol === 2 ? 2 : undefined)).hash
+        object(object(bodies.terminalEvidence).factCoverage).version === 2 ? 2 : 1), object(bodies.terminalEvidence).verdictProtocol === 3 ? 3 : object(bodies.terminalEvidence).verdictProtocol === 2 ? 2 : undefined)).hash
   }
   if (!sourceMatches && !chainProtocol) {
     // A proven non-dispatch may have frozen the previous single-source
@@ -137,7 +146,7 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
     const previousSource = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, 7)
     const previousCoverage = compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
       source: previousSource, focus: typeof args.focus === 'string' ? args.focus : undefined,
-      terminalCandidate: args.terminalState ? terminalCandidateSchema.parse(args.terminalState) : readTerminalCandidate(compilation.validation) }, 7)
+      terminalCandidate: coverageInput.terminalCandidate }, 7)
     sourceMatches = bodies.previous === (previousSource?.content ?? null) && frozen.bindingHash === runtimeJson(previousCoverage).hash
   }
   if (meta.admissionId === input.admission.id || frozen.chapterId !== chapter.id || frozen.revision !== chapter.revision || bodies.current !== chapter.content

@@ -1,6 +1,6 @@
 import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { retainedFindings } from './chapter-arguments.js'
-import { readTerminalCandidate, terminalCandidateSchema, terminalCandidateInputSchema, resolveTerminalCandidate, terminalReviewInput, currentTerminalReview, terminalReviewFailure, type TerminalCandidate } from '../terminal-state-review.js'
+import { readTerminalCandidate, terminalCandidateSchema, terminalCandidateInputSchema, resolveTerminalCandidate, reviewTerminalSelection, terminalReviewInput, currentTerminalReview, terminalReviewFailure, type TerminalCandidate } from '../terminal-state-review.js'
 import { terminalCoverageInput, terminalCoverageAuditVersion, hasTerminalCoverageProtocol } from '../terminal-fact-coverage.js'
 import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, terminalVerdictAuditVersion, continuitySemanticRule, type TerminalCarriedFact } from '../terminal-evidence-context.js'
 import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
@@ -689,7 +689,7 @@ export const chapterBridgeGetTool = defineTool({
       ? inheritanceSource.terminalInheritance as TerminalCarriedFact[] | undefined : undefined
     const inheritedFacts = (carriedFacts ?? []).filter(fact => fact.depth < 16).map(({ proofHash, field, claim }) => ({ proofHash, field, claim }))
     const inheritanceGuidance = inheritedFacts.length
-      ? `\n可显式继承的已验证事实目录：${JSON.stringify(inheritedFacts)}\n本章仍成立的旧事实只在 continuity_validate 的 terminalState.inheritedProofs 中选择 proofHash，例如 terminalState={exitState:{},inheritedProofs:["目录中的proofHash"]}；服务端还原精确字段与事实，独立编辑仍须判断本章未改变。新增事实写入 exitState，不把未决旧事改写成新否定事实，也不必为继承而让正文复述历史。检查后 chapter_bridge_commit 省略 terminalState 即复用已核验候选。` : ''
+      ? `\n可显式继承的已验证事实目录：${JSON.stringify(inheritedFacts)}\n本章仍成立的旧事实可在 continuity_validate 顶层 inheritedProofs 中选择 proofHash，复用同一编译已保存候选，无需重抄整份 terminalState；首次同时给新候选时也可传 terminalState.inheritedProofs。服务端还原精确字段与完整事实，独立编辑仍须判断本章是否改变。新增事实写入 exitState，不把未决旧事改写成新否定事实，也不必为继承而让正文复述历史。检查后 chapter_bridge_commit 省略 terminalState 即复用已核验候选。` : ''
     const bridgeState = committedBridge
       ? `本章已提交终态 r${bridge.targetRevision}${compilation.chapter && compilation.chapter.revision !== bridge.targetRevision ? '（当前正文已变化，须重新检查提交）' : ''}`
       : `入章承接${bridge.fromChapterId ? `（前章 ${bridge.fromChapterId}@r${bridge.sourceRevision}）` : '（无前章）'}；本章终态尚未提交`
@@ -825,6 +825,7 @@ export const continuityValidateTool = defineTool({
     compilationId: z.string().min(1).optional().describe('仅检查当前写作流水线时传；独立审阅既有章节省略'),
     focus: z.string().max(500).optional().describe('作者明确要求额外关注的连续性范围；未指定时不传'),
     terminalState: terminalCandidateInputSchema.optional().describe('写作交付前要提交的真实章末状态 {exitState,lastUnfinishedAction}；须在本次独立检查前给出。不能从场景计划抄事实，缺失信息保持未知。提交必须与此候选一致；单独审阅既有章省略。'),
+    inheritedProofs: z.array(z.string().regex(/^[a-f0-9]{64}$/u)).max(200).optional().describe('显式选择当前已验证的 proofHash；可单独传此项，在同一编译已保存候选上还原原字段、完整事实，仍须独立核对本章是否改变。无需重复整份 terminalState。'),
   }),
   coerceArgs(raw) {
     const source = coerceToolArgumentEnvelope(raw)
@@ -862,7 +863,7 @@ export const continuityValidateTool = defineTool({
     const chapterOnlyPipeline = !args.compilationId && !!args.chapterId && !!compilation?.chapter
       && await isWritingTaskContinuityCompiler(prisma, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, chapterId: args.chapterId })
     if (!args.compilationId && (!compilation || args.chapterId && !chapterOnlyPipeline)) {
-      if (args.terminalState) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
+      if (args.terminalState || args.inheritedProofs !== undefined) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
       const context = await buildStandaloneContinuityContext(ctx, args.chapterId, prisma, sourceAuthority ? 4 : 3)
       const cached = await readStandaloneContinuityReport(ctx, context.contextHash, args.focus)
       if (cached) return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, { structured: true, findings: cached.findings }, tx, args.focus, true, true, undefined, sourceAuthority ? 4 : 3))
@@ -923,7 +924,8 @@ export const continuityValidateTool = defineTool({
     const frozenReviewInput = reviewInput(compilation)
     const bridge = compilation.bridge
     const sourceChapter = await readCompilerContinuitySource(prisma, ctx, chapter, bridge.fromChapterId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
-    const selectedTerminal = args.terminalState ? resolveTerminalCandidate(args.terminalState,
+    const selectionInput = reviewTerminalSelection(args.terminalState, readTerminalCandidate(compilation.validation), args.inheritedProofs)
+    const selectedTerminal = selectionInput ? resolveTerminalCandidate(selectionInput,
       sourceChapter && 'preceding' in sourceChapter && 'terminalInheritance' in sourceChapter ? sourceChapter.terminalInheritance : [], terminalVersion) : undefined
     if (selectedTerminal && !selectedTerminal.ok) return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED',
       summary: '终态证明选择未通过', output: selectedTerminal.reason }
@@ -1044,7 +1046,7 @@ export const continuityValidateTool = defineTool({
     // Only a new request receives the current response contract. Old cache,
     // correction and exact-call replay retain their own full frozen input.
     const requestBodies = structuredClone(bodies)
-    if (!continued && terminalVersion === 2 && requestBodies.terminalEvidence) requestBodies.terminalEvidence.verdictProtocol = 2
+    if (!continued && terminalVersion === 2 && requestBodies.terminalEvidence) requestBodies.terminalEvidence.verdictProtocol = 3
     if (!continued && requestBodies.terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) {
       requestBodies.terminalEvidence.factCoverage = terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, 2)
     }

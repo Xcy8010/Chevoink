@@ -53,6 +53,7 @@ describe.runIf(available)('request-owned evidence at the real commit boundary', 
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
     expect(readiness?.progressEvidence?.phases).toContain('terminal')
     expect(readiness?.terminalReview?.state).toBe(status === 'supported' ? 'supported' : 'unverified')
+    expect(readiness?.progressEvidence?.phases.includes('terminal_supported')).toBe(status === 'supported')
     const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, f))
     const subject = { ...f, expectedOriginalTaskId: original.taskId, taskSpec: original.spec as typeof f.spec }
     const seen = new Set<string>()

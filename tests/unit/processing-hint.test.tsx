@@ -2,12 +2,47 @@
 import { act, cleanup, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ProcessingHint } from '../../src/features/studio/agent/components/ProcessingHint'
+import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
 import { projectAgentAuthorParts } from '../../shared/agent-author-view'
 import { shouldShowProcessingHint } from '../../src/features/studio/agent/lib/panel-helpers'
 import type { AgentUIMessage } from '../../shared/contracts/index.js'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 import { OUTPUT_SILENCE_MS, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
 afterEach(() => { cleanup(); useAgentStore.getState().resetRun(); vi.useRealTimers() })
+
+function LiveParts() {
+  const messages=useAgentStore(state=>state.messages)
+  const visible=useProcessingHint(messages,'r','running',false)
+  return <><ProcessingHint visible={visible}/>{messages.map(message=><AgentMessageParts key={message.id} parts={message.parts} streaming runActive/>)}</>
+}
+
+it('hands fallback feedback to the first preparation frame and keeps one card throughout visible draft growth',()=>{
+  vi.useFakeTimers()
+  useAgentStore.getState().resumeRun('r','session')
+  useAgentStore.setState({messages:[],lastSeq:0,lastVisibleOutput:null})
+  const view=render(<LiveParts/>),apply=useAgentStore.getState().applyEvent
+  const base={runId:'r',messageId:'m',callId:'write',ts:new Date().toISOString()}
+  expect(screen.getByRole('status').textContent).toBe('正在处理...')
+  act(()=>apply({...base,seq:1,type:'tool.delta',toolName:'chapter_write',argsChars:0}))
+  expect(screen.getByText('准备中…')).toBeTruthy()
+  expect(screen.queryByRole('status')).toBeNull()
+  expect(view.container.querySelector('.agent-tool-progress')).not.toBeNull()
+  for(let seq=2;seq<=4;seq++){
+    act(()=>apply({...base,seq,type:'tool.delta',toolName:'chapter_write',argsChars:seq*10,draft:{kind:'chapter',toolName:'chapter_write',content:'可见正文'.repeat(seq)}}))
+    act(()=>vi.advanceTimersByTime(OUTPUT_SILENCE_MS+1))
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(view.container.querySelectorAll('[data-agent-call-id="write"]')).toHaveLength(1)
+  }
+  expect(useAgentStore.getState().workspaceActivities).toEqual([])
+  act(()=>apply({...base,seq:5,type:'tool.call',toolName:'chapter_write',title:'写入正文',args:{chapterId:'chapter'}}))
+  expect(screen.queryByText('准备中…')).toBeNull()
+  expect(screen.getByText('执行中…')).toBeTruthy()
+  act(()=>apply({...base,seq:6,type:'tool.result',toolName:'chapter_write',ok:true,summary:'正文已保存'}))
+  expect(view.container.querySelectorAll('[data-agent-call-id="write"]')).toHaveLength(1)
+  expect(view.container.querySelector('.agent-tool-progress')).toBeNull()
+  expect(screen.getByRole('status').textContent).toBe('正在处理...')
+  expect(useAgentStore.getState().liveToolDrafts).toEqual({})
+})
 
 it('cancels the fallback timer when goal control suppresses a stale running phase', () => {
   vi.useFakeTimers()

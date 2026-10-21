@@ -1205,7 +1205,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (review?.progressEvidence) {
           const pending = [...pendingReviews.values()].filter(item => item.chapterId === review.chapterId)
           const phases = review.progressEvidence.phases.filter(phase => !pending.some(item => phase === 'decision'
-            || item.revision === review.revision && item.toolName === (phase === 'continuity' || phase === 'terminal' ? 'continuity_validate' : 'quality_analyze')))
+            || item.revision === review.revision && item.toolName === (phase === 'continuity' || phase === 'terminal' || phase === 'terminal_supported' ? 'continuity_validate' : 'quality_analyze')))
           currentReviewState.value = { ...review, progressEvidence: { ...review.progressEvidence, phases } }
         }
         return observeChapterReviewProgress(progressSignatures, currentReviewState.value?.progressEvidence,
@@ -2438,7 +2438,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const args = reviewPreflightArgs(call, validator)
           const compilationId = args?.compilationId
           if (validator && args && validator.parameters.safeParse(args).success) {
-            explicitTerminalCandidate = call.name === 'continuity_validate' && args.terminalState !== undefined
+            explicitTerminalCandidate = call.name === 'continuity_validate' && (args.terminalState !== undefined || args.inheritedProofs !== undefined)
             const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
               { userId: params.userId, novelId: params.novelId, runId }, typeof compilationId === 'string' ? compilationId : undefined))
             if (readiness && (typeof args.chapterId !== 'string' || args.chapterId === readiness.chapterId)) reviewDispatch = { compilationId: readiness.compilationId, chapterId: readiness.chapterId,

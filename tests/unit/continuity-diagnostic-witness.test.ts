@@ -8,10 +8,10 @@ import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-c
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 
 afterEach(() => { vi.unstubAllGlobals() })
-function fixture(legacy: boolean, rootError = false) {
+function fixture(legacy: boolean, rootError = false, verdictProtocol?: 2 | 3) {
   const current = { id: 'chapter', content: 'The sensor is offline.', revision: 1, orderIndex: 1 }
   const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: ['The sensor is offline.'] } })
-  const evidence = terminalEvidenceContext(current, null, 2, 1, terminalCoverageInput({ id: 'task', scope: { terminalCoverageProtocol: 2 } }, {}, current, candidate))
+  const evidence = terminalEvidenceContext(current, null, 2, 1, terminalCoverageInput({ id: 'task', scope: { terminalCoverageProtocol: 2 } }, {}, current, candidate), verdictProtocol)
   const input = { chapterId: 'chapter', revision: 1, parserVersion: 8 as const, bodies: { previous: null, current: current.content, terminalEvidence: evidence },
     terminalCandidate: candidate, sourceScope: { previous: [], currentOrderIndex: 1 }, system: 'frozen system', content: 'frozen original request', targetType: 'chapter' as const, targetId: 'chapter' }
   const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Checked.', findingIndexes: [] })),
@@ -38,6 +38,14 @@ function fixture(legacy: boolean, rootError = false) {
   return { input, inspected, claim, claims, tx, findMany, write, args }
 }
 describe('exact frozen diagnostic witness compatibility', () => {
+  it.each([2, 3] as const)('authenticates the exact frozen request marker %s without changing the raw response or dispatching', async version => {
+    const f=fixture(false,true,version),fetcher=vi.fn(()=>{throw Error('Unexpected request')})
+    vi.stubGlobal('fetch',fetcher)
+    const before=JSON.stringify(f.claims)
+    expect(await readOwnedContinuityReassessment(f.tx,{userId:'owner',novelId:'novel'},f.args)).toMatchObject({claim:{id:'claim'},input:f.input})
+    expect(JSON.stringify(f.claims)).toBe(before)
+    expect(fetcher).not.toHaveBeenCalled();expect(f.write).not.toHaveBeenCalled()
+  })
   it.each([[true, false], [false, false], [true, true], [false, true]])('authenticates legacy=%s rootError=%s without a provider call or write', async (legacy, rootError) => {
     const f = fixture(legacy, rootError), fetcher = vi.fn(() => { throw Error('Unexpected request') })
     vi.stubGlobal('fetch', fetcher)

@@ -476,6 +476,14 @@ function projectStoredMessage(message: AgentUIMessage): AgentUIMessage {
   return message.role === 'assistant' ? { ...message, parts: projectStoredParts(message.parts) } : message
 }
 
+/** Reconnection may start at a tool frame. Restore only its exact owned message. */
+function ensureToolMessage(messages: AgentUIMessage[], event: { messageId: string; runId: string; ts: string }, goalId: string | null): AgentUIMessage[] | null {
+  const existing = messages.find(message => message.id === event.messageId)
+  if (existing) return existing.runId === event.runId && existing.role === 'assistant' ? messages : null
+  return [...messages, { id: event.messageId, runId: event.runId, role: 'assistant', goalId, parts: [], createdAt: event.ts,
+    runTiming: messages.find(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId)?.runTiming }]
+}
+
 function updateMessageParts(
   messages: AgentUIMessage[],
   messageId: string,
@@ -1139,6 +1147,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             parts => appendDelta(parts, 'reasoning', event.delta)) }
 
         case 'tool.call': {
+          const messages = ensureToolMessage(state.messages, event, event.runId === state.runId ? state.runGoalId : null)
+          if (!messages) return {}
           const isWrite = WORKSPACE_WRITE_TOOLS.has(event.toolName)
           // 子 Agent 内嵌执行内部的写工具不进主活动区（卡片已嵌套在子 Agent 容器内展示）
           const isSubagentInternal = Boolean(event.subagentCallId)
@@ -1168,7 +1178,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                   ],
                 }
               : {}),
-            messages: updateMessageParts(state.messages, event.messageId, (parts) => {
+            messages: updateMessageParts(messages, event.messageId, (parts) => {
               const index = parts.findIndex((part) => part.type === 'tool-call' && part.callId === event.callId)
               const previous = index >= 0 ? parts[index] : undefined
               // Preview order is the model's proposal order. Server-inserted
@@ -1223,13 +1233,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         case 'tool.delta': {
           // Late or foreign previews cannot resurrect stopped tasks or settled calls.
           if (event.runId !== state.runId || !isRunActive(state.phase)) return {}
-          const existing = state.messages.find(message => message.id === event.messageId)?.parts
+          const messages = ensureToolMessage(state.messages, event, state.runGoalId)
+          if (!messages) return {}
+          const existing = messages.find(message => message.id === event.messageId)?.parts
             .find(part => part.type === 'tool-call' && part.callId === event.callId)
           if (existing?.type === 'tool-call' && existing.status !== 'running') return base
           return {
             ...base,
             ...(event.draft ? { liveToolDrafts: { ...state.liveToolDrafts, [event.callId]: event.draft } } : {}),
-            messages: updateMessageParts(state.messages, event.messageId, (parts) => {
+            messages: updateMessageParts(messages, event.messageId, (parts) => {
               const toolName = event.toolName ?? event.draft?.toolName
               if (!existing && toolName) return [...parts, {
                 type: 'tool-call', callId: event.callId, toolName, title: getAgentToolPresentation(toolName).label,
@@ -1271,10 +1283,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         case 'tool.result': {
           // A reconnect can deliver the terminal witness without its call/start.
           // Restore only this exact message/call, never another tool with the same name.
-          const messages: AgentUIMessage[] = state.messages.some(message => message.id === event.messageId)
-            ? state.messages : [...state.messages, { id: event.messageId, runId: event.runId, role: 'assistant',
-                goalId: event.runId === state.runId ? state.runGoalId : null, parts: [], createdAt: event.ts,
-                runTiming: state.messages.find(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId)?.runTiming }]
+          const messages = ensureToolMessage(state.messages, event, event.runId === state.runId ? state.runGoalId : null)
+          if (!messages) return {}
           const extracted = activityFromDisplay(event.display)
           const clearQuestion = state.pendingQuestion?.callId === event.callId
           const clearImport = event.toolName === 'novel_import' && state.messages.some(message => message.parts.some(part =>
