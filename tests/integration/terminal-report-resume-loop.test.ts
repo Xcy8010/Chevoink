@@ -82,7 +82,8 @@ describe.runIf(available)('complete terminal report resumes through processing a
       const prefix = '待提交候选（写者主张，不是证据）：'
       const candidateLine = request.messages.at(-1).content.split('\n').find((line: string) => line.startsWith(prefix))
       expect(candidateLine).toBeDefined()
-      expect(JSON.parse(candidateLine.slice(prefix.length))).toEqual([{ path: 'exitState.objects.0', claim: body, inheritedSources: [] }])
+      expect(JSON.parse(candidateLine.slice(prefix.length))).toEqual([{ path: 'exitState.objects.0', claim: body, inheritedSources: [],
+        factId: '669fd15becd7c9f8ba6d723a2cb34e93451953d9c63a7d4ea267ecacc2ff84f2' }])
       const response = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body judgment.', findingIndexes: [] })),
         terminalVerdicts: [{ path: 'exitState.objects.0', verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: body }] }], terminalDispositions: [] })
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: response }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })

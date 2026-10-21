@@ -4,7 +4,7 @@ import { terminalCandidateSchema, inspectTerminalReview, terminalResponseFields 
 import { terminalCandidateFacts, terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 import { applyTerminalCandidatePatch, terminalCandidatePatchSchema, freezeLegacyTerminalPatch, readFrozenLegacyTerminalPatch } from '../../api/lib/agent/terminal-candidate-patch.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
-import { applyContinuityReassessment, continuityReassessmentRequest, runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { applyContinuityReassessment, continuityReassessmentRequest, runContinuityReassessment, freshContinuityResponseContract } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import * as original from '../../api/lib/agent/original-request.js'
 import type { Prisma } from '@prisma/client'
@@ -80,6 +80,55 @@ describe('frozen addressed continuity contract', () => {
     expect(() => applyContinuityReassessment(originalResponse, JSON.stringify({ decisions: [{ index: 0, action: 'retract', reason: 'invented', sourceEvidence: [{ source: 'current', quote: chapter.content }] }], ...response() }), bodies)).toThrow()
   })
 
+  it('reassesses the existing body-only report without inventing terminal claims or losing decisions', async () => {
+    const chapter = {id:'body-only',revision:1,orderIndex:1,content:'原文'}
+    const bodies = {previous:null,current:chapter.content,terminalEvidence:terminalEvidenceContext(chapter,null,2,undefined,undefined,4)}
+    const semanticChecks = ['action_direction','state_progression'].map(kind=>({kind,result:'not_applicable',reason:'已核对匿名原文无相关动作。',findingIndexes:[]}))
+    const first = JSON.stringify({findings:[{signal:'object',severity:'error',evidence:'第1章却写“门已拆除”。',suggestion:'核对真实门状态。',sourceEvidence:[{source:'current',segmentId:'c0',quote:'原文'}]}],semanticChecks})
+    const original = inspectContinuityResponse(first,bodies,true,8,undefined,{currentOrderIndex:1,previous:[]})
+    expect(original.complete).toBe(false)
+    const second = {decisions:[{index:0,action:'retract',reason:'旧句未在当前稿中出现。',sourceEvidence:[{source:'current',segmentId:'c0',quote:'原文'}]}],findings:[],semanticChecks}
+    const dispatch = vi.fn().mockResolvedValue({content:JSON.stringify(second),complete:true}), claim = vi.fn().mockResolvedValue(true)
+    const result = await runContinuityReassessment({original,bodies,system:'frozen',content:'frozen body-only input',billingKnown:true,providerComplete:true,slotUsed:false,
+      signal:new AbortController().signal,assertCurrent:vi.fn(),claim,dispatch})
+    expect(result).toMatchObject({complete:true,audit:{reassessment:{decisions:second.decisions}}})
+    expect(result.audit).not.toHaveProperty('terminalCandidate')
+    expect(dispatch).toHaveBeenCalledOnce(); expect(claim).toHaveBeenCalledOnce()
+    const schema = JSON.parse(continuityReassessmentRequest('frozen','input',original,bodies).system.split('完整响应 JSON Schema（普通事实地址与语义 map 由服务端绑定，不补造任何独立判断）：')[1])
+    expect(schema.required).toEqual(expect.arrayContaining(['decisions','findings','semanticChecks']))
+    expect(schema.required).not.toContain('terminalVerdicts')
+    expect(() => applyContinuityReassessment(original,JSON.stringify({...second,decisions:[]}),bodies)).toThrow()
+  })
+
+  it.each(['ordinary','proof','disposition','fake-conflict'] as const)('rejects unbound terminal data or false semantic clearance in a body-only report: %s', scenario => {
+    const parts:Record<string,unknown> = {findings:[],semanticChecks:checks()}
+    if (scenario==='ordinary') parts.terminalVerdicts = [{factId:'f'.repeat(64),verdict:'unknown',sourceEvidence:[]}]
+    if (scenario==='proof') parts.terminalProofVerdicts = [{proofHash:'f'.repeat(64),currentState:'unchanged',reason:'Unbound proof.'}]
+    if (scenario==='disposition') parts.terminalDispositions = [{id:'f'.repeat(64),outcome:'unknown',reason:'Unbound obligation.',sourceEvidence:[]}]
+    if (scenario==='fake-conflict') parts.semanticChecks = {...checks(),action_direction:{result:'conflict',reason:'No error evidence.',findingIndexes:[0]}}
+    expect(inspectContinuityResponse(JSON.stringify(parts),body(),true,8).complete).toBe(false)
+  })
+
+  it('binds fresh keyed semantics independently of whether the frozen task enabled fact coverage', () => {
+    const bodies = {previous:null,current:chapter.content,terminalEvidence:terminalEvidenceContext(chapter,null,2,undefined,undefined,4)}
+    expect(terminalResponseFields(false).semanticChecks.safeParse(checks()).success).toBe(true)
+    expect(inspectContinuityResponse(JSON.stringify({findings:[],semanticChecks:checks()}),bodies,true,8).complete).toBe(true)
+  })
+
+  it('keeps the existing complete-report capacity in the fresh generated contract', () => {
+    const prompt = freshContinuityResponseContract(false,false)
+    const schema = JSON.parse(prompt.slice(prompt.indexOf('{')))
+    expect(schema.properties.findings).not.toHaveProperty('maxItems')
+    const findings = Array.from({length:31},(_,index)=>({signal:'object',severity:'warning',evidence:chapter.content,suggestion:`Review original item ${index}`,sourceEvidence:[{source:'current',segmentId:'c0',quote:chapter.content}]}))
+    const parsed = inspectContinuityResponse(JSON.stringify({findings,semanticChecks:checks()}),body(),true,8)
+    expect(parsed).toMatchObject({complete:true,findings:expect.any(Array)})
+    expect(parsed.findings).toHaveLength(31)
+  })
+
+  it.each([candidate,terminalCandidateSchema.parse({exitState:{}})])('still requires a verdict array for every explicit frozen candidate', state => {
+    expect(inspectContinuityResponse(JSON.stringify({findings:[],semanticChecks:checks()}),body(),true,8,state).complete).toBe(false)
+  })
+
   it('uses the same strict semantic core for primary and second while preserving old contracts', () => {
     const shared = { action_direction: 'clear', state_progression: 'clear', reason: 'Checked body.' }
     const parts = { ...response(), semanticChecks: shared }
@@ -153,7 +202,11 @@ describe('explicit candidate delta and input recovery', () => {
     const scope = {id:'compiler',validation:{terminalCandidate:candidate},chapter:{...chapter}}, patch = terminalCandidatePatchSchema.parse({baseCandidateHash:runtimeJson(candidate).hash,addFacts:[{field:'knowledge',claim:'The manifest is missing.'}]})
     vi.spyOn(original, 'readOriginalTaskRequest').mockResolvedValue({taskId:'original'} as never)
     const rows = new Map<string, unknown>()
-    const create = vi.fn(async ({data}:{data:{id:string;runId:string;metadata:unknown}})=>{ rows.set(data.id,data);return data })
+    const create = vi.fn(async ({data}:{data:{id:string;runId:string;metadata:unknown}})=>{
+      // AgentArtifact.id is VARCHAR(64), including in the initial migration.
+      expect(data.id.length).toBeLessThanOrEqual(64)
+      rows.set(data.id,data);return data
+    })
     const tx = {agentArtifact:{findUnique:vi.fn(async ({where}:{where:{id:string}})=>rows.get(where.id)??null),create}} as unknown as Prisma.TransactionClient
     try {
       expect(await readFrozenLegacyTerminalPatch(tx,ctx,scope,null,[],2,patch)).toBeNull()

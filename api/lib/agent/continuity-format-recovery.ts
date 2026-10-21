@@ -100,7 +100,7 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
     }
   }
   if (raw.length > MAX_AUDIT_CHARS) classification = 'response_too_large'
-  const freshFields = bodies?.terminalEvidence?.verdictProtocol === 4 ? terminalResponseFields() : null
+  const freshFields = bodies?.terminalEvidence?.verdictProtocol === 4 ? terminalResponseFields(!!terminalCandidate) : null
   if (classification === 'complete' && parserVersion === 8 && (!bodies?.terminalEvidence
     || freshFields && !freshFields.semanticChecks.safeParse(record?.semanticChecks).success
     || !validContinuitySemanticChecks(record?.semanticChecks, findings, bodies.terminalEvidence.factCoverage?.version, bodies.terminalEvidence.verdictProtocol === 4))) classification = 'semantic_invalid'

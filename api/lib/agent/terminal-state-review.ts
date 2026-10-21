@@ -81,11 +81,17 @@ const factVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(termin
 
 /** Shared fresh response shape; proof/decision semantics remain independently
  * checked after binding these mechanically addressed fields. */
-export function terminalResponseFields() {
+export function terminalResponseFields(hasCandidate = true) {
+  // Use the request's frozen candidate. A body-only review has no terminal
+  // claims; an explicit empty candidate still needs its exhaustive empty array.
   const keyed = semanticCheckSchema.omit({ kind: true }).extend({ kind: semanticCheckSchema.shape.kind.optional() }).strict()
+  const ordinary = z.array(terminalFactVerdictSchema).max(200)
+  const proofs = z.array(terminalProofVerdictSchema).max(200)
+  const dispositions = z.array(addressedTerminalDispositionSchema).max(200)
   return { semanticChecks: z.union([z.array(semanticCheckSchema).length(2), z.object({ action_direction: keyed, state_progression: keyed }).strict()]),
-    terminalVerdicts: z.array(terminalFactVerdictSchema).max(200), terminalProofVerdicts: z.array(terminalProofVerdictSchema).max(200).optional(),
-    terminalDispositions: z.array(addressedTerminalDispositionSchema).max(200).optional() }
+    terminalVerdicts: hasCandidate ? ordinary : ordinary.length(0).optional(),
+    terminalProofVerdicts: (hasCandidate ? proofs : proofs.length(0)).optional(),
+    terminalDispositions: (hasCandidate ? dispositions : dispositions.length(0)).optional() }
 }
 
 /** Source is encoded in server-owned addresses. This projection changes no

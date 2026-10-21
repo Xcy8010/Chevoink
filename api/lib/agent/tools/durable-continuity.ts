@@ -140,7 +140,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     return { kind: 'check' as const, version: terminalVersion === 2 ? 17 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
       ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),
       criticSystem, repairSystem: repairPrompt,
-      criticInput: [...(terminalEvidence?.verdictProtocol === 4 ? [freshContinuityResponseContract()] : []), `章节：《${compilation.chapter.title}》`,
+      criticInput: [...(terminalEvidence?.verdictProtocol === 4 ? [freshContinuityResponseContract(false, !!terminalCandidate)] : []), `章节：《${compilation.chapter.title}》`,
         sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
         ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: compilation.chapter.id, revision: compilation.chapter.revision, orderIndex: compilation.chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
         `章节桥（待核对摘要，不能代替前章原文）：${JSON.stringify(continuityStoryInput(compilation.bridge))}`, `生成场景任务草案（目标/代价/转折不是历史事实）：${JSON.stringify(continuityStoryInput(compilation.sceneTasks))}`,

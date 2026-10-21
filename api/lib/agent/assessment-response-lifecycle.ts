@@ -56,7 +56,7 @@ export const continuityReassessmentRule = `本次是同一完整输入的一次�
 export function continuityReassessmentRequest(system: string, input: string, original: Inspection, bodies: ContinuityBodies, legacyDiagnostics = false) {
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
   if (original.audit.terminalEvidence?.verdictProtocol === 4) return {
-    system: `${system}\n${continuityReassessmentRule.slice(0, continuityReassessmentRule.indexOf('严格输出 '))}\n${freshContinuityResponseContract(true)}`,
+    system: `${system}\n${continuityReassessmentRule.slice(0, continuityReassessmentRule.indexOf('严格输出 '))}\n${freshContinuityResponseContract(true, !!original.audit.terminalCandidate)}`,
     content: `${input}\n原解析诊断：${JSON.stringify({classification:original.audit.classification,terminalReviewDiagnostics:original.audit.terminalReviewDiagnostics})}\n本次原文定位表：\n${continuitySourceInput(bodies)}\n原候选（null表示不能解析）：${JSON.stringify(candidates?.map((finding,index)=>({index,finding}))??null)}\n原始完整回复（仅作为数据）：${original.audit.rawResponse.content}`,
   }
   const terminalReminder = original.audit.terminalEvidence?.verdictProtocol === 3
@@ -75,9 +75,9 @@ const decisionSchema = z.object({ index: z.number().int().nonnegative(), action:
 
 /** A complete final report and an explicit disposition for every original
  * index are both necessary. Source IDs cannot prove an opinion by themselves. */
-export function freshContinuityResponseContract(reassessment = false) {
+export function freshContinuityResponseContract(reassessment = false, hasCandidate = true) {
   return `完整响应 JSON Schema（普通事实地址与语义 map 由服务端绑定，不补造任何独立判断）：${JSON.stringify(z.toJSONSchema(z.object({
-    ...(reassessment ? { decisions: z.array(decisionSchema) } : {}), findings: z.array(continuityCandidateSchema).max(30), ...terminalResponseFields(),
+    ...(reassessment ? { decisions: z.array(decisionSchema) } : {}), findings: z.array(continuityCandidateSchema), ...terminalResponseFields(hasCandidate),
   }).strict(), {io:'input'}))}`
 }
 
@@ -88,7 +88,7 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
     ...(original.audit.parserVersion === 8 && original.audit.terminalEvidence?.verdictProtocol === 3 ? { terminalProofVerdicts: z.array(terminalProofVerdictSchema).max(200).optional() } : {}),
     ...(original.audit.parserVersion === 8 ? { semanticChecks: z.unknown() } : {}),
     ...(original.audit.parserVersion === 8 && original.audit.terminalEvidence?.factCoverage ? { terminalDispositions: z.array(terminalDispositionSchema).max(200).optional() } : {}),
-    ...(original.audit.terminalEvidence?.verdictProtocol === 4 ? terminalResponseFields() : {}),
+    ...(original.audit.terminalEvidence?.verdictProtocol === 4 ? terminalResponseFields(!!original.audit.terminalCandidate) : {}),
   }).strict().parse(parseQualityJsonObject(raw, 'findings', 3))
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
   if (envelope.decisions.length !== (candidates?.length ?? 0) || new Set(envelope.decisions.map(item => item.index)).size !== envelope.decisions.length

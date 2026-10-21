@@ -62,7 +62,8 @@ async function legacyTerminalPatch(tx: Prisma.TransactionClient,ctx: Pick<ToolCo
   const identity={userId:ctx.userId,novelId:ctx.novelId,taskId:original.taskId,runId:ctx.runId,callId:ctx.callId,
     compilationId:compilation.id,chapterId:compilation.chapter.id,revision:compilation.chapter.revision,
     bodyHash:runtimeJson({content:compilation.chapter.content}).hash,sourceHash:runtimeJson({source:source??null}).hash}
-  const request={patch,inheritedProofs},id=`terminal-patch-${runtimeJson({runId:ctx.runId,callId:ctx.callId,compilationId:compilation.id}).hash}`
+  // Keep the full domain-separated hash within AgentArtifact.id VARCHAR(64).
+  const request={patch,inheritedProofs},id=runtimeJson({kind:'terminalCandidatePatch',runId:ctx.runId,callId:ctx.callId,compilationId:compilation.id}).hash
   const saved=await tx.agentArtifact.findUnique({where:{id},select:{runId:true,metadata:true}})
   const current=readTerminalCandidate(compilation.validation)
   if(!current)throw stale()

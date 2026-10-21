@@ -79,13 +79,13 @@ export const semanticCheckSchema = z.object({ kind: z.enum(['action_direction', 
 }).strict()
 export function validContinuitySemanticChecks(raw: unknown, findings: Array<{ severity: string }>, version: 1 | 2 = 1, keyedKind = false) {
   let normalized = raw
-  if (version === 2 && raw && typeof raw === 'object' && !Array.isArray(raw)) {
+  if ((version === 2 || keyedKind) && raw && typeof raw === 'object' && !Array.isArray(raw)) {
     const record = raw as Record<string, unknown>, kinds = ['action_direction', 'state_progression']
     const keys = Object.keys(record)
     if (keys.length === 2 && kinds.every(kind => record[kind] && typeof record[kind] === 'object'
       && !Array.isArray(record[kind]) && ((record[kind] as Record<string, unknown>).kind === kind
         || keyedKind && !Object.prototype.hasOwnProperty.call(record[kind], 'kind')))) normalized = kinds.map(kind => ({ ...(record[kind] as Record<string, unknown>), kind }))
-    else if (keys.length === 3 && keys.includes('reason') && typeof record.reason === 'string'
+    else if (version === 2 && keys.length === 3 && keys.includes('reason') && typeof record.reason === 'string'
       && kinds.every(kind => typeof record[kind] === 'string' && record[kind] !== 'conflict')) {
       normalized = kinds.map(kind => ({ kind, result: record[kind], reason: record.reason, findingIndexes: [] }))
     }
