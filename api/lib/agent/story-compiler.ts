@@ -838,7 +838,6 @@ export async function commitChapterBridge(input: {
   }
   const orderedScenes = [...compilation.sceneTasks].sort((a, b) => a.ordinal - b.ordinal)
   const probeRunId = input.runId ?? compilation.runId
-  const terminalAddressProtocol = probeRunId ? terminalQuoteAddressVersion((await readOriginalTaskRequest(db, { ...input, runId: probeRunId })).spec) : undefined
   const { readChapterReviewReadiness, readCurrentCompilerContinuity, terminalReviewStateHash, recordChapterReviewDecisions, chapterReviewDecisionGuidance, lockChapterReviewDecisions } = await import('./chapter-review-guard.js')
   const currentContinuityReview = readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, source)
   let readiness = probeRunId ? await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id) : null
@@ -900,6 +899,10 @@ export async function commitChapterBridge(input: {
   // independent critic's candidate, bound to this body's full coverage.
   const proposedTerminal = terminalCandidateSchema.parse({ exitState: input.exitState, lastUnfinishedAction: input.lastUnfinishedAction })
   const reviewedCandidate = readTerminalCandidate(compilation.validation)
+  // Legacy/manual error gates need no new task lookup. Read the frozen address
+  // policy only when this producer actually carries terminal evidence context.
+  const terminalAddressProtocol = (currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 && probeRunId
+    ? terminalQuoteAddressVersion((await readOriginalTaskRequest(db, { ...input, runId: probeRunId })).spec) : undefined
   const terminalReview = currentTerminalReview(compilation.validation, chapter.content,
     (currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 ? terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, currentContinuityReview.coverage.protocolVersion === 11 ? 2 : 1, terminalAddressProtocol) : undefined)
   if (reviewedCandidate || terminalClaims(proposedTerminal).length) {

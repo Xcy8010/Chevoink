@@ -58,13 +58,24 @@ describe('immutable parent-root DB contention permits', () => {
     const gate = createParentContentionGate()
     const held = await Promise.all(Array.from({ length: PARENT_CONTENTION_LIMITS.activeRoots }, (_, i) => gate.acquire(scope(String(i)), { deadline: deadline() })))
     await expect(gate.acquire(scope('overflow'), { deadline: deadline() })).rejects.toMatchObject({ code: 'RUNTIME_CONTENTION_CAPACITY' })
-    const queued = Array.from({ length: PARENT_CONTENTION_LIMITS.totalWaiting }, (_, i) => gate.acquire(scope(String(i % PARENT_CONTENTION_LIMITS.activeRoots)), { deadline: Date.now() + 100 }).catch(error => error.code))
-    await expect(gate.acquire(scope('0'), { deadline: deadline() })).rejects.toMatchObject({ code: 'RUNTIME_CONTENTION_CAPACITY' })
-    vi.advanceTimersByTime(100)
-    expect((await Promise.all(queued)).every(code => code === 'RUNTIME_CONTENTION_TIMEOUT')).toBe(true)
-    held.forEach(permit => permit.release())
-    expect(gate.size()).toEqual({ roots: 0, waiting: 0 })
-    expect(vi.getTimerCount()).toBe(0)
+    const scheduled = vi.spyOn(globalThis, 'setTimeout'), expiresAt = Date.now() + 100
+    try {
+      const queued = Array.from({ length: PARENT_CONTENTION_LIMITS.totalWaiting }, (_, i) => gate.acquire(scope(String(i % PARENT_CONTENTION_LIMITS.activeRoots)), { deadline: expiresAt }).catch(error => error.code))
+      await expect(gate.acquire(scope('0'), { deadline: deadline() })).rejects.toMatchObject({ code: 'RUNTIME_CONTENTION_CAPACITY' })
+      expect(gate.size()).toEqual({ roots: PARENT_CONTENTION_LIMITS.activeRoots, waiting: PARENT_CONTENTION_LIMITS.totalWaiting })
+      expect(vi.getTimerCount()).toBe(PARENT_CONTENTION_LIMITS.totalWaiting)
+      expect(scheduled.mock.calls.map(([, delay]) => delay)).toEqual(Array(PARENT_CONTENTION_LIMITS.totalWaiting).fill(100))
+      // Dispatch the registered deadline callbacks directly: advancing 4096 fake
+      // timers repeatedly scans their entire remaining set. The smaller timeout
+      // case above exercises the clock's own dispatch; this case tests capacity.
+      vi.setSystemTime(expiresAt)
+      scheduled.mock.calls.forEach(([callback]) => callback())
+      expect((await Promise.all(queued)).every(code => code === 'RUNTIME_CONTENTION_TIMEOUT')).toBe(true)
+      expect(gate.size()).toEqual({ roots: PARENT_CONTENTION_LIMITS.activeRoots, waiting: 0 })
+      held.forEach(permit => permit.release())
+      expect(gate.size()).toEqual({ roots: 0, waiting: 0 })
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { scheduled.mockRestore() }
   })
 })
 
