@@ -85,7 +85,7 @@ describe.runIf(available)('complete terminal report resumes through processing a
       expect(JSON.parse(candidateLine.slice(prefix.length))).toEqual([{ path: 'exitState.objects.0', claim: body, inheritedSources: [] }])
       const response = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body judgment.', findingIndexes: [] })),
         terminalVerdicts: [{ path: 'exitState.objects.0', verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: body }] }], terminalDispositions: [] })
-      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: response }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: response }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     })
     vi.stubGlobal('fetch', network)
     let turn = 0
