@@ -12,7 +12,6 @@ import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverag
 import { terminalCandidateSchema, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { observeChapterReviewProgress } from '../../api/lib/agent/semantic-progress.js'
-import { continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import * as ai from '../../api/lib/ai-service.js'
 import * as credits from '../../api/lib/credits.js'
@@ -74,13 +73,21 @@ describe.runIf(available)('complete terminal report resumes through processing a
     vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
     const feature = flags.isAgent2FeatureEnabled
     vi.spyOn(flags, 'isAgent2FeatureEnabled').mockImplementation((key, owner) => key === 'storyCompiler' || key !== 'memory2' && feature(key, owner))
-    const network = vi.fn(() => { throw new Error('No network request in offline resume path') })
-    vi.stubGlobal('fetch', network)
-    const reviewTool = vi.spyOn(continuityValidateTool, 'execute').mockImplementation(async (_ctx, args) => {
-      expect(args.terminalState).toEqual(accurate)
-      expect(await assess(accurate, 'supported')).toBeNull()
-      return { reviewCompleted: true, summary: 'Synthetic complete corrected terminal review', output: 'The corrected candidate is independently supported.' }
+    const network = vi.fn(async (url: unknown, init: RequestInit) => {
+      expect(scenario).toBe('commit')
+      expect(url).toBe('https://provider.invalid/v1/chat/completions')
+      expect(network).toHaveBeenCalledOnce()
+      const request = JSON.parse(String(init.body))
+      expect(request.messages.at(-1).content).toContain(body)
+      const prefix = '待提交候选（写者主张，不是证据）：'
+      const candidateLine = request.messages.at(-1).content.split('\n').find((line: string) => line.startsWith(prefix))
+      expect(candidateLine).toBeDefined()
+      expect(JSON.parse(candidateLine.slice(prefix.length))).toEqual([{ path: 'exitState.objects.0', claim: body, inheritedSources: [] }])
+      const response = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body judgment.', findingIndexes: [] })),
+        terminalVerdicts: [{ path: 'exitState.objects.0', verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: body }] }], terminalDispositions: [] })
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: response }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
     })
+    vi.stubGlobal('fetch', network)
     let turn = 0
     const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async () => {
       turn++
@@ -93,7 +100,9 @@ describe.runIf(available)('complete terminal report resumes through processing a
     })
     await executeAgentRun({ ...f, prompt, mode: 'build', resume: true, eventStartSeq: 4, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     expect(main).toHaveBeenCalled()
-    expect(network).not.toHaveBeenCalled()
+    expect(network).toHaveBeenCalledTimes(scenario === 'commit' ? 1 : 0)
+    const criticUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, agentRunId: f.runId, action: 'agent3ContinuityCritic' } })
+    expect(criticUsage).toHaveLength(scenario === 'commit' ? 1 : 0)
     const savedRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
     const finalBridge = await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })
     const state = (savedRun.usage as { checkpoint: typeof checkpoint }).checkpoint
@@ -103,12 +112,12 @@ describe.runIf(available)('complete terminal report resumes through processing a
     expect(state.progressSignatures.filter(key => key.endsWith(',"terminal"]'))).toHaveLength(1)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ revision: 15, content: body })
     if (scenario === 'commit') {
-      expect(reviewTool).toHaveBeenCalledOnce()
+      expect(criticUsage[0]).toMatchObject({ billingStatus: 'settled', usageSource: 'reported', reservedCreditMilli: 0, requestTokens: 10, responseTokens: 0 })
       expect(finalBridge.committedAt).not.toBeNull()
+      expect(finalBridge.objectState).toEqual([body])
       expect(savedRun.status).toBe('completed')
       expect(await prisma.agentRunEvent.count({ where: { runId: f.runId, seq: { gt: 4 }, type: 'tool.result', payload: { path: ['ok'], equals: false } } })).toBe(0)
     } else {
-      expect(reviewTool).not.toHaveBeenCalled()
       expect(finalBridge.committedAt).toBeNull()
       expect(state.stagnantBatches).toBeGreaterThanOrEqual(4)
       expect(savedRun.status).toBe('paused')
