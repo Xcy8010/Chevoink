@@ -81,9 +81,11 @@ describe('Agent voice draft integration', () => {
   it('distinguishes preparation from execution and settles in place', () => {
     const part = { type: 'tool-call' as const, callId: 'preview', toolName: 'chapter_write', title: '写入章节正文', args: null, status: 'running' as const, preparing: true, progressChars: 80 }
     const { container, rerender } = render(<AgentMessageParts parts={[part]} streaming runActive />)
-    expect(screen.queryByText('撰写章节')).toBeNull()
-    expect(screen.queryByText('准备中…')).toBeNull()
-    expect(container.querySelector('.agent-tool-progress')).toBeNull()
+    expect(screen.getAllByText('撰写章节')).toHaveLength(1)
+    expect(screen.getByText('准备中…')).toBeTruthy()
+    expect(container.querySelector('.agent-tool-progress')).toBeTruthy()
+    expect(screen.queryByText('执行中…')).toBeNull()
+    expect(screen.queryByText('已完成')).toBeNull()
     expect(screen.queryByText('已生成 80 字 · 执行中…')).toBeNull()
     rerender(<AgentMessageParts parts={[{ ...part, preparing: false }]} streaming runActive />)
     expect(screen.getAllByText('撰写章节')).toHaveLength(1)

@@ -125,13 +125,15 @@ it('shows a passed empty report summary and allows its empty-result detail to be
 })
 
 
-it('hides a proposed commit until its real tool.call arrives', () => {
+it('shows a proposed commit as preparation without claiming execution or saved state', () => {
   const check = { ...tool(quality), status: 'running' as const, display: undefined, summary: undefined }
   const commit = { type: 'tool-call' as const, callId: 'commit', toolName: 'chapter_bridge_commit', title: '提交章节终态', status: 'running' as const, preparing: true }
   const view = render(<AgentMessageParts parts={[check, commit]} streaming runActive />)
   expect(screen.getAllByText('执行中…')).toHaveLength(1)
-  expect(screen.queryByText('准备中…')).toBeNull()
-  expect(screen.queryByText('提交章节终态')).toBeNull()
+  expect(screen.getByText('准备中…')).toBeTruthy()
+  expect(screen.getByText('保存章节进展')).toBeTruthy()
+  expect(screen.queryByText('已完成')).toBeNull()
+  expect(view.container.querySelectorAll('[data-agent-call-id="commit"]')).toHaveLength(1)
   view.rerender(<AgentMessageParts parts={[tool(quality), { ...commit, preparing: false }]} streaming={false} runActive />)
   expect(screen.queryByText('准备中…')).toBeNull()
   expect(screen.getAllByText('执行中…')).toHaveLength(1)
