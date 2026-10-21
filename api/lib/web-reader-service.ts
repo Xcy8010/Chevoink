@@ -2,7 +2,7 @@ import { Agent, fetch } from 'undici'
 import { env } from '../config/env.js'
 import { decodeWebPageBuffer } from './html-extract.js'
 import { getPublicHttpBytes, parsePublicHttpUrl, publicEgressLookup, PublicHttpError, readBoundedPublicBody } from './public-http.js'
-import { assessReaderText, assessReaderEvidence, extractReaderHtml, extractReaderLinks, type ReaderQualityResult, type ReaderEvidence, type ReaderTarget } from './web-reader-quality.js'
+import { assessReaderText, assessReaderEvidence, extractReaderHtml, extractReaderLinks, extractReaderNavigationHtml, type ReaderQualityResult, type ReaderEvidence, type ReaderTarget } from './web-reader-quality.js'
 import { getToolModelRuntime, ToolModelConfigurationError, type ToolModelRuntime } from './tool-model-config.js'
 import { requestWebTool, webToolEndpoint } from './web-tool-provider.js'
 import { extractMarkdownReaderLinks } from './web-reader-markdown.js'
@@ -15,8 +15,33 @@ export type WebReadResult = Omit<ReaderQualityResult, 'status'> & {
   retryable: boolean
   retryAfter?: string | null
   contentKind: 'article' | 'metadata'
+  purpose?: 'navigation'
+  canonicalUrl?: string
   links?: Array<{ url: string; title: string }>
   evidence?: ReaderEvidence
+}
+
+/** Ordinary public GET only. Navigation cannot activate configured paid tools
+ * or hosted readers, nor attest that metadata/commentary is a chapter body. */
+export async function readPublicWebNavigation(value: string, signal: AbortSignal, expectedTarget?: ReaderTarget): Promise<WebReadResult> {
+  signal.throwIfAborted()
+  let finalUrl = value
+  const navigation = (result: WebReadResult): WebReadResult => ({ ...result, contentKind: 'metadata', purpose: 'navigation' })
+  try {
+    const page = await getPublicHttpBytes(value, { signal, timeoutMs: 12000, maxBytes: WEB_READER_MAX_BYTES,
+      allowHttp: true, maxRedirects: 5, acceptedContentTypes: ['text/html', 'application/xhtml+xml'] })
+    finalUrl = page.finalUrl
+    signal.throwIfAborted()
+    if (!['text/html', 'application/xhtml+xml'].includes(page.contentType.split(';')[0].trim())) return navigation(failure('WEB_READ_UNSUPPORTED_TYPE', finalUrl))
+    let outcome: ReturnType<typeof extractReaderNavigationHtml>
+    try { outcome = extractReaderNavigationHtml(decodeWebPageBuffer(page.bytes, page.contentType), finalUrl, expectedTarget) }
+    catch { return navigation(failure('WEB_READ_PARSE_ERROR', finalUrl)) }
+    signal.throwIfAborted()
+    return navigation({ ...outcome, finalUrl, provider: 'direct', retryable: false, contentKind: 'metadata' })
+  } catch (error) {
+    signal.throwIfAborted()
+    return navigation(networkFailure(error, finalUrl))
+  }
 }
 
 function failure(code: string, finalUrl: string, status: ReaderQualityResult['status'] = 'unreadable'): WebReadResult {

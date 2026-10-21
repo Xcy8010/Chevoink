@@ -130,6 +130,8 @@ export type AgentTool<Args = unknown> = {
   description: string
   /** zod schema：校验模型参数 + 自动转 JSON Schema 给 LLM */
   parameters: ZodType<Args>
+  /** Server-only fresh research presentation; legacy tools retain their schema. */
+  researchNavigation?: { parameters: ZodType; description: string }
   permission: Record<AgentExecutionMode, AgentWorkspaceToolPermission>
   /** 只读工具跳过审批与快照 */
   readOnly: boolean

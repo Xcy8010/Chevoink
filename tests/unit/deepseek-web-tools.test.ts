@@ -37,6 +37,23 @@ describe('explicit web tool endpoints', () => {
 })
 
 describe('DeepSeek Search JSON contract', () => {
+  it.each([false, true])('retains free navigation provenance without rewriting paid result ownership; empty=%s', empty => {
+    const target = { title: '河谷纪事', author: '林青', sourceHosts: ['fiction.example.com'] }
+    const irrelevant = { title: '汉字释义', url: 'https://dictionary.example.com/item/river', summary: '字词解释', snippet: '', content: '', site_name: 'dictionary.example.com' }
+    const comment = { title: '河谷纪事读者讨论', url: 'https://fiction.example.com/comment/123-456' }
+    transport.mockResolvedValueOnce(Response.json({ results: empty ? [] : [irrelevant] }))
+      .mockResolvedValueOnce(new Response(`<div class="vrwrap" data-url="${comment.url}"><h3 class="vr-title"><a href="${comment.url}">${comment.title}</a></h3><p>作者：林青</p></div>`))
+      .mockResolvedValueOnce(new Response('<li class="b_algo"><h2><a href="https://dictionary.example.com/item/river">字词</a></h2><p>解释</p></li>'))
+    return searchWeb('site:fiction.example.com/page 河谷纪事 林青', 6, undefined, config, target, { version: 1 }).then(outcome => {
+      expect(outcome.provider).toBe(empty ? 'sogou' : 'deepseek')
+      expect(outcome.attempts?.[0]).toMatchObject({ provider: 'deepseek', outcome: empty ? 'empty' : 'results', httpStatus: 200 })
+      expect(outcome.navigation).toMatchObject({ provider: 'sogou', results: [{ url: comment.url }] })
+      expect(outcome.quality?.eligibleCount).toBe(0)
+      expect(outcome.results[0].url).toBe(empty ? comment.url : irrelevant.url)
+      expect(transport).toHaveBeenCalledTimes(3)
+      expect(JSON.stringify(outcome)).not.toContain(config.apiKey)
+    })
+  })
   it('preserves longer legacy Bocha queries rather than applying DeepSeek-specific limits globally', async () => {
     transport.mockResolvedValue(Response.json({ code: 200, data: { webPages: { value: [{ name: 'Source', url: item.url, summary: 'summary' }] } } }))
     const query = '界'.repeat(129)

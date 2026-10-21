@@ -1757,7 +1757,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const handoff = await (await import('./research-recovery.js')).takeResearchReadHandoff({ userId: params.userId,
           novelId: params.novelId, sessionId: params.sessionId, runId })
         if (handoff) bootstrapCall = { id: `research-read-${handoff.receiptId}`, name: 'web_read',
-          arguments: JSON.stringify({ sourceId: handoff.sourceId }) }
+          arguments: JSON.stringify({ sourceId: handoff.sourceId, ...(handoff.purpose ? { purpose: handoff.purpose } : {}) }) }
         researchReadBootstrap = null
       }
       let bootstrapItem: ContinuedReviewRecovery | undefined
@@ -2181,7 +2181,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId,
         }) : null
         const reportIncomplete = Boolean(report && report.chineseCharacters < reportMinimum)
-        const requiresTargetText = taskSpec.researchTarget && taskSpec.researchTarget.textAnalysisRequired !== false
+        const requiresTargetText = (taskSpec.researchTarget || taskSpec.researchNavigation) && taskSpec.researchTarget?.textAnalysisRequired !== false
         const targetEvidenceMissing = requiresTargetText ? report?.evidence?.targetAnalysisSupported !== true
           : taskSpec.researchTarget?.textAnalysisRequired === false ? false : report?.evidence?.targetAnalysisSupported === false
         const researchLimitation = '未取得身份与完整性均可核验的目标原作正文，本次仅交付来源核验与受限说明，未完成有正文依据的写法分析。'
@@ -2721,7 +2721,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const fulfilled = chapterRequired
           ? await (await import('./humanity-quality.js')).hasCommittedTaskChapter(prisma, params.userId, params.novelId, runId)
           : reportRequired ? Boolean(report?.content && report.chineseCharacters >= reportMinimum
-            && (taskSpec.researchTarget?.textAnalysisRequired === false || (taskSpec.researchTarget
+            && (taskSpec.researchTarget?.textAnalysisRequired === false || (taskSpec.researchTarget || taskSpec.researchNavigation
               ? report.evidence?.targetAnalysisSupported === true : report.evidence?.targetAnalysisSupported !== false)))
             : expectsPlanSave && planSavePerformed
         const notice = fulfilled

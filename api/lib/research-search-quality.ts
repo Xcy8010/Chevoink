@@ -117,3 +117,15 @@ export function evaluateResearchSearchCandidates(query: string, results: readonl
   return { version: 1, queryHash: searchQueryHash(query), hasHardConstraints, resultCount: results.length,
     eligibleCount: eligibleResults.length, eligibleResults, candidates }
 }
+
+/** A navigation hint is neither a body candidate nor verified identity. Query
+ * path operators guide recall; only original author site boundaries authorize
+ * a navigation hop. No URL is generated from an ID or a title. */
+export function evaluateResearchNavigationCandidates(results: readonly WebSearchResult[], target?: ResearchSearchTarget, sourceSites: readonly string[] = [], allowAlternative = false) {
+  if (!target?.sourceHosts?.length) return []
+  const checked = evaluateResearchSearchCandidates(sourceSites.join(' '), results, target)
+  return checked.candidates.filter(candidate => candidate.hostMatch && candidate.siteMatch
+    && ((allowAlternative || !target.title) && candidate.pageType === 'book' || target.title && candidate.authorMatch !== 'conflicting' && candidate.titleMatch !== 'absent')
+    && candidate.pageType !== 'homepage').map(candidate => ({ ...results[candidate.index], index: candidate.index,
+      purpose: 'navigation' as const, verifiedOriginalText: false as const }))
+}

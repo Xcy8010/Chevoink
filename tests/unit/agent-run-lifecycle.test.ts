@@ -28,8 +28,8 @@ const mocks = vi.hoisted(() => ({
   todos: vi.fn(async (): Promise<AgentTodoItem[]> => []),
   priorRuns: vi.fn(),
   report: vi.fn(async (): Promise<{ chineseCharacters: number; content: string; evidence?: { targetAnalysisSupported?: boolean } }> => ({ chineseCharacters: 0, content: '' })),
-  researchClaim: vi.fn(async (): Promise<{ sourceId: string; receiptId: string } | null> => null),
-  researchTake: vi.fn(async (): Promise<{ sourceId: string; receiptId: string } | null> => null),
+  researchClaim: vi.fn(async (): Promise<{ sourceId: string; receiptId: string; purpose?: 'navigation' } | null> => null),
+  researchTake: vi.fn(async (): Promise<{ sourceId: string; receiptId: string; purpose?: 'navigation' } | null> => null),
   researchPartial: vi.fn(async (): Promise<string | null> => '研究尚未完成：未完成有正文依据的写法分析。'),
   original: vi.fn<() => Promise<{ parts: Array<{ type: string; text: string }> } | null>>(async () => ({ parts: [{ type: 'text', text: '核对原任务的剩余工作。' }] })),
   tools: [] as AgentTool[],
@@ -1898,10 +1898,11 @@ describe('original task context on resume', () => {
     expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
     expect(mocks.runs.get('run')).toMatchObject({ status: 'paused' })
   })
-  it('hands the fourth authenticated candidate to one normal admitted read before the stagnation stop', async () => {
+  it.each([undefined, 'navigation'] as const)('hands the fourth authenticated candidate to one admitted read before stagnation, purpose=%s', async purpose => {
     const prompt = '联网研究番茄小说《样本》的写作手法并读取公开正文'
-    mocks.update.mockResolvedValueOnce({ taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, researchAdmission: 1 }) })
-    const handoff = { sourceId: 'source', receiptId: 'handoff' }
+    mocks.update.mockResolvedValueOnce({ taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, researchAdmission: 1,
+      ...(purpose ? { researchNavigationAdmission: 1 } : {}) }) })
+    const handoff = { sourceId: 'source', receiptId: 'handoff', ...(purpose ? { purpose } : {}) }
     mocks.researchClaim.mockResolvedValueOnce(handoff)
     mocks.researchTake.mockResolvedValueOnce(null).mockResolvedValueOnce(handoff)
     const read = tool('web_read', async () => ({ output: '取得已保存的可核验正文证据。' }))
@@ -1910,11 +1911,25 @@ describe('original task context on resume', () => {
     await run(prompt)
     expect(mocks.researchClaim).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run' }), ['search-3'])
     expect(read.execute).toHaveBeenCalledOnce()
-    expect(read.execute).toHaveBeenCalledWith(expect.objectContaining({ callId: 'research-read-handoff' }), { sourceId: 'source' })
+    expect(read.execute).toHaveBeenCalledWith(expect.objectContaining({ callId: 'research-read-handoff' }), { sourceId: 'source', ...(purpose ? { purpose } : {}) })
     expect(mocks.chat).toHaveBeenCalledTimes(5)
     expect(mocks.researchPartial).toHaveBeenCalledOnce()
     expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
     expect(mocks.runs.get('run')).toMatchObject({ status: 'paused' })
+  })
+  it.each([undefined, false, true])('requires confirmed actual text for a fresh generic research delivery: supported=%s', async supported => {
+    const prompt = '联网搜索一本小说，读取公开章节分析写作手法'
+    const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, researchAdmission: 1, researchNavigationAdmission: 1 })
+    expect(spec.researchTarget).toBeUndefined()
+    expect(spec.researchNavigation?.version).toBe(1)
+    mocks.update.mockResolvedValueOnce({ taskSpec: spec })
+    mocks.report.mockResolvedValue({ chineseCharacters: 30, content: '仅已核对来源，完整性以实际报告证据为准。',
+      ...(supported === undefined ? {} : { evidence: { targetAnalysisSupported: supported } }) })
+    queue(response('研究已经完成。'))
+    await run(prompt)
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject(supported ? { type: 'run.finished', status: 'succeeded' } : { type: 'run.paused', reason: 'needs_input' })
+    expect(mocks.runs.get('run')).toMatchObject({ status: supported ? 'completed' : 'paused' })
   })
   it('parks four distinct irrelevant searches with a deterministic partial report and no paid wrap-up', async () => {
     const prompt = '联网研究番茄小说《样本》的写作手法并读取公开正文'

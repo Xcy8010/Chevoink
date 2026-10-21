@@ -8,7 +8,7 @@ vi.mock('../../api/lib/agent/writing-experiments.js', () => ({ recordSevenDayCon
 import { prisma } from '../../api/lib/prisma.js'
 import app from '../../api/app.js'
 import { buildSessionTokens } from '../../api/lib/auth-session.js'
-import { reserveResearchRequest, settleResearchRequest } from '../../api/lib/agent/research-sources.js'
+import { reserveResearchRequest, settleResearchRequest, recordResearchReadOutcome } from '../../api/lib/agent/research-sources.js'
 import { startLoopRun } from '../../api/lib/agent/run-service.js'
 import { enqueueRequest } from '../../api/lib/agent/request-queue.js'
 import { verifyTestDatabase } from '../support/database-preflight.js'
@@ -194,6 +194,7 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
         const scope = { ...f, runId, callId: `${kind}-${index}` }
         expect(await reserveResearchRequest(scope, kind, `request-${index}`)).toBe(true)
         await settleResearchRequest(scope, 'consumed')
+        if (kind === 'read') await recordResearchReadOutcome(scope, true)
       }
       expect(await reserveResearchRequest({ ...f, runId, callId: `${kind}-denied` }, kind, 'over-limit')).toBe(false)
     }
@@ -223,6 +224,24 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
       expect(taskSpecSchema.parse(JSON.parse(JSON.stringify(row.taskSpec))).networkAccess).toBe('denied')
     }))
+  it.each([true, false])('freezes original author, navigation and bounded alternative policy through HTTP: %s', allowed => fixture(async f => {
+    const prompt = `只读联网研究《河谷纪事》，候选作者“林青”，仅在site:fiction.example.com/public 查找并读取公开样本分析写法。${allowed
+      ? '如果首选不可读，可以另选一本公开作品。' : '不要换书。'}`
+    const response = await request(app).post('/api/agent/runs')
+      .set('Cookie', `chevoink_session=${buildSessionTokens(f.userId, 0).accessToken}`)
+      .send({ ...f, prompt, mode: 'build' })
+    expect(response.status).toBe(200)
+    const runId = response.body.data.runId as string
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec)
+    expect(spec).toMatchObject({ intent: 'research_analysis', researchBudget: 'extended',
+      researchTarget: { title: '河谷纪事', author: '林青', sourceHosts: ['fiction.example.com'] },
+      researchNavigation: { version: 1, alternativeSelection: allowed ? 'after_preferred_unavailable' : 'denied',
+        sourceSites: ['site:fiction.example.com/public'] } })
+    // No model or provider was dispatched by the mocked asynchronous executor.
+    expect(await prisma.webToolCall.count({ where: { runId } })).toBe(0)
+    expect(await prisma.agentResearchRequest.count({ where: { ownerRunId: runId } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+  }))
   it.each([true, false])('freezes compound external research only for fresh HTTP author admission: %s', human => fixture(async f => {
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '联网搜一篇番茄小说，分析并总结它的写作手法和思路' }, human ? { humanOrigin: 'http' } : {})

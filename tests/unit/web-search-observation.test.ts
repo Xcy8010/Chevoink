@@ -24,6 +24,7 @@ vi.mock('../../api/lib/agent/research-sources.js', async original => ({
   settleResearchRequest: vi.fn(async () => {}),
   findResearchSearchOutcome: vi.fn(async () => null),
   getResearchReadTarget: vi.fn(async () => undefined),
+  getResearchNavigationPolicy: vi.fn(async () => undefined),
   saveResearchSearchOutcome: vi.fn(async () => {}),
   registerResearchSources: async (_scope: unknown, entries: Array<{ url: string }>) => entries.map((entry, index) => ({ id: `source-${index}`, canonicalUrl: entry.url })),
 }))

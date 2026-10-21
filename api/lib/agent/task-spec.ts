@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { DataAccessError } from '../prisma.js'
 import { localEditGuidance } from './local-edit-scope.js'
 import { parseAuthorWritingRequest } from './author-writing-request.js'
+import { researchAuthor, researchAlternativeSelection, researchSourceSites, researchSourceHosts } from './research-navigation-policy.js'
 
 import type { TaskIntent, TaskSpec, UserDirective } from '../../../shared/contracts/index.js'
 import type { CreativeFreedom } from '../../../shared/contracts/index.js'
@@ -248,6 +249,7 @@ export function buildTaskSpec(input: {
   localEditProtocol?: 1
   /** Internal fresh human admission only; not exposed in a request schema. */
   researchAdmission?: 1
+  researchNavigationAdmission?: 1
   /** Fresh HTTP boundary; separate from research budget opt-in. */
   networkAdmission?: 1
   /** Genuine fresh HTTP authority; legacy build/recovery retains its classifier. */
@@ -294,7 +296,16 @@ export function buildTaskSpec(input: {
     ...(researchReadDenied ? { researchReadAccess: 'denied' as const } : {}),
     ...(freshResearch && !networkDenied
       ? { researchDiscoveryProtocol: 1 as const } : {}),
-    ...(freshResearch && namedResearchTarget(input.prompt) ? { researchTarget: namedResearchTarget(input.prompt) } : {}),
+    ...(freshResearch && input.researchNavigationAdmission === 1 && !networkDenied ? { researchNavigation: {
+      version: 1 as const, requestHash: createHash('sha256').update(input.prompt).digest('hex'),
+      alternativeSelection: researchAlternativeSelection(input.prompt),
+      ...(researchSourceSites(input.prompt).length ? { sourceSites: researchSourceSites(input.prompt) } : {}),
+      ...(researchSourceHosts(input.prompt).length ? { sourceHosts: researchSourceHosts(input.prompt) } : {}),
+    } } : {}),
+    ...(freshResearch && namedResearchTarget(input.prompt) ? { researchTarget: {
+      ...namedResearchTarget(input.prompt)!, ...(input.researchNavigationAdmission === 1
+        ? { author: researchAuthor(input.prompt), sourceHosts: researchSourceHosts(input.prompt).length ? researchSourceHosts(input.prompt) : undefined } : {}),
+    } } : {}),
     researchBudget: !networkDenied && (freshResearch
       || /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt)) ? 'extended' : 'standard',
     scope: { novelId: input.novelId, chapterIds, selection, ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
@@ -339,7 +350,9 @@ export function renderTaskSpec(spec: TaskSpec): string {
     ? '[系统] 原始请求明确禁止联网：本任务不提供或执行搜索、网页获取，不预约、不请求供应商、不收工具费。只使用已有获准材料并说明证据限制。\n' : ''
   const readRule = spec.researchReadAccess === 'denied'
     ? '[系统] 原始请求只允许搜索或返回链接：不提供或执行web_read，不自动打开网页，不预约或收读取费。\n' : ''
-  return networkRule + readRule + renderTaskSpecBody(spec)
+  const navigationRule = spec.researchNavigation ? `[系统] 本任务导航协议：相关官方评论或检索页仅可用web_read purpose="navigation"获取可读书目与实际href，最多两次且计入原Fetch预算；元数据不可引用为目标正文。首选作品：${spec.researchTarget?.title ?? '按原请求核验'}${spec.researchTarget?.author ? `；作者：${spec.researchTarget.author}` : ''}。${spec.researchNavigation.alternativeSelection === 'denied'
+    ? '没有换书授权，不能自行改选。' : '原请求允许首选公开来源不可用后改选；仅服务端确认真实访问/404回执后可用selectAlternative=true导航核验一次替代作品。空搜索、乱码、未知请求不解锁改选。'}没有可读正文时报告实际来源与不足。\n` : ''
+  return networkRule + readRule + navigationRule + renderTaskSpecBody(spec)
 }
 
 function renderTaskSpecBody(spec: TaskSpec): string {

@@ -47,7 +47,7 @@ const identityValue = (value: string) => value.normalize('NFC').trim().replace(/
 
 /** Metadata is source evidence, not authority. Never equate a title prefix,
  * common hostname or a search snippet with the requested original work. */
-export function assessReaderEvidence(text: string, pageTitle: string, target?: ReaderTarget, sourceHtml?: string, sourceUrl?: string): ReaderEvidence {
+export function assessReaderEvidence(text: string, pageTitle: string, target?: ReaderTarget, sourceHtml?: string, sourceUrl?: string, purpose?: 'navigation'): ReaderEvidence {
   let title: string | undefined, author: string | undefined
   let basis: ReaderEvidence['identity']['basis'] = 'none'
   let pageType: ReaderEvidence['identity']['pageType'] = 'unknown'
@@ -62,6 +62,7 @@ export function assessReaderEvidence(text: string, pageTitle: string, target?: R
       return undefined
     }
     title = meta(['og:novel:book_name', 'og:book_name', 'book:name'])
+    if (!title && purpose === 'navigation' && /^(?:book|novel)$/iu.test(meta(['og:type']) ?? '')) title = meta(['og:title'])
     author = meta(['og:novel:author', 'book:author', 'author'])
     const authorName = (value: unknown): string | undefined => typeof value === 'string' ? value : value && typeof value === 'object' && 'name' in value && typeof value.name === 'string' ? value.name : undefined
     const inspect = (value: unknown, depth = 0): void => {
@@ -190,4 +191,95 @@ export function extractReaderHtml(html: string, useReadability = true): ReaderQu
     } catch { /* The cleaned DOM candidate is still subject to the same quality gate. */ }
   }
   return assessReaderText(text, title)
+}
+
+const navigationAccessRequirement = /(?:(?:请|需要|必须|只能|仅限|仅能|须|需).{0,24}(?:登录|付费|订阅|购买|解锁|SVIP|VIP|APP|客户端).{0,32}(?:阅读|查看|继续|访问|全文|章节|正文)|(?:登录|付费|订阅|购买|SVIP|VIP).{0,16}(?:后|才能|方可|才可).{0,16}(?:阅读|查看|继续|访问)|(?:本章|章节|本书|正文|全文).{0,16}(?:仅限|需要|必须|需).{0,24}(?:登录|付费|订阅|购买|SVIP|VIP|APP)|(?:please|must|only|requires?).{0,24}(?:sign.?in|log.?in|subscription|payment|premium|app).{0,32}(?:read|view|continue|access))/iu
+const navigationVerificationGate = /(?:(?:请|需要|必须|需).{0,12}(?:验证码|安全验证|人机验证|身份验证)|(?:本章|章节|本书|正文|全文).{0,16}(?:SVIP|VIP|会员).{0,8}(?:专享|专属|限定)|(?:SVIP|VIP|会员)(?:专享|专属|限定)(?:章节|正文|全文|阅读))/iu
+const navigationText = (value: string | undefined | null, max = 300) => {
+  if (!value) return ''
+  const text = value.replace(/\s+/gu, ' ').trim()
+  if (/[\p{Co}\p{Cc}\uFFFD]/u.test(text)) return ''
+  return /[\p{L}\p{N}]/u.test(text) ? text.slice(0, max) : ''
+}
+
+/** A separate metadata lane: no body extraction, glyph recovery or inference of
+ * reader URLs. Even perfectly legible comments remain navigation, not prose. */
+export function extractReaderNavigationHtml(html: string, finalUrl: string, target?: ReaderTarget): ReaderQualityResult & {
+  links?: Array<{ url: string; title: string }>; canonicalUrl?: string; evidence?: ReaderEvidence
+} {
+  const base = parsePublicHttpUrl(finalUrl, true), { document } = parseHTML(html)
+  if (!document.documentElement) return assessReaderText('')
+  if (document.querySelectorAll('*').length > 20000) return { ...assessReaderText(''), code: 'WEB_READ_COMPLEX_DOCUMENT' }
+  const pageTitle = navigationText(document.querySelector('title')?.textContent ?? document.querySelector('h1')?.textContent)
+  const meta = (names: string[]) => [...document.querySelectorAll('meta[content]')].find(node =>
+    names.includes((node.getAttribute('property') ?? node.getAttribute('name') ?? '').toLowerCase()))?.getAttribute('content') ?? ''
+  const pageKind = meta(['og:type']).trim().toLowerCase()
+  let book = /^(?:book|novel)$/u.test(pageKind) || Boolean(meta(['og:novel:book_name']))
+  let other = /^(?:article|review|chapter|blog|blogposting|newsarticle)$/u.test(pageKind)
+  const inspectPrimary = (value: unknown, depth = 0): void => {
+    if (!value || typeof value !== 'object' || depth > 5) return
+    if (Array.isArray(value)) { value.slice(0, 100).forEach(item => inspectPrimary(item, depth + 1)); return }
+    const entry = value as Record<string, unknown>, types = Array.isArray(entry['@type']) ? entry['@type'] : [entry['@type']]
+    if (types.some(type => type === 'Book' || type === 'Novel')) book = true
+    if (types.some(type => ['Review', 'Article', 'Chapter', 'BlogPosting', 'NewsArticle'].includes(String(type)))) other = true
+    inspectPrimary(entry['@graph'], depth + 1)
+    if (types.includes('WebPage')) inspectPrimary(entry.mainEntity, depth + 1)
+  }
+  for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+    if ((script.textContent?.length ?? 0) > 256_000) continue
+    try { inspectPrimary(JSON.parse(script.textContent ?? '')) } catch { /* Invalid metadata proves no identity. */ }
+  }
+  // Inspect access requirements in the main content, never a site-wide APP/VIP
+  // mention, download promotion, footer or incidental prose keyword.
+  for (const node of document.querySelectorAll('script,style,noscript,svg,[hidden],[aria-hidden="true"]')) node.remove()
+  const main = document.querySelector('main,[role="main"],article') ?? document.querySelector('body') ?? document.documentElement
+  const gateMain = main?.cloneNode(true) as typeof main | undefined
+  for (const node of gateMain?.querySelectorAll('header,footer,aside,nav,[role="banner"],[role="navigation"]') ?? []) node.remove()
+  const gateNodes = [...gateMain?.querySelectorAll('h1,h2,h3,p,div,section,form,[role="alert"],[role="dialog"]') ?? []]
+    .filter(node => ![...node.children].some(child => /^(?:H[1-3]|P|DIV|SECTION|FORM)$/u.test(child.tagName)))
+  const gateTexts = [pageTitle, ...gateNodes.map(node => node.textContent ?? '')]
+  if ((gateMain?.textContent?.length ?? 0) <= 500) gateTexts.push(gateMain?.textContent ?? '')
+  for (const text of gateTexts) {
+    if (text.length > 500) continue
+    const gate = assessReaderText(text, pageTitle)
+    if (gate.status === 'blocked' || gate.status === 'not_found') return gate
+    if (navigationAccessRequirement.test(text.replace(/\s+/gu, ' ')) || navigationVerificationGate.test(text)) return { ...gate, status: 'blocked', code: 'WEB_READ_BLOCKED', text: '', quality: { ...gate.quality, readable: false } }
+  }
+  if (gateMain?.querySelector('form input[type="password"],form input[name*="captcha" i]')) return { ...assessReaderText('', pageTitle), status: 'blocked', code: 'WEB_READ_BLOCKED' }
+  let hrefBase: URL | undefined = base
+  const declaredBase = document.querySelector('base[href]')?.getAttribute('href')
+  if (declaredBase !== undefined && declaredBase !== null) {
+    try { hrefBase = parsePublicHttpUrl(new URL(declaredBase, base).href, true) } catch { hrefBase = undefined }
+  }
+  const publicLink = (href: string) => {
+    try {
+      const url = parsePublicHttpUrl(new URL(href, hrefBase).href, true)
+      return url.origin === base.origin ? url.href : undefined
+    } catch { return undefined }
+  }
+  const links = new Map<string, { url: string; title: string }>()
+  let canonicalUrl: string | undefined
+  for (const node of document.querySelectorAll('link[href]')) {
+    if (!(node.getAttribute('rel') ?? '').toLowerCase().split(/\s+/u).includes('canonical')) continue
+    const url = publicLink(node.getAttribute('href')!)
+    if (url) { canonicalUrl = url; links.set(url, { url, title: 'canonical关系' }); break }
+  }
+  for (const anchor of document.querySelectorAll('a[href]')) {
+    if (links.size >= 4096) break
+    const url = publicLink(anchor.getAttribute('href')!), title = navigationText(anchor.textContent, 160)
+    if (url && url !== base.href && new URL(url).pathname !== '/' && title && url !== canonicalUrl) links.set(url, { url, title })
+  }
+  const evidence = assessReaderEvidence('', pageTitle, target, html, finalUrl, 'navigation')
+  const title = evidence.identity.basis === 'structured_metadata' ? navigationText(evidence.identity.title) : '', author = navigationText(evidence.identity.author)
+  const lines = [...new Set([pageTitle && `页面标题：${pageTitle}`, title && `书名元数据：${title}`, author && `作者元数据：${author}`].filter(Boolean))]
+  if (!lines.length && !links.size) return assessReaderText('')
+  const text = [...lines, ...[...links.values()].slice(0, 40).map(link => `实际链接：${link.title}`)].join('\n')
+  const quality = assessReaderText(text, pageTitle || title)
+  return { ...quality, status: 'ok', code: 'WEB_READ_OK', text, quality: { ...quality.quality, readable: true }, links: [...links.values()],
+    ...(canonicalUrl ? { canonicalUrl } : {}), evidence: { ...evidence,
+      identity: { status: evidence.identity.status === 'mismatch' ? 'mismatch'
+        : evidence.identity.title && !title || evidence.identity.author && !author ? 'unknown' : evidence.identity.status,
+        ...(title ? { title } : {}), ...(author ? { author } : {}), basis: evidence.identity.basis,
+        pageType: book && !other && evidence.identity.basis === 'structured_metadata' ? 'book' : 'unknown' },
+      integrity: { status: 'unverified', code: 'METADATA_ONLY', extractedHash: textHash(text) } } }
 }

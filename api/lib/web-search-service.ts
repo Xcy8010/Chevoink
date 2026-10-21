@@ -4,7 +4,7 @@ import { parsePublicHttpUrl, readBoundedPublicBody } from './public-http.js'
 import { getToolModelRuntime, ToolModelConfigurationError, type ToolModelRuntime } from './tool-model-config.js'
 import { requestWebTool, webToolEndpoint } from './web-tool-provider.js'
 import { parseHTML } from 'linkedom'
-import { evaluateResearchSearchCandidates, searchQueryHash, type ResearchSearchEvaluation, type ResearchSearchTarget } from './research-search-quality.js'
+import { evaluateResearchSearchCandidates, evaluateResearchNavigationCandidates, searchQueryHash, type ResearchSearchEvaluation, type ResearchSearchTarget } from './research-search-quality.js'
 
 export { evaluateResearchSearchCandidates } from './research-search-quality.js'
 export type { ResearchSearchEvaluation, ResearchSearchTarget } from './research-search-quality.js'
@@ -30,6 +30,8 @@ export type WebSearchOutcome = {
   results: WebSearchResult[]
   attempts?: SearchAttempt[]
   quality?: ResearchSearchEvaluation
+  /** Supplementary navigation retains its actual engine; result/fee owner stays unchanged. */
+  navigation?: { provider: WebSearchOutcome['provider']; results: WebSearchResult[] }
 }
 
 type SearchAttempt = {
@@ -357,6 +359,7 @@ export async function searchWeb(
   signal?: AbortSignal,
   configuredInput?: ToolModelRuntime | null,
   expectedTarget?: ResearchSearchTarget,
+  navigationPolicy?: { version: 1; sourceSites?: readonly string[]; alternativeAvailable?: boolean },
 ): Promise<WebSearchOutcome> {
   if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 8) {
     throw new WebSearchError('搜索结果数量必须为 1–8')
@@ -378,6 +381,7 @@ export async function searchWeb(
     const constrained = evaluateResearchSearchCandidates(query, [], expectedTarget).hasHardConstraints
     let constrainedResult: Pick<WebSearchOutcome, 'provider' | 'results' | 'quality'> | undefined
     let emptyProvider: WebSearchOutcome['provider'] | undefined
+    let navigation: WebSearchOutcome['navigation']
     for (const provider of providers) {
       merged.throwIfAborted()
       const started = Date.now()
@@ -396,6 +400,9 @@ export async function searchWeb(
           throw new WebSearchError('搜索未返回可用的公开来源')
         }
         const quality = constrained ? evaluateResearchSearchCandidates(query, results, expectedTarget) : undefined
+        const hints = navigationPolicy ? evaluateResearchNavigationCandidates(results, expectedTarget, navigationPolicy.sourceSites, navigationPolicy.alternativeAvailable).slice(0, 2)
+          .map(({ title, url, snippet, source }) => ({ title, url, snippet, source })) : []
+        if (hints.length > (navigation?.results.length ?? 0)) navigation = { provider, results: hints }
         attempts.push({ provider, outcome: results.length ? 'results' : 'empty', durationMs: Date.now() - started, ...metadata,
           ...(quality ? { resultCount: results.length, eligibleCount: quality.eligibleCount,
             constraintCodes: [...new Set(quality.candidates.flatMap(candidate => candidate.reasons))] } : {}) })
@@ -411,7 +418,7 @@ export async function searchWeb(
       } catch (error) {
         attempts.push({ provider, outcome: merged.aborted ? 'aborted' : 'failed', durationMs: Date.now() - started, ...metadata })
         if (merged.aborted) {
-          if (!signal?.aborted && constrainedResult) return { ...constrainedResult, attempts }
+          if (!signal?.aborted && constrainedResult) return { ...constrainedResult, attempts, ...(navigation ? { navigation } : {}) }
           if (!signal?.aborted && emptyProvider) return { provider: emptyProvider, results: [], attempts }
           throw error
         }
@@ -419,7 +426,7 @@ export async function searchWeb(
         local.cleanup()
       }
     }
-    if (constrainedResult) return { ...constrainedResult, attempts }
+    if (constrainedResult) return { ...constrainedResult, attempts, ...(navigation ? { navigation } : {}) }
     if (emptyProvider) return { provider: emptyProvider, results: [], attempts }
     throw new WebSearchError('所有搜索引擎均未返回有效响应', attempts)
   } catch (error) {

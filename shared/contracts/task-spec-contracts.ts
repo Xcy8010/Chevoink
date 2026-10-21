@@ -130,6 +130,10 @@ export const taskSpecSchema = z.object({
   researchReadAccess: z.literal('denied').optional(),
   /** Fresh server policy for bounded source discovery/reading and limitation receipts. */
   researchDiscoveryProtocol: z.literal(1).optional(),
+  /** Fresh HTTP admission only. Navigation is not original prose or a new budget. */
+  researchNavigation: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/u),
+    alternativeSelection: z.enum(['denied', 'after_preferred_unavailable']), sourceSites: z.array(z.string().min(1).max(8192)).max(8).optional(),
+    sourceHosts: z.array(z.string().min(1).max(253)).min(1).max(8).optional() }).strict().optional(),
   /** Exact external work named by the fresh author, never a model-selected prefix. */
   researchTarget: z.object({ title: z.string().trim().min(1).max(120), author: z.string().trim().min(1).max(120).optional(),
     textAnalysisRequired: z.boolean().optional(),
