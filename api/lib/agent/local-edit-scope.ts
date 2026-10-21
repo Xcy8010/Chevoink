@@ -2,7 +2,7 @@ import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/task-sp
 import { createHash } from 'node:crypto'
 import { DataAccessError } from '../prisma.js'
 import { runtimeJson } from './runtime-common.js'
-import { parseAuthorWritingRequest } from './author-writing-request.js'
+import { parseAuthorWritingRequest, type AuthorWritingRequest } from './author-writing-request.js'
 import { freezeIssueQuoteBoundary, localEditProtectionRanges, validIssueQuoteBoundary } from './local-edit-citations.js'
 import { assertFrozenWritingContract } from './writing-contract.js'
 
@@ -24,9 +24,9 @@ export function hasReadOnlyRevisionAssessment(prompt: string | null): boolean {
 
 /** Only actionable author wording counts. Quoted instructions, examples,
  * questions and readonly recommendations cannot authorize a local mutation. */
-export function requestedLocalEdit(prompt: string, protocol: 1 | 2 = 1): Locator | null {
+export function requestedLocalEdit(prompt: string, protocol: 1 | 2 = 1, resolved?: AuthorWritingRequest): Locator | null {
   const unquoted = prompt.replace(quotePattern, '【引文】')
-  const interpretation = protocol === 2 ? parseAuthorWritingRequest(prompt) : null
+  const interpretation = protocol === 2 ? resolved ?? parseAuthorWritingRequest(prompt) : null
   if (interpretation?.reasons.some(reason => ['unclosed_source_quote', 'unresolved_source_quote'].includes(reason))) return { kind: 'unknown' }
   // A fresh assessment has no body effect to locate. Its frozen review intent
   // denies mutation; an unknown edit window must not block the requested read.
@@ -93,8 +93,8 @@ export function requestedLocalEdit(prompt: string, protocol: 1 | 2 = 1): Locator
 }
 
 export function freezeLocalEditBoundary(prompt: string, writing: TaskSpec['scope']['writing'],
-  chapters: Array<{ id: string; revision: number; content: string }>, protocol: 1 | 2 = 1): NonNullable<TaskSpec['scope']['localEditBoundary']> | undefined {
-  const parsed = protocol === 2 ? parseAuthorWritingRequest(prompt) : null
+  chapters: Array<{ id: string; revision: number; content: string }>, protocol: 1 | 2 = 1, resolved?: AuthorWritingRequest): NonNullable<TaskSpec['scope']['localEditBoundary']> | undefined {
+  const parsed = protocol === 2 ? resolved ?? parseAuthorWritingRequest(prompt) : null
   const phase = parsed?.conditionalLocalRepair
   if (phase && writing?.kind === 'bounded' && !parsed.ambiguous) {
     const regions = []
@@ -113,7 +113,7 @@ export function freezeLocalEditBoundary(prompt: string, writing: TaskSpec['scope
       repairs: phase.repairs.map(repair => ({ ...parsed.evidence.operations[repair.operationIndex].span,
         condition: { kind: repair.condition.kind, ...repair.condition.span } })) } }
   }
-  const locator = requestedLocalEdit(prompt, protocol)
+  const locator = requestedLocalEdit(prompt, protocol, parsed ?? undefined)
   if (!locator) return undefined
   const denied = { version: 1 as const, kind: 'needs_input' as const, regions: [] }
   if (locator.kind === 'unknown') return protocol === 2 ? freezeIssueQuoteBoundary(prompt, writing, chapters) ?? denied : denied

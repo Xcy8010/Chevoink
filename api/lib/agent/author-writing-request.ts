@@ -1,6 +1,10 @@
 import { chapterNumber, numeric, type RequestedWritingRange } from './writing-target-range.js'
 
 export type AuthorSpan = { start: number; end: number }
+export type AuthorWritingDirectory = {
+  chapters: Array<{ id: string; orderIndex: number; orderInVolume: number; volumeId: string }>
+  volumes: Array<{ id: string; orderIndex: number }>
+}
 export type AuthorClause = AuthorSpan & { text: string; masked: string; sentence: number }
 export type AuthorQuotedSpan = AuthorSpan & { kind: 'quotation' | 'title' | 'code'; role: 'unknown';
   closed: boolean; contentStart: number; contentEnd: number }
@@ -162,9 +166,15 @@ function extractTargets(clause: AuthorClause): AuthorWritingTarget[] {
   return selected.sort((a, b) => a.span.start - b.span.start)
 }
 
-function mergeRanges(ranges: RequestedWritingRange[]): RequestedWritingRange | null {
+function mergeRanges(ranges: RequestedWritingRange[], directory?: AuthorWritingDirectory): RequestedWritingRange | null {
   if (!ranges.length) return null
   const first = ranges[0]
+  // A volume address and a book address are constraints on an entity, not
+  // independent chapters merely because their textual forms differ. Only the
+  // fresh admission directory may prove their identity; keep the volume fence.
+  if (directory && ranges.every(range => rangeKey(range, directory) === rangeKey(first, directory))) {
+    return ranges.find(range => range.volume !== undefined) ?? first
+  }
   if (ranges.every(range => JSON.stringify(range) === JSON.stringify(first))) return first
   if (ranges.some(range => range.volume !== first.volume || !['first', 'range', 'list'].includes(range.kind))) return null
   const positions = [...new Set(ranges.flatMap(range => range.kind === 'list' ? range.positions ?? []
@@ -212,14 +222,49 @@ function assessmentPredicates(text: string, matches: RegExpMatchArray[]): Map<nu
 
 const singleton = (range: RequestedWritingRange) => ['first', 'range', 'next'].includes(range.kind) && range.count === 1
   || range.kind === 'list' && range.positions?.length === 1
-const rangeKey = (range: RequestedWritingRange) => JSON.stringify(range.kind === 'list' && range.positions?.length === 1
+function directoryRangeKey(range: RequestedWritingRange, directory?: AuthorWritingDirectory): string | undefined {
+  if (!directory || !['first', 'range', 'list'].includes(range.kind)) return undefined
+  const positions = range.kind === 'list' ? range.positions ?? []
+    : Array.from({ length: range.count ?? 1 }, (_, index) => (range.start ?? 1) + index)
+  if (!positions.length) return undefined
+  const { chapters, volumes } = directory
+  if (new Set(chapters.map(chapter => chapter.id)).size !== chapters.length
+    || new Set(chapters.map(chapter => chapter.orderIndex)).size !== chapters.length
+    || new Set(volumes.map(volume => volume.orderIndex)).size !== volumes.length) return undefined
+  const volume = range.volume === undefined ? undefined : volumes.find(item => item.orderIndex === range.volume)
+  if (range.volume !== undefined && !volume) return undefined
+  const contiguousBook = chapters.every((chapter, index) => chapter.orderIndex === index + 1)
+  const tail = chapters.at(-1)
+  const keys: string[] = []
+  for (const position of positions) {
+    const matches = chapters.filter(chapter => volume
+      ? chapter.volumeId === volume.id && chapter.orderInVolume === position : chapter.orderIndex === position)
+    if (matches.length > 1) return undefined
+    if (matches.length === 1) { keys.push(`chapter:${matches[0].id}`); continue }
+    // A missing row is not a chapter identity. Prove one contiguous next slot,
+    // including its actual volume, instead of guessing an offset or future row.
+    if (!contiguousBook) return undefined
+    const next = (tail?.orderIndex ?? 0) + 1
+    if (!volume) {
+      if (position !== next) return undefined
+    } else {
+      const within = chapters.filter(chapter => chapter.volumeId === volume.id)
+      if (!within.every((chapter, index) => chapter.orderInVolume === index + 1)
+        || (tail ? tail.volumeId !== volume.id || position !== tail.orderInVolume + 1
+          : volume.orderIndex !== 1 || position !== 1)) return undefined
+    }
+    keys.push(`new:${next}`)
+  }
+  return JSON.stringify([...new Set(keys)].sort())
+}
+const rangeKey = (range: RequestedWritingRange, directory?: AuthorWritingDirectory) => directoryRangeKey(range, directory) ?? JSON.stringify(range.kind === 'list' && range.positions?.length === 1
   ? { kind: 'range', start: range.positions[0], count: 1, ...(range.volume ? { volume: range.volume } : {}) }
   : range.kind === 'first' ? { kind: 'range', start: 1, count: 1, ...(range.volume ? { volume: range.volume } : {}) } : range)
 
 /** A read object is an address, never a mutation. A primary author scope takes
  * precedence over earlier reads, but a later non-reference read can introduce
  * a conflicting domain. Reference material and instruction-shaped data stay inert. */
-function bindSameTargetObjects(masked: string, operations: AuthorWritingOperation[], targets: AuthorWritingTarget[], reasons: Set<string>) {
+function bindSameTargetObjects(masked: string, operations: AuthorWritingOperation[], targets: AuthorWritingTarget[], reasons: Set<string>, directory?: AuthorWritingDirectory) {
   const ranged = (operation: AuthorWritingOperation) => operation.targetIndices.filter(index => targets[index].range && !targets[index].contextual && !targets[index].invalid)
   const readable = (operation: AuthorWritingOperation) => {
     if (operation.kind !== 'read' || operation.polarity !== 'affirmative' || operation.reason !== 'reference'
@@ -238,7 +283,7 @@ function bindSameTargetObjects(masked: string, operations: AuthorWritingOperatio
     const primary = mutations.length ? mutations : prior.filter(item => item.accepted && item.kind === 'review' && ranged(item).length)
     const latestPrimary = primary.at(-1)
     const primaryTargets = primary.flatMap(ranged)
-    const singlePrimary = primaryTargets.length > 0 && new Set(primaryTargets.map(index => rangeKey(targets[index].range!))).size === 1
+    const singlePrimary = primaryTargets.length > 0 && new Set(primaryTargets.map(index => rangeKey(targets[index].range!, directory))).size === 1
       && primaryTargets.every(index => singleton(targets[index].range!))
     const supportingCoverage = (item: AuthorWritingOperation) => {
       const scopes = ranged(item)
@@ -251,7 +296,7 @@ function bindSameTargetObjects(masked: string, operations: AuthorWritingOperatio
     }
     const recentReads = prior.filter(item => readable(item) && (!latestPrimary || item.span.start >= latestPrimary.span.end) && !supportingCoverage(item))
     const candidates = [...primary, ...recentReads].flatMap(ranged)
-    const unique = [...new Map(candidates.map(index => [rangeKey(targets[index].range!), index])).values()]
+    const unique = [...new Map(candidates.map(index => [rangeKey(targets[index].range!, directory), index])).values()]
     if (unique.length > 1 || unique.some(index => !singleton(targets[index].range!))) {
       reasons.add('ambiguous_target_reference')
     } else if (unique.length === 1) operation.targetIndices.push(unique[0])
@@ -302,13 +347,13 @@ function repairCondition(operation: AuthorWritingOperation, clauses: AuthorClaus
 
 /** This projection describes an ordered request, not a writable body range.
  * Consumers still need a fresh chapter identity and persisted finding anchors. */
-function conditionalLocalRepair(operations: AuthorWritingOperation[], targets: AuthorWritingTarget[], clauses: AuthorClause[]): AuthorConditionalLocalRepair | undefined {
+function conditionalLocalRepair(operations: AuthorWritingOperation[], targets: AuthorWritingTarget[], clauses: AuthorClause[], directory?: AuthorWritingDirectory): AuthorConditionalLocalRepair | undefined {
   const mutations = operations.flatMap((operation, index) => operation.accepted && ['write', 'revise'].includes(operation.kind) ? [index] : [])
   if (!mutations.length || mutations.some(index => operations[index].kind !== 'revise')) return undefined
   const domain = (operation: AuthorWritingOperation) => {
     const ranged = operation.targetIndices.filter(index => targets[index].range)
     if (ranged.length) {
-      const keys = [...new Set(ranged.map(index => rangeKey(targets[index].range!)))]
+      const keys = [...new Set(ranged.map(index => rangeKey(targets[index].range!, directory)))]
       return keys.length === 1 && ranged.every(index => singleton(targets[index].range!)) ? { key: keys[0], indices: ranged } : null
     }
     const same = operation.targetIndices.filter(index => targets[index].kind === 'same_target')
@@ -333,7 +378,7 @@ function conditionalLocalRepair(operations: AuthorWritingOperation[], targets: A
 
 /** Fresh-author protocol 2 only. This interpreter does not read a manuscript,
  * resolve a relative target, mutate an old contract or grant an execution. */
-export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest {
+function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWritingDirectory): AuthorWritingRequest {
   const lexical = lexAuthorWritingRequest(prompt)
   // Never truncate a request into a smaller grant, or let oversized audit
   // metadata fail schema validation and fall back to historical authority.
@@ -517,12 +562,13 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
       || /^(?:修改|修订|改|替换|edit|revise|replace)$/iu.test(operator) && /^\s*(?:为|成|with)\s*$/iu.test(prompt.slice(owner.span.end, quote.start)))
     if (!replacement) reasons.add('unresolved_source_quote')
   }
-  bindSameTargetObjects(lexical.masked, operations, targets, reasons)
+  bindSameTargetObjects(lexical.masked, operations, targets, reasons, directory)
   const mutations = operations.filter(operation => operation.accepted && (operation.kind === 'write' || operation.kind === 'revise'))
   const selected = mutations.length ? mutations : operations.filter(operation => operation.accepted && operation.kind === 'review')
   for (const operation of selected) {
     if (operation.targetIndices.some(index => targets[index].invalid)) reasons.add('invalid_target')
-    if (operation.targetIndices.filter(index => targets[index].range && targets[index].kind !== 'same_target').length > 1) reasons.add('unbound_target_relation')
+    const addresses = operation.targetIndices.filter(index => targets[index].range && targets[index].kind !== 'same_target')
+    if (addresses.length > 1 && (!directory || new Set(addresses.map(index => rangeKey(targets[index].range!, directory))).size > 1)) reasons.add('unbound_target_relation')
   }
   const selectedTargets = [...new Set(selected.flatMap(operation => operation.targetIndices))].map(index => targets[index])
   const ranges = selectedTargets.flatMap(target => target.range ? [target.range] : [])
@@ -532,7 +578,7 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
       if (rangeIndex >= 0) ranges[rangeIndex] = { kind: 'unbounded' }
     }
   }
-  const range = mergeRanges(ranges)
+  const range = mergeRanges(ranges, directory)
   if (ranges.length && !range) reasons.add('conflicting_targets')
   if (selectedTargets.some(target => target.invalid)) reasons.add('invalid_target')
   const reference = selectedTargets.some(target => target.kind === 'same_target')
@@ -548,11 +594,20 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
   const writing = mutations.some(operation => operation.kind === 'write' && operation.targetIndices.some(index => targets[index].range?.kind === 'next'))
   const intent = writing ? 'write' : mutations.some(operation => operation.kind === 'revise') ? 'revise'
     : mutations.length ? 'write' : selected.length ? 'review' : null
-  const workflow = reasons.size ? undefined : conditionalLocalRepair(operations, targets, lexical.clauses)
+  const workflow = reasons.size ? undefined : conditionalLocalRepair(operations, targets, lexical.clauses, directory)
   return { protocol: 2, range: reasons.size ? null : range, ambiguous: reasons.size > 0, hasAction: selected.length > 0,
     exclusions: [...new Set(exclusions)], ...(confirmedNextOrderIndex !== undefined ? { confirmedNextOrderIndex } : {}), intent,
     ...(workflow ? { conditionalLocalRepair: workflow } : {}),
     evidence: { clauses: lexical.clauses, quoted: lexical.quoted, operations, targets }, reasons: [...reasons].slice(0, 32) }
+}
+
+export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest {
+  return interpretAuthorWritingRequest(prompt)
+}
+
+/** Only fresh admission supplies its locked, complete directory snapshot. */
+export function resolveAuthorWritingRequest(prompt: string, directory: AuthorWritingDirectory): AuthorWritingRequest {
+  return interpretAuthorWritingRequest(prompt, directory)
 }
 
 /** Same lexer and bindings as admission, restricted to actual negative author

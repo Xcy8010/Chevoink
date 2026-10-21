@@ -10,7 +10,8 @@ import { buildSessionTokens } from '../../api/lib/auth-session.js'
 import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
 import { chapterEditRangeTool, chapterWriteTool, chapterAppendTool, chapterCreateTool, preflightChapterReviewWrite } from '../../api/lib/agent/tools/chapter-tools.js'
 import { chapterBridgeGetTool, chapterBridgeCommitTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
-import { freezeWritingScope, readWritingScope } from '../../api/lib/agent/writing-scope.js'
+import { freezeWritingScope, readWritingScope, assertWritingTarget } from '../../api/lib/agent/writing-scope.js'
+import { directoryContinuationPrompt } from '../support/writing-target-prompt.js'
 import { taskSpecSchema } from '../../shared/contracts/index.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { verifyTestDatabase } from '../support/database-preflight.js'
@@ -41,7 +42,8 @@ const requests = [
   '先通读前两章；对第二卷第2章的正文进行局部修订，不修改前3章，不新建章节。',
 ]
 
-async function fixture(prompt: string, work: (ctx: ToolContext, before: Awaited<ReturnType<typeof prisma.chapter.findMany>>) => Promise<void>, duplicate = false, targetBody = body) {
+async function fixture(prompt: string, work: (ctx: ToolContext, before: Awaited<ReturnType<typeof prisma.chapter.findMany>>) => Promise<void>, duplicate = false, targetBody = body,
+  directory?: { singleVolume: boolean; editor: 'none' }) {
   const userId = randomUUID(), novelId = randomUUID(), sessionId = randomUUID()
   try {
     vi.stubGlobal('fetch', vi.fn(() => { throw Error('No Provider allowed in synthetic admission test') }))
@@ -50,18 +52,19 @@ async function fixture(prompt: string, work: (ctx: ToolContext, before: Awaited<
     const volumes = []
     for (const orderIndex of [1, 2]) volumes.push(await prisma.volume.create({ data: { novelId, title: `合成卷${orderIndex}`, orderIndex } }))
     for (const orderIndex of [1, 2, 3, 4]) await prisma.chapter.create({ data: { novelId, authorId: userId,
-      volumeId: volumes[orderIndex <= 2 ? 0 : 1].id, title: `合成章${orderIndex}`, orderIndex,
-      orderInVolume: orderIndex <= 2 ? orderIndex : orderIndex - 2, revision: 4,
+      volumeId: volumes[directory?.singleVolume || orderIndex <= 2 ? 0 : 1].id, title: `合成章${orderIndex}`, orderIndex,
+      orderInVolume: directory?.singleVolume || orderIndex <= 2 ? orderIndex : orderIndex - 2, revision: 4,
       content: orderIndex === 4 ? targetBody + (duplicate ? '又向右转。' : '') : `前章合成正文${orderIndex}。` } })
     const before = await prisma.chapter.findMany({ where: { novelId }, orderBy: { orderIndex: 'asc' } })
+    const editor = directory?.editor === 'none' ? null : before[0].id
     await prisma.agentSession.create({ data: { id: sessionId, novelId, userId, title: '合成局部任务' } })
     const response = await request(app).post('/api/agent/runs')
       .set('Cookie', `chevoink_session=${buildSessionTokens(userId, 0).accessToken}`)
-      .send({ novelId, sessionId, chapterId: before[0].id, prompt, mode: 'build' })
+      .send({ novelId, sessionId, chapterId: editor, prompt, mode: 'build' })
     expect(response.status).toBe(200)
     const runId = response.body.data.runId as string
     await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
-    await work({ userId, novelId, sessionId, runId, chapterId: before[0].id, callId: 'synthetic-contract', mode: 'build',
+    await work({ userId, novelId, sessionId, runId, chapterId: editor, callId: 'synthetic-contract', mode: 'build',
       creativeFreedom: 'balanced', qualityMode: 'premium', emit: () => {}, signal: new AbortController().signal }, before)
     expect(await prisma.aiUsageLog.count({ where: { userId } })).toBe(0)
     expect(await prisma.creditLedgerEntry.count({ where: { userId } })).toBe(0)
@@ -84,6 +87,49 @@ const prepare = (ctx: ToolContext) => storyCompilerPrepareTool.execute(ctx, { ta
   intentSummary: '只对第四个已存合成章作作者指出的局部修订', volumeDecision: { kind: 'continue', reason: '原卷原章' } })
 
 describe.skipIf(!available)('unified fresh HTTP author contract with actual PostgreSQL writes', () => {
+  it('admits the complete compound continuation and only creates its proved fifth-chapter slot', () => fixture(directoryContinuationPrompt, async (ctx, before) => {
+    const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+    const frozen = taskSpecSchema.parse(run.taskSpec)
+    expect(frozen).toMatchObject({ intent: 'write', scope: { writing: { kind: 'bounded', repairAuthorized: false,
+      targets: [{ orderIndex: 5, chapterId: null, volumeId: before[3].volumeId, positionInVolume: 5 }] },
+    writingInterpretation: { reasons: [], excludedChapterIds: expect.arrayContaining(before.map(chapter => chapter.id)) } } })
+    expect(frozen.scope.writing?.targets).toHaveLength(1)
+    expect(frozen.scope.localEditBoundary).toBeUndefined()
+    expect((await storyCompilerPrepareTool.execute(ctx, { targetOrderIndex: 5, intentSummary: '续写合成第五章',
+      volumeDecision: { kind: 'continue', reason: '作者指定第一卷' } })).outcome).not.toBe('failed')
+    const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: ctx.runId, status: 'active' } })
+    await saveSceneTasks({ ...ctx, compilationId: compilation.id, tasks: [{ purpose: '新章冲突', entryState: {}, goal: '前进', obstacle: '门关着',
+      choice: '等候', cost: '时间', turn: '新声音', exitState: {}, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
+    const created = await chapterCreateTool.execute({ ...ctx, callId: 'create-proved-five' }, { title: '合成新章', content: '新的合成冲突。',
+      volumeId: before[3].volumeId, positionInVolume: 5 })
+    expect(created.outcome).not.toBe('failed')
+    const fifth = await prisma.chapter.findFirstOrThrow({ where: { novelId: ctx.novelId, orderIndex: 5 } })
+    expect(fifth).toMatchObject({ volumeId: before[3].volumeId, orderInVolume: 5, content: '新的合成冲突。' })
+    for (const chapter of before) await expect(prisma.$transaction(tx => assertWritingTarget(tx, ctx, { chapterId: chapter.id, effect: 'replace' })))
+      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expect(prisma.$transaction(tx => assertWritingTarget(tx, ctx, { orderIndex: 6, effect: 'create' })))
+      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId, id: { in: before.map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+    expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(5)
+  }, false, body, { singleVolume: true, editor: 'none' }))
+  it('retains an original frozen conflict instead of upgrading the old paused contract', () => fixture(directoryContinuationPrompt, async (ctx) => {
+    const current = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
+    const { frozenWritingScopeHash } = await import('../../api/lib/agent/writing-contract.js')
+    const old = structuredClone(current)
+    old.scope.writing = { ...old.scope.writing!, kind: 'needs_input', targets: [] }
+    old.scope.writingInterpretation!.reasons = ['conflicting_targets', 'TARGET_UNRESOLVED']
+    old.scope.writingInterpretation!.scopeHash = frozenWritingScopeHash(old.scope)
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(old).value } })
+    expect(await prisma.$transaction(tx => freezeWritingScope(tx, ctx, old, directoryContinuationPrompt, 2))).toEqual(old)
+  }, false, body, { singleVolume: true, editor: 'none' }))
+  it.each([directoryContinuationPrompt, '续写第二卷第3章。仅写第3章。不修改第1至4章。'])('rejects conflicting volume/book addresses without creating or changing rows: %s', prompt => fixture(prompt, async (ctx, before) => {
+    const frozen = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
+    expect(frozen.scope.writing).toMatchObject({ kind: 'needs_input', targets: [] })
+    expect(frozen.scope.writingInterpretation?.reasons).toContain('conflicting_targets')
+    await expect(prisma.$transaction(tx => assertWritingTarget(tx, ctx, { orderIndex: 5, effect: 'create' })))
+      .rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+  }, false, body, { singleVolume: false, editor: 'none' }))
   it('retains independently supported facts across candidate omission, failed commit and reprepare without editing prose', () => fixture(
     '先读取第4章当前已存正文，完成本章检查和提交。请先做连续性与人类感检查；如有必要，只对本章做局部修订并复检。不新建章节，不修改前3章。', async (ctx, before) => {
       const original = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)

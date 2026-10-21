@@ -12,7 +12,7 @@ import { assertRunGoalFence } from './goal-fence.js'
 import { readWritingPresentation } from './writing-request-context.js'
 import { freezeLocalEditBoundary, originalLocalEditBoundary, requestedLocalEdit } from './local-edit-scope.js'
 import { eligibleEmptyWritingClarification, readWritingClarification } from './writing-clarification.js'
-import { parseAuthorWritingRequest, parseAuthorWritingExclusion } from './author-writing-request.js'
+import { parseAuthorWritingRequest, parseAuthorWritingExclusion, resolveAuthorWritingRequest } from './author-writing-request.js'
 import { currentIssueQuoteRegions } from './local-edit-citations.js'
 import { assertFrozenWritingContract, frozenWritingScopeHash } from './writing-contract.js'
 
@@ -55,8 +55,17 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   }
   if (!['write', 'revise', 'review'].includes(spec.intent) || spec.writingPacing === 'proposal_only' || spec.writingPacing === 'conversation_only') return spec
   const admissionPrompt = original.prompt ?? prompt
-  let localRequest = spec.scope.localEditProtocol === 1 ? requestedLocalEdit(admissionPrompt, targetProtocol === 2 ? 2 : 1) : null
-  const interpretation = targetProtocol === 2 ? parseAuthorWritingRequest(admissionPrompt) : null
+  const chapters = await tx.chapter.findMany({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) },
+    select: { id: true, revision: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
+  const initial = targetProtocol === 2 ? parseAuthorWritingRequest(admissionPrompt) : null
+  const addresses = initial?.evidence.targets.flatMap(target => target.range ? [target.range] : []) ?? []
+  const mixedAddresses = addresses.some(range => range.volume !== undefined) && addresses.some(range => range.volume === undefined)
+  const volumes = mixedAddresses ? (await Promise.all([...new Set(addresses.flatMap(range => range.volume === undefined ? [] : [range.volume]))]
+    .map(orderIndex => tx.volume.findFirst({ where: { novelId: subject.novelId, archivedAt: null, orderIndex }, select: { id: true, orderIndex: true } })))).filter(item => item !== null) : undefined
+  const interpretation = volumes ? resolveAuthorWritingRequest(admissionPrompt, { chapters, volumes }) : initial
+  // All consumers share the directory-resolved interpretation from this locked
+  // fresh admission; later recovery never reparses or upgrades the root scope.
+  let localRequest = spec.scope.localEditProtocol === 1 ? requestedLocalEdit(admissionPrompt, targetProtocol === 2 ? 2 : 1, interpretation ?? undefined) : null
   if (spec.scope.localEditProtocol === 1 && interpretation?.conditionalLocalRepair) localRequest ??= { kind: 'unknown' }
   const negativeOperations = interpretation?.evidence.operations.filter(operation => operation.polarity === 'negative' && operation.reason === 'negated') ?? []
   const creationDenied = negativeOperations.some(operation => operation.kind === 'write'
@@ -77,8 +86,6 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     && /(?:第|前|后|余|剩|卷|章)/u.test(clause) && /(?:章|卷|chapter|volume)/iu.test(clause)
     && /[0-9零〇一二两三四五六七八九十百千]/u.test(clause))
     && !(localRequest && !/(?:章|卷|chapter|volume)/iu.test(admissionPrompt))
-  const chapters = await tx.chapter.findMany({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) },
-    select: { id: true, revision: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
   // An empty book has no saved body to edit. A new-scene write/finish operation
   // without a chapter target may ask for first-chapter placement; it does not
   // manufacture an old-body window from "finish this passage and stop".
@@ -173,7 +180,7 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   const localEditBoundary = localRequest
     ? freezeLocalEditBoundary(admissionPrompt, writing, await tx.chapter.findMany({ where: { authorId: subject.userId,
       ...activeChapterScope(subject.novelId), id: { in: writing.targets.flatMap(target => target.chapterId ? [target.chapterId] : []) } },
-      select: { id: true, revision: true, content: true } }), targetProtocol === 2 ? 2 : 1) : undefined
+      select: { id: true, revision: true, content: true } }), targetProtocol === 2 ? 2 : 1, interpretation ?? undefined) : undefined
   // Finding-conditioned repair is a distinct phase, not a broad repair grant.
   if (localEditBoundary?.version === 3) writing.repairAuthorized = false
   const clarification = !chapters.length && !range && !ambiguousRange && !localRequest

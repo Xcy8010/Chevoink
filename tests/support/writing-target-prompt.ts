@@ -9,6 +9,9 @@ export const chapterRevisionPrompt = '继续完成当前第3章《第三封信�
       + '只在本章实际检查合格并提交成功后报告完成。'
 
 /** Synthetic continuation instructions; no production title, body or IDs. */
+export const directoryContinuationPrompt = '请承接《合成续写作品》前四章，续写第一卷第5章，正文约600至900字。保持既有科幻场景、人物声口和物品状态，推进新的实际冲突，不复述前章、不扩写大纲。请读取必要上下文及第4章当前已提交终态，正常准备建章、写入，完成连续性和人类感检查；如有确证问题，只对本章必要位置修订并复检，最终真实提交章节桥与故事终态，确认保存后自然结束。仅写第5章，不修改第1至4章，不继续第6章。'
+
+/** Synthetic continuation instructions; no production title, body or IDs. */
 export const nextChapterContinuationPrompt = '请承接《合成前章》已经提交的结尾，续写下一章，作为第4章正式写入。'
   + '先读前文和已提交终态。只写这一章，约600字，控制在500至800字；围绕一个小冲突推进。章名自行决定。'
   + '不批量建章，不继续第5章，不修改已经保存的第1、2、3章。'
