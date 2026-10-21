@@ -121,7 +121,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
           contentHash: createHash('sha256').update(chapter.content).digest('hex'), qualityContextHash: qualityReviewContextHash(quality) } } })
       await expect(chapterBridgeCommitTool.execute(ctx, { compilationId: compilation.id, chapterSummary: '原文保留', exitState: empty.exitState,
         lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '等候', endingStructure: '未开门' }))
-        .rejects.toMatchObject({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+        .resolves.toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' })
       const unchanged = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
       expect(unchanged.bridge?.committedAt).toBeNull()
       const pending = readTerminalCoverageState(original, unchanged.preparedContext, chapter.id)
@@ -129,8 +129,11 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       const next = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: ctx.runId, status: 'active' } })
       expect(next.id).not.toBe(compilation.id)
       expect(readTerminalCoverageState(original, next.preparedContext, chapter.id)).toEqual(pending)
+      expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, next.id)))
+        .toMatchObject({ ready: false, terminalReview: { state: 'unverified' } })
       await expect(chapterBridgeCommitTool.execute(ctx, { compilationId: next.id, chapterSummary: '不能以重准备清空义务', exitState: empty.exitState,
-        lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '等候', endingStructure: '未开门' })).rejects.toBeDefined()
+        lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '等候', endingStructure: '未开门' }))
+        .resolves.toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_REQUIRED' })
       expect((await prisma.chapterBridge.findFirstOrThrow({ where: { compilationId: next.id } })).committedAt).toBeNull()
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
     }, false, body + '林舟右掌有伤。'))
