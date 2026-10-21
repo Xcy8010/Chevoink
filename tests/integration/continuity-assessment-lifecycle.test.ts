@@ -93,8 +93,9 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
           { path: 'exitState.action', verdict: 'supported', segmentIds: ['c0'] }] })))
         const next = await continuityValidateTool.execute({ ...ctx, callId: 'changed-input' }, { chapterId: f.chapterId,
           terminalState: scenario === 'known-new-candidate' ? terminalCandidateSchema.parse({ exitState: { action: '人物走进门' } }) : candidate,
-          ...(scenario === 'focus-only' ? { focus: '核对当前正文' } : {}) }).catch(error => ({ outcome: 'failed', failureCode: error.code }))
+          ...(scenario === 'focus-only' ? { focus: '核对当前正文' } : {}) }).catch(error => ({ outcome: 'failed', failureCode: error.code, output: error.message }))
         const allowed = scenario.startsWith('known-new-body') || scenario === 'known-new-candidate' || scenario === 'delayed-call-persistence'
+        if (allowed) expect(next).not.toMatchObject({ outcome: 'failed' })
         expect(fetcher).toHaveBeenCalledTimes(sends + (allowed ? 1 : 0))
         expect(next.outcome === 'failed').toBe(!allowed)
         const after = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
@@ -108,7 +109,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
             .toMatchObject({ independentCheck: 'complete', checkedRevision: current.revision })
         }
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
-    }))
+    }, undefined, '写本章'))
   it('keeps a changed candidate blocked between the observed primary response and the old second-pass claim', () => fixture(async f => {
     let release = () => {}, entered = () => {}
     const held = new Promise<void>(resolve => { release = resolve })
