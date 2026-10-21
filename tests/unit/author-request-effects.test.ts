@@ -138,4 +138,20 @@ describe('fresh request effects without a global chapter prerequisite', () => {
       expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: { kind: 'range', start: 1, count: 1 }, ambiguous: false })
       expect(fresh(prompt).scope.authorEffects?.manuscript).toBe(true)
     })
+
+  it.each(['修订“原短句', '修订"原短句', "修订'原短句", '修订“外“内”尾', '修订第4章的“原短句', '修改第4章“原短句'])(
+    'retains an unresolved source edit as a write phase without granting its incomplete quote: %s', action => {
+      const prompt = '第二卷第2章正文，' + action
+      expect(fresh(prompt).scope.authorEffects?.manuscript).toBe(true)
+      expect(parseAuthorWritingRequest(prompt)).toMatchObject({ ambiguous: true, reasons: expect.arrayContaining(['unclosed_source_quote']) })
+      expect(originalRepairAuthority({ prompt, spec: fresh(prompt) })).toBe(false)
+    })
+  it.each(['已保存', '已经保存', '早已保存', '曾经保存'])(
+    'keeps a preservation predicate bound through its %s body modifier', saved => {
+      const prompt = `续写下一章，作为第四章保存。仅写该章，不修改${saved}的第1、2、3章。`
+      const request = parseAuthorWritingRequest(prompt)
+      expect(request).toMatchObject({ ambiguous: false, confirmedNextOrderIndex: 4, range: { kind: 'next', count: 1 } })
+      const denial = request.evidence.operations.find(operation => operation.kind === 'revise' && operation.polarity === 'negative')!
+      expect(denial.targetIndices.map(index => request.evidence.targets[index].range)).toContainEqual({ kind: 'list', positions: [1, 2, 3] })
+    })
 })

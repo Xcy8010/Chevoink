@@ -146,12 +146,13 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
       expect(response.status).toBe(200)
       const runId = response.body.data.runId as string
       const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec)
-      expect(spec.scope.writing).toMatchObject({ kind: 'needs_input', targets: [] })
+      expect(spec.scope.authorEffects).toMatchObject({ manuscript: false, structure: false })
+      expect(spec.scope.writing).toBeUndefined()
       await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
       await expect(chapterEditRangeTool.execute({ ...f, runId, mode: 'build', callId: 'reading-is-not-writing',
         creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
       { chapterId: f.chapterId, oldText: '首段原文。', newText: '不应执行。' })).rejects.toMatchObject({
-        code: 'SCOPE_NEEDS_INPUT',
+        code: 'AUTHOR_CHAPTER_SCOPE',
       })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
@@ -375,8 +376,13 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
     expect(spec.scope.selectionBoundary).toBeUndefined()
     expect(spec.scope.writing?.targets).toEqual(prompt === '修改第一章' ? [{ chapterId: f.chapterId, orderIndex: 1 }] : [{ chapterId: null, orderIndex: 2 }])
   }))
-  it('does not mint a writing review protocol for a nonwriting fresh request', () => fixture(async f => {
+  it('persists a nonwriting contract without chapter scope or compilation obligations', () => fixture(async f => {
     const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '你好' })
-    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec).toBeNull()
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
+    expect(spec.scope.authorEffects).toMatchObject({ manuscript: false, structure: false })
+    expect(spec.scope.writing).toBeUndefined()
+    expect(spec.scope.writingTargetProtocol).toBeUndefined()
+    expect(spec.writingPacing).toBe('conversation_only')
+    expect(await prisma.storyCompilation.count({ where: { runId: result.runId } })).toBe(0)
   }))
 })

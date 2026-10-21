@@ -143,7 +143,7 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     expect(spec.scope.writing).toBeUndefined()
     expect((await chapterReadTool.execute({ ...ctx, callId: 'safe-independent-read' }, { chapterId: before[0].id })).output).toContain(before[0].content)
     await expect(chapterWriteTool.execute({ ...ctx, callId: 'deny-body-proposal' }, { chapterId: before[0].id, content: '未授权替换。' }))
-      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+      .rejects.toMatchObject({ code: spec.intent === 'review' ? 'REPAIR_NOT_AUTHORIZED' : 'AUTHOR_CHAPTER_SCOPE' })
     await expect(chapterCreateTool.execute({ ...ctx, callId: 'deny-create-proposal' }, { title: '未授权新章' }))
       .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
     await expect(chapterSplitTool.execute({ ...ctx, callId: 'deny-structure-proposal' },

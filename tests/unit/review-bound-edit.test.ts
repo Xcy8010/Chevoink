@@ -28,6 +28,13 @@ function fixture() {
   return { boundary, evidence, range, after: body.replace('向左转', '向右转') }
 }
 describe('finding-conditioned local repair effects', () => {
+  it.each(['保存', '存入', '导出', '发布', 'save', 'export', 'publish'])(
+    'keeps the finding condition when the final authorized result is persisted with %s', predicate => {
+      const request = prompt + `最终以当前正文真实提交章节桥与故事终态，确认${predicate}后自然结束。`
+      const boundary = freezeLocalEditBoundary(request, { version: 1, kind: 'bounded', targets: [{ orderIndex: 4, chapterId: chapter.id }],
+        titleAndBodyOnly: false, repairAuthorized: false }, [chapter], 2)
+      expect(boundary).toMatchObject({ version: 3, kind: 'review_bound', regions: [{ chapterId: chapter.id, revision: chapter.revision }] })
+    })
   function ready(evidence: ReviewBoundEvidence): ChapterReviewReadiness {
     return { ready: true, checksRequired: true, compilationId: 'compilation', chapterId: chapter.id, revision: chapter.revision,
       continuity: 'complete', quality: 'complete', continuityErrorCount: 0, qualityErrorCount: 0, qualityReportId: 'current-report',

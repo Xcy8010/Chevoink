@@ -486,7 +486,11 @@ export async function assertWritingTarget(tx: Prisma.TransactionClient, subject:
     throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '当前执行已暂停或结束，不能再写入章节。')
   }
   const scope = await readWritingScope(tx, subject)
-  if (taskSpecSchema.safeParse(scope.spec).data?.scope.authorEffects?.manuscript === false) {
+  const frozen = taskSpecSchema.safeParse(scope.spec).data
+  if (frozen?.scope.authorEffects?.manuscript === false) {
+    if (frozen.intent === 'review' && target.effect && ['range', 'replace', 'append', 'changeset'].includes(target.effect)) {
+      throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原始作者请求未授权改写该正文；检查报告不能扩大写入权限。')
+    }
     throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原始请求未授权该章节，不能通过工具、待办或子任务扩大范围。')
   }
   const boundary = originalSelectionBoundary(scope.spec)

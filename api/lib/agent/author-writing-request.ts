@@ -38,7 +38,11 @@ const structureWords = '移动|重排|排序|拆分|合并'
 const reviewWords = '检查|审查|审阅|核对|核实|评估|分析|判断|检视|看看|复检|复核|校验'
 const readWords = '读取|阅读|读完|参考|参照|根据|对照|呼应|回顾|借鉴|比照|通读|引用|搜索|检索|查找|查阅|研究|读'
 const operationPattern = new RegExp(`${structureWords}|${revisionWords}|${preservationWords}|${writeWords}|${reviewWords}|${readWords}|\\b(?:write|draft|finish|complete|continue|revise|edit|repair|rewrite|polish|fix|replace|insert|delete|shorten|expand|check|review|assess|evaluate|read|consult|reference|save|export|generate|publish|move|reorder|split|merge)\\b`, 'iu')
-const operationsIn = (text: string) => [...text.matchAll(new RegExp(operationPattern.source, 'giu'))]
+const persistencePredicate = /^(?:保存|存入|导出|发布|save|export|publish)$/iu
+const operationsIn = (text: string) => [...text.matchAll(new RegExp(operationPattern.source, 'giu'))].filter(match =>
+  // A saved-body modifier belongs to its object. It must not split a negative
+  // predicate from the chapter list on its right.
+  !(persistencePredicate.test(match[0]) && /(?:已经|早已|曾经|已)\s*$/u.test(text.slice(0, match.index!))))
 const hasPlacement = (text: string) => /(?:作为|as\s+(?:the\s+)?)(?:全书)?第/iu.test(text) && /写入|保存|落稿/u.test(text)
 const revisionPattern = new RegExp(`^(?:${revisionWords}|revise|edit|repair|rewrite|polish|fix|replace|insert|delete|shorten|expand)$`, 'iu')
 const preservationPattern = new RegExp(`^(?:${preservationWords})$`, 'u')
@@ -355,7 +359,14 @@ function repairCondition(operation: AuthorWritingOperation, clauses: AuthorClaus
 /** This projection describes an ordered request, not a writable body range.
  * Consumers still need a fresh chapter identity and persisted finding anchors. */
 function conditionalLocalRepair(operations: AuthorWritingOperation[], targets: AuthorWritingTarget[], clauses: AuthorClause[], directory?: AuthorWritingDirectory): AuthorConditionalLocalRepair | undefined {
-  const mutations = operations.flatMap((operation, index) => operation.accepted && ['write', 'revise'].includes(operation.kind) ? [index] : [])
+  const mutations = operations.flatMap((operation, index) => {
+    const clause = clauses.find(item => item.start === operation.clauseSpan.start)
+    const predicate = clause?.text.slice(operation.span.start - clause.start, operation.span.end - clause.start) ?? ''
+    // Persisting the authorized result does not turn a conditional local repair
+    // into an unconditional drafting operation. Actual writes still use scope.
+    return operation.accepted && ['write', 'revise'].includes(operation.kind)
+      && !(operation.kind === 'write' && persistencePredicate.test(predicate)) ? [index] : []
+  })
   if (!mutations.length || mutations.some(index => operations[index].kind !== 'revise')) return undefined
   const domain = (operation: AuthorWritingOperation) => {
     const ranged = operation.targetIndices.filter(index => targets[index].range)

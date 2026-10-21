@@ -263,7 +263,8 @@ export function buildTaskSpec(input: {
     throw new DataAccessError(409, 'AUTHOR_SELECTION_STALE', '选区必须绑定当前章节及非空 UTF-16 坐标，请重新选择正文。')
   }
   const writingRequest = input.authorWritingProtocol === 2 ? parseAuthorWritingRequest(input.prompt) : null
-  const effects = writingRequest?.evidence.operations.filter(operation => operation.accepted && operation.polarity === 'affirmative') ?? []
+  const effects = writingRequest?.evidence.operations.filter(operation => operation.polarity === 'affirmative'
+    && (operation.accepted || operation.reason === 'unclosed_source_quote')) ?? []
   const manuscriptRequested = effects.some(operation => operation.kind === 'write' || operation.kind === 'revise')
   const structureRequested = effects.some(operation => operation.kind === 'structure')
   const artifactRequested = effects.some(operation => operation.kind === 'artifact')
