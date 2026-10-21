@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { toOpenAIParameters, withObjectType, originalToolParameterSchemas } from '../../api/lib/agent/tool-schema.js'
 import { getToolsForMode, toOpenAITools } from '../../api/lib/agent/tools/registry.js'
@@ -12,9 +12,30 @@ import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.j
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
 
+vi.mock('zod', async importOriginal => {
+  const actual = await importOriginal<typeof import('zod')>()
+  return { ...actual, z: { ...actual.z, toJSONSchema: vi.fn(actual.z.toJSONSchema) } }
+})
+
 // 回归：novel_import 顶层 discriminatedUnion 转换后没有 type，DeepSeek 按 type null 拒绝，
 // 导致线上继续任务时报 Invalid schema for function 'novel_import'。
 describe('tool schema provider contract', () => {
+  it('converts each schema only once per alternatives lookup while preserving scoped and legacy hashes', () => {
+    const conversion = vi.mocked(z.toJSONSchema)
+    try {
+      for (const tool of [chapterCreateTool, storyCompilerPrepareTool, chapterBridgeCommitTool, continuityValidateTool, researchReportSaveTool]) {
+        const scopes: TaskSpec['scope'][] = [{ novelId: 'n' }, { novelId: 'n', reviewProtocol: 1, writing: { version: 1, kind: 'bounded',
+          targets: [{ orderIndex: 3, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false } }]
+        for (const scope of scopes) {
+          const expected = toOpenAITools([tool], scope)[0].function.parameters
+          conversion.mockClear()
+          const alternatives = originalToolParameterSchemas(tool, scope)
+          expect(conversion).toHaveBeenCalledTimes(1)
+          expect(alternatives.map(schema => runtimeJson(schema).hash)).toContain(runtimeJson(expected).hash)
+        }
+      }
+    } finally { conversion.mockClear() }
+  })
   it('keeps the pre-optional-title research report schema exactly without rewriting its frozen title field', () => {
     const previous = toOpenAIParameters(researchReportSaveParameters.extend({ title: z.string().trim().min(1).max(160) }))
     expect(originalToolParameterSchemas(researchReportSaveTool, { novelId: 'n' })).toContainEqual(previous)

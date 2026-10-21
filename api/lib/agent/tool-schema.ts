@@ -18,7 +18,10 @@ export function toOpenAIParameters(parameters: z.ZodType): Record<string, unknow
 /** Only a deterministic server-frozen global slot gets simpler presentation.
  * Execution still parses the original full schema and validates scope. */
 export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
-  const parameters = toOpenAIParameters(tool.parameters)
+  return toolPresentation(tool, toOpenAIParameters(tool.parameters), scope)
+}
+
+function toolPresentation(tool: Pick<AgentTool, 'name' | 'description'>, parameters: Record<string, unknown>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
   if (tool.name === 'chapter_bridge_commit') {
     const properties = parameters.properties as Record<string, unknown>
     return scope?.reviewProtocol === 1 ? { description: `${tool.description} 新严格意见协议可传decisionOnly:true与每批最多40条retainedFindings，仅保存当前真实意见保留决定，不提交章节桥、正文或记忆；随后普通提交仍校验全部意见和硬通过要求。`, parameters }
@@ -74,7 +77,7 @@ export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'des
     ? { ...current, properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'terminalPatch')) } : null
   const oldTerminal = previousTerminal && previousPatch ? { ...previousTerminal,
     properties: Object.fromEntries(Object.entries(previousTerminal.properties).filter(([key]) => key !== 'terminalPatch')) } : null
-  return [current, toOpenAIToolPresentation(tool, scope).parameters, ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : []),
+  return [current, toolPresentation(tool, current, scope).parameters, ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : []),
     ...(previousPatch ? [previousPatch, withoutTopLevelProofs(previousPatch), ...(oldTerminal ? [oldTerminal, withoutTopLevelProofs(oldTerminal)] : [])] : []),
     ...(previousProofSelection.length ? previousProofSelection : previousTerminal ? [previousTerminal] : []), ...(previousResearch ? [previousResearch] : [])]
 }

@@ -35,7 +35,10 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
   if (!Number.isSafeInteger(cursor.expectedRevision) || cursor.expectedRevision < 0) runtimeError('RUNTIME_STATE_INVALID', '工具拒绝位置无效。')
   return withRunLease(token, async tx => {
     const current = await readExecutionStateInTransaction(tx, token.taskRootId)
-    const frame = await readExecutionFrame(tx, token.taskRootId, cursor.expectedRevision)
+    // The state reader has already verified this exact frame and its event in
+    // this transaction. Historical cursors still load their original receipt.
+    const frame = current.frame.revision === cursor.expectedRevision ? current.frame
+      : await readExecutionFrame(tx, token.taskRootId, cursor.expectedRevision)
     if (frame.snapshotHash !== cursor.expectedHash || frame.state.phase !== 'idle') runtimeError('RUNTIME_STATE_CONFLICT', '拒绝记录必须绑定原始空闲执行位置。')
     let index = frame.state.messages.length - 1
     while (index >= 0 && frame.state.messages[index].role === 'tool') index--
@@ -141,7 +144,8 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
   if (!Number.isSafeInteger(cursor.expectedRevision) || cursor.expectedRevision < 0) runtimeError('RUNTIME_STATE_INVALID', '工具执行位置无效。')
   const work = async (tx: import('./runtime-common.js').RuntimeTx) => {
     const current = await readExecutionStateInTransaction(tx, token.taskRootId)
-    const frame = await readExecutionFrame(tx, token.taskRootId, cursor.expectedRevision)
+    const frame = current.frame.revision === cursor.expectedRevision ? current.frame
+      : await readExecutionFrame(tx, token.taskRootId, cursor.expectedRevision)
     if (frame.snapshotHash !== cursor.expectedHash || frame.state.phase !== 'idle' || input.key !== `exec:${frame.state.nextOperationSequence}`) runtimeError('RUNTIME_STATE_CONFLICT', '工具必须从原执行位置准入。')
     const grant = current.configuration.toolAuthority.find(item => item.name === input.action)
     if (input.action === 'novel_import' && input.effectDomain !== 'import') runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '导入不能通过只读或旧写入适配器执行。')

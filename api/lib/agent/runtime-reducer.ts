@@ -32,7 +32,8 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
     || !/^[a-f0-9]{64}$/.test(cursor.expectedHash)) runtimeError('RUNTIME_STATE_INVALID', '回执归约位置无效。')
   const reduce = async (tx: RuntimeTx) => {
     const current = await readExecutionStateInTransaction(tx, lease.taskRootId)
-    const frame = await readExecutionFrame(tx, lease.taskRootId, cursor.expectedRevision)
+    const frame = current.frame.revision === cursor.expectedRevision ? current.frame
+      : await readExecutionFrame(tx, lease.taskRootId, cursor.expectedRevision)
     if (frame.snapshotHash !== cursor.expectedHash || frame.state.phase !== 'awaiting_operation'
       || frame.state.pendingOperationId !== cursor.operationId) runtimeError('RUNTIME_STATE_CONFLICT', '回执与原待执行位置不一致。')
     const operation = await tx.agentOperation.findFirst({ where: { id: cursor.operationId, taskRootId: lease.taskRootId }, include: { effectReceipt: true } })
