@@ -1,10 +1,12 @@
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
 import { storyStateSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import { continuitySourceSegments, locateUniqueContinuityQuote } from './continuity-review-context.js'
 import { parseQualityJsonObject } from './quality-evidence.js'
 import { runtimeJson } from './runtime-common.js'
 import { terminalEvidenceContextSchema, type TerminalCarriedFact, type TerminalEvidenceContext } from './terminal-evidence-context.js'
 import { inspectTerminalCoverage, terminalCoverageGuidance } from './terminal-fact-coverage.js'
+import { terminalQuoteRange } from './terminal-quote-range.js'
 
 export const terminalCandidateSchema = z.object({
   exitState: storyStateSchema,
@@ -59,7 +61,7 @@ export const inheritedTerminalVerdictSchema = terminalVerdictSchema.omit({ segme
 export type TerminalQuoteAddressDiagnostic = { path: string; referenceIndex: number; originalSegmentId: string; actualSegmentId?: string;
   reason: 'relocated' | 'unknown_segment' | 'wrong_source' | 'quote_missing' | 'quote_ambiguous' | 'quote_not_in_single_segment' | 'carried_quote_mismatch' }
 type TerminalQuoteRelocation = { verdictIndex: number; path: string; referenceIndex: number; source: 'previous' | 'current';
-  originalSegmentId: string; actualSegmentId: string; quoteHash: string }
+  originalSegmentId: string; actualSegmentId: string; quoteHash: string; range?: { start: number; end: number; segmentIds: string[] } }
 
 function previousQuoteBlocks(previous: NonNullable<TerminalEvidenceContext['previous']>) {
   const blocks: Array<{ end: number; text: string }> = []
@@ -97,6 +99,16 @@ function canonicalTerminalQuoteAddresses(items: Array<z.infer<typeof inheritedTe
     // address in this source's legal set. Never rescue an unknown ID or a tN.
     if (!original) { diagnostics.push({ ...address, reason: 'unknown_segment' }); return ref }
     if (original.quote.includes(ref.quote)) return ref
+    if (context.factCoverage?.version === 2) {
+      const range = terminalQuoteRange(ref, segments)
+      if (range) {
+        const actualSegmentId = range.segmentIds[0]
+        diagnostics.push({ ...address, reason: 'relocated', actualSegmentId })
+        relocations.push({ ...address, verdictIndex, source: item.basis === 'current' ? 'current' : 'previous',
+          actualSegmentId, quoteHash: createHash('sha256').update(ref.quote).digest('hex'), range })
+        return { ...ref, segmentId: actualSegmentId }
+      }
+    }
     const located = locateUniqueContinuityQuote(ref.quote, item.basis === 'current' ? [content] : previousBlocks, segments)
     if (!located.valid) { diagnostics.push({ ...address, reason: located.reason }); return ref }
     diagnostics.push({ ...address, reason: 'relocated', actualSegmentId: located.segmentId })
@@ -130,12 +142,20 @@ export function terminalClaims(candidate: TerminalCandidate) {
 
 export function terminalReviewInput(candidate?: TerminalCandidate, context?: TerminalEvidenceContext): string {
   const input = terminalReviewClaimsInput(candidate, context) + terminalCoverageGuidance(context?.factCoverage)
+  if (context?.factCoverage?.version === 2) return input
   return input && context?.quoteAddressProtocol === 1
     ? `${input}\n引用地址策略：quote 必须逐字不变且完整落在单个合法片段；优先给出正确 cN/pN。服务器只可将已存在的同来源错误编号定位到唯一逐字引文所在片段，不跨来源、不补造编号、不修改 tN；重复、跨片段或不存在的引文不能修复。` : input
 }
 
 function terminalReviewClaimsInput(candidate?: TerminalCandidate, context?: TerminalEvidenceContext): string {
   if (!candidate) return ''
+  if (context?.factCoverage?.version === 2) {
+    const previous = context.previous ? { ...context.previous, carried: context.previous.carried?.map(({ segmentId, field, claim, anchors }) =>
+      ({ segmentId, field, claim, quotes: anchors.map(anchor => anchor.quote) })) } : null
+    const claims = terminalClaims(candidate).map(item => ({ ...item,
+      inheritedSources: context.previous?.carried?.filter(fact => fact.field === item.path.split('.')[1] && fact.claim === item.claim).map(fact => fact.segmentId) ?? [] }))
+    return `待提交候选（写者主张，不是证据）：${JSON.stringify(claims)}\n冻结证据目录：${JSON.stringify({ ...context, previous })}\n逐 path 恰好返回一项 terminalVerdicts={path,verdict,basis,sourceEvidence:[{segmentId,quote}],inheritance?}。verdict=supported/unknown/planned/negated/attributed。本章新增或变化事实用 current/cN；持续事实可用 inherited/pN 或服务端已验证的 tN，须独立核对本章全文未解除、转移或否定，inheritance={priorEndState:"established",currentState:"unchanged"}。tN 只支持原字段和完整原主张，inheritedSources 是服务端精确匹配，不需重新拼接证明或要求正文重述历史。位置、动作、时间、情绪和 lastUnfinishedAction 不凭未提及继承。逐字 quote 可跨相邻的人为300字符片段，服务端在同一可用来源中确定唯一连续位置；不要为切段改写原文或主张，引用一个现有同来源编号即可。不得跨章、跨缺失范围或引用摘要/计划作事实。核对整个主张而非相邻半句，不添加原主张未声称的原因等条件。旧事项已由本章确实完成时判 negated，不强迫保留；unknown 保留待核，不删空凑通过。findings 只报告正文实际矛盾；semanticChecks 包含 action_direction/state_progression 两个完整 {kind,result,reason,findingIndexes}，conflict 仅引用有原文证据的 error 索引；其他结果索引为空。`
+  }
   if (context?.protocol === 1) return `待提交终态候选（主写者主张，不是证据）：${JSON.stringify(terminalClaims(candidate))}\n服务端终态证据范围：${JSON.stringify(context)}\n除 findings 和 semanticChecks 外，输出 terminalVerdicts，每个 path 恰好一项：{path,verdict,basis,sourceEvidence:[{segmentId,quote}],inheritance?}。verdict 为 supported、unknown、planned、negated、attributed。同一正文片段可引用多个逐字短 quote，每条都须在所标 cN/pN 片段内分别定位。当前新增或改变事实 basis=current，只能引用本章 cN 及逐字短 quote；核对完整对象、持有者、方向、时刻及章末是否仍成立，不能以“朝某处走”证明已到达。basis=inherited 只能引用服务端 previous.segments 中紧邻前章 pN 及逐字短 quote，并给 inheritance={priorEndState:"established",currentState:"unchanged"}：独立核对前章末实际成立，且本章全文未解除、转移或否定。只能继承 knowledge、body、objects、relationships、openLoops 中持续事实；位置、动作、时间、情绪和 lastUnfinishedAction 不能凭未提及延续。旧桥遗漏但前章正文明确支持的未解决事项可继承，不要求本章重述；较早章、桥摘要、Scene Task、作者要求、计划、传言或猜测不能当事实。证据不足用 unknown 等相应判定，保留未知主张，不删除或清空来凑通过。无候选 terminalVerdicts=[]。`
   if (context) return `待提交终态候选（主写者主张，不是证据）：${JSON.stringify(terminalClaims(candidate))}\n服务端终态证据范围：${JSON.stringify(context)}\n除 findings 和 semanticChecks 外，输出 terminalVerdicts，每个 path 恰好一项：{path,verdict,basis,sourceEvidence:[{segmentId,quote}],inheritance?}。verdict 为 supported、unknown、planned、negated、attributed。同一正文片段可引用多个逐字短 quote，每条都须在所标 cN/pN 片段内分别定位。当前新增或改变事实 basis=current，只能引用本章 cN 及逐字短 quote；核对完整对象、持有者、方向、时刻及章末是否仍成立，不能以“朝某处走”证明已到达。basis=inherited 只能引用服务端 previous.segments 中紧邻前章 pN 或 previous.carried 中已提交证明 tN 及逐字短 quote；tN 只支持其 field 与完整 claim 精确相同的事实，证明链已由服务端重新核对原始正文锚点和各中间章，最多16级，断链或超限只能 unknown，并给 inheritance={priorEndState:"established",currentState:"unchanged"}：独立核对前章末实际成立（直接正文或服务端已核验的提交证明链），且本章全文未解除、转移或否定。只能继承 knowledge、body、objects、relationships、openLoops 中持续事实；位置、动作、时间、情绪和 lastUnfinishedAction 不能凭未提及延续。旧桥遗漏但前章正文明确支持的未解决事项可继承，不要求本章重述；较早章、桥摘要、Scene Task、作者要求、计划、传言或猜测不能当事实。证据不足用 unknown 等相应判定，保留未知主张，不删除或清空来凑通过。无候选 terminalVerdicts=[]。`
   return `待提交终态候选（仅是主写者的主张，绝非证据）：${JSON.stringify(terminalClaims(candidate))}\n除 findings 外必须输出 terminalVerdicts 数组，每个 path 恰好一项：{path,verdict,segmentIds}。verdict=supported 仅表示当前正文明确支持同一人物/物品、同一时刻的该完整状态；segmentIds 只选服务端 current 原文编号 c0、c1 等，不写 quote、不编造编号。计划/将来/假设用 planned，含糊推断或未记载用 unknown，正文否定该主张用 negated，仅他人传言/引用而未确证用 attributed。疼痛不等于骨裂，人物怀疑不等于人物知道；前章事实或 Scene Task 不能代替当前章终态。负面主张本身若被原文明确支持可 supported。某状态先发生后被解除，不是章末仍成立。未知项保留原主张及未确认判定，不静默删除或将空数组当全部通过。无候选事实时 terminalVerdicts=[]。`
@@ -160,7 +180,11 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
     const inheritedItems = addresses?.items ?? (inherited?.success ? inherited.data : null)
     // Quote references remain intact and are each checked below. Only their
     // derived segment-address projection is a set; multiple quotes can share a span.
-    const parsed = inheritedItems ? { success: true as const, data: inheritedItems.map(item => ({ ...item, segmentIds: [...new Set(item.sourceEvidence.map(ref => ref.segmentId))] })) }
+    const parsed = inheritedItems ? { success: true as const, data: inheritedItems.map(item => ({ ...item, segmentIds: [...new Set(item.sourceEvidence.flatMap(ref => {
+      if (context?.factCoverage?.version !== 2 || ref.segmentId.startsWith('t')) return [ref.segmentId]
+      const available = ref.segmentId.startsWith('c') ? continuitySourceSegments({ previous: null, current: content }) : context.previous?.segments ?? []
+      return terminalQuoteRange(ref, available)?.segmentIds ?? [ref.segmentId]
+    }))] })) }
       : context ? null : z.array(terminalVerdictSchema).max(200).safeParse(record.terminalVerdicts)
     if (!parsed?.success) return invalid('verdict_schema_invalid')
     const claims = terminalClaims(candidate), verdicts = parsed.data
@@ -179,7 +203,8 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
           if (fact.field !== item.path.split('.')[1] || fact.claim !== claims.find(claim => claim.path === item.path)?.claim) return invalid('carried_fact_mismatch', item.path, index, ref.segmentId, { field: fact.field, claim: fact.claim })
           if (!fact.anchors.some(anchor => anchor.quote.includes(ref.quote))) return invalid('carried_quote_mismatch', item.path, index, ref.segmentId)
         }
-        if (!segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote))) return invalid('evidence_quote_invalid', item.path, index, ref.segmentId)
+        if (context?.factCoverage?.version === 2 && !ref.segmentId.startsWith('t') ? !terminalQuoteRange(ref, segments)
+          : !segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote))) return invalid('evidence_quote_invalid', item.path, index, ref.segmentId)
       }
     }
     if (verdicts.length !== claims.length || new Set(verdicts.map(item => item.path)).size !== verdicts.length
@@ -233,6 +258,17 @@ export function terminalReviewFailure(validation: unknown, content: string, cont
   const review = currentTerminalReview(validation, content, context)
   if (review?.supported) return null
   const diagnostics = (validation as { continuityCriticResponse?: { terminalReviewDiagnostics?: TerminalReviewDiagnostic[] } }).continuityCriticResponse?.terminalReviewDiagnostics
+  if (context?.factCoverage?.version === 2 && review) {
+    const claims = terminalClaims(review.candidate)
+    const disputed = review.verdicts.filter(item => item.verdict !== 'supported').map(item => ({ path: item.path,
+      claim: claims.find(claim => claim.path === item.path)?.claim ?? '', verdict: item.verdict,
+      ...('sourceEvidence' in item ? { sourceEvidence: item.sourceEvidence } : {}) }))
+    const unresolved = review.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => ({ ...item,
+      fact: context.factCoverage?.obligations.find(fact => fact.id === item.id) })) ?? []
+    return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: true,
+      summary: '终态候选尚未获独立证实',
+      output: `正文独立检查已完成，终态未提交。仅下列候选或旧事实尚需处理：${JSON.stringify({ disputed, unresolved })}。其余已支持项无需同义重写。以本章明确完成证据判为 negated 的旧待办，可据该裁决移除或更新；unknown 不能删空，持续事实请使用已有核验的原字段/原主张证明并核对本章是否变化，不要求正文重述历史。保留事实主体、条件和未解决义务，不把状态误改成已完成。按实际裁决更新 terminalState 后调用 continuity_validate；同一版本检查通过再 chapter_bridge_commit，无需改正文或重跑已通过的质量检查。` }
+  }
   return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: !!review,
     summary: '终态候选尚未获正文证实',
     output: `正文与候选均保留，终态未提交；不把连续性 findings 为空当作终态通过。${review

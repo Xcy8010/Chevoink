@@ -100,7 +100,7 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
     }
   }
   if (raw.length > MAX_AUDIT_CHARS) classification = 'response_too_large'
-  if (classification === 'complete' && parserVersion === 8 && (!bodies?.terminalEvidence || !validContinuitySemanticChecks(record?.semanticChecks, findings))) classification = 'semantic_invalid'
+  if (classification === 'complete' && parserVersion === 8 && (!bodies?.terminalEvidence || !validContinuitySemanticChecks(record?.semanticChecks, findings, bodies.terminalEvidence.factCoverage?.version))) classification = 'semantic_invalid'
   const terminalReviewDiagnostics: TerminalReviewDiagnostic[] = []
   if (classification === 'complete' && terminalCandidate && (!bodies || !inspectTerminalReview(terminalCandidate, bodies.current, raw, responseComplete,
     parserVersion === 8 ? bodies.terminalEvidence : undefined, terminalReviewDiagnostics))) classification = 'terminal_invalid'

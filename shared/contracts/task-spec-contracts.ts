@@ -67,7 +67,7 @@ export const taskScopeSchema = z.object({
   terminalEvidenceProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   /** Fresh admission permits exact, unique same-source terminal quote addressing. */
   terminalQuoteAddressProtocol: z.literal(1).optional(),
-  terminalCoverageProtocol: z.literal(1).optional(),
+  terminalCoverageProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   /** Authenticated answers fill missing scope; v1 preserves empty-book receipts. */
   writingClarificationProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   localEditBoundary: localEditBoundarySchema.optional(),

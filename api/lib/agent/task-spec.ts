@@ -246,7 +246,7 @@ export function buildTaskSpec(input: {
   continuityEvidenceProtocol?: 1
   terminalEvidenceProtocol?: 1 | 2
   terminalQuoteAddressProtocol?: 1
-  terminalCoverageProtocol?: 1
+  terminalCoverageProtocol?: 1 | 2
   localEditProtocol?: 1
   /** Internal fresh human admission only; not exposed in a request schema. */
   researchAdmission?: 1

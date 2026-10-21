@@ -5,6 +5,8 @@ import { activeChapterScope } from '../data/internal.js'
 import { terminalCarriedFactSchema, type TerminalCarriedFact, type TerminalEvidenceContext } from './terminal-evidence-context.js'
 import { currentTerminalReview, terminalClaims } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
+import { terminalQuoteRange } from './terminal-quote-range.js'
+import { continuitySourceSegments } from './continuity-review-context.js'
 
 export const TERMINAL_INHERITANCE_MAX_DEPTH = 16
 const bodyHash = (content: string) => createHash('sha256').update(content).digest('hex')
@@ -38,11 +40,25 @@ export function buildTerminalFactProofs(input: { compilationId: string; chapter:
         if (!carried || refs.length !== 1) return []
         anchors.push(...carried.anchors); nodes = [...carried.nodes]
       } else if (ref.segmentId.startsWith('c')) {
+        if (input.evidence.factCoverage?.version === 2) {
+          const range = terminalQuoteRange(ref, continuitySourceSegments({ previous: null, current: input.chapter.content }))
+          if (!range) return []
+          anchors.push({ chapterId: input.chapter.id, revision: input.chapter.revision, contentHash: bodyHash(input.chapter.content),
+            start: range.start, end: range.end, quote: ref.quote })
+          continue
+        }
         const base = Number(ref.segmentId.slice(1)) * 300, offset = input.chapter.content.slice(base, base + 300).indexOf(ref.quote)
         if (offset < 0) return []
         anchors.push({ chapterId: input.chapter.id, revision: input.chapter.revision, contentHash: bodyHash(input.chapter.content),
           start: base + offset, end: base + offset + ref.quote.length, quote: ref.quote })
       } else if (input.evidence.previous) {
+        if (input.evidence.factCoverage?.version === 2) {
+          const previous = input.evidence.previous, range = terminalQuoteRange(ref, previous.segments)
+          if (!range) return []
+          const start = previous.start + range.start - previous.joinedStart
+          anchors.push({ chapterId: previous.id, revision: previous.revision, contentHash: previous.contentHash, start, end: start + ref.quote.length, quote: ref.quote })
+          continue
+        }
         const previous = input.evidence.previous, span = previous.segments.find(part => part.segmentId === ref.segmentId)
         const offset = span?.quote.indexOf(ref.quote) ?? -1
         if (!span || offset < 0) return []

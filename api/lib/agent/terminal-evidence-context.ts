@@ -69,8 +69,19 @@ const semanticCheckSchema = z.object({ kind: z.enum(['action_direction', 'state_
   result: z.enum(['clear', 'conflict', 'not_applicable']), reason: z.string().trim().min(1).max(1500),
   findingIndexes: z.array(z.number().int().nonnegative()).max(20),
 }).strict()
-export function validContinuitySemanticChecks(raw: unknown, findings: Array<{ severity: string }>) {
-  const parsed = z.array(semanticCheckSchema).length(2).safeParse(raw)
+export function validContinuitySemanticChecks(raw: unknown, findings: Array<{ severity: string }>, version: 1 | 2 = 1) {
+  let normalized = raw
+  if (version === 2 && raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const record = raw as Record<string, unknown>, kinds = ['action_direction', 'state_progression']
+    const keys = Object.keys(record)
+    if (keys.length === 2 && kinds.every(kind => record[kind] && typeof record[kind] === 'object'
+      && (record[kind] as Record<string, unknown>).kind === kind)) normalized = kinds.map(kind => record[kind])
+    else if (keys.length === 3 && keys.includes('reason') && typeof record.reason === 'string'
+      && kinds.every(kind => typeof record[kind] === 'string' && record[kind] !== 'conflict')) {
+      normalized = kinds.map(kind => ({ kind, result: record[kind], reason: record.reason, findingIndexes: [] }))
+    }
+  }
+  const parsed = z.array(semanticCheckSchema).length(2).safeParse(normalized)
   return parsed.success && new Set(parsed.data.map(item => item.kind)).size === 2
     && parsed.data.every(item => item.result === 'conflict'
       ? item.findingIndexes.length > 0 && new Set(item.findingIndexes).size === item.findingIndexes.length
