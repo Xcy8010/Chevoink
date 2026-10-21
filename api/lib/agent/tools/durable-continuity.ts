@@ -1,7 +1,7 @@
 import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { continuityFindingText, continuitySourceInput, unconfirmedContinuityOutput } from '../continuity-review-context.js'
 import { z } from 'zod'
-import { readChapterReviewRevisionGuidance, continuityDecisionBinding } from '../chapter-review-guard.js'
+import { readChapterReviewRevisionGuidance, continuityDecisionBinding, readChapterReviewReadiness } from '../chapter-review-guard.js'
 import { readOriginalTaskRequest } from '../original-request.js'
 import { terminalCoverageInput, terminalCoverageAuditVersion, hasTerminalCoverageProtocol } from '../terminal-fact-coverage.js'
 import { hasContinuitySourceAuthority, continuitySourceAuthorityRule, continuityAuthorRequirements, compilerEvidenceScope, continuitySourceScopeSchema } from '../continuity-source-authority.js'
@@ -278,8 +278,10 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
           ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }).value,
       } })
       const repairGuidance = parsed.structured && report.independentCheck === 'complete' && report.errorCount > 0 ? await readChapterReviewRevisionGuidance(tx, ctx, frozen.chapter) : ''
-      const terminalFailure = terminalReviewFailure({ ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.chapter.content, frozen.sourceBodies?.terminalEvidence)
-      const toolResult: ToolResult = terminalFailure ?? (!parsed.structured || report.independentCheck !== 'complete'
+      const incomplete = !parsed.structured || report.independentCheck !== 'complete'
+      const terminalFailure = incomplete ? null : terminalReviewFailure({ ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.chapter.content, frozen.sourceBodies?.terminalEvidence,
+        { errors: report.errorCount, text: `连续性完整报告：${report.errorCount} 错误、${report.warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compiler.id, frozen.chapter.revision, { ...report, coverage: frozen.coverage })}\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` })
+      const toolResult: ToolResult = terminalFailure ?? (incomplete
         ? { outcome: 'failed', failureCode: inspected?.audit.classification === 'source_invalid' ? 'CONTINUITY_EVIDENCE_UNLOCATED' : !parsed.structured ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED', summary: '独立连续性复核未完成',
           output: unconfirmedContinuityOutput }
         : { summary: `连续性检查${frozen.cached ? '（复用）' : ''} · ${report.errorCount} 错误 ${report.warningCount} 警告`,
@@ -288,6 +290,11 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       const stateHash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, compiler.id)
       if (!stateHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查后的编译状态缺失。')
       ctx.signal.throwIfAborted()
+      if (toolResult.outcome !== 'failed') {
+        const readiness = await readChapterReviewReadiness(tx, ctx, compiler.id)
+        if (readiness?.progressEvidence) toolResult.reviewProgress = { ...readiness.progressEvidence,
+          phases: readiness.progressEvidence.phases.filter(phase => phase === 'continuity' || phase === 'terminal') }
+      }
       return runtimeJson({ compilerState: { id: compiler.id, hash: stateHash }, toolResult, memoryJobId: null }).value
     })
   }

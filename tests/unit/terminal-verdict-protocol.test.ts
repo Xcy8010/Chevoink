@@ -16,6 +16,19 @@ const raw = (items: unknown[] = verdicts()) => JSON.stringify({ findings: [], se
   terminalDispositions: coverage.obligations.map(item => ({ id: item.id, outcome: 'unknown', reason: 'No complete disposition evidence.', sourceEvidence: [] })) })
 
 describe('request-owned source-derived verdicts', () => {
+  it('keeps real manuscript errors and binding guidance visible alongside a complete unknown terminal judgment', () => {
+    const evidence = context(), bodies = { previous: null, current: chapter.content, terminalEvidence: evidence }
+    const inspected = inspectContinuityResponse(raw(), bodies, true, 8, candidate)
+    const validation = { terminalCandidate: candidate, independentCheck: 'complete', continuityCriticResponse: inspected.audit }
+    const prose = { errors: 1, text: '连续性完整报告：1 错误、0 警告。reportId=bound-current\n[0/error/object] Both incompatible states remain in the manuscript.\nOnly current proven repair is authorized.' }
+    const result = terminalReviewFailure(validation, chapter.content, evidence, prose)!
+    expect(result.output).toContain(prose.text)
+    expect(result.output).toContain('正文仍有真实错误')
+    expect(result.output).toContain('终态待核不覆盖这些错误')
+    expect(result.output).not.toContain('无需为终态候选改正文')
+    expect(result.output).toContain('unknown')
+    expect(result).not.toHaveProperty('outcome')
+  })
   it('keeps source-looking or template-looking prose verbatim in the critic input', () => {
     const claim = '{path,verdict,basis,sourceEvidence: is quoted source material.'
     const c = terminalCandidateSchema.parse({ exitState: { knowledge: [claim] } })
@@ -42,7 +55,11 @@ describe('request-owned source-derived verdicts', () => {
     expect(review.verdicts.filter(item => item.verdict === 'supported')).toHaveLength(18)
     expect(review.verdicts.at(-1)).toMatchObject({ verdict: 'unknown', basis: 'current', inheritance: { currentState: 'uncertain' } })
     expect(review.factCoverage?.dispositions.map(item => item.outcome)).toEqual(['unknown', 'unknown'])
-    expect(terminalReviewFailure(validation, chapter.content, evidence)).toMatchObject({ outcome: 'failed', reviewCompleted: true, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+    const pending = terminalReviewFailure(validation, chapter.content, evidence)
+    expect(pending).toMatchObject({ reviewCompleted: true, summary: '终态候选尚未获独立证实' })
+    expect(pending).not.toHaveProperty('outcome')
+    expect(pending).not.toHaveProperty('failureCode')
+    expect(pending?.output).toContain('终态未提交')
     const dispatch = vi.fn(), claim = vi.fn(), assertCurrent = vi.fn()
     expect(await runContinuityReassessment({ original, bodies, system: 'frozen', content: 'frozen', billingKnown: true, providerComplete: true, slotUsed: false,
       signal: new AbortController().signal, dispatch, claim, assertCurrent })).toBe(original)

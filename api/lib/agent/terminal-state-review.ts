@@ -271,21 +271,22 @@ export function currentTerminalReview(validation: unknown, content: string, expe
   } catch { return null }
 }
 
-export function terminalReviewFailure(validation: unknown, content: string, context?: TerminalEvidenceContext) {
+export function terminalReviewFailure(validation: unknown, content: string, context?: TerminalEvidenceContext,
+  proseReport?: { errors: number; text: string }) {
   if (!readTerminalCandidate(validation)) return null
   const review = currentTerminalReview(validation, content, context)
   if (review?.supported) return null
   const diagnostics = (validation as { continuityCriticResponse?: { terminalReviewDiagnostics?: TerminalReviewDiagnostic[] } }).continuityCriticResponse?.terminalReviewDiagnostics
-  if (context?.factCoverage?.version === 2 && review) {
+  if (review && (context?.factCoverage?.version === 2 || context?.verdictProtocol === 2)) {
     const claims = terminalClaims(review.candidate)
     const disputed = review.verdicts.filter(item => item.verdict !== 'supported').map(item => ({ path: item.path,
       claim: claims.find(claim => claim.path === item.path)?.claim ?? '', verdict: item.verdict,
       ...('sourceEvidence' in item ? { sourceEvidence: item.sourceEvidence } : {}) }))
     const unresolved = review.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => ({ ...item,
       fact: context.factCoverage?.obligations.find(fact => fact.id === item.id) })) ?? []
-    return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: true,
+    return { ...(context.verdictProtocol === 2 ? {} : { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' }), reviewCompleted: true,
       summary: '终态候选尚未获独立证实',
-      output: `正文独立检查已完成，终态未提交。仅下列候选或旧事实尚需处理：${JSON.stringify({ disputed, unresolved })}。其余已支持项无需同义重写。以本章明确完成证据判为 negated 的旧待办，可据该裁决移除或更新；unknown 不能删空，持续事实请使用已有核验的原字段/原主张证明并核对本章是否变化，不要求正文重述历史。保留事实主体、条件和未解决义务，不把状态误改成已完成。按实际裁决更新 terminalState 后调用 continuity_validate；同一版本检查通过再 chapter_bridge_commit，无需改正文或重跑已通过的质量检查。` }
+      output: `${proseReport ? proseReport.text + '\n' : ''}正文独立检查已完成，终态未提交。终态待处理候选或旧事实：${JSON.stringify({ disputed, unresolved })}。其余已支持项无需同义重写。以本章明确完成证据判为 negated 的旧待办，可据该裁决移除或更新；unknown 不能删空，持续事实请使用已有核验的原字段/原主张证明并核对本章是否变化，不要求正文重述历史。保留事实主体、条件和未解决义务，不把状态误改成已完成。按实际裁决更新 terminalState 后调用 continuity_validate；同一版本检查通过再 chapter_bridge_commit，${proseReport?.errors ? '正文仍有真实错误，按完整报告、当前证据和原授权处理后复核；终态待核不覆盖这些错误。' : '无需为终态候选改正文或重跑已通过的质量检查。'}` }
   }
   return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: !!review,
     summary: '终态候选尚未获正文证实',

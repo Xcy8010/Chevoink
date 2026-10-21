@@ -569,6 +569,7 @@ export async function handleToolCall(
       observation: wrapToolOutput(tool.name, result.output),
       ...(call.name === 'ask_user' && result.failureCode === 'AUTHOR_INPUT_REQUIRED' ? { failureCode: result.failureCode } : {}),
       unresolvedTextRequest: requestTrace.records.length > 0 && !textRequestsFinished(requestTrace),
+      reviewCompleted: result.reviewCompleted,
       workflowMilestone: ctx.inlineChild ? undefined : result.workflowMilestone,
       reviewDecisionFeedback: ctx.inlineChild ? undefined : result.reviewDecisionFeedback,
       requiredResult: result.requiredResult,
@@ -1204,7 +1205,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (review?.progressEvidence) {
           const pending = [...pendingReviews.values()].filter(item => item.chapterId === review.chapterId)
           const phases = review.progressEvidence.phases.filter(phase => !pending.some(item => phase === 'decision'
-            || item.revision === review.revision && item.toolName === (phase === 'continuity' ? 'continuity_validate' : 'quality_analyze')))
+            || item.revision === review.revision && item.toolName === (phase === 'continuity' || phase === 'terminal' ? 'continuity_validate' : 'quality_analyze')))
           currentReviewState.value = { ...review, progressEvidence: { ...review.progressEvidence, phases } }
         }
         return observeChapterReviewProgress(progressSignatures, currentReviewState.value?.progressEvidence,
@@ -1219,7 +1220,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
     const pendingReviewPauseReason = () => {
       const types = [...new Set([...pendingReviews.values()].map(item => item.toolName === 'quality_analyze' ? '质量' : '连续性'))]
-      const completed = currentReviewState.value?.progressEvidence?.phases.filter(phase => phase !== 'decision')
+      const completed = currentReviewState.value?.progressEvidence?.phases.filter(phase => phase === 'continuity' || phase === 'quality')
         .map(phase => phase === 'continuity' ? '连续性' : '质量') ?? []
       return `检查未完成；${types.join('、')}检查仍有未确认的请求，模型结果或用量尚未确认。${completed.length ? `当前${[...new Set(completed)].join('、')}检查结果已独立保存；` : ''}正文、进度与原预算保留；先核对原调用回执，不重发未知付费请求、不调用模型作收尾，也未将任务标记完成。`
     }

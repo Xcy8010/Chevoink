@@ -28,10 +28,10 @@ export function observeWritingWorkflowMilestone(seen: Set<string>, action: strin
   return fresh
 }
 
-export type ChapterReviewProgressEvidence = {
-  taskId: string; userId: string; novelId: string; chapterId: string; orderIndex: number; contentHash: string
-  phases: Array<'continuity' | 'quality' | 'decision'>
-}
+export const chapterReviewProgressEvidenceSchema = z.object({ taskId: z.string().min(1), userId: z.string().min(1), novelId: z.string().min(1),
+  chapterId: z.string().min(1), orderIndex: z.number().int().positive(), contentHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  phases: z.array(z.enum(['continuity', 'quality', 'decision', 'terminal'])).max(4) }).strict()
+export type ChapterReviewProgressEvidence = z.infer<typeof chapterReviewProgressEvidenceSchema>
 
 /** Readiness supplies persisted current evidence, never a model/tool success label.
  * Revisions, report IDs and compiler IDs cannot manufacture another milestone. */

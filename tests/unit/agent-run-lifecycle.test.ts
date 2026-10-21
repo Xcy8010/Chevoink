@@ -3571,9 +3571,37 @@ describe('independent persisted review phases with unresolved usage', () => {
       reviewAttempts: ['old-unconfirmed-attempt'], pendingReviews, inputProtocolRecovery: { protocol: 2, key: 'a'.repeat(64) } }
     const usage = { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint }
     return { taskSpec, contentHash, checkpoint, usage, signature: (phase: string) => 'review:' + JSON.stringify(['user', 'novel', taskSpec.id, 'c', contentHash, phase]),
-      state: (phases: Array<'continuity' | 'quality' | 'decision'>): ChapterReviewReadiness => ({ ...readiness('complete', 'complete', 4), continuityErrorCount: 4,
+      state: (phases: Array<'continuity' | 'quality' | 'decision' | 'terminal'>): ChapterReviewReadiness => ({ ...readiness('complete', 'complete', 4), continuityErrorCount: 4,
         progressEvidence: { taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'c', orderIndex: 1, contentHash, phases } }) }
   }
+  it.each(['bootstrap', 'saved'] as const)('hands a complete unknown terminal report to the main model before stagnation, then still stops repeated observations: %s', async scenario => {
+    const f = saved(7)
+    f.checkpoint.progressSignatures = [f.signature('continuity'), f.signature('quality')]
+    f.checkpoint.reviewAttempts.push('settled-continuity:comp:c:4:continuity_validate:protocol8')
+    mocks.update.mockResolvedValueOnce({ taskSpec: f.taskSpec, currentTurn: 18, startedAt: new Date(f.checkpoint.runStartedAt), usage: f.usage })
+    const complete = (): ChapterReviewReadiness => ({ ...f.state(['continuity', 'quality', 'terminal']), continuityErrorCount: 0,
+      decisionPending: false, qualityCandidateCount: 0, terminalReview: { state: 'unverified', unresolved: [{ path: 'exitState.openLoops.0', verdict: 'unknown' }] } })
+    let state = scenario === 'bootstrap' ? readiness('incomplete', 'complete', 4) : complete()
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const recovery = 'continuity-author-recovery:' + 'e'.repeat(64)
+    if (scenario === 'bootstrap') mocks.continuedContinuity.mockResolvedValue([['comp:c:4:continuity_validate:protocol8', recovery]])
+    const check = tool('continuity_validate', async () => { state = complete(); return { output: '完整终态报告已保存，unknown仍未获支持，未提交。', reviewCompleted: true } })
+    const read = tool('chapter_bridge_get', async () => ({ output: '完整报告和候选原样保留；unknown需要按真实证据处理。' }), true)
+    mocks.tools = [check, read]
+    queue(...Array.from({ length: 7 }, (_, index) => response('', [call(`handle-terminal-${index}`, read.name, '{"compilationId":"comp"}')])) )
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: true })
+    expect(check.execute).toHaveBeenCalledTimes(scenario === 'bootstrap' ? 1 : 0)
+    expect(read.execute).toHaveBeenCalledOnce()
+    expect(mocks.chat.mock.calls.length).toBeGreaterThan(0)
+    expect(mocks.chat.mock.calls.length).toBeLessThanOrEqual(7)
+    const checkpoint = mocks.runs.get('run')?.usage?.checkpoint
+    expect(checkpoint.progressSignatures).toEqual(expect.arrayContaining([...f.checkpoint.progressSignatures, f.signature('terminal')]))
+    expect(checkpoint.progressSignatures.filter((key: string) => key === f.signature('terminal'))).toHaveLength(1)
+    expect(checkpoint.stagnantBatches).toBeGreaterThanOrEqual(4)
+    expect(checkpoint).toMatchObject({ tokenBudget: 500, maxTurns: 1, writeProgress: 3, readProgress: 3, reviewAttempts: expect.arrayContaining(['old-unconfirmed-attempt']) })
+    expect(state.terminalReview).toMatchObject({ state: 'unverified', unresolved: [{ verdict: 'unknown' }] })
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
+  })
   it('records real current continuity after quality AI_PROVIDER_ERROR at cp9 and pauses without a paid wrap-up', async () => {
     const f = saved(9)
     mocks.update.mockResolvedValueOnce({ taskSpec: f.taskSpec, currentTurn: 24, startedAt: new Date(f.checkpoint.runStartedAt), usage: f.usage })

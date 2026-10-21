@@ -1,4 +1,4 @@
-import { observeSemanticTransition, observeRequiredResult, semanticReadIdentity, observeSemanticReadProgress, observeWritingWorkflowMilestone, writingWorkflowMilestoneSchema } from './semantic-progress.js'
+import { observeSemanticTransition, observeRequiredResult, semanticReadIdentity, observeSemanticReadProgress, observeWritingWorkflowMilestone, writingWorkflowMilestoneSchema, chapterReviewProgressEvidenceSchema, observeChapterReviewProgress } from './semantic-progress.js'
 import { taskSpecSchema } from '../../../shared/contracts/index.js'
 import { readOriginalTaskRequest } from './original-request.js'
 import { effectiveWritingTaskSpec } from './writing-scope.js'
@@ -12,6 +12,7 @@ import { durableProgressSchema } from './runtime-checkpoint.js'
 const inputSchema = z.object({ input: z.object({ callId: z.string(), normalization: z.object({ sourceRevision: z.number().int().nonnegative() }) }) })
 const resultSchema = z.object({ toolResult: z.object({ output: z.string(), summary: z.string(), outcome: z.literal('failed').optional(), semanticTransition: z.object({ targetId: z.string().min(1), beforeHash: z.string().regex(/^[a-f0-9]{64}$/), afterHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(), requiredResult: z.object({ targetId: z.string().min(1), contentHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
   workflowMilestone: writingWorkflowMilestoneSchema.optional(),
+  reviewProgress: chapterReviewProgressEvidenceSchema.optional(),
   observedChapterRange: z.object({ targetId: z.string().min(1), contentHash: z.string().regex(/^[a-f0-9]{64}$/), start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }).strict().refine(value => value.end >= value.start).optional(),
 }).passthrough(), progress: z.unknown().optional() })
 /** Receipt metadata is evidence only after its exact observation entered the
@@ -47,6 +48,16 @@ export async function collectDurableToolEvidence(tx: RuntimeTx, taskRootId: stri
       effects.push({ operationId: operation.id, action: operation.action, resultHash: receipt.resultHash, sequence: String(event.sequence), sourceRevision,
         outcome: failed ? 'failed' : 'succeeded', summary: result.data.toolResult.summary })
       if (failed || operation.action === 'todo_write') continue
+      const review = result.data.toolResult.reviewProgress
+      if (review) {
+        const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: taskRootId } })
+        const original = await readOriginalTaskRequest(tx, { userId: root.userId, novelId: root.novelId, runId: receipt.runId })
+        const spec = taskSpecSchema.safeParse(original.spec)
+        if (operation.action !== 'continuity_validate' || !spec.success || review.taskId !== original.taskId || review.userId !== root.userId || review.novelId !== root.novelId
+          || review.phases.some(phase => phase !== 'continuity' && phase !== 'terminal')) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查进度不属于当前原始任务或实际检查阶段。')
+        if (original.taskId === taskRootId && !original.parentRunId && observeChapterReviewProgress(observations, review, { userId: root.userId, novelId: root.novelId, expectedOriginalTaskId: original.taskId,
+          taskSpec: await effectiveWritingTaskSpec(tx, { userId: root.userId, novelId: root.novelId, runId: receipt.runId }, spec.data) })) progressSequence = String(event.sequence)
+      }
       const milestone = result.data.toolResult.workflowMilestone
       if (milestone) {
         const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: taskRootId } })

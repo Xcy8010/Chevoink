@@ -2,6 +2,26 @@ import { expect, it } from 'vitest'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { observeChapterReviewProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 
+it('gives a complete terminal assessment its own finite handling phase after prose continuity, preserving unknown and repeat protection', () => {
+  const taskSpec = buildTaskSpec({ runId: 'original', novelId: 'novel', chapterId: 'chapter', prompt: '修改本章' })
+  taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 5, chapterId: 'chapter' }], titleAndBodyOnly: false, repairAuthorized: true }
+  const subject = { userId: 'owner', novelId: 'novel', expectedOriginalTaskId: taskSpec.id, taskSpec }
+  const evidence = { taskId: taskSpec.id, userId: 'owner', novelId: 'novel', chapterId: 'chapter', orderIndex: 5, contentHash: 'a'.repeat(64), phases: ['continuity', 'quality'] as Array<'continuity' | 'quality' | 'terminal'> }
+  const seen = new Set<string>()
+  expect(observeChapterReviewProgress(seen, evidence, subject)).toBe(true)
+  let stagnant = 7
+  const terminal = { ...evidence, phases: ['continuity', 'quality', 'terminal'] as typeof evidence.phases }
+  stagnant = nextStagnantBatch(stagnant, observeChapterReviewProgress(seen, terminal, subject))
+  expect(stagnant).toBe(0)
+  const restored = new Set(seen)
+  for (let index = 0; index < 4; index++) stagnant = nextStagnantBatch(stagnant, observeChapterReviewProgress(restored,
+    { ...terminal, reportId: `new-${index}`, revision: 100 + index, candidate: `changed wording ${index}` } as typeof terminal, subject))
+  expect(stagnant).toBe(4)
+  expect(restored).toEqual(seen)
+  expect(observeChapterReviewProgress(seen, { ...terminal, taskId: 'foreign' }, subject)).toBe(false)
+  expect(observeChapterReviewProgress(seen, { ...terminal, chapterId: 'foreign' }, subject)).toBe(false)
+})
+
 it('credits only finite first prerequisites for the current frozen writing target, without using compiler IDs', () => {
   const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'old47', prompt: '写下一章' })
   taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 48, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }

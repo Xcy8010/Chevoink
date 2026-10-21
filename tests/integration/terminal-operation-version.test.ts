@@ -8,6 +8,9 @@ import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-c
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import { observeChapterReviewProgress } from '../../api/lib/agent/semantic-progress.js'
+import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 
@@ -47,6 +50,15 @@ describe.runIf(available)('request-owned evidence at the real commit boundary', 
       coverage: compilerContinuityCoverage({ chapter: current, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: next }, 11), continuityCriticResponse: inspected.audit })
     await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: current.id, chapterRevision: 2, mode: 'balanced',
       criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
+    const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
+    expect(readiness?.progressEvidence?.phases).toContain('terminal')
+    expect(readiness?.terminalReview?.state).toBe(status === 'supported' ? 'supported' : 'unverified')
+    const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, f))
+    const subject = { ...f, expectedOriginalTaskId: original.taskId, taskSpec: original.spec as typeof f.spec }
+    const seen = new Set<string>()
+    expect(observeChapterReviewProgress(seen, { ...readiness!.progressEvidence!, phases: ['continuity', 'quality'] }, subject)).toBe(true)
+    expect(observeChapterReviewProgress(seen, readiness?.progressEvidence, subject)).toBe(true)
+    expect(observeChapterReviewProgress(new Set(seen), readiness?.progressEvidence, subject)).toBe(false)
     const terminal = { ...f, compilationId: compilation.id, ...next, chapterSummary: 'Repair still required.', hookDecision: '', delayedHookReason: '', openingStructure: 'Continue', endingStructure: 'Record' }
     if (status === 'supported') {
       await commitChapterBridge(terminal)
