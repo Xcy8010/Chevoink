@@ -212,7 +212,10 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
           const remaining = repaired.report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
           return {
             output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。修订回执已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 和 quality_analyze 只读复核当前版本，旧 critic 结论不证明修订后正文已检查。${remaining ? decisionGuidance : ''}${bindingSuffix}${retainedNote}\n${renderQualityReportFindings(repaired.report)}`,
-            summary: `人类感质量检查 · r${checkedRevision} 已检查，修订 ${repaired.patchCount} 处至 r${repaired.result.updated.revision}，需复检`, display: reportDisplay(repaired.report),
+            summary: `人类感质量检查 · r${checkedRevision} 已检查，修订 ${repaired.patchCount} 处至 r${repaired.result.updated.revision}，需复检`,
+            display: { ...reportDisplay(repaired.report), appliedBodyChange: { version: 1, chapterId: repaired.result.updated.id,
+              chapterTitle: repaired.result.updated.title, before: repaired.result.before, after: repaired.result.after,
+              sourceRevision: checkedRevision, targetRevision: repaired.result.updated.revision } },
             semanticTransition: { targetId: `chapter:${repaired.result.updated.id}`, beforeHash: persistedContentHash(repaired.result.before), afterHash: persistedContentHash(repaired.result.after) },
             snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },
           }

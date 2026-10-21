@@ -6,6 +6,7 @@ import { advanceTerminalCoverage, readTerminalCoverageState, terminalCoverageInp
 import { buildTerminalFactProofs } from '../../api/lib/agent/terminal-inheritance-chain.js'
 import { terminalQuoteRange } from '../../api/lib/agent/terminal-quote-range.js'
 import { currentTerminalReview, inspectTerminalReview, terminalCandidateSchema, terminalReviewInput } from '../../api/lib/agent/terminal-state-review.js'
+import { continuityReassessmentRequest } from '../../api/lib/agent/assessment-response-lifecycle.js'
 
 const checks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Checked the actual sequence.', findingIndexes: [] }))
 const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: ['The sensor remains offline.'] } })
@@ -19,6 +20,35 @@ const raw = (terminalVerdicts: unknown[], semanticChecks: unknown = checks, term
   JSON.stringify({ findings: [], semanticChecks, terminalVerdicts, ...(terminalDispositions ? { terminalDispositions } : {}) })
 
 describe('fresh terminal fact evidence v2', () => {
+  it('gives the critic the actual strict response schema, including the basis enum', () => {
+    const prompt = terminalReviewInput(candidate, evidence('The sensor remains offline.'))
+    const line = prompt.split('\n').find(item => item.startsWith('terminalVerdicts JSON Schema: '))!
+    const contract = JSON.parse(line.slice('terminalVerdicts JSON Schema: '.length))
+    expect(contract).toMatchObject({ type: 'array', maxItems: 200, items: { type: 'object', additionalProperties: false,
+      properties: { basis: { type: 'string', enum: ['current', 'inherited'] } }, required: expect.arrayContaining(['path', 'verdict', 'basis', 'sourceEvidence']) } })
+    expect(terminalReviewInput(candidate, evidence('The sensor remains offline.', 1))).not.toContain('terminalVerdicts JSON Schema: ')
+  })
+
+  it('pinpoints an explanation placed in basis and forwards it to the bounded reassessment', () => {
+    const content = 'The sensor remains offline.', bodies = { previous: null, current: content, terminalEvidence: evidence(content) }
+    const response = raw([{ ...verdict('c0', content), basis: 'The body explicitly says the sensor is offline.' }])
+    const inspected = inspectContinuityResponse(response, bodies, true, 8, candidate)
+    expect(inspected.audit.classification).toBe('terminal_invalid')
+    expect(inspected.audit.terminalReviewDiagnostics).toEqual([{ code: 'verdict_schema_invalid', path: 'terminalVerdicts.0.basis' }])
+    expect(JSON.parse(inspected.audit.rawResponse.content)).toBe(response)
+    const retry = continuityReassessmentRequest('system', terminalReviewInput(candidate, bodies.terminalEvidence), inspected, bodies)
+    expect(retry.content).toContain('"terminalReviewDiagnostics":[{"code":"verdict_schema_invalid","path":"terminalVerdicts.0.basis"}]')
+    expect(retry.content).toContain(inspected.audit.rawResponse.content)
+  })
+
+  it('valid basis encoding never promotes an independent unknown verdict to supported', () => {
+    const content = 'The sensor remains offline.', bodies = { previous: null, current: content, terminalEvidence: evidence(content) }
+    const response = raw([verdict('c0', content, 'exitState.knowledge.0', 'unknown')])
+    const inspected = inspectContinuityResponse(response, bodies, true, 8, candidate)
+    expect(inspected.audit.classification).toBe('complete')
+    expect(currentTerminalReview({ terminalCandidate: candidate, independentCheck: 'complete', continuityCriticResponse: inspected.audit }, content, bodies.terminalEvidence)).toMatchObject({ supported: false, verdicts: [{ verdict: 'unknown' }] })
+  })
+
   it.each(['complete-map', 'explicit-shared-reason'] as const)('accepts a lossless semantic envelope: %s', kind => {
     const input = kind === 'complete-map' ? Object.fromEntries(checks.map(check => [check.kind, check]))
       : { action_direction: 'clear', state_progression: 'clear', reason: 'Checked both relationships explicitly.' }

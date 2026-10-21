@@ -57,6 +57,7 @@ export const inheritedTerminalVerdictSchema = terminalVerdictSchema.omit({ segme
   sourceEvidence: z.array(z.object({ segmentId: z.string().regex(/^[cpt][0-9]+$/), quote: z.string().min(2).max(300) }).strict()).max(8),
   inheritance: z.object({ priorEndState: z.enum(['established', 'uncertain']), currentState: z.enum(['unchanged', 'changed', 'uncertain']) }).strict().optional(),
 }).strict()
+const inheritedVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(inheritedTerminalVerdictSchema).max(200), { io: 'input' }))
 
 export type TerminalQuoteAddressDiagnostic = { path: string; referenceIndex: number; originalSegmentId: string; actualSegmentId?: string;
   reason: 'relocated' | 'unknown_segment' | 'wrong_source' | 'quote_missing' | 'quote_ambiguous' | 'quote_not_in_single_segment' | 'carried_quote_mismatch' }
@@ -142,7 +143,7 @@ export function terminalClaims(candidate: TerminalCandidate) {
 
 export function terminalReviewInput(candidate?: TerminalCandidate, context?: TerminalEvidenceContext): string {
   const input = terminalReviewClaimsInput(candidate, context) + terminalCoverageGuidance(context?.factCoverage)
-  if (context?.factCoverage?.version === 2) return input
+  if (context?.factCoverage?.version === 2) return `${input}\nterminalVerdicts JSON Schema: ${inheritedVerdictResponseContract}\nbasis is a source enum (${inheritedTerminalVerdictSchema.shape.basis.options.join(' | ')}), never an explanation. Use current for cN; use inherited for pN/tN and supply the explicit inheritance judgment. Keep every original verdict, including unknown.`
   return input && context?.quoteAddressProtocol === 1
     ? `${input}\n引用地址策略：quote 必须逐字不变且完整落在单个合法片段；优先给出正确 cN/pN。服务器只可将已存在的同来源错误编号定位到唯一逐字引文所在片段，不跨来源、不补造编号、不修改 tN；重复、跨片段或不存在的引文不能修复。` : input
 }
@@ -186,7 +187,11 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
       return terminalQuoteRange(ref, available)?.segmentIds ?? [ref.segmentId]
     }))] })) }
       : context ? null : z.array(terminalVerdictSchema).max(200).safeParse(record.terminalVerdicts)
-    if (!parsed?.success) return invalid('verdict_schema_invalid')
+    if (!parsed?.success) {
+      const issue = inherited && !inherited.success ? inherited.error.issues[0] : undefined
+      return invalid('verdict_schema_invalid', context?.factCoverage?.version === 2 && issue
+        ? ['terminalVerdicts', ...issue.path].join('.') : undefined)
+    }
     const claims = terminalClaims(candidate), verdicts = parsed.data
     const segments = [...continuitySourceSegments({ previous: null, current: content }), ...(context?.previous?.segments ?? []),
       ...(context?.previous?.carried ?? []).map(fact => ({ segmentId: fact.segmentId, quote: fact.anchors.map(anchor => anchor.quote).join('\n') }))]

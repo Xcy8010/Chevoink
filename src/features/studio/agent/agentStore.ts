@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { createAgentAuthorTextStream, projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
 import { advanceRunTiming, settleRunTiming } from '../../../../shared/agent-timing.js'
+import { qualityAppliedBodyChange } from '../../../../shared/agent-applied-body-change.js'
 
 import type {
   AgentAttachmentMeta,
@@ -397,6 +398,9 @@ function writeStoredAutoFollow(value: boolean) {
 
 /** 从工具事件提取变更条所需的章节/字数信息 */
 function activityFromDisplay(display: unknown): { label: string | null; chapterId: string | null; deltaChars: number | null; before?: string; after?: string } {
+  const applied = qualityAppliedBodyChange(display)
+  if (applied) return { label: applied.chapterTitle, chapterId: applied.chapterId, deltaChars: applied.after.length - applied.before.length,
+    before: applied.before, after: applied.after }
   if (display && typeof display === 'object' && 'kind' in display) {
     const payload = display as { kind: string; [key: string]: unknown }
     if (payload.kind === 'chapterDiff') {
@@ -437,7 +441,8 @@ function deriveSessionStateFromMessages(messages: AgentUIMessage[]): {
       if (part.status === 'success' && part.display?.kind === 'todoList' && message.runId === messages.at(-1)?.runId) {
         todos = part.display.items
       }
-      if (!WORKSPACE_WRITE_TOOLS.has(part.toolName) && part.display?.kind !== 'chapterDiff' && part.display?.kind !== 'planDiff') {
+      if (!WORKSPACE_WRITE_TOOLS.has(part.toolName) && part.display?.kind !== 'chapterDiff' && part.display?.kind !== 'planDiff'
+        && !(part.status === 'success' && qualityAppliedBodyChange(part.display))) {
         continue
       }
       const extracted = activityFromDisplay(part.display)
@@ -1287,8 +1292,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...(clearImport ? { phase: 'running' as const, ...withoutActiveSessionSignal(state) } : {}),
             ...todoUpdate,
             liveToolDrafts: Object.fromEntries(Object.entries(state.liveToolDrafts).filter(([callId]) => callId !== event.callId)),
-            workspaceActivities: [...state.workspaceActivities, ...(event.ok && (event.display?.kind === 'chapterDiff' || event.display?.kind === 'planDiff') && !state.workspaceActivities.some(activity => activity.callId === event.callId)
-              ? [{ callId: event.callId, toolName: 'body_edit', label: extracted.label ?? '正文变更', chapterId: extracted.chapterId, deltaChars: extracted.deltaChars, status: 'done' as const }] : [])].map((activity) =>
+            workspaceActivities: [...state.workspaceActivities, ...(event.ok && (event.display?.kind === 'chapterDiff' || event.display?.kind === 'planDiff' || qualityAppliedBodyChange(event.display)) && !state.workspaceActivities.some(activity => activity.callId === event.callId)
+              ? [{ callId: event.callId, toolName: qualityAppliedBodyChange(event.display) ? event.toolName : 'body_edit', label: extracted.label ?? '正文变更', chapterId: extracted.chapterId, deltaChars: extracted.deltaChars, status: 'done' as const }] : [])].map((activity) =>
               activity.callId === event.callId
                 ? {
                     ...activity,

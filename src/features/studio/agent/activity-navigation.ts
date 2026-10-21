@@ -1,6 +1,7 @@
 import type { AgentMessagePart } from '../../../../shared/contracts/index.js'
 import type { WorkspaceActivity } from './agentStore'
 import { getToolTargetTitle } from './tool-argument-view'
+import { qualityAppliedBodyChange } from '../../../../shared/agent-applied-body-change.js'
 
 type ToolPart = Extract<AgentMessagePart, { type: 'tool-call' }>
 
@@ -26,10 +27,11 @@ export function resolveActivityNavigation(activity: WorkspaceActivity, part?: To
   }
   // A deletion record is not an extant document to open.
   if (toolName.endsWith('_delete') || display?.kind === 'planDelete') return null
-  const title = getToolTargetTitle(display, args)
+  const applied = qualityAppliedBodyChange(display)
+  const title = applied?.chapterTitle || getToolTargetTitle(display, args)
   if (!title) return null
   const chapterId = display?.kind === 'chapterDiff' || display?.kind === 'chapterRef'
-    ? display.chapterId : toolName.startsWith('chapter_') ? activity.chapterId || text(args.chapterId) : null
+    ? display.chapterId : applied?.chapterId ?? (toolName.startsWith('chapter_') ? activity.chapterId || text(args.chapterId) : null)
   const planId = display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
     ? display.artifactId : toolName.startsWith('plan_') ? text(args.planId) : null
   if (!chapterId && !planId) return null

@@ -288,6 +288,8 @@ describe('严谨创作自动落实质量建议', () => {
   it('provides the patcher the original intent and read-only context, bound at write time', async () => {
     const f = fixture(true)
     const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(result.display).toMatchObject({ kind: 'qualityReport', appliedBodyChange: { version: 1, chapterId: 'c',
+      before: f.bundle.chapter.content, after: '修订正文', sourceRevision: 1, targetRevision: 2 } })
     expect(result.semanticTransition).toMatchObject({ targetId: 'chapter:c', beforeHash: expect.stringMatching(/^[a-f0-9]{64}$/u), afterHash: expect.stringMatching(/^[a-f0-9]{64}$/u) })
     expect(result.semanticTransition?.beforeHash).not.toBe(result.semanticTransition?.afterHash)
     expect(f.model.mock.calls[0][1]).toContain(f.bundle.originalRequest!)

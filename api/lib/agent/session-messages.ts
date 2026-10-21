@@ -17,6 +17,7 @@ import { getActiveRunIdBySession, hasActiveRunInSession } from './active-runs.js
 import { publishDurableEvents } from './runtime-event-projection.js'
 import { MAIN_RUN_FILTER, prepareChildGrantDeletion } from './runtime-child.js'
 import { loadMessageTimings } from './message-timing.js'
+import { projectLegacyQualityBodyChanges } from './quality-body-change-history.js'
 
 const historyRunState = { select: { runtimeProtocolVersion: true, status: true, finishedAt: true, taskRoot: { select: { status: true } },
   goalExecution: { select: { goalId: true, trigger: true } },
@@ -214,7 +215,7 @@ export async function listLoopSessionMessages(
 
     const timings = await loadMessageTimings(userId, sessionId, [...pageRunIds, ...records.map(record => record.runId)])
     const pagedMessages: AgentUIMessage[] = []
-    for (const record of records) {
+    for (const record of await projectLegacyQualityBodyChanges(userId, records)) {
       const stripped = visibleHistoryParts(record.parts as unknown as AgentMessagePart[], record.run)
       pagedMessages.push({
         id: record.id,
@@ -280,7 +281,7 @@ export async function listLoopSessionMessages(
 
   const timings = await loadMessageTimings(userId, sessionId, records.map(record => record.runId))
   const messages: AgentUIMessage[] = []
-  for (const record of records) {
+  for (const record of await projectLegacyQualityBodyChanges(userId, records)) {
     const stripped = visibleHistoryParts(record.parts as unknown as AgentMessagePart[], record.run)
     messages.push({
       id: record.id,

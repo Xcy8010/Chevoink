@@ -189,6 +189,8 @@ export type AgentToolDisplayPayload =
     }
   | {
       kind: 'qualityReport'
+      /** Exact server-applied prose, for workspace accounting only; never an author review proposal. */
+      appliedBodyChange?: { version: 1; chapterId: EntityId; chapterTitle: string; before: string; after: string; sourceRevision: number; targetRevision: number }
       reportId: EntityId
       chapterId: EntityId
       chapterRevision: number
