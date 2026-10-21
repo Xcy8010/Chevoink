@@ -17,6 +17,7 @@ export const terminalCarriedFactSchema = z.object({ segmentId: z.string().regex(
 export type TerminalCarriedFact = z.infer<typeof terminalCarriedFactSchema>
 export const terminalEvidenceContextSchema = z.object({
   protocol: z.union([z.literal(1), z.literal(2)]),
+  quoteAddressProtocol: z.literal(1).optional(),
   current: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash }).strict(),
   previous: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash,
     start: z.number().int(), end: z.number().int(), joinedStart: z.number().int(), joinedEnd: z.number().int(),
@@ -35,13 +36,18 @@ export function terminalEvidenceVersion(spec: unknown): 1 | 2 | undefined {
   const value = spec as { scope?: { terminalEvidenceProtocol?: unknown } } | null
   return value?.scope?.terminalEvidenceProtocol === 2 ? 2 : value?.scope?.terminalEvidenceProtocol === 1 ? 1 : undefined
 }
+export function terminalQuoteAddressVersion(spec: unknown): 1 | undefined {
+  const value = spec as { scope?: { terminalQuoteAddressProtocol?: unknown } } | null
+  return value?.scope?.terminalQuoteAddressProtocol === 1 ? 1 : undefined
+}
 
 /** Derive proof addresses from the actual active predecessor, not a bridge
  * summary. A 300-character span crossing chapter boundaries cannot inherit. */
 export function terminalEvidenceContext(chapter: { id: string; revision: number; orderIndex: number; content: string },
-  source: Awaited<ReturnType<typeof readCompilerContinuitySource>>, version: 1 | 2 = source && 'terminalInheritance' in source ? 2 : 1): TerminalEvidenceContext {
+  source: Awaited<ReturnType<typeof readCompilerContinuitySource>>, version: 1 | 2 = source && 'terminalInheritance' in source ? 2 : 1,
+  quoteAddressProtocol?: 1): TerminalEvidenceContext {
   const previous = source && 'preceding' in source ? source.preceding.at(-1) : undefined
-  return { protocol: version, current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
+  return { protocol: version, ...(quoteAddressProtocol === 1 ? { quoteAddressProtocol } : {}), current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
     contentHash: runtimeJson({ content: chapter.content }).hash }, previous: previous ? {
     id: previous.id, revision: previous.revision, orderIndex: previous.orderIndex, contentHash: previous.contentHash,
     start: previous.start, end: previous.end, joinedStart: previous.joinedStart, joinedEnd: previous.joinedEnd,

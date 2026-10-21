@@ -9,7 +9,8 @@ import { compilerContinuityCoverage } from './compiler-continuity-contract.js'
 import { activeChapterScope } from '../data/internal.js'
 import { terminalCandidateSchema, readTerminalCandidate } from './terminal-state-review.js'
 import { continuitySourceScopeSchema } from './continuity-source-authority.js'
-import { terminalEvidenceContextSchema, terminalEvidenceContext } from './terminal-evidence-context.js'
+import { terminalEvidenceContextSchema, terminalEvidenceContext, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
+import { readOriginalTaskRequest } from './original-request.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 /** Authenticate only this exact two-request tool interval. A matching action
@@ -106,7 +107,10 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   if (chainProtocol) source = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, 11)
   const coverage = compilerContinuityCoverage({ ...coverageInput, source }, chainProtocol ? 11 : frozen.parserVersion === 8 ? 10 : frozen.parserVersion === 7 ? 9 : 8)
   let sourceMatches = bodies.previous === (source?.content ?? null) && frozen.bindingHash === runtimeJson(coverage).hash
-  if (chainProtocol) sourceMatches &&= runtimeJson(bodies.terminalEvidence).hash === runtimeJson(terminalEvidenceContext(chapter, source, 2)).hash
+  if (chainProtocol) {
+    const original = await readOriginalTaskRequest(tx, { ...subject, runId: call.runId })
+    sourceMatches &&= runtimeJson(bodies.terminalEvidence).hash === runtimeJson(terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original.spec))).hash
+  }
   if (!sourceMatches && !chainProtocol) {
     // A proven non-dispatch may have frozen the previous single-source
     // protocol. Verify those exact bytes; the returned NEW admission still

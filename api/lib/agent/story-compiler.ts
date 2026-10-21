@@ -1,5 +1,5 @@
 import { readCompilerContinuitySource } from './compiler-continuity-source.js'
-import { terminalEvidenceContext } from './terminal-evidence-context.js'
+import { terminalEvidenceContext, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
 import { buildTerminalFactProofs } from './terminal-inheritance-chain.js'
 import { continuityRecheckBaseline } from './continuity-review-context.js'
 import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision } from './writing-scope.js'
@@ -838,6 +838,7 @@ export async function commitChapterBridge(input: {
   }
   const orderedScenes = [...compilation.sceneTasks].sort((a, b) => a.ordinal - b.ordinal)
   const probeRunId = input.runId ?? compilation.runId
+  const terminalAddressProtocol = probeRunId ? terminalQuoteAddressVersion((await readOriginalTaskRequest(db, { ...input, runId: probeRunId })).spec) : undefined
   const { readChapterReviewReadiness, readCurrentCompilerContinuity, terminalReviewStateHash, recordChapterReviewDecisions, chapterReviewDecisionGuidance, lockChapterReviewDecisions } = await import('./chapter-review-guard.js')
   const currentContinuityReview = readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, source)
   let readiness = probeRunId ? await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id) : null
@@ -900,7 +901,7 @@ export async function commitChapterBridge(input: {
   const proposedTerminal = terminalCandidateSchema.parse({ exitState: input.exitState, lastUnfinishedAction: input.lastUnfinishedAction })
   const reviewedCandidate = readTerminalCandidate(compilation.validation)
   const terminalReview = currentTerminalReview(compilation.validation, chapter.content,
-    (currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 ? terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, currentContinuityReview.coverage.protocolVersion === 11 ? 2 : 1) : undefined)
+    (currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 ? terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, currentContinuityReview.coverage.protocolVersion === 11 ? 2 : 1, terminalAddressProtocol) : undefined)
   if (reviewedCandidate || terminalClaims(proposedTerminal).length) {
     if (!currentContinuityReview.assessment || !reviewedCandidate || !terminalReview?.supported
       || runtimeJson(reviewedCandidate).hash !== runtimeJson(proposedTerminal).hash) {
@@ -939,7 +940,7 @@ export async function commitChapterBridge(input: {
   const terminalFactProofs = currentContinuityReview.coverage.protocolVersion === 11 && terminalReview?.supported
     ? buildTerminalFactProofs({ compilationId: compilation.id, chapter: { ...compilation.chapter, ...chapter }, validation: compilation.validation,
       stateHash: terminalReviewStateHash(sameTerminal ? compilation.bridge : { ...compilation.bridge, ...bridgeData }, orderedScenes),
-      evidence: terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, 2), review: terminalReview }) : undefined
+      evidence: terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, 2, terminalAddressProtocol), review: terminalReview }) : undefined
   if (sameTerminal && terminalContext.terminalContentHash === terminalContentHash && terminalContext.terminalCandidateHash === terminalCandidateHash) {
     if (terminalFactProofs && runtimeJson({ facts: terminalContext.terminalFactProofs ?? null }).hash !== runtimeJson({ facts: terminalFactProofs }).hash) {
       await db.storyCompilation.update({ where: { id: compilation.id }, data: { preparedContext: runtimeJson({ ...terminalContext, terminalFactProofs }).value } })

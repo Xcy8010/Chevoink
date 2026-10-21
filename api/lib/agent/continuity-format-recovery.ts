@@ -5,7 +5,7 @@ import { parseQualityJsonObject } from './quality-evidence.js'
 import { resolveContinuitySources, type ContinuityBodies, type ContinuitySourceRelocation } from './continuity-review-context.js'
 import { unlocatedContinuityEvidence } from './continuity-finding-authority.js'
 import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './continuity-source-authority.js'
-import { inspectTerminalReview, type TerminalCandidate } from './terminal-state-review.js'
+import { inspectTerminalReview, terminalQuoteAddressDiagnostics, type TerminalCandidate } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
 import { validContinuitySemanticChecks } from './terminal-evidence-context.js'
 
@@ -103,6 +103,7 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
   if (classification === 'complete' && parserVersion === 8 && (!bodies?.terminalEvidence || !validContinuitySemanticChecks(record?.semanticChecks, findings))) classification = 'semantic_invalid'
   if (classification === 'complete' && terminalCandidate && (!bodies || !inspectTerminalReview(terminalCandidate, bodies.current, raw, responseComplete, parserVersion === 8 ? bodies.terminalEvidence : undefined))) classification = 'terminal_invalid'
   const audit = { version: 1, parserVersion, classification, unwrapped, ...(parserVersion >= 4 ? { sourceRelocations } : {}),
+    ...(parserVersion === 8 && bodies?.terminalEvidence?.quoteAddressProtocol === 1 ? { terminalAddressDiagnostics: terminalQuoteAddressDiagnostics(raw, bodies.current, bodies.terminalEvidence) } : {}),
     ...(parserVersion >= 7 && sourceScope ? { sourceScope } : {}),
     ...(parserVersion === 8 && bodies?.terminalEvidence ? { terminalEvidence: bodies.terminalEvidence } : {}),
     ...(terminalCandidate ? { terminalCandidate, terminalContentHash: bodies ? runtimeJson({ content: bodies.current }).hash : null } : {}),

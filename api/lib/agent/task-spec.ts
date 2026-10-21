@@ -244,6 +244,7 @@ export function buildTaskSpec(input: {
   reviewProtocol?: 1
   continuityEvidenceProtocol?: 1
   terminalEvidenceProtocol?: 1 | 2
+  terminalQuoteAddressProtocol?: 1
   localEditProtocol?: 1
   /** Internal fresh human admission only; not exposed in a request schema. */
   researchAdmission?: 1
@@ -300,6 +301,7 @@ export function buildTaskSpec(input: {
       ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}),
       ...(input.continuityEvidenceProtocol ? { continuityEvidenceProtocol: input.continuityEvidenceProtocol } : {}),
       ...(input.terminalEvidenceProtocol ? { terminalEvidenceProtocol: input.terminalEvidenceProtocol } : {}),
+      ...(input.terminalQuoteAddressProtocol ? { terminalQuoteAddressProtocol: input.terminalQuoteAddressProtocol } : {}),
       ...(input.localEditProtocol ? { localEditProtocol: input.localEditProtocol } : {}) },
     goals: [input.prompt.trim().slice(0, 1000) || '继续完成上一轮任务'],
     hardConstraints: directives

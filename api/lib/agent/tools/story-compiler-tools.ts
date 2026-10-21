@@ -1,7 +1,7 @@
 import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { retainedFindings } from './chapter-arguments.js'
 import { readTerminalCandidate, terminalCandidateSchema, terminalReviewInput, currentTerminalReview, terminalReviewFailure, type TerminalCandidate } from '../terminal-state-review.js'
-import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalEvidenceContext, continuitySemanticRule } from '../terminal-evidence-context.js'
+import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, continuitySemanticRule } from '../terminal-evidence-context.js'
 import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
 import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '../continuity-format-recovery.js'
@@ -673,7 +673,12 @@ export const chapterBridgeGetTool = defineTool({
     if (!compilation?.bridge) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND',
       output: `当前任务没有可读取的指定 Chapter Bridge，compilationId 不能使用章节或任务合同编号。${compilation ? '编译缺少章节桥，身份异常需核对，不能重建绕过。' : await missingCompilationGuidance(db, ctx, scope)}`, summary: '未找到章节编译状态' }
     const bridge = compilation.bridge
+    const committedBridge = !!bridge.committedAt && bridge.targetRevision !== null
+    const bridgeState = committedBridge
+      ? `本章已提交终态 r${bridge.targetRevision}${compilation.chapter && compilation.chapter.revision !== bridge.targetRevision ? '（当前正文已变化，须重新检查提交）' : ''}`
+      : `入章承接${bridge.fromChapterId ? `（前章 ${bridge.fromChapterId}@r${bridge.sourceRevision}）` : '（无前章）'}；本章终态尚未提交`
     const items = [
+      bridgeState,
       bridge.lastUnfinishedAction ? `未完成动作：${bridge.lastUnfinishedAction}` : '未完成动作：无',
       `地点/时间：${bridge.location || '未标注'} / ${bridge.storyTime || '未标注'}`,
       `人物已知：${asStrings(bridge.knowledgeState).join('；') || '未记录'}`,
@@ -694,7 +699,7 @@ export const chapterBridgeGetTool = defineTool({
       ...(currentQuality && review?.decisionFeedback && review.decisionFeedbackSnapshotHash === qualityDecisionSnapshotHash(report.findings)
         ? { reviewDecisionFeedback: review.decisionFeedback } : {}),
       summary: `读取第 ${compilation.targetOrderIndex} 章章节桥`,
-      display: { kind: 'storyCompiler', compilationId: compilation.id, phase: compilation.stage, title: '章节桥', detail: `第 ${compilation.targetOrderIndex} 章 · ${compilation.stage}`, items },
+      display: { kind: 'storyCompiler', compilationId: compilation.id, phase: compilation.stage, title: committedBridge ? '章节桥 · 已提交终态' : '章节桥 · 入章承接', detail: `第 ${compilation.targetOrderIndex} 章 · ${compilation.stage}`, items },
     }
   },
 })
@@ -903,7 +908,7 @@ export const continuityValidateTool = defineTool({
     const bridge = compilation.bridge
     const sourceChapter = await readCompilerContinuitySource(prisma, ctx, chapter, bridge.fromChapterId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
     const terminalCandidate = args.terminalState ?? readTerminalCandidate(compilation.validation)
-    const terminalEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion) : undefined
+    const terminalEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec)) : undefined
     const bodies = { previous: sourceChapter?.content ?? null, current: chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }
     if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
     const coverage = compilerContinuityCoverage({ chapter, bridge, sceneTasks: compilation.sceneTasks, source: sourceChapter, focus: args.focus, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
@@ -1186,8 +1191,9 @@ export const chapterBridgeCommitTool = defineTool({
     // Omitted state remains unknown, including after a revision diverged from BEAT.
     const commitSource = await readCompilerContinuitySource(db, ctx, compilation.chapter, compilation.bridge.fromChapterId, storedContinuityProtocol(compilation.validation))
     const commitAudit = (compilation.validation as { continuityCriticResponse?: { parserVersion?: number } } | null)?.continuityCriticResponse
+    const commitRequest = await readOriginalTaskRequest(db, ctx)
     const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content,
-      commitAudit?.parserVersion === 8 ? terminalEvidenceContext(compilation.chapter, commitSource, storedContinuityProtocol(compilation.validation) === 11 ? 2 : 1) : undefined)
+      commitAudit?.parserVersion === 8 ? terminalEvidenceContext(compilation.chapter, commitSource, storedContinuityProtocol(compilation.validation) === 11 ? 2 : 1, terminalQuoteAddressVersion(commitRequest.spec)) : undefined)
     const lastExit = storyStateSchema.parse(args.exitState ?? args.terminalState?.exitState ?? reviewedTerminal?.candidate.exitState ?? {})
     const paragraphs = compilation.chapter.content.split(/\n\s*\n/u).map(text => text.trim()).filter(Boolean)
     const terminal = {

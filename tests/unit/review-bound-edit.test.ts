@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { freezeLocalEditBoundary, localEditGuidance, originalLocalEditBoundary } from '../../api/lib/agent/local-edit-scope.js'
-import { reviewBoundEditAllowed, type ReviewBoundEvidence } from '../../api/lib/agent/review-bound-edit.js'
+import { reviewBoundEditAllowed, unprovenReviewBoundPatchIndexes, type ReviewBoundEvidence } from '../../api/lib/agent/review-bound-edit.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { taskSpecSchema, type TaskSpec } from '../../shared/contracts/task-spec-contracts.js'
 import type { Prisma } from '@prisma/client'
@@ -27,6 +27,12 @@ function fixture() {
   return { boundary, evidence, range, after: body.replace('向左转', '向右转') }
 }
 describe('finding-conditioned local repair effects', () => {
+  it('identifies the unproven patch without authorizing any part of a rejected batch', () => {
+    const f = fixture(), ranges = [f.range, { start: 0, end: 1, newText: '窗' }]
+    expect(unprovenReviewBoundPatchIndexes(body, f.evidence, ranges)).toEqual([1])
+    expect(reviewBoundEditAllowed(f.boundary, chapter, f.evidence, f.after, ranges)).toBe(false)
+    expect(unprovenReviewBoundPatchIndexes(body, f.evidence, [f.range])).toEqual([])
+  })
   function frozenSpec() {
     const f = fixture()
     const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt, localEditProtocol: 1 })

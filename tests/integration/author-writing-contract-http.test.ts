@@ -25,7 +25,7 @@ import { assertChapterReviewRevision, readChapterReviewReadiness } from '../../a
 import { saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
-import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
+import { terminalEvidenceContext, terminalQuoteAddressVersion } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
@@ -114,6 +114,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
   it.each([false, true])('completes current checks and real commit with conditional repair=%s, preserving prior chapters', repair => fixture(reviewRequests[0], async (ctx, before) => {
     expect((await prepare(ctx)).outcome).not.toBe('failed')
     const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: ctx.runId } })
+    expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ display: { title: '章节桥 · 入章承接' } })
     await saveSceneTasks({ ...ctx, compilationId: compilation.id, tasks: [{ purpose: '核对现有场景', entryState: { location: '长廊' },
       goal: '等待门开', obstacle: '门关着', choice: '等候', cost: '时间流逝', turn: '听见指令', exitState: { location: '长廊' },
       styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
@@ -122,7 +123,8 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
       const source = await readCompilerContinuitySource(prisma, ctx, chapter, saved.bridge!.fromChapterId, 11)
-      const evidence = terminalEvidenceContext(chapter, source, 2)
+      const original = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
+      const evidence = terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original))
       // Synthetic provider RESPONSE only; exercise the actual fresh producer /
       // parser / coverage / commit contract without a provider dispatch.
       const response = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear',
@@ -135,7 +137,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       expect(validation.errorCount).toBe(0)
       await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...validation, continuityCriticResponse: inspected.audit }).value } })
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation)
-        .toMatchObject({ coverage: { protocolVersion: 11 }, continuityCriticResponse: { parserVersion: 8 } })
+        .toMatchObject({ coverage: { protocolVersion: 11 }, continuityCriticResponse: { parserVersion: 8, terminalEvidence: { quoteAddressProtocol: 1 } } })
       const context = await buildHumanityQualityContext(ctx.userId, ctx.novelId, chapter.id, ctx.runId)
       const text = '向左走', start = chapter.content.indexOf(text)
       const sha = (content: string) => createHash('sha256').update(content).digest('hex')
@@ -179,6 +181,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })
     expect(final).toMatchObject({ status: 'completed', stage: 'commit', bridge: { toChapterId: chapter.id, targetRevision: chapter.revision } })
     expect(final.bridge?.committedAt).toBeInstanceOf(Date)
+    expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ display: { title: '章节桥 · 已提交终态' } })
     expect(chapter.content).toBe(repair ? body.replace('向左走', '向右走') : body)
     expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(item => item.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
   }))
@@ -193,7 +196,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
   }))
   it.each(requests)('binds a qualified chapter and two local islands without touching read-context chapters: %s', start => fixture(start + concerns, async (ctx, before) => {
     const original = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
-    expect(original).toMatchObject({ intent: 'revise', scope: { writingTargetProtocol: 2,
+    expect(original).toMatchObject({ intent: 'revise', scope: { writingTargetProtocol: 2, terminalQuoteAddressProtocol: 1,
       writing: { kind: 'bounded', targets: [{ chapterId: before[3].id, orderIndex: 4, volumeId: before[3].volumeId, positionInVolume: 2 }] },
       writingInterpretation: { version: 2, intent: 'revise', excludedChapterIds: expect.arrayContaining(before.slice(0, 3).map(chapter => chapter.id)) },
       localEditBoundary: { version: 2, kind: 'bounded', regions: [{ text: '向左走。' }, { text: '向右转' }] } } })

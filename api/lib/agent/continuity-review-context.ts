@@ -35,6 +35,28 @@ export function continuitySourceInput(bodies: ContinuityBodies) {
 }
 
 export type ContinuitySourceRelocation = { findingIndex: number; referenceIndex: number; source: 'previous' | 'current'; originalSegmentId: string; actualSegmentId: string; quoteHash: string }
+
+/** Blocks are exact, contiguous source text; separate blocks never join across
+ * an unavailable chapter or span. Uniqueness also counts overlapping matches
+ * and matches crossing segment boundaries, which cannot supply an address. */
+export function locateUniqueContinuityQuote(quote: string, sourceBlocks: readonly string[],
+  segments: ReadonlyArray<{ segmentId: string; quote: string }>):
+  | { valid: true; segmentId: string; quoteHash: string }
+  | { valid: false; reason: 'quote_missing' | 'quote_ambiguous' | 'quote_not_in_single_segment' } {
+  if (!quote.length) return { valid: false, reason: 'quote_missing' }
+  let occurrences = 0
+  for (const block of sourceBlocks) {
+    const start = block.indexOf(quote)
+    if (start < 0) continue
+    if (++occurrences > 1 || block.indexOf(quote, start + 1) >= 0) return { valid: false, reason: 'quote_ambiguous' }
+  }
+  if (!occurrences) return { valid: false, reason: 'quote_missing' }
+  const matches = segments.filter(segment => segment.quote.includes(quote))
+  return matches.length === 1
+    ? { valid: true, segmentId: matches[0].segmentId, quoteHash: createHash('sha256').update(quote).digest('hex') }
+    : { valid: false, reason: 'quote_not_in_single_segment' }
+}
+
 export function resolveContinuitySources(item: unknown, bodies: ContinuityBodies, parserVersion: 3 | 4 = 3,
   relocations: ContinuitySourceRelocation[] = [], findingIndex = 0): unknown {
   if (!item || typeof item !== 'object' || Array.isArray(item)) return item
@@ -52,11 +74,10 @@ export function resolveContinuitySources(item: unknown, bodies: ContinuityBodies
       if (parserVersion === 4 && (ref.source === 'previous' || ref.source === 'current') && typeof ref.segmentId === 'string'
         && new RegExp(`^${ref.source === 'previous' ? 'p' : 'c'}[0-9]+$`, 'u').test(ref.segmentId)
         && typeof ref.quote === 'string' && ref.quote.length) {
-        const body = bodies[ref.source] ?? '', start = body.indexOf(ref.quote)
-        const matches = segments.filter(part => part.source === ref.source && part.quote.includes(ref.quote as string))
-        if (start >= 0 && body.indexOf(ref.quote, start + 1) < 0 && matches.length === 1) {
+        const located = locateUniqueContinuityQuote(ref.quote, [bodies[ref.source] ?? ''], segments.filter(part => part.source === ref.source))
+        if (located.valid) {
           relocations.push({ findingIndex, referenceIndex, source: ref.source, originalSegmentId: ref.segmentId,
-            actualSegmentId: matches[0].segmentId, quoteHash: createHash('sha256').update(ref.quote).digest('hex') })
+            actualSegmentId: located.segmentId, quoteHash: located.quoteHash })
           return { source: ref.source, quote: ref.quote }
         }
       }

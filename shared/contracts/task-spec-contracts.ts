@@ -61,6 +61,8 @@ export const taskScopeSchema = z.object({
   /** New human admission requires factual claims anchored in the current manuscript. */
   continuityEvidenceProtocol: z.literal(1).optional(),
   terminalEvidenceProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
+  /** Fresh admission permits exact, unique same-source terminal quote addressing. */
+  terminalQuoteAddressProtocol: z.literal(1).optional(),
   /** Fresh empty-book admission may bind one explicit first-chapter answer. */
   writingClarificationProtocol: z.literal(1).optional(),
   localEditBoundary: localEditBoundarySchema.optional(),
