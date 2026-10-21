@@ -16,6 +16,7 @@ import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continu
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { readContinuedContinuityEvidence } from '../../api/lib/agent/continued-continuity-evidence.js'
+import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 
 const runtime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1',
   apiKey: 'fixture-only', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
@@ -59,11 +60,11 @@ async function retryFixture(f: Parameters<Parameters<typeof fixture>[0]>[0], con
 }
 
 describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', () => {
-  it.each(['known-new-body', 'known-new-candidate', 'delayed-call-persistence', 'unknown-first', 'unknown-second', 'incomplete-second', 'focus-only', 'revision-only'] as const)(
+  it.each(['known-new-body', 'known-new-body-no-candidate', 'known-new-candidate', 'delayed-call-persistence', 'unknown-first', 'unknown-second', 'incomplete-second', 'focus-only', 'revision-only'] as const)(
     'a known completed failure fences its reviewed input without resetting the original contract or fees: %s', scenario => fixture(async f => {
       try {
         const { ctx, compilation } = await retryFixture(f, new AbortController())
-        const candidate = { exitState: { action: '门打开' } }
+        const candidate = scenario === 'known-new-body-no-candidate' ? undefined : terminalCandidateSchema.parse({ exitState: { action: '门打开' } })
         const fetcher = vi.fn(async () => {
           if (scenario === 'unknown-first') throw new TypeError('synthetic unknown first request')
           if (fetcher.mock.calls.length === 1) return completion(JSON.stringify({ findings: [finding] }))
@@ -85,15 +86,15 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
         expect(sends).toBe(scenario === 'unknown-first' ? 1 : 2)
         await expect(continuityValidateTool.execute({ ...ctx, callId: 'same-input' }, { compilationId: compilation.id, terminalState: candidate }))
           .rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
-        const changedBody = scenario === 'known-new-body' || scenario === 'delayed-call-persistence' || scenario.startsWith('unknown') || scenario === 'incomplete-second'
+        const changedBody = scenario.startsWith('known-new-body') || scenario === 'delayed-call-persistence' || scenario.startsWith('unknown') || scenario === 'incomplete-second'
         if (changedBody || scenario === 'revision-only') await prisma.chapter.update({ where: { id: f.chapterId },
           data: { revision: { increment: 1 }, ...(changedBody ? { content: body + '人物放下钥匙。', wordCount: body.length + 7 } : {}) } })
         fetcher.mockImplementation(async () => completion(JSON.stringify({ findings: [], terminalVerdicts: [
           { path: 'exitState.action', verdict: 'supported', segmentIds: ['c0'] }] })))
         const next = await continuityValidateTool.execute({ ...ctx, callId: 'changed-input' }, { chapterId: f.chapterId,
-          terminalState: scenario === 'known-new-candidate' ? { exitState: { action: '人物走进门' } } : candidate,
+          terminalState: scenario === 'known-new-candidate' ? terminalCandidateSchema.parse({ exitState: { action: '人物走进门' } }) : candidate,
           ...(scenario === 'focus-only' ? { focus: '核对当前正文' } : {}) }).catch(error => ({ outcome: 'failed', failureCode: error.code }))
-        const allowed = scenario === 'known-new-body' || scenario === 'known-new-candidate' || scenario === 'delayed-call-persistence'
+        const allowed = scenario.startsWith('known-new-body') || scenario === 'known-new-candidate' || scenario === 'delayed-call-persistence'
         expect(fetcher).toHaveBeenCalledTimes(sends + (allowed ? 1 : 0))
         expect(next.outcome === 'failed').toBe(!allowed)
         const after = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
@@ -123,13 +124,13 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
       vi.stubGlobal('fetch', fetcher)
       await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call',
         payload: { callId: ctx.callId, toolName: 'continuity_validate', args: { compilationId: compilation.id } } } })
-      first = continuityValidateTool.execute(ctx, { compilationId: compilation.id, terminalState: { exitState: { action: '门打开' } } }).catch(error => error)
+      first = continuityValidateTool.execute(ctx, { compilationId: compilation.id, terminalState: terminalCandidateSchema.parse({ exitState: { action: '门打开' } }) }).catch(error => error)
       await waiting
       const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
       expect(before).toHaveLength(1)
       expect(before[0]).toMatchObject({ billingStatus: 'settled', reservedCreditMilli: 0 })
       await expect(continuityValidateTool.execute({ ...ctx, callId: 'candidate-during-primary' },
-        { compilationId: compilation.id, terminalState: { exitState: { action: '人物走进门' } } }))
+        { compilationId: compilation.id, terminalState: terminalCandidateSchema.parse({ exitState: { action: '人物走进门' } }) }))
         .rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
       expect(fetcher).toHaveBeenCalledOnce()
       expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)

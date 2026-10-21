@@ -171,7 +171,7 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
     const subjectChanged = frozen?.targetType === input.targetType && frozen.targetId === input.targetId
       && frozen.chapterId === input.chapterId && typeof frozenBodies?.current === 'string'
       && (frozenBodies.current !== input.bodies.current
-        || runtimeJson(frozen.terminalCandidate ?? null).hash !== runtimeJson(input.terminalCandidate ?? null).hash)
+        || runtimeJson({ terminalCandidate: frozen.terminalCandidate ?? null }).hash !== runtimeJson({ terminalCandidate: input.terminalCandidate ?? null }).hash)
     if (known && admission && meta.admissionId === admission.id && subjectChanged && typeof meta.callId === 'string') {
       // A primary response may be observed before the old chain claims its
       // second pass. Only its real terminal tool result closes that window.
