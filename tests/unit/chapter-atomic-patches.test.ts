@@ -3,6 +3,16 @@ import { composeChapterEdit } from '../../api/lib/agent/tools/chapter-patches.js
 import { chapterEditArguments } from '../../api/lib/agent/tools/chapter-arguments.js'
 
 describe('one immutable chapter patch batch', () => {
+  it('rejects all seven edits when only the third anchor changes punctuation, then accepts the corrected exact batch', () => {
+    const fragments = ['甲门锁着。', '乙灯亮着。', '「请稍等。」', '丙窗关着。', '丁箱封着。', '戊轮停着。', '己阀闭着。']
+    const original = fragments.join('\n\n')
+    const patches = fragments.map((oldText, index) => ({ oldText, newText: `修订${index + 1}。` }))
+    patches[2].oldText = '「请稍等」。'
+    expect(() => composeChapterEdit(original, { patches })).toThrow(expect.objectContaining({ code: 'CHAPTER_ANCHOR_CONFLICT', message: expect.stringMatching(/第\s*3\s*处/u) }))
+    expect(original).toBe(fragments.join('\n\n'))
+    patches[2].oldText = fragments[2]
+    expect(composeChapterEdit(original, { patches }).after).toBe(patches.map(item => item.newText).join('\n\n'))
+  })
   const before = '甲门锁着。乙灯亮着。丙箱关着。'
   it('resolves all offsets before variable length composition and retains untouched text', () => {
     const result = composeChapterEdit(before, { patches: [{ oldText: '甲门锁着', newText: '甲门已经打开' }, { oldText: '乙灯亮着', newText: '乙灯熄了' }] })

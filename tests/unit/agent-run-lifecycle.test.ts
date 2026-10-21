@@ -16,6 +16,7 @@ import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-
 import type { WritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 import { persistedContentHash } from '../../api/lib/agent/semantic-progress.js'
 import { toolFailureInputHash } from '../../api/lib/agent/tool-local-failure.js'
+import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 const mocks = vi.hoisted(() => ({
@@ -506,7 +507,7 @@ describe('server assessment fallback in the real execution loop', () => {
     const prepare = tool('story_compiler_prepare', async () => { state = { ...readiness('missing', 'complete'), compilationId: 'new-comp' }; return { output: '同章新编译' } }, false)
     mocks.tools = [check, prepare]
     queue(response('', [call('unknown', check.name, scenario === 'standalone' ? '{"chapterId":"c"}' : '{"compilationId":"comp"}'),
-      call('prepare', prepare.name), call('new-alias', check.name, '{"compilationId":"new-comp"}')]), response('检查结果尚未确认。'))
+      call('prepare', prepare.name), call('new-alias', check.name, '{"compilationId":"new-comp","terminalState":{"exitState":{"action":"corrected candidate"}}}')]), response('检查结果尚未确认。'))
     await run('写下一章')
     expect(check.execute).toHaveBeenCalledOnce()
     expect(prepare.execute).not.toHaveBeenCalled()
@@ -538,6 +539,29 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(commit.execute).toHaveBeenCalledOnce()
     expect(events().filter(event => event.type === 'tool.deferred' && event.callId.startsWith('repeat'))).toHaveLength(3)
     expect((mocks.runs.get('run')?.usage as { checkpoint: { toolRestrictions?: unknown[] } }).checkpoint.toolRestrictions ?? []).toEqual([])
+  })
+  it('lets an explicit corrected candidate at the same revision reach the persisted fence without editing prose or renewing checkpoint budgets', async () => {
+    let state = readiness('missing', 'complete', 8), checks = 0
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const check = tool('continuity_validate', async () => {
+      checks++
+      state = readiness(checks === 1 ? 'incomplete' : 'complete', 'complete', 8)
+      return checks === 1 ? { outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE', output: '原终态证明错绑，原始响应和费用保留' }
+        : { output: '原预算内的新候选已由持久化门禁核验' }
+    })
+    check.parameters = z.object({ compilationId: z.string(), terminalState: terminalCandidateSchema })
+    const commit = tool('chapter_bridge_commit', async () => { expect(state.ready).toBe(true); mocks.committedChapter.mockResolvedValue(true); return { output: '已提交' } }, false)
+    mocks.tools = [check, commit]
+    queue(response('', [call('bad-terminal', check.name, JSON.stringify({ compilationId: 'comp', terminalState: { exitState: { action: '旧候选' } } })),
+      call('corrected-terminal', check.name, JSON.stringify({ compilationId: 'comp', terminalState: { exitState: { action: '已核对候选' } } })),
+      call('commit', commit.name, '{"compilationId":"comp"}')]), response('已完成。'))
+    await run('写下一章')
+    expect(check.execute).toHaveBeenCalledTimes(2)
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(events().filter(event => event.type === 'tool.call' && event.toolName === check.name)).toHaveLength(2)
+    const checkpoint = (mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[]; resumeCount: number; compactionCount: number; writeProgress: number } }).checkpoint
+    expect(checkpoint.pendingReviews ?? []).toEqual([])
+    expect(checkpoint).toMatchObject({ resumeCount: 0, compactionCount: 0, writeProgress: 0 })
   })
   it.each(['CONTINUITY_EVIDENCE_UNLOCATED', 'CONTINUITY_REPORT_INCOMPLETE'])('%s clears the received pending call and records a deferred commit without a failed tool card and keeps the remaining batch', async failureCode => {
     let state = readiness('missing', 'complete')

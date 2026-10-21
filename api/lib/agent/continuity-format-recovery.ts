@@ -5,7 +5,7 @@ import { parseQualityJsonObject } from './quality-evidence.js'
 import { resolveContinuitySources, type ContinuityBodies, type ContinuitySourceRelocation } from './continuity-review-context.js'
 import { unlocatedContinuityEvidence } from './continuity-finding-authority.js'
 import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './continuity-source-authority.js'
-import { inspectTerminalReview, terminalQuoteAddressDiagnostics, type TerminalCandidate } from './terminal-state-review.js'
+import { inspectTerminalReview, terminalQuoteAddressDiagnostics, type TerminalCandidate, type TerminalReviewDiagnostic } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
 import { validContinuitySemanticChecks } from './terminal-evidence-context.js'
 
@@ -101,8 +101,11 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
   }
   if (raw.length > MAX_AUDIT_CHARS) classification = 'response_too_large'
   if (classification === 'complete' && parserVersion === 8 && (!bodies?.terminalEvidence || !validContinuitySemanticChecks(record?.semanticChecks, findings))) classification = 'semantic_invalid'
-  if (classification === 'complete' && terminalCandidate && (!bodies || !inspectTerminalReview(terminalCandidate, bodies.current, raw, responseComplete, parserVersion === 8 ? bodies.terminalEvidence : undefined))) classification = 'terminal_invalid'
+  const terminalReviewDiagnostics: TerminalReviewDiagnostic[] = []
+  if (classification === 'complete' && terminalCandidate && (!bodies || !inspectTerminalReview(terminalCandidate, bodies.current, raw, responseComplete,
+    parserVersion === 8 ? bodies.terminalEvidence : undefined, terminalReviewDiagnostics))) classification = 'terminal_invalid'
   const audit = { version: 1, parserVersion, classification, unwrapped, ...(parserVersion >= 4 ? { sourceRelocations } : {}),
+    ...(terminalReviewDiagnostics.length ? { terminalReviewDiagnostics } : {}),
     ...(parserVersion === 8 && bodies?.terminalEvidence?.quoteAddressProtocol === 1 ? { terminalAddressDiagnostics: terminalQuoteAddressDiagnostics(raw, bodies.current, bodies.terminalEvidence) } : {}),
     ...(parserVersion >= 7 && sourceScope ? { sourceScope } : {}),
     ...(parserVersion === 8 && bodies?.terminalEvidence ? { terminalEvidence: bodies.terminalEvidence } : {}),
@@ -110,4 +113,10 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
     ...(parserVersion >= 5 ? { candidateFindings, invalidSourceReferences } : {}), contentHash: createHash('sha256').update(raw).digest('hex'),
     characterCount: raw.length, rawResponse: { version: 1, encoding: 'json-string', content: JSON.stringify(raw.slice(0, MAX_AUDIT_CHARS)), complete: raw.length <= MAX_AUDIT_CHARS } }
   return { structured, findings, complete: structured && classification === 'complete', candidateFindings, invalidSourceReferences, audit }
+}
+
+/** Internal model observation only; public summaries and saved raw responses stay intact. */
+export function continuityFailureOutput(audit: { classification?: string; terminalReviewDiagnostics?: TerminalReviewDiagnostic[] } | undefined, fallback: string) {
+  if (audit?.classification !== 'terminal_invalid' || !audit.terminalReviewDiagnostics?.length) return fallback
+  return `${fallback}\n已接收独立响应，终态证据绑定未通过：${JSON.stringify(audit.terminalReviewDiagnostics)}。核对对应候选与冻结证据，使用准确的完整 terminalState 重检；保留正文、原预算及失败记录。`
 }

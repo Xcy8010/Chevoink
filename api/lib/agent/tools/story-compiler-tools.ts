@@ -5,7 +5,7 @@ import { terminalCoverageInput } from '../terminal-fact-coverage.js'
 import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, continuitySemanticRule } from '../terminal-evidence-context.js'
 import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
-import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '../continuity-format-recovery.js'
+import { inspectContinuityResponse, continuityUnlocatedCandidateCount, continuityFailureOutput } from '../continuity-format-recovery.js'
 import { hasContinuitySourceAuthority, continuitySourceAuthorityRule, continuityAuthorRequirements, compilerEvidenceScope, type ContinuitySourceScope } from '../continuity-source-authority.js'
 import { runContinuityEvidenceCorrection, claimLegacyContinuityCorrection, readLegacyContinuityCorrectionGate,
   claimContinuedContinuityAssessment, recordLegacyContinuityCorrectionObservation, recordLegacyContinuityAssessmentObservation } from '../continuity-response-correction.js'
@@ -750,7 +750,7 @@ export async function saveStandaloneContinuityReport(ctx: ToolContext, context: 
       content: unconfirmedContinuityOutput, summary: '独立连续性复核未完成', metadata: runtimeJson({ independentCheck: 'unavailable', chapterId: context.chapter.id,
         revision: context.chapter.revision, contextHash: context.contextHash, ...(contextProtocol >= 3 ? { sourceProvenance: current.sourceProvenance } : {}), criticResponse }).value } })
     return { outcome: 'failed', failureCode: criticResponse?.classification === 'source_invalid' ? 'CONTINUITY_EVIDENCE_UNLOCATED' : 'CONTINUITY_REPORT_INCOMPLETE',
-      summary: '独立连续性复核未完成', output: unconfirmedContinuityOutput }
+      summary: '独立连续性复核未完成', output: continuityFailureOutput(criticResponse, unconfirmedContinuityOutput) }
   }
   const cacheProtocol = contextProtocol >= 3 ? 3 : requirePair ? 2 : 1
   const cached = await readStandaloneContinuityReport(ctx, context.contextHash, focus, db, cacheProtocol)
@@ -1104,7 +1104,7 @@ export const continuityValidateTool = defineTool({
     if (criticFallback || result.independentCheck !== 'complete') return {
       outcome: 'failed' as const,
       failureCode: inspected.audit.classification === 'source_invalid' ? 'CONTINUITY_EVIDENCE_UNLOCATED' : criticFallback ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED',
-      output: unconfirmedContinuityOutput,
+      output: continuityFailureOutput(inspected.audit, unconfirmedContinuityOutput),
       summary: '独立连续性复核未完成',
     }
     const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }, chapter.content, terminalEvidence)

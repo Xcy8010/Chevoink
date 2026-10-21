@@ -2417,11 +2417,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }
         }
         let reviewDispatch: PendingReviewCall | undefined
+        let explicitTerminalCandidate = false
         if (STATE_SENSITIVE_VALIDATORS.has(call.name)) {
           const validator = tools.find(tool => tool.name === call.name)
           const args = reviewPreflightArgs(call, validator)
           const compilationId = args?.compilationId
           if (validator && args && validator.parameters.safeParse(args).success) {
+            explicitTerminalCandidate = call.name === 'continuity_validate' && args.terminalState !== undefined
             const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
               { userId: params.userId, novelId: params.novelId, runId }, typeof compilationId === 'string' ? compilationId : undefined))
             if (readiness && (typeof args.chapterId !== 'string' || args.chapterId === readiness.chapterId)) reviewDispatch = { compilationId: readiness.compilationId, chapterId: readiness.chapterId,
@@ -2482,7 +2484,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const attemptKey = reviewAttemptKey(reviewDispatch, reviewDispatch.toolName)
           const pendingKey = `${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`
           const unconfirmed = [...pendingReviews.values()].some(item => item.toolName === reviewDispatch.toolName && item.chapterId === reviewDispatch.chapterId)
-          if (unconfirmed || (automaticReviewAttempts.has(attemptKey) && settledReviewFailures.has(attemptKey))) {
+          // Explicit candidate corrections reach the authoritative persisted
+          // input/response/billing fence. The revision-only in-memory key cannot
+          // decide whether a candidate changed. Unknown work still blocks first.
+          if (unconfirmed || (!explicitTerminalCandidate && automaticReviewAttempts.has(attemptKey) && settledReviewFailures.has(attemptKey))) {
             const reason = unconfirmed ? '此前的检查请求结果尚未确认，未重放付费请求。'
               : '本次检查返回的报告尚未完成有效核验；检查自身的格式或引用问题不代表正文需要修改。保留检查结果与费用记录，不通过改稿重新触发同一检查。'
             deferToolProposal(call, reason, messageId, bus)

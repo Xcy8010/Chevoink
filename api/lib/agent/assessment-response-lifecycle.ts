@@ -164,6 +164,47 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
       && usage.every(row => knownAssessmentBilling(row) || isKnownTextRequestBilling(row) && row.billingStatus === 'not_dispatched')
     const explicitlyRetired = usage.length > 0 && usage.length === new Set(ids).size && (!unseenSecond || usage.some(row => retired.has(row.id)))
       && usage.every(row => knownAssessmentBilling(row) || retired.has(row.id))
+    // A completed, paid failure belongs to its exact reviewed input, not every
+    // later revision of the chapter. Changing focus/selectors/callId is not a
+    // new subject. Unknown dispatches and unseen second passes stay fenced.
+    const frozen = object(meta.input), frozenBodies = object(frozen?.bodies)
+    const subjectChanged = frozen?.targetType === input.targetType && frozen.targetId === input.targetId
+      && frozen.chapterId === input.chapterId && typeof frozenBodies?.current === 'string'
+      && (frozenBodies.current !== input.bodies.current
+        || runtimeJson(frozen.terminalCandidate ?? null).hash !== runtimeJson(input.terminalCandidate ?? null).hash)
+    if (known && admission && meta.admissionId === admission.id && subjectChanged && typeof meta.callId === 'string') {
+      // A primary response may be observed before the old chain claims its
+      // second pass. Only its real terminal tool result closes that window.
+      const events = await tx.agentRunEvent.findMany({ where: { runId: reservation.runId, type: { in: ['tool.call', 'tool.result'] },
+        payload: { path: ['callId'], equals: meta.callId } } })
+      const calls = events.filter(row => row.type === 'tool.call' && object(row.payload)?.toolName === 'continuity_validate')
+      const results = events.filter(row => row.type === 'tool.result' && object(row.payload)?.toolName === 'continuity_validate' && object(row.payload)?.ok === false)
+      const lastObservation = observations.reduce((date, row) => row.createdAt > date ? row.createdAt : date, reservation.createdAt)
+      // Events flush asynchronously. Their database insertion time need not be
+      // the call time; new events carry the server's canonical emission stamp.
+      const emittedAt = (event: typeof events[number]) => {
+        const payload = object(event.payload)
+        if (payload?.seq !== undefined && payload.seq !== event.seq || payload?.type !== undefined && payload.type !== event.type) return null
+        if (payload?.ts === undefined) return event.createdAt
+        if (typeof payload.ts !== 'string') return null
+        const at = new Date(payload.ts)
+        return Number.isFinite(at.getTime()) && at.toISOString() === payload.ts ? at : null
+      }
+      const callAt = calls.length === 1 ? emittedAt(calls[0]) : null, resultAt = results.length === 1 ? emittedAt(results[0]) : null
+      const finished = callAt && resultAt && callAt <= reservation.createdAt
+        && results[0].seq > calls[0].seq && resultAt >= lastObservation
+      const fullyObserved = observations.length > 0 && observations.every(row => {
+        const frame = object(row.metadata), response = object(frame?.response)
+        return response?.transportComplete === true && response.finishReason === 'stop'
+          && Array.isArray(response.toolCalls) && response.toolCalls.length === 0 && typeof response.content === 'string'
+          || response?.content === null && Array.isArray(frame?.usageIds) && frame.usageIds.length > 0
+            && frame.usageIds.every(id => usage.some(row => row.id === id && isKnownRejectedTextRequestAttempt(row)))
+      })
+      if (finished && fullyObserved) {
+        const prior = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
+        if (prior.billingKnown && prior.providerComplete) continue
+      }
+    }
     const last = observations.reduce((date, row) => row.createdAt > date ? row.createdAt : date, reservation.createdAt)
     if ((!known && !explicitlyRetired) || !admission || meta.admissionId === admission.id || admission.at <= last) return 'blocked' as const
   }

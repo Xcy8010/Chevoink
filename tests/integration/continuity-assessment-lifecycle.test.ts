@@ -59,6 +59,85 @@ async function retryFixture(f: Parameters<Parameters<typeof fixture>[0]>[0], con
 }
 
 describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', () => {
+  it.each(['known-new-body', 'known-new-candidate', 'delayed-call-persistence', 'unknown-first', 'unknown-second', 'incomplete-second', 'focus-only', 'revision-only'] as const)(
+    'a known completed failure fences its reviewed input without resetting the original contract or fees: %s', scenario => fixture(async f => {
+      try {
+        const { ctx, compilation } = await retryFixture(f, new AbortController())
+        const candidate = { exitState: { action: '门打开' } }
+        const fetcher = vi.fn(async () => {
+          if (scenario === 'unknown-first') throw new TypeError('synthetic unknown first request')
+          if (fetcher.mock.calls.length === 1) return completion(JSON.stringify({ findings: [finding] }))
+          if (scenario === 'unknown-second') throw new TypeError('synthetic unknown second request')
+          return completion('{"decisions":[],"findings":[]}', scenario === 'incomplete-second' ? 'length' : 'stop')
+        })
+        vi.stubGlobal('fetch', fetcher)
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call',
+          ...(scenario === 'delayed-call-persistence' ? { createdAt: new Date(Date.now() + 60_000) } : {}),
+          payload: { seq: 1, type: 'tool.call', ts: new Date().toISOString(), callId: ctx.callId, toolName: 'continuity_validate', args: { compilationId: compilation.id, terminalState: candidate } } } })
+        const first = await continuityValidateTool.execute(ctx, { compilationId: compilation.id, terminalState: candidate })
+          .catch(error => ({ outcome: 'failed', failureCode: error.code }))
+        expect(first.outcome).toBe('failed')
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.result',
+          payload: { seq: 2, type: 'tool.result', ts: new Date().toISOString(), callId: ctx.callId, toolName: 'continuity_validate', ok: false, failureCode: first.failureCode } } })
+        const payments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+        const frozen = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).taskSpec
+        const sends = fetcher.mock.calls.length
+        expect(sends).toBe(scenario === 'unknown-first' ? 1 : 2)
+        await expect(continuityValidateTool.execute({ ...ctx, callId: 'same-input' }, { compilationId: compilation.id, terminalState: candidate }))
+          .rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
+        const changedBody = scenario === 'known-new-body' || scenario === 'delayed-call-persistence' || scenario.startsWith('unknown') || scenario === 'incomplete-second'
+        if (changedBody || scenario === 'revision-only') await prisma.chapter.update({ where: { id: f.chapterId },
+          data: { revision: { increment: 1 }, ...(changedBody ? { content: body + '人物放下钥匙。', wordCount: body.length + 7 } : {}) } })
+        fetcher.mockImplementation(async () => completion(JSON.stringify({ findings: [], terminalVerdicts: [
+          { path: 'exitState.action', verdict: 'supported', segmentIds: ['c0'] }] })))
+        const next = await continuityValidateTool.execute({ ...ctx, callId: 'changed-input' }, { chapterId: f.chapterId,
+          terminalState: scenario === 'known-new-candidate' ? { exitState: { action: '人物走进门' } } : candidate,
+          ...(scenario === 'focus-only' ? { focus: '核对当前正文' } : {}) }).catch(error => ({ outcome: 'failed', failureCode: error.code }))
+        const allowed = scenario === 'known-new-body' || scenario === 'known-new-candidate' || scenario === 'delayed-call-persistence'
+        expect(fetcher).toHaveBeenCalledTimes(sends + (allowed ? 1 : 0))
+        expect(next.outcome === 'failed').toBe(!allowed)
+        const after = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+        expect(after.filter(row => payments.some(old => old.id === row.id))).toEqual(payments)
+        expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).taskSpec).toEqual(frozen)
+        expect(after).toHaveLength(payments.length + (allowed ? 1 : 0))
+        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(after.filter(row => row.billingStatus === 'settled').length)
+        if (allowed) {
+          const current = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+          expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation)
+            .toMatchObject({ independentCheck: 'complete', checkedRevision: current.revision })
+        }
+      } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+    }))
+  it('keeps a changed candidate blocked between the observed primary response and the old second-pass claim', () => fixture(async f => {
+    let release = () => {}, entered = () => {}
+    const held = new Promise<void>(resolve => { release = resolve })
+    const waiting = new Promise<void>(resolve => { entered = resolve })
+    let first: Promise<unknown> | undefined
+    try {
+      const { ctx, compilation } = await retryFixture(f, new AbortController())
+      const claim = lifecycle.claimLegacyContinuityReassessment
+      vi.spyOn(lifecycle, 'claimLegacyContinuityReassessment').mockImplementationOnce(async (...args) => {
+        entered(); await held; return claim(...args)
+      })
+      const fetcher = vi.fn(async () => completion(JSON.stringify({ findings: [finding] })))
+      vi.stubGlobal('fetch', fetcher)
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call',
+        payload: { callId: ctx.callId, toolName: 'continuity_validate', args: { compilationId: compilation.id } } } })
+      first = continuityValidateTool.execute(ctx, { compilationId: compilation.id, terminalState: { exitState: { action: '门打开' } } }).catch(error => error)
+      await waiting
+      const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+      expect(before).toHaveLength(1)
+      expect(before[0]).toMatchObject({ billingStatus: 'settled', reservedCreditMilli: 0 })
+      await expect(continuityValidateTool.execute({ ...ctx, callId: 'candidate-during-primary' },
+        { compilationId: compilation.id, terminalState: { exitState: { action: '人物走进门' } } }))
+        .rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)
+      release(); await first
+      expect(fetcher).toHaveBeenCalledTimes(2)
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(body)
+    } finally { release(); await first; await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+  }))
   it.each(['settled-with-continue', 'unknown-same-admission'] as const)(
     'protocol 7 to 8 preserves actual reservations and billing: %s', scenario => fixture(async f => {
       try {

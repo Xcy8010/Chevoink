@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { buildTerminalFactProofs, terminalAssessmentHash } from '../../api/lib/agent/terminal-inheritance-chain.js'
 import { type TerminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { terminalCandidateSchema, currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
-import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { inspectContinuityResponse, continuityFailureOutput } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches } from '../../api/lib/agent/compiler-continuity-contract.js'
 
@@ -21,6 +21,31 @@ function assessment(chapter: { id: string; orderIndex: number; revision: number;
   return { validation, review: currentTerminalReview(validation, chapter.content, evidence) }
 }
 describe('bounded flat terminal fact chains', () => {
+  it.each(['field', 'claim'])('retains a rejected carried %s binding and exposes its exact internal recovery path', kind => {
+    const first = { id: 'first', orderIndex: 1, revision: 1, content: '冷却泵仍待检修。' }
+    const evidence = baseContext(first.id, 1, first.content)
+    const { validation, review } = assessment(first, evidence, initial,
+      [{ path: 'exitState.openLoops.0', verdict: 'supported', basis: 'current', sourceEvidence: [{ segmentId: 'c0', quote: '冷却泵仍待检修' }] }])
+    const carried = buildTerminalFactProofs({ compilationId: 'first-compilation', chapter: first, validation, evidence, review: review!, stateHash: 'a'.repeat(64) })
+    const current = { id: 'second', orderIndex: 2, revision: 2, content: '他取出清单。' }
+    const context = { ...baseContext(current.id, 2, current.content), previous: { id: first.id, revision: 1, orderIndex: 1,
+      contentHash: createHash('sha256').update(first.content).digest('hex'), start: 0, end: first.content.length,
+      joinedStart: 0, joinedEnd: first.content.length, segments: [], carried } }
+    const candidate = terminalCandidateSchema.parse({ exitState: kind === 'field' ? { objects: initial.exitState.openLoops }
+      : { openLoops: ['冷却泵修好后才能启航'] } })
+    const path = kind === 'field' ? 'exitState.objects.0' : 'exitState.openLoops.0'
+    const response = JSON.stringify({ findings: [], semanticChecks: checks, terminalVerdicts: [{ path, verdict: 'supported', basis: 'inherited',
+      sourceEvidence: [{ segmentId: 't0', quote: '冷却泵仍待检修' }], inheritance: { priorEndState: 'established', currentState: 'unchanged' } }] })
+    const before = structuredClone({ candidate, context, response })
+    const rejected = inspectContinuityResponse(response, { previous: first.content, current: current.content, terminalEvidence: context }, true, 8, candidate)
+    expect(rejected.complete).toBe(false)
+    expect(rejected.audit).toMatchObject({ classification: 'terminal_invalid', terminalReviewDiagnostics: [
+      { code: 'carried_fact_mismatch', path, referenceIndex: 0, segmentId: 't0' }] })
+    expect(continuityFailureOutput(rejected.audit, 'original failure')).toContain(path)
+    expect({ candidate, context, response }).toEqual(before)
+    const corrected = JSON.stringify({ ...JSON.parse(response), terminalVerdicts: [{ ...JSON.parse(response).terminalVerdicts[0], path: 'exitState.openLoops.0' }] })
+    expect(assessment(current, context, initial, JSON.parse(corrected).terminalVerdicts).review?.supported).toBe(true)
+  })
   it('ignores cache counters/time while binding semantic coverage and actual response', () => {
     const chapter = { id: 'c', orderIndex: 1, revision: 1, content: '过滤泵仍需检修。' }
     const { validation } = assessment(chapter, baseContext(chapter.id, 1, chapter.content), initial,

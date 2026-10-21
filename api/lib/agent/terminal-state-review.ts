@@ -109,11 +109,17 @@ function terminalReviewClaimsInput(candidate?: TerminalCandidate, context?: Term
 /** A critic selects server-owned spans. It cannot supply or rewrite evidence.
  * Source existence is checked here; entailment is the independent critic's
  * explicit, exhaustive judgment, never inferred from a substring match. */
-export function inspectTerminalReview(candidate: TerminalCandidate, content: string, raw: string, complete: boolean, context?: TerminalEvidenceContext) {
-  if (!complete) return null
+export type TerminalReviewDiagnostic = { code: string; path?: string; referenceIndex?: number; segmentId?: string; expectedFact?: { field: string; claim: string } }
+export function inspectTerminalReview(candidate: TerminalCandidate, content: string, raw: string, complete: boolean, context?: TerminalEvidenceContext,
+  diagnostics?: TerminalReviewDiagnostic[]) {
+  const invalid = (code: string, path?: string, referenceIndex?: number, segmentId?: string, expectedFact?: { field: string; claim: string }) => {
+    diagnostics?.push({ code, ...(path ? { path } : {}), ...(referenceIndex !== undefined ? { referenceIndex } : {}), ...(segmentId ? { segmentId } : {}), ...(expectedFact ? { expectedFact } : {}) })
+    return null
+  }
+  if (!complete) return invalid('response_incomplete')
   try {
     const record = parseQualityJsonObject(raw, 'continuity', 3) as Record<string, unknown>
-    if (context && (!terminalEvidenceContextSchema.safeParse(context).success || context.current.contentHash !== runtimeJson({ content }).hash)) return null
+    if (context && (!terminalEvidenceContextSchema.safeParse(context).success || context.current.contentHash !== runtimeJson({ content }).hash)) return invalid('evidence_context_stale')
     const inherited = context ? z.array(inheritedTerminalVerdictSchema).max(200).safeParse(record.terminalVerdicts) : null
     const addresses = inherited?.success && context?.quoteAddressProtocol === 1 ? canonicalTerminalQuoteAddresses(inherited.data, content, context) : null
     const inheritedItems = addresses?.items ?? (inherited?.success ? inherited.data : null)
@@ -121,33 +127,33 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
     // derived segment-address projection is a set; multiple quotes can share a span.
     const parsed = inheritedItems ? { success: true as const, data: inheritedItems.map(item => ({ ...item, segmentIds: [...new Set(item.sourceEvidence.map(ref => ref.segmentId))] })) }
       : context ? null : z.array(terminalVerdictSchema).max(200).safeParse(record.terminalVerdicts)
-    if (!parsed?.success) return null
+    if (!parsed?.success) return invalid('verdict_schema_invalid')
     const claims = terminalClaims(candidate), verdicts = parsed.data
     const segments = [...continuitySourceSegments({ previous: null, current: content }), ...(context?.previous?.segments ?? []),
       ...(context?.previous?.carried ?? []).map(fact => ({ segmentId: fact.segmentId, quote: fact.anchors.map(anchor => anchor.quote).join('\n') }))]
-    if (inheritedItems?.some(item => {
+    for (const item of inheritedItems ?? []) {
       const supported = item.verdict === 'supported'
       if (item.basis === 'inherited' && (!/^exitState\.(knowledge|body|objects|relationships|openLoops)\./u.test(item.path)
-        || supported && (item.inheritance?.priorEndState !== 'established' || item.inheritance.currentState !== 'unchanged'))) return true
-      if (item.basis === 'current' && item.inheritance !== undefined) return true
-      return item.sourceEvidence.some(ref => {
-        if (item.basis === 'current' ? !ref.segmentId.startsWith('c') : !/^[pt]/u.test(ref.segmentId)) return true
+        || supported && (item.inheritance?.priorEndState !== 'established' || item.inheritance.currentState !== 'unchanged'))) return invalid('inheritance_invalid', item.path)
+      if (item.basis === 'current' && item.inheritance !== undefined) return invalid('inheritance_invalid', item.path)
+      for (const [index, ref] of item.sourceEvidence.entries()) {
+        if (item.basis === 'current' ? !ref.segmentId.startsWith('c') : !/^[pt]/u.test(ref.segmentId)) return invalid('evidence_source_mismatch', item.path, index, ref.segmentId)
         if (ref.segmentId.startsWith('t')) {
           const fact = context?.previous?.carried?.find(part => part.segmentId === ref.segmentId)
-          if (context?.protocol !== 2 || item.sourceEvidence.length !== 1 || !fact || supported && fact.depth >= 16
-            || fact.field !== item.path.split('.')[1] || fact.claim !== claims.find(claim => claim.path === item.path)?.claim
-            || !fact.anchors.some(anchor => anchor.quote.includes(ref.quote))) return true
+          if (context?.protocol !== 2 || item.sourceEvidence.length !== 1 || !fact || supported && fact.depth >= 16) return invalid('carried_proof_unavailable', item.path, index, ref.segmentId)
+          if (fact.field !== item.path.split('.')[1] || fact.claim !== claims.find(claim => claim.path === item.path)?.claim) return invalid('carried_fact_mismatch', item.path, index, ref.segmentId, { field: fact.field, claim: fact.claim })
+          if (!fact.anchors.some(anchor => anchor.quote.includes(ref.quote))) return invalid('carried_quote_mismatch', item.path, index, ref.segmentId)
         }
-        return !segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote))
-      })
-    })) return null
+        if (!segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote))) return invalid('evidence_quote_invalid', item.path, index, ref.segmentId)
+      }
+    }
     if (verdicts.length !== claims.length || new Set(verdicts.map(item => item.path)).size !== verdicts.length
       || verdicts.some(item => !claims.some(claim => claim.path === item.path)
         || new Set(item.segmentIds).size !== item.segmentIds.length
         || item.verdict === 'supported' && item.segmentIds.length === 0
-        || item.segmentIds.some(id => !segments.some(segment => segment.segmentId === id)))) return null
+        || item.segmentIds.some(id => !segments.some(segment => segment.segmentId === id)))) return invalid('claim_coverage_invalid')
     const factCoverage = inspectTerminalCoverage(context?.factCoverage, record.terminalDispositions, candidate, verdicts, segments.filter(item => item.segmentId.startsWith('c')))
-    if (factCoverage === null) return null
+    if (factCoverage === null) return invalid('fact_disposition_invalid')
     return { version: context ? 2 : 1, ...(context ? { evidenceContextHash: runtimeJson(context).hash } : {}), ...(factCoverage ? { factCoverage } : {}), candidate, contentHash: runtimeJson({ content }).hash,
       candidateHash: runtimeJson(candidate).hash, responseHash: runtimeJson({ raw }).hash,
       ...(addresses ? { originalRefs: addresses.originalRefs, relocations: addresses.relocations } : {}),
@@ -161,7 +167,7 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
         const start = Number(id.slice(1)) * 300
         return { segmentId: id, start, end: start + segment.quote.length, hash: runtimeJson({ text: segment.quote }).hash }
       }) })) }
-  } catch { return null }
+  } catch { return invalid('response_invalid') }
 }
 
 export function readTerminalCandidate(validation: unknown): TerminalCandidate | undefined {
@@ -191,9 +197,10 @@ export function terminalReviewFailure(validation: unknown, content: string, cont
   if (!readTerminalCandidate(validation)) return null
   const review = currentTerminalReview(validation, content, context)
   if (review?.supported) return null
+  const diagnostics = (validation as { continuityCriticResponse?: { terminalReviewDiagnostics?: TerminalReviewDiagnostic[] } }).continuityCriticResponse?.terminalReviewDiagnostics
   return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: !!review,
     summary: '终态候选尚未获正文证实',
     output: `正文与候选均保留，终态未提交；不把连续性 findings 为空当作终态通过。${review
       ? `逐项核验：${JSON.stringify(review.verdicts.map(item => ({ path: item.path, verdict: item.verdict, evidence: item.evidence })))}${review.factCoverage ? `；持续事实处置：${JSON.stringify(review.factCoverage.dispositions)}` : ''}`
-      : '独立响应缺少完整逐项判定或有效 current 原文编号，不能补造证据。'}核对真实正文后，调用 continuity_validate，以 terminalState={exitState,lastUnfinishedAction} 传入完整准确候选重检。候选任何改动（含删除未知项）都须重新核验；重检通过后才可 chapter_bridge_commit，提交同一候选或省略状态复用。不得把计划、推断或转述改称实况，也不要清空已知状态绕过核验。` }
+      : `独立响应缺少完整逐项判定或有效 current 原文编号，不能补造证据。${diagnostics?.length ? `终态证据诊断：${JSON.stringify(diagnostics)}。` : ''}`}核对真实正文后，调用 continuity_validate，以 terminalState={exitState,lastUnfinishedAction} 传入完整准确候选重检。候选任何改动（含删除未知项）都须重新核验；重检通过后才可 chapter_bridge_commit，提交同一候选或省略状态复用。不得把计划、推断或转述改称实况，也不要清空已知状态绕过核验。` }
 }

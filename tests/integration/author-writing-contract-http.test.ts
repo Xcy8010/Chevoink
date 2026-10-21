@@ -87,6 +87,27 @@ const prepare = (ctx: ToolContext) => storyCompilerPrepareTool.execute(ctx, { ta
   intentSummary: '只对第四个已存合成章作作者指出的局部修订', volumeDecision: { kind: 'continue', reason: '原卷原章' } })
 
 describe.skipIf(!available)('unified fresh HTTP author contract with actual PostgreSQL writes', () => {
+  it('atomically rejects a seven-patch punctuation conflict and applies only the corrected current draft batch', () => fixture(directoryContinuationPrompt, async (ctx, before) => {
+    await storyCompilerPrepareTool.execute(ctx, { targetOrderIndex: 5, intentSummary: '新章的合成编辑定位回归', volumeDecision: { kind: 'continue', reason: '原卷续写' } })
+    const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: ctx.runId, status: 'active' } })
+    await saveSceneTasks({ ...ctx, compilationId: compilation.id, tasks: [{ purpose: '定位回归', entryState: {}, goal: '核对', obstacle: '门锁',
+      choice: '等候', cost: '时间', turn: '重新定位', exitState: {}, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
+    const fragments = ['甲门锁着。', '乙灯亮着。', '「请稍等。」', '丙窗关着。', '丁箱封着。', '戊轮停着。', '己阀闭着。']
+    const content = fragments.join('\n\n')
+    expect((await chapterCreateTool.execute({ ...ctx, callId: 'seven-create' }, { title: '合成新章', content,
+      volumeId: before[3].volumeId, positionInVolume: 5 })).outcome).not.toBe('failed')
+    const chapter = await prisma.chapter.findFirstOrThrow({ where: { novelId: ctx.novelId, orderIndex: 5 } })
+    const patches = fragments.map((oldText, index) => ({ oldText, newText: `修订${index + 1}。` }))
+    patches[2].oldText = '「请稍等」。'
+    const failed = await chapterEditRangeTool.execute({ ...ctx, callId: 'seven-bad-anchor' }, { chapterId: chapter.id, patches })
+      .catch(error => ({ outcome: 'failed', failureCode: error.code }))
+    expect(failed).toMatchObject({ outcome: 'failed', failureCode: 'CHAPTER_ANCHOR_CONFLICT' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
+    patches[2].oldText = fragments[2]
+    expect((await chapterEditRangeTool.execute({ ...ctx, callId: 'seven-corrected-anchor' }, { chapterId: chapter.id, patches })).outcome).not.toBe('failed')
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(patches.map(item => item.newText).join('\n\n'))
+    expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId, id: { in: before.map(item => item.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+  }, false, body, { singleVolume: true, editor: 'none' }))
   it('admits the complete compound continuation and only creates its proved fifth-chapter slot', () => fixture(directoryContinuationPrompt, async (ctx, before) => {
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
     const frozen = taskSpecSchema.parse(run.taskSpec)
