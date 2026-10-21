@@ -19,7 +19,7 @@ export type TerminalCarriedFact = z.infer<typeof terminalCarriedFactSchema>
 export const terminalEvidenceContextSchema = z.object({
   protocol: z.union([z.literal(1), z.literal(2)]),
   quoteAddressProtocol: z.literal(1).optional(),
-  verdictProtocol: z.union([z.literal(2), z.literal(3)]).optional(),
+  verdictProtocol: z.union([z.literal(2), z.literal(3), z.literal(4)]).optional(),
   factCoverage: terminalCoverageInputSchema.optional(),
   current: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash }).strict(),
   previous: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash,
@@ -31,10 +31,10 @@ export const terminalEvidenceContextSchema = z.object({
 export type TerminalEvidenceContext = z.infer<typeof terminalEvidenceContextSchema>
 
 /** A response is always read with its own frozen verdict contract. */
-export function terminalVerdictAuditVersion(validation: unknown): 2 | 3 | undefined {
+export function terminalVerdictAuditVersion(validation: unknown): 2 | 3 | 4 | undefined {
   const audit = (validation as { continuityCriticResponse?: { parserVersion?: number; terminalEvidence?: { verdictProtocol?: unknown } } } | null)?.continuityCriticResponse
   const version = audit?.terminalEvidence?.verdictProtocol
-  return audit?.parserVersion === 8 && (version === 2 || version === 3) ? version : undefined
+  return audit?.parserVersion === 8 && (version === 2 || version === 3 || version === 4) ? version : undefined
 }
 
 /** Only a fresh HTTP admission opts in. Saved contracts are never upgraded. */
@@ -55,7 +55,7 @@ export function terminalQuoteAddressVersion(spec: unknown): 1 | undefined {
  * summary. A 300-character span crossing chapter boundaries cannot inherit. */
 export function terminalEvidenceContext(chapter: { id: string; revision: number; orderIndex: number; content: string },
   source: Awaited<ReturnType<typeof readCompilerContinuitySource>>, version: 1 | 2 = source && 'terminalInheritance' in source ? 2 : 1,
-  quoteAddressProtocol?: 1, factCoverage?: TerminalCoverageInput, verdictProtocol?: 2 | 3): TerminalEvidenceContext {
+  quoteAddressProtocol?: 1, factCoverage?: TerminalCoverageInput, verdictProtocol?: 2 | 3 | 4): TerminalEvidenceContext {
   const previous = source && 'preceding' in source ? source.preceding.at(-1) : undefined
   return { protocol: version, ...(quoteAddressProtocol === 1 ? { quoteAddressProtocol } : {}), ...(verdictProtocol ? { verdictProtocol } : {}), ...(factCoverage ? { factCoverage } : {}), current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
     contentHash: runtimeJson({ content: chapter.content }).hash }, previous: previous ? {
@@ -73,17 +73,18 @@ export function terminalEvidenceContext(chapter: { id: string; revision: number;
 
 export const continuitySemanticRule = `核对完整动作关系和状态进展：方向冲突只在同一人物操作同一物体/控制件、同一时段且没有明确改令或反向操作解释时成立；不同物体、不同视角、明确撤回旧指令后逆操作不算矛盾。准备、打算、朝目的地移动不证明已完成或已到达；距离/方位/持有者须核对整个主张，不能用相邻正确半句支持错误定位。正文中的计划、引用、人物猜测不能当实况。除 findings 外输出 semanticChecks，恰好包含 action_direction 与 state_progression 各一项：{kind,result,reason,findingIndexes}。result 为 clear、conflict 或 not_applicable；逐项说明实际核对关系；conflict 专指正文之间的实际矛盾，必须引用 findings 中有原文证据的 error 索引，其他结果索引为空。仅终态候选夸大正文时，在 terminalVerdicts 标记 planned/unknown/negated，不把候选伪装成正文引文来制造 error。不臆造矛盾，无适用动作时说明 not_applicable。`
 
-const semanticCheckSchema = z.object({ kind: z.enum(['action_direction', 'state_progression']),
+export const semanticCheckSchema = z.object({ kind: z.enum(['action_direction', 'state_progression']),
   result: z.enum(['clear', 'conflict', 'not_applicable']), reason: z.string().trim().min(1).max(1500),
   findingIndexes: z.array(z.number().int().nonnegative()).max(20),
 }).strict()
-export function validContinuitySemanticChecks(raw: unknown, findings: Array<{ severity: string }>, version: 1 | 2 = 1) {
+export function validContinuitySemanticChecks(raw: unknown, findings: Array<{ severity: string }>, version: 1 | 2 = 1, keyedKind = false) {
   let normalized = raw
   if (version === 2 && raw && typeof raw === 'object' && !Array.isArray(raw)) {
     const record = raw as Record<string, unknown>, kinds = ['action_direction', 'state_progression']
     const keys = Object.keys(record)
     if (keys.length === 2 && kinds.every(kind => record[kind] && typeof record[kind] === 'object'
-      && (record[kind] as Record<string, unknown>).kind === kind)) normalized = kinds.map(kind => record[kind])
+      && !Array.isArray(record[kind]) && ((record[kind] as Record<string, unknown>).kind === kind
+        || keyedKind && !Object.prototype.hasOwnProperty.call(record[kind], 'kind')))) normalized = kinds.map(kind => ({ ...(record[kind] as Record<string, unknown>), kind }))
     else if (keys.length === 3 && keys.includes('reason') && typeof record.reason === 'string'
       && kinds.every(kind => typeof record[kind] === 'string' && record[kind] !== 'conflict')) {
       normalized = kinds.map(kind => ({ kind, result: record[kind], reason: record.reason, findingIndexes: [] }))

@@ -4,10 +4,11 @@ import { storyStateSchema } from '../../../shared/contracts/story-compiler-contr
 import { continuitySourceSegments, locateUniqueContinuityQuote } from './continuity-review-context.js'
 import { parseQualityJsonObject } from './quality-evidence.js'
 import { runtimeJson } from './runtime-common.js'
-import { terminalEvidenceContextSchema, type TerminalCarriedFact, type TerminalEvidenceContext } from './terminal-evidence-context.js'
-import { inspectTerminalCoverage, terminalCoverageGuidance } from './terminal-fact-coverage.js'
+import { terminalEvidenceContextSchema, semanticCheckSchema, type TerminalCarriedFact, type TerminalEvidenceContext } from './terminal-evidence-context.js'
+import { inspectTerminalCoverage, terminalCoverageGuidance, addressedTerminalDispositionSchema } from './terminal-fact-coverage.js'
 import { terminalQuoteRange } from './terminal-quote-range.js'
 import { terminalProofCatalog, readTerminalProofVerdicts, terminalProofVerdictSchema } from './terminal-proof-verdict.js'
+import { terminalCandidateFacts } from './terminal-fact-identity.js'
 
 export const terminalCandidateSchema = z.object({
   exitState: storyStateSchema,
@@ -73,24 +74,50 @@ export const terminalSpanVerdictSchema = sourcedTerminalVerdictSchema.extend({ s
   segmentId: z.string().regex(/^[cp][0-9]+$/u), quote: z.string().min(2).max(300).optional(),
 }).strict()).max(8) })
 const spanVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(terminalSpanVerdictSchema.omit({ basis: true })).max(200), { io: 'input' }))
+export const terminalFactVerdictSchema = z.union([terminalSpanVerdictSchema.omit({ path: true }).extend({
+  factId: z.string().regex(/^[a-f0-9]{64}$/u),
+}).strict(), terminalSpanVerdictSchema])
+const factVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(terminalFactVerdictSchema).max(200), { io: 'input' }))
+
+/** Shared fresh response shape; proof/decision semantics remain independently
+ * checked after binding these mechanically addressed fields. */
+export function terminalResponseFields() {
+  const keyed = semanticCheckSchema.omit({ kind: true }).extend({ kind: semanticCheckSchema.shape.kind.optional() }).strict()
+  return { semanticChecks: z.union([z.array(semanticCheckSchema).length(2), z.object({ action_direction: keyed, state_progression: keyed }).strict()]),
+    terminalVerdicts: z.array(terminalFactVerdictSchema).max(200), terminalProofVerdicts: z.array(terminalProofVerdictSchema).max(200).optional(),
+    terminalDispositions: z.array(addressedTerminalDispositionSchema).max(200).optional() }
+}
 
 /** Source is encoded in server-owned addresses. This projection changes no
  * quote, verdict or attestation, and never upgrades a saved old contract. */
 function readSourcedVerdicts(value: unknown, context: TerminalEvidenceContext, candidate?: TerminalCandidate, proofVerdicts?: unknown, content?: string) {
   if (context.verdictProtocol === undefined) return z.array(inheritedTerminalVerdictSchema).max(200).safeParse(value)
-  const selections = context.verdictProtocol === 3 ? z.array(terminalSpanVerdictSchema).max(200).safeParse(value) : null
+  let normalized = value
+  if (context.verdictProtocol === 4) {
+    const selected = z.array(terminalFactVerdictSchema).max(200).safeParse(value)
+    if (!selected.success) return selected
+    const facts = candidate ? terminalCandidateFacts(candidate) : []
+    normalized = selected.data.map(item => {
+      if (!('factId' in item)) return item
+      const matches = facts.filter(fact => fact.id === item.factId)
+      if (matches.length !== 1) return null
+      const { factId: _id, ...rest } = item
+      return { ...rest, path: matches[0].path }
+    })
+  }
+  const selections = context.verdictProtocol === 3 || context.verdictProtocol === 4 ? z.array(terminalSpanVerdictSchema).max(200).safeParse(normalized) : null
   if (selections && !selections.success) return selections
   // A fresh critic may select an existing server span rather than transcribe
   // its prose. Supplied quotes remain strict; no fuzzy or historical repair.
   const bound = selections?.success ? selections.data.map(item => ({ ...item, sourceEvidence: item.sourceEvidence.map(ref => ({ ...ref,
     quote: ref.quote ?? (ref.segmentId.startsWith('c') ? continuitySourceSegments({ previous: null, current: content ?? '' }) : context.previous?.segments ?? [])
       .find(part => part.segmentId === ref.segmentId)?.quote ?? '',
-  })) })) : value
+  })) })) : normalized
   const parsed = z.array(sourcedTerminalVerdictSchema).max(200).safeParse(bound)
   if (!parsed.success) return parsed
   const ordinary = parsed.data.map(item => ({ ...item,
     basis: !item.sourceEvidence.length ? undefined : item.sourceEvidence.some(ref => /^[pt]/u.test(ref.segmentId)) ? 'inherited' as const : 'current' as const }))
-  if (context.verdictProtocol !== 3) return { success: true as const, data: ordinary }
+  if (context.verdictProtocol !== 3 && context.verdictProtocol !== 4) return { success: true as const, data: ordinary }
   const proofs = candidate ? readTerminalProofVerdicts(proofVerdicts, candidate, context) : null
   if (!proofs || ordinary.some(item => proofs.verdicts.some(proof => proof.path === item.path))) return z.array(inheritedTerminalVerdictSchema).safeParse(undefined)
   return { success: true as const, data: [...ordinary, ...proofs.verdicts], proofChecks: proofs.checks,
@@ -180,12 +207,16 @@ export function terminalClaims(candidate: TerminalCandidate) {
 }
 
 export function terminalReviewInput(candidate?: TerminalCandidate, context?: TerminalEvidenceContext): string {
-  if (context?.verdictProtocol === 3 && candidate) {
+  if ((context?.verdictProtocol === 3 || context?.verdictProtocol === 4) && candidate) {
     const catalog = terminalProofCatalog(candidate, context), selected = new Set(catalog.flatMap(item => item.paths))
-    const ordinary = terminalClaims(candidate).filter(item => !selected.has(item.path)).map(item => ({ ...item, inheritedSources: [] }))
+    const ordinary = terminalClaims(candidate).filter(item => !selected.has(item.path)).map(item => ({ ...item,
+      ...(context.verdictProtocol === 4 ? { factId: terminalCandidateFacts(candidate).find(fact => fact.path === item.path)!.id } : {}), inheritedSources: [] }))
+    const addressedGuide = context.verdictProtocol === 4
+      ? `普通项优先用 factId 代替 path，只引用本次显式候选的唯一精确字段与完整事实。保留事实的 replaced 处置可用 candidateFactId 选择本次 supported 候选；不要求旧待办已解决，整个尚未解决的义务被候选承接即可，仍须独立核对。unknown 不自动通过，不引用账本 ID 冒充候选或证明。sourceEvidence 可只选已有 cN，由服务端绑定原段；跨字段依然需要本章证据。semanticChecks 可为恰好 action_direction/state_progression 两键 map，kind 可由键唯一确定，其他字段和实际判断必须完整。已选择历史候选的稳定目标：${JSON.stringify(terminalCandidateFacts(candidate).filter(fact => selected.has(fact.path)).map(({ id, field, claim }) => ({ factId: id, field, claim })))}\n`
+      : ''
     const previous = context.previous ? { ...context.previous, carried: context.previous.carried?.map(({ segmentId, field, claim, anchors }) =>
       ({ segmentId, field, claim, quotes: anchors.map(anchor => anchor.quote) })) } : null
-    return `待提交候选（写者主张，不是证据）：${JSON.stringify(ordinary)}\n冻结证据目录：${JSON.stringify({ ...context, previous })}\n已选择的已验证历史事实：${JSON.stringify(catalog.map(({fact}) => ({proofHash:fact.proofHash,field:fact.field,claim:fact.claim,priorEvidence:fact.anchors.map(anchor=>({chapterId:anchor.chapterId,revision:anchor.revision,quote:anchor.quote}))})))}\n本次两组核验穷尽且互斥。只对普通候选逐 path 返回 terminalVerdicts，verdict=supported/unknown/planned/negated/attributed，sourceEvidence 只需选择已有同来源的 cN/pN segmentId，quote 可省略，服务端绑定该段原文；若给 quote 则必须逐字存在，不能补引号或改写。核对整个主张，不能用相邻正确半句作证明，不改写正文凑候选。普通项来源由服务端按 sourceEvidence 判定，勿输出 basis；本章 cN 的 supported 不得带 inheritance。紧邻前章 pN 的 supported 必须给 inheritance={priorEndState:"established",currentState:"unchanged"}，独立核对前章末成立且本章全文未解除、转移或否定；只能继承 knowledge、body、objects、relationships、openLoops 中持续事实，位置、动作、时间、情绪和 lastUnfinishedAction 不能凭未提及延续。每项只用同一来源，禁止混用 cN/pN/tN；已选历史证明只走 terminalProofVerdicts，未选 tN 不替代普通项的 pN/cN 依据。旧桥遗漏但前章正文明确支持的未解决事项可继承，不要求本章重述；较早章、桥摘要、Scene Task、作者要求、计划、传言或猜测不能当事实。\n每个已选择的历史 proofHash 恰好返回一项 terminalProofVerdicts={proofHash,currentState,reason}，currentState=unchanged/changed/uncertain。原字段、完整主张、锚点和证明链已由服务端核实绑定；你须完整核对本章是否改变、解除、转移或否定它，不重拼 tN、quote、path。旧待办尚未解决但仍持续是 unchanged，不要求本章重新叙述或解决它；未提及本身不证明改变，真实冲突或确实无法判断时用 changed/uncertain，不凑通过。只有明确 unchanged 可继承支持；changed 不自动当作 ended/negated。${terminalCoverageGuidance(context.factCoverage)}\n历史同义表述仍按每个 obligation 独立 replaced 到本次 supported 候选，保留主体、极性、条件和未解决义务；同字段承接无需为旧事伪造本章引文。findings 只报告正文真实矛盾；semanticChecks 按原规则完整返回。\nterminalProofVerdicts JSON Schema: ${JSON.stringify(z.toJSONSchema(z.array(terminalProofVerdictSchema).max(200), {io:'input'}))}\n普通 terminalVerdicts JSON Schema: ${spanVerdictResponseContract}`
+    return `${addressedGuide}待提交候选（写者主张，不是证据）：${JSON.stringify(ordinary)}\n冻结证据目录：${JSON.stringify({ ...context, previous })}\n已选择的已验证历史事实：${JSON.stringify(catalog.map(({fact}) => ({proofHash:fact.proofHash,field:fact.field,claim:fact.claim,priorEvidence:fact.anchors.map(anchor=>({chapterId:anchor.chapterId,revision:anchor.revision,quote:anchor.quote}))})))}\n本次两组核验穷尽且互斥。只对普通候选逐 path 返回 terminalVerdicts，verdict=supported/unknown/planned/negated/attributed，sourceEvidence 只需选择已有同来源的 cN/pN segmentId，quote 可省略，服务端绑定该段原文；若给 quote 则必须逐字存在，不能补引号或改写。核对整个主张，不能用相邻正确半句作证明，不改写正文凑候选。普通项来源由服务端按 sourceEvidence 判定，勿输出 basis；本章 cN 的 supported 不得带 inheritance。紧邻前章 pN 的 supported 必须给 inheritance={priorEndState:"established",currentState:"unchanged"}，独立核对前章末成立且本章全文未解除、转移或否定；只能继承 knowledge、body、objects、relationships、openLoops 中持续事实，位置、动作、时间、情绪和 lastUnfinishedAction 不能凭未提及延续。每项只用同一来源，禁止混用 cN/pN/tN；已选历史证明只走 terminalProofVerdicts，未选 tN 不替代普通项的 pN/cN 依据。旧桥遗漏但前章正文明确支持的未解决事项可继承，不要求本章重述；较早章、桥摘要、Scene Task、作者要求、计划、传言或猜测不能当事实。\n每个已选择的历史 proofHash 恰好返回一项 terminalProofVerdicts={proofHash,currentState,reason}，currentState=unchanged/changed/uncertain。原字段、完整主张、锚点和证明链已由服务端核实绑定；你须完整核对本章是否改变、解除、转移或否定它，不重拼 tN、quote、path。旧待办尚未解决但仍持续是 unchanged，不要求本章重新叙述或解决它；未提及本身不证明改变，真实冲突或确实无法判断时用 changed/uncertain，不凑通过。只有明确 unchanged 可继承支持；changed 不自动当作 ended/negated。${terminalCoverageGuidance(context.factCoverage)}\n历史同义表述仍按每个 obligation 独立 replaced 到本次 supported 候选，保留主体、极性、条件和未解决义务；同字段承接无需为旧事伪造本章引文。findings 只报告正文真实矛盾；semanticChecks 按原规则完整返回。\nterminalProofVerdicts JSON Schema: ${JSON.stringify(z.toJSONSchema(z.array(terminalProofVerdictSchema).max(200), {io:'input'}))}\n普通 terminalVerdicts JSON Schema: ${context.verdictProtocol === 4 ? factVerdictResponseContract : spanVerdictResponseContract}`
   }
   const input = terminalReviewClaimsInput(candidate, context) + terminalCoverageGuidance(context?.factCoverage)
   if (context?.verdictProtocol === 2) return `${input}\nterminalVerdicts JSON Schema: ${sourcedVerdictResponseContract}\n来源由服务端根据 sourceEvidence 中的 cN（本章）或 pN/tN（前章/已核验提交证明）确定；不要返回 basis。单项不得混合两种来源。supported 的持续事实必须明确 inheritance={priorEndState:"established",currentState:"unchanged"}；本章 supported 不返回 inheritance。unknown 等非支持判断是完整结果，不补造证据或继承结论。`
@@ -263,7 +294,7 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
         || new Set(item.segmentIds).size !== item.segmentIds.length
         || item.verdict === 'supported' && item.segmentIds.length === 0
         || item.segmentIds.some(id => !segments.some(segment => segment.segmentId === id)))) return invalid('claim_coverage_invalid')
-    const factCoverage = inspectTerminalCoverage(context?.factCoverage, record.terminalDispositions, candidate, verdicts, segments.filter(item => item.segmentId.startsWith('c')))
+    const factCoverage = inspectTerminalCoverage(context?.factCoverage, record.terminalDispositions, candidate, verdicts, segments.filter(item => item.segmentId.startsWith('c')), context?.verdictProtocol === 4)
     if (factCoverage === null) return invalid('fact_disposition_invalid')
     return { version: context ? 2 : 1, ...(context ? { evidenceContextHash: runtimeJson(context).hash } : {}), ...(factCoverage ? { factCoverage } : {}), candidate, contentHash: runtimeJson({ content }).hash,
       candidateHash: runtimeJson(candidate).hash, responseHash: runtimeJson({ raw }).hash,
@@ -326,9 +357,12 @@ export function terminalReviewFailure(validation: unknown, content: string, cont
       || disputed.some(item => item.path.split('.')[1] === fact.field && item.claim === fact.claim)))
       .map(({ proofHash, field, claim }) => ({ proofHash, field, claim })) ?? []
     const selection = selectable.length ? `\n可显式选择的当前有效证明：${JSON.stringify(selectable)}。保持同一 compilationId，可只传顶层 inheritedProofs=[所选proofHash]，服务端在本任务已保存候选上还原原字段与完整主张；这只是待核选择，仍须独立判断本章是否改变。不要复制临时编号或手拼旧事实。` : ''
+    const updateGuidance = context.verdictProtocol === 4
+      ? `按实际裁决用 terminalPatch={baseCandidateHash:${JSON.stringify(runtimeJson(review.candidate).hash)},removeFactIds:[],addFacts:[{field,claim}]} 只更新需要处理的候选，未指定项保留；当前事实地址：${JSON.stringify(terminalCandidateFacts(review.candidate).map(({ id, field, claim }) => ({ factId: id, field, claim })))}。也可提供完整 terminalState。更新后调用 continuity_validate；`
+      : '按实际裁决更新 terminalState 后调用 continuity_validate；'
     return { ...(context.verdictProtocol !== undefined ? {} : { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' }), reviewCompleted: true,
       summary: '终态候选尚未获独立证实',
-      output: `${proseReport ? proseReport.text + '\n' : ''}正文独立检查已完成，终态未提交。终态待处理候选或旧事实：${JSON.stringify({ disputed, unresolved, ...('proofChecks' in review ? { proofChecks: review.proofChecks } : {}) })}。其余已支持项无需同义重写。以本章明确完成证据判为 negated 的旧待办，可据该裁决移除或更新；unknown 不能删空，持续事实请使用已有核验的原字段/原主张证明并核对本章是否变化，不要求正文重述历史。保留事实主体、条件和未解决义务，不把状态误改成已完成。按实际裁决更新 terminalState 后调用 continuity_validate；同一版本检查通过再 chapter_bridge_commit，${proseReport?.errors ? '正文仍有真实错误，按完整报告、当前证据和原授权处理后复核；终态待核不覆盖这些错误。' : '无需为终态候选改正文或重跑已通过的质量检查。'}${selection}` }
+      output: `${proseReport ? proseReport.text + '\n' : ''}正文独立检查已完成，终态未提交。终态待处理候选或旧事实：${JSON.stringify({ disputed, unresolved, ...('proofChecks' in review ? { proofChecks: review.proofChecks } : {}) })}。其余已支持项无需同义重写。以本章明确完成证据判为 negated 的旧待办，可据该裁决移除或更新；unknown 不能删空，持续事实请使用已有核验的原字段/原主张证明并核对本章是否变化，不要求正文重述历史。保留事实主体、条件和未解决义务，不把状态误改成已完成。${updateGuidance}同一版本检查通过再 chapter_bridge_commit，${proseReport?.errors ? '正文仍有真实错误，按完整报告、当前证据和原授权处理后复核；终态待核不覆盖这些错误。' : '无需为终态候选改正文或重跑已通过的质量检查。'}${selection}` }
   }
   return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: !!review,
     summary: '终态候选尚未获正文证实',

@@ -1,0 +1,96 @@
+import { z } from 'zod'
+import type { Prisma } from '@prisma/client'
+import { DataAccessError } from '../prisma.js'
+import { runtimeJson } from './runtime-common.js'
+import { terminalCandidateSchema, readTerminalCandidate, resolveTerminalCandidate, type TerminalCandidate } from './terminal-state-review.js'
+import { terminalCandidateFacts, terminalFactId } from './terminal-fact-identity.js'
+import type { TerminalCarriedFact } from './terminal-evidence-context.js'
+import type { ToolContext } from './tools/types.js'
+import { readOriginalTaskRequest } from './original-request.js'
+
+const hash = z.string().regex(/^[a-f0-9]{64}$/u)
+const field = z.enum(['action','location','storyTime','emotion','knowledge','body','objects','relationships','openLoops','lastUnfinishedAction'])
+export const terminalCandidatePatchSchema = z.object({ baseCandidateHash: hash,
+  removeFactIds: z.array(hash).max(200).default([]),
+  addFacts: z.array(z.object({ field, claim: z.string().trim().min(1).max(1000) }).strict()).max(200).default([]),
+}).strict()
+export type TerminalCandidatePatch = z.infer<typeof terminalCandidatePatchSchema>
+const stale = () => new DataAccessError(409,'CONTINUITY_INPUT_STALE','章末候选已变化或事实地址不唯一；请读取当前章节桥后只更新需要处理的事实，未派发旧补丁。')
+
+/** Explicit delta on this saved candidate only. Omission is not deletion;
+ * deleting a candidate fact never deletes its coverage obligation. */
+export function applyTerminalCandidatePatch(base: TerminalCandidate, patch: TerminalCandidatePatch) {
+  if (runtimeJson(base).hash !== patch.baseCandidateHash || new Set(patch.removeFactIds).size !== patch.removeFactIds.length
+    || new Set(patch.addFacts.map(fact=>terminalFactId(fact.field,fact.claim))).size !== patch.addFacts.length) throw stale()
+  const result=structuredClone(base),facts=terminalCandidateFacts(base)
+  for(const id of patch.removeFactIds){
+    const matches=facts.filter(fact=>fact.id===id)
+    if(matches.length!==1)throw stale()
+    const fact=matches[0],name=field.parse(fact.field)
+    if(name==='lastUnfinishedAction')result.lastUnfinishedAction=''
+    else if(name==='action'||name==='location'||name==='storyTime')delete result.exitState[name]
+    else result.exitState[name]=result.exitState[name].filter(claim=>claim!==fact.claim)
+  }
+  for(const fact of patch.addFacts){
+    if(patch.removeFactIds.includes(terminalFactId(fact.field,fact.claim)))throw stale()
+    const name=fact.field
+    if(name==='lastUnfinishedAction'){
+      if(result.lastUnfinishedAction&&result.lastUnfinishedAction!==fact.claim)throw stale()
+      result.lastUnfinishedAction=fact.claim
+    }else if(name==='action'||name==='location'||name==='storyTime'){
+      if(result.exitState[name]&&result.exitState[name]!==fact.claim)throw stale()
+      result.exitState[name]=fact.claim
+    }else if(!result.exitState[name].includes(fact.claim))result.exitState[name].push(fact.claim)
+  }
+  const parsed = terminalCandidateSchema.safeParse(result)
+  if (!parsed.success) throw new DataAccessError(409, 'TERMINAL_STATE_REVIEW_REQUIRED', '增量候选超出原字段长度或容量；原候选保留，未派发检查。')
+  return parsed.data
+}
+
+const identitySchema=z.object({userId:z.string(),novelId:z.string(),taskId:z.string(),runId:z.string(),callId:z.string(),compilationId:z.string(),
+  chapterId:z.string(),revision:z.number().int(),bodyHash:hash,sourceHash:hash}).strict()
+const snapshotSchema=z.object({version:z.literal(1),kind:z.literal('terminalCandidatePatch'),identity:identitySchema,
+  request:z.object({patch:terminalCandidatePatchSchema,inheritedProofs:z.array(hash)}).strict(),base:terminalCandidateSchema,candidate:terminalCandidateSchema}).strict()
+
+/** Same owned call recovers its canonical delta result before testing an old
+ * base hash. A new call still needs the current base. No provider/fee authority
+ * is created by this input snapshot; the existing review lifecycle owns that. */
+async function legacyTerminalPatch(tx: Prisma.TransactionClient,ctx: Pick<ToolContext,'userId'|'novelId'|'runId'|'callId'>,
+  compilation:{id:string;validation:unknown;chapter:{id:string;revision:number;content:string}},
+  source:unknown,carried:TerminalCarriedFact[]|undefined,protocol:1|2|undefined,patch:TerminalCandidatePatch,inheritedProofs:string[]=[],readOnly=false){
+  const original=await readOriginalTaskRequest(tx,ctx)
+  const identity={userId:ctx.userId,novelId:ctx.novelId,taskId:original.taskId,runId:ctx.runId,callId:ctx.callId,
+    compilationId:compilation.id,chapterId:compilation.chapter.id,revision:compilation.chapter.revision,
+    bodyHash:runtimeJson({content:compilation.chapter.content}).hash,sourceHash:runtimeJson({source:source??null}).hash}
+  const request={patch,inheritedProofs},id=`terminal-patch-${runtimeJson({runId:ctx.runId,callId:ctx.callId,compilationId:compilation.id}).hash}`
+  const saved=await tx.agentArtifact.findUnique({where:{id},select:{runId:true,metadata:true}})
+  const current=readTerminalCandidate(compilation.validation)
+  if(!current)throw stale()
+  if(saved){
+    const snapshot=snapshotSchema.safeParse(saved.metadata)
+    if(!snapshot.success||saved.runId!==ctx.runId||runtimeJson(snapshot.data.identity).hash!==runtimeJson(identity).hash
+      ||runtimeJson(snapshot.data.request).hash!==runtimeJson(request).hash)throw stale()
+    const rebuilt=resolveTerminalCandidate({...applyTerminalCandidatePatch(snapshot.data.base,patch),inheritedProofs},carried,protocol)
+    if(!rebuilt.ok||runtimeJson(rebuilt.candidate).hash!==runtimeJson(snapshot.data.candidate).hash
+      ||![patch.baseCandidateHash,runtimeJson(rebuilt.candidate).hash].includes(runtimeJson(current).hash))throw stale()
+    return {candidate:rebuilt.candidate,expectedBaseHash:runtimeJson(current).hash}
+  }
+  if(readOnly)return null
+  const selected=resolveTerminalCandidate({...applyTerminalCandidatePatch(current,patch),inheritedProofs},carried,protocol)
+  if(!selected.ok)throw stale()
+  const snapshot=snapshotSchema.parse({version:1,kind:'terminalCandidatePatch',identity,request,base:current,candidate:selected.candidate})
+  await tx.agentArtifact.create({data:{id,runId:ctx.runId,artifactType:'continuityReview',title:'章末候选增量输入快照',content:'',metadata:runtimeJson(snapshot).value}})
+  return {candidate:selected.candidate,expectedBaseHash:patch.baseCandidateHash}
+}
+
+export const readFrozenLegacyTerminalPatch = (tx: Prisma.TransactionClient,ctx: Pick<ToolContext,'userId'|'novelId'|'runId'|'callId'>,
+  ...input: [compilation:{id:string;validation:unknown;chapter:{id:string;revision:number;content:string}},source:unknown,
+    carried:TerminalCarriedFact[]|undefined,protocol:1|2|undefined,patch:TerminalCandidatePatch,inheritedProofs?:string[]]) =>
+  legacyTerminalPatch(tx,ctx,input[0],input[1],input[2],input[3],input[4],input[5]??[],true)
+
+export async function freezeLegacyTerminalPatch(tx: Prisma.TransactionClient,ctx: Pick<ToolContext,'userId'|'novelId'|'runId'|'callId'|'signal'>,
+  ...input: [compilation:{id:string;validation:unknown;chapter:{id:string;revision:number;content:string}},source:unknown,
+    carried:TerminalCarriedFact[]|undefined,protocol:1|2|undefined,patch:TerminalCandidatePatch,inheritedProofs?:string[]]) {
+  ctx.signal.throwIfAborted()
+  return (await legacyTerminalPatch(tx,ctx,...input))!
+}

@@ -5,7 +5,7 @@ import { parseQualityJsonObject } from './quality-evidence.js'
 import { resolveContinuitySources, type ContinuityBodies, type ContinuitySourceRelocation } from './continuity-review-context.js'
 import { unlocatedContinuityEvidence } from './continuity-finding-authority.js'
 import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './continuity-source-authority.js'
-import { inspectTerminalReview, terminalQuoteAddressDiagnostics, type TerminalCandidate, type TerminalReviewDiagnostic } from './terminal-state-review.js'
+import { inspectTerminalReview, terminalQuoteAddressDiagnostics, terminalResponseFields, type TerminalCandidate, type TerminalReviewDiagnostic } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
 import { validContinuitySemanticChecks } from './terminal-evidence-context.js'
 
@@ -100,7 +100,11 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
     }
   }
   if (raw.length > MAX_AUDIT_CHARS) classification = 'response_too_large'
-  if (classification === 'complete' && parserVersion === 8 && (!bodies?.terminalEvidence || !validContinuitySemanticChecks(record?.semanticChecks, findings, bodies.terminalEvidence.factCoverage?.version))) classification = 'semantic_invalid'
+  const freshFields = bodies?.terminalEvidence?.verdictProtocol === 4 ? terminalResponseFields() : null
+  if (classification === 'complete' && parserVersion === 8 && (!bodies?.terminalEvidence
+    || freshFields && !freshFields.semanticChecks.safeParse(record?.semanticChecks).success
+    || !validContinuitySemanticChecks(record?.semanticChecks, findings, bodies.terminalEvidence.factCoverage?.version, bodies.terminalEvidence.verdictProtocol === 4))) classification = 'semantic_invalid'
+  if (classification === 'complete' && freshFields && !z.object(freshFields).passthrough().safeParse(record).success) classification = 'terminal_invalid'
   const terminalReviewDiagnostics: TerminalReviewDiagnostic[] = []
   if (classification === 'complete' && terminalCandidate && (!bodies || !inspectTerminalReview(terminalCandidate, bodies.current, raw, responseComplete,
     parserVersion === 8 ? bodies.terminalEvidence : undefined, terminalReviewDiagnostics))) classification = 'terminal_invalid'

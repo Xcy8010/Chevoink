@@ -3,6 +3,7 @@ import { DataAccessError } from '../prisma.js'
 import { runtimeJson } from './runtime-common.js'
 import type { TerminalCandidate, inspectTerminalReview } from './terminal-state-review.js'
 import { terminalQuoteRange } from './terminal-quote-range.js'
+import { terminalCandidateFacts } from './terminal-fact-identity.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
 const field = z.enum(['knowledge', 'body', 'objects', 'relationships', 'openLoops'])
@@ -64,13 +65,37 @@ export const terminalDispositionSchema = z.object({ id: hash, outcome: z.enum(['
   reason: z.string().trim().min(1).max(1000), candidatePath: z.string().max(100).optional(),
   sourceEvidence: z.array(z.object({ segmentId: z.string().regex(/^c[0-9]+$/u), quote: z.string().min(2).max(300) }).strict()).max(8),
 }).strict()
+const addressedDisposition = terminalDispositionSchema.omit({ candidatePath: true, sourceEvidence: true }).extend({
+  sourceEvidence: z.array(z.object({ segmentId: z.string().regex(/^c[0-9]+$/u), quote: z.string().min(2).max(300).optional() }).strict()).max(8),
+})
+export const addressedTerminalDispositionSchema = z.union([
+  addressedDisposition.extend({ candidateFactId: hash.optional() }).strict(),
+  addressedDisposition.extend({ candidatePath: z.string().max(100).optional() }).strict(),
+])
 
 /** Quoted source existence is mechanical; the fresh critic owns whether the
  * whole fact ended or is represented by a new independently supported claim. */
 export function inspectTerminalCoverage(input: TerminalCoverageInput | undefined, raw: unknown,
-  candidate: TerminalCandidate, verdicts: Array<{ path: string; verdict: string }>, segments: Array<{ segmentId: string; quote: string }>) {
+  candidate: TerminalCandidate, verdicts: Array<{ path: string; verdict: string }>, segments: Array<{ segmentId: string; quote: string }>, addressed = false) {
   if (!input) return undefined
-  const parsed = z.array(terminalDispositionSchema).max(200).safeParse(raw ?? (input.obligations.length ? undefined : []))
+  let normalized = raw ?? (input.obligations.length ? undefined : [])
+  if (addressed) {
+    const selected = z.array(addressedTerminalDispositionSchema).max(200).safeParse(normalized)
+    if (!selected.success) return null
+    const facts = terminalCandidateFacts(candidate)
+    normalized = selected.data.map(item => {
+      const { sourceEvidence, ...rest } = item
+      const refs = sourceEvidence.map(ref => ({ ...ref, quote: ref.quote ?? segments.find(part => part.segmentId === ref.segmentId)?.quote ?? '' }))
+      if ('candidateFactId' in rest && rest.candidateFactId !== undefined) {
+        const matches = facts.filter(fact => fact.id === rest.candidateFactId)
+        if (matches.length !== 1) return null
+        const { candidateFactId: _id, ...value } = rest
+        return { ...value, candidatePath: matches[0].path, sourceEvidence: refs }
+      }
+      return { ...rest, sourceEvidence: refs }
+    })
+  }
+  const parsed = z.array(terminalDispositionSchema).max(200).safeParse(normalized)
   if (!parsed.success || parsed.data.length !== input.obligations.length
     || new Set(parsed.data.map(item => item.id)).size !== parsed.data.length) return null
   if (parsed.data.some(item => {

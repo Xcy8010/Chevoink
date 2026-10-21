@@ -183,7 +183,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         }
       }
       if (captured.step === 'continuity_reassessment') {
-        const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16)]), criticSystem: z.string(), criticInput: z.string(), terminalCandidate: terminalCandidateSchema.optional(), sourceScope: continuitySourceScopeSchema.optional(),
+        const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16), z.literal(17)]), criticSystem: z.string(), criticInput: z.string(), terminalCandidate: terminalCandidateSchema.optional(), sourceScope: continuitySourceScopeSchema.optional(),
           sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }) }) }) }).safeParse(parent.inputSnapshot)
         const usage = result.usageReceipt, response = parsedResult.data.result
         if (!work.success || usage?.source !== 'reported' || usage.settlementStatus !== 'settled' || usage.promptTokens === null || usage.completionTokens === null

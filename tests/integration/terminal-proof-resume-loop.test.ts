@@ -13,6 +13,8 @@ import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continu
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { observeChapterReviewProgress, observeSemanticReadProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 import { terminalFeedbackSlots } from '../../api/lib/agent/terminal-feedback-handoff.js'
@@ -60,8 +62,8 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     expect(readiness?.progressEvidence?.phases).not.toContain('terminal_supported')
     expect(await prisma.aiUsageLog.count({where:{agentRunId:f.runId}})).toBe(0)
   },undefined,'修改本章',{continuityEvidenceProtocol:1,terminalEvidenceProtocol:2,terminalQuoteAddressProtocol:1,terminalCoverageProtocol:1}))
-  it.each(['unchanged','seen-supported','fresh-context','changed','uncertain','alias-unknown','interrupted'] as const)('keeps ownership, costs and unknown protection: %s',scenario=>fixture(async f=>{
-    const supported=scenario==='unchanged'||scenario==='seen-supported'||scenario==='fresh-context'
+  it.each(['unchanged','seen-supported','fresh-context','changed','uncertain','alias-unknown','interrupted','patch'] as const)('keeps ownership, costs and unknown protection: %s',scenario=>fixture(async f=>{
+    const supported=scenario==='unchanged'||scenario==='seen-supported'||scenario==='fresh-context'||scenario==='patch'
     vi.spyOn(memory,'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory,'syncNovelMemoryProjection').mockResolvedValue(undefined)
     vi.spyOn(titles,'autoNameSession').mockResolvedValue(undefined)
@@ -84,11 +86,11 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     const body='The officer inventories a crate. The crate is sealed.'
     chapter=await prisma.chapter.update({where:{id:f.chapterId},data:{revision:15,content:body,wordCount:body.length}})
     await recordStoryCompilerWrite({...f,chapterOrderIndex:2,chapterRevision:15})
-    const base=terminalCandidateSchema.parse({exitState:{objects:['The crate is sealed.']}})
+    const base=terminalCandidateSchema.parse({exitState:{objects:['The crate is sealed.'],...(scenario==='patch'?{emotion:['The officer is relieved.']}: {})}})
     const saved=await prisma.storyCompilation.findUniqueOrThrow({where:{id:compilationId}}),original=await prisma.$transaction(tx=>readOriginalTaskRequest(tx,f))
     const obligations=terminalCoverageInput(original.spec,saved.preparedContext,chapter,base,2)!.obligations
     expect(obligations).toHaveLength(2)
-    const evidence=await saveReview(f,chapter,compilationId,base,{terminalVerdicts:[{path:'exitState.objects.0',verdict:'supported',sourceEvidence:[{segmentId:'c0',quote:'The crate is sealed.'}]}],
+    const evidence=await saveReview(f,chapter,compilationId,base,{terminalVerdicts:[{path:'exitState.objects.0',verdict:'supported',sourceEvidence:[{segmentId:'c0',quote:'The crate is sealed.'}]},...(scenario==='patch'?[{path:'exitState.emotion.0',verdict:'unknown',sourceEvidence:[]}]:[])],
       terminalDispositions:obligations.map(({id})=>({id,outcome:'unknown',reason:'Prior obligation retained; no fresh persistence judgment yet.',sourceEvidence:[]}))})
     const proof=evidence.previous!.carried!.find(fact=>fact.field==='openLoops'&&fact.claim===claim)!
     expect(proof.depth).toBe(1)
@@ -119,10 +121,10 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     vi.spyOn(flags,'isAgent2FeatureEnabled').mockImplementation((key,owner)=>key==='storyCompiler'||key!=='memory2'&&feature(key,owner))
     const requests:unknown[]=[],network=vi.fn(async (_url:unknown,init:RequestInit)=>{
       requests.push(JSON.parse(String(init.body)))
-      const response={findings:[],semanticChecks:checks,terminalVerdicts:[{path:'exitState.objects.0',verdict:'supported',sourceEvidence:[{segmentId:'c0'}]}],
+      const response={findings:[],semanticChecks:scenario==='patch'?Object.fromEntries(checks.map(({kind,...check})=>[kind,check])):checks,terminalVerdicts:[{...(scenario==='patch'?{factId:terminalFactId('objects',base.exitState.objects[0])}:{path:'exitState.objects.0'}),verdict:'supported',sourceEvidence:[{segmentId:'c0'}]}],
         terminalProofVerdicts:[{proofHash:proof.proofHash,currentState:scenario==='changed'||scenario==='uncertain'?scenario:'unchanged',reason:'Independent complete-current-body persistence judgment.'}],
         terminalDispositions:obligations.map(({id},index)=>supported||scenario==='alias-unknown'&&index===0
-          ?{id,outcome:'replaced',reason:'The whole original obligation is represented by the same pending repair.',candidatePath:'exitState.openLoops.0',sourceEvidence:[]}
+          ?{id,outcome:'replaced',reason:'The whole original obligation is represented by the same pending repair.',...(scenario==='patch'?{candidateFactId:terminalFactId('openLoops',claim)}:{candidatePath:'exitState.openLoops.0'}),sourceEvidence:[]}
           :{id,outcome:'unknown',reason:'The old obligation is not independently resolved.',sourceEvidence:[]})}
       return new Response(`data: ${JSON.stringify({choices:[{delta:{content:JSON.stringify(response)},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:0}})}\n\ndata: [DONE]\n\n`,{headers:{'content-type':'text/event-stream'}})
     })
@@ -138,7 +140,7 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
       const checkTurn=scenario==='fresh-context'?6:2
       const call=turn===1?{id:'reread-saved-body',name:'chapter_read',arguments:JSON.stringify({chapterId:chapter.id})}
         :scenario==='fresh-context'&&turn<6?{id:`read-new-range-${turn}`,name:'chapter_read',arguments:JSON.stringify({chapterId:previous.id,offset:(turn-2)*10,limit:10})}
-        :turn===checkTurn?{id:'select-proof-only',name:'continuity_validate',arguments:JSON.stringify({compilationId,inheritedProofs:[proof.proofHash]})}
+        :turn===checkTurn?{id:'select-proof-only',name:'continuity_validate',arguments:JSON.stringify({compilationId,inheritedProofs:[proof.proofHash],...(scenario==='patch'?{terminalPatch:{baseCandidateHash:runtimeJson(base).hash,removeFactIds:[terminalFactId('emotion',base.exitState.emotion[0])]}}:{})})}
         :supported&&turn===checkTurn+1?{id:'real-commit',name:'chapter_bridge_commit',arguments:JSON.stringify({compilationId})}
           :supported?undefined:{id:`same-report-${turn}`,name:'chapter_bridge_get',arguments:JSON.stringify({compilationId})}
       return{content:call?'':'Completed.',reasoning:'',finishReason:call?'tool_calls':'stop',toolCalls:call?[call]:[],usage:{promptTokens:10,completionTokens:0,totalTokens:10,promptCacheHitTokens:null,promptCacheMissTokens:null}}
@@ -156,7 +158,7 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     expect(await prisma.chapter.findUniqueOrThrow({where:{id:chapter.id}})).toMatchObject({content:body,revision:15})
     const final=await prisma.storyCompilation.findUniqueOrThrow({where:{id:compilationId},include:{bridge:true}}),run=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}}),cp=(run.usage as {checkpoint:typeof checkpoint}).checkpoint
     expect(final.validation).toMatchObject({independentCheck:'complete',terminalCandidate:{exitState:{objects:base.exitState.objects,openLoops:[claim]}},
-      continuityCriticResponse:{classification:'complete',terminalEvidence:{verdictProtocol:3}}})
+      continuityCriticResponse:{classification:'complete',terminalEvidence:{verdictProtocol:4}}})
     expect(await prisma.agentRunEvent.count({where:{runId:f.runId,seq:{gt:4},type:'tool.result',payload:{path:['ok'],equals:false}}})).toBe(0)
     expect(cp.reviewAttempts).toContain('old-attempt')
     expect(cp.readProgress).toBe(scenario==='fresh-context'?11:7)

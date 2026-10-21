@@ -11,7 +11,7 @@ import { runContinuityEvidenceCorrection, claimLegacyContinuityCorrection, readL
   claimContinuedContinuityAssessment, recordLegacyContinuityCorrectionObservation, recordLegacyContinuityAssessmentObservation } from '../continuity-response-correction.js'
 import { readReusableLegacyContinuityCorrection, markLegacyContinuityCorrectionApplied, markLegacyContinuityAssessmentApplied } from '../continuity-response-correction.js'
 import { readContinuedContinuityEvidence } from '../continued-continuity-evidence.js'
-import { runContinuityReassessment, observeLegacyContinuityAssessment, claimLegacyContinuityReassessment, reserveLegacyContinuityAssessment,
+import { runContinuityReassessment, freshContinuityResponseContract, observeLegacyContinuityAssessment, claimLegacyContinuityReassessment, reserveLegacyContinuityAssessment,
   readLegacyContinuityAssessment, markLegacyContinuityAssessmentApplication, type LegacyAssessmentInput, type FrozenTerminalContract } from '../assessment-response-lifecycle.js'
 import { readReusableLegacyContinuityAssessment, bindLegacyContinuityAssessment, readFrozenLegacyContinuityInput } from '../assessment-response-lifecycle.js'
 import { observeLegacyContinuityReassessmentNotDispatched, observeLegacyContinuityFirstNotDispatched, bindLegacyContinuityRequest } from '../assessment-response-lifecycle.js'
@@ -20,6 +20,8 @@ import { createTextRequestTrace, withTextRequestTrace, textRequestsFinished } fr
 import { readOfflineContinuityRecovery, applyOfflineContinuityRecovery } from '../continuity-offline-recovery.js'
 import { runtimeJson } from '../runtime-common.js'
 import { persistedContentHash } from '../semantic-progress.js'
+import { terminalCandidateFacts } from '../terminal-fact-identity.js'
+import { terminalCandidatePatchSchema, freezeLegacyTerminalPatch } from '../terminal-candidate-patch.js'
 import { continuityChapterProvenance, continuityFindingText, continuitySourceInput, resolveContinuitySources, continuityRecheckInput, unconfirmedContinuityOutput, type ContinuityBodies } from '../continuity-review-context.js'
 import { unlocatedContinuityEvidence } from '../continuity-finding-authority.js'
 import { createHash } from 'node:crypto'
@@ -690,6 +692,9 @@ export const chapterBridgeGetTool = defineTool({
     const inheritedFacts = (carriedFacts ?? []).filter(fact => fact.depth < 16).map(({ proofHash, field, claim }) => ({ proofHash, field, claim }))
     const inheritanceGuidance = inheritedFacts.length
       ? `\n可显式继承的已验证事实目录：${JSON.stringify(inheritedFacts)}\n本章仍成立的旧事实可在 continuity_validate 顶层 inheritedProofs 中选择 proofHash，复用同一编译已保存候选，无需重抄整份 terminalState；首次同时给新候选时也可传 terminalState.inheritedProofs。服务端还原精确字段与完整事实，独立编辑仍须判断本章是否改变。新增事实写入 exitState，不把未决旧事改写成新否定事实，也不必为继承而让正文复述历史。检查后 chapter_bridge_commit 省略 terminalState 即复用已核验候选。` : ''
+    const savedCandidate = readTerminalCandidate(compilation.validation)
+    const candidatePatchGuidance = savedCandidate
+      ? `\n本编译当前候选：${JSON.stringify({ baseCandidateHash: runtimeJson(savedCandidate).hash, facts: terminalCandidateFacts(savedCandidate).map(({ id, field, claim }) => ({ factId: id, field, claim })) })}\n需要修改候选时，可用 continuity_validate.terminalPatch 指定此 baseCandidateHash、removeFactIds 和 addFacts（field/claim），仅更新明确指定项，其余候选保持；不要反复重抄整份状态。候选地址不是事实证明，所有事实仍独立复核；删候选不会删除旧义务。` : ''
     const bridgeState = committedBridge
       ? `本章已提交终态 r${bridge.targetRevision}${compilation.chapter && compilation.chapter.revision !== bridge.targetRevision ? '（当前正文已变化，须重新检查提交）' : ''}`
       : `入章承接${bridge.fromChapterId ? `（前章 ${bridge.fromChapterId}@r${bridge.sourceRevision}）` : '（无前章）'}；本章终态尚未提交`
@@ -711,7 +716,7 @@ export const chapterBridgeGetTool = defineTool({
         .map(item => `[findingId=${item.id}/${item.severity}/${review?.retainedDecisions?.some(saved => saved.source === 'quality' && saved.reportId === report.id && saved.findingId === item.id) ? '已明确留置' : item.disposition}] 「${item.evidenceExcerpt}」；原因：${item.explanation}；建议：${item.suggestion}`).join('\n') || '无剩余候选。'}`
       : report ? `质量报告 reportId=${report.id} 不属于当前完整正文检查，不能用旧候选证明当前版本通过。` : '当前质量报告尚未建立。'
     return {
-      output: `compilationId=${compilation.id}，chapterId=${compilation.chapterId ?? '尚未创建'}，阶段=${compilation.stage}，状态=${compilation.status}，目标第 ${compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。\n${items.join('\n')}\nScene Task：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜目标 ${task.goal}｜阻力 ${task.obstacle}｜代价 ${task.cost}｜转折 ${task.turn}`).join('\n') || '尚未建立'}\n${qualityDetails}\n${review ? chapterReviewDecisionGuidance(review) : ''}${inheritanceGuidance}`,
+      output: `compilationId=${compilation.id}，chapterId=${compilation.chapterId ?? '尚未创建'}，阶段=${compilation.stage}，状态=${compilation.status}，目标第 ${compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。\n${items.join('\n')}\nScene Task：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜目标 ${task.goal}｜阻力 ${task.obstacle}｜代价 ${task.cost}｜转折 ${task.turn}`).join('\n') || '尚未建立'}\n${qualityDetails}\n${review ? chapterReviewDecisionGuidance(review) : ''}${inheritanceGuidance}${candidatePatchGuidance}`,
       ...(currentQuality && review?.decisionFeedback && review.decisionFeedbackSnapshotHash === qualityDecisionSnapshotHash(report.findings)
         ? { reviewDecisionFeedback: review.decisionFeedback } : {}),
       summary: `读取第 ${compilation.targetOrderIndex} 章章节桥`,
@@ -826,6 +831,7 @@ export const continuityValidateTool = defineTool({
     focus: z.string().max(500).optional().describe('作者明确要求额外关注的连续性范围；未指定时不传'),
     terminalState: terminalCandidateInputSchema.optional().describe('写作交付前要提交的真实章末状态 {exitState,lastUnfinishedAction}；须在本次独立检查前给出。不能从场景计划抄事实，缺失信息保持未知。提交必须与此候选一致；单独审阅既有章省略。'),
     inheritedProofs: z.array(z.string().regex(/^[a-f0-9]{64}$/u)).max(200).optional().describe('显式选择当前已验证的 proofHash；可单独传此项，在同一编译已保存候选上还原原字段、完整事实，仍须独立核对本章是否改变。无需重复整份 terminalState。'),
+    terminalPatch: terminalCandidatePatchSchema.optional().describe('对章节桥返回的当前候选做明确增删：baseCandidateHash校验基线，removeFactIds只删除指定事实，addFacts只增加指定字段/完整事实。其余候选保留，无需重抄；不能与terminalState同时传，删候选不删除未决覆盖义务。'),
   }),
   coerceArgs(raw) {
     const source = coerceToolArgumentEnvelope(raw)
@@ -863,7 +869,7 @@ export const continuityValidateTool = defineTool({
     const chapterOnlyPipeline = !args.compilationId && !!args.chapterId && !!compilation?.chapter
       && await isWritingTaskContinuityCompiler(prisma, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, chapterId: args.chapterId })
     if (!args.compilationId && (!compilation || args.chapterId && !chapterOnlyPipeline)) {
-      if (args.terminalState || args.inheritedProofs !== undefined) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
+      if (args.terminalState || args.terminalPatch || args.inheritedProofs !== undefined) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
       const context = await buildStandaloneContinuityContext(ctx, args.chapterId, prisma, sourceAuthority ? 4 : 3)
       const cached = await readStandaloneContinuityReport(ctx, context.contextHash, args.focus)
       if (cached) return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, { structured: true, findings: cached.findings }, tx, args.focus, true, true, undefined, sourceAuthority ? 4 : 3))
@@ -924,12 +930,15 @@ export const continuityValidateTool = defineTool({
     const frozenReviewInput = reviewInput(compilation)
     const bridge = compilation.bridge
     const sourceChapter = await readCompilerContinuitySource(prisma, ctx, chapter, bridge.fromChapterId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
-    const selectionInput = reviewTerminalSelection(args.terminalState, readTerminalCandidate(compilation.validation), args.inheritedProofs)
+    if(args.terminalPatch&&args.terminalState)return {outcome:'failed' as const,failureCode:'TERMINAL_STATE_REVIEW_REQUIRED',summary:'候选更新不明确',output:'terminalPatch 与 terminalState 只能选择一种；未应用或派发。'}
+    const patch = args.terminalPatch ? await prisma.$transaction(tx=>freezeLegacyTerminalPatch(tx,ctx,{...compilation,chapter},sourceChapter,
+      sourceChapter&&'terminalInheritance' in sourceChapter?sourceChapter.terminalInheritance:undefined,terminalVersion,args.terminalPatch!,args.inheritedProofs)) : null
+    const selectionInput = patch ? undefined : reviewTerminalSelection(args.terminalState, readTerminalCandidate(compilation.validation), args.inheritedProofs)
     const selectedTerminal = selectionInput ? resolveTerminalCandidate(selectionInput,
       sourceChapter && 'preceding' in sourceChapter && 'terminalInheritance' in sourceChapter ? sourceChapter.terminalInheritance : [], terminalVersion) : undefined
     if (selectedTerminal && !selectedTerminal.ok) return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED',
       summary: '终态证明选择未通过', output: selectedTerminal.reason }
-    const terminalCandidate = selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation)
+    const terminalCandidate = patch?.candidate ?? (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
       ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
     const terminalEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
       terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate)) : undefined
@@ -950,7 +959,7 @@ export const continuityValidateTool = defineTool({
       const warningCount = cachedValidation.warningCount ?? findings.filter((item) => item.severity === 'warning').length
       ctx.signal.throwIfAborted()
       const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, findings,
-        expectedChapterRevision: chapter.revision, independentCheck: 'complete', coverage, terminalCandidate, focus: args.focus, signal: ctx.signal })
+        expectedChapterRevision: chapter.revision, expectedTerminalCandidateHash:patch?.expectedBaseHash, independentCheck: 'complete', coverage, terminalCandidate, focus: args.focus, signal: ctx.signal })
       if (result.independentCheck !== 'complete') return { outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED',
         summary: '缓存连续性证据未确认', output: '本次只读复核发现缓存引用缺失或不属于当前对应正文，已保留未确认报告；未调用模型、未增加检查次数，不能宣称检查通过或据此改稿。原任务内仍可纠正真实问题，按原预算取得有效复核。' }
       const cachedEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
@@ -1046,11 +1055,12 @@ export const continuityValidateTool = defineTool({
     // Only a new request receives the current response contract. Old cache,
     // correction and exact-call replay retain their own full frozen input.
     const requestBodies = structuredClone(bodies)
-    if (!continued && terminalVersion === 2 && requestBodies.terminalEvidence) requestBodies.terminalEvidence.verdictProtocol = 3
+    if (!continued && terminalVersion === 2 && requestBodies.terminalEvidence) requestBodies.terminalEvidence.verdictProtocol = 4
     if (!continued && requestBodies.terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) {
       requestBodies.terminalEvidence.factCoverage = terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, 2)
     }
     const criticInput = [
+        ...(requestBodies.terminalEvidence?.verdictProtocol === 4 ? [freshContinuityResponseContract()] : []),
         sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
         ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
         `章节：${chapter.title}`,
@@ -1080,6 +1090,8 @@ export const continuityValidateTool = defineTool({
       if (reviewInput(current) !== frozenReviewInput || runtimeJson({ source }).hash !== runtimeJson({ source: sourceChapter }).hash) {
         throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文或章节桥已变化，未应用或重发旧版本连续性检查，请读取当前版本。')
       }
+      const currentCandidate = readTerminalCandidate(current?.validation)
+      if(patch&&(!currentCandidate||runtimeJson(currentCandidate).hash!==patch.expectedBaseHash))throw new DataAccessError(409,'CONTINUITY_INPUT_STALE','检查期间章末候选已变化，未覆盖较新的候选。')
       if (continued && runtimeJson(current?.validation).hash !== continued.validationHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原失败报告已变化，未纠正或应用旧意见。')
     }
     await assertCurrent()
@@ -1117,7 +1129,7 @@ export const continuityValidateTool = defineTool({
       await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilation.id} FOR UPDATE`
       await assertCurrent(tx)
       const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, compilationId: compilation.id, findings: independentFindings,
-        runId: ctx.runId, expectedChapterRevision: chapter.revision, independentCheck: criticFallback ? 'unavailable' : 'complete', coverage, terminalCandidate,
+        runId: ctx.runId, expectedChapterRevision: chapter.revision, expectedTerminalCandidateHash:patch?.expectedBaseHash, independentCheck: criticFallback ? 'unavailable' : 'complete', coverage, terminalCandidate,
         continuityCriticResponse: continued ? continued.originalAudit : inspected.audit, focus: args.focus, signal: ctx.signal }, tx)
       if (result.independentCheck === 'complete') {
         await markLegacyContinuityCorrectionApplied(tx, ctx, { originalHash: inspected.audit.contentHash,

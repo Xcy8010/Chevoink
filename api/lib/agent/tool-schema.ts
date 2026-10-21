@@ -70,6 +70,11 @@ export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'des
   const previousResearch = tool.name === 'research_report_save' && properties?.title
     ? { ...current, properties: { ...properties, title: Object.fromEntries(Object.entries(properties.title).filter(([key]) => key !== 'description')) },
       required: Object.keys(properties).filter(key => key === 'title' || (current.required as string[] ?? []).includes(key)) } : null
+  const previousPatch = tool.name === 'continuity_validate' && properties?.terminalPatch
+    ? { ...current, properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'terminalPatch')) } : null
+  const oldTerminal = previousTerminal && previousPatch ? { ...previousTerminal,
+    properties: Object.fromEntries(Object.entries(previousTerminal.properties).filter(([key]) => key !== 'terminalPatch')) } : null
   return [current, toOpenAIToolPresentation(tool, scope).parameters, ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : []),
+    ...(previousPatch ? [previousPatch, withoutTopLevelProofs(previousPatch), ...(oldTerminal ? [oldTerminal, withoutTopLevelProofs(oldTerminal)] : [])] : []),
     ...(previousProofSelection.length ? previousProofSelection : previousTerminal ? [previousTerminal] : []), ...(previousResearch ? [previousResearch] : [])]
 }

@@ -675,6 +675,7 @@ export async function validateStoryContinuity(input: {
   compilationId: string
   findings: ContinuityFindingInput[]
   expectedChapterRevision?: number
+  expectedTerminalCandidateHash?: string
   independentCheck?: 'complete' | 'unavailable'
   coverage?: CompilerContinuityCoverage
   terminalCandidate?: TerminalCandidate
@@ -696,6 +697,10 @@ export async function validateStoryContinuity(input: {
     include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
   })
   if (!compilation) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '写作编译任务不存在、已结束或不属于当前作品。')
+  const savedTerminalCandidate = readTerminalCandidate(compilation.validation)
+  if (input.expectedTerminalCandidateHash !== undefined && (!savedTerminalCandidate || runtimeJson(savedTerminalCandidate).hash !== input.expectedTerminalCandidateHash)) {
+    throw new DataAccessError(409,'CONTINUITY_INPUT_STALE','检查期间章末候选已变化，未覆盖较新的候选。')
+  }
   if (!compilation.chapter || !compilation.bridge) {
     throw new DataAccessError(409, 'COMPILATION_NOT_WRITTEN', '目标章节尚未完成写入，不能进入连续性检查。')
   }
