@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
+import { available, fixture as durableFixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { executeAgentRun } from '../../api/lib/agent/loop.js'
 import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
@@ -20,6 +20,10 @@ import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 import * as titles from '../../api/lib/agent/session-title.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
+
+const fixture: typeof durableFixture = (work, ...rest) => durableFixture(async f => {
+  try { await work(f) } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
+}, ...rest)
 
 describe.runIf(available)('complete terminal report resumes through processing and real commit', () => {
   it.each(['commit', 'repeat'] as const)('preserves the original stalled task and permits only genuine next work: %s', async scenario => fixture(async f => {

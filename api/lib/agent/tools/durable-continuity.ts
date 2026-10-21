@@ -290,7 +290,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       const stateHash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, compiler.id)
       if (!stateHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查后的编译状态缺失。')
       ctx.signal.throwIfAborted()
-      if (toolResult.outcome !== 'failed') {
+      if (toolResult.outcome !== 'failed' && frozen.sourceBodies?.terminalEvidence?.verdictProtocol === 2) {
         const readiness = await readChapterReviewReadiness(tx, ctx, compiler.id)
         if (readiness?.progressEvidence) toolResult.reviewProgress = { ...readiness.progressEvidence,
           phases: readiness.progressEvidence.phases.filter(phase => phase === 'continuity' || phase === 'terminal') }
