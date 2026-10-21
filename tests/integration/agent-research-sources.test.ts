@@ -309,7 +309,10 @@ describe.skipIf(!available)('J4 private versioned research sources', () => {
       await expect(saveResearchReportSection({ ...scope, runId: otherId }, input)).rejects.toMatchObject({ code: 'RESEARCH_REPORT_NOT_AUTHORIZED' })
       await expect(readResearchReport({ ...scope, userId: randomUUID() }, {})).rejects.toMatchObject({ code: 'RESEARCH_SOURCE_NOT_FOUND' })
       expect(await prisma.chapter.count({ where: { novelId: novel.id } })).toBe(0)
-      expect(await prisma.agentArtifact.count({ where: { run: { userId: user.id } } })).toBe(1)
+      // The initial-title case deliberately creates its own second report.
+      // Recovery and rejected writes may create neither duplicates nor extras.
+      expect(new Set((await prisma.agentArtifact.findMany({ where: { run: { userId: user.id } }, select: { id: true } }))
+        .map(artifact => artifact.id))).toEqual(new Set([saved.artifactId, derived.artifactId]))
     } finally {
       await prisma.agentArtifact.deleteMany({ where: { run: { userId: user.id } } })
       await prisma.agentRun.deleteMany({ where: { userId: user.id } })

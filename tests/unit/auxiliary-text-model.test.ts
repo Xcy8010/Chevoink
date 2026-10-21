@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 const mocks = vi.hoisted(() => ({ complete: vi.fn(), persist: vi.fn(), report: vi.fn() }))
 vi.mock('../../api/lib/ai-service.js', () => ({ generateTextCompletion: mocks.complete }))
@@ -66,13 +67,18 @@ describe('auxiliary text model inheritance', () => {
   })
   it('a needs-attention report cannot be described as quality passed or permission to clear every warning', async () => {
     mocks.complete.mockResolvedValue('{"findings":[]}')
+    const content = '她关上了门。'
+    const contentHash = createHash('sha256').update(content).digest('hex')
     mocks.report.mockResolvedValue({ id: 'report', chapterId: 'chapter', chapterRevision: 4, repairRound: 0, status: 'needs_repair',
-      findings: [{ severity: 'warning', signal: 'emotion_grounding', quote: '她关上了门。', explanation: '待审意见', suggestion: '供作者参考' }] })
+      chapter: { id: 'chapter', revision: 4, content }, deterministicMetrics: { independentCheck: 'complete', contentHash, sourceRevision: 4 },
+      findings: [{ id: 'finding', source: 'critic', severity: 'warning', signal: 'emotion_grounding', disposition: 'pending', authorFeedback: null,
+        startOffset: 0, endOffset: content.length, evidenceExcerpt: content, evidenceHash: contentHash, explanation: '待审意见', suggestion: '供作者参考' }] })
     const result = await qualityAnalyzeTool.execute(context(runtime('custom')), {})
     expect(result.output).toContain('绑定 r4，状态=needs_repair')
     expect(result.output).toContain('不能宣称质量检查通过')
     expect(result.output).toContain('不要求为清零意见改稿')
     expect(result.output).toContain('修订须由原始请求明确授权')
+    expect(result.output).toContain('"currentEvidence":true')
   })
   it.each(['lite', 'custom', 'speed'] as const)('preserves the full %s runtime when the selected model is free', tier => {
     const selected = runtime(tier)
