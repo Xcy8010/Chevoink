@@ -1164,7 +1164,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         taskSpec: taskSpec as unknown as object, usage: { ...usage, checkpoint: checkpointSnapshot() },
       } })
     } else await persistCheckpoint()
-    const checkAuthorScope = continuingTask || taskSpec.scope.writingTargetProtocol === 2 && taskSpec.scope.writingClarificationProtocol !== 1
+    const checkAuthorScope = !taskSpec.scope.authorEffects
+      && (continuingTask || taskSpec.scope.writingTargetProtocol === 2 && taskSpec.scope.writingClarificationProtocol !== 1)
     const needsScopeDecision = checkAuthorScope && (taskSpec.scope.writing?.kind === 'needs_input' || taskSpec.scope.localEditBoundary?.kind === 'needs_input')
       ? await prisma.$transaction(async tx => {
         const effective = await effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)
@@ -2219,7 +2220,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           return
         }
         const todoIncomplete = unfinishedTodos.length > 0 && !(nextChapterRequired && !chapterIncomplete && taskSpec.goals.length === 1)
-        const otherPremature = chapterIncomplete || reportIncomplete || todoIncomplete || result.finishReason === 'length' || promisesFurtherAction(cleanContent) || (expectsPlanSave && !planSavePerformed)
+        const unresolvedWritingScope = taskSpec.scope.authorEffects?.manuscript
+          && (taskSpec.scope.writing?.kind === 'needs_input' || taskSpec.scope.localEditBoundary?.kind === 'needs_input')
+          && await prisma.$transaction(async tx => {
+            const effective = await effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)
+            return effective.scope.writing?.kind === 'needs_input' || effective.scope.localEditBoundary?.kind === 'needs_input'
+          })
+        const otherPremature = unresolvedWritingScope || chapterIncomplete || reportIncomplete || todoIncomplete || result.finishReason === 'length' || promisesFurtherAction(cleanContent) || (expectsPlanSave && !planSavePerformed)
         // A review denial already told the model to finish only authorized work
         // and report the remainder honestly. Afterwards a silent wrap-up is not
         // completion unless the requested next chapter is already committed.

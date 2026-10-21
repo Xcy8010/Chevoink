@@ -6,7 +6,7 @@ import { runtimeJson } from './runtime-common.js'
  * again. Frozen root/input ownership remains the authority for this receipt. */
 export function frozenWritingScopeHash(scope: TaskSpec['scope']): string {
   const interpretation = scope.writingInterpretation
-  return runtimeJson({ writing: scope.writing ?? null, localEditBoundary: scope.localEditBoundary ?? null,
+  return runtimeJson({ writing: scope.writing ?? null, ...(scope.authorEffects ? { authorEffects: scope.authorEffects } : {}), localEditBoundary: scope.localEditBoundary ?? null,
     localEditProtocol: scope.localEditProtocol ?? null, selection: scope.selection ?? null, selectionBoundary: scope.selectionBoundary ?? null,
     requestHash: interpretation?.requestHash ?? null, intent: interpretation?.intent ?? null,
     revisionDenied: interpretation?.revisionDenied ?? null, creationDenied: interpretation?.creationDenied ?? null,

@@ -489,21 +489,19 @@ export async function startLoopRunLocked(
       const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
         prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 1,
         researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
-      if (researchAdmission && fresh.intent === 'research_analysis') {
-        // Freeze identity/budget before async bootstrap, without writing grants.
-        created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(fresh)) as Prisma.InputJsonValue } })
-      } else if (input.selection || ['write', 'revise', 'review'].includes(fresh.intent) && !['proposal_only', 'conversation_only'].includes(fresh.writingPacing ?? '')) {
+      let frozen = fresh
+      if (input.selection || fresh.scope.authorEffects?.manuscript) {
         // Preserve the original protected-body snapshot normally captured by
         // async initialization when freezing this fresh contract at admission.
         if (fresh.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')) {
           const chapters = await tx.chapter.findMany({ where: { ...activeChapterScope(session.novelId), authorId: userId }, select: { id: true } })
           fresh.scope.chapterIds = chapters.map(chapter => chapter.id)
         }
-        const frozen = await freezeWritingScope(tx, { userId, novelId: session.novelId, runId: created.id }, fresh, input.prompt, 2)
-        created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(frozen)) as Prisma.InputJsonValue } })
-      } else if (fresh.networkAccess === 'denied') {
-        created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(fresh)) as Prisma.InputJsonValue } })
+        frozen = await freezeWritingScope(tx, { userId, novelId: session.novelId, runId: created.id }, fresh, input.prompt, 2)
       }
+      // Every fresh request keeps its original effect interpretation, including
+      // chat and plans. Async bootstrap must not classify it as a legacy write.
+      created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(frozen)) as Prisma.InputJsonValue } })
     }
     if (steering) await tx.agentMessage.create({ data: { id: steeringMessageId!, runId: created.id, sessionId: session.id, role: 'user', parts: [
       { type: 'text', text: steering.prompt }, ...(steering.attachments ?? []).map(item => ({
@@ -1045,7 +1043,7 @@ async function continueLoopRunLocked(
   const savedUsage = savedRunUsageSchema.safeParse(run.usage)
   const frozen = taskSpecSchema.safeParse(run.taskSpec)
   let authorInputRequired = savedUsage.success && Boolean(savedUsage.data.checkpoint?.authorInputRequired)
-  if (frozen.success && (frozen.data.scope.writing?.kind === 'needs_input' || frozen.data.scope.localEditBoundary?.kind === 'needs_input')) {
+  if (frozen.success && !frozen.data.scope.authorEffects && (frozen.data.scope.writing?.kind === 'needs_input' || frozen.data.scope.localEditBoundary?.kind === 'needs_input')) {
     const effective = frozen.data.scope.writingClarificationProtocol === 1
       ? await prisma.$transaction(tx => readWritingScope(tx, { userId, novelId: run.novelId, runId })) : null
     authorInputRequired ||= frozen.data.scope.localEditBoundary?.kind === 'needs_input'

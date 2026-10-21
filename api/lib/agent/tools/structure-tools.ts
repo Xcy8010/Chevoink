@@ -21,13 +21,13 @@ import { executeDurableCreate } from './durable-create.js'
 import { getStructureRevisionHash } from '../../data/volume.js'
 import { withAgentManuscriptWrite } from '../manuscript-scope.js'
 
-async function withStructureProgress<T>(ctx: ToolContext, work: (tx: Prisma.TransactionClient) => Promise<T>) {
+async function withStructureProgress<T>(ctx: ToolContext, work: (tx: Prisma.TransactionClient) => Promise<T>, effect: 'structure' | 'metadata' = 'structure') {
   return withAgentManuscriptWrite(ctx, async tx => {
     const beforeHash = await readSemanticStructureHash(tx, ctx.novelId)
     const value = await work(tx)
     const afterHash = await readSemanticStructureHash(tx, ctx.novelId)
     return { value, semanticTransition: { targetId: ctx.novelId, beforeHash, afterHash } }
-  })
+  }, effect)
 }
 
 const STRUCTURE_PERMISSION = { plan: 'deny', build: 'allow', review: 'deny' } as const
@@ -112,7 +112,7 @@ export const volumeUpdateTool = defineTool({
   permission: STRUCTURE_PERMISSION,
   readOnly: false,
   async execute(ctx, { volumeId, ...input }) {
-    const { value: volume, semanticTransition } = await withStructureProgress(ctx, tx => updateVolumeData(ctx.userId, ctx.novelId, volumeId, input, tx))
+    const { value: volume, semanticTransition } = await withStructureProgress(ctx, tx => updateVolumeData(ctx.userId, ctx.novelId, volumeId, input, tx), 'metadata')
     return volume
       ? { semanticTransition, output: `已更新卷《${volume.title}》。`, summary: `更新卷《${volume.title}》` }
       : { output: '目标卷不存在或不属于当前作品。', outcome: 'failed' as const }

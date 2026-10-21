@@ -8,8 +8,16 @@ export type ToolAuthority = ReadonlyMap<string, Readonly<{
   dangerous: boolean
 }>>
 
+const manuscriptEffects = new Set(['chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename',
+  'story_compiler_prepare', 'scene_task_build', 'chapter_bridge_commit', 'changeset_apply', 'changeset_rollback', 'quality_revision_apply'])
+const structureEffects = new Set(['volume_create', 'volume_move', 'volume_delete',
+  'chapter_move', 'chapter_move_to_volume', 'chapter_split', 'chapter_merge'])
+
 /** Narrow both the model's schemas and the executor's admission ceiling. */
 export function restrictToolsToTask(tools: AgentTool[], task: TaskSpec): AgentTool[] {
+  if (task.scope.authorEffects) tools = tools.filter(tool =>
+    (task.scope.authorEffects!.manuscript || !manuscriptEffects.has(tool.name))
+    && (task.scope.authorEffects!.structure || !structureEffects.has(tool.name)))
   if (task.researchNavigation?.version === 1 && task.intent === 'research_analysis') tools = tools.map(tool => tool.researchNavigation
     ? { ...tool, ...tool.researchNavigation } : tool)
   if (task.networkAccess === 'denied') tools = tools.filter(tool => tool.name !== 'web_search' && tool.name !== 'web_read')

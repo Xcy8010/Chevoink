@@ -3124,9 +3124,70 @@ describe('ordinary chapter summary presentation', () => {
 })
 
 describe('author-directed task ending in the real execution loop', () => {
-  it.each([false, true])('pauses fresh unresolved protocol2 admission before chat, naming or tool execution, local=%s', async local => {
+  it.each([
+    '列出三个提升注意力的方法。',
+    '我们讨论人物动机，不续写或修改任何作品正文。',
+    '请读取第1章，整理人物关系，不改动正文。',
+  ])('executes an independent read and answers a fresh non-writing request: %s', async prompt => {
+    const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, authorWritingProtocol: 2 })
+    mocks.currentOriginal = { prompt, taskSpec: spec }
+    const read = tool('chapter_read', async () => ({ output: '合成资料：人物尚在门外。' }), true)
+    const write = tool('chapter_write', async () => ({ output: 'must not execute' }), false)
+    mocks.tools = [read, write]
+    queue(response('', [call('independent-read', 'chapter_read')]), response('人物目前仍在门外。'))
+    await run(prompt)
+    expect(read.execute).toHaveBeenCalledOnce()
+    expect(write.execute).not.toHaveBeenCalled()
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+  it('finishes the safe read of a mixed task before asking for its unresolved write target', async () => {
+    const prompt = '先读取资料并总结结论，再修改正文。'
+    const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, authorWritingProtocol: 2 })
+    spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: true, titleAndBodyOnly: false }
+    mocks.currentOriginal = { prompt, taskSpec: spec }
+    const read = tool('chapter_read', async () => ({ output: '已读取原请求所需的合成资料。' }), true)
+    const write = tool('chapter_write', async () => ({ output: 'must not execute' }), false)
+    const ask = tool('ask_user', async () => ({ failureCode: 'AUTHOR_INPUT_REQUIRED', output: '等待真实作者明确范围', summary: '等待作者输入',
+      display: { kind: 'question', question: '要修改哪一章？', options: [{ label: '第1章' }, { label: '稍后再定' }], unanswered: true } }))
+    mocks.tools = [read, ask, write]
+    queue(response('', [call('mixed-read', 'chapter_read')]), response('', [call('mixed-question', 'ask_user')]))
+    await run(prompt)
+    expect(read.execute).toHaveBeenCalledOnce()
+    expect(ask.execute).toHaveBeenCalledOnce()
+    expect(write.execute).not.toHaveBeenCalled()
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { authorInputRequired: { callId: 'mixed-question' } } })
+  })
+  it.each(['解释一下限知视角，然后继续下一章。', 'explain limited viewpoint, then write chapter 3.', '请问如何开场？请写第3章。'])(
+    'preserves the frozen writing phase when a mixed request resumes: %s', async prompt => {
+      const fresh = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt, authorWritingProtocol: 2 })
+      seedAdmission(prompt, 'c')
+      mocks.runs.get('run')!.taskSpec = fresh
+      const { prisma } = await import('../../api/lib/prisma.js')
+      const { freezeWritingScope } = await import('../../api/lib/agent/writing-scope.js')
+      const spec = await prisma.$transaction(tx => freezeWritingScope(tx, { userId: 'user', novelId: 'novel', runId: 'run' }, fresh, prompt, 2))
+      expect(spec.scope.authorEffects?.manuscript).toBe(true)
+      const frozen = structuredClone(spec)
+      mocks.currentOriginal = { prompt, taskSpec: spec }
+      mocks.update.mockResolvedValueOnce({ taskSpec: spec, currentTurn: 1, startedAt: new Date(), usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10 } })
+      const write = tool('chapter_write', async () => ({ output: 'must not execute before author answer' }), false)
+      const ask = tool('ask_user', async () => ({ failureCode: 'AUTHOR_INPUT_REQUIRED', output: '等待真实作者明确落点',
+        display: { kind: 'question', question: '确认写入落点？', options: [{ label: '确认' }, { label: '稍后' }], unanswered: true } }))
+      mocks.tools = [write, ask]
+      queue(response('', [call('resume-placement', 'ask_user')]))
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+      expect((mocks.openAITools.mock.calls as unknown[][]).some(([admitted]) => (admitted as AgentTool[]).some(item => item.name === 'chapter_write'))).toBe(true)
+      expect(ask.execute, JSON.stringify({ events: events().slice(-6), chatCalls: mocks.chat.mock.calls.length })).toHaveBeenCalledOnce()
+      expect(write.execute).not.toHaveBeenCalled()
+      expect(mocks.runs.get('run')?.taskSpec).toEqual(frozen)
+      expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+    })
+  it.each([false, true])('keeps legacy unresolved protocol2 contracts local before chat, naming or tool execution, local=%s', async local => {
     const prompt = local ? '局部修订第1章的某句话。' : '修订一章，目标尚未明确。'
     const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, authorWritingProtocol: 2, localEditProtocol: 1 })
+    delete spec.scope.authorEffects
     spec.scope.writingTargetProtocol = 2
     spec.scope.writingInterpretation = { version: 2, requestHash: 'a'.repeat(64), scopeHash: '0'.repeat(64), intent: 'revise',
       revisionDenied: false, creationDenied: false,

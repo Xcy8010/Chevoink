@@ -33,10 +33,10 @@ async function assertManuscriptRevision(tx: Prisma.TransactionClient, scope: Wri
   }
 }
 
-export async function withAgentManuscriptWrite<T>(scope: WriteScope, write: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+export async function withAgentManuscriptWrite<T>(scope: WriteScope, write: (tx: Prisma.TransactionClient) => Promise<T>, effect: 'structure' | 'metadata' = 'structure'): Promise<T> {
   const apply = async (tx: Prisma.TransactionClient) => {
     await assertAgentManuscriptCurrent(tx, scope)
-    await assertWritingStructureAuthority(tx, scope)
+    await assertWritingStructureAuthority(tx, scope, effect)
     return write(tx)
   }
   return scope.transaction ? apply(scope.transaction) : prisma.$transaction(apply)

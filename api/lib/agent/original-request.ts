@@ -106,6 +106,14 @@ export async function assertOriginalRepairAuthority(tx: Prisma.TransactionClient
  * truncated goal or a second lexical classifier for its frozen decision. */
 export function originalRepairAuthority(original: { prompt: string | null; spec: unknown }): boolean {
   const raw = record(original.spec), scope = record(raw?.scope)
+  if (scope && 'authorEffects' in scope) {
+    const parsed = taskSpecSchema.safeParse(original.spec)
+    if (!parsed.success || !original.prompt || !parsed.data.scope.authorEffects
+      || parsed.data.scope.authorEffects.requestHash !== createHash('sha256').update(original.prompt).digest('hex')) {
+      throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者操作解释与请求不匹配，不能重新猜测修订授权。')
+    }
+    if (!parsed.data.scope.authorEffects.manuscript || scope.writingTargetProtocol !== 2) return false
+  }
   if (scope?.writingTargetProtocol !== 2) return hasOriginalRepairAuthority(original.prompt)
   const parsed = taskSpecSchema.safeParse(original.spec)
   if (!parsed.success || !original.prompt || !parsed.data.scope.writingInterpretation

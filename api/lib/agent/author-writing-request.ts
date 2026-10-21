@@ -9,10 +9,10 @@ export type AuthorClause = AuthorSpan & { text: string; masked: string; sentence
 export type AuthorQuotedSpan = AuthorSpan & { kind: 'quotation' | 'title' | 'code'; role: 'unknown';
   closed: boolean; contentStart: number; contentEnd: number }
 export type AuthorWritingTarget = { span: AuthorSpan; clauseSpan: AuthorSpan;
-  kind: 'ordinal' | 'count' | 'relative' | 'same_target' | 'global' | 'local' | 'prose'; range: RequestedWritingRange | null;
+  kind: 'ordinal' | 'count' | 'relative' | 'same_target' | 'global' | 'local' | 'prose' | 'book' | 'artifact' | 'metadata' | 'structure'; range: RequestedWritingRange | null;
   invalid?: boolean; contextual?: boolean }
 export type AuthorWritingOperation = { span: AuthorSpan; clauseSpan: AuthorSpan;
-  kind: 'write' | 'revise' | 'review' | 'read' | 'placement'; polarity: 'affirmative' | 'negative';
+  kind: 'write' | 'revise' | 'review' | 'read' | 'placement' | 'artifact' | 'structure'; polarity: 'affirmative' | 'negative';
   accepted: boolean; reason: string; targetIndices: number[] }
 export type AuthorConditionalLocalRepair = { targetIndices: number[]; reviewOperationIndices: number[];
   repairs: Array<{ operationIndex: number; condition: { kind: 'review_findings' | 'necessity'; span: AuthorSpan } }> }
@@ -31,18 +31,21 @@ const numberPattern = `(?:${numeric})`
 const join = '(?:、|及|与|和|至|到|[-–—−~～〜－])'
 const chapterPattern = `(?:第\\s*)?${numberPattern}\\s*(?:章)?(?:\\s*${join}\\s*(?:第\\s*)?${numberPattern}\\s*(?:章)?)*\\s*章`
 const numbered = new RegExp(`^(?:第\\s*)?(${numberPattern})\\s*章$`, 'u')
-const revisionWords = '修订|修正|修改|改写|重写|扩写|缩写|修复|纠正|纠错|润色|优化|调整|替换|改为|改成|插入|删除|删掉|删去|精简|补充|增加|整改|补足|解决|不动|改(?!名|价|变|卷)'
+const revisionWords = '修订|修正|修改|改写|重写|扩写|缩写|修复|纠正|纠错|润色|优化|调整|替换|改名|重命名|改为|改成|插入|删除|删掉|删去|精简|补充|增加|整改|补足|解决|不动|改(?!价|变|卷)'
 const preservationWords = '保持不变|保持原样|保留原样|保留|保持|不变'
-const writeWords = '续写|创作|起草|补写|补完|补齐|写完|完成|写入|落稿|新建|创建|建章|写'
+const writeWords = '续写|继续(?!\\s*(?:写|创作|起草))|创作|起草|补写|补完|补齐|写完|完成|写入|落稿|新建|创建|新增|建章|保存|存入|导出|生成|发布|制定|拟定|编写|撰写|设计|构思|策划|整理|写(?!作)'
+const structureWords = '移动|重排|排序|拆分|合并'
 const reviewWords = '检查|审查|审阅|核对|核实|评估|分析|判断|检视|看看|复检|复核|校验'
-const readWords = '读取|阅读|读完|参考|参照|根据|对照|呼应|回顾|借鉴|比照|通读|引用|读'
-const operationPattern = new RegExp(`${revisionWords}|${preservationWords}|${writeWords}|${reviewWords}|${readWords}|\\b(?:write|draft|finish|complete|revise|edit|repair|rewrite|polish|fix|replace|insert|delete|shorten|expand|check|review|assess|evaluate|read|consult|reference)\\b`, 'iu')
+const readWords = '读取|阅读|读完|参考|参照|根据|对照|呼应|回顾|借鉴|比照|通读|引用|搜索|检索|查找|查阅|研究|读'
+const operationPattern = new RegExp(`${structureWords}|${revisionWords}|${preservationWords}|${writeWords}|${reviewWords}|${readWords}|\\b(?:write|draft|finish|complete|continue|revise|edit|repair|rewrite|polish|fix|replace|insert|delete|shorten|expand|check|review|assess|evaluate|read|consult|reference|save|export|generate|publish|move|reorder|split|merge)\\b`, 'iu')
 const operationsIn = (text: string) => [...text.matchAll(new RegExp(operationPattern.source, 'giu'))]
 const hasPlacement = (text: string) => /(?:作为|as\s+(?:the\s+)?)(?:全书)?第/iu.test(text) && /写入|保存|落稿/u.test(text)
 const revisionPattern = new RegExp(`^(?:${revisionWords}|revise|edit|repair|rewrite|polish|fix|replace|insert|delete|shorten|expand)$`, 'iu')
 const preservationPattern = new RegExp(`^(?:${preservationWords})$`, 'u')
 const readPattern = new RegExp(`^(?:${readWords}|read|consult|reference)$`, 'iu')
 const reviewPattern = new RegExp(`^(?:${reviewWords}|check|review|assess|evaluate)$`, 'iu')
+const structurePattern = new RegExp(`^(?:${structureWords}|move|reorder|split|merge)$`, 'iu')
+const coordinatedPredicates = /^\s*(?:或(?:者)?|和|及|以及|与|并(?:且)?|、|and|or|nor)\s*$/iu
 const factBefore = /提到|写道|写着|记载|描述|讲述|表示|说过|却|例如|举例|原文[:：]|(?:主角|角色|人物).{0,8}(?:尝试|打算|决定)|\b(?:said|says|mentions?|describes?)\b/iu
 const advice = /如何|怎样|怎么|建议|方案|思路|方法|说明|讲解|\b(?:how|advice|suggestions?)\b/iu
 const connective = /并且|然后|接着|同时|但是|不过|而且|并|但|且|再|\b(?:and|then|but)\b/iu
@@ -157,6 +160,10 @@ function extractTargets(clause: AuthorClause): AuthorWritingTarget[] {
     const value = text.match(/chapter\s*(\d+)/iu)
     return value ? chapterRange(`第${value[1]}章`) : null
   })
+  add(/小说|故事|novel|book/giu, 'book', () => null)
+  add(/(?:作品|小说)?(?:简介|标签|书名|章名|卷名|标题|摘要)|(?:book|chapter|volume)\s+(?:title|summary)|tags/giu, 'metadata', () => null)
+  add(/(?:(?:章节|正文|连续性|质量|分析|研究|拆书)(?:检查|分析|评估)?)?报告|计划(?:文件)?|大纲|规划|封面|设定集|人物表|文件|report|plan|outline|cover|file/giu, 'artifact', () => null)
+  add(/章节顺序|卷章顺序|章节结构|卷章结构|顺序|结构|卷(?!内)|chapter order|structure|volume/giu, 'structure', () => null)
   // Longest object wins before operation binding; a title placeholder cannot
   // manufacture a volume/ordinal adjacency because its UTF-16 space remains.
   const selected: AuthorWritingTarget[] = []
@@ -411,15 +418,20 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
     for (const [index, match] of matches.entries()) {
       const start = clause.start + match.index!, end = start + match[0].length
       const protecting = preservationPattern.test(match[0])
-      const kind = revisionPattern.test(match[0]) || protecting ? 'revise' : reviewPattern.test(match[0]) ? 'review' : readPattern.test(match[0]) ? 'read' : 'write'
-      const left = previous?.span.end ?? clause.start, right = clause.start + (matches[index + 1]?.index ?? text.length)
+      let kind: AuthorWritingOperation['kind'] = structurePattern.test(match[0]) ? 'structure'
+        : revisionPattern.test(match[0]) || protecting ? 'revise' : reviewPattern.test(match[0]) ? 'review' : readPattern.test(match[0]) ? 'read' : 'write'
+      // Past-tense object modifiers ("chapter 3's already saved body") are
+      // evidence, not a new directive boundary that severs its chapter address.
+      const left = previous?.reason === 'factual_statement' ? clause.start : previous?.span.end ?? clause.start
+      const right = clause.start + (matches[index + 1]?.index ?? text.length)
       const before = lexical.masked.slice(clause.start, start), between = lexical.masked.slice(left, start), after = lexical.masked.slice(end, right)
       const conditionalRevision = kind === 'revise' && conditionalRevisionModifier.test(between)
       const negative = /(?:不要|不得|不许|不能|禁止|无需|无须|不用|不必|不应(?:该)?|不可|不再|不准|不允许|严禁|勿|(?<!分)别|never|(?:do|must|should|may|can|will)\s+not|don['’]t|cannot)\s*(?:(?!并|但|然后|接着|随后|而且|\b(?:and|then|but)\b).)*$/iu.exec(between)
       const directNegative = /不\s*$/u.test(between) || match[0] === '不动'
       const inheritedNegative = previous?.polarity === 'negative' && !connective.test(between)
         && /[，,、]/u.test(between) && /^[第零〇一二两三四五六七八九十百千0-9章，,、和及与\s]+$/u.test(between)
-      const polarity = (protecting || negative && !/跳过|省略|略过|伪造/u.test(negative[0]) || directNegative || inheritedNegative) ? 'negative' : 'affirmative'
+      const coordinatedNegative = previous?.polarity === 'negative' && coordinatedPredicates.test(between)
+      const polarity = (protecting || negative && !/跳过|省略|略过|伪造/u.test(negative[0]) || directNegative || inheritedNegative || coordinatedNegative) ? 'negative' : 'affirmative'
       let bound = clauseTargets.filter(targetIndex => {
         const target = targets[targetIndex]
         return !target.contextual && target.span.start >= end && target.span.end <= right
@@ -436,8 +448,9 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
       // Coordinated predicates can share an object on their right. A reading
       // predicate never lends its reference object to a mutation.
       const nextMatch = matches[index + 1]
-      if (!bound.length && nextMatch && reviewPattern.test(nextMatch[0])
-        && /^\s*(?:并且?|与|和|然后|and|then)\s*$/iu.test(after)) {
+      if (!bound.length && nextMatch && (reviewPattern.test(nextMatch[0])
+        && /^\s*(?:并且?|与|和|然后|and|then)\s*$/iu.test(after)
+        || ['write', 'revise', 'artifact', 'structure'].includes(kind) && coordinatedPredicates.test(after))) {
         const objectEnd = clause.start + (matches[index + 2]?.index ?? text.length)
         bound = clauseTargets.filter(targetIndex => targets[targetIndex].span.start >= right + nextMatch[0].length
           && targets[targetIndex].span.end <= objectEnd && !targets[targetIndex].contextual)
@@ -478,11 +491,30 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
         bound.push(targetIndex)
       }
       const quoteEdit = sourceQuotes.length > 0
+      const objectKinds = bound.map(targetIndex => targets[targetIndex].kind)
+      if (['write', 'revise'].includes(kind) && (objectKinds.includes('metadata')
+        || /^(?:改名|重命名|rename)$/iu.test(match[0]) && objectKinds.length > 0)
+        && !bound.some(targetIndex => targets[targetIndex].range && targets[targetIndex].range!.volume === undefined)
+        && !objectKinds.some(object => ['prose', 'local', 'global'].includes(object))) kind = 'artifact'
+      if (['write', 'revise'].includes(kind) && objectKinds.includes('artifact')
+        && (objectKinds.every(object => object === 'artifact')
+          || /^(?:保存|存入|导出|save|export)$/iu.test(match[0]) && /到|为|成|\b(?:to|as)\b/iu.test(after))) kind = 'artifact'
+      if (['write', 'revise'].includes(kind) && objectKinds.includes('structure')
+        && !objectKinds.some(object => ['ordinal', 'relative', 'same_target', 'local', 'prose', 'book'].includes(object))) kind = 'structure'
+      if (/^(?:新增|新建|创建|删除)$/u.test(match[0]) && bound.some(targetIndex => {
+        const target = targets[targetIndex]
+        return target.range?.volume !== undefined && /卷\s*$/u.test(prompt.slice(target.span.start, target.span.end))
+      })) kind = 'structure'
       const explicitLocal = /修复|修正|纠正|修改|修订|补足|解决|改/u.test(match[0]) && /问题|因果|矛盾/u.test(after)
+      // A direct, objectless writing command asks for prose placement; it is
+      // not a grant to guess a chapter. Named artifacts retain their own role.
+      const implicitWriting = kind === 'write' && !bound.length && /^(?:写|续写|创作|起草|write|draft)$/iu.test(match[0])
+        && /^(?:(?:请(?:你)?|帮我|替我|为我|给我|麻烦(?:你)?|现在|直接|先|再|就|只|然后|接着|please|then)\s*)*$/iu.test(before.trim())
       let reason = polarity === 'negative' ? 'negated' : 'author_operation'
       if (kind === 'read') reason = 'reference'
       else if (factBefore.test(before) || /(?:已经|早已|曾经|已)\s*$/u.test(before) || /^\s*过/u.test(after)) reason = 'factual_statement'
-      else if (advice.test(before) || /的(?:建议|方案|思路|方法|报告|情况)\s*$/u.test(after)) reason = 'advice'
+      else if (advice.test(before) || /的(?:建议|方案|思路|方法|报告|情况)\s*$/u.test(after)
+        || /^(?:的)?(?:手法|技巧|方法|建议|教程|风格)/u.test(after)) reason = 'advice'
       else if (/只读|仅供阅读|read.only/iu.test(before)) reason = 'read_only'
       else if (/[:：]/u.test(before) && operations.some(operation => operation.clauseSpan.start === clause.start
         && (operation.kind === 'read' || operation.kind === 'review'
@@ -496,8 +528,10 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
         && !/并|然后|后|再/u.test(after)) reason = 'review_wrapper'
       else if ((kind === 'write' || kind === 'revise') && nextMatch && reviewPattern.test(nextMatch[0])
         && !conditionalRevision && !/并|与|和|然后|后|再|\b(?:and|then)\b/iu.test(after)) reason = 'review_subject'
-      else if ((kind === 'write' || kind === 'revise') && !bound.length && !quoteEdit && !explicitLocal && !conditionalRevision) reason = 'no_manuscript_object'
+      else if ((kind === 'write' || kind === 'revise') && !bound.length && !quoteEdit && !explicitLocal && !conditionalRevision && !implicitWriting) reason = 'no_manuscript_object'
+      else if (kind === 'structure' && !bound.length) reason = 'no_manuscript_object'
       else if (kind === 'revise' && !quoteEdit && bound.length && bound.every(targetIndex => targets[targetIndex].span.end <= start)
+        && !/^(?:改名|重命名|rename)$/iu.test(match[0])
         && after.trim() && !clauseTargets.some(targetIndex => ['prose', 'local'].includes(targets[targetIndex].kind))
         && !bound.some(targetIndex => targets[targetIndex].kind === 'global')
         && !/[:：]|正文|草稿|稿件|问题/u.test(before + after)) reason = 'unbound_postposed_operation'

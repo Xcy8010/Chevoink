@@ -50,6 +50,10 @@ export const taskScopeSchema = z.object({
   localEditProtocol: z.literal(1).optional(),
   /** Fresh admission binds chapter targets to their requested action, never reference prose. */
   writingTargetProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
+  /** Fresh server interpretation of requested effects. Missing keeps legacy
+   * contracts unchanged; chapter scope is checked only when applying writes. */
+  authorEffects: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+    manuscript: z.boolean(), structure: z.boolean() }).strict().optional(),
   /** Fresh parser result, bound once to original human input; never re-derived on recovery. */
   writingInterpretation: z.object({ version: z.literal(2), requestHash: z.string().regex(/^[a-f0-9]{64}$/), scopeHash: z.string().regex(/^[a-f0-9]{64}$/),
     intent: z.enum(['write', 'revise', 'review']).nullable(), reasons: z.array(z.string().min(1)).max(32),

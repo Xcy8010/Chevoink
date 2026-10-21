@@ -53,7 +53,8 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
       revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash, start: selection.start, end: selection.end,
       prefix: chapter.content.slice(0, selection.start), suffix: chapter.content.slice(selection.end) } } }
   }
-  if (!['write', 'revise', 'review'].includes(spec.intent) || spec.writingPacing === 'proposal_only' || spec.writingPacing === 'conversation_only') return spec
+  if (spec.scope.authorEffects?.manuscript === false || !['write', 'revise', 'review', 'global_transform'].includes(spec.intent)
+    || spec.writingPacing === 'proposal_only' || spec.writingPacing === 'conversation_only') return spec
   const admissionPrompt = original.prompt ?? prompt
   const chapters = await tx.chapter.findMany({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) },
     select: { id: true, revision: true, orderIndex: true, orderInVolume: true, volumeId: true, volume: { select: { orderIndex: true } } }, orderBy: { orderIndex: 'asc' } })
@@ -273,6 +274,10 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
   const spec = taskSpecSchema.safeParse(original.spec)
   const raw = original.spec && typeof original.spec === 'object' && !Array.isArray(original.spec) ? original.spec as Record<string, unknown> : null
   const rawScope = raw?.scope && typeof raw.scope === 'object' && !Array.isArray(raw.scope) ? raw.scope as Record<string, unknown> : null
+  if (rawScope && 'authorEffects' in rawScope && (!spec.success || !original.prompt || !spec.data.scope.authorEffects
+    || spec.data.scope.authorEffects.requestHash !== createHash('sha256').update(original.prompt).digest('hex'))) {
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者请求的章节解释凭证缺失或不匹配，不能重新解析补授权。')
+  }
   if (rawScope?.writingTargetProtocol === 2 && (!spec.success || !spec.data.scope.writingInterpretation || !original.prompt
     || spec.data.scope.writingInterpretation.requestHash !== createHash('sha256').update(original.prompt).digest('hex')
     || spec.data.scope.writingInterpretation.operations.some(operation => operation.end <= operation.start || operation.end > original.prompt!.length)
@@ -283,6 +288,12 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者请求的章节解释凭证缺失或不匹配，不能重新解析补授权。')
   }
   if (spec.success) assertFrozenWritingContract(spec.data)
+  if (spec.success && spec.data.scope.authorEffects?.manuscript === false) {
+    return { ...original, writing: undefined, bindings: null, clarification: null }
+  }
+  if (spec.success && spec.data.scope.authorEffects?.manuscript && !spec.data.scope.writing) {
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者请求的章节解释凭证缺失或不匹配，不能重新解析补授权。')
+  }
   let writing = spec.success ? spec.data.scope.writing : undefined
   const source = await tx.agentRun.findFirstOrThrow({ where: { id: original.sourceRunId, userId: subject.userId, novelId: subject.novelId } })
   const clarification = spec.success ? await readWritingClarification(tx, subject, original, source, spec.data) : null
@@ -475,6 +486,9 @@ export async function assertWritingTarget(tx: Prisma.TransactionClient, subject:
     throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '当前执行已暂停或结束，不能再写入章节。')
   }
   const scope = await readWritingScope(tx, subject)
+  if (taskSpecSchema.safeParse(scope.spec).data?.scope.authorEffects?.manuscript === false) {
+    throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原始请求未授权该章节，不能通过工具、待办或子任务扩大范围。')
+  }
   const boundary = originalSelectionBoundary(scope.spec)
   if (boundary && (target.chapterId !== boundary.chapterId || target.effect && target.effect !== 'range')) {
     throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '原任务只授权选区内片段替换，不能整体覆盖、追加、改名、创建或通过其他工具改动正文。')
@@ -550,8 +564,11 @@ export async function bindWritingChapter(tx: Prisma.TransactionClient, subject: 
     targets: [...(scope.bindings?.targets.filter(item => item.orderIndex !== orderIndex) ?? []), { orderIndex, chapterId }].sort((a, b) => a.orderIndex - b.orderIndex) }).value } })
 }
 
-export async function assertWritingStructureAuthority(tx: Prisma.TransactionClient, subject: Subject) {
+export async function assertWritingStructureAuthority(tx: Prisma.TransactionClient, subject: Subject, effect: 'structure' | 'metadata' = 'structure') {
   const scope = await readWritingScope(tx, subject)
+  if (effect !== 'metadata' && taskSpecSchema.safeParse(scope.spec).data?.scope.authorEffects?.structure === false) {
+    throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原请求仅授权指定章节正文，未授权拆分、合并或重排作品结构。')
+  }
   if (originalSelectionBoundary(scope.spec)) throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '选区授权不允许改变章节结构。')
   if (originalLocalEditBoundary(scope.spec)) throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '局部正文授权不允许改变章节结构。')
   if (scope.writing && scope.writing.kind !== 'unbounded') throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原请求仅授权指定章节正文，未授权拆分、合并或重排作品结构。')

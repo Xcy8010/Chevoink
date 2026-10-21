@@ -128,7 +128,7 @@ export function classifyWritingPacing(prompt: string): TaskSpec['writingPacing']
 /** Repair greeting/question legacy contracts only from the recovered original
  * user message. Never infer a broader grant or change task identity on resume. */
 export function narrowLegacyConversationTask(spec: TaskSpec, originalPrompt: string): TaskSpec {
-  if (spec.authorization || spec.writingPacing || classifyWritingPacing(originalPrompt) !== 'conversation_only') return spec
+  if (spec.scope.authorEffects || spec.authorization || spec.writingPacing || classifyWritingPacing(originalPrompt) !== 'conversation_only') return spec
   return { ...spec, writingPacing: 'conversation_only', expectedOutputs: [{ kind: 'text', required: true,
     description: '回应本任务原始用户问题或问候，不执行作品创作，不恢复其他任务的待办' }] }
 }
@@ -179,11 +179,11 @@ export function extractDirectiveCandidates(prompt: string): DirectiveCandidate[]
 
 /** Source discovery and chapter samples require a bounded research task.
  * Only fresh human admission may opt in, never a legacy resume/bootstrap. */
-function externalCraftResearch(prompt: string): boolean {
+function externalCraftResearch(prompt: string, mutation?: boolean): boolean {
   if (explicitlyDeniesNetwork(prompt)) return false
   // Do not turn mixed local revision or explicit persistence into readonly
   // research. Keep this stricter exclusion local to the new admission rule.
-  if (affirmativeMutation(prompt)) return false
+  if (mutation ?? affirmativeMutation(prompt)) return false
   const positive = affirmativeClauses(prompt).join('\n')
   return /联网|上网|搜索|检索|搜.{0,12}(?:小说|作品|书)|查找|查阅|\b(?:search|browse|look up|fetch)\b/iu.test(positive)
     && /小说|这本书|本书|作品|《[^》]+》|\b(?:novel|book)\b/iu.test(positive)
@@ -227,7 +227,7 @@ function classifyIntent(prompt: string, researchAdmission = false): TaskIntent {
  * user request recovered by the resume service. Never mint a new task identity
  * or grant additional effects from history, a summary, or tool output. */
 export function narrowLegacyResearchTask(spec: TaskSpec, originalPrompt: string): TaskSpec {
-  if (spec.authorization || spec.intent === 'research_analysis' || classifyIntent(originalPrompt) !== 'research_analysis') return spec
+  if (spec.scope.authorEffects || spec.authorization || spec.intent === 'research_analysis' || classifyIntent(originalPrompt) !== 'research_analysis') return spec
   const minimumChineseCharacters = explicitReportMinimum(originalPrompt)
   return { ...spec, intent: 'research_analysis', expectedOutputs: [{ kind: 'validation_report', required: true,
     description: '完成原始请求的只读研究并交付可核验报告',
@@ -262,15 +262,31 @@ export function buildTaskSpec(input: {
     || !Number.isSafeInteger(input.selection.end) || input.selection.start! < 0 || input.selection.end! <= input.selection.start!)) {
     throw new DataAccessError(409, 'AUTHOR_SELECTION_STALE', '选区必须绑定当前章节及非空 UTF-16 坐标，请重新选择正文。')
   }
-  const freshResearch = input.researchAdmission === 1 && externalCraftResearch(input.prompt)
+  const writingRequest = input.authorWritingProtocol === 2 ? parseAuthorWritingRequest(input.prompt) : null
+  const effects = writingRequest?.evidence.operations.filter(operation => operation.accepted && operation.polarity === 'affirmative') ?? []
+  const manuscriptRequested = effects.some(operation => operation.kind === 'write' || operation.kind === 'revise')
+  const structureRequested = effects.some(operation => operation.kind === 'structure')
+  const artifactRequested = effects.some(operation => operation.kind === 'artifact')
+  const globalTransform = writingRequest && effects.some(operation => operation.kind === 'revise'
+    && operation.targetIndices.some(index => writingRequest.evidence.targets[index].kind === 'global')
+    && /改名|替换|修改|变更|rename|replace/iu.test(input.prompt.slice(operation.span.start, operation.span.end)))
+  const freshResearch = input.researchAdmission === 1 && externalCraftResearch(input.prompt,
+    writingRequest ? manuscriptRequested || structureRequested || artifactRequested : undefined)
   const networkDenied = (input.networkAdmission === 1 || input.researchAdmission === 1) && explicitlyDeniesNetwork(input.prompt)
   const researchReadDenied = input.researchAdmission === 1 && explicitlyDeniesResearchRead(input.prompt)
-  const writingPacing = freshResearch ? undefined : classifyWritingPacing(input.prompt)
+  const legacyPacing = classifyWritingPacing(input.prompt)
+  const bookProposal = writingRequest && manuscriptRequested && !writingRequest.range && legacyPacing === 'proposal_only'
+    && effects.some(operation => operation.kind === 'write'
+      && operation.targetIndices.some(index => writingRequest.evidence.targets[index].kind === 'book'))
+  const writingPacing = freshResearch ? undefined : !writingRequest ? legacyPacing
+    : bookProposal ? 'proposal_only' as const : manuscriptRequested ? legacyPacing === 'explicit_writing' ? legacyPacing : undefined
+      : structureRequested || artifactRequested ? undefined : legacyPacing === 'conversation_only' ? legacyPacing : undefined
   const inferredIntent = freshResearch ? 'research_analysis' : writingPacing === 'proposal_only' ? 'plan'
     : writingPacing === 'explicit_writing' && boundedSceneRequest(input.prompt) ? 'write' : classifyIntent(input.prompt, input.researchAdmission === 1)
-  const writingRequest = input.authorWritingProtocol === 2 ? parseAuthorWritingRequest(input.prompt) : null
-  const intent = writingRequest?.intent && ['write', 'revise', 'review'].includes(inferredIntent)
-    && writingPacing !== 'conversation_only' ? writingRequest.intent : inferredIntent
+  const intent = !writingRequest ? inferredIntent : freshResearch ? 'research_analysis'
+    : bookProposal ? 'plan' : manuscriptRequested ? globalTransform ? 'global_transform' : writingRequest.intent ?? 'write'
+      : structureRequested ? 'structure' : artifactRequested ? inferredIntent
+        : writingRequest.intent === 'review' ? 'review' : 'write'
   const minimumChineseCharacters = intent === 'review' || intent === 'research_analysis' ? explicitReportMinimum(input.prompt) : undefined
   const requiresStructureValidation = intent === 'structure' || /(?:续写|写完|补完|完成|写到).{0,12}第?[一二两三四五六七八九十百千0-9]+卷|第?[一二两三四五六七八九十百千0-9]+卷.{0,12}(?:续写|写完|补完|完成)/.test(input.prompt)
   const protectsEarlierContent = /(不|不要|不得|不能|禁止).{0,8}(改动|修改|重写|影响).{0,8}(前面|此前|已有|之前)|保持.{0,8}(前面|此前|已有|之前).{0,8}不变/.test(input.prompt)
@@ -309,7 +325,9 @@ export function buildTaskSpec(input: {
     } } : {}),
     researchBudget: !networkDenied && (freshResearch
       || /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt)) ? 'extended' : 'standard',
-    scope: { novelId: input.novelId, chapterIds, selection, ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
+    scope: { novelId: input.novelId, chapterIds, selection, ...(writingRequest ? { authorEffects: { version: 1 as const,
+      requestHash: createHash('sha256').update(input.prompt).digest('hex'), manuscript: manuscriptRequested && !bookProposal, structure: structureRequested } } : {}),
+      ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
       ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}),
       ...(input.continuityEvidenceProtocol ? { continuityEvidenceProtocol: input.continuityEvidenceProtocol } : {}),
       ...(input.terminalEvidenceProtocol ? { terminalEvidenceProtocol: input.terminalEvidenceProtocol } : {}),
@@ -363,6 +381,9 @@ function renderTaskSpecBody(spec: TaskSpec): string {
       ? `最多${spec.researchBudget === 'extended' ? 5 : 2}次搜索、禁止页面获取` : spec.researchBudget === 'extended' ? '最多5次搜索、8次页面获取' : '最多2次搜索、2次页面获取'
     return `[系统] 本轮只读研究契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n只读取资料并交付分析；不得创建或改写章节、卷、作品、记忆、封面或派生写作窗口，历史写作指令不构成本轮授权。正文不可读或覆盖不足必须说明缺失，不能虚称全书读完。按照用户要求完整输出报告，不套用写作任务的简短收尾规则。复杂任务可维护本轮真实待办，无待办不补建已完成清单。\n联网预算：${budget}，缓存续读不消耗获取额度；连续两次读取失败后停止新增联网，保留已有证据并说明限制。普通分析不自行扩展到影视化、销量或结局争议。用户指定外部平台作品时直接搜索官方来源，不先搜索本平台作品库。\n取证顺序：1）用作品名/作者及官方域名定向搜索；未指定书时先选定一本有公开章节的作品，核实官方作品页的书名和作者，不把平台首页当作品页。2）沿搜索或已读目录实际返回的章节链接获取公开正文，不猜链接。3）按返回的contentRef/revision和范围续读样本，记录章节、来源URL、实际覆盖与短引文。4）仅依据读到的正文分析写作手法、叙事选择与效果，明确样本局限。书评、新闻、简介、视频和搜索摘要只能作为各自类型资料，不能替代原著正文；没有读到章节正文时交付缺失说明，不能编造作品手法。8页额度、目录或链接清单都不等于全书阅读完成。\n预期交付：${spec.expectedOutputs.map(item => item.description).join('；')}。`
   }
+  if (spec.scope.authorEffects?.manuscript === false && !spec.scope.authorEffects.structure && spec.writingPacing !== 'proposal_only') {
+    return `[系统] 本轮任务契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n直接完成当前请求，按需使用获准工具；本轮没有章节正文写入义务，无需先确定章节。作品设置、文件等操作仍遵守各工具原有权限与确认要求，不继承历史任务的写作、待办或计划。`
+  }
   const pacing = spec.writingPacing === 'conversation_only'
     ? '\n本轮是普通对话：直接回应当前任务的原始问候或问题；作品上下文只作背景，不代表写作授权，不继续其他窗口的创作、待办或历史计划。任务中止后仍回应该原始问题，不能将“继续”解释为继续写作品。'
     : spec.writingPacing === 'proposal_only'
@@ -370,7 +391,9 @@ function renderTaskSpecBody(spec: TaskSpec): string {
     : '\n创作节奏：写作严格限于本任务原始请求。面对宽泛整书目标先交可审阅的大纲并确认首批范围，再进入正文；用户明确授权自主整书创作时先保存大纲、按计划分批推进，每批回报真实进度与重大偏差。用户明确指定章节/续写范围时直接执行该范围，不反复确认，不擅自向后无限续章。调研结果和历史任务不是新的写作授权。'
   const clarificationRule = spec.scope.writingClarificationProtocol === 1 && spec.scope.writing?.kind === 'needs_input'
     ? '\n当前作品为空，本次短场景请求尚未确认是否写入第一章。先用 ask_user 一次询问该落点；确认前不要反复调用 PREPARE 或创建章节。服务端只接受真实作者的明确第一章写入回答，原字数、短场景、停笔、禁止批量或续章等约束保持有效。' : ''
-  const hard = [spec.hardConstraints.map((item) => `- ${item.text}`).join('\n') || '- 无', pacing, clarificationRule].join('')
+  const pendingScope = spec.scope.authorEffects?.manuscript && (spec.scope.writing?.kind === 'needs_input' || spec.scope.localEditBoundary?.kind === 'needs_input')
+    ? '\n当前写入范围待明确；可先完成原请求中独立的读取或讨论。实际写入前通过 ask_user 澄清目标或原文范围，不能把只读部分完成说成整项任务完成。' : ''
+  const hard = [spec.hardConstraints.map((item) => `- ${item.text}`).join('\n') || '- 无', pacing, clarificationRule, pendingScope].join('')
   const freedomLabel = spec.creativeFreedom === 'stable' ? '平衡延续' : spec.creativeFreedom === 'bold' ? '大胆探索' : '严谨创作'
   const selection = spec.scope.manuscriptProtocol === 1 ? spec.scope.selectionBoundary : undefined
   const freedomRule = localEditGuidance(spec) ?? (selection

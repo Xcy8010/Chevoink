@@ -8,7 +8,7 @@ import app from '../../api/app.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { buildSessionTokens } from '../../api/lib/auth-session.js'
 import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
-import { chapterEditRangeTool, chapterWriteTool, chapterAppendTool, chapterCreateTool, preflightChapterReviewWrite } from '../../api/lib/agent/tools/chapter-tools.js'
+import { chapterEditRangeTool, chapterWriteTool, chapterAppendTool, chapterCreateTool, chapterRenameTool, preflightChapterReviewWrite } from '../../api/lib/agent/tools/chapter-tools.js'
 import { chapterBridgeGetTool, chapterBridgeCommitTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { freezeWritingScope, readWritingScope, assertWritingTarget } from '../../api/lib/agent/writing-scope.js'
 import { directoryContinuationPrompt } from '../support/writing-target-prompt.js'
@@ -21,7 +21,7 @@ import * as questionPermissions from '../../api/lib/agent/permissions.js'
 import { resolveLoopRunQuestion } from '../../api/lib/agent/run-service.js'
 import { shortSceneRequest, firstChapterAnswer, placementQuestion } from '../support/writing-clarification-fixture.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
-import { buildHumanityQualityContext, qualityReviewContextHash } from '../../api/lib/agent/humanity-quality.js'
+import { buildHumanityQualityContext, qualityReviewContextHash, persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { assertChapterReviewRevision, readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 import { saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
@@ -29,6 +29,11 @@ import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-conti
 import { terminalEvidenceContext, terminalQuoteAddressVersion } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
+import { chapterSplitTool, volumeUpdateTool } from '../../api/lib/agent/tools/structure-tools.js'
+import { novelUpdateMetaTool } from '../../api/lib/agent/tools/novel-tools.js'
+import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
+import { inspectCriticResponse } from '../../api/lib/agent/quality-evidence.js'
 import { terminalCoverageInput, readTerminalCoverageState } from '../../api/lib/agent/terminal-fact-coverage.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
@@ -85,6 +90,88 @@ async function fixture(prompt: string, work: (ctx: ToolContext, before: Awaited<
 }
 const prepare = (ctx: ToolContext) => storyCompilerPrepareTool.execute(ctx, { targetOrderIndex: 4,
   intentSummary: '只对第四个已存合成章作作者指出的局部修订', volumeDecision: { kind: 'continue', reason: '原卷原章' } })
+
+describe.skipIf(!available)('fresh independent reads and effect-scoped writes over HTTP and PostgreSQL', () => {
+  it('preserves explicit novel and volume metadata operations with their original version checks', () => fixture(
+    '请修改作品简介并更新第1卷标题。', async (ctx, before) => {
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toMatchObject({ scope: { authorEffects: { manuscript: false } } })
+      expect((await novelUpdateMetaTool.execute(ctx, { summary: '合成简介。' })).outcome).not.toBe('failed')
+      expect((await prisma.novel.findUniqueOrThrow({ where: { id: ctx.novelId } })).summary).toBe('合成简介。')
+      const volume = await prisma.volume.findUniqueOrThrow({ where: { id: before[0].volumeId } })
+      expect((await volumeUpdateTool.execute(ctx, { volumeId: volume.id, title: '合成新卷名', expectedRevision: volume.revision })).outcome).not.toBe('failed')
+      await expect(volumeUpdateTool.execute(ctx, { volumeId: volume.id, title: '旧版本不得覆盖', expectedRevision: volume.revision }))
+        .rejects.toMatchObject({ code: 'VOLUME_REVISION_CONFLICT' })
+      expect(await prisma.volume.findUniqueOrThrow({ where: { id: volume.id } })).toMatchObject({ title: '合成新卷名', revision: volume.revision + 1 })
+      expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+    }))
+  it('keeps a chapter title operation bound to the requested chapter', () => fixture('请修改第1章标题。', async (ctx, before) => {
+    expect((await chapterRenameTool.execute(ctx, { chapterId: before[0].id, title: '合成新章名' })).outcome).not.toBe('failed')
+    await expect(chapterRenameTool.execute(ctx, { chapterId: before[1].id, title: '未授权章名' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: before[0].id } })).toMatchObject({
+      title: '合成新章名', revision: before[0].revision + 1, content: before[0].content })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: before[1].id } })).toEqual(before[1])
+  }))
+  it('returns a quality report with suggestions for an assessment-only request without reserving a repair', () => fixture(
+    '检查本章是否需要润色。', async (ctx, before) => {
+      const target = before[0]
+      const bundle = await buildHumanityQualityContext(ctx.userId, ctx.novelId, target.id, ctx.runId)
+      const inspected = inspectCriticResponse(JSON.stringify({ findings: [{ signal: 'causal_gap', severity: 'warning',
+        quote: target.content, explanation: '合成的待审因果意见。', suggestion: '交作者决定是否补足。', confidence: 0.8 }] }))
+      const report = await persistHumanityQualityReport({ ...ctx, chapterId: target.id, chapterRevision: target.revision,
+        mode: 'premium', deterministicMetrics: {}, qualityContextHash: qualityReviewContextHash(bundle), deterministicFindings: [],
+        criticFindings: inspected.findings, criticComplete: inspected.complete, criticResponseDiagnostic: inspected.diagnostic })
+      expect(report.status).toBe('needs_repair')
+      const result = await qualityAnalyzeTool.execute({ ...ctx, creativeFreedom: 'balanced' }, { chapterId: target.id })
+      expect(result.outcome).not.toBe('failed')
+      expect(result.display).toMatchObject({ kind: 'qualityReport', reportId: report.id })
+      const saved = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: report.id } })
+      expect(saved.repairRound).toBe(0)
+      expect(saved.deterministicMetrics).not.toHaveProperty('autoRepairAttempted')
+      expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+    }))
+  it.each([
+    '列出三个提升注意力的方法。',
+    '我们讨论人物动机，不续写或修改任何作品正文。',
+    '请读取第1章，整理人物关系，不改动任何正文。',
+    '请搜索公开小说并研究语言风格，不创建或修改任何章节。',
+    '请只审阅已提供的段落并列出问题，不修改或重写正文。',
+    '请研究这本书，再把研究报告保存到计划文件。',
+  ])('admits the original non-manuscript request and rejects body/structure proposals: %s', prompt => fixture(prompt, async (ctx, before) => {
+    const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+    const spec = taskSpecSchema.parse(run.taskSpec)
+    expect(spec.scope.authorEffects).toMatchObject({ manuscript: false, structure: false })
+    expect(spec.scope.writing).toBeUndefined()
+    expect((await chapterReadTool.execute({ ...ctx, callId: 'safe-independent-read' }, { chapterId: before[0].id })).output).toContain(before[0].content)
+    await expect(chapterWriteTool.execute({ ...ctx, callId: 'deny-body-proposal' }, { chapterId: before[0].id, content: '未授权替换。' }))
+      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expect(chapterCreateTool.execute({ ...ctx, callId: 'deny-create-proposal' }, { title: '未授权新章' }))
+      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expect(chapterSplitTool.execute({ ...ctx, callId: 'deny-structure-proposal' },
+      { chapterId: before[0].id, splitOffset: 2, newChapterTitle: '未授权拆章', expectedRevision: before[0].revision }))
+      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(run.taskSpec)
+  }))
+
+  it.each([
+    '先读取资料并总结结论，再修改正文。',
+    '先解释一下限知视角，然后写下一段正文。',
+    '先搜索公开小说并分析叙事手法，再修改正文。',
+  ])('keeps a mixed request readable while an unresolved write stays denied: %s', prompt => fixture(prompt, async (ctx, before) => {
+    const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+    const spec = taskSpecSchema.parse(run.taskSpec)
+    expect(spec.scope.authorEffects).toMatchObject({ manuscript: true, structure: false })
+    expect(spec.scope.writing?.kind).toBe('needs_input')
+    expect(spec.intent).not.toBe('plan')
+    expect((await chapterReadTool.execute({ ...ctx, callId: 'mixed-safe-read' }, { chapterId: before[0].id })).output).toContain(before[0].content)
+    await expect(prisma.$transaction(tx => assertWritingTarget(tx, ctx, { chapterId: before[0].id, effect: 'replace' })))
+      .rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    await expect(chapterCreateTool.execute({ ...ctx, callId: 'mixed-deny-create' }, { title: '不猜写入目标' }))
+      .rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(run.taskSpec)
+  }, false, body, { singleVolume: true, editor: 'none' }))
+})
 
 describe.skipIf(!available)('unified fresh HTTP author contract with actual PostgreSQL writes', () => {
   it('atomically rejects a seven-patch punctuation conflict and applies only the corrected current draft batch', () => fixture(directoryContinuationPrompt, async (ctx, before) => {
