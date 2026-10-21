@@ -19,7 +19,7 @@ import { beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, readRevi
 import { observedReviewCycleVerification, prepareReviewCycleTransition } from './review-cycle-store.js'
 import { readTerminalCandidate, currentTerminalReview } from './terminal-state-review.js'
 import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
-import { terminalCoverageInput } from './terminal-fact-coverage.js'
+import { terminalCoverageInput, terminalCoverageAuditVersion } from './terminal-fact-coverage.js'
 
 import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
 import { projectReviewBoundEditPlan, type ReviewBoundEditPlan, type ReviewBoundEvidence } from './review-bound-edit.js'
@@ -345,7 +345,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     { ...readiness, reviewBoundEvidence: { contentHash, anchors: repairAnchors, cycle: savedCycle } })
   const terminalVersion = terminalEvidenceVersion(original.spec)
   const terminalCandidate = readTerminalCandidate(validation)
-  const factCoverage = terminalCoverageInput(original.spec, compilation.preparedContext, chapter, terminalCandidate)
+  const factCoverage = terminalCoverageInput(original.spec, compilation.preparedContext, chapter, terminalCandidate, terminalCoverageAuditVersion(validation))
   if (terminalVersion && (terminalCandidate || factCoverage?.obligations.length)) {
     const terminal = assessment ? currentTerminalReview(validation, chapter.content,
       terminalEvidenceContext(chapter, source, terminalVersion, terminalQuoteAddressVersion(original.spec),

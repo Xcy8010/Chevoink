@@ -24,13 +24,20 @@ export function hasTerminalCoverageProtocol(spec: unknown) {
   return version === 1 || version === 2
 }
 
+/** Read the response's own frozen operation contract, never today's default. */
+export function terminalCoverageAuditVersion(validation: unknown): 1 | 2 | undefined {
+  const audit = object(object(validation).continuityCriticResponse)
+  const version = object(object(audit.terminalEvidence).factCoverage).version
+  return audit.parserVersion === 8 && (version === 1 || version === 2) ? version : undefined
+}
+
 export function readTerminalCoverageState(spec: unknown, preparedContext: unknown, chapterId: string): TerminalCoverageState | undefined {
   if (!hasTerminalCoverageProtocol(spec)) return undefined
   const value = object(preparedContext).terminalFactCoverage
   if (value === undefined) return undefined
   const parsed = stateSchema.safeParse(value)
   if (!parsed.success || parsed.data.taskId !== object(spec).id || parsed.data.chapterId !== chapterId
-    || parsed.data.lastReview.input.version !== object(object(spec).scope).terminalCoverageProtocol
+    || object(object(spec).scope).terminalCoverageProtocol === 2 && parsed.data.lastReview.input.version !== 2
     || parsed.data.lastReview.input.taskId !== parsed.data.taskId || parsed.data.lastReview.input.chapterId !== chapterId
     || [parsed.data.facts, parsed.data.lastReview.input.obligations].some(items => new Set(items.map(item => item.id)).size !== items.length
       || items.some(item => item.id !== runtimeJson({ field: item.field, claim: item.claim }).hash))) throw blocked()
@@ -39,13 +46,14 @@ export function readTerminalCoverageState(spec: unknown, preparedContext: unknow
 
 /** Exact included claims still need their ordinary independent verdict. Only
  * omissions add an explicit disposition; this never merges claims into state. */
-export function terminalCoverageInput(spec: unknown, preparedContext: unknown, chapter: { id: string; content: string }, candidate?: TerminalCandidate): TerminalCoverageInput | undefined {
+export function terminalCoverageInput(spec: unknown, preparedContext: unknown, chapter: { id: string; content: string }, candidate?: TerminalCandidate,
+  operationVersion?: 1 | 2): TerminalCoverageInput | undefined {
   if (!hasTerminalCoverageProtocol(spec)) return undefined
   const saved = readTerminalCoverageState(spec, preparedContext, chapter.id)
-  const version = object(object(spec).scope).terminalCoverageProtocol === 2 ? 2 : 1
+  const version = operationVersion ?? (object(object(spec).scope).terminalCoverageProtocol === 2 ? 2 : 1)
   if (!candidate && !saved?.facts.length && version === 1) return undefined
   const normalized = candidate ?? { exitState: {}, lastUnfinishedAction: '' }
-  if (saved?.lastReview.bodyHash === runtimeJson({ content: chapter.content }).hash
+  if (saved?.lastReview.input.version === version && saved.lastReview.bodyHash === runtimeJson({ content: chapter.content }).hash
     && saved.lastReview.candidateHash === runtimeJson(normalized).hash) return saved.lastReview.input
   const obligations = (saved?.facts ?? []).filter(item => !candidate
     || !candidate.exitState[item.field].includes(item.claim))
@@ -76,7 +84,7 @@ export function inspectTerminalCoverage(input: TerminalCoverageInput | undefined
       || !candidate.exitState[field.parse(match[1])][Number(match[2])]
       || !verdicts.some(verdict => verdict.path === item.candidatePath && verdict.verdict === 'supported')
   })) return null
-  return { complete: parsed.data.every(item => item.outcome !== 'unknown'), dispositions: parsed.data }
+  return { ...(input.version === 2 ? { version: 2 as const } : {}), complete: parsed.data.every(item => item.outcome !== 'unknown'), dispositions: parsed.data }
 }
 
 export function terminalCoverageGuidance(input: TerminalCoverageInput | undefined) {
@@ -89,7 +97,7 @@ export function terminalCoverageGuidance(input: TerminalCoverageInput | undefine
  * independent audit. Unresolved facts survive; no main-model disposition exists. */
 export function advanceTerminalCoverage(spec: unknown, preparedContext: unknown, chapter: { id: string; content: string },
   review: NonNullable<ReturnType<typeof inspectTerminalReview>>): TerminalCoverageState | undefined {
-  const input = terminalCoverageInput(spec, preparedContext, chapter, review.candidate)
+  const input = terminalCoverageInput(spec, preparedContext, chapter, review.candidate, review.factCoverage?.version)
   if (!input) return undefined
   const old = readTerminalCoverageState(spec, preparedContext, chapter.id)
   const resolved = new Set(review.factCoverage?.dispositions.filter(item => item.outcome !== 'unknown').map(item => item.id))

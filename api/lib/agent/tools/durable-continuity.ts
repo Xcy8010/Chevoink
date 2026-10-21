@@ -3,7 +3,7 @@ import { continuityFindingText, continuitySourceInput, unconfirmedContinuityOutp
 import { z } from 'zod'
 import { readChapterReviewRevisionGuidance, continuityDecisionBinding } from '../chapter-review-guard.js'
 import { readOriginalTaskRequest } from '../original-request.js'
-import { terminalCoverageInput } from '../terminal-fact-coverage.js'
+import { terminalCoverageInput, terminalCoverageAuditVersion, hasTerminalCoverageProtocol } from '../terminal-fact-coverage.js'
 import { hasContinuitySourceAuthority, continuitySourceAuthorityRule, continuityAuthorRequirements, compilerEvidenceScope, continuitySourceScopeSchema } from '../continuity-source-authority.js'
 import { DataAccessError } from '../../prisma.js'
 import { activeChapterScope } from '../../data/internal.js'
@@ -117,13 +117,15 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     if (selectedTerminal && !selectedTerminal.ok) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: selectedTerminal.reason }
     const terminalCandidate = (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
       ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
-    const terminalEvidence = terminalProtocol ? terminalEvidenceContext(compilation.chapter, source, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
-      terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate)) : undefined
+    let terminalEvidence = terminalProtocol ? terminalEvidenceContext(compilation.chapter, source, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
+      terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation))) : undefined
     if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
     const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
       source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
     const reusable = cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
+    if (!reusable && terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) terminalEvidence = { ...terminalEvidence,
+      factCoverage: terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, 2)! }
     const repair = false
     validatedContinuityCheckRounds(compilation.validation, !reusable)
     return { kind: 'check' as const, version: terminalVersion === 2 ? 14 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,

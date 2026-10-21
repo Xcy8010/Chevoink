@@ -14,8 +14,9 @@ import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.js'
 import { markLegacyContinuityAssessmentApplied } from './continuity-response-correction.js'
-import { terminalVerdictSchema, inheritedTerminalVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
-import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './continuity-source-authority.js'
+import { terminalCandidateSchema, terminalVerdictSchema, inheritedTerminalVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
+import { terminalEvidenceContextSchema } from './terminal-evidence-context.js'
+import { invalidContinuitySourceClaim, continuitySourceScopeSchema, type ContinuitySourceScope } from './continuity-source-authority.js'
 import { terminalDispositionSchema } from './terminal-fact-coverage.js'
 
 type Inspection = ReturnType<typeof inspectContinuityResponse>
@@ -127,6 +128,35 @@ export const legacyContinuityAssessmentKey = (ctx: Pick<ToolContext, 'runId' | '
   input: { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system, content: input.content, bindingHash: input.bindingHash ?? null,
     ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}) } }).hash
 const assessmentKey = legacyContinuityAssessmentKey
+
+/** Existing owned call identities always retain their whole request. Choosing a
+ * newer response format cannot create a second reservation for the same call. */
+export async function readFrozenLegacyContinuityInput(tx: Prisma.TransactionClient, ctx: ToolContext, proposed: LegacyAssessmentInput,
+  recoverBodies?: (version: 1 | 2) => ContinuityBodies) {
+  const rows = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, run: { userId: ctx.userId, novelId: ctx.novelId },
+    artifactType: 'continuityReview', metadata: { path: ['callId'], equals: ctx.callId } } })
+  const reservations = rows.filter(row => typeof object(row.metadata)?.continuityAssessmentRequestKey === 'string')
+  if (!reservations.length) return null
+  const invalid = () => new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原调用冻结输入不一致，未重放或重新派发检查。')
+  if (reservations.length !== 1) throw invalid()
+  const meta = object(reservations[0].metadata)!
+  const parsed = z.object({ chapterId: z.string(), revision: z.number().int(),
+    bodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).strict(),
+    system: z.string(), content: z.string(), parserVersion: z.union([z.literal(7), z.literal(8)]).optional(),
+    sourceScope: continuitySourceScopeSchema.optional(), terminalCandidate: terminalCandidateSchema.optional(), bindingHash: z.string().optional(),
+    targetType: z.enum(['chapter', 'story_compilation']), targetId: z.string() }).strict().safeParse(meta.input)
+  if (!parsed.success || parsed.data.parserVersion && !parsed.data.sourceScope
+    || meta.continuityAssessmentRequestKey !== assessmentKey(ctx, parsed.data)) throw invalid()
+  const identity = (input: LegacyAssessmentInput) => {
+    const copy = structuredClone(input)
+    if (copy.bodies.terminalEvidence?.factCoverage) copy.bodies.terminalEvidence.factCoverage.version = 1
+    return { chapterId: copy.chapterId, revision: copy.revision, bodies: copy.bodies, targetType: copy.targetType, targetId: copy.targetId,
+      terminalCandidate: copy.terminalCandidate ?? null, bindingHash: copy.bindingHash ?? null, parserVersion: copy.parserVersion ?? null, sourceScope: copy.sourceScope ?? null }
+  }
+  const expected = recoverBodies ? { ...proposed, bodies: recoverBodies(parsed.data.bodies.terminalEvidence?.factCoverage?.version ?? 1) } : proposed
+  if (runtimeJson(identity(parsed.data)).hash !== runtimeJson(identity(expected)).hash) throw invalid()
+  return parsed.data
+}
 
 /** One actual tool-call reservation. A new selector, body or worker restart
  * cannot retire an unknown request; only existing authenticated retirement can. */

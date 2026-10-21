@@ -1,7 +1,7 @@
 import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { retainedFindings } from './chapter-arguments.js'
 import { readTerminalCandidate, terminalCandidateSchema, terminalCandidateInputSchema, resolveTerminalCandidate, terminalReviewInput, currentTerminalReview, terminalReviewFailure, type TerminalCandidate } from '../terminal-state-review.js'
-import { terminalCoverageInput } from '../terminal-fact-coverage.js'
+import { terminalCoverageInput, terminalCoverageAuditVersion, hasTerminalCoverageProtocol } from '../terminal-fact-coverage.js'
 import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, continuitySemanticRule, type TerminalCarriedFact } from '../terminal-evidence-context.js'
 import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
@@ -13,7 +13,7 @@ import { readReusableLegacyContinuityCorrection, markLegacyContinuityCorrectionA
 import { readContinuedContinuityEvidence } from '../continued-continuity-evidence.js'
 import { runContinuityReassessment, observeLegacyContinuityAssessment, claimLegacyContinuityReassessment, reserveLegacyContinuityAssessment,
   readLegacyContinuityAssessment, markLegacyContinuityAssessmentApplication, type LegacyAssessmentInput } from '../assessment-response-lifecycle.js'
-import { readReusableLegacyContinuityAssessment, bindLegacyContinuityAssessment } from '../assessment-response-lifecycle.js'
+import { readReusableLegacyContinuityAssessment, bindLegacyContinuityAssessment, readFrozenLegacyContinuityInput } from '../assessment-response-lifecycle.js'
 import { observeLegacyContinuityReassessmentNotDispatched, observeLegacyContinuityFirstNotDispatched, bindLegacyContinuityRequest } from '../assessment-response-lifecycle.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { createTextRequestTrace, withTextRequestTrace, textRequestsFinished } from '../../text-request-trace.js'
@@ -123,15 +123,20 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   options: Parameters<typeof generateReviewCompletion>[2]; assertCurrent: (db?: Prisma.TransactionClient) => Promise<void>;
   bindingHash?: string;
   assessmentAdmissionId?: string;
+  recoverBodies?: (version: 1 | 2) => ContinuityBodies;
 }) {
   const trace = createTextRequestTrace()
   let observedContent: string | undefined
   let observedComplete: boolean | undefined
-  const frozen: LegacyAssessmentInput = { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system,
+  let frozen: LegacyAssessmentInput = { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system,
     ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}),
     ...(input.terminalCandidate ? { terminalCandidate: input.terminalCandidate } : {}),
     content: input.content, ...(input.bindingHash ? { bindingHash: input.bindingHash } : {}),
     targetType: input.options.targetType as 'chapter' | 'story_compilation', targetId: input.options.targetId! }
+  if (input.bodies.terminalEvidence?.factCoverage?.version === 2) {
+    const saved = await prisma.$transaction(tx => readFrozenLegacyContinuityInput(tx, ctx, frozen, input.recoverBodies))
+    if (saved) { frozen = saved; input = { ...input, ...saved } }
+  }
   type Observation = Parameters<typeof observeLegacyContinuityAssessment>[3] & { usageId: string }
   const observations: Observation[] = []
   const stages = new Map<string, 'first' | 'output_recovery' | 'reassessment'>()
@@ -946,7 +951,9 @@ export const continuityValidateTool = defineTool({
         expectedChapterRevision: chapter.revision, independentCheck: 'complete', coverage, terminalCandidate, focus: args.focus, signal: ctx.signal })
       if (result.independentCheck !== 'complete') return { outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED',
         summary: '缓存连续性证据未确认', output: '本次只读复核发现缓存引用缺失或不属于当前对应正文，已保留未确认报告；未调用模型、未增加检查次数，不能宣称检查通过或据此改稿。原任务内仍可纠正真实问题，按原预算取得有效复核。' }
-      const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: (compilation.validation as Record<string, unknown>)?.continuityCriticResponse }, chapter.content, terminalEvidence)
+      const cachedEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
+        terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation))) : undefined
+      const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: (compilation.validation as Record<string, unknown>)?.continuityCriticResponse }, chapter.content, cachedEvidence)
       if (terminalFailure) return terminalFailure
       const repairGuidance = errorCount > 0 ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
       return {
@@ -1033,6 +1040,12 @@ export const continuityValidateTool = defineTool({
       }
     }
     const allowRepair = false
+    // Only a new request receives the current response contract. Old cache,
+    // correction and exact-call replay retain their own full frozen input.
+    const requestBodies = structuredClone(bodies)
+    if (!continued && requestBodies.terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) {
+      requestBodies.terminalEvidence.factCoverage = terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, 2)
+    }
     const criticInput = [
         sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
         ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
@@ -1050,7 +1063,7 @@ export const continuityValidateTool = defineTool({
         continuityReviewTail(compilation.validation, chapter.revision, allowRepair, args.focus, chapter.content),
         compilerContinuitySourceScope(sourceChapter),
         continuitySourceInput({ previous: sourceChapter?.content ?? null, current: chapter.content }),
-        terminalReviewInput(terminalCandidate, terminalEvidence),
+        terminalReviewInput(terminalCandidate, requestBodies.terminalEvidence),
       ].filter(Boolean).join('\n')
     const assertCurrent = async (db: Prisma.TransactionClient = prisma) => {
       const current = await db.storyCompilation.findFirst({
@@ -1067,7 +1080,7 @@ export const continuityValidateTool = defineTool({
     }
     await assertCurrent()
     if (correctionGate.freshAdmissionId && !await prisma.$transaction(tx => claimContinuedContinuityAssessment(tx, ctx,
-      { chapterId: chapter.id, revision: chapter.revision, bodies, bindingHash: runtimeJson(coverage).hash }, correctionGate.freshAdmissionId!, assertCurrent))) return {
+      { chapterId: chapter.id, revision: chapter.revision, bodies: requestBodies, bindingHash: runtimeJson(coverage).hash }, correctionGate.freshAdmissionId!, assertCurrent))) return {
       outcome: 'failed' as const, failureCode: 'CONTINUITY_REPORT_INCOMPLETE', summary: '独立连续性复核未完成', output: unconfirmedContinuityOutput,
     }
     const inspected = continued ? await runContinuityEvidenceCorrection({ original: continued.inspected, bodies, billingKnown: true, signal: ctx.signal,
@@ -1082,7 +1095,9 @@ export const continuityValidateTool = defineTool({
         options: { modelRuntime: reviewRuntime, explicitModelSelection: true,
           signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityEvidenceCorrection', novelId: ctx.novelId, chapterId: chapter.id,
           targetType: 'story_compilation', targetId: compilation.id, temperature: 0, reasoningEffort: reviewRuntime.reasoningEffort,
-        } }) }) : await runLegacyContinuityReview(ctx, { chapterId: chapter.id, revision: chapter.revision, bodies,
+        } }) }) : await runLegacyContinuityReview(ctx, { chapterId: chapter.id, revision: chapter.revision, bodies: requestBodies,
+      recoverBodies: version => ({ ...bodies, ...(terminalProtocol ? { terminalEvidence: terminalEvidenceContext(chapter, sourceChapter, terminalVersion,
+        terminalQuoteAddressVersion(originalRequest.spec), terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, version)) } : {}) }),
       system: criticSystem, content: criticInput, terminalCandidate, ...(sourceAuthority ? { parserVersion: terminalProtocol ? 8 as const : 7 as const, sourceScope: compilerEvidenceScope(chapter, sourceChapter) } : {}),
       options: { modelRuntime: reviewRuntime, explicitModelSelection: true, signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0, reasoningEffort: reviewRuntime.reasoningEffort }, assertCurrent, bindingHash: runtimeJson(coverage).hash,
       assessmentAdmissionId: correctionGate.freshAdmissionId ?? undefined })
@@ -1121,7 +1136,8 @@ export const continuityValidateTool = defineTool({
       output: continuityFailureOutput(inspected.audit, unconfirmedContinuityOutput),
       summary: '独立连续性复核未完成',
     }
-    const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }, chapter.content, terminalEvidence)
+    const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }, chapter.content,
+      continued ? terminalEvidence : inspected.audit.terminalEvidence ?? terminalEvidence)
     if (terminalFailure) return terminalFailure
     const phase = result.errorCount > 0 ? 'repair' : 'check'
     const repairGuidance = result.errorCount > 0 ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
@@ -1213,7 +1229,7 @@ export const chapterBridgeCommitTool = defineTool({
     const commitRequest = await readOriginalTaskRequest(db, ctx)
     const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content,
       commitAudit?.parserVersion === 8 ? terminalEvidenceContext(compilation.chapter, commitSource, storedContinuityProtocol(compilation.validation) === 11 ? 2 : 1, terminalQuoteAddressVersion(commitRequest.spec),
-        terminalCoverageInput(commitRequest.spec, compilation.preparedContext, compilation.chapter, readTerminalCandidate(compilation.validation))) : undefined)
+        terminalCoverageInput(commitRequest.spec, compilation.preparedContext, compilation.chapter, readTerminalCandidate(compilation.validation), terminalCoverageAuditVersion(compilation.validation))) : undefined)
     const lastExit = storyStateSchema.parse(args.exitState ?? args.terminalState?.exitState ?? reviewedTerminal?.candidate.exitState ?? {})
     const paragraphs = compilation.chapter.content.split(/\n\s*\n/u).map(text => text.trim()).filter(Boolean)
     const terminal = {
