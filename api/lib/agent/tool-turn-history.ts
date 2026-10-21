@@ -17,14 +17,14 @@ export function scheduledToolHistoryIds(message: ChatMessage | undefined): Set<s
  * checks and recovered text calls remain readonly execution history; inventing
  * native calls for them also invents a provider reasoning/tool round. */
 export function toolTurnHistory(result: Pick<ChatCompletionResult, 'content' | 'reasoning' | 'toolCalls'>,
-  effectiveCalls: readonly ToolCallRequest[], options: { bootstrap?: boolean; recoveredText?: boolean } = {}): ChatMessage[] {
+  effectiveCalls: readonly ToolCallRequest[], options: { bootstrap?: boolean; recoveredText?: boolean; withholdText?: boolean } = {}): ChatMessage[] {
   const nativeCalls = options.bootstrap ? [] : result.toolCalls
   const nativeIds = new Set(nativeCalls.map(call => call.id))
   const scheduled = effectiveCalls.filter(call => !nativeIds.has(call.id))
   const messages: ChatMessage[] = []
   if (scheduled.length) messages.push({ role: 'user', content: scheduledHistoryPrefix
     + JSON.stringify(scheduled.map(call => ({ callId: call.id, toolName: call.name }))) })
-  if (!options.bootstrap) messages.push({ role: 'assistant', content: options.recoveredText ? null : result.content || null,
+  if (!options.bootstrap) messages.push({ role: 'assistant', content: options.recoveredText || options.withholdText ? null : result.content || null,
     reasoning: result.reasoning, ...(nativeCalls.length ? { toolCalls: nativeCalls } : {}) })
   return messages
 }

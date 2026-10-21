@@ -2108,7 +2108,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
       const reviewProgressText = mergedReviewReminder ? '正在核对检查意见的处理结果。' : '正文已保存，正在完成当前版本的必要检查。'
 
-      messages.push(...toolTurnHistory(result, effectiveToolCalls, { bootstrap: Boolean(bootstrapCall), recoveredText: recoveredToolCalls.length > 0 }))
+      messages.push(...toolTurnHistory(result, effectiveToolCalls, { bootstrap: Boolean(bootstrapCall),
+        recoveredText: recoveredToolCalls.length > 0, withholdText: automaticReviewTriggered }))
 
       const cleanContent = automaticReviewTriggered ? reviewProgressText
         : normalizeExecutionText(result.content ? stripAgentProtocolArtifacts(result.content) : '')

@@ -274,6 +274,20 @@ describe('lossless tool argument transport', () => {
     expect(JSON.stringify(history)).not.toContain('"arguments"')
     expect(result.content).toBe('text protocol')
   })
+  it('withholds a rejected completion claim while returning its exact native reasoning to DeepSeek', async () => {
+    const result = { content: '尚未处理却声称全部建议已经应用', reasoning: '模型原生思考，必须逐字保留', toolCalls: [] }
+    const messages = toolTurnHistory(result, [], { withholdText: true })
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    const tools = [{ type: 'function' as const, function: { name: 'chapter_bridge_commit', description: 'fixture', parameters: { type: 'object' } } }]
+    await chatWithTools({ messages, tools, provider: 'deepseek', model: 'deepseek-flash', reasoningEffort: 'high',
+      providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]!.body))
+    expect(body.messages).toEqual([{ role: 'assistant', content: '', reasoning_content: result.reasoning }])
+    expect(JSON.stringify(body.messages)).not.toContain(result.content)
+    expect(result.content).toBe('尚未处理却声称全部建议已经应用')
+    expect(body.thinking).toEqual({ type: 'enabled' })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
   it('closes a deferred native commit with its real local refusal before a server replacement receipt', async () => {
     const commit = { id: 'native-commit', name: 'chapter_bridge_commit', arguments: '{}' }
     const messages: ChatMessage[] = [...toolTurnHistory({ content: '', reasoning: '真实提交提议思考', toolCalls: [commit] }, [commit]),

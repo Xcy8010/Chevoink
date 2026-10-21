@@ -844,7 +844,8 @@ describe('server assessment fallback in the real execution loop', () => {
     const critic = tool('quality_analyze', async () => ({ output: '不应再次检查' }))
     const commit = tool('chapter_bridge_commit', async () => { expect(state.qualityCandidateCount).toBe(0); mocks.committedChapter.mockResolvedValue(true); return { output: '终态已提交' } }, false)
     mocks.tools = [edit, critic, commit]
-    queue(response('全部审美建议已经应用。'), response('', [call('merged', edit.name, '{"chapterId":"c"}')]),
+    const proposed = { ...response('全部审美建议已经应用。'), reasoning: '必须原样保留的原生思考；不是意见已处理证明' }
+    queue(proposed, response('', [call('merged', edit.name, '{"chapterId":"c"}')]),
       response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('已保存。'))
     await run('写下一章')
     expect(edit.execute).toHaveBeenCalledOnce()
@@ -853,6 +854,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: '正在核对检查意见的处理结果。' }))
     const history = mocks.chat.mock.calls[1][0].messages
     expect(history.some((message: { content?: string }) => message.content === '全部审美建议已经应用。')).toBe(false)
+    expect(history.some((message: { reasoning?: string }) => message.reasoning === proposed.reasoning)).toBe(true)
     expect(history.some((message: { content?: string }) => message.content?.includes('逐项合理保留'))).toBe(true)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
@@ -871,7 +873,8 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(commit.execute).toHaveBeenCalledOnce()
     expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_bridge_get', 'chapter_edit_range', 'chapter_bridge_commit'])
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'early-commit', execution: 'not_dispatched' }))
-    expect(mocks.chat.mock.calls[1][0].messages.filter((message: { role: string; toolCallId?: string }) => message.role === 'tool' && message.toolCallId === 'early-commit')).toEqual([])
+    expect(mocks.chat.mock.calls[1][0].messages.filter((message: { role: string; toolCallId?: string }) => message.role === 'tool' && message.toolCallId === 'early-commit'))
+      .toEqual([{ role: 'tool', toolCallId: 'early-commit', content: '本次未执行提交；先读取当前检查意见并处理，之后再提议提交。' }])
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
   it('does not introduce chapter review reads into a conversation tool batch', async () => {
@@ -940,8 +943,11 @@ describe('server assessment fallback in the real execution loop', () => {
     const history = mocks.chat.mock.calls[1][0].messages
     const emittedIds = events().filter(event => event.type === 'tool.result' && event.callId !== 'commit').map(event => event.callId)
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'commit', execution: 'not_dispatched' }))
-    expect(history.filter((message: { role: string; toolCalls?: unknown[] }) => message.role === 'assistant' && message.toolCalls?.length).flatMap((message: { toolCalls: Array<{ id: string }> }) => message.toolCalls.map(item => item.id))).toEqual(emittedIds)
-    expect(history.filter((message: { role: string }) => message.role === 'tool').map((item: { toolCallId: string }) => item.toolCallId)).toEqual(emittedIds)
+    expect(history.filter((message: { role: string; toolCalls?: unknown[] }) => message.role === 'assistant' && message.toolCalls?.length).flatMap((message: { toolCalls: Array<{ id: string }> }) => message.toolCalls.map(item => item.id)))
+      .toEqual(['commit', 'fresh-commit'])
+    expect(history.filter((message: { role: string }) => message.role === 'tool').map((item: { toolCallId: string }) => item.toolCallId)).toEqual(['commit', ...emittedIds])
+    expect(history.find((message: { role: string; toolCallId?: string }) => message.role === 'tool' && message.toolCallId === 'commit')?.content)
+      .toBe('本次未执行提交；先完成当前版本检查，读取结果后再提议提交。')
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
   it('replaces an unverified completion claim with progress and completes the missing check', async () => {
