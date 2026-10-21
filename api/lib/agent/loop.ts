@@ -1,4 +1,5 @@
 import { readSettledQualityReviews } from './quality-review-admission.js'
+import { terminalFeedbackSlots } from './terminal-feedback-handoff.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
@@ -1393,6 +1394,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         await persistCheckpoint()
       }
     }
+    // Old stalled tasks may have a complete but unsupported judgment already
+    // seen. Give its processing sequence a finite persisted handoff; rereading
+    // the manuscript still does not count as progress or reset old counters.
+    let terminalHandoffSlots = (params.resume || previousTask) && stagnantBatches >= 4 && !pendingReviews.size
+      ? terminalFeedbackSlots(currentReviewState.value, { userId: params.userId, novelId: params.novelId,
+        taskSpec: await prisma.$transaction(tx => effectiveWritingTaskSpec(tx,
+          { userId: params.userId, novelId: params.novelId, runId }, taskSpec)) }) : null
+    const closeTerminalHandoff = () => {
+      if (!terminalHandoffSlots) return
+      terminalHandoffSlots.forEach(key => consumedReviewDecisionFeedback.add(key))
+      terminalHandoffSlots = null
+    }
     if (!params.resume && taskSpec.intent !== 'research_analysis') {
       await withGoalExecutionContext(ownedGoalExecution, () => withGoalEffects(() => captureUserDirectives({
         userId: params.userId,
@@ -1763,7 +1776,13 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const executionControl = untilCompletionControl(checkpointOrigin)
     while (executionControl.controlPolicy === 'until_completion') {
       if (controller.signal.aborted) throw new DOMException('run aborted', 'AbortError')
-      if (await finishPersistedWritingIfComplete()) return
+      if (await finishPersistedWritingIfComplete(terminalHandoffSlots
+        ? async () => { closeTerminalHandoff(); await persistCheckpoint() } : undefined)) return
+      if (terminalHandoffSlots?.every(key => consumedReviewDecisionFeedback.has(key))) {
+        forceWrapUpLocal = true
+        await wrapUpAndFinish('当前检查结论仍未得到实质处理，已停止重复执行。正文与检查记录保留，本次工作尚未完成。')
+        return
+      }
       let bootstrapCall: ToolCallRequest | undefined
       if ((!researchHandoffChecked || researchReadBootstrap) && taskSpec.researchDiscoveryProtocol === 1
         && taskSpec.networkAccess !== 'denied' && taskSpec.researchReadAccess !== 'denied'
@@ -1886,6 +1905,21 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (!bootstrapCall && !requestBudget.fits) {
         await wrapUpAndFinish('当前任务上下文已达到所选模型的安全窗口上限。')
         return
+      }
+
+      let terminalHandoffTurn = false
+      const terminalHandoffWriteBaseline = writeProgressCount
+      if (!bootstrapCall && terminalHandoffSlots) {
+        const slot = terminalHandoffSlots.find(key => !consumedReviewDecisionFeedback.has(key))
+        if (!slot) {
+          forceWrapUpLocal = true
+          await wrapUpAndFinish('当前检查结论仍未得到实质处理，已停止重复执行。正文与检查记录保留，本次工作尚未完成。')
+          return
+        }
+        controller.signal.throwIfAborted()
+        consumedReviewDecisionFeedback.add(slot)
+        await persistCheckpoint()
+        terminalHandoffTurn = true
       }
 
       const messageId = randomUUID()
@@ -2779,7 +2813,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         todoReminders = 0
       }
       stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, waitingForChild)
-      if (reviewProgress) await persistCheckpoint()
+      const terminalHandoffClosed = !!terminalHandoffSlots && (reviewProgress || writeProgressCount > terminalHandoffWriteBaseline)
+      if (terminalHandoffClosed) closeTerminalHandoff()
+      if (reviewProgress || terminalHandoffClosed) await persistCheckpoint()
       // A just-read, current decision needs to reach the model before the stop
       // test. This consumes feedback once; it creates no progress or allowance.
       const review = currentReviewState.value
@@ -2814,7 +2850,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           continue
         }
       }
-      if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead && !feedbackRead)) {
+      const terminalHandoffPending = terminalHandoffTurn && terminalHandoffSlots?.some(key => !consumedReviewDecisionFeedback.has(key))
+      if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead && !feedbackRead && !terminalHandoffPending)) {
         const sameIncompleteReview = incompleteReview && review && !review.ready
           && review.chapterId === incompleteReview.chapterId && review.revision === incompleteReview.revision
           && (review.compilationId ?? null) === (incompleteReview.compilationId ?? null)
@@ -2824,7 +2861,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             + (incompleteReview!.failureCode.endsWith('EVIDENCE_UNLOCATED') ? '报告中的正文引用尚未确认。' : '检查报告未能完整解析。')
             + '原始报告和检查记录保留，已停止重复请求；继续时需先恢复或完成这项检查。'
           : '连续多轮没有推进原任务的内容或必需成果，已停止重复执行，进度保留。'
-        forceWrapUpLocal = toolRestrictions.length > 0 || pendingReviews.size > 0 || settledReviewFailures.size > 0
+        forceWrapUpLocal = terminalHandoffTurn || toolRestrictions.length > 0 || pendingReviews.size > 0 || settledReviewFailures.size > 0
       }
 
       // P0/P1 熔断收尾：结构熔断优先级更高（上方已 return），这里处理重复签名第 4 次/复读二次命中

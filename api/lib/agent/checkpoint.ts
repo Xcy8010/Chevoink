@@ -62,8 +62,9 @@ const runCheckpointFields = {
   // Write before a legacy critic/repair chain starts. A process interruption or
   // uncertain provider outcome cannot become permission to pay for it again.
   reviewAttempts: z.array(z.string().min(1)).optional(),
-  // A current decision observation may reach the next model turn before the
-  // stagnation stop. It is not progress or budget; resumes cannot replenish it.
+  // Current decision observations and domain-separated terminal handoff slots
+  // can reach bounded processing turns before the stagnation stop. They are
+  // not progress or budget; resumes cannot replenish consumed receipts.
   consumedReviewDecisionFeedback: z.array(z.string().regex(/^[a-f0-9]{64}$/u)).optional(),
   toolRestrictions: z.array(toolRestrictionSchema).optional(),
   // One persisted conversion identity, never replenished by resume. It allows
