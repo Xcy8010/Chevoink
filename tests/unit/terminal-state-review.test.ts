@@ -1,12 +1,27 @@
 import { describe, expect, it } from 'vitest'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches } from '../../api/lib/agent/compiler-continuity-contract.js'
-import { currentTerminalReview, inspectTerminalReview, terminalCandidateSchema, terminalClaims, terminalReviewInput } from '../../api/lib/agent/terminal-state-review.js'
+import { currentTerminalReview, inspectTerminalReview, terminalCandidateSchema, terminalClaims, terminalReviewInput, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { applyContinuityReassessment, continuityReassessmentRequest } from '../../api/lib/agent/assessment-response-lifecycle.js'
 
 const candidate = terminalCandidateSchema.parse({ exitState: { body: ['林舟右掌骨裂'] } })
 const raw = (verdict = 'supported', segmentIds = ['c0']) => JSON.stringify({ findings: [], terminalVerdicts: [{ path: 'exitState.body.0', verdict, segmentIds }] })
 describe('independent terminal fact evidence', () => {
+  it('keeps a completed check and unsupported candidate distinct without changing visible presentation', () => {
+    const body = '他右掌疼痛，伤情未明。', response = raw('unknown')
+    const inspected = inspectContinuityResponse(response, { previous: null, current: body }, true, 6, candidate)
+    expect(inspected.complete).toBe(true)
+    const validation = { terminalCandidate: candidate, independentCheck: 'complete', continuityCriticResponse: inspected.audit }
+    const before = structuredClone(validation)
+    const result = terminalReviewFailure(validation, body)
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: true,
+      summary: '终态候选尚未获正文证实' })
+    expect(result).not.toHaveProperty('display')
+    expect(result?.output).toContain('exitState.body.0')
+    expect(result?.output).toContain('unknown')
+    expect(validation).toEqual(before)
+    expect(currentTerminalReview(validation, body)?.supported).toBe(false)
+  })
   it('preserves the old frozen request prefix byte for byte when no terminal candidate exists', () => {
     const bodies = { previous: null, current: '正文' }
     const old = inspectContinuityResponse('{"findings":[]}', bodies, true, 6)

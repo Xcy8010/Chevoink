@@ -1,0 +1,101 @@
+import { z } from 'zod'
+import { DataAccessError } from '../prisma.js'
+import { runtimeJson } from './runtime-common.js'
+import type { TerminalCandidate, inspectTerminalReview } from './terminal-state-review.js'
+
+const hash = z.string().regex(/^[a-f0-9]{64}$/u)
+const field = z.enum(['knowledge', 'body', 'objects', 'relationships', 'openLoops'])
+const fact = z.object({ id: hash, field, claim: z.string().min(1).max(1000) }).strict()
+export const terminalCoverageInputSchema = z.object({ version: z.literal(1), taskId: z.string(), chapterId: z.string(),
+  obligations: z.array(fact).max(200),
+}).strict()
+export type TerminalCoverageInput = z.infer<typeof terminalCoverageInputSchema>
+const stateSchema = z.object({ version: z.literal(1), taskId: z.string(), chapterId: z.string(), facts: z.array(fact).max(200),
+  lastReview: z.object({ bodyHash: hash, candidateHash: hash, input: terminalCoverageInputSchema }).strict(),
+}).strict()
+export type TerminalCoverageState = z.infer<typeof stateSchema>
+const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+const blocked = () => new DataAccessError(409, 'TERMINAL_STATE_REVIEW_REQUIRED', '持续事实覆盖记录缺失、损坏或超出有界容量；保留正文、原报告和未知结果，不能清空或重复检查绕过。')
+
+/** Only new admissions opt in. Historical contracts, snapshots and audits stay immutable. */
+export function hasTerminalCoverageProtocol(spec: unknown) {
+  return object(object(spec).scope).terminalCoverageProtocol === 1
+}
+
+export function readTerminalCoverageState(spec: unknown, preparedContext: unknown, chapterId: string): TerminalCoverageState | undefined {
+  if (!hasTerminalCoverageProtocol(spec)) return undefined
+  const value = object(preparedContext).terminalFactCoverage
+  if (value === undefined) return undefined
+  const parsed = stateSchema.safeParse(value)
+  if (!parsed.success || parsed.data.taskId !== object(spec).id || parsed.data.chapterId !== chapterId
+    || parsed.data.lastReview.input.taskId !== parsed.data.taskId || parsed.data.lastReview.input.chapterId !== chapterId
+    || [parsed.data.facts, parsed.data.lastReview.input.obligations].some(items => new Set(items.map(item => item.id)).size !== items.length
+      || items.some(item => item.id !== runtimeJson({ field: item.field, claim: item.claim }).hash))) throw blocked()
+  return parsed.data
+}
+
+/** Exact included claims still need their ordinary independent verdict. Only
+ * omissions add an explicit disposition; this never merges claims into state. */
+export function terminalCoverageInput(spec: unknown, preparedContext: unknown, chapter: { id: string; content: string }, candidate?: TerminalCandidate): TerminalCoverageInput | undefined {
+  if (!hasTerminalCoverageProtocol(spec)) return undefined
+  const saved = readTerminalCoverageState(spec, preparedContext, chapter.id)
+  if (!candidate && !saved?.facts.length) return undefined
+  const normalized = candidate ?? { exitState: {}, lastUnfinishedAction: '' }
+  if (saved?.lastReview.bodyHash === runtimeJson({ content: chapter.content }).hash
+    && saved.lastReview.candidateHash === runtimeJson(normalized).hash) return saved.lastReview.input
+  const obligations = (saved?.facts ?? []).filter(item => !candidate
+    || !candidate.exitState[item.field].includes(item.claim))
+  return terminalCoverageInputSchema.parse({ version: 1, taskId: object(spec).id, chapterId: chapter.id, obligations })
+}
+
+export const terminalDispositionSchema = z.object({ id: hash, outcome: z.enum(['replaced', 'ended', 'unknown']),
+  reason: z.string().trim().min(1).max(1000), candidatePath: z.string().max(100).optional(),
+  sourceEvidence: z.array(z.object({ segmentId: z.string().regex(/^c[0-9]+$/u), quote: z.string().min(2).max(300) }).strict()).max(8),
+}).strict()
+
+/** Quoted source existence is mechanical; the fresh critic owns whether the
+ * whole fact ended or is represented by a new independently supported claim. */
+export function inspectTerminalCoverage(input: TerminalCoverageInput | undefined, raw: unknown,
+  candidate: TerminalCandidate, verdicts: Array<{ path: string; verdict: string }>, segments: Array<{ segmentId: string; quote: string }>) {
+  if (!input) return undefined
+  const parsed = z.array(terminalDispositionSchema).max(200).safeParse(raw ?? (input.obligations.length ? undefined : []))
+  if (!parsed.success || parsed.data.length !== input.obligations.length
+    || new Set(parsed.data.map(item => item.id)).size !== parsed.data.length) return null
+  if (parsed.data.some(item => {
+    const obligation = input.obligations.find(fact => fact.id === item.id)
+    if (!obligation || item.sourceEvidence.some(ref => !segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote)))) return true
+    if (item.outcome === 'unknown') return item.candidatePath !== undefined
+    if (item.outcome === 'ended') return item.candidatePath !== undefined || !item.sourceEvidence.length
+    const match = /^exitState\.(knowledge|body|objects|relationships|openLoops)\.([0-9]+)$/u.exec(item.candidatePath ?? '')
+    return !match || match[1] !== obligation.field || !candidate.exitState[obligation.field][Number(match[2])]
+      || !verdicts.some(verdict => verdict.path === item.candidatePath && verdict.verdict === 'supported')
+  })) return null
+  return { complete: parsed.data.every(item => item.outcome !== 'unknown'), dispositions: parsed.data }
+}
+
+export function terminalCoverageGuidance(input: TerminalCoverageInput | undefined) {
+  if (!input?.obligations.length) return ''
+  return '\n服务端factCoverage.obligations是此前独立证实但本候选省略的持续事实，仅作待核义务。输出terminalDispositions，每个id恰好一项：{id,outcome,reason,sourceEvidence:[{segmentId,quote}],candidatePath?}。核对全文和章末：同一事实的更新/等义表述用replaced，candidatePath指向同字段且本次supported的候选；明确解除/解决用ended及当前cN逐字证据；不能确定用unknown并保留阻碍。旧引文仍在不证明持续，未提及不证明解除；不得机械复制、清空状态或改稿证明候选。处置并入本次独立响应，不增加请求或预算。'
+}
+
+/** Called inside the original report transaction after reparsing its complete
+ * independent audit. Unresolved facts survive; no main-model disposition exists. */
+export function advanceTerminalCoverage(spec: unknown, preparedContext: unknown, chapter: { id: string; content: string },
+  review: NonNullable<ReturnType<typeof inspectTerminalReview>>): TerminalCoverageState | undefined {
+  const input = terminalCoverageInput(spec, preparedContext, chapter, review.candidate)
+  if (!input) return undefined
+  const old = readTerminalCoverageState(spec, preparedContext, chapter.id)
+  const resolved = new Set(review.factCoverage?.dispositions.filter(item => item.outcome !== 'unknown').map(item => item.id))
+  const facts = new Map((old?.facts ?? []).filter(item => !resolved.has(item.id)).map(item => [item.id, item]))
+  for (const item of review.verdicts) {
+    const match = /^exitState\.(knowledge|body|objects|relationships|openLoops)\.([0-9]+)$/u.exec(item.path)
+    if (item.verdict !== 'supported' || !match) continue
+    const name = field.parse(match[1]), claim = review.candidate.exitState[name][Number(match[2])]
+    const id = runtimeJson({ field: name, claim }).hash
+    facts.set(id, { id, field: name, claim })
+  }
+  const parsed = stateSchema.safeParse({ version: 1, taskId: input.taskId, chapterId: chapter.id, facts: [...facts.values()],
+    lastReview: { bodyHash: runtimeJson({ content: chapter.content }).hash, candidateHash: runtimeJson(review.candidate).hash, input } })
+  if (!parsed.success) throw blocked()
+  return parsed.data
+}

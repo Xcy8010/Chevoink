@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { freezeLocalEditBoundary, localEditGuidance, originalLocalEditBoundary } from '../../api/lib/agent/local-edit-scope.js'
-import { reviewBoundEditAllowed, unprovenReviewBoundPatchIndexes, type ReviewBoundEvidence } from '../../api/lib/agent/review-bound-edit.js'
+import { reviewBoundEditAllowed, projectReviewBoundEditPlan, unprovenReviewBoundPatchIndexes, type ReviewBoundEvidence } from '../../api/lib/agent/review-bound-edit.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { taskSpecSchema, type TaskSpec } from '../../shared/contracts/task-spec-contracts.js'
 import type { Prisma } from '@prisma/client'
@@ -8,7 +8,8 @@ import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import * as original from '../../api/lib/agent/original-request.js'
 import { frozenWritingScopeHash } from '../../api/lib/agent/writing-contract.js'
 import { frozenWritingRevisionAuthority } from '../../api/lib/agent/writing-scope.js'
-import { readChapterReviewRevisionGuidance } from '../../api/lib/agent/chapter-review-guard.js'
+import { readChapterReviewRevisionGuidance, type ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import { projectCurrentReviewNextStep, currentReviewNextStepGuidance } from '../../api/lib/agent/review-dispatch.js'
 
 const prompt = '读取第4章当前正文并完成本章检查和提交，不续写，不修改第1至3章。先做连续性和人类感检查；如有确证问题，只对本章必要位置做局部修订并复检，其他保持。'
 const body = '门边有灯。她向左转，另一人向右转。门仍关着。'
@@ -27,6 +28,59 @@ function fixture() {
   return { boundary, evidence, range, after: body.replace('向左转', '向右转') }
 }
 describe('finding-conditioned local repair effects', () => {
+  function ready(evidence: ReviewBoundEvidence): ChapterReviewReadiness {
+    return { ready: true, checksRequired: true, compilationId: 'compilation', chapterId: chapter.id, revision: chapter.revision,
+      continuity: 'complete', quality: 'complete', continuityErrorCount: 0, qualityErrorCount: 0, qualityReportId: 'current-report',
+      requiredTools: [], reviewBoundEvidence: evidence, selectionOnly: true }
+  }
+  it('projects missing checks before any conditional manuscript proposal can execute', () => {
+    const f = fixture(), review = ready(f.evidence)
+    review.ready = false; review.quality = 'missing'; review.requiredTools = [{ name: 'quality_analyze', args: { compilationId: review.compilationId } }]
+    const plan = projectReviewBoundEditPlan(f.boundary, chapter, review, { after: f.after, ranges: [f.range] })
+    expect(plan.state).toBe('checks_required')
+    expect(plan.requiredTools).toEqual(review.requiredTools)
+    expect(plan.guidance).toContain('quality_analyze')
+    expect(review.quality).toBe('missing')
+  })
+  it('projects the same exact evidence boundary for presentation and mixed-batch admission', () => {
+    const f = fixture(), review = ready(f.evidence)
+    const plan = projectReviewBoundEditPlan(f.boundary, chapter, review,
+      { after: f.after, ranges: [f.range, { start: 0, end: 1, newText: '另' }] })
+    expect(plan.state).toBe('proposal_outside_evidence')
+    expect(plan.unprovenPatchIndexes).toEqual([1])
+    expect(plan.anchors).toEqual(f.evidence.anchors)
+    expect(plan.guidance).toContain('第2项')
+    expect(projectReviewBoundEditPlan(f.boundary, chapter, review, { after: f.after, ranges: [f.range] }).state).toBe('findings_available')
+  })
+  it.each(['missing', 'wrong-revision', 'wrong-chapter', 'wrong-hash'])(
+    'does not advertise edit evidence from %s review state', scenario => {
+      const f = fixture(), review = ready(f.evidence)
+      if (scenario === 'wrong-revision') review.revision++
+      if (scenario === 'wrong-chapter') review.chapterId = 'prior'
+      if (scenario === 'wrong-hash') review.reviewBoundEvidence!.contentHash = '0'.repeat(64)
+      expect(projectReviewBoundEditPlan(f.boundary, chapter, scenario === 'missing' ? null : review).state).toBe('unavailable')
+    })
+  it('projects no findings as keep-body, never as a new selection or broad manual repair grant', () => {
+    const f = fixture(), review = ready({ ...f.evidence, anchors: [] })
+    const plan = projectReviewBoundEditPlan(f.boundary, chapter, review)
+    expect(plan.state).toBe('no_proven_findings')
+    expect(plan.anchors).toEqual([])
+    const guidance = currentReviewNextStepGuidance(projectCurrentReviewNextStep({ ...review, reviewBoundPlan: plan, decisionPending: true }))
+    expect(guidance).not.toContain('未明确定位则先请作者补准确原文')
+    expect(guidance).toContain('保持正文')
+  })
+  it('keeps completed manuscript checks distinct from unsupported terminal claims and from edit anchors', () => {
+    const f = fixture(), review = ready({ ...f.evidence, anchors: [] })
+    review.terminalReview = { state: 'unverified', unresolved: [{ path: 'exitState.emotion.0', verdict: 'unknown' }] }
+    const step = projectCurrentReviewNextStep(review)
+    expect(step.state).toBe('terminal_review_required')
+    expect(step.requiredTools).toEqual([])
+    expect(currentReviewNextStepGuidance(step)).toContain('exitState.emotion.0')
+    expect(currentReviewNextStepGuidance(step)).toContain('不是正文问题')
+    expect(projectReviewBoundEditPlan(f.boundary, chapter, review).anchors).toEqual([])
+    review.ready = false; review.quality = 'incomplete'; review.requiredTools = [{ name: 'quality_analyze', args: { compilationId: review.compilationId } }]
+    expect(projectCurrentReviewNextStep(review).state).toBe('blocked')
+  })
   it('identifies the unproven patch without authorizing any part of a rejected batch', () => {
     const f = fixture(), ranges = [f.range, { start: 0, end: 1, newText: '窗' }]
     expect(unprovenReviewBoundPatchIndexes(body, f.evidence, ranges)).toEqual([1])

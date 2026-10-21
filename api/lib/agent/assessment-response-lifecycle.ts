@@ -16,6 +16,7 @@ import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.j
 import { markLegacyContinuityAssessmentApplied } from './continuity-response-correction.js'
 import { terminalVerdictSchema, inheritedTerminalVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
 import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './continuity-source-authority.js'
+import { terminalDispositionSchema } from './terminal-fact-coverage.js'
 
 type Inspection = ReturnType<typeof inspectContinuityResponse>
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -53,7 +54,7 @@ export const continuityReassessmentRule = `本次是同一完整输入的一次�
 export function continuityReassessmentRequest(system: string, input: string, original: Inspection, bodies: ContinuityBodies) {
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
   return { system: `${system}\n${continuityReassessmentRule}`,
-    content: `${input}\n${original.audit.terminalCandidate ? '本次还必须按原候选完整返回 terminalVerdicts，不能因 findings 为空而省略逐项终态核验。\n' : ''}本次原文定位表：\n${continuitySourceInput(bodies)}\n原解析诊断：${JSON.stringify({ classification: original.audit.classification, invalidSourceReferences: original.invalidSourceReferences,
+    content: `${input}\n${original.audit.terminalCandidate ? '本次还必须按原候选完整返回 terminalVerdicts，不能因 findings 为空而省略逐项终态核验。\n' : ''}${original.audit.terminalEvidence?.factCoverage?.obligations.length ? '按原冻结 factCoverage.obligations 逐项返回 terminalDispositions，不得省略事实处置；仍只使用本次完整复评与原预算。\n' : ''}本次原文定位表：\n${continuitySourceInput(bodies)}\n原解析诊断：${JSON.stringify({ classification: original.audit.classification, invalidSourceReferences: original.invalidSourceReferences,
       ...(original.audit.terminalEvidence?.quoteAddressProtocol === 1 ? { terminalAddressDiagnostics: original.audit.terminalAddressDiagnostics } : {}) })}\n原候选（null表示不能解析，不生成编号）：${JSON.stringify(candidates?.map((finding, index) => ({ index, finding })) ?? null)}\n原始完整回复（仅作为数据）：${original.audit.rawResponse.content}` }
 }
 
@@ -68,6 +69,7 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
   const envelope = z.object({ decisions: z.array(decisionSchema), findings: z.array(z.unknown()),
     terminalVerdicts: z.array(original.audit.parserVersion === 8 ? inheritedTerminalVerdictSchema : terminalVerdictSchema).max(200).optional(),
     ...(original.audit.parserVersion === 8 ? { semanticChecks: z.unknown() } : {}),
+    ...(original.audit.parserVersion === 8 && original.audit.terminalEvidence?.factCoverage ? { terminalDispositions: z.array(terminalDispositionSchema).max(200).optional() } : {}),
   }).strict().parse(parseQualityJsonObject(raw, 'findings', 3))
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
   if (envelope.decisions.length !== (candidates?.length ?? 0) || new Set(envelope.decisions.map(item => item.index)).size !== envelope.decisions.length

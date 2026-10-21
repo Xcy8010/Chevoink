@@ -16,10 +16,12 @@ import { hasReadOnlyRevisionAssessment, localEditGuidance, localRevisionAuthorit
 import { beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, readReviewCycle, reviewCycleFinding, reviewCycleRefKey,
   type ReviewCycleFinding } from './review-cycle.js'
 import { observedReviewCycleVerification, prepareReviewCycleTransition } from './review-cycle-store.js'
-import { readTerminalCandidate } from './terminal-state-review.js'
+import { readTerminalCandidate, currentTerminalReview } from './terminal-state-review.js'
+import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
+import { terminalCoverageInput } from './terminal-fact-coverage.js'
 
 import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
-import type { ReviewBoundEvidence } from './review-bound-edit.js'
+import { projectReviewBoundEditPlan, type ReviewBoundEditPlan, type ReviewBoundEvidence } from './review-bound-edit.js'
 
 export type ChapterReviewDecision = { source: 'continuity' | 'quality'; reportId: string; findingId: string }
 export type RetainedChapterReviewDecision = ChapterReviewDecision & { reason: string }
@@ -48,6 +50,8 @@ export type ChapterReviewRevisionOptions = {
   pendingQuality?: { compilationId: string; candidates: number }
 }
 export type ChapterReviewReadiness = {
+  reviewBoundPlan?: ReviewBoundEditPlan
+  terminalReview?: { state: 'supported' | 'unverified'; unresolved: Array<{ path: string; verdict: string }> }
   /** Server-only mutation proof projection; ordinary read tools never request it. */
   reviewBoundEvidence?: ReviewBoundEvidence
   reviewCycle?: ReturnType<typeof projectReviewCycle>
@@ -292,8 +296,9 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   if (requirements.quality && quality === 'complete' && qualityContextCurrent) phases.push('quality')
   if (!requiredTools.length && !decisionPending && requiredDecisions.length > 0
     && (!requirements.quality || qualityContextCurrent)) phases.push('decision')
+  const conditionalBoundary = originalLocalEditBoundary(original.spec)
   const repairAnchors: ReviewBoundEvidence['anchors'] = []
-  if (options?.reviewBoundEvidence && !requiredTools.length && (!requirements.quality || qualityContextCurrent)) {
+  if ((options?.reviewBoundEvidence || conditionalBoundary?.version === 3) && !requiredTools.length && (!requirements.quality || qualityContextCurrent)) {
     // Only structured CURRENT source quotes confer edit authority. Narrative
     // explanations, previous-source quotes and generic cycle anchors do not.
     if (assessment && validation && Array.isArray(validation.findings)) for (const [index, item] of validation.findings.entries()) {
@@ -317,7 +322,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       }
     }
   }
-  return { ready: !requiredTools.length, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id,
+  const readiness: ChapterReviewReadiness = { ready: !requiredTools.length, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id,
     ...(options?.reviewBoundEvidence ? { reviewBoundEvidence: { contentHash, anchors: repairAnchors, cycle: savedCycle } } : {}),
     ...(reviewProtocol ? { reviewProtocol, completeStrictReview,
       selectionOnly: !!originalSelectionBoundary(original.spec) || !!originalLocalEditBoundary(original.spec) } : {}),
@@ -334,6 +339,21 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       finding.severity === 'error' && finding.disposition !== 'repaired' && (reviewProtocol === 1 || finding.authorFeedback !== 'rejected')).length : 0,
     qualityCandidateCount: quality === 'complete' ? selectAutomaticQualityFindings(report!.findings).length : 0,
     qualityReportId: quality === 'complete' ? report!.id : null }
+  if (conditionalBoundary?.version === 3) readiness.reviewBoundPlan = projectReviewBoundEditPlan(conditionalBoundary, chapter,
+    { ...readiness, reviewBoundEvidence: { contentHash, anchors: repairAnchors, cycle: savedCycle } })
+  const terminalVersion = terminalEvidenceVersion(original.spec)
+  const terminalCandidate = readTerminalCandidate(validation)
+  const factCoverage = terminalCoverageInput(original.spec, compilation.preparedContext, chapter, terminalCandidate)
+  if (terminalVersion && (terminalCandidate || factCoverage?.obligations.length)) {
+    const terminal = assessment ? currentTerminalReview(validation, chapter.content,
+      terminalEvidenceContext(chapter, source, terminalVersion, terminalQuoteAddressVersion(original.spec),
+        factCoverage)) : null
+    readiness.terminalReview = { state: terminal?.supported ? 'supported' : 'unverified',
+      unresolved: [...(terminal?.verdicts.filter(item => item.verdict !== 'supported').map(({ path, verdict }) => ({ path, verdict })) ?? []),
+        ...(terminal?.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' }))
+          ?? factCoverage?.obligations.map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' })) ?? [])] }
+  }
+  return readiness
 }
 
 const decisionKey = (item: ChapterReviewDecision) => `${item.source}:${item.reportId}:${item.findingId}`

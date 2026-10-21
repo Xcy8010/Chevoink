@@ -10,6 +10,7 @@ import { activeChapterScope } from '../data/internal.js'
 import { terminalCandidateSchema, readTerminalCandidate } from './terminal-state-review.js'
 import { continuitySourceScopeSchema } from './continuity-source-authority.js'
 import { terminalEvidenceContextSchema, terminalEvidenceContext, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
+import { terminalCoverageInput } from './terminal-fact-coverage.js'
 import { readOriginalTaskRequest } from './original-request.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -105,11 +106,14 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   const meta = object(reservation[0].metadata), frozen = object(meta.input), bodies = object(frozen.bodies), key = meta.continuityAssessmentRequestKey
   const chainProtocol = frozen.parserVersion === 8 && object(bodies.terminalEvidence).protocol === 2
   if (chainProtocol) source = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, 11)
+  const original = chainProtocol ? await readOriginalTaskRequest(tx, { ...subject, runId: call.runId }) : null
+  coverageInput.terminalCandidate ??= terminalCoverageInput(original?.spec, compilation.preparedContext, chapter)?.obligations.length
+    ? terminalCandidateSchema.parse({ exitState: {} }) : undefined
   const coverage = compilerContinuityCoverage({ ...coverageInput, source }, chainProtocol ? 11 : frozen.parserVersion === 8 ? 10 : frozen.parserVersion === 7 ? 9 : 8)
   let sourceMatches = bodies.previous === (source?.content ?? null) && frozen.bindingHash === runtimeJson(coverage).hash
   if (chainProtocol) {
-    const original = await readOriginalTaskRequest(tx, { ...subject, runId: call.runId })
-    sourceMatches &&= runtimeJson(bodies.terminalEvidence).hash === runtimeJson(terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original.spec))).hash
+    sourceMatches &&= runtimeJson(bodies.terminalEvidence).hash === runtimeJson(terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original?.spec),
+      terminalCoverageInput(original?.spec, compilation.preparedContext, chapter, coverageInput.terminalCandidate))).hash
   }
   if (!sourceMatches && !chainProtocol) {
     // A proven non-dispatch may have frozen the previous single-source

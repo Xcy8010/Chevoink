@@ -1,5 +1,6 @@
 import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { terminalEvidenceContext, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
+import { advanceTerminalCoverage, readTerminalCoverageState, terminalCoverageInput } from './terminal-fact-coverage.js'
 import { buildTerminalFactProofs } from './terminal-inheritance-chain.js'
 import { continuityRecheckBaseline } from './continuity-review-context.js'
 import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision } from './writing-scope.js'
@@ -339,11 +340,14 @@ export async function prepareStoryCompilation(input: {
   const autoRepairRounds = Math.max(0, ...priorRepairStates.map(item => continuityRepairRounds(item.validation)))
   const checkRounds = Math.max(0, ...priorRepairStates.map(item => validatedContinuityCheckRounds(item.validation)))
   const newDraftRevision = priorRepairStates.map(item => readNewDraftRevision(item.validation)).find(Boolean)
+  const priorFactCoverage = target.chapter ? priorRepairStates.filter(item => item.chapterId === target.chapter!.id)
+    .map(item => readTerminalCoverageState(writing.spec, item.preparedContext, target.chapter!.id)).find(Boolean) : undefined
   await db.storyCompilation.updateMany({
     where: { userId: input.userId, novelId: input.novelId, ...scope, status: 'active' },
     data: { status: 'abandoned' },
   })
   const preparedContext = {
+    ...(priorFactCoverage ? { terminalFactCoverage: priorFactCoverage } : {}),
     ...(priorCycle ? { reviewCycle: priorCycle } : {}),
     volumeContext, volumeDecision,
     charterRevision: bundle.charter?.revision ?? null,
@@ -674,6 +678,7 @@ export async function validateStoryContinuity(input: {
   independentCheck?: 'complete' | 'unavailable'
   coverage?: CompilerContinuityCoverage
   terminalCandidate?: TerminalCandidate
+  continuityCriticResponse?: unknown
   focus?: string
   signal?: AbortSignal
 }, transaction?: Prisma.TransactionClient): Promise<{ checkedChapterId: string; checkedRevision: number; checkedAt: string; independentCheck: 'complete' | 'unavailable'; findings: ContinuityFindingInput[]; errorCount: number; warningCount: number; autoRepairRounds: number; checkRounds: number }> {
@@ -750,8 +755,9 @@ export async function validateStoryContinuity(input: {
     && recovery.coverageHash === runtimeJson(currentCoverage).hash && Array.isArray(recovery.sourceRelocations) && recovery.sourceRelocations.length > 0
     && typeof previousValidation.checkedAt === 'string' && Number.isFinite(Date.parse(previousValidation.checkedAt))
   const validation = {
+    ...(input.continuityCriticResponse ? { continuityCriticResponse: runtimeJson(input.continuityCriticResponse).value } : {}),
     ...(sameReviewedInput && previousValidation.retainedReviewDecision ? { retainedReviewDecision: previousValidation.retainedReviewDecision } : {}),
-    ...(sameReviewedInput && previousValidation.continuityCriticResponse ? { continuityCriticResponse: previousValidation.continuityCriticResponse } : {}),
+    ...(!input.continuityCriticResponse && sameReviewedInput && previousValidation.continuityCriticResponse ? { continuityCriticResponse: previousValidation.continuityCriticResponse } : {}),
     ...(preservedRecovery ? { continuityFormatRecovery: recovery } : {}),
     ...(readNewDraftRevision(compilation.validation) ? { newDraftRevision: readNewDraftRevision(compilation.validation) } : {}),
     autoRepairRounds: continuityRepairRounds(compilation.validation),
@@ -771,9 +777,19 @@ export async function validateStoryContinuity(input: {
     warningCount: findings.filter((item) => item.severity === 'warning').length,
   }
   input.signal?.throwIfAborted()
+  const factCoverage = terminalCoverageInput(authorRequest?.spec, compilation.preparedContext, compilation.chapter, input.terminalCandidate)
+  const terminalContext = factCoverage ? terminalEvidenceContext(compilation.chapter, reviewSource, protocol === 11 ? 2 : 1,
+    terminalQuoteAddressVersion(authorRequest?.spec), factCoverage) : undefined
+  if (terminalContext && validation.continuityCriticResponse
+    && runtimeJson((validation.continuityCriticResponse as Record<string, unknown>).terminalEvidence).hash !== runtimeJson(terminalContext).hash) {
+    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间持续事实覆盖义务已变化；保留原请求和结果，不将旧核验绑定当前候选。')
+  }
+  const terminalReview = terminalContext ? currentTerminalReview(validation, compilation.chapter.content, terminalContext) : null
+  const nextFactCoverage = terminalReview ? advanceTerminalCoverage(authorRequest?.spec, compilation.preparedContext, compilation.chapter, terminalReview) : undefined
   await db.storyCompilation.update({
     where: { id: compilation.id },
-    data: { stage: compilation.status === 'completed' ? 'commit' : 'check', validation: validation as Prisma.InputJsonValue },
+    data: { stage: compilation.status === 'completed' ? 'commit' : 'check', validation: validation as Prisma.InputJsonValue,
+      ...(nextFactCoverage ? { preparedContext: runtimeJson({ ...(compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}), terminalFactCoverage: nextFactCoverage }).value } : {}) },
   })
   input.signal?.throwIfAborted()
   return validation
@@ -901,11 +917,16 @@ export async function commitChapterBridge(input: {
   const reviewedCandidate = readTerminalCandidate(compilation.validation)
   // Legacy/manual error gates need no new task lookup. Read the frozen address
   // policy only when this producer actually carries terminal evidence context.
-  const terminalAddressProtocol = (currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 && probeRunId
-    ? terminalQuoteAddressVersion((await readOriginalTaskRequest(db, { ...input, runId: probeRunId })).spec) : undefined
+  const hasStoredFactCoverage = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext)
+    && 'terminalFactCoverage' in compilation.preparedContext
+  const terminalRequest = ((currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 || hasStoredFactCoverage) && probeRunId
+    ? await readOriginalTaskRequest(db, { ...input, runId: probeRunId }) : undefined
+  const outstandingFacts = readTerminalCoverageState(terminalRequest?.spec, compilation.preparedContext, compilation.chapter.id)?.facts.length ?? 0
+  const terminalAddressProtocol = terminalQuoteAddressVersion(terminalRequest?.spec)
   const terminalReview = currentTerminalReview(compilation.validation, chapter.content,
-    (currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 ? terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, currentContinuityReview.coverage.protocolVersion === 11 ? 2 : 1, terminalAddressProtocol) : undefined)
-  if (reviewedCandidate || terminalClaims(proposedTerminal).length) {
+    (currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 ? terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, currentContinuityReview.coverage.protocolVersion === 11 ? 2 : 1, terminalAddressProtocol,
+      terminalCoverageInput(terminalRequest?.spec, compilation.preparedContext, { ...compilation.chapter, ...chapter }, reviewedCandidate)) : undefined)
+  if (outstandingFacts || reviewedCandidate || terminalClaims(proposedTerminal).length) {
     if (!currentContinuityReview.assessment || !reviewedCandidate || !terminalReview?.supported
       || runtimeJson(reviewedCandidate).hash !== runtimeJson(proposedTerminal).hash) {
       throw new DataAccessError(409, 'TERMINAL_STATE_REVIEW_REQUIRED', '终态包含尚未由当前正文独立核验的事实，或与检查候选不同。正文与原终态保留；调用 continuity_validate，terminalState={exitState,lastUnfinishedAction} 传入准确候选，核对逐项正文证据后再提交。计划、推测、否定或仅转述不能作为实况；不要静默清空已知状态绕过核验。')
@@ -943,7 +964,8 @@ export async function commitChapterBridge(input: {
   const terminalFactProofs = currentContinuityReview.coverage.protocolVersion === 11 && terminalReview?.supported
     ? buildTerminalFactProofs({ compilationId: compilation.id, chapter: { ...compilation.chapter, ...chapter }, validation: compilation.validation,
       stateHash: terminalReviewStateHash(sameTerminal ? compilation.bridge : { ...compilation.bridge, ...bridgeData }, orderedScenes),
-      evidence: terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, 2, terminalAddressProtocol), review: terminalReview }) : undefined
+      evidence: terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, 2, terminalAddressProtocol,
+        terminalCoverageInput(terminalRequest?.spec, compilation.preparedContext, { ...compilation.chapter, ...chapter }, reviewedCandidate)), review: terminalReview }) : undefined
   if (sameTerminal && terminalContext.terminalContentHash === terminalContentHash && terminalContext.terminalCandidateHash === terminalCandidateHash) {
     if (terminalFactProofs && runtimeJson({ facts: terminalContext.terminalFactProofs ?? null }).hash !== runtimeJson({ facts: terminalFactProofs }).hash) {
       await db.storyCompilation.update({ where: { id: compilation.id }, data: { preparedContext: runtimeJson({ ...terminalContext, terminalFactProofs }).value } })

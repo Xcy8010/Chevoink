@@ -11,6 +11,10 @@ import { nextReviewDispatch, reviewDispatchKey } from '../../api/lib/agent/revie
 import * as lock from '../../api/lib/data/novel-write-lock.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 import * as humanity from '../../api/lib/agent/humanity-quality.js'
+import { advanceTerminalCoverage, terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
+import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
+import { inspectTerminalReview, terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
+import { projectCurrentReviewNextStep, currentReviewNextStepGuidance } from '../../api/lib/agent/review-dispatch.js'
 
 afterEach(() => vi.restoreAllMocks())
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
@@ -51,6 +55,25 @@ function fixture(prompt = '写下一章') {
 }
 
 describe('persisted current review readiness', () => {
+  it.each(['检查当前章节', '写下一章，不用检查', '写下一章，跳过质量检查和连续性检查'])(
+    'cannot bypass previously supported facts with reprepare and empty commit even when checks were not required: %s', async prompt => {
+      const f = fixture(prompt)
+      Object.assign(f.task.scope, { terminalCoverageProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1 })
+      const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['门已经锁好'] } })
+      const evidence = terminalEvidenceContext(f.chapter, null, 2, 1, terminalCoverageInput(f.task, {}, f.chapter, candidate))
+      const reviewed = inspectTerminalReview(candidate, f.chapter.content, JSON.stringify({ findings: [], terminalVerdicts: [{ path: 'exitState.objects.0',
+        verdict: 'supported', basis: 'current', sourceEvidence: [{ segmentId: 'c0', quote: '门已经锁好' }] }] }), true, evidence)!
+      f.compilation.preparedContext = { terminalFactCoverage: advanceTerminalCoverage(f.task, {}, f.chapter, reviewed) }
+      f.compilation.validation = null as never
+      const readiness = await readChapterReviewReadiness(f.tx, f.subject)
+      expect(readiness).toMatchObject({ ready: true, checksRequired: false, terminalReview: { state: 'unverified' } })
+      const step = projectCurrentReviewNextStep(readiness!)
+      expect(step.state).toBe('terminal_review_required')
+      expect(currentReviewNextStepGuidance(step)).toContain('当前完整独立检查尚待确认')
+      await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+      expect(f.db.chapterBridge.update).not.toHaveBeenCalled()
+      expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    })
   it.each(['current', 'repaired', 'rejected', 'wrong-hash', 'wrong-offset', 'stale-context', 'latest-failed', 'stale-revision'])(
     'projects conditional quality edit evidence only from an owned complete current report: %s', async scenario => {
       const f = fixture('修改第44章。完成连续性与人类感检查。')

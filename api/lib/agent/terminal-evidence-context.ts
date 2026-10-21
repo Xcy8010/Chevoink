@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { continuitySourceSegments } from './continuity-review-context.js'
 import { runtimeJson } from './runtime-common.js'
 import type { readCompilerContinuitySource } from './compiler-continuity-source.js'
+import { terminalCoverageInputSchema, type TerminalCoverageInput } from './terminal-fact-coverage.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 export const terminalFactNodeSchema = z.object({ compilationId: z.string(), chapterId: z.string(), revision: z.number().int(),
@@ -18,6 +19,7 @@ export type TerminalCarriedFact = z.infer<typeof terminalCarriedFactSchema>
 export const terminalEvidenceContextSchema = z.object({
   protocol: z.union([z.literal(1), z.literal(2)]),
   quoteAddressProtocol: z.literal(1).optional(),
+  factCoverage: terminalCoverageInputSchema.optional(),
   current: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash }).strict(),
   previous: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash,
     start: z.number().int(), end: z.number().int(), joinedStart: z.number().int(), joinedEnd: z.number().int(),
@@ -45,9 +47,9 @@ export function terminalQuoteAddressVersion(spec: unknown): 1 | undefined {
  * summary. A 300-character span crossing chapter boundaries cannot inherit. */
 export function terminalEvidenceContext(chapter: { id: string; revision: number; orderIndex: number; content: string },
   source: Awaited<ReturnType<typeof readCompilerContinuitySource>>, version: 1 | 2 = source && 'terminalInheritance' in source ? 2 : 1,
-  quoteAddressProtocol?: 1): TerminalEvidenceContext {
+  quoteAddressProtocol?: 1, factCoverage?: TerminalCoverageInput): TerminalEvidenceContext {
   const previous = source && 'preceding' in source ? source.preceding.at(-1) : undefined
-  return { protocol: version, ...(quoteAddressProtocol === 1 ? { quoteAddressProtocol } : {}), current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
+  return { protocol: version, ...(quoteAddressProtocol === 1 ? { quoteAddressProtocol } : {}), ...(factCoverage ? { factCoverage } : {}), current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
     contentHash: runtimeJson({ content: chapter.content }).hash }, previous: previous ? {
     id: previous.id, revision: previous.revision, orderIndex: previous.orderIndex, contentHash: previous.contentHash,
     start: previous.start, end: previous.end, joinedStart: previous.joinedStart, joinedEnd: previous.joinedEnd,

@@ -4,6 +4,7 @@ import { continuitySourceSegments, locateUniqueContinuityQuote } from './continu
 import { parseQualityJsonObject } from './quality-evidence.js'
 import { runtimeJson } from './runtime-common.js'
 import { terminalEvidenceContextSchema, type TerminalEvidenceContext } from './terminal-evidence-context.js'
+import { inspectTerminalCoverage, terminalCoverageGuidance } from './terminal-fact-coverage.js'
 
 export const terminalCandidateSchema = z.object({
   exitState: storyStateSchema,
@@ -93,7 +94,7 @@ export function terminalClaims(candidate: TerminalCandidate) {
 }
 
 export function terminalReviewInput(candidate?: TerminalCandidate, context?: TerminalEvidenceContext): string {
-  const input = terminalReviewClaimsInput(candidate, context)
+  const input = terminalReviewClaimsInput(candidate, context) + terminalCoverageGuidance(context?.factCoverage)
   return input && context?.quoteAddressProtocol === 1
     ? `${input}\n引用地址策略：quote 必须逐字不变且完整落在单个合法片段；优先给出正确 cN/pN。服务器只可将已存在的同来源错误编号定位到唯一逐字引文所在片段，不跨来源、不补造编号、不修改 tN；重复、跨片段或不存在的引文不能修复。` : input
 }
@@ -145,10 +146,12 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
         || new Set(item.segmentIds).size !== item.segmentIds.length
         || item.verdict === 'supported' && item.segmentIds.length === 0
         || item.segmentIds.some(id => !segments.some(segment => segment.segmentId === id)))) return null
-    return { version: context ? 2 : 1, ...(context ? { evidenceContextHash: runtimeJson(context).hash } : {}), candidate, contentHash: runtimeJson({ content }).hash,
+    const factCoverage = inspectTerminalCoverage(context?.factCoverage, record.terminalDispositions, candidate, verdicts, segments.filter(item => item.segmentId.startsWith('c')))
+    if (factCoverage === null) return null
+    return { version: context ? 2 : 1, ...(context ? { evidenceContextHash: runtimeJson(context).hash } : {}), ...(factCoverage ? { factCoverage } : {}), candidate, contentHash: runtimeJson({ content }).hash,
       candidateHash: runtimeJson(candidate).hash, responseHash: runtimeJson({ raw }).hash,
       ...(addresses ? { originalRefs: addresses.originalRefs, relocations: addresses.relocations } : {}),
-      supported: verdicts.every(item => item.verdict === 'supported'),
+      supported: verdicts.every(item => item.verdict === 'supported') && factCoverage?.complete !== false,
       verdicts: verdicts.map(item => ({ ...item, evidence: item.segmentIds.map(id => {
         if (id.startsWith('t')) {
           const fact = context!.previous!.carried!.find(part => part.segmentId === id)!
@@ -188,8 +191,9 @@ export function terminalReviewFailure(validation: unknown, content: string, cont
   if (!readTerminalCandidate(validation)) return null
   const review = currentTerminalReview(validation, content, context)
   if (review?.supported) return null
-  return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', summary: '终态候选尚未获正文证实',
+  return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: !!review,
+    summary: '终态候选尚未获正文证实',
     output: `正文与候选均保留，终态未提交；不把连续性 findings 为空当作终态通过。${review
-      ? `逐项核验：${JSON.stringify(review.verdicts.map(item => ({ path: item.path, verdict: item.verdict, evidence: item.evidence })))}`
+      ? `逐项核验：${JSON.stringify(review.verdicts.map(item => ({ path: item.path, verdict: item.verdict, evidence: item.evidence })))}${review.factCoverage ? `；持续事实处置：${JSON.stringify(review.factCoverage.dispositions)}` : ''}`
       : '独立响应缺少完整逐项判定或有效 current 原文编号，不能补造证据。'}核对真实正文后，调用 continuity_validate，以 terminalState={exitState,lastUnfinishedAction} 传入完整准确候选重检。候选任何改动（含删除未知项）都须重新核验；重检通过后才可 chapter_bridge_commit，提交同一候选或省略状态复用。不得把计划、推断或转述改称实况，也不要清空已知状态绕过核验。` }
 }

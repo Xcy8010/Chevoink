@@ -378,6 +378,33 @@ function context(): ToolContext {
 }
 
 describe('server assessment fallback in the real execution loop', () => {
+  it('defers an early conditional edit without dispatch and then runs the original missing check once', async () => {
+    let state = readiness('complete', 'missing')
+    const guidance = '条件局部修订尚缺 quality_analyze；提议未执行，不重发未知请求。'
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    mocks.reviewWritePreflight.mockResolvedValue({ kind: 'decision_required', guidance })
+    const edit = tool('chapter_edit_range', async () => { throw Error('Conditional writer must not execute before its check') }, false)
+    const check = tool('quality_analyze', async () => { state = readiness('complete', 'complete'); return { output: '当前版本质量检查已完成，无需改文' } })
+    mocks.tools = [edit, check]
+    queue(response('', [call('early-conditional', edit.name, '{"chapterId":"c","oldText":"当前章节正文","newText":"另一种表达"}'),
+      call('required-quality', check.name, '{"compilationId":"comp"}')]), response('保留正文与真实检查结果。'))
+    await run('检查当前章节，如有确证问题只作局部修订。')
+    expect(edit.execute).not.toHaveBeenCalled()
+    expect(check.execute).toHaveBeenCalledOnce()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'early-conditional', execution: 'not_dispatched', reason: guidance }))
+    expect(events().filter(event => (event.type === 'tool.call' || event.type === 'tool.result') && event.callId === 'early-conditional')).toEqual([])
+  })
+  it('keeps a scope refusal failed with the original visible summary and no new display', async () => {
+    const reason = '第 2 项补丁超出当前完整检查逐字证实的问题范围，本批补丁均未写入。'
+    const edit = tool('chapter_edit_range', async () => { throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', reason) }, false)
+    mocks.tools = [edit]
+    queue(response('', [call('scope-refusal', edit.name, '{"chapterId":"c"}')]), response('该提议未执行，原文保留。'))
+    await run('局部修订当前章节')
+    expect(edit.execute).toHaveBeenCalledOnce()
+    const result = events().find(event => event.type === 'tool.result' && event.callId === 'scope-refusal')
+    expect(result).toMatchObject({ ok: false, failureCode: 'AUTHOR_LOCAL_SCOPE', summary: '执行失败' })
+    expect(result).not.toHaveProperty('display')
+  })
   it('defers repeated advisory-driven writes and accepts current reasoned retention in the same batch', async () => {
     let state = { ...readiness('complete', 'complete'), decisionPending: true }
     mocks.reviewReadiness.mockImplementation(async () => state)

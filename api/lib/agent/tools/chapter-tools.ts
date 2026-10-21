@@ -26,6 +26,7 @@ import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js
 import { writingNewVolumeSchema } from '../../../../shared/contracts/writing-volume-contracts.js'
 import { assertPreparedWritingVolumeDecision, createWritingTailVolume } from '../writing-volume.js'
 import { projectChapterBodyResult, projectConfirmedToolFailure } from './contract.js'
+import { readReviewBoundEditPlan } from '../review-bound-edit.js'
 
 function requireChapterTitle(value: string): string {
   const title = plainChapterTitle(value)
@@ -85,15 +86,20 @@ export async function preflightChapterReviewWrite(ctx: ToolContext, name: string
   const baseline = ctx.durableContent?.expectedRevision ?? getChapterBaseline(ctx.runId, chapter.id)
   if (baseline !== null && baseline !== chapter.revision) return null
   let effect: ReturnType<typeof composeChapterBody>
+  const scope = await readWritingScope(ctx.transaction ?? prisma, ctx)
+  const conditionalBoundary = originalLocalEditBoundary(scope.spec)?.version === 3
   try {
     if (name === 'chapter_edit_range') {
       const editArgs = chapterEditArguments.parse(args)
-      const scope = await readWritingScope(ctx.transaction ?? prisma, ctx)
       assertLocalEditArguments(scope.spec, editArgs)
       effect = composeChapterBody(chapter.content, 'range', editArgs,
         originalSelectionBoundary(scope.spec) || originalLocalEditBoundary(scope.spec) ? 1 : 2)
     } else effect = composeChapterBody(chapter.content, name === 'chapter_write' ? 'replace' : 'append', args)
   } catch (error) { if (error instanceof DataAccessError) return null; throw error }
+  const conditional = conditionalBoundary ? await readReviewBoundEditPlan(ctx.transaction ?? prisma, ctx, chapter, { after: effect.after, ranges: effect.ranges ?? [] }) : null
+  if (conditional && effect.after !== chapter.content && conditional.state !== 'findings_available') {
+    return { kind: 'decision_required' as const, code: 'AUTHOR_LOCAL_SCOPE', guidance: conditional.guidance, conditional }
+  }
   return readChapterReviewWriteAdmission(ctx.transaction ?? prisma, ctx, {
     chapterId, revision: chapter.revision, after: effect.after, editRanges: effect.ranges,
   })

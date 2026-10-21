@@ -1,6 +1,7 @@
 import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { retainedFindings } from './chapter-arguments.js'
 import { readTerminalCandidate, terminalCandidateSchema, terminalReviewInput, currentTerminalReview, terminalReviewFailure, type TerminalCandidate } from '../terminal-state-review.js'
+import { terminalCoverageInput } from '../terminal-fact-coverage.js'
 import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, continuitySemanticRule } from '../terminal-evidence-context.js'
 import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
@@ -908,7 +909,9 @@ export const continuityValidateTool = defineTool({
     const bridge = compilation.bridge
     const sourceChapter = await readCompilerContinuitySource(prisma, ctx, chapter, bridge.fromChapterId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
     const terminalCandidate = args.terminalState ?? readTerminalCandidate(compilation.validation)
-    const terminalEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec)) : undefined
+      ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
+    const terminalEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
+      terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate)) : undefined
     const bodies = { previous: sourceChapter?.content ?? null, current: chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }
     if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
     const coverage = compilerContinuityCoverage({ chapter, bridge, sceneTasks: compilation.sceneTasks, source: sourceChapter, focus: args.focus, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
@@ -974,7 +977,8 @@ export const continuityValidateTool = defineTool({
         if (reviewInput(current) !== frozenReviewInput || runtimeJson({ validation: current?.validation }).hash !== runtimeJson({ validation: compilation.validation }).hash
           || runtimeJson({ source }).hash !== runtimeJson({ source: sourceChapter }).hash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '已收到的纠正报告上下文变化，未离线应用。')
         const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id,
-          findings: reusable.inspected.findings, expectedChapterRevision: chapter.revision, independentCheck: 'complete', coverage, terminalCandidate, focus: args.focus, signal: ctx.signal }, tx)
+          findings: reusable.inspected.findings, expectedChapterRevision: chapter.revision, independentCheck: 'complete', coverage, terminalCandidate,
+          continuityCriticResponse: reusable.inspected.audit, focus: args.focus, signal: ctx.signal }, tx)
         if (result.independentCheck === 'complete') {
           await markLegacyContinuityCorrectionApplied(tx, ctx, { observationId: reusable.observationId })
         }
@@ -1080,7 +1084,8 @@ export const continuityValidateTool = defineTool({
       await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilation.id} FOR UPDATE`
       await assertCurrent(tx)
       const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, compilationId: compilation.id, findings: independentFindings,
-        runId: ctx.runId, expectedChapterRevision: chapter.revision, independentCheck: criticFallback ? 'unavailable' : 'complete', coverage, terminalCandidate, focus: args.focus, signal: ctx.signal }, tx)
+        runId: ctx.runId, expectedChapterRevision: chapter.revision, independentCheck: criticFallback ? 'unavailable' : 'complete', coverage, terminalCandidate,
+        continuityCriticResponse: continued ? continued.originalAudit : inspected.audit, focus: args.focus, signal: ctx.signal }, tx)
       if (result.independentCheck === 'complete') {
         await markLegacyContinuityCorrectionApplied(tx, ctx, { originalHash: inspected.audit.contentHash,
           correctionHash: ((inspected.audit as unknown as Record<string, unknown>).evidenceCorrection as { contentHash?: string } | undefined)?.contentHash })
@@ -1193,7 +1198,8 @@ export const chapterBridgeCommitTool = defineTool({
     const commitAudit = (compilation.validation as { continuityCriticResponse?: { parserVersion?: number } } | null)?.continuityCriticResponse
     const commitRequest = await readOriginalTaskRequest(db, ctx)
     const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content,
-      commitAudit?.parserVersion === 8 ? terminalEvidenceContext(compilation.chapter, commitSource, storedContinuityProtocol(compilation.validation) === 11 ? 2 : 1, terminalQuoteAddressVersion(commitRequest.spec)) : undefined)
+      commitAudit?.parserVersion === 8 ? terminalEvidenceContext(compilation.chapter, commitSource, storedContinuityProtocol(compilation.validation) === 11 ? 2 : 1, terminalQuoteAddressVersion(commitRequest.spec),
+        terminalCoverageInput(commitRequest.spec, compilation.preparedContext, compilation.chapter, readTerminalCandidate(compilation.validation))) : undefined)
     const lastExit = storyStateSchema.parse(args.exitState ?? args.terminalState?.exitState ?? reviewedTerminal?.candidate.exitState ?? {})
     const paragraphs = compilation.chapter.content.split(/\n\s*\n/u).map(text => text.trim()).filter(Boolean)
     const terminal = {

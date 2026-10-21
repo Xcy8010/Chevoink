@@ -12,12 +12,13 @@ export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) 
     || (readiness.qualityCandidateCount ?? 0) > 0)
   const incomplete = readiness.requiredTools.some(tool => (tool.name === 'quality_analyze' ? readiness.quality : readiness.continuity) === 'incomplete')
   const state = !readiness.ready ? incomplete ? 'blocked' : 'check_required'
-    : readiness.mustPassPending ? 'must_pass_required'
+    : readiness.terminalReview?.state === 'unverified' ? 'terminal_review_required'
+      : readiness.mustPassPending ? 'must_pass_required'
       : decisionPending ? 'decision_required' : 'commit_available'
   const cycle = readiness.reviewCycle ?? projectReviewCycle(null, { revision: readiness.revision,
     contentHash: readiness.decisionBinding?.contentHash ?? '', ready: readiness.ready, pending: decisionPending, findings: [] })
   return { version: 1 as const, compilationId: readiness.compilationId, chapterId: readiness.chapterId, revision: readiness.revision,
-    phase: cycle.phase, reviewCycle: cycle,
+    phase: cycle.phase, reviewCycle: cycle, reviewBoundPlan: readiness.reviewBoundPlan, terminalReview: readiness.terminalReview,
     state, continuity: readiness.continuity, quality: readiness.quality, binding: readiness.decisionBinding ?? null,
     requiredTools: readiness.requiredTools, pending, details: (readiness.decisionDetails ?? []).filter(item => state === 'must_pass_required' || pending.some(ref => same(item, ref))),
     decisionBatchesAvailable: readiness.reviewProtocol === 1,
@@ -29,7 +30,7 @@ export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) 
 export type CurrentReviewNextStep = NonNullable<ReturnType<typeof projectCurrentReviewNextStep>>
 export function currentReviewNextStepGuidance(step: CurrentReviewNextStep) {
   const facts = `当前 compilationId=${step.compilationId}、chapterId=${step.chapterId}、r${step.revision}：连续性=${step.continuity}，质量=${step.quality}。`
-  const authority = step.selectionOnly
+  const authority = step.reviewBoundPlan ? step.reviewBoundPlan.guidance : step.selectionOnly
     ? '原任务仅授权冻结选区或局部范围，写入只能使用 chapter_edit_range 逐字唯一锚点，保留范围外正文；未明确定位则先请作者补准确原文或选区后重新发起任务。不得使用 chapter_write、chapter_append 或元数据修改扩大范围。'
     : step.phase === 'verification'
       ? '复核已开始，原写作权限不能重开本轮润色。只有精确落在尚未尝试的原始义务或当前完整报告真实错误证据内的改动仍可按原权限与必要审批执行；新建议或 unknown 关系本身不提供写入依据。'
@@ -43,6 +44,7 @@ export function currentReviewNextStepGuidance(step: CurrentReviewNextStep) {
   const phase = step.phase === 'verification'
     ? `本周期已经保存真实修订（基线r${step.reviewCycle.baselineRevision}），当前处于最终核验。新出现的纯质量建议须由当前模型逐项核对并写明具体保留原因；不能因每次完整检查又有新措辞就自动开启下一轮润色。首次复核已开始后，正文写入只接受精确落在尚未尝试的原始义务证据或当前完整报告真实错误证据内的改动；仅称为回归、模糊重叠或unknown不授予写入。相同锚点意见延续同一问题，不推断已解决；任何合法再修改仍使最终检查失效。当前意见关系：${JSON.stringify(step.reviewCycle.findings)}。`
     : '当前处于初始评估与意见决策：核对真实意见后，在原授权内完成所需修改；完整修改后进入最终核验。'
+  if (step.state === 'terminal_review_required') return `${facts}${step.continuity === 'complete' ? '正文独立检查已完成' : '当前完整独立检查尚待确认'}；终态候选尚未证实，不能提交。未证实路径：${JSON.stringify(step.terminalReview?.unresolved ?? [])}。这是候选事实核对，不是正文问题或额外改稿依据。保留原候选与证据，核对实际正文和当前报告；不要静默清空已知事实、杜撰结构或为证明候选而改文。候选变更仍须按原预算和恢复准入核验，状态提示不授权重发未知调用。${step.reviewBoundPlan?.guidance ?? ''}`
   if (step.state === 'blocked') return `${facts}${phase}必要检查未确认完成。读取已保存状态与失败证据；不重放未知或已尝试付费请求，不以改文购买新检查，也不以留置替代完整检查。正文与进度保留，尚不能提交为完成。`
   if (step.state === 'check_required') return `${facts}${phase}最终保存版本仍缺必要检查：${JSON.stringify(step.requiredTools)}。先核对当前状态，仅通过原工具、原审批、原预算与恢复准入执行缺项；不重买已完成检查。尚不能提交为完成。`
   if (step.state === 'must_pass_required') return `${facts}${candidates}${scope}原作者明确要求检查通过；retainedFindings不能替代硬通过要求。按证据合法修改后复核最终版本；无法安全完成时保留事实及阻碍，不能提交或宣称通过。当前真实意见：${JSON.stringify(step.details)}。`

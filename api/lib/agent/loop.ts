@@ -637,6 +637,11 @@ export async function handleToolCall(
     if (error instanceof DataAccessError && ['RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) {
       return fail('原任务状态或授权不匹配', `工具 ${call.name} 未执行（${error.code}）：${error.message} 停止后续写入并核对原任务状态和授权；不得调整参数重试、换工具绕过或自行恢复权限。`, 'failed')
     }
+    if (error instanceof DataAccessError && ['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE'].includes(error.code)) {
+      // Only known server scope diagnostics; never a raw provider exception.
+      const detail = error.message.slice(0, 4096)
+      return fail('执行失败', detail, 'failed')
+    }
     const recovery = error instanceof DataAccessError ? toolFailureRecovery(error.code) : undefined
     if (recovery && error instanceof DataAccessError) return {
       ...fail(recovery.label, `工具 ${call.name} 未完成（${error.code}）：${error.message} ${recovery.guidance} ${frozenWritingToolGuidance(call.name, ctx.writingScope)}`, 'failed'),
@@ -1524,6 +1529,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const phaseDigests = new Map<SkillPhase, string>(assembledContext.skillRoute
       ? [[assembledContext.skillRoute.phase, buildSkillExecutionDigest(assembledContext.skillRoute, taskSpec.creativeFreedom)]] : [])
     let activeSkillHint: ChatMessage | null = null
+    let activeReviewStateHint: ChatMessage | null = null
     let pendingSkillPhase: SkillPhase | null = null
     const activateSkillDigest = (digest?: string) => {
       if (digest !== undefined) {
@@ -1842,6 +1848,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       lastActivityAt = Date.now()
 
       await refreshPhaseSkills()
+      if (activeReviewStateHint) {
+        const index = messages.indexOf(activeReviewStateHint)
+        if (index >= 0) messages.splice(index, 1)
+      }
+      const reviewState = currentReviewState.value
+      activeReviewStateHint = reviewState && (reviewState.reviewBoundPlan || reviewState.terminalReview?.state === 'unverified')
+        ? { role: 'user', content: `[系统/只读修订状态] 仅呈现原合同与当前报告，不新增权限、检查额度或进度。${reviewState.reviewBoundPlan?.guidance ?? ''}\n${chapterReviewDecisionGuidance(reviewState)}` } : null
+      if (activeReviewStateHint) messages.push(activeReviewStateHint)
       // A4 长上下文防稀释：超过阈值后每轮把提醒刷新到队尾，拉回系统约束注意力
       const reminderIndex = messages.indexOf(contextReminder)
       if (reminderIndex >= 0) {
