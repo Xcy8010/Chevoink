@@ -14,7 +14,7 @@ import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-c
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
-import { observeChapterReviewProgress, observeSemanticReadProgress } from '../../api/lib/agent/semantic-progress.js'
+import { observeChapterReviewProgress, observeSemanticReadProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 import { terminalFeedbackSlots } from '../../api/lib/agent/terminal-feedback-handoff.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import * as ai from '../../api/lib/ai-service.js'
@@ -60,8 +60,8 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     expect(readiness?.progressEvidence?.phases).not.toContain('terminal_supported')
     expect(await prisma.aiUsageLog.count({where:{agentRunId:f.runId}})).toBe(0)
   },undefined,'修改本章',{continuityEvidenceProtocol:1,terminalEvidenceProtocol:2,terminalQuoteAddressProtocol:1,terminalCoverageProtocol:1}))
-  it.each(['unchanged','seen-supported','changed','uncertain','alias-unknown','interrupted'] as const)('keeps ownership, costs and unknown protection: %s',scenario=>fixture(async f=>{
-    const supported=scenario==='unchanged'||scenario==='seen-supported'
+  it.each(['unchanged','seen-supported','fresh-context','changed','uncertain','alias-unknown','interrupted'] as const)('keeps ownership, costs and unknown protection: %s',scenario=>fixture(async f=>{
+    const supported=scenario==='unchanged'||scenario==='seen-supported'||scenario==='fresh-context'
     vi.spyOn(memory,'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory,'syncNovelMemoryProjection').mockResolvedValue(undefined)
     vi.spyOn(titles,'autoNameSession').mockResolvedValue(undefined)
@@ -100,6 +100,9 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     observeChapterReviewProgress(seen,{...readiness!.progressEvidence!,phases:['continuity','quality','terminal']},{...f,taskSpec:spec,expectedOriginalTaskId:original.taskId})
     if(scenario==='seen-supported') observeChapterReviewProgress(seen,{...readiness!.progressEvidence!,phases:['terminal_supported']},{...f,taskSpec:spec,expectedOriginalTaskId:original.taskId})
     observeSemanticReadProgress(seen,'chapter_read',body,{targetId:chapter.id,contentHash:createHash('sha256').update(body).digest('hex'),start:0,end:body.length})
+    for(const phase of ['prepare','scenes'] as const) expect(observeWritingWorkflowMilestone(seen,
+      phase==='prepare'?'story_compiler_prepare':'scene_task_build',
+      {version:1,userId:f.userId,novelId:f.novelId,runId:f.runId,targetOrderIndex:2,phase},{...f,taskSpec:spec})).toBe(true)
     const handoff=terminalFeedbackSlots(readiness!,{...f,taskSpec:spec})!
     expect(handoff).toHaveLength(4)
     const started=Date.now()-10000,checkpoint={version:2,controlPolicy:'until_completion',origin:'system_default',activeExecutionMs:200,stagnantBatches:4,runStartedAt:started,resumeCount:0,compactionCount:0,maxTurns:1,tokenBudget:500,writeProgress:1,writeBaseline:0,readProgress:7,readBaseline:0,progressSignatures:[...seen],
@@ -125,20 +128,25 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     })
     vi.stubGlobal('fetch',network)
     let turn=0
+    let afterReadCheckpoint:unknown
     const main=vi.spyOn(ai,'chatWithTools').mockImplementation(async()=>{
       if(++turn>8)throw Error('Repeated unknown must terminate')
       if(turn===2) {
         const afterRead=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}})
-        expect((afterRead.usage as {checkpoint:typeof checkpoint}).checkpoint).toMatchObject({stagnantBatches:5,readProgress:7,writeProgress:1})
+        afterReadCheckpoint=(afterRead.usage as {checkpoint:typeof checkpoint}).checkpoint
       }
+      const checkTurn=scenario==='fresh-context'?6:2
       const call=turn===1?{id:'reread-saved-body',name:'chapter_read',arguments:JSON.stringify({chapterId:chapter.id})}
-        :turn===2?{id:'select-proof-only',name:'continuity_validate',arguments:JSON.stringify({compilationId,inheritedProofs:[proof.proofHash]})}
-        :supported&&turn===3?{id:'real-commit',name:'chapter_bridge_commit',arguments:JSON.stringify({compilationId})}
+        :scenario==='fresh-context'&&turn<6?{id:`read-new-range-${turn}`,name:'chapter_read',arguments:JSON.stringify({chapterId:previous.id,offset:(turn-2)*10,limit:10})}
+        :turn===checkTurn?{id:'select-proof-only',name:'continuity_validate',arguments:JSON.stringify({compilationId,inheritedProofs:[proof.proofHash]})}
+        :supported&&turn===checkTurn+1?{id:'real-commit',name:'chapter_bridge_commit',arguments:JSON.stringify({compilationId})}
           :supported?undefined:{id:`same-report-${turn}`,name:'chapter_bridge_get',arguments:JSON.stringify({compilationId})}
       return{content:call?'':'Completed.',reasoning:'',finishReason:call?'tool_calls':'stop',toolCalls:call?[call]:[],usage:{promptTokens:10,completionTokens:0,totalTokens:10,promptCacheHitTokens:null,promptCacheMissTokens:null}}
     })
     await executeAgentRun({...f,prompt:'修改本章',mode:'build',resume:true,eventStartSeq:4,modelTier:'speed',qualityMode:'balanced',creativeFreedom:'balanced'})
-    expect(main).toHaveBeenCalledTimes(scenario==='interrupted'?3:4)
+    expect(afterReadCheckpoint).toMatchObject({stagnantBatches:5,readProgress:7,writeProgress:1,
+      consumedReviewDecisionFeedback:expect.arrayContaining(handoff.slice(0,scenario==='interrupted'?3:2))})
+    expect(main).toHaveBeenCalledTimes(scenario==='interrupted'?3:scenario==='fresh-context'?8:4)
     expect(network).toHaveBeenCalledOnce()
     expect(JSON.stringify(requests[0])).toContain(proof.proofHash)
     const usage=await prisma.aiUsageLog.findMany({where:{userId:f.userId,agentRunId:f.runId,action:'agent3ContinuityCritic'}})
@@ -151,7 +159,7 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
       continuityCriticResponse:{classification:'complete',terminalEvidence:{verdictProtocol:3}}})
     expect(await prisma.agentRunEvent.count({where:{runId:f.runId,seq:{gt:4},type:'tool.result',payload:{path:['ok'],equals:false}}})).toBe(0)
     expect(cp.reviewAttempts).toContain('old-attempt')
-    expect(cp.readProgress).toBe(7)
+    expect(cp.readProgress).toBe(scenario==='fresh-context'?11:7)
     expect(cp.writeProgress).toBe(supported?2:1)
     expect(cp.progressSignatures).toEqual(expect.arrayContaining(checkpoint.progressSignatures))
     expect(cp).toMatchObject({consumedReviewDecisionFeedback:expect.arrayContaining(handoff)})

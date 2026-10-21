@@ -1908,7 +1908,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
 
       let terminalHandoffTurn = false
-      const terminalHandoffWriteBaseline = writeProgressCount
       if (!bootstrapCall && terminalHandoffSlots) {
         const slot = terminalHandoffSlots.find(key => !consumedReviewDecisionFeedback.has(key))
         if (!slot) {
@@ -2813,7 +2812,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         todoReminders = 0
       }
       stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, waitingForChild)
-      const terminalHandoffClosed = !!terminalHandoffSlots && (reviewProgress || writeProgressCount > terminalHandoffWriteBaseline)
+      // batchProgress is already deduplicated semantic content/read/workflow
+      // evidence, never merely a successful tool. Return to the ordinary guard
+      // after real progress instead of imposing a four-turn execution cap.
+      const terminalHandoffClosed = !!terminalHandoffSlots && batchProgress
       if (terminalHandoffClosed) closeTerminalHandoff()
       if (reviewProgress || terminalHandoffClosed) await persistCheckpoint()
       // A just-read, current decision needs to reach the model before the stop
