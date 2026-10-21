@@ -18,7 +18,9 @@ export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) 
   const cycle = readiness.reviewCycle ?? projectReviewCycle(null, { revision: readiness.revision,
     contentHash: readiness.decisionBinding?.contentHash ?? '', ready: readiness.ready, pending: decisionPending, findings: [] })
   return { version: 1 as const, compilationId: readiness.compilationId, chapterId: readiness.chapterId, revision: readiness.revision,
-    phase: cycle.phase, reviewCycle: cycle, reviewBoundPlan: readiness.reviewBoundPlan, terminalReview: readiness.terminalReview,
+    phase: cycle.phase, reviewCycle: cycle,
+    ...(readiness.reviewBoundPlan ? { reviewBoundPlan: readiness.reviewBoundPlan } : {}),
+    ...(readiness.terminalReview ? { terminalReview: readiness.terminalReview } : {}),
     state, continuity: readiness.continuity, quality: readiness.quality, binding: readiness.decisionBinding ?? null,
     requiredTools: readiness.requiredTools, pending, details: (readiness.decisionDetails ?? []).filter(item => state === 'must_pass_required' || pending.some(ref => same(item, ref))),
     decisionBatchesAvailable: readiness.reviewProtocol === 1,

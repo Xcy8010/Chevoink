@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { currentReviewNextStepGuidance, projectCurrentReviewNextStep, nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 function pending(overrides: Partial<ChapterReviewReadiness> = {}): ChapterReviewReadiness {
   return { ready: false, checksRequired: true, compilationId: 'compile', chapterId: 'chapter', revision: 4,
@@ -8,6 +9,14 @@ function pending(overrides: Partial<ChapterReviewReadiness> = {}): ChapterReview
     requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'compile' } }], ...overrides }
 }
 describe('server review fallback', () => {
+  it.each([false, true])('persists a complete strict JSON observation with optional terminal state=%s', terminal => {
+    const step = projectCurrentReviewNextStep(pending(terminal ? { terminalReview: { state: 'unverified', unresolved: [] } } : {}))
+    expect(() => runtimeJson(step)).not.toThrow()
+    expect(step).not.toHaveProperty('reviewBoundPlan')
+    if (terminal) expect(step.terminalReview).toEqual({ state: 'unverified', unresolved: [] })
+    else expect(step).not.toHaveProperty('terminalReview')
+    expect(() => runtimeJson({ ...step, reviewBoundPlan: undefined })).toThrow()
+  })
   it('directs final pure advice to exact retention instead of inviting another manuscript proposal', () => {
     const ref = { source: 'quality' as const, reportId: 'q', findingId: 'f' }
     const state = pending({ ready: true, quality: 'complete', requiredTools: [], decisionPending: true, requiredDecisions: [ref],

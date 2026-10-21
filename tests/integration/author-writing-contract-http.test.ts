@@ -85,7 +85,7 @@ const prepare = (ctx: ToolContext) => storyCompilerPrepareTool.execute(ctx, { ta
 
 describe.skipIf(!available)('unified fresh HTTP author contract with actual PostgreSQL writes', () => {
   it('retains independently supported facts across candidate omission, failed commit and reprepare without editing prose', () => fixture(
-    '读取第4章当前已存正文并做完整连续性和人类感检查，最后提交章节桥。不改正文、不新建章节、不修改前3章。', async (ctx, before) => {
+    '先读取第4章当前已存正文，完成本章检查和提交。请先做连续性与人类感检查；如有必要，只对本章做局部修订并复检。不新建章节，不修改前3章。', async (ctx, before) => {
       const original = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
       expect(original.scope.terminalCoverageProtocol).toBe(1)
       expect((await prepare(ctx)).outcome).not.toBe('failed')
