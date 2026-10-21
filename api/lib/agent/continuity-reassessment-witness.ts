@@ -128,7 +128,7 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   if (chainProtocol) {
     sourceMatches &&= runtimeJson(bodies.terminalEvidence).hash === runtimeJson(terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original?.spec),
       terminalCoverageInput(original?.spec, compilation.preparedContext, chapter, coverageInput.terminalCandidate,
-        object(object(bodies.terminalEvidence).factCoverage).version === 2 ? 2 : 1))).hash
+        object(object(bodies.terminalEvidence).factCoverage).version === 2 ? 2 : 1), object(bodies.terminalEvidence).verdictProtocol === 2 ? 2 : undefined)).hash
   }
   if (!sourceMatches && !chainProtocol) {
     // A proven non-dispatch may have frozen the previous single-source

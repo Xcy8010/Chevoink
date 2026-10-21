@@ -18,7 +18,7 @@ import { beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, readRevi
   type ReviewCycleFinding } from './review-cycle.js'
 import { observedReviewCycleVerification, prepareReviewCycleTransition } from './review-cycle-store.js'
 import { readTerminalCandidate, currentTerminalReview } from './terminal-state-review.js'
-import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
+import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalVerdictAuditVersion } from './terminal-evidence-context.js'
 import { terminalCoverageInput, terminalCoverageAuditVersion } from './terminal-fact-coverage.js'
 
 import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
@@ -349,7 +349,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   if (terminalVersion && (terminalCandidate || factCoverage?.obligations.length)) {
     const terminal = assessment ? currentTerminalReview(validation, chapter.content,
       terminalEvidenceContext(chapter, source, terminalVersion, terminalQuoteAddressVersion(original.spec),
-        factCoverage)) : null
+        factCoverage, terminalVerdictAuditVersion(validation))) : null
     readiness.terminalReview = { state: terminal?.supported ? 'supported' : 'unverified',
       unresolved: [...(terminal?.verdicts.filter(item => item.verdict !== 'supported').map(({ path, verdict }) => ({ path, verdict })) ?? []),
         ...(terminal?.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' }))

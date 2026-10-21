@@ -12,7 +12,7 @@ import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quali
 import * as memory from '../../api/lib/agent/story-memory.js'
 
 describe.runIf(available)('request-owned evidence at the real commit boundary', () => {
-  it.each(['supported', 'unknown'] as const)('keeps the same original v1 task and commits only a complete new v2 review: %s', status => fixture(async f => {
+  it.each([['supported', undefined], ['unknown', undefined], ['supported', 2], ['unknown', 2]] as const)('keeps the same original v1 task and commits only a complete review: %s / verdict protocol %s', (status, verdictProtocol) => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const initialBody = 'The sensor remains offline.'
     let current = await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: initialBody, revision: 1 } })
@@ -36,9 +36,9 @@ describe.runIf(available)('request-owned evidence at the real commit boundary', 
     const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
     const next = terminalCandidateSchema.parse({ exitState: { openLoops: ['Repair the offline sensor.'] } })
     const input = terminalCoverageInput(f.spec, before.preparedContext, current, next, 2)!
-    const evidence = terminalEvidenceContext(current, source, 2, 1, input)
+    const evidence = terminalEvidenceContext(current, source, 2, 1, input, verdictProtocol)
     const response = JSON.stringify({ findings: [], semanticChecks: Object.fromEntries(checks.map(check => [check.kind, check])),
-      terminalVerdicts: [{ path: 'exitState.openLoops.0', verdict: 'supported', basis: 'current', sourceEvidence: [{ segmentId: 'c2', quote }] }],
+      terminalVerdicts: [{ path: 'exitState.openLoops.0', verdict: 'supported', ...(verdictProtocol ? {} : { basis: 'current' }), sourceEvidence: [{ segmentId: 'c2', quote }] }],
       terminalDispositions: [{ id: input.obligations[0].id, outcome: status === 'supported' ? 'replaced' : 'unknown', reason: 'The entire same repair obligation remains.',
         ...(status === 'supported' ? { candidatePath: 'exitState.openLoops.0' } : {}), sourceEvidence: [{ segmentId: 'c2', quote }] }] })
     const inspected = inspectContinuityResponse(response, { previous: null, current: content, terminalEvidence: evidence }, true, 8, next)

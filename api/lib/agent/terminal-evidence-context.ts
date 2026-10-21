@@ -19,6 +19,7 @@ export type TerminalCarriedFact = z.infer<typeof terminalCarriedFactSchema>
 export const terminalEvidenceContextSchema = z.object({
   protocol: z.union([z.literal(1), z.literal(2)]),
   quoteAddressProtocol: z.literal(1).optional(),
+  verdictProtocol: z.literal(2).optional(),
   factCoverage: terminalCoverageInputSchema.optional(),
   current: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash }).strict(),
   previous: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash,
@@ -28,6 +29,12 @@ export const terminalEvidenceContextSchema = z.object({
   }).strict().nullable(),
 }).strict()
 export type TerminalEvidenceContext = z.infer<typeof terminalEvidenceContextSchema>
+
+/** A response is always read with its own frozen verdict contract. */
+export function terminalVerdictAuditVersion(validation: unknown): 2 | undefined {
+  const audit = (validation as { continuityCriticResponse?: { parserVersion?: number; terminalEvidence?: { verdictProtocol?: unknown } } } | null)?.continuityCriticResponse
+  return audit?.parserVersion === 8 && audit.terminalEvidence?.verdictProtocol === 2 ? 2 : undefined
+}
 
 /** Only a fresh HTTP admission opts in. Saved contracts are never upgraded. */
 export function hasTerminalEvidenceProtocol(spec: unknown): boolean {
@@ -47,9 +54,9 @@ export function terminalQuoteAddressVersion(spec: unknown): 1 | undefined {
  * summary. A 300-character span crossing chapter boundaries cannot inherit. */
 export function terminalEvidenceContext(chapter: { id: string; revision: number; orderIndex: number; content: string },
   source: Awaited<ReturnType<typeof readCompilerContinuitySource>>, version: 1 | 2 = source && 'terminalInheritance' in source ? 2 : 1,
-  quoteAddressProtocol?: 1, factCoverage?: TerminalCoverageInput): TerminalEvidenceContext {
+  quoteAddressProtocol?: 1, factCoverage?: TerminalCoverageInput, verdictProtocol?: 2): TerminalEvidenceContext {
   const previous = source && 'preceding' in source ? source.preceding.at(-1) : undefined
-  return { protocol: version, ...(quoteAddressProtocol === 1 ? { quoteAddressProtocol } : {}), ...(factCoverage ? { factCoverage } : {}), current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
+  return { protocol: version, ...(quoteAddressProtocol === 1 ? { quoteAddressProtocol } : {}), ...(verdictProtocol ? { verdictProtocol } : {}), ...(factCoverage ? { factCoverage } : {}), current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
     contentHash: runtimeJson({ content: chapter.content }).hash }, previous: previous ? {
     id: previous.id, revision: previous.revision, orderIndex: previous.orderIndex, contentHash: previous.contentHash,
     start: previous.start, end: previous.end, joinedStart: previous.joinedStart, joinedEnd: previous.joinedEnd,

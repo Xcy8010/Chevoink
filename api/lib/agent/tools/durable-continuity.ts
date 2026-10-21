@@ -30,7 +30,7 @@ import { runContinuityEvidenceCorrection } from '../continuity-response-correcti
 import { runContinuityReassessment } from '../assessment-response-lifecycle.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { readTerminalCandidate, resolveTerminalCandidate, terminalCandidateInputSchema, terminalCandidateSchema, terminalReviewInput, terminalReviewFailure } from '../terminal-state-review.js'
-import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, terminalEvidenceContextSchema, continuitySemanticRule } from '../terminal-evidence-context.js'
+import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, terminalEvidenceContextSchema, terminalVerdictAuditVersion, continuitySemanticRule } from '../terminal-evidence-context.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const chapterSchema = z.object({ id: z.string(), title: z.string(), revision: z.number().int().positive(), content: z.string(), orderIndex: z.number().int() }).strict()
@@ -38,7 +38,7 @@ const routeSchema = auxiliaryRouteSchema
 const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional(), terminalHash: hash.optional() }).strict()
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
     sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
@@ -118,7 +118,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     const terminalCandidate = (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
       ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
     let terminalEvidence = terminalProtocol ? terminalEvidenceContext(compilation.chapter, source, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
-      terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation))) : undefined
+      terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation)), terminalVerdictAuditVersion(compilation.validation)) : undefined
     if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
     const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
       source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
@@ -127,8 +127,9 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     if (!reusable && terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) terminalEvidence = { ...terminalEvidence,
       factCoverage: terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, 2)! }
     const repair = false
+    if (!reusable && terminalVersion === 2 && terminalEvidence) terminalEvidence.verdictProtocol = 2
     validatedContinuityCheckRounds(compilation.validation, !reusable)
-    return { kind: 'check' as const, version: terminalVersion === 2 ? 14 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
+    return { kind: 'check' as const, version: terminalVersion === 2 ? 15 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
       ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),
       criticSystem, repairSystem: repairPrompt,
       criticInput: [`章节：《${compilation.chapter.title}》`,

@@ -14,8 +14,8 @@ import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.js'
 import { markLegacyContinuityAssessmentApplied } from './continuity-response-correction.js'
-import { terminalCandidateSchema, terminalVerdictSchema, inheritedTerminalVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
-import { terminalEvidenceContextSchema } from './terminal-evidence-context.js'
+import { terminalCandidateSchema, terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
+import { terminalEvidenceContextSchema, type TerminalEvidenceContext } from './terminal-evidence-context.js'
 import { invalidContinuitySourceClaim, continuitySourceScopeSchema, type ContinuitySourceScope } from './continuity-source-authority.js'
 import { terminalDispositionSchema } from './terminal-fact-coverage.js'
 
@@ -69,7 +69,7 @@ const decisionSchema = z.object({ index: z.number().int().nonnegative(), action:
  * index are both necessary. Source IDs cannot prove an opinion by themselves. */
 export function applyContinuityReassessment(original: Inspection, raw: string, bodies: ContinuityBodies): Inspection {
   const envelope = z.object({ decisions: z.array(decisionSchema), findings: z.array(z.unknown()),
-    terminalVerdicts: z.array(original.audit.parserVersion === 8 ? inheritedTerminalVerdictSchema : terminalVerdictSchema).max(200).optional(),
+    terminalVerdicts: z.array(original.audit.parserVersion === 8 ? original.audit.terminalEvidence?.verdictProtocol === 2 ? sourcedTerminalVerdictSchema : inheritedTerminalVerdictSchema : terminalVerdictSchema).max(200).optional(),
     ...(original.audit.parserVersion === 8 ? { semanticChecks: z.unknown() } : {}),
     ...(original.audit.parserVersion === 8 && original.audit.terminalEvidence?.factCoverage ? { terminalDispositions: z.array(terminalDispositionSchema).max(200).optional() } : {}),
   }).strict().parse(parseQualityJsonObject(raw, 'findings', 3))
@@ -125,6 +125,7 @@ export async function runContinuityReassessment(input: { original: Inspection; b
 
 export type LegacyAssessmentInput = { chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate;
   parserVersion?: 7 | 8; sourceScope?: ContinuitySourceScope; bindingHash?: string; targetType: 'chapter' | 'story_compilation'; targetId: string }
+export type FrozenTerminalContract = Pick<TerminalEvidenceContext, 'verdictProtocol'> & { coverageVersion: 1 | 2 }
 export const legacyContinuityAssessmentKey = (ctx: Pick<ToolContext, 'runId' | 'callId'>, input: LegacyAssessmentInput) => runtimeJson({ runId: ctx.runId, callId: ctx.callId,
   input: { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system, content: input.content, bindingHash: input.bindingHash ?? null,
     ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}) } }).hash
@@ -133,7 +134,7 @@ const assessmentKey = legacyContinuityAssessmentKey
 /** Existing owned call identities always retain their whole request. Choosing a
  * newer response format cannot create a second reservation for the same call. */
 export async function readFrozenLegacyContinuityInput(tx: Prisma.TransactionClient, ctx: ToolContext, proposed: LegacyAssessmentInput,
-  recoverBodies?: (version: 1 | 2) => ContinuityBodies) {
+  recoverBodies?: (version: FrozenTerminalContract) => ContinuityBodies) {
   const rows = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, run: { userId: ctx.userId, novelId: ctx.novelId },
     artifactType: 'continuityReview', metadata: { path: ['callId'], equals: ctx.callId } } })
   const reservations = rows.filter(row => typeof object(row.metadata)?.continuityAssessmentRequestKey === 'string')
@@ -154,7 +155,8 @@ export async function readFrozenLegacyContinuityInput(tx: Prisma.TransactionClie
     return { chapterId: copy.chapterId, revision: copy.revision, bodies: copy.bodies, targetType: copy.targetType, targetId: copy.targetId,
       terminalCandidate: copy.terminalCandidate ?? null, bindingHash: copy.bindingHash ?? null, parserVersion: copy.parserVersion ?? null, sourceScope: copy.sourceScope ?? null }
   }
-  const expected = recoverBodies ? { ...proposed, bodies: recoverBodies(parsed.data.bodies.terminalEvidence?.factCoverage?.version ?? 1) } : proposed
+  const expected = recoverBodies ? { ...proposed, bodies: recoverBodies({ coverageVersion: parsed.data.bodies.terminalEvidence?.factCoverage?.version ?? 1,
+    ...(parsed.data.bodies.terminalEvidence?.verdictProtocol ? { verdictProtocol: parsed.data.bodies.terminalEvidence.verdictProtocol } : {}) }) } : proposed
   if (runtimeJson(identity(parsed.data)).hash !== runtimeJson(identity(expected)).hash) throw invalid()
   return parsed.data
 }

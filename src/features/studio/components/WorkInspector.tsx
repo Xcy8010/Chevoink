@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import type { StudioPayload } from '../../../../shared/contracts/index.js'
 import { useAgentStore, type WorkspaceActivity } from '../agent/agentStore'
 import { resolveActivityNavigation } from '../agent/activity-navigation'
+import { workspaceActivityDelta, workspaceGroupDelta } from '../agent/workspace-body-changes'
 import type { ProjectNotesState, WorkspacePlanFile } from '../types'
 
 export type WorkInspectorTab = 'work' | 'context' | 'changes' | 'memory' | 'skills'
@@ -33,20 +34,6 @@ type Props = {
   projectNotes?: ProjectNotesState | null
   activeTaskTitle?: string | null
   taskCount?: number
-}
-
-function activityDelta(activity: WorkspaceActivity) {
-  if (typeof activity.before !== 'string' || typeof activity.after !== 'string') {
-    const delta = activity.deltaChars ?? 0
-    return { added: Math.max(0, delta), removed: Math.max(0, -delta) }
-  }
-  const before = activity.before
-  const after = activity.after
-  let prefix = 0
-  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1
-  let suffix = 0
-  while (suffix < before.length - prefix && suffix < after.length - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix += 1
-  return { added: Math.max(0, after.length - prefix - suffix), removed: Math.max(0, before.length - prefix - suffix) }
 }
 
 function Delta({ added, removed }: { added: number; removed: number }) {
@@ -84,12 +71,12 @@ function ChangesTree({ activities, pendingReviewCount }: { activities: Workspace
     <div className="mb-3 flex items-center gap-2 px-2 text-sm text-[var(--text-primary)]"><GitCompareArrows className="h-4 w-4" /><span>{activities.length} 项变更</span>{pendingReviewCount > 0 ? <span className="text-[10px] text-amber-500">{pendingReviewCount} 项待审</span> : null}</div>
     <div className="space-y-1">
       {groups.map(([key, group]) => {
-        const totals = group.items.reduce((sum, item) => { const delta = activityDelta(item); return { added: sum.added + delta.added, removed: sum.removed + delta.removed } }, { added: 0, removed: 0 })
+        const totals = workspaceGroupDelta(group.items)
         return <details key={key} open className="group overflow-hidden rounded-[9px] border border-[var(--border-subtle)] bg-[var(--surface-default)]">
           <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"><ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" /><FolderTree className="h-3.5 w-3.5 text-[var(--text-secondary)]" /><span className="min-w-0 flex-1 truncate">{group.label}</span><Delta {...totals} /></summary>
           <div className="border-t border-[var(--border-subtle)]">
             {group.items.map((activity) => {
-              const delta = activityDelta(activity)
+              const delta = workspaceActivityDelta(activity)
               const open = expandedCalls.has(activity.callId)
               const target = resolveActivityNavigation(activity, toolParts.get(activity.callId))
               const summary = activity.summary || activity.label

@@ -58,6 +58,18 @@ export const inheritedTerminalVerdictSchema = terminalVerdictSchema.omit({ segme
   inheritance: z.object({ priorEndState: z.enum(['established', 'uncertain']), currentState: z.enum(['unchanged', 'changed', 'uncertain']) }).strict().optional(),
 }).strict()
 const inheritedVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(inheritedTerminalVerdictSchema).max(200), { io: 'input' }))
+export const sourcedTerminalVerdictSchema = inheritedTerminalVerdictSchema.extend({ basis: z.string().max(1500).optional() })
+const sourcedVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(sourcedTerminalVerdictSchema.omit({ basis: true })).max(200), { io: 'input' }))
+
+/** Source is encoded in server-owned addresses. This projection changes no
+ * quote, verdict or attestation, and never upgrades a saved old contract. */
+function readSourcedVerdicts(value: unknown, context: TerminalEvidenceContext) {
+  if (context.verdictProtocol !== 2) return z.array(inheritedTerminalVerdictSchema).max(200).safeParse(value)
+  const parsed = z.array(sourcedTerminalVerdictSchema).max(200).safeParse(value)
+  if (!parsed.success) return parsed
+  return { success: true as const, data: parsed.data.map(item => ({ ...item,
+    basis: !item.sourceEvidence.length ? undefined : item.sourceEvidence.some(ref => /^[pt]/u.test(ref.segmentId)) ? 'inherited' as const : 'current' as const })) }
+}
 
 export type TerminalQuoteAddressDiagnostic = { path: string; referenceIndex: number; originalSegmentId: string; actualSegmentId?: string;
   reason: 'relocated' | 'unknown_segment' | 'wrong_source' | 'quote_missing' | 'quote_ambiguous' | 'quote_not_in_single_segment' | 'carried_quote_mismatch' }
@@ -78,7 +90,7 @@ function previousQuoteBlocks(previous: NonNullable<TerminalEvidenceContext['prev
 
 /** This only repairs addresses. The caller still verifies every reference and
  * the exhaustive semantic and inheritance judgments against the frozen scope. */
-function canonicalTerminalQuoteAddresses(items: Array<z.infer<typeof inheritedTerminalVerdictSchema>>, content: string, context: TerminalEvidenceContext) {
+function canonicalTerminalQuoteAddresses(items: Array<Omit<z.infer<typeof inheritedTerminalVerdictSchema>, 'basis'> & { basis?: 'current' | 'inherited' }>, content: string, context: TerminalEvidenceContext) {
   const current = continuitySourceSegments({ previous: null, current: content })
   const previous = context.previous?.segments ?? [], previousBlocks = context.previous ? previousQuoteBlocks(context.previous) : []
   const diagnostics: TerminalQuoteAddressDiagnostic[] = [], relocations: TerminalQuoteRelocation[] = []
@@ -127,7 +139,7 @@ export function terminalQuoteAddressDiagnostics(raw: string, content: string, co
   try {
     if (!terminalEvidenceContextSchema.safeParse(context).success || context.current.contentHash !== runtimeJson({ content }).hash) return []
     const record = parseQualityJsonObject(raw, 'continuity', 3) as Record<string, unknown>
-    const parsed = z.array(inheritedTerminalVerdictSchema).max(200).safeParse(record.terminalVerdicts)
+    const parsed = readSourcedVerdicts(record.terminalVerdicts, context)
     return parsed.success ? canonicalTerminalQuoteAddresses(parsed.data, content, context).diagnostics : []
   } catch { return [] }
 }
@@ -143,6 +155,7 @@ export function terminalClaims(candidate: TerminalCandidate) {
 
 export function terminalReviewInput(candidate?: TerminalCandidate, context?: TerminalEvidenceContext): string {
   const input = terminalReviewClaimsInput(candidate, context) + terminalCoverageGuidance(context?.factCoverage)
+  if (context?.verdictProtocol === 2) return `${input}\nterminalVerdicts JSON Schema: ${sourcedVerdictResponseContract}\n来源由服务端根据 sourceEvidence 中的 cN（本章）或 pN/tN（前章/已核验提交证明）确定；不要返回 basis。单项不得混合两种来源。supported 的持续事实必须明确 inheritance={priorEndState:"established",currentState:"unchanged"}；本章 supported 不返回 inheritance。unknown 等非支持判断是完整结果，不补造证据或继承结论。`
   if (context?.factCoverage?.version === 2) return `${input}\nterminalVerdicts JSON Schema: ${inheritedVerdictResponseContract}\nbasis is a source enum (${inheritedTerminalVerdictSchema.shape.basis.options.join(' | ')}), never an explanation. Use current for cN; use inherited for pN/tN and supply the explicit inheritance judgment. Keep every original verdict, including unknown.`
   return input && context?.quoteAddressProtocol === 1
     ? `${input}\n引用地址策略：quote 必须逐字不变且完整落在单个合法片段；优先给出正确 cN/pN。服务器只可将已存在的同来源错误编号定位到唯一逐字引文所在片段，不跨来源、不补造编号、不修改 tN；重复、跨片段或不存在的引文不能修复。` : input
@@ -155,7 +168,7 @@ function terminalReviewClaimsInput(candidate?: TerminalCandidate, context?: Term
       ({ segmentId, field, claim, quotes: anchors.map(anchor => anchor.quote) })) } : null
     const claims = terminalClaims(candidate).map(item => ({ ...item,
       inheritedSources: context.previous?.carried?.filter(fact => fact.field === item.path.split('.')[1] && fact.claim === item.claim).map(fact => fact.segmentId) ?? [] }))
-    return `待提交候选（写者主张，不是证据）：${JSON.stringify(claims)}\n冻结证据目录：${JSON.stringify({ ...context, previous })}\n逐 path 恰好返回一项 terminalVerdicts={path,verdict,basis,sourceEvidence:[{segmentId,quote}],inheritance?}。verdict=supported/unknown/planned/negated/attributed。本章新增或变化事实用 current/cN；持续事实可用 inherited/pN 或服务端已验证的 tN，须独立核对本章全文未解除、转移或否定，inheritance={priorEndState:"established",currentState:"unchanged"}。tN 只支持原字段和完整原主张，inheritedSources 是服务端精确匹配，不需重新拼接证明或要求正文重述历史。位置、动作、时间、情绪和 lastUnfinishedAction 不凭未提及继承。逐字 quote 可跨相邻的人为300字符片段，服务端在同一可用来源中确定唯一连续位置；不要为切段改写原文或主张，引用一个现有同来源编号即可。不得跨章、跨缺失范围或引用摘要/计划作事实。核对整个主张而非相邻半句，不添加原主张未声称的原因等条件。旧事项已由本章确实完成时判 negated，不强迫保留；unknown 保留待核，不删空凑通过。findings 只报告正文实际矛盾；semanticChecks 包含 action_direction/state_progression 两个完整 {kind,result,reason,findingIndexes}，conflict 仅引用有原文证据的 error 索引；其他结果索引为空。`
+    return `待提交候选（写者主张，不是证据）：${JSON.stringify(claims)}\n冻结证据目录：${JSON.stringify({ ...context, previous })}\n逐 path 恰好返回一项 terminalVerdicts={path,verdict,${context.verdictProtocol === 2 ? '' : 'basis,'}sourceEvidence:[{segmentId,quote}],inheritance?}。verdict=supported/unknown/planned/negated/attributed。本章新增或变化事实用 current/cN；持续事实可用 inherited/pN 或服务端已验证的 tN，须独立核对本章全文未解除、转移或否定，inheritance={priorEndState:"established",currentState:"unchanged"}。tN 只支持原字段和完整原主张，inheritedSources 是服务端精确匹配，不需重新拼接证明或要求正文重述历史。位置、动作、时间、情绪和 lastUnfinishedAction 不凭未提及继承。逐字 quote 可跨相邻的人为300字符片段，服务端在同一可用来源中确定唯一连续位置；不要为切段改写原文或主张，引用一个现有同来源编号即可。不得跨章、跨缺失范围或引用摘要/计划作事实。核对整个主张而非相邻半句，不添加原主张未声称的原因等条件。旧事项已由本章确实完成时判 negated，不强迫保留；unknown 保留待核，不删空凑通过。findings 只报告正文实际矛盾；semanticChecks 包含 action_direction/state_progression 两个完整 {kind,result,reason,findingIndexes}，conflict 仅引用有原文证据的 error 索引；其他结果索引为空。`
   }
   if (context?.protocol === 1) return `待提交终态候选（主写者主张，不是证据）：${JSON.stringify(terminalClaims(candidate))}\n服务端终态证据范围：${JSON.stringify(context)}\n除 findings 和 semanticChecks 外，输出 terminalVerdicts，每个 path 恰好一项：{path,verdict,basis,sourceEvidence:[{segmentId,quote}],inheritance?}。verdict 为 supported、unknown、planned、negated、attributed。同一正文片段可引用多个逐字短 quote，每条都须在所标 cN/pN 片段内分别定位。当前新增或改变事实 basis=current，只能引用本章 cN 及逐字短 quote；核对完整对象、持有者、方向、时刻及章末是否仍成立，不能以“朝某处走”证明已到达。basis=inherited 只能引用服务端 previous.segments 中紧邻前章 pN 及逐字短 quote，并给 inheritance={priorEndState:"established",currentState:"unchanged"}：独立核对前章末实际成立，且本章全文未解除、转移或否定。只能继承 knowledge、body、objects、relationships、openLoops 中持续事实；位置、动作、时间、情绪和 lastUnfinishedAction 不能凭未提及延续。旧桥遗漏但前章正文明确支持的未解决事项可继承，不要求本章重述；较早章、桥摘要、Scene Task、作者要求、计划、传言或猜测不能当事实。证据不足用 unknown 等相应判定，保留未知主张，不删除或清空来凑通过。无候选 terminalVerdicts=[]。`
   if (context) return `待提交终态候选（主写者主张，不是证据）：${JSON.stringify(terminalClaims(candidate))}\n服务端终态证据范围：${JSON.stringify(context)}\n除 findings 和 semanticChecks 外，输出 terminalVerdicts，每个 path 恰好一项：{path,verdict,basis,sourceEvidence:[{segmentId,quote}],inheritance?}。verdict 为 supported、unknown、planned、negated、attributed。同一正文片段可引用多个逐字短 quote，每条都须在所标 cN/pN 片段内分别定位。当前新增或改变事实 basis=current，只能引用本章 cN 及逐字短 quote；核对完整对象、持有者、方向、时刻及章末是否仍成立，不能以“朝某处走”证明已到达。basis=inherited 只能引用服务端 previous.segments 中紧邻前章 pN 或 previous.carried 中已提交证明 tN 及逐字短 quote；tN 只支持其 field 与完整 claim 精确相同的事实，证明链已由服务端重新核对原始正文锚点和各中间章，最多16级，断链或超限只能 unknown，并给 inheritance={priorEndState:"established",currentState:"unchanged"}：独立核对前章末实际成立（直接正文或服务端已核验的提交证明链），且本章全文未解除、转移或否定。只能继承 knowledge、body、objects、relationships、openLoops 中持续事实；位置、动作、时间、情绪和 lastUnfinishedAction 不能凭未提及延续。旧桥遗漏但前章正文明确支持的未解决事项可继承，不要求本章重述；较早章、桥摘要、Scene Task、作者要求、计划、传言或猜测不能当事实。证据不足用 unknown 等相应判定，保留未知主张，不删除或清空来凑通过。无候选 terminalVerdicts=[]。`
@@ -176,7 +189,7 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
   try {
     const record = parseQualityJsonObject(raw, 'continuity', 3) as Record<string, unknown>
     if (context && (!terminalEvidenceContextSchema.safeParse(context).success || context.current.contentHash !== runtimeJson({ content }).hash)) return invalid('evidence_context_stale')
-    const inherited = context ? z.array(inheritedTerminalVerdictSchema).max(200).safeParse(record.terminalVerdicts) : null
+    const inherited = context ? readSourcedVerdicts(record.terminalVerdicts, context) : null
     const addresses = inherited?.success && context?.quoteAddressProtocol === 1 ? canonicalTerminalQuoteAddresses(inherited.data, content, context) : null
     const inheritedItems = addresses?.items ?? (inherited?.success ? inherited.data : null)
     // Quote references remain intact and are each checked below. Only their
@@ -197,9 +210,9 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
       ...(context?.previous?.carried ?? []).map(fact => ({ segmentId: fact.segmentId, quote: fact.anchors.map(anchor => anchor.quote).join('\n') }))]
     for (const item of inheritedItems ?? []) {
       const supported = item.verdict === 'supported'
-      if (item.basis === 'inherited' && (!/^exitState\.(knowledge|body|objects|relationships|openLoops)\./u.test(item.path)
+      if (item.basis === 'inherited' && ((context?.verdictProtocol !== 2 || supported) && !/^exitState\.(knowledge|body|objects|relationships|openLoops)\./u.test(item.path)
         || supported && (item.inheritance?.priorEndState !== 'established' || item.inheritance.currentState !== 'unchanged'))) return invalid('inheritance_invalid', item.path)
-      if (item.basis === 'current' && item.inheritance !== undefined) return invalid('inheritance_invalid', item.path)
+      if (item.basis === 'current' && item.inheritance !== undefined && (context?.verdictProtocol !== 2 || supported)) return invalid('inheritance_invalid', item.path)
       for (const [index, ref] of item.sourceEvidence.entries()) {
         if (item.basis === 'current' ? !ref.segmentId.startsWith('c') : !/^[pt]/u.test(ref.segmentId)) return invalid('evidence_source_mismatch', item.path, index, ref.segmentId)
         if (ref.segmentId.startsWith('t')) {

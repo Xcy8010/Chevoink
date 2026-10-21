@@ -15,13 +15,25 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 const spec = { id: 'same-task', scope: { terminalCoverageProtocol: 1 } }
 const chapter = { id: 'chapter', revision: 1, orderIndex: 5, content: 'The pump remains offline.' }
 const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['The pump remains offline.'] } })
-const context = (version: 1 | 2) => terminalEvidenceContext(chapter, null, 2, 1, terminalCoverageInput(spec, {}, chapter, candidate, version))
+const context = (version: 1 | 2, verdictProtocol?: 2) => terminalEvidenceContext(chapter, null, 2, 1, terminalCoverageInput(spec, {}, chapter, candidate, version), verdictProtocol)
 const frozen: LegacyAssessmentInput = { chapterId: chapter.id, revision: 1, bodies: { previous: null, current: chapter.content, terminalEvidence: context(1) },
   system: 'original system', content: 'original full request', parserVersion: 8, sourceScope: { currentOrderIndex: 5, previous: [] }, targetType: 'story_compilation', targetId: 'compilation', terminalCandidate: candidate }
 const ctx = { runId: 'same-run', callId: 'same-call', userId: 'author', novelId: 'novel' } as ToolContext
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('request-owned terminal response versions', () => {
+  it.each([[1, undefined], [2, undefined], [2, 2]] as const)('rebuilds the exact saved coverage %i / verdict %s pair before restoring an owned call', async (coverageVersion, verdictProtocol) => {
+    const saved = { ...structuredClone(frozen), bodies: { ...frozen.bodies, terminalEvidence: context(coverageVersion, verdictProtocol) } }
+    const metadata = { input: saved, continuityAssessmentRequestKey: legacyContinuityAssessmentKey(ctx, saved) }
+    const before = JSON.stringify(metadata)
+    const tx = { agentArtifact: { findMany: vi.fn().mockResolvedValue([{ metadata }]) } } as unknown as Prisma.TransactionClient
+    const recover = vi.fn((contract: lifecycle.FrozenTerminalContract) => ({ ...frozen.bodies, terminalEvidence: context(contract.coverageVersion, contract.verdictProtocol) }))
+    expect(await readFrozenLegacyContinuityInput(tx, ctx, { ...frozen, bodies: { ...frozen.bodies, terminalEvidence: context(2, 2) } }, recover)).toEqual(saved)
+    expect(recover).toHaveBeenCalledWith({ coverageVersion, ...(verdictProtocol ? { verdictProtocol } : {}) })
+    expect(JSON.stringify(metadata)).toBe(before)
+    await expect(readFrozenLegacyContinuityInput(tx, ctx, { ...frozen, bodies: { ...frozen.bodies, terminalEvidence: context(2, 2) } },
+      () => ({ ...frozen.bodies, current: 'Changed current body', terminalEvidence: context(coverageVersion, verdictProtocol) }))).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
+  })
   it.each(['replay', 'duplicate', 'bad-hash', 'changed-body', 'changed-candidate', 'changed-target', 'changed-chapter', 'new-call'] as const)('recovers whole frozen input before choosing a new request contract: %s', scenario => {
     const proposed = structuredClone(frozen)
     proposed.bodies.terminalEvidence = context(2)
@@ -66,8 +78,8 @@ describe('request-owned terminal response versions', () => {
     expect(currentTerminalReview(validation, chapter.content, context(1))).toBeNull()
   })
 
-  it.each([1, 2] as const)('restores the producer entire saved v%i request before any reserve or provider dispatch', async version => {
-    const saved = { ...structuredClone(frozen), bodies: { ...frozen.bodies, terminalEvidence: context(version) } }
+  it.each([[1, undefined], [2, undefined], [2, 2]] as const)('restores the producer entire saved coverage %i / verdict %s request before any reserve or provider dispatch', async (version, verdictProtocol) => {
+    const saved = { ...structuredClone(frozen), bodies: { ...frozen.bodies, terminalEvidence: context(version, verdictProtocol) } }
     const response = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
       ({ kind, result: 'clear', reason: 'Checked.', findingIndexes: [] })), terminalVerdicts: [{ path: 'exitState.objects.0', verdict: 'supported', basis: 'current', sourceEvidence: [{ segmentId: 'c0', quote: chapter.content }] }] })
     const inspected = inspectContinuityResponse(response, saved.bodies, true, 8, candidate)
@@ -84,9 +96,9 @@ describe('request-owned terminal response versions', () => {
     const provider = vi.spyOn(completion, 'generateReviewCompletion')
     const fetch = vi.fn().mockRejectedValue(new Error('Unexpected provider dispatch'))
     vi.stubGlobal('fetch', fetch)
-    const controller = new AbortController(), recover = vi.fn((requested: 1 | 2) => ({ ...frozen.bodies, terminalEvidence: context(requested) }))
+    const controller = new AbortController(), recover = vi.fn((requested: lifecycle.FrozenTerminalContract) => ({ ...frozen.bodies, terminalEvidence: { ...context(requested.coverageVersion), ...(requested.verdictProtocol ? { verdictProtocol: requested.verdictProtocol } : {}) } }))
     const result = await runLegacyContinuityReview({ ...ctx, signal: controller.signal }, {
-      ...frozen, bodies: { ...frozen.bodies, terminalEvidence: context(2) }, system: 'new system', content: 'new compact input',
+      ...frozen, bodies: { ...frozen.bodies, terminalEvidence: context(2, 2) }, system: 'new system', content: 'new compact input',
       recoverBodies: recover, assertCurrent: async () => {}, options: { targetType: frozen.targetType, targetId: frozen.targetId },
     })
     expect(result).toEqual(bound)
@@ -105,12 +117,12 @@ describe('request-owned terminal response versions', () => {
     const oldInput = { version, taskId: spec.id, chapterId: chapter.id, obligations: [old] }
     const state = { terminalFactCoverage: { version: 1, taskId: spec.id, chapterId: chapter.id, facts: [retained],
       lastReview: { bodyHash: runtimeJson({ content: chapter.content }).hash, candidateHash: runtimeJson(candidate).hash, input: oldInput } } }
-    const recover = (requested: 1 | 2) => ({ previous: null, current: chapter.content,
-      terminalEvidence: terminalEvidenceContext(chapter, null, 2, 1, terminalCoverageInput(spec, state, chapter, candidate, requested)) })
-    const saved = { ...structuredClone(frozen), bodies: recover(version) }
+    const recover = (requested: lifecycle.FrozenTerminalContract) => ({ previous: null, current: chapter.content,
+      terminalEvidence: terminalEvidenceContext(chapter, null, 2, 1, terminalCoverageInput(spec, state, chapter, candidate, requested.coverageVersion), requested.verdictProtocol) })
+    const saved = { ...structuredClone(frozen), bodies: recover({ coverageVersion: version }) }
     const metadata = { input: saved, continuityAssessmentRequestKey: legacyContinuityAssessmentKey(ctx, saved) }
     const tx = { agentArtifact: { findMany: vi.fn().mockResolvedValue([{ metadata }]) } } as unknown as Prisma.TransactionClient
-    const restored = await readFrozenLegacyContinuityInput(tx, ctx, { ...frozen, bodies: recover(2) }, recover)
+    const restored = await readFrozenLegacyContinuityInput(tx, ctx, { ...frozen, bodies: recover({ coverageVersion: 2 }) }, recover)
     expect(restored).toEqual(saved)
     expect(restored?.bodies.terminalEvidence?.factCoverage?.obligations).toEqual([old])
     if (version === 1) expect(terminalCoverageInput(spec, state, chapter, candidate, 2)?.obligations).toEqual([])
