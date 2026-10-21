@@ -363,10 +363,15 @@ describe.runIf(available)('native quality continuation binds real pause and paym
     await step()
     if (scenario.startsWith('cached')) {
       const old = await oldCompleteReport(f, compilationId, scenario === 'cached-dropped')
+      const oldSnapshot = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: old.id }, include: { findings: { orderBy: { id: 'asc' } } } })
+      // Only the bridge ran: an existing report is not a frozen quality operation.
+      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'quality_analyze' } })).toBe(0)
       expect(await step()).toMatchObject({ kind: 'tool' })
       expect(fetchMock).toHaveBeenCalledTimes(scenario === 'cached-dropped' ? 1 : 0)
+      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'quality_analyze' } })).toBe(1)
       const work = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze' } })
-      expect(work.inputSnapshot).toMatchObject({ input: { work: { version: 11, parserVersion: 3, repairContext: expect.any(String), cached: scenario === 'cached-dropped' ? null : { id: old.id } } } })
+      expect(work.inputSnapshot).toMatchObject({ input: { work: { version: 12, parserVersion: 3, repairContext: expect.any(String), cached: scenario === 'cached-dropped' ? null : { id: old.id } } } })
+      expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: old.id }, include: { findings: { orderBy: { id: 'asc' } } } })).toEqual(oldSnapshot)
       return
     }
     if (scenario === 'unknown') await expect(step()).rejects.toThrow('synthetic unknown provider outcome')
