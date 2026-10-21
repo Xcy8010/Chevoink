@@ -78,7 +78,7 @@ describe.skipIf(!available)('authenticated empty-book clarification', () => {
     await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } })
     return spec
   }
-  async function legacyAnswer(ctx: ToolContext, answer: string, cancel?: () => Promise<void>) {
+  async function legacyAnswer(ctx: ToolContext, answer: string, cancel?: () => Promise<void>, question = placementQuestion) {
     const wait = questionPermissions.waitForQuestionAnswer
     const spy = vi.spyOn(questionPermissions, 'waitForQuestionAnswer').mockImplementation((runId, callId, timeout, signal) => {
       const pending = wait(runId, callId, timeout, signal)
@@ -88,8 +88,36 @@ describe.skipIf(!available)('authenticated empty-book clarification', () => {
       }
       return Promise.all([pending, deliver()]).then(([result]) => result)
     })
-    try { return await askUserTool.execute(ctx, placementQuestion) } finally { spy.mockRestore() }
+    try { return await askUserTool.execute(ctx, question) } finally { spy.mockRestore() }
   }
+  it.each([false, true, 'narrow'] as const)('uses the authenticated same-task answer through actual chapter mutation, local=%s', local => {
+    const prompt = local === true ? '只修改第5章这句话。' : '修改那一章。'
+    return fixture(prompt, async ctx => {
+      const volume = await prisma.volume.findFirstOrThrow({ where: { novelId: ctx.novelId } })
+      const body = '窗边还留着一盏灯。门开了。走廊无人。'
+      const chapter = await prisma.chapter.create({ data: { authorId: ctx.userId, novelId: ctx.novelId, volumeId: volume.id,
+        title: '合成第五章', content: body, orderIndex: 5, orderInVolume: 5 } })
+      const fresh = buildTaskSpec({ ...ctx, prompt, authorWritingProtocol: 2, reviewProtocol: 1, localEditProtocol: 1 })
+      const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, fresh, prompt, 2))
+      expect(spec.scope.writingClarificationProtocol).toBe(2)
+      await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } })
+      const before = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+      const answer = await legacyAnswer(ctx, local === 'narrow' ? '只修改第5章这句“门开了。”' : local ? '原文是“门开了。”' : '第5章', undefined,
+        { question: local ? '请提供需要修改的原文。' : '需要修改哪一章？', options: [{ label: '稍后确定' }, { label: '输入原文或章节' }] })
+      expect(answer.semanticTransition).toBeDefined()
+      expect(answer.output).not.toContain('已确认写入第一章')
+      await chapterReadTool.execute({ ...ctx, callId: 'read-clarified' }, { chapterId: chapter.id })
+      await chapterEditRangeTool.execute({ ...ctx, callId: 'edit-clarified' }, { chapterId: chapter.id, oldText: '门开了。', newText: '门缓缓开了。' })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: body.replace('门开了。', '门缓缓开了。'), revision: chapter.revision + 1 })
+      if (local) await expect(chapterWriteTool.execute({ ...ctx, callId: 'deny-whole' }, { chapterId: chapter.id, content: '整章重写。' }))
+        .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      const after = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+      expect(after.taskSpec).toEqual(before.taskSpec)
+      expect(after.startRequest).toEqual(before.startRequest)
+      expect(after.usage).toEqual(before.usage)
+      expect(await prisma.aiUsageLog.count({ where: { novelId: ctx.novelId } })).toBe(0)
+    })
+  })
   it.each(['legacy', 'durable'] as const)('%s answers initialize exactly one chapter without changing origin hashes or review obligations', mode => fixture(shortSceneRequest, async ctx => {
     await admit(ctx)
     const frozenRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })

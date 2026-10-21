@@ -3124,6 +3124,36 @@ describe('ordinary chapter summary presentation', () => {
 })
 
 describe('author-directed task ending in the real execution loop', () => {
+  it.each([true, false])('reconciles the restored input marker only for its matching authenticated receipt: %s', async matching => {
+    const prompt = '修改那一章。'
+    const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, authorWritingProtocol: 2 })
+    spec.scope.writingClarificationProtocol = 2
+    spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: true, titleAndBodyOnly: false }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: 1000,
+      activeExecutionMs: 10, stagnantBatches: 0, resumeCount: 0, compactionCount: 0, maxTurns: 50, tokenBudget: 1000,
+      writeProgress: 0, writeBaseline: 0, readProgress: 0, readBaseline: 0, progressSignatures: [],
+      authorInputRequired: { version: 1, callId: 'original-question', kind: 'writing_scope' } }
+    mocks.currentOriginal = { prompt, taskSpec: spec }
+    mocks.update.mockResolvedValueOnce({ taskSpec: spec, currentTurn: 1, startedAt: new Date(),
+      usage: { promptTokens: 20, completionTokens: 5, totalTokens: 25, checkpoint } })
+    const writing = { ...spec.scope.writing, kind: 'bounded' as const, targets: [{ orderIndex: 1, chapterId: 'c' }] }
+    const writingScope = await import('../../api/lib/agent/writing-scope.js')
+    const read = vi.spyOn(writingScope, 'readWritingScope').mockResolvedValue({ taskId: spec.id,
+      spec: { ...spec, scope: { ...spec.scope, writing } }, writing,
+      clarification: { taskId: spec.id, callId: matching ? 'original-question' : 'another-question' } } as Awaited<ReturnType<typeof writingScope.readWritingScope>>)
+    queue(response('已读取当前任务资料。'))
+    try {
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+      if (matching) {
+        expect(mocks.chat).toHaveBeenCalled()
+        expect((mocks.runs.get('run')?.usage as { checkpoint?: { authorInputRequired?: unknown } }).checkpoint?.authorInputRequired).toBeUndefined()
+      } else {
+        expect(mocks.chat).not.toHaveBeenCalled()
+        expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+      }
+      expect(mocks.runs.get('run')?.taskSpec).toEqual(spec)
+    } finally { read.mockRestore() }
+  })
   it.each([
     '列出三个提升注意力的方法。',
     '我们讨论人物动机，不续写或修改任何作品正文。',

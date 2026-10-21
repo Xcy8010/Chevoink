@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { advanceReviewCycle, beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, attemptedReviewCycleRefs, markReviewCycleVerification, readReviewCycle, reviewCycleContentHash, reviewCycleFinding, verificationQualityAdviceRequiresDecision } from '../../api/lib/agent/review-cycle.js'
+import { advanceReviewCycle, beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, attemptedReviewCycleRefs, markReviewCycleVerification, readReviewCycle, reviewCycleContentHash, reviewCycleFinding, verificationQualityAdviceRequiresDecision, qualityReviewCycleContext } from '../../api/lib/agent/review-cycle.js'
 import { observedReviewCycleVerification, observedReviewCycleVerificationBody } from '../../api/lib/agent/review-cycle-store.js'
 import { currentReviewNextStepGuidance, projectCurrentReviewNextStep } from '../../api/lib/agent/review-dispatch.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
@@ -27,6 +27,34 @@ function revisions() {
   bodies.forEach((after, i) => { cycle = advanceReviewCycle(cycle, { beforeRevision: 4 + i, before: body, afterRevision: 5 + i, after }); body = after })
   return { cycle, body }
 }
+describe('verified prior review context for the next quality critic', () => {
+  it('exposes only actual contiguous edits ending at the current saved body', () => {
+    const { cycle, body } = revisions()
+    const projected = qualityReviewCycleContext(cycle, { revision: 7, content: body })!
+    expect(projected.baseline.body.revision).toBe(4)
+    expect(projected.transitions.map(step => step.after.revision)).toEqual([5, 6, 7])
+    expect(projected.current).toEqual({ revision: 7, contentHash: reviewCycleContentHash(body) })
+    expect(qualityReviewCycleContext(cycle, { revision: 8, content: body })).toBeNull()
+    expect(qualityReviewCycleContext(cycle, { revision: 7, content: body + 'new' })).toBeNull()
+    expect(qualityReviewCycleContext(baseline(), { revision: 4, content })).toBeNull()
+    expect(qualityReviewCycleContext(null, { revision: 7, content: body })).toBeNull()
+    const gap = structuredClone(cycle); gap.transitions[1].contiguous = false
+    expect(qualityReviewCycleContext(gap, { revision: 7, content: body })).toBeNull()
+  })
+  it('keeps new original rationale while leaving legacy missing rationale missing', () => {
+    const { cycle, body } = revisions()
+    expect(qualityReviewCycleContext(cycle, { revision: 7, content: body })!.baseline.findings[0]).not.toHaveProperty('explanation')
+    cycle.baseline!.findings[0].explanation = 'The prior critic requested more explicit grounding.'
+    cycle.baseline!.findings[0].suggestion = 'Preserve the fact while adding a concrete action.'
+    const saved = readReviewCycle(JSON.parse(JSON.stringify({ reviewCycle: cycle })), scope)!
+    expect(qualityReviewCycleContext(saved, { revision: 7, content: body })!.baseline.findings[0]).toMatchObject({
+      explanation: cycle.baseline!.findings[0].explanation, suggestion: cycle.baseline!.findings[0].suggestion })
+    const marked = markReviewCycleVerification(saved, { revision: 7, contentHash: reviewCycleContentHash(body) })
+    expect(qualityReviewCycleContext(marked, { revision: 7, content: body })).toEqual(qualityReviewCycleContext(saved, { revision: 7, content: body }))
+    expect(() => readReviewCycle({ reviewCycle: saved }, { ...scope, taskId: 'foreign' })).toThrow()
+  })
+})
+
 describe('current mandatory quality warning write admission', () => {
   const sha = (text: string) => createHash('sha256').update(text).digest('hex')
   function current(mandatory = true, duplicate = false) {

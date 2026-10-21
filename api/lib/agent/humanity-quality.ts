@@ -1,6 +1,6 @@
 import { assertWritingTarget } from './writing-scope.js'
 import { assertChapterReviewRevision, readChapterReviewReadiness } from './chapter-review-guard.js'
-import { verificationQualityAdviceRequiresDecision } from './review-cycle.js'
+import { verificationQualityAdviceRequiresDecision, readReviewCycle, qualityReviewCycleContext } from './review-cycle.js'
 import { prepareReviewCycleTransition } from './review-cycle-store.js'
 import { readOriginalTaskRequest } from './original-request.js'
 import { readChapterWritingBackground } from './writing-request-context.js'
@@ -35,7 +35,8 @@ import { qualityAutoRepairPending, qualityReportMatchesContent, selectAutomaticQ
 
 export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v5'
 /** v5 is the finding contract; this separately identifies the new prompt rules. */
-export const HUMANITY_PROMPT_PROTOCOL = 'humanity-context.v4'
+export const HUMANITY_PROMPT_PROTOCOL = 'humanity-context.v5'
+export type HumanityPromptProtocol = typeof HUMANITY_PROMPT_PROTOCOL | 'humanity-context.v2' | 'humanity-context.v3' | 'humanity-context.v4'
 export const FROZEN_V4_HUMANITY_CRITIC_VERSION = 'humanity-critic.v4'
 export const PREVIOUS_HUMANITY_CRITIC_VERSION = 'humanity-critic.v3'
 export const LEGACY_HUMANITY_CRITIC_VERSION = 'humanity-critic.v2'
@@ -362,18 +363,22 @@ export async function buildHumanityQualityContext(userId: string, novelId: strin
     })
     .slice(0, 3)
 
+  const priorReviewCycle = original && compilation ? qualityReviewCycleContext(readReviewCycle(compilation.preparedContext,
+    { taskId: original.taskId, userId, novelId, chapterId }), chapter) : null
   return { chapter, charter, compilation, profiles: mentionedProfiles, anchors: relevantAnchors, recentChapters, feedback: dataControl?.qualityTelemetryEnabled === false ? [] : feedback,
     originalRequest: original?.prompt ?? null,
-    chapterWritingBackground: runId ? await readChapterWritingBackground(db, { userId, novelId, runId }, chapterId) : [] }
+    chapterWritingBackground: runId ? await readChapterWritingBackground(db, { userId, novelId, runId }, chapterId) : [],
+    ...(priorReviewCycle ? { priorReviewCycle } : {}) }
 }
 
-export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>, promptProtocol: typeof HUMANITY_PROMPT_PROTOCOL | 'humanity-context.v2' | 'humanity-context.v3' = HUMANITY_PROMPT_PROTOCOL): string {
+export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>, promptProtocol: HumanityPromptProtocol = HUMANITY_PROMPT_PROTOCOL): string {
   return hashText(JSON.stringify({
     ...(promptProtocol === 'humanity-context.v2' ? { contextProtocol: 2 } : { contextProtocol: 3, criticPromptProtocol: promptProtocol }),
     chapter: { title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content, novel: bundle.chapter.novel },
     charter: bundle.charter, compiler: bundle.compilation ? { id: bundle.compilation.id, bridge: bundle.compilation.bridge, sceneTasks: bundle.compilation.sceneTasks } : null,
     profiles: bundle.profiles, anchors: bundle.anchors, recentChapters: bundle.recentChapters, feedback: bundle.feedback, originalRequest: bundle.originalRequest ?? null,
     chapterWritingBackground: bundle.chapterWritingBackground,
+    ...(promptProtocol === HUMANITY_PROMPT_PROTOCOL ? { priorReviewCycle: bundle.priorReviewCycle ?? null } : {}),
   }))
 }
 
@@ -441,7 +446,7 @@ export async function persistHumanityQualityReport(input: {
   mode: StoryCompilerMode
   deterministicMetrics: Record<string, number | string[]>
   qualityContextHash?: string
-  criticPromptProtocol?: typeof HUMANITY_PROMPT_PROTOCOL | 'humanity-context.v2' | 'humanity-context.v3'
+  criticPromptProtocol?: HumanityPromptProtocol
   /** Recovered pre-upgrade paid work retains the critic rules it actually used. */
   criticVersion?: typeof HUMANITY_CRITIC_VERSION | typeof FROZEN_V4_HUMANITY_CRITIC_VERSION | typeof PREVIOUS_HUMANITY_CRITIC_VERSION | typeof LEGACY_HUMANITY_CRITIC_VERSION
   sources?: QualityEvidenceSources
@@ -460,7 +465,7 @@ export async function persistHumanityQualityReport(input: {
   await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${input.chapterId} AND author_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
   const chapter = await getOwnedQualityChapter(input.userId, input.novelId, input.chapterId, tx)
   if (chapter.revision !== input.chapterRevision) throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '章节在质量检查期间已被修改，请基于最新版本重新检查。')
-  if (input.qualityContextHash && qualityReviewContextHash(await buildHumanityQualityContext(input.userId, input.novelId, input.chapterId, input.runId, tx)) !== input.qualityContextHash) {
+  if (input.qualityContextHash && qualityReviewContextHash(await buildHumanityQualityContext(input.userId, input.novelId, input.chapterId, input.runId, tx), input.criticPromptProtocol) !== input.qualityContextHash) {
     throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '邻章、作者要求或质量参考在检查期间已变化，旧意见未保存为当前报告。')
   }
 
@@ -560,10 +565,10 @@ export async function selectQualityFindings(userId: string, novelId: string, rep
 /** Explicit reasons for selected candidates for which the bounded repairer
  * returned no actual patch. The source/report/ID remains immutable evidence. */
 export function retainedQualityCandidates(report: { id: string; findings: Array<{ id: string; severity: string; startOffset: number; endOffset: number; disposition?: string; authorFeedback?: string | null }> },
-  replacements: Array<{ findingId: string; replacement: string }>) {
+  replacements: Array<{ findingId: string; replacement: string }>, retained: Array<{ findingId: string; reason: string }> = []) {
   return selectAutomaticQualityFindings(report.findings).filter(finding => !replacements.some(patch => patch.findingId === finding.id))
     .map(finding => ({ source: 'quality' as const, reportId: report.id, findingId: finding.id,
-      reason: '本次有界修订未返回该意见可验证且实际改变原文的安全补丁；保留证据与建议交作者决定，不追加自动修订。' }))
+      reason: retained.find(item => item.findingId === finding.id)?.reason ?? '本次有界修订未返回该意见可验证且实际改变原文的安全补丁；保留证据与建议交作者决定，不追加自动修订。' }))
 }
 
 export async function applyQualityRepair(input: {

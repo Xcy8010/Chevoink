@@ -6,6 +6,7 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const scopeSchema = z.object({ taskId: z.string().min(1), userId: z.string().min(1), novelId: z.string().min(1), chapterId: z.string().min(1) })
 const refSchema = z.object({ source: z.enum(['continuity', 'quality']), reportId: z.string().min(1), findingId: z.string().min(1) })
 const findingSchema = refSchema.extend({ signal: z.string(), severity: z.string(), evidence: z.string(),
+  explanation: z.string().optional(), suggestion: z.string().optional(),
   anchor: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), text: z.string().min(1) }).nullable() })
 const bindingSchema = z.object({ contentHash: hash, continuityBinding: z.string(), qualityReportId: z.string().nullable(), qualityReportHash: hash.nullable() })
 const bodySchema = z.object({ revision: z.number().int().nonnegative(), contentHash: hash })
@@ -34,6 +35,19 @@ export const reviewCycleRefKey = (ref: Pick<ReviewCycleFinding, 'source' | 'repo
 const sameBody = (a: ReviewCycle['transitions'][number]['before'], b: typeof a) => a.revision === b.revision && a.contentHash === b.contentHash
 const sameScope = (a: ReviewCycleScope, b: ReviewCycleScope) => Object.keys(a).every(key => a[key as keyof ReviewCycleScope] === b[key as keyof ReviewCycleScope])
 const conflict = () => new DataAccessError(409, 'REVIEW_CYCLE_CONFLICT', '章节复查周期的任务、正文或历史转换无法核实；保留正文与真实报告，未重置周期或推断已完成。')
+
+/** Prior judgments are context, never current findings or authority. Phase
+ * markers are intentionally excluded so admitting verification cannot change
+ * the critic input that was just frozen. Missing old rationale stays missing. */
+export function qualityReviewCycleContext(cycle: ReviewCycle | null, chapter: { revision: number; content: string }) {
+  const baseline = cycle?.baseline, transitions = cycle?.transitions ?? []
+  const current = { revision: chapter.revision, contentHash: reviewCycleContentHash(chapter.content) }
+  if (!baseline || !transitions.length || !transitions.every((step, index) => step.contiguous
+    && sameBody(step.before, index ? transitions[index - 1].after : baseline.body))
+    || !sameBody(transitions.at(-1)!.after, current)) return null
+  return { version: 1 as const, baseline: { body: baseline.body, findings: baseline.findings },
+    transitions: transitions.map(({ before, after, ranges }) => ({ before, after, ranges })), current }
+}
 
 /** Server bookkeeping only. Missing historical evidence stays missing. */
 export function readReviewCycle(context: unknown, scope: ReviewCycleScope): ReviewCycle | null {

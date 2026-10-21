@@ -589,7 +589,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       expect(admitted.status).toBe(200)
       const runId = admitted.body.data.runId as string
       const frozen = (await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec
-      expect(frozen).toMatchObject({ scope: { writingTargetProtocol: 2, writingClarificationProtocol: 1, writing: { kind: 'needs_input' } } })
+      expect(frozen).toMatchObject({ scope: { writingTargetProtocol: 2, writingClarificationProtocol: 2, writing: { kind: 'needs_input' } } })
       await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
       const ctx: ToolContext = { userId, novelId, sessionId, runId, chapterId: null, callId: 'true-author-answer', mode: 'build',
         qualityMode: 'premium', creativeFreedom: 'balanced', signal: new AbortController().signal, emit: () => {} }

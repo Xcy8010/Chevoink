@@ -10,8 +10,9 @@ import { activeChapterScope } from '../data/internal.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches, currentCompilerContinuityAssessment, completeCompilerContinuityAssessment, continuityStoryInput, storedContinuityProtocol } from './compiler-continuity-contract.js'
 import { qualityReportCheckedCurrentContent, selectAutomaticQualityFindings, qualityAutoRepairPending } from './quality-report-contract.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
+import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { runtimeJson } from './runtime-common.js'
-import { assertSelectionBodyEffect, originalSelectionBoundary } from './writing-scope.js'
+import { assertSelectionBodyEffect, effectiveWritingTaskSpec, originalSelectionBoundary } from './writing-scope.js'
 import { hasReadOnlyRevisionAssessment, localEditGuidance, localRevisionAuthorityText, originalLocalEditBoundary } from './local-edit-scope.js'
 import { beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, readReviewCycle, reviewCycleFinding, reviewCycleRefKey,
   type ReviewCycleFinding } from './review-cycle.js'
@@ -264,7 +265,8 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     }) : []),
     ...(quality === 'complete' ? report!.findings.filter(item => item.disposition !== 'repaired').map(finding => {
       const projected = reviewCycleFinding({ source: 'quality', reportId: report!.id, findingId: finding.id, signal: finding.signal,
-        severity: finding.severity, evidence: finding.evidenceExcerpt, startOffset: finding.startOffset, endOffset: finding.endOffset }, chapter.content)
+        severity: finding.severity, evidence: finding.evidenceExcerpt, explanation: finding.explanation, suggestion: finding.suggestion,
+        startOffset: finding.startOffset, endOffset: finding.endOffset }, chapter.content)
       // Only this owned, complete, revision/hash-bound persisted report can
       // prove a repeated occurrence. Generic/model offsets remain untrusted.
       const { startOffset: start, endOffset: end, evidenceExcerpt: text } = finding
@@ -529,6 +531,11 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   await lockNovelActiveScope(tx, subject.novelId)
   const conditionalAuthority = await assertSelectionBodyEffect(tx, subject, chapter, options)
   const original = await readOriginalTaskRequest(tx, subject)
+  const parsedSpec = taskSpecSchema.safeParse(original.spec)
+  // Consume only the authenticated answer projection for body authority. The
+  // immutable original still supplies lineage, review requirements and budgets.
+  const authoritySpec = parsedSpec.success && parsedSpec.data.scope.writingClarificationProtocol === 2
+    ? await effectiveWritingTaskSpec(tx, subject, parsedSpec.data) : original.spec
   const runIds = await originalTaskRunIds(tx, subject, original)
   await tx.$queryRaw(Prisma.sql`SELECT id FROM story_compilations WHERE user_id = ${subject.userId}
     AND novel_id = ${subject.novelId} AND chapter_id = ${chapter.id} AND run_id IN (${Prisma.join(runIds)}) ORDER BY id FOR UPDATE`)
@@ -556,12 +563,12 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
     || !!item.validation && typeof item.validation === 'object' && !Array.isArray(item.validation) && typeof item.validation.checkedRevision === 'number')
   const spec = original.spec && typeof original.spec === 'object' && !Array.isArray(original.spec) ? original.spec as Record<string, unknown> : null
   const newReview = !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope) && (spec.scope as Record<string, unknown>).reviewProtocol === 1
-  const frozenAuthority = frozenWritingRevisionAuthority(original.spec, current.id, !!authority)
-  const authorityText = (text: string | null) => chapterRevisionAuthorityText(localRevisionAuthorityText(text, original.spec), original.spec, current.id)
+  const frozenAuthority = frozenWritingRevisionAuthority(authoritySpec, current.id, !!authority)
+  const authorityText = (text: string | null) => chapterRevisionAuthorityText(localRevisionAuthorityText(text, authoritySpec), authoritySpec, current.id)
   const prohibited = conditionalAuthority ? false : frozenAuthority !== undefined ? !frozenAuthority : prohibitsNewDraftRevision(authorityText(original.prompt)) || Array.isArray(spec?.hardConstraints) && spec.hardConstraints.some(item =>
     !!item && typeof item === 'object' && 'text' in item && typeof item.text === 'string'
       && prohibitsNewDraftRevision(authorityText(item.text)))
-  const localAuthority = conditionalAuthority || originalLocalEditBoundary(original.spec)?.kind === 'bounded'
+  const localAuthority = conditionalAuthority || originalLocalEditBoundary(authoritySpec)?.kind === 'bounded'
   const freshAssessment = frozenAuthority === undefined && !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope)
     && (spec.scope as Record<string, unknown>).localEditProtocol === 1 && hasReadOnlyRevisionAssessment(original.prompt)
   if (prohibited || freshAssessment || (!authority && !localAuthority && (reviewed || newReview && spec?.intent === 'review')

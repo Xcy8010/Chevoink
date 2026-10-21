@@ -58,5 +58,14 @@ export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'des
     ? { ...current, properties: Object.fromEntries(Object.entries(current.properties).filter(([key]) => key !== additive)) } : null
   const previousPrepare = tool.name === 'story_compiler_prepare' && scope.writing?.tailVolume
     ? { ...current, required: [...new Set([...(current.required as string[] ?? []), 'volumeDecision'])] } : null
-  return [current, toOpenAIToolPresentation(tool, scope).parameters, ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : [])]
+  const properties = current.properties as Record<string, Record<string, unknown>> | undefined
+  const terminalState = properties?.terminalState
+  const previousTerminal = tool.name === 'continuity_validate' && terminalState?.properties
+    ? { ...current, properties: { ...properties, terminalState: { ...terminalState,
+      properties: Object.fromEntries(Object.entries(terminalState.properties).filter(([key]) => key !== 'inheritedProofs')) } } } : null
+  const previousResearch = tool.name === 'research_report_save' && properties?.title
+    ? { ...current, properties: { ...properties, title: Object.fromEntries(Object.entries(properties.title).filter(([key]) => key !== 'description')) },
+      required: Object.keys(properties).filter(key => key === 'title' || (current.required as string[] ?? []).includes(key)) } : null
+  return [current, toOpenAIToolPresentation(tool, scope).parameters, ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : []),
+    ...(previousTerminal ? [previousTerminal] : []), ...(previousResearch ? [previousResearch] : [])]
 }

@@ -1,6 +1,6 @@
 import { readSettledQualityReviews } from './quality-review-admission.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
-import { freezeWritingScope, effectiveWritingTaskSpec, readCompletedWritingDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
+import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery } from './review-request-recovery.js'
@@ -1164,8 +1164,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         taskSpec: taskSpec as unknown as object, usage: { ...usage, checkpoint: checkpointSnapshot() },
       } })
     } else await persistCheckpoint()
+    if (authorInputRequired && taskSpec.scope.writingClarificationProtocol !== undefined) {
+      const clarified = await prisma.$transaction(tx => readWritingScope(tx, { userId: params.userId, novelId: params.novelId, runId }))
+      if (writingClarificationResolvesInput(clarified, authorInputRequired)) {
+        authorInputRequired = undefined
+        await persistCheckpoint()
+      }
+    }
     const checkAuthorScope = !taskSpec.scope.authorEffects
-      && (continuingTask || taskSpec.scope.writingTargetProtocol === 2 && taskSpec.scope.writingClarificationProtocol !== 1)
+      && (continuingTask || taskSpec.scope.writingTargetProtocol === 2 && taskSpec.scope.writingClarificationProtocol === undefined)
     const needsScopeDecision = checkAuthorScope && (taskSpec.scope.writing?.kind === 'needs_input' || taskSpec.scope.localEditBoundary?.kind === 'needs_input')
       ? await prisma.$transaction(async tx => {
         const effective = await effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)

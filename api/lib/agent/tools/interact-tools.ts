@@ -145,7 +145,7 @@ export const askUserTool = defineTool({
     }
     return {
       ...(clarification ? { semanticTransition: clarification } : {}),
-      output: `作者的回答：${result.answer}${clarification ? '\n已确认写入第一章；按原请求完成该段后停笔，保留原有检查、权限与预算。' : ''}`,
+      output: `作者的回答：${result.answer}${clarification ? '\n已补全原请求缺失的目标或原文范围；继续原任务，保留原有检查、权限与预算。' : ''}`,
       summary: `作者已回答：${result.answer.slice(0, 40)}${result.answer.length > 40 ? '…' : ''}`,
       display: {
         kind: 'question',

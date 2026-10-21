@@ -156,7 +156,7 @@ function extractTargets(clause: AuthorClause): AuthorWritingTarget[] {
   add(/首章|first chapter/giu, 'ordinal', () => ({ kind: 'first', start: 1, count: 1 }))
   add(/(?:(?:当前(?:这)?(?:章|章节)|正在编辑(?:的)?(?:这章|章节|章))(?:之|以)?后(?:的)?\s*)?(?:下\s*[一1]\s*章|next chapter)/giu,
     'relative', text => ({ kind: 'next', count: 1, ...(/之后|以后|章后|章节后/u.test(text) ? { anchor: 'editor' as const } : {}) }))
-  add(/当前(?:这)?(?:一)?(?:章|章节)|(?:这|该|本)(?:一)?章|正在编辑(?:的)?章节|current chapter/giu, 'same_target', () => null)
+  add(/当前(?:这)?(?:一)?(?:章|章节)|(?:这|那|该|本)(?:一)?章|正在编辑(?:的)?章节|current chapter/giu, 'same_target', () => null)
   add(/全书|整本(?:书|小说)|所有(?:已有|现有)?章节|全部(?:已有|现有)?章节|whole book|all chapters/giu,
     'global', () => ({ kind: 'existing', start: 1 }))
   add(new RegExp(`(?:第\\s*${numberPattern}\\s*段|首段|末段|最后一段|开头|结尾|段落|句子|对白|对话|那句话|这句话|这句|一句|几句|这段|这一段|那段|某段|该段|片段|局部|选区|paragraph\\s*\\d+|sentence|passage|opening|beginning|ending|dialogue)`, 'giu'), 'local', () => null)

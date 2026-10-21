@@ -70,6 +70,7 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id } })
     const cycle = readReviewCycle(saved.preparedContext, scope)!
     expect(cycle.baseline?.body.revision).toBe(4)
+    expect(cycle.baseline?.findings[0]).toMatchObject({ explanation: expect.any(String), suggestion: expect.any(String) })
     expect(cycle.transitions.map(step => step.after.revision)).toEqual([5, 6, 7])
     await mutate(7, finalBody)
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id } })).preparedContext).toEqual(saved.preparedContext)

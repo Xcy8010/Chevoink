@@ -209,6 +209,29 @@ export function stripAgentProtocolArtifacts(text: string): string {
   }).join('')
 }
 
+/** Delimit bare citations before GFM autolinking can absorb adjacent Chinese
+ * punctuation/prose. Existing links, literal examples and quoted source stay intact. */
+export function normalizeAgentCitationLinks(text: string): string {
+  if (!/https?:\/\/[^\s<>"'）】]+[）】][：；，。！？]/u.test(text)) return text
+  type Node = { type: string; position?: { start: { offset?: number }; end: { offset?: number } }; children?: Node[] }
+  const containsHtml = (node: Node): boolean => node.type === 'html' || !!node.children?.some(containsHtml)
+  const protectedRanges: Array<{ start: number; end: number }> = [...text.matchAll(/“[^”]*”|「[^」]*」|『[^』]*』|‘[^’]*’|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/gu)]
+    .map(match => ({ start: match.index, end: match.index + match[0].length }))
+  const stack: Node[] = [fromMarkdown(text)]
+  while (stack.length) {
+    const node = stack.pop()!
+    if (['paragraph', 'heading'].includes(node.type) && containsHtml(node)
+      || ['code', 'inlineCode', 'link', 'image', 'linkReference', 'imageReference', 'definition', 'html', 'blockquote'].includes(node.type)) {
+      const start = node.position?.start.offset, end = node.position?.end.offset
+      if (start !== undefined && end !== undefined) protectedRanges.push({ start, end })
+    } else if (node.children) stack.push(...node.children)
+  }
+  return outputSegments(text, false, protectedRanges).map(segment => segment.code ? segment.text : segment.text.replace(
+    /https?:\/\/[^\s<>"'）】]+(?=[）】][：；，。！？])/gu, url => {
+      try { const parsed = new URL(url); return parsed.username || parsed.password ? url : `<${url}>` } catch { return url }
+    })).join('')
+}
+
 function stripProtocolSegment(text: string): string {
   let cleaned = text
   for (const pattern of PROTOCOL_BLOCK_PATTERNS) {

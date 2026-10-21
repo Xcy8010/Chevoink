@@ -20,6 +20,7 @@ vi.mock('../../api/lib/agent/runtime-resume.js', () => ({ resumeDurableTask: moc
 vi.mock('../../api/lib/agent/review-resume-readiness.js', () => ({ readReviewReceiptWait: mocks.receiptWait }))
 import { continueActivatedGoalRun, continueLoopRun } from '../../api/lib/agent/run-service.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import * as writingScope from '../../api/lib/agent/writing-scope.js'
 const run = { id: 'run19', sessionId: 's', userId: 'u', novelId: 'n', chapterId: 'c19', status: 'paused', engine: 'loop', mode: 'build', inputSummary: 'truncated', modelTier: 'speed', reasoningEffort: 'high', customModelId: null }
 beforeEach(() => {
   vi.resetAllMocks()
@@ -58,6 +59,36 @@ function activatedFixture(durable = false) {
   return goal
 }
 describe('continue API exact target', () => {
+  it.each(['answered', 'different-call', 'unresolved-local'] as const)('uses only a matching fully resolved authenticated clarification before resume: %s', async kind => {
+    const prompt = '只修改第5章这句话。'
+    const taskSpec = buildTaskSpec({ runId: run.id, novelId: 'n', prompt, authorWritingProtocol: 2, localEditProtocol: 1 })
+    taskSpec.scope.writingClarificationProtocol = 2
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 5, chapterId: 'c19' }], titleAndBodyOnly: false, repairAuthorized: true }
+    taskSpec.scope.localEditBoundary = { version: 1, kind: 'needs_input', regions: [] }
+    const original = { ...run, taskSpec, usage: { promptTokens: 20, completionTokens: 5, totalTokens: 25, checkpoint: {
+      version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: 1000, activeExecutionMs: 10,
+      stagnantBatches: 0, resumeCount: 0, compactionCount: 0, maxTurns: 50, tokenBudget: 1000,
+      writeProgress: 0, writeBaseline: 0, readProgress: 0, readBaseline: 0, progressSignatures: [],
+      authorInputRequired: { version: 1, callId: 'original-question', kind: 'local_edit_scope' } } } }
+    const before = structuredClone(original)
+    const effective = { ...taskSpec, scope: { ...taskSpec.scope, localEditBoundary: undefined } }
+    const read = vi.spyOn(writingScope, 'readWritingScope').mockResolvedValue({ spec: kind === 'unresolved-local' ? taskSpec : effective,
+      taskId: taskSpec.id, writing: taskSpec.scope.writing, clarification: { taskId: taskSpec.id,
+        callId: kind === 'different-call' ? 'another-question' : 'original-question' } } as Awaited<ReturnType<typeof writingScope.readWritingScope>>)
+    mocks.find.mockReset().mockImplementation(async args => args.where.id ? original : { id: run.id })
+    mocks.message.mockResolvedValue({ parts: [{ type: 'text', text: prompt }] })
+    try {
+      if (kind === 'answered') {
+        expect(await continueLoopRun('u', run.id)).toMatchObject({ runId: run.id, status: 'running' })
+        expect(mocks.execute).toHaveBeenCalledOnce()
+      } else {
+        await expect(continueLoopRun('u', run.id)).rejects.toMatchObject({ code: 'AUTHOR_INPUT_REQUIRED' })
+        expect(mocks.execute).not.toHaveBeenCalled()
+        expect(mocks.creditAccess).not.toHaveBeenCalled()
+      }
+      expect(original).toEqual(before)
+    } finally { read.mockRestore() }
+  })
   it.each(['scope', 'message', 'malformed'] as const)('rejects %s input corruption before treating an unresolved frozen target as clarification', async kind => {
     const input = { sessionId: 's', novelId: 'n', chapterId: 'c19', mode: 'build', prompt: '本次第19章要求' }
     const taskSpec = buildTaskSpec({ runId: run.id, novelId: 'n', chapterId: null, prompt: input.prompt })

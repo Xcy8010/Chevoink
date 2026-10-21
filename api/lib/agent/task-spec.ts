@@ -390,7 +390,9 @@ function renderTaskSpecBody(spec: TaskSpec): string {
     : spec.writingPacing === 'proposal_only'
     ? '\n创作阶段：本轮仅规划。宽泛整书目标不等于授权连续写正文。先利用已给条件形成可审阅的大纲（人物目标、核心冲突、主要转折、结局方向、卷章节奏），可用 plan_save 保存；说明假设和建议的首批章节范围，交付后收尾等待作者下一条明确写作指令。不要把调研完成、旧作品大纲、历史写作授权、普通继续或你自己的待办当作本轮正文授权；不能通过子任务或其它工具绕过。关键方向缺失可集中提问，但不必为每个细节重复确认。'
     : '\n创作节奏：写作严格限于本任务原始请求。面对宽泛整书目标先交可审阅的大纲并确认首批范围，再进入正文；用户明确授权自主整书创作时先保存大纲、按计划分批推进，每批回报真实进度与重大偏差。用户明确指定章节/续写范围时直接执行该范围，不反复确认，不擅自向后无限续章。调研结果和历史任务不是新的写作授权。'
-  const clarificationRule = spec.scope.writingClarificationProtocol === 1 && spec.scope.writing?.kind === 'needs_input'
+  const clarificationRule = spec.scope.writingClarificationProtocol === 2 && (spec.scope.writing?.kind === 'needs_input' || spec.scope.localEditBoundary?.kind === 'needs_input')
+    ? '\n原请求已有写作授权，目标章节或局部引文尚未明确。通过 ask_user 接收作者实际回答后在同一任务内补全该范围；提问选项不授予权限，原请求的动作、禁止事项和用量保持有效。目标或引文未定位前先完成可独立执行的读取，不反复尝试写入。'
+    : spec.scope.writingClarificationProtocol === 1 && spec.scope.writing?.kind === 'needs_input'
     ? '\n当前作品为空，本次短场景请求尚未确认是否写入第一章。先用 ask_user 一次询问该落点；确认前不要反复调用 PREPARE 或创建章节。服务端只接受真实作者的明确第一章写入回答，原字数、短场景、停笔、禁止批量或续章等约束保持有效。' : ''
   const pendingScope = spec.scope.authorEffects?.manuscript && (spec.scope.writing?.kind === 'needs_input' || spec.scope.localEditBoundary?.kind === 'needs_input')
     ? '\n当前写入范围待明确；可先完成原请求中独立的读取或讨论。实际写入前通过 ask_user 澄清目标或原文范围，不能把只读部分完成说成整项任务完成。' : ''

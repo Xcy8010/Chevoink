@@ -29,7 +29,7 @@ import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '..
 import { runContinuityEvidenceCorrection } from '../continuity-response-correction.js'
 import { runContinuityReassessment } from '../assessment-response-lifecycle.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
-import { readTerminalCandidate, terminalCandidateSchema, terminalReviewInput, terminalReviewFailure } from '../terminal-state-review.js'
+import { readTerminalCandidate, resolveTerminalCandidate, terminalCandidateInputSchema, terminalCandidateSchema, terminalReviewInput, terminalReviewFailure } from '../terminal-state-review.js'
 import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, terminalEvidenceContextSchema, continuitySemanticRule } from '../terminal-evidence-context.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
@@ -112,7 +112,10 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
       || sourceId && source?.revision !== compilation.bridge.sourceRevision) return {
       kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '正文为空、场景数量不合法或前章版本变化；先修复章节桥前置状态，不启动正文修订。',
     }
-    const terminalCandidate = (args.terminalState ? terminalCandidateSchema.parse(args.terminalState) : readTerminalCandidate(compilation.validation))
+    const selectedTerminal = args.terminalState ? resolveTerminalCandidate(terminalCandidateInputSchema.parse(args.terminalState),
+      source && 'preceding' in source && 'terminalInheritance' in source ? source.terminalInheritance : [], terminalVersion) : undefined
+    if (selectedTerminal && !selectedTerminal.ok) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: selectedTerminal.reason }
+    const terminalCandidate = (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
       ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
     const terminalEvidence = terminalProtocol ? terminalEvidenceContext(compilation.chapter, source, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
       terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate)) : undefined

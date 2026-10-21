@@ -4,13 +4,33 @@ import { toOpenAIParameters, withObjectType, originalToolParameterSchemas } from
 import { getToolsForMode, toOpenAITools } from '../../api/lib/agent/tools/registry.js'
 import { novelImportArguments } from '../../api/lib/agent/tools/import-tools.js'
 import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
-import { chapterBridgeCommitTool, storyCompilerPrepareTool, sceneTaskBuildTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { chapterBridgeCommitTool, continuityValidateTool, storyCompilerPrepareTool, sceneTaskBuildTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
+import { researchReportSaveTool } from '../../api/lib/agent/tools/search-tools.js'
+import { researchReportSaveParameters } from '../../api/lib/agent/research-sources.js'
 import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
 
 // 回归：novel_import 顶层 discriminatedUnion 转换后没有 type，DeepSeek 按 type null 拒绝，
 // 导致线上继续任务时报 Invalid schema for function 'novel_import'。
 describe('tool schema provider contract', () => {
+  it('keeps the pre-optional-title research report schema exactly without rewriting its frozen title field', () => {
+    const previous = toOpenAIParameters(researchReportSaveParameters.extend({ title: z.string().trim().min(1).max(160) }))
+    expect(originalToolParameterSchemas(researchReportSaveTool, { novelId: 'n' })).toContainEqual(previous)
+    expect(previous.required).toEqual(['title', 'expectedRevision', 'section'])
+  })
+  it('retains the exact nested pre-selection continuity schema while preserving explicit hashes through normalization', () => {
+    const current = toOpenAIParameters(continuityValidateTool.parameters)
+    const properties = current.properties as Record<string, Record<string, unknown>>
+    const original = toOpenAIParameters(z.object({ terminalState: terminalCandidateSchema.optional()
+      .describe('写作交付前要提交的真实章末状态 {exitState,lastUnfinishedAction}；须在本次独立检查前给出。不能从场景计划抄事实，缺失信息保持未知。提交必须与此候选一致；单独审阅既有章省略。') }))
+    const previous = { ...current, properties: { ...properties, terminalState: (original.properties as Record<string, unknown>).terminalState } }
+    expect(originalToolParameterSchemas(continuityValidateTool, { novelId: 'n' })).toContainEqual(previous)
+    expect((properties.terminalState.properties as Record<string, unknown>).inheritedProofs).toBeDefined()
+    const parsed = continuityValidateTool.parameters.parse(normalizeToolInput(continuityValidateTool,
+      { compilationId: 'comp', terminalState: { exitState: {}, inheritedProofs: ['a'.repeat(64)] } }))
+    expect(parsed.terminalState?.inheritedProofs).toEqual(['a'.repeat(64)])
+  })
   it('publishes a complete compact native scene example accepted without generated state facts', () => {
     const example = sceneTaskBuildTool.description.split('最小原生参数示例：')[1]
     const input = JSON.parse(example)

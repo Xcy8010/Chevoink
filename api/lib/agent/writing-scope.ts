@@ -11,7 +11,7 @@ import { runtimeJson } from './runtime-common.js'
 import { assertRunGoalFence } from './goal-fence.js'
 import { readWritingPresentation } from './writing-request-context.js'
 import { freezeLocalEditBoundary, originalLocalEditBoundary, requestedLocalEdit } from './local-edit-scope.js'
-import { eligibleEmptyWritingClarification, readWritingClarification } from './writing-clarification.js'
+import { eligibleEmptyWritingClarification, eligibleWritingClarification, readWritingClarification } from './writing-clarification.js'
 import { parseAuthorWritingRequest, parseAuthorWritingExclusion, resolveAuthorWritingRequest } from './author-writing-request.js'
 import { currentIssueQuoteRegions } from './local-edit-citations.js'
 import { assertFrozenWritingContract, frozenWritingScopeHash } from './writing-contract.js'
@@ -199,6 +199,8 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
       ...(clarification ? { writingClarificationProtocol: 1 as const } : {}),
     ...(localEditBoundary ? { localEditBoundary } : {}) } }
   if (frozen.scope.writingInterpretation) frozen.scope.writingInterpretation.scopeHash = frozenWritingScopeHash(frozen.scope)
+  if (targetProtocol === 2 && run.session.sandboxMode !== 'read_only' && !run.session.spawnedFromRunId
+    && eligibleWritingClarification(frozen)) frozen.scope.writingClarificationProtocol = 2
   return frozen
 }
 
@@ -261,7 +263,7 @@ export async function readNewDraftWritingAuthority(tx: Prisma.TransactionClient,
     || parsed.data.scope.writingTargetProtocol !== 2 && (prohibitsNewDraftRevision(original.prompt)
       || parsed.data.hardConstraints.some(item => prohibitsNewDraftRevision(item.text)))) return null
   const frozen = parsed.data.scope.writing
-  if (frozen?.kind !== 'bounded' && !(frozen?.kind === 'needs_input' && parsed.data.scope.writingClarificationProtocol === 1)) return null
+  if (frozen?.kind !== 'bounded' && !(frozen?.kind === 'needs_input' && parsed.data.scope.writingClarificationProtocol !== undefined)) return null
   const scope = await readWritingScope(tx, subject)
   const writing = scope.writing
   if (writing?.kind !== 'bounded') return null
@@ -337,15 +339,21 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
     || bindings.targets.some(item => !writing?.targets.some(target => target.orderIndex === item.orderIndex && (!target.chapterId || target.chapterId === item.chapterId))))) {
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '章节写入绑定损坏，不能扩大授权范围。')
   }
-  return { ...original, writing, bindings, clarification: clarification?.evidence ?? null }
+  return { ...original, ...(clarification?.evidence.version === 2 ? { spec: clarification.spec } : {}), writing, bindings, clarification: clarification?.evidence ?? null }
 }
 
 /** A read projection for workflow observers; the frozen spec/hash is untouched. */
+export function writingClarificationResolvesInput(scope: Awaited<ReturnType<typeof readWritingScope>>, marker: { callId: string }) {
+  const spec = taskSpecSchema.safeParse(scope.spec)
+  return !!scope.clarification && scope.clarification.taskId === scope.taskId && scope.clarification.callId === marker.callId
+    && scope.writing?.kind === 'bounded' && spec.success && spec.data.scope.localEditBoundary?.kind !== 'needs_input'
+}
+
 export async function effectiveWritingTaskSpec(tx: Prisma.TransactionClient, subject: Subject, spec: TaskSpec): Promise<TaskSpec> {
-  if (spec.scope.writingClarificationProtocol !== 1) return spec
+  if (spec.scope.writingClarificationProtocol === undefined) return spec
   const scope = await readWritingScope(tx, subject)
   if (!scope.clarification || scope.taskId !== spec.id) return spec
-  const projection = { ...spec, scope: { ...spec.scope, writing: scope.writing,
+  const projection = { ...spec, scope: { ...spec.scope, ...taskSpecSchema.parse(scope.spec).scope, writing: scope.writing,
     ...(spec.scope.writingInterpretation ? { writingInterpretation: { ...spec.scope.writingInterpretation } } : {}) } }
   // This authenticated observer projection is never persisted as the root.
   if (projection.scope.writingInterpretation) projection.scope.writingInterpretation.scopeHash = frozenWritingScopeHash(projection.scope)
@@ -376,7 +384,10 @@ export function originalSelectionBoundary(value: unknown) {
 export async function assertSelectionBodyEffect(tx: Prisma.TransactionClient, subject: Subject,
   chapter: { id: string; revision: number }, options: { mutation?: 'range' | 'replace' | 'append'; after?: string;
     editRanges?: Array<{ start: number; end: number; newText: string }> }, automatic = false) {
-  const spec = (await readOriginalTaskRequest(tx, subject)).spec
+  const original = await readOriginalTaskRequest(tx, subject)
+  const parsed = taskSpecSchema.safeParse(original.spec)
+  const spec = parsed.success && parsed.data.scope.writingClarificationProtocol === 2
+    ? await effectiveWritingTaskSpec(tx, subject, parsed.data) : original.spec
   const conditional = await assertLocalBodyEffect(tx, subject, chapter, options, automatic, spec)
   const boundary = originalSelectionBoundary(spec)
   if (!boundary) return conditional
@@ -649,7 +660,7 @@ export function frozenWritingRevisionAuthority(value: unknown, chapterId: string
   if (!interpretation || !writing || interpretation.revisionDenied || spec.scope.localEditBoundary?.kind === 'needs_input'
     || spec.scope.localEditBoundary?.version === 3
     || interpretation.excludedChapterIds.includes(chapterId)) return false
-  if (writing.kind === 'needs_input') return provenNewDraft && spec.scope.writingClarificationProtocol === 1 && spec.intent === 'write'
+  if (writing.kind === 'needs_input') return provenNewDraft && spec.scope.writingClarificationProtocol !== undefined && spec.intent === 'write'
   const action = interpretation.operations.some(operation => operation.polarity === 'affirmative'
     && (operation.kind === 'revise' || spec.intent === 'write' && operation.kind === 'write'))
   return action && (writing.kind === 'unbounded' || writing.targets.some(target => target.chapterId === chapterId)

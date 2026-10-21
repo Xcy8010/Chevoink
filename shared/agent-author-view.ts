@@ -1,5 +1,5 @@
 import type { AgentMessagePart, AgentUIMessage } from './contracts/index.js'
-import { containsAgentProtocolArtifact, mapAgentVisibleProse, stripAgentProtocolArtifacts } from './agent-output.js'
+import { containsAgentProtocolArtifact, mapAgentVisibleProse, normalizeAgentCitationLinks, stripAgentProtocolArtifacts } from './agent-output.js'
 import { getAgentToolPresentation, hasAgentToolPresentation } from './agent-tool-presentation.js'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 
@@ -72,7 +72,7 @@ export function projectAgentAuthorText(text: string): string {
     && (isOperational(text) || /^\s*<(?:invoke|tool[_-]?call|function[_-]?call|\|\|DSML)/im.test(text))
     ? stripAgentProtocolArtifacts(text) : text
   const clean = removeOperationalCode(protocolClean)
-  return mapAgentVisibleProse(clean, prose => prose
+  return normalizeAgentCitationLinks(mapAgentVisibleProse(clean, prose => prose
     .split(/(\n\s*\n)/).map(paragraph => {
       if (!isOperational(paragraph)) {
         return protocolJson.test(paragraph) && /^\s*[[{]/.test(paragraph) ? '' : paragraph
@@ -89,7 +89,7 @@ export function projectAgentAuthorText(text: string): string {
       visible = visible.replace(/Story\s*Compiler/gi, '剧情编译').replace(/Chapter\s*Bridge/gi, '章节衔接')
         .replace(/Scene\s*Task/gi, '场景任务').replace(/Story\s*Charter/gi, '创作设定')
       return visible
-    }).join(''), authorQuoteRanges(clean))
+    }).join(''), authorQuoteRanges(clean)))
 }
 
 /** Partial progress has no stable classification. Keep it private until a

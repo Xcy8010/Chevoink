@@ -54,14 +54,12 @@ import { copiesQualityNeighborClause, qualityRepairSurroundings, renderQualityNe
 import { persistedContentHash } from '../semantic-progress.js'
 import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../../text-request-trace.js'
 import { persistQualityRepairAttemptAudit, type QualityRepairAttemptAudit } from '../quality-repair-audit.js'
+import { parseQualityRepairResponse, partitionQualityRepairResponse, QUALITY_REPAIR_RETAIN_RULE } from '../quality-repair-response.js'
 
 const READ = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const WRITE = { plan: 'deny', build: 'allow', review: 'allow' } as const
 const CONTENT_WRITE = { plan: 'deny', build: 'allow', review: 'deny' } as const
 
-const repairEnvelopeSchema = z.object({
-  patches: z.array(z.object({ findingId: z.string().min(1), replacement: z.string().max(2_000) })).min(1).max(12),
-})
 const experienceAnchorToolSchema = experienceAnchorInputSchema
   .omit({ sourceId: true, sourceRevision: true })
   .extend({ sourceChapterId: z.string().min(1).optional(), sourceRevision: z.number().int().positive().optional() })
@@ -102,6 +100,33 @@ export function reportDisplay(report: Awaited<ReturnType<typeof getQualityReport
   }
 }
 
+/** Model-facing evidence is independent of the UI card. Repaired reports keep
+ * their original anchors, so never present those offsets as current proof. */
+export function renderQualityReportFindings(report: Awaited<ReturnType<typeof getQualityReport>>) {
+  const metrics = report.deterministicMetrics
+  const source = metrics && typeof metrics === 'object' && !Array.isArray(metrics) ? metrics.sourceRevision : undefined
+  const sourceRevision = typeof source === 'number' && Number.isSafeInteger(source) ? source : report.chapterRevision
+  return `质量逐项原始判断（评论可能误读语义；引文有效不证明解释正确；旧版本证据不授权当前改写）：\n${JSON.stringify({
+    reportId: report.id, chapterId: report.chapterId, reportRevision: report.chapterRevision, sourceRevision, status: report.status,
+    findings: report.findings.map(finding => {
+      const current = qualityReportCheckedCurrentContent(report, report.chapter.revision, report.chapter.content) && report.chapter.revision === sourceRevision
+        && report.chapter.content.slice(finding.startOffset, finding.endOffset) === finding.evidenceExcerpt
+        && finding.evidenceHash === createHash('sha256').update(finding.evidenceExcerpt).digest('hex')
+      return { source: 'quality', reportId: report.id, findingId: finding.id, signal: finding.signal, severity: finding.severity,
+        disposition: finding.disposition, authorFeedback: finding.authorFeedback, sourceRevision,
+        start: finding.startOffset, end: finding.endOffset, evidenceHash: finding.evidenceHash, evidence: finding.evidenceExcerpt,
+        explanation: finding.explanation, suggestion: finding.suggestion, currentEvidence: current,
+        ...(current ? qualityRepairSurroundings(report.chapter.content, finding.startOffset, finding.endOffset) : {}) }
+    }),
+  })}`
+}
+
+export function renderQualityRetainProposals(report: QualityReport, retained: Array<{ findingId: string; reason: string }>, sourceRevision = report.chapterRevision) {
+  return retained.length ? `\n有界修订器建议保留（原 finding 仍待处理；不代表通过，须由主模型核对当前报告后通过现有决定机制处理）：\n${JSON.stringify(retained.map(item => ({
+    source: 'quality', reportId: report.id, findingId: item.findingId, sourceRevision, reason: item.reason,
+  })))}` : ''
+}
+
 export function buildCriticSystem(lens: 'balanced' | 'story' | 'style'): string {
   const lensRule = lens === 'story'
     ? '本轮优先审查 plot_progress、emotion_grounding、causal_gap、chapter_bridge、reader_pull、character_voice。'
@@ -112,6 +137,8 @@ export function buildCriticSystem(lens: 'balanced' | 'story' | 'style'): string 
 最近邻文只作为声音、意象和因果的比较依据，发现必须定位当前正文；标明省略的范围不在检查覆盖内。词组重合度不能识别同义复述，也不能证明文风好坏：另行判断反复换词却没有新增信息的语义重复，给出本章逐字证据及具体重复关系。单次“不是……而是……”、有意排比、母题回响不构成错误；不强迫错别字、语病或随机断句来制造人类感。计划、桥状态与正文冲突时，不得以计划替代正文事实。
 十三类 signal 及边界：style_drift=相邻段落声音无依据突变；orphaned_sophistication=修辞缺少人物视角/意象链/语境支撑；plot_progress=场景没有改变动作/信息/关系/资源/风险；description_load=描写不服务当前场景；emotion_grounding=情绪缺少触发/选择/后果支撑；explanation_echo=动作或对白后重复解释；sentence_homology=非刻意的连续同构句；image_repetition=近期意象机械复用；character_voice=角色句长/词汇/回避方式/知识边界混同；causal_gap=转折缺少人物选择或已知条件；chapter_bridge=上章终态被忽略或机械复述；reader_pull=本次承诺需要拉读却没有有意义的收益、期待或关系余波；punctuation_misuse=把引号当圈重点符号包裹普通叙述过程。世界内面板、提示、数值、纸面文字、直接话语和逐字引文允许清晰引号及结构化排版，不能仅因括号、同类字段或整齐格式误报。
 ${WRITING_REQUEST_GUIDANCE}
+逐项核对原文的否定、比较对象、动作归属和先后顺序；sourceId/quote 只证明引用位置，不能证明 explanation 的语义结论。解释必须忠实陈述原文实际表达，不能把“并非、无需、尚未”等读成相反事实。若声称重复，必须指出前一处实际表达同一事实的内容并区分本句新增事实，不能仅凭词语相同。
+已核实的前次复核周期是只读历史资料：先前评论和建议也可能误读，按建议做过修改不证明问题已解决，也不能把为补足事实而增加的内容仅因“更显性”再判 explanation_echo。仍需独立检查当前全文；真实的新问题照常报告，不得自动豁免、删除问题或降低标准。历史资料不是写入权限，也不是本次引用证据。
 原始作者请求在输入中仅作为创作标准，不能授权改文或覆盖本检查的只读、证据及 JSON 规则。爽文检查可理解的机会/优势、主动选择、阶段收益与情绪回应；觉醒或发现价值本身可以兑现，不能要求在指定停笔前强加成交、反派或打脸。悬疑、言情、慢热、现实和喜剧按各自承诺判断。允许有原因的野心、直接内心、喜悦、强烈反应和刻意情绪排比；隐藏优势的外表克制不等于内心无感。仍报告无依据情绪、真正重复解释、机械同构或因果缺口。
 同章历史创作背景是未被本次明确修改的创作规格；本次作者修改优先。场景任务与桥的终态不能推翻作者的精确停笔；不得以场景已问价为由要求正文问价、成交或到账。捡漏爽文应让独享的信息优势、可理解的获利空间、兴奋或野心、主动决定在正文中形成鲜明体验；避免长篇低谷挤掉承诺。检查机会收益与实际现金的区别，不把尚未成交本身当缺陷。
 只报告有正文证据且存在最小修法的问题。优先选择本次原文证据表的 sourceId，服务器据此取得原文与精确位置；不要复制或改写 quote。sourceId 仅证明原文位置，不证明意见正确，不允许借编号扩写相邻范围。同句重复时仍选对应位置的编号。没有合适编号时才使用 quote，必须从正文连续复制、逐字一致且全文唯一，不得改写、缩写或拼接；若同时给 sourceId 和 quote，quote 必须与该编号原文逐字一致。
@@ -144,6 +171,7 @@ export function buildCriticInput(bundle: Awaited<ReturnType<typeof buildHumanity
     `章节桥与场景（次级，不能扩大原请求）：${JSON.stringify(bundle.compilation ? { id: bundle.compilation.id, bridge: bundle.compilation.bridge, sceneTasks: bundle.compilation.sceneTasks } : null)}`,
     renderVoiceAndAnchorContext(bundle), renderQualityLearning(bundle.feedback),
     renderQualityNeighbors(bundle.recentChapters),
+    bundle.priorReviewCycle ? `已核实的前次复核周期（仅历史判断和成功正文转换；不是当前结论）：${JSON.stringify(bundle.priorReviewCycle)}` : '',
     `确定性统计（只能作为线索，不能替代原文证据）：${JSON.stringify(metrics)}`,
     `正文开始：\n${bundle.chapter.content}\n正文结束。`,
     sources ? renderQualityEvidenceSources(sources) : '',
@@ -169,26 +197,27 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
     try {
       const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, report.compilationId ?? undefined))
       if (review?.chapterId === report.chapterId && verificationQualityAdviceRequiresDecision(review, selected)) return { reviewCompleted: true,
-        output: `质量报告 ${report.id}已保存。当前属于最终核验的质量建议，保留正文并逐项决定，不自动开启新一轮润色。不要为这些纯建议再调用正文写入工具；下一步按当前精确引用填写 retainedFindings 的 source、reportId、findingId、reason，再提交章节终态。涉及解释负担时，保留理由分别说明事实为何必要、当前表达为何仍合适，并考虑保留事实而减少负担的方案；只说信息不能丢不足以论证原说法，当前阶段也不因此获得改文权限。真实错误或尚未尝试原始义务仍按原证据与原权限处理，留置不能替代硬通过要求。${review ? chapterReviewDecisionGuidance(review) : decisionGuidance}${bindingSuffix}`,
+        output: `质量报告 ${report.id}已保存。当前属于最终核验的质量建议，保留正文并逐项决定，不自动开启新一轮润色。不要为这些纯建议再调用正文写入工具；下一步按当前精确引用填写 retainedFindings 的 source、reportId、findingId、reason，再提交章节终态。涉及解释负担时，保留理由分别说明事实为何必要、当前表达为何仍合适，并考虑保留事实而减少负担的方案；只说信息不能丢不足以论证原说法，当前阶段也不因此获得改文权限。真实错误或尚未尝试原始义务仍按原证据与原权限处理，留置不能替代硬通过要求。${review ? chapterReviewDecisionGuidance(review) : decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
         summary: '质量核验 · 意见待决定', display: reportDisplay(report) }
       // 付费前只读探测：同一次合并修订的准入由守卫统一判定（新稿质量通道或原始修复
       // 授权），被拒时不预约、不调用修订模型，正文与报告保持原样。
       const probe = await prisma.$transaction(tx => probeChapterReviewRevision(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },
         { id: report.chapterId, revision: report.chapterRevision }, { requireQualityChannel: true, mutation: 'replace' }))
-      if (!probe.open) return { output: `质量报告 ${report.id}已保留，自动修订未应用：${probe.message}剩余意见保留待审，不重复自动改写。${decisionGuidance}${bindingSuffix}`,
+      if (!probe.open) return { output: `质量报告 ${report.id}已保留，自动修订未应用：${probe.message}剩余意见保留待审，不重复自动改写。${decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
         summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
       if (await reserveQualityAutoRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id })) {
         const repaired = await applySelectedQualityRepairs(ctx, report, selected, frozenQuality)
-        if (repaired) {
+        const retainedNote = renderQualityRetainProposals(report, repaired?.retainedFindings ?? [], checkedRevision)
+        if (repaired?.result) {
           const remaining = repaired.report.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected').length
           return {
-            output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。修订回执已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 和 quality_analyze 只读复核当前版本，旧 critic 结论不证明修订后正文已检查。${remaining ? decisionGuidance : ''}${bindingSuffix}`,
+            output: `严谨创作质量检查完成：${cached ? '复用已绑定报告，' : ''}已集中落实警告与建议，原子修订 ${repaired.patchCount} 处${remaining ? `；另有 ${remaining} 项因重叠、数量上限或无安全补丁保留待审，未标记为已修复` : ''}。修订回执已绑定 r${repaired.result.updated.revision}，不再重复质量修订；正文已变化，提交前必须调用 continuity_validate 和 quality_analyze 只读复核当前版本，旧 critic 结论不证明修订后正文已检查。${remaining ? decisionGuidance : ''}${bindingSuffix}${retainedNote}\n${renderQualityReportFindings(repaired.report)}`,
             summary: `人类感质量检查 · r${checkedRevision} 已检查，修订 ${repaired.patchCount} 处至 r${repaired.result.updated.revision}，需复检`, display: reportDisplay(repaired.report),
             semanticTransition: { targetId: `chapter:${repaired.result.updated.id}`, beforeHash: persistedContentHash(repaired.result.before), afterHash: persistedContentHash(repaired.result.after) },
             snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },
           }
         }
-        return { output: `质量检查已完成：${warningCount} 个需关注问题、${advisoryCount} 个建议；已尝试集中修订，但未获得可安全验证且实际改变正文的补丁，正文未修改，意见保留待审。同一报告不循环重试。${decisionGuidance}${bindingSuffix}`,
+        return { output: `质量检查已完成：${warningCount} 个需关注问题、${advisoryCount} 个建议；已尝试集中修订，但未获得可安全验证且实际改变正文的补丁，正文未修改，意见保留待审。同一报告不循环重试。${decisionGuidance}${bindingSuffix}${retainedNote}\n${renderQualityReportFindings(report)}`,
           summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
       }
     } catch (error) {
@@ -196,13 +225,13 @@ async function finishQualityReview(ctx: ToolContext, report: QualityReport, bind
       if (!(error instanceof DataAccessError) || !REPAIR_BLOCK_CODES.has(error.code)) throw error
       const stale = !REPAIR_CHANNEL_CODES.has(error.code)
       return { reviewCompleted: true, ...(stale ? { outcome: 'failed' as const, failureCode: error.code } : {}),
-        output: `质量报告已保留，自动修订未应用：${error.message}${stale ? '当前证据或版本不可用于本次修订，不能据此宣称已修复或直接提交；请核对当前正文与报告。' : '剩余意见保留待审，不重复自动改写。'}${decisionGuidance}${bindingSuffix}`,
+        output: `质量报告已保留，自动修订未应用：${error.message}${stale ? '当前证据或版本不可用于本次修订，不能据此宣称已修复或直接提交；请核对当前正文与报告。' : '剩余意见保留待审，不重复自动改写。'}${decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
         summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
     }
   }
   const reason = !automatic ? '本次只保存检查意见，正文未改动；修订须由原始请求明确授权'
     : report.findings.length ? '自动修订已尝试、报告不属于当前修订任务或没有待处理的安全候选；剩余意见仍保留待审' : '未发现有证据的问题'
-  return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.findings.length ? '检查完成仍有意见，不能宣称全部建议已应用或全部问题已解决；剩余意见保留待审，不要求为清零意见改稿' : '本次完整检查未发现有证据的问题'}。${report.status === 'needs_repair' ? '不能宣称质量检查通过。' : ''}${decisionGuidance}${bindingSuffix}`,
+  return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.findings.length ? '检查完成仍有意见，不能宣称全部建议已应用或全部问题已解决；剩余意见保留待审，不要求为清零意见改稿' : '本次完整检查未发现有证据的问题'}。${report.status === 'needs_repair' ? '不能宣称质量检查通过。' : ''}${decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
     summary: cached ? '复用当前质量报告' : `人类感质量检查 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
 }
 
@@ -217,10 +246,11 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
   const repairRuntime = frozenQuality?.runtime ?? await resolveReviewModelRuntime({ ...ctx, task: 'quality' })
   const selectedById = new Map(selected.map((finding) => [finding.id, finding]))
   const patches = new Map<string, { findingId: string; replacement: string }>()
+  const retained = new Map<string, { findingId: string; reason: string }>()
   const unsafe = new Set<string>()
   let trigger: QualityRepairAttemptAudit['trigger'] = 'initial'
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const remaining = selected.filter((finding) => !patches.has(finding.id) && !unsafe.has(finding.id))
+    const remaining = selected.filter((finding) => !patches.has(finding.id) && !retained.has(finding.id) && !unsafe.has(finding.id))
     if (remaining.length === 0) break
     // Only a normally returned response may enter format recovery. A timeout
     // or transport error can carry unknown billed usage; never dispatch again.
@@ -237,7 +267,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
     try {
       ctx.signal.throwIfAborted()
       response = await withTextRequestTrace(trace, () => generateTextCompletion(
-        `你是与 Writer/Critic 上下文隔离的局部修订编辑。只替换每条 evidence 本身，不扩写相邻内容，不改变事实、情节结果、人物知识或作者刻意的口语与断句。删除优先于同义词替换；补写只补建议中缺失的具体动作、选择或后果。解释负担与事实必要性分开：保留危机条件、期限、后果及读者未知规则，可在 evidence 内用视角内感知、短念头或有交际必要的台词承载，不强制转对白，不改机器人程序声口、人物辨析或有意对比。建议若指向 evidence 外，只保留原证据，不借 before/after 修改邻文。punctuation_misuse 只移除误用符号，保留人物直接话语和逐字引文。replacement 可以为空。严格只输出 JSON：{"patches":[{"findingId":"原 id","replacement":"只替换证据范围的文本"}]}。必须为每个输入 id 返回且只返回一次。`,
+        QUALITY_REPAIR_RETAIN_RULE + '\n' + `你是与 Writer/Critic 上下文隔离的局部修订编辑。只替换每条 evidence 本身，不扩写相邻内容，不改变事实、情节结果、人物知识或作者刻意的口语与断句。删除优先于同义词替换；补写只补建议中缺失的具体动作、选择或后果。解释负担与事实必要性分开：保留危机条件、期限、后果及读者未知规则，可在 evidence 内用视角内感知、短念头或有交际必要的台词承载，不强制转对白，不改机器人程序声口、人物辨析或有意对比。建议若指向 evidence 外，只保留原证据，不借 before/after 修改邻文。punctuation_misuse 只移除误用符号，保留人物直接话语和逐字引文。replacement 可以为空。严格只输出 JSON，以下两种条目按实际需要放入对应数组，数组可以为空：{"patches":[{"findingId":"需要修改的原 id","replacement":"只替换证据范围的文本"}],"retainedFindings":[{"findingId":"需要保留的原 id","reason":"具体理由"}]}。必须为每个输入 id 返回且只返回一次。`,
         `${buildQualityRepairContext(bundle)}\n待修订证据（只有 evidence 可替换，before/after 不可改写）：\n${JSON.stringify(remaining.map(finding => ({ findingId: finding.id, signal: finding.signal,
           evidence: finding.evidenceExcerpt, explanation: finding.explanation, suggestion: finding.suggestion,
           ...qualityRepairSurroundings(report.chapter.content, finding.startOffset, finding.endOffset) })))}`,
@@ -270,20 +300,18 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
       audit.classifications = ['parse_error']
       trigger = 'parse_error'
     }
-    const parsedAttempt = envelope === undefined ? null : repairEnvelopeSchema.safeParse(envelope)
-    if (parsedAttempt && !parsedAttempt.success) {
-      audit.classifications = ['schema_error']
-      trigger = 'schema_error'
+    let parsedAttempt: ReturnType<typeof parseQualityRepairResponse> | undefined
+    if (envelope !== undefined) try { parsedAttempt = parseQualityRepairResponse(envelope) } catch {
+      audit.classifications = ['schema_error']; trigger = 'schema_error'
     }
-    if (parsedAttempt?.success) {
-      const counts = { requested: remaining.length, returned: parsedAttempt.data.patches.length,
-        accepted: 0, missing: 0, duplicate: 0, unknown: 0, noOp: 0, unsafe: 0 }
-      const requested = new Set(remaining.map(finding => finding.id))
-      for (const finding of remaining) if (!parsedAttempt.data.patches.some(patch => patch.findingId === finding.id)) counts.missing++
-      for (const patch of parsedAttempt.data.patches) {
-        const finding = selectedById.get(patch.findingId)
-        if (!finding || !requested.has(patch.findingId)) { counts.unknown++; continue }
-        if (parsedAttempt.data.patches.filter(item => item.findingId === patch.findingId).length !== 1) { counts.duplicate++; continue }
+    if (parsedAttempt) {
+      const candidates = partitionQualityRepairResponse(parsedAttempt, remaining.map(finding => finding.id))
+      const counts = { requested: remaining.length, ...candidates.counts, accepted: 0, noOp: 0, unsafe: 0,
+        retained: candidates.retainedFindings.length }
+      for (const item of candidates.retainedFindings) retained.set(item.id, { findingId: item.id, reason: item.reason })
+      for (const candidate of candidates.patches) {
+        const patch = { findingId: candidate.id, replacement: candidate.replacement }
+        const finding = selectedById.get(patch.findingId)!
         if (copiesQualityNeighborClause(report.chapter.content, finding.startOffset, finding.endOffset, patch.replacement)) {
           counts.unsafe++
           unsafe.add(finding.id)
@@ -298,6 +326,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
         ...(counts.duplicate || counts.unknown ? ['schema_error' as const] : []),
         ...(counts.missing ? ['missing_patch' as const] : []), ...(counts.noOp ? ['no_op' as const] : []),
         ...(counts.unsafe ? ['unsafe_patch' as const] : []), ...(counts.accepted ? ['valid_patch' as const] : []),
+        ...(counts.retained ? ['valid_retain' as const] : []),
       ]
       const retryClasses = audit.classifications.filter(kind => ['schema_error', 'missing_patch', 'no_op'].includes(kind))
       trigger = retryClasses.length === 1 ? retryClasses[0] as QualityRepairAttemptAudit['trigger'] : 'mixed_unresolved'
@@ -308,14 +337,21 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
     }
   }
   const replacements = [...patches.values()]
+  const retainedFindings = [...retained.values()]
   ctx.signal.throwIfAborted()
-  if (replacements.length === 0) return null
+  if (replacements.length === 0) {
+    if (!retainedFindings.length) return null
+    const current = await buildHumanityQualityContext(ctx.userId, ctx.novelId, report.chapterId, ctx.runId)
+    if (qualityReviewContextHash(current) !== expectedContextHash) throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '原文或复核参考已变化，旧版本保留建议不能作为当前决定。')
+    return { result: null, patchCount: 0, missingCount: selected.length, report, retainedFindings }
+  }
   // 模型若仍漏掉个别项，只应用已逐字绑定的安全补丁，并把漏项退回待审，不让整章修订归零。
   await selectQualityFindings(ctx.userId, ctx.novelId, report.id, replacements.map((patch) => patch.findingId))
   const result = await applyQualityRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id, replacements,
-    retainedFindings: retainedQualityCandidates(report, replacements), expectedContextHash, signal: ctx.signal })
+    retainedFindings: retainedQualityCandidates(report, replacements, retainedFindings), expectedContextHash, signal: ctx.signal })
   recordChapterBaseline(ctx.runId, result.updated.id, result.updated.revision)
-  return { result, patchCount: result.repairedFindingIds.length, missingCount: selected.length - result.repairedFindingIds.length, report: await getQualityReport(ctx.userId, ctx.novelId, report.id) }
+  return { result, patchCount: result.repairedFindingIds.length, missingCount: selected.length - result.repairedFindingIds.length,
+    report: await getQualityReport(ctx.userId, ctx.novelId, report.id), retainedFindings }
 }
 
 export function buildQualityRepairContext(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>): string {
@@ -378,7 +414,7 @@ export const qualityAnalyzeTool = defineTool({
     }
     let formatRecovery: QualityFormatRecovery | null = null
     const sameFailedContext = existing?.status === 'failed' && !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics)
-      && (matchingContext || ['humanity-context.v2', 'humanity-context.v3'].some(protocol => cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, protocol as 'humanity-context.v2' | 'humanity-context.v3')))
+      && (matchingContext || ['humanity-context.v2', 'humanity-context.v3', 'humanity-context.v4'].some(protocol => cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, protocol as 'humanity-context.v2' | 'humanity-context.v3' | 'humanity-context.v4')))
     if (sameFailedContext && existing.chapterRevision === bundle.chapter.revision
       && !await prisma.$transaction(tx => hasReconciledQualityRequest(tx, ctx, existing))) {
       formatRecovery = await prisma.$transaction(tx => readQualityFormatRecovery(tx, ctx, { chapterId }))
@@ -534,11 +570,11 @@ export const qualityAnalyzeTool = defineTool({
     if (correctionError) throw correctionError
     if (report.status === 'failed') return { outcome: 'failed' as const,
       failureCode: criticFallback ? 'QUALITY_REPORT_INCOMPLETE' : 'QUALITY_EVIDENCE_UNLOCATED',
-      output: criticFallback
+      output: (criticFallback
         ? `质量模型返回的报告格式不完整，不能判定质量通过。确定性报告和正文已保留；${formatRecovery ? '本次工具执行内的独立计费格式恢复已完成，报告仍不可验证；后续检查须遵守真实作者继续授权、预算与未知结果保护。' : ''}不得重复改写正文来解决格式错误。`
         : evidenceCorrectionIncomplete
           ? `部分质量意见的引用无法在正文中逐字定位，${attemptedEvidenceCorrection ? '本次引用校正未能完成，' : ''}报告已保留但不能判定质量通过。本次恢复额度已用，保留真实失败原因等待作者继续，不为解除检查阻塞改写正文。`
-          : `质量报告仍有证据未能在当前正文中定位，已定位的意见与原报告保留，${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。保留真实失败原因等待作者继续，不为解除检查阻塞改写正文。`,
+          : `质量报告仍有证据未能在当前正文中定位，已定位的意见与原报告保留，${attemptedEvidenceCorrection ? '已在本次调用内尝试一次引用校正，' : ''}仍不能判定质量通过。保留真实失败原因等待作者继续，不为解除检查阻塞改写正文。`) + '\n' + renderQualityReportFindings(report),
       summary: criticFallback ? '质量报告格式不完整' : '质量证据定位未完成', display: reportDisplay(report) }
     const reportMetrics: Record<string, unknown> = report.deterministicMetrics && typeof report.deterministicMetrics === 'object' && !Array.isArray(report.deterministicMetrics) ? report.deterministicMetrics : {}
     const unlocatedCount = typeof reportMetrics.unlocatedFindings === 'number' ? reportMetrics.unlocatedFindings : 0
@@ -561,7 +597,7 @@ export const qualityReportGetTool = defineTool({
     const readiness = await readChapterReviewReadiness(ctx.transaction ?? prisma, ctx, report.compilationId ?? undefined)
     const reviewDecisionFeedback = readiness?.qualityReportId === report.id
       && readiness.decisionFeedbackSnapshotHash === qualityDecisionSnapshotHash(report.findings) ? readiness.decisionFeedback : undefined
-    return { output: `当前质量报告 reportId=${report.id}，r${report.chapterRevision}；留置 source=quality，findingId 使用对应意见ID。\n${report.findings.map((finding) => `[${finding.id}/${findingLabel(finding.signal)}/${finding.disposition}] 「${finding.evidenceExcerpt}」→${finding.suggestion}`).join('\n') || '报告没有 finding。'}${reviewDecisionFeedback ? `\n${chapterReviewDecisionGuidance(readiness!)}` : ''}`, summary: '读取质量报告', display: reportDisplay(report), ...(reviewDecisionFeedback ? { reviewDecisionFeedback } : {}) }
+    return { output: `当前质量报告 reportId=${report.id}，r${report.chapterRevision}；留置 source=quality，findingId 使用对应意见ID。\n${renderQualityReportFindings(report)}${reviewDecisionFeedback ? `\n${chapterReviewDecisionGuidance(readiness!)}` : ''}`, summary: '读取质量报告', display: reportDisplay(report), ...(reviewDecisionFeedback ? { reviewDecisionFeedback } : {}) }
   },
 })
 
@@ -591,9 +627,9 @@ export const qualityRevisionApplyTool = defineTool({
     await prisma.$transaction(tx => assertSelectionBodyEffect(tx, ctx,
       { id: report.chapterId, revision: report.chapterRevision }, { mutation: 'replace' }, true))
     const repaired = await applySelectedQualityRepairs(ctx, report, selected)
-    if (!repaired) return { output: '局部修订器本次未返回可验证补丁，正文保持不变，可稍后重试。', summary: '局部质量修订 · 正文未改动', display: reportDisplay(report) }
+    if (!repaired?.result) return { output: '局部修订器本次未返回可验证补丁，正文保持不变，可稍后重试。' + renderQualityRetainProposals(report, repaired?.retainedFindings ?? []) + '\n' + renderQualityReportFindings(report), summary: '局部质量修订 · 正文未改动', display: reportDisplay(report) }
     return {
-      output: `已原子应用 ${repaired.patchCount} 个局部修订并绑定 r${repaired.result.updated.revision}，正文已变化；历史检查只证明原版本。写作交付前需调用 continuity_validate 和 quality_analyze 只读复核当前版本，不能继续自动改写。`,
+      output: `已原子应用 ${repaired.patchCount} 个局部修订并绑定 r${repaired.result.updated.revision}，正文已变化；历史检查只证明原版本。写作交付前需调用 continuity_validate 和 quality_analyze 只读复核当前版本，不能继续自动改写。${renderQualityRetainProposals(report, repaired.retainedFindings)}\n${renderQualityReportFindings(repaired.report)}`,
       summary: `局部质量修订 · ${repaired.patchCount} 处`,
       display: { kind: 'chapterDiff', chapterId: repaired.result.updated.id, chapterTitle: repaired.result.updated.title, before: repaired.result.before, after: repaired.result.after, appliedDirectly: true, revision: repaired.result.updated.revision },
       snapshot: { target: 'chapter', targetId: repaired.result.updated.id, field: 'content', previousValue: repaired.result.before },

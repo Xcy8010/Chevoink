@@ -104,6 +104,9 @@ describe.skipIf(!available)('J4 private versioned research sources', () => {
       await save({ ...original, content: '新事实B' }, false)
       expect(stagnant).toBe(2)
       const report = await readResearchReport(ctx, {})
+      const untitled = await saveResearchReportSection(ctx, { reportId: 'blank-heading', expectedRevision: 0,
+        section: { id: 'main', order: 0, content: '##   \n有效正文', citations: [] } })
+      expect(await prisma.agentArtifact.findUnique({ where: { id: untitled.artifactId }, select: { title: true } })).toEqual({ title: '研究报告' })
       expect(report.sections).toHaveLength(6)
       expect(report.content).toContain('真实分析成果0')
       expect(report.content).toContain('新事实B')
@@ -239,6 +242,12 @@ describe.skipIf(!available)('J4 private versioned research sources', () => {
       const saved = await saveResearchReportSection(scope, input)
       expect(saved.revision).toBe(1)
       expect(await saveResearchReportSection(scope, input)).toMatchObject({ revision: 1, replayed: true })
+      const { title: _title, ...sectionOnly } = input
+      expect(await saveResearchReportSection(scope, sectionOnly)).toMatchObject({ revision: 1, replayed: true })
+      expect(await prisma.agentArtifact.findUnique({ where: { id: saved.artifactId }, select: { title: true } })).toEqual({ title: input.title })
+      const derived = await saveResearchReportSection(scope, { ...sectionOnly, reportId: 'derived-title',
+        section: { ...input.section, content: '## 公开来源核验\n只有已核对的元数据。' } })
+      expect(await prisma.agentArtifact.findUnique({ where: { id: derived.artifactId }, select: { title: true } })).toEqual({ title: '公开来源核验' })
       await expect(saveResearchReportSection(scope, { ...input, section: { ...input.section, content: '过时覆盖。' } }))
         .rejects.toMatchObject({ code: 'RESEARCH_REPORT_CONFLICT' })
       const resumedId = randomUUID()

@@ -68,8 +68,8 @@ export const taskScopeSchema = z.object({
   /** Fresh admission permits exact, unique same-source terminal quote addressing. */
   terminalQuoteAddressProtocol: z.literal(1).optional(),
   terminalCoverageProtocol: z.literal(1).optional(),
-  /** Fresh empty-book admission may bind one explicit first-chapter answer. */
-  writingClarificationProtocol: z.literal(1).optional(),
+  /** Authenticated answers fill missing scope; v1 preserves empty-book receipts. */
+  writingClarificationProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   localEditBoundary: localEditBoundarySchema.optional(),
   selectionBoundary: z.object({ version: z.literal(1), chapterId: z.string().min(1),
     revision: z.number().int().positive(), contentHash: z.string().regex(/^[a-f0-9]{64}$/),

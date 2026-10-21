@@ -1,8 +1,8 @@
 import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { retainedFindings } from './chapter-arguments.js'
-import { readTerminalCandidate, terminalCandidateSchema, terminalReviewInput, currentTerminalReview, terminalReviewFailure, type TerminalCandidate } from '../terminal-state-review.js'
+import { readTerminalCandidate, terminalCandidateSchema, terminalCandidateInputSchema, resolveTerminalCandidate, terminalReviewInput, currentTerminalReview, terminalReviewFailure, type TerminalCandidate } from '../terminal-state-review.js'
 import { terminalCoverageInput } from '../terminal-fact-coverage.js'
-import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, continuitySemanticRule } from '../terminal-evidence-context.js'
+import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, continuitySemanticRule, type TerminalCarriedFact } from '../terminal-evidence-context.js'
 import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
 import { inspectContinuityResponse, continuityUnlocatedCandidateCount, continuityFailureOutput } from '../continuity-format-recovery.js'
@@ -675,6 +675,16 @@ export const chapterBridgeGetTool = defineTool({
       output: `当前任务没有可读取的指定 Chapter Bridge，compilationId 不能使用章节或任务合同编号。${compilation ? '编译缺少章节桥，身份异常需核对，不能重建绕过。' : await missingCompilationGuidance(db, ctx, scope)}`, summary: '未找到章节编译状态' }
     const bridge = compilation.bridge
     const committedBridge = !!bridge.committedAt && bridge.targetRevision !== null
+    const originalRequest = await readOriginalTaskRequest(db, ctx)
+    const inheritanceSource = terminalEvidenceVersion(originalRequest.spec) === 2
+      ? await readCompilerContinuitySource(db, ctx, { orderIndex: compilation.targetOrderIndex }, bridge.fromChapterId, 11) : null
+    // Protocol 11's catalog is produced only by readTerminalInheritance, which
+    // has already validated every fact and its chain. Narrow the legacy union.
+    const carriedFacts = inheritanceSource && 'preceding' in inheritanceSource && 'terminalInheritance' in inheritanceSource
+      ? inheritanceSource.terminalInheritance as TerminalCarriedFact[] | undefined : undefined
+    const inheritedFacts = (carriedFacts ?? []).filter(fact => fact.depth < 16).map(({ proofHash, field, claim }) => ({ proofHash, field, claim }))
+    const inheritanceGuidance = inheritedFacts.length
+      ? `\n可显式继承的已验证事实目录：${JSON.stringify(inheritedFacts)}\n本章仍成立的旧事实只在 continuity_validate 的 terminalState.inheritedProofs 中选择 proofHash，例如 terminalState={exitState:{},inheritedProofs:["目录中的proofHash"]}；服务端还原精确字段与事实，独立编辑仍须判断本章未改变。新增事实写入 exitState，不把未决旧事改写成新否定事实，也不必为继承而让正文复述历史。检查后 chapter_bridge_commit 省略 terminalState 即复用已核验候选。` : ''
     const bridgeState = committedBridge
       ? `本章已提交终态 r${bridge.targetRevision}${compilation.chapter && compilation.chapter.revision !== bridge.targetRevision ? '（当前正文已变化，须重新检查提交）' : ''}`
       : `入章承接${bridge.fromChapterId ? `（前章 ${bridge.fromChapterId}@r${bridge.sourceRevision}）` : '（无前章）'}；本章终态尚未提交`
@@ -696,7 +706,7 @@ export const chapterBridgeGetTool = defineTool({
         .map(item => `[findingId=${item.id}/${item.severity}/${review?.retainedDecisions?.some(saved => saved.source === 'quality' && saved.reportId === report.id && saved.findingId === item.id) ? '已明确留置' : item.disposition}] 「${item.evidenceExcerpt}」；原因：${item.explanation}；建议：${item.suggestion}`).join('\n') || '无剩余候选。'}`
       : report ? `质量报告 reportId=${report.id} 不属于当前完整正文检查，不能用旧候选证明当前版本通过。` : '当前质量报告尚未建立。'
     return {
-      output: `compilationId=${compilation.id}，chapterId=${compilation.chapterId ?? '尚未创建'}，阶段=${compilation.stage}，状态=${compilation.status}，目标第 ${compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。\n${items.join('\n')}\nScene Task：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜目标 ${task.goal}｜阻力 ${task.obstacle}｜代价 ${task.cost}｜转折 ${task.turn}`).join('\n') || '尚未建立'}\n${qualityDetails}\n${review ? chapterReviewDecisionGuidance(review) : ''}`,
+      output: `compilationId=${compilation.id}，chapterId=${compilation.chapterId ?? '尚未创建'}，阶段=${compilation.stage}，状态=${compilation.status}，目标第 ${compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。\n${items.join('\n')}\nScene Task：\n${compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜目标 ${task.goal}｜阻力 ${task.obstacle}｜代价 ${task.cost}｜转折 ${task.turn}`).join('\n') || '尚未建立'}\n${qualityDetails}\n${review ? chapterReviewDecisionGuidance(review) : ''}${inheritanceGuidance}`,
       ...(currentQuality && review?.decisionFeedback && review.decisionFeedbackSnapshotHash === qualityDecisionSnapshotHash(report.findings)
         ? { reviewDecisionFeedback: review.decisionFeedback } : {}),
       summary: `读取第 ${compilation.targetOrderIndex} 章章节桥`,
@@ -809,7 +819,7 @@ export const continuityValidateTool = defineTool({
     chapterId: z.string().min(1).optional().describe('既有章节的真实编号，从 chapter_read 或作品目录取得；不能填编译编号'),
     compilationId: z.string().min(1).optional().describe('仅检查当前写作流水线时传；独立审阅既有章节省略'),
     focus: z.string().max(500).optional().describe('作者明确要求额外关注的连续性范围；未指定时不传'),
-    terminalState: terminalCandidateSchema.optional().describe('写作交付前要提交的真实章末状态 {exitState,lastUnfinishedAction}；须在本次独立检查前给出。不能从场景计划抄事实，缺失信息保持未知。提交必须与此候选一致；单独审阅既有章省略。'),
+    terminalState: terminalCandidateInputSchema.optional().describe('写作交付前要提交的真实章末状态 {exitState,lastUnfinishedAction}；须在本次独立检查前给出。不能从场景计划抄事实，缺失信息保持未知。提交必须与此候选一致；单独审阅既有章省略。'),
   }),
   coerceArgs(raw) {
     const source = coerceToolArgumentEnvelope(raw)
@@ -908,7 +918,11 @@ export const continuityValidateTool = defineTool({
     const frozenReviewInput = reviewInput(compilation)
     const bridge = compilation.bridge
     const sourceChapter = await readCompilerContinuitySource(prisma, ctx, chapter, bridge.fromChapterId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
-    const terminalCandidate = args.terminalState ?? readTerminalCandidate(compilation.validation)
+    const selectedTerminal = args.terminalState ? resolveTerminalCandidate(args.terminalState,
+      sourceChapter && 'preceding' in sourceChapter && 'terminalInheritance' in sourceChapter ? sourceChapter.terminalInheritance : [], terminalVersion) : undefined
+    if (selectedTerminal && !selectedTerminal.ok) return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED',
+      summary: '终态证明选择未通过', output: selectedTerminal.reason }
+    const terminalCandidate = selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation)
       ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
     const terminalEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
       terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate)) : undefined

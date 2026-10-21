@@ -3,7 +3,7 @@ import { storyStateSchema } from '../../../shared/contracts/story-compiler-contr
 import { continuitySourceSegments, locateUniqueContinuityQuote } from './continuity-review-context.js'
 import { parseQualityJsonObject } from './quality-evidence.js'
 import { runtimeJson } from './runtime-common.js'
-import { terminalEvidenceContextSchema, type TerminalEvidenceContext } from './terminal-evidence-context.js'
+import { terminalEvidenceContextSchema, type TerminalCarriedFact, type TerminalEvidenceContext } from './terminal-evidence-context.js'
 import { inspectTerminalCoverage, terminalCoverageGuidance } from './terminal-fact-coverage.js'
 
 export const terminalCandidateSchema = z.object({
@@ -11,6 +11,41 @@ export const terminalCandidateSchema = z.object({
   lastUnfinishedAction: z.string().max(1000).default(''),
 }).strict()
 export type TerminalCandidate = z.infer<typeof terminalCandidateSchema>
+/** Selection is a tool input only; saved candidates and paid audits retain their
+ * original schema. A selected proof supplies identity, never a fresh verdict. */
+export const terminalCandidateInputSchema = terminalCandidateSchema.extend({
+  inheritedProofs: z.array(z.string().regex(/^[a-f0-9]{64}$/u)).max(200).optional()
+    .describe('从 chapter_bridge_get 的已验证事实目录中显式选择 proofHash；服务端还原原字段与原文事实，仍需独立判断本章未改变。不要改写旧事实或填写临时片段编号。'),
+})
+export type TerminalCandidateInput = z.infer<typeof terminalCandidateInputSchema>
+const inheritedFieldSchema = z.enum(['knowledge', 'body', 'objects', 'relationships', 'openLoops'])
+
+export function resolveTerminalCandidate(input: TerminalCandidateInput, carried: readonly TerminalCarriedFact[] | undefined, protocol?: 1 | 2):
+  { ok: true; candidate: TerminalCandidate } | { ok: false; reason: string } {
+  const { inheritedProofs, ...plain } = input
+  const parsed = terminalCandidateSchema.safeParse(plain)
+  if (!parsed.success) return { ok: false, reason: '终态候选格式无效；保留完整 exitState 与 lastUnfinishedAction 后重试。' }
+  if (!inheritedProofs?.length) return { ok: true, candidate: parsed.data }
+  if (protocol !== 2) return { ok: false, reason: '原任务未启用可继承事实证明；请使用原合同允许的正文候选，不升级旧任务协议。' }
+  if (new Set(inheritedProofs).size !== inheritedProofs.length) return { ok: false, reason: 'inheritedProofs 包含重复 proofHash；每个证明只选择一次。' }
+  const selected: Array<{ proofHash: string; field: z.infer<typeof inheritedFieldSchema>; claim: string }> = []
+  for (const proofHash of inheritedProofs) {
+    const matches = carried?.filter(fact => fact.proofHash === proofHash) ?? []
+    const field = inheritedFieldSchema.safeParse(matches[0]?.field)
+    if (matches.length !== 1 || !field.success || matches[0].depth >= 16) return { ok: false,
+      reason: '所选 proofHash 已不可用、已过期或达到继承深度上限；请 chapter_bridge_get 读取当前目录后重新选择，不能猜测或删除未决事实绕过核验。' }
+    selected.push({ proofHash, field: field.data, claim: matches[0].claim })
+  }
+  // Input ordering and transient tN addresses do not change the canonical set.
+  // Typed claims remain intact, including conflicting or differently filed ones.
+  for (const fact of selected.sort((a, b) => a.proofHash.localeCompare(b.proofHash))) {
+    const values = parsed.data.exitState[fact.field]
+    if (!values.includes(fact.claim)) values.push(fact.claim)
+  }
+  const candidate = terminalCandidateSchema.safeParse(parsed.data)
+  return candidate.success ? { ok: true, candidate: candidate.data }
+    : { ok: false, reason: '显式选择后的终态超出字段容量或事实长度上限；请核对候选与目录，不得静默截断或删除事实。' }
+}
 export const terminalVerdictSchema = z.object({ path: z.string().max(100),
   verdict: z.enum(['supported', 'unknown', 'planned', 'negated', 'attributed']),
   segmentIds: z.array(z.string().regex(/^c[0-9]+$/)).max(8),

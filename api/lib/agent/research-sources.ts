@@ -37,12 +37,13 @@ const reportSectionSchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,64
 const reportStateSchema = z.object({ kind: z.literal('researchReport'), taskKey: z.string(), revision: z.number().int().positive(),
   sections: z.array(reportSectionSchema).max(100) }).strict()
 export const researchReportSaveParameters = z.object({ reportId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).default('main'),
-  title: z.string().trim().min(1).max(160), expectedRevision: z.number().int().nonnegative(), section: reportSectionSchema }).strict()
+  title: z.string().trim().min(1).max(160).optional().describe('报告标题；更新区块时省略沿用已保存标题，首次省略使用区块标题。'),
+  expectedRevision: z.number().int().nonnegative(), section: reportSectionSchema }).strict()
 
 /** Save only the addressed section. A replay cannot append it twice, and a
  * stale revision cannot overwrite a newer report. No chapter/plan writes. */
 export async function saveResearchReportSection(scope: Scope, input: {
-  reportId: string; title: string; expectedRevision: number; section: z.infer<typeof reportSectionSchema>;
+  reportId: string; title?: string; expectedRevision: number; section: z.infer<typeof reportSectionSchema>;
 }) {
   const parsed = researchReportSaveParameters.parse(input)
   return prisma.$transaction(async tx => {
@@ -73,9 +74,11 @@ export async function saveResearchReportSection(scope: Scope, input: {
           return { url: saved.source.canonicalUrl, revision: citation.revision, start: citation.start, end: citation.end, excerptHash: citation.excerptHash }
         })) }))) }))
     const beforeHash = await reportHash(previous?.title ?? '', state?.sections ?? [])
+    const inferredTitle = parsed.section.content.match(/^#{1,6}[\t ]+([^\r\n]+)/mu)?.[1].trim().slice(0, 160) || '研究报告'
+    const title = parsed.title ?? previous?.title ?? inferredTitle
     const targetId = `research-report:${scope.userId}:${scope.sessionId}:${taskKey}:${parsed.reportId}`
     const priorSection = state?.sections.find(section => section.id === parsed.section.id)
-    if (previous && previous.title === parsed.title && JSON.stringify(priorSection) === JSON.stringify(parsed.section)) {
+    if (previous && previous.title === title && JSON.stringify(priorSection) === JSON.stringify(parsed.section)) {
       return { artifactId: id, revision: state!.revision, chineseCharacters: countReportChineseCharacters(previous.content), replayed: true,
         semanticTransition: { targetId, beforeHash, afterHash: beforeHash } }
     }
@@ -120,10 +123,10 @@ export async function saveResearchReportSection(scope: Scope, input: {
     if (Buffer.byteLength(content, 'utf8') > 2 * 1024 * 1024) throw new DataAccessError(413, 'RESEARCH_REPORT_TOO_LARGE', '报告超过保存上限。')
     const revision = (state?.revision ?? 0) + 1
     const metadata = { kind: 'researchReport', taskKey, revision, sections }
-    if (previous) await tx.agentArtifact.update({ where: { id }, data: { title: parsed.title, content, metadata } })
-    else await tx.agentArtifact.create({ data: { id, runId: scope.runId, artifactType: 'researchReport', title: parsed.title, content, metadata } })
+    if (previous) await tx.agentArtifact.update({ where: { id }, data: { title, content, metadata } })
+    else await tx.agentArtifact.create({ data: { id, runId: scope.runId, artifactType: 'researchReport', title, content, metadata } })
     return { artifactId: id, revision, chineseCharacters: countReportChineseCharacters(content), replayed: false,
-      semanticTransition: { targetId, beforeHash, afterHash: await reportHash(parsed.title, sections) } }
+      semanticTransition: { targetId, beforeHash, afterHash: await reportHash(title, sections) } }
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
 }
 

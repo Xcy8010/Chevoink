@@ -531,7 +531,7 @@ export async function readPersistedWritingWorkflowMilestones(input: {
   if (!parsed.success || parsed.data.runId !== input.runId || parsed.data.scope.novelId !== input.novelId
     || !['write', 'revise'].includes(parsed.data.intent) || parsed.data.scope.selection
     || ['proposal_only', 'conversation_only'].includes(parsed.data.writingPacing ?? '')
-    || parsed.data.scope.writing?.kind !== 'bounded' && parsed.data.scope.writingClarificationProtocol !== 1) return []
+    || parsed.data.scope.writing?.kind !== 'bounded' && parsed.data.scope.writingClarificationProtocol === undefined) return []
   const main = { userId: input.userId, novelId: input.novelId, runtimeProtocolVersion: 0, taskRootId: null,
     incomingChildGrant: null, session: { userId: input.userId, novelId: input.novelId, spawnedFromRunId: null, spawnedFromSessionId: null } }
   const current = await db.agentRun.findFirst({ where: { ...main, id: input.runId, status: { in: ['queued', 'running', 'awaiting_approval'] } } })

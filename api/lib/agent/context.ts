@@ -625,7 +625,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     history,
     workspace: workspaceSnapshot ? [{ role: 'user', content: workspaceSnapshot }] : [],
     todo: todoDigest ? [{ role: 'user', content: todoDigest }] : [],
-    task: [{ role: 'user', content: renderTaskSpec(input.taskSpec.scope.writingClarificationProtocol === 1
+    task: [{ role: 'user', content: renderTaskSpec(input.taskSpec.scope.writingClarificationProtocol !== undefined
       ? await prisma.$transaction(tx => effectiveWritingTaskSpec(tx,
         { userId: input.userId, novelId: input.novelId, runId: input.runId }, input.taskSpec)) : input.taskSpec) }],
     intent: [{ role: 'user', content: intentSections.join('\n\n') }],

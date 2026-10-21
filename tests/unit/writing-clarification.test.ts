@@ -49,18 +49,19 @@ describe('authenticated first-chapter scope clarification', () => {
     expect(renderTaskSpec(frozen)).toContain('先用 ask_user 一次询问该落点')
     expect(f.create).not.toHaveBeenCalled()
   })
-  it('keeps fresh protocol2 scene creation eligible for an authenticated first-chapter answer', async () => {
+  it.each([firstChapterAnswer, '第一章', '写入第一章'])('keeps fresh protocol2 scene creation eligible for the actual first-chapter answer: %s', async answer => {
     const f = fixture()
     const fresh = buildTaskSpec({ ...f.subject, prompt: shortSceneRequest, authorWritingProtocol: 2,
       reviewProtocol: 1, localEditProtocol: 1 })
     const frozen = await scope.freezeWritingScope(f.tx, f.subject, fresh, shortSceneRequest, 2)
-    expect(frozen).toMatchObject({ intent: 'write', scope: { writingTargetProtocol: 2, writingClarificationProtocol: 1,
+    expect(frozen).toMatchObject({ intent: 'write', scope: { writingTargetProtocol: 2, writingClarificationProtocol: 2,
       writing: { kind: 'needs_input', targets: [] }, writingInterpretation: { intent: 'write' } } })
     expect(frozen.scope.localEditBoundary).toBeUndefined()
     expect(f.create).not.toHaveBeenCalled()
     // The production admission is persisted as JSON before its answer receipt.
     f.admission.spec = JSON.parse(JSON.stringify(frozen)) as typeof frozen
-    expect(await recordWritingClarification(f.tx, f.subject, f.answer)).toBeTruthy()
+    f.admission.taskId = frozen.id
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer })).toBeTruthy()
     expect((await scope.readWritingScope(f.tx, f.subject)).writing).toMatchObject({ kind: 'bounded', targets: [{ orderIndex: 1, chapterId: null }] })
     expect(f.admission.spec).toEqual(frozen)
   })
@@ -139,5 +140,83 @@ describe('authenticated first-chapter scope clarification', () => {
     expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '先讨论，暂不写入' })).toBeNull()
     expect(f.create).not.toHaveBeenCalled()
     expect(explicitFirstChapterAnswer(firstChapterAnswer)).toBe(true)
+  })
+})
+
+describe('authenticated same-task chapter and quote clarification', () => {
+  const chapter = { id: 'chapter-five', revision: 4, orderIndex: 5, orderInVolume: 5, volumeId: 'volume',
+    volume: { orderIndex: 1 }, content: '窗边还留着一盏灯。门开了。走廊无人。' }
+  async function generalFixture(prompt = '修改那一章。') {
+    const f = fixture()
+    f.admission.prompt = prompt
+    vi.mocked(f.tx.chapter.findMany).mockResolvedValue([chapter] as never)
+    const fresh = buildTaskSpec({ ...f.subject, prompt, authorWritingProtocol: 2, reviewProtocol: 1, localEditProtocol: 1 })
+    const frozen = await scope.freezeWritingScope(f.tx, f.subject, fresh, prompt, 2)
+    f.admission.spec = JSON.parse(JSON.stringify(frozen)) as typeof frozen
+    f.admission.taskId = frozen.id
+    return { ...f, frozen }
+  }
+  it.each(['第5章', '就是第五章', '修改第5章'])('binds the real chapter answer without rewriting the original contract: %s', async answer => {
+    const f = await generalFixture(), originalHash = runtimeJson(f.admission).hash
+    expect(f.frozen.scope.writingClarificationProtocol).toBe(2)
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer })).toBeTruthy()
+    const effective = await scope.readWritingScope(f.tx, f.subject)
+    expect(effective.writing).toMatchObject({ kind: 'bounded', targets: [{ chapterId: chapter.id, orderIndex: 5 }], repairAuthorized: true })
+    expect(runtimeJson(f.admission).hash).toBe(originalHash)
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer })).toBeTruthy()
+    expect(f.create).toHaveBeenCalledOnce()
+    await expect(scope.assertWritingTarget(f.tx, f.subject, { chapterId: 'other', effect: 'replace' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+  })
+  it('fills an exact unique quote on the already known chapter in the same task', async () => {
+    const f = await generalFixture('只修改第5章这句话。'), before = runtimeJson(f.admission).hash
+    expect(f.frozen.scope.localEditBoundary?.kind).toBe('needs_input')
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '原文是“门开了。”' })).toBeTruthy()
+    const effective = await scope.effectiveWritingTaskSpec(f.tx, f.subject, f.frozen)
+    expect(effective.scope.localEditBoundary).toMatchObject({ kind: 'bounded', regions: [{ chapterId: chapter.id, revision: 4,
+      start: chapter.content.indexOf('门开了。'), end: chapter.content.indexOf('门开了。') + '门开了。'.length }] })
+    expect(runtimeJson(f.admission).hash).toBe(before)
+    await expect(scope.assertWritingTarget(f.tx, f.subject, { chapterId: chapter.id, effect: 'replace' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    expect((await scope.assertWritingTarget(f.tx, f.subject, { chapterId: chapter.id, effect: 'range' })).writing?.targets[0].chapterId).toBe(chapter.id)
+  })
+  it.each(['第5章？', '第5章不要改', '第5章，继续写第6章', '第5章和第6章', '按推荐方案', '第5章是否合适',
+    '不要第5章，选第6章', '不是第5章，是第6章', '第5章暂不确定', '也许第5章', '可能是第5章', '第5章我还没确定',
+    '第5章应该可以吧', '修改第5章也许合适', '不要第5章，修改第5章'])('does not turn an ambiguous or expanded answer into authority: %s', async answer => {
+    const f = await generalFixture()
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer })).toBeNull()
+    expect(f.create).not.toHaveBeenCalled()
+  })
+  it('never changes the known chapter to another target when only a quote was missing', async () => {
+    const f = await generalFixture('只修改第5章这句话。')
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '第6章的“门开了。”' })).toBeNull()
+    expect(f.create).not.toHaveBeenCalled()
+  })
+  it('clears only the matching answered question after both chapter and local boundaries are resolved', async () => {
+    const f = await generalFixture('只修改第5章这句话。')
+    const marker = { callId: f.answer.callId }
+    expect(scope.writingClarificationResolvesInput(await scope.readWritingScope(f.tx, f.subject), marker)).toBe(false)
+    await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '原文是“门开了。”' })
+    const effective = await scope.readWritingScope(f.tx, f.subject)
+    expect(scope.writingClarificationResolvesInput(effective, marker)).toBe(true)
+    expect(scope.writingClarificationResolvesInput(effective, { callId: 'unanswered-question' })).toBe(false)
+    expect(scope.writingClarificationResolvesInput({ ...effective, clarification: null }, marker)).toBe(false)
+    const unresolved = { ...effective, spec: { ...f.frozen, scope: { ...f.frozen.scope, writing: effective.writing } } }
+    expect(scope.writingClarificationResolvesInput(unresolved, marker)).toBe(false)
+  })
+  it('preserves a newly narrowed exact-quote boundary when the answer supplies the missing chapter', async () => {
+    const f = await generalFixture()
+    expect(f.frozen.scope.localEditBoundary).toBeUndefined()
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '只修改第5章这句“门开了。”' })).toBeTruthy()
+    const effective = await scope.effectiveWritingTaskSpec(f.tx, f.subject, f.frozen)
+    expect(effective.scope.localEditBoundary).toMatchObject({ kind: 'bounded', regions: [{ chapterId: chapter.id,
+      start: chapter.content.indexOf('门开了。'), end: chapter.content.indexOf('门开了。') + '门开了。'.length }] })
+    await expect(scope.assertWritingTarget(f.tx, f.subject, { chapterId: chapter.id, effect: 'replace' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+  })
+  it('requires a real answer, an unambiguous quote and the original manuscript epoch', async () => {
+    const f = await generalFixture('只修改第5章这句话。')
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '按选项一' })).toBeNull()
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '原文是“尚未出现的句子”' })).toBeNull()
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '原文是“门开了。”' })).toBeTruthy()
+    f.run.manuscriptRevision = 1
+    await expect(scope.readWritingScope(f.tx, f.subject)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
   })
 })

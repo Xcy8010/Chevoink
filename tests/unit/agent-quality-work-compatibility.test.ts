@@ -13,6 +13,7 @@ const bundle = { chapter: { id: 'chapter', title: '旧物摊', content: '沈桐�
 
 describe('frozen quality work across deployments', () => {
   it('new work identifies contextual prose without relabeling an already frozen v9 request', () => {
+    expect(qualityWorkPromptProtocol(12)).toBe('humanity-context.v5')
     expect(qualityWorkPromptProtocol(11)).toBe('humanity-context.v4')
     expect(qualityWorkPromptProtocol(10)).toBe('humanity-context.v3')
     expect(qualityWorkPromptProtocol(9)).toBe('humanity-context.v2')
@@ -28,6 +29,19 @@ describe('frozen quality work across deployments', () => {
     const current = { ...bundle, compilation: { ...bundle.compilation!, preparedContext: { reviewCycle: { version: 1,
       scope: { taskId: 'task', chapterId: 'chapter' }, transitions: [{ after: { revision: 1 } }] } } } }
     expect(qualityReviewContextHash(current)).toBe(qualityReviewContextHash(bundle))
+  })
+  it('binds new prior-cycle context without changing any frozen version up to v11', () => {
+    const current = { ...bundle, priorReviewCycle: { version: 1, baseline: { body: { revision: 0, contentHash: 'a'.repeat(64) }, findings: [] },
+      transitions: [], current: { revision: 1, contentHash: 'b'.repeat(64) } } } as Bundle
+    expect(buildCriticInput(current, {})).toContain(JSON.stringify(current.priorReviewCycle))
+    expect(qualityReviewContextHash(current)).not.toBe(qualityReviewContextHash(bundle))
+    for (const protocol of ['humanity-context.v2', 'humanity-context.v3', 'humanity-context.v4'] as const) {
+      expect(qualityReviewContextHash(current, protocol)).toBe(qualityReviewContextHash(bundle, protocol))
+    }
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] as const) {
+      expect(runtimeJson(qualityWorkContextProjection(current, version)).hash).toBe(runtimeJson(qualityWorkContextProjection(bundle, version)).hash)
+    }
+    expect(runtimeJson(qualityWorkContextProjection(current, 12)).hash).not.toBe(runtimeJson(qualityWorkContextProjection(bundle, 12)).hash)
   })
   it('only newly frozen parserVersion enables deterministic extraction and duplicate-key rejection', () => {
     const noisy = '{"metadata":"noise"}\n```json\n{"findings":[]}\n```'

@@ -5,7 +5,7 @@ import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity, commi
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
-import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
+import { resolveTerminalCandidate, terminalCandidateInputSchema, terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -34,6 +34,9 @@ describe.runIf(available)('serial inherited terminal facts with real PostgreSQL 
         const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
         const source = await readCompilerContinuitySource(prisma, f, chapter, saved.bridge!.fromChapterId, 11)
         const evidence = terminalEvidenceContext(chapter, source, 2, scenario === 'quote-address' ? 1 : undefined)
+        const selectedProof = evidence.previous?.carried?.[0]?.proofHash
+        if (index > 0) expect(resolveTerminalCandidate(terminalCandidateInputSchema.parse({ exitState: {}, inheritedProofs: [selectedProof] }),
+          evidence.previous?.carried, 2)).toEqual({ ok: true, candidate })
         if (index > 0) expect(evidence.previous?.carried).toMatchObject([{ field: 'openLoops', claim: '过滤泵检修等零件', depth: index }])
         const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'not_applicable',
           reason: '本合成例只核对持续未解决事项。', findingIndexes: [] })), terminalVerdicts: [{ path: 'exitState.openLoops.0', verdict: 'supported',
@@ -72,6 +75,9 @@ describe.runIf(available)('serial inherited terminal facts with real PostgreSQL 
           volumeId: initial.volumeId, orderIndex: 15, orderInVolume: 15, title: '改变邻接', content: initial.content, revision: initial.revision } })
         if (scenario === 'unchanged' || scenario === 'bookkeeping' || scenario === 'quote-address') await commitChapterBridge(terminal(compilation.id))
         else {
+          const refreshed = await readCompilerContinuitySource(prisma, f, chapter, saved.bridge!.fromChapterId, 11)
+          expect(resolveTerminalCandidate(terminalCandidateInputSchema.parse({ exitState: {}, inheritedProofs: [selectedProof] }),
+            refreshed && 'preceding' in refreshed && 'terminalInheritance' in refreshed ? refreshed.terminalInheritance : [], 2)).toMatchObject({ ok: false })
           await expect(commitChapterBridge(terminal(compilation.id))).rejects.toMatchObject({ code: expect.stringMatching(/CONTINUITY_|TERMINAL_STATE_/) })
           expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toEqual(before)
         }

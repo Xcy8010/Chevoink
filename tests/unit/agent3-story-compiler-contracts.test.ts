@@ -12,6 +12,7 @@ import * as ai from '../../api/lib/ai-service.js'
 import { recordTextRequestFailure } from '../../api/lib/text-request-trace.js'
 import * as scope from '../../api/lib/agent/manuscript-scope.js'
 import * as originalRequest from '../../api/lib/agent/original-request.js'
+import * as continuitySource from '../../api/lib/agent/compiler-continuity-source.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as novelTools from '../../api/lib/agent/tools/novel-tools.js'
 import { continuityValidateTool, continuityReviewTail, continuityCriticSystem, chapterBridgeCommitTool, chapterBridgeGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
@@ -26,6 +27,7 @@ import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continu
 import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
 import { qualityRevisionApplyTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import * as repairAudit from '../../api/lib/agent/quality-repair-audit.js'
+import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 
 describe('严谨创作落实连续性警告', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -71,6 +73,67 @@ describe('严谨创作落实连续性警告', () => {
         multiplierBps: 10000, reasoningEffort: 'high', reasoningEfforts: ['none', 'high'], thinkingEnabled: true, reasoningParameterMode: 'native', visionEnabled: false, contextWindowTokens: 64000 } }
     return { ctx, chapter, compilation, validation, qualityReport, reserve, critic, repair, write, findCompilation, tx, sourceQuery }
   }
+  function inheritedSource() {
+    const content = '过滤泵仍待检修。'
+    const carried = { proofHash: 'a'.repeat(64), field: 'openLoops', claim: '过滤泵检修等零件', segmentId: 't0', depth: 1,
+      anchors: [{ chapterId: 'prior', revision: 1, contentHash: 'b'.repeat(64), start: 0, end: 7, quote: '过滤泵仍待检修' }],
+      nodes: [{ compilationId: 'prior-compilation', chapterId: 'prior', revision: 1, orderIndex: 0,
+        bodyHash: 'b'.repeat(64), candidateHash: 'b'.repeat(64), validationHash: 'b'.repeat(64), stateHash: 'b'.repeat(64),
+        path: 'exitState.openLoops.0', previousChapterId: null }] }
+    return { id: '', revision: 0, content, scope: 'current_and_previous_3_bounded', targetOrderIndex: 1,
+      preceding: [{ id: 'prior', revision: 1, orderIndex: 0, contentHash: 'b'.repeat(64), start: 0, end: content.length, joinedStart: 0, joinedEnd: content.length }],
+      bridgeSource: null, terminalInheritance: [carried] } as unknown as NonNullable<Awaited<ReturnType<typeof continuitySource.readCompilerContinuitySource>>>
+  }
+  it('exposes only live stable proof identities to the main model without changing display state', async () => {
+    const f = fixture(false)
+    vi.spyOn(originalRequest, 'readOriginalTaskRequest').mockResolvedValue({ prompt: '写完章节', spec: { scope: { terminalEvidenceProtocol: 2, continuityEvidenceProtocol: 1 } }, taskId: 'task', sourceRunId: 'r', parentRunId: null } as never)
+    vi.spyOn(compiler, 'compilationRunScope').mockResolvedValue({ run: { id: 'r' } })
+    vi.spyOn(readiness, 'readChapterReviewReadiness').mockResolvedValue(null)
+    Object.assign(f.compilation, { qualityReports: [], targetOrderIndex: 1 })
+    const source = vi.spyOn(continuitySource, 'readCompilerContinuitySource').mockResolvedValue(inheritedSource())
+    const result = await chapterBridgeGetTool.execute(f.ctx, { compilationId: 'comp' })
+    expect(result.output).toContain(JSON.stringify([{ proofHash: 'a'.repeat(64), field: 'openLoops', claim: '过滤泵检修等零件' }]))
+    expect(result.output).toContain('terminalState.inheritedProofs')
+    expect(result.output).not.toContain('"nodes"')
+    expect(result.output).not.toContain('"anchors"')
+    expect(result.output).not.toContain('"segmentId"')
+    expect(JSON.stringify(result.display)).not.toContain('proofHash')
+    expect(source).toHaveBeenCalledOnce()
+    expect(source.mock.calls[0].slice(2)).toEqual([{ orderIndex: 1 }, null, 11])
+    expect(f.critic).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+  })
+  it.each(['known', 'unknown'] as const)('canonicalizes %s selected proofs before coverage and paid critic dispatch', async scenario => {
+    const f = fixture(false)
+    vi.spyOn(originalRequest, 'readOriginalTaskRequest').mockResolvedValue({ prompt: '写完章节', spec: { scope: { terminalEvidenceProtocol: 2, continuityEvidenceProtocol: 1 } }, taskId: 'task', sourceRunId: 'r', parentRunId: null } as never)
+    vi.spyOn(continuitySource, 'readCompilerContinuitySource').mockResolvedValue(inheritedSource())
+    const canonical = terminalCandidateSchema.parse({ exitState: { openLoops: ['过滤泵检修等零件'] } })
+    f.critic.mockResolvedValue(JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({
+      kind, result: 'not_applicable', reason: '仅核对持续事实。', findingIndexes: [],
+    })), terminalVerdicts: [{ path: 'exitState.openLoops.0', verdict: 'supported', basis: 'inherited',
+      sourceEvidence: [{ segmentId: 't0', quote: '过滤泵仍待检修' }], inheritance: { priorEndState: 'established', currentState: 'unchanged' } }] }))
+    vi.mocked(compiler.validateStoryContinuity).mockImplementation(async input => ({ ...f.validation,
+      terminalCandidate: input.terminalCandidate, coverage: input.coverage, independentCheck: input.independentCheck,
+    }) as Awaited<ReturnType<typeof compiler.validateStoryContinuity>>)
+    const result = await continuityValidateTool.execute(f.ctx, { compilationId: 'comp', terminalState: {
+      ...terminalCandidateSchema.parse({ exitState: {} }), inheritedProofs: [(scenario === 'known' ? 'a' : 'c').repeat(64)],
+    } })
+    if (scenario === 'unknown') {
+      expect(result).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+      expect(f.critic).not.toHaveBeenCalled()
+      expect(compiler.validateStoryContinuity).not.toHaveBeenCalled()
+    } else {
+      expect(result.outcome).not.toBe('failed')
+      expect(f.critic.mock.calls[0][1]).toContain('过滤泵检修等零件')
+      expect(compiler.validateStoryContinuity).toHaveBeenCalledWith(expect.objectContaining({ terminalCandidate: canonical,
+        coverage: expect.objectContaining({ terminalHash: runtimeJson(canonical).hash }) }), f.tx)
+      const commit = vi.spyOn(compiler, 'commitChapterBridge').mockResolvedValue({ compilationId: 'comp', chapterId: 'c', chapterRevision: 1, skippedMemoryCount: 0, retainedIssueCount: 0 })
+      await chapterBridgeCommitTool.execute(f.ctx, { compilationId: 'comp' })
+      expect(commit).toHaveBeenCalledWith(expect.objectContaining({ exitState: canonical.exitState, lastUnfinishedAction: canonical.lastUnfinishedAction }), undefined)
+    }
+    expect(f.write).not.toHaveBeenCalled()
+    expect(f.repair).not.toHaveBeenCalled()
+  })
   it.each([false, true])('0错误3警告仅保存检查意见并复用，不自动修订，缓存=%s', async cached => {
     const f = fixture(cached)
     expect(await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })).toMatchObject({ display: { errorCount: 0, warningCount: 3 } })

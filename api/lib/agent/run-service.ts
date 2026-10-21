@@ -1,4 +1,4 @@
-import { freezeWritingScope, readWritingScope } from './writing-scope.js'
+import { freezeWritingScope, readWritingScope, writingClarificationResolvesInput } from './writing-scope.js'
 import { savedRunUsageSchema } from './checkpoint.js'
 import { syncBuiltinSkillCatalog } from './skills/service.js'
 import { readAuthorEnded } from './author-ended.js'
@@ -1042,12 +1042,15 @@ async function continueLoopRunLocked(
   // rejected before credit/model/event admission or any continuation writes.
   const savedUsage = savedRunUsageSchema.safeParse(run.usage)
   const frozen = taskSpecSchema.safeParse(run.taskSpec)
-  let authorInputRequired = savedUsage.success && Boolean(savedUsage.data.checkpoint?.authorInputRequired)
-  if (frozen.success && !frozen.data.scope.authorEffects && (frozen.data.scope.writing?.kind === 'needs_input' || frozen.data.scope.localEditBoundary?.kind === 'needs_input')) {
-    const effective = frozen.data.scope.writingClarificationProtocol === 1
+  const inputMarker = savedUsage.success ? savedUsage.data.checkpoint?.authorInputRequired : undefined
+  let authorInputRequired = Boolean(inputMarker)
+  if (frozen.success && (inputMarker || frozen.data.scope.writing?.kind === 'needs_input' || frozen.data.scope.localEditBoundary?.kind === 'needs_input')) {
+    const effective = frozen.data.scope.writingClarificationProtocol !== undefined
       ? await prisma.$transaction(tx => readWritingScope(tx, { userId, novelId: run.novelId, runId })) : null
-    authorInputRequired ||= frozen.data.scope.localEditBoundary?.kind === 'needs_input'
-      || (effective?.writing ?? frozen.data.scope.writing)?.kind === 'needs_input'
+    if (inputMarker && effective && writingClarificationResolvesInput(effective, inputMarker)) authorInputRequired = false
+    const effectiveSpec = effective ? taskSpecSchema.parse(effective.spec) : frozen.data
+    if (!frozen.data.scope.authorEffects) authorInputRequired ||= effectiveSpec.scope.localEditBoundary?.kind === 'needs_input'
+      || (effective?.writing ?? effectiveSpec.scope.writing)?.kind === 'needs_input'
   }
   if (authorInputRequired) throw new DataAccessError(409, 'AUTHOR_INPUT_REQUIRED',
     '原任务仍等待作者明确目标章节与范围，不能选择默认方案继续。请在输入框发送明确的新指令；原合同、用量与已保存内容保留，超时旧提问不会自动恢复。')
