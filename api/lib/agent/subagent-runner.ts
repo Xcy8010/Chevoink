@@ -12,6 +12,7 @@ import { handleToolCall } from './loop.js'
 import { toOpenAITools } from './tools/registry.js'
 import type { ToolContext } from './tools/types.js'
 import { intersectToolAuthority, snapshotToolAuthority } from './tool-authority.js'
+import { toolTurnHistory } from './tool-turn-history.js'
 import {
   collapseEarlyToolRounds,
   compactEarlyToolPayloads,
@@ -214,12 +215,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         : []
       const effectiveToolCalls = result.toolCalls.length > 0 ? result.toolCalls : recoveredToolCalls
 
-      messages.push({
-        role: 'assistant',
-        content: recoveredToolCalls.length > 0 ? null : (result.content || null),
-        reasoning: result.reasoning || undefined,
-        toolCalls: effectiveToolCalls.length > 0 ? effectiveToolCalls : undefined,
-      })
+      messages.push(...toolTurnHistory(result, effectiveToolCalls, { recoveredText: recoveredToolCalls.length > 0 }))
 
       if (effectiveToolCalls.length === 0) {
         // 无工具调用的轮次即最终报告

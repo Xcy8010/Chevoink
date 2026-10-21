@@ -742,7 +742,7 @@ function toProviderMessages(messages: ChatMessage[]) {
           type: 'function',
           function: { name: call.name, arguments: call.arguments },
         }))
-        if (message.reasoning) payload.reasoning_content = message.reasoning
+        if (typeof message.reasoning === 'string') payload.reasoning_content = message.reasoning
         output.push(payload)
         const ids = new Set(valid.map(call => call.id))
         // Finish every retained native call before inserting non-executable data.
@@ -760,7 +760,7 @@ function toProviderMessages(messages: ChatMessage[]) {
         if (records.length) output.push(historical(records))
         continue
       }
-      if (message.reasoning) payload.reasoning_content = message.reasoning
+      if (typeof message.reasoning === 'string') payload.reasoning_content = message.reasoning
 
       output.push(payload)
       continue

@@ -157,7 +157,7 @@ export function childContext(messages: ChildMessages, prompt: string, rolePrompt
     if (item.role !== 'assistant' || !item.toolCalls?.length) return [item]
     const calls = item.toolCalls.filter(call => replies.has(call.id))
     if (calls.length) return [{ ...item, toolCalls: calls }]
-    return item.content ? [{ role: 'assistant' as const, content: item.content }] : []
+    return item.content ? [{ ...item, toolCalls: undefined }] : []
   })
   return [...history, { role: 'system', content: rolePrompt }, { role: 'user', content: prompt }]
 }

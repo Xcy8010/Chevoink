@@ -291,7 +291,7 @@ describe.runIf(available)('actual model adapter execution cursor', () => {
       const restored = await loadExecutionState(f.userId, lease.runId)
       expect(restored.frame.revision).toBe(2)
       expect(restored.frame.state).toMatchObject({ phase: 'idle', turn: 1, nextOperationSequence: 1, pendingOperationId: null })
-      expect(restored.frame.state.messages).toEqual([{ role: 'user', content: '修改本章' }, { role: 'assistant', content: '完整结果' }])
+      expect(restored.frame.state.messages).toEqual([{ role: 'user', content: '修改本章' }, { role: 'assistant', content: '完整结果', reasoning: '' }])
       if (scenario === 'v2-price') expect((await prisma.creditLedgerEntry.findFirstOrThrow({ where: { userId: f.userId } })).metadata).toMatchObject({ pricingVersion: 'credits-v2-itemized', rateCardId: 'fixture-model-v2' })
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(1)
     })

@@ -39,6 +39,7 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
     if (!operation || (operation.status !== 'succeeded' && !(operation.kind === 'tool' && operation.status === 'failed'))) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原操作没有确认终态，不能将部分结果当成交付。')
     if (!operation.inputSnapshot || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原操作输入损坏。')
     let appended: Message
+    let emptyProviderReasoning = false
     if (operation.kind === 'provider') {
       const attempts = await tx.agentProviderAttempt.findMany({ where: { operationId: operation.id, status: 'succeeded', dispatchedAt: { not: null } }, take: 2 })
       if (attempts.length !== 1) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '模型成功回执不唯一，不能猜测采用哪次结果。')
@@ -48,9 +49,10 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
       if (!event || event.taskRootId !== lease.taskRootId || event.operationId !== operation.id || event.type !== 'provider.result.recorded'
         || runtimeJson(event.payload).hash !== runtimeJson({ attemptId: attempt.id, status: 'succeeded', resultHash: attempt.resultHash }).hash) runtimeError('RUNTIME_RECEIPT_INVALID', '模型结果与持久事件不一致。')
       const result = parsed.data.result
+      emptyProviderReasoning = result.reasoning === ''
       if (result.toolCalls.some(call => !call.id || !call.name) || new Set(result.toolCalls.map(call => call.id)).size !== result.toolCalls.length) runtimeError('RUNTIME_RECEIPT_INVALID', '模型工具调用身份缺失或重复。')
       appended = { role: 'assistant', content: result.content || null,
-        ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+        reasoning: result.reasoning,
         ...(result.toolCalls.length ? { toolCalls: result.toolCalls } : {}) }
     } else if (operation.kind === 'tool') {
       const receipt = operation.effectReceipt, parsedInput = toolInput.safeParse(operation.inputSnapshot)
@@ -113,7 +115,18 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
         ? formatReferencedToolObservation(operation.action, output, { operationId: operation.id, resultHash: receipt.resultHash })
         : formatDurableToolObservation(operation.action, output) }
     } else return runtimeError('RUNTIME_STATE_CONFLICT', '内部操作不能伪装成模型工具回复。')
-    return { ...frame.state, phase: 'idle' as const, pendingOperationId: null, messages: [...frame.state.messages, appended] }
+    const snapshot = { ...frame.state, phase: 'idle' as const, pendingOperationId: null, messages: [...frame.state.messages, appended] }
+    if (emptyProviderReasoning && current.head.revision > cursor.expectedRevision && appended.role === 'assistant') {
+      // Old reducers omitted a genuinely empty provider field. Replay only that
+      // exact already-saved projection; the normal state writer still checks
+      // its parent hash, immutable frame and event. Never rewrite old history.
+      const previous = await tx.agentExecutionFrame.findUnique({ where: { taskRootId_revision: {
+        taskRootId: lease.taskRootId, revision: cursor.expectedRevision + 1 } } })
+      const { reasoning: _empty, ...legacyAssistant } = appended
+      const legacy = { ...snapshot, messages: [...frame.state.messages, legacyAssistant] }
+      if (previous?.previousHash === cursor.expectedHash && previous.snapshotHash === runtimeJson(legacy).hash) return legacy
+    }
+    return snapshot
   }
   if (lease.parent) return withRunLease(lease, async tx => saveExecutionStateInTransaction(tx, lease,
     { expectedRevision: cursor.expectedRevision, expectedHash: cursor.expectedHash, snapshot: await reduce(tx) }))

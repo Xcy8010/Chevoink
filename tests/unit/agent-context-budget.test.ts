@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ChatMessage, OpenAIToolDefinition } from '../../api/lib/ai-service.js'
+import { toolTurnHistory } from '../../api/lib/agent/tool-turn-history.js'
 import {
   collapseEarlyToolRounds,
   archiveEarlyToolRounds,
@@ -41,6 +42,9 @@ describe('Agent 运行中上下文预算与压缩', () => {
     const latest = structuredClone(messages.slice(-2))
     expect(compactEarlyToolPayloads(messages, 8).collapsedToolRounds).toBe(0)
     expect(releaseCompletedReasoning(messages)).toBeGreaterThan(0)
+    expect(messages[1]).toMatchObject({ role: 'assistant', reasoning: '正在执行 files' })
+    expect(messages[3]).toMatchObject({ role: 'user' })
+    expect(messages[3].content).toContain('只读历史')
     expect(collapseEarlyToolRounds(messages, 1).collapsedToolRounds).toBe(1)
     expect(messages[0].content).toBe('只研究附件，不写正文')
     expect(messages.slice(-2)).toEqual(latest)
@@ -51,6 +55,90 @@ describe('Agent 运行中上下文预算与压缩', () => {
     const messages: ChatMessage[] = [pending, { role: 'user', content: '等待' }, { role: 'assistant', content: '最新', reasoning: '最新思考' }]
     expect(releaseCompletedReasoning(messages)).toBe(0)
     expect(messages[0]).toBe(pending)
+  })
+  it('整轮压缩仍保留的原生工具轮不丢失任何思考', () => {
+    const messages: ChatMessage[] = [...buildToolRound('first', '{}', 'first'), ...buildToolRound('second', '{}', 'second'),
+      ...buildToolRound('latest', '{}', 'latest')]
+    const original = structuredClone(messages)
+    expect(releaseCompletedReasoning(messages)).toBe(0)
+    expect(compactEarlyToolPayloads(messages, 8).collapsedToolRounds).toBe(0)
+    expect(messages).toEqual(original)
+  })
+  it('混合调度回执不阻塞完整原生轮压缩，仍保留服务器回执', () => {
+    const server: ChatMessage = { role: 'tool', toolCallId: 'server', content: '服务器真实检查成功，未提交' }
+    const native = { id: 'native', name: 'chapter_read', arguments: '{}' }
+    const scheduled = { id: 'server', name: 'continuity_validate', arguments: '{}' }
+    const messages: ChatMessage[] = [...toolTurnHistory({ content: '', reasoning: '真实思考', toolCalls: [native] }, [native, scheduled]),
+      { role: 'tool', toolCallId: native.id, content: '原生读取成功' }, server]
+    const original = structuredClone(messages)
+    const archived = archiveEarlyToolRounds(messages, { revision: 7, hash: 'b'.repeat(64) }, 0)
+    expect(archived.archivedRounds).toBe(2)
+    expect(archived.messages.at(-1)?.role).toBe('user')
+    expect(archived.messages.at(-1)?.content).toContain('"messageIndex":3')
+    expect(JSON.stringify(archived.messages)).toContain('messageIndex')
+    expect(messages).toEqual(original)
+    expect(collapseEarlyToolRounds(messages, 0).collapsedToolRounds).toBe(1)
+    expect(messages.at(-1)).toEqual(server)
+    expect(messages[1]).toMatchObject({ role: 'user' })
+    expect(messages[1].content).toContain('原生读取成功')
+  })
+  it('只压缩旧的无原生归属观察，保护近期观察并按原索引归档', () => {
+    const calls = ['old-server', 'recent-server'].map(id => ({ id, name: 'continuity_validate', arguments: '{}' }))
+    const messages: ChatMessage[] = [...toolTurnHistory({ content: '', reasoning: '', toolCalls: calls }, calls, { bootstrap: true }),
+      { role: 'tool', toolCallId: 'old-server', content: '真实旧回执'.repeat(500) },
+      { role: 'tool', toolCallId: 'recent-server', content: '近期原始回执'.repeat(500) }]
+    const original = structuredClone(messages)
+    const source = { revision: 6, hash: 'd'.repeat(64) }
+    const archived = archiveEarlyToolRounds(messages, source, 1)
+    expect(archived.archivedRounds).toBe(1)
+    expect(JSON.parse(String(archived.messages[1].content).split('\n').at(-1)!)).toEqual({ callId: 'old-server', references: [{ ...source, messageIndex: 1 }] })
+    expect(archived.messages[2]).toEqual(original[2])
+    expect(messages).toEqual(original)
+    expect(collapseEarlyToolRounds(messages, 1)).toMatchObject({ collapsedToolRounds: 0, compactedToolOutputs: 1 })
+    expect(messages[1].role).toBe('user')
+    expect(messages[2]).toEqual(original[2])
+    expect(estimateChatMessagesTokens(messages)).toBeLessThan(estimateChatMessagesTokens(original))
+  })
+  it.each(['missing', 'duplicate'] as const)('保留%s原生组和其附加观察，不能借压缩掩盖未配对调用', kind => {
+    const call = { id: 'native', name: 'chapter_write', arguments: '{}' }, extra = { id: 'extra', name: 'continuity_validate', arguments: '{}' }
+    const messages: ChatMessage[] = [...toolTurnHistory({ content: '', reasoning: '原思考', toolCalls: [call] }, [call, extra]),
+      { role: 'tool', toolCallId: 'extra', content: '附加回执'.repeat(500) },
+      ...(kind === 'duplicate' ? [buildToolRound('native', '{}', '第一次')[1], buildToolRound('native', '{}', '第二次')[1]] : [])]
+    const original = structuredClone(messages)
+    expect(collapseEarlyToolRounds(messages, 0)).toMatchObject({ collapsedToolRounds: 0, compactedToolOutputs: 0 })
+    expect(messages).toEqual(original)
+    expect(archiveEarlyToolRounds(messages, { revision: 5, hash: 'e'.repeat(64) }, 0)).toEqual({ messages: original, archivedRounds: 0 })
+  })
+  it('自动调度的普通模型轮退休后仍能按原调度来源压缩观察', () => {
+    const call = { id: 'scheduled', name: 'continuity_validate', arguments: '{}' }
+    const messages: ChatMessage[] = [...toolTurnHistory({ content: '', reasoning: '模型返回的真实思考', toolCalls: [] }, [call], { recoveredText: true }),
+      { role: 'tool', toolCallId: call.id, content: '真实调度回执'.repeat(500) }, ...buildToolRound('latest', '{}', '最新结果')]
+    expect(releaseCompletedReasoning(messages)).toBeGreaterThan(0)
+    const original = structuredClone(messages)
+    const archived = archiveEarlyToolRounds(messages, { revision: 8, hash: 'c'.repeat(64) }, 1)
+    expect(archived.archivedRounds).toBe(1)
+    expect(archived.messages[2].content).toContain('"messageIndex":2')
+    expect(messages).toEqual(original)
+    expect(collapseEarlyToolRounds(messages, 1)).toMatchObject({ collapsedToolRounds: 0, compactedToolOutputs: 1 })
+    expect(messages[2].role).toBe('user')
+    expect(messages.slice(-2)).toEqual(original.slice(-2))
+  })
+  it('跨轮重复ID只与本轮回执配对', () => {
+    const messages = [...buildToolRound('same', '{}', '第一轮'), ...buildToolRound('same', '{}', '第二轮')]
+    expect(collapseEarlyToolRounds(messages, 0).collapsedToolRounds).toBe(2)
+    expect(messages).toHaveLength(2)
+    expect(messages[0].content).toContain('第一轮')
+    expect(messages[1].content).toContain('第二轮')
+  })
+  it('近期原生回执保护同一块中较早的附加观察，不能插入数据打断调用配对', () => {
+    const native = buildToolRound('native', '{}', '近期原生结果')
+    const call = { id: 'native', name: 'chapter_write', arguments: '{}' }, extra = { id: 'server', name: 'continuity_validate', arguments: '{}' }
+    const messages: ChatMessage[] = [...toolTurnHistory({ content: '', reasoning: '原思考', toolCalls: [call] }, [call, extra]),
+      { role: 'tool', toolCallId: 'server', content: '较早附加观察'.repeat(500) }, native[1]]
+    const original = structuredClone(messages)
+    expect(collapseEarlyToolRounds(messages, 1)).toMatchObject({ collapsedToolRounds: 0, compactedToolOutputs: 0 })
+    expect(messages).toEqual(original)
+    expect(archiveEarlyToolRounds(messages, { revision: 4, hash: 'f'.repeat(64) }, 1)).toEqual({ messages: original, archivedRounds: 0 })
   })
   it('持久归档保留原数组和作者要求，并指向准确原文索引', () => {
     const messages: ChatMessage[] = [{ role: 'user', content: '只处理第19章，不能继承旧任务。' },

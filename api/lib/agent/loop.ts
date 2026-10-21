@@ -61,6 +61,7 @@ import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestr
 import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-text.js'
 import { createExecutionTextDetector, normalizeExecutionText } from './execution-text-detector.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
+import { toolTurnHistory } from './tool-turn-history.js'
 import { createEmptyResponseGuard, createProtocolRecoveryGuard, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { toolFailureRecovery, toolRecoveryKey } from './tool-failure-recovery.js'
 import { frozenWritingToolGuidance } from './writing-tool-guidance.js'
@@ -2107,12 +2108,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
       const reviewProgressText = mergedReviewReminder ? '正在核对检查意见的处理结果。' : '正文已保存，正在完成当前版本的必要检查。'
 
-      messages.push({
-        role: 'assistant',
-        content: automaticReviewTriggered ? reviewProgressText : recoveredToolCalls.length > 0 ? null : (result.content || null),
-        reasoning: result.reasoning || undefined,
-        toolCalls: effectiveToolCalls.length > 0 ? effectiveToolCalls : undefined,
-      })
+      messages.push(...toolTurnHistory(result, effectiveToolCalls, { bootstrap: Boolean(bootstrapCall), recoveredText: recoveredToolCalls.length > 0 }))
 
       const cleanContent = automaticReviewTriggered ? reviewProgressText
         : normalizeExecutionText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
@@ -2419,6 +2415,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (next.kind === 'tool') {
               const required = { id: `review_${messageId}_${callIndex}_${randomUUID()}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
               deferToolProposal(call, '先完成当前版本检查，读取结果后再提交章节终态。', messageId, bus)
+              messages.push({ role: 'tool', toolCallId: call.id, content: '本次未执行提交；先完成当前版本检查，读取结果后再提议提交。' })
               effectiveToolCalls.splice(callIndex, 1, required)
               const note = '正在完成当前版本的必要检查，之后再核对修订与章节终态。'
               for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') parts.splice(index, 1)
@@ -2452,6 +2449,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
                 await persistCheckpoint()
                 const required = { id: `review_decision_${messageId}_${callIndex}`, name: reader.name, arguments: JSON.stringify(readArgs) }
                 deferToolProposal(call, '正在处理当前版本的检查意见，处理后再提交章节终态。', messageId, bus)
+                messages.push({ role: 'tool', toolCallId: call.id, content: '本次未执行提交；先读取当前检查意见并处理，之后再提议提交。' })
                 // An early commit is only a proposal. Read its current decision
                 // state and ask for a new commit; preserve unrelated calls in this batch.
                 effectiveToolCalls.splice(callIndex, 1, required)

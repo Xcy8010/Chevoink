@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SseDataDecoder } from '../../api/lib/ai-sse.js'
-import { collapseEarlyToolRounds } from '../../api/lib/agent/context-budget.js'
+import { collapseEarlyToolRounds, releaseCompletedReasoning } from '../../api/lib/agent/context-budget.js'
+import { toolTurnHistory } from '../../api/lib/agent/tool-turn-history.js'
 import type { ChatMessage } from '../../api/lib/ai-service.js'
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(), reserveTokenCredits: vi.fn(), consumeTokenCredits: vi.fn(async () => ({ chargedMilli: 0 })) }))
 vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { aiUsageLog: { create: vi.fn(async () => ({ id: 'usage' })), findUnique: vi.fn(async () => null), update: vi.fn(async () => ({ id: 'usage' })), updateMany: vi.fn(async () => ({ count: 1 })) } } }))
@@ -214,6 +215,78 @@ describe('lossless tool argument transport', () => {
     expect(sent[1].reasoning_content).toBe('original reasoning')
     expect(sent[1].tool_calls[0].id).toBe('new')
     expect(sent[2].tool_call_id).toBe('new')
+  })
+  it('projects a resumed server check as readonly history before the next DeepSeek thinking request', async () => {
+    const call = { id: 'continued_review_fixture', name: 'continuity_validate', arguments: '{"compilationId":"owned"}' }
+    const messages: ChatMessage[] = [{ role: 'user', content: '继续原任务，不能重复已完成检查' },
+      ...toolTurnHistory({ content: '', reasoning: '', toolCalls: [call] }, [call], { bootstrap: true }),
+      { role: 'tool', toolCallId: call.id, content: '当前版本连续性0错误0警告，检查已完成；尚未提交' }]
+    const original = structuredClone(messages)
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    const tools = [{ type: 'function' as const, function: { name: 'chapter_bridge_commit', description: 'fixture', parameters: { type: 'object' } } }]
+    await chatWithTools({ messages, tools, provider: 'deepseek', model: 'deepseek-flash', reasoningEffort: 'high',
+      providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'agentLoopTurn', turn: 29 } })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]!.body))
+    expect(body.thinking).toEqual({ type: 'enabled' })
+    expect(body.reasoning_effort).toBe('high')
+    expect(body.tools).toEqual(tools)
+    expect(body.messages.every((message: Record<string, unknown>) => message.role !== 'tool' && !message.tool_calls)).toBe(true)
+    expect(JSON.stringify(body.messages)).toContain(call.id)
+    expect(JSON.stringify(body.messages)).toContain('0错误0警告')
+    expect(JSON.stringify(body.messages)).toContain('尚未提交')
+    expect(JSON.stringify(body.messages)).not.toContain('"arguments"')
+    expect(messages).toEqual(original)
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+  it.each(['high', 'none'] as const)('keeps original and empty reasoning through mixed native/server history in %s mode', async reasoningEffort => {
+    const native = { id: 'native', name: 'chapter_read', arguments: '{}' }
+    const scheduled = { id: 'scheduled', name: 'continuity_validate', arguments: '{}' }
+    const plain = { content: '已读取', reasoning: '真实普通轮思考', toolCalls: [] }
+    const messages: ChatMessage[] = [
+      ...toolTurnHistory(plain, []),
+      ...toolTurnHistory({ content: '', reasoning: '真实工具轮思考', toolCalls: [native] }, [scheduled, native]),
+      { role: 'tool', toolCallId: scheduled.id, content: '服务端检查成功，正文未修改' },
+      { role: 'tool', toolCallId: native.id, content: '读取成功' },
+      ...toolTurnHistory({ content: '没有原生思考内容', reasoning: '', toolCalls: [] }, []),
+    ]
+    releaseCompletedReasoning(messages)
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    const tools = [{ type: 'function' as const, function: { name: 'chapter_read', description: 'fixture', parameters: { type: 'object' } } }]
+    await chatWithTools({ messages, tools, provider: 'deepseek', model: 'deepseek-flash', reasoningEffort,
+      providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]!.body))
+    const assistants = body.messages.filter((message: Record<string, unknown>) => message.role === 'assistant')
+    expect(assistants).toHaveLength(2)
+    expect(assistants[0]).toMatchObject({ reasoning_content: '真实工具轮思考', tool_calls: [{ id: native.id }] })
+    expect(assistants[1].reasoning_content).toBe('')
+    expect(body.messages.filter((message: Record<string, unknown>) => message.role === 'tool')).toEqual([
+      { role: 'tool', tool_call_id: native.id, content: '读取成功' }])
+    expect(JSON.stringify(body.messages)).toContain('服务端检查成功，正文未修改')
+    expect(body.thinking.type).toBe(reasoningEffort === 'none' ? 'disabled' : 'enabled')
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+  it('keeps text-recovered calls out of native protocol without inventing reasoning', () => {
+    const call = { id: 'recovered', name: 'chapter_read', arguments: '{}' }
+    const result = { content: 'text protocol', reasoning: '原响应的真实思考', toolCalls: [] }
+    const history = toolTurnHistory(result, [call], { recoveredText: true })
+    expect(history[0]).toMatchObject({ role: 'user' })
+    expect(history[1]).toEqual({ role: 'assistant', content: null, reasoning: result.reasoning })
+    expect(JSON.stringify(history)).not.toContain('"arguments"')
+    expect(result.content).toBe('text protocol')
+  })
+  it('closes a deferred native commit with its real local refusal before a server replacement receipt', async () => {
+    const commit = { id: 'native-commit', name: 'chapter_bridge_commit', arguments: '{}' }
+    const messages: ChatMessage[] = [...toolTurnHistory({ content: '', reasoning: '真实提交提议思考', toolCalls: [commit] }, [commit]),
+      { role: 'tool', toolCallId: commit.id, content: '本次未执行提交；先完成检查。' },
+      { role: 'tool', toolCallId: 'replacement-check', content: '替代检查完成，仍未提交。' }]
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    await chatWithTools({ messages, tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+    const sent = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]!.body)).messages
+    expect(sent[0]).toMatchObject({ role: 'assistant', reasoning_content: '真实提交提议思考', tool_calls: [{ id: commit.id }] })
+    expect(sent[1]).toEqual({ role: 'tool', tool_call_id: commit.id, content: '本次未执行提交；先完成检查。' })
+    expect(sent[2].role).toBe('user')
+    expect(sent[2].content).toContain('仍未提交')
+    expect(fetch).toHaveBeenCalledOnce()
   })
   it('classifies a terminated stream without executing partial tools or retrying the request', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({

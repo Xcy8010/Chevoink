@@ -123,7 +123,7 @@ async function knownProvider(f: Awaited<ReturnType<typeof prepareFixture>>, leas
 }
 
 describe.runIf(available)('canonical durable child grants', () => {
-  it('atomically reduces a child receipt in one transaction and replays the same saved frame without HTTP or debit', async () => fixture(async f => {
+  it.each(['current', 'legacy-empty', 'legacy-other'] as const)('atomically reduces and replays %s frames without HTTP or debit', async projection => fixture(async f => {
     const fetcher = vi.fn(() => { throw new Error('receipt reduction cannot dispatch HTTP') })
     vi.stubGlobal('fetch', fetcher)
     const grant = await admitChildExecution(f.lease, f.input)
@@ -131,10 +131,19 @@ describe.runIf(available)('canonical durable child grants', () => {
     const call = await knownProvider(f, child)
     const debitCount = await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })
     const cursor = { expectedRevision: call.pending.revision, expectedHash: call.pending.snapshotHash, operationId: call.operation.id }
+    if (projection !== 'current') await saveExecutionState(child, { expectedRevision: cursor.expectedRevision, expectedHash: cursor.expectedHash,
+      snapshot: { ...call.pending.state, phase: 'idle', pendingOperationId: null, messages: [...call.pending.state.messages,
+        { role: 'assistant', content: projection === 'legacy-empty' ? '原始已确认交付' : '不属于该回执的其他内容' }] } })
+    if (projection === 'legacy-other') {
+      await expect(reduceExecutionReceipt(child, cursor)).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(debitCount)
+      expect(fetcher).not.toHaveBeenCalled()
+      return
+    }
     const transactions = vi.spyOn(runtimeCommon, 'runtimeTransaction')
     const saved = await reduceExecutionReceipt(child, cursor)
     expect(transactions).toHaveBeenCalledTimes(1)
-    expect(saved.state.messages.at(-1)).toEqual({ role: 'assistant', content: '原始已确认交付' })
+    expect(saved.state.messages.at(-1)).toEqual({ role: 'assistant', content: '原始已确认交付', ...(projection === 'current' ? { reasoning: '' } : {}) })
     expect(saved.state.phase).toBe('idle')
     const replay = await reduceExecutionReceipt(child, cursor)
     expect(transactions).toHaveBeenCalledTimes(2)
