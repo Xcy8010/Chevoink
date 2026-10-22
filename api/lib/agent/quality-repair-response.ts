@@ -39,4 +39,4 @@ export function partitionQualityRepairResponse(response: ReturnType<typeof parse
       duplicate: entries.filter(item => requested.has(item.id) && frequencies.get(item.id)! > 1).length } }
 }
 
-export const QUALITY_REPAIR_RETAIN_RULE = '先核对 explanation 与证据及前后文的真实语义。原文事实、否定、比较对象、动作归属和时序优先于评论；原文已有支撑时不要为了迎合评论补写解释。没有安全且必要的局部修改时，返回 retainedFindings 中的原始标识和具体 reason，patches 可为空；不得用照抄原文的 replacement 代替保留。每个请求标识必须且只能出现在 patches 或 retainedFindings 一处。保留仅是待主模型复核的建议，不改变原 finding、不代表通过，也不扩大写入权限。'
+export const QUALITY_REPAIR_RETAIN_RULE = '先按当前完整正文核对 explanation 的事实前提，再判断证据范围内是否有必要修改；局部 before/after 不是完整语境。载体、说话者、否定、比较对象、动作归属与时序由全文判定，不能把评论当事实。前提与正文相反、原文已有支撑或无法确定时，返回 retainedFindings，具体说明相关语境；仅前提成立且有安全必要的局部改法才返回 patches。原文事实、否定、比较对象、动作归属和时序优先于评论；原文已有支撑时不要为了迎合评论补写解释。没有安全且必要的局部修改时，返回 retainedFindings 中的原始标识和具体 reason，patches 可为空；不得用照抄原文的 replacement 代替保留。每个请求标识必须且只能出现在 patches 或 retainedFindings 一处。保留仅是待主模型复核的建议，不改变原 finding、不代表通过，也不扩大写入权限。'

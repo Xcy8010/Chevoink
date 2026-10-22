@@ -1055,12 +1055,12 @@ export const continuityValidateTool = defineTool({
     // Only a new request receives the current response contract. Old cache,
     // correction and exact-call replay retain their own full frozen input.
     const requestBodies = structuredClone(bodies)
-    if (!continued && terminalVersion === 2 && requestBodies.terminalEvidence) requestBodies.terminalEvidence.verdictProtocol = 4
+    if (!continued && terminalVersion === 2 && requestBodies.terminalEvidence) requestBodies.terminalEvidence.verdictProtocol = 5
     if (!continued && requestBodies.terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) {
       requestBodies.terminalEvidence.factCoverage = terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, 2)
     }
     const criticInput = [
-        ...(requestBodies.terminalEvidence?.verdictProtocol === 4 ? [freshContinuityResponseContract(false, !!terminalCandidate)] : []),
+        ...((requestBodies.terminalEvidence?.verdictProtocol === 4 || requestBodies.terminalEvidence?.verdictProtocol === 5) ? [freshContinuityResponseContract(false, !!terminalCandidate, requestBodies.terminalEvidence.verdictProtocol)] : []),
         sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
         ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
         `章节：${chapter.title}`,

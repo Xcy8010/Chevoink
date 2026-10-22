@@ -18,7 +18,7 @@ import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reduc
 import { auxiliaryRouteSchema, auxiliaryRouteForRuntime, callDurableAuxiliary, resolveDurableAuxiliaryRuntime } from '../runtime-auxiliary-call.js'
 import type { AuxiliaryModelStep } from '../runtime-auxiliary-model.js'
 import { analyzeDeterministicQuality, applyQualityRepair, buildHumanityQualityContext, calibrateCriticFindings, HUMANITY_PROMPT_PROTOCOL,
-  getLatestQualityReport, getQualityReport, HUMANITY_CRITIC_VERSION, FROZEN_V4_HUMANITY_CRITIC_VERSION, PREVIOUS_HUMANITY_CRITIC_VERSION, LEGACY_HUMANITY_CRITIC_VERSION, persistHumanityQualityReport,
+  getLatestQualityReport, getQualityReport, HUMANITY_CRITIC_VERSION, FROZEN_V5_HUMANITY_CRITIC_VERSION, FROZEN_V4_HUMANITY_CRITIC_VERSION, PREVIOUS_HUMANITY_CRITIC_VERSION, LEGACY_HUMANITY_CRITIC_VERSION, persistHumanityQualityReport,
   prepareQualityFindings, qualityReviewContextHash, resolveQualityChapterTarget, retainedQualityCandidates } from '../humanity-quality.js'
 import { qualityReportCheckedCurrentContent, qualityAutoRepairPending, selectAutomaticQualityFindings, REPAIR_BLOCK_CODES } from '../quality-report-contract.js'
 import { chapterReviewDecisionGuidance, probeChapterReviewRevision, readChapterReviewReadiness, readChapterReviewRevisionGuidance } from '../chapter-review-guard.js'
@@ -34,7 +34,7 @@ import type { AgentTool, ToolContext, ToolResult } from './types.js'
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12)]), compiler: compilerObservationSchema.nullable(),
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13)]), compiler: compilerObservationSchema.nullable(),
     repairContext: z.string().optional(),
     parserVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
     repairSourceReferences: z.literal(true).optional(),
@@ -48,7 +48,7 @@ const workSchema = z.discriminatedUnion('kind', [
 type Work = Extract<z.infer<typeof workSchema>, { kind: 'check' }>
 /** Deployment never rewrites frozen paid work or its prompt. Project only the
  * fields that existed at admission, and preserve that review's actual version. */
-export function qualityWorkContextProjection(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>, version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12) {
+export function qualityWorkContextProjection(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>, version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13) {
   const { priorReviewCycle: _cycle, ...oldBundle } = bundle
   const compatible = version < 12 ? oldBundle : bundle
   const projected = version < 9 ? { ...compatible, recentChapters: bundle.recentChapters.map(({ title, content, orderIndex }) => ({ title, content, orderIndex })) } : compatible
@@ -56,11 +56,11 @@ export function qualityWorkContextProjection(bundle: Awaited<ReturnType<typeof b
   const { originalRequest: _request, ...v1 } = v2
   return version === 1 ? v1 : version === 2 ? v2 : projected
 }
-export function qualityWorkCriticVersion(version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12) {
-  return version === 1 ? LEGACY_HUMANITY_CRITIC_VERSION : version === 2 ? PREVIOUS_HUMANITY_CRITIC_VERSION : version === 3 ? FROZEN_V4_HUMANITY_CRITIC_VERSION : HUMANITY_CRITIC_VERSION
+export function qualityWorkCriticVersion(version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13) {
+  return version === 1 ? LEGACY_HUMANITY_CRITIC_VERSION : version === 2 ? PREVIOUS_HUMANITY_CRITIC_VERSION : version === 3 ? FROZEN_V4_HUMANITY_CRITIC_VERSION : version <= 12 ? FROZEN_V5_HUMANITY_CRITIC_VERSION : HUMANITY_CRITIC_VERSION
 }
 export function qualityWorkPromptProtocol(version: number) {
-  return version >= 12 ? HUMANITY_PROMPT_PROTOCOL : version === 11 ? 'humanity-context.v4' : version === 10 ? 'humanity-context.v3' : version === 9 ? 'humanity-context.v2' : undefined
+  return version >= 13 ? HUMANITY_PROMPT_PROTOCOL : version === 12 ? 'humanity-context.v5' as const : version === 11 ? 'humanity-context.v4' : version === 10 ? 'humanity-context.v3' : version === 9 ? 'humanity-context.v2' : undefined
 }
 /** Preserve the actual parser frozen paid work used before this deployment. */
 export function qualityWorkParseObject(text: string, envelope: 'findings' | 'corrections' | 'patches', parserVersion?: 1 | 2 | 3): unknown {
@@ -122,7 +122,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
     const cacheMetrics = existingReport?.deterministicMetrics
     const matchingContext = !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics) && cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle)
     const sameFailedContext = existingReport?.status === 'failed' && !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics)
-      && (matchingContext || ['humanity-context.v2', 'humanity-context.v3', 'humanity-context.v4'].some(protocol => cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, protocol as 'humanity-context.v2' | 'humanity-context.v3' | 'humanity-context.v4')))
+      && (matchingContext || ['humanity-context.v2', 'humanity-context.v3', 'humanity-context.v4', 'humanity-context.v5'].some(protocol => cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, protocol as 'humanity-context.v2' | 'humanity-context.v3' | 'humanity-context.v4' | 'humanity-context.v5')))
     const formatRecovery = sameFailedContext && existingReport.chapterRevision === bundle.chapter.revision
       ? await readQualityFormatRecovery(tx, ctx, { chapterId }) : null
     if (sameFailedContext && existingReport.chapterRevision === bundle.chapter.revision && !formatRecovery) {
@@ -132,7 +132,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
       && matchingContext && !qualityReportHasDroppedFindings(cacheMetrics) && qualityReportCheckedCurrentContent(existingReport, bundle.chapter.revision, bundle.chapter.content)
       ? { id: existingReport.id, hash: jsonHash(await getQualityReport(ctx.userId, ctx.novelId, existingReport.id, tx)) } : null
     const sources = buildQualityEvidenceSources({ userId: ctx.userId, novelId: ctx.novelId, chapterId, chapterRevision: bundle.chapter.revision }, bundle.chapter.content)
-    return { kind: 'check' as const, version: 12 as const, parserVersion: 3 as const, repairSourceReferences: true as const, formatRecovery, deadlineAt: Date.now() + env.aiTextTimeoutMs, sources, compiler: bundle.compilation ? baseline : null,
+    return { kind: 'check' as const, version: 13 as const, parserVersion: 3 as const, repairSourceReferences: true as const, formatRecovery, deadlineAt: Date.now() + env.aiTextTimeoutMs, sources, compiler: bundle.compilation ? baseline : null,
       chapter: { id: chapterId, title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content }, contextHash: jsonHash(bundle),
       recentContents: bundle.recentChapters.map(item => item.content), feedback: bundle.feedback,
       mode: state.configuration.qualityMode, repair: comp?.status !== 'completed' && writable && state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId)

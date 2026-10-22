@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import type { buildHumanityQualityContext } from '../../api/lib/agent/humanity-quality.js'
 import { qualityReviewContextHash } from '../../api/lib/agent/humanity-quality.js'
@@ -13,6 +14,7 @@ const bundle = { chapter: { id: 'chapter', title: '旧物摊', content: '沈桐�
 
 describe('frozen quality work across deployments', () => {
   it('new work identifies contextual prose without relabeling an already frozen v9 request', () => {
+    expect(qualityWorkPromptProtocol(13)).toBe('humanity-context.v6')
     expect(qualityWorkPromptProtocol(12)).toBe('humanity-context.v5')
     expect(qualityWorkPromptProtocol(11)).toBe('humanity-context.v4')
     expect(qualityWorkPromptProtocol(10)).toBe('humanity-context.v3')
@@ -24,6 +26,26 @@ describe('frozen quality work across deployments', () => {
     expect(qualityWorkContextProjection(bundle, 10)).toEqual(bundle)
     expect(runtimeJson(old).hash).toBe(hash)
     expect(old).not.toHaveProperty('criticPromptProtocol')
+  })
+  it.each([
+    ['balanced', '38be2baef2d1e2f1abf7634cd81e8febe00ceff3f2ce2872ef0826cbe168ef7e'],
+    ['story', '43523376f4ca55cbf5355c24dd11a3015975dfd9df374ca56767e0b8449a98b4'],
+    ['style', '07f321338dcd6356ecfbcb887ae850837ea83a5ed322aa9858db96ea4a4ca72d'],
+  ] as const)('preserves the exact frozen v5 %s prompt while new work checks carrier scope', (lens, expected) => {
+    const old = buildCriticSystem(lens, 'humanity-context.v5')
+    expect(createHash('sha256').update(old).digest('hex')).toBe(expected)
+    const current = buildCriticSystem(lens)
+    expect(current).toContain('不要求每行重复引号')
+    expect(current).toContain('不把载体无限延伸')
+    expect(current).toContain('不编造“并非纸面/引文”的断言')
+    expect(current).not.toBe(old)
+  })
+  it('keeps the exact v5 cycle projection and authentic critic version on old work', () => {
+    const current = { ...bundle, priorReviewCycle: { version: 1, baseline: { body: { revision: 0, contentHash: 'a'.repeat(64) }, findings: [] }, transitions: [], current: { revision: 1, contentHash: 'b'.repeat(64) } } } as Bundle
+    expect(qualityReviewContextHash(current, 'humanity-context.v5')).not.toBe(qualityReviewContextHash(bundle, 'humanity-context.v5'))
+    expect(qualityWorkContextProjection(current, 13)).toEqual(qualityWorkContextProjection(current, 12))
+    for (const version of [4, 5, 6, 7, 8, 9, 10, 11, 12] as const) expect(qualityWorkCriticVersion(version)).toBe('humanity-critic.v5')
+    expect(qualityWorkCriticVersion(13)).toBe('humanity-critic.v6')
   })
   it('review-cycle bookkeeping cannot invalidate a complete current quality report', () => {
     const current = { ...bundle, compilation: { ...bundle.compilation!, preparedContext: { reviewCycle: { version: 1,

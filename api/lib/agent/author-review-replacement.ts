@@ -11,7 +11,7 @@ import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { savedRunUsageSchema, type PendingReviewCall } from './checkpoint.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.js'
-import { analyzeDeterministicQuality, buildHumanityQualityContext, getLatestQualityReport, HUMANITY_CRITIC_VERSION,
+import { analyzeDeterministicQuality, buildHumanityQualityContext, getLatestQualityReport, HUMANITY_CRITIC_VERSION, FROZEN_V5_HUMANITY_CRITIC_VERSION,
   persistHumanityQualityReport, prepareQualityFindings, qualityReviewContextHash } from './humanity-quality.js'
 import { buildQualityEvidenceSources, inspectCorrectableCriticResponse } from './quality-evidence.js'
 import { buildCriticInput, buildCriticSystem } from './tools/humanity-quality-tools.js'
@@ -57,7 +57,7 @@ const authorizationSchema = z.object({ authorizationId: idSchema, humanAuthoriza
 }).strict()
 type Frozen = AuthorReviewReplacementAuthorization & { version: 1; newCallId: string; sourceCallEventId: string; sourceResultId: string;
   lineageIds: string[]; specHash: string; originalUsageHash: string; sourceEventsHash: string; budget: { currentTurn: number; usage: Prisma.JsonValue };
-  criticVersion: typeof HUMANITY_CRITIC_VERSION; baselineUsage: Array<{ id: string; hash: string }>; quotedMaximumCreditMilli: number }
+  criticVersion: typeof HUMANITY_CRITIC_VERSION | typeof FROZEN_V5_HUMANITY_CRITIC_VERSION; baselineUsage: Array<{ id: string; hash: string }>; quotedMaximumCreditMilli: number }
 type Completion = { version: 1; authorizationId: string; authorizationEventId: string; claimEventId: string; frozenHash: string;
   observationEventId: string; observationHash: string; newCallId: string; reportId: string; reportHash: string; responseHash: string; finishReason: string | null; toolCalls: number; newUsageIds: string[] }
 export type AuthorReviewResponseObservation = { authorizationId: string; newCallId: string; rawResponse: string; finishReason: string | null;
@@ -72,7 +72,7 @@ const observationSchema = z.object({ version: z.literal(1), authorizationId: idS
 const frozenSchema = authorizationSchema.extend({ version: z.literal(1), newCallId: z.string().min(1), sourceCallEventId: z.string().min(1),
   sourceResultId: z.string().min(1), lineageIds: z.array(z.string().min(1)).min(1), specHash: digest, originalUsageHash: digest, sourceEventsHash: digest,
   budget: z.object({ currentTurn: z.number().int().nonnegative(), usage: z.record(z.string(), z.unknown()) }).strict(),
-  criticVersion: z.literal(HUMANITY_CRITIC_VERSION), baselineUsage: z.array(z.object({ id: z.string().min(1), hash: digest }).strict()).min(1),
+  criticVersion: z.union([z.literal(HUMANITY_CRITIC_VERSION), z.literal(FROZEN_V5_HUMANITY_CRITIC_VERSION)]), baselineUsage: z.array(z.object({ id: z.string().min(1), hash: digest }).strict()).min(1),
   quotedMaximumCreditMilli: z.number().int().nonnegative().max(MAX_CREDIT_STORAGE_INT),
 }).strict()
 const completionSchema = z.object({ version: z.literal(1), authorizationId: idSchema, authorizationEventId: z.string().min(1),
@@ -95,7 +95,7 @@ async function frozenFor(tx: Prisma.TransactionClient, authorizationId: string) 
   const event = await tx.agentRunEvent.findUnique({ where: { id: eventId(authorizationId, 'authorization') } })
   const frozen = frozenSchema.parse(unpack<Frozen>(event, authorizationId, 'authorization')) as Frozen
   if (!validAuthority(frozen) || frozen.authorizationId !== authorizationId || event!.runId !== frozen.subject.runId
-    || frozen.newCallId !== callId(authorizationId) || frozen.criticVersion !== HUMANITY_CRITIC_VERSION) reject('独立检查授权身份不一致。')
+    || frozen.newCallId !== callId(authorizationId)) reject('独立检查授权身份不一致。')
   return { frozen, event: event! }
 }
 function validAuthority(input: AuthorReviewReplacementAuthorization) {
@@ -137,6 +137,7 @@ function budgetPreserved(current: Prisma.JsonValue | null, frozen: Frozen, readi
 
 async function current(tx: Prisma.TransactionClient, input: AuthorReviewReplacementAuthorization, frozen?: Frozen, reading = false) {
   const { subject, pending } = input
+  const protocol = (frozen?.criticVersion ?? ('criticVersion' in input ? input.criticVersion : undefined)) === FROZEN_V5_HUMANITY_CRITIC_VERSION ? 'humanity-context.v5' : 'humanity-context.v6'
   const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
   if (!run || run.taskRootId || run.runtimeProtocolVersion !== 0 || (!reading && !['failed', 'paused'].includes(run.status))
     || ['completed', 'cancelled'].includes(run.status) || object(run.usage).authorEnded !== undefined
@@ -151,7 +152,7 @@ async function current(tx: Prisma.TransactionClient, input: AuthorReviewReplacem
   if (!inScope(original.spec, subject.novelId, bundle.chapter) || bundle.chapter.revision !== input.expected.currentRevision || input.expected.currentRevision < pending.revision
     || bundle.compilation?.id !== pending.compilationId || !bundle.compilation || !ids.includes(bundle.compilation.runId ?? '')
     || bundle.compilation.status !== 'active' || sha(bundle.chapter.content) !== input.expected.currentContentHash
-    || qualityReviewContextHash(bundle) !== input.expected.qualityContextHash) reject('当前正文、完整上下文或原任务范围已变化。')
+    || qualityReviewContextHash(bundle, protocol) !== input.expected.qualityContextHash) reject('当前正文、完整上下文或原任务范围已变化。')
   const events = await tx.agentRunEvent.findMany({ where: { runId: { in: ids }, type: { in: ['tool.call', 'tool.result'] },
     payload: { path: ['callId'], equals: pending.callId } }, orderBy: { seq: 'asc' } })
   const calls = events.filter(event => event.type === 'tool.call'), results = events.filter(event => event.type === 'tool.result')
@@ -178,7 +179,7 @@ async function current(tx: Prisma.TransactionClient, input: AuthorReviewReplacem
   }
   const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map(item => item.content))
   const sources = buildQualityEvidenceSources({ userId: subject.userId, novelId: subject.novelId, chapterId: pending.chapterId, chapterRevision: input.expected.currentRevision }, bundle.chapter.content)
-  const system = buildCriticSystem('balanced'), content = buildCriticInput(bundle, deterministic.metrics, sources)
+  const system = buildCriticSystem('balanced', protocol), content = buildCriticInput(bundle, deterministic.metrics, sources)
   if (sha(JSON.stringify({ system, content })) !== input.expected.promptHash || input.conservativeInputTokenCeiling < estimateChatMessagesTokens([
     { role: 'system', content: system }, { role: 'user', content },
   ])) reject('实际提示词或保守输入上限不一致。')
@@ -377,7 +378,8 @@ export async function completeAuthorReviewReplacement(tx: Prisma.TransactionClie
   const complete = inspected.complete && !inspected.diagnostic.droppedFindings && !inspected.diagnostic.invalidSources && !prepared.unlocatedFindings && !prepared.omittedFindings
   const report = await persistHumanityQualityReport({ ...frozen.subject, compilationId: frozen.pending.compilationId!, chapterId: frozen.pending.chapterId,
     chapterRevision: frozen.expected.currentRevision, mode: live.bundle.compilation!.mode, deterministicMetrics: live.deterministic.metrics,
-    qualityContextHash: frozen.expected.qualityContextHash, criticVersion: frozen.criticVersion, sources: live.sources,
+    qualityContextHash: frozen.expected.qualityContextHash, criticVersion: frozen.criticVersion,
+    criticPromptProtocol: frozen.criticVersion === FROZEN_V5_HUMANITY_CRITIC_VERSION ? 'humanity-context.v5' : 'humanity-context.v6', sources: live.sources,
     deterministicFindings: live.deterministic.findings, criticFindings: inspected.findings, criticComplete: complete,
     criticDropped: inspected.diagnostic.droppedFindings, criticResponseDiagnostic: { ...inspected.diagnostic, callId: frozen.newCallId } }, tx)
   const actual = await tx.chapterQualityReport.findFirstOrThrow({ where: { id: report.id }, include: { findings: true } })

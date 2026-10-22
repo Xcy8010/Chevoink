@@ -51,4 +51,14 @@ describe('bounded humanity neighbors and repair intent', () => {
     expect(context.before).toHaveLength(600)
     expect(context.after).toHaveLength(600)
   })
+  it('gives the existing patch request complete carrier context beyond its local evidence window', () => {
+    const content = '她拿起登记纸，逐栏填写。' + '路上风声很轻。'.repeat(140) + '位置栏：北门，设备柜。' + '她放下纸，离开柜台。'
+    const current = { ...bundle, chapter: { ...bundle.chapter, content }, priorReviewCycle: { baseline: { findings: ['prior judgment'] }, transitions: [] } } as unknown as Bundle
+    const input = buildQualityRepairContext(current)
+    expect(input).toContain(JSON.stringify(content))
+    expect(input).toContain(JSON.stringify(current.priorReviewCycle))
+    expect(input).toContain('只有请求的 evidence 可改')
+    const span = content.indexOf('位置栏')
+    expect(qualityRepairSurroundings(content, span, span + 12).before).not.toContain('登记纸')
+  })
 })

@@ -33,10 +33,11 @@ import { enqueueChapterMemoryExtraction } from './story-memory.js'
 import { locateQualityFindingSpans, validateQualityEvidenceSources, type QualityEvidenceSources, type CriticResponseDiagnostic } from './quality-evidence.js'
 import { qualityAutoRepairPending, qualityReportMatchesContent, selectAutomaticQualityFindings } from './quality-report-contract.js'
 
-export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v5'
+export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v6'
+export const FROZEN_V5_HUMANITY_CRITIC_VERSION = 'humanity-critic.v5'
 /** v5 is the finding contract; this separately identifies the new prompt rules. */
-export const HUMANITY_PROMPT_PROTOCOL = 'humanity-context.v5'
-export type HumanityPromptProtocol = typeof HUMANITY_PROMPT_PROTOCOL | 'humanity-context.v2' | 'humanity-context.v3' | 'humanity-context.v4'
+export const HUMANITY_PROMPT_PROTOCOL = 'humanity-context.v6'
+export type HumanityPromptProtocol = typeof HUMANITY_PROMPT_PROTOCOL | 'humanity-context.v2' | 'humanity-context.v3' | 'humanity-context.v4' | 'humanity-context.v5'
 export const FROZEN_V4_HUMANITY_CRITIC_VERSION = 'humanity-critic.v4'
 export const PREVIOUS_HUMANITY_CRITIC_VERSION = 'humanity-critic.v3'
 export const LEGACY_HUMANITY_CRITIC_VERSION = 'humanity-critic.v2'
@@ -378,7 +379,7 @@ export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof build
     charter: bundle.charter, compiler: bundle.compilation ? { id: bundle.compilation.id, bridge: bundle.compilation.bridge, sceneTasks: bundle.compilation.sceneTasks } : null,
     profiles: bundle.profiles, anchors: bundle.anchors, recentChapters: bundle.recentChapters, feedback: bundle.feedback, originalRequest: bundle.originalRequest ?? null,
     chapterWritingBackground: bundle.chapterWritingBackground,
-    ...(promptProtocol === HUMANITY_PROMPT_PROTOCOL ? { priorReviewCycle: bundle.priorReviewCycle ?? null } : {}),
+    ...((promptProtocol === 'humanity-context.v5' || promptProtocol === HUMANITY_PROMPT_PROTOCOL) ? { priorReviewCycle: bundle.priorReviewCycle ?? null } : {}),
   }))
 }
 
@@ -448,7 +449,7 @@ export async function persistHumanityQualityReport(input: {
   qualityContextHash?: string
   criticPromptProtocol?: HumanityPromptProtocol
   /** Recovered pre-upgrade paid work retains the critic rules it actually used. */
-  criticVersion?: typeof HUMANITY_CRITIC_VERSION | typeof FROZEN_V4_HUMANITY_CRITIC_VERSION | typeof PREVIOUS_HUMANITY_CRITIC_VERSION | typeof LEGACY_HUMANITY_CRITIC_VERSION
+  criticVersion?: typeof HUMANITY_CRITIC_VERSION | typeof FROZEN_V5_HUMANITY_CRITIC_VERSION | typeof FROZEN_V4_HUMANITY_CRITIC_VERSION | typeof PREVIOUS_HUMANITY_CRITIC_VERSION | typeof LEGACY_HUMANITY_CRITIC_VERSION
   sources?: QualityEvidenceSources
   deterministicFindings: LocatedQualityFinding[]
   criticFindings: CriticQualityFinding[]

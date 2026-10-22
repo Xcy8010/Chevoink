@@ -207,7 +207,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       if (['source-authority-reassessment', 'terminal-reassessment', 'terminal-chain-reassessment'].includes(scenario)) {
         expect(saved.validation).toMatchObject({ independentCheck: 'complete', errorCount: 0, coverage: { protocolVersion: scenario === 'terminal-chain-reassessment' ? 11 : scenario === 'terminal-reassessment' ? 10 : 9 }, continuityCriticResponse: { parserVersion: ['terminal-reassessment', 'terminal-chain-reassessment'].includes(scenario) ? 8 : 7, sourceScope: { currentOrderIndex: 1 }, reassessment: { decisions: [{ action: 'retract' }] } } });
         const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' } });
-          expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'terminal-chain-reassessment' ? 17 : scenario === 'terminal-reassessment' ? 13 : 12, sourceScope: { currentOrderIndex: 1 } } } });
+          expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'terminal-chain-reassessment' ? 18 : scenario === 'terminal-reassessment' ? 13 : 12, sourceScope: { currentOrderIndex: 1 } } } });
         if (['terminal-reassessment', 'terminal-chain-reassessment'].includes(scenario)) {
           expect(parent.inputSnapshot).toMatchObject({ input: { work: { sourceBodies: { terminalEvidence: { protocol: scenario === 'terminal-chain-reassessment' ? 2 : 1, current: { id: f.chapterId }, previous: null } } } } })
           expect(saved.validation).toMatchObject({ continuityCriticResponse: { terminalEvidence: { protocol: scenario === 'terminal-chain-reassessment' ? 2 : 1, current: { id: f.chapterId }, previous: null } } })

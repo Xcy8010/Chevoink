@@ -16,18 +16,19 @@ vi.mock('../../api/lib/agent/manuscript-scope.js', () => ({ assertAgentManuscrip
 vi.mock('../../api/lib/agent/original-request.js', () => ({ readOriginalTaskRequest: vi.fn(async () => mocks.original), originalTaskRunIds: vi.fn(async () => ['run']) }))
 vi.mock('../../api/lib/credits.js', () => ({ getModelTierRuntime: vi.fn(async () => mocks.runtime) }))
 vi.mock('../../api/lib/billing/resolve-token-price.js', () => ({ resolveTokenPrice: vi.fn(async () => mocks.price) }))
-vi.mock('../../api/lib/agent/tools/humanity-quality-tools.js', () => ({ buildCriticSystem: () => 'system', buildCriticInput: () => JSON.stringify(mocks.bundle) }))
+vi.mock('../../api/lib/agent/tools/humanity-quality-tools.js', () => ({ buildCriticSystem: (_lens: string, protocol?: string) => protocol === 'humanity-context.v5' ? 'frozen-v5-system' : 'system', buildCriticInput: () => JSON.stringify(mocks.bundle) }))
 vi.mock('../../api/lib/agent/humanity-quality.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../../api/lib/agent/humanity-quality.js')>()
   return { ...actual, buildHumanityQualityContext: vi.fn(async () => mocks.bundle),
-    qualityReviewContextHash: (bundle: unknown) => sha(JSON.stringify(bundle)), analyzeDeterministicQuality: () => ({ metrics: {}, findings: [] }),
+    qualityReviewContextHash: (bundle: unknown, protocol = 'humanity-context.v6') => sha(JSON.stringify({ bundle, protocol })), analyzeDeterministicQuality: () => ({ metrics: {}, findings: [] }),
     getLatestQualityReport: async (_user: unknown, _novel: unknown, _chapter: unknown, tx: Prisma.TransactionClient) => tx.chapterQualityReport.findFirst({ orderBy: { createdAt: 'desc' } }),
     persistHumanityQualityReport: async (input: Parameters<typeof actual.persistHumanityQualityReport>[0], tx: Prisma.TransactionClient) => {
       const content = String((mocks.bundle.chapter as { content: string }).content)
+      if (input.qualityContextHash !== sha(JSON.stringify({ bundle: mocks.bundle, protocol: input.criticPromptProtocol ?? 'humanity-context.v6' }))) throw new Error('quality context protocol mismatch')
       const prepared = actual.prepareQualityFindings(content, input.deterministicFindings, input.criticFindings, input.criticComplete === true, input.sources, 3)
       return tx.chapterQualityReport.create({ data: { ...input, id: 'report', chapterRevision: input.chapterRevision, repairRound: 0,
         status: !prepared.complete ? 'failed' : prepared.findings.some(row => row.severity !== 'advisory') ? 'needs_repair' : 'passed',
-        deterministicMetrics: { ...input.deterministicMetrics, qualityContextHash: input.qualityContextHash, contentHash: sha(content),
+        deterministicMetrics: { ...input.deterministicMetrics, qualityContextHash: input.qualityContextHash, criticPromptProtocol: input.criticPromptProtocol, contentHash: sha(content),
           independentCheck: prepared.complete ? 'complete' : 'unavailable', droppedFindings: input.criticDropped,
           omittedFindings: prepared.omittedFindings, unlocatedFindings: prepared.unlocatedFindings, criticFindingCount: prepared.criticFindingCount,
           criticResponse: input.criticResponseDiagnostic, evidenceSourceTableHash: sha(JSON.stringify(input.sources)) },
@@ -97,14 +98,14 @@ function fixture() {
   const authorizationId = 'author-review-replacement:owner:123e4567-e89b-42d3-a456-426614174000'
   const input: AuthorReviewReplacementAuthorization = { authorizationId, humanAuthorizationRef: authorizationId, subject, taskId: 'task', pending, originalUsageIds: ['oldUsage'],
     authority: { source: 'authenticated_author_action', actorUserId: 'owner', quoteNonce: '123e4567-e89b-42d3-a456-426614174000' },
-    expected: { currentRevision: 4, currentContentHash: sha(String((mocks.bundle.chapter as Row).content)), qualityContextHash: sha(JSON.stringify(mocks.bundle)),
+    expected: { currentRevision: 4, currentContentHash: sha(String((mocks.bundle.chapter as Row).content)), qualityContextHash: sha(JSON.stringify({ bundle: mocks.bundle, protocol: 'humanity-context.v6' })),
       promptHash: sha(JSON.stringify({ system: 'system', content: JSON.stringify(mocks.bundle) })),
       model: { ...mocks.runtime, customModelId: null } as AuthorReviewReplacementAuthorization['expected']['model'], price: mocks.price as AuthorReviewReplacementAuthorization['expected']['price'] },
     conservativeInputTokenCeiling: 35100, maxOutputTokens: 16384, maxModelRequests: 1, maxCreditMilli: priceTokenEvidence(mocks.price as never, 35100, 16384, 0) }
   const snapshot = JSON.stringify({ run, originalUsage })
   async function start() { await authorizeAuthorReviewReplacement(tx, input); return claimAuthorReviewReplacement(tx, input.authorizationId) }
-  async function finish(rawResponse = '{"findings":[]}', finishReason: string | null = 'stop') {
-    const plan = await start(), price = priceTokenEvidence(input.expected.price, 100, 10)
+  async function finish(rawResponse = '{"findings":[]}', finishReason: string | null = 'stop', claimedPlan?: Awaited<ReturnType<typeof start>>) {
+    const plan = claimedPlan ?? await start(), price = priceTokenEvidence(input.expected.price, 100, 10)
     usage.push({ id: 'newUsage', userId: 'owner', novelId: 'novel', chapterId: 'chapter', targetType: 'chapter', targetId: plan.newCallId,
       agentRunId: 'run', action: plan.action, providerType: 'text', providerName: 'Xiaomi', modelName: 'mimo-v2.6-flash', modelTier: 'standard', multiplierBps: 12000,
       billingSnapshot: JSON.parse(JSON.stringify(input.expected.price)), usageSource: 'reported', billingStatus: 'settled', reservedCreditMilli: 0, requestTokens: 100, responseTokens: 10,
@@ -131,6 +132,24 @@ function fixture() {
 
 beforeEach(() => vi.clearAllMocks())
 describe('one independent author quality dependency', () => {
+  it('reads and completes an authenticated frozen v5 authorization using its original prompt', async () => {
+    const f = fixture(), oldUsage = JSON.stringify(f.usage[0])
+    await authorizeAuthorReviewReplacement(f.tx, f.input)
+    const event = f.events.find(row => row.type === 'review.replacement.authorized')!
+    const payload = event.payload as { value: Row; hash: string }, value = payload.value
+    value.criticVersion = 'humanity-critic.v5'
+    ;(value.expected as Row).qualityContextHash = sha(JSON.stringify({ bundle: mocks.bundle, protocol: 'humanity-context.v5' }))
+    ;(value.expected as Row).promptHash = sha(JSON.stringify({ system: 'frozen-v5-system', content: JSON.stringify(mocks.bundle) }))
+    payload.hash = runtimeJson(JSON.parse(JSON.stringify(value))).hash
+    const plan = await claimAuthorReviewReplacement(f.tx, f.input.authorizationId)
+    expect(plan.system).toBe('frozen-v5-system')
+    await f.finish(undefined, undefined, plan)
+    expect(f.reports[0].criticVersion).toBe('humanity-critic.v5')
+    expect(f.reports[0].deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v5' })
+    expect(await f.read()).toHaveLength(1)
+    expect(JSON.stringify(f.usage[0])).toBe(oldUsage)
+    await expect(claimAuthorReviewReplacement(f.tx, f.input.authorizationId)).rejects.toThrow()
+  })
   it('restores only a real completed report, idempotently, preserving unknown charges and original budgets', async () => {
     const f = fixture(), old = JSON.stringify(f.usage[0]), before = JSON.parse(f.snapshot).run
     await f.finish()
@@ -292,7 +311,7 @@ describe('one independent author quality dependency', () => {
     const f = fixture()
     ;(mocks.bundle.chapter as Row).revision = 5
     f.input.expected.currentRevision = 5
-    f.input.expected.qualityContextHash = sha(JSON.stringify(mocks.bundle))
+    f.input.expected.qualityContextHash = sha(JSON.stringify({ bundle: mocks.bundle, protocol: 'humanity-context.v6' }))
     f.input.expected.promptHash = sha(JSON.stringify({ system: 'system', content: JSON.stringify(mocks.bundle) }))
     await f.finish()
     expect(f.reports[0].chapterRevision).toBe(5)
@@ -307,7 +326,7 @@ describe('one independent author quality dependency', () => {
         f.usage[1].usageSource = 'unknown'
         ;(mocks.bundle.chapter as Row).revision = 5
         f.input.expected.currentRevision = 5
-        f.input.expected.qualityContextHash = sha(JSON.stringify(mocks.bundle))
+        f.input.expected.qualityContextHash = sha(JSON.stringify({ bundle: mocks.bundle, protocol: 'humanity-context.v6' }))
         f.input.expected.promptHash = sha(JSON.stringify({ system: 'system', content: JSON.stringify(mocks.bundle) }))
       }
       f.input.authority.quoteNonce = '123e4567-e89b-42d3-a456-426614174001'
@@ -374,7 +393,7 @@ describe('one independent author quality dependency', () => {
     await f.finish('{"findings":[null]}')
     ;(mocks.bundle.chapter as Row).revision = 5
     f.input.expected.currentRevision = 5
-    f.input.expected.qualityContextHash = sha(JSON.stringify(mocks.bundle))
+    f.input.expected.qualityContextHash = sha(JSON.stringify({ bundle: mocks.bundle, protocol: 'humanity-context.v6' }))
     f.input.expected.promptHash = sha(JSON.stringify({ system: 'system', content: JSON.stringify(mocks.bundle) }))
     f.input.authority.quoteNonce = '123e4567-e89b-42d3-a456-426614174001'
     f.input.authorizationId = f.input.humanAuthorizationRef = `author-review-replacement:owner:${f.input.authority.quoteNonce}`

@@ -49,7 +49,7 @@ const selectedRuntime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed
   reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
 
 describe.runIf(available)('native paid failed quality response and limited delivery proof', () => {
-  it.each(['continuity-complete', 'continuity-capped', 'response-outbox', 'settlement', 'usage-observation', 'charge-association', 'continuity-error', 'protocol-marker', 'unknown-work-version'] as const)('%s requires the authentic saved body, response and settled payment chain', async scenario => fixture(async f => {
+  it.each(['continuity-complete', 'continuity-capped', 'response-outbox', 'settlement', 'usage-observation', 'charge-association', 'continuity-error', 'protocol-marker', 'critic-marker', 'unknown-work-version'] as const)('%s requires the authentic saved body, response and settled payment chain', async scenario => fixture(async f => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const lease = await claim(f)
     const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '修改本章' })
@@ -144,14 +144,18 @@ describe.runIf(available)('native paid failed quality response and limited deliv
       report.deterministicMetrics = { ...report.deterministicMetrics as Prisma.JsonObject, criticPromptProtocol: 'humanity-context.v4' }
       await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { deterministicMetrics: report.deterministicMetrics } })
     }
+    if (scenario === 'critic-marker') {
+      report.criticVersion = 'humanity-critic.v6'
+      await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { criticVersion: report.criticVersion } })
+    }
     if (scenario === 'unknown-work-version') {
       const parent = await prisma.agentOperation.findUniqueOrThrow({ where: { id: critic.parentOperationId! } })
       const snapshot = JSON.parse(JSON.stringify(parent.inputSnapshot)) as { input: { work: { version: number } } }
-      snapshot.input.work.version = 13
+      snapshot.input.work.version = 14
       const sealed = runtimeJson(snapshot)
       await prisma.agentOperation.update({ where: { id: parent.id }, data: { inputSnapshot: sealed.value, inputHash: sealed.hash } })
     }
-    if (proof && ['response-outbox', 'settlement', 'usage-observation', 'charge-association', 'protocol-marker', 'unknown-work-version'].includes(scenario)) {
+    if (proof && ['response-outbox', 'settlement', 'usage-observation', 'charge-association', 'protocol-marker', 'critic-marker', 'unknown-work-version'].includes(scenario)) {
       expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
       expect(await prisma.$transaction(tx => readQualityUnavailableProof(tx, subject, [f.runId], report, chapter, f.rootId))).toBeNull()
       expect(await prisma.$transaction(tx => readQualityFormatRecovery(tx, subject, { chapterId: chapter.id }))).toBeNull()
@@ -796,7 +800,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(2)
         if (noOpRepair) {
           expect(await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze' } }))
-            .toMatchObject({ inputSnapshot: { input: { work: { version: 12 } } } })
+            .toMatchObject({ inputSnapshot: { input: { work: { version: 13 } } } })
           expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'quality_repair' } })).toBe(1)
           expect(await prisma.chapterQualityReport.count({ where: { chapterId: f.chapterId, status: 'passed' } })).toBe(0)
           expect(result.result.snapshot).toBeUndefined()
@@ -954,7 +958,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(JSON.stringify(result)).not.toContain('rawResponse')
         expect(await prisma.$transaction(tx => readQualityFormatRecovery(tx, { userId: f.userId, novelId: f.novelId, runId: lease.runId }, { chapterId: f.chapterId }))).toBeNull()
         const savedWork = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
-        expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 12, parserVersion: 3, repairContext: expect.any(String), deadlineAt: expect.any(Number) } } })
+        expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 13, parserVersion: 3, repairContext: expect.any(String), deadlineAt: expect.any(Number) } } })
         expect(reports[0].deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v5' })
         const recoveryOp = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: savedWork.id, action: 'quality_format_recovery' }, include: { attempts: { include: { usageReceipt: true } } } })
         expect(recoveryOp.attempts).toHaveLength(1)
@@ -993,8 +997,8 @@ describe.runIf(available)('frozen cached quality repair authorization', () => {
     expect(await check(work)).toBe(true)
     for (const version of [1, 2, 3]) expect(await check({ ...work, version, sources: undefined })).toBe(true)
     const currentSources = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, chapterRevision: 1 }, '原文')
-    for (const version of [9, 10, 11, 12]) expect(await check({ ...work, version, sources: currentSources })).toBe(true)
-    expect(await check({ ...work, version: 13, sources: currentSources })).toBe(false)
+    for (const version of [9, 10, 11, 12, 13]) expect(await check({ ...work, version, sources: currentSources })).toBe(true)
+    expect(await check({ ...work, version: 14, sources: currentSources })).toBe(false)
     expect(await check({ ...work, sources: { ...sources, identity: { ...sources.identity, userId: randomUUID() } } })).toBe(false)
     expect(await check({ ...work, sources: { ...sources, identity: { ...sources.identity, chapterRevision: 2 } } })).toBe(false)
     expect(await check({ ...work, chapter: { ...work.chapter, content: '另文' } })).toBe(false)

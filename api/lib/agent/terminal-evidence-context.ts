@@ -19,7 +19,7 @@ export type TerminalCarriedFact = z.infer<typeof terminalCarriedFactSchema>
 export const terminalEvidenceContextSchema = z.object({
   protocol: z.union([z.literal(1), z.literal(2)]),
   quoteAddressProtocol: z.literal(1).optional(),
-  verdictProtocol: z.union([z.literal(2), z.literal(3), z.literal(4)]).optional(),
+  verdictProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).optional(),
   factCoverage: terminalCoverageInputSchema.optional(),
   current: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash }).strict(),
   previous: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash,
@@ -31,10 +31,10 @@ export const terminalEvidenceContextSchema = z.object({
 export type TerminalEvidenceContext = z.infer<typeof terminalEvidenceContextSchema>
 
 /** A response is always read with its own frozen verdict contract. */
-export function terminalVerdictAuditVersion(validation: unknown): 2 | 3 | 4 | undefined {
+export function terminalVerdictAuditVersion(validation: unknown): 2 | 3 | 4 | 5 | undefined {
   const audit = (validation as { continuityCriticResponse?: { parserVersion?: number; terminalEvidence?: { verdictProtocol?: unknown } } } | null)?.continuityCriticResponse
   const version = audit?.terminalEvidence?.verdictProtocol
-  return audit?.parserVersion === 8 && (version === 2 || version === 3 || version === 4) ? version : undefined
+  return audit?.parserVersion === 8 && (version === 2 || version === 3 || version === 4 || version === 5) ? version : undefined
 }
 
 /** Only a fresh HTTP admission opts in. Saved contracts are never upgraded. */
@@ -55,7 +55,7 @@ export function terminalQuoteAddressVersion(spec: unknown): 1 | undefined {
  * summary. A 300-character span crossing chapter boundaries cannot inherit. */
 export function terminalEvidenceContext(chapter: { id: string; revision: number; orderIndex: number; content: string },
   source: Awaited<ReturnType<typeof readCompilerContinuitySource>>, version: 1 | 2 = source && 'terminalInheritance' in source ? 2 : 1,
-  quoteAddressProtocol?: 1, factCoverage?: TerminalCoverageInput, verdictProtocol?: 2 | 3 | 4): TerminalEvidenceContext {
+  quoteAddressProtocol?: 1, factCoverage?: TerminalCoverageInput, verdictProtocol?: 2 | 3 | 4 | 5): TerminalEvidenceContext {
   const previous = source && 'preceding' in source ? source.preceding.at(-1) : undefined
   return { protocol: version, ...(quoteAddressProtocol === 1 ? { quoteAddressProtocol } : {}), ...(verdictProtocol ? { verdictProtocol } : {}), ...(factCoverage ? { factCoverage } : {}), current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
     contentHash: runtimeJson({ content: chapter.content }).hash }, previous: previous ? {

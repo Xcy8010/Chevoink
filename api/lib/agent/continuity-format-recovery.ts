@@ -100,12 +100,22 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
     }
   }
   if (raw.length > MAX_AUDIT_CHARS) classification = 'response_too_large'
-  const freshFields = bodies?.terminalEvidence?.verdictProtocol === 4 ? terminalResponseFields(!!terminalCandidate) : null
+  const freshFields = bodies?.terminalEvidence?.verdictProtocol === 4 || bodies?.terminalEvidence?.verdictProtocol === 5 ? terminalResponseFields(!!terminalCandidate, bodies.terminalEvidence.verdictProtocol) : null
   if (classification === 'complete' && parserVersion === 8 && (!bodies?.terminalEvidence
     || freshFields && !freshFields.semanticChecks.safeParse(record?.semanticChecks).success
-    || !validContinuitySemanticChecks(record?.semanticChecks, findings, bodies.terminalEvidence.factCoverage?.version, bodies.terminalEvidence.verdictProtocol === 4))) classification = 'semantic_invalid'
-  if (classification === 'complete' && freshFields && !z.object(freshFields).passthrough().safeParse(record).success) classification = 'terminal_invalid'
+    || !validContinuitySemanticChecks(record?.semanticChecks, findings, bodies.terminalEvidence.factCoverage?.version, (bodies.terminalEvidence.verdictProtocol === 4 || bodies.terminalEvidence.verdictProtocol === 5)))) classification = 'semantic_invalid'
   const terminalReviewDiagnostics: TerminalReviewDiagnostic[] = []
+  if (classification === 'complete' && freshFields) {
+    const parsed = z.object(freshFields).passthrough().safeParse(record)
+    if (!parsed.success) {
+      classification = 'terminal_invalid'
+      // New requests receive bounded field diagnostics through the existing
+      // full-reassessment channel; old frozen request renderings stay identical.
+      if (bodies?.terminalEvidence?.verdictProtocol === 5) terminalReviewDiagnostics.push(...parsed.error.issues.slice(0, 8).map(issue => ({
+        code: issue.code, path: issue.path.join('.'),
+      })))
+    }
+  }
   if (classification === 'complete' && terminalCandidate && (!bodies || !inspectTerminalReview(terminalCandidate, bodies.current, raw, responseComplete,
     parserVersion === 8 ? bodies.terminalEvidence : undefined, terminalReviewDiagnostics))) classification = 'terminal_invalid'
   const audit = { version: 1, parserVersion, classification, unwrapped, ...(parserVersion >= 4 ? { sourceRelocations } : {}),

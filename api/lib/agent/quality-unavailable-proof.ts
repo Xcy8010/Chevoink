@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { runtimeJson } from './runtime-common.js'
-import { buildHumanityQualityContext, HUMANITY_CRITIC_VERSION, HUMANITY_PROMPT_PROTOCOL, qualityReviewContextHash } from './humanity-quality.js'
+import { buildHumanityQualityContext, HUMANITY_CRITIC_VERSION, FROZEN_V5_HUMANITY_CRITIC_VERSION, HUMANITY_PROMPT_PROTOCOL, qualityReviewContextHash } from './humanity-quality.js'
 import { readOriginalTaskRequest } from './original-request.js'
 import { readOrphanQualityRecoveryProofs } from './quality-orphan-recovery.js'
 import { hasReturnedQualityCorrection } from './quality-evidence.js'
@@ -25,7 +25,7 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, runIds: string[], report: Report,
   chapter: { id: string; revision: number; content: string }, taskRootId: string | null, options: { allowFormatRecovery?: boolean } = {}) {
   const metrics = object(report.deterministicMetrics)
-  if (report.status !== 'failed' || report.criticVersion !== HUMANITY_CRITIC_VERSION || !report.runId || !runIds.includes(report.runId)
+  if (report.status !== 'failed' || (report.criticVersion !== HUMANITY_CRITIC_VERSION && report.criticVersion !== FROZEN_V5_HUMANITY_CRITIC_VERSION) || !report.runId || !runIds.includes(report.runId)
     || report.chapterId !== chapter.id || report.chapterRevision !== chapter.revision || !report.compilationId
     || metrics.independentCheck !== 'unavailable' || metrics.contentHash !== createHash('sha256').update(chapter.content).digest('hex')) return null
   const context = await buildHumanityQualityContext(subject.userId, subject.novelId, chapter.id, report.runId, tx)
@@ -61,9 +61,10 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
     // A failed source's protocol comes from its authenticated original work,
     // never from today's reviewer or an unverified report marker. This grants
     // recovery eligibility only; passed caches still require the current hash.
-    if (!Number.isInteger(frozen.version) || Number(frozen.version) < 1 || Number(frozen.version) > 12) return null
-    const sourceProtocol = Number(frozen.version) >= 12 ? HUMANITY_PROMPT_PROTOCOL : Number(frozen.version) === 11 ? 'humanity-context.v4' : Number(frozen.version) === 10 ? 'humanity-context.v3' : 'humanity-context.v2'
-    if (metrics.qualityContextHash !== qualityReviewContextHash(context, sourceProtocol)
+    if (!Number.isInteger(frozen.version) || Number(frozen.version) < 1 || Number(frozen.version) > 13) return null
+    const sourceProtocol = Number(frozen.version) >= 13 ? HUMANITY_PROMPT_PROTOCOL : Number(frozen.version) === 12 ? 'humanity-context.v5' : Number(frozen.version) === 11 ? 'humanity-context.v4' : Number(frozen.version) === 10 ? 'humanity-context.v3' : 'humanity-context.v2'
+    if (report.criticVersion !== (Number(frozen.version) >= 13 ? HUMANITY_CRITIC_VERSION : FROZEN_V5_HUMANITY_CRITIC_VERSION)
+      || metrics.qualityContextHash !== qualityReviewContextHash(context, sourceProtocol)
       || metrics.criticPromptProtocol !== undefined && metrics.criticPromptProtocol !== sourceProtocol) return null
     const paid = operation.children.flatMap(child => child.attempts.map(attempt => ({ child, attempt })))
     if (options.allowFormatRecovery && audit?.classification === 'source_invalid'
@@ -114,8 +115,9 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
   }
   // Legacy has no immutable work version. Only its explicit saved protocol may
   // select old rules; unmarked receipts retain the existing current-only check.
-  const legacyProtocol = metrics.criticPromptProtocol === 'humanity-context.v2' ? 'humanity-context.v2' : metrics.criticPromptProtocol === 'humanity-context.v3' ? 'humanity-context.v3' : metrics.criticPromptProtocol === 'humanity-context.v4' ? 'humanity-context.v4' : HUMANITY_PROMPT_PROTOCOL
-  if (metrics.criticPromptProtocol !== undefined && !['humanity-context.v2', 'humanity-context.v3', 'humanity-context.v4', HUMANITY_PROMPT_PROTOCOL].includes(String(metrics.criticPromptProtocol))
+  const legacyProtocol = metrics.criticPromptProtocol === 'humanity-context.v2' ? 'humanity-context.v2' : metrics.criticPromptProtocol === 'humanity-context.v3' ? 'humanity-context.v3' : metrics.criticPromptProtocol === 'humanity-context.v4' ? 'humanity-context.v4' : metrics.criticPromptProtocol === 'humanity-context.v5' ? 'humanity-context.v5' : report.criticVersion === FROZEN_V5_HUMANITY_CRITIC_VERSION ? 'humanity-context.v5' : HUMANITY_PROMPT_PROTOCOL
+  if (report.criticVersion !== (legacyProtocol === HUMANITY_PROMPT_PROTOCOL ? HUMANITY_CRITIC_VERSION : FROZEN_V5_HUMANITY_CRITIC_VERSION)
+    || metrics.criticPromptProtocol !== undefined && !['humanity-context.v2', 'humanity-context.v3', 'humanity-context.v4', 'humanity-context.v5', HUMANITY_PROMPT_PROTOCOL].includes(String(metrics.criticPromptProtocol))
     || metrics.qualityContextHash !== qualityReviewContextHash(context, legacyProtocol)) return null
   const events = await tx.agentRunEvent.findMany({ where: { runId: report.runId, type: { in: ['tool.call', 'tool.result'] } }, orderBy: { seq: 'asc' }, take: 2001 })
   if (events.length >= 2001) return null

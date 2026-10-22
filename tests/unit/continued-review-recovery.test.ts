@@ -5,12 +5,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readContinuedReviewRecovery, readAuthorContinuedReviewUsageIds, readContinuedReviewDispatchWitness, readContinuedReviewRepairHandoff,
   continuedReviewAttemptKey, continuedReviewCallId } from '../../api/lib/agent/continued-review-recovery.js'
 import { hasReconciledQualityRequest } from '../../api/lib/agent/quality-format-recovery.js'
-const mocks = vi.hoisted(() => ({ original: {} as Record<string, unknown>, bundle: {} as Record<string, unknown>, admission: null as null | { id: string; at: Date } }))
+const mocks = vi.hoisted(() => ({ rules: 'full rules', original: {} as Record<string, unknown>, bundle: {} as Record<string, unknown>, admission: null as null | { id: string; at: Date } }))
 vi.mock('../../api/lib/agent/original-request.js', () => ({ readOriginalTaskRequest: async () => mocks.original, originalTaskRunIds: async () => ['run'] }))
 vi.mock('../../api/lib/agent/quality-review-admission.js', () => ({ readQualityReviewAdmission: async () => mocks.admission }))
 vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ HUMANITY_CRITIC_VERSION: 'current-test', buildHumanityQualityContext: async () => mocks.bundle,
   analyzeDeterministicQuality: () => ({ metrics: {}, findings: [] }), qualityReviewContextHash: (value: unknown) => JSON.stringify(value) }))
-vi.mock('../../api/lib/agent/tools/humanity-quality-tools.js', () => ({ buildCriticSystem: () => 'full rules', buildCriticInput: () => JSON.stringify(mocks.bundle) }))
+vi.mock('../../api/lib/agent/tools/humanity-quality-tools.js', () => ({ buildCriticSystem: () => mocks.rules, buildCriticInput: () => JSON.stringify(mocks.bundle) }))
 vi.mock('../../api/lib/agent/tools/story-compiler-tools.js', () => ({ continuityCriticSystem: 'full continuity rules' }))
 type Row = Record<string, unknown>
 function matches(row: Row, where: Row = {}): boolean {
@@ -63,8 +63,20 @@ function fixture(toolName: 'quality_analyze' | 'continuity_validate' = 'quality_
   return { tx, db, run, events, usage, reports, artifacts, findings, chapter, compilation, pending, subject, read, persist,
     snapshot: () => JSON.stringify({ run, events, usage, reports, compilation }) }
 }
-beforeEach(() => { vi.clearAllMocks() })
+beforeEach(() => { vi.clearAllMocks(); mocks.rules = 'full rules' })
 describe('ordinary Continue review retirement', () => {
+  it('preserves a historic retirement but cannot dispatch from a changed quality prompt context', async () => {
+    const f = fixture(), [original] = await f.read()
+    f.persist(original)
+    const before = f.snapshot()
+    mocks.rules = 'new quality rules'
+    expect(await f.read()).toEqual([])
+    expect(await readContinuedReviewDispatchWitness(f.tx, f.subject, original, 'new-call')).toBeNull()
+    expect(await readAuthorContinuedReviewUsageIds(f.tx, f.subject)).toEqual(new Set(['unknown']))
+    expect(f.snapshot()).toBe(before)
+    expect(f.db.aiUsageLog.update).not.toHaveBeenCalled()
+    expect(f.db.agentRun.update).not.toHaveBeenCalled()
+  })
   it.each(['quality_analyze', 'continuity_validate'] as const)('%s authenticates one prior failed request and leaves old usage/reserve/budget/stagnation intact', async toolName => {
     const f = fixture(toolName), before = f.snapshot(), rows = await f.read()
     expect(rows).toHaveLength(1)

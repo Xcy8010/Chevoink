@@ -8,7 +8,7 @@ import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-c
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 
 afterEach(() => { vi.unstubAllGlobals() })
-function fixture(legacy: boolean, rootError = false, verdictProtocol?: 2 | 3) {
+function fixture(legacy: boolean, rootError = false, verdictProtocol?: 2 | 3 | 4 | 5) {
   const current = { id: 'chapter', content: 'The sensor is offline.', revision: 1, orderIndex: 1 }
   const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: ['The sensor is offline.'] } })
   const evidence = terminalEvidenceContext(current, null, 2, 1, terminalCoverageInput({ id: 'task', scope: { terminalCoverageProtocol: 2 } }, {}, current, candidate), verdictProtocol)
@@ -38,7 +38,7 @@ function fixture(legacy: boolean, rootError = false, verdictProtocol?: 2 | 3) {
   return { input, inspected, claim, claims, tx, findMany, write, args }
 }
 describe('exact frozen diagnostic witness compatibility', () => {
-  it.each([2, 3] as const)('authenticates the exact frozen request marker %s without changing the raw response or dispatching', async version => {
+  it.each([2, 3, 4, 5] as const)('authenticates the exact frozen request marker %s without changing the raw response or dispatching', async version => {
     const f=fixture(false,true,version),fetcher=vi.fn(()=>{throw Error('Unexpected request')})
     vi.stubGlobal('fetch',fetcher)
     const before=JSON.stringify(f.claims)
