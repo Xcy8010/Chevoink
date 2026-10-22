@@ -1,5 +1,5 @@
 import { readSettledQualityReviews } from './quality-review-admission.js'
-import { terminalFeedbackSlots } from './terminal-feedback-handoff.js'
+import { terminalFeedbackSlots, terminalCorrectionReceiptKey } from './terminal-feedback-handoff.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
@@ -1402,6 +1402,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       ? terminalFeedbackSlots(currentReviewState.value, { userId: params.userId, novelId: params.novelId,
         taskSpec: await prisma.$transaction(tx => effectiveWritingTaskSpec(tx,
           { userId: params.userId, novelId: params.novelId, runId }, taskSpec)) }) : null
+    if (currentReviewState.value?.terminalCorrection && terminalHandoffSlots) {
+      if (!consumedReviewDecisionFeedback.has(terminalCorrectionReceiptKey(terminalHandoffSlots))) terminalHandoffSlots = null
+    }
     const closeTerminalHandoff = () => {
       if (!terminalHandoffSlots) return
       terminalHandoffSlots.forEach(key => consumedReviewDecisionFeedback.add(key))
@@ -1479,6 +1482,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         break
       }
     }
+    if (currentReviewState.value?.terminalCorrection && terminalHandoffSlots) messages.push({ role: 'user', content: `[系统] 恢复已保存的候选处理交接，保留已用步骤及失败记录。${currentReviewState.value.terminalCorrection.guidance}` })
     if (params.goalSteering && ownedGoalExecution) {
       messages.push(await (await import('./goal-steering-message.js')).buildGoalSteeringMessage(params.goalSteering, params.userId, Boolean(modelRuntime.visionEnabled)))
     }
@@ -1807,6 +1811,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           { userId: params.userId, novelId: params.novelId, runId }, item.compilationId ?? undefined))
         if (readiness?.ready) { continuedReviewBootstrap.shift(); continue }
         if (readiness && (readiness.chapterId !== item.chapterId || readiness.revision !== item.receipt.currentRevision)) throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '本次继续的检查目标已变化，未派发请求。')
+        const correctionSlots = item.toolName === 'continuity_validate' && readiness?.terminalCorrection ? terminalFeedbackSlots(readiness, { userId: params.userId, novelId: params.novelId,
+          taskSpec: await prisma.$transaction(tx => effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)) }) : null
+        if (correctionSlots?.some(key => !consumedReviewDecisionFeedback.has(key))
+          && consumedReviewDecisionFeedback.has(terminalCorrectionReceiptKey(correctionSlots))) {
+          terminalHandoffSlots = correctionSlots
+          messages.push({ role: 'user', content: `[系统] 本次已结束检查的候选处理交接已保存，沿用剩余步骤，不重放检查、不补充次数。${readiness!.terminalCorrection!.guidance}` })
+          continuedReviewBootstrap.shift()
+          continue
+        }
         const next = readiness ? nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
           : { kind: 'tool' as const, key: continuedReviewAttemptKey(item.receipt, item.toolName), tool: { name: item.toolName,
             args: { chapterId: item.chapterId, ...(item.compilationId ? { compilationId: item.compilationId } : {}) } } }
@@ -2470,7 +2483,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const args = reviewPreflightArgs(call, validator)
           const compilationId = args?.compilationId
           if (validator && args && validator.parameters.safeParse(args).success) {
-            explicitTerminalCandidate = call.name === 'continuity_validate' && (args.terminalState !== undefined || args.inheritedProofs !== undefined)
+            explicitTerminalCandidate = call.name === 'continuity_validate' && (args.terminalState !== undefined || args.inheritedProofs !== undefined || args.terminalPatch !== undefined)
             const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
               { userId: params.userId, novelId: params.novelId, runId }, typeof compilationId === 'string' ? compilationId : undefined))
             if (readiness && (typeof args.chapterId !== 'string' || args.chapterId === readiness.chapterId)) reviewDispatch = { compilationId: readiness.compilationId, chapterId: readiness.chapterId,
@@ -2590,6 +2603,25 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           && outcome.reviewRequestFinished.revision === reviewDispatch.revision
           && /^[a-f0-9]{64}$/.test(outcome.reviewRequestFinished.contentHash)
         if (requestFinished) await bus.persist()
+        if (boundBootstrap && bootstrapWitness && requestFinished && !outcome.unresolvedTextRequest
+          && outcome.failureCode === 'CONTINUITY_REPORT_INCOMPLETE' && reviewDispatch) {
+          const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
+            { userId: params.userId, novelId: params.novelId, runId }, reviewDispatch!.compilationId ?? undefined))
+          const finishedBodyMatches = readiness?.terminalCorrection && readiness.chapterId === reviewDispatch.chapterId
+            && readiness.revision === reviewDispatch.revision && readiness.compilationId === reviewDispatch.compilationId
+            && [readiness.terminalCorrection.contentHash, readiness.progressEvidence?.contentHash].includes(outcome.reviewRequestFinished!.contentHash)
+          const slots = finishedBodyMatches ? terminalFeedbackSlots(readiness, { userId: params.userId, novelId: params.novelId,
+            taskSpec: await prisma.$transaction(tx => effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)) }) : null
+          if (slots?.some(key => !consumedReviewDecisionFeedback.has(key))) {
+            terminalHandoffSlots = slots
+            terminalHandoffTurn = true
+            consumedReviewDecisionFeedback.add(terminalCorrectionReceiptKey(slots))
+            for (let index = continuedReviewBootstrap.length - 1; index >= 0; index--) {
+              if (continuedReviewBootstrap[index].receipt.recoveryKey === boundBootstrap.receipt.recoveryKey) continuedReviewBootstrap.splice(index, 1)
+            }
+            messages.push({ role: 'user', content: `[系统] 本次已结束的检查保留为失败，原停滞计数、请求记录和费用不变。现交回有限的候选处理步骤；这不是检查通过或新增写作权限。${readiness!.terminalCorrection!.guidance}` })
+          }
+        }
         if (reviewDispatch && !outcome.unresolvedTextRequest && (requestFinished || outcome.reviewCompleted || outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
           'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED',
           'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? ''))) {

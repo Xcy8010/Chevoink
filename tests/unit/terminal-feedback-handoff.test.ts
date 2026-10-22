@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
-import { terminalFeedbackSlots } from '../../api/lib/agent/terminal-feedback-handoff.js'
+import { terminalFeedbackSlots, terminalCorrectionReceiptKey } from '../../api/lib/agent/terminal-feedback-handoff.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 
 function fixture() {
@@ -40,4 +40,26 @@ it('requires a current complete terminal judgment inside the original owner and 
   expect(terminalFeedbackSlots(review,{...subject,taskSpec:{...subject.taskSpec,writingPacing:'proposal_only'}})).toBeNull()
   const otherBody={...review,progressEvidence:{...review.progressEvidence!,contentHash:'b'.repeat(64)}}
   expect(terminalFeedbackSlots(otherBody,subject)).not.toEqual(terminalFeedbackSlots(review,subject))
+})
+
+it('shares the same finite ledger for a bound candidate rejection without creating progress or refilling on new candidates',()=>{
+  const {subject,review}=fixture(),oldSlots=terminalFeedbackSlots(review,subject)!
+  const incomplete:ChapterReviewReadiness={...review,ready:false,continuity:'incomplete',
+    progressEvidence:{...review.progressEvidence!,phases:[]},terminalReview:{state:'unverified',unresolved:[]},
+    requiredTools:[{name:'continuity_validate',args:{compilationId:review.compilationId}}],
+    terminalCorrection:{version:1,candidateHash:'b'.repeat(64),contentHash:'e'.repeat(64),paths:['exitState.location'],guidance:'Correct only the candidate.'}}
+  const slots=terminalFeedbackSlots(incomplete,subject)!
+  expect(slots).toEqual(oldSlots)
+  expect(terminalCorrectionReceiptKey(slots)).toMatch(/^[a-f0-9]{64}$/)
+  const consumed=new Set([...slots,terminalCorrectionReceiptKey(slots)])
+  incomplete.terminalCorrection!.candidateHash='c'.repeat(64)
+  expect(terminalFeedbackSlots(incomplete,subject)!.filter(key=>!consumed.has(key))).toEqual([])
+  expect(incomplete.progressEvidence!.phases).toEqual([])
+  expect(incomplete.ready).toBe(false)
+  const other = {...incomplete,chapterId:'another',progressEvidence:{...incomplete.progressEvidence!,chapterId:'another',contentHash:'d'.repeat(64)}}
+  const otherSubject={...subject,taskSpec:{...subject.taskSpec,scope:{...subject.taskSpec.scope,writing:{version:1 as const,kind:'bounded' as const,
+    targets:[{orderIndex:5,chapterId:'another'}],titleAndBodyOnly:false,repairAuthorized:true}}}}
+  const otherSlots=terminalFeedbackSlots(other,otherSubject)!
+  expect(otherSlots).not.toEqual(slots)
+  expect(consumed.has(terminalCorrectionReceiptKey(otherSlots))).toBe(false)
 })
