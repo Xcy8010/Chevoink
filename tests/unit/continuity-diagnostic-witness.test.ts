@@ -8,12 +8,12 @@ import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-c
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 
 afterEach(() => { vi.unstubAllGlobals() })
-function fixture(legacy: boolean, rootError = false, verdictProtocol?: 2 | 3 | 4 | 5) {
+function fixture(legacy: boolean, rootError = false, verdictProtocol?: 2 | 3 | 4 | 5, reassessmentProtocol?: 2) {
   const current = { id: 'chapter', content: 'The sensor is offline.', revision: 1, orderIndex: 1 }
   const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: ['The sensor is offline.'] } })
   const evidence = terminalEvidenceContext(current, null, 2, 1, terminalCoverageInput({ id: 'task', scope: { terminalCoverageProtocol: 2 } }, {}, current, candidate), verdictProtocol)
   const input = { chapterId: 'chapter', revision: 1, parserVersion: 8 as const, bodies: { previous: null, current: current.content, terminalEvidence: evidence },
-    terminalCandidate: candidate, sourceScope: { previous: [], currentOrderIndex: 1 }, system: 'frozen system', content: 'frozen original request', targetType: 'chapter' as const, targetId: 'chapter' }
+    terminalCandidate: candidate, ...(reassessmentProtocol ? { reassessmentProtocol } : {}), sourceScope: { previous: [], currentOrderIndex: 1 }, system: 'frozen system', content: 'frozen original request', targetType: 'chapter' as const, targetId: 'chapter' }
   const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Checked.', findingIndexes: [] })),
     terminalVerdicts: rootError ? {} : [{ path: 'exitState.knowledge.0', verdict: 'unknown', basis: 'The source was considered.', sourceEvidence: [{ segmentId: 'c0', quote: current.content }] }] })
   const inspected = inspectContinuityResponse(raw, input.bodies, true, 8, candidate, input.sourceScope)
@@ -21,7 +21,7 @@ function fixture(legacy: boolean, rootError = false, verdictProtocol?: 2 | 3 | 4
   const frozen = structuredClone(inspected)
   if (legacy) frozen.audit.terminalReviewDiagnostics!.forEach(item => { delete item.path })
   const key = legacyContinuityAssessmentKey({ runId: 'run', callId: 'call' }, input)
-  const request = continuityReassessmentRequest(input.system, input.content, frozen, input.bodies, legacy)
+  const request = continuityReassessmentRequest(input.system, input.content, frozen, input.bodies, legacy, reassessmentProtocol)
   const claim = { id: 'claim', createdAt: new Date(5), metadata: { callId: 'call', fullReassessmentKey: key, input,
     original: frozen.audit, request, usageIds: ['primary'] } }
   const claims = [claim,
@@ -38,6 +38,14 @@ function fixture(legacy: boolean, rootError = false, verdictProtocol?: 2 | 3 | 4
   return { input, inspected, claim, claims, tx, findMany, write, args }
 }
 describe('exact frozen diagnostic witness compatibility', () => {
+  it.each([undefined, 2] as const)('rejects mixed reassessment renderers while retaining exact protocol %s', async protocol => {
+    const f = fixture(false, true, 5, protocol), before = JSON.stringify(f.claims)
+    expect(await readOwnedContinuityReassessment(f.tx, { userId: 'owner', novelId: 'novel' }, f.args)).not.toBeNull()
+    expect(JSON.stringify(f.claims)).toBe(before)
+    f.claim.metadata.request = continuityReassessmentRequest(f.input.system, f.input.content, f.inspected, f.input.bodies, false, protocol === 2 ? undefined : 2)
+    expect(await readOwnedContinuityReassessment(f.tx, { userId: 'owner', novelId: 'novel' }, f.args)).toBeNull()
+    expect(f.write).not.toHaveBeenCalled()
+  })
   it.each([2, 3, 4, 5] as const)('authenticates the exact frozen request marker %s without changing the raw response or dispatching', async version => {
     const f=fixture(false,true,version),fetcher=vi.fn(()=>{throw Error('Unexpected request')})
     vi.stubGlobal('fetch',fetcher)

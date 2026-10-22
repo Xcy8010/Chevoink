@@ -38,7 +38,7 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
       const network = vi.fn(() => { throw Error('This reconciliation must remain offline') })
       vi.stubGlobal('fetch', network)
       try {
-        await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: scenario === 'durable' ? 1 : 0 } })
+        await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: scenario === 'durable' ? f.rootId : null, runtimeProtocolVersion: scenario === 'durable' ? 1 : 0 } })
         const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '检查本章' })
         const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
         const base = terminalCandidateSchema.parse({ exitState: { objects: ['A sealed packet'] } })

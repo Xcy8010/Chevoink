@@ -40,7 +40,7 @@ const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, char
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
   z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16), z.literal(17), z.literal(18)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
-    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
+    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).optional(), reassessmentProtocol: z.literal(2).optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
 type Work = Extract<z.infer<typeof workSchema>, { kind: 'check' }>
@@ -137,7 +137,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     const repair = false
     if (!reusable && terminalVersion === 2 && terminalEvidence) terminalEvidence.verdictProtocol = 5
     validatedContinuityCheckRounds(compilation.validation, !reusable)
-    return { kind: 'check' as const, version: terminalVersion === 2 ? 18 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
+    return { kind: 'check' as const, version: terminalVersion === 2 ? 18 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), ...(terminalVersion === 2 ? { reassessmentProtocol: 2 as const } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
       ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),
       criticSystem, repairSystem: repairPrompt,
       criticInput: [...((terminalEvidence?.verdictProtocol === 4 || terminalEvidence?.verdictProtocol === 5) ? [freshContinuityResponseContract(false, !!terminalCandidate, terminalEvidence.verdictProtocol)] : []), `章节：《${compilation.chapter.title}》`,
@@ -230,7 +230,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
         return previous?.status === 'succeeded' && attempt?.status === 'succeeded' && usage?.source === 'reported' && usage.settlementStatus === 'settled'
           && usage.promptTokens !== null && usage.completionTokens !== null && usage.promptTokens >= 0 && usage.completionTokens >= 0
       })
-      inspected = await runContinuityReassessment({ original: inspected, bodies: frozen.sourceBodies, system: frozen.criticSystem, content: frozen.criticInput,
+      inspected = await runContinuityReassessment({ original: inspected, bodies: frozen.sourceBodies, system: frozen.criticSystem, content: frozen.criticInput, reassessmentProtocol: frozen.reassessmentProtocol,
         billingKnown, providerComplete: critic.finishReason === 'stop' && !critic.toolCalls.length, slotUsed: false, signal: ctx.signal,
         assertCurrent: () => withRunLease(lease, tx => assertCurrent(tx, frozen)),
         claim: request => withRunLease(lease, async tx => {

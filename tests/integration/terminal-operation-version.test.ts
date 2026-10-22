@@ -51,7 +51,7 @@ describe.runIf(available)('request-owned evidence at the real commit boundary', 
     const first = inspectContinuityResponse(JSON.stringify({ findings: [], semanticChecks: checks, terminalVerdicts: [] }), bodies, true, 8, next)
     expect(first.complete).toBe(false)
     const frozen = JSON.stringify(first)
-    const inspected = applyContinuityReassessment(first, response, bodies)
+    const inspected = applyContinuityReassessment(first, response, bodies, 2)
     expect(inspected.complete).toBe(true)
     expect(JSON.stringify(first)).toBe(frozen)
     expect(inspected.audit).toMatchObject({ reassessment: { rawResponse: { content: JSON.stringify(response) },

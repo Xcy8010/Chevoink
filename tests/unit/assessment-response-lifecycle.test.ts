@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { applyContinuityReassessment, bindLegacyContinuityRequest, continuityReassessmentCandidates, readLegacyContinuityAssessment, runContinuityReassessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { applyContinuityReassessment, bindLegacyContinuityRequest, continuityReassessmentCandidates, continuityReassessmentRequest, readLegacyContinuityAssessment, runContinuityReassessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import type { AiUsageLog, Prisma } from '@prisma/client'
 import { readOwnedContinuityReassessment } from '../../api/lib/agent/continuity-reassessment-witness.js'
@@ -106,6 +107,22 @@ describe('legacy continuity request attempts retain their semantic stage', () =>
     const result = await readLegacyContinuityAssessment(reader([settled, zero], frames), ctx, input)
     expect(result).toMatchObject({ billingKnown: true, providerComplete: true, slotUsed: true, inspected: { complete: true, findings: [] } })
   })
+  it.each([undefined, 2] as const)('interprets stored missing-decisions responses only under their frozen protocol: %s', async reassessmentProtocol => {
+    const second = { ...settled, id: 'second', action: 'agent3ContinuityCriticSecondPass' }
+    const firstRaw = '{"findings":[]}'
+    const secondRaw = JSON.stringify({ findings: [], terminalVerdicts: [{ path: 'exitState.body.0', verdict: 'unknown', segmentIds: ['c0'] }] })
+    const frames = [{ stage: 'first', usageIds: [settled.id], response: response(firstRaw) },
+      { stage: 'reassessment', usageIds: [second.id], response: response(secondRaw) }]
+    const before = JSON.stringify(frames)
+    const result = await readLegacyContinuityAssessment(reader([settled, second], frames), ctx, { ...input,
+      terminalCandidate: terminalCandidateSchema.parse({ exitState: { body: ['An injury is confirmed.'] } }),
+      ...(reassessmentProtocol ? { reassessmentProtocol } : {}),
+    })
+    expect(result.billingKnown).toBe(true)
+    expect(result.inspected.complete).toBe(reassessmentProtocol === 2)
+    expect(JSON.stringify(frames)).toBe(before)
+    expect(result.inspected.audit.rawResponse.content).toBe(JSON.stringify(reassessmentProtocol === 2 ? secondRaw : firstRaw))
+  })
   it.each(['unknown', 'partial', 'pending-settlement', 'charged-rejection'] as const)('does not certify %s prior attempts', async kind => {
     const unsafe = { ...rejected, ...(kind === 'unknown' ? { usageSource: 'unknown', billingStatus: 'pending_usage', reservedCreditMilli: 3 }
       : kind === 'partial' ? { usageSource: 'partial', billingStatus: 'pending_usage', requestTokens: 1 }
@@ -119,10 +136,23 @@ describe('legacy continuity request attempts retain their semantic stage', () =>
 })
 
 describe('one complete continuity reassessment', () => {
+  it('new independent reassessment retains original findings and full sources without feeding back failed terminal judgments', () => {
+    const first = original(JSON.stringify({ findings: [finding], terminalVerdicts: ['failed-terminal-answer'], semanticChecks: 'failed-semantic-summary' }))
+    const before = JSON.stringify(first)
+    const request = continuityReassessmentRequest('frozen system', 'full candidate and source context', first, bodies, false, 2)
+    expect(request.content).toContain('full candidate and source context')
+    expect(request.content).toContain(bodies.current)
+    expect(request.content).toContain(JSON.stringify({ index: 0, finding }))
+    expect(request.content).not.toContain('failed-terminal-answer')
+    expect(request.content).not.toContain('failed-semantic-summary')
+    expect(JSON.stringify(first)).toBe(before)
+    expect(continuityReassessmentRequest('frozen system', 'input', first, bodies).content).toContain('failed-terminal-answer')
+  })
   it('derives empty dispositions only from a known empty original, preserving the raw audit', () => {
     const first = original('{"findings":[]}'), raw = '{\n  "findings": []\n}'
     const before = JSON.stringify(first)
-    const result = applyContinuityReassessment(first, raw, bodies)
+    expect(() => applyContinuityReassessment(first, raw, bodies)).toThrow()
+    const result = applyContinuityReassessment(first, raw, bodies, 2)
     expect(result.complete).toBe(true)
     expect(JSON.stringify(first)).toBe(before)
     expect((result.audit as unknown as { reassessment: { decisions: unknown[]; rawResponse: { content: string } } }).reassessment)
@@ -131,12 +161,12 @@ describe('one complete continuity reassessment', () => {
         responseHash: createHash('sha256').update(raw).digest('hex'), derived: { decisions: [] },
       } })
     for (const content of ['{broken', JSON.stringify({ findings: [finding] }), '{"findings":[],"issues":[]}']) {
-      expect(() => applyContinuityReassessment(original(content), raw, bodies)).toThrow()
+      expect(() => applyContinuityReassessment(original(content), raw, bodies, 2)).toThrow()
     }
     for (const decisions of [null, {}, '[]', [{ index: 0 }]]) {
-      expect(() => applyContinuityReassessment(first, JSON.stringify({ findings: [], decisions }), bodies)).toThrow()
+      expect(() => applyContinuityReassessment(first, JSON.stringify({ findings: [], decisions }), bodies, 2)).toThrow()
     }
-    expect(() => applyContinuityReassessment(first, '{"findings":null}', bodies)).toThrow()
+    expect(() => applyContinuityReassessment(first, '{"findings":null}', bodies, 2)).toThrow()
   })
   it('limits the Prisma run filter to the owner even when the caller has a full tool context', async () => {
     const findMany = vi.fn(async () => [])

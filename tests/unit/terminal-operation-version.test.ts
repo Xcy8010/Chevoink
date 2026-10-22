@@ -98,7 +98,7 @@ describe('request-owned terminal response versions', () => {
     vi.stubGlobal('fetch', fetch)
     const controller = new AbortController(), recover = vi.fn((requested: lifecycle.FrozenTerminalContract) => ({ ...frozen.bodies, terminalEvidence: { ...context(requested.coverageVersion), ...(requested.verdictProtocol ? { verdictProtocol: requested.verdictProtocol } : {}) } }))
     const result = await runLegacyContinuityReview({ ...ctx, signal: controller.signal }, {
-      ...frozen, bodies: { ...frozen.bodies, terminalEvidence: context(2, 2) }, system: 'new system', content: 'new compact input',
+      ...frozen, bodies: { ...frozen.bodies, terminalEvidence: context(2, 5) }, system: 'new system', content: 'new compact input',
       recoverBodies: recover, assertCurrent: async () => {}, options: { targetType: frozen.targetType, targetId: frozen.targetId },
     })
     expect(result).toEqual(bound)

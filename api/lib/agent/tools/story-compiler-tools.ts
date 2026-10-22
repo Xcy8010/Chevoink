@@ -131,11 +131,12 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   let observedContent: string | undefined
   let observedComplete: boolean | undefined
   let frozen: LegacyAssessmentInput = { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system,
+    ...(input.bodies.terminalEvidence?.verdictProtocol === 5 ? { reassessmentProtocol: 2 as const } : {}),
     ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}),
     ...(input.terminalCandidate ? { terminalCandidate: input.terminalCandidate } : {}),
     content: input.content, ...(input.bindingHash ? { bindingHash: input.bindingHash } : {}),
     targetType: input.options.targetType as 'chapter' | 'story_compilation', targetId: input.options.targetId! }
-  if (input.bodies.terminalEvidence?.factCoverage?.version === 2) {
+  if (frozen.reassessmentProtocol === 2 || input.bodies.terminalEvidence?.factCoverage?.version === 2) {
     const saved = await prisma.$transaction(tx => readFrozenLegacyContinuityInput(tx, ctx, frozen, input.recoverBodies))
     if (saved) { frozen = saved; input = { ...input, ...saved } }
   }
@@ -190,7 +191,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   }
   const last = observations.at(-1)
   const original = replay?.inspected ?? inspectContinuityResponse(last?.content ?? raw, input.bodies, true, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope)
-  const assessed = await runContinuityReassessment({ original, bodies: input.bodies, system: input.system, content: input.content,
+  const assessed = await runContinuityReassessment({ original, bodies: input.bodies, system: input.system, content: input.content, reassessmentProtocol: frozen.reassessmentProtocol,
     billingKnown: replay?.billingKnown ?? textRequestsFinished(trace), providerComplete: replay?.providerComplete ?? (!!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length),
     slotUsed: replay?.slotUsed ?? [...stages.values()].some(stage => stage === 'output_recovery'), signal: ctx.signal,
     assertCurrent: input.assertCurrent,

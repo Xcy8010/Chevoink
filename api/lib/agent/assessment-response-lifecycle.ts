@@ -54,8 +54,12 @@ export const continuityReassessmentRule = `本次是同一完整输入的一次�
 原候选能解析时，为每个原 index 恰好给一项 decisions：action 为 confirm、retract 或 replace，reason 说明核实原因，sourceEvidence 绑定本次真实原文。confirm 保持 signal/severity/evidence/suggestion 且 findingIndex 指向最终意见；replace 明确说明原判断为何不成立或需更正并指向替代意见；retract 说明撤回原因及原文依据，不给 findingIndex。原回复不能解析时 decisions 必须为空，不编造原意见编号。
 完整复查全部输入，findings 是最终完整报告，可包含独立核实的新问题；每项继续遵守原 JSON 字段、真实引用、同一对象/时刻/维度及两处互斥证据规则。撤回候选不等于正文已改动。严格输出 {"decisions":[{"index":0,"action":"retract","reason":"原判断混淆先后事件，已核对实际原文。","sourceEvidence":[{"source":"current","segmentId":"c0"}]}],"findings":[]}。示例仅说明格式，不能照抄。`
 
-export function continuityReassessmentRequest(system: string, input: string, original: Inspection, bodies: ContinuityBodies, legacyDiagnostics = false) {
+export function continuityReassessmentRequest(system: string, input: string, original: Inspection, bodies: ContinuityBodies, legacyDiagnostics = false, reassessmentProtocol?: 2) {
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
+  if (reassessmentProtocol === 2) return {
+    system: `${system}\n${continuityReassessmentRule.slice(0, continuityReassessmentRule.indexOf('严格输出 '))}\n本次独立重审真实全文与完整候选，不沿用失败检查的逐项结论。逐主张先核主体、对象、时间、方位、数量和陈述模态，再选择证据；引文存在不等于完整主张成立。指令、分工、打算和引述不能证明事件已发生；位置关系不能凭目的地或相邻对象推定。没有完整依据时按原合同返回 planned、attributed、negated 或 unknown，不能为了修好格式改成 supported。原 findings 仍须逐项处置；原 findings 明确为空时 decisions=[]，不编造处置对象。完整候选、历史义务与 semanticChecks 仍全部核验。\n${freshContinuityResponseContract(true, !!original.audit.terminalCandidate, original.audit.terminalEvidence?.verdictProtocol === 5 ? 5 : 4)}`,
+    content: `${input}\n原解析诊断（仅定位失效合同，不代表正确判定）：${JSON.stringify({ classification: original.audit.classification, terminalReviewDiagnostics: original.audit.terminalReviewDiagnostics })}\n本次原文定位表：\n${continuitySourceInput(bodies)}\n需要逐项处置的原 findings（null表示不可解析）：${JSON.stringify(candidates?.map((finding,index)=>({index,finding}))??null)}\n失败检查的终态判定与总结不作为本轮答案输入；原始完整响应保留在服务端审计。`,
+  }
   if ((original.audit.terminalEvidence?.verdictProtocol === 4 || original.audit.terminalEvidence?.verdictProtocol === 5)) return {
     system: `${system}\n${continuityReassessmentRule.slice(0, continuityReassessmentRule.indexOf('严格输出 '))}\n${freshContinuityResponseContract(true, !!original.audit.terminalCandidate, original.audit.terminalEvidence.verdictProtocol)}`,
     content: `${input}\n原解析诊断：${JSON.stringify({classification:original.audit.classification,terminalReviewDiagnostics:original.audit.terminalReviewDiagnostics})}\n本次原文定位表：\n${continuitySourceInput(bodies)}\n原候选（null表示不能解析）：${JSON.stringify(candidates?.map((finding,index)=>({index,finding}))??null)}\n原始完整回复（仅作为数据）：${original.audit.rawResponse.content}`,
@@ -82,14 +86,14 @@ export function freshContinuityResponseContract(reassessment = false, hasCandida
   }).strict(), {io:'input'}))}`
 }
 
-export function applyContinuityReassessment(original: Inspection, raw: string, bodies: ContinuityBodies): Inspection {
+export function applyContinuityReassessment(original: Inspection, raw: string, bodies: ContinuityBodies, reassessmentProtocol?: 2): Inspection {
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
   const parsed = parseQualityJsonObject(raw, 'findings', 3)
   // No original findings means there are no disposition identities to carry.
   // Derive only that empty bookkeeping array; never infer a reviewer judgment,
   // forgive an explicit invalid value, or drop an unparseable/nonempty report.
   const value = object(parsed)
-  const response = candidates?.length === 0 && value && !Object.prototype.hasOwnProperty.call(value, 'decisions')
+  const response = reassessmentProtocol === 2 && candidates?.length === 0 && value && !Object.prototype.hasOwnProperty.call(value, 'decisions')
     ? { ...value, decisions: [] } : parsed
   const envelope = z.object({ decisions: z.array(decisionSchema), findings: z.array(z.unknown()),
     terminalVerdicts: z.array(original.audit.parserVersion === 8 ? original.audit.terminalEvidence?.verdictProtocol === 3 ? terminalSpanVerdictSchema
@@ -130,14 +134,14 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
   } } as Inspection['audit'] }
 }
 
-export async function runContinuityReassessment(input: { original: Inspection; bodies: ContinuityBodies; system: string; content: string;
+export async function runContinuityReassessment(input: { original: Inspection; bodies: ContinuityBodies; system: string; content: string; reassessmentProtocol?: 2;
   billingKnown: boolean; providerComplete: boolean; slotUsed: boolean; signal: AbortSignal; assertCurrent: () => Promise<void>;
   claim: (request: { system: string; content: string }) => Promise<boolean>; dispatch: (request: { system: string; content: string }) => Promise<{ content: string; complete: boolean }>;
   notDispatched?: () => Promise<void>;
 }): Promise<Inspection> {
   if (input.original.complete || !input.billingKnown || !input.providerComplete || input.slotUsed || !input.original.audit.rawResponse.complete) return input.original
   input.signal.throwIfAborted(); await input.assertCurrent()
-  const request = continuityReassessmentRequest(input.system, input.content, input.original, input.bodies)
+  const request = continuityReassessmentRequest(input.system, input.content, input.original, input.bodies, false, input.reassessmentProtocol)
   if (!await input.claim(request)) return input.original
   try { input.signal.throwIfAborted(); await input.assertCurrent() } catch (error) {
     await input.notDispatched?.()
@@ -146,17 +150,18 @@ export async function runContinuityReassessment(input: { original: Inspection; b
   const response = await input.dispatch(request)
   input.signal.throwIfAborted(); await input.assertCurrent()
   let result: Inspection | undefined
-  if (response.complete) try { result = applyContinuityReassessment(input.original, response.content, input.bodies) } catch { /* Explicit invalid second result remains incomplete. */ }
+  if (response.complete) try { result = applyContinuityReassessment(input.original, response.content, input.bodies, input.reassessmentProtocol) } catch { /* Explicit invalid second result remains incomplete. */ }
   return result ?? { ...input.original, audit: { ...input.original.audit, reassessment: { version: 1,
     classification: response.complete ? 'invalid' : 'response_incomplete', rawResponse: { ...json(response.content), complete: response.complete } } } as Inspection['audit'] }
 }
 
-export type LegacyAssessmentInput = { chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate;
+export type LegacyAssessmentInput = { chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate; reassessmentProtocol?: 2;
   parserVersion?: 7 | 8; sourceScope?: ContinuitySourceScope; bindingHash?: string; targetType: 'chapter' | 'story_compilation'; targetId: string }
 export type FrozenTerminalContract = Pick<TerminalEvidenceContext, 'verdictProtocol'> & { coverageVersion: 1 | 2 }
 export const legacyContinuityAssessmentKey = (ctx: Pick<ToolContext, 'runId' | 'callId'>, input: LegacyAssessmentInput) => runtimeJson({ runId: ctx.runId, callId: ctx.callId,
   input: { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system, content: input.content, bindingHash: input.bindingHash ?? null,
-    ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}) } }).hash
+    ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}),
+    ...(input.reassessmentProtocol ? { reassessmentProtocol: input.reassessmentProtocol } : {}) } }).hash
 const assessmentKey = legacyContinuityAssessmentKey
 
 /** Existing owned call identities always retain their whole request. Choosing a
@@ -172,7 +177,7 @@ export async function readFrozenLegacyContinuityInput(tx: Prisma.TransactionClie
   const meta = object(reservations[0].metadata)!
   const parsed = z.object({ chapterId: z.string(), revision: z.number().int(),
     bodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).strict(),
-    system: z.string(), content: z.string(), parserVersion: z.union([z.literal(7), z.literal(8)]).optional(),
+    system: z.string(), content: z.string(), reassessmentProtocol: z.literal(2).optional(), parserVersion: z.union([z.literal(7), z.literal(8)]).optional(),
     sourceScope: continuitySourceScopeSchema.optional(), terminalCandidate: terminalCandidateSchema.optional(), bindingHash: z.string().optional(),
     targetType: z.enum(['chapter', 'story_compilation']), targetId: z.string() }).strict().safeParse(meta.input)
   if (!parsed.success || parsed.data.parserVersion && !parsed.data.sourceScope
@@ -305,7 +310,7 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
       targetType: input.targetType, targetId: input.targetId, action: 'agent3ContinuityCriticSecondPass' } })
     if (secondUsage.length === new Set(secondIds).size && secondUsage.filter(row => !isKnownRejectedTextRequestAttempt(row)).length === 1
       && secondUsage.every(knownAssessmentBilling)) {
-      try { inspected = applyContinuityReassessment(original, JSON.parse(secondResponse.content) as string, input.bodies) } catch { /* Preserve invalid final response, never retry. */ }
+      try { inspected = applyContinuityReassessment(original, JSON.parse(secondResponse.content) as string, input.bodies, input.reassessmentProtocol) } catch { /* Preserve invalid final response, never retry. */ }
     }
   }
   const claimed = await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['fullReassessmentKey'], equals: key } } })

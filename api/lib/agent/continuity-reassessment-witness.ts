@@ -35,7 +35,7 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
   if (full.length !== 1) return null
   const claim = full[0], meta = object(claim.metadata)
   const frozen = z.object({ chapterId: z.literal(input.chapterId), revision: z.literal(input.revision), bodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }),
-    system: z.string(), content: z.string(), parserVersion: z.union([z.literal(7), z.literal(8)]).optional(), sourceScope: continuitySourceScopeSchema.optional(), bindingHash: z.string().optional(), terminalCandidate: terminalCandidateSchema.optional(), targetType: z.enum(['chapter', 'story_compilation']), targetId: z.string() }).strict().safeParse(meta.input)
+    system: z.string(), content: z.string(), reassessmentProtocol: z.literal(2).optional(), parserVersion: z.union([z.literal(7), z.literal(8)]).optional(), sourceScope: continuitySourceScopeSchema.optional(), bindingHash: z.string().optional(), terminalCandidate: terminalCandidateSchema.optional(), targetType: z.enum(['chapter', 'story_compilation']), targetId: z.string() }).strict().safeParse(meta.input)
   if (!frozen.success || !Array.isArray(meta.usageIds) || !object(meta.request).system || !object(meta.request).content
     || frozen.data.targetId !== (frozen.data.targetType === 'chapter' ? input.chapterId : input.compilationId)
     || meta.fullReassessmentKey !== legacyContinuityAssessmentKey({ runId: input.runId, callId: input.callId }, frozen.data)
@@ -52,7 +52,7 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
   const inspected = inspectContinuityResponse(content, frozen.data.bodies, true, frozen.data.parserVersion ?? 6, frozen.data.terminalCandidate, frozen.data.sourceScope)
   if (inspected.complete) return null
   const currentPair = runtimeJson(inspected.audit).hash === runtimeJson(original).hash
-    && runtimeJson(meta.request).hash === runtimeJson(continuityReassessmentRequest(frozen.data.system, frozen.data.content, inspected, frozen.data.bodies)).hash
+    && runtimeJson(meta.request).hash === runtimeJson(continuityReassessmentRequest(frozen.data.system, frozen.data.content, inspected, frozen.data.bodies, false, frozen.data.reassessmentProtocol)).hash
   // The earlier v2 renderer omitted schema-error paths and their prompt field.
   // Authenticate that exact pair; never mix projections or ignore other bytes.
   const legacyAudit = { ...inspected.audit, ...(inspected.audit.terminalReviewDiagnostics ? {
@@ -62,7 +62,7 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
       return projected
     }),
   } : {}) }
-  const legacyPair = runtimeJson(legacyAudit).hash === runtimeJson(original).hash
+  const legacyPair = frozen.data.reassessmentProtocol === undefined && runtimeJson(legacyAudit).hash === runtimeJson(original).hash
     && runtimeJson(meta.request).hash === runtimeJson(continuityReassessmentRequest(frozen.data.system, frozen.data.content,
       { ...inspected, audit: legacyAudit }, frozen.data.bodies, true)).hash
   if (!currentPair && !legacyPair) return null
