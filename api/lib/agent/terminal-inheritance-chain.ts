@@ -3,10 +3,13 @@ import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { activeChapterScope } from '../data/internal.js'
 import { terminalCarriedFactSchema, type TerminalCarriedFact, type TerminalEvidenceContext } from './terminal-evidence-context.js'
-import { currentTerminalReview, terminalClaims } from './terminal-state-review.js'
+import { currentTerminalReview, terminalClaims, readTerminalCandidate } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
 import { terminalQuoteRange } from './terminal-quote-range.js'
 import { continuitySourceSegments } from './continuity-review-context.js'
+import { attachTerminalProposalInput, terminalProposalTaskId } from './terminal-proposal-context.js'
+import { readOriginalTaskRequest } from './original-request.js'
+import { DataAccessError } from '../prisma.js'
 
 export const TERMINAL_INHERITANCE_MAX_DEPTH = 16
 const bodyHash = (content: string) => createHash('sha256').update(content).digest('hex')
@@ -120,7 +123,16 @@ export async function readTerminalInheritance(db: Prisma.TransactionClient, subj
       }
       const compilation = compilations.get(node.compilationId), context = object(compilation?.preparedContext), proof = object(context.terminalReviewProof)
       const validation = object(compilation?.validation), coverage = object(validation.coverage), audit = object(validation.continuityCriticResponse)
-      const evidence = audit.terminalEvidence as TerminalEvidenceContext | undefined
+      let evidence = audit.terminalEvidence as TerminalEvidenceContext | undefined
+      if (evidence && compilation && (evidence.proposalChanges || context.terminalProposalReview)) {
+        if (!compilation.runId) { good = false; break }
+        const original = await readOriginalTaskRequest(db, { ...subject, runId: compilation.runId })
+        const candidate = readTerminalCandidate(validation)
+        if (!candidate) { good = false; break }
+        try { evidence = attachTerminalProposalInput(evidence, { taskId: terminalProposalTaskId(original.spec, original.taskId),
+          preparedContext: compilation.preparedContext, validation, candidate }) }
+        catch (error) { if (!(error instanceof DataAccessError)) throw error; good = false; break }
+      }
       const review = compilation && chapter ? currentTerminalReview(compilation.validation, chapter.content, evidence) : null
       if (!chapter || !compilation?.bridge?.committedAt || compilation.chapterId !== chapter.id || compilation.bridge.targetRevision !== chapter.revision
         || chapter.revision !== node.revision || chapter.orderIndex !== node.orderIndex || bodyHash(chapter.content) !== node.bodyHash

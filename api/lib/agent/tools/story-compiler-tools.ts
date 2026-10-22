@@ -21,7 +21,8 @@ import { readOfflineContinuityRecovery, applyOfflineContinuityRecovery } from '.
 import { runtimeJson } from '../runtime-common.js'
 import { persistedContentHash } from '../semantic-progress.js'
 import { terminalCandidateFacts } from '../terminal-fact-identity.js'
-import { terminalCandidatePatchSchema, freezeLegacyTerminalPatch, hasLegacyTerminalCallEvidence, terminalCandidateReplacementIssue } from '../terminal-candidate-patch.js'
+import { terminalCandidatePatchSchema, freezeLegacyTerminalPatch, hasLegacyTerminalCallEvidence } from '../terminal-candidate-patch.js'
+import { attachTerminalProposalInput, prepareCompilerTerminalProposals, terminalProposalCacheMatches, terminalProposalTaskId } from '../terminal-proposal-context.js'
 import { continuityChapterProvenance, continuityFindingText, continuitySourceInput, resolveContinuitySources, continuityRecheckInput, unconfirmedContinuityOutput, type ContinuityBodies } from '../continuity-review-context.js'
 import { unlocatedContinuityEvidence } from '../continuity-finding-authority.js'
 import { createHash } from 'node:crypto'
@@ -931,11 +932,19 @@ export const continuityValidateTool = defineTool({
     const frozenReviewInput = reviewInput(compilation)
     const bridge = compilation.bridge
     const sourceChapter = await readCompilerContinuitySource(prisma, ctx, chapter, bridge.fromChapterId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
+    const prepareProposals = (candidate: TerminalCandidate) => {
+      if (!terminalProtocol) return undefined
+      const nextContext = terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
+        terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, candidate, 2, terminalCoverageProofs(sourceChapter, terminalVersion === 2 ? 2 : undefined)),
+        terminalVersion === 2 ? 5 : terminalVerdictAuditVersion(compilation.validation), terminalVersion === 2 ? 2 : undefined)
+      return prepareCompilerTerminalProposals({ spec: originalRequest.spec, preparedContext: compilation.preparedContext,
+        validation: compilation.validation, chapter, source: sourceChapter, candidate, nextContext })
+    }
     if(args.terminalPatch&&args.terminalState)return {outcome:'failed' as const,failureCode:'TERMINAL_STATE_REVIEW_REQUIRED',summary:'候选更新不明确',output:'terminalPatch 与 terminalState 只能选择一种；未应用或派发。'}
     let patch: Awaited<ReturnType<typeof freezeLegacyTerminalPatch>> | null = null
     if (args.terminalPatch) {
       try { patch = await prisma.$transaction(tx=>freezeLegacyTerminalPatch(tx,ctx,{...compilation,chapter},sourceChapter,
-        sourceChapter&&'terminalInheritance' in sourceChapter?sourceChapter.terminalInheritance:undefined,terminalVersion,args.terminalPatch!,args.inheritedProofs)) }
+        sourceChapter&&'terminalInheritance' in sourceChapter?sourceChapter.terminalInheritance:undefined,terminalVersion,args.terminalPatch!,args.inheritedProofs,prepareProposals)) }
       catch (error) {
         if (!(error instanceof DataAccessError) || !['CONTINUITY_INPUT_STALE', 'TERMINAL_STATE_REVIEW_REQUIRED'].includes(error.code)
           || await hasLegacyTerminalCallEvidence(prisma, ctx)) throw error
@@ -954,12 +963,14 @@ export const continuityValidateTool = defineTool({
       summary: '终态证明选择未通过', output: selectedTerminal.reason }
     const terminalCandidate = patch?.candidate ?? (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
       ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
-    if (args.terminalState && terminalCandidate && !await hasLegacyTerminalCallEvidence(prisma, ctx)) {
-      const issue = terminalCandidateReplacementIssue(compilation.validation, terminalCandidate, chapter.content)
-      if (issue) return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', summary: '章末候选更新未应用', output: issue }
-    }
-    const terminalEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
+    let terminalEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
       terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(sourceChapter, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
+    const savedReviewCandidate = readTerminalCandidate(compilation.validation)
+    if (terminalEvidence && terminalCandidate && savedReviewCandidate && runtimeJson(terminalCandidate).hash === runtimeJson(savedReviewCandidate).hash
+      && (compilation.validation as { continuityCriticResponse?: { terminalContentHash?: string } } | null)?.continuityCriticResponse?.terminalContentHash === terminalEvidence.current.contentHash) {
+      terminalEvidence = attachTerminalProposalInput(terminalEvidence, { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext,
+        validation: compilation.validation, candidate: terminalCandidate })
+    }
     const bodies = { previous: sourceChapter?.content ?? null, current: chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }
     if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
     const coverage = compilerContinuityCoverage({ chapter, bridge, sceneTasks: compilation.sceneTasks, source: sourceChapter, focus: args.focus, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
@@ -971,7 +982,9 @@ export const continuityValidateTool = defineTool({
     const parsedCachedValidation = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number().int(), coverage: z.unknown().optional(),
       findings: z.array(continuityFindingInputSchema), errorCount: z.number().int().nonnegative().optional(), warningCount: z.number().int().nonnegative().optional() }).safeParse(compilation.validation)
     const cachedValidation = parsedCachedValidation.success ? parsedCachedValidation.data : null
-    if (sourceUnchanged && cachedValidation?.independentCheck === 'complete' && cachedValidation.checkedRevision === chapter.revision && compilerContinuityCoverageMatches(cachedValidation.coverage, coverage)) {
+    const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
+      preparedContext: compilation.preparedContext, validation: compilation.validation, chapter, source: sourceChapter, candidate: terminalCandidate, nextContext: terminalEvidence })
+    if (sourceUnchanged && proposalCacheCurrent && cachedValidation?.independentCheck === 'complete' && cachedValidation.checkedRevision === chapter.revision && compilerContinuityCoverageMatches(cachedValidation.coverage, coverage)) {
       const findings = cachedValidation.findings ?? []
       const errorCount = cachedValidation.errorCount ?? findings.filter((item) => item.severity === 'error').length
       const warningCount = cachedValidation.warningCount ?? findings.filter((item) => item.severity === 'warning').length
@@ -980,8 +993,7 @@ export const continuityValidateTool = defineTool({
         expectedChapterRevision: chapter.revision, expectedTerminalCandidateHash:patch?.expectedBaseHash, independentCheck: 'complete', coverage, terminalCandidate, focus: args.focus, signal: ctx.signal })
       if (result.independentCheck !== 'complete') return { outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED',
         summary: '缓存连续性证据未确认', output: '本次只读复核发现缓存引用缺失或不属于当前对应正文，已保留未确认报告；未调用模型、未增加检查次数，不能宣称检查通过或据此改稿。原任务内仍可纠正真实问题，按原预算取得有效复核。' }
-      const cachedEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
-        terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(sourceChapter, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
+      const cachedEvidence = terminalEvidence
       const repairGuidance = errorCount > 0 ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
       const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: (compilation.validation as Record<string, unknown>)?.continuityCriticResponse }, chapter.content, cachedEvidence,
         { errors: errorCount, text: `连续性完整报告：${errorCount} 错误、${warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...cachedValidation, checkedChapterId: chapter.id })}\n${findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` })
@@ -1078,6 +1090,13 @@ export const continuityValidateTool = defineTool({
     if (!continued && requestBodies.terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) {
       requestBodies.terminalEvidence.factCoverage = terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, 2, terminalCoverageProofs(sourceChapter, requestBodies.terminalEvidence.spanAddressProtocol))
     }
+    if (!continued && terminalCandidate && requestBodies.terminalEvidence) {
+      // Snapshot v1 keeps its original contract. New patch snapshots and full
+      // candidates freeze the same server-owned proposal input as the report.
+      const proposals = patch ? patch.proposalReview : prepareProposals(terminalCandidate)
+      if (proposals?.changes) requestBodies.terminalEvidence.proposalChanges = proposals.changes
+      else delete requestBodies.terminalEvidence.proposalChanges
+    }
     const criticInput = [
         ...((requestBodies.terminalEvidence?.verdictProtocol === 4 || requestBodies.terminalEvidence?.verdictProtocol === 5) ? [freshContinuityResponseContract(false, !!terminalCandidate, requestBodies.terminalEvidence.verdictProtocol, requestBodies)] : []),
         sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
@@ -1131,8 +1150,17 @@ export const continuityValidateTool = defineTool({
           signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityEvidenceCorrection', novelId: ctx.novelId, chapterId: chapter.id,
           targetType: 'story_compilation', targetId: compilation.id, temperature: 0, reasoningEffort: reviewRuntime.reasoningEffort,
         } }) }) : await runLegacyContinuityReview(ctx, { chapterId: chapter.id, revision: chapter.revision, bodies: requestBodies,
-      recoverBodies: version => ({ ...bodies, ...(terminalProtocol ? { terminalEvidence: terminalEvidenceContext(chapter, sourceChapter, terminalVersion,
-        terminalQuoteAddressVersion(originalRequest.spec), terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, version.coverageVersion, terminalCoverageProofs(sourceChapter, version.spanAddressProtocol)), version.verdictProtocol, version.spanAddressProtocol) } : {}) }),
+      recoverBodies: version => {
+        if (!terminalProtocol) return bodies
+        let evidence = terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
+          terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, version.coverageVersion, terminalCoverageProofs(sourceChapter, version.spanAddressProtocol)), version.verdictProtocol, version.spanAddressProtocol)
+        if (version.proposalChanges && terminalCandidate) {
+          const proposals = patch ? patch.proposalReview : prepareCompilerTerminalProposals({ spec: originalRequest.spec,
+            preparedContext: compilation.preparedContext, validation: compilation.validation, chapter, source: sourceChapter, candidate: terminalCandidate, nextContext: evidence })
+          if (proposals?.changes) evidence = { ...evidence, proposalChanges: proposals.changes }
+        }
+        return { ...bodies, terminalEvidence: evidence }
+      },
       system: criticSystem, content: criticInput, terminalCandidate, ...(sourceAuthority ? { parserVersion: terminalProtocol ? 8 as const : 7 as const, sourceScope: compilerEvidenceScope(chapter, sourceChapter) } : {}),
       options: { modelRuntime: reviewRuntime, explicitModelSelection: true, signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0, reasoningEffort: reviewRuntime.reasoningEffort }, assertCurrent, bindingHash: runtimeJson(coverage).hash,
       assessmentAdmissionId: correctionGate.freshAdmissionId ?? undefined })
@@ -1263,9 +1291,12 @@ export const chapterBridgeCommitTool = defineTool({
     const commitSource = await readCompilerContinuitySource(db, ctx, compilation.chapter, compilation.bridge.fromChapterId, storedContinuityProtocol(compilation.validation))
     const commitAudit = (compilation.validation as { continuityCriticResponse?: { parserVersion?: number } } | null)?.continuityCriticResponse
     const commitRequest = await readOriginalTaskRequest(db, ctx)
-    const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content,
-      commitAudit?.parserVersion === 8 ? terminalEvidenceContext(compilation.chapter, commitSource, storedContinuityProtocol(compilation.validation) === 11 ? 2 : 1, terminalQuoteAddressVersion(commitRequest.spec),
-        terminalCoverageInput(commitRequest.spec, compilation.preparedContext, compilation.chapter, readTerminalCandidate(compilation.validation), terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(commitSource, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined)
+    const savedCommitCandidate = readTerminalCandidate(compilation.validation)
+    let commitEvidence = commitAudit?.parserVersion === 8 ? terminalEvidenceContext(compilation.chapter, commitSource, storedContinuityProtocol(compilation.validation) === 11 ? 2 : 1, terminalQuoteAddressVersion(commitRequest.spec),
+      terminalCoverageInput(commitRequest.spec, compilation.preparedContext, compilation.chapter, savedCommitCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(commitSource, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
+    if (commitEvidence && savedCommitCandidate) commitEvidence = attachTerminalProposalInput(commitEvidence, { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId),
+      preparedContext: compilation.preparedContext, validation: compilation.validation, candidate: savedCommitCandidate })
+    const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content, commitEvidence)
     const lastExit = storyStateSchema.parse(args.exitState ?? args.terminalState?.exitState ?? reviewedTerminal?.candidate.exitState ?? {})
     const paragraphs = compilation.chapter.content.split(/\n\s*\n/u).map(text => text.trim()).filter(Boolean)
     const terminal = {

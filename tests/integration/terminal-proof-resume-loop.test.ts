@@ -125,7 +125,9 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
         terminalProofVerdicts:[{proofHash:proof.proofHash,currentState:scenario==='changed'||scenario==='uncertain'?scenario:'unchanged',reason:'Independent complete-current-body persistence judgment.'}],
         terminalDispositions:obligations.map(({id},index)=>supported||scenario==='alias-unknown'&&index===0
           ?{id,outcome:'replaced',reason:'The whole original obligation is represented by the same pending repair.',...(scenario==='patch'?{candidateFactId:terminalFactId('openLoops',claim)}:{candidatePath:'exitState.openLoops.0'}),sourceEvidence:[]}
-          :{id,outcome:'unknown',reason:'The old obligation is not independently resolved.',sourceEvidence:[]})}
+          :{id,outcome:'unknown',reason:'The old obligation is not independently resolved.',sourceEvidence:[]}),
+        ...(scenario==='patch'?{proposalDispositions:[{id:terminalFactId('emotion',base.exitState.emotion[0]),outcome:'retracted',
+          reason:'The current inventory establishes the physical object only; the earlier emotional inference was not established.',sourceEvidence:[{segmentId:'c0',quote:body}]}]}:{})}
       return new Response(`data: ${JSON.stringify({choices:[{delta:{content:JSON.stringify(response)},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:0}})}\n\ndata: [DONE]\n\n`,{headers:{'content-type':'text/event-stream'}})
     })
     vi.stubGlobal('fetch',network)

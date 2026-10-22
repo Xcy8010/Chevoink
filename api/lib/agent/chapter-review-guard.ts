@@ -21,6 +21,7 @@ import { readTerminalCandidate, currentTerminalReview } from './terminal-state-r
 import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalVerdictAuditVersion, terminalSpanAuditVersion } from './terminal-evidence-context.js'
 import { terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs } from './terminal-fact-coverage.js'
 import { terminalCandidateCorrection, type TerminalCandidateCorrection } from './terminal-candidate-feedback.js'
+import { attachTerminalProposalInput, terminalProposalTaskId } from './terminal-proposal-context.js'
 import type { TerminalProcessingInput } from './terminal-processing.js'
 
 import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
@@ -352,8 +353,10 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   const terminalCandidate = readTerminalCandidate(validation)
   const factCoverage = terminalCoverageInput(original.spec, compilation.preparedContext, chapter, terminalCandidate, terminalCoverageAuditVersion(validation), terminalCoverageProofs(source, terminalSpanAuditVersion(validation)))
   if (terminalVersion && (terminalCandidate || factCoverage?.obligations.length)) {
-    const evidence = terminalEvidenceContext(chapter, source, terminalVersion, terminalQuoteAddressVersion(original.spec),
+    let evidence = terminalEvidenceContext(chapter, source, terminalVersion, terminalQuoteAddressVersion(original.spec),
       factCoverage, terminalVerdictAuditVersion(validation), terminalSpanAuditVersion(validation))
+    if (terminalCandidate && (validation as { continuityCriticResponse?: { terminalContentHash?: string } } | null)?.continuityCriticResponse?.terminalContentHash === evidence.current.contentHash) evidence = attachTerminalProposalInput(evidence, { taskId: terminalProposalTaskId(original.spec, original.taskId),
+      preparedContext: compilation.preparedContext, validation, candidate: terminalCandidate })
     const terminal = assessment ? currentTerminalReview(validation, chapter.content, evidence) : null
     if (continuity === 'incomplete' && validation && compilerContinuityCoverageMatches(validation.coverage,
       compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source,

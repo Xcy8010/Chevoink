@@ -11,6 +11,7 @@ import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-c
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { terminalCandidateSchema, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 import { observeChapterReviewProgress } from '../../api/lib/agent/semantic-progress.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import * as ai from '../../api/lib/ai-service.js'
@@ -79,7 +80,10 @@ describe.runIf(available)('complete terminal report resumes through processing a
       // correctly treated as an unknown provider result by real billing.
       requests.push({ url, body: String(init.body) })
       const response = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body judgment.', findingIndexes: [] })),
-        terminalVerdicts: [{ path: 'exitState.objects.0', verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: body }] }], terminalDispositions: [] })
+        terminalVerdicts: [{ path: 'exitState.objects.0', verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: body }] }], terminalDispositions: [],
+        proposalDispositions: [{ id: terminalFactId('objects', candidate.exitState.objects[0]), outcome: 'replaced',
+          reason: 'The saved body establishes that the sensor remains offline rather than repaired.', candidateFactId: terminalFactId('objects', body),
+          sourceEvidence: [{ segmentId: 'c0', quote: body }] }] })
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: response }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     })
     vi.stubGlobal('fetch', network)

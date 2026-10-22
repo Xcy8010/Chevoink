@@ -1771,20 +1771,38 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     // Cumulative usage is accounting. Completion, cancellation and stagnation stop the loop.
     const seenGoalConsents = new Set<string>()
     let terminalProcessingMessage: ChatMessage | undefined
+    let terminalCompatibilityChecked = false
     if (taskSpec.controlPolicy !== 'until_completion') checkpointOrigin = 'unknown_legacy'
     const executionControl = untilCompletionControl(checkpointOrigin)
     while (executionControl.controlPolicy === 'until_completion') {
       if (controller.signal.aborted) throw new DOMException('run aborted', 'AbortError')
       if (await finishPersistedWritingIfComplete()) return
       const terminalPlan = await terminalPlanForCurrentState()
-      const processing = terminalPlan?.kind === 'process' && stagnantBatches >= 4
+      let processing = terminalPlan?.kind === 'process' && stagnantBatches >= 4
         && tools.some(tool => tool.name === 'continuity_validate') ? terminalPlan : null
+      let bootstrapCall: ToolCallRequest | undefined
+      let terminalCompatibilityClaim: string | undefined
+      if (processing && !processing.claim && params.resume && !terminalCompatibilityChecked) {
+        terminalCompatibilityChecked = true
+        await bus.persist()
+        const compatible = await prisma.$transaction(tx => (async () => {
+          const { readCompatibleTerminalProposal } = await import('./terminal-proposal-resume.js')
+          return readCompatibleTerminalProposal(tx, { userId: params.userId, novelId: params.novelId, runId },
+            { compilationId: processing!.compilationId, chapterId: processing!.chapterId, revision: currentReviewState.value!.revision })
+        })())
+        if (compatible) {
+          terminalCompatibilityClaim = compatible.claim
+          automaticReviewAttempts.add(compatible.claim)
+          await persistCheckpoint()
+          bootstrapCall = { id: compatible.callId, name: 'continuity_validate', arguments: JSON.stringify(compatible.args) }
+          processing = null
+        }
+      }
       if (processing && !processing.claim) {
         forceWrapUpLocal = true
         await wrapUpAndFinish('当前候选处理仍未取得有效独立结果，已停止重复请求。正文、原检查、费用与处理记录保留，本次工作尚未完成。')
         return
       }
-      let bootstrapCall: ToolCallRequest | undefined
       if (terminalPlan?.kind === 'commit' && tools.some(tool => tool.name === 'chapter_bridge_commit')) {
         const callId = `terminal_commit_${terminalPlan.key.slice(0, 40)}`
         if (!terminalPlan.claim) {
@@ -2623,6 +2641,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (!proof.some(([key, attempt]) => key === continuityBootstrap!.baseKey && attempt === continuityBootstrap!.recoveryKey)) {
               throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '原检查或本次继续的依据已变化，未派发请求。')
             }
+          } : terminalCompatibilityClaim && bootstrapCall?.id === call.id ? async () => {
+            controller.signal.throwIfAborted()
+            await bus.persist()
+            const { readCompatibleTerminalProposal } = await import('./terminal-proposal-resume.js')
+            const current = currentReviewState.value
+            const proof = current && await prisma.$transaction(tx => readCompatibleTerminalProposal(tx,
+              { userId: params.userId, novelId: params.novelId, runId },
+              { compilationId: current.compilationId, chapterId: current.chapterId, revision: current.revision }, call.id))
+            if (!proof || proof.claim !== terminalCompatibilityClaim) throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '原候选的本地未派发证明或当前版本已变化，未执行兼容恢复。')
           } : bootstrapCall?.id === call.id && call.name === 'chapter_bridge_commit' ? async () => { await bus.persist() } : undefined)
         // A failed assessment may still persist a new candidate/report. A
         // subsequent local read must observe it, without crediting progress or

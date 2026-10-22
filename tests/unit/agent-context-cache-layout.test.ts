@@ -431,4 +431,22 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(messages[0].content).toBe(prefix)
     expect(messages.at(-1)).toEqual(original)
   })
+  it('uses compact task guidance only for an interpreted request while preserving its original evidence and legacy layout', async () => {
+    const legacyInput = buildInput()
+    const legacy = await assembleContext(legacyInput)
+    // Each real DB query returns a fresh descending array. The history loader
+    // reverses its query result; do not share that mutable mock across reads.
+    mockState()
+    const input = buildInput()
+    input.taskSpec.scope.authorEffects = { version: 1, requestHash: 'a'.repeat(64), manuscript: true, structure: false }
+    const current = await assembleContext(input)
+    const system = String(current.messages[0].content)
+    expect(system.length).toBeLessThan(String(legacy.messages[0].content).length)
+    expect(system).toContain('工具失败可能发生在已保存或已请求之后')
+    expect(system).not.toContain('那次调用完全没执行')
+    expect(system).not.toContain('同一份产物（计划/章节）在一次任务里只落盘一次')
+    expect(current.messages.slice(1)).toEqual(legacy.messages.slice(1))
+    expect(String(current.messages.at(-1)?.content)).toContain(input.prompt)
+    expect(input.taskSpec.scope.authorEffects.manuscript).toBe(true)
+  })
 })

@@ -789,6 +789,45 @@ function withoutModelManuscriptBlocks(text: string): string {
 
 /** Only final presentation changes here. The manuscript, original request and
  * review findings remain untouched, and supported natural summaries survive. */
+function withoutWritingReceiptClauses(sentence: string, delivery: PresentationDelivery): string {
+  // currentWritingSummarySentence already checked this block quotation against
+  // saved prose. Its literal words are evidence, not an operation receipt.
+  if (/^\s*>/u.test(sentence)) return sentence
+  const quotes = writingQuotations(sentence)
+  const boundaries = [...sentence.matchAll(/[，,；;]/gu)].filter(match =>
+    !quotes.some(quote => quote.start < match.index! && match.index! < quote.end))
+  const clauses: Array<{ text: string; separator: string }> = []
+  let start = 0
+  for (const match of boundaries) {
+    clauses.push({ text: sentence.slice(start, match.index), separator: match[0] })
+    start = match.index! + match[0].length
+  }
+  clauses.push({ text: sentence.slice(start), separator: '' })
+  const visible = clauses.filter(({ text }) => {
+    let prose = text
+    for (const quote of [...writingQuotations(text)].reverse()) {
+      if (delivery.chapters.some(chapter => text.slice(quote.start, quote.end) === `《${chapter.title}》`)) continue
+      if (/^r(?:evision)?\s*\d+$/iu.test(quote.value.trim())
+        && /(?:已(?:保存|提交)|当前稿(?:是|为)?|(?:当前|修订)?版本(?:是|为)?)[\s:：]*$/u.test(text.slice(0, quote.start))) {
+        prose = prose.slice(0, quote.start) + quote.value + prose.slice(quote.end)
+        continue
+      }
+      prose = prose.slice(0, quote.start) + '[引用]' + prose.slice(quote.end)
+    }
+    if (/章节终态|终态(?:已|已经)?提交|提交终态|(?:章节|编译|任务|报告)(?:ID|编号)\s*(?:为|是|[=:：])/iu.test(prose)) return false
+    if (!/\br(?:evision)?\s*\d+\b|(?:当前版本|修订版本)\s*[:：]?\s*\d+/iu.test(prose)) return true
+    for (const chapter of delivery.chapters) prose = prose.split(`《${chapter.title}》`).join('')
+    // Only a metadata-only clause is removed. A novel's r6 room, quoted code,
+    // excerpt or plot summary is not a revision receipt.
+    return Boolean(prose.replace(/第\s*[0-9一二两三四五六七八九十百千]+\s*章/gu, '')
+      .replace(/\br(?:evision)?\s*\d+\b|(?:当前版本|修订版本)\s*[:：]?\s*\d+/giu, '')
+      .replace(/当前稿|当前版本|修订版本|版本|正文|章节|本章|已经|已|保存|提交|更新|完成|为|是/gu, '')
+      .replace(/[\s\p{P}]/gu, ''))
+  })
+  if (visible.length === clauses.length) return sentence
+  return visible.map(({ text, separator }, index) => text + (index < visible.length - 1 ? separator || '，' : '')).join('').trim()
+}
+
 export function completedWritingPresentationText(delivery: PresentationDelivery, candidateText: string): string {
   const receipt = `${delivery.chapters.map(chapter => `已保存《${chapter.title}》（r${chapter.revision}）`).join('；')}，章节终态已提交。`
   const showFullText = delivery.presentation?.mode === 'full_text'
@@ -804,9 +843,13 @@ export function completedWritingPresentationText(delivery: PresentationDelivery,
     const supported = currentWritingSummarySentence(sentence, delivery, inherited)
     if (mentions.length) inherited = mentions.at(-1)!.chapters
     return supported
-  }).join('').trim()
+  }).map(sentence => withoutWritingReceiptClauses(sentence, delivery)).join('').trim()
   if (showFullText && delivery.titleAndBodyOnly) return delivery.text
-  return [showFullText ? delivery.text : '', summary, receipt].filter(Boolean).join('\n\n')
+  // Completion was verified against current saved text and reports above.
+  // The author receives their text or natural wrap-up, not an internal receipt.
+  // Keep receipt/proof schemas and historical messages unchanged.
+  return [showFullText ? delivery.text : '', summary || (!showFullText
+    ? `已完成${delivery.chapters.map(chapter => `《${chapter.title}》`).join('、')}。` : '')].filter(Boolean).join('\n\n')
 }
 
 /** A no-repeat preference withdraws chapter prose, not the author's wrap-up. */

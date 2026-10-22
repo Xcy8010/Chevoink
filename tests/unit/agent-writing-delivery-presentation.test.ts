@@ -81,7 +81,8 @@ describe('current committed manuscript wrap-up', () => {
       `第3章已提交r6。闸门表述已改为${open}北岸闸门开了整整一尺${close}。\n\n人物的选择仍落在等待回答上。`)
     expect(text).not.toContain('整整一尺')
     expect(text).toContain('人物的选择仍落在等待回答上。')
-    expect(text).toContain('（r6），章节终态已提交。')
+    expect(text).not.toContain('章节终态已提交')
+    expect(text).not.toContain('（r6）')
     expect(completedWritingPresentationText(delivery, text)).toBe(text)
   })
   it('keeps current excerpts and quoted style labels while rejecting an obsolete revision claim', async () => {
@@ -124,7 +125,7 @@ describe('current committed manuscript wrap-up', () => {
     delivery.chapters[0].content = '北岸闸门只开了半尺。\n阿岚等守闸人的回答。'
     const accepted = completedWritingPresentationText(delivery, '第3章保留“只开了半尺。\n阿岚等守闸人”。章节ID为`chapter`。')
     expect(accepted).toContain('“只开了半尺。\n阿岚等守闸人”')
-    expect(accepted).toContain('`chapter`')
+    expect(accepted).not.toContain('章节ID')
     const rejected = completedWritingPresentationText(delivery, '第1章却写“只开了半尺”。\n\n审美总结保留。')
     expect(rejected).not.toContain('第1章却写')
     expect(rejected).toContain('审美总结保留。')
@@ -135,14 +136,15 @@ describe('current committed manuscript wrap-up', () => {
     delivery.chapters = [{ ...third, id: 'chapter-one', title: '第一章 山径', orderIndex: 1, revision: 4, content: '山径只剩一串湿脚印。',
       completion: { ...third.completion, compilationId: 'compiler-one', qualityReportId: 'quality-one' } }, third]
     const supported = completedWritingPresentationText(delivery, '第1章r4，正文保留「山径只剩一串湿脚印」。第3章r6，正文保留「北岸闸门只开了半尺」。')
-    expect(supported).toContain('第1章r4，正文保留「山径只剩一串湿脚印」。')
-    expect(supported).toContain('第3章r6，正文保留「北岸闸门只开了半尺」。')
+    expect(supported).toContain('正文保留「山径只剩一串湿脚印」。')
+    expect(supported).toContain('正文保留「北岸闸门只开了半尺」。')
+    expect(supported).not.toMatch(/\br[46]\b/)
     const wrong = completedWritingPresentationText(delivery, '第1章r6。第3章r4。第1章却写「北岸闸门只开了半尺」。\n\n多章的未引用总结仍保留。')
     expect(wrong).not.toContain('第1章r6')
     expect(wrong).not.toContain('第3章r4')
     expect(wrong).not.toContain('第1章却写')
     expect(wrong).toContain('多章的未引用总结仍保留。')
-    expect(completedWritingPresentationText(delivery, '《第一章 山径》r4，当前版本已保存。')).toContain('《第一章 山径》r4')
+    expect(completedWritingPresentationText(delivery, '《第一章 山径》r4，当前版本已保存。')).not.toContain('r4')
     for (const wrongAttribution of ['第1章的原句如下：\n“北岸闸门只开了半尺”', '第1章写道，“北岸闸门只开了半尺”']) {
       const text = completedWritingPresentationText(delivery, `${wrongAttribution}\n\n未引用总结保留。`)
       expect(text).not.toContain('“北岸闸门只开了半尺”')
@@ -156,6 +158,22 @@ describe('current committed manuscript wrap-up', () => {
     expect(completedWritingPresentationText(delivery, `“${body}”\n\n保留停顿的总结。`)).not.toContain(body)
     delivery.chapters[0].content = '门'
     expect(completedWritingPresentationText(delivery, '门外的悬念让人物停顿更自然。')).toContain('门外的悬念让人物停顿更自然。')
+  })
+  it('removes correct-version and terminal metadata clauses while preserving literary r6 text and exact saved delivery', async () => {
+    const { delivery } = await current()
+    const text = completedWritingPresentationText(delivery, '第3章已提交r6。章节终态已提交。当前稿是r6。\n\n人物在r6房间等待回答，停顿更克制。')
+    expect(text).toBe('人物在r6房间等待回答，停顿更克制。')
+    delivery.titleAndBodyOnly = true
+    delivery.text = `标题r6\n\n${delivery.chapters[0].content}\n章节终态已提交。\n\n\`r6\``
+    expect(completedWritingPresentationText(delivery, '章节终态已提交。')).toBe(delivery.text)
+  })
+  it('preserves verified manuscript block quotes and paragraph boundaries, but removes metadata-only quoted versions', async () => {
+    const { delivery } = await current()
+    delivery.chapters[0].content += '\n屏幕显示：章节终态已提交。'
+    const quote = '> 章节终态已提交。\n\n保留屏幕上的提示。\n\n人物的犹豫仍然清楚。'
+    expect(completedWritingPresentationText(delivery, quote)).toBe(quote)
+    expect(completedWritingPresentationText(delivery, '第3章已提交`r6`。\n\n人物的犹豫仍然清楚。')).toBe('人物的犹豫仍然清楚。')
+    expect(completedWritingPresentationText(delivery, '当前稿是“r6”。\n\n人物的犹豫仍然清楚。')).toBe('人物的犹豫仍然清楚。')
   })
   it('respects no-repeat and explicit full-text display without inventing passed checks', async () => {
     const { delivery } = await current()
@@ -178,6 +196,14 @@ describe('current committed manuscript wrap-up', () => {
 })
 
 describe('saved artifact display withdrawal', () => {
+  it('uses a truthful short fallback only after current completion and never appends implementation receipts', async () => {
+    const f = fixture('完成第一章，简要说明结果。', false)
+    const delivery = await readCompletedWritingPresentation(f.db, subject)
+    expect(delivery).not.toBeNull()
+    expect(completedWritingPresentationText(delivery!, '')).toBe('已完成《第一章 旧罗盘》。')
+    expect(completedWritingPresentationText(delivery!, '人物的决定让机会变得具体。')).toBe('人物的决定让机会变得具体。')
+    expect(f.chapter.content).toBe('沈桐眼前浮起价值数字。他压住笑意，决定抓住这个独享的机会。')
+  })
   it('keeps a natural wrap-up with a title and short excerpt under a no-repeat preference', async () => {
     const f = fixture('重写第一章，突出捡漏爽文。', false)
     mocks.preference.mockResolvedValue({ mode: 'saved_only', sourceRunId: 'author-correction', sourceMessageId: 'message' })

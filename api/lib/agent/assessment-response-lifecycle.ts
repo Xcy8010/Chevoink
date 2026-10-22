@@ -84,7 +84,7 @@ export function freshContinuityResponseContract(reassessment = false, hasCandida
   const scope = bodies?.terminalEvidence?.spanAddressProtocol === 2
     ? continuitySourceCatalog(bodies).terminalSources.map(part => part.segmentId) : undefined
   return `完整响应 JSON Schema（普通事实地址与语义 map 由服务端绑定，不补造任何独立判断）：${JSON.stringify(z.toJSONSchema(z.object({
-    ...(reassessment ? { decisions: z.array(decisionSchema) } : {}), findings: z.array(continuityCandidateSchema), ...terminalResponseFields(hasCandidate, version, scope),
+    ...(reassessment ? { decisions: z.array(decisionSchema) } : {}), findings: z.array(continuityCandidateSchema), ...terminalResponseFields(hasCandidate, version, scope, bodies?.terminalEvidence?.proposalChanges),
   }).strict(), {io:'input'}))}`
 }
 
@@ -103,7 +103,7 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
     ...(original.audit.parserVersion === 8 && original.audit.terminalEvidence?.verdictProtocol === 3 ? { terminalProofVerdicts: z.array(terminalProofVerdictSchema).max(200).optional() } : {}),
     ...(original.audit.parserVersion === 8 ? { semanticChecks: z.unknown() } : {}),
     ...(original.audit.parserVersion === 8 && original.audit.terminalEvidence?.factCoverage ? { terminalDispositions: z.array(terminalDispositionSchema).max(200).optional() } : {}),
-    ...((original.audit.terminalEvidence?.verdictProtocol === 4 || original.audit.terminalEvidence?.verdictProtocol === 5) ? terminalResponseFields(!!original.audit.terminalCandidate, original.audit.terminalEvidence.verdictProtocol) : {}),
+    ...((original.audit.terminalEvidence?.verdictProtocol === 4 || original.audit.terminalEvidence?.verdictProtocol === 5) ? terminalResponseFields(!!original.audit.terminalCandidate, original.audit.terminalEvidence.verdictProtocol, undefined, original.audit.terminalEvidence.proposalChanges) : {}),
   }).strict().parse(response)
   if (envelope.decisions.length !== (candidates?.length ?? 0) || new Set(envelope.decisions.map(item => item.index)).size !== envelope.decisions.length
     || envelope.decisions.some(item => item.index >= (candidates?.length ?? 0))) throw new Error('Reassessment omitted or invented an original candidate')
@@ -159,7 +159,7 @@ export async function runContinuityReassessment(input: { original: Inspection; b
 
 export type LegacyAssessmentInput = { chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate; reassessmentProtocol?: 2;
   parserVersion?: 7 | 8; sourceScope?: ContinuitySourceScope; bindingHash?: string; targetType: 'chapter' | 'story_compilation'; targetId: string }
-export type FrozenTerminalContract = Pick<TerminalEvidenceContext, 'verdictProtocol' | 'spanAddressProtocol'> & { coverageVersion: 1 | 2 }
+export type FrozenTerminalContract = Pick<TerminalEvidenceContext, 'verdictProtocol' | 'spanAddressProtocol' | 'proposalChanges'> & { coverageVersion: 1 | 2 }
 export const legacyContinuityAssessmentKey = (ctx: Pick<ToolContext, 'runId' | 'callId'>, input: LegacyAssessmentInput) => runtimeJson({ runId: ctx.runId, callId: ctx.callId,
   input: { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system, content: input.content, bindingHash: input.bindingHash ?? null,
     ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}),
@@ -191,6 +191,7 @@ export async function readFrozenLegacyContinuityInput(tx: Prisma.TransactionClie
       terminalCandidate: copy.terminalCandidate ?? null, bindingHash: copy.bindingHash ?? null, parserVersion: copy.parserVersion ?? null, sourceScope: copy.sourceScope ?? null }
   }
   const expected = recoverBodies ? { ...proposed, bodies: recoverBodies({ coverageVersion: parsed.data.bodies.terminalEvidence?.factCoverage?.version ?? 1,
+    ...(parsed.data.bodies.terminalEvidence?.proposalChanges ? { proposalChanges: parsed.data.bodies.terminalEvidence.proposalChanges } : {}),
     ...(parsed.data.bodies.terminalEvidence?.spanAddressProtocol ? { spanAddressProtocol: parsed.data.bodies.terminalEvidence.spanAddressProtocol } : {}),
     ...(parsed.data.bodies.terminalEvidence?.verdictProtocol ? { verdictProtocol: parsed.data.bodies.terminalEvidence.verdictProtocol } : {}) }) } : proposed
   if (runtimeJson(identity(parsed.data)).hash !== runtimeJson(identity(expected)).hash) throw invalid()

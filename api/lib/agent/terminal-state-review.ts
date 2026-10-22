@@ -8,7 +8,8 @@ import { terminalEvidenceContextSchema, semanticCheckSchema, type TerminalCarrie
 import { inspectTerminalCoverage, terminalCoverageGuidance, addressedTerminalDispositionSchema } from './terminal-fact-coverage.js'
 import { terminalQuoteRange } from './terminal-quote-range.js'
 import { terminalProofCatalog, readTerminalProofVerdicts, terminalProofVerdictSchema } from './terminal-proof-verdict.js'
-import { terminalCandidateFacts } from './terminal-fact-identity.js'
+import { terminalCandidateFacts, terminalFactId } from './terminal-fact-identity.js'
+import { inspectTerminalProposalDispositions, terminalProposalDispositionSchema, terminalProposalGuidance, type TerminalProposalChanges } from './terminal-proposal-review.js'
 
 export const terminalCandidateSchema = z.object({
   exitState: storyStateSchema,
@@ -87,7 +88,7 @@ const jointFactVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(t
 
 /** Shared fresh response shape; proof/decision semantics remain independently
  * checked after binding these mechanically addressed fields. */
-export function terminalResponseFields(hasCandidate = true, version: 4 | 5 = 4, legalSegmentIds?: string[]) {
+export function terminalResponseFields(hasCandidate = true, version: 4 | 5 = 4, legalSegmentIds?: string[], proposalChanges?: TerminalProposalChanges) {
   // Use the request's frozen candidate. A body-only review has no terminal
   // claims; an explicit empty candidate still needs its exhaustive empty array.
   const keyed = semanticCheckSchema.omit({ kind: true }).extend({ kind: semanticCheckSchema.shape.kind.optional() }).strict()
@@ -102,7 +103,9 @@ export function terminalResponseFields(hasCandidate = true, version: 4 | 5 = 4, 
   return { semanticChecks: z.union([z.array(semanticCheckSchema).length(2), z.object({ action_direction: keyed, state_progression: keyed }).strict()]),
     terminalVerdicts: hasCandidate ? ordinary : ordinary.length(0).optional(),
     terminalProofVerdicts: (hasCandidate ? proofs : proofs.length(0)).optional(),
-    terminalDispositions: (hasCandidate ? dispositions : dispositions.length(0)).optional() }
+    terminalDispositions: (hasCandidate ? dispositions : dispositions.length(0)).optional(),
+    ...(proposalChanges ? { proposalDispositions: z.array(terminalProposalDispositionSchema.extend({ id: z.enum(
+      proposalChanges.proposals.map(item => item.id) as [string, ...string[]]) })).length(proposalChanges.proposals.length) } : {}) }
 }
 
 /** Source is encoded in server-owned addresses. This projection changes no
@@ -225,6 +228,10 @@ export function terminalClaims(candidate: TerminalCandidate) {
 }
 
 export function terminalReviewInput(candidate?: TerminalCandidate, context?: TerminalEvidenceContext): string {
+  return terminalReviewInputBase(candidate, context) + terminalProposalGuidance(context?.proposalChanges)
+}
+
+function terminalReviewInputBase(candidate?: TerminalCandidate, context?: TerminalEvidenceContext): string {
   if ((context?.verdictProtocol === 3 || context?.verdictProtocol === 4 || context?.verdictProtocol === 5) && candidate) {
     const catalog = terminalProofCatalog(candidate, context), selected = new Set(catalog.flatMap(item => item.paths))
     const ordinary = terminalClaims(candidate).filter(item => !selected.has(item.path)).map(item => ({ ...item,
@@ -319,10 +326,17 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
         || item.segmentIds.some(id => !segments.some(segment => segment.segmentId === id)))) return invalid('claim_coverage_invalid')
     const factCoverage = inspectTerminalCoverage(context?.factCoverage, record.terminalDispositions, candidate, verdicts, segments.filter(item => item.segmentId.startsWith('c')), context?.verdictProtocol === 4 || context?.verdictProtocol === 5)
     if (factCoverage === null) return invalid('fact_disposition_invalid')
-    return { version: context ? 2 : 1, ...(context ? { evidenceContextHash: runtimeJson(context).hash } : {}), ...(factCoverage ? { factCoverage } : {}), candidate, contentHash: runtimeJson({ content }).hash,
+    const proposalInput = context?.proposalChanges
+    if (proposalInput && (proposalInput.chapterId !== context.current.id || proposalInput.bodyHash !== context.current.contentHash
+      || proposalInput.sourceHash !== runtimeJson({ previous: context.previous }).hash)) return invalid('proposal_input_stale')
+    const proposals = inspectTerminalProposalDispositions(proposalInput, record.proposalDispositions, candidate, verdicts, segments,
+      [...(context?.factCoverage?.obligations.map(item => item.id) ?? []),
+      ...(context?.previous?.carried?.map(item => terminalFactId(item.field, item.claim)) ?? [])])
+    if (proposals === null) return invalid('proposal_disposition_invalid')
+    return { version: context ? 2 : 1, ...(context ? { evidenceContextHash: runtimeJson(context).hash } : {}), ...(factCoverage ? { factCoverage } : {}), ...(proposals ? { proposals } : {}), candidate, contentHash: runtimeJson({ content }).hash,
       candidateHash: runtimeJson(candidate).hash, responseHash: runtimeJson({ raw }).hash,
       ...(addresses ? { originalRefs: addresses.originalRefs, relocations: addresses.relocations } : {}),
-      supported: verdicts.every(item => item.verdict === 'supported') && factCoverage?.complete !== false,
+      supported: verdicts.every(item => item.verdict === 'supported') && factCoverage?.complete !== false && proposals?.complete !== false,
       ...(inherited?.success && 'proofChecks' in inherited ? { proofChecks: inherited.proofChecks } : {}),
       ...(inherited?.success && 'spanSelections' in inherited ? { spanSelections: inherited.spanSelections } : {}),
       verdicts: verdicts.map(item => ({ ...item, evidence: item.segmentIds.map(id => {

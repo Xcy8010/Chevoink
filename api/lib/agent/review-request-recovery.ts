@@ -8,7 +8,7 @@ import { originalTaskRunIds, readOriginalTaskRequest } from './original-request.
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { isKnownTextRequestBilling } from './text-request-billing.js'
 import { runtimeJson } from './runtime-common.js'
-import { applyTerminalCandidatePatch, hasLegacyTerminalCallEvidence, terminalCandidatePatchSchema } from './terminal-candidate-patch.js'
+import { applyTerminalCandidatePatch, hasLegacyTerminalCallEvidence, terminalCandidatePatchSchema, terminalCandidateReplacementIssue } from './terminal-candidate-patch.js'
 import { readTerminalCandidate } from './terminal-state-review.js'
 import { DataAccessError } from '../prisma.js'
 
@@ -94,7 +94,7 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
     // unlike an arbitrary legacy stale/provider error or an absent usage row.
     let localPatchRefusal = false
     const patch = terminalCandidatePatchSchema.safeParse(args.terminalPatch)
-    if (!typed && item.toolName === 'continuity_validate' && payload.failureCode === 'CONTINUITY_INPUT_STALE'
+    if (!typed && item.toolName === 'continuity_validate' && ['CONTINUITY_INPUT_STALE', 'TERMINAL_STATE_REVIEW_REQUIRED'].includes(String(payload.failureCode))
       && !source.taskRootId && source.runtimeProtocolVersion === 0 && item.compilationId && patch.success
       && args.terminalState === undefined && chapter.revision === item.revision
       && !await hasLegacyTerminalCallEvidence(tx, { runId: call.runId, callId: item.callId })) {
@@ -103,8 +103,13 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
       const validation = object(compiler?.validation), candidate = readTerminalCandidate(validation)
       if (candidate && typeof validation.checkedAt === 'string' && Date.parse(validation.checkedAt) <= call.createdAt.getTime()
         && chapter.updatedAt <= call.createdAt) {
-        try { applyTerminalCandidatePatch(candidate, patch.data) }
-        catch (error) { localPatchRefusal = error instanceof DataAccessError && error.code === 'CONTINUITY_INPUT_STALE' }
+        try {
+          const proposed = applyTerminalCandidatePatch(candidate, patch.data)
+          localPatchRefusal = payload.failureCode === 'TERMINAL_STATE_REVIEW_REQUIRED'
+            && !!terminalCandidateReplacementIssue(validation, proposed, chapter.content)
+        }
+        catch (error) { localPatchRefusal = payload.failureCode === 'CONTINUITY_INPUT_STALE'
+          && error instanceof DataAccessError && error.code === 'CONTINUITY_INPUT_STALE' }
       }
     }
     if (payload.reviewRequestFinished !== undefined && !typed && !(localPatchRefusal && proof.version === 1

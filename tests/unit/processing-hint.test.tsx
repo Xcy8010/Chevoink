@@ -40,6 +40,8 @@ it('hands fallback feedback to the first preparation frame and keeps one card th
   act(()=>apply({...base,seq:6,type:'tool.result',toolName:'chapter_write',ok:true,summary:'正文已保存'}))
   expect(view.container.querySelectorAll('[data-agent-call-id="write"]')).toHaveLength(1)
   expect(view.container.querySelector('.agent-tool-progress')).toBeNull()
+  expect(screen.queryByRole('status')).toBeNull()
+  act(()=>vi.advanceTimersByTime(OUTPUT_SILENCE_MS))
   expect(screen.getByRole('status').textContent).toBe('正在处理...')
   expect(useAgentStore.getState().liveToolDrafts).toEqual({})
 })
@@ -73,6 +75,49 @@ it('hides on published paragraph output and returns only after silence without a
   expect(view.result.current).toBe(true)
   view.unmount()
   expect(vi.getTimerCount()).toBe(0)
+})
+
+it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to actually rendered %s, and restores one timer after silence', type => {
+  vi.useFakeTimers()
+  useAgentStore.getState().resetRun()
+  useAgentStore.getState().resumeRun('r', 'session')
+  const view = render(<LiveParts />), apply = useAgentStore.getState().applyEvent
+  const base = { runId: 'r', messageId: 'm', ts: new Date().toISOString() }
+  act(() => apply({ ...base, seq: 1, type: 'message.start', role: 'assistant' }))
+  expect(screen.getByRole('status')).toBeTruthy()
+  for (let seq = 2; seq <= 5; seq++) {
+    act(() => apply({ ...base, seq, type, delta: `第${seq}处调整让人物的选择更清楚。\n\n` }))
+    // The existing Markdown renderer batches visible updates for 40ms; it
+    // owns a separate timer and is not a second waiting indicator.
+    act(() => vi.advanceTimersByTime(40))
+    expect(view.container.textContent).toContain(`第${seq}处调整让人物的选择更清楚。`)
+    expect(view.container.textContent).not.toContain('正在处理...')
+    expect(vi.getTimerCount()).toBe(1)
+    act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS - 41))
+    expect(screen.queryByRole('status')).toBeNull()
+  }
+  act(() => vi.advanceTimersByTime(1))
+  expect(screen.getAllByRole('status')).toHaveLength(1)
+  // A heartbeat, unfinished paragraph or replay is not visible progress.
+  act(() => apply({ ...base, seq: 6, type, delta: '尚未展示' }))
+  expect(screen.getByRole('status')).toBeTruthy()
+  act(() => apply({ ...base, seq: 7, type: 'run.paused', reason: 'needs_input' }))
+  view.unmount()
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it('counts a new visible final result but not an identical replay or hidden finalization', () => {
+  vi.useFakeTimers()
+  useAgentStore.getState().resumeRun('r', 'session')
+  useAgentStore.setState({ lastSeq: 0, messages: [], lastVisibleOutput: null })
+  const apply = useAgentStore.getState().applyEvent, base = { runId: 'r', messageId: 'm', ts: new Date().toISOString() }
+  act(() => apply({ ...base, seq: 1, type: 'message.start', role: 'assistant' }))
+  const view = renderHook(() => useProcessingHint(useAgentStore(state => state.messages), 'r', 'running', false))
+  act(() => apply({ ...base, seq: 2, type: 'text.final', text: '已保留这段人物对话。', asReasoning: false }))
+  expect(view.result.current).toBe(false)
+  act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS))
+  act(() => apply({ ...base, seq: 3, type: 'text.final', text: '已保留这段人物对话。', asReasoning: false }))
+  expect(view.result.current).toBe(true)
 })
 
 it.each(['text.delta', 'reasoning.delta'] as const)('keeps truthful waiting feedback while %s contains invisible progress', type => {

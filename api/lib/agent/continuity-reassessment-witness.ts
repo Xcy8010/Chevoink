@@ -14,6 +14,7 @@ import { terminalCoverageInput, terminalCoverageProofs } from './terminal-fact-c
 import { readOriginalTaskRequest } from './original-request.js'
 import { readFrozenLegacyTerminalPatch, terminalCandidatePatchSchema } from './terminal-candidate-patch.js'
 import { DataAccessError } from '../prisma.js'
+import { prepareCompilerTerminalProposals } from './terminal-proposal-context.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 /** Authenticate only this exact two-request tool interval. A matching action
@@ -148,10 +149,19 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   const coverage = compilerContinuityCoverage({ ...coverageInput, source }, chainProtocol ? 11 : frozen.parserVersion === 8 ? 10 : frozen.parserVersion === 7 ? 9 : 8)
   let sourceMatches = bodies.previous === (source?.content ?? null) && frozen.bindingHash === runtimeJson(coverage).hash
   if (chainProtocol) {
-    sourceMatches &&= runtimeJson(bodies.terminalEvidence).hash === runtimeJson(terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original?.spec),
+    let evidence = terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original?.spec),
       terminalCoverageInput(original?.spec, compilation.preparedContext, chapter, coverageInput.terminalCandidate,
         object(object(bodies.terminalEvidence).factCoverage).version === 2 ? 2 : 1, terminalCoverageProofs(source, object(bodies.terminalEvidence).spanAddressProtocol === 2 ? 2 : undefined)), object(bodies.terminalEvidence).verdictProtocol === 5 ? 5 : object(bodies.terminalEvidence).verdictProtocol === 4 ? 4 : object(bodies.terminalEvidence).verdictProtocol === 3 ? 3 : object(bodies.terminalEvidence).verdictProtocol === 2 ? 2 : undefined,
-      object(bodies.terminalEvidence).spanAddressProtocol === 2 ? 2 : undefined)).hash
+      object(bodies.terminalEvidence).spanAddressProtocol === 2 ? 2 : undefined)
+    if (object(bodies.terminalEvidence).proposalChanges !== undefined && coverageInput.terminalCandidate && original) {
+      try {
+        const proposals = prepareCompilerTerminalProposals({ spec: original.spec, preparedContext: compilation.preparedContext,
+          validation: compilation.validation, chapter, source, candidate: coverageInput.terminalCandidate, nextContext: evidence })
+        if (!proposals?.changes) return null
+        evidence = { ...evidence, proposalChanges: proposals.changes }
+      } catch (error) { if (error instanceof DataAccessError) return null; throw error }
+    }
+    sourceMatches &&= runtimeJson(bodies.terminalEvidence).hash === runtimeJson(evidence).hash
   }
   if (!sourceMatches && !chainProtocol) {
     // A proven non-dispatch may have frozen the previous single-source

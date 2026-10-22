@@ -3,6 +3,7 @@ import { continuitySourceSegments } from './continuity-review-context.js'
 import { runtimeJson } from './runtime-common.js'
 import type { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { terminalCoverageInputSchema, type TerminalCoverageInput } from './terminal-fact-coverage.js'
+import { terminalProposalChangesSchema } from './terminal-proposal-review.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 export const terminalFactNodeSchema = z.object({ compilationId: z.string(), chapterId: z.string(), revision: z.number().int(),
@@ -22,6 +23,7 @@ export const terminalEvidenceContextSchema = z.object({
   spanAddressProtocol: z.literal(2).optional(),
   verdictProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).optional(),
   factCoverage: terminalCoverageInputSchema.optional(),
+  proposalChanges: terminalProposalChangesSchema.optional(),
   current: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash }).strict(),
   previous: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash,
     start: z.number().int(), end: z.number().int(), joinedStart: z.number().int(), joinedEnd: z.number().int(),

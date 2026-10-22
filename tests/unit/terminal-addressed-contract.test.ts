@@ -223,4 +223,19 @@ describe('explicit candidate delta and input recovery', () => {
       expect(create).toHaveBeenCalledTimes(1)
     } finally { vi.restoreAllMocks() }
   })
+
+  it('freezes a current patch with no removed proposals as valid JSON, without changing the old snapshot contract', async () => {
+    const ctx = { userId: 'u', novelId: 'n', runId: 'r', callId: 'new-current-call', signal: new AbortController().signal }
+    const scope = { id: 'compiler', validation: { terminalCandidate: candidate }, chapter }
+    const patch = terminalCandidatePatchSchema.parse({ baseCandidateHash: runtimeJson(candidate).hash })
+    vi.spyOn(original, 'readOriginalTaskRequest').mockResolvedValue({ taskId: 'original' } as never)
+    const create = vi.fn(async ({ data }: { data: { metadata: unknown } }) => data)
+    const tx = { agentArtifact: { findUnique: vi.fn().mockResolvedValue(null), create } } as unknown as Prisma.TransactionClient
+    try {
+      expect(await freezeLegacyTerminalPatch(tx, ctx, scope, null, [], 2, patch, [], () => undefined)).toMatchObject({ proposalVersion: 2, candidate })
+      expect(create).toHaveBeenCalledOnce()
+      expect(create.mock.calls[0][0].data.metadata).toMatchObject({ version: 2, candidate })
+      expect(create.mock.calls[0][0].data.metadata).not.toHaveProperty('proposalReview')
+    } finally { vi.restoreAllMocks() }
+  })
 })

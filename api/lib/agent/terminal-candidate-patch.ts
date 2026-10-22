@@ -7,6 +7,8 @@ import { terminalCandidateFacts, terminalFactId } from './terminal-fact-identity
 import type { TerminalCarriedFact } from './terminal-evidence-context.js'
 import type { ToolContext } from './tools/types.js'
 import { readOriginalTaskRequest } from './original-request.js'
+import { terminalProposalTaskId, type TerminalProposalPreparation } from './terminal-proposal-context.js'
+import { terminalProposalChangesSchema, terminalProposalStateSchema, readTerminalProposalState } from './terminal-proposal-review.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
 const field = z.enum(['action','location','storyTime','emotion','knowledge','body','objects','relationships','openLoops','lastUnfinishedAction'])
@@ -78,13 +80,26 @@ const identitySchema=z.object({userId:z.string(),novelId:z.string(),taskId:z.str
   chapterId:z.string(),revision:z.number().int(),bodyHash:hash,sourceHash:hash}).strict()
 const snapshotSchema=z.object({version:z.literal(1),kind:z.literal('terminalCandidatePatch'),identity:identitySchema,
   request:z.object({patch:terminalCandidatePatchSchema,inheritedProofs:z.array(hash)}).strict(),base:terminalCandidateSchema,candidate:terminalCandidateSchema}).strict()
+const proposalPreparationSchema = z.object({ state: terminalProposalStateSchema, changes: terminalProposalChangesSchema.optional() }).strict()
+const currentSnapshotSchema = snapshotSchema.extend({ version: z.literal(2), proposalReview: proposalPreparationSchema.optional() })
+const savedSnapshotSchema = z.discriminatedUnion('version', [snapshotSchema, currentSnapshotSchema])
+function validateProposalSnapshot(snapshot: z.infer<typeof currentSnapshotSchema>, taskId: string) {
+  const prepared = snapshot.proposalReview
+  if (!prepared) return
+  const state = readTerminalProposalState({ terminalProposalReview: prepared.state }, { taskId, chapterId: snapshot.identity.chapterId })!
+  if (prepared.changes ? prepared.changes.taskId !== taskId || prepared.changes.chapterId !== snapshot.identity.chapterId
+    || prepared.changes.bodyHash !== snapshot.identity.bodyHash || prepared.changes.candidateHash !== runtimeJson(snapshot.candidate).hash
+    || runtimeJson(prepared.changes).hash !== runtimeJson(state.lastInput.input).hash
+    || runtimeJson(state.pending).hash !== runtimeJson(prepared.changes.proposals).hash : state.pending.length > 0) throw stale()
+}
 
 /** Same owned call recovers its canonical delta result before testing an old
  * base hash. A new call still needs the current base. No provider/fee authority
  * is created by this input snapshot; the existing review lifecycle owns that. */
 async function legacyTerminalPatch(tx: Prisma.TransactionClient,ctx: Pick<ToolContext,'userId'|'novelId'|'runId'|'callId'>,
   compilation:{id:string;validation:unknown;chapter:{id:string;revision:number;content:string}},
-  source:unknown,carried:TerminalCarriedFact[]|undefined,protocol:1|2|undefined,patch:TerminalCandidatePatch,inheritedProofs:string[]=[],readOnly=false){
+  source:unknown,carried:TerminalCarriedFact[]|undefined,protocol:1|2|undefined,patch:TerminalCandidatePatch,inheritedProofs:string[]=[],readOnly=false,
+  prepareProposals?: (candidate: TerminalCandidate) => TerminalProposalPreparation | undefined){
   const original=await readOriginalTaskRequest(tx,ctx)
   const identity={userId:ctx.userId,novelId:ctx.novelId,taskId:original.taskId,runId:ctx.runId,callId:ctx.callId,
     compilationId:compilation.id,chapterId:compilation.chapter.id,revision:compilation.chapter.revision,
@@ -95,22 +110,30 @@ async function legacyTerminalPatch(tx: Prisma.TransactionClient,ctx: Pick<ToolCo
   const current=readTerminalCandidate(compilation.validation)
   if(!current)throw stale()
   if(saved){
-    const snapshot=snapshotSchema.safeParse(saved.metadata)
+    const snapshot=savedSnapshotSchema.safeParse(saved.metadata)
     if(!snapshot.success||saved.runId!==ctx.runId||runtimeJson(snapshot.data.identity).hash!==runtimeJson(identity).hash
       ||runtimeJson(snapshot.data.request).hash!==runtimeJson(request).hash)throw stale()
+    if(snapshot.data.version === 2) validateProposalSnapshot(snapshot.data, terminalProposalTaskId(original.spec, original.taskId))
     const rebuilt=resolveTerminalCandidate({...applyTerminalCandidatePatch(snapshot.data.base,patch),inheritedProofs},carried,protocol)
     if(!rebuilt.ok||runtimeJson(rebuilt.candidate).hash!==runtimeJson(snapshot.data.candidate).hash
       ||![patch.baseCandidateHash,runtimeJson(rebuilt.candidate).hash].includes(runtimeJson(current).hash))throw stale()
-    return {candidate:rebuilt.candidate,expectedBaseHash:runtimeJson(current).hash}
+    return {candidate:rebuilt.candidate,expectedBaseHash:runtimeJson(current).hash,
+      ...(snapshot.data.version === 2 ? { proposalVersion: 2 as const, proposalReview: snapshot.data.proposalReview } : {})}
   }
   if(readOnly)return null
   const selected=resolveTerminalCandidate({...applyTerminalCandidatePatch(current,patch),inheritedProofs},carried,protocol)
   if(!selected.ok)throw stale()
   const issue=terminalCandidateReplacementIssue(compilation.validation,selected.candidate,compilation.chapter.content)
-  if(issue)throw new DataAccessError(409,'TERMINAL_STATE_REVIEW_REQUIRED',issue)
-  const snapshot=snapshotSchema.parse({version:1,kind:'terminalCandidatePatch',identity,request,base:current,candidate:selected.candidate})
+  const proposalReview = prepareProposals?.(selected.candidate)
+  if(issue && !proposalReview?.changes)throw new DataAccessError(409,'TERMINAL_STATE_REVIEW_REQUIRED',issue)
+  const snapshot=prepareProposals
+    ? currentSnapshotSchema.parse({version:2,kind:'terminalCandidatePatch',identity,request,base:current,candidate:selected.candidate,
+      ...(proposalReview ? { proposalReview } : {})})
+    : snapshotSchema.parse({version:1,kind:'terminalCandidatePatch',identity,request,base:current,candidate:selected.candidate})
+  if (snapshot.version === 2) validateProposalSnapshot(snapshot, terminalProposalTaskId(original.spec, original.taskId))
   await tx.agentArtifact.create({data:{id,runId:ctx.runId,artifactType:'continuityReview',title:'章末候选增量输入快照',content:'',metadata:runtimeJson(snapshot).value}})
-  return {candidate:selected.candidate,expectedBaseHash:patch.baseCandidateHash}
+  return {candidate:selected.candidate,expectedBaseHash:patch.baseCandidateHash,
+    ...(snapshot.version === 2 ? { proposalVersion: 2 as const, proposalReview: snapshot.proposalReview } : {})}
 }
 
 export const readFrozenLegacyTerminalPatch = (tx: Prisma.TransactionClient,ctx: Pick<ToolContext,'userId'|'novelId'|'runId'|'callId'>,
@@ -120,7 +143,8 @@ export const readFrozenLegacyTerminalPatch = (tx: Prisma.TransactionClient,ctx: 
 
 export async function freezeLegacyTerminalPatch(tx: Prisma.TransactionClient,ctx: Pick<ToolContext,'userId'|'novelId'|'runId'|'callId'|'signal'>,
   ...input: [compilation:{id:string;validation:unknown;chapter:{id:string;revision:number;content:string}},source:unknown,
-    carried:TerminalCarriedFact[]|undefined,protocol:1|2|undefined,patch:TerminalCandidatePatch,inheritedProofs?:string[]]) {
+    carried:TerminalCarriedFact[]|undefined,protocol:1|2|undefined,patch:TerminalCandidatePatch,inheritedProofs?:string[],
+    prepareProposals?: (candidate: TerminalCandidate) => TerminalProposalPreparation | undefined]) {
   ctx.signal.throwIfAborted()
-  return (await legacyTerminalPatch(tx,ctx,...input))!
+  return (await legacyTerminalPatch(tx,ctx,input[0],input[1],input[2],input[3],input[4],input[5] ?? [],false,input[6]))!
 }

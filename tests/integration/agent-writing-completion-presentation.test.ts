@@ -71,13 +71,14 @@ async function seed(userId: string) {
 }
 
 describe.skipIf(!available)('current committed writing presentation snapshots', () => {
-  it('persists only the current receipt and supported summary without changing protected earlier chapters', () => fixture(async f => {
+  it('persists a supported natural summary without appending internal receipts or changing protected earlier chapters', () => fixture(async f => {
     const delivery = await prisma.$transaction(tx => readCompletedWritingPresentation(tx, f))
     expect(delivery).not.toBeNull()
     const text = completedWritingPresentationText(delivery!, '已提交r6。正文改为「北岸闸门开了整整一尺」。\n\n结尾保留等待回答的停顿。')
     expect(text).not.toContain('整整一尺')
     expect(text).toContain('结尾保留等待回答的停顿。')
-    expect(text).toContain('（r6），章节终态已提交。')
+    expect(text).not.toContain('章节终态已提交')
+    expect(text).not.toContain('（r6）')
     await prisma.$transaction(async tx => {
       await assertCompletedWritingDelivery(tx, f, delivery!)
       await tx.agentMessage.create({ data: { runId: f.runId, sessionId: f.sessionId, role: 'assistant', parts: [{ type: 'text', text }] } })

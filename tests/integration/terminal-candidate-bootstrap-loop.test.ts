@@ -32,7 +32,7 @@ const fixture: typeof durableFixture = (work, ...rest) => durableFixture(async f
 const checks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body review.', findingIndexes: [] }))
 
 describe.runIf(available)('authenticated native review hands a rejected current-state candidate back to the original task', () => {
-  it.each([...(['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)), ...(['old-slots', 'local-refusal', 'objects', 'source-address', 'commit-reserved', 'commit-unknown', 'multiple-candidates', 'no-proposal'] as const).map(scenario => ['settled', scenario] as const)])(
+  it.each([...(['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)), ...(['old-slots', 'local-refusal', 'consumed-local-candidate', 'objects', 'source-address', 'commit-reserved', 'commit-unknown', 'multiple-candidates', 'no-proposal'] as const).map(scenario => ['settled', scenario] as const)])(
     'preserves failed requests and permits bounded candidate processing: %s / %s', (billing, scenario) => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
@@ -46,6 +46,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     const bad = terminalCandidateSchema.parse({ exitState: { location: scenario === 'objects' ? accurate : 'Inside the first door of the control room.',
       action: 'Preparing to turn the first-door wheel.', ...(scenario === 'objects' ? { objects: ['The packet has been archived.'] } : {}),
       ...(scenario === 'source-address' ? { knowledge: ['An earlier reading proves the current output.'] } : {}) }, lastUnfinishedAction: 'The first-door wheel has not been turned.' })
+    if (scenario === 'consumed-local-candidate') bad.exitState.emotion.push('Unverified tension about a distant event.')
     const good = terminalCandidateSchema.parse({ exitState: { location: accurate, action: 'Preparing to turn the control-room doorway wheel.',
       ...(scenario === 'objects' ? { objects: ['The packet remains on the desk.'] } : {}),
       ...(scenario === 'source-address' ? { knowledge: ['The current output remains unverified.'] } : {}) }, lastUnfinishedAction: 'The doorway wheel has not been turned.' })
@@ -111,7 +112,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
         failureCode: billing === 'unknown' ? 'AI_PROVIDER_TRANSPORT' : 'CONTINUITY_REPORT_INCOMPLETE',
         ...(billing === 'settled' ? { reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: 8,
           contentHash: createHash('sha256').update(body).digest('hex'), usageIds: [old.id] } } : {}) } }] })
-    const pauseSeq = scenario === 'local-refusal' || scenario === 'commit-unknown' ? 6 : 3
+    const pauseSeq = scenario === 'local-refusal' || scenario === 'consumed-local-candidate' || scenario === 'commit-unknown' ? 6 : 3
     if (scenario === 'commit-unknown') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4,
       type: 'tool.call', createdAt: at(2000), payload: { callId: `terminal_commit_${processingKey.slice(0, 40)}`,
         toolName: 'chapter_bridge_commit', args: { compilationId: compilation.id } } } })
@@ -121,6 +122,13 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       { runId: f.runId, seq: 5, type: 'tool.result', createdAt: at(2100), payload: { callId: 'local-stale', toolName: 'continuity_validate', ok: false,
         failureCode: 'CONTINUITY_INPUT_STALE' } },
     ] })
+    if (scenario === 'consumed-local-candidate') await prisma.agentRunEvent.createMany({ data: [
+      { runId: f.runId, seq: 4, type: 'tool.call', createdAt: at(2000), payload: { callId: 'local-field-count', toolName: 'continuity_validate',
+        args: { compilationId: compilation.id, terminalPatch: correction } } },
+      { runId: f.runId, seq: 5, type: 'tool.result', createdAt: at(2100), payload: { callId: 'local-field-count', toolName: 'continuity_validate', ok: false,
+        failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: chapter.revision,
+          contentHash: createHash('sha256').update(body).digest('hex'), usageIds: [] } } },
+    ] })
     const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: pauseSeq, type: 'run.paused', createdAt: at(2200), payload: { reason: 'model_stalled' } } })
     const history = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', activeExecutionMs: 200, stagnantBatches: scenario === 'local-refusal' ? 4 : 7, runStartedAt: start, resumeCount: 0, compactionCount: 0,
@@ -128,6 +136,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       pendingReviews: scenario === 'local-refusal' ? [{ compilationId: compilation.id, chapterId: chapter.id, revision: 8, toolName: 'continuity_validate', callId: 'local-stale' }] : billing === 'unknown' ? [{ compilationId: compilation.id, chapterId: chapter.id, revision: 8, toolName: 'continuity_validate', callId: 'original-ended' }] : [],
       consumedReviewDecisionFeedback: scenario === 'old-slots' ? [...slots] : [] as string[], inheritedTokens: 0, inheritedTurns: 0, manualResumeCount: 0 }
     if (scenario === 'commit-reserved' || scenario === 'commit-unknown') checkpoint.reviewAttempts.push(`terminal-commit:${processingKey}`)
+    if (scenario === 'consumed-local-candidate') checkpoint.reviewAttempts.push(...[0, 1].map(index => `terminal-processing:${processingKey}:${index}`))
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', currentTurn: 26, startedAt: at(0), usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, checkpoint } } })
     const window = credits.getCreditWindow()
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
@@ -141,13 +150,25 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       calls++
       if (calls > (scenario === 'repeat' ? 2 : 1)) throw Error('No extra critic request is permitted')
       const parts = scenario === 'repeat' ? { ...rejected, ...(calls === 2 ? { decisions: [] } : {}) }
-        : { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(good).map(fact => ({ factId: fact.id, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })), terminalProofVerdicts: [], terminalDispositions: [] }
+        : { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(good).map(fact => ({ factId: fact.id, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })), terminalProofVerdicts: [], terminalDispositions: [],
+          proposalDispositions: badFacts.filter(fact => !goodFacts.some(current => current.id === fact.id)).map(fact => {
+            const replacement = goodFacts.find(current => current.field === fact.field)
+            return { id: fact.id, outcome: replacement ? 'replaced' : 'retracted',
+              reason: 'The complete saved body supports the doorway state; the old assertion confused intent or location.',
+              sourceEvidence: [{ segmentId: 'c0', quote: body }], ...(replacement ? { candidateFactId: replacement.id } : {}) }
+          }) }
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(parts) }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     })
     vi.stubGlobal('fetch', network)
     let turn = 0, interrupted = false
     let firstAttempts: string[] | undefined
     const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async ({ messages, tools }) => {
+      if (scenario === 'consumed-local-candidate') {
+        expect(network).toHaveBeenCalledOnce()
+        expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toMatchObject({ status: 'completed', stage: 'commit' })
+        return { content: 'Completed.', reasoning: '', finishReason: 'stop', toolCalls: [],
+          usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
+      }
       if (main.mock.calls.length > (scenario === 'restart' ? 4 : 3)) throw Error('Bounded candidate processing must terminate')
       if (turn === 0) {
         expect(JSON.stringify(messages)).toContain(body)
@@ -200,7 +221,12 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: stop.id, afterSeq }, eventStartSeq: afterSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     }
     expect(network).toHaveBeenCalledTimes(scenario === 'no-proposal' ? 0 : scenario === 'repeat' ? 2 : 1)
-    expect(main).toHaveBeenCalledTimes(scenario === 'restart' ? 3 : scenario === 'no-proposal' || scenario === 'commit-unknown' ? 1 : 2)
+    expect(main).toHaveBeenCalledTimes(scenario === 'restart' ? 3 : scenario === 'no-proposal' || scenario === 'commit-unknown' || scenario === 'consumed-local-candidate' ? 1 : 2)
+    if (scenario === 'consumed-local-candidate') {
+      const resumed = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage as { checkpoint: typeof checkpoint }
+      expect(resumed.checkpoint.reviewAttempts.filter(key => key.startsWith(`terminal-processing:${processingKey}:`))).toHaveLength(2)
+      expect(resumed.checkpoint.reviewAttempts.filter(key => key.startsWith('terminal-compatibility:'))).toHaveLength(1)
+    }
     expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
     expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: pauseSeq } }, orderBy: { seq: 'asc' } })).toEqual(history)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: body, revision: 8 })

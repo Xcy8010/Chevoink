@@ -30,7 +30,8 @@ import { runContinuityEvidenceCorrection } from '../continuity-response-correcti
 import { runContinuityReassessment, freshContinuityResponseContract } from '../assessment-response-lifecycle.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { readTerminalCandidate, resolveTerminalCandidate, reviewTerminalSelection, terminalCandidateInputSchema, terminalCandidateSchema, terminalReviewInput, terminalReviewFailure } from '../terminal-state-review.js'
-import { applyTerminalCandidatePatch, terminalCandidatePatchSchema, terminalCandidateReplacementIssue } from '../terminal-candidate-patch.js'
+import { applyTerminalCandidatePatch, terminalCandidatePatchSchema } from '../terminal-candidate-patch.js'
+import { attachTerminalProposalInput, prepareCompilerTerminalProposals, terminalProposalCacheMatches, terminalProposalTaskId } from '../terminal-proposal-context.js'
 import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, terminalEvidenceContextSchema, terminalVerdictAuditVersion, terminalSpanAuditVersion, continuitySemanticRule } from '../terminal-evidence-context.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
@@ -125,21 +126,31 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     if (selectedTerminal && !selectedTerminal.ok) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: selectedTerminal.reason }
     const terminalCandidate = (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
       ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
-    const replacementIssue = terminalCandidate && (args.terminalPatch || args.terminalState)
-      ? terminalCandidateReplacementIssue(compilation.validation, terminalCandidate, compilation.chapter.content) : null
-    if (replacementIssue) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: replacementIssue }
     let terminalEvidence = terminalProtocol ? terminalEvidenceContext(compilation.chapter, source, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
       terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(source, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
+    if (terminalEvidence && terminalCandidate && savedCandidate && runtimeJson(terminalCandidate).hash === runtimeJson(savedCandidate).hash
+      && (compilation.validation as { continuityCriticResponse?: { terminalContentHash?: string } } | null)?.continuityCriticResponse?.terminalContentHash === terminalEvidence.current.contentHash) {
+      terminalEvidence = attachTerminalProposalInput(terminalEvidence, { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext,
+        validation: compilation.validation, candidate: terminalCandidate })
+    }
     if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
     const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
       source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
-    const reusable = cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
+    const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
+      preparedContext: compilation.preparedContext, validation: compilation.validation, chapter: compilation.chapter, source, candidate: terminalCandidate, nextContext: terminalEvidence })
+    const reusable = proposalCacheCurrent && cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
     if (!reusable && terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) terminalEvidence = { ...terminalEvidence,
       factCoverage: terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, 2, terminalCoverageProofs(source, 2))! }
     const repair = false
     if (!reusable && terminalVersion === 2 && terminalEvidence) terminalEvidence = terminalEvidenceContext(compilation.chapter, source, terminalVersion,
       terminalQuoteAddressVersion(originalRequest.spec), terminalEvidence.factCoverage, 5, 2)
+    if (!reusable && terminalCandidate && terminalEvidence) {
+      const proposals = prepareCompilerTerminalProposals({ spec: originalRequest.spec, preparedContext: compilation.preparedContext,
+        validation: compilation.validation, chapter: compilation.chapter, source, candidate: terminalCandidate, nextContext: terminalEvidence })
+      if (proposals?.changes) terminalEvidence = { ...terminalEvidence, proposalChanges: proposals.changes }
+      else delete terminalEvidence.proposalChanges
+    }
     validatedContinuityCheckRounds(compilation.validation, !reusable)
     return { kind: 'check' as const, version: terminalVersion === 2 ? 18 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), ...(terminalVersion === 2 ? { reassessmentProtocol: 2 as const } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
       ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),

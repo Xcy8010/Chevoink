@@ -617,6 +617,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       usage: emptyUsage,
       currentTurn: 0,
       lastSeq: 0,
+      lastVisibleOutput: null,
       outputSummary: '',
       errorMessage: null,
       errorCode: null,
@@ -678,6 +679,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       usage: emptyUsage,
       currentTurn: 0,
       lastSeq: 0,
+      lastVisibleOutput: null,
       outputSummary: '',
       errorMessage: null,
       errorCode: null,
@@ -703,6 +705,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     writeSessionMessagesCache(sessionId, restored, todos)
     set((state) => ({
       messages: restored,
+      lastVisibleOutput: null,
       phase: 'idle',
       runId: null,
       runGoalId: null,
@@ -794,6 +797,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       usage: emptyUsage,
       currentTurn: 0,
       lastSeq: 0,
+      lastVisibleOutput: null,
       outputSummary: '',
       errorMessage: null,
       errorCode: null,
@@ -1127,8 +1131,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         case 'text.final': {
           authorTextStreams.delete(`${event.runId}:${event.messageId}`)
           const text = event.asReasoning ? '' : projectAgentAuthorText(event.text)
+          const previousText = state.messages.find(message => message.id === event.messageId)?.parts
+            .filter(part => part.type === 'text').map(part => part.text).join('') ?? ''
           return {
             ...base,
+            ...(text.trim() && text !== previousText ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
             finalizedTextIds: state.finalizedTextIds.includes(event.messageId)
               ? state.finalizedTextIds : [...state.finalizedTextIds, event.messageId],
             messages: updateMessageParts(state.messages, event.messageId, parts => {
@@ -1141,10 +1148,19 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           }
         }
 
-        case 'reasoning.delta':
+        case 'reasoning.delta': {
           if (!isRunActive(state.phase)) return base
-          return { ...base, messages: updateMessageParts(state.messages, event.messageId,
-            parts => appendDelta(parts, 'reasoning', event.delta)) }
+          const previous = state.messages.find(message => message.id === event.messageId)?.parts.at(-1)
+          const before = previous?.type === 'reasoning' ? createAgentAuthorTextStream().push(previous.text) : ''
+          const messages = updateMessageParts(state.messages, event.messageId, parts => appendDelta(parts, 'reasoning', event.delta))
+          const current = messages.find(message => message.id === event.messageId)?.parts.at(-1)
+          // Use the same published prefix as the message renderer. Raw model
+          // tokens, hidden protocol and unfinished paragraphs are not visible
+          // progress; an existing thinking card alone cannot reset silence.
+          const after = current?.type === 'reasoning' ? createAgentAuthorTextStream().push(current.text) : ''
+          return { ...base, messages,
+            ...(after.trim() && after !== before ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}) }
+        }
 
         case 'tool.call': {
           const messages = ensureToolMessage(state.messages, event, event.runId === state.runId ? state.runGoalId : null)
@@ -1152,11 +1168,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const isWrite = WORKSPACE_WRITE_TOOLS.has(event.toolName)
           // 子 Agent 内嵌执行内部的写工具不进主活动区（卡片已嵌套在子 Agent 容器内展示）
           const isSubagentInternal = Boolean(event.subagentCallId)
+          const priorCall = state.messages.find(message => message.id === event.messageId)?.parts
+            .find(part => part.type === 'tool-call' && part.callId === event.callId)
           const question = event.toolName === 'ask_user' ? parseQuestionArgs(event.callId, event.args) : null
           // 同一 callId 可能先收到参数生成中的预告事件（args 为 null），再收到执行时的正式事件：按 callId upsert 保证只有一张卡片
           const existingActivity = state.workspaceActivities.some((activity) => activity.callId === event.callId)
           return {
             ...base,
+            ...(!isSubagentInternal && (!priorCall || priorCall.type === 'tool-call' && priorCall.preparing)
+              ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
             // 进入工具执行即证明该消息正文流已结束：登记定稿，text.final 因断线重连等丢失时光标也不残留
             ...(state.finalizedTextIds.includes(event.messageId) ? {} : { finalizedTextIds: [...state.finalizedTextIds, event.messageId] }),
             ...(question ? { phase: 'awaiting_input' as const, pendingQuestion: question } : {}),
@@ -1240,6 +1260,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           if (existing?.type === 'tool-call' && existing.status !== 'running') return base
           return {
             ...base,
+            ...(!existing && (event.toolName || event.draft?.toolName) ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
             ...(event.draft ? { liveToolDrafts: { ...state.liveToolDrafts, [event.callId]: event.draft } } : {}),
             messages: updateMessageParts(messages, event.messageId, (parts) => {
               const toolName = event.toolName ?? event.draft?.toolName
@@ -1286,6 +1307,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const messages = ensureToolMessage(state.messages, event, event.runId === state.runId ? state.runGoalId : null)
           if (!messages) return {}
           const extracted = activityFromDisplay(event.display)
+          const previousCall = state.messages.find(message => message.id === event.messageId)?.parts
+            .find(part => part.type === 'tool-call' && part.callId === event.callId)
+          const resultStatus = event.ok ? 'success' : 'failed'
+          const visibleResultChanged = !previousCall || previousCall.type === 'tool-call' && (previousCall.status !== resultStatus
+            || projectAgentToolSummary(previousCall.summary ?? '', previousCall.status) !== projectAgentToolSummary(event.summary, resultStatus))
           const clearQuestion = state.pendingQuestion?.callId === event.callId
           const clearImport = event.toolName === 'novel_import' && state.messages.some(message => message.parts.some(part =>
             part.type === 'tool-call' && part.callId === event.callId && part.importWaiting))
@@ -1296,6 +1322,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               : {}
           return {
             ...base,
+            ...(!event.subagentCallId && visibleResultChanged ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
             // 工具结果到达同样证明正文流早已结束：兜底登记定稿，确保光标不残留
             ...(state.finalizedTextIds.includes(event.messageId) ? {} : { finalizedTextIds: [...state.finalizedTextIds, event.messageId] }),
             ...(clearQuestion ? { phase: 'running' as const, pendingQuestion: null, ...withoutActiveSessionSignal(state) } : {}),

@@ -8,6 +8,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { readReviewRequestRecoveryEvidence, readReviewRequestRecovery } from '../../api/lib/agent/review-request-recovery.js'
 import { listAgentSessionHistoryData } from '../../api/lib/agent/run-service.js'
 import { continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 
 describe.runIf(available)('closed local candidate refusal is not an unknown provider request', () => {
   it('the real tool records a local stale delta without dispatch, charging or changing the manuscript', () => fixture(async f => {
@@ -32,7 +33,7 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(before)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
   }))
-  it.each(['known', 'typed', 'reservation', 'owner', 'response', 'snapshot', 'payment', 'earlier-unknown', 'overlap',
+  it.each(['known', 'typed', 'candidate-replacement', 'reservation', 'owner', 'response', 'snapshot', 'payment', 'earlier-unknown', 'overlap',
     'duplicate', 'plain-state', 'valid-patch', 'newer-candidate', 'newer-body', 'wrong-code', 'durable'] as const)(
     '%s preserves the original evidence and does not create paid retry authority', scenario => fixture(async f => {
       const network = vi.fn(() => { throw Error('This reconciliation must remain offline') })
@@ -41,11 +42,17 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
         await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: scenario === 'durable' ? f.rootId : null, runtimeProtocolVersion: scenario === 'durable' ? 1 : 0 } })
         const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '检查本章' })
         const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-        const base = terminalCandidateSchema.parse({ exitState: { objects: ['A sealed packet'] } })
+        const base = terminalCandidateSchema.parse({ exitState: scenario === 'candidate-replacement'
+          ? { knowledge: ['Combined reading'], emotion: ['Unverified suspicion'] } : { objects: ['A sealed packet'] } })
         const start = Date.now() + 1000, at = (ms: number) => new Date(start + ms)
-        const patch = { baseCandidateHash: scenario === 'valid-patch' ? runtimeJson(base).hash : 'f'.repeat(64), removeFactIds: [], addFacts: [] }
+        const patch = scenario === 'candidate-replacement' ? { baseCandidateHash: runtimeJson(base).hash,
+          removeFactIds: [terminalFactId('knowledge', base.exitState.knowledge[0]), terminalFactId('emotion', base.exitState.emotion[0])],
+          addFacts: [{ field: 'knowledge', claim: 'First reading' }, { field: 'knowledge', claim: 'Second reading' }] }
+          : { baseCandidateHash: scenario === 'valid-patch' ? runtimeJson(base).hash : 'f'.repeat(64), removeFactIds: [], addFacts: [] }
         await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({
           terminalCandidate: base, checkedAt: at(scenario === 'newer-candidate' ? 200 : -100).toISOString(), checkedRevision: chapter.revision,
+          ...(scenario === 'candidate-replacement' ? { independentCheck: 'unavailable', continuityCriticResponse: { classification: 'terminal_invalid',
+            terminalCandidate: base, terminalContentHash: runtimeJson({ content: chapter.content }).hash } } : {}),
         }).value } })
         if (scenario === 'newer-body') await prisma.chapter.update({ where: { id: chapter.id }, data: { content: chapter.content, updatedAt: at(200) } })
         const call = { callId: 'local-delta', toolName: 'continuity_validate', args: { compilationId: compilation.id,
@@ -55,8 +62,8 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
         if (scenario === 'overlap') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.call',
           payload: { toolName: 'quality_analyze', callId: 'other-review' }, createdAt: at(50) } })
         await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'tool.result', createdAt: at(400), payload: {
-          callId: call.callId, toolName: call.toolName, ok: false, failureCode: scenario === 'wrong-code' ? 'AI_PROVIDER_TRANSPORT' : 'CONTINUITY_INPUT_STALE',
-          ...(scenario === 'typed' ? { reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: chapter.revision,
+          callId: call.callId, toolName: call.toolName, ok: false, failureCode: scenario === 'wrong-code' ? 'AI_PROVIDER_TRANSPORT' : scenario === 'candidate-replacement' ? 'TERMINAL_STATE_REVIEW_REQUIRED' : 'CONTINUITY_INPUT_STALE',
+          ...(scenario === 'typed' || scenario === 'candidate-replacement' ? { reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: chapter.revision,
             contentHash: createHash('sha256').update(chapter.content).digest('hex'), usageIds: [] } } : {}),
         } } })
         const stop = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4, type: 'run.paused', createdAt: at(401), payload: {} } })
@@ -79,7 +86,7 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
         const body = await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })
         const evidence = await prisma.$transaction(tx => readReviewRequestRecoveryEvidence(tx, f, pending))
         const recovered = await prisma.$transaction(tx => readReviewRequestRecovery(tx, f, pending))
-        const permitted = scenario === 'known' || scenario === 'typed'
+        const permitted = scenario === 'known' || scenario === 'typed' || scenario === 'candidate-replacement'
         expect(evidence).toHaveLength(permitted ? 1 : 0)
         expect(recovered).toHaveLength(permitted ? 1 : 0)
         if (permitted) expect(await prisma.$transaction(tx => readReviewRequestRecoveryEvidence(tx, f)))
