@@ -42,6 +42,10 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       action: 'Preparing to turn the first-door wheel.', ...(scenario === 'objects' ? { objects: ['The packet has been archived.'] } : {}) }, lastUnfinishedAction: 'The first-door wheel has not been turned.' })
     const good = terminalCandidateSchema.parse({ exitState: { location: accurate, action: 'Preparing to turn the control-room doorway wheel.',
       ...(scenario === 'objects' ? { objects: ['The packet remains on the desk.'] } : {}) }, lastUnfinishedAction: 'The doorway wheel has not been turned.' })
+    const badFacts = terminalCandidateFacts(bad), goodFacts = terminalCandidateFacts(good)
+    const correction = { baseCandidateHash: runtimeJson(bad).hash,
+      removeFactIds: badFacts.filter(fact => !goodFacts.some(current => current.id === fact.id)).map(fact => fact.id),
+      addFacts: goodFacts.filter(fact => !badFacts.some(current => current.id === fact.id)).map(({ field, claim }) => ({ field, claim })) }
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { orderIndex: 2, orderInVolume: 2, revision: 8, content: body, wordCount: body.length } })
     await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: chapter.volumeId, title: 'Synthetic predecessor', orderIndex: 1, orderInVolume: 1, revision: 15,
       content: 'He crossed the first door, the middle chamber, then the second door into the control room.', wordCount: 90 } })
@@ -158,8 +162,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       const call = turn === 1 || scenario === 'repeat'
         ? { id: 'correct-only-candidate-' + turn, name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id,
           terminalPatch: scenario === 'repeat' ? { baseCandidateHash: runtimeJson(bad).hash }
-            : { baseCandidateHash: runtimeJson(bad).hash, removeFactIds: terminalCandidateFacts(bad).map(fact => fact.id),
-              addFacts: terminalCandidateFacts(good).map(({ field, claim }) => ({ field, claim })) } }) }
+            : correction }) }
         : undefined
       // This ordinary revision request still needs its natural final reply.
       // The server has already committed the reviewed candidate before that
