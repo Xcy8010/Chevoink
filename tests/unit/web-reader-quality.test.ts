@@ -28,6 +28,29 @@ describe('reader content quality without navigation false positives', () => {
     const result = extractReaderHtml(`<html><title>网页错误处理指南</title><body><a href="/login">登录</a><article><h1>网页错误处理指南</h1><p>本节解释登录、HTTP 404和验证码的设计。</p><p>${body.repeat(6)}</p></article></body></html>`)
     expect(result.status).toBe('ok')
   })
+  it('does not deliver a preview as readable chapter text when structured access metadata denies free access', () => {
+    const html = `<html><head><script type="application/ld+json">${JSON.stringify({ '@type': 'Chapter', isAccessibleForFree: false })}</script></head><body><article><h1>河谷纪事第1章</h1><p>${body.repeat(6)}</p></article></body></html>`
+    expect(extractReaderHtml(html)).toMatchObject({ status: 'blocked', code: 'WEB_READ_BLOCKED', text: '' })
+  })
+  it('keeps a free chapter readable when only its parent book requires payment', () => {
+    const html = `<html><head><script type="application/ld+json">${JSON.stringify({ '@type': 'Chapter', isAccessibleForFree: true,
+      isPartOf: { '@type': 'Book', isAccessibleForFree: false } })}</script></head><body><article><h1>河谷纪事第1章</h1><p>${body.repeat(6)}</p></article></body></html>`
+    expect(extractReaderHtml(html).status).toBe('ok')
+  })
+  it('does not apply a related paid article restriction to the current free chapter', () => {
+    const html = `<script type="application/ld+json">${JSON.stringify({ '@graph': [
+      { '@type': 'Chapter', isAccessibleForFree: true }, { '@type': 'Article', isAccessibleForFree: false, url: '/related-review' },
+    ] })}</script><article><h1>河谷纪事第1章</h1><p>${body.repeat(6)}</p></article>`
+    expect(extractReaderHtml(html).status).toBe('ok')
+  })
+  it('resolves the current page mainEntity before honoring its explicit access restriction', () => {
+    const html = `<script type="application/ld+json">${JSON.stringify({ '@graph': [
+      { '@type': 'WebPage', mainEntity: { '@id': '#current' } },
+      { '@id': '#current', '@type': 'Article', isAccessibleForFree: false },
+      { '@id': '#related', '@type': 'Article', isAccessibleForFree: true },
+    ] })}</script><article><h1>河谷纪事第1章</h1><p>${body.repeat(6)}</p></article>`
+    expect(extractReaderHtml(html)).toMatchObject({ status: 'blocked', text: '' })
+  })
   it.each(['\ue123', '\u{f0123}', '\u{100123}', '\ufffd'])('refuses significant unreadable glyph content %s', glyph => {
     const result = assessReaderText(`${body}${glyph.repeat(400)}`)
     expect(result.code).toBe('WEB_READ_GARBLED')
@@ -66,6 +89,13 @@ describe('source-grounded work identity and extraction integrity', () => {
       expect(assessReaderEvidence(original, target.title, scoped, html(), url).identity.status).toBe('mismatch')
     }
     expect(assessReaderEvidence(original, target.title, scoped, html(), 'https://www.publisher.example/chapter/1').identity.status).toBe('verified')
+  })
+  it('accepts the same work from an explicitly authorized author channel and rejects unapproved or mismatched sources', () => {
+    const scoped = { ...target, sourceHosts: ['publisher.example', 'author.example'] }
+    expect(assessReaderEvidence(original, '河谷纪事第1章', scoped, html(), 'https://author.example/chapter/1'))
+      .toMatchObject({ identity: { status: 'verified', pageType: 'chapter' }, integrity: { status: 'source_compared' } })
+    expect(assessReaderEvidence(original, '河谷纪事第1章', scoped, html(), 'https://unknown-free.example/chapter/1').identity.status).toBe('mismatch')
+    expect(assessReaderEvidence(original, '河谷纪事第1章', scoped, html(target.title, '另一作者'), 'https://author.example/chapter/1').identity.status).toBe('mismatch')
   })
   it.each(['河谷纪事：番外', '河谷纪事青龙', '另一部作品'])('rejects the original-name prefix as identity proof: %s', title => {
     expect(assessReaderEvidence(original, `${title}第1章`, target, html(title)).identity.status).toBe('mismatch')

@@ -1600,6 +1600,26 @@ describe('author Continue bootstraps checks through the real execution loop', ()
     await f.execute()
     expect(quality.execute).not.toHaveBeenCalled(); expect(continuity.execute).not.toHaveBeenCalled(); expect(mocks.chat).toHaveBeenCalledOnce()
   })
+  it.each(['matching', 'uncommitted', 'other-compilation', 'other-chapter', 'other-revision'] as const)(
+    'retires a stale bootstrap only for the authenticated exact committed target: %s', async scenario => {
+      const f = restored()
+      mocks.continuedReviews.mockResolvedValue([])
+      mocks.reviewReadiness.mockResolvedValue({ ...readiness('complete', 'complete', scenario === 'other-revision' ? 5 : 4),
+        compilationId: scenario === 'other-compilation' ? 'other' : 'comp', chapterId: scenario === 'other-chapter' ? 'other' : 'c',
+        terminalCommitted: scenario !== 'uncommitted', progressEvidence: f.evidence(['continuity', 'quality']) })
+      const quality = tool('quality_analyze', async () => ({ output: 'must not send' })), continuity = tool('continuity_validate', async () => ({ output: 'must not send' }))
+      mocks.tools = [quality, continuity]; queue(response('已核对真实提交回执。'))
+      await f.execute()
+      expect(quality.execute).not.toHaveBeenCalled(); expect(continuity.execute).not.toHaveBeenCalled()
+      if (scenario === 'matching') {
+        expect(mocks.chat).toHaveBeenCalledOnce()
+        expect(events().filter(event => event.type === 'error')).toEqual([])
+      } else {
+        expect(mocks.chat).not.toHaveBeenCalled()
+        expect(mocks.runs.get('run')).toMatchObject({ status: 'failed',
+          errorMessage: '本次继续的检查输入已变化，未派发旧检查或生成新许可。' })
+      }
+    })
   it.each(['body', 'context', 'admission', 'cancel'] as const)('actual first phase progress cannot grant a second synthetic phase after unrelated %s drift', async kind => {
     const f = restored()
     let state = readiness('missing', 'missing', 4)

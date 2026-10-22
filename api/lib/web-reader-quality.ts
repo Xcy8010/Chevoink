@@ -177,6 +177,39 @@ export function extractReaderHtml(html: string, useReadability = true): ReaderQu
   const heading = document.querySelector('h1')?.textContent ?? ''
   const gate = assessReaderText(heading, title)
   if (gate.status === 'blocked' || gate.status === 'not_found') return gate
+  // A visible preview does not override the current page's explicit access
+  // restriction. Parent-book pricing does not restrict a free chapter.
+  const accessBlocked = (value: unknown): boolean => {
+    const record = (entry: unknown): Record<string, unknown> | null => entry && typeof entry === 'object' && !Array.isArray(entry) ? entry as Record<string, unknown> : null
+    const root = record(value)
+    const entries = Array.isArray(value) ? value : Array.isArray(root?.['@graph']) ? root['@graph'] : [value]
+    const nodes = entries.slice(0, 2000).map(record).filter((entry): entry is Record<string, unknown> => !!entry)
+    const types = (entry: Record<string, unknown>) => Array.isArray(entry['@type']) ? entry['@type'] : [entry['@type']]
+    const article = (entry: Record<string, unknown>) => types(entry).some(type => ['Chapter', 'Article', 'NewsArticle', 'BlogPosting'].includes(String(type)))
+    const unique = (entries: Record<string, unknown>[]) => entries.length === 1 ? entries[0] : null
+    // A recommendation in @graph is not the current article. Prefer an
+    // explicit page/mainEntity link, then a unique chapter/article only.
+    const primary = root && (article(root) || types(root).includes('WebPage') || root.mainEntity) ? root
+      : unique(nodes.filter(entry => types(entry).includes('WebPage') && !!entry.mainEntity))
+        ?? unique(nodes.filter(entry => types(entry).includes('Chapter')))
+        ?? unique(nodes.filter(article))
+    const inspect = (input: unknown, depth = 0): boolean => {
+      if (depth > 5) return false
+      const entry = record(input)
+      if (!entry) return false
+      if (entry.isAccessibleForFree === false && (article(entry) || types(entry).includes('WebPage'))) return true
+      if (entry.mainEntity) return inspect(entry.mainEntity, depth + 1)
+      const linked = typeof entry['@id'] === 'string' ? unique(nodes.filter(node => node !== entry && node['@id'] === entry['@id'])) : null
+      return linked ? inspect(linked, depth + 1) : false
+    }
+    return primary ? inspect(primary) : false
+  }
+  for (const node of document.querySelectorAll('script[type="application/ld+json"]')) {
+    if ((node.textContent?.length ?? 0) > 256_000) continue
+    try {
+      if (accessBlocked(JSON.parse(node.textContent ?? ''))) return { ...assessReaderText('', title), status: 'blocked', code: 'WEB_READ_BLOCKED' }
+    } catch { /* Invalid metadata cannot establish an access restriction. */ }
+  }
   for (const node of document.querySelectorAll('script,style,noscript,svg,nav,footer,aside,form,button,[hidden],[aria-hidden="true"]')) node.remove()
   for (const node of document.querySelectorAll('br')) node.replaceWith(document.createTextNode('\n'))
   for (const node of document.querySelectorAll('p,h1,h2,h3,h4,li,blockquote')) node.appendChild(document.createTextNode('\n\n'))

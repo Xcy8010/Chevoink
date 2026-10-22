@@ -1824,12 +1824,19 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       let continuityBootstrap: typeof continuedContinuityBootstrap[number] | undefined
       while (continuedReviewBootstrap.length && !bootstrapCall && !processing) {
         const item = continuedReviewBootstrap[0]
+        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
+          { userId: params.userId, novelId: params.novelId, runId }, item.compilationId ?? undefined))
+        // Native candidate processing may already have completed this exact
+        // target. Its authenticated commit supersedes only the unsent bootstrap
+        // plan; the old request, unknown accounting and receipt remain intact.
+        if (readiness?.ready && readiness.terminalCommitted && readiness.compilationId === item.compilationId
+          && readiness.chapterId === item.chapterId && readiness.revision === item.receipt.currentRevision) {
+          continuedReviewBootstrap.shift(); continue
+        }
         const current = await prisma.$transaction(tx => readContinuedReviewRecovery(tx,
           { userId: params.userId, novelId: params.novelId, runId }, []))
         const bound = current.some(plan => plan.receipt.recoveryKey === item.receipt.recoveryKey)
         if (!bound) throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '本次继续的检查输入已变化，未派发旧检查或生成新许可。')
-        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
-          { userId: params.userId, novelId: params.novelId, runId }, item.compilationId ?? undefined))
         if (readiness?.ready) { continuedReviewBootstrap.shift(); continue }
         if (readiness && (readiness.chapterId !== item.chapterId || readiness.revision !== item.receipt.currentRevision)) throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '本次继续的检查目标已变化，未派发请求。')
         const next = readiness ? nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
