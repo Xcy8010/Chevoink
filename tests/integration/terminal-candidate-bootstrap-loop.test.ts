@@ -42,6 +42,12 @@ describe.runIf(available)('settled native review hands a rejected current-state 
     await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: chapter.volumeId, title: 'Synthetic predecessor', orderIndex: 1, orderInVolume: 1, revision: 15,
       content: 'He crossed the first door, the middle chamber, then the second door into the control room.', wordCount: 90 } })
     await prisma.agentRun.update({ where: { id: f.runId }, data: { runtimeProtocolVersion: 0, taskRootId: null, startRequest: { prompt: '修复本章' } } })
+    // Freeze only after the synthetic chapter directory is final. The fixture
+    // starts at order1; an already-frozen scope must never be reinterpreted
+    // after moving that chapter to order2 for the predecessor topology.
+    const admitted = await prisma.$transaction(tx => readOriginalTaskRequest(tx, f))
+    const spec = await prisma.$transaction(tx => freezeWritingScope(tx, f, admitted.spec as typeof f.spec, '修复本章'))
+    await prisma.agentRun.update({ where: { id: f.runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } })
     const { compilation } = await prepareStoryCompilation({ ...f, mode: 'balanced', intentSummary: 'Review the saved chapter.' })
     const empty = terminalCandidateSchema.parse({ exitState: {} }).exitState
     await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: 'Record position', entryState: empty, goal: 'Record', obstacle: 'Door', choice: 'Wait', cost: 'Time', turn: 'At doorway', exitState: empty,
@@ -57,8 +63,6 @@ describe.runIf(available)('settled native review hands a rejected current-state 
     await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: 8, independentCheck: 'unavailable', findings: [], terminalCandidate: bad,
       coverage: compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: bad }, 11), continuityCriticResponse: inspected.audit })
     await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: chapter.id, chapterRevision: 8, mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
-    const spec = await prisma.$transaction(tx => freezeWritingScope(tx, f, original.spec as typeof f.spec, '修复本章'))
-    await prisma.agentRun.update({ where: { id: f.runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } })
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
     expect(readiness?.terminalCorrection).toMatchObject({ paths: ['exitState.location'] })
     expect(readiness).toMatchObject({ quality: 'complete', requiredTools: [{ name: 'continuity_validate' }] })
@@ -167,5 +171,5 @@ describe.runIf(available)('settled native review hands a rejected current-state 
     expect(final.bridge!.committedAt === null).toBe(scenario === 'repeat')
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).status).toBe(scenario === 'repeat' ? 'paused' : 'completed')
     if (scenario !== 'repeat') expect(final.bridge).toMatchObject({ location: accurate, lastUnfinishedAction: good.lastUnfinishedAction })
-  }, undefined, '修复本章', { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 1 }), 30000)
+  }, undefined, '修复本章', { continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 1 }), 30000)
 })

@@ -959,7 +959,12 @@ describe.runIf(available)('durable quality actual tool chain', () => {
           initialDiagnostic: { classification: 'json_invalid', rawResponse: { encoding: 'json-string', content: JSON.stringify('broken JSON'), complete: true } } } })
         expect(JSON.stringify(result)).not.toContain('rawResponse')
         expect(await prisma.$transaction(tx => readQualityFormatRecovery(tx, { userId: f.userId, novelId: f.novelId, runId: lease.runId }, { chapterId: f.chapterId }))).toBeNull()
-        const savedWork = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
+        const recoveryBinding = (reports[0].deterministicMetrics as { formatRecovery?: { operationId?: string } }).formatRecovery
+        expect(recoveryBinding?.operationId).toEqual(expect.any(String))
+        if (!recoveryBinding?.operationId) throw new Error('Expected the exact report-owned format recovery operation')
+        // A deliberate second blocked call also records rejected work. Bind
+        // this assertion to the report's actual checked input, never DB order.
+        const savedWork = await prisma.agentOperation.findFirstOrThrow({ where: { id: recoveryBinding.operationId, taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
         expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 13, parserVersion: 3, repairContext: expect.any(String), deadlineAt: expect.any(Number) } } })
         expect(reports[0].deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v6' })
         const recoveryOp = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: savedWork.id, action: 'quality_format_recovery' }, include: { attempts: { include: { usageReceipt: true } } } })
