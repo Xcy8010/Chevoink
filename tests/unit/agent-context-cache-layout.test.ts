@@ -142,6 +142,40 @@ function buildInput(visionEnabled = false): AssembleInput {
 }
 
 describe('assembleContext 缓存友好布局（阶段二：动态上下文后移）', () => {
+  it('reuses the novel rule query for genre tags while retaining cover identity and the exact original request', async () => {
+    const input = buildInput()
+    const { messages } = await assembleContext(input)
+    expect(prisma.novel.findUnique).toHaveBeenCalledTimes(2) // rule bundle plus existing cover mapping
+    expect(prisma.novel.findUnique).not.toHaveBeenCalledWith(expect.objectContaining({ select: { tagNames: true } }))
+    const text = JSON.stringify(messages)
+    expect(text).toContain('科幻')
+    expect(text).toContain('cover-1')
+    expect(String(messages.at(-1)?.content)).toContain(input.prompt)
+  })
+  it('keeps inferred fallback memory visibly unconfirmed with its actual source revision for legacy tasks', async () => {
+    vi.mocked(searchStoryMemory).mockResolvedValueOnce([])
+    vi.mocked(prisma.projectMemoryEntry.findMany).mockImplementation(async args => args?.take === 12 ? [{
+      memoryType: 'characterCard', status: 'inferred', title: '待核人物动机', content: '尚未证实的推断',
+      evidence: [{ sourceType: 'chapter', sourceId: 'source-chapter', revision: 8 }],
+    }] as never : [] as never)
+    const { messages } = await assembleContext(buildInput())
+    const text = JSON.stringify(messages)
+    expect(text).toContain('[角色/inferred] 待核人物动机')
+    expect(text).toContain('chapter:source-chapter@r8')
+    expect(text).toContain('inferred 需按证据核实')
+  })
+  it('avoids arbitrary fallback preload after no relevant memory match for a fresh interpreted task without dropping compiler obligations', async () => {
+    const input = buildInput()
+    input.taskSpec.scope.authorEffects = { version: 1, requestHash: 'a'.repeat(64), manuscript: true, structure: false }
+    vi.mocked(searchStoryMemory).mockResolvedValueOnce([])
+    vi.mocked(isAgent2FeatureEnabled).mockImplementation(flag => flag === 'storyCompiler')
+    vi.mocked(buildStoryCompilerDigest).mockResolvedValueOnce('当前章节检查未完成；原事实与待核提议保留。')
+    const { messages } = await assembleContext(input)
+    expect(prisma.projectMemoryEntry.findMany).not.toHaveBeenCalledWith(expect.objectContaining({ take: 12 }))
+    expect(buildStoryCompilerDigest).toHaveBeenCalledWith(input.userId, input.novelId, input.chapterId, input.runId)
+    expect(JSON.stringify(messages)).toContain('当前章节检查未完成；原事实与待核提议保留。')
+    expect(String(messages.at(-1)?.content)).toContain(input.prompt)
+  })
   it('overlaps the owned goal read with workspace waits while preserving the original request', async () => {
     let release!: () => void
     const memory = vi.mocked(searchStoryMemory).getMockImplementation()!

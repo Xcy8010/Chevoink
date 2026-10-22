@@ -13,6 +13,7 @@ import { assertResearchAlternativeAllowed, assertResearchUrlProvenance, authoriz
   recordResearchReadFailure, recordResearchReadOutcome, registerResearchSource, reserveResearchRequest,
   saveResearchContent, saveResearchReportSection, saveResearchSearchOutcome, settleResearchRequest } from '../../api/lib/agent/research-sources.js'
 import { claimResearchReadHandoff, saveResearchLimitationDelivery, takeResearchReadHandoff } from '../../api/lib/agent/research-recovery.js'
+import * as researchSources from '../../api/lib/agent/research-sources.js'
 import { assessReaderEvidence, assessReaderText, extractReaderNavigationHtml } from '../../api/lib/web-reader-quality.js'
 import type { WebReadResult } from '../../api/lib/web-reader-service.js'
 import type { WebSearchResult } from '../../api/lib/web-search-service.js'
@@ -106,6 +107,50 @@ async function saveBook(scope: Scope) {
 }
 
 describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL and offline responses', () => {
+  it('repairs the original search budget projection from a completed raw receipt without another request or fee', async () => {
+    await fixture(async ({ scope, scopeKey }) => {
+      supplier.search.mockResolvedValue({ provider: 'sogou', results: [comment] })
+      const ctx = call(scope), args = webSearchTool.parameters.parse({ query: 'site:fiction.example.com 霜河档案 周禾' })
+      const interrupted = vi.spyOn(researchSources, 'saveResearchSearchOutcome').mockRejectedValueOnce(Error('Worker ended after raw search result'))
+      expect(await webSearchTool.execute(ctx, args)).toMatchObject({ outcome: 'failed' })
+      interrupted.mockRestore()
+      const id = digest([scopeKey, scope.runId, ctx.callId])
+      expect(await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'consumed', savedOutcome: null })
+      expect(await prisma.webToolCall.count({ where: { runId: scope.runId, status: 'completed' } })).toBe(1)
+      await webSearchTool.execute(ctx, args)
+      const repaired = await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id } })
+      expect(repaired).toMatchObject({ status: 'consumed', units: 1, savedOutcome: { provider: 'sogou', results: [comment] } })
+      await webSearchTool.execute(ctx, args)
+      expect(await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id } })).toEqual(repaired)
+      expect(supplier.search).toHaveBeenCalledTimes(1)
+      expect(await prisma.agentResearchRequest.count({ where: { ownerRunId: scope.runId, kind: 'search', status: 'consumed' } })).toBe(1)
+      expect(await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: digest([scopeKey, 'search', 'baseline']) } })).toMatchObject({ status: 'baseline', units: 0 })
+      expect(await prisma.webToolCall.count({ where: { runId: scope.runId } })).toBe(1)
+    })
+  })
+  it('repairs a consumed navigation outcome on raw Fetch replay and unlocks only the remaining original allowance', async () => {
+    await fixture(async ({ scope, scopeKey, spec }) => {
+      const { sources } = await seedSearch(scope)
+      supplier.navigation.mockResolvedValue(navigation(commentUrl, [{ url: bookUrl, title: '霜河档案作品目录' }]))
+      const tool = restrictToolsToTask([webReadTool], spec)[0]
+      const ctx = call(scope), args = tool.parameters.parse({ sourceId: sources[0].id, purpose: 'navigation' })
+      const interrupted = vi.spyOn(researchSources, 'recordResearchReadOutcome').mockRejectedValueOnce(Error('Worker ended after raw Fetch result'))
+      await expect(tool.execute(ctx, args)).rejects.toThrow('Worker ended after raw Fetch result')
+      interrupted.mockRestore()
+      const id = digest([scopeKey, scope.runId, ctx.callId])
+      expect(await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'consumed', savedOutcome: { purpose: 'navigation' } })
+      await expect(reserveResearchRequest(call(scope), 'read', digest(['blocked-next', ctx.callId]))).rejects.toMatchObject({ code: 'RESEARCH_REQUEST_UNCERTAIN' })
+      await tool.execute(ctx, args)
+      const repaired = await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id } })
+      expect(repaired).toMatchObject({ status: 'consumed', units: 1, savedOutcome: { purpose: 'navigation', ok: true } })
+      await tool.execute(ctx, args)
+      expect(await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id } })).toEqual(repaired)
+      expect(supplier.navigation).toHaveBeenCalledTimes(1)
+      expect(await prisma.webToolCall.count({ where: { runId: scope.runId } })).toBe(1)
+      expect(await reserveResearchRequest(call(scope), 'read', digest(['allowed-next', ctx.callId]))).toBe(true)
+      expect(await prisma.agentResearchRequest.count({ where: { ownerRunId: scope.runId, kind: 'read', status: 'consumed' } })).toBe(1)
+    })
+  })
   it('freezes the fresh author policy, source host and tool presentation without widening the old schema', async () => {
     await fixture(async ({ scope, spec }) => {
       expect(spec).toMatchObject({ intent: 'research_analysis', researchBudget: 'extended', researchDiscoveryProtocol: 1,

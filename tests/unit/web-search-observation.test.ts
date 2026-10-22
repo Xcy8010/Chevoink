@@ -38,6 +38,20 @@ const context = (): ToolContext => ({ userId: 'fixture', novelId: 'fixture', cha
   runId: randomUUID(), callId: randomUUID(), mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: vi.fn() })
 
 describe('search URL handoff to the model', () => {
+  it('repairs the research projection of this completed raw call even after configuration is disabled without reserving or charging again', async () => {
+    const { findWebToolCallOutcome } = await import('../../api/lib/billing/web-tool-calls.js')
+    const { reserveResearchRequest, saveResearchSearchOutcome } = await import('../../api/lib/agent/research-sources.js')
+    vi.mocked(reserveResearchRequest).mockClear()
+    const ctx = context(), outcome = { provider: 'bocha' as const, results: [] }
+    vi.mocked(findWebToolCallOutcome).mockResolvedValueOnce(outcome)
+    env.webSearchProvider = 'disabled'
+    await webSearchTool.execute(ctx, { query: '原调用已有结果', maxResults: 2 })
+    expect(saveResearchSearchOutcome).toHaveBeenCalledWith(ctx, outcome, '原调用已有结果')
+    expect(reserveResearchRequest).not.toHaveBeenCalled()
+    expect(mocks.configuration).not.toHaveBeenCalled()
+    expect(mocks.search).not.toHaveBeenCalled()
+    expect(mocks.charge).not.toHaveBeenCalled()
+  })
   it('rejects an invalid configured provider before reserving, charging or dispatching', async () => {
     const { reserveResearchRequest } = await import('../../api/lib/agent/research-sources.js')
     vi.mocked(reserveResearchRequest).mockClear()

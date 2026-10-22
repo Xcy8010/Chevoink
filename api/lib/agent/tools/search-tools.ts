@@ -134,7 +134,10 @@ export const webSearchTool = defineTool({
         async () => { dispatched = true; await settleResearchRequest(ctx, 'consumed'); return searchWeb(args.query, args.maxResults, ctx.signal, configured, target, navigationPolicy) },
         result => result.results.length === 0 ? 'empty'
           : result.provider === 'bocha' || result.provider === 'deepseek' ? 'billable' : 'fallback')
-      if (!cached) await saveResearchSearchOutcome(ctx, outcome, args.query)
+      // A completed WebToolCall can outlive a crash before its research
+      // projection. This helper fills only the same consumed request once;
+      // cache-only calls have no reserved request and remain a no-op.
+      if (!cached || previous) await saveResearchSearchOutcome(ctx, outcome, args.query)
       ctx.signal.throwIfAborted()
 
       if (!cached) {
@@ -328,7 +331,9 @@ export const webReadTool = defineTool({
         if (ctx.signal.aborted || (error instanceof DataAccessError && /^CREDITS?_/.test(error.code))) await settleResearchRequest(ctx, 'released')
         throw error
       }
-      if (!previous) await recordResearchReadOutcome(ctx, result.status === 'ok')
+      // Repair the original consumed request on raw-result replay as well.
+      // Never reserve a new unit or dispatch to recover this DB projection.
+      await recordResearchReadOutcome(ctx, result.status === 'ok')
       ctx.signal.throwIfAborted()
       if (result.status !== 'ok') {
         await recordResearchReadFailure(ctx, source.id, result, request)

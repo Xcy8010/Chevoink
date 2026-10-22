@@ -27,6 +27,10 @@ import { entityResolveTool,impactAnalyzeTool,projectSearchTool,structureValidate
 import { chapterCreateTool,chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { toOpenAITools } from '../../api/lib/agent/tools/registry.js'
 import { taskSpecSchema } from '../../shared/contracts/task-spec-contracts.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { researchReportSaveTool, researchReportReadTool, webSearchTool, webReadTool } from '../../api/lib/agent/tools/search-tools.js'
+import { volumeCreateTool } from '../../api/lib/agent/tools/structure-tools.js'
+import { planSaveTool } from '../../api/lib/agent/tools/write-tools.js'
 import { retrievalTraceReadTool,styleProfileGetTool } from '../../api/lib/agent/tools/craft-library-tools.js'
 import { directiveListTool } from '../../api/lib/agent/tools/directive-tools.js'
 import { characterVoiceGetTool,experienceAnchorGetTool,qualityReportGetTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
@@ -117,6 +121,40 @@ describe.runIf(available)('durable domain reads', () => {
 })
 
 describe.runIf(available)('durable service dispatch', () => {
+  it.each(['network-denied', 'search-only', 'conversation', 'proposal', 'research', 'no-author-writes'] as const)('%s freezes one task ceiling for both schemas and execution without refreshing it on replay', async scenario => {
+    await fixture(async f => {
+      vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
+        baseUrl: 'https://provider.invalid/v1/', apiKey: 'not-real', reasoningEffort: 'high', reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: null })
+      const candidates = [chapterReadTool, chapterWriteTool, webSearchTool, webReadTool, planSaveTool, researchReportSaveTool, researchReportReadTool, volumeCreateTool]
+      const tools = vi.spyOn(agentDefinitions, 'getToolsForAgent').mockReturnValue(candidates)
+      const prompt = '修改本章', runId = randomUUID()
+      const input = { sessionId: f.sessionId, novelId: f.novelId, chapterId: f.chapterId, mode: 'build' as const, prompt }
+      const spec = buildTaskSpec({ runId, novelId: f.novelId, chapterId: f.chapterId, prompt })
+      if (scenario === 'network-denied') spec.networkAccess = 'denied'
+      if (scenario === 'search-only') { spec.intent = 'research_analysis'; spec.researchReadAccess = 'denied' }
+      if (scenario === 'research') spec.intent = 'research_analysis'
+      if (scenario === 'conversation') spec.writingPacing = 'conversation_only'
+      if (scenario === 'proposal') spec.writingPacing = 'proposal_only'
+      if (scenario === 'no-author-writes') spec.scope.authorEffects = { version: 1, requestHash: 'a'.repeat(64), manuscript: false, structure: false }
+      const assemble = vi.spyOn(contextAssembler, 'assembleContext').mockResolvedValue({ messages: [{ role: 'user', content: prompt }], skillRoute: null, availableSkillVersions: [], timings: {} })
+      await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: f.chapterId,
+        status: 'queued', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', startRequest: input,
+        taskSpec: JSON.parse(JSON.stringify(spec)) } })
+      await prisma.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+      const admitted = await initializePersistedLoopRun(f.userId, runId, input)
+      const expected = scenario === 'network-denied' ? ['chapter_read', 'chapter_write', 'plan_save', 'volume_create', 'execution_context_read']
+        : scenario === 'search-only' ? ['chapter_read', 'web_search', 'research_report_save', 'research_report_read', 'execution_context_read']
+        : scenario === 'research' ? ['chapter_read', 'web_search', 'web_read', 'research_report_save', 'research_report_read', 'execution_context_read']
+        : scenario === 'conversation' ? ['chapter_read', 'web_search', 'web_read', 'research_report_read', 'execution_context_read']
+        : ['chapter_read', 'web_search', 'web_read', 'plan_save', ...(scenario === 'proposal' ? ['research_report_read'] : []), 'execution_context_read']
+      expect(admitted.configuration.tools.map(tool => tool.function.name)).toEqual(expected)
+      expect(admitted.configuration.toolAuthority.map(tool => tool.name)).toEqual(expected)
+      tools.mockReturnValue([])
+      expect(await initializePersistedLoopRun(f.userId, runId, input)).toEqual(admitted)
+      expect(assemble).toHaveBeenCalledTimes(1)
+      expect(tools).toHaveBeenCalledTimes(1)
+    })
+  })
   it('freezes a fresh global chapter schema at service admission and executes it without rebuilding stored identity', async () => {
     await fixture(async f => {
       vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',

@@ -132,7 +132,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const { applySessionToolPolicy, getAgentDefinition, getToolsForAgent } = await import('./agents.js')
   const { resolveAgent2FeatureFlags } = await import('../agent2-feature-flags.js')
   const { assembleContext, insertSubagentCatalog } = await import('./context.js')
-  const { snapshotToolAuthority, intersectToolAuthority } = await import('./tool-authority.js')
+  const { snapshotToolAuthority, intersectToolAuthority, restrictToolsToTask } = await import('./tool-authority.js')
   const { toOpenAITools } = await import('./tools/registry.js')
   const { executionContextReadTool } = await import('./tools/task-context-tools.js')
   const { ORCHESTRATION_TOOL_NAMES } = await import('./tools/task-orchestration-tools.js')
@@ -170,13 +170,10 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
     .filter(tool => !session.spawnedFromSessionId || !ORCHESTRATION_TOOL_NAMES.has(tool.name))
   const contextRead: import('./tools/types.js').AgentTool = { ...executionContextReadTool,
     execute: (ctx, args) => executionContextReadTool.execute(ctx, executionContextReadTool.parameters.parse(args)) }
-  const currentTools = applySessionToolPolicy([...scoped, contextRead], input.mode, session.toolPolicy,
-    session.sandboxMode === 'read_only' || session.sandboxMode === 'full_access' ? session.sandboxMode : 'workspace')
   const activationCeiling = goalBinding ? await prisma.$transaction(async tx => {
     const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: goalBinding.goalId } })
     return (await import('./goal-activation.js')).readGoalActivationToolCeiling(tx, goal)
   }) : null
-  const tools = activationCeiling ? intersectToolAuthority(currentTools, input.mode, new Map(activationCeiling)) : currentTools
   const spec = await runtimeTransaction(async tx => {
     const current = await lockOwnedRun(tx, userId, runId)
     if (current.status !== 'queued') throw new DataAccessError(409, 'RUN_IN_PROGRESS', '初始化期间任务状态已变化。')
@@ -191,6 +188,11 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
     await tx.agentRun.update({ where: { id: runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(task))).value } })
     return task
   })
+  // Freeze the same task ceiling as the ordinary loop before applying the
+  // session/goal ceilings. Existing saved configurations return above intact.
+  const currentTools = applySessionToolPolicy(restrictToolsToTask([...scoped, contextRead], spec), input.mode, session.toolPolicy,
+    session.sandboxMode === 'read_only' || session.sandboxMode === 'full_access' ? session.sandboxMode : 'workspace')
+  const tools = activationCeiling ? intersectToolAuthority(currentTools, input.mode, new Map(activationCeiling)) : currentTools
   const assembled = await assembleContext({ agent, mode: input.mode, userId, sessionId: run.sessionId, runId, novelId: run.novelId, chapterId: run.chapterId,
     prompt: input.prompt, selection: input.selection, attachments: input.attachments, visionEnabled: runtime.visionEnabled, taskSpec: spec,
     modelTier: runtime.tier, modelName: runtime.modelName, contextWindowTokens: runtime.contextWindowTokens, pinnedSkillIds: input.pinnedSkillIds })

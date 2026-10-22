@@ -130,14 +130,14 @@ const TAG_LIBRARY_DIGEST = [
  * bootstrap 初始化协议留在 system 维持规则权威；作品数据进入尾部快照。 */
 async function buildNovelRuleBundle(
   novelId: string,
-): Promise<{ bootstrapPrompt: string | null; novelDataBundle: string | null }> {
+): Promise<{ bootstrapPrompt: string | null; novelDataBundle: string | null; tagNames: string[] }> {
   const novel = await prisma.novel.findUnique({
     where: { id: novelId },
     select: { title: true, displayTitle: true, summary: true, tagNames: true, status: true, chapterCount: true, wordCount: true, coverAssetId: true },
   })
 
   if (!novel) {
-    return { bootstrapPrompt: null, novelDataBundle: null }
+    return { bootstrapPrompt: null, novelDataBundle: null, tagNames: [] }
   }
 
   const rules = await prisma.projectMemoryEntry.findMany({
@@ -165,22 +165,27 @@ async function buildNovelRuleBundle(
     ...rules.map((rule) => `[${rule.memoryType === 'stylePreference' ? '风格' : '一致性'}] ${rule.title}：${clip(rule.content, 160)}`),
   ].filter(Boolean)
 
-  return { bootstrapPrompt, novelDataBundle: dataLines.length > 0 ? dataLines.join('\n') : null }
+  return { bootstrapPrompt, novelDataBundle: dataLines.length > 0 ? dataLines.join('\n') : null, tagNames: novel.tagNames }
 }
 
 /** L2/L3：角色卡 + 时间线 + 伏笔摘要（≤1200 字） */
-async function buildStoryMemoryDigest(userId: string, novelId: string, query: string): Promise<string | null> {
+async function buildStoryMemoryDigest(userId: string, novelId: string, query: string, relevantOnly = false): Promise<string | null> {
   const retrieved = await searchStoryMemory({ userId, novelId, query, limit: 12 })
   if (retrieved.length > 0) {
     return `与本轮任务相关的故事记忆（RRF 混合召回；confirmed 可作事实，inferred 需按证据核实）：\n${retrieved
       .map((entry) => `[${entry.memoryType}/${entry.status}] ${entry.title}：${clip(entry.content, 180)}（依据：${entry.evidence.map((item) => `${item.sourceType}:${item.sourceId}${item.revision ? `@r${item.revision}` : ''}`).join('、') || '无'}）`)
       .join('\n')}`
   }
+  // Fresh interpreted tasks already get global rules and the compiler's real
+  // obligations separately. Do not preload arbitrary memories after no match.
+  // Historical task views keep their fallback without relabelling inference.
+  if (relevantOnly) return null
   const entries = await prisma.projectMemoryEntry.findMany({
     where: { novelId, status: { in: ['confirmed', 'inferred'] }, reviewStatus: { in: ['none', 'accepted'] }, memoryType: { in: ['characterCard', 'timelineEvent', 'foreshadowing', 'worldbuilding', 'storyBible', 'volumeSummary', 'sceneState', 'relationshipState'] } },
     orderBy: { importance: 'desc' },
     take: 12,
-    select: { memoryType: true, title: true, content: true },
+    select: { memoryType: true, status: true, title: true, content: true,
+      evidence: { orderBy: { createdAt: 'desc' }, take: 3, select: { sourceType: true, sourceId: true, revision: true } } },
   })
 
   if (entries.length === 0) {
@@ -194,8 +199,8 @@ async function buildStoryMemoryDigest(userId: string, novelId: string, query: st
     worldbuilding: '设定',
   }
 
-  const lines = entries.map((entry) => `[${label[entry.memoryType] ?? entry.memoryType}] ${entry.title}：${clip(entry.content, 90)}`)
-  return `已沉淀的故事记忆摘要（详情用 memory_search 检索）：\n${lines.join('\n')}`
+  const lines = entries.map((entry) => `[${label[entry.memoryType] ?? entry.memoryType}/${entry.status}] ${entry.title}：${clip(entry.content, 90)}（依据：${entry.evidence.map(item => `${item.sourceType}:${item.sourceId}${item.revision != null ? `@r${item.revision}` : ''}`).join('、') || '无'}）`)
+  return `故事记忆摘要（confirmed 可作事实，inferred 需按证据核实；详情用 memory_search 检索）：\n${lines.join('\n')}`
 }
 
 /** 计划文件夹清单：让模型拿到既有计划的 planId，支持跨会话就地修订/重命名/删除 */
@@ -457,9 +462,9 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     && !['conversation_only', 'proposal_only'].includes(input.taskSpec.writingPacing ?? '')
     && input.taskSpec.scope.writing?.kind === 'bounded'
   const writingTaskRunIds = frozenWriting ? new Set(await getTaskRunIds(input.sessionId, input.runId)) : undefined
-  const [ruleBundleSplit, memoryDigest, planDigest, coverDigest, todoDigest, directives, history, chapter, novelTags, storyCompilerDigest, goalMessages] = await Promise.all([
+  const [ruleBundleSplit, memoryDigest, planDigest, coverDigest, todoDigest, directives, history, chapter, storyCompilerDigest, goalMessages] = await Promise.all([
     buildNovelRuleBundle(input.novelId),
-    buildStoryMemoryDigest(input.userId, input.novelId, input.prompt),
+    buildStoryMemoryDigest(input.userId, input.novelId, input.prompt, input.taskSpec.scope.authorEffects !== undefined),
     buildPlanFolderDigest(input.userId, input.novelId),
     buildCoverCandidateDigest(input.userId, input.novelId),
     buildTodoDigest(input.sessionId, input.taskSpec?.runId ?? input.runId),
@@ -473,7 +478,6 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
           select: { id: true, title: true, orderIndex: true, wordCount: true },
         })
       : Promise.resolve(null),
-    prisma.novel.findUnique({ where: { id: input.novelId }, select: { tagNames: true } }),
     storyCompilerFeatureEnabled
       ? buildStoryCompilerDigest(input.userId, input.novelId, input.chapterId, input.runId)
       : Promise.resolve(null),
@@ -509,7 +513,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
         pinnedSkillIds: pinnedSkillIds.length > 0 ? new Set(pinnedSkillIds) : undefined,
       })
     : null
-  const genreDigest = input.mode === 'build' && input.taskSpec.intent !== 'research_analysis' ? buildGenreWritingDigest(novelTags?.tagNames ?? [], 3, input.prompt) : null
+  const genreDigest = input.mode === 'build' && input.taskSpec.intent !== 'research_analysis' ? buildGenreWritingDigest(ruleBundleSplit.tagNames, 3, input.prompt) : null
   const { bootstrapPrompt, novelDataBundle } = ruleBundleSplit
 
   // 逐轮可变内容的 digest 统一收集，全部进尾部快照；system 只留任务内稳定的固定规则

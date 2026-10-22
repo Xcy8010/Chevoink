@@ -26,6 +26,8 @@ async function start(f: Parameters<Parameters<typeof fixture>[0]>[0], tools: Age
     toolAuthority: tools.map(tool => ({ name: tool.name, permission: tool.permission[mode], alwaysConfirm: Boolean(tool.alwaysConfirm), dangerous: Boolean(tool.dangerous) })),
     protectedChapterIds: [], pinnedSkillVersions: [] }, snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0,
     phase: 'idle', pendingOperationId: null, messages: [{ role: 'user', content: 'Original synthetic task' }, { role: 'assistant', content: null, toolCalls: calls }], successfulToolSignatures: [] } })
+  // Match executeOwnedPersistedLoopRun: admission alone does not start a run.
+  await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
   return lease
 }
 const call = (id: string, name: string, args: unknown) => ({ id, name, arguments: JSON.stringify(args) })
@@ -40,7 +42,12 @@ describe.runIf(available)('durable research and plan artifacts', () => {
     let lease = await start(f, [researchReportSaveTool, researchReportReadTool], [call('save', 'research_report_save', input), call('read', 'research_report_read', {}),
       call('continued-save', 'research_report_save', updated),
       call('conflict', 'research_report_save', { ...input, section: { ...input.section, content: 'Stale overwrite attempt' } })])
-    const interrupted = vi.spyOn(reducer, 'reduceExecutionReceipt').mockRejectedValueOnce(Error('Worker ended after commit'))
+    const interrupted = vi.spyOn(reducer, 'reduceExecutionReceipt').mockImplementationOnce(async (_lease, receipt) => {
+      const operation = await prisma.agentOperation.findUniqueOrThrow({ where: { id: receipt.operationId }, include: { effectReceipt: true } })
+      expect(operation.status).toBe('succeeded')
+      expect(operation.effectReceipt?.result).toMatchObject({ toolResult: { summary: expect.stringContaining('报告区块已保存') } })
+      throw Error('Worker ended after commit')
+    })
     await expect(executeDurableToolStep(lease, signal())).rejects.toThrow('Worker ended after commit')
     interrupted.mockRestore()
     expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'researchReport' } })).toBe(1)
@@ -50,6 +57,7 @@ describe.runIf(available)('durable research and plan artifacts', () => {
     await pauseDurableTask(f.userId, f.runId)
     const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { runId: f.runId, type: 'run.paused' } })
     const resumed = await resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id })
+    await prisma.agentRun.update({ where: { id: resumed.run.id }, data: { status: 'running' } })
     lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'report-resumed-worker')
     expect(await executeDurableToolStep(lease, signal())).toMatchObject({ kind: 'tool', result: { semanticTransition: { beforeHash: expect.any(String), afterHash: expect.any(String) } } })
     expect(await executeDurableToolStep(lease, signal())).toMatchObject({ kind: 'tool', result: { outcome: 'failed', summary: '研究报告未保存' } })
