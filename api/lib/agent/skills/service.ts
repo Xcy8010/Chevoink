@@ -103,14 +103,16 @@ export async function syncBuiltinSkillCatalog(tx?: Prisma.TransactionClient): Pr
   else await prisma.$transaction(versionOperations)
 }
 
-async function assertOwnedNovel(userId: string, novelId: string): Promise<void> {
-  const novel = await prisma.novel.findFirst({ where: { id: novelId, authorId: userId }, select: { id: true } })
+async function assertOwnedNovel(userId: string, novelId: string, transaction?: Prisma.TransactionClient): Promise<void> {
+  const db = transaction ?? prisma
+  const novel = await db.novel.findFirst({ where: { id: novelId, authorId: userId }, select: { id: true } })
   if (!novel) throw new DataAccessError(404, 'NOVEL_NOT_FOUND', '作品不存在或无权访问。')
 }
 
-async function ensureNovelInstallations(userId: string, novelId: string): Promise<void> {
-  await syncBuiltinSkillCatalog()
-  await prisma.agentSkillInstallation.createMany({
+async function ensureNovelInstallations(userId: string, novelId: string, transaction?: Prisma.TransactionClient): Promise<void> {
+  const db = transaction ?? prisma
+  await syncBuiltinSkillCatalog(transaction)
+  await db.agentSkillInstallation.createMany({
     data: skillCatalog.map((skill) => ({
       skillId: skill.id,
       userId,
@@ -139,12 +141,13 @@ function readStrings(value: Prisma.JsonValue): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 }
 
-export async function listNovelSkills(userId: string, novelId: string): Promise<NovelSkillsPayload> {
-  await assertOwnedNovel(userId, novelId)
-  await ensureNovelInstallations(userId, novelId)
+export async function listNovelSkills(userId: string, novelId: string, transaction?: Prisma.TransactionClient): Promise<NovelSkillsPayload> {
+  const db = transaction ?? prisma
+  await assertOwnedNovel(userId, novelId, transaction)
+  await ensureNovelInstallations(userId, novelId, transaction)
 
   const [definitions, installations, runs, usageBySkill] = await Promise.all([
-    prisma.agentSkillDefinition.findMany({
+    db.agentSkillDefinition.findMany({
       where: { OR: [{ source: BUILTIN_SOURCE, status: 'active' }, { ownerUserId: userId }, { installations: { some: { userId, scope: NOVEL_SCOPE, scopeId: novelId } } }] },
       include: {
         versions: { orderBy: { createdAt: 'desc' } },
@@ -152,15 +155,15 @@ export async function listNovelSkills(userId: string, novelId: string): Promise<
       },
       orderBy: [{ source: 'asc' }, { name: 'asc' }],
     }),
-    prisma.agentSkillInstallation.findMany({
+    db.agentSkillInstallation.findMany({
       where: { userId, scope: NOVEL_SCOPE, scopeId: novelId },
     }),
-    prisma.agentSkillRun.findMany({
+    db.agentSkillRun.findMany({
       where: { userId, novelId },
       orderBy: { createdAt: 'desc' },
       take: 30,
     }),
-    getSkillUsage(userId, novelId),
+    getSkillUsage(userId, novelId, transaction),
   ])
 
   const installationBySkill = new Map(installations.map((installation) => [installation.skillId, installation]))
@@ -282,11 +285,12 @@ export async function updateNovelSkill(
   userId: string,
   novelId: string,
   skillId: string,
-  patch: UpdateNovelSkillRequest,
+  patch: UpdateNovelSkillRequest, transaction?: Prisma.TransactionClient
 ): Promise<NovelSkillsPayload> {
-  await assertOwnedNovel(userId, novelId)
-  await ensureNovelInstallations(userId, novelId)
-  const definition = await prisma.agentSkillDefinition.findFirst({
+  const db = transaction ?? prisma
+  await assertOwnedNovel(userId, novelId, transaction)
+  await ensureNovelInstallations(userId, novelId, transaction)
+  const definition = await db.agentSkillDefinition.findFirst({
     where: { id: skillId, status: 'active', OR: [{ source: BUILTIN_SOURCE }, { ownerUserId: userId }, { installations: { some: { userId, scope: NOVEL_SCOPE, scopeId: novelId } } }] },
     select: { id: true, defaultVersion: true },
   })
@@ -294,25 +298,26 @@ export async function updateNovelSkill(
 
   const lockedVersion = patch.lockedVersion === undefined ? undefined : patch.lockedVersion ?? definition.defaultVersion
   if (lockedVersion) {
-    const version = await prisma.agentSkillVersion.findUnique({
+    const version = await db.agentSkillVersion.findUnique({
       where: { skillId_version: { skillId, version: lockedVersion } },
       select: { id: true, status: true },
     })
     if (!version || version.status !== 'active') throw new DataAccessError(409, 'SKILL_VERSION_NOT_FOUND', '指定的已发布技能版本不存在，无法回滚。')
   }
 
-  await prisma.agentSkillInstallation.update({
+  await db.agentSkillInstallation.update({
     where: { skillId_userId_scope_scopeId: { skillId, userId, scope: NOVEL_SCOPE, scopeId: novelId } },
     data: {
       ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
       ...(lockedVersion !== undefined ? { lockedVersion } : {}),
     },
   })
-  return listNovelSkills(userId, novelId)
+  return listNovelSkills(userId, novelId, transaction)
 }
 
-async function findOwnedSkill(userId: string, skillId: string) {
-  const skill = await prisma.agentSkillDefinition.findFirst({
+async function findOwnedSkill(userId: string, skillId: string, transaction?: Prisma.TransactionClient) {
+  const db = transaction ?? prisma
+  const skill = await db.agentSkillDefinition.findFirst({
     where: { id: skillId, ownerUserId: userId },
     include: { versions: { orderBy: { createdAt: 'desc' } } },
   })
@@ -339,17 +344,17 @@ async function persistAudit(input: {
   })
 }
 
-export async function createNovelSkillDraft(
+export async function createNovelSkillDraftWithId(
   userId: string,
   novelId: string,
-  input: CreateNovelSkillRequest,
-): Promise<NovelSkillsPayload> {
-  await assertOwnedNovel(userId, novelId)
+  input: CreateNovelSkillRequest, transaction?: Prisma.TransactionClient
+): Promise<{ skillId: string; payload: NovelSkillsPayload }> {
+  await assertOwnedNovel(userId, novelId, transaction)
   const version = '0.1.0'
   const source = input.source === 'agent' ? 'agent' : 'user'
   const artifacts = buildCustomSkillArtifacts(input, version, source)
   const skillId = `custom.${randomUUID()}`
-  await prisma.$transaction(async (tx) => {
+  const save = async (tx: Prisma.TransactionClient) => {
     await tx.agentSkillDefinition.create({
       data: {
         id: skillId,
@@ -392,8 +397,17 @@ export async function createNovelSkillDraft(
         createdByUserId: userId,
       },
     })
-  })
-  return listNovelSkills(userId, novelId)
+  }
+  if (transaction) await save(transaction)
+  else await prisma.$transaction(save)
+  return { skillId, payload: await listNovelSkills(userId, novelId, transaction) }
+}
+
+/** Keep the existing API response unchanged; tool receipts also need the
+ * actual created identity when an author reuses a skill name. */
+export async function createNovelSkillDraft(userId: string, novelId: string, input: CreateNovelSkillRequest,
+  transaction?: Prisma.TransactionClient): Promise<NovelSkillsPayload> {
+  return (await createNovelSkillDraftWithId(userId, novelId, input, transaction)).payload
 }
 
 export async function importThirdPartyNovelSkill(
@@ -492,10 +506,11 @@ export async function testNovelSkill(
   userId: string,
   novelId: string,
   skillId: string,
-  input: TestNovelSkillRequest,
+  input: TestNovelSkillRequest, transaction?: Prisma.TransactionClient
 ): Promise<AgentSkillTestResult> {
-  await assertOwnedNovel(userId, novelId)
-  const skill = await findOwnedSkill(userId, skillId)
+  const db = transaction ?? prisma
+  await assertOwnedNovel(userId, novelId, transaction)
+  const skill = await findOwnedSkill(userId, skillId, transaction)
   const versionName = input.version ?? skill.defaultVersion
   const version = skill.versions.find((item) => item.version === versionName)
   if (!version) throw new DataAccessError(404, 'SKILL_VERSION_NOT_FOUND', '要测试的技能版本不存在。')
@@ -533,8 +548,8 @@ export async function testNovelSkill(
     blockedByNegativeTrigger,
     estimatedTokens: decision.estimatedTokens,
   }
-  await prisma.$transaction([
-    prisma.agentSkillEval.create({
+  const writes = [
+    db.agentSkillEval.create({
       data: {
         skillId,
         version: version.version,
@@ -546,8 +561,10 @@ export async function testNovelSkill(
         passed: result.passed,
       },
     }),
-    prisma.agentSkillVersion.update({ where: { id: version.id }, data: { status: version.status === 'active' ? 'active' : 'testing' } }),
-  ])
+    db.agentSkillVersion.update({ where: { id: version.id }, data: { status: version.status === 'active' ? 'active' : 'testing' } }),
+  ]
+  if (transaction) { for (const write of writes) await write }
+  else await prisma.$transaction(writes)
   return result
 }
 
@@ -555,14 +572,15 @@ export async function publishNovelSkillVersion(
   userId: string,
   novelId: string,
   skillId: string,
-  version: string,
+  version: string, transaction?: Prisma.TransactionClient
 ): Promise<NovelSkillsPayload> {
-  await assertOwnedNovel(userId, novelId)
-  await findOwnedSkill(userId, skillId)
+  const db = transaction ?? prisma
+  await assertOwnedNovel(userId, novelId, transaction)
+  await findOwnedSkill(userId, skillId, transaction)
   const [skillVersion, audit, evaluations] = await Promise.all([
-    prisma.agentSkillVersion.findUnique({ where: { skillId_version: { skillId, version } } }),
-    prisma.agentSkillAudit.findFirst({ where: { skillId, version }, orderBy: { createdAt: 'desc' } }),
-    prisma.agentSkillEval.findMany({ where: { skillId, version, passed: true }, orderBy: { createdAt: 'desc' }, take: 20 }),
+    db.agentSkillVersion.findUnique({ where: { skillId_version: { skillId, version } } }),
+    db.agentSkillAudit.findFirst({ where: { skillId, version }, orderBy: { createdAt: 'desc' } }),
+    db.agentSkillEval.findMany({ where: { skillId, version, passed: true }, orderBy: { createdAt: 'desc' }, take: 20 }),
   ])
   if (!skillVersion) throw new DataAccessError(404, 'SKILL_VERSION_NOT_FOUND', '要发布的技能版本不存在。')
   if (!audit || audit.status !== 'passed') {
@@ -577,19 +595,21 @@ export async function publishNovelSkillVersion(
     throw new DataAccessError(409, 'SKILL_TEST_REQUIRED', '发布前必须各通过一条“应命中”和“不应命中”测试。')
   }
   const manifest = skillVersion.manifest as Record<string, unknown>
-  await prisma.$transaction([
-    prisma.agentSkillVersion.update({ where: { id: skillVersion.id }, data: { status: 'active' } }),
-    prisma.agentSkillDefinition.update({
+  const writes = [
+    db.agentSkillVersion.update({ where: { id: skillVersion.id }, data: { status: 'active' } }),
+    db.agentSkillDefinition.update({
       where: { id: skillId },
       data: { status: 'active', defaultVersion: version },
     }),
-    prisma.agentSkillInstallation.upsert({
+    db.agentSkillInstallation.upsert({
       where: { skillId_userId_scope_scopeId: { skillId, userId, scope: NOVEL_SCOPE, scopeId: novelId } },
       create: { skillId, userId, scope: NOVEL_SCOPE, scopeId: novelId, enabled: true, lockedVersion: version, priority: typeof manifest.priority === 'number' ? manifest.priority : 70 },
       update: { enabled: true, lockedVersion: version, priority: typeof manifest.priority === 'number' ? manifest.priority : 70 },
     }),
-  ])
-  return listNovelSkills(userId, novelId)
+  ]
+  if (transaction) { for (const write of writes) await write }
+  else await prisma.$transaction(writes)
+  return listNovelSkills(userId, novelId, transaction)
 }
 
 export async function deleteNovelSkill(userId: string, novelId: string, skillId: string): Promise<NovelSkillsPayload> {
@@ -600,23 +620,27 @@ export async function deleteNovelSkill(userId: string, novelId: string, skillId:
 }
 
 /** 运行时目录：内置代码资产 + 当前作品已启用且已发布的私有技能。 */
-export async function resolveRuntimeSkillContext(userId: string, novelId: string, runId?: string): Promise<{ catalog: AgentSkill[]; routerVersion: string }> {
-  let saved = runId ? await prisma.agentSkillRun.findFirst({ where: { runId, userId, novelId } }) : null
-  const run = runId ? await prisma.agentRun.findFirst({ where: { id: runId, userId, novelId }, select: { runtimeProtocolVersion: true, taskRootId: true, status: true } }) : null
+export async function resolveRuntimeSkillContext(userId: string, novelId: string, runId?: string, transaction?: Prisma.TransactionClient): Promise<{ catalog: AgentSkill[]; routerVersion: string }> {
+  const db = transaction ?? prisma
+  let saved = runId ? await db.agentSkillRun.findFirst({ where: { runId, userId, novelId } }) : null
+  const run = runId ? await db.agentRun.findFirst({ where: { id: runId, userId, novelId }, select: { runtimeProtocolVersion: true, taskRootId: true, status: true } }) : null
   if (runId && !run && !saved) throw new DataAccessError(409, 'SKILL_RUN_SCOPE_MISMATCH', '技能加载不属于当前作者和作品的任务。')
   // Durable tasks already own a configuration hash. Read/validate that exact
   // snapshot; neither a catalog lookup nor a resume may rewrite it.
   const durable = run?.runtimeProtocolVersion === 1 && run.taskRootId
-    && await prisma.agentExecutionState.findUnique({ where: { taskRootId: run.taskRootId }, select: { taskRootId: true } })
-    ? await (await import('../runtime-state.js')).loadExecutionState(userId, runId!) : null
+    && await db.agentExecutionState.findUnique({ where: { taskRootId: run.taskRootId }, select: { taskRootId: true } })
+    ? transaction
+      ? await (await import('../runtime-state.js')).readExecutionStateInTransaction(transaction, run.taskRootId!)
+      : await (await import('../runtime-state.js')).loadExecutionState(userId, runId!)
+    : null
   if (run && !durable) {
-    const original = await (await import('../original-request.js')).readOriginalTaskRequest(prisma, { userId, novelId, runId: runId! })
+    const original = await (await import('../original-request.js')).readOriginalTaskRequest(db, { userId, novelId, runId: runId! })
     if (original.sourceRunId !== runId) {
-      const source = await prisma.agentSkillRun.findFirst({ where: { runId: original.sourceRunId, userId, novelId } })
+      const source = await db.agentSkillRun.findFirst({ where: { runId: original.sourceRunId, userId, novelId } })
       if (source) saved = { ...source, loaded: [...readSelected(source.loaded), ...readSelected(saved?.loaded ?? [])], selected: source.selected }
     }
   }
-  const installations = await prisma.agentSkillInstallation.findMany({
+  const installations = await db.agentSkillInstallation.findMany({
     where: { userId, scope: NOVEL_SCOPE, scopeId: novelId },
     include: { skill: { include: { versions: true } } },
   })
@@ -625,13 +649,16 @@ export async function resolveRuntimeSkillContext(userId: string, novelId: string
   const builtinCatalog = routerVersion === '3.6.0' ? frozenV350BuiltinCatalog
     : routerVersion !== SKILL_ROUTER_VERSION ? historicalBuiltinCatalog : skillCatalog
   const pinned = new Map([...readSelected(saved?.loaded ?? []), ...readSelected(saved?.selected ?? [])].map(item => [item.id, item.version]))
+  const frozenInventory = durable?.configuration.skillInventoryVersion === 1
+    ? new Map(durable.configuration.pinnedSkillVersions.map(item => [item.id, item.version])) : null
   for (const item of durable?.configuration.pinnedSkillVersions ?? []) pinned.set(item.id, item.version)
   const runtime: AgentSkill[] = []
   for (const skill of builtinCatalog) {
+    if (frozenInventory && !frozenInventory.has(skill.id)) continue
     if (installationBySkill.get(skill.id)?.enabled === false) continue
     const versionName = pinned.get(skill.id)
     if (!versionName || versionName === skill.version) { runtime.push(skill); continue }
-    const stored = await prisma.agentSkillVersion.findUnique({ where: { skillId_version: { skillId: skill.id, version: versionName } } })
+    const stored = await db.agentSkillVersion.findUnique({ where: { skillId_version: { skillId: skill.id, version: versionName } } })
     if (!stored || stored.status !== 'active' || !stored.instructions || typeof stored.instructions !== 'object' || Array.isArray(stored.instructions)) {
       throw new DataAccessError(409, 'SKILL_FROZEN_VERSION_UNAVAILABLE', '原任务的技能版本不可用，不能替换为新版本继续。')
     }
@@ -639,6 +666,10 @@ export async function resolveRuntimeSkillContext(userId: string, novelId: string
     runtime.push({ ...skill, version: versionName, resources })
   }
   for (const installation of installations) {
+    if (frozenInventory && !frozenInventory.has(installation.skillId)) continue
+    // Old selected-only snapshots do not attest to any unpinned private
+    // version. Keep their historical built-ins, never add a later install.
+    if (durable && !frozenInventory && !pinned.has(installation.skillId)) continue
     if (!installation.enabled || installation.skill.source === BUILTIN_SOURCE || installation.skill.status !== 'active') continue
     const versionName = pinned.get(installation.skillId) ?? installation.lockedVersion ?? installation.skill.defaultVersion
     const version = installation.skill.versions.find((item) => item.version === versionName && item.status === 'active')
@@ -662,8 +693,8 @@ export async function resolveRuntimeSkillContext(userId: string, novelId: string
   return { catalog: runtime, routerVersion }
 }
 
-export async function resolveEnabledRuntimeSkills(userId: string, novelId: string, runId?: string): Promise<AgentSkill[]> {
-  return (await resolveRuntimeSkillContext(userId, novelId, runId)).catalog
+export async function resolveEnabledRuntimeSkills(userId: string, novelId: string, runId?: string, transaction?: Prisma.TransactionClient): Promise<AgentSkill[]> {
+  return (await resolveRuntimeSkillContext(userId, novelId, runId, transaction)).catalog
 }
 
 /** 路由热路径不做目录同步；没有安装记录等价于默认启用，关闭后下一轮立即生效。 */

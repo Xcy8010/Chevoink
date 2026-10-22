@@ -216,7 +216,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
       tools: toOpenAITools(tools, spec.scope), toolAuthority: [...snapshotToolAuthority(tools, input.mode)].map(([name, grant]) => ({ name, ...grant })),
       protectedChapterIds: spec.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED') ? spec.scope.chapterIds ?? [] : [],
       skillRouterVersion: assembled.skillRoute?.routerVersion ?? (await import('./skills/index.js')).SKILL_ROUTER_VERSION,
-      pinnedSkillVersions: assembled.availableSkillVersions },
+      pinnedSkillVersions: assembled.availableSkillVersions, skillInventoryVersion: 1 },
       snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
         messages: assembled.messages, successfulToolSignatures: [] } })
   } finally { await releaseRunLease(lease) }

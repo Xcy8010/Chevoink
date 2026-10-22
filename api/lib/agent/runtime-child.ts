@@ -279,8 +279,14 @@ export function intersectChildConfiguration(parent: ChildConfiguration, requeste
   })
   const tools = requested.tools.filter(tool => authority.some(item => item.name === tool.function.name)
     && parent.tools.some(item => item.function.name === tool.function.name && runtimeJson(item.function.parameters).hash === runtimeJson(tool.function.parameters).hash))
-  const { pinnedSubagentId: _pin, ...childConfiguration } = requested
-  return { ...childConfiguration, tools, toolAuthority: authority.filter(item => tools.some(tool => tool.function.name === item.name)),
+  const { pinnedSubagentId: _pin, skillInventoryVersion: _inventory, ...childConfiguration } = requested
+  if (parent.skillInventoryVersion === 1) {
+    childConfiguration.pinnedSkillVersions = requested.pinnedSkillVersions.filter(item => parent.pinnedSkillVersions.some(ceiling => ceiling.id === item.id && ceiling.version === item.version))
+    if (parent.skillRouterVersion === undefined) delete childConfiguration.skillRouterVersion
+    else childConfiguration.skillRouterVersion = parent.skillRouterVersion
+  }
+  return { ...childConfiguration, ...(parent.skillInventoryVersion === 1 ? { skillInventoryVersion: 1 as const } : {}),
+    tools, toolAuthority: authority.filter(item => tools.some(tool => tool.function.name === item.name)),
     protectedChapterIds: [...new Set([...parent.protectedChapterIds, ...requested.protectedChapterIds])],
     ...(parent.modelAssignments ? { modelAssignments: parent.modelAssignments } : {}) }
 }

@@ -6,10 +6,11 @@ import { prisma } from '../../prisma.js'
 import { loadSkill, type CreativeFreedom, type SkillPhase } from '../skills/index.js'
 import { recordSkillLoads } from '../skills/receipts.js'
 import {
-  createNovelSkillDraft,
+  createNovelSkillDraftWithId,
   listNovelSkills,
   publishNovelSkillVersion,
   resolveEnabledRuntimeSkills,
+  resolveRuntimeSkillContext,
   testNovelSkill,
   updateNovelSkill,
 } from '../skills/service.js'
@@ -25,7 +26,7 @@ export const skillCatalogTool = defineTool({
   parameters: z.object({ phase: PHASE.optional() }),
   permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: true,
   async execute(ctx, args) {
-    const runtime = await resolveEnabledRuntimeSkills(ctx.userId, ctx.novelId, ctx.runId)
+    const runtime = await resolveEnabledRuntimeSkills(ctx.userId, ctx.novelId, ctx.runId, ctx.transaction)
     const items = args.phase ? runtime.filter((item) => item.phases.includes(args.phase!)) : runtime
     return {
       output: items.map((item) => `${item.id}@${item.version} [${item.phases.join('/')}] ${item.synopsis}${item.attribution ? ` 来源说明：${item.attribution}` : ''}`).join('\n'),
@@ -40,10 +41,10 @@ export const skillLoadTool = defineTool({
   parameters: z.object({ skillId: z.string().min(1), phase: PHASE, creativeFreedom: FREEDOM }),
   permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: true,
   async execute(ctx, args) {
-    const runtime = await resolveEnabledRuntimeSkills(ctx.userId, ctx.novelId, ctx.runId)
+    const { catalog: runtime, routerVersion } = await resolveRuntimeSkillContext(ctx.userId, ctx.novelId, ctx.runId, ctx.transaction)
     const content = loadSkill(args.skillId, args.phase, args.creativeFreedom, runtime)
     const loaded = content ? runtime.filter(skill => content.startsWith(`[Skill ${skill.id}@${skill.version} /`)) : []
-    if (ctx.runId && loaded.length) await recordSkillLoads(ctx as typeof ctx & { runId: string }, loaded, args.phase, 'tool')
+    if (ctx.runId && loaded.length) await recordSkillLoads({ ...ctx, runId: ctx.runId, routerVersion }, loaded, args.phase, 'tool', ctx.transaction)
     return content
       ? { output: content, summary: `加载 ${args.skillId} · ${args.phase}` }
       : { output: `Skill ${args.skillId} 不存在或不支持 ${args.phase} 阶段。` }
@@ -74,8 +75,8 @@ export const skillCreateDraftTool = defineTool({
   parameters: customSkillDraftSchema,
   permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: false,
   async execute(ctx, args) {
-    const payload = await createNovelSkillDraft(ctx.userId, ctx.novelId, { ...args, source: 'agent' })
-    const draft = payload.items.find((item) => item.source === 'agent' && item.name === args.name)
+    const { skillId, payload } = await createNovelSkillDraftWithId(ctx.userId, ctx.novelId, { ...args, source: 'agent' }, ctx.transaction)
+    const draft = payload.items.find((item) => item.id === skillId)
     return {
       output: draft
         ? `已创建私有技能草稿 ${draft.id}@${draft.activeVersion}。当前未启用；请先调用 skill_test，再请作者确认是否发布。`
@@ -94,7 +95,7 @@ export const skillTestTool = defineTool({
   }),
   permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: false,
   async execute(ctx, args) {
-    const result = await testNovelSkill(ctx.userId, ctx.novelId, args.skillId, args)
+    const result = await testNovelSkill(ctx.userId, ctx.novelId, args.skillId, args, ctx.transaction)
     return {
       output: `测试${result.passed ? '通过' : '失败'}：实际${result.matched ? '命中' : '未命中'}，预期${result.expected ? '命中' : '未命中'}，score=${result.score}，负触发=${result.blockedByNegativeTrigger ? '是' : '否'}。`,
       summary: `测试技能 · ${result.passed ? '通过' : '失败'}`,
@@ -108,7 +109,7 @@ export const skillEnableTool = defineTool({
   parameters: z.object({ skillId: z.string().min(1), enabled: z.boolean() }),
   permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: false,
   async execute(ctx, args) {
-    await updateNovelSkill(ctx.userId, ctx.novelId, args.skillId, { enabled: args.enabled })
+    await updateNovelSkill(ctx.userId, ctx.novelId, args.skillId, { enabled: args.enabled }, ctx.transaction)
     return { output: `技能 ${args.skillId} 已${args.enabled ? '启用' : '关闭'}，从下一轮开始生效。`, summary: `${args.enabled ? '启用' : '关闭'}技能` }
   },
 })
@@ -119,7 +120,7 @@ export const skillRollbackTool = defineTool({
   parameters: z.object({ skillId: z.string().min(1), version: z.string().min(1) }),
   permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: false,
   async execute(ctx, args) {
-    await updateNovelSkill(ctx.userId, ctx.novelId, args.skillId, { lockedVersion: args.version })
+    await updateNovelSkill(ctx.userId, ctx.novelId, args.skillId, { lockedVersion: args.version }, ctx.transaction)
     return { output: `技能 ${args.skillId} 已回滚并锁定到 ${args.version}。`, summary: `回滚技能到 ${args.version}` }
   },
 })
@@ -130,7 +131,7 @@ export const skillPublishTool = defineTool({
   parameters: z.object({ skillId: z.string().min(1), version: z.string().min(1) }),
   permission: { plan: 'ask', build: 'ask', review: 'ask' }, readOnly: false, alwaysConfirm: true,
   async execute(ctx, args) {
-    await publishNovelSkillVersion(ctx.userId, ctx.novelId, args.skillId, args.version)
+    await publishNovelSkillVersion(ctx.userId, ctx.novelId, args.skillId, args.version, ctx.transaction)
     return { output: `技能 ${args.skillId}@${args.version} 已发布并启用。`, summary: `发布技能 ${args.version}` }
   },
 })
@@ -141,7 +142,7 @@ export const skillRunExplainTool = defineTool({
   parameters: z.object({ runId: z.string().optional() }),
   permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: true,
   async execute(ctx, args) {
-    const payload = await listNovelSkills(ctx.userId, ctx.novelId)
+    const payload = await listNovelSkills(ctx.userId, ctx.novelId, ctx.transaction)
     const run = args.runId ? payload.recentRuns.find((item) => item.runId === args.runId) : payload.recentRuns[0]
     return run
       ? { output: `阶段=${run.phase}；已选=${run.selected.map((item) => `${item.id}@${item.version}`).join('、') || '无'}；原因=${run.reasonCodes.join('、') || '无明确触发'}；置信度=${run.confidence}；估算 token=${run.estimatedTokens}。`, summary: '解释技能路由' }
@@ -155,7 +156,7 @@ export const skillSharedInvitesTool = defineTool({
   parameters: z.object({}),
   permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: true,
   async execute(ctx) {
-    const invites = await listSkillShareInvites(ctx.userId)
+    const invites = await listSkillShareInvites(ctx.userId, ctx.transaction)
     const pending = invites.received.filter((invite) => invite.status === 'pending')
     return {
       output: pending.length
@@ -172,7 +173,7 @@ export const skillInstallSharedTool = defineTool({
   parameters: z.object({ inviteId: z.string().min(1) }),
   permission: { plan: 'ask', build: 'ask', review: 'ask' }, readOnly: false, alwaysConfirm: true,
   async execute(ctx, args) {
-    await acceptSkillShareInvite(ctx.userId, args.inviteId, ctx.novelId)
+    await acceptSkillShareInvite(ctx.userId, args.inviteId, ctx.novelId, ctx.transaction)
     return { output: '共享作品技能已安装并启用，将从下一轮任务开始由服务端按需路由。', summary: '安装共享作品技能' }
   },
 })

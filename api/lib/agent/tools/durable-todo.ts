@@ -13,7 +13,7 @@ import { todoWriteTool, prepareTodoUpdate, renderTodoItems } from './todo-tools.
 const itemsSchema = z.array(z.object({ id: z.string().max(64).optional(), reason: z.string().max(200).optional(), content: z.string().min(1).max(100), status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']) }).strict()).max(20)
 const resultSchema = z.object({ todoItems: itemsSchema, toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() })
 
-/** DB-only directives, research sections and creative reference artifacts.
+/** DB-only directives, research sections, skills and creative reference artifacts.
  * Directive bookkeeping is not manuscript progress or a renewed budget. */
 export async function executeDurableTaskArtifact(ctx: ToolContext, tool: AgentTool, raw: unknown): Promise<ToolResult> {
   const capability = ctx.durableTask
@@ -32,14 +32,17 @@ export async function executeDurableTaskArtifact(ctx: ToolContext, tool: AgentTo
     const result = await tool.execute({ ...ctx, durableTask: undefined, transaction: tx }, args)
     if (result.outcome === 'failed') return runtimeError('DIRECTIVE_WRITE_REJECTED', result.output)
     ctx.signal.throwIfAborted()
-    return runtimeJson({ toolResult: result }).value
+    return runtimeJson({ toolResult: { ...result, summary: result.summary ?? tool.title } }).value
   }).catch(async error => {
     if (!(error instanceof DataAccessError) || !['DIRECTIVE_WRITE_REJECTED', 'DIRECTIVE_NOT_FOUND', 'DIRECTIVE_CHANGED',
       'RESEARCH_REPORT_NOT_AUTHORIZED', 'RESEARCH_RUN_NOT_ACTIVE', 'RESEARCH_REPORT_INVALID', 'RESEARCH_REPORT_CONFLICT',
       'RESEARCH_TARGET_EVIDENCE_REQUIRED', 'RESEARCH_SOURCE_NOT_FOUND', 'RESEARCH_CITATION_INVALID', 'RESEARCH_REPORT_SECTION_INVALID', 'RESEARCH_REPORT_TOO_LARGE',
       'NOVEL_NOT_FOUND', 'QUALITY_FINDING_NOT_FOUND', 'VOICE_SAMPLE_COUNT_REQUIRED', 'VOICE_SAMPLE_DUPLICATED', 'VOICE_SAMPLE_EVIDENCE_REQUIRED', 'VOICE_SAMPLE_EVIDENCE_INVALID',
       'ANCHOR_REVISION_REQUIRED', 'ANCHOR_EVIDENCE_INVALID', 'PRIVATE_STYLE_DISABLED', 'STYLE_SAMPLE_CHAPTER_NOT_FOUND', 'STYLE_SAMPLE_TOO_SHORT', 'STYLE_SAMPLE_TOO_LARGE',
-      'STORY_CHARTER_REQUIRED', 'RESEARCH_DOSSIER_REQUIRED', 'PROTOTYPE_DIRECTION_INVALID'].includes(error.code)) throw error
+      'STORY_CHARTER_REQUIRED', 'RESEARCH_DOSSIER_REQUIRED', 'PROTOTYPE_DIRECTION_INVALID',
+      'SKILL_RUN_SCOPE_MISMATCH', 'SKILL_FROZEN_VERSION_UNAVAILABLE', 'SKILL_NOT_FOUND', 'SKILL_VERSION_NOT_FOUND',
+      'SKILL_MANIFEST_INVALID', 'SKILL_AUDIT_REQUIRED', 'SKILL_TEST_REQUIRED', 'SKILL_SHARE_INVITE_NOT_FOUND',
+      'SKILL_SHARE_INVITE_EXPIRED', 'SKILL_SHARE_VERSION_UNAVAILABLE'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash,
       code: error.code, output: error.message, summary: tool.name === 'research_report_save' ? '研究报告未保存'
         : tool.name.startsWith('directive_') ? '指令未保存' : '任务资料未保存' })

@@ -63,6 +63,8 @@ import { subAgentRunTool, subAgentDelegateTool } from './tools/subagent-tools.js
 import { taskSpawnTool, taskWaitTool, taskSendTool } from './tools/task-orchestration-tools.js'
 import { CHILD_ACTIONS } from './runtime-child.js'
 import { executeDurableChildTool } from './runtime-child-tools.js'
+import { skillCatalogTool, skillLoadTool, skillRunExplainTool, skillSharedInvitesTool, skillCreateDraftTool, skillTestTool,
+  skillEnableTool, skillInstallSharedTool, skillRollbackTool, skillPublishTool } from './tools/skill-tools.js'
 
 const HISTORY_READ_ACTIONS = ['account_credits', 'account_credit_history', 'account_novels', 'task_context_list', 'task_context_read', 'session_history_search', 'session_message_read'] as const
 const DOMAIN_READ_ACTIONS = ['model_list', 'craft_search', 'style_leakage_check', 'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get', 'research_report_read', 'plan_exit', 'platform_novel_search', 'platform_novel_read'] as const
@@ -71,6 +73,8 @@ function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
   return { ...tool, execute: (ctx, args) => tool.execute(ctx, tool.parameters.parse(args)) }
 }
 const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
+  checkedAdapter(skillCatalogTool), checkedAdapter(skillLoadTool), checkedAdapter(skillRunExplainTool), checkedAdapter(skillSharedInvitesTool),
+  checkedAdapter(skillCreateDraftTool), checkedAdapter(skillTestTool), checkedAdapter(skillEnableTool), checkedAdapter(skillInstallSharedTool), checkedAdapter(skillRollbackTool), checkedAdapter(skillPublishTool),
   checkedAdapter(subAgentRunTool), checkedAdapter(subAgentDelegateTool), checkedAdapter(taskSpawnTool), checkedAdapter(taskWaitTool), checkedAdapter(taskSendTool),
   checkedAdapter(configureAgentTool), checkedAdapter(modelListTool), checkedAdapter(modelAssignmentTool),
   checkedAdapter(researchReportReadTool), checkedAdapter(researchReportSaveTool), checkedAdapter(planExitTool),
