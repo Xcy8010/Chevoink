@@ -9,7 +9,7 @@ import { DataAccessError } from '../../prisma.js'
 
 /** DB-only reads: the returned observation and baseline are committed together.
  * Never use for paid network, subprocess, filesystem, or a tool with external effects. */
-export async function executeDurableRead(ctx: ToolContext, action: 'model_list' | 'account_credits' | 'account_credit_history' | 'account_novels' | 'craft_search' | 'style_leakage_check' | 'research_dossier_get' | 'first_three_prototype_get' | 'style_profile_get' | 'retrieval_trace_read' | 'memory_review_list' | 'character_voice_get' | 'experience_anchor_get' | 'directive_list' | 'project_search' | 'entity_resolve' | 'impact_analyze' | 'structure_validate' | 'story_charter_get' | 'quality_report_get' | 'execution_context_read' | 'chapter_read' | 'plan_read' | 'novel_get_context' | 'chapter_list_summaries' | 'memory_search' | 'volume_list' | 'structure_outline' | 'session_history_search' | 'session_message_read' | 'task_context_list' | 'task_context_read', args: unknown,
+export async function executeDurableRead(ctx: ToolContext, action: 'model_list' | 'account_credits' | 'account_credit_history' | 'account_novels' | 'craft_search' | 'style_leakage_check' | 'research_dossier_get' | 'first_three_prototype_get' | 'style_profile_get' | 'retrieval_trace_read' | 'memory_review_list' | 'character_voice_get' | 'experience_anchor_get' | 'directive_list' | 'project_search' | 'entity_resolve' | 'impact_analyze' | 'structure_validate' | 'story_charter_get' | 'quality_report_get' | 'execution_context_read' | 'chapter_read' | 'plan_read' | 'novel_get_context' | 'chapter_list_summaries' | 'memory_search' | 'volume_list' | 'structure_outline' | 'session_history_search' | 'session_message_read' | 'task_context_list' | 'task_context_read' | 'research_report_read' | 'plan_exit' | 'platform_novel_search' | 'platform_novel_read', args: unknown,
   normalize: (raw: unknown) => unknown, read: (tx: Prisma.TransactionClient) => Promise<ToolResult>): Promise<ToolResult> {
   const capability = ctx.durableRead && { ...ctx.durableRead, lease: { ...ctx.durableRead.lease }, cursor: { ...ctx.durableRead.cursor } }
   if (!capability || capability.lease.userId !== ctx.userId || capability.lease.runId !== ctx.runId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '读取能力与原任务不一致。')
@@ -35,7 +35,8 @@ export async function executeDurableRead(ctx: ToolContext, action: 'model_list' 
     ctx.signal.throwIfAborted()
     return runtimeJson({ toolResult: { ...result, summary: result.summary ?? '读取完成' } }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || !['TOOL_READ_NOT_FOUND', 'QUALITY_REPORT_NOT_FOUND', 'RETRIEVAL_TRACE_NOT_FOUND', 'CHAPTER_NOT_FOUND'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || !['TOOL_READ_NOT_FOUND', 'QUALITY_REPORT_NOT_FOUND', 'RETRIEVAL_TRACE_NOT_FOUND', 'CHAPTER_NOT_FOUND',
+      'RESEARCH_REPORT_CONFLICT', 'RESEARCH_REPORT_INVALID', 'RESEARCH_REPORT_OFFSET_INVALID', 'RESEARCH_SOURCE_NOT_FOUND'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: '未找到读取目标' })
   })
   const failure = failedToolResultSchema.safeParse(receipt.result)

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
-import { runtimeError, runtimeJson, type RuntimeTx } from '../runtime-common.js'
+import { runtimeError, runtimeJson, TASK_ARTIFACT_ACTIONS, type RuntimeTx } from '../runtime-common.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
 import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
@@ -13,12 +13,12 @@ import { todoWriteTool, prepareTodoUpdate, renderTodoItems } from './todo-tools.
 const itemsSchema = z.array(z.object({ id: z.string().max(64).optional(), reason: z.string().max(200).optional(), content: z.string().min(1).max(100), status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']) }).strict()).max(20)
 const resultSchema = z.object({ todoItems: itemsSchema, toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() })
 
-/** Author directives share the task-state transaction boundary. Saving a
- * directive is not content progress and cannot renew a checkpoint budget. */
-export async function executeDurableDirective(ctx: ToolContext, tool: AgentTool, raw: unknown): Promise<ToolResult> {
+/** DB-only directives, research sections and creative reference artifacts.
+ * Directive bookkeeping is not manuscript progress or a renewed budget. */
+export async function executeDurableTaskArtifact(ctx: ToolContext, tool: AgentTool, raw: unknown): Promise<ToolResult> {
   const capability = ctx.durableTask
   if (!capability || capability.lease.userId !== ctx.userId || capability.lease.runId !== ctx.runId
-    || !['directive_save', 'directive_supersede'].includes(tool.name)) return runtimeError('RUNTIME_SCOPE_MISMATCH', '作者指令缺少原任务能力。')
+    || !(TASK_ARTIFACT_ACTIONS as readonly string[]).includes(tool.name)) return runtimeError('RUNTIME_SCOPE_MISMATCH', '任务资料缺少原任务能力。')
   const lease = { ...capability.lease }, cursor = { ...capability.cursor }
   const normalize = (value: unknown) => Object.fromEntries(Object.entries(tool.parameters.parse(normalizeToolInput(tool, value)) as Record<string, unknown>).filter(([, value]) => value !== undefined))
   const args = normalize(raw)
@@ -28,20 +28,26 @@ export async function executeDurableDirective(ctx: ToolContext, tool: AgentTool,
   const receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
-    if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '作者指令不属于原任务。')
+    if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '任务资料不属于原任务。')
     const result = await tool.execute({ ...ctx, durableTask: undefined, transaction: tx }, args)
     if (result.outcome === 'failed') return runtimeError('DIRECTIVE_WRITE_REJECTED', result.output)
     ctx.signal.throwIfAborted()
     return runtimeJson({ toolResult: result }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || !['DIRECTIVE_WRITE_REJECTED', 'DIRECTIVE_NOT_FOUND', 'DIRECTIVE_CHANGED'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || !['DIRECTIVE_WRITE_REJECTED', 'DIRECTIVE_NOT_FOUND', 'DIRECTIVE_CHANGED',
+      'RESEARCH_REPORT_NOT_AUTHORIZED', 'RESEARCH_RUN_NOT_ACTIVE', 'RESEARCH_REPORT_INVALID', 'RESEARCH_REPORT_CONFLICT',
+      'RESEARCH_TARGET_EVIDENCE_REQUIRED', 'RESEARCH_SOURCE_NOT_FOUND', 'RESEARCH_CITATION_INVALID', 'RESEARCH_REPORT_SECTION_INVALID', 'RESEARCH_REPORT_TOO_LARGE',
+      'NOVEL_NOT_FOUND', 'QUALITY_FINDING_NOT_FOUND', 'VOICE_SAMPLE_COUNT_REQUIRED', 'VOICE_SAMPLE_DUPLICATED', 'VOICE_SAMPLE_EVIDENCE_REQUIRED', 'VOICE_SAMPLE_EVIDENCE_INVALID',
+      'ANCHOR_REVISION_REQUIRED', 'ANCHOR_EVIDENCE_INVALID', 'PRIVATE_STYLE_DISABLED', 'STYLE_SAMPLE_CHAPTER_NOT_FOUND', 'STYLE_SAMPLE_TOO_SHORT', 'STYLE_SAMPLE_TOO_LARGE',
+      'STORY_CHARTER_REQUIRED', 'RESEARCH_DOSSIER_REQUIRED', 'PROTOTYPE_DIRECTION_INVALID'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash,
-      code: error.code, output: error.message, summary: '指令未保存' })
+      code: error.code, output: error.message, summary: tool.name === 'research_report_save' ? '研究报告未保存'
+        : tool.name.startsWith('directive_') ? '指令未保存' : '任务资料未保存' })
   })
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
   const failed = failedToolResultSchema.safeParse(receipt.result)
   if (failed.success) return { ...failed.data.toolResult, outcome: 'failed' }
-  return z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }) }).parse(receipt.result).toolResult
+  return z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
 }
 
 /** Only this root's confirmed/reduced receipt is authoritative; the artifact is a UI copy. */

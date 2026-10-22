@@ -57,3 +57,10 @@ test('zero vulnerabilities requires an explicit complete empty map', () => {
     assert.throws(() => verifyDualAudit({ ...input(), production: { ...zero, vulnerabilities } }), /complete audit/)
   }
 })
+
+test('reports the actual vulnerability gate when npm exits nonzero with a complete finding', () => {
+  for (const severity of ['high', 'critical']) {
+    assert.throws(() => verifyDualAudit({ ...input(), full: report(severity), fullOutcome: 'failure' }), /high\/critical vulnerability/)
+  }
+  assert.throws(() => verifyDualAudit({ ...input(), full: report('low'), fullOutcome: 'failure' }), /complete audit/)
+})

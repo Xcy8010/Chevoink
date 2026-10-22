@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
-import { runtimeError, runtimeJson } from './runtime-common.js'
+import { runtimeError, runtimeJson, TASK_ARTIFACT_ACTIONS } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { prepareOperationInTransaction, recordToolFailureInTransaction } from './runtime-operations.js'
@@ -158,7 +158,7 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     if (metadata && (!['cover_apply', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品设置能力不能用于其他动作。')
     const memory = input.effectDomain === 'memory'
     if (memory && (!['memory_save', 'memory_event_save', 'memory_relation_save'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '记忆能力仅允许原任务保存记忆。')
-    const task = input.effectDomain === 'task' && ['todo_write', 'directive_save', 'directive_supersede'].includes(input.action) && input.targetId === token.taskRootId
+    const task = input.effectDomain === 'task' && ['todo_write', ...TASK_ARTIFACT_ACTIONS].includes(input.action) && input.targetId === token.taskRootId
     if (input.effectDomain === 'task' && !task) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '任务状态能力仅允许更新原任务待办。')
     const structure = input.effectDomain === 'structure'
     const compiler = input.effectDomain === 'compiler'

@@ -55,7 +55,7 @@ export const styleProfileExtractTool = defineTool({
   readOnly: false,
   alwaysConfirm: true,
   async execute(ctx, args) {
-    const result = await extractAuthorStyleProfile({ userId: ctx.userId, novelId: ctx.novelId, title: args.title, chapterIds: args.chapterIds })
+    const result = await extractAuthorStyleProfile({ userId: ctx.userId, novelId: ctx.novelId, title: args.title, chapterIds: args.chapterIds }, ctx.transaction)
     return {
       output: `已从作者明确选定的 ${result.stats.sampleCount} 个章节提取私有 Style DNA（profileId=${result.profileId}，${result.stats.sampleChars} 字符）。仅限当前作品召回；原文不会进入公共技法库。sourceId=${result.sourceId} 可用于撤回。`,
       summary: `提取 Style DNA · ${result.stats.sampleCount} 个样章`,

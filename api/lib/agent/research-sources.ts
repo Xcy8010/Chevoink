@@ -9,6 +9,7 @@ import type { WebReadResult } from '../web-reader-service.js'
 import { countReportChineseCharacters } from '../../../shared/agent-output.js'
 import { mergeResearchRanges } from './research-ranges.js'
 import { evaluateResearchNavigationCandidates, evaluateResearchSearchCandidates } from '../research-search-quality.js'
+import { runtimeJson } from './runtime-common.js'
 
 type Scope = { userId: string; sessionId: string; novelId: string; runId: string }
 
@@ -44,15 +45,21 @@ export const researchReportSaveParameters = z.object({ reportId: z.string().rege
  * stale revision cannot overwrite a newer report. No chapter/plan writes. */
 export async function saveResearchReportSection(scope: Scope, input: {
   reportId: string; title?: string; expectedRevision: number; section: z.infer<typeof reportSectionSchema>;
-}) {
+}, transaction?: Prisma.TransactionClient) {
   const parsed = researchReportSaveParameters.parse(input)
-  return prisma.$transaction(async tx => {
+  const save = async (tx: Prisma.TransactionClient) => {
     // Share the legacy run's row lock with pause/stop. A committed stop cannot
     // be followed by a late report write from that execution.
     await tx.$queryRaw`SELECT id FROM agent_runs WHERE id = ${scope.runId} AND user_id = ${scope.userId} FOR UPDATE`
     const { taskKey, run } = await ownedTask(tx, scope)
     const spec = taskSpecSchema.parse(run.taskSpec)
-    if (spec.intent !== 'research_analysis' || spec.authorization || run.runtimeProtocolVersion !== 0) {
+    const durableRoot = transaction && run.runtimeProtocolVersion === 1 && run.taskRootId
+      ? await tx.agentTaskRoot.findFirst({ where: { id: run.taskRootId, userId: scope.userId, novelId: scope.novelId, sessionId: scope.sessionId } }) : null
+    const original = durableRoot ? taskSpecSchema.parse(durableRoot.specSnapshot) : null
+    // Resume keeps the original task/spec and changes only its executing run.
+    const durable = original && spec.runId === scope.runId
+      && runtimeJson(original).hash === runtimeJson({ ...spec, runId: original.runId }).hash
+    if (spec.intent !== 'research_analysis' || spec.authorization || (run.runtimeProtocolVersion !== 0 && !durable)) {
       throw new DataAccessError(403, 'RESEARCH_REPORT_NOT_AUTHORIZED', '当前执行入口没有研究报告保存权限。')
     }
     if (run.status !== 'running') throw new DataAccessError(409, 'RESEARCH_RUN_NOT_ACTIVE', '任务已停止，报告未被修改。')
@@ -127,13 +134,14 @@ export async function saveResearchReportSection(scope: Scope, input: {
     else await tx.agentArtifact.create({ data: { id, runId: scope.runId, artifactType: 'researchReport', title, content, metadata } })
     return { artifactId: id, revision, chineseCharacters: countReportChineseCharacters(content), replayed: false,
       semanticTransition: { targetId, beforeHash, afterHash: await reportHash(title, sections) } }
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
+  }
+  return transaction ? save(transaction) : prisma.$transaction(save, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
 }
 
 type ReportReadInput = { reportId?: string; offset?: number; limit?: number; expectedRevision?: number }
 
-export function readResearchReport(scope: Scope, input: ReportReadInput) {
-  return loadResearchReport(scope, input, false)
+export function readResearchReport(scope: Scope, input: ReportReadInput, transaction?: Prisma.TransactionClient) {
+  return loadResearchReport(scope, input, false, transaction)
 }
 
 /** Server-only final delivery: one owned, consistent snapshot, not hundreds of
@@ -142,11 +150,11 @@ export function readResearchReportForDelivery(scope: Scope) {
   return loadResearchReport(scope, {}, true)
 }
 
-async function loadResearchReport(scope: Scope, input: ReportReadInput, complete: boolean) {
+async function loadResearchReport(scope: Scope, input: ReportReadInput, complete: boolean, transaction?: Prisma.TransactionClient) {
   const parsed = z.object({ reportId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).default('main'),
     offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(6000).default(6000),
     expectedRevision: z.number().int().nonnegative().optional() }).parse(input)
-  return prisma.$transaction(async tx => {
+  const read = async (tx: Prisma.TransactionClient) => {
     const { taskKey, run } = await ownedTask(tx, scope)
     const spec = taskSpecSchema.safeParse(run.taskSpec)
     const id = hash(JSON.stringify(['research-report', scope.userId, scope.sessionId, taskKey, parsed.reportId]))
@@ -186,7 +194,8 @@ async function loadResearchReport(scope: Scope, input: ReportReadInput, complete
       sections: state.sections.map(section => ({ id: section.id, order: section.order })),
       content: report.content.slice(parsed.offset, end), offset: parsed.offset, totalChars: report.content.length,
       chineseCharacters: countReportChineseCharacters(report.content), nextOffset: end < report.content.length ? end : null, evidence }
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead })
+  }
+  return transaction ? read(transaction) : prisma.$transaction(read, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead })
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const denied = (): never => { throw new DataAccessError(404, 'RESEARCH_SOURCE_NOT_FOUND', '来源不存在或不属于当前任务。') }

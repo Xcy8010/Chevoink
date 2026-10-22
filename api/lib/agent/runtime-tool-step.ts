@@ -15,21 +15,23 @@ import { chapterReadTool, planReadTool, novelGetContextTool, chapterListSummarie
 import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool, chapterCreateTool, chapterRenameTool, preflightChapterReviewWrite } from './tools/chapter-tools.js'
 import { deferReviewWriteInTransaction } from './runtime-review-deferral.js'
 import { executeDurableChapterRename } from './tools/durable-chapter.js'
-import { planSaveTool, planRenameTool, planDeleteTool, memorySaveTool } from './tools/write-tools.js'
+import { planSaveTool, planRenameTool, planDeleteTool, memorySaveTool, planExitTool } from './tools/write-tools.js'
+import { researchReportReadTool, researchReportSaveTool } from './tools/search-tools.js'
+import { platformNovelReadTool, platformNovelSearchTool } from './tools/platform-tools.js'
 import { executeDurablePlanSave } from './tools/durable-plan.js'
 import { executeDurableMemorySave } from './runtime-memory.js'
 import { novelRenameTool, novelUpdateMetaTool, coverPromptSetTool } from './tools/novel-tools.js'
 import { METADATA_ACTIONS, executeDurableMetadata } from './tools/durable-metadata.js'
 import { settleProviderOperation } from './runtime-settlement.js'
 import { volumeListTool, volumeCreateTool, structureOutlineTool, volumeUpdateTool, volumeMoveTool, volumeDeleteTool, chapterMoveTool, chapterMoveToVolumeTool, chapterSplitTool, chapterMergeTool } from './tools/structure-tools.js'
-import { STRUCTURE_MUTATIONS, structureContentTargets } from './runtime-common.js'
+import { STRUCTURE_MUTATIONS, structureContentTargets, TASK_ARTIFACT_ACTIONS } from './runtime-common.js'
 import { executeDurableStructure } from './tools/durable-structure.js'
 import type { AgentTool, ToolContext, ToolResult } from './tools/types.js'
 import { taskContextListTool, taskContextReadTool, executionContextReadTool } from './tools/task-context-tools.js'
 import { sessionHistorySearchTool, sessionMessageReadTool } from './tools/session-history-tools.js'
 import { executeDurableRead } from './tools/durable-read.js'
 import { todoWriteTool } from './tools/todo-tools.js'
-import { executeDurableTodo, executeDurableDirective } from './tools/durable-todo.js'
+import { executeDurableTodo, executeDurableTaskArtifact } from './tools/durable-todo.js'
 import { storyCompilerPrepareTool, sceneTaskBuildTool, chapterBridgeGetTool, continuityValidateTool, chapterBridgeCommitTool } from './tools/story-compiler-tools.js'
 import { executeDurableCompiler } from './tools/durable-compiler.js'
 import { executeDurableContinuity } from './tools/durable-continuity.js'
@@ -40,11 +42,11 @@ import { askUserTool } from './tools/interact-tools.js'
 import { executeDurableQuestion } from './runtime-question.js'
 import { projectSearchTool, entityResolveTool, impactAnalyzeTool, structureValidateTool } from './tools/changeset-tools.js'
 import { storyCharterGetTool, storyCharterSaveTool, readerPromiseSaveTool, readerPromiseUpdateTool } from './tools/story-compiler-tools.js'
-import { qualityReportGetTool, characterVoiceGetTool, experienceAnchorGetTool } from './tools/humanity-quality-tools.js'
+import { qualityReportGetTool, characterVoiceGetTool, experienceAnchorGetTool, qualityFindingFeedbackTool, characterVoiceSaveTool, experienceAnchorSaveTool } from './tools/humanity-quality-tools.js'
 import { memoryReviewListTool, memoryEventSaveTool, memoryRelationSaveTool } from './tools/memory-tools.js'
 import { directiveListTool, directiveSaveTool, directiveSupersedeTool } from './tools/directive-tools.js'
-import { styleProfileGetTool, retrievalTraceReadTool, craftSearchTool, styleLeakageCheckTool } from './tools/craft-library-tools.js'
-import { researchDossierGetTool, firstThreePrototypeGetTool } from './tools/research-dossier-tools.js'
+import { styleProfileGetTool, retrievalTraceReadTool, craftSearchTool, styleLeakageCheckTool, styleProfileExtractTool } from './tools/craft-library-tools.js'
+import { researchDossierGetTool, firstThreePrototypeGetTool, firstThreePrototypeBuildTool } from './tools/research-dossier-tools.js'
 import { novelImportTool } from './tools/import-tools.js'
 import { accountCreditsTool, accountCreditHistoryTool, accountNovelsTool, sessionRenameTool } from './tools/account-tools.js'
 import { executeDurableImport } from './runtime-import.js'
@@ -63,7 +65,7 @@ import { CHILD_ACTIONS } from './runtime-child.js'
 import { executeDurableChildTool } from './runtime-child-tools.js'
 
 const HISTORY_READ_ACTIONS = ['account_credits', 'account_credit_history', 'account_novels', 'task_context_list', 'task_context_read', 'session_history_search', 'session_message_read'] as const
-const DOMAIN_READ_ACTIONS = ['model_list', 'craft_search', 'style_leakage_check', 'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get'] as const
+const DOMAIN_READ_ACTIONS = ['model_list', 'craft_search', 'style_leakage_check', 'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get', 'research_report_read', 'plan_exit', 'platform_novel_search', 'platform_novel_read'] as const
 
 function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
   return { ...tool, execute: (ctx, args) => tool.execute(ctx, tool.parameters.parse(args)) }
@@ -71,6 +73,10 @@ function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
 const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(subAgentRunTool), checkedAdapter(subAgentDelegateTool), checkedAdapter(taskSpawnTool), checkedAdapter(taskWaitTool), checkedAdapter(taskSendTool),
   checkedAdapter(configureAgentTool), checkedAdapter(modelListTool), checkedAdapter(modelAssignmentTool),
+  checkedAdapter(researchReportReadTool), checkedAdapter(researchReportSaveTool), checkedAdapter(planExitTool),
+  checkedAdapter(platformNovelSearchTool), checkedAdapter(platformNovelReadTool),
+  checkedAdapter(qualityFindingFeedbackTool), checkedAdapter(characterVoiceSaveTool), checkedAdapter(experienceAnchorSaveTool),
+  checkedAdapter(styleProfileExtractTool), checkedAdapter(firstThreePrototypeBuildTool),
   checkedAdapter(coverApplyTool),
   checkedAdapter(goalEnableTool), checkedAdapter(goalReadTool), checkedAdapter(goalReportTool),
   checkedAdapter(novelImportTool),
@@ -176,7 +182,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     else if (call.name === 'novel_import') ctx.durableImport = capability
     else if ((METADATA_ACTIONS as readonly string[]).includes(call.name)) ctx.durableMetadata = capability
     else if (['memory_save', 'memory_event_save', 'memory_relation_save'].includes(call.name)) ctx.durableMemory = capability
-    else if (['todo_write', 'directive_save', 'directive_supersede'].includes(call.name)) ctx.durableTask = capability
+    else if (['todo_write', ...TASK_ARTIFACT_ACTIONS].includes(call.name)) ctx.durableTask = capability
     else if (['story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'continuity_validate', 'chapter_bridge_commit', 'quality_analyze'].includes(call.name)) ctx.durableCompiler = { ...capability,
       baseline: ['scene_task_build', 'continuity_validate', 'chapter_bridge_commit', 'quality_analyze'].includes(call.name) ? await readCompilerObservation(tx, root.id, frame.revision, typeof args.compilationId === 'string' ? args.compilationId : undefined) : null }
     else if (call.name === 'chapter_create' || call.name === 'volume_create') ctx.durableCreate = capability
@@ -259,7 +265,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       tx => selected.tool.execute({ ...selected.ctx, durableRead: undefined, transaction: tx }, selected.args)) }
   }
   if (selected.ctx.durableTask) return { kind: 'tool' as const, result: selected.tool.name === 'todo_write'
-    ? await executeDurableTodo(selected.ctx, selected.args) : await executeDurableDirective(selected.ctx, selected.tool, selected.args) }
+    ? await executeDurableTodo(selected.ctx, selected.args) : await executeDurableTaskArtifact(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durablePlan && (selected.tool.name === 'plan_rename' || selected.tool.name === 'plan_delete')) {
     const normalize = (raw: unknown) => selected.tool.parameters.parse(normalizeToolInput(selected.tool, raw))
     return { kind: 'tool' as const, result: await executeDurablePlanSave(selected.ctx, selected.args, normalize,

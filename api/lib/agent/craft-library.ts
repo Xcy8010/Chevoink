@@ -138,12 +138,13 @@ export async function extractAuthorStyleProfile(input: {
   title: string
   chapterIds: string[]
   uploadedFile?: { name: string; size: number; content: string }
-}): Promise<{ profileId: string; sourceId: string; documentId: string; stats: StyleStats }> {
-  await assertOwnedNovel(input.userId, input.novelId)
-  const dataControl = await prisma.agentDataControl.findUnique({ where: { userId_novelId: { userId: input.userId, novelId: input.novelId } }, select: { privateStyleEnabled: true } })
+}, transaction?: Prisma.TransactionClient): Promise<{ profileId: string; sourceId: string; documentId: string; stats: StyleStats }> {
+  const db = transaction ?? prisma
+  await assertOwnedNovel(input.userId, input.novelId, db)
+  const dataControl = await db.agentDataControl.findUnique({ where: { userId_novelId: { userId: input.userId, novelId: input.novelId } }, select: { privateStyleEnabled: true } })
   if (dataControl?.privateStyleEnabled === false) throw new DataAccessError(409, 'PRIVATE_STYLE_DISABLED', '当前作品已关闭 Style DNA 使用，请先在技能区的数据设置中开启。')
   const uniqueIds = [...new Set(input.chapterIds)]
-  const chapters = await prisma.chapter.findMany({
+  const chapters = await db.chapter.findMany({
     where: { id: { in: uniqueIds }, novelId: input.novelId, authorId: input.userId },
     orderBy: { orderIndex: 'asc' },
     select: { id: true, title: true, content: true, revision: true },
@@ -167,7 +168,7 @@ export async function extractAuthorStyleProfile(input: {
     ...(input.uploadedFile ? [`upload:${input.uploadedFile.name}:${input.uploadedFile.size}:${sha256(uploadedSample)}`] : []),
   ].join('|'))
   const passages = splitPassages(samples)
-  const result = await prisma.$transaction(async (tx) => {
+  const save = async (tx: Prisma.TransactionClient) => {
     const source = await tx.corpusSource.create({
       data: {
         userId: input.userId,
@@ -239,7 +240,8 @@ export async function extractAuthorStyleProfile(input: {
       },
     })
     return { source, document, profile }
-  })
+  }
+  const result = transaction ? await save(transaction) : await prisma.$transaction(save)
   return { profileId: result.profile.id, sourceId: result.source.id, documentId: result.document.id, stats }
 }
 

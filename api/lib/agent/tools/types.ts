@@ -76,6 +76,8 @@ export type ToolContext = {
 }
 
 export type ToolResult = {
+  /** Original-root DB observation allowance; not model input or manuscript progress. */
+  platformBudget?: { version: 1; requestHash: string; charged: boolean }
   /** Return-only server diagnostics; never canonical receipt data or authority. */
   resultSemantics?: import('./contract.js').AgentToolResultSemantics
   reviewDecisionFeedback?: import('../chapter-review-guard.js').ReviewDecisionFeedback

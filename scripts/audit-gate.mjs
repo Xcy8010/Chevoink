@@ -7,7 +7,7 @@ const record = value => value !== null && typeof value === 'object' && !Array.is
 function verifiedReport(report, outcome, label) {
   const counts = report?.metadata?.vulnerabilities
   const entries = Object.values(report?.vulnerabilities ?? {})
-  if (outcome !== 'success' || !record(report) || report.auditReportVersion !== 2 || report.error
+  if (!record(report) || report.auditReportVersion !== 2 || report.error
     || !record(report.metadata) || !record(report.vulnerabilities) || !record(counts)
     || !levels.every(level => Number.isSafeInteger(counts[level]) && counts[level] >= 0)
     || counts.total !== levels.reduce((sum, level) => sum + counts[level], 0)
@@ -17,6 +17,7 @@ function verifiedReport(report, outcome, label) {
     throw new Error(`${label}: npm did not return a successful complete audit report`)
   }
   if (counts.high || counts.critical) throw new Error(`${label}: high/critical vulnerability gate failed`)
+  if (outcome !== 'success') throw new Error(`${label}: npm did not return a successful complete audit report`)
   return { status: 'success', vulnerabilities: counts, dependencies: report.metadata.dependencies }
 }
 

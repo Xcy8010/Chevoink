@@ -321,20 +321,20 @@ export async function buildResearchDossier(
   return toDossierView(row)
 }
 
-export async function buildFirstThreePrototype(userId: string, novelId: string, input: FirstThreePrototypeBuild): Promise<FirstThreePrototypeView> {
-  await assertOwnedNovel(userId, novelId)
-  const charter = await prisma.storyCharter.findFirst({ where: { userId, novelId } })
+export async function buildFirstThreePrototype(userId: string, novelId: string, input: FirstThreePrototypeBuild, db: Prisma.TransactionClient = prisma): Promise<FirstThreePrototypeView> {
+  await assertOwnedNovel(userId, novelId, db)
+  const charter = await db.storyCharter.findFirst({ where: { userId, novelId } })
   if (!charter) throw new DataAccessError(409, 'STORY_CHARTER_REQUIRED', '前三章试制前必须先建立 Story Charter。')
   const dossier = input.dossierId
-    ? await prisma.researchDossier.findFirst({ where: { id: input.dossierId, userId, novelId, status: 'ready', expiresAt: { gt: new Date() } } })
-    : await prisma.researchDossier.findFirst({ where: { userId, novelId, status: 'ready', expiresAt: { gt: new Date() } }, orderBy: { version: 'desc' } })
+    ? await db.researchDossier.findFirst({ where: { id: input.dossierId, userId, novelId, status: 'ready', expiresAt: { gt: new Date() } } })
+    : await db.researchDossier.findFirst({ where: { userId, novelId, status: 'ready', expiresAt: { gt: new Date() } }, orderBy: { version: 'desc' } })
   if (!dossier) throw new DataAccessError(409, 'RESEARCH_DOSSIER_REQUIRED', '前三章试制前需要一份未过期的研究档案。')
   const selectedDirection = input.selectedDirectionId
     ? input.directions.find((direction) => direction.id === input.selectedDirectionId)
     : undefined
   if (input.selectedDirectionId && !selectedDirection) throw new DataAccessError(400, 'PROTOTYPE_DIRECTION_INVALID', '选中的故事方向不在候选列表中。')
-  const latest = await prisma.firstThreePrototype.findFirst({ where: { userId, novelId }, orderBy: { version: 'desc' } })
-  const row = await prisma.firstThreePrototype.create({
+  const latest = await db.firstThreePrototype.findFirst({ where: { userId, novelId }, orderBy: { version: 'desc' } })
+  const row = await db.firstThreePrototype.create({
     data: {
       userId, novelId, dossierId: dossier.id, version: (latest?.version ?? 0) + 1,
       status: 'ready', genreRisks: input.genreRisks as Prisma.InputJsonValue,
@@ -351,8 +351,8 @@ export async function buildFirstThreePrototype(userId: string, novelId: string, 
     subjectId: row.id,
     arm: 'agent3_research_guided_v1',
     exposure: { dossierVersion: dossier.version, charterRevision: charter.revision, directionCount: input.directions.length },
-  })
-  await recordWritingSignal(userId, novelId, 'prototype_created')
+  }, db)
+  await recordWritingSignal(userId, novelId, 'prototype_created', 1, db)
   return toPrototypeView(row)
 }
 

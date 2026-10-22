@@ -687,30 +687,31 @@ export async function applyQualityRepair(input: {
 
 export async function recordQualityFindingFeedback(input: {
   userId: string
+  novelId?: string
   findingId: string
   accepted: boolean
   reason?: string
-}) {
-  const finding = await prisma.qualityFinding.findFirst({ where: { id: input.findingId, userId: input.userId } })
+}, db: Prisma.TransactionClient = prisma) {
+  const finding = await db.qualityFinding.findFirst({ where: { id: input.findingId, userId: input.userId, ...(input.novelId ? { novelId: input.novelId } : {}) } })
   if (!finding) throw new DataAccessError(404, 'QUALITY_FINDING_NOT_FOUND', '质量问题不存在或不属于当前用户。')
-  const updated = await prisma.qualityFinding.update({
+  const updated = await db.qualityFinding.update({
     where: { id: finding.id },
     data: { authorFeedback: input.accepted ? 'accepted' : 'rejected', feedbackReason: input.reason?.trim() || null },
   })
   const { recordWritingSignal } = await import('./writing-experiments.js')
-  await recordWritingSignal(input.userId, finding.novelId, input.accepted ? 'quality_feedback_accepted' : 'quality_feedback_rejected')
+  await recordWritingSignal(input.userId, finding.novelId, input.accepted ? 'quality_feedback_accepted' : 'quality_feedback_rejected', 1, db)
   return updated
 }
 
-export async function saveCharacterVoiceProfile(userId: string, novelId: string, input: CharacterVoiceProfileInput) {
-  const novel = await prisma.novel.findFirst({ where: { id: novelId, authorId: userId }, select: { id: true } })
+export async function saveCharacterVoiceProfile(userId: string, novelId: string, input: CharacterVoiceProfileInput, db: Prisma.TransactionClient = prisma) {
+  const novel = await db.novel.findFirst({ where: { id: novelId, authorId: userId }, select: { id: true } })
   if (!novel) throw new DataAccessError(404, 'NOVEL_NOT_FOUND', '作品不存在或不属于当前用户。')
   if (input.confirmed) {
     if (input.voiceSamples.length < 3) throw new DataAccessError(400, 'VOICE_SAMPLE_COUNT_REQUIRED', '确认版 Voice DNA 至少需要 3 条逐字声口样本。')
     if (new Set(input.voiceSamples.map((sample) => sample.text)).size !== input.voiceSamples.length) throw new DataAccessError(400, 'VOICE_SAMPLE_DUPLICATED', '确认版声口样本不能重复。')
     for (const sample of input.voiceSamples) {
       if (!sample.sourceChapterId || !sample.sourceRevision) throw new DataAccessError(400, 'VOICE_SAMPLE_EVIDENCE_REQUIRED', '确认版声口样本必须提供章节与 revision 证据。')
-      const chapter = await prisma.chapter.findFirst({ where: { id: sample.sourceChapterId, novelId, authorId: userId, revision: sample.sourceRevision }, select: { content: true } })
+      const chapter = await db.chapter.findFirst({ where: { id: sample.sourceChapterId, novelId, authorId: userId, revision: sample.sourceRevision }, select: { content: true } })
       if (!chapter || !chapter.content.includes(sample.text)) throw new DataAccessError(400, 'VOICE_SAMPLE_EVIDENCE_INVALID', '声口样本必须逐字存在于指定章节 revision。')
     }
   }
@@ -720,7 +721,7 @@ export async function saveCharacterVoiceProfile(userId: string, novelId: string,
     attentionBias: input.attentionBias, voiceSamples: input.voiceSamples, forbiddenKnowledge: input.forbiddenKnowledge,
     evolutionNotes: input.evolutionNotes, status: input.confirmed ? 'confirmed' as const : 'draft' as const,
   }
-  return prisma.characterVoiceProfile.upsert({
+  return db.characterVoiceProfile.upsert({
     where: { novelId_characterName: { novelId, characterName: input.characterName } },
     create: { novelId, characterName: input.characterName, ...data },
     update: { ...data, revision: { increment: 1 } },
@@ -731,15 +732,15 @@ export async function listCharacterVoiceProfiles(userId: string, novelId: string
   return db.characterVoiceProfile.findMany({ where: { userId, novelId, status: { not: 'archived' } }, orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }] })
 }
 
-export async function saveExperienceAnchor(userId: string, novelId: string, input: ExperienceAnchorInput) {
-  const novel = await prisma.novel.findFirst({ where: { id: novelId, authorId: userId }, select: { id: true } })
+export async function saveExperienceAnchor(userId: string, novelId: string, input: ExperienceAnchorInput, db: Prisma.TransactionClient = prisma) {
+  const novel = await db.novel.findFirst({ where: { id: novelId, authorId: userId }, select: { id: true } })
   if (!novel) throw new DataAccessError(404, 'NOVEL_NOT_FOUND', '作品不存在或不属于当前用户。')
   if (input.sourceType === 'chapter') {
     if (!input.sourceRevision) throw new DataAccessError(400, 'ANCHOR_REVISION_REQUIRED', '章节经历锚点必须携带 revision。')
-    const chapter = await prisma.chapter.findFirst({ where: { id: input.sourceId, novelId, authorId: userId, revision: input.sourceRevision }, select: { content: true } })
+    const chapter = await db.chapter.findFirst({ where: { id: input.sourceId, novelId, authorId: userId, revision: input.sourceRevision }, select: { content: true } })
     if (!chapter || !chapter.content.includes(input.concreteDetail)) throw new DataAccessError(400, 'ANCHOR_EVIDENCE_INVALID', '经历锚点的具体细节必须存在于指定章节 revision。')
   }
-  return prisma.experienceAnchor.upsert({
+  return db.experienceAnchor.upsert({
     where: { novelId_characterName_title_sourceId: { novelId, characterName: input.characterName, title: input.title, sourceId: input.sourceId } },
     create: { userId, novelId, ...input },
     update: input,

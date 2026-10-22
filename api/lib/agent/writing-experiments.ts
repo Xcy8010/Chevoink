@@ -28,12 +28,12 @@ export async function ensureWritingExperiment(input: {
   subjectId: string
   arm: string
   exposure: Record<string, string | number | boolean>
-}) {
-  if (!await analyticsEnabled(input.userId, input.novelId)) return null
+}, db: Prisma.TransactionClient = prisma) {
+  if (!await analyticsEnabled(input.userId, input.novelId, db)) return null
   const subjectHash = hash(`${input.kind}:${input.userId}:${input.novelId}:${input.subjectId}`)
-  const existing = await prisma.writingExperiment.findFirst({ where: { userId: input.userId, novelId: input.novelId, kind: input.kind, subjectHash, status: 'active' } })
+  const existing = await db.writingExperiment.findFirst({ where: { userId: input.userId, novelId: input.novelId, kind: input.kind, subjectHash, status: 'active' } })
   if (existing) return existing
-  return prisma.writingExperiment.create({
+  return db.writingExperiment.create({
     data: {
       userId: input.userId,
       novelId: input.novelId,

@@ -11,6 +11,7 @@ import {
 } from '../permissions.js'
 import type { ToolResult } from './types.js'
 import { defineTool } from './types.js'
+import { observePlatformNovel } from './platform-observation.js'
 
 /**
  * 站内作品查看工具：按书名定位站内已上架作品（任何作者）与本作者未公开作品，
@@ -57,93 +58,97 @@ export const platformNovelSearchTool = defineTool({
   permission: READ_PERMISSION,
   readOnly: true,
   async execute(ctx, args) {
-    if (!consumePlatformSearchBudget(ctx.runId)) {
+    const search = async (): Promise<ToolResult> => {
+      const client = ctx.transaction ?? prisma
+      if (!ctx.transaction && !consumePlatformSearchBudget(ctx.runId)) {
+        return {
+          output:
+            '本次任务的站内作品搜索次数已用完（每次任务最多 5 次）。请基于已获取的搜索结果与既有上下文完成任务，不要再搜索。',
+          summary: '站内搜索预算已用尽',
+        }
+      }
+
+      // 关键词匹配 OR 组（书名模糊 + 标签精确/部分匹配扩展），与全站搜索共用口径
+      const keywordOr = novelKeywordOr(args.query)
+
+      // 两路查询：① 本人作品任意状态；② 平台已上架池（与发现页口径一致）
+      const [ownNovels, publicNovels] = await Promise.all([
+        client.novel.findMany({
+          where: { authorId: ctx.userId, OR: keywordOr },
+          orderBy: { updatedAt: 'desc' },
+          take: 5,
+          select: {
+            id: true,
+            authorId: true,
+            title: true,
+            displayTitle: true,
+            status: true,
+            wordCount: true,
+            tagNames: true,
+            author: { select: { nickname: true } },
+          },
+        }),
+        client.novel.findMany({
+          where: { ...searchableNovelWhere, OR: keywordOr },
+          orderBy: [{ viewCount: 'desc' }, { favoriteCount: 'desc' }, { lastPublishedAt: 'desc' }],
+          take: 8,
+          select: {
+            id: true,
+            authorId: true,
+            title: true,
+            displayTitle: true,
+            status: true,
+            wordCount: true,
+            tagNames: true,
+            author: { select: { nickname: true } },
+          },
+        }),
+      ])
+
+      // 合并去重：本人作品优先（同书在平台池也出现时以本人视角的状态为准）
+      const merged = new Map<string, (typeof ownNovels)[number]>()
+      for (const novel of publicNovels) {
+        merged.set(novel.id, novel)
+      }
+      for (const novel of ownNovels) {
+        merged.set(novel.id, novel)
+      }
+      const results = [...merged.values()]
+
+      if (results.length === 0) {
+        return {
+          output: `站内搜索「${args.query}」没有找到匹配的作品。可换标签/题材特征词重试，或用 web_search 搜站外类似作品。`,
+          summary: `已搜索作品「${args.query}」· 0 个结果`,
+          display: { kind: 'platformNovelSearch', query: args.query, results: [] },
+        }
+      }
+
+      const lines = results.map((novel, index) => {
+        const isOwn = novel.authorId === ctx.userId
+        const title = novel.displayTitle ?? novel.title
+        const label = novelStatusLabel(isOwn, novel.status)
+        const tags = novel.tagNames.length ? ` · 标签：${novel.tagNames.join('、')}` : ''
+        return `[${index + 1}] novelId=${novel.id} 《${title}》 ${novel.author.nickname} · ${label} · ${novel.wordCount} 字${tags}`
+      })
+
       return {
-        output:
-          '本次任务的站内作品搜索次数已用完（每次任务最多 5 次）。请基于已获取的搜索结果与既有上下文完成任务，不要再搜索。',
-        summary: '站内搜索预算已用尽',
+        output: `站内搜索「${args.query}」共 ${results.length} 个结果：\n${lines.join('\n')}\n要查看某部作品的介绍与章节，用 platform_novel_read 传对应 novelId；带 chapterId 可继续读章节正文。`,
+        summary: `已搜索作品「${args.query}」· ${results.length} 个结果`,
+        display: {
+          kind: 'platformNovelSearch',
+          query: args.query,
+          results: results.map((novel) => ({
+            id: novel.id,
+            title: novel.displayTitle ?? novel.title,
+            authorName: novel.author.nickname,
+            isOwn: novel.authorId === ctx.userId,
+            published: novel.status === 'published' || novel.status === 'completed',
+            wordCount: novel.wordCount,
+          })),
+        },
       }
     }
-
-    // 关键词匹配 OR 组（书名模糊 + 标签精确/部分匹配扩展），与全站搜索共用口径
-    const keywordOr = novelKeywordOr(args.query)
-
-    // 两路查询：① 本人作品任意状态；② 平台已上架池（与发现页口径一致）
-    const [ownNovels, publicNovels] = await Promise.all([
-      prisma.novel.findMany({
-        where: { authorId: ctx.userId, OR: keywordOr },
-        orderBy: { updatedAt: 'desc' },
-        take: 5,
-        select: {
-          id: true,
-          authorId: true,
-          title: true,
-          displayTitle: true,
-          status: true,
-          wordCount: true,
-          tagNames: true,
-          author: { select: { nickname: true } },
-        },
-      }),
-      prisma.novel.findMany({
-        where: { ...searchableNovelWhere, OR: keywordOr },
-        orderBy: [{ viewCount: 'desc' }, { favoriteCount: 'desc' }, { lastPublishedAt: 'desc' }],
-        take: 8,
-        select: {
-          id: true,
-          authorId: true,
-          title: true,
-          displayTitle: true,
-          status: true,
-          wordCount: true,
-          tagNames: true,
-          author: { select: { nickname: true } },
-        },
-      }),
-    ])
-
-    // 合并去重：本人作品优先（同书在平台池也出现时以本人视角的状态为准）
-    const merged = new Map<string, (typeof ownNovels)[number]>()
-    for (const novel of publicNovels) {
-      merged.set(novel.id, novel)
-    }
-    for (const novel of ownNovels) {
-      merged.set(novel.id, novel)
-    }
-    const results = [...merged.values()]
-
-    if (results.length === 0) {
-      return {
-        output: `站内搜索「${args.query}」没有找到匹配的作品。可换标签/题材特征词重试，或用 web_search 搜站外类似作品。`,
-        summary: `已搜索作品「${args.query}」· 0 个结果`,
-        display: { kind: 'platformNovelSearch', query: args.query, results: [] },
-      }
-    }
-
-    const lines = results.map((novel, index) => {
-      const isOwn = novel.authorId === ctx.userId
-      const title = novel.displayTitle ?? novel.title
-      const label = novelStatusLabel(isOwn, novel.status)
-      const tags = novel.tagNames.length ? ` · 标签：${novel.tagNames.join('、')}` : ''
-      return `[${index + 1}] novelId=${novel.id} 《${title}》 ${novel.author.nickname} · ${label} · ${novel.wordCount} 字${tags}`
-    })
-
-    return {
-      output: `站内搜索「${args.query}」共 ${results.length} 个结果：\n${lines.join('\n')}\n要查看某部作品的介绍与章节，用 platform_novel_read 传对应 novelId；带 chapterId 可继续读章节正文。`,
-      summary: `已搜索作品「${args.query}」· ${results.length} 个结果`,
-      display: {
-        kind: 'platformNovelSearch',
-        query: args.query,
-        results: results.map((novel) => ({
-          id: novel.id,
-          title: novel.displayTitle ?? novel.title,
-          authorName: novel.author.nickname,
-          isOwn: novel.authorId === ctx.userId,
-          published: novel.status === 'published' || novel.status === 'completed',
-          wordCount: novel.wordCount,
-        })),
-      },
-    }
+    return ctx.transaction ? observePlatformNovel(ctx, 'platform_novel_search', args, search, ctx.transaction) : search()
   },
 })
 
@@ -172,6 +177,8 @@ export const platformNovelReadTool = defineTool({
   async execute(ctx, args) {
     const offset = args.offset ?? 0
     const limit = args.limit ?? 6000
+    if (ctx.transaction) return observePlatformNovel(ctx, 'platform_novel_read', { novelId: args.novelId, chapterId: args.chapterId ?? null, offset, limit },
+      () => readPlatformNovel(ctx.userId, args.novelId, args.chapterId, offset, limit, ctx.transaction), ctx.transaction)
     const cacheKey = `${args.novelId}|${args.chapterId ?? ''}|${offset}|${limit}`
 
     // 同 run 内相同入参去重：命中缓存直接返回，不扣深读预算
@@ -200,8 +207,10 @@ async function readPlatformNovel(
   chapterId: string | undefined,
   offset: number,
   limit: number,
+  transaction?: Prisma.TransactionClient,
 ): Promise<ToolResult> {
-  const novel = await prisma.novel.findUnique({
+  const client = transaction ?? prisma
+  const novel = await client.novel.findUnique({
     where: { id: novelId },
     select: {
       id: true,
@@ -259,7 +268,7 @@ async function readPlatformNovel(
   }
 
   if (chapterId) {
-    const chapter = await prisma.chapter.findFirst({
+    const chapter = await client.chapter.findFirst({
       where: { ...chapterWhere, id: chapterId },
       select: {
         id: true,
@@ -299,7 +308,7 @@ async function readPlatformNovel(
     }
   }
 
-  const chapters = await prisma.chapter.findMany({
+  const chapters = await client.chapter.findMany({
     where: chapterWhere,
     orderBy: { orderIndex: 'asc' },
     take: CHAPTER_LIST_IN_OUTPUT,

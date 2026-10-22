@@ -128,6 +128,9 @@ export function matchesToolObservation(action: string, output: string, observed:
 }
 
 export const STRUCTURE_MUTATIONS = ['volume_update', 'volume_move', 'volume_delete', 'chapter_move', 'chapter_move_to_volume', 'chapter_split', 'chapter_merge'] as const
+/** DB-only task artifacts; none of these is manuscript write authority. */
+export const TASK_ARTIFACT_ACTIONS = ['directive_save', 'directive_supersede', 'research_report_save', 'quality_finding_feedback',
+  'character_voice_save', 'experience_anchor_save', 'style_profile_extract', 'first_three_prototype_build'] as const
 
 export function structureContentTargets(action: string, args: Record<string, unknown>): string[] {
   return action === 'chapter_split' ? [String(args.chapterId)] : action === 'chapter_merge' ? [String(args.targetChapterId), String(args.sourceChapterId)] : []

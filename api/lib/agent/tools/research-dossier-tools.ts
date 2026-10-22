@@ -185,7 +185,7 @@ export const firstThreePrototypeBuildTool = defineTool({
   permission: PLAN_BUILD_WRITE,
   readOnly: false,
   async execute(ctx, args) {
-    const prototype = await buildFirstThreePrototype(ctx.userId, ctx.novelId, args)
+    const prototype = await buildFirstThreePrototype(ctx.userId, ctx.novelId, args, ctx.transaction)
     const items = prototype.chapterBlueprints.map((chapter) => `第 ${chapter.orderIndex} 章「${chapter.title}」：${chapter.concreteEvent}｜选择：${chapter.protagonistChoice}｜代价：${chapter.cost}`)
     return {
       output: `前三章试制 v${prototype.version} 已建立，prototypeId=${prototype.id}。先让作者选择方向（若尚未选择），再逐章执行 Story Compiler 和质量门；通过前三章样本后才扩完整长纲。\n题材风险：${prototype.genreRisks.join('；')}\n${items.join('\n')}`,

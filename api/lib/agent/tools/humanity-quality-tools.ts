@@ -648,7 +648,7 @@ export const qualityFindingFeedbackTool = defineTool({
   parameters: z.object({ findingId: z.string().min(1), accepted: z.boolean(), reason: z.string().max(500).optional() }),
   permission: WRITE, readOnly: false,
   async execute(ctx, args) {
-    const finding = await recordQualityFindingFeedback({ userId: ctx.userId, ...args })
+    const finding = await recordQualityFindingFeedback({ userId: ctx.userId, novelId: ctx.novelId, ...args }, ctx.transaction)
     return { output: `已记录作者${args.accepted ? '接受' : '拒绝'} ${findingLabel(finding.signal)} finding；只影响后续置信度，不覆盖正文证据。`, summary: '记录质量反馈' }
   },
 })
@@ -668,7 +668,7 @@ export const characterVoiceSaveTool = defineTool({
   description: '保存 Character Voice DNA。仅在作者明确提供/确认声口规则，或从作者确认章节逐字引用 1–10 条短样本时使用；Agent 自行推断只能存 draft，禁止冒充确认。confirmed=true 时每条样本必须带 chapterId/revision 且逐字存在。',
   parameters: characterVoiceProfileInputSchema, permission: WRITE, readOnly: false,
   async execute(ctx, args) {
-    const profile = await saveCharacterVoiceProfile(ctx.userId, ctx.novelId, args)
+    const profile = await saveCharacterVoiceProfile(ctx.userId, ctx.novelId, args, ctx.transaction)
     return { output: `${profile.characterName} Voice DNA 已保存为 ${profile.status} r${profile.revision}。${profile.status === 'draft' ? '草稿不会进入质量 Critic，需作者确认后再启用。' : '后续相关对白只召回这份确认版短画像。'}`, summary: `保存人物声口 · ${profile.characterName}` }
   },
 })
@@ -688,12 +688,14 @@ export const experienceAnchorSaveTool = defineTool({
   description: '仅保存作者明确确认的经历，或指定章节 revision 中逐字存在的具体细节。章节证据必须可验证；临时试写和模型臆测禁止沉淀。',
   parameters: experienceAnchorToolSchema, permission: WRITE, readOnly: false,
   async execute(ctx, args) {
+    const task = ctx.transaction && args.sourceType === 'author_input'
+      ? await ctx.transaction.agentRun.findFirstOrThrow({ where: { id: ctx.runId, userId: ctx.userId, novelId: ctx.novelId, sessionId: ctx.sessionId }, select: { taskRootId: true } }) : null
     const anchor = await saveExperienceAnchor(ctx.userId, ctx.novelId, {
       characterName: args.characterName, title: args.title, triggerEvent: args.triggerEvent, concreteDetail: args.concreteDetail,
       sensoryCue: args.sensoryCue, habitualResponse: args.habitualResponse, emotionalMeaning: args.emotionalMeaning,
-      sourceType: args.sourceType, sourceId: args.sourceType === 'chapter' ? args.sourceChapterId! : ctx.runId,
+      sourceType: args.sourceType, sourceId: args.sourceType === 'chapter' ? args.sourceChapterId! : task?.taskRootId ?? ctx.runId,
       sourceRevision: args.sourceType === 'chapter' ? args.sourceRevision : undefined,
-    })
+    }, ctx.transaction)
     return { output: `已保存 ${anchor.characterName} 的经历锚点「${anchor.title}」，来源=${anchor.sourceType}:${anchor.sourceId}${anchor.sourceRevision ? `@r${anchor.sourceRevision}` : ''}。`, summary: `保存经历锚点 · ${anchor.title}` }
   },
 })
