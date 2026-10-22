@@ -14,7 +14,8 @@ import { terminalCandidateFacts } from '../../api/lib/agent/terminal-fact-identi
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
-import { terminalFeedbackSlots, terminalCorrectionReceiptKey } from '../../api/lib/agent/terminal-feedback-handoff.js'
+import { terminalFeedbackSlots } from '../../api/lib/agent/terminal-feedback-handoff.js'
+import { terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
 import { observeChapterReviewProgress, observeSemanticReadProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -31,14 +32,16 @@ const fixture: typeof durableFixture = (work, ...rest) => durableFixture(async f
 const checks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body review.', findingIndexes: [] }))
 
 describe.runIf(available)('authenticated native review hands a rejected current-state candidate back to the original task', () => {
-  it.each((['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)))(
+  it.each([...(['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)), ...(['old-slots', 'local-refusal', 'objects', 'commit-reserved', 'commit-unknown', 'multiple-candidates', 'no-proposal'] as const).map(scenario => ['settled', scenario] as const)])(
     'preserves failed requests and permits bounded candidate processing: %s / %s', (billing, scenario) => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
     vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
-    const body = 'He stops at the control-room doorway, before turning the wheel.', accurate = 'At the control-room doorway, before crossing it.'
-    const bad = terminalCandidateSchema.parse({ exitState: { location: 'Inside the first door of the control room.', action: 'Preparing to turn the first-door wheel.' }, lastUnfinishedAction: 'The first-door wheel has not been turned.' })
-    const good = terminalCandidateSchema.parse({ exitState: { location: accurate, action: 'Preparing to turn the control-room doorway wheel.' }, lastUnfinishedAction: 'The doorway wheel has not been turned.' })
+    const body = 'He stops at the control-room doorway, before turning the wheel. The packet remains on the desk.', accurate = 'At the control-room doorway, before crossing it.'
+    const bad = terminalCandidateSchema.parse({ exitState: { location: scenario === 'objects' ? accurate : 'Inside the first door of the control room.',
+      action: 'Preparing to turn the first-door wheel.', ...(scenario === 'objects' ? { objects: ['The packet has been archived.'] } : {}) }, lastUnfinishedAction: 'The first-door wheel has not been turned.' })
+    const good = terminalCandidateSchema.parse({ exitState: { location: accurate, action: 'Preparing to turn the control-room doorway wheel.',
+      ...(scenario === 'objects' ? { objects: ['The packet remains on the desk.'] } : {}) }, lastUnfinishedAction: 'The doorway wheel has not been turned.' })
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { orderIndex: 2, orderInVolume: 2, revision: 8, content: body, wordCount: body.length } })
     await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: chapter.volumeId, title: 'Synthetic predecessor', orderIndex: 1, orderInVolume: 1, revision: 15,
       content: 'He crossed the first door, the middle chamber, then the second door into the control room.', wordCount: 90 } })
@@ -58,18 +61,20 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     const source = await readCompilerContinuitySource(prisma, f, chapter, saved.bridge!.fromChapterId, 11)
     expect(source?.content).toContain('second door')
     const evidence = terminalEvidenceContext(chapter, source, 2, 1, terminalCoverageInput(original.spec, saved.preparedContext, chapter, bad, 2), 5)
-    const rejected = { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(bad).map(fact => ({ factId: fact.id, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }, ...(fact.field === 'location' ? [{ segmentId: 'p0' }] : [])] })), terminalProofVerdicts: [], terminalDispositions: [] }
+    const rejectedPath = scenario === 'objects' ? 'exitState.objects.0' : 'exitState.location'
+    const rejected = { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(bad).map(fact => ({ factId: fact.id, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }, ...(fact.path === rejectedPath ? [{ segmentId: 'p0' }] : [])] })), terminalProofVerdicts: [], terminalDispositions: [] }
     const inspected = inspectContinuityResponse(JSON.stringify(rejected), { current: body, previous: source!.content, terminalEvidence: evidence }, true, 8, bad)
-    expect(inspected).toMatchObject({ complete: false, audit: { classification: 'terminal_invalid', terminalReviewDiagnostics: [{ code: 'inheritance_invalid', path: 'exitState.location' }] } })
+    expect(inspected).toMatchObject({ complete: false, audit: { classification: 'terminal_invalid', terminalReviewDiagnostics: [{ code: 'inheritance_invalid', path: rejectedPath }] } })
     await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: 8, independentCheck: 'unavailable', findings: [], terminalCandidate: bad,
       coverage: compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: bad }, 11), continuityCriticResponse: inspected.audit })
     await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: chapter.id, chapterRevision: 8, mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
-    expect(readiness?.terminalCorrection).toMatchObject({ paths: ['exitState.location'] })
+    expect(readiness?.terminalCorrection).toMatchObject({ paths: [rejectedPath] })
     expect(readiness).toMatchObject({ quality: 'complete', requiredTools: [{ name: 'continuity_validate' }] })
     expect(readiness?.progressEvidence?.phases).not.toContain('terminal')
     const slots = terminalFeedbackSlots(readiness, { ...f, taskSpec: spec })!
     expect(slots).toHaveLength(4)
+    const processingKey = terminalProcessingPlan(readiness, { ...f, taskSpec: spec }, new Set())!.key
     const seen = new Set<string>()
     // Previously persisted quality and workflow receipts cannot reset the
     // exhausted stall counter when this original task is continued again.
@@ -91,12 +96,23 @@ describe.runIf(available)('authenticated native review hands a rejected current-
         failureCode: billing === 'unknown' ? 'AI_PROVIDER_TRANSPORT' : 'CONTINUITY_REPORT_INCOMPLETE',
         ...(billing === 'settled' ? { reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: 8,
           contentHash: createHash('sha256').update(body).digest('hex'), usageIds: [old.id] } } : {}) } }] })
-    const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'run.paused', createdAt: at(1002), payload: { reason: 'model_stalled' } } })
+    const pauseSeq = scenario === 'local-refusal' || scenario === 'commit-unknown' ? 6 : 3
+    if (scenario === 'commit-unknown') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4,
+      type: 'tool.call', createdAt: at(2000), payload: { callId: `terminal_commit_${processingKey.slice(0, 40)}`,
+        toolName: 'chapter_bridge_commit', args: { compilationId: compilation.id } } } })
+    if (scenario === 'local-refusal') await prisma.agentRunEvent.createMany({ data: [
+      { runId: f.runId, seq: 4, type: 'tool.call', createdAt: at(2000), payload: { callId: 'local-stale', toolName: 'continuity_validate',
+        args: { compilationId: compilation.id, terminalPatch: { baseCandidateHash: 'f'.repeat(64) } } } },
+      { runId: f.runId, seq: 5, type: 'tool.result', createdAt: at(2100), payload: { callId: 'local-stale', toolName: 'continuity_validate', ok: false,
+        failureCode: 'CONTINUITY_INPUT_STALE' } },
+    ] })
+    const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: pauseSeq, type: 'run.paused', createdAt: at(2200), payload: { reason: 'model_stalled' } } })
     const history = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
-    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', activeExecutionMs: 200, stagnantBatches: 7, runStartedAt: start, resumeCount: 0, compactionCount: 0,
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', activeExecutionMs: 200, stagnantBatches: scenario === 'local-refusal' ? 4 : 7, runStartedAt: start, resumeCount: 0, compactionCount: 0,
       maxTurns: 1, tokenBudget: 500, writeProgress: 1, writeBaseline: 0, readProgress: 7, readBaseline: 0, progressSignatures: [...seen], reviewAttempts: ['old-attempt'],
-      pendingReviews: billing === 'unknown' ? [{ compilationId: compilation.id, chapterId: chapter.id, revision: 8, toolName: 'continuity_validate', callId: 'original-ended' }] : [],
-      consumedReviewDecisionFeedback: [] as string[], inheritedTokens: 0, inheritedTurns: 0, manualResumeCount: 0 }
+      pendingReviews: scenario === 'local-refusal' ? [{ compilationId: compilation.id, chapterId: chapter.id, revision: 8, toolName: 'continuity_validate', callId: 'local-stale' }] : billing === 'unknown' ? [{ compilationId: compilation.id, chapterId: chapter.id, revision: 8, toolName: 'continuity_validate', callId: 'original-ended' }] : [],
+      consumedReviewDecisionFeedback: scenario === 'old-slots' ? [...slots] : [] as string[], inheritedTokens: 0, inheritedTurns: 0, manualResumeCount: 0 }
+    if (scenario === 'commit-reserved' || scenario === 'commit-unknown') checkpoint.reviewAttempts.push(`terminal-commit:${processingKey}`)
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', currentTurn: 26, startedAt: at(0), usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, checkpoint } } })
     const window = credits.getCreditWindow()
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
@@ -108,78 +124,81 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     let calls = 0
     const network = vi.fn(async () => {
       calls++
-      if (calls > 3) throw Error('No extra critic request is permitted')
-      const parts = calls <= 2 ? { ...rejected, ...(calls === 2 ? { decisions: [] } : {}) }
+      if (calls > (scenario === 'repeat' ? 2 : 1)) throw Error('No extra critic request is permitted')
+      const parts = scenario === 'repeat' ? { ...rejected, ...(calls === 2 ? { decisions: [] } : {}) }
         : { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(good).map(fact => ({ factId: fact.id, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })), terminalProofVerdicts: [], terminalDispositions: [] }
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(parts) }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     })
     vi.stubGlobal('fetch', network)
     let turn = 0, interrupted = false
-    let firstFeedback: string[] | undefined
-    const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async ({ messages }) => {
-      if (main.mock.calls.length > (scenario === 'restart' ? 6 : 5)) throw Error('Bounded candidate processing must terminate')
+    let firstAttempts: string[] | undefined
+    const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async ({ messages, tools }) => {
+      if (main.mock.calls.length > (scenario === 'restart' ? 4 : 3)) throw Error('Bounded candidate processing must terminate')
       if (turn === 0) {
+        expect(JSON.stringify(messages)).toContain(body)
         expect(JSON.stringify(messages)).toContain('terminalPatch')
-        // Both real bootstrap requests must finish before the original task
-        // sees feedback; each original request keeps its exact billing truth.
-        expect(network).toHaveBeenCalledTimes(2)
-        const events = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { gt: 3 } }, orderBy: { seq: 'asc' } })
-        const bootstrap = events.filter(event => event.type === 'tool.call' && String((event.payload as { callId?: string }).callId).startsWith('continued_review_'))
-        expect(bootstrap).toHaveLength(1)
-        expect(events.find(event => event.type === 'tool.result' && (event.payload as { callId?: string }).callId === (bootstrap[0].payload as { callId: string }).callId)?.payload)
-          .toMatchObject({ ok: false, failureCode: 'CONTINUITY_REPORT_INCOMPLETE' })
+        expect(tools.map(tool => tool.function.name)).toEqual(['continuity_validate'])
+        expect(network).not.toHaveBeenCalled()
         const current = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
         const cp = (current.usage as { checkpoint: typeof checkpoint }).checkpoint
         expect(cp.pendingReviews ?? []).toEqual([])
-        expect(cp.consumedReviewDecisionFeedback).toContain(terminalCorrectionReceiptKey(slots))
-        expect(cp.reviewAttempts.some(key => key.startsWith(billing === 'settled' ? 'continuity-author-recovery:' : 'author-continued-review:'))).toBe(true)
-        expect(cp.stagnantBatches).toBeGreaterThanOrEqual(7)
+        expect(cp.consumedReviewDecisionFeedback ?? []).toEqual(checkpoint.consumedReviewDecisionFeedback)
+        expect(cp.stagnantBatches).toBeGreaterThanOrEqual(checkpoint.stagnantBatches)
+        expect(cp.reviewAttempts.filter(key => key.startsWith('terminal-processing:'))).toHaveLength(interrupted ? 2 : 1)
         if (scenario === 'restart' && !interrupted) {
-          expect(cp.consumedReviewDecisionFeedback.filter(key => slots.includes(key))).toEqual([slots[0]])
-          firstFeedback = cp.consumedReviewDecisionFeedback
+          firstAttempts = cp.reviewAttempts
           interrupted = true
-          throw new DOMException('Synthetic interruption after the actual handoff checkpoint', 'AbortError')
+          throw new DOMException('Synthetic interruption after processing claim', 'AbortError')
         }
-        if (scenario === 'restart') {
-          expect(cp.consumedReviewDecisionFeedback).toEqual(expect.arrayContaining(firstFeedback!))
-          expect(cp.consumedReviewDecisionFeedback.filter(key => slots.includes(key))).toEqual(slots.slice(0, 2))
-        }
+        if (scenario === 'restart') expect(cp.reviewAttempts).toEqual(expect.arrayContaining(firstAttempts!))
       }
+      if (scenario === 'no-proposal') return { content: '无法安全确定。', reasoning: '', finishReason: 'stop', toolCalls: [],
+        usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
       turn++
-      const call = turn === 1 ? { id: 'read-real-body', name: 'chapter_read', arguments: JSON.stringify({ chapterId: chapter.id }) }
-        : turn === 2 ? { id: 'read-saved-candidate', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId: compilation.id }) }
-        : turn === 3 ? { id: 'correct-only-candidate', name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id, terminalPatch: scenario === 'repeat'
-          ? { baseCandidateHash: runtimeJson(bad).hash }
-          : { baseCandidateHash: runtimeJson(bad).hash, removeFactIds: terminalCandidateFacts(bad).map(fact => fact.id), addFacts: terminalCandidateFacts(good).map(({ field, claim }) => ({ field, claim })) } }) }
-        : turn === 4 ? { id: scenario === 'repeat' ? 'read-rejected-again' : 'actual-commit', name: scenario === 'repeat' ? 'chapter_bridge_get' : 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: compilation.id }) } : undefined
-      return { content: call ? '' : 'Completed.', reasoning: '', finishReason: call ? 'tool_calls' : 'stop', toolCalls: call ? [call] : [], usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
+      const call = turn === 1 || scenario === 'repeat'
+        ? { id: 'correct-only-candidate-' + turn, name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id,
+          terminalPatch: scenario === 'repeat' ? { baseCandidateHash: runtimeJson(bad).hash }
+            : { baseCandidateHash: runtimeJson(bad).hash, removeFactIds: terminalCandidateFacts(bad).map(fact => fact.id),
+              addFacts: terminalCandidateFacts(good).map(({ field, claim }) => ({ field, claim })) } }) }
+        : turn === 2 ? { id: 'actual-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: compilation.id }) } : undefined
+      const proposals = call ? [call] : []
+      if (scenario === 'multiple-candidates' && call) proposals.push({ ...call, id: call.id + '-extra' },
+        { id: 'unexpected-body-write', name: 'chapter_append', arguments: JSON.stringify({ chapterId: chapter.id, content: 'Unapproved candidate-processing body change.' }) })
+      return { content: call ? '' : 'Completed.', reasoning: '', finishReason: call ? 'tool_calls' : 'stop', toolCalls: proposals,
+        usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
     })
-    await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: pause.id, afterSeq: 3 }, eventStartSeq: 3, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
+    await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: pause.id, afterSeq: pauseSeq }, eventStartSeq: pauseSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     if (scenario === 'restart') {
       expect(main).toHaveBeenCalledOnce()
-      expect(network).toHaveBeenCalledTimes(2)
+      expect(network).not.toHaveBeenCalled()
       const interruptedRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
       expect(interruptedRun.status).toBe('paused')
-      expect((interruptedRun.usage as { checkpoint: typeof checkpoint }).checkpoint.consumedReviewDecisionFeedback).toEqual(firstFeedback)
+      expect((interruptedRun.usage as { checkpoint: typeof checkpoint }).checkpoint.reviewAttempts).toEqual(firstAttempts)
       const events = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
       const stop = events.filter(event => event.type === 'run.paused').at(-1)!
-      expect(stop.seq).toBeGreaterThan(3)
+      expect(stop.seq).toBeGreaterThan(pauseSeq)
       const afterSeq = events.at(-1)!.seq
       await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: stop.id, afterSeq }, eventStartSeq: afterSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     }
-    expect(network).toHaveBeenCalledTimes(scenario === 'repeat' ? 2 : 3)
-    expect(main.mock.calls.length).toBeGreaterThanOrEqual(scenario === 'restart' ? 4 : 3)
-    expect(main.mock.calls.length).toBeLessThanOrEqual(scenario === 'restart' ? 6 : 5)
+    expect(network).toHaveBeenCalledTimes(scenario === 'no-proposal' ? 0 : scenario === 'repeat' ? 2 : 1)
+    expect(main).toHaveBeenCalledTimes(scenario === 'restart' || scenario === 'repeat' ? 2 : 1)
     expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
-    expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: 3 } }, orderBy: { seq: 'asc' } })).toEqual(history)
+    expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: pauseSeq } }, orderBy: { seq: 'asc' } })).toEqual(history)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: body, revision: 8 })
     const used = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, id: { not: old.id } } })
     expect(used).toHaveLength(network.mock.calls.length)
     expect(used.every(row => row.usageSource === 'reported' && row.billingStatus === 'settled' && row.reservedCreditMilli === 0)).toBe(true)
     expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(network.mock.calls.length)
     const final = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
-    expect(final.bridge!.committedAt === null).toBe(scenario === 'repeat')
-    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).status).toBe(scenario === 'repeat' ? 'paused' : 'completed')
-    if (scenario !== 'repeat') expect(final.bridge).toMatchObject({ location: accurate, lastUnfinishedAction: good.lastUnfinishedAction })
+    const stopped = scenario === 'repeat' || scenario === 'commit-unknown' || scenario === 'no-proposal'
+    if (scenario === 'no-proposal') expect((final.validation as { continuityCriticResponse: unknown }).continuityCriticResponse).toEqual(inspected.audit)
+    expect(final.bridge!.committedAt === null).toBe(stopped)
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).status).toBe(stopped ? 'paused' : 'completed')
+    if (!stopped) {
+      expect(final.bridge).toMatchObject({ location: accurate, lastUnfinishedAction: good.lastUnfinishedAction })
+      const committed = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
+      expect(committed?.terminalCommitted).toBe(true)
+      expect(terminalProcessingPlan(committed, { ...f, taskSpec: spec }, new Set())).toBeNull()
+    }
   }, undefined, '修复本章', { continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 1 }), 30000)
 })

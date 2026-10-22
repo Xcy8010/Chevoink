@@ -13,6 +13,7 @@ import { readKnownFailedContinuityCorrection } from './continuity-response-corre
 import { readOwnedContinuityReassessment, readUnsentContinuityAdmission } from './continuity-reassessment-witness.js'
 import { hasContinuitySourceAuthority } from './continuity-source-authority.js'
 import { hasTerminalEvidenceProtocol, terminalEvidenceVersion } from './terminal-evidence-context.js'
+import { readReviewRequestRecoveryEvidence } from './review-request-recovery.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const capCodes = new Set(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED'])
@@ -116,6 +117,8 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     events = events.filter(event => event.id !== call.id)
   }
   const keys: Array<[string, string]> = []
+  const localRefusals = new Set((await readReviewRequestRecoveryEvidence(tx, subject))
+    .filter(item => item.notDispatched).map(item => `${item.receipt.sourceRunId}:${item.callId}`))
   for (const compilation of compilations) {
     const validation = object(compilation.validation), coverage = object(validation.coverage)
     if (compilation.status !== 'active' || !compilation.chapterId || validation.independentCheck !== 'unavailable'
@@ -149,6 +152,7 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     // actual assessment. No generic failure or unconfirmed request is skipped.
     const executedCalls = calls.filter(call => {
       const start = object(call.payload)
+      if (localRefusals.has(`${call.runId}:${String(start.callId)}`)) return false
       const pair = events.filter(event => event.runId === call.runId && object(event.payload).callId === start.callId)
       const result = pair.find(event => event.type === 'tool.result'), end = object(result?.payload)
       return !(pair.length === 2 && start.autoApproved === false && result && result.seq === call.seq + 1

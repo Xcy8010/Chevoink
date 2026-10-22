@@ -42,13 +42,25 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
   for (const result of history) {
     const payload = object(result.payload), proof = object(payload.reviewRequestFinished)
     if (result.type !== 'tool.result' || payload.ok !== false || !reviewers.includes(String(payload.toolName))
-      || proof.version !== 1 || !Array.isArray(proof.usageIds) || !proof.usageIds.length || typeof payload.callId !== 'string'
+      || typeof payload.callId !== 'string'
       || candidates.some(item => item.callId === payload.callId)) continue
     const call = history.find(row => row.type === 'tool.call' && row.runId === result.runId && object(row.payload).callId === payload.callId)
-    if (!call || typeof proof.chapterId !== 'string' || !Number.isSafeInteger(proof.revision)) continue
+    if (!call) continue
     const args = object(object(call.payload).args)
-    candidates.push({ callId: payload.callId, toolName: payload.toolName as PendingReviewCall['toolName'], chapterId: proof.chapterId,
-      revision: Number(proof.revision), compilationId: typeof args.compilationId === 'string' ? args.compilationId : null })
+    if (proof.version === 1 && Array.isArray(proof.usageIds) && typeof proof.chapterId === 'string' && Number.isSafeInteger(proof.revision)) {
+      candidates.push({ callId: payload.callId, toolName: payload.toolName as PendingReviewCall['toolName'], chapterId: proof.chapterId,
+        revision: Number(proof.revision), compilationId: typeof args.compilationId === 'string' ? args.compilationId : null })
+    } else if (payload.toolName === 'continuity_validate' && payload.failureCode === 'CONTINUITY_INPUT_STALE'
+      && typeof args.compilationId === 'string' && terminalCandidatePatchSchema.safeParse(args.terminalPatch).success) {
+      // Discover old local refusals even after their pending checkpoint entry
+      // was reconciled. The exact same ownership/journal/usage proof below
+      // authenticates them; a missing usage row alone proves nothing.
+      const compiler = await tx.storyCompilation.findFirst({ where: { id: args.compilationId, userId: subject.userId,
+        novelId: subject.novelId, runId: { in: ids } }, select: { chapterId: true, validation: true } })
+      const revision = object(compiler?.validation).checkedRevision
+      if (compiler?.chapterId && Number.isSafeInteger(revision)) candidates.push({ callId: payload.callId, toolName: 'continuity_validate',
+        chapterId: compiler.chapterId, revision: Number(revision), compilationId: args.compilationId })
+    }
   }
   for (const item of candidates) {
     const events = history.filter(row => object(row.payload).callId === item.callId)

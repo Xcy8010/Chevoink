@@ -11,7 +11,8 @@ export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) 
   const decisionPending = readiness.decisionPending ?? (readiness.continuityErrorCount > 0 || readiness.qualityErrorCount > 0
     || (readiness.qualityCandidateCount ?? 0) > 0)
   const incomplete = readiness.requiredTools.some(tool => (tool.name === 'quality_analyze' ? readiness.quality : readiness.continuity) === 'incomplete')
-  const state = !readiness.ready ? incomplete ? 'blocked' : 'check_required'
+  const state = readiness.terminalProcessing && readiness.terminalReview?.state === 'unverified'
+    ? 'terminal_review_required' : !readiness.ready ? incomplete ? 'blocked' : 'check_required'
     : readiness.terminalReview?.state === 'unverified' ? 'terminal_review_required'
       : readiness.mustPassPending ? 'must_pass_required'
       : decisionPending ? 'decision_required' : 'commit_available'

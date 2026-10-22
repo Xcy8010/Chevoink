@@ -45,14 +45,10 @@ it.each(['body', 'candidate', 'source', 'raw', 'incomplete', 'old-protocol'] as 
   expect(terminalCandidateCorrection(f.validation, f.content, f.context)).toBeNull()
 })
 
-it.each(['unknown', 'persistent', 'current-only', 'duplicate', 'invented-span'] as const)('does not turn a different critic failure into candidate authority: %s', change => {
+it.each(['unknown', 'current-only', 'duplicate', 'invented-span'] as const)('does not turn a different critic failure into candidate authority: %s', change => {
   const f = fixture(), parts = JSON.parse(f.raw)
-  let candidate = f.candidate
+  const candidate = f.candidate
   if (change === 'unknown') parts.terminalVerdicts[0].verdict = 'unknown'
-  if (change === 'persistent') {
-    candidate = terminalCandidateSchema.parse({ exitState: { knowledge: ['A past event remains true.'] } })
-    parts.terminalVerdicts[0].factId = terminalCandidateFacts(candidate)[0].id
-  }
   if (change === 'current-only') {
     parts.terminalVerdicts[0].sourceEvidence = [{ segmentId: 'c0' }]
     parts.terminalVerdicts[0].inheritance = { priorEndState: 'established', currentState: 'unchanged' }
@@ -61,6 +57,18 @@ it.each(['unknown', 'persistent', 'current-only', 'duplicate', 'invented-span'] 
   if (change === 'invented-span') parts.terminalVerdicts[0].sourceEvidence[1].segmentId = 'p99'
   const inspected = inspectContinuityResponse(JSON.stringify(parts), { current: f.content, previous: f.previous, terminalEvidence: f.context }, true, 8, candidate)
   expect(terminalCandidateCorrection({ independentCheck: 'unavailable', terminalCandidate: candidate, continuityCriticResponse: inspected.audit }, f.content, f.context)).toBeNull()
+})
+
+it.each(['knowledge', 'objects', 'openLoops'] as const)('returns authenticated failed inheritance feedback for %s without certifying the claim', field => {
+  const f = fixture(), parts = JSON.parse(f.raw)
+  const candidate = terminalCandidateSchema.parse({ exitState: { [field]: ['A persistent claim still needs its actual proof.'] } })
+  parts.terminalVerdicts[0].factId = terminalCandidateFacts(candidate)[0].id
+  const inspected = inspectContinuityResponse(JSON.stringify(parts), { current: f.content, previous: f.previous, terminalEvidence: f.context }, true, 8, candidate)
+  const saved = { independentCheck: 'unavailable', terminalCandidate: candidate, continuityCriticResponse: inspected.audit }
+  const before = JSON.stringify(saved)
+  expect(inspected.complete).toBe(false)
+  expect(terminalCandidateCorrection(saved, f.content, f.context)?.paths).toEqual([`exitState.${field}.0`])
+  expect(JSON.stringify(saved)).toBe(before)
 })
 
 it('clarifies source policy only for new primary v5 coverage2 inputs, without changing older renderer branches', () => {

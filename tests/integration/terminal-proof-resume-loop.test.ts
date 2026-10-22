@@ -147,8 +147,8 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     })
     await executeAgentRun({...f,prompt:'修改本章',mode:'build',resume:true,eventStartSeq:4,modelTier:'speed',qualityMode:'balanced',creativeFreedom:'balanced'})
     expect(afterReadCheckpoint).toMatchObject({stagnantBatches:5,readProgress:7,writeProgress:1,
-      consumedReviewDecisionFeedback:expect.arrayContaining(handoff.slice(0,scenario==='interrupted'?3:2))})
-    expect(main).toHaveBeenCalledTimes(scenario==='interrupted'?3:scenario==='fresh-context'?8:4)
+      reviewAttempts:expect.arrayContaining(['old-attempt'])})
+    expect(main).toHaveBeenCalledTimes(scenario==='fresh-context'?6:2)
     expect(network).toHaveBeenCalledOnce()
     expect(JSON.stringify(requests[0])).toContain(proof.proofHash)
     const usage=await prisma.aiUsageLog.findMany({where:{userId:f.userId,agentRunId:f.runId,action:'agent3ContinuityCritic'}})
@@ -164,7 +164,8 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     expect(cp.readProgress).toBe(scenario==='fresh-context'?11:7)
     expect(cp.writeProgress).toBe(supported?2:1)
     expect(cp.progressSignatures).toEqual(expect.arrayContaining(checkpoint.progressSignatures))
-    expect(cp).toMatchObject({consumedReviewDecisionFeedback:expect.arrayContaining(handoff)})
+    expect(cp.consumedReviewDecisionFeedback ?? []).toEqual(checkpoint.consumedReviewDecisionFeedback)
+    expect(cp.reviewAttempts.filter(key=>key.startsWith('terminal-processing:'))).toHaveLength(2)
     if(supported){
       expect(run.status).toBe('completed')
       expect(final.bridge).toMatchObject({openLoops:[claim],objectState:base.exitState.objects,committedAt:expect.any(Date)})

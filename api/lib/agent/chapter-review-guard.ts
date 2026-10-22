@@ -21,6 +21,7 @@ import { readTerminalCandidate, currentTerminalReview } from './terminal-state-r
 import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalVerdictAuditVersion } from './terminal-evidence-context.js'
 import { terminalCoverageInput, terminalCoverageAuditVersion } from './terminal-fact-coverage.js'
 import { terminalCandidateCorrection, type TerminalCandidateCorrection } from './terminal-candidate-feedback.js'
+import type { TerminalProcessingInput } from './terminal-processing.js'
 
 import type { ChapterReviewProgressEvidence } from './semantic-progress.js'
 import { projectReviewBoundEditPlan, type ReviewBoundEditPlan, type ReviewBoundEvidence } from './review-bound-edit.js'
@@ -52,6 +53,8 @@ export type ChapterReviewRevisionOptions = {
   pendingQuality?: { compilationId: string; candidates: number }
 }
 export type ChapterReviewReadiness = {
+  terminalCommitted?: boolean
+  terminalProcessing?: TerminalProcessingInput
   terminalCorrection?: TerminalCandidateCorrection
   reviewBoundPlan?: ReviewBoundEditPlan
   terminalReview?: { state: 'supported' | 'unverified'; unresolved: Array<{ path: string; verdict: string }> }
@@ -362,11 +365,30 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       unresolved: [...(terminal?.verdicts.filter(item => item.verdict !== 'supported').map(({ path, verdict }) => ({ path, verdict })) ?? []),
         ...(terminal?.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' }))
           ?? factCoverage?.obligations.map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' })) ?? [])] }
+    const committed = compilation.preparedContext as Record<string, unknown> | null
+    const commitProof = committed?.terminalReviewProof as Record<string, unknown> | undefined
+    readiness.terminalCommitted = !!terminal?.supported && compilation.status === 'completed' && compilation.stage === 'commit'
+      && !!compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision
+      && committed?.terminalContentHash === runtimeJson({ content: chapter.content }).hash
+      && committed?.terminalCandidateHash === runtimeJson(terminalCandidate).hash
+      && commitProof?.version === 2 && commitProof.terminalStateHash === terminalReviewStateHash(compilation.bridge, compilation.sceneTasks)
     // Complete assessment is distinct from candidate support. Give the writer
     // its first terminal judgment even if prose continuity was already seen.
     if (terminal) {
       readiness.progressEvidence!.phases.push('terminal')
       if (terminal.supported && (terminal.verdicts.length > 0 || (terminal.factCoverage?.dispositions.length ?? 0) > 0)) readiness.progressEvidence!.phases.push('terminal_supported')
+    }
+    if (terminalCandidate && (readiness.terminalCorrection || terminal)) {
+      readiness.terminalProcessing = {
+        contractHash: runtimeJson(JSON.parse(JSON.stringify(original.spec))).hash,
+        sourceHash: runtimeJson({ previousContent: source?.content ?? '', previousChapterId: compilation.bridge.fromChapterId }).hash,
+        candidate: terminalCandidate, content: chapter.content, previous: source?.content ?? '',
+        inherited: (evidence.previous?.carried ?? []).filter(fact => fact.depth < 16)
+          .map(({ proofHash, field, claim }) => ({ proofHash, field, claim })),
+        issues: readiness.terminalCorrection
+          ? readiness.terminalCorrection.paths.map(path => ({ path, reason: 'inheritance_invalid' }))
+          : readiness.terminalReview.unresolved.map(({ path, verdict }) => ({ path, reason: verdict })),
+      }
     }
   }
   return readiness

@@ -9,7 +9,6 @@ import type { TerminalEvidenceContext } from './terminal-evidence-context.js'
 
 export type TerminalCandidateCorrection = { version: 1; candidateHash: string; contentHash: string; paths: string[]; guidance: string }
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
-const currentOnly = /^(?:exitState\.(?:location|action|storyTime|emotion(?:\.\d+)?)|lastUnfinishedAction)$/u
 
 /** Advisory processing feedback, never a complete report, proof, edit authority
  * or dispatch grant. Reproduce the saved rejection against the current frozen
@@ -29,8 +28,7 @@ export function terminalCandidateCorrection(validation: unknown, content: string
       || createHash('sha256').update(response).digest('hex') !== audit.contentHash) return null
     const diagnostics: Parameters<typeof inspectTerminalReview>[5] = []
     if (inspectTerminalReview(candidate, content, response, true, context, diagnostics)
-      || diagnostics.length !== 1 || diagnostics[0].code !== 'inheritance_invalid'
-      || !currentOnly.test(diagnostics[0].path ?? '')) return null
+      || diagnostics.length !== 1 || diagnostics[0].code !== 'inheritance_invalid') return null
     const parsed: unknown = parseQualityJsonObject(response, 'continuity', 3)
     const verdicts = z.array(terminalJointFactVerdictSchema).max(200).safeParse(object(parsed)?.terminalVerdicts)
     if (!verdicts.success) return null
@@ -46,11 +44,11 @@ export function terminalCandidateCorrection(validation: unknown, content: string
     const paths = verdicts.data.flatMap(item => {
       const fact = 'factId' in item ? facts.find(f => f.id === item.factId && (item.path === undefined || item.path === f.path))
         : facts.find(f => f.path === item.path)
-      return fact && currentOnly.test(fact.path) && item.verdict === 'supported'
+      return fact && item.verdict === 'supported'
         && item.sourceEvidence.some(ref => /^[pt]/u.test(ref.segmentId)) ? [fact.path] : []
     })
     if (!paths.includes(diagnostics[0].path!)) return null
     return { version: 1, candidateHash: runtimeJson(candidate).hash, contentHash: createHash('sha256').update(content).digest('hex'), paths,
-      guidance: `当前终态候选尚未得到独立证实。${JSON.stringify(paths.map(path => ({ path, claim: facts.find(f => f.path === path)!.claim })))} 属于本章结束时的状态，前章引用不能单独证明或继承这些状态。关联的当前候选为${JSON.stringify({ location: candidate.exitState.location, action: candidate.exitState.action, lastUnfinishedAction: candidate.lastUnfinishedAction })}。阅读真实正文及必要的承接上下文，核对整组位置、方向、动作和未完成动作是否指向同一对象、同一侧，以及动作是否已经发生；必要时用 terminalPatch 精确纠正相互依赖的候选，保留其余已记录事实。不得为迁就候选改正文，也不得把这份失败报告当作通过。修改后仍须经过原版本、请求结果、费用和独立复核保护；相同候选不得重复付费。` }
+      guidance: `当前终态候选的继承依据未通过核验：${JSON.stringify(paths.map(path => ({ path, claim: facts.find(f => f.path === path)!.claim })))}。这是失败依据，不是事实裁决。核对当前正文与真实前章；持续事实可选择已有的完整继承证明，本章位置和动作须由本章证实。区分指令、计划与实际完成，核对对象、门序和内外侧。用 terminalPatch 只纠正有依据的候选项，保留其余事实及未解决义务；不能删空难处理事实或改正文迁就候选。修改后仍须独立复核；失败报告保持失败，相同输入和未知付费请求不得重发。` }
   } catch { return null }
 }

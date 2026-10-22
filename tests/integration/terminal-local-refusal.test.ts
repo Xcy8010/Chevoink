@@ -82,6 +82,8 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
         const permitted = scenario === 'known' || scenario === 'typed'
         expect(evidence).toHaveLength(permitted ? 1 : 0)
         expect(recovered).toHaveLength(permitted ? 1 : 0)
+        if (permitted) expect(await prisma.$transaction(tx => readReviewRequestRecoveryEvidence(tx, f)))
+          .toMatchObject([{ notDispatched: true, callId: call.callId }])
         if (permitted) expect(recovered[0]).toMatchObject({ notDispatched: true, callId: call.callId, reconciliation: { usageIds: [], sourceReportId: null } })
         expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })).toEqual(history)
         expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })).toEqual(usages)
