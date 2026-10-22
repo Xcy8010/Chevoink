@@ -10,6 +10,7 @@ import { countReportChineseCharacters } from '../../../shared/agent-output.js'
 import { mergeResearchRanges } from './research-ranges.js'
 import { evaluateResearchNavigationCandidates, evaluateResearchSearchCandidates } from '../research-search-quality.js'
 import { runtimeJson } from './runtime-common.js'
+import { durableTaskSpecIdentity } from './runtime-identity.js'
 
 type Scope = { userId: string; sessionId: string; novelId: string; runId: string }
 
@@ -55,10 +56,10 @@ export async function saveResearchReportSection(scope: Scope, input: {
     const spec = taskSpecSchema.parse(run.taskSpec)
     const durableRoot = transaction && run.runtimeProtocolVersion === 1 && run.taskRootId
       ? await tx.agentTaskRoot.findFirst({ where: { id: run.taskRootId, userId: scope.userId, novelId: scope.novelId, sessionId: scope.sessionId } }) : null
-    const original = durableRoot ? taskSpecSchema.parse(durableRoot.specSnapshot) : null
-    // Resume keeps the original task/spec and changes only its executing run.
-    const durable = original && spec.runId === scope.runId
-      && runtimeJson(original).hash === runtimeJson({ ...spec, runId: original.runId }).hash
+    // Root admission already excludes runId and omits schema-produced undefined
+    // values. Reuse that exact identity instead of hashing a reparsed snapshot.
+    const durable = durableRoot && !spec.authorization && spec.runId === scope.runId
+      && runtimeJson(durableRoot.specSnapshot).hash === durableTaskSpecIdentity(run.taskSpec).frozen.hash
     if (spec.intent !== 'research_analysis' || spec.authorization || (run.runtimeProtocolVersion !== 0 && !durable)) {
       throw new DataAccessError(403, 'RESEARCH_REPORT_NOT_AUTHORIZED', '当前执行入口没有研究报告保存权限。')
     }

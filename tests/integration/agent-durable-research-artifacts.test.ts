@@ -157,8 +157,9 @@ describe.runIf(available)('durable research and plan artifacts', () => {
   }))
 
   it('limits quality feedback to the original novel even when the user owns another novel', () => fixture(async f => {
-    const other = await prisma.novel.create({ data: { authorId: f.userId, title: 'Other owned novel', slug: randomUUID() } })
-    const chapter = await prisma.chapter.create({ data: { authorId: f.userId, novelId: other.id, title: 'Other chapter', content: 'Other text', orderIndex: 1 } })
+    const other = await prisma.novel.create({ data: { authorId: f.userId, title: 'Other owned novel', summary: '', slug: randomUUID() } })
+    const volume = await prisma.volume.create({ data: { novelId: other.id, title: 'Other volume', orderIndex: 1 } })
+    const chapter = await prisma.chapter.create({ data: { authorId: f.userId, novelId: other.id, volumeId: volume.id, orderInVolume: 1, title: 'Other chapter', content: 'Other text', orderIndex: 1 } })
     const finding = async (novelId: string, chapterId: string) => {
       const report = await prisma.chapterQualityReport.create({ data: { userId: f.userId, novelId, chapterId, chapterRevision: 1, deterministicMetrics: {},
         findings: { create: { userId: f.userId, novelId, signal: 'emotion_grounding', source: 'critic', severity: 'advisory', startOffset: 0, endOffset: 1,

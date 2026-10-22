@@ -6,7 +6,9 @@ import { recordTaskContentBaseline } from './runtime-postconditions.js'
 import { assertRunGoalFence } from './goal-fence.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 
-function frozenSpec(raw: unknown) {
+/** The existing task identity excludes execution provenance and persists only
+ * JSON-safe schema values. All adapters must use this same frozen contract. */
+export function durableTaskSpecIdentity(raw: unknown) {
   const parsed = taskSpecSchema.safeParse(raw)
   if (!parsed.success) return runtimeError('RUNTIME_INPUT_INVALID', '建立持久任务需要完整的原任务合同。')
   if (parsed.data.authorization) runtimeError('TASK_AUTHORIZATION_NOT_ACTIVATED', '阶段授权签发及效果执行尚未接入，不能作为旧权限任务启用。')
@@ -27,7 +29,7 @@ export async function initializeDurableTask(input: { userId: string; runId: stri
     const run = await lockOwnedRun(tx, input.userId, input.runId)
     if (await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: run.id } })) return runtimeError('RUNTIME_CHILD_SOURCE_REQUIRED', '子任务只能由原父任务授权初始化，不能作为作者新任务重建。')
     if (run.runtimeProtocolVersion === 0 && run.status !== 'queued') runtimeError('RUNTIME_NOT_ACTIVE', '只能在旧执行器启动之前建立持久任务。')
-    const { spec, frozen } = frozenSpec(run.taskSpec)
+    const { spec, frozen } = durableTaskSpecIdentity(run.taskSpec)
     if (spec.scope.novelId !== run.novelId || (run.taskRootId && run.taskRootId !== spec.id)
       || ![0, DURABLE_RUNTIME_VERSION].includes(run.runtimeProtocolVersion)) runtimeError('RUNTIME_SCOPE_MISMATCH', '任务根或版本不匹配，不能重建为新任务。')
     const message = await tx.agentMessage.findFirst({ where: { id: input.sourceMessageId, runId: run.id, sessionId: run.sessionId,
@@ -62,7 +64,7 @@ export async function attachRunToDurableTask(input: { userId: string; runId: str
     const run = await lockOwnedRun(tx, input.userId, input.runId)
     if (await tx.agentChildExecutionGrant.findFirst({ where: { OR: [{ childRunId: run.id }, { childRun: { taskRootId: input.taskRootId } }] } })) return runtimeError('RUNTIME_CHILD_SOURCE_REQUIRED', '不能通过作者继续入口接管子任务授权。')
     if (run.runtimeProtocolVersion === 0 && run.status !== 'queued') runtimeError('RUNTIME_NOT_ACTIVE', '只能在旧执行器启动之前绑定持久任务。')
-    const { spec, frozen } = frozenSpec(run.taskSpec)
+    const { spec, frozen } = durableTaskSpecIdentity(run.taskSpec)
     await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${input.taskRootId} FOR UPDATE`
     const root = await tx.agentTaskRoot.findUnique({ where: { id: input.taskRootId } })
     if (!root || root.userId !== run.userId || root.sessionId !== run.sessionId || root.novelId !== run.novelId
