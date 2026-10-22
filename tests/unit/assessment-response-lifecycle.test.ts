@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { applyContinuityReassessment, bindLegacyContinuityRequest, continuityReassessmentCandidates, readLegacyContinuityAssessment, runContinuityReassessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
@@ -118,6 +119,25 @@ describe('legacy continuity request attempts retain their semantic stage', () =>
 })
 
 describe('one complete continuity reassessment', () => {
+  it('derives empty dispositions only from a known empty original, preserving the raw audit', () => {
+    const first = original('{"findings":[]}'), raw = '{\n  "findings": []\n}'
+    const before = JSON.stringify(first)
+    const result = applyContinuityReassessment(first, raw, bodies)
+    expect(result.complete).toBe(true)
+    expect(JSON.stringify(first)).toBe(before)
+    expect((result.audit as unknown as { reassessment: { decisions: unknown[]; rawResponse: { content: string } } }).reassessment)
+      .toMatchObject({ decisions: [], rawResponse: { content: JSON.stringify(raw) }, mechanicalRecovery: {
+        version: 1, kind: 'empty_original_dispositions', originalResponseHash: first.audit.contentHash,
+        responseHash: createHash('sha256').update(raw).digest('hex'), derived: { decisions: [] },
+      } })
+    for (const content of ['{broken', JSON.stringify({ findings: [finding] }), '{"findings":[],"issues":[]}']) {
+      expect(() => applyContinuityReassessment(original(content), raw, bodies)).toThrow()
+    }
+    for (const decisions of [null, {}, '[]', [{ index: 0 }]]) {
+      expect(() => applyContinuityReassessment(first, JSON.stringify({ findings: [], decisions }), bodies)).toThrow()
+    }
+    expect(() => applyContinuityReassessment(first, '{"findings":null}', bodies)).toThrow()
+  })
   it('limits the Prisma run filter to the owner even when the caller has a full tool context', async () => {
     const findMany = vi.fn(async () => [])
     const tx = { agentArtifact: { findMany } } as unknown as Prisma.TransactionClient

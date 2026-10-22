@@ -21,7 +21,7 @@ import { readOfflineContinuityRecovery, applyOfflineContinuityRecovery } from '.
 import { runtimeJson } from '../runtime-common.js'
 import { persistedContentHash } from '../semantic-progress.js'
 import { terminalCandidateFacts } from '../terminal-fact-identity.js'
-import { terminalCandidatePatchSchema, freezeLegacyTerminalPatch } from '../terminal-candidate-patch.js'
+import { terminalCandidatePatchSchema, freezeLegacyTerminalPatch, hasLegacyTerminalCallEvidence } from '../terminal-candidate-patch.js'
 import { continuityChapterProvenance, continuityFindingText, continuitySourceInput, resolveContinuitySources, continuityRecheckInput, unconfirmedContinuityOutput, type ContinuityBodies } from '../continuity-review-context.js'
 import { unlocatedContinuityEvidence } from '../continuity-finding-authority.js'
 import { createHash } from 'node:crypto'
@@ -931,8 +931,21 @@ export const continuityValidateTool = defineTool({
     const bridge = compilation.bridge
     const sourceChapter = await readCompilerContinuitySource(prisma, ctx, chapter, bridge.fromChapterId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
     if(args.terminalPatch&&args.terminalState)return {outcome:'failed' as const,failureCode:'TERMINAL_STATE_REVIEW_REQUIRED',summary:'候选更新不明确',output:'terminalPatch 与 terminalState 只能选择一种；未应用或派发。'}
-    const patch = args.terminalPatch ? await prisma.$transaction(tx=>freezeLegacyTerminalPatch(tx,ctx,{...compilation,chapter},sourceChapter,
-      sourceChapter&&'terminalInheritance' in sourceChapter?sourceChapter.terminalInheritance:undefined,terminalVersion,args.terminalPatch!,args.inheritedProofs)) : null
+    let patch: Awaited<ReturnType<typeof freezeLegacyTerminalPatch>> | null = null
+    if (args.terminalPatch) {
+      try { patch = await prisma.$transaction(tx=>freezeLegacyTerminalPatch(tx,ctx,{...compilation,chapter},sourceChapter,
+        sourceChapter&&'terminalInheritance' in sourceChapter?sourceChapter.terminalInheritance:undefined,terminalVersion,args.terminalPatch!,args.inheritedProofs)) }
+      catch (error) {
+        if (!(error instanceof DataAccessError) || !['CONTINUITY_INPUT_STALE', 'TERMINAL_STATE_REVIEW_REQUIRED'].includes(error.code)
+          || await hasLegacyTerminalCallEvidence(prisma, ctx)) throw error
+        // This stack has not reached reserve/dispatch, and no prior same-call
+        // evidence exists. Do not turn a local delta rejection into unknown fees.
+        return { outcome: 'failed' as const, failureCode: error.code, summary: '章末候选更新未应用',
+          output: `${error.message} 正文未变化；读取当前章节桥取得新候选地址，不改写正文来适配旧候选。`,
+          reviewRequestFinished: { version: 1 as const, chapterId: chapter.id, revision: chapter.revision,
+            contentHash: createHash('sha256').update(chapter.content).digest('hex'), usageIds: [] } }
+      }
+    }
     const selectionInput = patch ? undefined : reviewTerminalSelection(args.terminalState, readTerminalCandidate(compilation.validation), args.inheritedProofs)
     const selectedTerminal = selectionInput ? resolveTerminalCandidate(selectionInput,
       sourceChapter && 'preceding' in sourceChapter && 'terminalInheritance' in sourceChapter ? sourceChapter.terminalInheritance : [], terminalVersion) : undefined

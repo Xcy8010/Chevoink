@@ -13,6 +13,18 @@ import { createRepeatDetector } from '../../api/lib/agent/repeat-detect.js'
 import { toolSignature, ToolAdmissionGuard } from '../../api/lib/agent/tool-signature.js'
 import { createProtocolRecoveryGuard, isContinuationRequest, promisesFurtherAction, requiresNextChapterDelivery } from '../../api/lib/agent/completion-guard.js'
 
+it('invalidates stale report reads independently of write admission and progress', () => {
+  const guard = new ToolAdmissionGuard(), signature = toolSignature('chapter_bridge_get', '{"compilationId":"c"}')
+  const read = guard.key(signature, true), write = guard.key('write:same-input', false)
+  guard.record(read, 'old candidate', false)
+  guard.record(write, 'already written', false)
+  guard.invalidateStateReads()
+  expect(guard.previous(guard.key(signature, true))).toBeUndefined()
+  expect(guard.previous(guard.key('write:same-input', false))).toBe('already written')
+  guard.record(guard.key(signature, true), 'new candidate after a failed check', false)
+  expect(guard.previous(guard.key(signature, true))).toBe('new candidate after a failed check')
+})
+
 it('requires actual chapter delivery only for explicit next-chapter instructions, not default write intent', () => {
   for (const goal of ['写下一章', '帮我写下一章', '请继续写下一章。', '续写下一章']) expect(requiresNextChapterDelivery([goal])).toBe(true)
   for (const goal of ['告诉我原因', '不要写下一章', '写下一章之前先告诉我计划', '为什么没有写下一章', '分析这本小说']) expect(requiresNextChapterDelivery([goal])).toBe(false)

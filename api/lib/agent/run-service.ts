@@ -1,4 +1,5 @@
 import { freezeWritingScope, readWritingScope, writingClarificationResolvesInput } from './writing-scope.js'
+import { isInternalAgentArtifact } from './artifact-visibility.js'
 import { savedRunUsageSchema } from './checkpoint.js'
 import { syncBuiltinSkillCatalog } from './skills/service.js'
 import { readAuthorEnded } from './author-ended.js'
@@ -1616,7 +1617,7 @@ function buildAgentRunResultPayload(
   artifacts: Awaited<ReturnType<typeof prisma.agentArtifact.findMany>>,
   memoryEntries: Awaited<ReturnType<typeof prisma.projectMemoryEntry.findMany>>,
 ): AgentActionResponse['data'] {
-  const artifactItems = artifacts.map(toAgentArtifact)
+  const artifactItems = artifacts.filter(item => !isInternalAgentArtifact(item)).map(toAgentArtifact)
   const memoryItems = memoryEntries.map(toProjectMemoryEntry)
   const firstArtifact = artifactItems[0] ?? null
   const executionMode =

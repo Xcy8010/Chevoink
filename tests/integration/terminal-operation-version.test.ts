@@ -8,6 +8,7 @@ import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-c
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { applyContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 import { observeChapterReviewProgress } from '../../api/lib/agent/semantic-progress.js'
 import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
@@ -16,6 +17,8 @@ import * as memory from '../../api/lib/agent/story-memory.js'
 
 describe.runIf(available)('request-owned evidence at the real commit boundary', () => {
   it.each([['supported', undefined], ['unknown', undefined], ['supported', 2], ['unknown', 2]] as const)('keeps the same original v1 task and commits only a complete review: %s / verdict protocol %s', (status, verdictProtocol) => fixture(async f => {
+    const network = vi.fn(() => { throw Error('Offline report application cannot dispatch') })
+    vi.stubGlobal('fetch', network)
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const initialBody = 'The sensor remains offline.'
     let current = await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: initialBody, revision: 1 } })
@@ -44,8 +47,15 @@ describe.runIf(available)('request-owned evidence at the real commit boundary', 
       terminalVerdicts: [{ path: 'exitState.openLoops.0', verdict: 'supported', ...(verdictProtocol ? {} : { basis: 'current' }), sourceEvidence: [{ segmentId: 'c2', quote }] }],
       terminalDispositions: [{ id: input.obligations[0].id, outcome: status === 'supported' ? 'replaced' : 'unknown', reason: 'The entire same repair obligation remains.',
         ...(status === 'supported' ? { candidatePath: 'exitState.openLoops.0' } : {}), sourceEvidence: [{ segmentId: 'c2', quote }] }] })
-    const inspected = inspectContinuityResponse(response, { previous: null, current: content, terminalEvidence: evidence }, true, 8, next)
+    const bodies = { previous: null, current: content, terminalEvidence: evidence }
+    const first = inspectContinuityResponse(JSON.stringify({ findings: [], semanticChecks: checks, terminalVerdicts: [] }), bodies, true, 8, next)
+    expect(first.complete).toBe(false)
+    const frozen = JSON.stringify(first)
+    const inspected = applyContinuityReassessment(first, response, bodies)
     expect(inspected.complete).toBe(true)
+    expect(JSON.stringify(first)).toBe(frozen)
+    expect(inspected.audit).toMatchObject({ reassessment: { rawResponse: { content: JSON.stringify(response) },
+      mechanicalRecovery: { kind: 'empty_original_dispositions', derived: { decisions: [] } } } })
     await validateStoryContinuity({ ...f, compilationId: compilation.id, findings: [], independentCheck: 'complete', terminalCandidate: next,
       coverage: compilerContinuityCoverage({ chapter: current, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: next }, 11), continuityCriticResponse: inspected.audit })
     await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: current.id, chapterRevision: 2, mode: 'balanced',
@@ -74,5 +84,6 @@ describe.runIf(available)('request-owned evidence at the real commit boundary', 
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).taskSpec).toEqual(originalSpec)
     expect((originalSpec as { scope: { terminalCoverageProtocol: number } }).scope.terminalCoverageProtocol).toBe(1)
     expect(await prisma.aiUsageLog.count({ where: { agentRunId: f.runId } })).toBe(0)
+    expect(network).not.toHaveBeenCalled()
   }, undefined, '修改本章', { continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 1 }))
 })

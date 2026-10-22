@@ -8,12 +8,16 @@ import { originalTaskRunIds, readOriginalTaskRequest } from './original-request.
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { isKnownTextRequestBilling } from './text-request-billing.js'
 import { runtimeJson } from './runtime-common.js'
+import { applyTerminalCandidatePatch, hasLegacyTerminalCallEvidence, terminalCandidatePatchSchema } from './terminal-candidate-patch.js'
+import { readTerminalCandidate } from './terminal-state-review.js'
+import { DataAccessError } from '../prisma.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const reviewers = ['quality_analyze', 'continuity_validate']
 const sensitive = [...reviewers, 'chapter_write', 'chapter_edit_range', 'chapter_append']
 
 export type ReviewRequestRecoveryEvidence = PendingReviewCall & {
+  notDispatched?: true
   changedReviewInput?: { chapterId: string; revision: number }
   resultAt: Date
   receipt: Omit<AgentReviewFailureReconciliation, 'admissionId'>
@@ -73,8 +77,28 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
       && Array.isArray(proof.usageIds) && proof.usageIds.length > 0 && proof.usageIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 64)
       && new Set(proof.usageIds).size === proof.usageIds.length
     const source = await tx.agentRun.findUniqueOrThrow({ where: { id: call.runId } })
-    if (payload.reviewRequestFinished !== undefined && !typed) continue
-    if (!typed && (source.taskRootId || source.runtimeProtocolVersion !== 0 || !String(payload.failureCode).startsWith('AI_PROVIDER_'))) continue
+    // terminalPatch was introduced with reserve-before-send journaling. A
+    // closed local stale refusal on that producer can prove zero dispatch,
+    // unlike an arbitrary legacy stale/provider error or an absent usage row.
+    let localPatchRefusal = false
+    const patch = terminalCandidatePatchSchema.safeParse(args.terminalPatch)
+    if (!typed && item.toolName === 'continuity_validate' && payload.failureCode === 'CONTINUITY_INPUT_STALE'
+      && !source.taskRootId && source.runtimeProtocolVersion === 0 && item.compilationId && patch.success
+      && args.terminalState === undefined && chapter.revision === item.revision
+      && !await hasLegacyTerminalCallEvidence(tx, { runId: call.runId, callId: item.callId })) {
+      const compiler = await tx.storyCompilation.findFirst({ where: { id: item.compilationId, userId: subject.userId,
+        novelId: subject.novelId, runId: { in: ids }, chapterId: chapter.id }, select: { validation: true } })
+      const validation = object(compiler?.validation), candidate = readTerminalCandidate(validation)
+      if (candidate && typeof validation.checkedAt === 'string' && Date.parse(validation.checkedAt) <= call.createdAt.getTime()
+        && chapter.updatedAt <= call.createdAt) {
+        try { applyTerminalCandidatePatch(candidate, patch.data) }
+        catch (error) { localPatchRefusal = error instanceof DataAccessError && error.code === 'CONTINUITY_INPUT_STALE' }
+      }
+    }
+    if (payload.reviewRequestFinished !== undefined && !typed && !(localPatchRefusal && proof.version === 1
+      && proof.chapterId === chapter.id && proof.revision === chapter.revision && proof.contentHash === contentHash
+      && Array.isArray(proof.usageIds) && proof.usageIds.length === 0)) continue
+    if (!typed && !localPatchRefusal && (source.taskRootId || source.runtimeProtocolVersion !== 0 || !String(payload.failureCode).startsWith('AI_PROVIDER_'))) continue
     if (history.some(event => {
       if (event.type !== 'tool.call' || event.id === call.id || !sensitive.includes(String(object(event.payload).toolName)) || event.createdAt > result.createdAt) return false
       const ends = history.filter(end => end.type === 'tool.result' && end.runId === event.runId && object(end.payload).callId === object(event.payload).callId && end.seq > event.seq)
@@ -92,6 +116,14 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
         && row.action.startsWith(family) && row.createdAt >= call.createdAt && row.createdAt <= result.createdAt
         && (row.chapterId === item.chapterId || row.targetId !== null && targets.includes(row.targetId)))
     const payments = related.filter(row => row.action.startsWith(family) && row.createdAt >= call.createdAt && row.createdAt <= result.createdAt)
+    if (localPatchRefusal) {
+      if (payments.length || related.some(row => row.createdAt >= call.createdAt && row.createdAt <= result.createdAt)) continue
+      relatedByCall.set(item.callId, related)
+      recovered.push({ ...item, notDispatched: true, resultAt: result.createdAt, receipt: { status: 'terminal_failed_billing_known',
+        sourceRunId: call.runId, sourceResultId: result.id, sourceReportId: null, usageIds: [],
+        currentRevision: chapter.revision, currentContentHash: contentHash } })
+      continue
+    }
     if (!payments.length || payments.some(row => !known(row) || row.durationMs < 0 || row.createdAt.getTime() + row.durationMs > result.createdAt.getTime())) continue
     if (typed && (proof.usageIds as string[]).some(id => !payments.some(row => row.id === id))) continue
     if (typed && payments.some(row => !(proof.usageIds as string[]).includes(row.id))) continue

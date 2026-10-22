@@ -17,6 +17,17 @@ export const terminalCandidatePatchSchema = z.object({ baseCandidateHash: hash,
 export type TerminalCandidatePatch = z.infer<typeof terminalCandidatePatchSchema>
 const stale = () => new DataAccessError(409,'CONTINUITY_INPUT_STALE','章末候选已变化或事实地址不唯一；请读取当前章节桥后只更新需要处理的事实，未派发旧补丁。')
 
+/** This legacy delta producer freezes before reserving any model request.
+ * A prior exact-call snapshot/reservation prevents a local refusal from being
+ * mistaken for proof about an earlier, possibly unknown provider attempt. */
+export async function hasLegacyTerminalCallEvidence(tx: Prisma.TransactionClient,
+  ctx: Pick<ToolContext, 'runId' | 'callId'>) {
+  return !!await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', OR: [
+    { metadata: { path: ['callId'], equals: ctx.callId } },
+    { metadata: { path: ['identity', 'callId'], equals: ctx.callId } },
+  ] }, select: { id: true } })
+}
+
 /** Explicit delta on this saved candidate only. Omission is not deletion;
  * deleting a candidate fact never deletes its coverage obligation. */
 export function applyTerminalCandidatePatch(base: TerminalCandidate, patch: TerminalCandidatePatch) {

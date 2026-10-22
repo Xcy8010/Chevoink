@@ -24,9 +24,12 @@ export class ToolAdmissionGuard {
     return stateSensitive ? `${signature}@${this.stateVersion}` : signature
   }
   previous(key: string): string | undefined { return this.completed.get(key) }
+  /** Reports/candidates can change even when a check fails. Cache freshness is
+   * independent of manuscript progress, convergence and paid retry authority. */
+  invalidateStateReads(): void { this.stateVersion += 1 }
   record(key: string, observation: string, changed: boolean): void {
     this.completed.set(key, observation.slice(0, 12000))
-    if (changed) this.stateVersion += 1
+    if (changed) this.invalidateStateReads()
     if (this.completed.size > 512) this.completed.delete(this.completed.keys().next().value!)
   }
 }

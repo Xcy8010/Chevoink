@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { DataAccessError } from '../prisma.js'
@@ -82,6 +83,14 @@ export function freshContinuityResponseContract(reassessment = false, hasCandida
 }
 
 export function applyContinuityReassessment(original: Inspection, raw: string, bodies: ContinuityBodies): Inspection {
+  const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
+  const parsed = parseQualityJsonObject(raw, 'findings', 3)
+  // No original findings means there are no disposition identities to carry.
+  // Derive only that empty bookkeeping array; never infer a reviewer judgment,
+  // forgive an explicit invalid value, or drop an unparseable/nonempty report.
+  const value = object(parsed)
+  const response = candidates?.length === 0 && value && !Object.prototype.hasOwnProperty.call(value, 'decisions')
+    ? { ...value, decisions: [] } : parsed
   const envelope = z.object({ decisions: z.array(decisionSchema), findings: z.array(z.unknown()),
     terminalVerdicts: z.array(original.audit.parserVersion === 8 ? original.audit.terminalEvidence?.verdictProtocol === 3 ? terminalSpanVerdictSchema
       : original.audit.terminalEvidence?.verdictProtocol === 2 ? sourcedTerminalVerdictSchema : inheritedTerminalVerdictSchema : terminalVerdictSchema).max(200).optional(),
@@ -89,8 +98,7 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
     ...(original.audit.parserVersion === 8 ? { semanticChecks: z.unknown() } : {}),
     ...(original.audit.parserVersion === 8 && original.audit.terminalEvidence?.factCoverage ? { terminalDispositions: z.array(terminalDispositionSchema).max(200).optional() } : {}),
     ...((original.audit.terminalEvidence?.verdictProtocol === 4 || original.audit.terminalEvidence?.verdictProtocol === 5) ? terminalResponseFields(!!original.audit.terminalCandidate, original.audit.terminalEvidence.verdictProtocol) : {}),
-  }).strict().parse(parseQualityJsonObject(raw, 'findings', 3))
-  const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
+  }).strict().parse(response)
   if (envelope.decisions.length !== (candidates?.length ?? 0) || new Set(envelope.decisions.map(item => item.index)).size !== envelope.decisions.length
     || envelope.decisions.some(item => item.index >= (candidates?.length ?? 0))) throw new Error('Reassessment omitted or invented an original candidate')
   const semantic = (value: unknown) => {
@@ -116,7 +124,10 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
   const result = inspectContinuityResponse(original.audit.terminalCandidate || original.audit.parserVersion === 8 ? raw : JSON.stringify({ findings: envelope.findings }), bodies, true, original.audit.parserVersion === 8 ? 8 : original.audit.parserVersion >= 7 ? 7 : 6, original.audit.terminalCandidate, original.audit.sourceScope)
   if (!result.complete) throw new Error('Reassessment final report is invalid')
   return { ...result, audit: { ...result.audit, reassessment: { version: 1, original: original.audit,
-    decisions: envelope.decisions, rawResponse: json(raw) } } as Inspection['audit'] }
+    decisions: envelope.decisions, rawResponse: json(raw),
+    ...(response !== parsed ? { mechanicalRecovery: { version: 1, kind: 'empty_original_dispositions',
+      originalResponseHash: original.audit.contentHash, responseHash: createHash('sha256').update(raw).digest('hex'), derived: { decisions: [] } } } : {}),
+  } } as Inspection['audit'] }
 }
 
 export async function runContinuityReassessment(input: { original: Inspection; bodies: ContinuityBodies; system: string; content: string;

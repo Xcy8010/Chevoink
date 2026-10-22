@@ -1274,7 +1274,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               && restriction.action === 'quality_analyze') restriction.reviewInput = item.changedReviewInput
           }
         }
-        reviewRecoveryKeys.set(reviewDispatchKey(item, item.toolName), `review-recovery:${item.reconciliation.admissionId}:${item.callId}`)
+        // Closing a proven local refusal grants no provider retry/bootstrap key.
+        if (!item.notDispatched) reviewRecoveryKeys.set(reviewDispatchKey(item, item.toolName), `review-recovery:${item.reconciliation.admissionId}:${item.callId}`)
       }
       if (recovered.length) await persistCheckpoint()
     }
@@ -2599,6 +2600,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             }
             continuityBootstrapVerified = true
           } : undefined)
+        // A failed assessment may still persist a new candidate/report. A
+        // subsequent local read must observe it, without crediting progress or
+        // refilling any retry/feedback allowance.
+        if (STATE_SENSITIVE_VALIDATORS.has(call.name)) admission.invalidateStateReads()
         if (continuityBootstrap && bootstrapCall?.id === call.id) continuedContinuityBootstrap.shift()
         const controlledRepair = boundBootstrap && bootstrapWitness && !outcome.unresolvedTextRequest ? await prisma.$transaction(tx => readContinuedReviewRepairHandoff(tx,
           { userId: params.userId, novelId: params.novelId, runId }, boundBootstrap, bootstrapWitness!, outcome.part)) : false

@@ -379,6 +379,27 @@ function context(): ToolContext {
 }
 
 describe('server assessment fallback in the real execution loop', () => {
+  it('refreshes the same bridge after a failed assessment saves a new candidate', async () => {
+    let candidate = 'old candidate hash'
+    const read = tool('chapter_bridge_get', async () => ({ output: candidate }))
+    const check = tool('continuity_validate', async () => {
+      candidate = 'new candidate hash'
+      return { outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE', output: 'Report incomplete; candidate saved.' }
+    })
+    mocks.tools = [read, check]
+    queue(response('', [call('bridge-before', read.name, '{"compilationId":"comp"}'),
+      call('failed-check', check.name, '{"compilationId":"comp"}'),
+      call('bridge-after', read.name, '{"compilationId":"comp"}')]), response('检查未完成，正文保留。'))
+    await run()
+    expect(check.execute).toHaveBeenCalledOnce()
+    expect(read.execute).toHaveBeenCalledTimes(2)
+    expect(events()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'tool.result', callId: 'failed-check', ok: false }),
+      expect.objectContaining({ type: 'tool.result', callId: 'bridge-after', ok: true }),
+    ]))
+    const observations = mocks.chat.mock.calls.flatMap(([input]) => input.messages ?? [])
+    expect(observations).toEqual(expect.arrayContaining([expect.objectContaining({ role: 'tool', toolCallId: 'bridge-after', content: expect.stringContaining('new candidate hash') })]))
+  })
   it('defers an early conditional edit without dispatch and then runs the original missing check once', async () => {
     let state = readiness('complete', 'missing')
     const guidance = '条件局部修订尚缺 quality_analyze；提议未执行，不重发未知请求。'
@@ -3580,6 +3601,30 @@ describe('independent persisted review phases with unresolved usage', () => {
       state: (phases: Array<'continuity' | 'quality' | 'decision' | 'terminal'>): ChapterReviewReadiness => ({ ...readiness('complete', 'complete', 4), continuityErrorCount: 4,
         progressEvidence: { taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'c', orderIndex: 1, contentHash, phases } }) }
   }
+  it('closes only the proven local refusal without creating a paid recovery key or clearing another unknown request', async () => {
+    const local = { compilationId: 'comp', chapterId: 'c', revision: 4, toolName: 'continuity_validate' as const, callId: 'local-refusal' }
+    const unknown = { ...local, toolName: 'quality_analyze' as const, callId: 'unresolved-quality' }
+    const f = saved(9, [local, unknown])
+    mocks.update.mockResolvedValueOnce({ taskSpec: f.taskSpec, currentTurn: 34, startedAt: new Date(f.checkpoint.runStartedAt), usage: f.usage })
+    mocks.requestRecovery.mockResolvedValue([{ ...local, notDispatched: true, reconciliation: {
+      status: 'terminal_failed_billing_known', sourceRunId: 'run', sourceResultId: 'local-result', sourceReportId: null,
+      usageIds: [], admissionId: 'author-continue:local', currentRevision: 4, currentContentHash: f.contentHash,
+    } }])
+    mocks.reviewReadiness.mockResolvedValue(readiness('incomplete', 'missing', 4))
+    const critic = tool('continuity_validate', async () => { throw Error('No provider retry is authorized') })
+    mocks.tools = [critic]
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: true })
+    expect(critic.execute).not.toHaveBeenCalled()
+    expect(mocks.chat).not.toHaveBeenCalled()
+    expect(events().filter(event => event.type === 'review.reconciled')).toEqual([
+      expect.objectContaining({ callId: local.callId, receipt: expect.objectContaining({ usageIds: [] }) }),
+    ])
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: {
+      pendingReviews: [unknown], reviewAttempts: f.checkpoint.reviewAttempts, stagnantBatches: 9,
+      writeProgress: 3, readProgress: 3, tokenBudget: 500, maxTurns: 1,
+    } })
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
+  })
   it.each(['bootstrap', 'saved'] as const)('hands a complete unknown terminal report to the main model before stagnation, then still stops repeated observations: %s', async scenario => {
     const f = saved(7)
     f.checkpoint.progressSignatures = [f.signature('continuity'), f.signature('quality')]
