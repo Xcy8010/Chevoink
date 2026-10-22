@@ -158,7 +158,7 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     expect(await prisma.chapter.findUniqueOrThrow({where:{id:chapter.id}})).toMatchObject({content:body,revision:15})
     const final=await prisma.storyCompilation.findUniqueOrThrow({where:{id:compilationId},include:{bridge:true}}),run=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}}),cp=(run.usage as {checkpoint:typeof checkpoint}).checkpoint
     expect(final.validation).toMatchObject({independentCheck:'complete',terminalCandidate:{exitState:{objects:base.exitState.objects,openLoops:[claim]}},
-      continuityCriticResponse:{classification:'complete',terminalEvidence:{verdictProtocol:4}}})
+      continuityCriticResponse:{classification:'complete',terminalEvidence:{verdictProtocol:5}}})
     expect(await prisma.agentRunEvent.count({where:{runId:f.runId,seq:{gt:4},type:'tool.result',payload:{path:['ok'],equals:false}}})).toBe(0)
     expect(cp.reviewAttempts).toContain('old-attempt')
     expect(cp.readProgress).toBe(scenario==='fresh-context'?11:7)

@@ -850,7 +850,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: { in: ['quality_format_recovery', 'quality_repair', 'quality_repair_retry'] } } })).toBe(0)
         const nextReports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId }, orderBy: { createdAt: 'asc' } })
         expect(nextReports).toHaveLength(2)
-        expect(nextReports[1]).toMatchObject({ status: 'passed', deterministicMetrics: { criticPromptProtocol: 'humanity-context.v5', qualityContextHash: qualityReviewContextHash(bundle) } })
+        expect(nextReports[1]).toMatchObject({ status: 'passed', criticVersion: 'humanity-critic.v6', deterministicMetrics: { criticPromptProtocol: 'humanity-context.v6', qualityContextHash: qualityReviewContextHash(bundle) } })
         expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: admittedLegacy!.id }, select: { id: true, inputHash: true, inputSnapshot: true } })).toEqual(admittedLegacy)
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: before, revision: 1 })
         return
@@ -933,7 +933,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       if (['synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario)) {
         const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
-        expect(operation.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'v5-parser-mechanical' ? 5 : 12, parserVersion: scenario === 'v5-parser-mechanical' ? 1 : 3 } } })
+        expect(operation.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'v5-parser-mechanical' ? 5 : 13, parserVersion: scenario === 'v5-parser-mechanical' ? 1 : 3 } } })
         expect(reports[0].deterministicMetrics).toMatchObject({ independentCheck: scenario === 'synthetic-mechanical' ? 'complete' : 'unavailable',
           criticResponse: { classification: scenario === 'synthetic-mechanical' ? 'complete' : scenario === 'synthetic-partial' ? 'findings_invalid' : 'incomplete_json' } })
         if (scenario === 'synthetic-partial') expect(reports[0].findings.filter(item => item.source === 'critic')).toHaveLength(1)
@@ -950,7 +950,9 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       else {
         expect(reports).toHaveLength(scenario === 'context-change' || scenario === 'repair' ? 2 : 1)
         expect(reports[0]).toMatchObject({ chapterRevision: repairedOnDisk ? 2 : 1, repairRound: repairedOnDisk ? 1 : 0, status: failed ? 'failed' : repairedOnDisk ? 'repaired' : scenario === 'protected' ? 'needs_repair' : 'passed' })
-        expect(reports[0].criticVersion).toBe(oldWorkVersion === 1 ? 'humanity-critic.v2' : oldWorkVersion === 2 ? 'humanity-critic.v3' : 'humanity-critic.v5')
+        const frozenMechanicalWork = ['v5-parser-mechanical', 'v6-parser-mechanical', 'v7-parser-mechanical'].includes(scenario)
+        expect(reports[0].criticVersion).toBe(oldWorkVersion === 1 ? 'humanity-critic.v2' : oldWorkVersion === 2 ? 'humanity-critic.v3'
+          : oldWorkVersion !== null || frozenMechanicalWork ? 'humanity-critic.v5' : 'humanity-critic.v6')
       }
       if (['format', 'format-valid', 'format-valid-repair', 'format-recovery-rollback'].includes(scenario)) {
         expect(reports[0].deterministicMetrics).toMatchObject({ formatRecovery: { version: 1, state: scenario === 'format' ? 'failed' : 'completed',
@@ -959,7 +961,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(await prisma.$transaction(tx => readQualityFormatRecovery(tx, { userId: f.userId, novelId: f.novelId, runId: lease.runId }, { chapterId: f.chapterId }))).toBeNull()
         const savedWork = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
         expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 13, parserVersion: 3, repairContext: expect.any(String), deadlineAt: expect.any(Number) } } })
-        expect(reports[0].deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v5' })
+        expect(reports[0].deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v6' })
         const recoveryOp = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: savedWork.id, action: 'quality_format_recovery' }, include: { attempts: { include: { usageReceipt: true } } } })
         expect(recoveryOp.attempts).toHaveLength(1)
         expect(recoveryOp.attempts[0].usageReceipt).toMatchObject({ source: 'reported', settlementStatus: 'settled' })
