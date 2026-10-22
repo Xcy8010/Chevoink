@@ -112,6 +112,8 @@
 
 四闸统一：`npm run check` → `npm run lint` → `npx vitest run --coverage` → `npm run build`。CI另做 Agent eval、生产与全依赖audit。
 
+两项依赖审计都须实际执行，保持 `--audit-level=high`。仅当生产审计明确命中 npm 官方退役 Quick 端点的特定 HTTP 400，且全树审计显式包含 dev/optional/peer、退出成功并返回完整且无 high/critical 的报告时，可用全树范围保守覆盖生产门禁；生产结果仍记为不可用，保留脱敏故障回执。漏洞、未知错误或全树报告缺失继续阻断，不重装依赖或改锁绕过审计。
+
 - Node/npm遵循仓库固定版本；`npm ci`，不在验证时升级锁文件。
 - 集成测试只能使用经过URL/权限校验的隔离数据库、非superuser/非CREATEDB等最小权限角色；不能只凭库名含test判断安全。
 - CI要求数据库ready、核心集成零skip。无DB快测不能签署发布通过。测试/浏览器执行位置遵守当前用户授权；不使用生产作者正文做写测试。

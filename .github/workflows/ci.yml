@@ -80,7 +80,7 @@ jobs:
         run: python3 -m unittest discover -s workers/document-import/tests -p 'test_*.py' -v
 
       - name: 云端发布准入、只读观察与开工同步回归（不连接生产）
-        run: node --test scripts/cloud-delivery.test.mjs scripts/production-observation.test.mjs scripts/workspace-start.test.mjs
+        run: node --test scripts/cloud-delivery.test.mjs scripts/production-observation.test.mjs scripts/workspace-start.test.mjs scripts/audit-gate.test.mjs
 
       - name: 生成 Agent 3.0 确定性评测快照
         run: |
@@ -98,10 +98,29 @@ jobs:
         run: npm run build
 
       - name: 生产依赖安全审计
-        run: npm audit --omit=dev --audit-level=high
+        id: audit-production
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high --json > audit-production.json 2> audit-production.stderr
 
       - name: 构建与测试依赖安全审计
-        run: npm audit --audit-level=high
+        id: audit-full
+        continue-on-error: true
+        run: npm audit --include=dev --include=optional --include=peer --audit-level=high --json > audit-full.json 2> audit-full.stderr
+
+      - name: 核验双审计结果（端点退役仅允许全树保守门禁）
+        env:
+          PRODUCTION_AUDIT_OUTCOME: ${{ steps.audit-production.outcome }}
+          FULL_AUDIT_OUTCOME: ${{ steps.audit-full.outcome }}
+        run: node scripts/audit-gate.mjs
+
+      - name: 保存脱敏审计结果
+        if: ${{ !cancelled() && (steps.audit-full.outcome == 'success' || steps.audit-full.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-result-${{ github.sha }}
+          path: audit-gate-result.json
+          if-no-files-found: error
+          retention-days: 7
 
   test-shard:
     name: test shard ${{ matrix.shard }}/${{ matrix.count }}

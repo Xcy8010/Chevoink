@@ -1840,6 +1840,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           || !proof.some(([key, attempt]) => key === item.baseKey && attempt === item.recoveryKey)) {
           throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '继续任务时的检查依据已变化，未派发旧检查。')
         }
+        const correctionSlots = readiness.terminalCorrection ? terminalFeedbackSlots(readiness, { userId: params.userId, novelId: params.novelId,
+          taskSpec: await prisma.$transaction(tx => effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)) }) : null
+        if (correctionSlots?.some(key => !consumedReviewDecisionFeedback.has(key))
+          && consumedReviewDecisionFeedback.has(terminalCorrectionReceiptKey(correctionSlots))) {
+          terminalHandoffSlots = correctionSlots
+          messages.push({ role: 'user', content: `[系统] 已结算检查的候选处理交接已保存，沿用剩余步骤，不重放检查、不补充次数。${readiness.terminalCorrection!.guidance}` })
+          continuedContinuityBootstrap.shift()
+          continue
+        }
         const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
         if (next.kind !== 'tool' || next.tool.name !== 'continuity_validate' || next.key !== item.recoveryKey) {
           throw new DataAccessError(409, 'REVIEW_DEPENDENCY_UNAVAILABLE', next.kind === 'blocked' ? next.reason : '当前检查状态不再匹配本次继续。')
@@ -2567,6 +2576,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }
         }
         let bootstrapWitness: ContinuedReviewDispatchWitness | null = null
+        let continuityBootstrapVerified = false
         const boundBootstrap = bootstrapCall?.id === call.id ? bootstrapItem : undefined
         const outcome = await handleToolCall(call, tools, { ...toolContext, ...(call.name === 'continuity_validate' && offlineContinuityCalls.has(call.id) ? { offlineContinuityOnly: offlineContinuityCalls.get(call.id) } : {}), callId: call.id, messageId }, bus, messageId, runId, undefined,
           boundBootstrap ? async () => {
@@ -2587,6 +2597,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (!proof.some(([key, attempt]) => key === continuityBootstrap!.baseKey && attempt === continuityBootstrap!.recoveryKey)) {
               throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '原检查或本次继续的依据已变化，未派发请求。')
             }
+            continuityBootstrapVerified = true
           } : undefined)
         if (continuityBootstrap && bootstrapCall?.id === call.id) continuedContinuityBootstrap.shift()
         const controlledRepair = boundBootstrap && bootstrapWitness && !outcome.unresolvedTextRequest ? await prisma.$transaction(tx => readContinuedReviewRepairHandoff(tx,
@@ -2603,7 +2614,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           && outcome.reviewRequestFinished.revision === reviewDispatch.revision
           && /^[a-f0-9]{64}$/.test(outcome.reviewRequestFinished.contentHash)
         if (requestFinished) await bus.persist()
-        if (boundBootstrap && bootstrapWitness && requestFinished && !outcome.unresolvedTextRequest
+        if ((boundBootstrap && bootstrapWitness || continuityBootstrapVerified) && requestFinished && !outcome.unresolvedTextRequest
           && outcome.failureCode === 'CONTINUITY_REPORT_INCOMPLETE' && reviewDispatch) {
           const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
             { userId: params.userId, novelId: params.novelId, runId }, reviewDispatch!.compilationId ?? undefined))
@@ -2617,7 +2628,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             terminalHandoffTurn = true
             consumedReviewDecisionFeedback.add(terminalCorrectionReceiptKey(slots))
             for (let index = continuedReviewBootstrap.length - 1; index >= 0; index--) {
-              if (continuedReviewBootstrap[index].receipt.recoveryKey === boundBootstrap.receipt.recoveryKey) continuedReviewBootstrap.splice(index, 1)
+              if (boundBootstrap && continuedReviewBootstrap[index].receipt.recoveryKey === boundBootstrap.receipt.recoveryKey) continuedReviewBootstrap.splice(index, 1)
             }
             messages.push({ role: 'user', content: `[系统] 本次已结束的检查保留为失败，原停滞计数、请求记录和费用不变。现交回有限的候选处理步骤；这不是检查通过或新增写作权限。${readiness!.terminalCorrection!.guidance}` })
           }

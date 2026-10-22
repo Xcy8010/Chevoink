@@ -30,8 +30,9 @@ const fixture: typeof durableFixture = (work, ...rest) => durableFixture(async f
 }, ...rest)
 const checks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body review.', findingIndexes: [] }))
 
-describe.runIf(available)('settled native review hands a rejected current-state candidate back to the original task', () => {
-  it.each(['commit', 'repeat', 'restart'] as const)('preserves failed requests and permits bounded candidate processing: %s', scenario => fixture(async f => {
+describe.runIf(available)('authenticated native review hands a rejected current-state candidate back to the original task', () => {
+  it.each((['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)))(
+    'preserves failed requests and permits bounded candidate processing: %s / %s', (billing, scenario) => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
     vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
@@ -76,17 +77,25 @@ describe.runIf(available)('settled native review hands a rejected current-state 
     observeSemanticReadProgress(seen, 'chapter_read', body, { targetId: chapter.id, contentHash: createHash('sha256').update(body).digest('hex'), start: 0, end: body.length })
     for (const phase of ['prepare', 'scenes'] as const) observeWritingWorkflowMilestone(seen, phase === 'prepare' ? 'story_compiler_prepare' : 'scene_task_build',
       { version: 1, userId: f.userId, novelId: f.novelId, runId: f.runId, targetOrderIndex: 2, phase }, { ...f, taskSpec: spec })
-    const start = Date.now() - 5000, at = (ms: number) => new Date(start + ms)
+    const validation = (await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, select: { validation: true } })).validation as { checkedAt: string }
+    const checkedAt = Date.parse(validation.checkedAt)
+    expect(Number.isFinite(checkedAt)).toBe(true)
+    const start = checkedAt - 1000, at = (ms: number) => new Date(start + ms)
     const old = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id,
       providerType: 'text', providerMode: 'custom', modelName: 'synthetic', modelTier: 'speed', multiplierBps: 10000, action: 'agent3ContinuityCritic',
-      requestTokens: null, responseTokens: null, usageSource: 'unknown', billingStatus: 'pending_usage', creditChargeMilli: 0, reservedCreditMilli: 18023, durationMs: 0, createdAt: at(100) } })
+      ...(billing === 'unknown' ? { requestTokens: null, responseTokens: null, usageSource: 'unknown', billingStatus: 'pending_usage', reservedCreditMilli: 18023 }
+        : { requestTokens: 10, responseTokens: 0, usageSource: 'reported', billingStatus: 'settled', reservedCreditMilli: 0, billingEvidence: { responseObserved: true } }),
+      creditChargeMilli: 0, durationMs: 0, createdAt: at(100) } })
     await prisma.agentRunEvent.createMany({ data: [{ runId: f.runId, seq: 1, type: 'tool.call', createdAt: at(0), payload: { callId: 'original-ended', toolName: 'continuity_validate', args: { compilationId: compilation.id } } },
-      { runId: f.runId, seq: 2, type: 'tool.result', createdAt: at(200), payload: { callId: 'original-ended', toolName: 'continuity_validate', ok: false, failureCode: 'AI_PROVIDER_TRANSPORT' } }] })
-    const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'run.paused', createdAt: at(300), payload: { reason: 'model_stalled' } } })
+      { runId: f.runId, seq: 2, type: 'tool.result', createdAt: at(1001), payload: { callId: 'original-ended', toolName: 'continuity_validate', ok: false,
+        failureCode: billing === 'unknown' ? 'AI_PROVIDER_TRANSPORT' : 'CONTINUITY_REPORT_INCOMPLETE',
+        ...(billing === 'settled' ? { reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: 8,
+          contentHash: createHash('sha256').update(body).digest('hex'), usageIds: [old.id] } } : {}) } }] })
+    const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'run.paused', createdAt: at(1002), payload: { reason: 'model_stalled' } } })
     const history = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', activeExecutionMs: 200, stagnantBatches: 7, runStartedAt: start, resumeCount: 0, compactionCount: 0,
       maxTurns: 1, tokenBudget: 500, writeProgress: 1, writeBaseline: 0, readProgress: 7, readBaseline: 0, progressSignatures: [...seen], reviewAttempts: ['old-attempt'],
-      pendingReviews: [{ compilationId: compilation.id, chapterId: chapter.id, revision: 8, toolName: 'continuity_validate', callId: 'original-ended' }],
+      pendingReviews: billing === 'unknown' ? [{ compilationId: compilation.id, chapterId: chapter.id, revision: 8, toolName: 'continuity_validate', callId: 'original-ended' }] : [],
       consumedReviewDecisionFeedback: [] as string[], inheritedTokens: 0, inheritedTurns: 0, manualResumeCount: 0 }
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', currentTurn: 26, startedAt: at(0), usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, checkpoint } } })
     const window = credits.getCreditWindow()
@@ -107,12 +116,12 @@ describe.runIf(available)('settled native review hands a rejected current-state 
     vi.stubGlobal('fetch', network)
     let turn = 0, interrupted = false
     let firstFeedback: string[] | undefined
-    const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async (_runtime, messages) => {
+    const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async ({ messages }) => {
       if (main.mock.calls.length > (scenario === 'restart' ? 6 : 5)) throw Error('Bounded candidate processing must terminate')
       if (turn === 0) {
         expect(JSON.stringify(messages)).toContain('terminalPatch')
         // Both real bootstrap requests must finish before the original task
-        // sees feedback; the original unknown usage remains unresolved.
+        // sees feedback; each original request keeps its exact billing truth.
         expect(network).toHaveBeenCalledTimes(2)
         const events = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { gt: 3 } }, orderBy: { seq: 'asc' } })
         const bootstrap = events.filter(event => event.type === 'tool.call' && String((event.payload as { callId?: string }).callId).startsWith('continued_review_'))
@@ -123,6 +132,7 @@ describe.runIf(available)('settled native review hands a rejected current-state 
         const cp = (current.usage as { checkpoint: typeof checkpoint }).checkpoint
         expect(cp.pendingReviews ?? []).toEqual([])
         expect(cp.consumedReviewDecisionFeedback).toContain(terminalCorrectionReceiptKey(slots))
+        expect(cp.reviewAttempts.some(key => key.startsWith(billing === 'settled' ? 'continuity-author-recovery:' : 'author-continued-review:'))).toBe(true)
         expect(cp.stagnantBatches).toBeGreaterThanOrEqual(7)
         if (scenario === 'restart' && !interrupted) {
           expect(cp.consumedReviewDecisionFeedback.filter(key => slots.includes(key))).toEqual([slots[0]])

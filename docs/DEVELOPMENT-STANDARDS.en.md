@@ -108,6 +108,8 @@ An explicitly approved discount-only release may waive the shadow wait, but must
 
 Four gates: `npm run check` → `npm run lint` → `npx vitest run --coverage` → `npm run build`. CI additionally runs Agent eval and production/full dependency audits.
 
+Both dependency audits must actually run with `--audit-level=high`. Only the specific HTTP 400 from npm's retired official Quick endpoint permits conservative production coverage by a successful full-tree audit that explicitly includes dev/optional/peer and returns a complete report with no high/critical findings. The production result remains unavailable with a sanitized failure receipt. Vulnerabilities, unclassified errors or missing full reports still block release; do not reinstall dependencies or change the lockfile to bypass auditing.
+
 - Use pinned Node/npm and npm ci; do not upgrade the lockfile while validating.
 - Integration tests require validated isolated URLs and least-privileged DB roles, not merely “test” in a database name.
 - CI requires DB readiness and no skipped critical integration tests. No-DB quick tests cannot authorize release. Respect the user's execution-location authorization; never rewrite production author content for tests.
