@@ -160,7 +160,12 @@ describe.runIf(available)('authenticated native review hands a rejected current-
           terminalPatch: scenario === 'repeat' ? { baseCandidateHash: runtimeJson(bad).hash }
             : { baseCandidateHash: runtimeJson(bad).hash, removeFactIds: terminalCandidateFacts(bad).map(fact => fact.id),
               addFacts: terminalCandidateFacts(good).map(({ field, claim }) => ({ field, claim })) } }) }
-        : turn === 2 ? { id: 'actual-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: compilation.id }) } : undefined
+        : undefined
+      // This ordinary revision request still needs its natural final reply.
+      // The server has already committed the reviewed candidate before that
+      // reply; the model must consume the receipt rather than submit again.
+      if (!call) expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } }))
+        .toMatchObject({ status: 'completed', stage: 'commit', bridge: { committedAt: expect.any(Date) } })
       const proposals = call ? [call] : []
       if (scenario === 'multiple-candidates' && call) proposals.push({ ...call, id: call.id + '-extra' },
         { id: 'unexpected-body-write', name: 'chapter_append', arguments: JSON.stringify({ chapterId: chapter.id, content: 'Unapproved candidate-processing body change.' }) })
@@ -181,7 +186,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: stop.id, afterSeq }, eventStartSeq: afterSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     }
     expect(network).toHaveBeenCalledTimes(scenario === 'no-proposal' ? 0 : scenario === 'repeat' ? 2 : 1)
-    expect(main).toHaveBeenCalledTimes(scenario === 'restart' || scenario === 'repeat' ? 2 : 1)
+    expect(main).toHaveBeenCalledTimes(scenario === 'restart' ? 3 : scenario === 'no-proposal' || scenario === 'commit-unknown' ? 1 : 2)
     expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
     expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: pauseSeq } }, orderBy: { seq: 'asc' } })).toEqual(history)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: body, revision: 8 })
@@ -195,6 +200,12 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     expect(final.bridge!.committedAt === null).toBe(stopped)
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).status).toBe(stopped ? 'paused' : 'completed')
     if (!stopped) {
+      const commits = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: { in: ['tool.call', 'tool.result'] },
+        payload: { path: ['toolName'], equals: 'chapter_bridge_commit' } }, orderBy: { seq: 'asc' } })
+      expect(commits.map(event => ({ type: event.type, payload: event.payload }))).toMatchObject([
+        { type: 'tool.call', payload: { callId: `terminal_commit_${processingKey.slice(0, 40)}`, toolName: 'chapter_bridge_commit' } },
+        { type: 'tool.result', payload: { callId: `terminal_commit_${processingKey.slice(0, 40)}`, toolName: 'chapter_bridge_commit', ok: true } },
+      ])
       expect(final.bridge).toMatchObject({ location: accurate, lastUnfinishedAction: good.lastUnfinishedAction })
       const committed = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
       expect(committed?.terminalCommitted).toBe(true)

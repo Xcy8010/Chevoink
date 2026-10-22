@@ -1071,7 +1071,7 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
         ? `保留此编译和场景，不重复 PREPARE/BEAT；尚无合法非空正文，下一步${chapter ? '' : '按冻结目标 chapter_create 后'}调用 chapter_write 保存正文，不能宣称已写完或完成。`
         : active.bridge?.targetRevision !== chapter?.revision
           ? `保留此编译和场景，不重复 PREPARE/BEAT；当前正文与本编译绑定写入版本（${active.bridge?.targetRevision ?? '未记录'}）不一致。先核对正文和原请求，再补缺失步骤；终态未核验，不能宣称完成。`
-          : `保留此编译、场景和已保存正文，不重复 PREPARE/BEAT 或整章写入；终态尚未提交。以当前检查状态决定先处理候选、复核或提交，只有当前版本必需检查及事实核验完成后才能 chapter_bridge_commit，不能提前宣称完成。`
+          : `保留此编译、场景和已保存正文，不重复 PREPARE/BEAT 或整章写入；终态尚未提交。以当前检查状态决定先处理候选、复核或提交，只有当前版本必需检查及事实核验完成后才能调用 chapter_bridge_commit；终态未核验，不能宣称完成。`
   const validation = active?.validation as { checkedRevision?: number; independentCheck?: string; errorCount?: number; warningCount?: number } | null
   const lines = [
     'Story Compiler 3.0 状态：',

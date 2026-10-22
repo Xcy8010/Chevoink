@@ -141,14 +141,17 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
       const call=turn===1?{id:'reread-saved-body',name:'chapter_read',arguments:JSON.stringify({chapterId:chapter.id})}
         :scenario==='fresh-context'&&turn<6?{id:`read-new-range-${turn}`,name:'chapter_read',arguments:JSON.stringify({chapterId:previous.id,offset:(turn-2)*10,limit:10})}
         :turn===checkTurn?{id:'select-proof-only',name:'continuity_validate',arguments:JSON.stringify({compilationId,inheritedProofs:[proof.proofHash],...(scenario==='patch'?{terminalPatch:{baseCandidateHash:runtimeJson(base).hash,removeFactIds:[terminalFactId('emotion',base.exitState.emotion[0])]}}:{})})}
-        :supported&&turn===checkTurn+1?{id:'real-commit',name:'chapter_bridge_commit',arguments:JSON.stringify({compilationId})}
-          :supported?undefined:{id:`same-report-${turn}`,name:'chapter_bridge_get',arguments:JSON.stringify({compilationId})}
+        :supported?undefined:{id:`same-report-${turn}`,name:'chapter_bridge_get',arguments:JSON.stringify({compilationId})}
+      // A generic revision uses the normal final reply after the automatic
+      // commit. Only an exclusive title/body request can finish without it.
+      if(!call)expect(await prisma.storyCompilation.findUniqueOrThrow({where:{id:compilationId},include:{bridge:true}}))
+        .toMatchObject({status:'completed',stage:'commit',bridge:{committedAt:expect.any(Date)}})
       return{content:call?'':'Completed.',reasoning:'',finishReason:call?'tool_calls':'stop',toolCalls:call?[call]:[],usage:{promptTokens:10,completionTokens:0,totalTokens:10,promptCacheHitTokens:null,promptCacheMissTokens:null}}
     })
     await executeAgentRun({...f,prompt:'修改本章',mode:'build',resume:true,eventStartSeq:4,modelTier:'speed',qualityMode:'balanced',creativeFreedom:'balanced'})
     expect(afterReadCheckpoint).toMatchObject({stagnantBatches:5,readProgress:7,writeProgress:1,
       reviewAttempts:expect.arrayContaining(['old-attempt'])})
-    expect(main).toHaveBeenCalledTimes(scenario==='fresh-context'?6:2)
+    expect(main).toHaveBeenCalledTimes(supported?(scenario==='fresh-context'?7:3):2)
     expect(network).toHaveBeenCalledOnce()
     expect(JSON.stringify(requests[0])).toContain(proof.proofHash)
     const usage=await prisma.aiUsageLog.findMany({where:{userId:f.userId,agentRunId:f.runId,action:'agent3ContinuityCritic'}})
@@ -167,6 +170,12 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     expect(cp.consumedReviewDecisionFeedback ?? []).toEqual(checkpoint.consumedReviewDecisionFeedback)
     expect(cp.reviewAttempts.filter(key=>key.startsWith('terminal-processing:'))).toHaveLength(2)
     if(supported){
+      const commits=await prisma.agentRunEvent.findMany({where:{runId:f.runId,type:{in:['tool.call','tool.result']},
+        payload:{path:['toolName'],equals:'chapter_bridge_commit'}},orderBy:{seq:'asc'}})
+      expect(commits.map(event=>({type:event.type,payload:event.payload}))).toMatchObject([
+        {type:'tool.call',payload:{callId:expect.stringMatching(/^terminal_commit_[a-f0-9]{40}$/u),toolName:'chapter_bridge_commit'}},
+        {type:'tool.result',payload:{callId:(commits[0].payload as {callId:string}).callId,toolName:'chapter_bridge_commit',ok:true}},
+      ])
       expect(run.status).toBe('completed')
       expect(final.bridge).toMatchObject({openLoops:[claim],objectState:base.exitState.objects,committedAt:expect.any(Date)})
       expect(final.preparedContext).toMatchObject({terminalFactProofs:expect.arrayContaining([expect.objectContaining({field:'openLoops',claim,depth:2})])})
