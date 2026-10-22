@@ -18,8 +18,8 @@ import { beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, readRevi
   type ReviewCycleFinding } from './review-cycle.js'
 import { observedReviewCycleVerification, prepareReviewCycleTransition } from './review-cycle-store.js'
 import { readTerminalCandidate, currentTerminalReview } from './terminal-state-review.js'
-import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalVerdictAuditVersion } from './terminal-evidence-context.js'
-import { terminalCoverageInput, terminalCoverageAuditVersion } from './terminal-fact-coverage.js'
+import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalVerdictAuditVersion, terminalSpanAuditVersion } from './terminal-evidence-context.js'
+import { terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs } from './terminal-fact-coverage.js'
 import { terminalCandidateCorrection, type TerminalCandidateCorrection } from './terminal-candidate-feedback.js'
 import type { TerminalProcessingInput } from './terminal-processing.js'
 
@@ -350,10 +350,10 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     { ...readiness, reviewBoundEvidence: { contentHash, anchors: repairAnchors, cycle: savedCycle } })
   const terminalVersion = terminalEvidenceVersion(original.spec)
   const terminalCandidate = readTerminalCandidate(validation)
-  const factCoverage = terminalCoverageInput(original.spec, compilation.preparedContext, chapter, terminalCandidate, terminalCoverageAuditVersion(validation))
+  const factCoverage = terminalCoverageInput(original.spec, compilation.preparedContext, chapter, terminalCandidate, terminalCoverageAuditVersion(validation), terminalCoverageProofs(source, terminalSpanAuditVersion(validation)))
   if (terminalVersion && (terminalCandidate || factCoverage?.obligations.length)) {
     const evidence = terminalEvidenceContext(chapter, source, terminalVersion, terminalQuoteAddressVersion(original.spec),
-      factCoverage, terminalVerdictAuditVersion(validation))
+      factCoverage, terminalVerdictAuditVersion(validation), terminalSpanAuditVersion(validation))
     const terminal = assessment ? currentTerminalReview(validation, chapter.content, evidence) : null
     if (continuity === 'incomplete' && validation && compilerContinuityCoverageMatches(validation.coverage,
       compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source,
@@ -386,7 +386,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
         inherited: (evidence.previous?.carried ?? []).filter(fact => fact.depth < 16)
           .map(({ proofHash, field, claim }) => ({ proofHash, field, claim })),
         issues: readiness.terminalCorrection
-          ? readiness.terminalCorrection.paths.map(path => ({ path, reason: 'inheritance_invalid' }))
+          ? readiness.terminalCorrection.issues ?? readiness.terminalCorrection.paths.map(path => ({ path, reason: 'inheritance_invalid' }))
           : readiness.terminalReview.unresolved.map(({ path, verdict }) => ({ path, reason: verdict })),
       }
     }

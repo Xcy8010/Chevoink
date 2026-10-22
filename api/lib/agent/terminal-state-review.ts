@@ -87,11 +87,16 @@ const jointFactVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(t
 
 /** Shared fresh response shape; proof/decision semantics remain independently
  * checked after binding these mechanically addressed fields. */
-export function terminalResponseFields(hasCandidate = true, version: 4 | 5 = 4) {
+export function terminalResponseFields(hasCandidate = true, version: 4 | 5 = 4, legalSegmentIds?: string[]) {
   // Use the request's frozen candidate. A body-only review has no terminal
   // claims; an explicit empty candidate still needs its exhaustive empty array.
   const keyed = semanticCheckSchema.omit({ kind: true }).extend({ kind: semanticCheckSchema.shape.kind.optional() }).strict()
-  const ordinary = z.array(version === 5 ? terminalJointFactVerdictSchema : terminalFactVerdictSchema).max(200)
+  const addressed = legalSegmentIds ? terminalSpanVerdictSchema.extend({ sourceEvidence: z.array(
+    terminalSpanVerdictSchema.shape.sourceEvidence.element.extend({ segmentId: legalSegmentIds.length
+      ? z.enum(legalSegmentIds as [string, ...string[]]) : z.never() })).max(8) }) : null
+  const scoped = addressed ? z.union([addressed.omit({ path: true }).extend({ factId: z.string().regex(/^[a-f0-9]{64}$/u),
+    ...(version === 5 ? { path: addressed.shape.path.optional() } : {}) }).strict(), addressed]) : null
+  const ordinary = z.array(scoped ?? (version === 5 ? terminalJointFactVerdictSchema : terminalFactVerdictSchema)).max(200)
   const proofs = z.array(terminalProofVerdictSchema).max(200)
   const dispositions = z.array(addressedTerminalDispositionSchema).max(200)
   return { semanticChecks: z.union([z.array(semanticCheckSchema).length(2), z.object({ action_direction: keyed, state_progression: keyed }).strict()]),
@@ -326,7 +331,7 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
           return { segmentId: id, proofHash: fact.proofHash, anchors: fact.anchors }
         }
         const segment = segments.find(part => part.segmentId === id)!
-        const start = Number(id.slice(1)) * 300
+        const start = 'start' in segment && typeof segment.start === 'number' ? segment.start : Number(id.slice(1)) * 300
         return { segmentId: id, start, end: start + segment.quote.length, hash: runtimeJson({ text: segment.quote }).hash }
       }) })) }
   } catch { return invalid('response_invalid') }

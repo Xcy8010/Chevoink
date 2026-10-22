@@ -10,7 +10,7 @@ import { activeChapterScope } from '../data/internal.js'
 import { terminalCandidateSchema, terminalCandidateInputSchema, readTerminalCandidate, reviewTerminalSelection, resolveTerminalCandidate } from './terminal-state-review.js'
 import { continuitySourceScopeSchema } from './continuity-source-authority.js'
 import { terminalEvidenceContextSchema, terminalEvidenceContext, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
-import { terminalCoverageInput } from './terminal-fact-coverage.js'
+import { terminalCoverageInput, terminalCoverageProofs } from './terminal-fact-coverage.js'
 import { readOriginalTaskRequest } from './original-request.js'
 import { readFrozenLegacyTerminalPatch, terminalCandidatePatchSchema } from './terminal-candidate-patch.js'
 import { DataAccessError } from '../prisma.js'
@@ -150,7 +150,8 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   if (chainProtocol) {
     sourceMatches &&= runtimeJson(bodies.terminalEvidence).hash === runtimeJson(terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original?.spec),
       terminalCoverageInput(original?.spec, compilation.preparedContext, chapter, coverageInput.terminalCandidate,
-        object(object(bodies.terminalEvidence).factCoverage).version === 2 ? 2 : 1), object(bodies.terminalEvidence).verdictProtocol === 5 ? 5 : object(bodies.terminalEvidence).verdictProtocol === 4 ? 4 : object(bodies.terminalEvidence).verdictProtocol === 3 ? 3 : object(bodies.terminalEvidence).verdictProtocol === 2 ? 2 : undefined)).hash
+        object(object(bodies.terminalEvidence).factCoverage).version === 2 ? 2 : 1, terminalCoverageProofs(source, object(bodies.terminalEvidence).spanAddressProtocol === 2 ? 2 : undefined)), object(bodies.terminalEvidence).verdictProtocol === 5 ? 5 : object(bodies.terminalEvidence).verdictProtocol === 4 ? 4 : object(bodies.terminalEvidence).verdictProtocol === 3 ? 3 : object(bodies.terminalEvidence).verdictProtocol === 2 ? 2 : undefined,
+      object(bodies.terminalEvidence).spanAddressProtocol === 2 ? 2 : undefined)).hash
   }
   if (!sourceMatches && !chainProtocol) {
     // A proven non-dispatch may have frozen the previous single-source

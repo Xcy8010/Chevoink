@@ -17,6 +17,22 @@ export const terminalCandidatePatchSchema = z.object({ baseCandidateHash: hash,
 export type TerminalCandidatePatch = z.infer<typeof terminalCandidatePatchSchema>
 const stale = () => new DataAccessError(409,'CONTINUITY_INPUT_STALE','章末候选已变化或事实地址不唯一；请读取当前章节桥后只更新需要处理的事实，未派发旧补丁。')
 
+/** Keep failed claims as unresolved processing data, not established facts.
+ * A fresh proposal must express its replacement instead of silently removing
+ * the difficult field. Independent review still decides every replacement. */
+export function terminalCandidateReplacementIssue(validation: unknown, candidate: TerminalCandidate, content: string): string | null {
+  const saved = validation as { independentCheck?: unknown; continuityCriticResponse?: { classification?: unknown; terminalContentHash?: unknown; terminalCandidate?: unknown } } | null
+  const base = readTerminalCandidate(validation), audit = saved?.continuityCriticResponse
+  if (!base || saved?.independentCheck !== 'unavailable' || audit?.classification !== 'terminal_invalid'
+    || audit.terminalContentHash !== runtimeJson({ content }).hash || runtimeJson(audit.terminalCandidate).hash !== runtimeJson(base).hash) return null
+  const before = terminalCandidateFacts(base), after = terminalCandidateFacts(candidate)
+  const additions = after.filter(fact => !before.some(prior => prior.id === fact.id))
+  const removed = before.filter(fact => !after.some(next => next.id === fact.id))
+  return removed.some(fact => additions.filter(next => next.field === fact.field).length
+    < removed.filter(prior => prior.field === fact.field).length)
+    ? '失败候选不能只删除问题事实；请明确同字段的事实替换或拆分，保留未解决事项及其状态。原候选和失败记录保留，未派发新检查；替换后仍须独立核验。' : null
+}
+
 /** This legacy delta producer freezes before reserving any model request.
  * A prior exact-call snapshot/reservation prevents a local refusal from being
  * mistaken for proof about an earlier, possibly unknown provider attempt. */
@@ -90,6 +106,8 @@ async function legacyTerminalPatch(tx: Prisma.TransactionClient,ctx: Pick<ToolCo
   if(readOnly)return null
   const selected=resolveTerminalCandidate({...applyTerminalCandidatePatch(current,patch),inheritedProofs},carried,protocol)
   if(!selected.ok)throw stale()
+  const issue=terminalCandidateReplacementIssue(compilation.validation,selected.candidate,compilation.chapter.content)
+  if(issue)throw new DataAccessError(409,'TERMINAL_STATE_REVIEW_REQUIRED',issue)
   const snapshot=snapshotSchema.parse({version:1,kind:'terminalCandidatePatch',identity,request,base:current,candidate:selected.candidate})
   await tx.agentArtifact.create({data:{id,runId:ctx.runId,artifactType:'continuityReview',title:'章末候选增量输入快照',content:'',metadata:runtimeJson(snapshot).value}})
   return {candidate:selected.candidate,expectedBaseHash:patch.baseCandidateHash}

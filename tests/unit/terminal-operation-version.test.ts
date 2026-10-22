@@ -22,6 +22,20 @@ const ctx = { runId: 'same-run', callId: 'same-call', userId: 'author', novelId:
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('request-owned terminal response versions', () => {
+  it('pins the new span scope when restoring an owned call and refuses a legacy reconstruction', async () => {
+    const evidence = terminalEvidenceContext(chapter, null, 2, 1, terminalCoverageInput(spec, {}, chapter, candidate, 2), 5, 2)
+    const saved = { ...structuredClone(frozen), bodies: { ...frozen.bodies, terminalEvidence: evidence } }
+    const metadata = { input: saved, continuityAssessmentRequestKey: legacyContinuityAssessmentKey(ctx, saved) }
+    const tx = { agentArtifact: { findMany: vi.fn().mockResolvedValue([{ metadata }]) } } as unknown as Prisma.TransactionClient
+    const before = JSON.stringify(metadata)
+    const recover = vi.fn((contract: lifecycle.FrozenTerminalContract) => ({ ...frozen.bodies,
+      terminalEvidence: terminalEvidenceContext(chapter, null, 2, 1, terminalCoverageInput(spec, {}, chapter, candidate, contract.coverageVersion), contract.verdictProtocol, contract.spanAddressProtocol) }))
+    expect(await readFrozenLegacyContinuityInput(tx, ctx, frozen, recover)).toEqual(saved)
+    expect(recover).toHaveBeenCalledWith({ coverageVersion: 2, verdictProtocol: 5, spanAddressProtocol: 2 })
+    expect(JSON.stringify(metadata)).toBe(before)
+    await expect(readFrozenLegacyContinuityInput(tx, ctx, frozen, () => ({ ...frozen.bodies, terminalEvidence: context(2, 5) })))
+      .rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
+  })
   it.each([[1, undefined], [2, undefined], [2, 2], [2, 3], [2, 4], [2, 5]] as const)('rebuilds the exact saved coverage %i / verdict %s pair before restoring an owned call', async (coverageVersion, verdictProtocol) => {
     const saved = { ...structuredClone(frozen), bodies: { ...frozen.bodies, terminalEvidence: context(coverageVersion, verdictProtocol) } }
     const metadata = { input: saved, continuityAssessmentRequestKey: legacyContinuityAssessmentKey(ctx, saved) }

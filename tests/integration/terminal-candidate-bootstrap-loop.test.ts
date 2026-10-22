@@ -32,7 +32,7 @@ const fixture: typeof durableFixture = (work, ...rest) => durableFixture(async f
 const checks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body review.', findingIndexes: [] }))
 
 describe.runIf(available)('authenticated native review hands a rejected current-state candidate back to the original task', () => {
-  it.each([...(['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)), ...(['old-slots', 'local-refusal', 'objects', 'commit-reserved', 'commit-unknown', 'multiple-candidates', 'no-proposal'] as const).map(scenario => ['settled', scenario] as const)])(
+  it.each([...(['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)), ...(['old-slots', 'local-refusal', 'objects', 'source-address', 'commit-reserved', 'commit-unknown', 'multiple-candidates', 'no-proposal'] as const).map(scenario => ['settled', scenario] as const)])(
     'preserves failed requests and permits bounded candidate processing: %s / %s', (billing, scenario) => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
@@ -41,11 +41,14 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     // including on fast CI workers. Keep the saved-version evidence on the
     // same clock; moving only calls would invalidate local-refusal proof.
     const start = Date.now() - 60_000, at = (ms: number) => new Date(start + ms)
-    const body = 'He stops at the control-room doorway, before turning the wheel. The packet remains on the desk.', accurate = 'At the control-room doorway, before crossing it.'
+    const body = 'He stops at the control-room doorway, before turning the wheel. The packet remains on the desk.'
+      + (scenario === 'source-address' ? ' The current output remains unverified.' : ''), accurate = 'At the control-room doorway, before crossing it.'
     const bad = terminalCandidateSchema.parse({ exitState: { location: scenario === 'objects' ? accurate : 'Inside the first door of the control room.',
-      action: 'Preparing to turn the first-door wheel.', ...(scenario === 'objects' ? { objects: ['The packet has been archived.'] } : {}) }, lastUnfinishedAction: 'The first-door wheel has not been turned.' })
+      action: 'Preparing to turn the first-door wheel.', ...(scenario === 'objects' ? { objects: ['The packet has been archived.'] } : {}),
+      ...(scenario === 'source-address' ? { knowledge: ['An earlier reading proves the current output.'] } : {}) }, lastUnfinishedAction: 'The first-door wheel has not been turned.' })
     const good = terminalCandidateSchema.parse({ exitState: { location: accurate, action: 'Preparing to turn the control-room doorway wheel.',
-      ...(scenario === 'objects' ? { objects: ['The packet remains on the desk.'] } : {}) }, lastUnfinishedAction: 'The doorway wheel has not been turned.' })
+      ...(scenario === 'objects' ? { objects: ['The packet remains on the desk.'] } : {}),
+      ...(scenario === 'source-address' ? { knowledge: ['The current output remains unverified.'] } : {}) }, lastUnfinishedAction: 'The doorway wheel has not been turned.' })
     const badFacts = terminalCandidateFacts(bad), goodFacts = terminalCandidateFacts(good)
     const correction = { baseCandidateHash: runtimeJson(bad).hash,
       removeFactIds: badFacts.filter(fact => !goodFacts.some(current => current.id === fact.id)).map(fact => fact.id),
@@ -69,10 +72,14 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     const source = await readCompilerContinuitySource(prisma, f, chapter, saved.bridge!.fromChapterId, 11)
     expect(source?.content).toContain('second door')
     const evidence = terminalEvidenceContext(chapter, source, 2, 1, terminalCoverageInput(original.spec, saved.preparedContext, chapter, bad, 2), 5)
-    const rejectedPath = scenario === 'objects' ? 'exitState.objects.0' : 'exitState.location'
-    const rejected = { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(bad).map(fact => ({ factId: fact.id, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }, ...(fact.path === rejectedPath ? [{ segmentId: 'p0' }] : [])] })), terminalProofVerdicts: [], terminalDispositions: [] }
+    const rejectedPath = scenario === 'source-address' ? 'exitState.knowledge.0' : scenario === 'objects' ? 'exitState.objects.0' : 'exitState.location'
+    const rejected = { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(bad).map(fact => ({ factId: fact.id, verdict: 'supported',
+      sourceEvidence: [{ segmentId: 'c0' }, ...(fact.path === rejectedPath ? [{ segmentId: scenario === 'source-address' ? 'p99' : 'p0',
+        ...(scenario === 'source-address' ? { quote: source!.content.slice(0, 40) } : {}) }] : [])],
+      ...(scenario === 'source-address' && fact.path === rejectedPath ? { inheritance: { priorEndState: 'established', currentState: 'unchanged' } } : {}) })), terminalProofVerdicts: [], terminalDispositions: [] }
     const inspected = inspectContinuityResponse(JSON.stringify(rejected), { current: body, previous: source!.content, terminalEvidence: evidence }, true, 8, bad)
-    expect(inspected).toMatchObject({ complete: false, audit: { classification: 'terminal_invalid', terminalReviewDiagnostics: [{ code: 'inheritance_invalid', path: rejectedPath }] } })
+    expect(inspected).toMatchObject({ complete: false, audit: { classification: 'terminal_invalid', terminalReviewDiagnostics: [{
+      code: scenario === 'source-address' ? 'evidence_quote_invalid' : 'inheritance_invalid', path: rejectedPath }] } })
     await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: 8, independentCheck: 'unavailable', findings: [], terminalCandidate: bad,
       coverage: compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: bad }, 11), continuityCriticResponse: inspected.audit })
     await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: chapter.id, chapterRevision: 8, mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })

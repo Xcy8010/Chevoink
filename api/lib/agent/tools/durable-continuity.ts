@@ -3,7 +3,7 @@ import { continuityFindingText, continuitySourceInput, unconfirmedContinuityOutp
 import { z } from 'zod'
 import { readChapterReviewRevisionGuidance, continuityDecisionBinding, readChapterReviewReadiness } from '../chapter-review-guard.js'
 import { readOriginalTaskRequest } from '../original-request.js'
-import { terminalCoverageInput, terminalCoverageAuditVersion, hasTerminalCoverageProtocol } from '../terminal-fact-coverage.js'
+import { terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs, hasTerminalCoverageProtocol } from '../terminal-fact-coverage.js'
 import { hasContinuitySourceAuthority, continuitySourceAuthorityRule, continuityAuthorRequirements, compilerEvidenceScope, continuitySourceScopeSchema } from '../continuity-source-authority.js'
 import { DataAccessError } from '../../prisma.js'
 import { activeChapterScope } from '../../data/internal.js'
@@ -30,8 +30,8 @@ import { runContinuityEvidenceCorrection } from '../continuity-response-correcti
 import { runContinuityReassessment, freshContinuityResponseContract } from '../assessment-response-lifecycle.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { readTerminalCandidate, resolveTerminalCandidate, reviewTerminalSelection, terminalCandidateInputSchema, terminalCandidateSchema, terminalReviewInput, terminalReviewFailure } from '../terminal-state-review.js'
-import { applyTerminalCandidatePatch, terminalCandidatePatchSchema } from '../terminal-candidate-patch.js'
-import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, terminalEvidenceContextSchema, terminalVerdictAuditVersion, continuitySemanticRule } from '../terminal-evidence-context.js'
+import { applyTerminalCandidatePatch, terminalCandidatePatchSchema, terminalCandidateReplacementIssue } from '../terminal-candidate-patch.js'
+import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, terminalEvidenceContextSchema, terminalVerdictAuditVersion, terminalSpanAuditVersion, continuitySemanticRule } from '../terminal-evidence-context.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const chapterSchema = z.object({ id: z.string(), title: z.string(), revision: z.number().int().positive(), content: z.string(), orderIndex: z.number().int() }).strict()
@@ -125,27 +125,31 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     if (selectedTerminal && !selectedTerminal.ok) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: selectedTerminal.reason }
     const terminalCandidate = (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
       ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
+    const replacementIssue = terminalCandidate && (args.terminalPatch || args.terminalState)
+      ? terminalCandidateReplacementIssue(compilation.validation, terminalCandidate, compilation.chapter.content) : null
+    if (replacementIssue) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: replacementIssue }
     let terminalEvidence = terminalProtocol ? terminalEvidenceContext(compilation.chapter, source, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
-      terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation)), terminalVerdictAuditVersion(compilation.validation)) : undefined
+      terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(source, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
     if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
     const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
       source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
     const reusable = cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
     if (!reusable && terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) terminalEvidence = { ...terminalEvidence,
-      factCoverage: terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, 2)! }
+      factCoverage: terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, 2, terminalCoverageProofs(source, 2))! }
     const repair = false
-    if (!reusable && terminalVersion === 2 && terminalEvidence) terminalEvidence.verdictProtocol = 5
+    if (!reusable && terminalVersion === 2 && terminalEvidence) terminalEvidence = terminalEvidenceContext(compilation.chapter, source, terminalVersion,
+      terminalQuoteAddressVersion(originalRequest.spec), terminalEvidence.factCoverage, 5, 2)
     validatedContinuityCheckRounds(compilation.validation, !reusable)
     return { kind: 'check' as const, version: terminalVersion === 2 ? 18 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), ...(terminalVersion === 2 ? { reassessmentProtocol: 2 as const } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
       ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),
       criticSystem, repairSystem: repairPrompt,
-      criticInput: [...((terminalEvidence?.verdictProtocol === 4 || terminalEvidence?.verdictProtocol === 5) ? [freshContinuityResponseContract(false, !!terminalCandidate, terminalEvidence.verdictProtocol)] : []), `章节：《${compilation.chapter.title}》`,
+      criticInput: [...((terminalEvidence?.verdictProtocol === 4 || terminalEvidence?.verdictProtocol === 5) ? [freshContinuityResponseContract(false, !!terminalCandidate, terminalEvidence.verdictProtocol, { previous: source?.content ?? null, current: compilation.chapter.content, terminalEvidence })] : []), `章节：《${compilation.chapter.title}》`,
         sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
         ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: compilation.chapter.id, revision: compilation.chapter.revision, orderIndex: compilation.chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
         `章节桥（待核对摘要，不能代替前章原文）：${JSON.stringify(continuityStoryInput(compilation.bridge))}`, `生成场景任务草案（目标/代价/转折不是历史事实）：${JSON.stringify(continuityStoryInput(compilation.sceneTasks))}`,
         continuityReviewTail(compilation.validation, compilation.chapter.revision, repair, typeof args.focus === 'string' ? args.focus : undefined, compilation.chapter.content),
-        compilerContinuitySourceScope(source), continuitySourceInput({ previous: source?.content ?? null, current: compilation.chapter.content }), terminalReviewInput(terminalCandidate, terminalEvidence)].join('\n'),
+        compilerContinuitySourceScope(source), continuitySourceInput({ previous: source?.content ?? null, current: compilation.chapter.content, terminalEvidence }), terminalReviewInput(terminalCandidate, terminalEvidence)].join('\n'),
       repair,
       cached: reusable ? cached.data.findings : null, route: null, price: null }
   }).catch(error => {

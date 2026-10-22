@@ -1,6 +1,6 @@
 import { readCompilerContinuitySource } from './compiler-continuity-source.js'
-import { terminalEvidenceContext, terminalQuoteAddressVersion, terminalVerdictAuditVersion } from './terminal-evidence-context.js'
-import { advanceTerminalCoverage, readTerminalCoverageState, terminalCoverageInput, terminalCoverageAuditVersion } from './terminal-fact-coverage.js'
+import { terminalEvidenceContext, terminalQuoteAddressVersion, terminalVerdictAuditVersion, terminalSpanAuditVersion } from './terminal-evidence-context.js'
+import { advanceTerminalCoverage, readTerminalCoverageState, terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs } from './terminal-fact-coverage.js'
 import { buildTerminalFactProofs } from './terminal-inheritance-chain.js'
 import { continuityRecheckBaseline } from './continuity-review-context.js'
 import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision } from './writing-scope.js'
@@ -782,15 +782,15 @@ export async function validateStoryContinuity(input: {
     warningCount: findings.filter((item) => item.severity === 'warning').length,
   }
   input.signal?.throwIfAborted()
-  const factCoverage = terminalCoverageInput(authorRequest?.spec, compilation.preparedContext, compilation.chapter, input.terminalCandidate, terminalCoverageAuditVersion(validation))
+  const factCoverage = terminalCoverageInput(authorRequest?.spec, compilation.preparedContext, compilation.chapter, input.terminalCandidate, terminalCoverageAuditVersion(validation), terminalCoverageProofs(reviewSource, terminalSpanAuditVersion(validation)))
   const terminalContext = factCoverage ? terminalEvidenceContext(compilation.chapter, reviewSource, protocol === 11 ? 2 : 1,
-    terminalQuoteAddressVersion(authorRequest?.spec), factCoverage, terminalVerdictAuditVersion(validation)) : undefined
+    terminalQuoteAddressVersion(authorRequest?.spec), factCoverage, terminalVerdictAuditVersion(validation), terminalSpanAuditVersion(validation)) : undefined
   if (terminalContext && validation.continuityCriticResponse
     && runtimeJson((validation.continuityCriticResponse as Record<string, unknown>).terminalEvidence).hash !== runtimeJson(terminalContext).hash) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间持续事实覆盖义务已变化；保留原请求和结果，不将旧核验绑定当前候选。')
   }
   const terminalReview = terminalContext ? currentTerminalReview(validation, compilation.chapter.content, terminalContext) : null
-  const nextFactCoverage = terminalReview ? advanceTerminalCoverage(authorRequest?.spec, compilation.preparedContext, compilation.chapter, terminalReview) : undefined
+  const nextFactCoverage = terminalReview ? advanceTerminalCoverage(authorRequest?.spec, compilation.preparedContext, compilation.chapter, terminalReview, terminalContext?.factCoverage) : undefined
   await db.storyCompilation.update({
     where: { id: compilation.id },
     data: { stage: compilation.status === 'completed' ? 'commit' : 'check', validation: validation as Prisma.InputJsonValue,
@@ -930,7 +930,7 @@ export async function commitChapterBridge(input: {
   const terminalAddressProtocol = terminalQuoteAddressVersion(terminalRequest?.spec)
   const terminalReview = currentTerminalReview(compilation.validation, chapter.content,
     (currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 ? terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, currentContinuityReview.coverage.protocolVersion === 11 ? 2 : 1, terminalAddressProtocol,
-      terminalCoverageInput(terminalRequest?.spec, compilation.preparedContext, { ...compilation.chapter, ...chapter }, reviewedCandidate, terminalCoverageAuditVersion(compilation.validation)), terminalVerdictAuditVersion(compilation.validation)) : undefined)
+      terminalCoverageInput(terminalRequest?.spec, compilation.preparedContext, { ...compilation.chapter, ...chapter }, reviewedCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(source, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined)
   if (outstandingFacts || reviewedCandidate || terminalClaims(proposedTerminal).length) {
     if (!currentContinuityReview.assessment || !reviewedCandidate || !terminalReview?.supported
       || runtimeJson(reviewedCandidate).hash !== runtimeJson(proposedTerminal).hash) {
@@ -970,7 +970,7 @@ export async function commitChapterBridge(input: {
     ? buildTerminalFactProofs({ compilationId: compilation.id, chapter: { ...compilation.chapter, ...chapter }, validation: compilation.validation,
       stateHash: terminalReviewStateHash(sameTerminal ? compilation.bridge : { ...compilation.bridge, ...bridgeData }, orderedScenes),
       evidence: terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, 2, terminalAddressProtocol,
-        terminalCoverageInput(terminalRequest?.spec, compilation.preparedContext, { ...compilation.chapter, ...chapter }, reviewedCandidate, terminalCoverageAuditVersion(compilation.validation)), terminalVerdictAuditVersion(compilation.validation)), review: terminalReview }) : undefined
+        terminalCoverageInput(terminalRequest?.spec, compilation.preparedContext, { ...compilation.chapter, ...chapter }, reviewedCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(source, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)), review: terminalReview }) : undefined
   if (sameTerminal && terminalContext.terminalContentHash === terminalContentHash && terminalContext.terminalCandidateHash === terminalCandidateHash) {
     if (terminalFactProofs && runtimeJson({ facts: terminalContext.terminalFactProofs ?? null }).hash !== runtimeJson({ facts: terminalFactProofs }).hash) {
       await db.storyCompilation.update({ where: { id: compilation.id }, data: { preparedContext: runtimeJson({ ...terminalContext, terminalFactProofs }).value } })

@@ -2909,7 +2909,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           && (incompleteReview.toolName === 'continuity_validate' ? review.continuity : review.quality) === 'incomplete'
         forceWrapUpReason = sameIncompleteReview
           ? (incompleteReview!.toolName === 'continuity_validate' ? '本章连续性复核尚未完成：' : '本章质量复核尚未完成：')
-            + (incompleteReview!.failureCode.endsWith('EVIDENCE_UNLOCATED') ? '报告中的正文引用尚未确认。' : '检查报告未能完整解析。')
+            + (incompleteReview!.toolName === 'continuity_validate' && review?.terminalCorrection
+              ? '独立报告已收到，终态候选的证据绑定未通过核验。'
+              : incompleteReview!.failureCode.endsWith('EVIDENCE_UNLOCATED') ? '报告中的正文引用尚未确认。' : '独立报告尚未通过完整性校验。')
             + '原始报告和检查记录保留，已停止重复请求；继续时需先恢复或完成这项检查。'
           : '连续多轮没有推进原任务的内容或必需成果，已停止重复执行，进度保留。'
         forceWrapUpLocal = !!processing || toolRestrictions.length > 0 || pendingReviews.size > 0 || settledReviewFailures.size > 0

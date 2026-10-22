@@ -19,6 +19,7 @@ export type TerminalCarriedFact = z.infer<typeof terminalCarriedFactSchema>
 export const terminalEvidenceContextSchema = z.object({
   protocol: z.union([z.literal(1), z.literal(2)]),
   quoteAddressProtocol: z.literal(1).optional(),
+  spanAddressProtocol: z.literal(2).optional(),
   verdictProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).optional(),
   factCoverage: terminalCoverageInputSchema.optional(),
   current: z.object({ id: z.string(), revision: z.number().int(), orderIndex: z.number().int(), contentHash: hash }).strict(),
@@ -35,6 +36,11 @@ export function terminalVerdictAuditVersion(validation: unknown): 2 | 3 | 4 | 5 
   const audit = (validation as { continuityCriticResponse?: { parserVersion?: number; terminalEvidence?: { verdictProtocol?: unknown } } } | null)?.continuityCriticResponse
   const version = audit?.terminalEvidence?.verdictProtocol
   return audit?.parserVersion === 8 && (version === 2 || version === 3 || version === 4 || version === 5) ? version : undefined
+}
+
+export function terminalSpanAuditVersion(validation: unknown): 2 | undefined {
+  const audit = (validation as { continuityCriticResponse?: { parserVersion?: number; terminalEvidence?: { spanAddressProtocol?: unknown } } } | null)?.continuityCriticResponse
+  return audit?.parserVersion === 8 && audit.terminalEvidence?.spanAddressProtocol === 2 ? 2 : undefined
 }
 
 /** Only a fresh HTTP admission opts in. Saved contracts are never upgraded. */
@@ -55,18 +61,22 @@ export function terminalQuoteAddressVersion(spec: unknown): 1 | undefined {
  * summary. A 300-character span crossing chapter boundaries cannot inherit. */
 export function terminalEvidenceContext(chapter: { id: string; revision: number; orderIndex: number; content: string },
   source: Awaited<ReturnType<typeof readCompilerContinuitySource>>, version: 1 | 2 = source && 'terminalInheritance' in source ? 2 : 1,
-  quoteAddressProtocol?: 1, factCoverage?: TerminalCoverageInput, verdictProtocol?: 2 | 3 | 4 | 5): TerminalEvidenceContext {
+  quoteAddressProtocol?: 1, factCoverage?: TerminalCoverageInput, verdictProtocol?: 2 | 3 | 4 | 5, spanAddressProtocol?: 2): TerminalEvidenceContext {
   const previous = source && 'preceding' in source ? source.preceding.at(-1) : undefined
-  return { protocol: version, ...(quoteAddressProtocol === 1 ? { quoteAddressProtocol } : {}), ...(verdictProtocol ? { verdictProtocol } : {}), ...(factCoverage ? { factCoverage } : {}), current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
+  return { protocol: version, ...(quoteAddressProtocol === 1 ? { quoteAddressProtocol } : {}), ...(spanAddressProtocol ? { spanAddressProtocol } : {}), ...(verdictProtocol ? { verdictProtocol } : {}), ...(factCoverage ? { factCoverage } : {}), current: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex,
     contentHash: runtimeJson({ content: chapter.content }).hash }, previous: previous ? {
     id: previous.id, revision: previous.revision, orderIndex: previous.orderIndex, contentHash: previous.contentHash,
     start: previous.start, end: previous.end, joinedStart: previous.joinedStart, joinedEnd: previous.joinedEnd,
     ...('terminalInheritance' in source! ? { carried: source.terminalInheritance } : {}),
-    segments: continuitySourceSegments({ previous: source!.content, current: '' }).filter(part => {
+    segments: continuitySourceSegments({ previous: source!.content, current: '' }).flatMap(part => {
       const start = Number(part.segmentId.slice(1)) * 300
-      return start >= previous.joinedStart && start + part.quote.length <= previous.joinedEnd
-    }).map(part => { const start = Number(part.segmentId.slice(1)) * 300
-      return { segmentId: part.segmentId, start, end: start + part.quote.length, quote: part.quote, hash: runtimeJson({ text: part.quote }).hash }
+      const end = start + part.quote.length
+      if (spanAddressProtocol !== 2) return start >= previous.joinedStart && end <= previous.joinedEnd
+        ? [{ segmentId: part.segmentId, start, end, quote: part.quote, hash: runtimeJson({ text: part.quote }).hash }] : []
+      const clippedStart = Math.max(start, previous.joinedStart), clippedEnd = Math.min(end, previous.joinedEnd)
+      if (clippedStart >= clippedEnd) return []
+      const quote = part.quote.slice(clippedStart - start, clippedEnd - start)
+      return [{ segmentId: part.segmentId, start: clippedStart, end: clippedEnd, quote, hash: runtimeJson({ text: quote }).hash }]
     }),
   } : null }
 }

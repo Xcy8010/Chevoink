@@ -45,7 +45,7 @@ it.each(['body', 'candidate', 'source', 'raw', 'incomplete', 'old-protocol'] as 
   expect(terminalCandidateCorrection(f.validation, f.content, f.context)).toBeNull()
 })
 
-it.each(['unknown', 'current-only', 'duplicate', 'invented-span'] as const)('does not turn a different critic failure into candidate authority: %s', change => {
+it.each(['unknown', 'current-only', 'duplicate'] as const)('does not turn a different critic failure into candidate authority: %s', change => {
   const f = fixture(), parts = JSON.parse(f.raw)
   const candidate = f.candidate
   if (change === 'unknown') parts.terminalVerdicts[0].verdict = 'unknown'
@@ -54,9 +54,44 @@ it.each(['unknown', 'current-only', 'duplicate', 'invented-span'] as const)('doe
     parts.terminalVerdicts[0].inheritance = { priorEndState: 'established', currentState: 'unchanged' }
   }
   if (change === 'duplicate') parts.terminalVerdicts.push(structuredClone(parts.terminalVerdicts[0]))
-  if (change === 'invented-span') parts.terminalVerdicts[0].sourceEvidence[1].segmentId = 'p99'
   const inspected = inspectContinuityResponse(JSON.stringify(parts), { current: f.content, previous: f.previous, terminalEvidence: f.context }, true, 8, candidate)
   expect(terminalCandidateCorrection({ independentCheck: 'unavailable', terminalCandidate: candidate, continuityCriticResponse: inspected.audit }, f.content, f.context)).toBeNull()
+})
+
+it('keeps an unknown historical address rejected while projecting the exact unresolved candidate', () => {
+  const f = fixture(), parts = JSON.parse(f.raw)
+  const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: ['Prior reading and current output require separate source proof.'] } })
+  parts.terminalVerdicts = [{ factId: terminalCandidateFacts(candidate)[0].id, verdict: 'supported',
+    inheritance: { priorEndState: 'established', currentState: 'unchanged' },
+    sourceEvidence: [{ segmentId: 'p99', quote: f.previous }] }]
+  const inspected = inspectContinuityResponse(JSON.stringify(parts), { current: f.content, previous: f.previous, terminalEvidence: f.context }, true, 8, candidate)
+  const saved = { independentCheck: 'unavailable', terminalCandidate: candidate, continuityCriticResponse: inspected.audit }
+  const before = JSON.stringify(saved)
+  expect(inspected).toMatchObject({ complete: false, structured: true, audit: { classification: 'terminal_invalid' } })
+  expect(terminalCandidateCorrection(saved, f.content, f.context)).toMatchObject({
+    paths: ['exitState.knowledge.0'], issues: expect.arrayContaining([
+      { path: 'exitState.knowledge.0', reason: 'evidence_quote_invalid' }, { path: 'exitState.knowledge.0', reason: 'unknown_segment' },
+    ]),
+  })
+  expect(JSON.stringify(saved)).toBe(before)
+  expect(saved.independentCheck).toBe('unavailable')
+})
+
+it('projects every uniquely mapped bad address, including current-only references, without accepting any', () => {
+  const f = fixture(), parts = JSON.parse(f.raw)
+  const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: ['Unresolved first fact.', 'Unresolved second fact.'] } })
+  parts.terminalVerdicts = terminalCandidateFacts(candidate).map((fact, index) => ({ factId: fact.id, verdict: 'supported',
+    sourceEvidence: [{ segmentId: `c${90 + index}`, quote: 'Invented addresses do not establish facts.' }] }))
+  const inspected = inspectContinuityResponse(JSON.stringify(parts), { current: f.content, previous: f.previous, terminalEvidence: f.context }, true, 8, candidate)
+  const saved = { independentCheck: 'unavailable', terminalCandidate: candidate, continuityCriticResponse: inspected.audit }
+  const before = JSON.stringify(saved)
+  const correction = terminalCandidateCorrection(saved, f.content, f.context)
+  expect(correction?.paths).toEqual(['exitState.knowledge.0', 'exitState.knowledge.1'])
+  expect(correction?.issues).toEqual([
+    { path: 'exitState.knowledge.0', reason: 'unknown_segment' }, { path: 'exitState.knowledge.1', reason: 'unknown_segment' },
+  ])
+  expect(inspected.complete).toBe(false)
+  expect(JSON.stringify(saved)).toBe(before)
 })
 
 it.each(['knowledge', 'objects', 'openLoops'] as const)('returns authenticated failed inheritance feedback for %s without certifying the claim', field => {

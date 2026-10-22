@@ -3,15 +3,20 @@ import { DataAccessError } from '../prisma.js'
 import { runtimeJson } from './runtime-common.js'
 import type { TerminalCandidate, inspectTerminalReview } from './terminal-state-review.js'
 import { terminalQuoteRange } from './terminal-quote-range.js'
-import { terminalCandidateFacts } from './terminal-fact-identity.js'
+import { terminalCandidateFacts, terminalFactId } from './terminal-fact-identity.js'
+import type { readCompilerContinuitySource } from './compiler-continuity-source.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
 const field = z.enum(['knowledge', 'body', 'objects', 'relationships', 'openLoops'])
 const fact = z.object({ id: hash, field, claim: z.string().min(1).max(1000) }).strict()
 export const terminalCoverageInputSchema = z.object({ version: z.union([z.literal(1), z.literal(2)]), taskId: z.string(), chapterId: z.string(),
-  obligations: z.array(fact).max(200),
+  obligations: z.array(fact).max(200), inheritedProofsHash: hash.optional(),
 }).strict()
 export type TerminalCoverageInput = z.infer<typeof terminalCoverageInputSchema>
+
+export function terminalCoverageProofs(source: Awaited<ReturnType<typeof readCompilerContinuitySource>>, spanAddressProtocol?: 2) {
+  return spanAddressProtocol === 2 && source && 'terminalInheritance' in source ? source.terminalInheritance : undefined
+}
 const stateSchema = z.object({ version: z.literal(1), taskId: z.string(), chapterId: z.string(), facts: z.array(fact).max(200),
   lastReview: z.object({ bodyHash: hash, candidateHash: hash, input: terminalCoverageInputSchema }).strict(),
 }).strict()
@@ -48,17 +53,31 @@ export function readTerminalCoverageState(spec: unknown, preparedContext: unknow
 /** Exact included claims still need their ordinary independent verdict. Only
  * omissions add an explicit disposition; this never merges claims into state. */
 export function terminalCoverageInput(spec: unknown, preparedContext: unknown, chapter: { id: string; content: string }, candidate?: TerminalCandidate,
-  operationVersion?: 1 | 2): TerminalCoverageInput | undefined {
+  operationVersion?: 1 | 2, inherited?: ReadonlyArray<{ field: string; claim: string }>): TerminalCoverageInput | undefined {
   if (!hasTerminalCoverageProtocol(spec)) return undefined
   const saved = readTerminalCoverageState(spec, preparedContext, chapter.id)
   const version = operationVersion ?? (object(object(spec).scope).terminalCoverageProtocol === 2 ? 2 : 1)
   if (!candidate && !saved?.facts.length && version === 1) return undefined
   const normalized = candidate ?? { exitState: {}, lastUnfinishedAction: '' }
+  // Only callers constructing the new frozen evidence scope supply these
+  // server-verified predecessor proofs. Failed candidate claims are not facts.
+  const priorFacts = (inherited ?? []).flatMap(item => {
+    const kind = field.safeParse(item.field)
+    if (!kind.success) return []
+    const parsed = fact.safeParse({ id: terminalFactId(kind.data, item.claim), field: kind.data, claim: item.claim })
+    if (!parsed.success) throw blocked()
+    return [parsed.data]
+  })
+  const inheritedProofsHash = inherited === undefined ? undefined : runtimeJson([...new Set(priorFacts.map(item => item.id))].sort()).hash
   if (saved?.lastReview.input.version === version && saved.lastReview.bodyHash === runtimeJson({ content: chapter.content }).hash
-    && saved.lastReview.candidateHash === runtimeJson(normalized).hash) return saved.lastReview.input
-  const obligations = (saved?.facts ?? []).filter(item => !candidate
+    && saved.lastReview.candidateHash === runtimeJson(normalized).hash
+    && (inherited === undefined || saved.lastReview.input.inheritedProofsHash === inheritedProofsHash)) return saved.lastReview.input
+  const known = [...new Map([...(saved?.facts ?? []), ...priorFacts].map(item => [item.id, item])).values()]
+  if (known.length > 200) throw blocked()
+  const obligations = known.filter(item => !candidate
     || !candidate.exitState[item.field].includes(item.claim))
-  return terminalCoverageInputSchema.parse({ version, taskId: object(spec).id, chapterId: chapter.id, obligations })
+  return terminalCoverageInputSchema.parse({ version, taskId: object(spec).id, chapterId: chapter.id, obligations,
+    ...(inheritedProofsHash ? { inheritedProofsHash } : {}) })
 }
 
 export const terminalDispositionSchema = z.object({ id: hash, outcome: z.enum(['replaced', 'ended', 'unknown']),
@@ -121,9 +140,14 @@ export function terminalCoverageGuidance(input: TerminalCoverageInput | undefine
 /** Called inside the original report transaction after reparsing its complete
  * independent audit. Unresolved facts survive; no main-model disposition exists. */
 export function advanceTerminalCoverage(spec: unknown, preparedContext: unknown, chapter: { id: string; content: string },
-  review: NonNullable<ReturnType<typeof inspectTerminalReview>>): TerminalCoverageState | undefined {
-  const input = terminalCoverageInput(spec, preparedContext, chapter, review.candidate, review.factCoverage?.version)
+  review: NonNullable<ReturnType<typeof inspectTerminalReview>>, frozenInput?: TerminalCoverageInput): TerminalCoverageState | undefined {
+  if (!hasTerminalCoverageProtocol(spec)) return undefined
+  // A resolved omission leaves the fact ledger. Preserve the exact reviewed
+  // request so the next guard can still bind its disposition and proof scope.
+  const input = frozenInput ?? terminalCoverageInput(spec, preparedContext, chapter, review.candidate, review.factCoverage?.version)
   if (!input) return undefined
+  if (input.taskId !== object(spec).id || input.chapterId !== chapter.id
+    || input.version !== (review.factCoverage?.version ?? 1)) throw blocked()
   const old = readTerminalCoverageState(spec, preparedContext, chapter.id)
   const resolved = new Set(review.factCoverage?.dispositions.filter(item => item.outcome !== 'unknown').map(item => item.id))
   const facts = new Map((old?.facts ?? []).filter(item => !resolved.has(item.id)).map(item => [item.id, item]))
