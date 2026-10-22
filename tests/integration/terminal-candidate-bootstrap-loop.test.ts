@@ -37,6 +37,10 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
     vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
+    // Every synthetic historical event precedes the real Continue admission,
+    // including on fast CI workers. Keep the saved-version evidence on the
+    // same clock; moving only calls would invalidate local-refusal proof.
+    const start = Date.now() - 60_000, at = (ms: number) => new Date(start + ms)
     const body = 'He stops at the control-room doorway, before turning the wheel. The packet remains on the desk.', accurate = 'At the control-room doorway, before crossing it.'
     const bad = terminalCandidateSchema.parse({ exitState: { location: scenario === 'objects' ? accurate : 'Inside the first door of the control room.',
       action: 'Preparing to turn the first-door wheel.', ...(scenario === 'objects' ? { objects: ['The packet has been archived.'] } : {}) }, lastUnfinishedAction: 'The first-door wheel has not been turned.' })
@@ -46,10 +50,10 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     const correction = { baseCandidateHash: runtimeJson(bad).hash,
       removeFactIds: badFacts.filter(fact => !goodFacts.some(current => current.id === fact.id)).map(fact => fact.id),
       addFacts: goodFacts.filter(fact => !badFacts.some(current => current.id === fact.id)).map(({ field, claim }) => ({ field, claim })) }
-    const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { orderIndex: 2, orderInVolume: 2, revision: 8, content: body, wordCount: body.length } })
+    const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { orderIndex: 2, orderInVolume: 2, revision: 8, content: body, wordCount: body.length, updatedAt: at(-1) } })
     await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: chapter.volumeId, title: 'Synthetic predecessor', orderIndex: 1, orderInVolume: 1, revision: 15,
       content: 'He crossed the first door, the middle chamber, then the second door into the control room.', wordCount: 90 } })
-    await prisma.agentRun.update({ where: { id: f.runId }, data: { runtimeProtocolVersion: 0, taskRootId: null, startRequest: { prompt: '修复本章' } } })
+    await prisma.agentRun.update({ where: { id: f.runId }, data: { runtimeProtocolVersion: 0, taskRootId: null, createdAt: at(-2), startRequest: { prompt: '修复本章' } } })
     // Freeze only after the synthetic chapter directory is final. The fixture
     // starts at order1; an already-frozen scope must never be reinterpreted
     // after moving that chapter to order2 for the predecessor topology.
@@ -89,7 +93,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     const validation = (await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, select: { validation: true } })).validation as { checkedAt: string }
     const checkedAt = Date.parse(validation.checkedAt)
     expect(Number.isFinite(checkedAt)).toBe(true)
-    const start = checkedAt - 1000, at = (ms: number) => new Date(start + ms)
+    await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: { ...validation, checkedAt: at(1000).toISOString() } } })
     const old = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id,
       providerType: 'text', providerMode: 'custom', modelName: 'synthetic', modelTier: 'speed', multiplierBps: 10000, action: 'agent3ContinuityCritic',
       ...(billing === 'unknown' ? { requestTokens: null, responseTokens: null, usageSource: 'unknown', billingStatus: 'pending_usage', reservedCreditMilli: 18023 }
