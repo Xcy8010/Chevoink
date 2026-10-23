@@ -1093,9 +1093,19 @@ export const continuityValidateTool = defineTool({
     if (!continued && terminalCandidate && requestBodies.terminalEvidence) {
       // Snapshot v1 keeps its original contract. New patch snapshots and full
       // candidates freeze the same server-owned proposal input as the report.
-      const proposals = patch ? patch.proposalReview : prepareProposals(terminalCandidate)
-      if (proposals?.changes) requestBodies.terminalEvidence.proposalChanges = proposals.changes
-      else delete requestBodies.terminalEvidence.proposalChanges
+      try {
+        const proposals = patch ? patch.proposalReview : prepareProposals(terminalCandidate)
+        if (proposals?.changes) requestBodies.terminalEvidence.proposalChanges = proposals.changes
+        else delete requestBodies.terminalEvidence.proposalChanges
+      } catch (error) {
+        if (!(error instanceof DataAccessError) || error.code !== 'TERMINAL_STATE_REVIEW_REQUIRED'
+          || await hasLegacyTerminalCallEvidence(prisma, ctx)) throw error
+        // The audit count above remains; this call has not reserved or sent a
+        // provider request. Close only this local refusal, not an earlier call.
+        return { outcome: 'failed' as const, failureCode: error.code, summary: '章末候选检查未派发', output: error.message,
+          reviewRequestFinished: { version: 1 as const, chapterId: chapter.id, revision: chapter.revision,
+            contentHash: createHash('sha256').update(chapter.content).digest('hex'), usageIds: [] } }
+      }
     }
     const criticInput = [
         ...((requestBodies.terminalEvidence?.verdictProtocol === 4 || requestBodies.terminalEvidence?.verdictProtocol === 5 || requestBodies.terminalEvidence?.verdictProtocol === 6) ? [freshContinuityResponseContract(false, !!terminalCandidate, requestBodies.terminalEvidence.verdictProtocol, requestBodies, terminalCandidate)] : []),

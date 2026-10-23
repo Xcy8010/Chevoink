@@ -5,7 +5,7 @@ import { activeChapterScope } from '../data/internal.js'
 import { originalTaskRunIds, readOriginalTaskRequest } from './original-request.js'
 import { readReviewRequestRecovery } from './review-request-recovery.js'
 import { applyTerminalCandidatePatch, terminalCandidatePatchSchema, terminalCandidateReplacementIssue } from './terminal-candidate-patch.js'
-import { readTerminalCandidate, resolveTerminalCandidate } from './terminal-state-review.js'
+import { readTerminalCandidate, resolveTerminalCandidate, terminalCandidateSchema } from './terminal-state-review.js'
 import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
 import { terminalCoverageInput, terminalCoverageProofs } from './terminal-fact-coverage.js'
@@ -13,8 +13,9 @@ import { prepareCompilerTerminalProposals } from './terminal-proposal-context.js
 import { runtimeJson } from './runtime-common.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
-const argsSchema = z.object({ compilationId: z.string(), chapterId: z.string().optional(), focus: z.string().optional(),
-  terminalPatch: terminalCandidatePatchSchema, inheritedProofs: z.array(z.string().regex(/^[a-f0-9]{64}$/u)).max(200).optional() }).strict()
+const argsSchema = z.union([z.object({ compilationId: z.string(), chapterId: z.string().optional(), focus: z.string().optional(),
+  terminalPatch: terminalCandidatePatchSchema, inheritedProofs: z.array(z.string().regex(/^[a-f0-9]{64}$/u)).max(200).optional() }).strict(),
+  z.object({ compilationId: z.string().min(1), terminalState: terminalCandidateSchema }).strict()])
 
 /** Resume one already proposed delta that this legacy producer demonstrably
  * refused locally. This is neither a third main-model proposal nor a new review
@@ -38,7 +39,7 @@ export async function readCompatibleTerminalProposal(tx: Prisma.TransactionClien
   if (calls.length !== 1) return null
   const parsed = argsSchema.safeParse(object(calls[0].payload).args)
   if (!parsed.success || parsed.data.compilationId !== target.compilationId
-    || parsed.data.chapterId !== undefined && parsed.data.chapterId !== target.chapterId) return null
+    || 'chapterId' in parsed.data && parsed.data.chapterId !== undefined && parsed.data.chapterId !== target.chapterId) return null
   const compilation = await tx.storyCompilation.findFirst({ where: { id: target.compilationId, userId: subject.userId,
     novelId: subject.novelId, runId: { in: runIds }, chapterId: target.chapterId, status: 'active',
     chapter: { authorId: subject.userId, ...activeChapterScope(subject.novelId) } }, include: { chapter: true, bridge: true } })
@@ -48,9 +49,10 @@ export async function readCompatibleTerminalProposal(tx: Prisma.TransactionClien
   const source = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, 11)
   if (compilation.bridge.fromChapterId && source?.revision !== compilation.bridge.sourceRevision) return null
   try {
-    const candidate = applyTerminalCandidatePatch(base, parsed.data.terminalPatch)
-    if (!terminalCandidateReplacementIssue(compilation.validation, candidate, chapter.content)) return null
-    const selected = resolveTerminalCandidate({ ...candidate, inheritedProofs: parsed.data.inheritedProofs },
+    const patch = 'terminalPatch' in parsed.data ? parsed.data.terminalPatch : undefined
+    const candidate = 'terminalState' in parsed.data ? parsed.data.terminalState : applyTerminalCandidatePatch(base, parsed.data.terminalPatch)
+    if (patch && !terminalCandidateReplacementIssue(compilation.validation, candidate, chapter.content)) return null
+    const selected = resolveTerminalCandidate({ ...candidate, inheritedProofs: 'inheritedProofs' in parsed.data ? parsed.data.inheritedProofs : undefined },
       source && 'terminalInheritance' in source ? source.terminalInheritance : [], 2)
     if (!selected.ok) return null
     const context = terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original.spec),

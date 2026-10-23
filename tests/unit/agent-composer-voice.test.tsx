@@ -136,6 +136,7 @@ describe('Agent voice draft integration', () => {
     fireEvent.click(play)
     fireEvent.click(play)
     expect(onContinue).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: '正在继续运行' }).getAttribute('disabled')).not.toBeNull()
     expect(screen.queryByRole('button', { name: '发送' })).toBeNull()
     await act(async () => finish())
     rerender(<AgentComposer {...input} running />)

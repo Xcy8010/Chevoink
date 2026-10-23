@@ -13,6 +13,7 @@ function activityDocument(activity: WorkspaceActivity) {
   return null
 }
 
+const bodyDeltas = new WeakMap<WorkspaceActivity, { before: string; after: string; delta: { added: number; removed: number } }>()
 function bodyDelta(before: string, after: string) {
   let added = 0, removed = 0
   for (const segment of buildReviewDiff(before, after).segments) {
@@ -25,7 +26,14 @@ function bodyDelta(before: string, after: string) {
 /** The tree row and document summary share the same prose identification/counting. */
 export function workspaceActivityDelta(activity: WorkspaceActivity) {
   const document = activityDocument(activity)
-  if (document) return activity.status === 'done' ? bodyDelta(document.before, document.after) : { added: 0, removed: 0 }
+  if (document) {
+    if (activity.status !== 'done') return { added: 0, removed: 0 }
+    const saved = bodyDeltas.get(activity)
+    if (saved?.before === document.before && saved.after === document.after) return saved.delta
+    const delta = bodyDelta(document.before, document.after)
+    bodyDeltas.set(activity, { before: document.before, after: document.after, delta })
+    return delta
+  }
   const delta = activity.deltaChars ?? 0
   return { added: Math.max(0, delta), removed: Math.max(0, -delta) }
 }
@@ -38,21 +46,19 @@ export function workspaceGroupDelta(activities: WorkspaceActivity[]) {
   }, body)
 }
 
-/** One entry per document, initial body -> latest successful body. Non-body tools never enter this view. */
+/** One row per document; successful edit additions and removals never cancel.
+ * Replayed call snapshots contribute once, using their final successful body. */
 export function workspaceBodyChanges(activities: WorkspaceActivity[]): BodyChange[] {
-  const documents = new Map<string, { before: string; after: string; title: string; activity: WorkspaceActivity }>()
-  for (const activity of activities) {
-    if (activity.status !== 'done') continue
+  const completed = new Map(activities.filter(activity => activity.status === 'done').map(activity => [activity.callId, activity]))
+  const documents = new Map<string, BodyChange>()
+  for (const activity of completed.values()) {
     const document = activityDocument(activity)
-    if (!document) continue
-    const { key, title, before, after } = document
-    if (before === after) continue
-    const existing = documents.get(key)
-    documents.delete(key) // insertion order is last changed order, including re-edits
-    documents.set(key, { before: existing?.before ?? before, after, title, activity })
+    if (!document || document.before === document.after) continue
+    const { key, title } = document
+    const delta = workspaceActivityDelta(activity), existing = documents.get(key)
+    documents.delete(key)
+    documents.set(key, { key, title, added: (existing?.added ?? 0) + delta.added,
+      removed: (existing?.removed ?? 0) + delta.removed, activity })
   }
-  return [...documents.entries()].flatMap(([key, item]) => {
-    if (item.before === item.after) return []
-    return [{ key, title: item.title, ...bodyDelta(item.before, item.after), activity: item.activity }]
-  })
+  return [...documents.values()]
 }

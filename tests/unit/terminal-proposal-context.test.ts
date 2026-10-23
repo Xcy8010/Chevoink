@@ -158,3 +158,33 @@ it.each([[false, false], [true, false], [false, true], [true, true]])('carries p
   expect(() => prepareCompilerTerminalProposals(corrupt)).toThrow()
   expect(f.chapter.revision).toBe(8)
 })
+
+it.each(['known', 'corrupt-hash', 'corrupt-raw', 'incomplete', 'wrong-classification'] as const)(
+  'keeps first failed candidates independently reviewable without requiring prior proposal state: %s', scenario => {
+    const f = fixture()
+    const invalid = f.audit(f.base, f.context, JSON.stringify({ ...f.response(), proposalDispositions: 'invalid' }))
+    expect(invalid.complete).toBe(false)
+    expect(invalid.audit.classification).toBe('terminal_invalid')
+    const validation = { independentCheck: 'unavailable', terminalCandidate: f.base, continuityCriticResponse: structuredClone(invalid.audit) }
+    if (scenario === 'corrupt-hash') validation.continuityCriticResponse.contentHash = 'f'.repeat(64)
+    if (scenario === 'corrupt-raw') validation.continuityCriticResponse.rawResponse.content = JSON.stringify('corrupt')
+    if (scenario === 'incomplete') validation.continuityCriticResponse.rawResponse.complete = false
+    if (scenario === 'wrong-classification') validation.continuityCriticResponse.classification = 'response_incomplete'
+    const input = { ...f.input, validation }
+    if (scenario !== 'known') {
+      expect(() => prepareTerminalProposalInput(input)).toThrow(expect.objectContaining({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' }))
+      return
+    }
+    const before = JSON.stringify(validation), next = prepareTerminalProposalInput(input)!
+    expect(next.state.pending).toHaveLength(2)
+    expect(next.state.pending.map(p => p.claim).sort()).toEqual([...f.base.exitState.knowledge].sort())
+    expect(currentTerminalReview(validation, f.chapter.content, f.context)).toBeNull()
+    expect(JSON.stringify(validation)).toBe(before)
+    const chapter = { ...f.chapter, revision: f.chapter.revision + 1, content: f.chapter.content + ' A local edit.' }
+    const nextContext = terminalEvidenceContext(chapter, null, 2, 1, f.context.factCoverage, 5, 2)
+    const afterEdit = prepareCompilerTerminalProposals({ spec: f.spec, preparedContext: {},
+      validation: { ...validation, checkedChapterId: f.chapter.id, checkedRevision: f.chapter.revision, checkedContent: f.chapter.content },
+      chapter, source: null, candidate: f.candidate, nextContext })!
+    expect(afterEdit.state.pending).toHaveLength(2)
+    expect(afterEdit.changes?.bodyHash).toBe(nextContext.current.contentHash)
+  })

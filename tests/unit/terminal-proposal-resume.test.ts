@@ -88,3 +88,20 @@ it('rechecks the same persisted call before execution and blocks a result, dupli
   Object.assign(call.payload.args, { focus: 'A different request' })
   expect(await readCompatibleTerminalProposal(f.tx, f.subject, f.target, plan.callId)).toBeNull()
 })
+
+it('reuses a proven explicit candidate exactly, preserving omitted facts as pending proposals for independent review', async () => {
+  const f = fixture(), args = { compilationId: f.target.compilationId,
+    terminalState: terminalCandidateSchema.parse({ exitState: { knowledge: ['The gauge reads two.'] } }) }
+  Object.assign(f.oldCall.payload, { args })
+  const plan = await readCompatibleTerminalProposal(f.tx, f.subject, f.target)
+  expect(plan).toMatchObject({ args, callId: expect.stringMatching(/^terminal_resume_/u) })
+  expect(await readCompatibleTerminalProposal(f.tx, f.subject, f.target)).toEqual(plan)
+  f.recovered.mockResolvedValue([])
+  expect(await readCompatibleTerminalProposal(f.tx, f.subject, f.target)).toBeNull()
+})
+it('does not widen explicit candidate compatibility to extra fields or unproven calls', async () => {
+  const f = fixture()
+  Object.assign(f.oldCall.payload, { args: { compilationId: f.target.compilationId,
+    terminalState: terminalCandidateSchema.parse({ exitState: {} }), focus: 'different request' } })
+  expect(await readCompatibleTerminalProposal(f.tx, f.subject, f.target)).toBeNull()
+})

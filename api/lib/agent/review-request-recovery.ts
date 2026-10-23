@@ -1,5 +1,6 @@
 import { readRetiredReviewUsageIds } from './cancelled-review-recovery.js'
 import { createHash } from 'node:crypto'
+import { z } from 'zod'
 import type { AiUsageLog, Prisma } from '@prisma/client'
 import type { AgentReviewFailureReconciliation } from '../../../shared/contracts/index.js'
 import type { PendingReviewCall } from './checkpoint.js'
@@ -9,7 +10,7 @@ import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { isKnownTextRequestBilling } from './text-request-billing.js'
 import { runtimeJson } from './runtime-common.js'
 import { applyTerminalCandidatePatch, hasLegacyTerminalCallEvidence, terminalCandidatePatchSchema, terminalCandidateReplacementIssue } from './terminal-candidate-patch.js'
-import { readTerminalCandidate } from './terminal-state-review.js'
+import { readTerminalCandidate, terminalCandidateSchema } from './terminal-state-review.js'
 import { prepareCompilerTerminalProposals } from './terminal-proposal-context.js'
 import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
@@ -17,6 +18,7 @@ import { terminalCoverageInput, terminalCoverageProofs } from './terminal-fact-c
 import { DataAccessError } from '../prisma.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+const explicitStateArgs = z.object({ compilationId: z.string().min(1), terminalState: terminalCandidateSchema }).strict()
 const reviewers = ['quality_analyze', 'continuity_validate']
 const sensitive = [...reviewers, 'chapter_write', 'chapter_edit_range', 'chapter_append']
 
@@ -56,13 +58,17 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
         revision: Number(proof.revision), compilationId: typeof args.compilationId === 'string' ? args.compilationId : null })
     } else if (payload.toolName === 'continuity_validate' && typeof args.compilationId === 'string'
       && (payload.failureCode === 'CONTINUITY_INPUT_STALE' && terminalCandidatePatchSchema.safeParse(args.terminalPatch).success
-        || payload.failureCode === 'TERMINAL_STATE_REVIEW_REQUIRED' && Object.keys(args).length === 1)) {
+        || payload.failureCode === 'TERMINAL_STATE_REVIEW_REQUIRED' && (Object.keys(args).length === 1 || explicitStateArgs.safeParse(args).success))) {
       // Discover old local refusals even after their pending checkpoint entry
       // was reconciled. The exact same ownership/journal/usage proof below
       // authenticates them; a missing usage row alone proves nothing.
       const compiler = await tx.storyCompilation.findFirst({ where: { id: args.compilationId, userId: subject.userId,
         novelId: subject.novelId, runId: { in: ids } }, select: { chapterId: true, validation: true } })
-      const revision = object(compiler?.validation).checkedRevision
+      // A full candidate can be proposed after a body edit; the old report is
+      // still bound to its own checkedRevision, not this refused request.
+      const revision = explicitStateArgs.safeParse(args).success && compiler?.chapterId
+        ? (await tx.chapter.findFirst({ where: { id: compiler.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) },
+          select: { revision: true } }))?.revision : object(compiler?.validation).checkedRevision
       if (compiler?.chapterId && Number.isSafeInteger(revision)) candidates.push({ callId: payload.callId, toolName: 'continuity_validate',
         chapterId: compiler.chapterId, revision: Number(revision), compilationId: args.compilationId })
     }
@@ -117,13 +123,14 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
           && error instanceof DataAccessError && error.code === 'CONTINUITY_INPUT_STALE' }
       }
     }
-    // The same journaled producer can also reject a bare resumed review while
+    // The same journaled producer can reject a bare or explicit full review while
     // rebuilding a known failed proposal audit, before its first reservation.
     // Rebuild all owned inputs; neither the error code nor absent usage alone
     // proves no dispatch. Older unknown/reserved calls remain fenced below.
+    const explicit = explicitStateArgs.safeParse(args)
     if (!typed && !localPatchRefusal && item.toolName === 'continuity_validate'
       && payload.failureCode === 'TERMINAL_STATE_REVIEW_REQUIRED' && !source.taskRootId && source.runtimeProtocolVersion === 0
-      && item.compilationId && Object.keys(args).length === 1 && args.compilationId === item.compilationId
+      && item.compilationId && (Object.keys(args).length === 1 || explicit.success) && args.compilationId === item.compilationId
       && chapter.revision === item.revision && chapter.updatedAt <= call.createdAt
       && !await hasLegacyTerminalCallEvidence(tx, { runId: call.runId, callId: item.callId })) {
       const compiler = await tx.storyCompilation.findFirst({ where: { id: item.compilationId, userId: subject.userId,
@@ -135,10 +142,12 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
         && terminalEvidenceVersion(original.spec) === 2) {
         try {
           const previous = await readCompilerContinuitySource(tx, subject, chapter, compiler.bridge.fromChapterId, 11)
+          if (compiler.bridge.fromChapterId && previous?.revision !== compiler.bridge.sourceRevision) continue
+          const proposed = explicit.success ? explicit.data.terminalState : candidate
           const nextContext = terminalEvidenceContext(chapter, previous, 2, terminalQuoteAddressVersion(original.spec),
-            terminalCoverageInput(original.spec, compiler.preparedContext, chapter, candidate, 2, terminalCoverageProofs(previous, 2)), 5, 2)
+            terminalCoverageInput(original.spec, compiler.preparedContext, chapter, proposed, 2, terminalCoverageProofs(previous, 2)), 5, 2)
           localPatchRefusal = !!prepareCompilerTerminalProposals({ spec: original.spec, preparedContext: compiler.preparedContext,
-            validation, chapter, source: previous, candidate, nextContext })?.changes
+            validation, chapter, source: previous, candidate: proposed, nextContext })?.changes
         } catch { /* An unauthenticated or changed report is still unresolved. */ }
       }
     }

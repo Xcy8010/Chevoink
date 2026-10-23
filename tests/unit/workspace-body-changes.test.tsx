@@ -73,11 +73,26 @@ it('centers the two matching capsules and only allows one expanded list at a tim
 it('groups repeated edits by document and reports additions AND removals, not net delta', () => {
   const changes = workspaceBodyChanges([chapter('1', '旧', '中间'), chapter('2', '中间', '新正文'), plan])
   expect(changes).toHaveLength(2)
-  expect(changes[0]).toMatchObject({ added: 3, removed: 1, key: 'chapter:c' })
+  expect(changes[0]).toMatchObject({ added: 5, removed: 3, key: 'chapter:c' })
   expect(changes[1]).toMatchObject({ added: 4, removed: 0, key: 'plan:plan-id' })
 })
-it('omits failed calls, empty creates, non-body tools, and net reverted documents', () => {
-  expect(workspaceBodyChanges([{ ...plan, status: 'failed' }, { ...plan, display: undefined, toolName: 'cover_apply' }, chapter('1', '', ''), chapter('2', '原文', '改后'), chapter('3', '改后', '原文')])).toEqual([])
+it('omits failed calls, empty creates and non-body tools while retaining edits that are later reverted', () => {
+  const changes = workspaceBodyChanges([{ ...plan, status: 'failed' }, { ...plan, display: undefined, toolName: 'cover_apply' }, chapter('1', '', ''), chapter('2', '原文', '改后'), chapter('3', '改后', '原文')])
+  expect(changes).toMatchObject([{ added: 4, removed: 4, key: 'chapter:c' }])
+})
+it('counts deletions after an empty create and deduplicates live/history snapshots by call identity', () => {
+  // The existing review diff counts whole changed lines: +3, then +2/-3.
+  const create = chapter('create', '', '甲乙丙'), edit = chapter('edit', '甲乙丙', '甲丁')
+  const changes = workspaceBodyChanges([create, edit, create, edit, { ...edit, callId: 'failed', status: 'failed' }])
+  expect(changes).toHaveLength(1)
+  expect(changes[0]).toMatchObject({ added: 5, removed: 3, key: 'chapter:c', activity: edit })
+})
+it('shows the same cumulative Unicode additions/removals in the capsule and document row', () => {
+  const activities = [chapter('create', '', '甲😀乙'), chapter('edit', '甲😀乙', '甲丁')]
+  render(<AgentActivityBar {...props} activities={activities} />)
+  expect(screen.getByRole('button', { name: /1 个工作区变更.*新增 5 字，减少 3 字/ })).toBeTruthy()
+  fireEvent.pointerEnter(screen.getByText('1 个工作区变更').closest('button')!.parentElement!.parentElement!)
+  expect(within(screen.getByRole('dialog', { name: '工作区正文变更' })).getByLabelText('新增 5 字，减少 3 字')).toBeTruthy()
 })
 it('does not auto-open todo updates, retains pending rows and opens only on click', () => {
   const view = render(<AgentActivityBar {...props} />)

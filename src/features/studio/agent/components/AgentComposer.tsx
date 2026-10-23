@@ -1263,8 +1263,8 @@ export function AgentComposer({
             onClick={() => void (showContinue && !running ? handleContinue() : handleSend())}
             disabled={showContinue && !running ? !canContinue : !canSend}
             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--surface-contrast)] text-[var(--text-contrast)] transition-opacity hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-35 mobile:h-11 mobile:w-11"
-            aria-label={running ? '加入待发队列' : showContinue ? continueLabel : '发送'}
-            title={running ? '当前任务结束后发送' : showContinue ? continueLabel : '发送'}
+            aria-label={running ? '加入待发队列' : showContinue ? sending ? '正在继续运行' : continueLabel : '发送'}
+            title={running ? '当前任务结束后发送' : showContinue ? sending ? '正在继续运行' : continueLabel : '发送'}
           >
             {sending ? <LoaderCircle className="h-4 w-4 animate-spin" /> : showContinue && !running ? <Play className="h-4 w-4 fill-current" /> : <ArrowUp className="h-4 w-4" />}
           </button>

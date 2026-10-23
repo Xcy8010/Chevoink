@@ -86,6 +86,7 @@ import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from 
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
+import { AgentRunPauseNotice } from './AgentRunPauseNotice'
 import { AgentActivityBar } from './AgentActivityBar'
 import { MessageTime, UserMessageActions } from './MessageActions'
 import { AgentComposer } from './AgentComposer'
@@ -219,6 +220,7 @@ export function AgentPanel({
   const runId = useAgentStore((state) => state.runId)
   const runGoalId = useAgentStore((state) => state.runGoalId)
   const phase = useAgentStore((state) => state.phase)
+  const runSummary = useAgentStore((state) => state.outputSummary)
   const authorEnded = useAgentStore((state) => state.authorEnded)
   const outcome = useAgentStore((state) => state.outcome)
   const resumeableRunId = useAgentStore((state) => state.resumeableRunId)
@@ -1758,6 +1760,8 @@ export function AgentPanel({
           />
         </div>
       ) : null}
+
+      <AgentRunPauseNotice phase={phase} summary={runSummary} />
 
       {/* 错误提示 */}
       {combinedError ? (

@@ -76,8 +76,9 @@ export function prepareTerminalProposalInput(input: { spec: unknown; preparedCon
   const original = attachTerminalProposalInput(input.originalContext, { ...input, taskId, candidate: previous })
   if (!currentTerminalReview(input.validation, originalContent, original)
     && !terminalCandidateCorrection(input.validation, originalContent, original)
-    && !(state?.pending.length && original.proposalChanges && input.previousContent !== undefined
-      && authenticPendingReport(input.validation, originalContent, input.previousContent, original, previous))) throw blocked()
+    && !(input.previousContent !== undefined
+      && (state?.pending.length ? original.proposalChanges : object(audit).classification === 'terminal_invalid')
+      && authenticFailedReport(input.validation, originalContent, input.previousContent, original, previous))) throw blocked()
   const verified = verifiedTerminalProposalFactIds(input.nextContext, input.spec, input.preparedContext)
   const staged = stageTerminalProposals({ preparedContext: input.preparedContext, identity,
     auditHash: runtimeJson(audit).hash, base: previous, candidate: input.candidate, verifiedFactIds: verified,
@@ -121,10 +122,10 @@ export function terminalProposalCacheMatches(input: Parameters<typeof prepareCom
   return runtimeJson({ changes: proposed?.changes ?? null }).hash === runtimeJson({ changes: input.nextContext.proposalChanges ?? null }).hash
 }
 
-/** A known malformed report may leave proposals unresolved. Authenticate the
+/** A first malformed report can precede proposal state. Authenticate the
  * entire saved response against its original input without certifying it as a
  * pass. Unknown/truncated observations cannot authorize a replacement request. */
-function authenticPendingReport(validation: unknown, content: string, previous: string | null,
+function authenticFailedReport(validation: unknown, content: string, previous: string | null,
   terminalEvidence: TerminalEvidenceContext, candidate: TerminalCandidate) {
   const saved = object(validation), audit = object(saved.continuityCriticResponse), raw = object(audit.rawResponse)
   if (saved.independentCheck !== 'unavailable' || audit.parserVersion !== 8 || raw.complete !== true
