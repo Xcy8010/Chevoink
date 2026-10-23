@@ -68,11 +68,11 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
   it('reuses a settled v6 report rejected by the old current-metadata rule after JSONB persistence, with no new request or audit rewrite', () => fixture(async f => {
     const { ctx } = await retryFixture(f, new AbortController())
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    const candidate = terminalCandidateSchema.parse({ exitState: { action: '他推门走进来。' } })
+    const candidate = terminalCandidateSchema.parse({ exitState: { action: '人物走进门。' } })
     const evidence = terminalEvidenceContext(chapter, null, 2, 1,
       { version: 2, taskId: f.spec.id, chapterId: chapter.id, obligations: [] }, 6, 2)
     const raw = JSON.stringify({ findings: [], terminalVerdicts: [{ claimIndex: 0, verdict: 'supported',
-      sourceEvidence: [{ segmentId: 'c0', quote: '他推门走进来' }], inheritance: { priorEndState: 'uncertain', currentState: 'changed' } }],
+      sourceEvidence: [{ segmentId: 'c0', quote: '人物走进门' }], inheritance: { priorEndState: 'uncertain', currentState: 'changed' } }],
     terminalProofVerdicts: [], terminalDispositions: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
       ({ kind, result: 'clear', reason: 'The current body records the action in this direction.', findingIndexes: [] })) })
     const input = { chapterId: chapter.id, revision: chapter.revision, bodies: { previous: null, current: body, terminalEvidence: evidence },
@@ -80,6 +80,9 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
       options: { modelRuntime: runtime, explicitModelSelection: true, userId: f.userId, novelId: f.novelId, chapterId: chapter.id,
         action: 'agent3ContinuityCritic', targetType: 'chapter' as const, targetId: chapter.id, signal: ctx.signal },
       assertCurrent: async () => { expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(body) } }
+    // The fixture must be a valid received report under the corrected contract;
+    // only the historical redundant-metadata rule may reject it initially.
+    expect(inspectContinuityResponse(raw, input.bodies, true, 8, candidate, input.sourceScope).complete).toBe(true)
     const fetcher = vi.fn(async () => completion(raw))
     vi.stubGlobal('fetch', fetcher)
     const parse = continuityParser.inspectContinuityResponse
