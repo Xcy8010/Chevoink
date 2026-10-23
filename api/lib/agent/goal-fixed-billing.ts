@@ -50,8 +50,21 @@ export async function recordGoalFixedCharge(tx: Prisma.TransactionClient, entry:
 export async function lockGoalFixedRefund(tx: Prisma.TransactionClient, original: CreditLedgerEntry | null) {
   if (!original || !isGoalFixedCharge(original.sourceType) || !original.metadata || typeof original.metadata !== 'object' || Array.isArray(original.metadata)) return undefined
   const binding = bindingSchema.safeParse(original.metadata.goalBinding)
-  if (!binding.success) return undefined
+  if (!binding.success && (original.sourceType !== 'image_generation' || !original.metadata.agentCover
+    || typeof original.metadata.agentCover !== 'object' || Array.isArray(original.metadata.agentCover))) return undefined
   const known = await tx.agentGoalUsage.findUnique({ where: { sourceKey: `ledger:${original.id}` }, include: { goal: true } })
+  if (!binding.success) {
+    // A later author-approved goal adoption must not rewrite the old debit's
+    // immutable metadata. Only its authentic fixed-cover ledger seed qualifies.
+    if (!known || original.sourceType !== 'image_generation' || known.goal.userId !== original.userId || !original.referenceId) return undefined
+    const attempt = await tx.agentProviderAttempt.findFirst({ where: { operationId: original.referenceId }, select: { id: true } })
+    const accounting = await import('./runtime-cover-accounting.js')
+    const cover = attempt && await accounting.readCoverUnit(tx, attempt.id)
+    if (!cover || cover.debit.id !== original.id || known.runId !== cover.attempt.runId || !await accounting.coverGoalScope(tx, known.goal, cover)) return goalError('GOAL_SCOPE_MISMATCH', '采用的封面费用与退款身份不一致。')
+    await lockNovelActiveScope(tx, known.goal.novelId)
+    await tx.$queryRaw`SELECT id FROM agent_goals WHERE id = ${known.goalId} FOR UPDATE`
+    return known.sourceKey
+  }
   if (!known || known.goalId !== binding.data.goalId || known.runId !== binding.data.runId || known.goal.userId !== original.userId) {
     return goalError('GOAL_SCOPE_MISMATCH', '退款与目标费用回执不一致。')
   }

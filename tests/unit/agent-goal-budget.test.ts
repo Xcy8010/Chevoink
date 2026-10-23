@@ -42,9 +42,11 @@ const mocks = vi.hoisted(() => {
     runtimeTransaction: vi.fn(),
     readGoalExecutionControl: vi.fn(),
     visionExemption: vi.fn(),
+    coverUnit: vi.fn(),
   }
 })
 vi.mock('../../api/lib/agent/runtime-vision-contract.js', () => ({ readVisionExemption: mocks.visionExemption }))
+vi.mock('../../api/lib/agent/runtime-cover-accounting.js', () => ({ readCoverUnit: mocks.coverUnit }))
 
 vi.mock('../../api/lib/prisma.js', () => ({ prisma: mocks.prisma }))
 vi.mock('../../api/lib/agent/goal-execution-control.js', () => ({ readGoalExecutionControl: mocks.readGoalExecutionControl }))
@@ -395,5 +397,20 @@ describe('goal budget accounting', () => {
     await expect(assertGoalProviderAdmission(context)).resolves.toBeUndefined()
     expect(mocks.prisma.$transaction).toHaveBeenCalledTimes(1)
     expect(mocks.assertGoalFence).toHaveBeenCalledWith(mocks.tx, context)
+  })
+
+  it.each([true, false])('fixed-cover proof=%s never duplicates ledger Credits or fabricates reported Token counts', async valid => {
+    const counts = { source: 'fixed_unit', promptTokens: null, completionTokens: null, cacheHitTokens: null, cacheMissTokens: null }
+    const result = { outcome: 'failed', result: { httpStatus: 429 } }
+    configureDurableSync({ id: 'cover', operationId: 'cover-op', operation: { action: 'cover_generate_image' }, status: 'failed', dispatchedAt: new Date(),
+      result, resultHash: JSON.stringify(result), usageReceipt: { ...counts, observationHash: JSON.stringify(counts), settlementStatus: 'fixed_unit' } })
+    mocks.prisma.agentExecutionOutbox.findUnique.mockResolvedValue({ type: 'cover.fixed_unit.observed', payload: { operationId: 'cover-op', attemptId: 'cover', chargedMilli: 6000 } })
+    mocks.prisma.$transaction.mockImplementation(async work => work(mocks.tx))
+    mocks.coverUnit.mockResolvedValue(valid ? { proof: { chargedMilli: 6000 } } : null)
+    mocks.tx.agentGoalUsage.findUniqueOrThrow.mockResolvedValue({ ...usage(), inputTokens: 0n, outputTokens: 0n, creditsMicros: 0n })
+    await syncGoalDurableUsage('cover')
+    expect(mocks.tx.agentGoalUsage.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      status: valid ? 'known' : 'unknown', reservedTokens: valid ? 0n : 30n, inputTokens: 0n, outputTokens: 0n, creditsMicros: 0n,
+    }) }))
   })
 })

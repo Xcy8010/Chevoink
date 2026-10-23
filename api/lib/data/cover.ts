@@ -4,6 +4,7 @@
  * 本文件为 api/lib/data-access.ts 桶文件的重导出源，禁止绕过桶文件新增消费者。
  */
 import { randomUUID } from 'node:crypto'
+import type { Prisma } from '@prisma/client'
 import type { CoverAsset } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { ensureNovelOwner, ensureUserExists, toCoverAsset } from './internal.js'
@@ -11,7 +12,7 @@ import { normalizeCoverImageUrl } from './novel.js'
 
 
 
-export async function createCoverAssetsData(input: {
+export type CoverAssetInput = {
   userId: string
   prompt: string
   count: number
@@ -21,7 +22,21 @@ export async function createCoverAssetsData(input: {
   negativePrompt?: string | null
   width?: number | null
   height?: number | null
-}): Promise<CoverAsset[]> {
+}
+
+/** DB-only phase; stable IDs belong to the original admitted operation. The
+ * caller commits its ordered asset proof in this same transaction. */
+export async function createCoverAssetsInTransaction(tx: Prisma.TransactionClient, input: CoverAssetInput, ids: string[]) {
+  if (!Number.isInteger(input.count) || input.count < 1 || input.count > 4 || ids.length !== input.count || new Set(ids).size !== ids.length) throw new DataAccessError(400, 'IMAGE_COUNT_INVALID', '每批生成张数必须为 1–4 张。')
+  if (!await tx.user.findUnique({ where: { id: input.userId }, select: { id: true } })
+    || input.novelId && !await tx.novel.findFirst({ where: { id: input.novelId, authorId: input.userId }, select: { id: true } })) throw new DataAccessError(404, 'NOT_FOUND', '作品不存在或无权访问。')
+  return Promise.all(input.imageUrls.slice(0, input.count).map((imageUrl, index) => tx.coverAsset.create({ data: {
+    id: ids[index], novelId: input.novelId ?? null, ownerUserId: input.userId, sourceType: 'ai_generated', imageUrl,
+    prompt: input.prompt, negativePrompt: input.negativePrompt ?? null, modelName: input.modelName, width: input.width ?? null, height: input.height ?? null,
+  } })))
+}
+
+export async function createCoverAssetsData(input: CoverAssetInput): Promise<CoverAsset[]> {
   if (!Number.isInteger(input.count) || input.count < 1 || input.count > 4) {
     throw new DataAccessError(400, 'IMAGE_COUNT_INVALID', '每批生成张数必须为 1–4 张。')
   }

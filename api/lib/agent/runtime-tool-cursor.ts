@@ -18,6 +18,25 @@ export type ToolExecutionCursor = { expectedRevision: number; expectedHash: stri
 export const argumentNormalizationSchema = z.object({ version: z.literal(1), rawArguments: z.string(), normalizedArgsHash: z.string().regex(/^[a-f0-9]{64}$/),
   sourceRevision: z.number().int().nonnegative(), sourceSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
 
+/** Historical identity only; usable by late accounting without fabricating an
+ * active lease. This reader grants no new provider/effect/cursor authority. */
+export async function readToolOperationSource(tx: Prisma.TransactionClient, operation: { kind: string; action: string; taskRootId: string; operationKey: string; inputSnapshot: unknown; inputHash: string }) {
+  if (operation.kind !== 'tool' || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具快照损坏。')
+  const saved = z.object({ kind: z.literal('tool'), action: z.literal(operation.action), input: z.object({ novelId: z.string(), callId: z.string(),
+    args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema }).passthrough() }).safeParse(operation.inputSnapshot)
+  if (!saved.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具参数准入快照不一致。')
+  const normalization = saved.data.input.normalization
+  if (runtimeJson(saved.data.input.args).hash !== normalization.normalizedArgsHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具参数准入快照不一致。')
+  const source = await readExecutionFrame(tx, operation.taskRootId, normalization.sourceRevision)
+  let index = source.state.messages.length - 1
+  while (index >= 0 && source.state.messages[index].role === 'tool') index--
+  const assistant = source.state.messages[index]
+  const call = assistant?.role === 'assistant' ? assistant.toolCalls?.find(item => !source.state.messages.slice(index + 1).some(message => message.role === 'tool' && message.toolCallId === item.id)) : undefined
+  if (source.state.phase !== 'idle' || source.snapshotHash !== normalization.sourceSnapshotHash || operation.operationKey !== `exec:${source.state.nextOperationSequence}`
+    || !call || call.id !== saved.data.input.callId || call.name !== operation.action || call.incomplete || call.arguments !== normalization.rawArguments) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具工作缺少真实调用的执行位置。')
+  return { input: saved.data.input, source }
+}
+
 /** Read saved work after real tool admission. This grants no new effect or
  * provider authority and never projects a tool message; those boundaries retain
  * their original policy, lease, approval and receipt checks. */
@@ -26,23 +45,13 @@ export async function readAdmittedToolOperation(token: RunLeaseToken, input: { o
   const work = async (tx: Prisma.TransactionClient) => {
     const operation = await tx.agentOperation.findFirst({ where: { id: input.operationId, taskRootId: token.taskRootId, kind: 'tool', action: input.action } })
     if (!operation || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '复核工作缺少原工具操作或冻结输入损坏。')
-    const saved = z.object({ kind: z.literal('tool'), action: z.literal(input.action), input: z.object({ novelId: z.literal(input.novelId),
-      callId: z.literal(input.callId), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema }).passthrough() }).safeParse(operation.inputSnapshot)
-    if (!saved.success || runtimeJson(saved.data.input.args).hash !== saved.data.input.normalization.normalizedArgsHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具工作的作品、调用或参数准入快照不一致。')
-    const normalization = saved.data.input.normalization
-    const source = await readExecutionFrame(tx, token.taskRootId, normalization.sourceRevision)
-    let index = source.state.messages.length - 1
-    while (index >= 0 && source.state.messages[index].role === 'tool') index--
-    const assistant = source.state.messages[index]
-    const call = assistant?.role === 'assistant' ? assistant.toolCalls?.find(item => !source.state.messages.slice(index + 1)
-      .some(message => message.role === 'tool' && message.toolCallId === item.id)) : undefined
-    if (source.state.phase !== 'idle' || source.snapshotHash !== normalization.sourceSnapshotHash || operation.operationKey !== `exec:${source.state.nextOperationSequence}`
-      || !call || call.id !== input.callId || call.name !== input.action || call.incomplete || call.arguments !== normalization.rawArguments) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具工作缺少真实调用的执行位置，不能合成另一条模型工具调用。')
+    const saved = await readToolOperationSource(tx, operation), source = saved.source
+    if (saved.input.novelId !== input.novelId || saved.input.callId !== input.callId) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具工作的作品、调用或参数准入快照不一致。')
     if (operation.status === 'prepared') {
       const current = await readExecutionStateInTransaction(tx, token.taskRootId)
       if (current.frame.revision !== source.revision + 1 || current.frame.state.phase !== 'awaiting_operation' || current.frame.state.pendingOperationId !== operation.id) return runtimeError('RUNTIME_STATE_CONFLICT', '原工具工作不是当前待执行操作。')
     }
-    return { operation, input: saved.data.input }
+    return { operation, input: saved.input }
   }
   return transaction ? (await import('./runtime-lease.js')).withRunLeaseInTransaction(transaction, token, work) : withRunLease(token, work)
 }
@@ -190,7 +199,7 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     if (configuration && (!['agent_configure', 'model_assign'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '配置能力只能更新当前任务的执行选项。')
     const read = input.effectDomain === 'read' || configuration
     const metadata = input.effectDomain === 'metadata'
-    if (metadata && (!['novel_create', 'novel_publish', 'novel_archive', 'cover_apply', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品设置能力不能用于其他动作。')
+    if (metadata && (!['novel_create', 'novel_publish', 'novel_archive', 'cover_generate', 'cover_apply', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品设置能力不能用于其他动作。')
     const memory = input.effectDomain === 'memory'
     if (memory && (!['memory_save', 'memory_event_save', 'memory_relation_save'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '记忆能力仅允许原任务保存记忆。')
     const task = input.effectDomain === 'task' && ['todo_write', ...TASK_ARTIFACT_ACTIONS].includes(input.action) && input.targetId === token.taskRootId

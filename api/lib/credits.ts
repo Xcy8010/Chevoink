@@ -418,10 +418,15 @@ export async function getTaskCreditUsage(userId: string, runId: string, input: {
       return milliToCredits(Number(value))
     }
     const total = totals[0], last = entries.at(-1)
-    const unresolvedProviderAttempts = run.taskRootId ? await tx.agentProviderAttempt.count({ where: {
+    let unresolvedProviderAttempts = run.taskRootId ? await tx.agentProviderAttempt.count({ where: {
       operation: { taskRootId: run.taskRootId }, createdAt: { lte: asOf }, dispatchedAt: { not: null },
       OR: [{ status: { in: ['dispatched', 'unknown'] } }, { usageReceipt: null }, { usageReceipt: { settlementStatus: 'pending' } }],
     } }) : null
+    if (run.taskRootId && unresolvedProviderAttempts !== null) {
+      const fixedUnits = await tx.agentProviderAttempt.findMany({ where: { operation: { taskRootId: run.taskRootId }, createdAt: { lte: asOf },
+        dispatchedAt: { not: null }, status: { in: ['succeeded', 'failed', 'cancelled'] }, usageReceipt: { settlementStatus: 'fixed_unit' } }, select: { id: true } })
+      for (const attempt of fixedUnits) if (!await (await import('./agent/runtime-cover-accounting.js')).readCoverUnit(tx, attempt.id)) unresolvedProviderAttempts += 1
+    }
     const [unsettled] = await tx.$queryRaw<Array<{ count: bigint }>>(Prisma.sql`
       SELECT count(*)::bigint AS count FROM ai_usage_logs u JOIN agent_runs r ON r.id = u.agent_run_id
       WHERE u.user_id = ${userId} AND r.user_id = ${userId} AND r.session_id = ${run.sessionId} AND r.novel_id = ${run.novelId}
@@ -877,7 +882,14 @@ export async function recordImageRefundIntent(userId: string, originalIdempotenc
   evidence: z.infer<typeof imageRefundEvidenceSchema>) {
   const parsed = imageRefundEvidenceSchema.safeParse(evidence)
   if (!parsed.success) throw new DataAccessError(409, 'CREDIT_REFUND_EVIDENCE_INVALID', '图片退款缺少有效失败记录。')
-  return prisma.$transaction(async tx => {
+  return prisma.$transaction(tx => recordImageRefundIntentInTransaction(tx, userId, originalIdempotencyKey, parsed.data))
+}
+
+/** Original image policy, usable atomically with its genuine attempt evidence. */
+export async function recordImageRefundIntentInTransaction(tx: Prisma.TransactionClient, userId: string, originalIdempotencyKey: string,
+  evidence: z.infer<typeof imageRefundEvidenceSchema>) {
+  const parsed = imageRefundEvidenceSchema.safeParse(evidence)
+  if (!parsed.success) throw new DataAccessError(409, 'CREDIT_REFUND_EVIDENCE_INVALID', '图片退款缺少有效失败记录。')
     const original = await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: originalIdempotencyKey } })
     if (!original || original.userId !== userId || original.kind !== 'usage' || original.sourceType !== 'image_generation' || original.deltaMilli >= 0) {
       throw new DataAccessError(409, 'CREDIT_REFUND_IDENTITY_INVALID', '未找到匹配的原图片收费，不能创建退款。')
@@ -885,7 +897,6 @@ export async function recordImageRefundIntent(userId: string, originalIdempotenc
     return tx.creditRefundIntent.upsert({ where: { originalEntryId: original.id }, update: {}, create: {
       originalEntryId: original.id, reason: 'image_generation_unavailable', evidence: parsed.data,
     } })
-  })
 }
 
 /** Bounded retry over durable obligations; wallet, refund row and completion

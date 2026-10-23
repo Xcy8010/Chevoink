@@ -23,6 +23,7 @@ import { executeDurableWeb } from './tools/durable-web.js'
 import { readFileTool, viewImageTool } from './tools/attachment-tools.js'
 import { executeDurableAttachmentRead } from './tools/durable-attachment.js'
 import { executeDurableVision } from './tools/durable-vision.js'
+import { executeDurableCover } from './tools/durable-cover.js'
 import { executeDurableCreative } from './tools/durable-creative.js'
 import { platformNovelReadTool, platformNovelSearchTool } from './tools/platform-tools.js'
 import { executeDurablePlanSave } from './tools/durable-plan.js'
@@ -58,7 +59,7 @@ import { researchDossierGetTool, firstThreePrototypeGetTool, firstThreePrototype
 import { novelImportTool } from './tools/import-tools.js'
 import { accountCreditsTool, accountCreditHistoryTool, accountNovelsTool, sessionRenameTool } from './tools/account-tools.js'
 import { executeDurableImport } from './runtime-import.js'
-import { coverApplyTool } from './tools/cover-tools.js'
+import { coverApplyTool, coverGenerateTool } from './tools/cover-tools.js'
 import { withGoalExecutionContext, withGoalEffects } from './goal-context.js'
 import { readGoalExecution } from './goal-fence.js'
 import { goalEnableTool, goalReadTool, goalReportTool } from './tools/goal-tools.js'
@@ -93,7 +94,7 @@ const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(platformNovelSearchTool), checkedAdapter(platformNovelReadTool),
   checkedAdapter(qualityFindingFeedbackTool), checkedAdapter(characterVoiceSaveTool), checkedAdapter(experienceAnchorSaveTool),
   checkedAdapter(styleProfileExtractTool), checkedAdapter(firstThreePrototypeBuildTool),
-  checkedAdapter(coverApplyTool),
+  checkedAdapter(coverApplyTool), checkedAdapter(coverGenerateTool),
   checkedAdapter(goalEnableTool), checkedAdapter(goalReadTool), checkedAdapter(goalReportTool),
   checkedAdapter(novelImportTool),
   checkedAdapter(accountCreditsTool), checkedAdapter(accountCreditHistoryTool), checkedAdapter(accountNovelsTool), checkedAdapter(sessionRenameTool),
@@ -205,6 +206,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     else if (call.name === 'web_search' || call.name === 'web_read') ctx.durableWeb = capability
     else if (call.name === 'read_file') ctx.durableAttachment = capability
     else if (call.name === 'view_image') ctx.durableVision = capability
+    else if (call.name === 'cover_generate') ctx.durableCover = capability
     else if (call.name === 'creative_critique' || call.name === 'creative_revision_draft') ctx.durableCreative = capability
     else if ((CHANGESET_ACTIONS as readonly string[]).includes(call.name)) ctx.durableChangeSet = capability
     else if (goalTool) ctx.durableRead = capability
@@ -297,6 +299,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   }
   const historyAction = [...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].find(name => name === selected.tool.name)
   if (selected.ctx.durableVision) return { kind: 'tool' as const, result: await executeDurableVision(selected.ctx, selected.tool, selected.args) }
+  if (selected.ctx.durableCover) return { kind: 'tool' as const, result: await executeDurableCover(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableContent && selected.ctx.writingScope?.writingCoordinationProtocol === 1
     && coordinatedWriterActions.some(name => name === selected.tool.name)) {
     return { kind: 'tool' as const, result: await executeDurableCoordinatedWriter(selected.ctx, selected.tool, selected.args) }

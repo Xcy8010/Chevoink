@@ -101,10 +101,16 @@ export async function reconcileGoalActivation(tx: GoalTx, goal: AgentGoal, now: 
   const logs = await tx.aiUsageLog.findMany({ where: { userId: goal.userId, agentRunId: { in: allIds } } })
   const attempts = await tx.agentProviderAttempt.findMany({ where: { runId: { in: allIds } }, include: { usageReceipt: true } })
   if (attempts.some(attempt => ['prepared', 'dispatched', 'unknown'].includes(attempt.status))) return true
-  const keys = [...logs.map(log => ({ key: `legacy:${log.id}`, runId: log.agentRunId! })), ...attempts.map(attempt => ({ key: `durable:${attempt.id}`, runId: attempt.runId }))]
+  const keys = attempts.map(attempt => ({ key: `durable:${attempt.id}`, runId: attempt.runId }))
   // Monotone seed. syncGoal*Usage uses the existing real settlement receipts on
   // the next supervisor poll; missing/unknown measurements stay unresolved.
   let seeded = false
+  for (const log of logs) {
+    const cover = log.action === 'generateCoverImage' && log.billingEvidence
+      ? await (await import('./runtime-cover-accounting.js')).adoptCoverGoalAccounting(tx, goal.id, log) : null
+    if (cover?.seeded) seeded = true
+    if (!cover?.mirror) keys.push({ key: `legacy:${log.id}`, runId: log.agentRunId! })
+  }
   for (const key of keys) {
     const prior = await tx.agentGoalUsage.findUnique({ where: { sourceKey: key.key } })
     if (prior && (prior.goalId !== goal.id || prior.runId !== key.runId)) return goalError('GOAL_SCOPE_MISMATCH', '原执行用量已有其他目标归属。')

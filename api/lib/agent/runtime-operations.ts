@@ -220,7 +220,11 @@ export async function prepareProviderAttempt(token: RunLeaseToken, input: {
 /** Only dispatchGranted=true permits a network call; a lost commit reply requires reconciliation. */
 export async function markProviderDispatched(token: RunLeaseToken, attemptId: string, goalTokenEstimate?: number) {
   token = { ...token }
-  return withRunLease(token, async tx => {
+  return withRunLease(token, tx => markProviderDispatchedInTransaction(tx, token, attemptId, goalTokenEstimate))
+}
+
+/** Caller holds the same root/lease transaction as a fixed-price debit. */
+export async function markProviderDispatchedInTransaction(tx: RuntimeTx, token: RunLeaseToken, attemptId: string, goalTokenEstimate?: number) {
     const attempt = await tx.agentProviderAttempt.findUnique({ where: { id: attemptId } })
     if (!attempt) return runtimeError('RUNTIME_SCOPE_MISMATCH', '供应商尝试不存在。')
     const operation = await ownedOperation(tx, token, attempt.operationId)
@@ -240,7 +244,8 @@ export async function markProviderDispatched(token: RunLeaseToken, attemptId: st
       }
       const request = attempt.requestSnapshot as { request?: { body?: { max_tokens?: unknown; max_completion_tokens?: unknown } } }
       const output = request.request?.body?.max_completion_tokens ?? request.request?.body?.max_tokens
-      if (typeof output !== 'number' || !Number.isSafeInteger(output) || output < 1) return runtimeError('RUNTIME_CHILD_REQUEST_BUDGET_REQUIRED', '子任务模型请求缺少可验证的输出上限。')
+      if ((typeof output !== 'number' || !Number.isSafeInteger(output) || output < 1)
+        && !await (await import('./runtime-cover-accounting.js')).readCoverAdmission(tx, attempt.id)) return runtimeError('RUNTIME_CHILD_REQUEST_BUDGET_REQUIRED', '子任务模型请求缺少可验证的输出上限。')
 
     }
     await assertPendingProviderState(tx, token.taskRootId, attempt.operationId)
@@ -255,7 +260,6 @@ export async function markProviderDispatched(token: RunLeaseToken, attemptId: st
     const updated = await tx.agentProviderAttempt.update({ where: { id: attempt.id }, data: { status: 'dispatched', dispatchedAt: await databaseNow(tx) } })
     await tx.agentOperation.update({ where: { id: attempt.operationId }, data: { status: 'dispatched' } })
     return { dispatchGranted: true, attempt: updated }
-  })
 }
 
 /**

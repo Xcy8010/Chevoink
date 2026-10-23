@@ -4,7 +4,8 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { activationReceiptSchema } from '../../api/lib/agent/goal-activation.js'
 import type { GoalTx } from '../../api/lib/agent/goal-store.js'
 
-const mocks = vi.hoisted(() => ({ activation: vi.fn(), source: vi.fn(), inspect: vi.fn(), change: vi.fn(), active: vi.fn() }))
+const mocks = vi.hoisted(() => ({ activation: vi.fn(), source: vi.fn(), inspect: vi.fn(), change: vi.fn(), active: vi.fn(), adoptCover: vi.fn() }))
+vi.mock('../../api/lib/agent/runtime-cover-accounting.js', () => ({ adoptCoverGoalAccounting: mocks.adoptCover }))
 vi.mock('../../api/lib/agent/goal-activation.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/goal-activation.js')>(),
   readGoalActivationReceipt: mocks.activation, readActivationSource: mocks.source }))
 vi.mock('../../api/lib/agent/active-runs.js', () => ({ getActiveRun: mocks.active }))
@@ -53,6 +54,17 @@ describe('deferred activation reconciliation barriers', () => {
     expect(await reconcileGoalActivation(f.tx, f.goal, new Date())).toBe(true)
     expect(f.db.agentGoalUsage.create).toHaveBeenCalledWith({ data: { sourceKey: 'legacy:usage', goalId: 'goal', runId: 'source', status: 'unknown' } })
     expect(f.db.agentGoalExecution.create).not.toHaveBeenCalled()
+  })
+  it('does not seed a second legacy charge for an authenticated durable cover mirror', async () => {
+    const f = fixture()
+    const log = { id: 'cover-log', agentRunId: 'source', action: 'generateCoverImage', billingEvidence: { operationId: 'cover-op' } }
+    f.db.aiUsageLog.findMany.mockResolvedValue([log])
+    f.db.agentProviderAttempt.findMany.mockResolvedValue([{ id: 'cover-attempt', runId: 'source', status: 'succeeded' }])
+    mocks.adoptCover.mockResolvedValue({ mirror: true, seeded: true })
+    expect(await reconcileGoalActivation(f.tx, f.goal, new Date())).toBe(true)
+    expect(mocks.adoptCover).toHaveBeenCalledWith(f.tx, f.goal.id, log)
+    expect(f.db.agentGoalUsage.create).toHaveBeenCalledOnce()
+    expect(f.db.agentGoalUsage.create).toHaveBeenCalledWith({ data: { sourceKey: 'durable:cover-attempt', goalId: 'goal', runId: 'source', status: 'unknown' } })
   })
   it('parks a completed ordinary run with no deliverable proof without creating another paid task', async () => {
     const f = fixture()

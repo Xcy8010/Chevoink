@@ -66,6 +66,7 @@ export async function readTaskBudgetInTransaction(tx: RuntimeTx, taskRootId: str
     for (const row of rows) {
       totals.attempts += 1n
       const usage = row.usageReceipt
+      if (usage?.source === 'fixed_unit' && await (await import('./runtime-cover-accounting.js')).readCoverUnit(tx, row.id)) continue
       if (usage) {
         const observed = { source: usage.source, promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, cacheHitTokens: usage.cacheHitTokens, cacheMissTokens: usage.cacheMissTokens }
         if (runtimeJson(observed).hash !== usage.observationHash) runtimeError('RUNTIME_RECEIPT_INVALID', '累计预算的用量回执损坏，不能按较低用量继续。')

@@ -1428,30 +1428,57 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   }
 }
 
+/** Credentials stay in memory; durable callers freeze only the public route. */
+export async function resolveCoverImageRuntime() {
+  const configured = await getToolModelRuntime('tool:image-generation')
+  const apiKey = configured?.apiKey ?? env.aiImageApiKey
+  ensureImageProviderConfigured(apiKey)
+  return { apiKey, route: { provider: configured?.provider ?? env.aiProviderMode, modelName: configured?.modelName ?? env.aiImageModel,
+    baseUrl: configured?.baseUrl ?? env.aiImageBaseUrl, providerMode: env.aiProviderMode } }
+}
+
+export function parseCoverImageResponse(httpStatus: number, body: string) {
+  let payload: unknown
+  try { payload = JSON.parse(body) } catch { throw new DataAccessError(502, 'AI_PROVIDER_INVALID_RESPONSE', '图片模型返回了无法解析的响应。') }
+  const decoded = payload && typeof payload === 'object' ? payload as { data?: unknown; error?: { message?: unknown } } : {}
+  if (httpStatus < 200 || httpStatus >= 300) throw new ImageProviderFailure(httpStatus, 502, 'AI_PROVIDER_ERROR',
+    typeof decoded.error?.message === 'string' ? decoded.error.message : '图片模型服务暂时不可用。')
+  const images: unknown[] = Array.isArray(decoded.data) ? decoded.data : []
+  const imageUrls = images.map(item => {
+    const image = item && typeof item === 'object' ? item as { url?: unknown; b64_json?: unknown } : {}
+    return typeof image.url === 'string' ? image.url : typeof image.b64_json === 'string' ? `data:image/png;base64,${image.b64_json}` : null
+  }).filter((item): item is string => Boolean(item))
+  if (!imageUrls.length) throw new DataAccessError(502, 'AI_PROVIDER_EMPTY_RESPONSE', '图片模型未返回有效图片。')
+  return imageUrls
+}
+
+/** Transport only. The caller must already own the sole committed permit. */
+export function requestCoverImages(runtime: Awaited<ReturnType<typeof resolveCoverImageRuntime>>, input: { prompt: string; size: string; count: number }, signal?: AbortSignal) {
+  return undiciFetch(runtime.route.baseUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${runtime.apiKey}` },
+    body: JSON.stringify({ model: runtime.route.modelName, prompt: input.prompt, size: input.size, n: input.count }), dispatcher: imageFetchAgent,
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(env.aiImageTimeoutMs)]) : AbortSignal.timeout(env.aiImageTimeoutMs) })
+}
+
 async function generateImageUrls(
   prompt: string,
   size: string,
   count: number,
   options: { signal?: AbortSignal; beforeDispatch?: () => Promise<void> } = {},
 ) {
-  const configured = await getToolModelRuntime('tool:image-generation')
-  const imageBaseUrl = configured?.baseUrl ?? env.aiImageBaseUrl
-  const imageApiKey = configured?.apiKey ?? env.aiImageApiKey
-  const imageModel = configured?.modelName ?? env.aiImageModel
-  ensureImageProviderConfigured(imageApiKey)
+  const runtime = await resolveCoverImageRuntime()
 
   const startedAt = Date.now()
   await options.beforeDispatch?.()
   options.signal?.throwIfAborted()
   // Node 内置 fetch 默认 5 分钟头超时，第三方生图服务经常超过，这里用 undici 显式放宽到 aiImageTimeoutMs
-  const response = await undiciFetch(imageBaseUrl, {
+  const response = await undiciFetch(runtime.route.baseUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${imageApiKey}`,
+      Authorization: `Bearer ${runtime.apiKey}`,
     },
     body: JSON.stringify({
-      model: imageModel,
+      model: runtime.route.modelName,
       prompt,
       size,
       n: count,
@@ -1488,7 +1515,7 @@ async function generateImageUrls(
     throw new DataAccessError(502, 'AI_PROVIDER_EMPTY_RESPONSE', '图片模型未返回有效图片。')
   }
 
-  return { imageUrls, modelName: imageModel, durationMs: Date.now() - startedAt }
+  return { imageUrls, modelName: runtime.route.modelName, durationMs: Date.now() - startedAt }
 }
 
 class ImageProviderFailure extends DataAccessError {
