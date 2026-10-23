@@ -32,6 +32,7 @@ vi.mock('../../api/lib/agent/runtime-common.js', () => ({
     if (typeof value !== 'string' || !value) throw new Error('invalid runtime id')
   },
   runtimeJson: (value: unknown) => ({ value, hash: JSON.stringify(value) }),
+  runtimeJsonHash: (value: unknown) => JSON.stringify(value),
 }))
 vi.mock('../../api/lib/agent/runtime-parent-contention.js', () => ({ readAttemptContentionScope: vi.fn().mockResolvedValue(null) }))
 vi.mock('../../api/lib/agent/runtime-lease.js', () => ({ withRunLease: mocks.withRunLease }))

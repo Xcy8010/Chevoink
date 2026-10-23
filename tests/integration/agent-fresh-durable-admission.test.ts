@@ -25,6 +25,8 @@ import { streamDurableRun } from '../../api/lib/agent/runtime-stream.js'
 import { env } from '../../api/config/env.js'
 import { createAgentGoal, actOnAgentGoal, readAgentGoal } from '../../api/lib/agent/goal-service.js'
 import { superviseAgentGoal } from '../../api/lib/agent/goal-supervisor.js'
+import { createDurableTestLifecycle, type DurableTestLifecycle } from '../support/durable-test-lifecycle.js'
+import { startDurableTestCpuProfile } from '../support/durable-test-cpu.js'
 
 const realBootstrap = await vi.importActual<typeof import('../../api/lib/agent/runtime-bootstrap.js')>('../../api/lib/agent/runtime-bootstrap.js')
 const originalRollout = env.agentDurableRolloutUserIds
@@ -66,16 +68,16 @@ const unknownUsage = (userId: string, novelId: string, runId: string) => prisma.
 
 /** CI exposes failure annotations without requiring restricted raw logs.
  * Observe the actual adapter calls; do not substitute an execution outcome. */
-function observeBootstrapFailures() {
+function observeBootstrapFailures(lifecycle?: DurableTestLifecycle) {
   const failures: Array<{ stage: string; message: string; code?: string }> = []
   const record = (stage: string, error: unknown) => failures.push({ stage, message: error instanceof Error ? error.message : String(error),
     ...(error instanceof DataAccessError ? { code: error.code } : {}) })
   const initialize = runService.initializePersistedLoopRun, execute = runService.executePersistedLoopRun
   vi.spyOn(runService, 'initializePersistedLoopRun').mockImplementation(async (...args) => {
-    try { return await initialize(...args) } catch (error) { record('initialize', error); throw error }
+    try { return await (lifecycle ? lifecycle.phase('runtime.seed', () => initialize(...args)) : initialize(...args)) } catch (error) { record('initialize', error); throw error }
   })
   vi.spyOn(runService, 'executePersistedLoopRun').mockImplementation(async (...args) => {
-    try { return await execute(...args) } catch (error) { record('execute', error); throw error }
+    try { return await (lifecycle ? lifecycle.phase('step', () => execute(...args)) : execute(...args)) } catch (error) { record('execute', error); throw error }
   })
   return failures
 }
@@ -412,9 +414,14 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     expect(fetch).not.toHaveBeenCalled()
   }))
 
-  it('runs a genuine fresh writer through real read, coordinated body/reviews/commit and natural completion', () => fixture(async f => {
+  it('runs a genuine fresh writer through real read, coordinated body/reviews/commit and natural completion', async ({ signal }) => {
+    const lifecycle = createDurableTestLifecycle(signal, entry => console.info('[durable-quality-stage]', JSON.stringify(entry)))
+    // This one diagnosed 5s failure needs its actual code-location profile.
+    // The original deadline/assertions remain unchanged; no provider is real.
+    const stopCpu = process.env.GITHUB_ACTIONS === 'true' ? await startDurableTestCpuProfile() : undefined
+    try { await fixture(async f => {
     await ready(f)
-    const failures = observeBootstrapFailures()
+    const failures = observeBootstrapFailures(lifecycle)
     // The derivative is owned by the native executor, not a parallel legacy job.
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const window = credits.getCreditWindow()
@@ -426,6 +433,7 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
       actualOutcomes: { exitState: { location: '原地' } }, chapterSummary: '仍停在原地', hookDecision: '', delayedHookReason: '', openingStructure: '停步', endingStructure: '等待' }
     let mainCalls = 0, criticCalls = 0
     const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
+      lifecycle.mockRequest()
       const body = JSON.parse(String(init.body))
       let delta: object
       if (body.tools) {
@@ -466,5 +474,7 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     expect(await prisma.agentOperation.count({ where: { taskRootId: initial.taskRootId!, kind: 'tool', action: 'chapter_write' } })).toBe(1)
     expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, kind: 'usage' } })).toBe(fetcher.mock.calls.length)
     expect(executeAgentRun).not.toHaveBeenCalled()
-  }))
+    }, undefined, '修改本章', { lifecycle })
+    } finally { if (stopCpu) console.info('[durable-quality-cpu]', JSON.stringify(await stopCpu())) }
+  })
 })
