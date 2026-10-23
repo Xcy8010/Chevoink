@@ -11,7 +11,6 @@ import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-c
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { terminalCandidateSchema, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
-import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 import { observeChapterReviewProgress } from '../../api/lib/agent/semantic-progress.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import * as ai from '../../api/lib/ai-service.js'
@@ -80,9 +79,9 @@ describe.runIf(available)('complete terminal report resumes through processing a
       // correctly treated as an unknown provider result by real billing.
       requests.push({ url, body: String(init.body) })
       const response = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body judgment.', findingIndexes: [] })),
-        terminalVerdicts: [{ path: 'exitState.objects.0', verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: body }] }], terminalDispositions: [],
-        proposalDispositions: [{ id: terminalFactId('objects', candidate.exitState.objects[0]), outcome: 'replaced',
-          reason: 'The saved body establishes that the sensor remains offline rather than repaired.', candidateFactId: terminalFactId('objects', body),
+        terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: body }] }], terminalDispositions: [],
+        proposalDispositions: [{ proposalIndex: 0, outcome: 'replaced',
+          reason: 'The saved body establishes that the sensor remains offline rather than repaired.', candidateIndex: 0,
           sourceEvidence: [{ segmentId: 'c0', quote: body }] }] })
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: response }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     })
@@ -104,11 +103,12 @@ describe.runIf(available)('complete terminal report resumes through processing a
       expect(requests[0].url).toBe('https://provider.invalid/v1/chat/completions')
       const request = JSON.parse(requests[0].body)
       expect(request.messages.at(-1).content).toContain(body)
-      const prefix = '待提交候选（写者主张，不是证据）：'
+      const prefix = '本次冻结复核目录：'
       const candidateLine = request.messages.at(-1).content.split('\n').find((line: string) => line.startsWith(prefix))
       expect(candidateLine).toBeDefined()
-      expect(JSON.parse(candidateLine.slice(prefix.length))).toEqual([{ path: 'exitState.objects.0', claim: body, sourcePolicy: 'current_or_attested_persistent', inheritedSources: [],
-        factId: '669fd15becd7c9f8ba6d723a2cb34e93451953d9c63a7d4ea267ecacc2ff84f2' }])
+      expect(JSON.parse(candidateLine.slice(prefix.length))).toMatchObject({ ordinary: [{ claimIndex: 0, field: 'objects', claim: body }],
+        candidates: [{ claimIndex: 0, field: 'objects', claim: body }], proofs: [], obligations: [],
+        proposals: [{ proposalIndex: 0, field: 'objects', claim: candidate.exitState.objects[0] }] })
     }
     const criticUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, agentRunId: f.runId, action: 'agent3ContinuityCritic' } })
     expect(criticUsage).toHaveLength(scenario === 'commit' ? 1 : 0)

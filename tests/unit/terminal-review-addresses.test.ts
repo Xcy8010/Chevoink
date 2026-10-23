@@ -7,6 +7,7 @@ import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format
 import { freshContinuityResponseContract, applyContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { stageTerminalProposals } from '../../api/lib/agent/terminal-proposal-review.js'
 import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
+import { terminalCandidateCorrection } from '../../api/lib/agent/terminal-candidate-feedback.js'
 
 const content = 'The clerk records the request but has not approved it. The pump still awaits a seal.'
 const persistent = 'The pump awaits a seal.'
@@ -162,6 +163,10 @@ describe('server-bound terminal review addresses', () => {
     const failure = inspectContinuityResponse(raw, bodies, true, 8, candidate)
     expect(failure).toMatchObject({ complete: false, audit: { classification: 'terminal_invalid', terminalEvidence: { verdictProtocol: 5 } } })
     const originalHash = runtimeJson(failure.audit).hash
+    // A malformed internal identity is not a new semantic candidate proposal.
+    // Keep it on the existing settled-review/author-Continue recovery path;
+    // exhausted semantic proposal slots must not be reset to repair a wire.
+    expect(terminalCandidateCorrection({ terminalCandidate: candidate, independentCheck: 'unavailable', continuityCriticResponse: failure.audit }, content, old)).toBeNull()
     expect(inspectTerminalReview(candidate, content, raw, true, ctx)).toBeNull()
     expect(inspectTerminalReview(candidate, content, JSON.stringify(response()), true, ctx)).toMatchObject({ supported: true })
     expect(runtimeJson(failure.audit).hash).toBe(originalHash)

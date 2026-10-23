@@ -8,7 +8,7 @@ import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-c
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 
 afterEach(() => { vi.unstubAllGlobals() })
-function fixture(legacy: boolean, rootError = false, verdictProtocol?: 2 | 3 | 4 | 5, reassessmentProtocol?: 2) {
+function fixture(legacy: boolean, rootError = false, verdictProtocol?: 2 | 3 | 4 | 5 | 6, reassessmentProtocol?: 2) {
   const current = { id: 'chapter', content: 'The sensor is offline.', revision: 1, orderIndex: 1 }
   const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: ['The sensor is offline.'] } })
   const evidence = terminalEvidenceContext(current, null, 2, 1, terminalCoverageInput({ id: 'task', scope: { terminalCoverageProtocol: 2 } }, {}, current, candidate), verdictProtocol)
@@ -46,8 +46,8 @@ describe('exact frozen diagnostic witness compatibility', () => {
     expect(await readOwnedContinuityReassessment(f.tx, { userId: 'owner', novelId: 'novel' }, f.args)).toBeNull()
     expect(f.write).not.toHaveBeenCalled()
   })
-  it.each([2, 3, 4, 5] as const)('authenticates the exact frozen request marker %s without changing the raw response or dispatching', async version => {
-    const f=fixture(false,true,version),fetcher=vi.fn(()=>{throw Error('Unexpected request')})
+  it.each([2, 3, 4, 5, 6] as const)('authenticates the exact frozen request marker %s without changing the raw response or dispatching', async version => {
+    const f=fixture(false,true,version,version===6?2:undefined),fetcher=vi.fn(()=>{throw Error('Unexpected request')})
     vi.stubGlobal('fetch',fetcher)
     const before=JSON.stringify(f.claims)
     expect(await readOwnedContinuityReassessment(f.tx,{userId:'owner',novelId:'novel'},f.args)).toMatchObject({claim:{id:'claim'},input:f.input})
