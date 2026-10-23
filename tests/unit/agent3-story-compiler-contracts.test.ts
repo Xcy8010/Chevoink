@@ -15,7 +15,7 @@ import * as originalRequest from '../../api/lib/agent/original-request.js'
 import * as continuitySource from '../../api/lib/agent/compiler-continuity-source.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as novelTools from '../../api/lib/agent/tools/novel-tools.js'
-import { continuityValidateTool, continuityReviewTail, continuityCriticSystem, chapterBridgeCommitTool, chapterBridgeGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { runLegacyContinuityReview, continuityValidateTool, continuityReviewTail, continuityCriticSystem, chapterBridgeCommitTool, chapterBridgeGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 import { sceneTaskInputSchema, storyStateSchema } from '../../shared/contracts/index.js'
@@ -27,6 +27,10 @@ import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continu
 import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
 import { qualityRevisionApplyTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import * as repairAudit from '../../api/lib/agent/quality-repair-audit.js'
+import * as assessment from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
+import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { compilerEvidenceScope } from '../../api/lib/agent/continuity-source-authority.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 
 describe('严谨创作落实连续性警告', () => {
@@ -139,6 +143,30 @@ describe('严谨创作落实连续性警告', () => {
     }
     expect(f.write).not.toHaveBeenCalled()
     expect(f.repair).not.toHaveBeenCalled()
+  })
+  it('does not let an old2 complete report bypass a current frozen3 unknown request', async () => {
+    const f = fixture(false), candidate = terminalCandidateSchema.parse({ exitState: { action: '原文' } })
+    const bodies = { previous: null, current: f.chapter.content, terminalEvidence: terminalEvidenceContext(f.chapter, null, 2, 1, undefined, 6, 2) }
+    const input = { chapterId: f.chapter.id, revision: f.chapter.revision, bodies, system: 'Synthetic current input', content: f.chapter.content,
+      parserVersion: 8 as const, sourceScope: compilerEvidenceScope(f.chapter, null), terminalCandidate: candidate,
+      options: { action: 'agent3ContinuityCritic', userId: f.ctx.userId, targetType: 'chapter' as const, targetId: f.chapter.id }, assertCurrent: vi.fn(async () => {}) }
+    const frozen: assessment.LegacyAssessmentInput = { chapterId: f.chapter.id, revision: f.chapter.revision, bodies, system: input.system,
+      content: input.content, parserVersion: 8, sourceScope: input.sourceScope, terminalCandidate: candidate, reassessmentProtocol: 3,
+      targetType: 'chapter', targetId: f.chapter.id }
+    const oldComplete = inspectContinuityResponse(JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
+      ({ kind, result: 'clear', reason: 'Synthetic body check.', findingIndexes: [] })), terminalVerdicts: [{ claimIndex: 0, verdict: 'supported',
+      sourceEvidence: [{ segmentId: 'c0', quote: '原文' }] }], terminalProofVerdicts: [], terminalDispositions: [] }), bodies, true, 8, candidate, input.sourceScope)
+    expect(oldComplete.complete).toBe(true)
+    const restore = vi.spyOn(assessment, 'readFrozenLegacyContinuityInput').mockResolvedValue(frozen)
+    const reusable = vi.spyOn(assessment, 'readReusableLegacyContinuityAssessment').mockImplementation(async (_tx, _ctx, request) =>
+      request.reassessmentProtocol === 3 ? null : oldComplete)
+    vi.spyOn(assessment, 'reserveLegacyContinuityAssessment').mockResolvedValue('replay')
+    vi.spyOn(assessment, 'readLegacyContinuityAssessment').mockRejectedValue(new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', 'Synthetic unknown current request'))
+    await expect(runLegacyContinuityReview(f.ctx, input)).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+    expect(restore.mock.invocationCallOrder[0]).toBeLessThan(reusable.mock.invocationCallOrder[0])
+    expect(reusable).toHaveBeenCalledOnce()
+    expect(reusable.mock.calls[0][2]).toMatchObject({ reassessmentProtocol: 3 })
+    expect(f.critic).not.toHaveBeenCalled(); expect(f.write).not.toHaveBeenCalled()
   })
   it.each([false, true])('0错误3警告仅保存检查意见并复用，不自动修订，缓存=%s', async cached => {
     const f = fixture(cached)

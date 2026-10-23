@@ -129,9 +129,6 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   assessmentAdmissionId?: string;
   recoverBodies?: (version: FrozenTerminalContract) => ContinuityBodies;
 }) {
-  if (input.bodies.terminalEvidence?.verdictProtocol === 6 && input.terminalCandidate) input = { ...input,
-    system: continuityResponseSystem(input.system, continuityResponseContract(input.bodies, input.terminalCandidate)),
-    content: continuityResponseInput(input.content, input.bodies, input.terminalCandidate) }
   const trace = createTextRequestTrace()
   let observedContent: string | undefined
   let observedComplete: boolean | undefined
@@ -142,9 +139,24 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
     ...(input.terminalCandidate ? { terminalCandidate: input.terminalCandidate } : {}),
     content: input.content, ...(input.bindingHash ? { bindingHash: input.bindingHash } : {}),
     targetType: input.options.targetType as 'chapter' | 'story_compilation', targetId: input.options.targetId! }
+  let restoredFrozen = false
   if (frozen.reassessmentProtocol === 2 || frozen.reassessmentProtocol === 3 || input.bodies.terminalEvidence?.factCoverage?.version === 2) {
     const saved = await prisma.$transaction(tx => readFrozenLegacyContinuityInput(tx, ctx, frozen, input.recoverBodies))
-    if (saved) { frozen = saved; input = { ...input, ...saved } }
+    if (saved) { frozen = saved; input = { ...input, ...saved }; restoredFrozen = true }
+  }
+  if (!restoredFrozen && frozen.reassessmentProtocol === 3 && input.terminalCandidate) {
+    // A new wire contract does not retire a paid complete historical report.
+    // Never cross this compatibility path for an already frozen current call:
+    // its own unknown requests/second slot must be reconciled first.
+    ctx.signal.throwIfAborted(); await input.assertCurrent()
+    const legacy = { ...frozen }; delete legacy.reassessmentProtocol
+    for (const prior of [{ ...legacy, reassessmentProtocol: 2 as const }, legacy]) {
+      const reusable = await prisma.$transaction(tx => readReusableLegacyContinuityAssessment(tx, ctx, prior))
+      if (reusable) { ctx.signal.throwIfAborted(); await input.assertCurrent(); return reusable }
+    }
+    input = { ...input, system: continuityResponseSystem(input.system, continuityResponseContract(input.bodies, input.terminalCandidate)),
+      content: continuityResponseInput(input.content, input.bodies, input.terminalCandidate) }
+    frozen = { ...frozen, system: input.system, content: input.content }
   }
   type Observation = Parameters<typeof observeLegacyContinuityAssessment>[3] & { usageId: string }
   const observations: Observation[] = []

@@ -76,7 +76,10 @@ describe('durable explicit terminal proof selection', () => {
     if (scenario === 'recovered') {
       expect(readSource).not.toHaveBeenCalled()
       expect(prepared.work).toEqual(frozen)
-    } else expect(readSource).toHaveBeenCalledOnce()
+    } else {
+      expect(readSource).toHaveBeenCalledOnce()
+      if (scenario === 'known') expect(prepared.work).toMatchObject({ version: 18, reassessmentProtocol: 2, cached: [] })
+    }
     expect(call).not.toHaveBeenCalled()
     expect(resolve).not.toHaveBeenCalled()
     expect(fetch).not.toHaveBeenCalled()
