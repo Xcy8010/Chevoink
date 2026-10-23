@@ -297,7 +297,8 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者请求的章节解释凭证缺失或不匹配，不能重新解析补授权。')
   }
   let writing = spec.success ? spec.data.scope.writing : undefined
-  const source = await tx.agentRun.findFirstOrThrow({ where: { id: original.sourceRunId, userId: subject.userId, novelId: subject.novelId } })
+  const source = await tx.agentRun.findFirstOrThrow({ where: { id: original.sourceRunId, userId: subject.userId, novelId: subject.novelId },
+    select: { id: true, chapterId: true, taskRootId: true, sessionId: true, manuscriptRevision: true, writingBindings: true } })
   const clarification = spec.success ? await readWritingClarification(tx, subject, original, source, spec.data) : null
   if (clarification) writing = clarification.writing
   if (!writing && original.prompt) {

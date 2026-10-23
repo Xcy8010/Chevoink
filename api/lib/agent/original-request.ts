@@ -21,12 +21,15 @@ function originalPrompt(value: unknown): string | null {
 /** Read the authenticated admission lineage, never a tool answer, summary or
  * child's generated brief. Saved inputs and their hashes are left untouched. */
 export async function readOriginalTaskRequest(tx: Prisma.TransactionClient, subject: Subject): Promise<OriginalRequest> {
-  let run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
-  if (!run) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '原任务身份无法核实。')
-  const incoming = await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: run.id } })
+  // Native lineage reads use the authenticated root below. Do not repeatedly
+  // deserialize its duplicated run taskSpec/startRequest and unrelated usage.
+  const identity = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId },
+    select: { id: true, sessionId: true, taskRootId: true } })
+  if (!identity) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '原任务身份无法核实。')
+  const incoming = await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: identity.id } })
   if (incoming && runtimeJson(incoming.snapshot).hash !== incoming.snapshotHash) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '子任务授权来源损坏。')
   if (incoming) (await import('./runtime-child.js')).verifyChildGrant(incoming)
-  const session = await tx.agentSession.findFirst({ where: { id: run.sessionId, userId: subject.userId, novelId: subject.novelId }, select: { spawnedFromRunId: true, spawnedFromSessionId: true } })
+  const session = await tx.agentSession.findFirst({ where: { id: identity.sessionId, userId: subject.userId, novelId: subject.novelId }, select: { spawnedFromRunId: true, spawnedFromSessionId: true } })
   if (!incoming && session?.spawnedFromRunId) {
     const parent = await tx.agentRun.findFirst({ where: { id: session.spawnedFromRunId, sessionId: session.spawnedFromSessionId ?? undefined,
       userId: subject.userId, novelId: subject.novelId }, include: { session: { select: { spawnedFromRunId: true } } } })
@@ -34,14 +37,16 @@ export async function readOriginalTaskRequest(tx: Prisma.TransactionClient, subj
     const original = await readOriginalTaskRequest(tx, { ...subject, runId: parent.id })
     return { ...original, parentRunId: parent.id }
   }
-  const rootId = incoming?.parentRootId ?? run.taskRootId
+  const rootId = incoming?.parentRootId ?? identity.taskRootId
   if (rootId) {
     const root = await tx.agentTaskRoot.findFirst({ where: { id: rootId, userId: subject.userId, novelId: subject.novelId } })
     if (!root) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '原任务范围无法核实。')
     if (runtimeJson({ spec: root.specSnapshot, request: root.requestSnapshot }).hash !== root.inputHash) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原任务输入损坏。')
     return { prompt: originalPrompt(root.requestSnapshot),
-      spec: root.specSnapshot, taskId: root.id, parentRunId: incoming?.currentParentRunId ?? null, sourceRunId: (await tx.agentRun.findFirst({ where: { taskRootId: root.id, userId: subject.userId, novelId: subject.novelId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true } }))?.id ?? run.id }
+      spec: root.specSnapshot, taskId: root.id, parentRunId: incoming?.currentParentRunId ?? null, sourceRunId: (await tx.agentRun.findFirst({ where: { taskRootId: root.id, userId: subject.userId, novelId: subject.novelId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true } }))?.id ?? identity.id }
   }
+  // Legacy tasks retain their original source-row interpretation.
+  let run = await tx.agentRun.findFirstOrThrow({ where: { id: identity.id, userId: subject.userId, novelId: subject.novelId } })
   const taskId = record(run.taskSpec)?.id
   if (typeof taskId === 'string') {
     run = await tx.agentRun.findFirstOrThrow({ where: { userId: subject.userId, novelId: subject.novelId, sessionId: run.sessionId,
