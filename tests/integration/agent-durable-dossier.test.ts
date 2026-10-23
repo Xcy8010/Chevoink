@@ -48,7 +48,7 @@ describe.runIf(available)('research dossier owns its original queries, synthesis
     vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(runtime)
     vi.spyOn(credits, 'assertCreditAccess').mockResolvedValue()
     vi.spyOn(prices, 'resolveDurableTokenPrice').mockResolvedValue(price)
-    const config = vi.spyOn(tools, 'getToolModelRuntime').mockResolvedValue({ provider: 'bocha', modelName: 'bocha', baseUrl: 'https://search.invalid/v1', apiKey: 'isolated-search-key' })
+    const config = vi.spyOn(tools, 'getToolModelRuntime').mockResolvedValue({ provider: 'bocha', modelName: 'bocha', baseUrl: 'https://search.example.org/v1', apiKey: 'isolated-search-key' })
     const createConcurrentDossier = () => prisma.researchDossier.create({ data: { ...synthesis, userId: f.userId, novelId: f.novelId, runId: f.runId,
       version: 1, status: 'ready', triggerReason: 'new_book', triggerSignals: [], topic: '其他合法入口的研究', genre: args.genre, targetAudience: args.targetAudience,
       queryPlan: [], sources: [], sourceHash: 'a'.repeat(64), cacheKey: 'b'.repeat(64), expiresAt: new Date(Date.now() + 86400000) } })

@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { researchDossierBuildSchema } from '../../shared/contracts/index.js'
 import { dossierCacheKey, parseResearchSynthesis, researchDossierSources } from '../../api/lib/agent/research-dossier.js'
-import { assertDossierBuildExclusive, dossierQueryIdentity, dossierQueryRequest, dossierWorkSchema, readIncludedDossierSearch, researchRefreshProof } from '../../api/lib/agent/runtime-dossier-contract.js'
+import { assertDossierBuildExclusive, dossierQueryIdentity, dossierQueryRequest, dossierWorkSchema, readIncludedDossierSearch, researchRefreshProof, resolveDossierSearchRoute } from '../../api/lib/agent/runtime-dossier-contract.js'
+import * as configurations from '../../api/lib/tool-model-config.js'
 import { runtimeJson, type RuntimeTx } from '../../api/lib/agent/runtime-common.js'
 import { env } from '../../api/config/env.js'
 import { searchWeb, WebSearchUnknownError } from '../../api/lib/web-search-service.js'
@@ -86,6 +87,14 @@ describe('included search is limited to the genuine original dossier service', (
 describe('durable search distinguishes unknown transport from an observed rejection', () => {
   const route = { provider: 'bocha', modelName: 'bocha', baseUrl: 'https://search.example.org/v1', apiKey: 'isolated-not-a-real-secret' }
   const html = '<div class="vrwrap" data-url="https://example.org/authorized"><h3 class="vr-title"><a href="https://example.org/authorized">公开资料标题</a></h3><p>只提供公开摘要</p></div>'
+  it.each(['public-synthetic', 'reserved-host'] as const)('uses the actual route admission for %s without a request', async scenario => {
+    const transport = vi.fn(); vi.stubGlobal('fetch', transport)
+    vi.spyOn(configurations, 'getToolModelRuntime').mockResolvedValue({ ...route, baseUrl: scenario === 'reserved-host' ? 'https://search.invalid/v1' : 'https://search.example.org/v1' })
+    const result = resolveDossierSearchRoute()
+    if (scenario === 'reserved-host') await expect(result).rejects.toMatchObject({ code: 'WEB_TOOL_ENDPOINT_INVALID' })
+    else expect((await result).route.configured).toEqual({ provider: 'bocha', modelName: 'bocha', baseUrl: 'https://search.example.org/v1' })
+    expect(transport).not.toHaveBeenCalled()
+  })
   it.each(['transport', 'partial-body'] as const)('retains %s unknown without issuing a fallback', async scenario => {
     env.webSearchProvider = 'auto'
     const transport = vi.fn(async () => {
