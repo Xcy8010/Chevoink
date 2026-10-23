@@ -133,7 +133,12 @@ export async function resumeFreshBootstrapInTransaction(tx: RuntimeTx, userId: s
         return runtimeError('GOAL_RESUME_REQUIRED', '请使用原目标的继续操作。')
       }
     } else if (goalId) return runtimeError('RUNTIME_BOOTSTRAP_SOURCE_REQUIRED', '缺少目标原始初始化准入。')
-    await assertAgentManuscriptCurrent(tx, { userId, runId, novelId: run.novelId })
+    if (goalSource) {
+      // The genuine goal resume still holds the old, paused run/epoch here.
+      // Check manuscript identity now; recheck the live goal fence after its
+      // original binding/status CAS below, inside this same transaction.
+      await (await import('./manuscript-scope.js')).assertAgentManuscriptRevisionCurrent(tx, { userId, runId, novelId: run.novelId })
+    } else await assertAgentManuscriptCurrent(tx, { userId, runId, novelId: run.novelId })
     const latest = await tx.agentRun.findFirst({ where: { sessionId: run.sessionId, ...MAIN_RUN_FILTER }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true } })
     if (latest?.id !== runId) return runtimeError('STALE_RESUME_TARGET', '当前会话已有后续任务，不能恢复旧初始化。')
     if (root.status !== 'paused' || run.status !== 'paused') return runtimeError('RUN_NOT_PAUSED', '仅本次暂停的新任务初始化可继续。')
@@ -162,6 +167,7 @@ export async function resumeFreshBootstrapInTransaction(tx: RuntimeTx, userId: s
     if (goalSource) {
       const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: goalSource.binding.goalId } })
       await tx.agentGoalExecution.update({ where: { runId }, data: { epoch: goal.epoch } })
+      await assertAgentManuscriptCurrent(tx, { userId, runId, novelId: run.novelId })
     }
     await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId, type: 'execution.bootstrap.resumed',
       eventKey: `bootstrap-resume:${pause.id}`, payload: { pauseId: pause.id, admissionId: admission.id, inputHash: root.inputHash } } })
