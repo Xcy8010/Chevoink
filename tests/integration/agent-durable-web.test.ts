@@ -146,6 +146,9 @@ describe.runIf(available)('durable web identity, research budget and dispatch fe
     await sources.reserveResearchRequest(seed, 'search', 'seed')
     await sources.settleResearchRequest(seed, 'consumed')
     await sources.saveResearchSearchOutcome(seed, { provider: 'sogou', results: [{ title: '河谷纪事_林青', url, source: 'fiction.example.com', snippet: '作者林青的作品目录' }] }, '小说 公开章节')
+    // Real Search projects both the saved transport outcome and owned sources.
+    // The outcome alone is not a URL-provenance grant for a later Fetch.
+    await sources.registerResearchSources(seed, [{ title: '河谷纪事_林青', url, source: 'fiction.example.com', snippet: '作者林青的作品目录' }])
     if (scenario === 'interrupted') {
       vi.spyOn(sources, 'readResearchContent').mockRejectedValueOnce(Error('interrupted after content save'))
       await expect(executeDurableToolStep(lease, signal())).rejects.toThrow('interrupted after content save')
