@@ -19,6 +19,9 @@ import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence
 import { collectDurableMemoryWork } from '../../api/lib/agent/runtime-memory.js'
 import { processMemoryExtractionJob } from '../../api/lib/agent/story-memory.js'
 import * as featureFlags from '../../api/lib/agent2-feature-flags.js'
+import * as credits from '../../api/lib/credits.js'
+import * as prices from '../../api/lib/billing/resolve-token-price.js'
+import * as reducer from '../../api/lib/agent/runtime-reducer.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { storyCompilerPrepareTool, sceneTaskBuildTool, continuityValidateTool, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
@@ -26,10 +29,11 @@ import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-t
 import type { ToolContext, AgentTool } from '../../api/lib/agent/tools/types.js'
 
 describe.runIf(available)('coordinated writer actual PG body and parent cursor', () => {
-  it.each(['draft', 'shell-draft', 'shell-approve', 'shell-deny', 'shell-approved-resume', 'rollback-body', 'stale-body', 'narrowed-policy', 'resume-after-body'] as const)('%s preserves the real body transaction and task identity', async scenario => {
+  it.each(['draft', 'shell-draft', 'shell-approve', 'shell-deny', 'shell-approved-resume', 'rollback-body', 'stale-body', 'narrowed-policy', 'resume-after-body', 'complete-chain', 'complete-reduce-recovery'] as const)('%s preserves the real body transaction and task identity', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
-      const complete = scenario === 'resume-after-body' || scenario === 'shell-approved-resume'
+      const fullChain = scenario === 'complete-chain' || scenario === 'complete-reduce-recovery'
+      const complete = fullChain || scenario === 'resume-after-body' || scenario === 'shell-approved-resume'
       if (complete) {
         const originalFlag = featureFlags.isAgent2FeatureEnabled
         vi.spyOn(featureFlags, 'isAgent2FeatureEnabled').mockImplementation((key, userId) => key === 'memory2' || originalFlag(key, userId))
@@ -53,6 +57,46 @@ describe.runIf(available)('coordinated writer actual PG body and parent cursor',
             { id: 'real-writer', name: 'chapter_write', arguments: JSON.stringify(args) }] }] } })
       await executeDurableToolStep(lease, new AbortController().signal) // A real reduced read, not a fresh DB read used as model observation.
       const before = await loadExecutionState(f.userId, lease.runId)
+      if (fullChain) {
+        const window = credits.getCreditWindow()
+        await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+        vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
+          baseUrl: 'https://provider.invalid/v1', apiKey: 'isolated-fixture-only', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'],
+          reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })
+        vi.spyOn(prices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
+          rateCardId: 'coordinator-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
+        const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
+          const body = JSON.parse(String(init.body))
+          expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
+          expect(body.tools).toBeUndefined()
+          expect(body.messages[1].content).toContain(args.content)
+          const report = fetcher.mock.calls.length === 1 ? { findings: [], terminalVerdicts: [],
+            semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: '本章只读记录、留下缺项并等待复核；未将等待或计划当作已经完成。', findingIndexes: [] })) } : { findings: [] }
+          return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(report) }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 20, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
+        })
+        vi.stubGlobal('fetch', fetcher)
+        const step = () => executeDurableToolStep(lease, new AbortController().signal)
+        if (scenario === 'complete-reduce-recovery') {
+          vi.spyOn(reducer, 'reduceExecutionReceipt').mockRejectedValueOnce(Error('interrupted after actual chapter commit'))
+          await expect(step()).rejects.toThrow('interrupted after actual chapter commit')
+          expect(await step()).toMatchObject({ kind: 'recovered' })
+        } else expect(await step()).toMatchObject({ kind: 'tool', result: { summary: '正文已保存并提交' } })
+        expect(fetcher).toHaveBeenCalledTimes(2) // Real continuity and quality cores; no synthetic successful report.
+        const parents = await prisma.agentOperation.findMany({ where: { taskRootId: f.rootId, kind: 'tool', action: 'chapter_write' }, include: { effectReceipt: true } })
+        expect(parents).toHaveLength(1)
+        expect(parents[0].effectReceipt?.result).toMatchObject({ writingCompletion: { status: 'completed', steps: [
+          { step: 'body' }, { step: 'continuity' }, { step: 'quality' }, { step: 'commit' },
+        ] } })
+        const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { userId: f.userId, chapterId: f.chapterId } })
+        expect(compilation).toMatchObject({ status: 'completed', validation: { independentCheck: 'complete', checkedRevision: 2 } })
+        expect(await prisma.chapterQualityReport.findFirstOrThrow({ where: { userId: f.userId, chapterId: f.chapterId } })).toMatchObject({ chapterRevision: 2 })
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(2)
+        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, kind: 'usage' } })).toBe(2)
+        expect((await loadExecutionState(f.userId, lease.runId)).frame.state).toMatchObject({ phase: 'idle', pendingOperationId: null })
+        expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: args.content, revision: 2 })
+        return
+      }
       if (serviceAsk) {
         const step = () => executeDurableToolStep(lease, new AbortController().signal)
         const waiting = await step()

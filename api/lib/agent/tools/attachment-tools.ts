@@ -14,7 +14,7 @@ import { extractFileText } from '../../file-extract.js'
 import { getPublicHttpBytes } from '../../public-http.js'
 import { prisma } from '../../prisma.js'
 import { describeImageWithVision } from '../../vision-service.js'
-import { defineTool } from './types.js'
+import { defineTool, type ToolContext, type ToolResult } from './types.js'
 
 /**
  * 附件理解工具（视觉旁路 + 文件提取）：
@@ -91,6 +91,71 @@ function clip(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max)}…`
 }
 
+export type ViewImageInput = { image: { buffer: Buffer; mime: string }; displayUrl: string; question: string }
+
+/** Read pixels through the same URL/attachment boundaries before any model call. */
+export async function readViewImageInput(ctx: ToolContext, args: { url: string; focus?: string }): Promise<ViewImageInput | ToolResult> {
+  ctx.signal.throwIfAborted()
+  let buffer: Buffer | null = null
+  let mime: string | undefined
+  // display 用真实图片地址：入参可能是 coverAssetId（UUID），直接展示会 404 破图
+  let displayUrl = args.url
+
+  if (args.url.startsWith('http://') || args.url.startsWith('https://')) {
+    // 外网图片（历史 AI 生图直存的远程封面等）：安全校验后下载
+    const remote = await downloadRemoteImage(args.url, ctx.signal)
+    if (!remote) {
+      return {
+        output:
+          'view_image 失败：该外网图片不可达、过大或不是 png/jpg/webp（仅允许 https 公网域名，禁止内网/IP 地址）。可基于文字信息继续任务，并向作者如实说明。',
+      }
+    }
+    buffer = remote.buffer
+    mime = remote.mime
+  } else {
+    let diskPath = resolveReadableImagePath(args.url)
+
+    if (!diskPath) {
+      // 容错：历史压缩可能只剩 coverAssetId，按归属反查候选图 url（防越权：仅限本人资源）
+      const asset = await prisma.coverAsset.findFirst({
+        where: { id: args.url, ownerUserId: ctx.userId },
+        select: { imageUrl: true },
+      })
+
+      if (asset) {
+        diskPath = resolveReadableImagePath(asset.imageUrl)
+        displayUrl = asset.imageUrl
+      }
+    }
+
+    if (!diskPath) {
+      return {
+        output: `view_image 被拒绝：${args.url} 不是可读图片地址（仅允许本会话附件、封面候选、封面候选 coverAssetId 或 https 外网图片）。请使用附件元数据、cover_generate 或 novel_get_context 返回的 url 或 coverAssetId。`,
+      }
+    }
+
+    if (displayUrl.startsWith(MANAGED_AGENT_ATTACHMENT_PREFIX)) {
+      buffer = await readAuthorizedAgentAttachment(displayUrl, ctx.userId)
+    } else {
+      const owned = await prisma.coverAsset.findFirst({ where: { imageUrl: displayUrl, ownerUserId: ctx.userId }, select: { id: true } })
+      if (!owned) return { outcome: 'failed', output: 'view_image 被拒绝：封面图片不属于当前作者。' }
+      try {
+        buffer = await readFile(diskPath)
+      } catch {
+        return { output: 'view_image 失败：图片文件不存在或已失效，请作者重新发送附件。' }
+      }
+    }
+
+    mime = EXT_TO_MIME[(path.extname(diskPath).slice(1) || '').toLowerCase()]
+
+    if (!mime) {
+      return { output: 'view_image 失败：该地址不是支持的图片格式（png/jpg/webp）。' }
+    }
+  }
+
+  return { image: { buffer, mime }, displayUrl, question: args.focus?.trim() || '请详细描述这张图片的内容：主体、场景、文字（如有，逐字列出）、构图与风格，供网文写作与封面校验参考。' }
+}
+
 export const viewImageTool = defineTool({
   name: 'view_image',
   title: '查看图片',
@@ -109,68 +174,13 @@ export const viewImageTool = defineTool({
   permission: READ_PERMISSION,
   readOnly: true,
   async execute(ctx, args) {
-    ctx.signal.throwIfAborted()
-    let buffer: Buffer | null = null
-    let mime: string | undefined
-    // display 用真实图片地址：入参可能是 coverAssetId（UUID），直接展示会 404 破图
-    let displayUrl = args.url
-
-    if (args.url.startsWith('http://') || args.url.startsWith('https://')) {
-      // 外网图片（历史 AI 生图直存的远程封面等）：安全校验后下载
-      const remote = await downloadRemoteImage(args.url, ctx.signal)
-      if (!remote) {
-        return {
-          output:
-            'view_image 失败：该外网图片不可达、过大或不是 png/jpg/webp（仅允许 https 公网域名，禁止内网/IP 地址）。可基于文字信息继续任务，并向作者如实说明。',
-        }
-      }
-      buffer = remote.buffer
-      mime = remote.mime
-    } else {
-      let diskPath = resolveReadableImagePath(args.url)
-
-      if (!diskPath) {
-        // 容错：历史压缩可能只剩 coverAssetId，按归属反查候选图 url（防越权：仅限本人资源）
-        const asset = await prisma.coverAsset.findFirst({
-          where: { id: args.url, ownerUserId: ctx.userId },
-          select: { imageUrl: true },
-        })
-
-        if (asset) {
-          diskPath = resolveReadableImagePath(asset.imageUrl)
-          displayUrl = asset.imageUrl
-        }
-      }
-
-      if (!diskPath) {
-        return {
-          output: `view_image 被拒绝：${args.url} 不是可读图片地址（仅允许本会话附件、封面候选、封面候选 coverAssetId 或 https 外网图片）。请使用附件元数据、cover_generate 或 novel_get_context 返回的 url 或 coverAssetId。`,
-        }
-      }
-
-      if (displayUrl.startsWith(MANAGED_AGENT_ATTACHMENT_PREFIX)) {
-        buffer = await readAuthorizedAgentAttachment(displayUrl, ctx.userId)
-      } else {
-        try {
-          buffer = await readFile(diskPath)
-        } catch {
-          return { output: 'view_image 失败：图片文件不存在或已失效，请作者重新发送附件。' }
-        }
-      }
-
-      mime = EXT_TO_MIME[(path.extname(diskPath).slice(1) || '').toLowerCase()]
-
-      if (!mime) {
-        return { output: 'view_image 失败：该地址不是支持的图片格式（png/jpg/webp）。' }
-      }
-    }
-
+    const prepared = await readViewImageInput(ctx, args)
+    if ('output' in prepared) return prepared
+    const { image, displayUrl, question } = prepared
     ctx.signal.throwIfAborted()
     try {
       const description = await describeImageWithVision(
-        { buffer, mime },
-        args.focus?.trim() ||
-          '请详细描述这张图片的内容：主体、场景、文字（如有，逐字列出）、构图与风格，供网文写作与封面校验参考。',
+        image, question,
         { userId: ctx.userId, runId: ctx.runId, signal: ctx.signal, novelId: ctx.novelId, modelAssignments: ctx.modelAssignments },
       )
 

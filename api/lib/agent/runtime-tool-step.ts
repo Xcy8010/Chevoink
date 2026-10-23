@@ -20,8 +20,9 @@ import { executeDurableCoordinatedWriter } from './tools/durable-coordinated-wri
 import { planSaveTool, planRenameTool, planDeleteTool, memorySaveTool, planExitTool } from './tools/write-tools.js'
 import { researchReportReadTool, researchReportSaveTool, webSearchTool, webReadTool, webReadNavigationTool } from './tools/search-tools.js'
 import { executeDurableWeb } from './tools/durable-web.js'
-import { readFileTool } from './tools/attachment-tools.js'
+import { readFileTool, viewImageTool } from './tools/attachment-tools.js'
 import { executeDurableAttachmentRead } from './tools/durable-attachment.js'
+import { executeDurableVision } from './tools/durable-vision.js'
 import { executeDurableCreative } from './tools/durable-creative.js'
 import { platformNovelReadTool, platformNovelSearchTool } from './tools/platform-tools.js'
 import { executeDurablePlanSave } from './tools/durable-plan.js'
@@ -81,7 +82,7 @@ function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
 }
 const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(webSearchTool), checkedAdapter(webReadTool),
-  checkedAdapter(readFileTool),
+  checkedAdapter(readFileTool), checkedAdapter(viewImageTool),
   checkedAdapter(creativeCritiqueTool), checkedAdapter(creativeRevisionDraftTool),
   checkedAdapter(bulkReplacePreviewTool), checkedAdapter(entityRenamePreviewTool), checkedAdapter(changeSetApplyTool), checkedAdapter(changeSetRollbackTool),
   checkedAdapter(skillCatalogTool), checkedAdapter(skillLoadTool), checkedAdapter(skillRunExplainTool), checkedAdapter(skillSharedInvitesTool),
@@ -203,6 +204,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     else if (call.name === 'goal_enable') ctx.durableGoalActivation = capability
     else if (call.name === 'web_search' || call.name === 'web_read') ctx.durableWeb = capability
     else if (call.name === 'read_file') ctx.durableAttachment = capability
+    else if (call.name === 'view_image') ctx.durableVision = capability
     else if (call.name === 'creative_critique' || call.name === 'creative_revision_draft') ctx.durableCreative = capability
     else if ((CHANGESET_ACTIONS as readonly string[]).includes(call.name)) ctx.durableChangeSet = capability
     else if (goalTool) ctx.durableRead = capability
@@ -251,11 +253,11 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       serviceConfirmation = (await (await import('./runtime-writing-service.js')).readWritingServiceConfirmations(tx, lease,
         manifest.steps.flatMap(step => step.actions))).length > 0
     }
-    // A validated prepared parent already owns this source frame. Its cores
-    // recheck the frozen approval/current policy; idle polling cannot run again
-    // after a body save or provider interruption.
-    const resumeWriting = ctx.writingScope?.writingCoordinationProtocol === 1 && current.frame.state.phase === 'awaiting_operation'
-    return { tool, args, ctx, cursor, needsApproval: !resumeWriting && (grant.permission === 'ask' || grant.alwaysConfirm || serviceConfirmation) }
+    // Every validated prepared tool already owns its original idle source.
+    // The adapter/effect rechecks that exact approval and current policy; a
+    // pending recovery cannot re-enter the idle-only approval polling path.
+    const resumeTool = current.frame.state.phase === 'awaiting_operation'
+    return { tool, args, ctx, cursor, needsApproval: !resumeTool && (grant.permission === 'ask' || grant.alwaysConfirm || serviceConfirmation) }
   })
   if ('deferred' in selected) return { kind: 'context' as const, frame: selected.deferred! }
   if ('recover' in selected) {
@@ -294,6 +296,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     // Actual adapter checks the saved decision again at effect admission.
   }
   const historyAction = [...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].find(name => name === selected.tool.name)
+  if (selected.ctx.durableVision) return { kind: 'tool' as const, result: await executeDurableVision(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableContent && selected.ctx.writingScope?.writingCoordinationProtocol === 1
     && coordinatedWriterActions.some(name => name === selected.tool.name)) {
     return { kind: 'tool' as const, result: await executeDurableCoordinatedWriter(selected.ctx, selected.tool, selected.args) }

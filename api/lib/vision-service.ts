@@ -16,7 +16,7 @@ import { assertGoalProviderAdmission, reserveGoalUsage, syncGoalLegacyUsage } fr
  */
 
 class VisionRetryableError extends Error {}
-type VisionScope = { userId: string; runId: string; signal: AbortSignal; novelId?: string;
+export type VisionScope = { userId: string; runId: string; signal: AbortSignal; novelId?: string;
   modelAssignments?: import('../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments }
 
 let inflight = 0
@@ -31,7 +31,7 @@ function releaseSlot() {
 }
 
 /** 获取并发槽位：排队超过 30s 视为视觉服务繁忙 */
-function acquireSlot(signal: AbortSignal): Promise<() => void> {
+export function acquireVisionSlot(signal: AbortSignal): Promise<() => void> {
   signal.throwIfAborted()
   if (inflight < env.aiVisionMaxConcurrent) {
     inflight += 1
@@ -68,6 +68,22 @@ function acquireSlot(signal: AbortSignal): Promise<() => void> {
 
 function isRetryable(error: unknown): boolean {
   return error instanceof VisionRetryableError
+}
+
+/** Shared route resolution; credentials remain in memory. Durable callers
+ * compare the public route before dispatch and replay before resolving it. */
+export async function resolveVisionRuntime(scope: VisionScope) {
+  const assigned = await assignedTaskModel(scope.userId, scope.novelId, 'vision', scope.modelAssignments, Boolean(scope.runId))
+  const configured = assigned ? { provider: assigned.runtime.provider, modelName: assigned.runtime.modelName!, baseUrl: assigned.runtime.baseUrl ?? env.aiVisionBaseUrl,
+    apiKey: assigned.runtime.apiKey ?? env.aiVisionApiKey } : await getToolModelRuntime('tool:image-vision')
+  if (!configured && !env.aiVisionApiKeyConfigured) throw new DataAccessError(503, 'VISION_NOT_CONFIGURED', '视觉服务未配置（缺少 AI_VISION_API_KEY）。')
+  const baseUrl = configured?.baseUrl ?? env.aiVisionBaseUrl, modelName = configured?.modelName ?? env.aiVisionModel
+  const options = assigned ? { [resolveTextOutputTokenParameter(assigned.runtime.outputTokenParameter,
+    { provider: assigned.runtime.provider, model: modelName, providerBaseUrl: baseUrl }, true)]: 4096,
+    ...buildProviderReasoningPayload({ provider: assigned.runtime.provider, model: modelName, providerBaseUrl: baseUrl,
+      reasoningEffort: assigned.runtime.reasoningEffort, reasoningParameterMode: assigned.runtime.reasoningParameterMode, thinkingEnabled: assigned.runtime.thinkingEnabled }) } : {}
+  return { configured, selected: assigned?.runtime, route: { provider: configured?.provider ?? 'vision', modelName, baseUrl,
+    providerMode: env.aiProviderMode, options }, apiKey: configured?.apiKey ?? env.aiVisionApiKey }
 }
 
 async function requestOnce(image: { buffer: Buffer; mime: string }, question: string, configured: ToolModelRuntime | null, scope: VisionScope,
@@ -182,19 +198,13 @@ export async function describeImageWithVision(
   question: string,
   scope: VisionScope,
 ): Promise<string> {
-  const assigned = await assignedTaskModel(scope.userId, scope.novelId, 'vision', scope.modelAssignments, Boolean(scope.runId))
-  const configured = assigned ? { provider: assigned.runtime.provider, modelName: assigned.runtime.modelName!, baseUrl: assigned.runtime.baseUrl ?? env.aiVisionBaseUrl,
-    apiKey: assigned.runtime.apiKey ?? env.aiVisionApiKey } : await getToolModelRuntime('tool:image-vision')
-  if (!configured && !env.aiVisionApiKeyConfigured) {
-    throw new DataAccessError(503, 'VISION_NOT_CONFIGURED', '视觉服务未配置（缺少 AI_VISION_API_KEY）。')
-  }
-
-  const release = await acquireSlot(scope.signal)
+  const runtime = await resolveVisionRuntime(scope)
+  const release = await acquireVisionSlot(scope.signal)
 
   try {
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await requestOnce(image, question, configured, scope, assigned?.runtime)
+        return await requestOnce(image, question, runtime.configured, scope, runtime.selected)
       } catch (error) {
         if (!isRetryable(error) || attempt >= 1) {
           throw error

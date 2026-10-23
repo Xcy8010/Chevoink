@@ -77,6 +77,7 @@ export function fixture(work: (f: {
           await tx.creditRateCard.deleteMany({ where: { createdBy: userId } })
           await tx.agentArtifact.deleteMany({ where: { run: { userId } } })
           await tx.projectMemoryEntry.deleteMany({ where: { novel: { authorId: userId } } })
+          await tx.aiUsageLog.deleteMany({ where: { userId } })
           // New roots cascade after their original runs are removed.
           await tx.agentRun.deleteMany({ where: { userId } })
           await tx.agentSession.deleteMany({ where: { userId } })

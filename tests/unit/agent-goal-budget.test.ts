@@ -41,8 +41,10 @@ const mocks = vi.hoisted(() => {
     databaseNow: vi.fn(),
     runtimeTransaction: vi.fn(),
     readGoalExecutionControl: vi.fn(),
+    visionExemption: vi.fn(),
   }
 })
+vi.mock('../../api/lib/agent/runtime-vision-contract.js', () => ({ readVisionExemption: mocks.visionExemption }))
 
 vi.mock('../../api/lib/prisma.js', () => ({ prisma: mocks.prisma }))
 vi.mock('../../api/lib/agent/goal-execution-control.js', () => ({ readGoalExecutionControl: mocks.readGoalExecutionControl }))
@@ -360,6 +362,30 @@ describe('goal budget accounting', () => {
 
     await expect(syncGoalDurableUsage('attempt-3')).rejects.toMatchObject({ code: 'GOAL_RECONCILIATION_REQUIRED' })
     expect(mocks.runtimeTransaction).not.toHaveBeenCalled()
+  })
+
+  it.each(['reported', 'unknown', 'invalid-policy'] as const)('keeps vision exemption separate from %s token evidence', async scenario => {
+    const reported = scenario !== 'unknown'
+    const counts = { source: reported ? 'reported' : 'unknown', promptTokens: reported ? 12 : null, completionTokens: reported ? 4 : null,
+      cacheHitTokens: null, cacheMissTokens: null }
+    const result = { outcome: 'succeeded', result: { description: '实际图片描述' } }
+    configureDurableSync({ id: 'vision', operationId: 'vision-op', operation: { action: 'view_image_vision' }, status: 'succeeded', dispatchedAt: new Date(), result,
+      resultHash: JSON.stringify(result), usageReceipt: { ...counts, observationHash: JSON.stringify(counts), settlementStatus: reported ? 'exempt' : 'pending' } })
+    mocks.prisma.agentExecutionOutbox.findUnique.mockResolvedValue({ type: 'credit.exempt', payload: { chargedMilli: 0 } })
+    mocks.visionExemption.mockResolvedValue(scenario !== 'invalid-policy')
+    await syncGoalDurableUsage('vision')
+    expect(mocks.tx.agentGoalUsage.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      status: scenario === 'reported' ? 'known' : 'unknown', reservedTokens: scenario === 'reported' ? 0n : 30n,
+    }) }))
+  })
+
+  it('keeps a real vision HTTP rejection with unknown usage unresolved even before the exemption receipt exists', async () => {
+    const counts = { source: 'unknown', promptTokens: null, completionTokens: null, cacheHitTokens: null, cacheMissTokens: null }
+    const result = { outcome: 'failed', result: { httpStatus: 429, body: '{}' } }
+    configureDurableSync({ id: 'vision', operationId: 'vision-op', operation: { action: 'view_image_vision' }, status: 'failed', dispatchedAt: new Date(),
+      result, resultHash: JSON.stringify(result), usageReceipt: { ...counts, observationHash: JSON.stringify(counts), settlementStatus: 'pending' } })
+    await syncGoalDurableUsage('vision')
+    expect(mocks.tx.agentGoalUsage.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'unknown', reservedTokens: 30n }) }))
   })
 
   it('uses the fenced transaction for provider admission', async () => {

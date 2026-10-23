@@ -123,7 +123,7 @@ export async function syncGoalLegacyUsage(usageId: string) {
 
 /** Reconcile persisted durable measurements without dispatching or charging a provider again. */
 export async function syncGoalDurableUsage(attemptId: string) {
-  const attempt = await withoutGoalEffects(() => prisma.agentProviderAttempt.findUnique({ where: { id: attemptId }, include: { usageReceipt: true } }))
+  const attempt = await withoutGoalEffects(() => prisma.agentProviderAttempt.findUnique({ where: { id: attemptId }, include: { usageReceipt: true, operation: true } }))
   if (!attempt) return
   if (attempt.result && (!attempt.resultHash || runtimeJson(attempt.result).hash !== attempt.resultHash)) {
     return goalError('GOAL_RECONCILIATION_REQUIRED', '模型结果回执不一致。')
@@ -147,10 +147,15 @@ export async function syncGoalDurableUsage(attemptId: string) {
   const confirmedNotDispatched = attempt.status === 'cancelled'
     && attempt.dispatchedAt === null
     && notDispatched.success
+  const visionAttempt = attempt.operation?.action === 'view_image_vision' || settlement?.type === 'credit.exempt'
+  const exemptVision = settlement?.type === 'credit.exempt' && usage?.settlementStatus === 'exempt'
+    && await (await import('./runtime-vision-contract.js')).readVisionExemption(attemptId, settlement)
   const known = attempt.status === 'succeeded' && usage?.source === 'reported' && usage.promptTokens !== null && usage.completionTokens !== null
     && usage.settlementStatus === 'settled' && paid.success && settlement?.type === 'credit.settled'
-  const status: GoalUsageObservation['status'] = known ? 'known' : confirmedNotDispatched ? 'rejected'
-    : rejected.success && [400, 401, 403, 404, 422, 429].includes(rejected.data.result.httpStatus) ? 'rejected'
+  const knownVision = exemptVision && ['succeeded', 'failed'].includes(attempt.status) && usage?.source === 'reported'
+    && usage.promptTokens !== null && usage.completionTokens !== null
+  const status: GoalUsageObservation['status'] = known || knownVision ? 'known' : confirmedNotDispatched ? 'rejected'
+    : visionAttempt ? 'unknown' : rejected.success && [400, 401, 403, 404, 422, 429].includes(rejected.data.result.httpStatus) ? 'rejected'
       : attempt.status === 'prepared' || attempt.status === 'dispatched' ? 'reserved' : 'unknown'
   await observeGoalUsage(`durable:${attemptId}`, { inputTokens: usage?.promptTokens ?? null, outputTokens: usage?.completionTokens ?? null,
     creditsMilli: paid.success ? paid.data.chargedMilli : 0,

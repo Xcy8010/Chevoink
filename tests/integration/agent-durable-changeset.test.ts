@@ -6,6 +6,9 @@ import { initializeExecutionState, loadExecutionState, saveExecutionState } from
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { resolveDurableApproval } from '../../api/lib/agent/runtime-approval.js'
 import * as reducer from '../../api/lib/agent/runtime-reducer.js'
+import * as operations from '../../api/lib/agent/runtime-operations.js'
+import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
+import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { bulkReplacePreviewTool, entityRenamePreviewTool, changeSetApplyTool, changeSetRollbackTool } from '../../api/lib/agent/tools/changeset-tools.js'
 import { novelCreateTool, novelPublishTool, novelArchiveTool } from '../../api/lib/agent/tools/novel-tools.js'
 import { readFileTool } from '../../api/lib/agent/tools/attachment-tools.js'
@@ -39,6 +42,29 @@ async function approve(lease: Awaited<ReturnType<typeof start>>, name: string) {
 }
 
 describe.runIf(available)('durable workspace changes', () => {
+  it.each(['approved', 'narrowed'] as const)('recovers alwaysConfirm prepared work before its first effect: %s', scenario => fixture(async f => {
+    const firstLease = await start(f, 'bulk_replace_preview', { query: '原文', replacement: '新文' })
+    await executeDurableToolStep(firstLease, signal())
+    const set = await prisma.changeSet.findFirstOrThrow({ where: { userId: f.userId } })
+    await next(firstLease, 'changeset_apply', { changeSetId: set.id })
+    await approve(firstLease, 'changeset_apply')
+    vi.spyOn(operations, 'commitOperationEffect').mockRejectedValueOnce(Error('approved apply interrupted before effect'))
+    await expect(executeDurableToolStep(firstLease, signal())).rejects.toThrow('approved apply interrupted before effect')
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('原文')
+    await pauseDurableTask(f.userId, f.runId)
+    const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' } })
+    const resumed = await resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id })
+    const lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'approved-changeset-resume')
+    if (scenario === 'narrowed') {
+      await prisma.agentSession.update({ where: { id: f.sessionId }, data: { toolPolicy: { bulkWrite: 'deny' } } })
+      await expect(executeDurableToolStep(lease, signal())).rejects.toMatchObject({ code: 'RUNTIME_EFFECT_NOT_AUTHORIZED' })
+    } else expect(await executeDurableToolStep(lease, signal())).toMatchObject({ kind: 'tool', result: { summary: expect.stringContaining('已应用') } })
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(scenario === 'approved' ? '新文' : '原文')
+    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'approval.requested' } })).toBe(1)
+    expect(await prisma.changeSet.count({ where: { userId: f.userId } })).toBe(1)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+  }))
+
   it.each(['bulk_replace_preview', 'entity_rename_preview'] as const)('recovers one %s receipt without creating another preview', name => fixture(async f => {
     const lease = await start(f, name, { query: '原文', replacement: '新文' }, 'plan')
     vi.spyOn(reducer, 'reduceExecutionReceipt').mockRejectedValueOnce(Error('interrupted after preview'))
