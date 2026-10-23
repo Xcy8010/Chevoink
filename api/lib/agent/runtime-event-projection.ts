@@ -28,6 +28,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
     const { root } = await lockRunRoot(tx, userId, runId)
     const sources = await tx.agentExecutionOutbox.findMany({ where: { taskRootId: root.id,
       OR: [{ type: { in: ['child.admitted', 'approval.requested', 'approval.resolved', 'execution.state.saved', 'writing.delivery.projected', 'question.requested', 'import.requested', 'import.commit_requested', 'goal.activation_registered', 'configuration.changed'] } },
+        { type: { in: ['execution.bootstrap.paused', 'execution.bootstrap.resumed'] }, runId },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'completed' } },
         { type: 'run.paused', payload: { path: ['runIds'], array_contains: [runId] } }],
       projections: { none: { runId } } }, orderBy: { sequence: 'asc' }, take: limit })
@@ -36,7 +37,22 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
     const events: AgentStreamEvent[] = []
     for (const source of sources) {
       let bodies: import('../../../shared/contracts/index.js').AgentStreamEventBody[]
-      if (source.type === 'writing.delivery.projected') {
+      if (source.type === 'execution.bootstrap.resumed') {
+        const original = await (await import('./runtime-bootstrap.js')).readFreshBootstrapResume(tx, userId, runId, source.id)
+        const pause = await tx.agentEventProjection.findFirst({ where: { sourceId: original.pause.id, runId, partIndex: 0 }, include: { event: true } })
+        if (!pause || pause.event.type !== 'run.paused' || pause.event.runId !== runId
+          || runtimeJson(pause.event.payload).hash !== pause.eventHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '初始化继续缺少原暂停事件。')
+        bodies = [{ type: 'run.started', agent: { type: original.run.agentType, title: 'Chevoink Agent', model: original.run.modelTier },
+          mode: original.run.mode === 'act' ? 'build' : original.run.mode as 'plan' | 'review', title: '恢复原任务',
+          authorContinue: { eventId: source.id, afterSeq: pause.event.seq } }]
+      } else if (source.type === 'execution.bootstrap.paused') {
+        const { readFreshBootstrapAdmission, bootstrapPauseSchema } = await import('./runtime-bootstrap.js')
+        const original = await readFreshBootstrapAdmission(tx, userId, runId)
+        const payload = bootstrapPauseSchema.parse(source.payload)
+        if (source.eventKey !== `bootstrap-pause:${source.id}` || payload.admissionId !== original.admission.id
+          || payload.inputHash !== original.root.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '初始化暂停与原准入不一致。')
+        bodies = [{ type: 'run.paused', reason: 'needs_input' }]
+      } else if (source.type === 'writing.delivery.projected') {
         const payload = z.object({ sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(), revision: z.number().int().positive(), snapshotHash: z.string(),
           proof: z.object({ version: z.literal(1), chapters: z.array(z.object({ id: z.string(), revision: z.number().int().positive(), contentHash: z.string() })), text: z.string(),
             limitedWritingDelivery: limitedWritingDeliverySchema.optional() }), proofHash: z.string() }).parse(source.payload)
@@ -199,6 +215,19 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
     }
     return events
   }, { contentionScope })
+}
+
+/** A same-run bootstrap retry supersedes only its actual old pause. Both
+ * sources and their projected hashes remain in history; no terminal is erased. */
+export async function isDurablePauseResumed(userId: string, runId: string, pauseSeq: number): Promise<boolean> {
+  const { prisma } = await import('../prisma.js')
+  const record = await prisma.agentRunEvent.findFirst({ where: { runId, seq: { gt: pauseSeq }, type: 'run.started',
+    payload: { path: ['authorContinue', 'afterSeq'], equals: pauseSeq } }, orderBy: { seq: 'asc' }, include: { projection: { include: { source: true } } } })
+  if (!record || record.projection?.source.type !== 'execution.bootstrap.resumed') return false
+  const [event] = await loadDurableEvents(userId, runId, record.seq - 1, 1)
+  if (event?.type !== 'run.started' || event.authorContinue?.afterSeq !== pauseSeq) return false
+  await runtimeTransaction(tx => import('./runtime-bootstrap.js').then(module => module.readFreshBootstrapResume(tx, userId, runId, record.projection!.sourceId)))
+  return true
 }
 
 /** Paginated replay never invents a terminal state from a disconnected process. */

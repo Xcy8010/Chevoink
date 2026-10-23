@@ -15,6 +15,10 @@ const structureEffects = new Set(['volume_create', 'volume_move', 'volume_delete
 
 /** Narrow both the model's schemas and the executor's admission ceiling. */
 export function restrictToolsToTask(tools: AgentTool[], task: TaskSpec): AgentTool[] {
+  if (task.scope.capabilityCatalog) {
+    const names = new Set(task.scope.capabilityCatalog.names)
+    tools = tools.filter(tool => names.has(tool.name))
+  }
   if (task.scope.authorEffects) tools = tools.filter(tool =>
     (task.scope.authorEffects!.manuscript || !manuscriptEffects.has(tool.name))
     && (task.scope.authorEffects!.structure || !structureEffects.has(tool.name)))

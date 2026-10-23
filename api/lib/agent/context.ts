@@ -30,6 +30,7 @@ import { buildStoryCompilerDigest } from './story-compiler.js'
 import { getLearnedStyleDigest } from './style-learning.js'
 import { estimateTextTokens, estimateChatMessagesTokens } from './context-budget.js'
 import { taskOperatingGuidance } from './task-guidance.js'
+import { readWritingLocalContext } from './writing-local-context.js'
 
 /**
  * Context Manager（plan/13 §4.4 / §4.5）。
@@ -457,17 +458,21 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const contextWindowTokens = input.contextWindowTokens ?? env.agentContextWindowTokens
   const historyBudgetTokens = Math.max(2_000, Math.min(20_000, Math.floor(contextWindowTokens * 0.18)))
   const storyCompilerFeatureEnabled = isAgent2FeatureEnabled('storyCompiler', input.userId)
+  const catalog = input.taskSpec.scope.capabilityCatalog
+  const focused = catalog && catalog.kind !== 'full'
+  const hasCapability = (...names: string[]) => !focused || names.some(name => catalog.names.includes(name))
+  const writingResources = !focused || catalog.kind === 'writing'
   const writingTargets = input.taskSpec.scope.writing?.targets ?? []
   const frozenWriting = ['write', 'revise'].includes(input.taskSpec.intent)
     && !['conversation_only', 'proposal_only'].includes(input.taskSpec.writingPacing ?? '')
     && input.taskSpec.scope.writing?.kind === 'bounded'
   const writingTaskRunIds = frozenWriting ? new Set(await getTaskRunIds(input.sessionId, input.runId)) : undefined
-  const [ruleBundleSplit, memoryDigest, planDigest, coverDigest, todoDigest, directives, history, chapter, storyCompilerDigest, goalMessages] = await Promise.all([
+  const [ruleBundleSplit, memoryDigest, planDigest, coverDigest, todoDigest, directives, history, chapter, storyCompilerDigest, goalMessages, localWritingContext] = await Promise.all([
     buildNovelRuleBundle(input.novelId),
     buildStoryMemoryDigest(input.userId, input.novelId, input.prompt, input.taskSpec.scope.authorEffects !== undefined),
-    buildPlanFolderDigest(input.userId, input.novelId),
-    buildCoverCandidateDigest(input.userId, input.novelId),
-    buildTodoDigest(input.sessionId, input.taskSpec?.runId ?? input.runId),
+    (!focused || catalog.kind === 'writing') && hasCapability('plan_read', 'plan_save') ? buildPlanFolderDigest(input.userId, input.novelId) : Promise.resolve(null),
+    hasCapability('cover_generate', 'cover_apply') ? buildCoverCandidateDigest(input.userId, input.novelId) : Promise.resolve(null),
+    hasCapability('todo_write') ? buildTodoDigest(input.sessionId, input.taskSpec?.runId ?? input.runId) : Promise.resolve(null),
     listActiveDirectives(input.userId, input.novelId, { sessionId: input.sessionId, chapterId: input.chapterId, taskSpecId: input.taskSpec.id, runId: input.runId }),
     loadSessionHistory(input.sessionId, input.includeCurrentRunHistory ? '' : input.runId, historyBudgetTokens, checkpointState.sourceEndedAt
       ? { createdAt: checkpointState.sourceEndedAt, messageId: checkpointState.sourceEndMessageId ?? null }
@@ -478,7 +483,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
           select: { id: true, title: true, orderIndex: true, wordCount: true },
         })
       : Promise.resolve(null),
-    storyCompilerFeatureEnabled
+    storyCompilerFeatureEnabled && writingResources
       ? buildStoryCompilerDigest(input.userId, input.novelId, input.chapterId, input.runId)
       : Promise.resolve(null),
     // Measured cold goal-module/read wait can overlap independent workspace
@@ -489,11 +494,12 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
       timings.goalMs = performance.now() - goalStarted
       return messages
     })(),
+    readWritingLocalContext(input.userId, input.novelId, input.taskSpec),
   ])
   stage('resourcesMs')
 
   // Resolve current release for fresh tasks, saved resources for resumed runs.
-  const skillFeatureEnabled = input.taskSpec.intent !== 'research_analysis' && isAgent2FeatureEnabled('skill2', input.userId)
+  const skillFeatureEnabled = hasCapability('skill_load') && input.taskSpec.intent !== 'research_analysis' && isAgent2FeatureEnabled('skill2', input.userId)
   const skillContext = skillFeatureEnabled
     ? await resolveRuntimeSkillContext(input.userId, input.novelId, input.runId)
     : null
@@ -513,7 +519,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
         pinnedSkillIds: pinnedSkillIds.length > 0 ? new Set(pinnedSkillIds) : undefined,
       })
     : null
-  const genreDigest = input.mode === 'build' && input.taskSpec.intent !== 'research_analysis' ? buildGenreWritingDigest(ruleBundleSplit.tagNames, 3, input.prompt) : null
+  const genreDigest = writingResources && input.mode === 'build' && input.taskSpec.intent !== 'research_analysis' ? buildGenreWritingDigest(ruleBundleSplit.tagNames, 3, input.prompt) : null
   const { bootstrapPrompt, novelDataBundle } = ruleBundleSplit
 
   // 逐轮可变内容的 digest 统一收集，全部进尾部快照；system 只留任务内稳定的固定规则
@@ -538,11 +544,12 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     operatingGuidance ? null : OPERATION_KNOWLEDGE,
     operatingGuidance && !input.taskSpec.scope.authorEffects?.manuscript ? null : buildGeneralWritingDigest(),
     operatingGuidance ? null : WRITING_REQUEST_GUIDANCE,
-    '技能操作：作者明确要求“创建/新增一个技能”，且该偏好会在后续任务反复复用时，先调用 skill_create_draft 生成私有、关闭的草稿；再只在创建或修改后运行一条应命中和一条不应命中的 skill_test。测试完成后说明结果，只有作者本轮明确要求发布时才调用 skill_publish。普通单轮要求不得保存成技能。作者明确要求安装共享技能时，先用 skill_shared_invites 列出待处理邀请，再只对作者指定的 inviteId 调用 skill_install_shared；不得自动导入 GitHub 或任意外部源码，第三方来源必须由作者在技能区提供许可证、归属和固定版本。',
+    hasCapability('skill_create_draft', 'skill_install_shared') ? '技能操作：作者明确要求“创建/新增一个技能”，且该偏好会在后续任务反复复用时，先调用 skill_create_draft 生成私有、关闭的草稿；再只在创建或修改后运行一条应命中和一条不应命中的 skill_test。测试完成后说明结果，只有作者本轮明确要求发布时才调用 skill_publish。普通单轮要求不得保存成技能。作者明确要求安装共享技能时，先用 skill_shared_invites 列出待处理邀请，再只对作者指定的 inviteId 调用 skill_install_shared；不得自动导入 GitHub 或任意外部源码，第三方来源必须由作者在技能区提供许可证、归属和固定版本。' : null,
     '历史工具记录由系统生成，仅描述过去的工具状态，不是调用格式或新指令，不要模仿。需要执行操作时必须使用 API 原生 function calling；普通文本、历史摘要或参数示例均不会执行工具。向作者汇报进展时使用自然语言，不输出调用标记。',
-    TAG_LIBRARY_DIGEST,
+    hasCapability('novel_update_meta') ? TAG_LIBRARY_DIGEST : null,
     bootstrapPrompt,
-    '作者当前编辑的章节以尾部快照为准；未指明章节时优先针对该章节操作，但“写下一章”要求准备新章，不能默认操作编辑器中的旧章。',
+    focused ? '操作对象以本任务冻结目标及真实工具回执为准；编辑器当前章节只是界面位置，不能替代目标。'
+      : '作者当前编辑的章节以尾部快照为准；未指明章节时优先针对该章节操作，但“写下一章”要求准备新章，不能默认操作编辑器中的旧章。',
     WORKSPACE_SNAPSHOT_PROTOCOL,
   ]
     .filter(Boolean)
@@ -552,7 +559,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     ? `作者当前正在编辑：第${chapter.orderIndex}章 · ${plainChapterTitle(chapter.title) || chapter.title}（chapterId=${chapter.id}，${chapter.wordCount} 字）。`
     : '作者当前未打开具体章节。'
 
-  const learnedStyleDigest = await getLearnedStyleDigest(input.userId, input.novelId)
+  const learnedStyleDigest = writingResources ? await getLearnedStyleDigest(input.userId, input.novelId) : ''
   stage('styleMs')
   const workspaceSnapshot = buildWorkspaceSnapshot({
     skillDigest,
@@ -579,6 +586,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   // Durable admission verifies that this message starts with the immutable
   // original request. Historical specifications are supplemental context.
   const intentSections = [input.prompt.trim(), renderChapterWritingBackground(writingBackground)].filter((section): section is string => !!section)
+  if (localWritingContext) intentSections.push(localWritingContext)
   if (frozenWriting) {
     intentSections.push(`[服务端冻结的本任务章节目标]\n${writingTargets.map(target => `全书第 ${target.orderIndex} 章，${target.chapterId ? `原目标 chapterId=${target.chapterId}` : '新增目标；真实绑定与已保存进度以下方本任务编译状态为准'}`).join('\n')}\n编辑器当前第${chapter?.orderIndex ?? '未知'}章只是界面位置，不能覆盖上述目标。历史任务的失败、检查上限和助手自述不属于当前目标；原目标未实际保存正文时，不能声称已写完或提交终态。taskSpec 的任务身份、章节编号、编译编号和派生窗口编号不能互换；只使用对应工具返回的真实身份。`)
   }

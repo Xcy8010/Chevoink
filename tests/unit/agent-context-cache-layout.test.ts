@@ -51,8 +51,8 @@ vi.mock('../../api/lib/agent/tools/todo-tools.js', async (importOriginal) => {
   return {
     ...actual,
     loadSessionTodoItems: vi.fn(async () => [
-      { id: 'todo-1', status: 'completed', content: '通读第一章', createdAt: new Date('2026-09-01T00:00:00.000Z') },
-      { id: 'todo-2', status: 'in_progress', content: '改写第二章开头', createdAt: new Date('2026-09-01T00:01:00.000Z') },
+      { id: 'todo-1', status: 'completed', content: '通读第一章' },
+      { id: 'todo-2', status: 'in_progress', content: '改写第二章开头' },
     ] as Awaited<ReturnType<typeof actual.loadSessionTodoItems>>),
   }
 })
@@ -121,7 +121,7 @@ function buildInput(visionEnabled = false): AssembleInput {
     chapterId: 'chapter-1',
     prompt: '把第三章开头改得更抓人',
     selection: null,
-    attachments: [{ kind: 'image', name: '参考图.png', url: 'https://example.test/reference.png' }],
+    attachments: [{ id: 'reference-image', kind: 'image', name: '参考图.png', url: 'https://example.test/reference.png' }],
     visionEnabled,
     taskSpec: {
       id: 'spec-1',
@@ -142,6 +142,26 @@ function buildInput(visionEnabled = false): AssembleInput {
 }
 
 describe('assembleContext 缓存友好布局（阶段二：动态上下文后移）', () => {
+  it('uses the frozen conversational catalog to avoid unrelated cover, plan, compiler and style reads', async () => {
+    const input = buildInput()
+    input.prompt = '你好'
+    input.attachments = []
+    input.taskSpec = { ...input.taskSpec, intent: 'write', writingPacing: 'conversation_only', goals: ['你好'], scope: {
+      novelId: input.novelId, authorEffects: { version: 1, requestHash: 'a'.repeat(64), manuscript: false, structure: false },
+      capabilityCatalog: { version: 1, requestHash: 'a'.repeat(64), kind: 'conversation', names: ['chapter_read', 'ask_user'] },
+    } }
+    vi.mocked(isAgent2FeatureEnabled).mockReturnValue(true)
+    const result = await assembleContext(input)
+    expect(prisma.coverAsset.findMany).not.toHaveBeenCalled()
+    expect(prisma.agentArtifact.findMany).not.toHaveBeenCalled()
+    expect(buildStoryCompilerDigest).not.toHaveBeenCalled()
+    expect(getLearnedStyleDigest).not.toHaveBeenCalled()
+    expect(JSON.stringify(result.messages)).not.toContain('技能操作：')
+    const workspace = result.messages.find(message => String(message.content).startsWith('[当前作品上下文快照]'))
+    expect(String(workspace?.content)).not.toContain('【封面候选】')
+    expect(String(result.messages.at(-1)?.content)).toBe('你好')
+    expect(result.inputEstimates!.system.tokens).toBeGreaterThan(0)
+  })
   it('reuses the novel rule query for genre tags while retaining cover identity and the exact original request', async () => {
     const input = buildInput()
     const { messages } = await assembleContext(input)
@@ -154,10 +174,14 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
   })
   it('keeps inferred fallback memory visibly unconfirmed with its actual source revision for legacy tasks', async () => {
     vi.mocked(searchStoryMemory).mockResolvedValueOnce([])
-    vi.mocked(prisma.projectMemoryEntry.findMany).mockImplementation(async args => args?.take === 12 ? [{
-      memoryType: 'characterCard', status: 'inferred', title: '待核人物动机', content: '尚未证实的推断',
-      evidence: [{ sourceType: 'chapter', sourceId: 'source-chapter', revision: 8 }],
-    }] as never : [] as never)
+    vi.mocked(prisma.projectMemoryEntry.findMany).mockImplementation(args => {
+      const pending = Promise.resolve(args?.take === 12 ? [{
+        memoryType: 'characterCard', status: 'inferred', title: '待核人物动机', content: '尚未证实的推断',
+        evidence: [{ sourceType: 'chapter', sourceId: 'source-chapter', revision: 8 }],
+      }] as never : [] as never)
+      Object.defineProperty(pending, Symbol.toStringTag, { value: 'PrismaPromise' })
+      return pending as ReturnType<typeof prisma.projectMemoryEntry.findMany>
+    })
     const { messages } = await assembleContext(buildInput())
     const text = JSON.stringify(messages)
     expect(text).toContain('[角色/inferred] 待核人物动机')

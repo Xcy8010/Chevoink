@@ -1,6 +1,6 @@
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { Prisma } from '@prisma/client'
-import { DURABLE_RUNTIME_VERSION, lockOwnedRun, runtimeError, runtimeId, runtimeJson, runtimeTransaction } from './runtime-common.js'
+import { DURABLE_RUNTIME_VERSION, lockOwnedRun, runtimeError, runtimeId, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 import { createTaskBudgetPolicy } from './runtime-budget.js'
 import { recordTaskContentBaseline } from './runtime-postconditions.js'
 import { assertRunGoalFence } from './goal-fence.js'
@@ -18,12 +18,18 @@ export function durableTaskSpecIdentity(raw: unknown) {
   return { spec: parsed.data, frozen: runtimeJson(JSON.parse(JSON.stringify(spec))) }
 }
 
-/** Internal bootstrap from a persisted user message. No HTTP/model-facing issuer exists yet. */
+/** Internal bootstrap from a persisted original message. */
 export async function initializeDurableTask(input: { userId: string; runId: string; sourceMessageId: string; tokenBudget?: number }) {
+  const captured = { ...input }
+  return runtimeTransaction(tx => initializeDurableTaskInTransaction(tx, captured))
+}
+
+/** Same identity checks, reusable inside the genuine admission transaction so
+ * a fresh run cannot be observed as a legacy run before async context loads. */
+export async function initializeDurableTaskInTransaction(tx: RuntimeTx, input: { userId: string; runId: string; sourceMessageId: string; tokenBudget?: number }) {
   input = { ...input }
   runtimeId(input.sourceMessageId)
   const budgetPolicy = createTaskBudgetPolicy(input.tokenBudget)
-  return runtimeTransaction(async tx => {
     const goalBinding = await tx.agentGoalExecution.findUnique({ where: { runId: input.runId } })
     if (goalBinding) await (await import('./goal-fence.js')).assertRunGoalFence(tx, input.userId, input.runId)
     const run = await lockOwnedRun(tx, input.userId, input.runId)
@@ -53,7 +59,6 @@ export async function initializeDurableTask(input: { userId: string; runId: stri
     await tx.agentRun.update({ where: { id: run.id }, data: { taskRootId: root.id, runtimeProtocolVersion: DURABLE_RUNTIME_VERSION } })
     if (goalBinding) await tx.agentGoalExecution.update({ where: { runId: run.id }, data: { taskRootId: root.id } })
     return root
-  })
 }
 
 /** Explicit continuation only. Same session membership is never enough. */

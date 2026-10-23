@@ -125,6 +125,12 @@ export async function initializeExecutionState(token: RunLeaseToken, input: { co
       if (existing.configurationHash !== configurationHash || initial.snapshotHash !== snapshot.hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '恢复不能替换原始模型配置或初始上下文。')
       return current
     }
+    const spec = (await import('../../../shared/contracts/task-spec-contracts.js')).taskSpecSchema.safeParse(root.specSnapshot)
+    if (spec.success && spec.data.scope.capabilityCatalog) {
+      // Same lease transaction as the first configuration/frame insertion.
+      // A fee/web row racing context assembly cannot be erased by bootstrap.
+      await (await import('./runtime-bootstrap.js')).assertUnstartedFreshBootstrap(tx, lease.userId, lease.runId)
+    }
     const budget = await readTaskBudgetInTransaction(tx, root.id)
     taskTurnLimit(budget.policy, budget.budget.checkpointCount)
     if (budget.budget.checkpointCount !== 0 || await tx.agentOperation.count({ where: { taskRootId: root.id } })) runtimeError('RUNTIME_STATE_REQUIRED', '已有执行事实，不能事后补造初始状态。')

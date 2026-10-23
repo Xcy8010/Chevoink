@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import request from 'supertest'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 const execution = vi.hoisted(() => vi.fn(async () => {}))
+// Admission/domain fixtures stop before async execution; the native dispatcher has its own PG matrix.
+vi.mock('../../api/lib/agent/runtime-bootstrap.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/runtime-bootstrap.js')>(), dispatchFreshDurableRun: vi.fn(async () => {}) }))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: execution }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(async () => {}), getModelTierRuntime: vi.fn(async () => ({ reasoningEffort: 'high' })) }))
 vi.mock('../../api/lib/agent/writing-experiments.js', () => ({ recordSevenDayContinuation: vi.fn(async () => {}) }))
@@ -15,6 +17,7 @@ import { verifyTestDatabase } from '../support/database-preflight.js'
 import { isTestDatabaseRequired } from '../support/database-availability.js'
 import { taskSpecSchema } from '../../shared/contracts/index.js'
 import * as skillService from '../../api/lib/agent/skills/service.js'
+import { dispatchFreshDurableRun } from '../../api/lib/agent/runtime-bootstrap.js'
 import { chapterEditRangeTool, chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { getToolsForMode } from '../../api/lib/agent/tools/registry.js'
 import { restrictToolsToTask, snapshotToolAuthority, intersectToolAuthority } from '../../api/lib/agent/tool-authority.js'
@@ -251,7 +254,10 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
     if (human) expect(spec.scope.writing).toBeUndefined()
     expect(spec.authorization).toBeUndefined()
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
-    expect(execution).toHaveBeenCalledWith(expect.objectContaining({ runId: result.runId }))
+    if (human) {
+      expect(dispatchFreshDurableRun).toHaveBeenCalledWith(f.userId, result.runId)
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).runtimeProtocolVersion).toBe(1)
+    } else expect(execution).toHaveBeenCalledWith(expect.objectContaining({ runId: result.runId }))
     const admitted = restrictToolsToTask(getToolsForMode('build'), spec).map(tool => tool.name)
     if (human) {
       expect(admitted).toEqual(expect.arrayContaining(['web_search', 'web_read', 'research_report_save']))

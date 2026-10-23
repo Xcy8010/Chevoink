@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import type { Response } from 'express'
-import { publishDurableEvents, loadDurableEvents } from './runtime-event-projection.js'
+import { publishDurableEvents, loadDurableEvents, isDurablePauseResumed } from './runtime-event-projection.js'
 
 /** DB-backed live/replay; no process-local bus or synthetic failure fallback. */
 export async function streamDurableRun(userId: string, runId: string, sinceSeq: number, res: Response): Promise<void> {
@@ -32,10 +32,11 @@ export async function streamDurableRun(userId: string, runId: string, sinceSeq: 
     while (!controller.signal.aborted && !res.writableEnded && !res.destroyed) {
       if (page.length === 0 && cursor > 0) {
         const previous = (await loadDurableEvents(userId, runId, cursor - 1, 1))[0]
-        if (previous?.seq === cursor && (previous.type === 'run.paused' || previous.type === 'run.finished'
+        if (previous?.seq === cursor && (previous.type === 'run.paused' && !await isDurablePauseResumed(userId, runId, previous.seq) || previous.type === 'run.finished'
           || (previous.type === 'error' && !previous.recoverable))) return
       }
       for (const event of page) {
+        if (event.type === 'run.paused' && await isDurablePauseResumed(userId, runId, event.seq)) { cursor = event.seq; continue }
         if (!await write(`id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)) return
         cursor = event.seq
         if (event.type === 'run.paused' || event.type === 'run.finished' || (event.type === 'error' && !event.recoverable)) return

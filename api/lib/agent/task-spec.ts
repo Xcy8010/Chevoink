@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { DataAccessError } from '../prisma.js'
 import { localEditGuidance } from './local-edit-scope.js'
 import { parseAuthorWritingRequest } from './author-writing-request.js'
+import { requiresWritingConfirmation } from './writing-pacing-policy.js'
 import { researchAuthor, researchAlternativeSelection, researchSourceSites, researchSourceHosts } from './research-navigation-policy.js'
 
 import type { TaskIntent, TaskSpec, UserDirective } from '../../../shared/contracts/index.js'
@@ -121,7 +122,7 @@ export function classifyWritingPacing(prompt: string): TaskSpec['writingPacing']
   // evidence than a general book goal. Never infer this from "写一本" alone.
   const bounded = /(?:写|创作|完成|起草).{0,12}(?:第[一二两三四五六七八九十百0-9]+章|前[一二两三四五六七八九十0-9]+章|首章|下一章)|(?:write|draft).{0,12}(?:chapter\s*\d+|first chapter)/iu.test(positive)
   const autonomous = /(?:自动|自主|自行|直接).{0,16}(?:写完|完成全书|创作全书|连续写|逐章写)|(?:全权|授权).{0,16}(?:写作|创作)|(?:write|finish).{0,24}(?:autonomously|automatically)/iu.test(positive)
-  const confirmationFirst = /(?:先|等).{0,24}(?:确认|同意|批准).{0,16}(?:再|后).{0,12}(?:写|正文)|(?:不要|不得|不能|别).{0,12}(?:直接|擅自|未经.{0,6}(?:同意|确认)).{0,8}(?:写|正文)|(?:先|只).{0,8}(?:大纲|规划|计划|方案)/u.test(prompt)
+  const confirmationFirst = requiresWritingConfirmation(prompt)
   return !confirmationFirst && (bounded || autonomous) ? 'explicit_writing' : 'proposal_only'
 }
 

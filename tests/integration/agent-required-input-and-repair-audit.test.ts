@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 const execution = vi.hoisted(() => vi.fn(async () => {}))
 const creditAccess = vi.hoisted(() => vi.fn(async () => {}))
 const modelRuntime = vi.hoisted(() => vi.fn(async () => ({ reasoningEffort: 'high' })))
+// Admission/domain fixtures stop before async execution; the native dispatcher has its own PG matrix.
+vi.mock('../../api/lib/agent/runtime-bootstrap.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/runtime-bootstrap.js')>(), dispatchFreshDurableRun: vi.fn(async () => {}) }))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: execution }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: creditAccess, getModelTierRuntime: modelRuntime }))
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'

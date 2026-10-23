@@ -52,6 +52,12 @@ export const taskScopeSchema = z.object({
   writingTargetProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   /** Server-only fresh admission. Never added by a tool, resume or migration. */
   writingCoordinationProtocol: z.literal(1).optional(),
+  /** Server-frozen relevance projection. It only narrows existing authority;
+   * absent historical tasks keep their original catalog. */
+  capabilityCatalog: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+    kind: z.enum(['full', 'writing', 'research', 'conversation']),
+    names: z.array(z.string().min(1)).min(1).max(256),
+  }).strict().refine(value => new Set(value.names).size === value.names.length).optional(),
   /** Fresh server interpretation of requested effects. Missing keeps legacy
    * contracts unchanged; chapter scope is checked only when applying writes. */
   authorEffects: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -160,6 +166,9 @@ export const taskSpecSchema = z.object({
   qualityMode: storyCompilerModeSchema.default('premium'),
   createdAt: z.string().datetime(),
 }).superRefine((spec, ctx) => {
+  if (spec.scope.capabilityCatalog && spec.scope.capabilityCatalog.requestHash !== spec.scope.authorEffects?.requestHash) {
+    ctx.addIssue({ code: 'custom', path: ['scope', 'capabilityCatalog'], message: 'The catalog must bind the original author request' })
+  }
   if (spec.scope.writingCoordinationProtocol === 1 && (!['write', 'revise'].includes(spec.intent)
     || spec.writingPacing !== 'explicit_writing' || spec.scope.writing?.kind !== 'bounded'
     || spec.scope.selection || spec.scope.selectionBoundary || spec.scope.localEditBoundary

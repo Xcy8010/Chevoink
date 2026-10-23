@@ -486,7 +486,11 @@ describe.runIf(available)('durable quality actual tool chain', () => {
   it.for(['retain', 'mixed-retain', 'no-op-repair', 'format-35', 'complete-35', 'source-id', 'invalid-source-id', 'success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale', 'v9-quality-resume', 'v2-quality-resume', 'v2-quality-stale', 'json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-valid', 'format-valid-repair', 'format-recovery-unknown', 'format-recovery-stale', 'format-recovery-rollback', 'format-expired', 'old-format-full-chain', 'v9-format-full-chain', 'format-reprepare', 'synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical', 'v6-parser-mechanical', 'v7-parser-mechanical'] as const)('%s preserves paid results and atomic business effects', async (scenario, { signal }) => {
     const lifecycle = createDurableTestLifecycle(signal, scenario === 'v9-format-full-chain'
       ? entry => console.info('[durable-quality-stage]', JSON.stringify(entry)) : undefined)
-    const stopCpu = scenario === 'v9-format-full-chain' && process.env.CI ? await startDurableTestCpuProfile() : undefined
+    // Profiling is an explicit diagnostic, not part of the unchanged 5s gate.
+    // The collected CI samples include ~177ms in inspector.post alone; leaving
+    // that observer enabled on every run can make cleanup cross the deadline.
+    const stopCpu = scenario === 'v9-format-full-chain' && process.env.CHEVOINK_TEST_CPU_PROFILE === '1'
+      ? await startDurableTestCpuProfile() : undefined
     const active = lifecycle.active
     const verification = <T>(work: () => PromiseLike<T>) => lifecycle.phase('verification', work)
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)

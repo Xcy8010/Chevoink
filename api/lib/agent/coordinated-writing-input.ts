@@ -4,10 +4,46 @@ import { writingVolumeDecisionSchema } from '../../../shared/contracts/writing-v
 import { terminalCandidateSchema } from './terminal-candidate-contract.js'
 import { runtimeError, runtimeJson } from './runtime-common.js'
 import { originalChapterReviewRequirements } from './chapter-review-requirements.js'
+import { createHash } from 'node:crypto'
+import { assertFrozenWritingContract } from './writing-contract.js'
+import { lexAuthorWritingRequest } from './author-writing-request.js'
+import { requiresWritingConfirmation } from './writing-pacing-policy.js'
 import type { TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
 import type { AgentTool } from './tools/types.js'
 
 export const coordinatedWriterActions = ['chapter_write', 'chapter_append', 'chapter_edit_range'] as const
+/** A conditional future instruction is not immediate complete-chapter work.
+ * Inspect author clauses only; quotation/code content remains inert data. */
+export function isDeferredWritingRequest(prompt: string): boolean {
+  const author = lexAuthorWritingRequest(prompt).clauses.map(clause => clause.masked).join('\n')
+  return requiresWritingConfirmation(author) || /(?:等|待|需|须|经|得到|获得).{0,24}(?:确认|同意|批准|许可).{0,16}(?:再|才|后).{0,24}(?:写|修改|修订|改写|动笔|创作)|(?:先|仅|只).{0,8}(?:给|提供|讨论|做|出).{0,12}(?:方案|计划|大纲|建议).{0,32}(?:再|才|确认).{0,16}(?:写|修改|动笔)|\b(?:after|until|once|when)\b.{0,32}\b(?:approv\w*|confirm\w*|consent)\b.{0,32}\b(?:write|revise|edit|draft)\b/isu.test(author)
+}
+/** Fresh issuer only. The legacy broad-book pacing classifier omits ordinary
+ * chapter requests; only the authenticated v2 bounded interpretation can fill
+ * that omission, before this new root/configuration is frozen. */
+export function issueWritingCoordination(spec: TaskSpec, mode: string, names: ReadonlySet<string>, prompt: string): TaskSpec {
+  if (spec.scope.writingCoordinationProtocol || mode !== 'build' || spec.scope.authorEffects?.manuscript !== true
+    || !['write', 'revise'].includes(spec.intent) || ['proposal_only', 'conversation_only'].includes(spec.writingPacing ?? '')
+    || spec.scope.writing?.kind !== 'bounded' || !spec.scope.writing.targets.length
+    || spec.scope.selection || spec.scope.selectionBoundary || spec.scope.localEditBoundary || isDeferredWritingRequest(prompt)) return spec
+  let admitted = spec
+  if (spec.writingPacing === undefined) {
+    const original = spec.scope.writingInterpretation
+    if (spec.scope.writingTargetProtocol !== 2 || !original || !['write', 'revise'].includes(original.intent ?? '')
+      || original.requestHash !== createHash('sha256').update(prompt).digest('hex')
+      || spec.scope.authorEffects.requestHash !== original.requestHash
+      || original.reasons.length || original.operations.some(operation => operation.start < 0 || operation.end > prompt.length || operation.start >= operation.end)
+      || !original.operations.some(operation => operation.polarity === 'affirmative' && ['write', 'revise'].includes(operation.kind))) return spec
+    assertFrozenWritingContract(spec)
+    admitted = { ...spec, writingPacing: 'explicit_writing' }
+  }
+  const required = originalChapterReviewRequirements({ spec: admitted, prompt })
+  const actions = ['chapter_read', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'story_compiler_prepare', 'scene_task_build', 'chapter_bridge_commit',
+    ...(required.continuity ? ['continuity_validate'] : []), ...(required.quality ? ['quality_analyze'] : []),
+    ...(spec.scope.writing.targets.some(target => !target.chapterId) ? ['chapter_create'] : [])]
+  if (actions.some(action => !names.has(action))) return spec
+  return { ...admitted, scope: { ...admitted.scope, writingCoordinationProtocol: 1 } }
+}
 export const writingServiceStepSchema = z.enum(['body', 'continuity', 'quality', 'commit'])
 export type WritingServiceStep = z.infer<typeof writingServiceStepSchema>
 

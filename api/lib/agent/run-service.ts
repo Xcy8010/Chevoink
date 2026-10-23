@@ -78,6 +78,7 @@ import { withHumanAdmission } from './goal-activation-authority.js'
 import { freezeModelAssignments, resolveAssignedModel } from './model-assignments.js'
 import { frozenModelAssignmentsSchema, agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
 import { buildTaskSpec } from './task-spec.js'
+import { freezeTaskCapabilities } from './task-capabilities.js'
 
 /**
  * Agent Loop 新链路的路由服务层（plan/13 §4.9）。
@@ -450,6 +451,7 @@ export async function startLoopRunLocked(
   const queuedRequest = options.queuedRequest
   const admittedMessageId = randomUUID()
   let initializeGoalDurable = false
+  let initializeFreshDurable = false
   const admittedParts = [{ type: 'text', text: input.prompt }, ...(input.attachments ?? []).map(attachment => ({
     type: 'attachment', kind: attachment.kind, name: attachment.name, url: attachment.url, size: attachment.size,
   }))]
@@ -521,7 +523,31 @@ export async function startLoopRunLocked(
       }
       // Every fresh request keeps its original effect interpretation, including
       // chat and plans. Async bootstrap must not classify it as a legacy write.
+      if (options.humanOrigin === 'http' && !options.goal) {
+        const { getAgentToolManifest } = await import('./tools/registry.js')
+        frozen = freezeTaskCapabilities(frozen, input, getAgentToolManifest().map(tool => tool.name))
+        const { getAgentDefinition, getToolsForAgent, applySessionToolPolicy } = await import('./agents.js')
+        const { resolveAgent2FeatureFlags } = await import('../agent2-feature-flags.js')
+        const { restrictToolsToTask } = await import('./tool-authority.js')
+        const { issueWritingCoordination, isDeferredWritingRequest } = await import('./coordinated-writing-input.js')
+        const available = applySessionToolPolicy(restrictToolsToTask(getToolsForAgent(getAgentDefinition(input.agentProfile ?? 'orchestrator'), input.mode,
+          resolveAgent2FeatureFlags(userId)), frozen), input.mode, session.toolPolicy,
+        session.sandboxMode === 'read_only' || session.sandboxMode === 'full_access' ? session.sandboxMode : 'workspace')
+        frozen = taskSpecSchema.parse(issueWritingCoordination(frozen, input.mode, new Set(available.map(tool => tool.name)), input.prompt))
+        // Scope questions retain their current admission/answer contract until
+        // the target is actually bound; never mint a marked whole-chapter task.
+        initializeFreshDurable = frozen.scope.writing?.kind !== 'needs_input' && frozen.scope.localEditBoundary?.kind !== 'needs_input'
+          && !isDeferredWritingRequest(input.prompt)
+      }
       created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(frozen)) as Prisma.InputJsonValue } })
+      if (initializeFreshDurable) {
+        const { initializeDurableTaskInTransaction } = await import('./runtime-identity.js')
+        const root = await initializeDurableTaskInTransaction(tx, { userId, runId: created.id, sourceMessageId: admittedMessageId, tokenBudget: input.tokenBudget })
+        await tx.agentRunLease.create({ data: { runId: created.id } })
+        await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId: created.id, eventKey: `bootstrap:${root.id}`,
+          type: 'execution.bootstrap.admitted', payload: { version: 1, sourceMessageId: admittedMessageId, inputHash: root.inputHash } } })
+        created = await tx.agentRun.findUniqueOrThrow({ where: { id: created.id } })
+      }
     }
     if (steering) await tx.agentMessage.create({ data: { id: steeringMessageId!, runId: created.id, sessionId: session.id, role: 'user', parts: [
       { type: 'text', text: steering.prompt }, ...(steering.attachments ?? []).map(item => ({
@@ -549,7 +575,10 @@ export async function startLoopRunLocked(
   void import('./writing-experiments.js').then(({ recordSevenDayContinuation }) => recordSevenDayContinuation(userId, session.novelId)).catch(() => {})
 
   // 异步执行循环，路由立即返回，前端连 stream 拿事件
-  if (initializeGoalDurable || run.runtimeProtocolVersion === 1) {
+  if (initializeFreshDurable) {
+    void import('./runtime-bootstrap.js').then(({ dispatchFreshDurableRun }) => dispatchFreshDurableRun(userId, run.id))
+      .catch(() => console.error('[agent-loop] 初始化派发未确认', { runId: run.id }))
+  } else if (initializeGoalDurable || run.runtimeProtocolVersion === 1) {
     void (async () => {
       if (initializeGoalDurable) await initializePersistedLoopRun(userId, run.id)
       await executePersistedLoopRun(userId, run.id)
@@ -935,9 +964,11 @@ export async function recoverDurableLoopRuns() {
     return tx.agentRunLease.findMany({
       where: { enabled: true, OR: [{ expiresAt: null }, { expiresAt: { lte: now } }],
         run: { engine: 'loop', runtimeProtocolVersion: 1, status: { in: ['queued', 'running'] },
-          taskRoot: { is: { status: 'active', authorizationMode: 'legacy', executionState: { isNot: null } } } } },
+          taskRoot: { is: { status: 'active', authorizationMode: 'legacy', OR: [
+            { executionState: { isNot: null } }, { events: { some: { type: 'execution.bootstrap.admitted' } } },
+          ] } } } },
       orderBy: [{ updatedAt: 'asc' }, { runId: 'asc' }], take: 32,
-      select: { run: { select: { id: true, userId: true, sessionId: true, incomingChildGrant: { select: { kind: true } } } } },
+      select: { run: { select: { id: true, userId: true, sessionId: true, taskRoot: { select: { executionState: { select: { taskRootId: true } } } }, incomingChildGrant: { select: { kind: true } } } } },
     })
   })
   // In B0, waiting tasks remain registered with a heartbeat. A concurrent scan
@@ -946,6 +977,7 @@ export async function recoverDurableLoopRuns() {
     if (getActiveRun(run.id) || run.incomingChildGrant?.kind !== 'inline' && hasActiveRunInSession(run.sessionId)) return { runId: run.id, status: 'skipped' as const }
     try {
       if (run.incomingChildGrant) await dispatchDurableChild(run.userId, run.id)
+      else if (!run.taskRoot?.executionState) await (await import('./runtime-bootstrap.js')).dispatchFreshDurableRun(run.userId, run.id)
       else await executePersistedLoopRun(run.userId, run.id)
       return { runId: run.id, status: 'dispatched' as const }
     } catch (error) {
@@ -1000,6 +1032,18 @@ async function continueLoopRunLocked(
   if (run.runtimeProtocolVersion === 1 && run.taskRootId) {
     const admitted = readAdmittedStart(run)
     await assertManagedAttachmentsAccess(admitted?.attachments, userId)
+    const currentSpec = taskSpecSchema.safeParse(run.taskSpec)
+    const bootstrap = currentSpec.success && currentSpec.data.scope.capabilityCatalog
+      ? await (await import('./runtime-bootstrap.js')).resumeFreshBootstrap(userId, runId) : null
+    if (bootstrap) {
+      // Project the real old pause before selecting this same unstarted run's
+      // reconnect position, otherwise its old terminal event closes Continue.
+      await (await import('./runtime-event-projection.js')).publishDurableEvents(userId, runId)
+      const last = await prisma.agentRunEvent.findFirst({ where: { runId }, orderBy: { seq: 'desc' }, select: { seq: true } })
+      void import('./runtime-bootstrap.js').then(({ dispatchFreshDurableRun }) => dispatchFreshDurableRun(userId, runId))
+        .catch(() => console.error('[agent-loop] 初始化继续派发未确认', { runId }))
+      return { runId, sessionId: run.sessionId, runGoalId: null, status: 'queued', streamUrl: `/api/agent/runs/${runId}/stream`, eventStartSeq: last?.seq ?? 0 }
+    }
     // Resume may only need to deliver/settle an already-paid result. The
     // provider adapter checks credits before any genuinely new paid request.
     const pause = await prisma.agentExecutionOutbox.findFirst({ where: { taskRootId: run.taskRootId, type: 'run.paused',
