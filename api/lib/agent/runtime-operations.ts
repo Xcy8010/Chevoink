@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
-import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
+import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeJson, runtimeJsonHash, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 import { withManuscriptRunLease, withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { STRUCTURE_MUTATIONS } from './runtime-common.js'
 import { prisma } from '../prisma.js'
@@ -15,7 +15,7 @@ async function outbox(tx: RuntimeTx, input: { taskRootId: string; operationId: s
 async function ownedOperation(tx: RuntimeTx, token: RunLeaseToken, operationId: string) {
   const operation = await tx.agentOperation.findFirst({ where: { id: operationId, taskRootId: token.taskRootId } })
   if (!operation) return runtimeError('RUNTIME_SCOPE_MISMATCH', '操作不属于当前任务。')
-  if (!operation.inputSnapshot || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原操作快照缺失或损坏，不能重新推测输入。')
+  if (!operation.inputSnapshot || runtimeJsonHash(operation.inputSnapshot) !== operation.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原操作快照缺失或损坏，不能重新推测输入。')
   return operation
 }
 
@@ -118,7 +118,7 @@ export async function commitOperationEffectInTransaction(tx: RuntimeTx, token: R
         && operation.status === 'failed' && existing.result && typeof existing.result === 'object'
         && !Array.isArray(existing.result) && existing.result.outcome === 'failed' && existing.result.effectApplied === false
       if (savedFailure && operation.kind === 'internal') await assertServiceFailureSource(tx, token, operation)
-      if ((!savedFailure && operation.status !== 'succeeded') || runtimeJson(existing.result).hash !== existing.resultHash) runtimeError('RUNTIME_RECEIPT_INVALID', '业务回执与状态不一致，需要核对。')
+      if ((!savedFailure && operation.status !== 'succeeded') || runtimeJsonHash(existing.result) !== existing.resultHash) runtimeError('RUNTIME_RECEIPT_INVALID', '业务回执与状态不一致，需要核对。')
       return existing
     }
     if (operation.status !== 'prepared') runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '业务操作不是可安全提交状态。')
@@ -175,7 +175,7 @@ function toolFailureWrite(token: RunLeaseToken, input: { operationId: string; in
     if (operation.inputHash !== input.inputHash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '失败观察不属于原工具操作。')
     const existing = await tx.agentEffectReceipt.findUnique({ where: { operationId: operation.id } })
     if (existing) {
-      if (runtimeJson(existing.result).hash !== existing.resultHash) runtimeError('RUNTIME_RECEIPT_INVALID', '工具回执损坏。')
+      if (runtimeJsonHash(existing.result) !== existing.resultHash) runtimeError('RUNTIME_RECEIPT_INVALID', '工具回执损坏。')
       if (operation.status === 'succeeded') return existing // A concurrent confirmed success is never downgraded.
       if (operation.status !== 'failed' || existing.resultHash !== result.hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '同一工具已有不同终态观察。')
       return existing
@@ -203,7 +203,7 @@ export async function prepareProviderAttempt(token: RunLeaseToken, input: {
     const existing = await tx.agentProviderAttempt.findUnique({ where: { operationId_attemptKey: { operationId: operation.id, attemptKey: captured.attemptKey } } })
     if (existing) {
       if (existing.requestHash !== snapshot.hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '供应商尝试的请求已变化。')
-      if (!existing.requestSnapshot || runtimeJson(existing.requestSnapshot).hash !== existing.requestHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原供应商请求快照缺失或损坏。')
+      if (!existing.requestSnapshot || runtimeJsonHash(existing.requestSnapshot) !== existing.requestHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原供应商请求快照缺失或损坏。')
       // An undispatched attempt can be recovered by the current owner; never rebind a sent one.
       return existing.status === 'prepared' ? tx.agentProviderAttempt.update({ where: { id: existing.id }, data: { runId: token.runId, ownerEpoch: token.epoch } }) : existing
     }
@@ -232,7 +232,7 @@ export async function markProviderDispatchedInTransaction(tx: RuntimeTx, token: 
     const attempt = await tx.agentProviderAttempt.findUnique({ where: { id: attemptId } })
     if (!attempt) return runtimeError('RUNTIME_SCOPE_MISMATCH', '供应商尝试不存在。')
     const operation = await ownedOperation(tx, token, attempt.operationId)
-    if (!attempt.requestSnapshot || runtimeJson(attempt.requestSnapshot).hash !== attempt.requestHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原供应商请求快照缺失或损坏。')
+    if (!attempt.requestSnapshot || runtimeJsonHash(attempt.requestSnapshot) !== attempt.requestHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原供应商请求快照缺失或损坏。')
     if (attempt.status !== 'prepared') return { dispatchGranted: false, attempt }
     if (attempt.runId !== token.runId || attempt.ownerEpoch !== token.epoch) runtimeError('RUNTIME_LEASE_LOST', '供应商尝试未归属当前执行者。')
     if (dossierScope && operation.parentOperationId !== dossierScope.parentOperationId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '研究综合锁范围不属于原父操作。')
@@ -302,7 +302,7 @@ export async function markProviderNotDispatched(input: {
     await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${initial.operation.taskRootId} FOR UPDATE`
     const attempt = await tx.agentProviderAttempt.findUniqueOrThrow({ where: { id: captured.attemptId }, include: { operation: true } })
     if (attempt.requestHash !== captured.requestHash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '供应商尝试不匹配原请求。')
-    if (!attempt.requestSnapshot || runtimeJson(attempt.requestSnapshot).hash !== attempt.requestHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原供应商请求快照缺失或损坏。')
+    if (!attempt.requestSnapshot || runtimeJsonHash(attempt.requestSnapshot) !== attempt.requestHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原供应商请求快照缺失或损坏。')
     if (attempt.dispatchedAt || attempt.status !== 'prepared' || attempt.operation.status !== 'prepared') return attempt
     const result = runtimeJson({ outcome: 'cancelled', result: { code: captured.code, dispatched: false } })
     const updated = await tx.agentProviderAttempt.update({ where: { id: attempt.id }, data: {
@@ -330,7 +330,7 @@ export async function lockOwnedAttempt(tx: RuntimeTx, userId: string, attemptId:
   await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${initial.operation.taskRootId} FOR UPDATE`
   const attempt = await tx.agentProviderAttempt.findUniqueOrThrow({ where: { id: attemptId }, include: { operation: true } })
   if (attempt.requestHash !== requestHash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '供应商回执不匹配原请求。')
-  if (!attempt.requestSnapshot || runtimeJson(attempt.requestSnapshot).hash !== attempt.requestHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原供应商请求快照缺失或损坏。')
+  if (!attempt.requestSnapshot || runtimeJsonHash(attempt.requestSnapshot) !== attempt.requestHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原供应商请求快照缺失或损坏。')
   if (!attempt.dispatchedAt) runtimeError('RUNTIME_NOT_DISPATCHED', '未派发的请求不能保存供应商执行结果。')
   return attempt
 }
@@ -346,7 +346,7 @@ export async function recordProviderResult(input: {
   return runtimeTransaction(async tx => {
     const attempt = await lockOwnedAttempt(tx, captured.userId, captured.attemptId, captured.requestHash)
     if ((attempt.resultHash !== null || attempt.result !== null)
-      && (attempt.resultHash === null || attempt.result === null || runtimeJson(attempt.result).hash !== attempt.resultHash)) {
+      && (attempt.resultHash === null || attempt.result === null || runtimeJsonHash(attempt.result) !== attempt.resultHash)) {
       runtimeError('RUNTIME_RECEIPT_INVALID', '已保存的供应商结果损坏，不能作为恢复依据。')
     }
     if (attempt.resultHash === result.hash) return tx.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })
@@ -390,7 +390,7 @@ export async function recordProviderUsage(input: { userId: string; attemptId: st
     const old = await tx.agentProviderUsageReceipt.findUnique({ where: { attemptId: attempt.id } })
     if (old) {
       const storedUsage = { source: old.source, promptTokens: old.promptTokens, completionTokens: old.completionTokens, cacheHitTokens: old.cacheHitTokens, cacheMissTokens: old.cacheMissTokens }
-      if (runtimeJson(storedUsage).hash !== old.observationHash) runtimeError('RUNTIME_RECEIPT_INVALID', '已保存的供应商用量损坏，需要对账而非覆盖。')
+      if (runtimeJsonHash(storedUsage) !== old.observationHash) runtimeError('RUNTIME_RECEIPT_INVALID', '已保存的供应商用量损坏，需要对账而非覆盖。')
       if (captured.revision < old.revision) return old
       if (captured.revision === old.revision) {
         if (snapshot.hash !== old.observationHash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '同一用量版本出现不同内容。')

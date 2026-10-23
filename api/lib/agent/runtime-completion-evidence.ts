@@ -2,7 +2,7 @@ import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js
 import { readChapterReviewReadiness } from './chapter-review-guard.js'
 import { projectCurrentReviewNextStep, currentReviewNextStepGuidance } from './review-dispatch.js'
 import { countReportChineseCharacters } from '../../../shared/agent-output.js'
-import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
+import { runtimeError, runtimeJson, runtimeJsonHash, type RuntimeTx } from './runtime-common.js'
 import { withManuscriptRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionStateInTransaction } from './runtime-state.js'
 import { readTaskBudgetInTransaction } from './runtime-budget.js'
@@ -67,7 +67,7 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       ...deliverables.filter(item => item.status === 'missing' || item.status === 'changed').map(item => ({ code: `deliverable_${item.status}`, reference: item.id })),
       ...postconditionChecks.filter(item => item.severity === 'error' && item.status !== 'passed').map(item => ({ code: `postcondition_${item.status}`, reference: item.code })),
       ...todos.filter(item => !writingDelivery && !(limitedWritingDelivery && limitedReviewDependency(item.content))
-        && (item.status === 'pending' || item.status === 'in_progress')).map(item => ({ code: 'unfinished_todo', reference: runtimeJson({ content: item.content }).hash })),
+        && (item.status === 'pending' || item.status === 'in_progress')).map(item => ({ code: 'unfinished_todo', reference: runtimeJsonHash({ content: item.content }) })),
       ...compilations.filter(item => !writingDelivery && !limitedWritingDelivery?.chapters.some(chapter => chapter.compilationId === item.id)
         && (item.status === 'active' || item.status === 'completed' && (!item.bridge?.committedAt || item.chapter?.revision !== item.bridge.targetRevision))).map(item => ({ code: 'uncommitted_compilation', reference: item.id })),
       ...pendingOperations.map(item => ({ code: 'unresolved_operation', reference: item.id })),
@@ -86,9 +86,9 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
         state: next.state, requiredToolNames: next.requiredTools.map(tool => tool.name), selectionOnly: next.selectionOnly,
         facts: next, content: currentReviewNextStepGuidance(next) })
     }
-    const reviewObservation = observations.length ? { version: 1, observations, fingerprint: runtimeJson(observations).hash } : null
+    const reviewObservation = observations.length ? { version: 1, observations, fingerprint: runtimeJsonHash(observations) } : null
     const snapshot = runtimeJson({ version: 1, taskRootId: root.id, inputHash: root.inputHash, sourceRevision: frame.revision, sourceHash: frame.snapshotHash,
-      candidateHash: runtimeJson({ content: last.content, reasoning: last.reasoning ?? null }).hash,
+      candidateHash: runtimeJsonHash({ content: last.content, reasoning: last.reasoning ?? null }),
       originalRequest: root.requestSnapshot,
       obligations: { goals: spec.goals, expectedOutputs: spec.expectedOutputs, postconditions: spec.postconditions, hardConstraints: spec.hardConstraints },
       verification: 'required', postconditionChecks, reportLengthChecks, deliverables, blockers, effects: evidence.effects, failedOperations, todos,

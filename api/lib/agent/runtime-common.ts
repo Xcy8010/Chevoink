@@ -30,11 +30,22 @@ function canonical(value: unknown, depth = 0): string {
   return runtimeError('RUNTIME_INPUT_INVALID', '持久执行数据不是合法JSON。')
 }
 
-export function runtimeJson(value: unknown): { value: Prisma.InputJsonValue; hash: string } {
+function runtimeJsonText(value: unknown): string {
   const text = canonical(value)
   if (Buffer.byteLength(text, 'utf8') > 2 * 1024 * 1024) runtimeError('RUNTIME_PAYLOAD_TOO_LARGE', '持久执行回执超过允许大小，需要分块交付。')
   // JSON null at the top level has a distinct Prisma sentinel; use an object envelope instead.
   if (value === null) runtimeError('RUNTIME_INPUT_INVALID', '回执必须使用非空JSON信封。')
+  return text
+}
+
+/** Verification needs the identical frozen bytes, not another parsed copy of
+ * the snapshot. Keep the original canonical/size/type validation unchanged. */
+export function runtimeJsonHash(value: unknown): string {
+  return createHash('sha256').update(runtimeJsonText(value)).digest('hex')
+}
+
+export function runtimeJson(value: unknown): { value: Prisma.InputJsonValue; hash: string } {
+  const text = runtimeJsonText(value)
   return { value: JSON.parse(text), hash: createHash('sha256').update(text).digest('hex') }
 }
 

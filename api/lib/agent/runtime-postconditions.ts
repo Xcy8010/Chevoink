@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
-import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
+import { runtimeError, runtimeJson, runtimeJsonHash, type RuntimeTx } from './runtime-common.js'
 import { getStructureReportObservation } from '../data/volume.js'
 
 const baselineSchema = z.object({
@@ -41,7 +41,7 @@ export async function evaluateTaskPostconditions(tx: RuntimeTx, root: { id: stri
       const parsed = envelopeSchema.safeParse(event.payload)
       if (!parsed.success || event.taskRootId !== root.id || event.type !== 'task.baseline.recorded'
         || parsed.data.snapshot.taskRootId !== root.id || parsed.data.snapshot.inputHash !== root.inputHash
-        || runtimeJson(parsed.data.snapshot).hash !== parsed.data.snapshotHash
+        || runtimeJsonHash(parsed.data.snapshot) !== parsed.data.snapshotHash
         || new Set(parsed.data.snapshot.chapters.map(item => item.id)).size !== parsed.data.snapshot.chapters.length) {
         return runtimeError('RUNTIME_RECEIPT_INVALID', '原任务正文基线损坏，不能宣称保护约束已满足。')
       }

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
+import { runtimeError, runtimeJsonHash, type RuntimeTx } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { durableChatResultSchema } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionState, saveExecutionStateInTransaction, type executionSnapshotSchema } from './runtime-state.js'
@@ -38,17 +38,17 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
       || frame.state.pendingOperationId !== cursor.operationId) runtimeError('RUNTIME_STATE_CONFLICT', '回执与原待执行位置不一致。')
     const operation = await tx.agentOperation.findFirst({ where: { id: cursor.operationId, taskRootId: lease.taskRootId }, include: { effectReceipt: true } })
     if (!operation || (operation.status !== 'succeeded' && !(operation.kind === 'tool' && operation.status === 'failed'))) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原操作没有确认终态，不能将部分结果当成交付。')
-    if (!operation.inputSnapshot || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原操作输入损坏。')
+    if (!operation.inputSnapshot || runtimeJsonHash(operation.inputSnapshot) !== operation.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原操作输入损坏。')
     let appended: Message
     let emptyProviderReasoning = false
     if (operation.kind === 'provider') {
       const attempts = await tx.agentProviderAttempt.findMany({ where: { operationId: operation.id, status: 'succeeded', dispatchedAt: { not: null } }, take: 2 })
       if (attempts.length !== 1) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '模型成功回执不唯一，不能猜测采用哪次结果。')
       const attempt = attempts[0], parsed = successfulModel.safeParse(attempt.result)
-      if (!parsed.success || !attempt.resultHash || runtimeJson(attempt.result).hash !== attempt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '模型结果回执不完整或损坏。')
+      if (!parsed.success || !attempt.resultHash || runtimeJsonHash(attempt.result) !== attempt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '模型结果回执不完整或损坏。')
       const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `result:${attempt.id}:${attempt.resultHash}` } })
       if (!event || event.taskRootId !== lease.taskRootId || event.operationId !== operation.id || event.type !== 'provider.result.recorded'
-        || runtimeJson(event.payload).hash !== runtimeJson({ attemptId: attempt.id, status: 'succeeded', resultHash: attempt.resultHash }).hash) runtimeError('RUNTIME_RECEIPT_INVALID', '模型结果与持久事件不一致。')
+        || runtimeJsonHash(event.payload) !== runtimeJsonHash({ attemptId: attempt.id, status: 'succeeded', resultHash: attempt.resultHash })) runtimeError('RUNTIME_RECEIPT_INVALID', '模型结果与持久事件不一致。')
       const result = parsed.data.result
       emptyProviderReasoning = result.reasoning === ''
       if (result.toolCalls.some(call => !call.id || !call.name) || new Set(result.toolCalls.map(call => call.id)).size !== result.toolCalls.length) runtimeError('RUNTIME_RECEIPT_INVALID', '模型工具调用身份缺失或重复。')
@@ -58,12 +58,12 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
     } else if (operation.kind === 'tool') {
       const receipt = operation.effectReceipt, parsedInput = toolInput.safeParse(operation.inputSnapshot)
       const parsedResult = toolResult.safeParse(receipt?.result)
-      if (!receipt || !parsedInput.success || !parsedResult.success || runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具输入关联或结果回执缺失。')
+      if (!receipt || !parsedInput.success || !parsedResult.success || runtimeJsonHash(receipt.result) !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具输入关联或结果回执缺失。')
       const failed = operation.status === 'failed'
       if (failed && !failedToolResultSchema.safeParse(receipt.result).success) runtimeError('RUNTIME_RECEIPT_INVALID', '工具失败观察不完整。')
       const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `${failed ? 'observation' : 'effect'}:${operation.id}` } })
       if (!event || event.taskRootId !== lease.taskRootId || event.operationId !== operation.id || event.type !== (failed ? 'tool.observation.recorded' : 'effect.committed')
-        || runtimeJson(event.payload).hash !== runtimeJson({ operationId: operation.id, resultHash: receipt.resultHash, ...(failed ? { outcome: 'failed' } : {}) }).hash) runtimeError('RUNTIME_RECEIPT_INVALID', '工具结果与持久事件不一致。')
+        || runtimeJsonHash(event.payload) !== runtimeJsonHash({ operationId: operation.id, resultHash: receipt.resultHash, ...(failed ? { outcome: 'failed' } : {}) })) runtimeError('RUNTIME_RECEIPT_INVALID', '工具结果与持久事件不一致。')
       const callId = parsedInput.data.input.callId
       // Only the latest assistant turn may own this reply. Old turns are not authority.
       let assistantIndex = frame.state.messages.length - 1
@@ -85,31 +85,31 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
           const outcome = await readToolApprovalOutcome(tx, lease, rejection.sourceSnapshotHash, callId, operation.action, rejection.rawArguments)
           if (!outcome || !outcome.decision || outcome.status !== (rejection.code === 'TOOL_APPROVAL_EXPIRED' ? 'expired' : 'denied')
             || outcome.request.id !== rejection.approval.requestId || outcome.decision.id !== rejection.approval.decisionId
-            || runtimeJson(outcome.decision.payload).hash !== rejection.approval.decisionHash) runtimeError('RUNTIME_RECEIPT_INVALID', '审批拒绝与原决定不一致。')
+            || runtimeJsonHash(outcome.decision.payload) !== rejection.approval.decisionHash) runtimeError('RUNTIME_RECEIPT_INVALID', '审批拒绝与原决定不一致。')
         }
         const definition = current.configuration.tools.find(tool => tool.function.name === operation.action)
         if ((rejection.code === 'TOOL_SCHEMA_INVALID') !== Boolean(rejection.validation)
-          || (rejection.validation && (!definition || runtimeJson(definition.function.parameters).hash !== rejection.validation.schemaHash))) runtimeError('RUNTIME_RECEIPT_INVALID', '字段拒绝回执未绑定原始工具schema。')
+          || (rejection.validation && (!definition || runtimeJsonHash(definition.function.parameters) !== rejection.validation.schemaHash))) runtimeError('RUNTIME_RECEIPT_INVALID', '字段拒绝回执未绑定原始工具schema。')
         const source = await readExecutionFrame(tx, lease.taskRootId, rejection.sourceRevision)
         const failure = failedToolResultSchema.safeParse(receipt.result)
         if (!failed || !failure.success || failure.data.code !== rejection.code || normalization
           || rejection.sourceRevision >= frame.revision || source.snapshotHash !== rejection.sourceSnapshotHash
-          || runtimeJson(source.state.messages).hash !== runtimeJson(frame.state.messages).hash
+          || runtimeJsonHash(source.state.messages) !== runtimeJsonHash(frame.state.messages)
           || rejection.rawArguments !== calls![0].arguments || rejection.incomplete !== Boolean(calls![0].incomplete)
           || Object.keys(parsedInput.data.input.args).length !== 0) runtimeError('RUNTIME_RECEIPT_INVALID', '工具拒绝观察与原始调用不一致。')
       } else if (normalization) {
         const source = await readExecutionFrame(tx, lease.taskRootId, normalization.sourceRevision)
         if (normalization.sourceRevision >= frame.revision || source.snapshotHash !== normalization.sourceSnapshotHash
-          || runtimeJson(source.state.messages).hash !== runtimeJson(frame.state.messages).hash
-          || normalization.rawArguments !== calls![0].arguments || normalization.normalizedArgsHash !== runtimeJson(parsedInput.data.input.args).hash) runtimeError('RUNTIME_RECEIPT_INVALID', '参数归一化回执与原调用或实际效果不同。')
+          || runtimeJsonHash(source.state.messages) !== runtimeJsonHash(frame.state.messages)
+          || normalization.rawArguments !== calls![0].arguments || normalization.normalizedArgsHash !== runtimeJsonHash(parsedInput.data.input.args)) runtimeError('RUNTIME_RECEIPT_INVALID', '参数归一化回执与原调用或实际效果不同。')
       } else {
         let originalArgs: unknown
         try { originalArgs = JSON.parse(calls![0].arguments) } catch { return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具参数不能解析，不能猜测调用关联。') }
-        if (runtimeJson(originalArgs).hash !== runtimeJson(parsedInput.data.input.args).hash) runtimeError('RUNTIME_STATE_CONFLICT', '工具回执参数与原调用不同，需要明确的参数归一化回执。')
+        if (runtimeJsonHash(originalArgs) !== runtimeJsonHash(parsedInput.data.input.args)) runtimeError('RUNTIME_STATE_CONFLICT', '工具回执参数与原调用不同，需要明确的参数归一化回执。')
       }
       const output = parsedResult.data.toolResult.output
       const canReadArchive = current.configuration.tools.some(tool => tool.function.name === 'execution_context_read'
-        && runtimeJson(tool.function.parameters).hash === runtimeJson(toOpenAIParameters(executionContextReadTool.parameters)).hash)
+        && runtimeJsonHash(tool.function.parameters) === runtimeJsonHash(toOpenAIParameters(executionContextReadTool.parameters)))
         && current.configuration.toolAuthority.some(grant => grant.name === 'execution_context_read' && grant.permission === 'allow' && !grant.alwaysConfirm)
       appended = { role: 'tool', toolCallId: callId, content: operation.action !== 'execution_context_read' && canReadArchive
         && Buffer.byteLength(output, 'utf8') > TOOL_OBSERVATION_INLINE_BYTES
@@ -125,7 +125,7 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
         taskRootId: lease.taskRootId, revision: cursor.expectedRevision + 1 } } })
       const { reasoning: _empty, ...legacyAssistant } = appended
       const legacy = { ...snapshot, messages: [...frame.state.messages, legacyAssistant] }
-      if (previous?.previousHash === cursor.expectedHash && previous.snapshotHash === runtimeJson(legacy).hash) return legacy
+      if (previous?.previousHash === cursor.expectedHash && previous.snapshotHash === runtimeJsonHash(legacy)) return legacy
     }
     return snapshot
   }

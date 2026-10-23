@@ -3,7 +3,7 @@ import { taskSpecSchema } from '../../../shared/contracts/index.js'
 import { readOriginalTaskRequest } from './original-request.js'
 import { effectiveWritingTaskSpec } from './writing-scope.js'
 import { z } from 'zod'
-import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
+import { runtimeError, runtimeJsonHash, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame } from './runtime-state.js'
 import { formatDurableToolObservation, matchesToolObservation } from './runtime-common.js'
 import { hasReadFullToolOutput } from './runtime-observed-baseline.js'
@@ -32,8 +32,8 @@ export async function collectDurableToolEvidence(tx: RuntimeTx, taskRootId: stri
     for (const event of events) {
       const operation = event.operation!, receipt = operation.effectReceipt
       const input = inputSchema.safeParse(operation.inputSnapshot)
-      if (!input.success || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash || !receipt || runtimeJson(receipt.result).hash !== receipt.resultHash
-        || event.eventKey !== `effect:${operation.id}` || runtimeJson(event.payload).hash !== runtimeJson({ operationId: operation.id, resultHash: receipt.resultHash }).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '进展或完成审查的工具证据损坏。')
+      if (!input.success || runtimeJsonHash(operation.inputSnapshot) !== operation.inputHash || !receipt || runtimeJsonHash(receipt.result) !== receipt.resultHash
+        || event.eventKey !== `effect:${operation.id}` || runtimeJsonHash(event.payload) !== runtimeJsonHash({ operationId: operation.id, resultHash: receipt.resultHash })) return runtimeError('RUNTIME_RECEIPT_INVALID', '进展或完成审查的工具证据损坏。')
       const sourceRevision = input.data.input.normalization.sourceRevision
       if (sourceRevision + 2 > revision) continue
       const result = resultSchema.safeParse(receipt.result)

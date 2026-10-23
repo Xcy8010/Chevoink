@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { lockRunRoot, runtimeError, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
+import { lockRunRoot, runtimeError, runtimeJson, runtimeJsonHash, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readTaskBudgetInTransaction, taskTurnLimit } from './runtime-budget.js'
 import { withObjectType } from './tool-schema.js'
@@ -46,24 +46,29 @@ export const executionSnapshotSchema = z.object({ version: z.literal(1), turn: c
   stagnation: z.object({ sourceRevision: count, payloadHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
 }).strict().refine(value => (value.phase === 'awaiting_operation') === (value.pendingOperationId !== null) && value.turn <= value.nextOperationSequence)
 
-function parseSnapshot(input: unknown) {
+function parseSnapshotState(input: unknown) {
   const parsed = executionSnapshotSchema.safeParse(input)
   if (!parsed.success) return runtimeError('RUNTIME_STATE_INVALID', '执行快照不完整或计数无效。')
-  return { ...runtimeJson(parsed.data), state: parsed.data }
+  return parsed.data
+}
+function parseSnapshot(input: unknown) {
+  const state = parseSnapshotState(input)
+  return { ...runtimeJson(state), state }
 }
 
 export async function readExecutionFrame(tx: RuntimeTx, taskRootId: string, revision: number) {
   const frame = await tx.agentExecutionFrame.findUnique({ where: { taskRootId_revision: { taskRootId, revision } } })
   if (!frame) return runtimeError('RUNTIME_STATE_REQUIRED', '执行快照缺失，不能用历史摘要代替。')
-  const parsed = parseSnapshot(frame.snapshot)
+  const state = parseSnapshotState(frame.snapshot)
+  const snapshotHash = runtimeJsonHash(state)
   const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `state:${taskRootId}:${revision}` } })
-  if (parsed.hash !== frame.snapshotHash || !event || event.taskRootId !== taskRootId || event.type !== 'execution.state.saved'
-    || runtimeJson(event.payload).hash !== runtimeJson({ revision, snapshotHash: frame.snapshotHash, previousHash: frame.previousHash }).hash) runtimeError('RUNTIME_RECEIPT_INVALID', '执行快照或事件损坏。')
+  if (snapshotHash !== frame.snapshotHash || !event || event.taskRootId !== taskRootId || event.type !== 'execution.state.saved'
+    || runtimeJsonHash(event.payload) !== runtimeJsonHash({ revision, snapshotHash: frame.snapshotHash, previousHash: frame.previousHash })) runtimeError('RUNTIME_RECEIPT_INVALID', '执行快照或事件损坏。')
   if (revision > 0) {
     const previous = await tx.agentExecutionFrame.findUnique({ where: { taskRootId_revision: { taskRootId, revision: revision - 1 } }, select: { snapshotHash: true } })
     if (!previous || previous.snapshotHash !== frame.previousHash) runtimeError('RUNTIME_RECEIPT_INVALID', '执行快照链不连续。')
   } else if (frame.previousHash !== null) runtimeError('RUNTIME_RECEIPT_INVALID', '初始快照链无效。')
-  return { ...frame, state: parsed.state }
+  return { ...frame, state }
 }
 const readFrame = readExecutionFrame
 
@@ -72,8 +77,8 @@ export async function readExecutionStateInTransaction(tx: RuntimeTx, taskRootId:
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: taskRootId } })
   if (!head) return runtimeError('RUNTIME_STATE_REQUIRED', '缺少原执行状态，不能重新初始化继续。')
   const configuration = configurationSchema.safeParse(head.configuration)
-  if (!configuration.success || runtimeJson({ configuration: head.configuration, inputHash: root.inputHash }).hash !== head.configurationHash
-    || runtimeJson({ spec: root.specSnapshot, request: root.requestSnapshot }).hash !== root.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原始输入或配置快照损坏。')
+  if (!configuration.success || runtimeJsonHash({ configuration: head.configuration, inputHash: root.inputHash }) !== head.configurationHash
+    || runtimeJsonHash({ spec: root.specSnapshot, request: root.requestSnapshot }) !== root.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原始输入或配置快照损坏。')
   const latest = await tx.agentExecutionFrame.findFirst({ where: { taskRootId }, orderBy: { revision: 'desc' }, select: { revision: true } })
   if (!latest || latest.revision !== head.revision) runtimeError('RUNTIME_RECEIPT_INVALID', '执行头指针与最新快照不一致。')
   // 旧快照的工具参数可能缺顶层 type（被供应商拒绝、任务无法继续）；读取时统一修复，与新转换哈希口径一致。
@@ -117,8 +122,8 @@ export async function initializeExecutionState(token: RunLeaseToken, input: { co
   if (snapshot.state.phase !== 'idle' || snapshot.state.turn !== 0 || snapshot.state.nextOperationSequence !== 0 || snapshot.state.checkpointIndex !== 0) runtimeError('RUNTIME_STATE_INVALID', '初始执行位置必须为零。')
   return withRunLease(lease, async tx => {
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
-    if (runtimeJson({ spec: root.specSnapshot, request: root.requestSnapshot }).hash !== root.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原始任务输入损坏。')
-    const configurationHash = runtimeJson({ configuration: configuration.value, inputHash: root.inputHash }).hash
+    if (runtimeJsonHash({ spec: root.specSnapshot, request: root.requestSnapshot }) !== root.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原始任务输入损坏。')
+    const configurationHash = runtimeJsonHash({ configuration: configuration.value, inputHash: root.inputHash })
     const existing = await tx.agentExecutionState.findUnique({ where: { taskRootId: root.id } })
     if (existing) {
       const current = await readState(tx, root.id), initial = await readFrame(tx, root.id, 0)
@@ -183,11 +188,11 @@ function executionStateWrite(token: RunLeaseToken, input: { expectedRevision: nu
     if (before.pendingOperationId && before.pendingOperationId !== after.pendingOperationId) {
       const operation = await tx.agentOperation.findUnique({ where: { id: before.pendingOperationId }, include: { effectReceipt: true } })
       if (!operation || !['succeeded', 'failed', 'cancelled'].includes(operation.status)) runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原操作尚未确认，不能跳过后继续。')
-      if (!operation.inputSnapshot || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原操作输入回执损坏。')
+      if (!operation.inputSnapshot || runtimeJsonHash(operation.inputSnapshot) !== operation.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原操作输入回执损坏。')
       if (operation.kind === 'provider') {
         const attempt = await tx.agentProviderAttempt.findFirst({ where: { operationId: operation.id, status: operation.status, dispatchedAt: { not: null } }, orderBy: { createdAt: 'desc' } })
-        if (!attempt?.result || !attempt.resultHash || runtimeJson(attempt.result).hash !== attempt.resultHash) runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '缺少原模型结果回执，不能跳过。')
-      } else if (!operation.effectReceipt || runtimeJson(operation.effectReceipt.result).hash !== operation.effectReceipt.resultHash) runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '缺少原工具效果回执，不能跳过。')
+        if (!attempt?.result || !attempt.resultHash || runtimeJsonHash(attempt.result) !== attempt.resultHash) runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '缺少原模型结果回执，不能跳过。')
+      } else if (!operation.effectReceipt || runtimeJsonHash(operation.effectReceipt.result) !== operation.effectReceipt.resultHash) runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '缺少原工具效果回执，不能跳过。')
     }
     await insertFrame(tx, lease, revision + 1, expectedHash, snapshot)
     const updated = await tx.agentExecutionState.updateMany({ where: { taskRootId: lease.taskRootId, revision }, data: { revision: revision + 1 } })

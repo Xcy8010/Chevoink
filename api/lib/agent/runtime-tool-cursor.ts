@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
-import { runtimeError, runtimeJson, TASK_ARTIFACT_ACTIONS } from './runtime-common.js'
+import { runtimeError, runtimeJson, runtimeJsonHash, TASK_ARTIFACT_ACTIONS } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { prepareOperationInTransaction, recordToolFailureInTransaction } from './runtime-operations.js'
@@ -21,12 +21,12 @@ export const argumentNormalizationSchema = z.object({ version: z.literal(1), raw
 /** Historical identity only; usable by late accounting without fabricating an
  * active lease. This reader grants no new provider/effect/cursor authority. */
 export async function readToolOperationSource(tx: Prisma.TransactionClient, operation: { kind: string; action: string; taskRootId: string; operationKey: string; inputSnapshot: unknown; inputHash: string }) {
-  if (operation.kind !== 'tool' || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具快照损坏。')
+  if (operation.kind !== 'tool' || runtimeJsonHash(operation.inputSnapshot) !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具快照损坏。')
   const saved = z.object({ kind: z.literal('tool'), action: z.literal(operation.action), input: z.object({ novelId: z.string(), callId: z.string(),
     args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema }).passthrough() }).safeParse(operation.inputSnapshot)
   if (!saved.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具参数准入快照不一致。')
   const normalization = saved.data.input.normalization
-  if (runtimeJson(saved.data.input.args).hash !== normalization.normalizedArgsHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具参数准入快照不一致。')
+  if (runtimeJsonHash(saved.data.input.args) !== normalization.normalizedArgsHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具参数准入快照不一致。')
   const source = await readExecutionFrame(tx, operation.taskRootId, normalization.sourceRevision)
   let index = source.state.messages.length - 1
   while (index >= 0 && source.state.messages[index].role === 'tool') index--
@@ -44,7 +44,7 @@ export async function readAdmittedToolOperation(token: RunLeaseToken, input: { o
   token = { ...token }; input = { ...input }
   const work = async (tx: Prisma.TransactionClient) => {
     const operation = await tx.agentOperation.findFirst({ where: { id: input.operationId, taskRootId: token.taskRootId, kind: 'tool', action: input.action } })
-    if (!operation || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '复核工作缺少原工具操作或冻结输入损坏。')
+    if (!operation || runtimeJsonHash(operation.inputSnapshot) !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '复核工作缺少原工具操作或冻结输入损坏。')
     const saved = await readToolOperationSource(tx, operation), source = saved.source
     if (saved.input.novelId !== input.novelId || saved.input.callId !== input.callId) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具工作的作品、调用或参数准入快照不一致。')
     if (operation.status === 'prepared') {
@@ -100,8 +100,8 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
       catch { code = 'TOOL_ARGUMENTS_INVALID' }
       if (!code && validator) {
         const scope = taskSpecSchema.parse(current.originalSpec).scope
-        const schemaHash = runtimeJson(published.function.parameters).hash
-        if (validator.name !== call.name || !originalToolParameterSchemas(validator, scope).some(schema => runtimeJson(schema).hash === schemaHash)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '字段校验器不匹配原工具合同，不能以新schema拒绝旧调用。')
+        const schemaHash = runtimeJsonHash(published.function.parameters)
+        if (validator.name !== call.name || !originalToolParameterSchemas(validator, scope).some(schema => runtimeJsonHash(schema) === schemaHash)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '字段校验器不匹配原工具合同，不能以新schema拒绝旧调用。')
         // An exception is an implementation fault, not proof of invalid user/model data.
         // Leave it for recovery instead of recording a deterministic schema rejection.
         const normalized = normalizeToolInput(validator, parsed)
@@ -152,7 +152,7 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
           { sourceHash: frame.snapshotHash, callId: call.id, toolName: call.name, rawArguments: call.arguments }) : null
       if (outcome && (outcome.status === 'denied' || outcome.status === 'expired') && outcome.decision) {
         code = outcome.status === 'expired' ? 'TOOL_APPROVAL_EXPIRED' : 'TOOL_APPROVAL_DENIED'
-        approval = { requestId: outcome.request.id, decisionId: outcome.decision.id, decisionHash: runtimeJson(outcome.decision.payload).hash }
+        approval = { requestId: outcome.request.id, decisionId: outcome.decision.id, decisionHash: runtimeJsonHash(outcome.decision.payload) }
       }
     }
     if (!code) return runtimeError('RUNTIME_STATE_CONFLICT', '未确认拒绝原因，不能跳过执行或审批。')
@@ -223,8 +223,8 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     let normalized: unknown
     try { normalized = input.normalize(coerceToolArgumentEnvelope(call!.arguments ? parseToolArgsTolerant(call!.arguments, false) : {})) }
     catch { return runtimeError('RUNTIME_INPUT_INVALID', '原始工具参数不能安全归一化，未执行。') }
-    const normalizedArgsHash = runtimeJson(normalized).hash
-    if (normalizedArgsHash !== runtimeJson(input.effectiveArgs).hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '实际工具参数与原调用的归一化结果不同。')
+    const normalizedArgsHash = runtimeJsonHash(normalized)
+    if (normalizedArgsHash !== runtimeJsonHash(input.effectiveArgs)) runtimeError('RUNTIME_IDENTITY_CONFLICT', '实际工具参数与原调用的归一化结果不同。')
     if (token.parent) {
       const parentRoot = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.parent.taskRootId } })
       const parentSpec = taskSpecSchema.parse(parentRoot.specSnapshot)
@@ -245,7 +245,7 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     const base = input.operationInput
     if (!base || typeof base !== 'object' || Array.isArray(base)) return runtimeError('RUNTIME_INPUT_INVALID', '工具操作需要对象输入。')
     const envelope = base as Prisma.InputJsonObject
-    if (envelope.callId !== input.callId || runtimeJson(envelope.args).hash !== normalizedArgsHash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '操作信封与归一化参数不同。')
+    if (envelope.callId !== input.callId || runtimeJsonHash(envelope.args) !== normalizedArgsHash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '操作信封与归一化参数不同。')
     const normalization = { version: 1 as const, rawArguments: call!.arguments, normalizedArgsHash,
       sourceRevision: frame.revision, sourceSnapshotHash: frame.snapshotHash }
     const operation = await prepareOperationInTransaction(tx, token, { key: input.key, kind: 'tool', action: input.action, input: { ...base, normalization } })
