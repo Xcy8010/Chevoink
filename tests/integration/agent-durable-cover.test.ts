@@ -13,7 +13,7 @@ import * as leases from '../../api/lib/agent/runtime-lease.js'
 import * as reducer from '../../api/lib/agent/runtime-reducer.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { getCreditWindow, getTaskCreditUsage } from '../../api/lib/credits.js'
-import { adoptCoverGoalAccounting, readCoverUnit } from '../../api/lib/agent/runtime-cover-accounting.js'
+import { adoptCoverGoalAccounting, readCoverAdmission, readCoverUnit } from '../../api/lib/agent/runtime-cover-accounting.js'
 import { coverGenerateTool } from '../../api/lib/agent/tools/cover-tools.js'
 import { initializeExecutionState, loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep, getDurableToolAdapterNames } from '../../api/lib/agent/runtime-tool-step.js'
@@ -29,6 +29,12 @@ import { available, claim, fixture } from '../support/agent-durable-runtime-fixt
 
 const runtime = { apiKey: 'isolated-cover-fake', route: { provider: 'fixture', modelName: 'cover-fixture', baseUrl: 'https://images.invalid/generate', providerMode: 'mock' } }
 const controller = () => new AbortController()
+async function resumeOriginalPause(lease: Awaited<ReturnType<typeof claim>>) {
+  await pauseDurableTask(lease.userId, lease.runId)
+  const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: lease.taskRootId, runId: lease.runId, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
+  const resumed = await resumeDurableTask({ userId: lease.userId, runId: lease.runId, pauseEventId: pause.id })
+  return claim({ userId: lease.userId, runId: resumed.run.id }, 'cover-resume-worker')
+}
 
 describe.runIf(available)('fixed-price cover generation genuine PG admission and recovery', () => {
   it.each(['success', 'raw-recovery', 'blob-recovery', 'asset-recovery', 'receipt-recovery', 'unknown', 'unknown-refund-recovery', 'dispatch-crash', 'debit-rollback',
@@ -94,9 +100,7 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
         await expect(step()).rejects.toThrow()
         if (scenario === 'deleted-asset') await prisma.coverAsset.deleteMany({ where: { ownerUserId: f.userId } })
         if (scenario === 'current-deny') await prisma.agentSession.update({ where: { id: f.sessionId }, data: { toolPolicy: { network: 'allow', contentWrite: 'deny', bulkWrite: 'deny' } } })
-        await pauseDurableTask(f.userId, lease.runId)
-        const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, idempotencyKey: `cover-resume-${scenario}`, model: { tier: 'speed' } })
-        lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'worker-b')
+        lease = await resumeOriginalPause(lease)
         if (scenario === 'deleted-asset' || scenario === 'current-deny') {
           await expect(step()).rejects.toMatchObject({ code: scenario === 'deleted-asset' ? 'RUNTIME_RECONCILIATION_REQUIRED' : 'RUNTIME_EFFECT_NOT_AUTHORIZED' })
           expect(transport).toHaveBeenCalledOnce(); return
@@ -113,9 +117,7 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
         await expect(step()).rejects.toThrow()
         if (scenario !== 'unknown') {
           expect(await prisma.creditRefundIntent.count({ where: { originalEntry: { userId: f.userId } } })).toBe(0)
-          await pauseDurableTask(f.userId, lease.runId)
-          const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, idempotencyKey: `cover-resume-${scenario}`, model: { tier: 'speed' } })
-          lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'worker-b')
+          lease = await resumeOriginalPause(lease)
         }
         await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
         expect((await readTaskBudget(lease)).unresolvedAttempts).toBe(1n)
@@ -160,6 +162,20 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
           throw rollback
         })).rejects.toBe(rollback)
         expect((await readTaskBudget(lease)).unresolvedAttempts).toBe(0n)
+        for (const corruption of ['log-key', 'log-action'] as const) {
+          await expect(prisma.$transaction(async tx => {
+            const child = await tx.agentOperation.findUniqueOrThrow({ where: { id: attempt.operationId } })
+            const snapshot = JSON.parse(JSON.stringify(child.inputSnapshot))
+            if (corruption === 'log-key') {
+              snapshot.input.usageLogId = 'other-owner-or-operation-log'
+              const changed = runtimeJson(snapshot)
+              await tx.agentOperation.update({ where: { id: child.id }, data: { inputSnapshot: changed.value, inputHash: changed.hash } })
+            } else await tx.aiUsageLog.update({ where: { id: snapshot.input.usageLogId }, data: { action: 'unrelated-image-operation' } })
+            expect(await readCoverAdmission(tx, attempt.id)).toBeNull()
+            expect((await readTaskBudgetInTransaction(tx, f.rootId)).unresolvedAttempts).toBe(1n)
+            throw rollback
+          })).rejects.toBe(rollback)
+        }
       }
       if (scenario === 'adopt-cover' || scenario === 'adopt-empty-late-refund' || scenario === 'rejected' || scenario === 'adopt-refund-race') {
         // Internal accounting contract under an isolated goal. Public human

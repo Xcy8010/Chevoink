@@ -26,6 +26,14 @@ export default class CiTestReporter implements Reporter {
       ...file.errors.map(error => ({ file: file.file, name: '(module/hooks)', error })),
       ...file.tests.flatMap(test => test.errors.map(error => ({ file: file.file, name: test.name, error }))),
     ])
+    // New run diagnostics also appear as ordinary job annotations, so the
+    // failing file/assertion is visible without downloading a restricted log.
+    // Escape workflow command data; test output cannot inject another command.
+    const escape = (value: string) => value.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A').replace(/,/g, '%2C')
+    if (process.env.GITHUB_ACTIONS === 'true') {
+      for (const failure of failures.slice(0, 50)) console.error(`::error file=${escape(failure.file)},title=CI test failure::${escape(`${failure.name}: ${failure.error.message}`.slice(0, 4000))}`)
+      for (const error of diagnostics.unhandledErrors.slice(0, 10)) console.error(`::error title=Unhandled test error::${escape(error.message.slice(0, 4000))}`)
+    }
     const markdown = [`## Shard ${shard.index}/${shard.count} test diagnostics`,
       `Revision: ${plan.revision}; files: ${diagnostics.files.length}; failed assertions/module errors: ${failures.length}; unhandled: ${unhandledErrors.length}.`,
       ...failures.map(failure => `${failure.file} — ${failure.name}\n\n\`\`\`text\n${failure.error.message.replace(/```/g, "'''")}\n\`\`\``),

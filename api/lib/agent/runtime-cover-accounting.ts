@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { coverChildSchema, coverRequest, coverUnitSchema, coverUnitUsage, coverWorkSchema } from './runtime-cover-contract.js'
 import { imageBlobSchema } from './provider-image-storage.js'
@@ -23,10 +23,16 @@ export async function readCoverAdmission(tx: RuntimeTx, attemptId: string) {
   if (work.novelId !== original.data.input.novelId || work.novelId !== operation.taskRoot.novelId || work.count !== (original.data.input.args.count ?? 1)
     || runtimeJson(original.data.input.args).hash !== original.data.input.normalization.normalizedArgsHash
     || input.parentInputHash !== parent.inputHash || input.workHash !== runtimeJson(work).hash || input.chargeKey !== `image:${parent.id}`
+    || input.usageLogId !== createHash('sha256').update(`cover:${parent.id}:0`).digest('hex')
     || work.prompt !== enforceCoverTitleInPrompt(original.data.input.args.prompt.trim(), work.title, work.displayTitle)
     || runtimeJson(input.request).hash !== runtimeJson(coverRequest(work)).hash || attempt.provider !== work.route.provider || attempt.model !== work.route.modelName
     || !attempt.requestSnapshot || runtimeJson(attempt.requestSnapshot).hash !== attempt.requestHash
     || runtimeJson(attempt.requestSnapshot).hash !== runtimeJson({ provider: attempt.provider, model: attempt.model, request: input.request }).hash) return null
+  const log = await tx.aiUsageLog.findUnique({ where: { id: input.usageLogId } })
+  if (!log || log.userId !== operation.taskRoot.userId || log.novelId !== work.novelId || log.agentRunId !== parent.originRunId
+    || log.providerType !== 'image' || log.action !== 'generateCoverImage' || log.modelName !== work.route.modelName || log.providerMode !== work.route.providerMode
+    || log.targetType !== 'imageCharge' || log.targetId !== input.chargeKey || log.creditChargeMilli !== 6000
+    || !log.billingEvidence || runtimeJson(log.billingEvidence).hash !== runtimeJson({ taskRootId: operation.taskRootId, operationId: operation.id }).hash) return null
   const debit = await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: input.chargeKey } })
   const metadata = debit?.metadata && typeof debit.metadata === 'object' && !Array.isArray(debit.metadata) ? debit.metadata.agentCover : null
   const binding = { version: 1, taskRootId: operation.taskRootId, parentOperationId: parent.id, parentInputHash: parent.inputHash,
