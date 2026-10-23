@@ -92,7 +92,7 @@ export async function databaseNow(tx: RuntimeTx): Promise<Date> {
   return row.now
 }
 
-export async function lockOwnedRun(tx: RuntimeTx, userId: string, runId: string) {
+async function readOwnedLockedRun<T>(tx: RuntimeTx, userId: string, runId: string, readLocked: () => Promise<T | null>) {
   runtimeId(userId); runtimeId(runId)
   // Read identity first, then take parent locks before the child. All common
   // effect/lease/control paths share this order, including paused recovery.
@@ -102,19 +102,48 @@ export async function lockOwnedRun(tx: RuntimeTx, userId: string, runId: string)
     const parent = await lockRunRoot(tx, userId, delegated.currentParentRunId)
     if (parent.root.id !== delegated.parentRootId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '子任务父级范围不匹配。')
   }
-  await tx.$queryRaw`SELECT id FROM agent_runs WHERE id = ${runId} AND user_id = ${userId} FOR UPDATE`
-  const run = await tx.agentRun.findFirst({ where: { id: runId, userId } })
+  const run = await readLocked()
   if (!run) return runtimeError('RUNTIME_SCOPE_MISMATCH', '任务不存在或不属于当前用户。')
   return run
+}
+
+export async function lockOwnedRun(tx: RuntimeTx, userId: string, runId: string) {
+  return readOwnedLockedRun(tx, userId, runId, async () => {
+    await tx.$queryRaw`SELECT id FROM agent_runs WHERE id = ${runId} AND user_id = ${userId} FOR UPDATE`
+    return tx.agentRun.findFirst({ where: { id: runId, userId } })
+  })
+}
+
+type LeaseRunRow = { id: string; userId: string; sessionId: string; novelId: string; taskRootId: string | null; runtimeProtocolVersion: number; status: string }
+type LeaseRootRow = { id: string; userId: string; sessionId: string; novelId: string; protocolVersion: number; status: string; authorizationMode: string }
+function checkedRoot<T extends Pick<LeaseRootRow, 'userId' | 'sessionId' | 'novelId' | 'protocolVersion'>>(run: Pick<LeaseRunRow, 'sessionId' | 'novelId'>, root: T | null, userId: string): T {
+  if (!root || root.userId !== userId || root.sessionId !== run.sessionId || root.novelId !== run.novelId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '持久任务范围不匹配。')
+  if (root.protocolVersion !== DURABLE_RUNTIME_VERSION) runtimeError('RUNTIME_VERSION_MISMATCH', '持久任务需要兼容版本的执行器。')
+  return root
 }
 
 export async function lockRunRoot(tx: RuntimeTx, userId: string, runId: string) {
   const run = await lockOwnedRun(tx, userId, runId)
   if (run.runtimeProtocolVersion !== DURABLE_RUNTIME_VERSION || !run.taskRootId) runtimeError('RUNTIME_VERSION_MISMATCH', '任务尚未建立兼容的持久执行协议。')
   await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${run.taskRootId} FOR UPDATE`
-  const root = await tx.agentTaskRoot.findUnique({ where: { id: run.taskRootId } })
-  if (!root || root.userId !== userId || root.sessionId !== run.sessionId || root.novelId !== run.novelId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '持久任务范围不匹配。')
-  if (root.protocolVersion !== DURABLE_RUNTIME_VERSION) runtimeError('RUNTIME_VERSION_MISMATCH', '持久任务需要兼容版本的执行器。')
+  const root = checkedRoot(run, await tx.agentTaskRoot.findUnique({ where: { id: run.taskRootId } }), userId)
+  return { run, root }
+}
+
+/** The lease fence needs identity/status, never whole frozen request JSON.
+ * Read those columns in the original ordered row-lock statements themselves. */
+export async function lockRunRootForLease(tx: RuntimeTx, userId: string, runId: string) {
+  const run = await readOwnedLockedRun(tx, userId, runId, async () => {
+    const [row] = await tx.$queryRaw<LeaseRunRow[]>`SELECT id, user_id AS "userId", session_id AS "sessionId", novel_id AS "novelId",
+      task_root_id AS "taskRootId", runtime_protocol_version AS "runtimeProtocolVersion", status::text AS status
+      FROM agent_runs WHERE id = ${runId} AND user_id = ${userId} FOR UPDATE`
+    return row ?? null
+  })
+  if (run.runtimeProtocolVersion !== DURABLE_RUNTIME_VERSION || !run.taskRootId) runtimeError('RUNTIME_VERSION_MISMATCH', '任务尚未建立兼容的持久执行协议。')
+  const [row] = await tx.$queryRaw<LeaseRootRow[]>`SELECT id, user_id AS "userId", session_id AS "sessionId", novel_id AS "novelId",
+    protocol_version AS "protocolVersion", status::text AS status, authorization_mode::text AS "authorizationMode"
+    FROM agent_task_roots WHERE id = ${run.taskRootId} FOR UPDATE`
+  const root = checkedRoot(run, row ?? null, userId)
   return { run, root }
 }
 

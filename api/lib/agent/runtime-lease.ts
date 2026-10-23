@@ -1,4 +1,4 @@
-import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
+import { databaseNow, lockRunRoot, lockRunRootForLease, runtimeError, runtimeId, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 import { assertRunGoalFence } from './goal-fence.js'
 import { adoptChildGrants, assertChildParentFence, type ChildParentFence } from './runtime-child.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
@@ -86,15 +86,16 @@ export async function withRunLeaseInTransaction<T>(tx: RuntimeTx, token: RunLeas
     const captured = { ...token }
     await assertRunGoalFence(tx, captured.userId, captured.runId)
     if (captured.parent) await assertRunGoalFence(tx, captured.userId, captured.parent.runId)
-    const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
+    const { run, root } = await lockRunRootForLease(tx, captured.userId, captured.runId)
     active(run, root)
     const check = async () => {
       const parent = await assertChildParentFence(tx, run.id, captured.parent)
       if (parent && !captured.parent) runtimeError('RUNTIME_PARENT_LEASE_LOST', '子任务令牌缺少父任务执行代次。')
-      const lease = await tx.agentRunLease.findUnique({ where: { runId: run.id } })
-      const now = await databaseNow(tx)
+      const [lease] = await tx.$queryRaw<Array<{ enabled: boolean; ownerId: string | null; claimId: string | null;
+        epoch: bigint; expiresAt: Date | null; now: Date }>>`SELECT enabled, owner_id AS "ownerId", claim_id AS "claimId", epoch,
+        expires_at AS "expiresAt", clock_timestamp() AS now FROM agent_run_leases WHERE run_id = ${run.id}`
       if (root.id !== captured.taskRootId || !lease?.enabled || lease.ownerId !== captured.ownerId || lease.claimId !== captured.claimId
-        || lease.epoch !== captured.epoch || !lease.expiresAt || lease.expiresAt <= now) runtimeError('RUNTIME_LEASE_LOST', '执行所有权已失效，已阻止旧执行者提交。')
+        || lease.epoch !== captured.epoch || !lease.expiresAt || lease.expiresAt <= lease.now) runtimeError('RUNTIME_LEASE_LOST', '执行所有权已失效，已阻止旧执行者提交。')
     }
     await check()
     const result = await work(tx)
