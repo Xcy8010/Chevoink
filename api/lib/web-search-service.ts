@@ -36,7 +36,7 @@ export type WebSearchOutcome = {
 
 type SearchAttempt = {
   provider: WebSearchOutcome['provider']
-  outcome: 'results' | 'empty' | 'failed' | 'aborted'
+  outcome: 'results' | 'empty' | 'failed' | 'aborted' | 'unknown'
   durationMs: number
   httpStatus?: number
   providerRequestId?: string
@@ -51,6 +51,8 @@ type SearchAttempt = {
 }
 
 type AttemptResponse = Pick<SearchAttempt, 'httpStatus' | 'providerRequestId' | 'providerCode' | 'queryHash' | 'parseCode' | 'responseFinalUrl' | 'queryEcho'>
+// Transport completeness is internal; preserve existing public attempt shapes.
+const completeSearchResponses = new WeakSet<AttemptResponse>()
 function captureSearchResponse(response: { status: number; url?: string; headers: { get(name: string): string | null } }, metadata: AttemptResponse) {
   metadata.httpStatus = response.status
   const requestId = response.headers.get('x-request-id') ?? response.headers.get('request-id')
@@ -95,6 +97,10 @@ export class WebSearchError extends Error {
     super(message)
     this.name = 'WebSearchError'
   }
+}
+
+export class WebSearchUnknownError extends WebSearchError {
+  constructor(attempts: SearchAttempt[]) { super('原搜索请求结果未知，未切换引擎或重新请求。', attempts); this.name = 'WebSearchUnknownError' }
 }
 
 export function assertWebSearchConfiguration(configured: ToolModelRuntime | null, query?: string): void {
@@ -193,6 +199,7 @@ async function searchBocha(query: string, maxResults: number, signal: AbortSigna
     }
 
     const body = await readBoundedPublicBody(response, 2 * 1024 * 1024)
+    completeSearchResponses.add(metadata)
     if (metadata.queryHash) metadata.parseCode = 'BOCHA_INVALID_JSON'
     const raw: unknown = JSON.parse(body.toString('utf8'))
     if (raw && typeof raw === 'object') {
@@ -225,7 +232,9 @@ async function searchDeepSeek(query: string, maxResults: number, signal: AbortSi
     captureSearchResponse(response, metadata)
     if (!response.ok) return await rejectSearchResponse(response, 'DeepSeek')
     if (metadata.queryHash) metadata.parseCode = 'DEEPSEEK_INVALID_JSON'
-    const raw: unknown = JSON.parse((await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8'))
+    const body = await readBoundedPublicBody(response, 2 * 1024 * 1024)
+    completeSearchResponses.add(metadata)
+    const raw: unknown = JSON.parse(body.toString('utf8'))
     const payload = deepseekSearchSchema.safeParse(raw)
     if (metadata.queryHash) metadata.parseCode = payload.success ? 'DEEPSEEK_RESULTS_SCHEMA_OK' : 'DEEPSEEK_SCHEMA_REJECTED'
     if (!payload.success) throw new WebSearchError('DEEPSEEK_SEARCH_PROTOCOL_ERROR')
@@ -255,6 +264,7 @@ async function searchSogou(query: string, maxResults: number, signal: AbortSigna
   }
 
   const html = (await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8')
+  completeSearchResponses.add(metadata)
   captureSearchHtml(html, metadata, query)
   // Parse observed DOM attributes, including class lists and single-quoted
   // HTML. Relative tracking links alone are not a discovered destination.
@@ -309,6 +319,7 @@ async function searchBing(query: string, maxResults: number, signal: AbortSignal
   }
 
   const html = (await readBoundedPublicBody(response, 2 * 1024 * 1024)).toString('utf8')
+  completeSearchResponses.add(metadata)
   captureSearchHtml(html, metadata, query)
   const blocks = [...html.matchAll(/<li class="b_algo"[\s\S]*?<\/li>/g)]
   const results: WebSearchResult[] = []
@@ -360,6 +371,7 @@ export async function searchWeb(
   configuredInput?: ToolModelRuntime | null,
   expectedTarget?: ResearchSearchTarget,
   navigationPolicy?: { version: 1; sourceSites?: readonly string[]; alternativeAvailable?: boolean },
+  durable?: { stopOnUnknown: true },
 ): Promise<WebSearchOutcome> {
   if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 8) {
     throw new WebSearchError('搜索结果数量必须为 1–8')
@@ -385,7 +397,7 @@ export async function searchWeb(
     for (const provider of providers) {
       merged.throwIfAborted()
       const started = Date.now()
-      const metadata: AttemptResponse = constrained ? { queryHash: searchQueryHash(query) } : {}
+      const metadata: AttemptResponse = constrained || durable ? { queryHash: searchQueryHash(query) } : {}
       // A slow provider must leave time for fallback; all attempts still share the overall deadline.
       const local = withTimeout(merged, Math.max(1, Math.floor(env.webSearchTimeoutMs / 2)))
       try {
@@ -416,7 +428,9 @@ export async function searchWeb(
         }
         emptyProvider = provider
       } catch (error) {
-        attempts.push({ provider, outcome: merged.aborted ? 'aborted' : 'failed', durationMs: Date.now() - started, ...metadata })
+        const unknown = durable && !completeSearchResponses.has(metadata) && !(metadata.httpStatus !== undefined && (metadata.httpStatus < 200 || metadata.httpStatus >= 300))
+        attempts.push({ provider, outcome: unknown ? 'unknown' : merged.aborted ? 'aborted' : 'failed', durationMs: Date.now() - started, ...metadata })
+        if (unknown) throw new WebSearchUnknownError(attempts)
         if (merged.aborted) {
           if (!signal?.aborted && constrainedResult) return { ...constrainedResult, attempts, ...(navigation ? { navigation } : {}) }
           if (!signal?.aborted && emptyProvider) return { provider: emptyProvider, results: [], attempts }
@@ -430,6 +444,7 @@ export async function searchWeb(
     if (emptyProvider) return { provider: emptyProvider, results: [], attempts }
     throw new WebSearchError('所有搜索引擎均未返回有效响应', attempts)
   } catch (error) {
+    if (error instanceof WebSearchUnknownError) throw error
     if (error instanceof ToolModelConfigurationError) throw new WebSearchError(error.code, attempts)
     // Preserve attempted-request evidence for cancellation settlement. A
     // pre-request cancellation still propagates unchanged and cannot refund.

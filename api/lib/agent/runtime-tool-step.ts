@@ -24,6 +24,7 @@ import { readFileTool, viewImageTool } from './tools/attachment-tools.js'
 import { executeDurableAttachmentRead } from './tools/durable-attachment.js'
 import { executeDurableVision } from './tools/durable-vision.js'
 import { executeDurableCover } from './tools/durable-cover.js'
+import { executeDurableDossier } from './tools/durable-research-dossier.js'
 import { executeDurableCreative } from './tools/durable-creative.js'
 import { platformNovelReadTool, platformNovelSearchTool } from './tools/platform-tools.js'
 import { executeDurablePlanSave } from './tools/durable-plan.js'
@@ -55,7 +56,7 @@ import { qualityReportGetTool, characterVoiceGetTool, experienceAnchorGetTool, q
 import { memoryReviewListTool, memoryEventSaveTool, memoryRelationSaveTool } from './tools/memory-tools.js'
 import { directiveListTool, directiveSaveTool, directiveSupersedeTool } from './tools/directive-tools.js'
 import { styleProfileGetTool, retrievalTraceReadTool, craftSearchTool, styleLeakageCheckTool, styleProfileExtractTool } from './tools/craft-library-tools.js'
-import { researchDossierGetTool, firstThreePrototypeGetTool, firstThreePrototypeBuildTool } from './tools/research-dossier-tools.js'
+import { researchDossierBuildTool, researchDossierGetTool, firstThreePrototypeGetTool, firstThreePrototypeBuildTool } from './tools/research-dossier-tools.js'
 import { novelImportTool } from './tools/import-tools.js'
 import { accountCreditsTool, accountCreditHistoryTool, accountNovelsTool, sessionRenameTool } from './tools/account-tools.js'
 import { executeDurableImport } from './runtime-import.js'
@@ -94,6 +95,7 @@ const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(platformNovelSearchTool), checkedAdapter(platformNovelReadTool),
   checkedAdapter(qualityFindingFeedbackTool), checkedAdapter(characterVoiceSaveTool), checkedAdapter(experienceAnchorSaveTool),
   checkedAdapter(styleProfileExtractTool), checkedAdapter(firstThreePrototypeBuildTool),
+  checkedAdapter(researchDossierBuildTool),
   checkedAdapter(coverApplyTool), checkedAdapter(coverGenerateTool),
   checkedAdapter(goalEnableTool), checkedAdapter(goalReadTool), checkedAdapter(goalReportTool),
   checkedAdapter(novelImportTool),
@@ -207,6 +209,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     else if (call.name === 'read_file') ctx.durableAttachment = capability
     else if (call.name === 'view_image') ctx.durableVision = capability
     else if (call.name === 'cover_generate') ctx.durableCover = capability
+    else if (call.name === 'research_dossier_build') ctx.durableDossier = capability
     else if (call.name === 'creative_critique' || call.name === 'creative_revision_draft') ctx.durableCreative = capability
     else if ((CHANGESET_ACTIONS as readonly string[]).includes(call.name)) ctx.durableChangeSet = capability
     else if (goalTool) ctx.durableRead = capability
@@ -300,6 +303,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   const historyAction = [...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].find(name => name === selected.tool.name)
   if (selected.ctx.durableVision) return { kind: 'tool' as const, result: await executeDurableVision(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableCover) return { kind: 'tool' as const, result: await executeDurableCover(selected.ctx, selected.tool, selected.args) }
+  if (selected.ctx.durableDossier) return { kind: 'tool' as const, result: await executeDurableDossier(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableContent && selected.ctx.writingScope?.writingCoordinationProtocol === 1
     && coordinatedWriterActions.some(name => name === selected.tool.name)) {
     return { kind: 'tool' as const, result: await executeDurableCoordinatedWriter(selected.ctx, selected.tool, selected.args) }

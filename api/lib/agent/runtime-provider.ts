@@ -110,7 +110,10 @@ export async function beginDurableChat(input: {
     }
     try {
       await input.admit()
-      if (!(await markProviderDispatched(execution.lease, attempt.id, goalTokenEstimate)).dispatchGranted) {
+      const permit = execution.auxiliaryStep === 'research_dossier_synthesis'
+        ? await markProviderDispatched(execution.lease, attempt.id, goalTokenEstimate, { parentOperationId: execution.parentOperationId! })
+        : await markProviderDispatched(execution.lease, attempt.id, goalTokenEstimate)
+      if (!permit.dispatchGranted) {
         runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '派发权已使用，不能重复请求供应商。')
       }
     } catch (error) {

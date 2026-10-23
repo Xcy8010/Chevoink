@@ -84,15 +84,19 @@ export async function executeWebToolCall<T>(ctx: ToolContext, kind: Kind, reques
     if (run.status !== 'running' && !ctx.webAdmission) throw new DataAccessError(409, 'CREDIT_WEB_TOOL_INACTIVE', '任务已停止，未发起收费联网请求。')
     if (await tx.webToolCall.findUnique({ where: { id } })) throw pending()
     await reserve?.(tx)
-    const config = await tx.aiModelConfig.findFirst({ where: { key: `tool:web-${kind === 'search' ? 'search' : 'fetch'}`, ownerUserId: null },
+    const included = ctx.includedDossierSearch
+      ? await (await import('../agent/runtime-dossier-contract.js')).readIncludedDossierSearch(tx, ctx, request) : null
+    if (included && (kind !== 'search' || !ctx.webAdmission || reserve)) throw new DataAccessError(409, 'CREDIT_WEB_TOOL_SCOPE', '研究搜索不能借用其他联网预算或派发权限。')
+    const config = included ? null : await tx.aiModelConfig.findFirst({ where: { key: `tool:web-${kind === 'search' ? 'search' : 'fetch'}`, ownerUserId: null },
       select: { multiplierBps: true } })
-    const multiplierBps = config?.multiplierBps ?? 10000
+    const multiplierBps = included ? 0 : config?.multiplierBps ?? 10000
     let amountMilli: number
-    try { amountMilli = paidProvider ? webToolChargeMilli(multiplierBps) : 0 }
+    try { amountMilli = included ? 0 : paidProvider ? webToolChargeMilli(multiplierBps) : 0 }
     catch { throw new DataAccessError(409, 'CREDIT_WEB_TOOL_PRICE_INVALID', '网页工具倍率无效，未请求供应商。') }
     await consumeCreditsInTransaction(tx, { userId: ctx.userId, amountMilli, kind: 'usage', sourceType: `web_${kind}`,
       idempotencyKey: key(ctx, kind), referenceId: ctx.runId, multiplierBps,
-      metadata: { webToolCallId: id, requestHash: digest(request), baseMilli: 2000 } })
+      metadata: { webToolCallId: id, requestHash: digest(request), baseMilli: included ? 0 : 2000,
+        ...(included ? { tariff: included.work.searchTariff, parentOperationId: included.parent.id, parentInputHash: included.parent.inputHash, ordinal: ctx.includedDossierSearch!.ordinal } : {}) } })
     await tx.webToolCall.create({ data: { id, runId: ctx.runId, requestHash: digest(request), kind, amountMilli, multiplierBps } })
   })).catch(error => {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw pending()

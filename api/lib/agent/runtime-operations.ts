@@ -103,7 +103,7 @@ export async function commitOperationEffect(token: RunLeaseToken, operationId: s
   // the operation snapshot, current tool policy, owner, and lease.
   const operation = await prisma.agentOperation.findFirst({ where: { id: operationId, taskRootId: token.taskRootId }, select: { action: true } })
   const manuscript = operation && [...STRUCTURE_MUTATIONS, 'chapter_create', 'chapter_rename', 'chapter_write', 'chapter_append', 'chapter_edit_range',
-    'novel_create', 'novel_publish', 'novel_archive', 'creative_critique', 'creative_revision_draft', 'story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'chapter_bridge_commit', 'quality_analyze', 'continuity_validate', 'changeset_apply', 'changeset_rollback'].includes(operation.action)
+    'novel_create', 'novel_publish', 'novel_archive', 'research_dossier_build', 'creative_critique', 'creative_revision_draft', 'story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'chapter_bridge_commit', 'quality_analyze', 'continuity_validate', 'changeset_apply', 'changeset_rollback'].includes(operation.action)
   return (manuscript ? withManuscriptRunLease : withRunLease)(token, tx => commitOperationEffectInTransaction(tx, token, operationId, inputHash, work))
 }
 
@@ -218,20 +218,38 @@ export async function prepareProviderAttempt(token: RunLeaseToken, input: {
 }
 
 /** Only dispatchGranted=true permits a network call; a lost commit reply requires reconciliation. */
-export async function markProviderDispatched(token: RunLeaseToken, attemptId: string, goalTokenEstimate?: number) {
+export async function markProviderDispatched(token: RunLeaseToken, attemptId: string, goalTokenEstimate?: number, dossierScope?: { parentOperationId: string }) {
   token = { ...token }
-  return withRunLease(token, tx => markProviderDispatchedInTransaction(tx, token, attemptId, goalTokenEstimate))
+  dossierScope = dossierScope ? { ...dossierScope } : undefined
+  // Dossier preconditions and its unique synthesis permit share the book/root
+  // lock order with query admission and final dossier persistence.
+  const guard = dossierScope ? withManuscriptRunLease : withRunLease
+  return guard(token, tx => markProviderDispatchedInTransaction(tx, token, attemptId, goalTokenEstimate, dossierScope))
 }
 
 /** Caller holds the same root/lease transaction as a fixed-price debit. */
-export async function markProviderDispatchedInTransaction(tx: RuntimeTx, token: RunLeaseToken, attemptId: string, goalTokenEstimate?: number) {
+export async function markProviderDispatchedInTransaction(tx: RuntimeTx, token: RunLeaseToken, attemptId: string, goalTokenEstimate?: number, dossierScope?: { parentOperationId: string }) {
     const attempt = await tx.agentProviderAttempt.findUnique({ where: { id: attemptId } })
     if (!attempt) return runtimeError('RUNTIME_SCOPE_MISMATCH', '供应商尝试不存在。')
     const operation = await ownedOperation(tx, token, attempt.operationId)
     if (!attempt.requestSnapshot || runtimeJson(attempt.requestSnapshot).hash !== attempt.requestHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原供应商请求快照缺失或损坏。')
     if (attempt.status !== 'prepared') return { dispatchGranted: false, attempt }
     if (attempt.runId !== token.runId || attempt.ownerEpoch !== token.epoch) runtimeError('RUNTIME_LEASE_LOST', '供应商尝试未归属当前执行者。')
-    if (operation.parentOperationId) await assertCurrentToolPolicy(tx, token, await ownedOperation(tx, token, operation.parentOperationId))
+    if (dossierScope && operation.parentOperationId !== dossierScope.parentOperationId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '研究综合锁范围不属于原父操作。')
+    if (operation.parentOperationId) {
+      const parent = await ownedOperation(tx, token, operation.parentOperationId)
+      await assertCurrentToolPolicy(tx, token, parent)
+      if (parent.action === 'research_dossier_build') {
+        if (!dossierScope || dossierScope.parentOperationId !== parent.id) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '研究综合必须在作品锁内核验原前置条件。')
+        const { dossierWorkSchema, assertDossierPredecessor, assertDossierForce, assertDossierBuildExclusive } = await import('./runtime-dossier-contract.js')
+        const source = await (await import('./runtime-tool-cursor.js')).readToolOperationSource(tx, parent)
+        const work = dossierWorkSchema.parse(source.input.work)
+        if (work.kind !== 'build' || work.novelId !== source.input.novelId) return runtimeError('RUNTIME_RECEIPT_INVALID', '研究综合缺少原档案工作。')
+        await assertDossierPredecessor(tx, token.userId, work)
+        await assertDossierForce(tx, { userId: token.userId, novelId: work.novelId, runId: token.runId }, work)
+        await assertDossierBuildExclusive(tx, token.userId, work.novelId, parent)
+      } else if (dossierScope) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '研究综合锁不能借给其他工具步骤。')
+    }
     await assertProviderBudget(tx, token.taskRootId)
     if (token.parent) {
       const grant = await tx.agentChildExecutionGrant.findUniqueOrThrow({ where: { childRunId: token.runId } })

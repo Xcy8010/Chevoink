@@ -47,6 +47,9 @@ export type ToolContext = {
   durableAttachment?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableVision?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableCover?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
+  durableDossier?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
+  /** Only the original owned dossier service may include its search fee. */
+  includedDossierSearch?: { parentOperationId: string; parentInputHash: string; ordinal: number }
   durableCreative?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   /** Server closure for the original web operation. Runs inside the cache or
    * dispatch transaction, never supplied by the model or inherited by a child. */

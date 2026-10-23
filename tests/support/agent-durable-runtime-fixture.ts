@@ -83,6 +83,10 @@ export function fixture(work: (f: {
           await tx.agentSession.deleteMany({ where: { userId } })
           await tx.chapter.deleteMany({ where: { authorId: userId } })
           await tx.novel.deleteMany({ where: { authorId: userId } })
+          // Novel deletion preserves owned image candidates (novelId becomes
+          // null). Sweep only this synthetic fixture owner's candidates before
+          // removing its user; never change the production retention relation.
+          await tx.coverAsset.deleteMany({ where: { ownerUserId: userId } })
           await tx.user.delete({ where: { id: userId } })
         })).catch(error => { cleanupFailed = true; throw error })
       } finally { lifecycle?.dispose() }

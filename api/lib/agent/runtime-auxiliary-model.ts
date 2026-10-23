@@ -22,6 +22,7 @@ import { terminalCandidateSchema } from './terminal-state-review.js'
 import { terminalEvidenceContextSchema } from './terminal-evidence-context.js'
 
 const steps = {
+  research_dossier_synthesis: { parent: 'research_dossier_build', previous: null },
   creative_critique: { parent: 'creative_critique', previous: null },
   creative_revision: { parent: 'creative_revision_draft', previous: null },
   continuity_critic: { parent: 'continuity_validate', previous: null },
@@ -36,7 +37,7 @@ const steps = {
   quality_repair_retry: { parent: 'quality_analyze', previous: 'quality_repair' },
 } as const
 export type AuxiliaryModelStep = keyof typeof steps
-const stepSchema = z.enum(['creative_critique', 'creative_revision', 'continuity_critic', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
+const stepSchema = z.enum(['research_dossier_synthesis', 'creative_critique', 'creative_revision', 'continuity_critic', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
 const parentInput = z.object({ input: z.object({ callId: z.string(), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema }) })
 const isolatedRequest = z.object({ body: z.object({
   messages: z.array(z.object({ role: z.enum(['system', 'user']), content: z.string() })).min(1),
@@ -110,10 +111,27 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
       || !call || call.name !== (service?.parent.action ?? parent.action) || call.incomplete || call.arguments !== original.normalization.rawArguments
       || runtimeJson(service?.original.args ?? original.args).hash !== original.normalization.normalizedArgsHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立模型缺少原工具调用关联。')
     const grant = state.configuration.toolAuthority.find(item => item.name === parent.action)
-    const modeAllowed = parent.action === 'creative_critique' ? ['build', 'review'].includes(state.configuration.mode) : state.configuration.mode === 'build'
+    const modeAllowed = parent.action === 'research_dossier_build' ? ['plan', 'build'].includes(state.configuration.mode)
+      : parent.action === 'creative_critique' ? ['build', 'review'].includes(state.configuration.mode) : state.configuration.mode === 'build'
     if (!modeAllowed || !grant || grant.permission === 'deny'
       || !state.configuration.tools.some(tool => tool.function.name === parent.action)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务不允许独立检查或修订。')
     if (!service && (grant.permission === 'ask' || grant.alwaysConfirm)) await assertToolApproval(tx, lease, source.snapshotHash, original.callId, parent.action, call.arguments, original.normalization.normalizedArgsHash)
+    if (captured.step === 'research_dossier_synthesis') {
+      const { dossierWorkSchema, dossierSynthesisInput } = await import('./runtime-dossier-contract.js')
+      const frozen = dossierWorkSchema.parse(z.object({ input: z.object({ work: z.unknown() }) }).parse(parent.inputSnapshot).input.work)
+      if (frozen.kind !== 'build' || runtimeJson(frozen.args).hash !== original.normalization.normalizedArgsHash
+        || runtimeJson(frozen.price).hash !== runtimeJson(captured.price).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '研究综合必须使用原档案查询和冻结价目。')
+      const prepared = await dossierSynthesisInput(tx, parent, lease.userId, frozen)
+      const request = z.object({ endpoint: z.string(), body: z.record(z.string(), z.unknown()) }).parse(captured.request)
+      if (request.endpoint !== `${frozen.route.baseUrl.replace(/\/$/, '')}/chat/completions`
+        || request.body.model !== frozen.route.model || request.body.temperature !== undefined && request.body.temperature !== 0.25
+        || request.body.stream !== true
+        || (request.body.max_tokens ?? request.body.max_completion_tokens) !== frozen.route.maxOutputTokens
+        || request.body.response_format !== undefined
+        || runtimeJson(request.body.messages).hash !== runtimeJson([{ role: 'system', content: prepared.system }, { role: 'user', content: prepared.content }]).hash) {
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '研究综合不能改用其他来源、上下文或模型路由。')
+      }
+    }
     if (captured.step === 'creative_critique' || captured.step === 'creative_revision') {
       const { creativeReviewWorkSchema } = await import('./tools/creative-review.js')
       const frozen = z.object({ input: z.object({ work: z.object({ kind: z.literal('creative'), version: z.literal(1), review: creativeReviewWorkSchema, price: z.unknown() }) }) }).safeParse(parent.inputSnapshot)
