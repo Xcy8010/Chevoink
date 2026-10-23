@@ -12,17 +12,20 @@ function fixture(native = true) {
   generated.scope.writing = { version: 1, kind: 'bounded', targets: [{ chapterId: 'chapter', orderIndex: 1 }], titleAndBodyOnly: false, repairAuthorized: true }
   const spec = JSON.parse(JSON.stringify(generated)) as typeof generated
   const original = runtimeJson({ spec, request: { prompt } })
-  const root = { id: 'root', specSnapshot: spec, requestSnapshot: { prompt }, inputHash: original.hash }
+  const root = { id: 'root', userId: 'user', novelId: 'novel', specSnapshot: spec, requestSnapshot: { prompt }, inputHash: original.hash }
   const run = { id: 'run', sessionId: 'session', taskRootId: native ? 'root' : null, chapterId: 'chapter', manuscriptRevision: 7,
     writingBindings: null as unknown, taskSpec: spec as unknown, startRequest: { prompt } as unknown }
   // Native readers must not ask Prisma to deserialize these duplicated JSON fields.
   const unused = vi.fn(() => { throw Error('Unused native JSON column requested') })
-  const project = (query: { select?: Record<string, boolean> }) => {
-    if (!native) return query.select ? Object.fromEntries(Object.keys(query.select).map(key => [key, run[key as keyof typeof run]])) : run
-    const stored = { ...run, get taskSpec() { return unused() }, get startRequest() { return unused() }, get usage() { return unused() } }
+  const project = (query: { select?: Record<string, unknown> }) => {
+    const relations = { incomingChildGrant: null, taskRoot: native ? root : null,
+      session: { userId: 'user', novelId: 'novel', spawnedFromRunId: null, spawnedFromSessionId: null } }
+    const legacy = { ...run, ...relations }
+    if (!native) return query.select ? Object.fromEntries(Object.keys(query.select).map(key => [key, legacy[key as keyof typeof legacy]])) : legacy
+    const stored = { ...run, ...relations, get taskSpec() { return unused() }, get startRequest() { return unused() }, get usage() { return unused() } }
     return query.select ? Object.fromEntries(Object.keys(query.select).map(key => [key, stored[key as keyof typeof stored]])) : { ...stored }
   }
-  const tx = { agentRun: { findFirst: vi.fn(async (query: { select?: Record<string, boolean> }) => project(query)), findFirstOrThrow: vi.fn(async (query: { select?: Record<string, boolean> }) => project(query)) },
+  const tx = { agentRun: { findFirst: vi.fn(async (query: { select?: Record<string, unknown> }) => project(query)), findFirstOrThrow: vi.fn(async (query: { select?: Record<string, unknown> }) => project(query)) },
     agentChildExecutionGrant: { findUnique: vi.fn(async () => null) }, agentSession: { findFirst: vi.fn(async () => ({ spawnedFromRunId: null })) },
     agentTaskRoot: { findFirst: vi.fn(async () => root) }, agentMessage: { findFirst: vi.fn(async () => ({ parts: [{ type: 'text', text: '历史原始请求' }] })) } }
   return { tx, transaction: tx as unknown as Prisma.TransactionClient, run, root, spec, prompt, unused }
@@ -34,6 +37,21 @@ describe('native original request and writing-source projections', () => {
     expect(await readOriginalTaskRequest(f.transaction, subject)).toEqual({ prompt: f.prompt, spec: f.spec, taskId: 'root', sourceRunId: 'run', parentRunId: null })
     expect(f.unused).not.toHaveBeenCalled()
     expect(f.tx.agentRun.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'run', userId: 'user', novelId: 'novel' } }))
+  })
+  it('loads native lineage relations in one call and keeps the original source lookup', async () => {
+    const f = fixture()
+    await readOriginalTaskRequest(f.transaction, subject)
+    expect(f.tx.agentRun.findFirst).toHaveBeenCalledTimes(2)
+    expect(f.tx.agentChildExecutionGrant.findUnique).not.toHaveBeenCalled()
+    expect(f.tx.agentSession.findFirst).not.toHaveBeenCalled()
+    expect(f.tx.agentTaskRoot.findFirst).not.toHaveBeenCalled()
+  })
+  it.each(['owner', 'novel', 'identity'] as const)('rejects a related root with a substituted %s', async field => {
+    const f = fixture()
+    if (field === 'owner') f.root.userId = 'other'
+    if (field === 'novel') f.root.novelId = 'other'
+    if (field === 'identity') f.root.id = 'other'
+    await expect(readOriginalTaskRequest(f.transaction, subject)).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })
   })
   it('retains the root integrity rejection', async () => {
     const f = fixture(); f.root.inputHash = '0'.repeat(64)
