@@ -12,6 +12,7 @@ import {
 import type { ChangeSet } from '../../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { defineTool } from './types.js'
+import { changeSetBaselineHash } from '../../data/changeset.js'
 
 const READ_PERMISSION = { plan: 'allow', build: 'allow', review: 'allow' } as const
 const PREVIEW_PERMISSION = { plan: 'allow', build: 'allow', review: 'allow' } as const
@@ -150,7 +151,7 @@ function definePreviewTool(name: 'bulk_replace_preview' | 'entity_rename_preview
     async execute(ctx, args) {
       let changeSet: ChangeSet
       try {
-        changeSet = await previewBulkReplaceData(ctx.userId, ctx.novelId, args)
+        changeSet = await previewBulkReplaceData(ctx.userId, ctx.novelId, args, ctx.transaction)
       } catch (error) {
         if (error instanceof DataAccessError && ['NO_SEARCH_MATCH', 'NO_CHANGE'].includes(error.code)) {
           const detail = error.code === 'NO_CHANGE' ? '替换前后相同，无需扫描。' : '已按指定字段、排除章节及引文保护条件核对。'
@@ -162,6 +163,7 @@ function definePreviewTool(name: 'bulk_replace_preview' | 'entity_rename_preview
         output: `已生成 ChangeSet ${changeSet.id}：${changeSet.patches.length} 个字段补丁，尚未写入正文。请检查预览与警告；确认后调用 changeset_apply(changeSetId=${changeSet.id})。`,
         summary: `生成变更预览 · ${changeSet.patches.length} 项`,
         display: changeSetDisplay(changeSet),
+        ...(ctx.transaction ? { observedState: { kind: 'changeset' as const, id: changeSet.id, hash: changeSetBaselineHash(changeSet) } } : {}),
       }
     },
   })
@@ -187,12 +189,13 @@ export const changeSetApplyTool = defineTool({
       if (novelId !== ctx.novelId) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '变更集不属于当前授权作品。')
       await assertAgentManuscriptCurrent(tx, ctx)
       for (const chapterId of ids) await assertWritingTarget(tx, ctx, { chapterId, effect: 'changeset' })
-    })
-    if (!changeSet) return { output: '变更集不存在或不属于当前作者。' }
+    }, ctx.transaction)
+    if (!changeSet) return { outcome: 'failed', output: '变更集不存在或不属于当前作者。' }
     return {
       output: `ChangeSet ${changeSet.id} 已原子应用，${changeSet.patches.filter((patch) => patch.selected).length} 个补丁全部通过版本与哈希校验。可用 changeset_rollback 整体回滚。`,
       summary: `已应用变更集 · ${changeSet.patches.filter((patch) => patch.selected).length} 项`,
       display: changeSetDisplay(changeSet),
+      ...(ctx.transaction ? { observedState: { kind: 'changeset' as const, id: changeSet.id, hash: changeSetBaselineHash(changeSet) } } : {}),
     }
   },
 })
@@ -211,12 +214,13 @@ export const changeSetRollbackTool = defineTool({
       if (novelId !== ctx.novelId) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '变更集不属于当前授权作品。')
       await assertAgentManuscriptCurrent(tx, ctx)
       for (const chapterId of ids) await assertWritingTarget(tx, ctx, { chapterId, effect: 'changeset' })
-    })
-    if (!changeSet) return { output: '变更集不存在或不属于当前作者。' }
+    }, ctx.transaction)
+    if (!changeSet) return { outcome: 'failed', output: '变更集不存在或不属于当前作者。' }
     return {
       output: `ChangeSet ${changeSet.id} 已整体回滚，所有目标章节恢复到应用前内容。`,
       summary: '已整体回滚变更集',
       display: changeSetDisplay(changeSet),
+      ...(ctx.transaction ? { observedState: { kind: 'changeset' as const, id: changeSet.id, hash: changeSetBaselineHash(changeSet) } } : {}),
     }
   },
 })

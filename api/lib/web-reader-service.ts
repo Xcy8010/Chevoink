@@ -14,6 +14,8 @@ export type WebReadResult = Omit<ReaderQualityResult, 'status'> & {
   provider: 'direct' | 'jina' | 'firecrawl' | 'deepseek'
   retryable: boolean
   retryAfter?: string | null
+  /** An observed response status distinguishes refusal from transport unknown. */
+  httpStatus?: number
   contentKind: 'article' | 'metadata'
   purpose?: 'navigation'
   canonicalUrl?: string
@@ -62,8 +64,9 @@ function networkFailure(error: unknown, finalUrl: string): WebReadResult {
   if (error instanceof PublicHttpError) {
     if (error.status === 404 || error.status === 410) return failure('WEB_READ_NOT_FOUND', finalUrl, 'not_found')
     if (error.status === 401 || error.status === 403 || error.status === 451) return failure('WEB_READ_BLOCKED', finalUrl, 'blocked')
-    if (error.status === 429) return { ...failure('WEB_READ_RATE_LIMITED', finalUrl), status: 'transient_error', retryable: true, retryAfter: error.retryAfter }
+    if (error.status === 429) return { ...failure('WEB_READ_RATE_LIMITED', finalUrl), status: 'transient_error', retryable: true, retryAfter: error.retryAfter, httpStatus: error.status }
     if (error.status && error.status < 500) return failure('WEB_READ_HTTP_ERROR', finalUrl)
+    if (error.status && error.status >= 500) return { ...failure('WEB_READ_UNAVAILABLE', finalUrl), status: 'transient_error', retryable: true, httpStatus: error.status }
   }
   return { ...failure('WEB_READ_UNAVAILABLE', finalUrl), status: 'transient_error', retryable: true }
 }
@@ -91,7 +94,7 @@ function hostedTargetFailure(status: number): ReaderQualityResult | null {
 }
 
 /** Provider endpoints are fixed, never taken from the model. No provider redirects. */
-async function readHosted(url: URL, provider: 'jina' | 'firecrawl', external: AbortSignal): Promise<ReaderQualityResult & { retryAfter?: string | null }> {
+async function readHosted(url: URL, provider: 'jina' | 'firecrawl', external: AbortSignal): Promise<ReaderQualityResult & { retryAfter?: string | null; httpStatus?: number }> {
   external.throwIfAborted()
   // Provider-side resolution cannot be pinned by this client. Reject unsafe targets
   // locally as well; the configured vendor remains responsible for its own egress.
@@ -112,8 +115,8 @@ async function readHosted(url: URL, provider: 'jina' | 'firecrawl', external: Ab
       method: provider === 'jina' ? 'GET' : 'POST',
       body: provider === 'firecrawl' ? JSON.stringify({ url: url.href, formats: ['markdown'] }) : undefined,
     })
-    if (response.status === 429) return { ...assessReaderText(''), code: 'WEB_READ_RATE_LIMITED', retryAfter: response.headers.get('retry-after') }
-    if (!response.ok) throw new Error('HOSTED_READER_UNAVAILABLE')
+    if (response.status === 429) return { ...assessReaderText(''), code: 'WEB_READ_RATE_LIMITED', retryAfter: response.headers.get('retry-after'), httpStatus: response.status }
+    if (!response.ok) return { ...assessReaderText(''), code: 'WEB_READ_HOSTED_UNAVAILABLE', httpStatus: response.status }
     const raw = (await readBoundedPublicBody(response, WEB_READER_MAX_BYTES)).toString('utf8')
     let text = raw, title = ''
     if (provider === 'firecrawl') {
@@ -208,7 +211,7 @@ async function readDeepSeek(value: string, configured: ToolModelRuntime, externa
         if ([400, 401, 402].includes(response.status)) return fail(`WEB_READ_PROVIDER_${response.status}`)
         const retryable = [408, 429].includes(response.status) || response.status >= 500
         return { ...fail(response.status === 429 ? 'WEB_READ_RATE_LIMITED' : 'WEB_READ_HOSTED_UNAVAILABLE', retryable,
-          retryable ? 'transient_error' : 'unreadable'), retryAfter: response.headers.get('retry-after') }
+          retryable ? 'transient_error' : 'unreadable'), retryAfter: response.headers.get('retry-after'), httpStatus: response.status }
       }
       const payload: unknown = JSON.parse((await readBoundedPublicBody(response, WEB_READER_MAX_BYTES)).toString('utf8'))
       if (!payload || typeof payload !== 'object' || !('title' in payload) || typeof payload.title !== 'string' ||
@@ -290,7 +293,7 @@ export async function readPublicWebPage(value: string, signal: AbortSignal, conf
       const hosted = await readHosted(target, mode, signal)
       return { ...hosted, ...(hosted.code === 'WEB_READ_RATE_LIMITED' ? { status: 'transient_error' as const } : {}),
         evidence: assessReaderEvidence(hosted.text, hosted.title, expectedTarget, raw, finalUrl),
-        provider: mode, finalUrl, retryable: hosted.code === 'WEB_READ_RATE_LIMITED', contentKind: bookMetadata ? 'metadata' : 'article',
+        provider: mode, finalUrl, retryable: hosted.code === 'WEB_READ_RATE_LIMITED' || (hosted.httpStatus ?? 0) >= 500, contentKind: bookMetadata ? 'metadata' : 'article',
         ...(hosted.status === 'ok' ? { links: extractReaderLinks(raw, finalUrl) } : {}) }
     } catch (error) {
       signal.throwIfAborted()

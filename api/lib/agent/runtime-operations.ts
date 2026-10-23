@@ -99,7 +99,7 @@ export async function commitOperationEffect(token: RunLeaseToken, operationId: s
   // the operation snapshot, current tool policy, owner, and lease.
   const operation = await prisma.agentOperation.findFirst({ where: { id: operationId, taskRootId: token.taskRootId }, select: { action: true } })
   const manuscript = operation && [...STRUCTURE_MUTATIONS, 'chapter_create', 'chapter_rename', 'chapter_write', 'chapter_append', 'chapter_edit_range',
-    'story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'chapter_bridge_commit', 'quality_analyze', 'continuity_validate', 'changeset_apply', 'changeset_rollback'].includes(operation.action)
+    'novel_create', 'novel_publish', 'novel_archive', 'creative_critique', 'creative_revision_draft', 'story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'chapter_bridge_commit', 'quality_analyze', 'continuity_validate', 'changeset_apply', 'changeset_rollback'].includes(operation.action)
   return (manuscript ? withManuscriptRunLease : withRunLease)(token, tx => commitOperationEffectInTransaction(tx, token, operationId, inputHash, work))
 }
 

@@ -58,24 +58,26 @@ const resultSchema = z.object({ toolResult: z.object({ output: z.string(),
     z.object({ kind: z.literal('plan'), id: z.string(), hash: z.string().regex(/^[a-f0-9]{64}$/) }),
     z.object({ kind: z.literal('novel'), id: z.string(), hash: z.string().regex(/^[a-f0-9]{64}$/) }),
     z.object({ kind: z.literal('charter'), id: z.string(), hash: z.string().regex(/^[a-f0-9]{64}$/) }),
+    z.object({ kind: z.literal('changeset'), id: z.string(), hash: z.string().regex(/^[a-f0-9]{64}$/) }),
   ]).optional(),
   display: z.union([
     z.object({ kind: z.literal('chapterDiff'), chapterId: z.string(), revision: z.number().int().positive() }).passthrough(),
     z.object({ kind: z.literal('chapterRef'), chapterId: z.string() }).passthrough(),
     z.object({ kind: z.literal('qualityReport'), chapterId: z.string() }).passthrough(),
     z.object({ kind: z.literal('storyCompiler') }).passthrough(),
+    z.object({ kind: z.literal('changeSet'), changeSetId: z.string() }).passthrough(),
     z.object({ kind: z.enum(['planFile', 'planDiff', 'planRename', 'planDelete']), artifactId: z.string() }).passthrough(),
   ]).optional(),
 }).passthrough() })
 
 /** Only observations already reduced into this cursor can authorize a baseline.
  * Never query today's content revision to silently upgrade an old write. */
-export async function readObservedBaseline(tx: RuntimeTx, rootId: string, revision: number, target: { kind: 'chapter' | 'plan' | 'structure' | 'memory' | 'novel' | 'charter'; id: string }) {
+export async function readObservedBaseline(tx: RuntimeTx, rootId: string, revision: number, target: { kind: 'chapter' | 'plan' | 'structure' | 'memory' | 'novel' | 'charter' | 'changeset'; id: string }) {
   let afterId: string | undefined
   let best: { revision: number; baseline: NonNullable<z.infer<typeof resultSchema>['toolResult']['observedState'] | z.infer<typeof resultSchema>['toolResult']['observedStructure']> | { kind: 'memory'; id: string; hash: string } } | undefined
   for (;;) {
     const operations = await tx.agentOperation.findMany({ where: { taskRootId: rootId, status: 'succeeded',
-      action: { in: target.kind === 'charter' ? ['story_charter_get', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'] : target.kind === 'novel' ? ['novel_get_context', 'novel_rename', 'novel_update_meta', 'cover_prompt_set'] : target.kind === 'memory' ? ['memory_search', 'memory_save', 'memory_event_save', 'memory_relation_save'] : target.kind === 'chapter' ? ['chapter_read', 'chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename', 'chapter_move', 'chapter_move_to_volume', 'chapter_merge', 'continuity_validate', 'quality_analyze']
+      action: { in: target.kind === 'changeset' ? ['bulk_replace_preview', 'entity_rename_preview', 'changeset_apply', 'changeset_rollback'] : target.kind === 'charter' ? ['story_charter_get', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'] : target.kind === 'novel' ? ['novel_get_context', 'novel_rename', 'novel_update_meta', 'cover_prompt_set'] : target.kind === 'memory' ? ['memory_search', 'memory_save', 'memory_event_save', 'memory_relation_save'] : target.kind === 'chapter' ? ['chapter_read', 'chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename', 'chapter_move', 'chapter_move_to_volume', 'chapter_merge', 'continuity_validate', 'quality_analyze']
         : target.kind === 'structure' ? ['volume_list', 'structure_outline', 'volume_update', 'volume_move', 'volume_delete', 'chapter_move', 'chapter_move_to_volume', 'chapter_split', 'chapter_merge'] : ['plan_read', 'plan_save', 'plan_rename', 'plan_delete'] } },
       orderBy: { id: 'asc' }, take: 100, ...(afterId ? { cursor: { id: afterId }, skip: 1 } : {}), include: { effectReceipt: true } })
     for (const operation of operations) {

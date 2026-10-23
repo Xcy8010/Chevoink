@@ -8,11 +8,12 @@ import { withoutGoalEffects } from '../agent/goal-context.js'
 import type { ToolContext } from '../agent/tools/types.js'
 
 type Kind = 'search' | 'fetch'
-type Scope = Pick<ToolContext, 'userId' | 'novelId' | 'sessionId' | 'runId' | 'callId'>
+type Scope = Pick<ToolContext, 'userId' | 'novelId' | 'sessionId' | 'runId' | 'callId' | 'webAdmission'>
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const identity = (ctx: Scope, kind: Kind) => digest([ctx.userId, ctx.runId, ctx.callId, kind])
 const key = (ctx: Scope, kind: Kind) => `web-${kind}:${ctx.runId}:${ctx.callId}`
 const pending = () => new DataAccessError(409, 'CREDIT_WEB_TOOL_PENDING', '此联网调用已有未完成回执，未重复请求或扣费；需核对原调用结果。')
+const admitted = <T>(ctx: Scope, tx: Prisma.TransactionClient, work: () => Promise<T>) => ctx.webAdmission ? ctx.webAdmission(tx, work) : work()
 
 const jsonOutcome = (value: unknown): Prisma.InputJsonValue => {
   const serialized = JSON.stringify(value)
@@ -38,8 +39,8 @@ export async function saveWebToolCacheOutcome(ctx: Scope, kind: Kind, request: u
       if (existing.status !== 'completed') throw pending()
       return
     }
-    await tx.webToolCall.create({ data: { id, runId: ctx.runId, kind, requestHash: digest(request), amountMilli: 0,
-      multiplierBps: 0, status: 'completed', outcome: jsonOutcome(result) } })
+    await admitted(ctx, tx, () => tx.webToolCall.create({ data: { id, runId: ctx.runId, kind, requestHash: digest(request), amountMilli: 0,
+      multiplierBps: 0, status: 'completed', outcome: jsonOutcome(result) } }))
   })
 }
 
@@ -74,13 +75,15 @@ export async function refundCancelledWebToolCall(ctx: ToolContext, kind: Kind, r
 
 /** One durable dispatch permit and one frozen debit. Unknown dispatches are never resent. */
 export async function executeWebToolCall<T>(ctx: ToolContext, kind: Kind, request: unknown, paidProvider: boolean,
-  dispatch: () => Promise<T>, classify: (result: T) => 'billable' | 'empty' | 'fallback' | 'failed'): Promise<T> {
+  dispatch: () => Promise<T>, classify: (result: T) => 'billable' | 'empty' | 'fallback' | 'failed' | 'unknown',
+  reserve?: (tx: Prisma.TransactionClient) => Promise<void>, knownRejection?: (error: unknown) => boolean): Promise<T> {
   ctx.signal.throwIfAborted()
   const id = identity(ctx, kind)
-  await creditTransaction(async tx => {
+  await creditTransaction(tx => admitted(ctx, tx, async () => {
     const run = await ownedRun(tx, ctx)
-    if (run.status !== 'running') throw new DataAccessError(409, 'CREDIT_WEB_TOOL_INACTIVE', '任务已停止，未发起收费联网请求。')
+    if (run.status !== 'running' && !ctx.webAdmission) throw new DataAccessError(409, 'CREDIT_WEB_TOOL_INACTIVE', '任务已停止，未发起收费联网请求。')
     if (await tx.webToolCall.findUnique({ where: { id } })) throw pending()
+    await reserve?.(tx)
     const config = await tx.aiModelConfig.findFirst({ where: { key: `tool:web-${kind === 'search' ? 'search' : 'fetch'}`, ownerUserId: null },
       select: { multiplierBps: true } })
     const multiplierBps = config?.multiplierBps ?? 10000
@@ -91,7 +94,7 @@ export async function executeWebToolCall<T>(ctx: ToolContext, kind: Kind, reques
       idempotencyKey: key(ctx, kind), referenceId: ctx.runId, multiplierBps,
       metadata: { webToolCallId: id, requestHash: digest(request), baseMilli: 2000 } })
     await tx.webToolCall.create({ data: { id, runId: ctx.runId, requestHash: digest(request), kind, amountMilli, multiplierBps } })
-  }).catch(error => {
+  })).catch(error => {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw pending()
     throw error
   })
@@ -109,16 +112,35 @@ export async function executeWebToolCall<T>(ctx: ToolContext, kind: Kind, reques
     })).catch(() => { throw pending() })
     if (outcome !== 'billable') await withoutGoalEffects(() => reconcileCreditRefunds({ userId: ctx.userId, limit: 10 })).catch(() => undefined)
   }
+  const preserveUnknown = async (result: T | null) => {
+    // A user refund is not evidence that the supplier did not process a request.
+    // Keep the original dispatch pending; a new worker must reconcile it.
+    await withoutGoalEffects(() => creditTransaction(async tx => {
+      await ownedRun(tx, ctx)
+      const receipt = await tx.webToolCall.findUniqueOrThrow({ where: { id } })
+      if (receipt.status !== 'dispatched' || receipt.requestHash !== digest(request)) throw pending()
+      if (result !== null) await tx.webToolCall.update({ where: { id }, data: { outcome: jsonOutcome(result) } })
+      const debit = await tx.creditLedgerEntry.findUniqueOrThrow({ where: { idempotencyKey: key(ctx, kind) } })
+      if (debit.deltaMilli < 0) await tx.creditRefundIntent.upsert({ where: { originalEntryId: debit.id }, update: {},
+        create: { originalEntryId: debit.id, reason: 'web_tool_no_billable_result', evidence: { callId: id, outcome: 'unknown' } } })
+    })).catch(() => { throw pending() })
+    await withoutGoalEffects(() => reconcileCreditRefunds({ userId: ctx.userId, limit: 10 })).catch(() => undefined)
+  }
   let result: T
+  let enteredDispatch = false
   try {
     ctx.signal.throwIfAborted()
+    enteredDispatch = true
     result = await dispatch()
   } catch (error) {
+    if (ctx.webAdmission && enteredDispatch && !knownRejection?.(error)) { await preserveUnknown(null); throw pending() }
     await finish(null, ctx.signal.aborted ? 'aborted' : 'failed')
     throw error
   }
+  const classified = classify(result)
+  if (classified === 'unknown') { await preserveUnknown(result); throw pending() }
   // A cancelled delivery is free even if the supplier returned a result.
-  await finish(result, ctx.signal.aborted ? 'aborted' : classify(result))
+  await finish(result, ctx.signal.aborted ? 'aborted' : classified)
   // Cancellation can arrive while the completion transaction is committing.
   // Keep its already-saved result, but do not retain the cancelled user's fee.
   if (ctx.signal.aborted) await refundCancelledWebToolCall(ctx, kind, request)

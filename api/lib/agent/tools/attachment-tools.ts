@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 
 import { z } from 'zod'
 
@@ -208,15 +209,18 @@ export const readFileTool = defineTool({
   permission: READ_PERMISSION,
   readOnly: true,
   async execute(ctx, args) {
+    ctx.signal.throwIfAborted()
     const diskPath = resolveManagedAttachmentPath(args.url)
 
     if (!diskPath) {
       return {
+        outcome: 'failed',
         output: `read_file 被拒绝：${args.url} 不是本会话上传的附件地址。请使用作者附件元数据中的 url。`,
       }
     }
 
     const buffer = await readAuthorizedAgentAttachment(args.url, ctx.userId)
+    ctx.signal.throwIfAborted()
 
     if (['.zip', '.doc'].includes(path.extname(diskPath).toLowerCase())) {
       return { outcome: 'failed', summary: '需使用作品导入', output: 'ZIP/DOC 仅作为导入原件保存，请使用 novel_import prepare，或打开作品导入面板核验。此工具未解压、未转换、未导入；DOC 转换器未开放时请另存为 DOCX。' }
@@ -224,6 +228,7 @@ export const readFileTool = defineTool({
 
     try {
       const result = await extractFileText(buffer, path.basename(diskPath), args.offset ?? 0)
+      ctx.signal.throwIfAborted()
 
       if (result.totalChars === 0) {
         return {
@@ -233,19 +238,22 @@ export const readFileTool = defineTool({
         }
       }
 
-      const offset = args.offset ?? 0
-      const tailNote = result.truncated
-        ? `（已截断：本次返回第 ${offset}-${offset + result.text.length} 字符，全文共 ${result.totalChars} 字符；需要后续内容请再次调用 read_file 并传 offset=${offset + result.text.length}）`
+      const offset = Math.min(args.offset ?? 0, result.totalChars)
+      const tailNote = result.truncated || offset > 0
+        ? `（本次返回第 ${offset}-${offset + result.text.length} 字符，全文共 ${result.totalChars} 字符；${result.truncated ? `需要后续内容请再次调用 read_file 并传 offset=${offset + result.text.length}` : '已到文件末尾，本次仅返回该范围'}）`
         : `（全文共 ${result.totalChars} 字符，已完整返回）`
 
       return {
         output: `文件内容提取结果${tailNote}：\n"""\n${result.text}\n"""`,
         summary: `读取文件 · ${result.text.length} 字`,
         display: { kind: 'markdown', markdown: clip(result.text, 2000) },
+        observedAttachment: { url: args.url, contentHash: createHash('sha256').update(buffer).digest('hex'),
+          offset, end: offset + result.text.length, totalChars: result.totalChars },
       }
     } catch (error) {
+      ctx.signal.throwIfAborted()
       const message = error instanceof Error ? error.message : String(error)
-      return { output: `read_file 失败：${message}` }
+      return { outcome: 'failed', output: `read_file 失败：${message}` }
     }
   },
 })

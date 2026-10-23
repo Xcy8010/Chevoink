@@ -10,7 +10,7 @@ import type { AgentTool, ToolContext, ToolResult } from './types.js'
 import { getStoryCharterBundle } from '../story-compiler.js'
 import { applyCoverSelection, prepareCoverSelection } from './cover-application.js'
 
-export const METADATA_ACTIONS = ['cover_apply', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'] as const
+export const METADATA_ACTIONS = ['novel_create', 'novel_publish', 'novel_archive', 'cover_apply', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'] as const
 export const storyCharterHash = (value: unknown) => runtimeJson(JSON.parse(JSON.stringify(value))).hash
 export const novelMetadataHash = (value: { title: string; displayTitle: string | null; summary: string; tagNames: string[]; coverPrompt: string | null }) =>
   runtimeJson({ title: value.title, displayTitle: value.displayTitle, summary: value.summary, tagNames: value.tagNames, coverPrompt: value.coverPrompt }).hash
@@ -33,8 +33,9 @@ export async function executeDurableMetadata(ctx: ToolContext, tool: AgentTool, 
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '作品设置不属于原任务。')
     if (cover) return runtimeJson({ toolResult: await applyCoverSelection(ctx, cover, tx) }).value
-    if (tool.name === 'session_rename') {
+    if (['session_rename', 'novel_create', 'novel_publish', 'novel_archive'].includes(tool.name)) {
       const result = await tool.execute({ ...ctx, durableMetadata: undefined, transaction: tx }, effective)
+      if (result.outcome === 'failed') return runtimeError('METADATA_WRITE_REJECTED', result.output)
       ctx.signal.throwIfAborted()
       return runtimeJson({ toolResult: result }).value
     }

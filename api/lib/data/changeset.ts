@@ -44,6 +44,13 @@ function readRebaseOperation(validations: Prisma.JsonValue): BulkReplaceRebaseOp
 function hashValue(value: string | null): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
+export { hashValue as changeSetFieldHash }
+
+export function changeSetBaselineHash(value: ChangeSet): string {
+  return createHash('sha256').update(JSON.stringify({ id: value.id, novelId: value.novelId, taskSpecId: value.taskSpecId,
+    status: value.status, baseRevision: value.baseRevision, patches: [...value.patches].sort((a, b) => a.id.localeCompare(b.id)),
+    validations: value.validations, snapshotId: value.snapshotId ?? null })).digest('hex')
+}
 
 function toChangeSet(record: ChangeSetRecord): ChangeSet {
   const validations = Array.isArray(record.validations)
@@ -263,12 +270,14 @@ export async function previewBulkReplaceData(
   userId: string,
   novelId: string,
   input: BulkReplacePreviewRequest,
+  transaction?: Prisma.TransactionClient,
 ): Promise<ChangeSet> {
-  await ensureNovelOwner(userId, novelId)
+  const db = transaction ?? prisma
+  await ensureNovelOwner(userId, novelId, db)
   if (input.query === input.replacement) {
     throw new DataAccessError(400, 'NO_CHANGE', '替换前后的文本相同，无需创建变更集。')
   }
-  const chapters = await prisma.chapter.findMany({
+  const chapters = await db.chapter.findMany({
     where: {
       ...activeChapterScope(novelId),
       id: input.excludeChapterIds.length ? { notIn: input.excludeChapterIds } : undefined,
@@ -348,7 +357,7 @@ export async function previewBulkReplaceData(
     },
   ]
   const baseRevision = chapters.reduce((maximum, chapter) => Math.max(maximum, chapter.revision), 0)
-  const record = await prisma.changeSet.create({
+  const record = await db.changeSet.create({
     data: {
       novelId,
       userId,
@@ -362,8 +371,8 @@ export async function previewBulkReplaceData(
   return toChangeSet(record)
 }
 
-async function loadOwnedChangeSet(userId: string, changeSetId: string): Promise<ChangeSetRecord | null> {
-  return prisma.changeSet.findFirst({
+async function loadOwnedChangeSet(userId: string, changeSetId: string, transaction?: Prisma.TransactionClient): Promise<ChangeSetRecord | null> {
+  return (transaction ?? prisma).changeSet.findFirst({
     where: { id: changeSetId, userId },
     include: { patches: { orderBy: { createdAt: 'asc' } } },
   })
@@ -385,8 +394,9 @@ export async function applyChangeSetData(
   changeSetId: string,
   input: ApplyChangeSetRequest,
   assertTargets?: (tx: Prisma.TransactionClient, novelId: string, chapterIds: string[]) => Promise<void>,
+  transaction?: Prisma.TransactionClient,
 ): Promise<ChangeSet | null> {
-  const existing = await loadOwnedChangeSet(userId, changeSetId)
+  const existing = await loadOwnedChangeSet(userId, changeSetId, transaction)
   if (!existing) return null
   if (existing.status === 'applied') return toChangeSet(existing)
   assertChangeSetManuscriptCurrent(existing.validations)
@@ -400,7 +410,7 @@ export async function applyChangeSetData(
   let rebasedPatchCount = 0
 
   try {
-    await prisma.$transaction(async (tx) => {
+    const apply = async (tx: Prisma.TransactionClient) => {
       await lockNovelActiveScope(tx, existing.novelId)
       await assertTargets?.(tx, existing.novelId, [...new Set(selected.map(patch => patch.targetId))])
       // Re-read under the import lock: an outside-lock preview may have raced
@@ -501,9 +511,11 @@ export async function applyChangeSetData(
         where: { id: changeSetId },
         data: { status: 'applied', snapshotId: changeSetId, validations },
       })
-    })
+    }
+    if (transaction) await apply(transaction)
+    else await prisma.$transaction(apply)
   } catch (error) {
-    if (error instanceof DataAccessError && error.status === 409 && !['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE'].includes(error.code)) {
+    if (!transaction && error instanceof DataAccessError && error.status === 409 && !['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE'].includes(error.code)) {
       await prisma.changeSet.update({
         where: { id: changeSetId },
         data: {
@@ -515,12 +527,12 @@ export async function applyChangeSetData(
     throw error
   }
 
-  return toChangeSet((await loadOwnedChangeSet(userId, changeSetId))!)
+  return toChangeSet((await loadOwnedChangeSet(userId, changeSetId, transaction))!)
 }
 
 export async function rollbackChangeSetData(userId: string, changeSetId: string,
-  assertTargets?: (tx: Prisma.TransactionClient, novelId: string, chapterIds: string[]) => Promise<void>): Promise<ChangeSet | null> {
-  const existing = await loadOwnedChangeSet(userId, changeSetId)
+  assertTargets?: (tx: Prisma.TransactionClient, novelId: string, chapterIds: string[]) => Promise<void>, transaction?: Prisma.TransactionClient): Promise<ChangeSet | null> {
+  const existing = await loadOwnedChangeSet(userId, changeSetId, transaction)
   if (!existing) return null
   if (existing.status === 'rolled_back') return toChangeSet(existing)
   if (existing.status !== 'applied') {
@@ -529,7 +541,7 @@ export async function rollbackChangeSetData(userId: string, changeSetId: string,
   const selected = existing.patches.filter((patch) => patch.selected && patch.appliedRevision !== null)
 
   try {
-    await prisma.$transaction(async (tx) => {
+    const rollback = async (tx: Prisma.TransactionClient) => {
       await lockNovelActiveScope(tx, existing.novelId)
       await assertTargets?.(tx, existing.novelId, [...new Set(selected.map(patch => patch.targetId))])
       const byChapter = new Map<string, PrismaChangeSetPatch[]>()
@@ -569,9 +581,11 @@ export async function rollbackChangeSetData(userId: string, changeSetId: string,
           validations: [{ code: 'ROLLBACK_COMPLETE', status: 'passed', message: `已整体回滚 ${selected.length} 个补丁。`, targetIds: [...byChapter.keys()] }],
         },
       })
-    })
+    }
+    if (transaction) await rollback(transaction)
+    else await prisma.$transaction(rollback)
   } catch (error) {
-    if (error instanceof DataAccessError && error.status === 409 && !['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE'].includes(error.code)) {
+    if (!transaction && error instanceof DataAccessError && error.status === 409 && !['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE'].includes(error.code)) {
       await prisma.changeSet.update({
         where: { id: changeSetId },
         data: { validations: [{ code: error.code, status: 'failed', message: error.message, targetIds: [] }] },
@@ -579,11 +593,11 @@ export async function rollbackChangeSetData(userId: string, changeSetId: string,
     }
     throw error
   }
-  return toChangeSet((await loadOwnedChangeSet(userId, changeSetId))!)
+  return toChangeSet((await loadOwnedChangeSet(userId, changeSetId, transaction))!)
 }
 
-export async function getChangeSetData(userId: string, changeSetId: string): Promise<ChangeSet | null> {
-  const record = await loadOwnedChangeSet(userId, changeSetId)
+export async function getChangeSetData(userId: string, changeSetId: string, transaction?: Prisma.TransactionClient): Promise<ChangeSet | null> {
+  const record = await loadOwnedChangeSet(userId, changeSetId, transaction)
   return record ? toChangeSet(record) : null
 }
 

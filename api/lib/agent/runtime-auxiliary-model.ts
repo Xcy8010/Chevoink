@@ -22,6 +22,8 @@ import { terminalCandidateSchema } from './terminal-state-review.js'
 import { terminalEvidenceContextSchema } from './terminal-evidence-context.js'
 
 const steps = {
+  creative_critique: { parent: 'creative_critique', previous: null },
+  creative_revision: { parent: 'creative_revision_draft', previous: null },
   continuity_critic: { parent: 'continuity_validate', previous: null },
   continuity_evidence_correction: { parent: 'continuity_validate', previous: 'continuity_critic' },
   continuity_reassessment: { parent: 'continuity_validate', previous: 'continuity_critic' },
@@ -34,7 +36,7 @@ const steps = {
   quality_repair_retry: { parent: 'quality_analyze', previous: 'quality_repair' },
 } as const
 export type AuxiliaryModelStep = keyof typeof steps
-const stepSchema = z.enum(['continuity_critic', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
+const stepSchema = z.enum(['creative_critique', 'creative_revision', 'continuity_critic', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
 const parentInput = z.object({ input: z.object({ callId: z.string(), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema }) })
 const isolatedRequest = z.object({ body: z.object({
   messages: z.array(z.object({ role: z.enum(['system', 'user']), content: z.string() })).min(1),
@@ -103,9 +105,20 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
       || !call || call.name !== parent.action || call.incomplete || call.arguments !== original.normalization.rawArguments
       || runtimeJson(original.args).hash !== original.normalization.normalizedArgsHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立模型缺少原工具调用关联。')
     const grant = state.configuration.toolAuthority.find(item => item.name === parent.action)
-    if (state.configuration.mode !== 'build' || !grant || grant.permission === 'deny'
+    const modeAllowed = parent.action === 'creative_critique' ? ['build', 'review'].includes(state.configuration.mode) : state.configuration.mode === 'build'
+    if (!modeAllowed || !grant || grant.permission === 'deny'
       || !state.configuration.tools.some(tool => tool.function.name === parent.action)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务不允许独立检查或修订。')
     if (grant.permission === 'ask' || grant.alwaysConfirm) await assertToolApproval(tx, lease, source.snapshotHash, original.callId, parent.action, call.arguments, original.normalization.normalizedArgsHash)
+    if (captured.step === 'creative_critique' || captured.step === 'creative_revision') {
+      const { creativeReviewWorkSchema } = await import('./tools/creative-review.js')
+      const frozen = z.object({ input: z.object({ work: z.object({ kind: z.literal('creative'), version: z.literal(1), review: creativeReviewWorkSchema, price: z.unknown() }) }) }).safeParse(parent.inputSnapshot)
+      const request = isolatedRequest.parse(captured.request)
+      if (!frozen.success || frozen.data.input.work.review.phase !== (captured.step === 'creative_critique' ? 'critique' : 'revision')
+        || runtimeJson(frozen.data.input.work.price).hash !== runtimeJson(captured.price).hash
+        || runtimeJson(request.body.messages).hash !== runtimeJson([{ role: 'system', content: frozen.data.input.work.review.system }, { role: 'user', content: frozen.data.input.work.review.content }]).hash) {
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '创作辅助请求必须使用原操作冻结的正文、技能和价目，不能借用其他上下文。')
+      }
+    }
     let frozenFormatClaim = false
     if (captured.step === 'quality_format_recovery') {
       const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13)]), parserVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),

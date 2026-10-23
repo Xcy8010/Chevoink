@@ -21,9 +21,9 @@ export const argumentNormalizationSchema = z.object({ version: z.literal(1), raw
 /** Read saved work after real tool admission. This grants no new effect or
  * provider authority and never projects a tool message; those boundaries retain
  * their original policy, lease, approval and receipt checks. */
-export async function readAdmittedToolOperation(token: RunLeaseToken, input: { operationId: string; action: string; novelId: string; callId: string }) {
+export async function readAdmittedToolOperation(token: RunLeaseToken, input: { operationId: string; action: string; novelId: string; callId: string }, transaction?: Prisma.TransactionClient) {
   token = { ...token }; input = { ...input }
-  return withRunLease(token, async tx => {
+  const work = async (tx: Prisma.TransactionClient) => {
     const operation = await tx.agentOperation.findFirst({ where: { id: input.operationId, taskRootId: token.taskRootId, kind: 'tool', action: input.action } })
     if (!operation || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '复核工作缺少原工具操作或冻结输入损坏。')
     const saved = z.object({ kind: z.literal('tool'), action: z.literal(input.action), input: z.object({ novelId: z.literal(input.novelId),
@@ -43,7 +43,8 @@ export async function readAdmittedToolOperation(token: RunLeaseToken, input: { o
       if (current.frame.revision !== source.revision + 1 || current.frame.state.phase !== 'awaiting_operation' || current.frame.state.pendingOperationId !== operation.id) return runtimeError('RUNTIME_STATE_CONFLICT', '原工具工作不是当前待执行操作。')
     }
     return { operation, input: saved.data.input }
-  })
+  }
+  return transaction ? (await import('./runtime-lease.js')).withRunLeaseInTransaction(transaction, token, work) : withRunLease(token, work)
 }
 
 export const toolRejectionSchema = z.object({ version: z.literal(1), rawArguments: z.string(), incomplete: z.boolean(),
@@ -164,7 +165,7 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
 export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: ToolExecutionCursor, input: {
   key: string; action: string; callId: string; targetId: string; operationInput: Prisma.InputJsonValue; effectiveArgs: unknown;
   requireApproval?: boolean;
-  effectDomain?: 'chapter' | 'plan' | 'read' | 'structure' | 'task' | 'compiler' | 'memory' | 'metadata' | 'import' | 'configuration';
+  effectDomain?: 'chapter' | 'plan' | 'read' | 'structure' | 'task' | 'compiler' | 'memory' | 'metadata' | 'import' | 'configuration' | 'changeset';
   normalize: (parsed: unknown) => unknown
 }, transaction?: import('./runtime-common.js').RuntimeTx) {
   token = { ...token }; cursor = { ...cursor }
@@ -183,16 +184,19 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     if (configuration && (!['agent_configure', 'model_assign'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '配置能力只能更新当前任务的执行选项。')
     const read = input.effectDomain === 'read' || configuration
     const metadata = input.effectDomain === 'metadata'
-    if (metadata && (!['cover_apply', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品设置能力不能用于其他动作。')
+    if (metadata && (!['novel_create', 'novel_publish', 'novel_archive', 'cover_apply', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品设置能力不能用于其他动作。')
     const memory = input.effectDomain === 'memory'
     if (memory && (!['memory_save', 'memory_event_save', 'memory_relation_save'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '记忆能力仅允许原任务保存记忆。')
     const task = input.effectDomain === 'task' && ['todo_write', ...TASK_ARTIFACT_ACTIONS].includes(input.action) && input.targetId === token.taskRootId
     if (input.effectDomain === 'task' && !task) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '任务状态能力仅允许更新原任务待办。')
     const structure = input.effectDomain === 'structure'
+    const changeset = input.effectDomain === 'changeset'
+    if (changeset && (!['changeset_apply', 'changeset_rollback'].includes(input.action)
+      || input.targetId !== taskSpecSchema.parse(current.originalSpec).scope.novelId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '变更集能力仅允许当前作品的已确认操作。')
     const compiler = input.effectDomain === 'compiler'
     if (compiler && (!['story_compiler_prepare', 'scene_task_build', 'continuity_validate', 'chapter_bridge_commit', 'quality_analyze'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '编译能力只允许本任务的准备、场景构建、连续性/质量检查与终态提交。')
     if ((!read && !task && !memory && input.action !== 'session_rename' && (plan || (metadata && ['story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action)) ? !['plan', 'build'].includes(current.configuration.mode) : current.configuration.mode !== 'build')) || !grant || grant.permission === 'deny'
-      || (!plan && !read && !structure && !task && !compiler && !memory && !metadata && current.configuration.protectedChapterIds.includes(input.targetId))) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原冻结授权不允许此次工具效果。')
+      || (!plan && !read && !structure && !task && !compiler && !memory && !metadata && !changeset && current.configuration.protectedChapterIds.includes(input.targetId))) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原冻结授权不允许此次工具效果。')
     let index = frame.state.messages.length - 1
     while (index >= 0 && frame.state.messages[index].role === 'tool') index--
     const assistant = frame.state.messages[index]

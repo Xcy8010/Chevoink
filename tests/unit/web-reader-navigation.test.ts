@@ -26,6 +26,18 @@ beforeEach(() => { Object.values(mocks).forEach(mock => mock.mockReset()); mocks
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('public metadata navigation without provider dispatch', () => {
+  it.each([429, 503])('retains an observed HTTP %s refusal independently of transport uncertainty', async status => {
+    mocks.get.mockRejectedValueOnce(new PublicHttpError(`PUBLIC_HTTP_${status}`, status))
+    expect(await readPublicWebPage(url, new AbortController().signal, null)).toMatchObject({ status: 'transient_error', httpStatus: status, retryable: true })
+    expect(mocks.get).toHaveBeenCalledTimes(1)
+    expect(mocks.provider).not.toHaveBeenCalled(); expect(mocks.hosted).not.toHaveBeenCalled()
+  })
+  it('keeps a response-less connection failure distinct from an HTTP refusal', async () => {
+    mocks.get.mockRejectedValueOnce(new PublicHttpError('PUBLIC_FETCH_TIMEOUT'))
+    const result = await readPublicWebPage(url, new AbortController().signal, null)
+    expect(result).toMatchObject({ status: 'transient_error', code: 'WEB_READ_UNAVAILABLE' })
+    expect(result.httpStatus).toBeUndefined()
+  })
   it('uses one bounded ordinary GET and preserves genuinely short metadata as metadata only', async () => {
     const controller = new AbortController(), source = html()
     mocks.get.mockResolvedValueOnce(response(source))

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 
 import { prisma } from '../../prisma.js'
@@ -14,6 +15,8 @@ import { defineTool } from './types.js'
 
 const WRITE_PERMISSION = { plan: 'deny', build: 'allow', review: 'deny' } as const
 const DANGEROUS_PERMISSION = { plan: 'deny', build: 'ask', review: 'deny' } as const
+const lifecycleTransition = (novelId: string, before: string, after: string) => ({ targetId: `novel-status:${novelId}`,
+  beforeHash: createHash('sha256').update(before).digest('hex'), afterHash: createHash('sha256').update(after).digest('hex') })
 
 export async function recalcNovelStats(novelId: string, db: Prisma.TransactionClient = prisma) {
   return recalculateNovelStats(db, novelId)
@@ -31,11 +34,13 @@ export const novelCreateTool = defineTool({
   permission: WRITE_PERMISSION,
   readOnly: false,
   async execute(ctx, args) {
-    const novel = await prisma.novel.findFirst({
+    ctx.signal.throwIfAborted()
+    const db = ctx.transaction ?? prisma
+    const novel = await db.novel.findFirst({
       where: { id: ctx.novelId, authorId: ctx.userId },
       select: { title: true, displayTitle: true, summary: true, chapterCount: true, wordCount: true },
     })
-    if (!novel) return { output: '未找到当前作品。' }
+    if (!novel) return { outcome: 'failed', output: '未找到当前作品。' }
 
     const isBootstrap =
       !novel.displayTitle?.trim()
@@ -43,16 +48,20 @@ export const novelCreateTool = defineTool({
       && novel.summary === '先创建一部作品，再继续完善简介、章节和封面。'
       && novel.chapterCount === 0
       && novel.wordCount === 0
-    if (!isBootstrap) return { output: '当前已是正式作品，不能重复执行创建作品。如需调整，请使用重命名或更新作品设置。' }
+    if (!isBootstrap) return { outcome: 'failed', output: '当前已是正式作品，不能重复执行创建作品。如需调整，请使用重命名或更新作品设置。' }
+    if (ctx.transaction && await db.chapter.count({ where: { novelId: ctx.novelId } })) {
+      return { outcome: 'failed', output: '当前占位作品已有章节记录，不能覆盖为新作品。请先读取当前作品。' }
+    }
 
     const dedupedTags = [...new Set(args.tags.map((tag) => tag.trim()).filter(Boolean))]
     const rejectedTags = dedupedTags.filter((tag) => !ALL_NOVEL_TAGS.includes(tag))
     if (rejectedTags.length > 0) {
-      return { output: `作品未创建：标签「${rejectedTags.join('、')}」不在站内标签库中，请改用上下文给出的标签。` }
+      return { outcome: 'failed', output: `作品未创建：标签「${rejectedTags.join('、')}」不在站内标签库中，请改用上下文给出的标签。` }
     }
 
     const title = args.title.trim()
-    await prisma.novel.update({
+    ctx.signal.throwIfAborted()
+    await db.novel.update({
       where: { id: ctx.novelId },
       data: { title, displayTitle: title, summary: args.summary.trim(), tagNames: dedupedTags.slice(0, MAX_NOVEL_TAGS) },
     })
@@ -204,17 +213,20 @@ export const novelPublishTool = defineTool({
   permission: DANGEROUS_PERMISSION,
   readOnly: false,
   dangerous: true,
-  async execute(ctx) {
-    const novel = await prisma.novel.findFirst({
+  async execute(ctx, args) {
+    ctx.signal.throwIfAborted()
+    const db = ctx.transaction ?? prisma
+    const novel = await db.novel.findFirst({
       where: { id: ctx.novelId, authorId: ctx.userId },
-      select: { title: true, status: true },
+      select: { title: true, displayTitle: true, status: true },
     })
 
     if (!novel) {
-      return { output: '未找到当前作品。' }
+      return { outcome: 'failed', output: '未找到当前作品。' }
     }
-
-    await prisma.novel.update({
+    if (args.confirmTitle.trim() !== (novel.displayTitle?.trim() || novel.title)) return { outcome: 'failed', output: '确认书名与当前作品不一致，作品未发布。请核对当前标题后再确认。' }
+    ctx.signal.throwIfAborted()
+    await db.novel.update({
       where: { id: ctx.novelId },
       data: { status: 'published', publishedAt: new Date() },
     })
@@ -222,6 +234,7 @@ export const novelPublishTool = defineTool({
     return {
       output: `作品《${novel.title}》已发布。`,
       summary: `发布《${novel.title}》`,
+      semanticTransition: lifecycleTransition(ctx.novelId, novel.status, 'published'),
       snapshot: { target: 'novel', targetId: ctx.novelId, field: 'status', previousValue: novel.status },
     }
   },
@@ -237,21 +250,25 @@ export const novelArchiveTool = defineTool({
   permission: DANGEROUS_PERMISSION,
   readOnly: false,
   dangerous: true,
-  async execute(ctx) {
-    const novel = await prisma.novel.findFirst({
+  async execute(ctx, args) {
+    ctx.signal.throwIfAborted()
+    const db = ctx.transaction ?? prisma
+    const novel = await db.novel.findFirst({
       where: { id: ctx.novelId, authorId: ctx.userId },
-      select: { title: true, status: true },
+      select: { title: true, displayTitle: true, status: true },
     })
 
     if (!novel) {
-      return { output: '未找到当前作品。' }
+      return { outcome: 'failed', output: '未找到当前作品。' }
     }
-
-    await prisma.novel.update({ where: { id: ctx.novelId }, data: { status: 'archived' } })
+    if (args.confirmTitle.trim() !== (novel.displayTitle?.trim() || novel.title)) return { outcome: 'failed', output: '确认书名与当前作品不一致，作品未下架。请核对当前标题后再确认。' }
+    ctx.signal.throwIfAborted()
+    await db.novel.update({ where: { id: ctx.novelId }, data: { status: 'archived' } })
 
     return {
       output: `作品《${novel.title}》已下架。`,
       summary: `下架《${novel.title}》`,
+      semanticTransition: lifecycleTransition(ctx.novelId, novel.status, 'archived'),
       snapshot: { target: 'novel', targetId: ctx.novelId, field: 'status', previousValue: novel.status },
     }
   },

@@ -16,11 +16,15 @@ import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool, chapterCreat
 import { deferReviewWriteInTransaction } from './runtime-review-deferral.js'
 import { executeDurableChapterRename } from './tools/durable-chapter.js'
 import { planSaveTool, planRenameTool, planDeleteTool, memorySaveTool, planExitTool } from './tools/write-tools.js'
-import { researchReportReadTool, researchReportSaveTool } from './tools/search-tools.js'
+import { researchReportReadTool, researchReportSaveTool, webSearchTool, webReadTool, webReadNavigationTool } from './tools/search-tools.js'
+import { executeDurableWeb } from './tools/durable-web.js'
+import { readFileTool } from './tools/attachment-tools.js'
+import { executeDurableAttachmentRead } from './tools/durable-attachment.js'
+import { executeDurableCreative } from './tools/durable-creative.js'
 import { platformNovelReadTool, platformNovelSearchTool } from './tools/platform-tools.js'
 import { executeDurablePlanSave } from './tools/durable-plan.js'
 import { executeDurableMemorySave } from './runtime-memory.js'
-import { novelRenameTool, novelUpdateMetaTool, coverPromptSetTool } from './tools/novel-tools.js'
+import { novelCreateTool, novelPublishTool, novelArchiveTool, novelRenameTool, novelUpdateMetaTool, coverPromptSetTool } from './tools/novel-tools.js'
 import { METADATA_ACTIONS, executeDurableMetadata } from './tools/durable-metadata.js'
 import { settleProviderOperation } from './runtime-settlement.js'
 import { volumeListTool, volumeCreateTool, structureOutlineTool, volumeUpdateTool, volumeMoveTool, volumeDeleteTool, chapterMoveTool, chapterMoveToVolumeTool, chapterSplitTool, chapterMergeTool } from './tools/structure-tools.js'
@@ -40,7 +44,8 @@ import { qualityAnalyzeTool } from './tools/humanity-quality-tools.js'
 import { executeDurableQuality } from './tools/durable-quality.js'
 import { askUserTool } from './tools/interact-tools.js'
 import { executeDurableQuestion } from './runtime-question.js'
-import { projectSearchTool, entityResolveTool, impactAnalyzeTool, structureValidateTool } from './tools/changeset-tools.js'
+import { projectSearchTool, entityResolveTool, impactAnalyzeTool, structureValidateTool, bulkReplacePreviewTool, entityRenamePreviewTool, changeSetApplyTool, changeSetRollbackTool } from './tools/changeset-tools.js'
+import { CHANGESET_ACTIONS, executeDurableChangeSet } from './tools/durable-changeset.js'
 import { storyCharterGetTool, storyCharterSaveTool, readerPromiseSaveTool, readerPromiseUpdateTool } from './tools/story-compiler-tools.js'
 import { qualityReportGetTool, characterVoiceGetTool, experienceAnchorGetTool, qualityFindingFeedbackTool, characterVoiceSaveTool, experienceAnchorSaveTool } from './tools/humanity-quality-tools.js'
 import { memoryReviewListTool, memoryEventSaveTool, memoryRelationSaveTool } from './tools/memory-tools.js'
@@ -64,7 +69,7 @@ import { taskSpawnTool, taskWaitTool, taskSendTool } from './tools/task-orchestr
 import { CHILD_ACTIONS } from './runtime-child.js'
 import { executeDurableChildTool } from './runtime-child-tools.js'
 import { skillCatalogTool, skillLoadTool, skillRunExplainTool, skillSharedInvitesTool, skillCreateDraftTool, skillTestTool,
-  skillEnableTool, skillInstallSharedTool, skillRollbackTool, skillPublishTool } from './tools/skill-tools.js'
+  skillEnableTool, skillInstallSharedTool, skillRollbackTool, skillPublishTool, creativeCritiqueTool, creativeRevisionDraftTool } from './tools/skill-tools.js'
 
 const HISTORY_READ_ACTIONS = ['account_credits', 'account_credit_history', 'account_novels', 'task_context_list', 'task_context_read', 'session_history_search', 'session_message_read'] as const
 const DOMAIN_READ_ACTIONS = ['model_list', 'craft_search', 'style_leakage_check', 'research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get', 'research_report_read', 'plan_exit', 'platform_novel_search', 'platform_novel_read'] as const
@@ -73,6 +78,10 @@ function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
   return { ...tool, execute: (ctx, args) => tool.execute(ctx, tool.parameters.parse(args)) }
 }
 const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
+  checkedAdapter(webSearchTool), checkedAdapter(webReadTool),
+  checkedAdapter(readFileTool),
+  checkedAdapter(creativeCritiqueTool), checkedAdapter(creativeRevisionDraftTool),
+  checkedAdapter(bulkReplacePreviewTool), checkedAdapter(entityRenamePreviewTool), checkedAdapter(changeSetApplyTool), checkedAdapter(changeSetRollbackTool),
   checkedAdapter(skillCatalogTool), checkedAdapter(skillLoadTool), checkedAdapter(skillRunExplainTool), checkedAdapter(skillSharedInvitesTool),
   checkedAdapter(skillCreateDraftTool), checkedAdapter(skillTestTool), checkedAdapter(skillEnableTool), checkedAdapter(skillInstallSharedTool), checkedAdapter(skillRollbackTool), checkedAdapter(skillPublishTool),
   checkedAdapter(subAgentRunTool), checkedAdapter(subAgentDelegateTool), checkedAdapter(taskSpawnTool), checkedAdapter(taskWaitTool), checkedAdapter(taskSendTool),
@@ -99,6 +108,8 @@ const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(askUserTool),
   checkedAdapter(chapterRenameTool),
   checkedAdapter(novelRenameTool), checkedAdapter(novelUpdateMetaTool), checkedAdapter(coverPromptSetTool),
+  checkedAdapter(novelCreateTool),
+  checkedAdapter(novelPublishTool), checkedAdapter(novelArchiveTool),
   checkedAdapter(qualityAnalyzeTool),
   checkedAdapter(storyCompilerPrepareTool), checkedAdapter(sceneTaskBuildTool), checkedAdapter(chapterBridgeGetTool), checkedAdapter(continuityValidateTool), checkedAdapter(chapterBridgeCommitTool),
   checkedAdapter(todoWriteTool),
@@ -149,13 +160,17 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     const cursor = { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }
     const grant = current.configuration.toolAuthority.find(item => item.name === call.name)
     const definition = current.configuration.tools.find(item => item.function.name === call.name)
-    const tool = adapters.get(call.name)
+    let tool = adapters.get(call.name)
     const goalTool = call.name === 'goal_read' || call.name === 'goal_report'
     if (goalTool && !await readGoalExecution(lease.userId, lease.runId, tx)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '目标工具仅允许目标归属执行使用。')
     if (!grant || grant.permission === 'deny' || !definition || call.incomplete) return { reject: { cursor, callId: call.id } }
     if (!tool) return runtimeError('RUNTIME_TOOL_ADAPTER_REQUIRED', '此工具的持久适配尚未接入，不能执行旧效果路径。')
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
-    const originalScope = taskSpecSchema.parse(root.specSnapshot).scope
+    const originalSpec = taskSpecSchema.parse(root.specSnapshot)
+    const originalScope = originalSpec.scope
+    if (call.name === 'web_read' && originalSpec.researchNavigation?.version === 1 && originalSpec.intent === 'research_analysis') {
+      tool = checkedAdapter(webReadNavigationTool)
+    }
     const storedSchemaHash = runtimeJson(definition.function.parameters).hash
     // Old generic snapshots stay immutable. A new narrowed schema is valid
     // only when recomputed exactly from this root's original frozen contract.
@@ -180,6 +195,10 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     if (call.name === 'agent_configure' || call.name === 'model_assign') ctx.durableConfiguration = capability
     else if (CHILD_ACTIONS.some(action => action === call.name) || call.name === 'task_wait') { /* Trusted child adapter below; no legacy ToolContext capability. */ }
     else if (call.name === 'goal_enable') ctx.durableGoalActivation = capability
+    else if (call.name === 'web_search' || call.name === 'web_read') ctx.durableWeb = capability
+    else if (call.name === 'read_file') ctx.durableAttachment = capability
+    else if (call.name === 'creative_critique' || call.name === 'creative_revision_draft') ctx.durableCreative = capability
+    else if ((CHANGESET_ACTIONS as readonly string[]).includes(call.name)) ctx.durableChangeSet = capability
     else if (goalTool) ctx.durableRead = capability
     else if (['execution_context_read', 'chapter_read', 'plan_read', 'novel_get_context', 'chapter_list_summaries', 'memory_search', 'volume_list', 'structure_outline', ...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].includes(call.name)) ctx.durableRead = capability
     else if (call.name === 'ask_user') { /* Persistent question step below; no legacy waiter. */ }
@@ -257,6 +276,10 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     // Actual adapter checks the saved decision again at effect admission.
   }
   const historyAction = [...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].find(name => name === selected.tool.name)
+  if (selected.ctx.durableWeb) return { kind: 'tool' as const, result: await executeDurableWeb(selected.ctx, selected.tool, selected.args) }
+  if (selected.ctx.durableAttachment) return { kind: 'tool' as const, result: await executeDurableAttachmentRead(selected.ctx, selected.tool, selected.args) }
+  if (selected.ctx.durableCreative) return { kind: 'tool' as const, result: await executeDurableCreative(selected.ctx, selected.tool, selected.args) }
+  if (selected.ctx.durableChangeSet) return { kind: 'tool' as const, result: await executeDurableChangeSet(selected.ctx, selected.tool, selected.args) }
   if (CHILD_ACTIONS.some(action => action === selected.tool.name) || selected.tool.name === 'task_wait') return executeDurableChildTool(lease, selected.cursor, selected.ctx, selected.tool, selected.args)
   if (selected.tool.name === 'ask_user') return executeDurableQuestion(lease, selected.cursor, selected.ctx, selected.tool, selected.args)
   if (selected.tool.name === 'agent_configure' || selected.tool.name === 'model_assign') return { kind: 'tool' as const, result: await selected.tool.execute(selected.ctx, selected.args) }

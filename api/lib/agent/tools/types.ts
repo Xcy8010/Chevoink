@@ -43,11 +43,20 @@ export type ToolContext = {
   durablePlan?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor;
     expected: { id: string | null; hash: string | null } }
   durableRead?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
+  durableWeb?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
+  durableAttachment?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
+  durableCreative?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
+  /** Server closure for the original web operation. Runs inside the cache or
+   * dispatch transaction, never supplied by the model or inherited by a child. */
+  webAdmission?: <T>(tx: import('@prisma/client').Prisma.TransactionClient, work: () => Promise<T>) => Promise<T>
+  /** DB-only source/window projection; atomically saved with the parent receipt. */
+  webProjection?: (work: (ctx: ToolContext) => Promise<ToolResult>) => Promise<ToolResult>
   durableImport?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableTask?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableConfiguration?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableMemory?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableMetadata?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
+  durableChangeSet?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableCompiler?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor;
     baseline: { id: string; hash: string } | null }
   durableCreate?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
@@ -76,6 +85,7 @@ export type ToolContext = {
 }
 
 export type ToolResult = {
+  observedAttachment?: { url: string; contentHash: string; offset: number; end: number; totalChars: number }
   /** Original-root DB observation allowance; not model input or manuscript progress. */
   platformBudget?: { version: 1; requestHash: string; charged: boolean }
   /** Return-only server diagnostics; never canonical receipt data or authority. */
@@ -98,7 +108,7 @@ export type ToolResult = {
   /** Server-produced validation evidence; completion checks must match current stateHash. */
   validationEvidence?: { code: 'STRUCTURE_VALIDATED'; passed: boolean; novelId: string; stateHash: string; issues: string[] }
   /** Internal observed revision used by durable write admission; not model authority. */
-  observedState?: { kind: 'chapter'; id: string; revision: number } | { kind: 'plan'; id: string; hash: string } | { kind: 'volume'; id: string; revision: number } | { kind: 'novel'; id: string; hash: string } | { kind: 'charter'; id: string; hash: string }
+  observedState?: { kind: 'chapter'; id: string; revision: number } | { kind: 'plan'; id: string; hash: string } | { kind: 'volume'; id: string; revision: number } | { kind: 'novel'; id: string; hash: string } | { kind: 'charter'; id: string; hash: string } | { kind: 'changeset'; id: string; hash: string }
   /** Explicit observed failure; never infer success just because execute resolved. */
   /** A report was received and persisted even if its subsequent local repair failed. */
   reviewCompleted?: boolean

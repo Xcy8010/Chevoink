@@ -11,8 +11,16 @@ import { mergeResearchRanges } from './research-ranges.js'
 import { evaluateResearchNavigationCandidates, evaluateResearchSearchCandidates } from '../research-search-quality.js'
 import { runtimeJson } from './runtime-common.js'
 import { durableTaskSpecIdentity } from './runtime-identity.js'
+import type { ToolContext } from './tools/types.js'
 
-type Scope = { userId: string; sessionId: string; novelId: string; runId: string }
+type Scope = Pick<ToolContext, 'userId' | 'sessionId' | 'novelId' | 'runId' | 'transaction' | 'webAdmission'>
+
+/** A durable projection uses the same operation/lease boundary as its receipt.
+ * Legacy callers keep their existing transaction behavior. Never wraps HTTP. */
+function researchTransaction<T>(scope: Scope, work: (tx: Prisma.TransactionClient) => Promise<T>) {
+  const admitted = (tx: Prisma.TransactionClient) => scope.webAdmission ? scope.webAdmission(tx, () => work(tx)) : work(tx)
+  return scope.transaction ? admitted(scope.transaction) : prisma.$transaction(admitted)
+}
 
 const savedLinksSchema = z.array(z.object({ url: z.string().min(1).max(8192), title: z.string().min(1).max(160) }).strict()).max(4096)
 function checkedSavedLinks(value: unknown, finalUrl: string) {
@@ -232,10 +240,10 @@ async function ownedSource(tx: Prisma.TransactionClient, scope: Scope, sourceId:
 
 /** Durable task-scoped safety attempts. Saved content/cache hits never call this.
  * Historical calls seed a conservative baseline; a restart cannot reset it. */
-export async function reserveResearchRequest(scope: Scope & { callId: string }, kind: 'search' | 'read', requestKey: string, purpose?: 'navigation') {
-  return prisma.$transaction(async tx => {
+export async function reserveResearchRequest(scope: Scope & Pick<ToolContext, 'callId' | 'webAdmission'>, kind: 'search' | 'read', requestKey: string, purpose?: 'navigation', transaction?: Prisma.TransactionClient) {
+  const reserve = async (tx: Prisma.TransactionClient) => {
     const { taskKey, run } = await ownedTask(tx, scope)
-    if (run.status !== 'running') throw new DataAccessError(409, 'RESEARCH_RUN_NOT_ACTIVE', '任务已停止，未发起联网请求。')
+    if (run.status !== 'running' && !scope.webAdmission) throw new DataAccessError(409, 'RESEARCH_RUN_NOT_ACTIVE', '任务已停止，未发起联网请求。')
     const frozen = taskSpecSchema.safeParse(run.taskSpec)
     if (frozen.success && frozen.data.networkAccess === 'denied') {
       throw new DataAccessError(403, 'RESEARCH_NETWORK_DENIED', '原始请求明确禁止联网，本次未预约、未请求供应商、未收工具费。')
@@ -292,21 +300,24 @@ export async function reserveResearchRequest(scope: Scope & { callId: string }, 
     await tx.agentResearchRequest.create({ data: { id, ownerRunId: scope.runId, scopeKey, kind, requestKey, requestLimit: baseline.requestLimit,
       ...(purpose ? { savedOutcome: { purpose, state: 'reserved' } } : {}) } })
     return true
-  })
+  }
+  const admitted = (tx: Prisma.TransactionClient) => scope.webAdmission ? scope.webAdmission(tx, () => reserve(tx)) : reserve(tx)
+  return transaction ? admitted(transaction) : prisma.$transaction(admitted)
 }
 
-export async function settleResearchRequest(scope: Scope & { callId: string }, status: 'consumed' | 'released') {
-  return prisma.$transaction(async tx => {
+export async function settleResearchRequest(scope: Scope & { callId: string }, status: 'consumed' | 'released', transaction?: Prisma.TransactionClient) {
+  const settle = async (tx: Prisma.TransactionClient) => {
     const { taskKey } = await ownedTask(tx, scope)
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
     const id = hash(JSON.stringify([scopeKey, scope.runId, scope.callId]))
     await tx.agentResearchRequest.updateMany({ where: { id, ownerRunId: scope.runId, scopeKey, status: 'reserved' }, data: { status } })
-  })
+  }
+  return transaction ? settle(transaction) : prisma.$transaction(settle)
 }
 
 /** Persist the transport outcome for the task-scoped no-progress breaker. */
 export async function recordResearchReadOutcome(scope: Scope & { callId: string }, ok: boolean) {
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const { taskKey } = await ownedTask(tx, scope)
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
     const id = hash(JSON.stringify([scopeKey, scope.runId, scope.callId]))
@@ -333,7 +344,7 @@ export async function saveResearchSearchOutcome(scope: Scope & { callId: string 
   })), ...(parsed.navigation ? { navigation: { provider: parsed.navigation.provider, results: parsed.navigation.results.map(result => ({
     title: result.title.slice(0, 300), url: canonicalResearchUrl(result.url), snippet: result.snippet.slice(0, 300), source: result.source.slice(0, 300),
   })) } } : {}) }
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const { taskKey } = await ownedTask(tx, scope)
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
     const id = hash(JSON.stringify([scopeKey, scope.runId, scope.callId]))
@@ -343,7 +354,7 @@ export async function saveResearchSearchOutcome(scope: Scope & { callId: string 
 }
 
 export async function findResearchSearchOutcome(scope: Scope, requestKey: string) {
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const { taskKey } = await ownedTask(tx, scope)
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
     const saved = await tx.agentResearchRequest.findFirst({ where: { scopeKey, kind: 'search', requestKey,
@@ -357,7 +368,7 @@ export async function findResearchSearchOutcome(scope: Scope, requestKey: string
  * author, never invent a chapter ID. This is provenance, not proof of content. */
 export async function assertResearchUrlProvenance(scope: Scope, value: string) {
   const url = canonicalResearchUrl(value)
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const { taskKey, run } = await ownedTask(tx, scope)
     const spec = taskSpecSchema.safeParse(run.taskSpec)
     const source = await tx.agentResearchSource.findFirst({ where: { taskKey, canonicalUrl: url,
@@ -388,7 +399,7 @@ export async function registerResearchSource(scope: Scope, url: string, title = 
 export async function registerResearchSources(scope: Scope, entries: ReadonlyArray<{ url: string; title: string }>) {
   if (entries.length < 1 || entries.length > 8) throw new DataAccessError(400, 'RESEARCH_SOURCE_BATCH_INVALID', '来源批次必须为1至8项。')
   const sources = entries.map(entry => ({ canonicalUrl: canonicalResearchUrl(entry.url), title: entry.title.slice(0, 300) }))
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const { taskKey } = await ownedTask(tx, scope)
     return Promise.all(sources.map(({ canonicalUrl, title }) => {
       const urlHash = hash(canonicalUrl)
@@ -401,12 +412,12 @@ export async function registerResearchSources(scope: Scope, entries: ReadonlyArr
 }
 
 export async function resolveResearchSource(scope: Scope, sourceId: string) {
-  return prisma.$transaction(tx => ownedSource(tx, scope, sourceId))
+  return researchTransaction(scope, tx => ownedSource(tx, scope, sourceId))
 }
 
 /** The model cannot replace the original task's named work or author. */
 export async function getResearchReadTarget(scope: Scope) {
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const { run, taskKey } = await ownedTask(tx, scope)
     const spec = taskSpecSchema.safeParse(run.taskSpec)
     if (spec.success && spec.data.researchNavigation) {
@@ -419,7 +430,7 @@ export async function getResearchReadTarget(scope: Scope) {
 }
 
 export async function getResearchNavigationPolicy(scope: Scope) {
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const { run, taskKey } = await ownedTask(tx, scope)
     const parsed = taskSpecSchema.safeParse(run.taskSpec)
     if (!parsed.success) return undefined
@@ -505,7 +516,7 @@ async function preferredResearchUnavailable(tx: Prisma.TransactionClient, scope:
 }
 
 export async function assertResearchAlternativeAllowed(scope: Scope) {
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const { run, taskKey } = await ownedTask(tx, scope)
     const spec = taskSpecSchema.parse(run.taskSpec)
     if (spec.researchNavigation?.alternativeSelection !== 'after_preferred_unavailable'
@@ -519,7 +530,7 @@ export async function assertResearchAlternativeAllowed(scope: Scope) {
 /** Only discovered public metadata gets this lane, never an inferred URL. */
 export async function authorizeResearchNavigation(scope: Scope, sourceId: string, alternative = false) {
   if (alternative) await assertResearchAlternativeAllowed(scope)
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const { run, taskKey } = await ownedTask(tx, scope)
     const spec = taskSpecSchema.parse(run.taskSpec)
     const source = await ownedSource(tx, scope, sourceId)
@@ -619,7 +630,7 @@ async function currentResearchTargetAnalysis(tx: Prisma.TransactionClient, scope
 /** A continuation reads its saved snapshot unless an explicit refresh is
  * requested. No network request, quota reset, or cross-task content cache. */
 export async function findSavedResearchContent(scope: Scope, sourceId: string, purpose?: 'navigation') {
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     await ownedSource(tx, scope, sourceId)
     const { run } = await ownedTask(tx, scope)
     const fresh = taskSpecSchema.safeParse(run.taskSpec)
@@ -634,7 +645,7 @@ export async function findSavedResearchContent(scope: Scope, sourceId: string, p
 /** Look up before reserving a new fetch: an existing negative cache is not a request. */
 export async function findResearchSource(scope: Scope, value: string) {
   const canonicalUrl = canonicalResearchUrl(value)
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const { taskKey } = await ownedTask(tx, scope)
     const id = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey, hash(canonicalUrl)]))
     const source = await tx.agentResearchSource.findUnique({ where: { id } })
@@ -656,7 +667,7 @@ const failureSchema = z.object({
 }).strict()
 
 export async function getResearchReadFailure(scope: Scope, sourceId: string) {
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const source = await ownedSource(tx, scope, sourceId)
     const { run, taskKey } = await ownedTask(tx, scope)
     const spec = taskSpecSchema.safeParse(run.taskSpec)
@@ -684,7 +695,7 @@ export async function recordResearchReadFailure(scope: Scope & { callId?: string
     const requested = Number.isFinite(seconds) ? now + seconds * 1000 : Date.parse(header)
     retryAt = Number.isFinite(requested) && requested > now && requested <= 8.64e15 ? requested : now + 60_000
   }
-  await prisma.$transaction(async tx => {
+  await researchTransaction(scope, async tx => {
     await ownedSource(tx, scope, sourceId)
     await tx.$queryRaw`SELECT id FROM agent_research_sources WHERE id = ${sourceId} FOR UPDATE`
     const source = await ownedSource(tx, scope, sourceId)
@@ -725,7 +736,7 @@ export async function saveResearchContent(scope: Scope, sourceId: string, result
     throw new DataAccessError(422, 'RESEARCH_CONTENT_UNREADABLE', '正文完整性证据与提取内容不一致，未保存为已获取内容。')
   }
   const contentHash = hash(result.text)
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const source = await ownedSource(tx, scope, sourceId)
     const { run, taskKey } = await ownedTask(tx, scope)
     const parsedSpec = taskSpecSchema.safeParse(run.taskSpec)
@@ -798,7 +809,7 @@ export async function readResearchContent(scope: Scope, input: { contentRef: str
   if (input.find !== undefined && (typeof input.find !== 'string' || !input.find.trim() || input.find.length > 200 || input.find.length > limit)) {
     throw new DataAccessError(400, 'RESEARCH_QUERY_INVALID', '检索词应为1–200字符的非空文本。')
   }
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const content = await tx.agentResearchContent.findUnique({ where: { id: input.contentRef } })
     if (!content) return denied()
     const source = await ownedSource(tx, scope, content.sourceId)
@@ -834,7 +845,7 @@ export async function readResearchContent(scope: Scope, input: { contentRef: str
 /** Records a prepared body observation, not a claim that the model analysed it.
  * Link-only calls must not call this. The source/version and owner remain fixed. */
 export async function recordResearchWindow(scope: Scope, input: { contentRef: string; revision: string; start: number; end: number }) {
-  return prisma.$transaction(async tx => {
+  return researchTransaction(scope, async tx => {
     const content = await tx.agentResearchContent.findUnique({ where: { id: input.contentRef } })
     if (!content) return denied()
     await ownedSource(tx, scope, content.sourceId)
