@@ -41,6 +41,7 @@ import { readLimitedWritingDelivery } from '../../api/lib/agent/writing-delivery
 import { readQualityFormatRecovery, claimQualityFormatRecovery } from '../../api/lib/agent/quality-format-recovery.js'
 import { readQualityUnavailableProof } from '../../api/lib/agent/quality-unavailable-proof.js'
 import { createDurableTestLifecycle } from '../support/durable-test-lifecycle.js'
+import { startDurableTestCpuProfile } from '../support/durable-test-cpu.js'
 
 // Native admission freezes this already-resolved identity, including high.
 // Legacy loop/inline tools receive the same complete runtime directly.
@@ -485,6 +486,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
   it.for(['retain', 'mixed-retain', 'no-op-repair', 'format-35', 'complete-35', 'source-id', 'invalid-source-id', 'success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale', 'v9-quality-resume', 'v2-quality-resume', 'v2-quality-stale', 'json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-valid', 'format-valid-repair', 'format-recovery-unknown', 'format-recovery-stale', 'format-recovery-rollback', 'format-expired', 'old-format-full-chain', 'v9-format-full-chain', 'format-reprepare', 'synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical', 'v6-parser-mechanical', 'v7-parser-mechanical'] as const)('%s preserves paid results and atomic business effects', async (scenario, { signal }) => {
     const lifecycle = createDurableTestLifecycle(signal, scenario === 'v9-format-full-chain'
       ? entry => console.info('[durable-quality-stage]', JSON.stringify(entry)) : undefined)
+    const stopCpu = scenario === 'v9-format-full-chain' && process.env.CI ? await startDurableTestCpuProfile() : undefined
     const active = lifecycle.active
     const verification = <T>(work: () => PromiseLike<T>) => lifecycle.phase('verification', work)
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
@@ -494,7 +496,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
     const checkingOriginal = scenario === 'original-request' || scenario === 'original-request-resume'
     const oldWorkVersion = scenario === 'legacy-quality-resume' || scenario === 'legacy-quality-stale' ? 1 : scenario === 'v2-quality-resume' || scenario === 'v2-quality-stale' ? 2 : scenario === 'v4-parser-noise' ? 4 : scenario === 'v9-quality-resume' ? 9 : null
     const legacyWork = oldWorkVersion !== null
-    await fixture(async f => {
+    try { await fixture(async f => {
       let lease = await lifecycle.phase('lease', () => claim(f))
       const before = retaining || noOpRepair ? 'He waited. She turned.' : scenario === 'long' ? '开头锚点' + '长正文'.repeat(6000) + '末尾锚点' : '原文'
       await lifecycle.phase('chapter.seed', () => prisma.chapter.update({ where: { id: f.chapterId }, data: { content: before, wordCount: before.length } }))
@@ -985,7 +987,13 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       const events = await publishDurableEvents(f.userId, lease.runId)
       expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'quality_analyze')).toMatchObject(scenario === 'format' ? [{ ok: false }, { ok: false }] : ['success', 'repair', 'context-change'].includes(scenario) ? [{ ok: true }, { ok: true }] : [{ ok: !failed }])
-    }, undefined, checkingOriginal ? authorRequest : '修改本章', { lifecycle })
+    }, undefined, checkingOriginal ? authorRequest : '修改本章', { lifecycle }) }
+    finally {
+      if (stopCpu) {
+        try { console.info('[durable-quality-cpu]', JSON.stringify(await stopCpu())) }
+        catch { console.warn('::warning title=CPU sampler unavailable::Original test assertions and deadline retained; local inspector did not return a profile.') }
+      }
+    }
   })
 })
 

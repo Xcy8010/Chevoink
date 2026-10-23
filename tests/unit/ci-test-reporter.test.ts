@@ -20,6 +20,8 @@ describe('CI diagnostics preserve failed assertions without minting a pass recei
       for (let index = 0; index < 30; index++) reporter.onUserConsoleLog({ taskId: 'synthetic-task', content: '[durable-quality-stage] ' + JSON.stringify({
         event: 'finish', elapsedMs: index, mockOrdinal: 1, cpuUserMs: 1, cpuSystemMs: 0, phase: 'step', ordinal: index, durationMs: 1, outcome: 'fulfilled',
         secret: 'never-forward-this' }) } as Parameters<Reporter['onUserConsoleLog']>[0])
+      reporter.onUserConsoleLog({ taskId: 'synthetic-task', content: '[durable-quality-cpu] ' + JSON.stringify({ samples: 1, totalMs: 1, idleMs: 0,
+        self: [{ file: 'api/lib/frame.ts', name: 'readFrame', selfMs: 1, inclusiveMs: 1 }], own: [], secret: 'never-forward-this' }) } as Parameters<Reporter['onUserConsoleLog']>[0])
       const run = () => reporter.onTestRunEnd([module], scenario === 'unhandled' ? [error] : [])
       if (scenario === 'passed') expect(run).not.toThrow()
       else expect(run).toThrow()
@@ -29,6 +31,8 @@ describe('CI diagnostics preserve failed assertions without minting a pass recei
       expect(diagnostic.files[0].tests[0].trace[0].ordinal).toBe(6)
       expect(JSON.stringify(diagnostic)).not.toContain('never-forward-this')
       expect(stderr.mock.calls.some(([value]) => String(value).includes('title=Durable test phases::'))).toBe(true)
+      expect(stderr.mock.calls.some(([value]) => String(value).includes('title=Durable test CPU::'))).toBe(true)
+      expect(diagnostic.files[0].tests[0].cpu.samples).toBe(1)
       if (scenario === 'assertion') expect(diagnostic.files[0].tests[0]).toMatchObject({ name: 'exact failing assertion', state: 'failed', errors: [{ message: error.message }] })
       if (scenario === 'assertion') expect(stderr).toHaveBeenCalledWith('::error file=tests/integration/fixture.test.ts,title=CI test failure::exact failing assertion: expected 1 to equal 2%0A::notice::synthetic command text%2C 100%25')
       expect(files.write.mock.calls.some(([filename]) => filename === '.ci-test-reports/shard-1.json')).toBe(scenario === 'passed')

@@ -20,3 +20,16 @@ export function parseCiDurableTrace(content: string) {
   } catch { return null }
 }
 export type CiDurableTrace = NonNullable<ReturnType<typeof parseCiDurableTrace>>
+
+const cpuFrame = z.object({ file: z.string().max(160).regex(/^(?:(?:api|scripts|tests|node_modules)\/[A-Za-z0-9_./@-]+|node:[A-Za-z0-9_/-]+|\[(?:runtime|v8)\])$/).refine(value => !value.split('/').includes('..')),
+  name: z.string().max(80).regex(/^[A-Za-z0-9_$ .<>()[\]:-]*$/), selfMs: milliseconds, inclusiveMs: milliseconds })
+const cpuSchema = z.object({ samples: ordinal, totalMs: milliseconds, idleMs: milliseconds, self: z.array(cpuFrame).max(8), own: z.array(cpuFrame).max(8) })
+export function parseCiDurableCpu(content: string) {
+  const prefix = '[durable-quality-cpu] '
+  if (!content.startsWith(prefix) || content.length > 8192) return null
+  try {
+    const parsed = cpuSchema.safeParse(JSON.parse(content.slice(prefix.length)))
+    return parsed.success ? parsed.data : null
+  } catch { return null }
+}
+export type CiDurableCpu = NonNullable<ReturnType<typeof parseCiDurableCpu>>

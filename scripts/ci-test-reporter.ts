@@ -1,16 +1,19 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { type Reporter, type SerializedError, type TestModule, type Vitest } from 'vitest/node'
 import { assertSameFiles, assertTestsPassed, testPath, type TestPlan } from './lib/ci-test-plan.js'
-import { parseCiDurableTrace, type CiDurableTrace } from './lib/ci-durable-trace.js'
+import { parseCiDurableTrace, parseCiDurableCpu, type CiDurableTrace, type CiDurableCpu } from './lib/ci-durable-trace.js'
 
 // A receipt is emitted only after every planned file/test completed. It also
 // makes the merge fail closed if artifacts contain duplicate or foreign files.
 export default class CiTestReporter implements Reporter {
   private ctx!: Vitest
   private traces = new Map<string, CiDurableTrace[]>()
+  private cpu = new Map<string, CiDurableCpu>()
   onInit(ctx: Vitest): void { this.ctx = ctx }
   onUserConsoleLog(log: Parameters<NonNullable<Reporter['onUserConsoleLog']>>[0]): void {
     if (!log.taskId) return
+    const profile = parseCiDurableCpu(log.content)
+    if (profile && (this.cpu.has(log.taskId) || this.cpu.size < 100)) this.cpu.set(log.taskId, profile)
     const entry = parseCiDurableTrace(log.content)
     if (!entry || !this.traces.has(log.taskId) && this.traces.size >= 100) return
     const entries = this.traces.get(log.taskId) ?? []
@@ -30,7 +33,7 @@ export default class CiTestReporter implements Reporter {
       unhandledErrors: unhandledErrors.map(errorText), files: testModules.map(module => ({ file: testPath(this.ctx.config.root, module.moduleId),
         state: module.state(), errors: module.errors().map(errorText),
         tests: [...module.children.allTests()].map(test => { const result = test.result(); return { name: test.fullName, state: result.state,
-          errors: result.state === 'failed' ? result.errors.map(errorText) : [], trace: this.traces.get(test.id) ?? [] } }) })) }
+          errors: result.state === 'failed' ? result.errors.map(errorText) : [], trace: this.traces.get(test.id) ?? [], cpu: this.cpu.get(test.id) ?? null } }) })) }
     mkdirSync('.ci-test-diagnostics', { recursive: true })
     writeFileSync(`.ci-test-diagnostics/shard-${shard.index}.json`, JSON.stringify(diagnostics) + '\n')
     const failures = diagnostics.files.flatMap(file => [
@@ -48,6 +51,9 @@ export default class CiTestReporter implements Reporter {
         // A bounded existing timing trace also remains visible when a formerly
         // slow case passes, without changing its 5s limit or rerunning it.
         console.error(`::notice file=${escape(file.file)},title=Durable test phases::${escape(JSON.stringify({ name: test.name, state: test.state, trace: test.trace }).slice(0, 12000))}`)
+      }
+      for (const file of diagnostics.files) for (const test of file.tests) if (test.cpu) {
+        console.error(`::notice file=${escape(file.file)},title=Durable test CPU::${escape(JSON.stringify({ name: test.name, state: test.state, cpu: test.cpu }))}`)
       }
     }
     const markdown = [`## Shard ${shard.index}/${shard.count} test diagnostics`,
