@@ -18,16 +18,35 @@ export function runtimeId(value: unknown, max = 64): asserts value is string {
   }
 }
 
-function canonical(value: unknown, depth = 0): string {
-  if (depth > 32) return runtimeError('RUNTIME_INPUT_INVALID', '持久执行数据嵌套过深。')
-  if (value === null) return 'null'
-  if (typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value)
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${Array.from(value, item => canonical(item, depth + 1)).join(',')}]`
-  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
-    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key], depth + 1)}`).join(',')}}`
+function canonical(input: unknown): string {
+  const parts: string[] = [], keys = new Map<string, string>()
+  // One call-local buffer avoids rebuilding each nested object string. Only
+  // immutable key encodings are shared; values/proofs are always visited anew.
+  const append = (value: unknown, depth: number): void => {
+    if (depth > 32) return runtimeError('RUNTIME_INPUT_INVALID', '持久执行数据嵌套过深。')
+    if (value === null) { parts.push('null'); return }
+    if (typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value)) {
+      parts.push(JSON.stringify(value)); return
+    }
+    if (Array.isArray(value)) {
+      parts.push('[')
+      Array.from(value, (item, index) => { if (index) parts.push(','); append(item, depth + 1) })
+      parts.push(']'); return
+    }
+    if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+      parts.push('{'); let index = 0
+      for (const key of Object.keys(value).sort()) {
+        if (index++) parts.push(',')
+        let quoted = keys.get(key)
+        if (quoted === undefined) { quoted = JSON.stringify(key); keys.set(key, quoted) }
+        parts.push(quoted, ':'); append((value as Record<string, unknown>)[key], depth + 1)
+      }
+      parts.push('}'); return
+    }
+    return runtimeError('RUNTIME_INPUT_INVALID', '持久执行数据不是合法JSON。')
   }
-  return runtimeError('RUNTIME_INPUT_INVALID', '持久执行数据不是合法JSON。')
+  append(input, 0)
+  return parts.join('')
 }
 
 function runtimeJsonText(value: unknown): string {

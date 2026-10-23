@@ -39,4 +39,27 @@ describe('frozen runtime JSON verification without a discarded snapshot copy', (
     expect(runtimeJsonHash(source)).toBe(runtimeJson(source).hash)
     expect(source.state).toEqual(['原文', 1])
   })
+
+  it('retains sorted getter order without reusing any property value', () => {
+    const reads: string[] = []
+    const child = { get z() { reads.push('child.z'); return '\n"' } }
+    const source = { get b() { reads.push('b'); return child }, get a() { reads.push('a'); return 'first' } }
+    const canonical = String.raw`{"a":"first","b":{"z":"\n\""}}`
+    const expected = createHash('sha256').update(canonical).digest('hex')
+    expect(runtimeJsonHash(source)).toBe(expected)
+    expect(reads).toEqual(['a', 'b', 'child.z'])
+    reads.length = 0
+    expect(runtimeJson(source)).toEqual({ value: JSON.parse(canonical), hash: expected })
+    expect(reads).toEqual(['a', 'b', 'child.z'])
+  })
+
+  it('keeps Array.from array-like behavior and fresh values for repeated keys', () => {
+    const source = [{ same: 'first' }, { same: 'second' }]
+    Object.defineProperty(source, Symbol.iterator, { value: undefined })
+    const canonical = '[{"same":"first"},{"same":"second"}]'
+    expect(runtimeJsonHash(source)).toBe(createHash('sha256').update(canonical).digest('hex'))
+    source[1].same = 'changed'
+    expect(runtimeJson(source).value).toEqual([{ same: 'first' }, { same: 'changed' }])
+    expect(runtimeJsonHash(source)).not.toBe(createHash('sha256').update(canonical).digest('hex'))
+  })
 })
