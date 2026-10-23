@@ -279,9 +279,9 @@ export const historicalBuiltinCatalog: AgentSkill[] = [
   },
 ]
 
-export const BUILTIN_SKILL_PACK_VERSION = '3.6.0'
-// 3.7 selects the contextual prose resource pack; ranking/triggers stay at 3.6.
-export const SKILL_ROUTER_VERSION = '3.7.0'
+export const BUILTIN_SKILL_PACK_VERSION = '4.0.0'
+// 4.0 publishes the current pack; historical router identities keep their own catalogs.
+export const SKILL_ROUTER_VERSION = '4.0.0'
 const RELEASE_GUIDANCE = '本任务的完整原始作者要求与服务端冻结边界优先。局部修改先读取当前正文，再用唯一原文片段精确修订，不借整章覆盖扩大范围；定位不足先补充证据。正文改变后完成本任务要求的当前版本检查。严格审查逐项实际应用或记录有依据的保留理由；保存、检查完成和任务交付分别按真实结果汇报。'
 
 /** Frozen 3.5 pack, including resources not yet loaded by an existing run. */
@@ -292,13 +292,18 @@ export const frozenV350BuiltinCatalog: AgentSkill[] = historicalBuiltinCatalog.m
 
 const CONTEXTUAL_PROSE_GUIDANCE = '同句或跨句释因前，先判断读者能否从动作、处境和已知风险推知情绪；能推知且没有新增作用时，减少替读者命名原因。把必要新事实与当前表达负担分开：危机条件、时间与后果要保留，可按视角选择当下感知、短念头或有交际必要的台词，不强制转对白。保护机器人程序声口、未知规则说明、人物辨析、有意对比和作者合理直述，不按“不是……而是……”等句式禁写。'
 
-/** New tasks use this pack; frozen resources above never acquire new guidance. */
-export const skillCatalog: AgentSkill[] = frozenV350BuiltinCatalog.map(skill => ({
-  ...skill, version: BUILTIN_SKILL_PACK_VERSION,
+/** Frozen contextual prose pack for existing 3.7 router tasks, including unloaded skills. */
+export const frozenV360BuiltinCatalog: AgentSkill[] = frozenV350BuiltinCatalog.map(skill => ({
+  ...skill, version: '3.6.0',
   resources: Object.fromEntries(Object.entries(skill.resources).map(([phase, resource]) => [phase,
     skill.id === 'cn-webfiction-draft.v3' || skill.id === 'cn-prose-specificity.v3'
       ? `${resource}\n${CONTEXTUAL_PROSE_GUIDANCE}${phase === 'critique' ? '证据必须包含拟修改对象，不能引用前句却建议改后句；必要事实不等于必须保留当前说法。' : ''}`
       : resource])),
+}))
+
+/** New admissions use 4.0; stable IDs and resource content remain compatible. */
+export const skillCatalog: AgentSkill[] = frozenV360BuiltinCatalog.map(skill => ({
+  ...skill, version: BUILTIN_SKILL_PACK_VERSION,
 }))
 
 const legacySkillAliases: Record<string, string> = {
@@ -379,7 +384,7 @@ export function routeSkills(input: {
   const normalizedPrompt = input.prompt.trim()
   // Only current built-in routing normalizes equivalent author language. Saved
   // runs and user-authored trigger expressions keep their original semantics.
-  const builtinPrompt = ['3.6.0', '3.7.0'].includes(routerVersion) ? normalizedPrompt.replace(/(?:A\s*I\s*(?:味|痕迹|感)|人工智能\s*(?:味|痕迹)|机器味)/giu, 'AI味') : normalizedPrompt
+  const builtinPrompt = ['3.6.0', '3.7.0', SKILL_ROUTER_VERSION].includes(routerVersion) ? normalizedPrompt.replace(/(?:A\s*I\s*(?:味|痕迹|感)|人工智能\s*(?:味|痕迹)|机器味)/giu, 'AI味') : normalizedPrompt
   const isEnabled = (skill: AgentSkill): boolean => input.enabledSkillIds?.has(skill.id) ?? true
 
   const pinnedCandidates: SkillRouteCandidate[] = input.pinnedSkillIds?.size

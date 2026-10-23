@@ -27,6 +27,7 @@ import type {
 
 // Private, run-scoped pending prose never enters author messages or caches.
 const authorTextStreams = new Map<string, ReturnType<typeof createAgentAuthorTextStream>>()
+const reasoningTextStreams = new Map<string, { part: AgentMessagePart; stream: ReturnType<typeof createAgentAuthorTextStream> }>()
 
 export type AgentRunPhase =
   | 'idle'
@@ -698,6 +699,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   restoreMessages: (messages, sessionId = null, snapshot) => {
     authorTextStreams.clear()
+    reasoningTextStreams.clear()
     const restored = decorateAcceptedMessages(messages.map(projectStoredMessage))
     const derived = deriveSessionStateFromMessages(restored)
     const cached = sessionId ? sessionMessagesCache.get(sessionId) : undefined
@@ -777,6 +779,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   resetRun: () => {
     authorTextStreams.clear()
+    reasoningTextStreams.clear()
     // 离开旧会话前把最新消息（含刚直播完的内容）快照进缓存：切回来可零延迟复原
     const { loadedSessionId: leavingSessionId, messages: leavingMessages, todos } = get()
     writeSessionMessagesCache(leavingSessionId, leavingMessages, todos)
@@ -1130,6 +1133,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
         case 'text.final': {
           authorTextStreams.delete(`${event.runId}:${event.messageId}`)
+          reasoningTextStreams.delete(`${event.runId}:${event.messageId}`)
           const text = event.asReasoning ? '' : projectAgentAuthorText(event.text)
           const previousText = state.messages.find(message => message.id === event.messageId)?.parts
             .filter(part => part.type === 'text').map(part => part.text).join('') ?? ''
@@ -1151,15 +1155,19 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         case 'reasoning.delta': {
           if (!isRunActive(state.phase)) return base
           const previous = state.messages.find(message => message.id === event.messageId)?.parts.at(-1)
-          const before = previous?.type === 'reasoning' ? createAgentAuthorTextStream().push(previous.text) : ''
+          const key = `${event.runId}:${event.messageId}`
+          const cached = reasoningTextStreams.get(key)
+          const stream = cached && cached.part === previous ? cached.stream : createAgentAuthorTextStream()
+          if (cached?.part !== previous && previous?.type === 'reasoning') stream.push(previous.text)
+          const visibleDelta = stream.push(event.delta)
           const messages = updateMessageParts(state.messages, event.messageId, parts => appendDelta(parts, 'reasoning', event.delta))
           const current = messages.find(message => message.id === event.messageId)?.parts.at(-1)
           // Use the same published prefix as the message renderer. Raw model
           // tokens, hidden protocol and unfinished paragraphs are not visible
           // progress; an existing thinking card alone cannot reset silence.
-          const after = current?.type === 'reasoning' ? createAgentAuthorTextStream().push(current.text) : ''
+          if (current) reasoningTextStreams.set(key, { part: current, stream })
           return { ...base, messages,
-            ...(after.trim() && after !== before ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}) }
+            ...(visibleDelta.trim() ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}) }
         }
 
         case 'tool.call': {

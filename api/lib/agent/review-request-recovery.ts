@@ -10,6 +10,10 @@ import { isKnownTextRequestBilling } from './text-request-billing.js'
 import { runtimeJson } from './runtime-common.js'
 import { applyTerminalCandidatePatch, hasLegacyTerminalCallEvidence, terminalCandidatePatchSchema, terminalCandidateReplacementIssue } from './terminal-candidate-patch.js'
 import { readTerminalCandidate } from './terminal-state-review.js'
+import { prepareCompilerTerminalProposals } from './terminal-proposal-context.js'
+import { readCompilerContinuitySource } from './compiler-continuity-source.js'
+import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion } from './terminal-evidence-context.js'
+import { terminalCoverageInput, terminalCoverageProofs } from './terminal-fact-coverage.js'
 import { DataAccessError } from '../prisma.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -50,8 +54,9 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
     if (proof.version === 1 && Array.isArray(proof.usageIds) && typeof proof.chapterId === 'string' && Number.isSafeInteger(proof.revision)) {
       candidates.push({ callId: payload.callId, toolName: payload.toolName as PendingReviewCall['toolName'], chapterId: proof.chapterId,
         revision: Number(proof.revision), compilationId: typeof args.compilationId === 'string' ? args.compilationId : null })
-    } else if (payload.toolName === 'continuity_validate' && payload.failureCode === 'CONTINUITY_INPUT_STALE'
-      && typeof args.compilationId === 'string' && terminalCandidatePatchSchema.safeParse(args.terminalPatch).success) {
+    } else if (payload.toolName === 'continuity_validate' && typeof args.compilationId === 'string'
+      && (payload.failureCode === 'CONTINUITY_INPUT_STALE' && terminalCandidatePatchSchema.safeParse(args.terminalPatch).success
+        || payload.failureCode === 'TERMINAL_STATE_REVIEW_REQUIRED' && Object.keys(args).length === 1)) {
       // Discover old local refusals even after their pending checkpoint entry
       // was reconciled. The exact same ownership/journal/usage proof below
       // authenticates them; a missing usage row alone proves nothing.
@@ -110,6 +115,31 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
         }
         catch (error) { localPatchRefusal = payload.failureCode === 'CONTINUITY_INPUT_STALE'
           && error instanceof DataAccessError && error.code === 'CONTINUITY_INPUT_STALE' }
+      }
+    }
+    // The same journaled producer can also reject a bare resumed review while
+    // rebuilding a known failed proposal audit, before its first reservation.
+    // Rebuild all owned inputs; neither the error code nor absent usage alone
+    // proves no dispatch. Older unknown/reserved calls remain fenced below.
+    if (!typed && !localPatchRefusal && item.toolName === 'continuity_validate'
+      && payload.failureCode === 'TERMINAL_STATE_REVIEW_REQUIRED' && !source.taskRootId && source.runtimeProtocolVersion === 0
+      && item.compilationId && Object.keys(args).length === 1 && args.compilationId === item.compilationId
+      && chapter.revision === item.revision && chapter.updatedAt <= call.createdAt
+      && !await hasLegacyTerminalCallEvidence(tx, { runId: call.runId, callId: item.callId })) {
+      const compiler = await tx.storyCompilation.findFirst({ where: { id: item.compilationId, userId: subject.userId,
+        novelId: subject.novelId, runId: { in: ids }, chapterId: chapter.id }, include: { bridge: true } })
+      const validation = object(compiler?.validation), audit = object(validation.continuityCriticResponse)
+      const candidate = readTerminalCandidate(validation)
+      if (compiler?.bridge && candidate && object(audit.assessmentRequest).version === 1
+        && typeof validation.checkedAt === 'string' && Date.parse(validation.checkedAt) <= call.createdAt.getTime()
+        && terminalEvidenceVersion(original.spec) === 2) {
+        try {
+          const previous = await readCompilerContinuitySource(tx, subject, chapter, compiler.bridge.fromChapterId, 11)
+          const nextContext = terminalEvidenceContext(chapter, previous, 2, terminalQuoteAddressVersion(original.spec),
+            terminalCoverageInput(original.spec, compiler.preparedContext, chapter, candidate, 2, terminalCoverageProofs(previous, 2)), 5, 2)
+          localPatchRefusal = !!prepareCompilerTerminalProposals({ spec: original.spec, preparedContext: compiler.preparedContext,
+            validation, chapter, source: previous, candidate, nextContext })?.changes
+        } catch { /* An unauthenticated or changed report is still unresolved. */ }
       }
     }
     if (payload.reviewRequestFinished !== undefined && !typed && !(localPatchRefusal && proof.version === 1

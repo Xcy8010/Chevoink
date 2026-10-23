@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { frozenV350BuiltinCatalog, historicalBuiltinCatalog, skillCatalog, loadSkill, routeSkills } from '../../api/lib/agent/skills/index.js'
+import { frozenV360BuiltinCatalog, frozenV350BuiltinCatalog, historicalBuiltinCatalog, skillCatalog, loadSkill, routeSkills } from '../../api/lib/agent/skills/index.js'
 import { createHash } from 'node:crypto'
 import { buildCustomSkillArtifacts } from '../../api/lib/agent/skills/custom.js'
 import { resolveEnabledRuntimeSkills, resolveRuntimeSkillContext, syncBuiltinSkillCatalog } from '../../api/lib/agent/skills/service.js'
@@ -8,16 +8,16 @@ import { prisma } from '../../api/lib/prisma.js'
 afterEach(() => vi.restoreAllMocks())
 
 describe('versioned built-in writing resources', () => {
-  it('creates 3.6.0 assets and preserves 3.5.0 without updating any immutable version', async () => {
+  it('creates 4.0.0 assets and preserves 3.5.0 without updating any immutable version', async () => {
     vi.spyOn(prisma.agentSkillDefinition, 'upsert').mockResolvedValue({} as never)
     const versions = vi.spyOn(prisma.agentSkillVersion, 'upsert').mockResolvedValue({} as never)
     vi.spyOn(prisma, '$transaction').mockResolvedValue([])
     await syncBuiltinSkillCatalog()
     const changed = ['cn-scene-task.v3', 'cn-webfiction-draft.v3', 'cn-emotion-grounding.v3']
     for (const id of changed) {
-      const call = versions.mock.calls.find(([input]) => input.where.skillId_version?.skillId === id && input.where.skillId_version.version === '3.6.0')![0]
-      expect(call.where.skillId_version).toEqual({ skillId: id, version: '3.6.0' })
-      expect(call.create).toMatchObject({ version: '3.6.0', contentHash: expect.stringMatching(/^[a-f0-9]{64}$/) })
+      const call = versions.mock.calls.find(([input]) => input.where.skillId_version?.skillId === id && input.where.skillId_version.version === '4.0.0')![0]
+      expect(call.where.skillId_version).toEqual({ skillId: id, version: '4.0.0' })
+      expect(call.create).toMatchObject({ version: '4.0.0', contentHash: expect.stringMatching(/^[a-f0-9]{64}$/) })
       expect(call.update).toEqual({})
     }
     expect(versions.mock.calls.every(([input]) => Object.keys(input.update).length === 0)).toBe(true)
@@ -42,10 +42,25 @@ describe('versioned built-in writing resources', () => {
     const runtime = await resolveEnabledRuntimeSkills('fixture-user', 'fixture-novel')
     const current = runtime.find(skill => skill.id === 'cn-webfiction-draft.v3')!
     expect(current).toBe(skillCatalog.find(skill => skill.id === current.id))
-    expect(current.version).toBe('3.6.0')
+    expect(current.version).toBe('4.0.0')
     expect(current.resources.draft).toContain('低修辞预算只控制无功能修饰，不代表低情绪')
     expect(runtime.some(skill => skill.id === 'cn-scene-task.v3')).toBe(false)
     expect(runtime.find(skill => skill.id === 'custom.fixture')).toMatchObject({ version: '0.1.0', resources: instructions })
+  })
+
+  it('a saved 3.7 router retains every 3.6 resource while new tasks use 4.0', async () => {
+    vi.spyOn(prisma.agentSkillRun, 'findFirst').mockResolvedValue({ routerVersion: '3.7.0', selected: [], loaded: [] } as never)
+    vi.spyOn(prisma.agentRun, 'findFirst').mockResolvedValue(null)
+    vi.spyOn(prisma.agentSkillInstallation, 'findMany').mockResolvedValue([])
+    const readVersion = vi.spyOn(prisma.agentSkillVersion, 'findUnique')
+    const result = await resolveRuntimeSkillContext('u', 'n', 'old-37')
+    expect(result.routerVersion).toBe('3.7.0')
+    expect(result.catalog).toEqual(frozenV360BuiltinCatalog)
+    expect(result.catalog.every(skill => skill.version === '3.6.0')).toBe(true)
+    expect(readVersion).not.toHaveBeenCalled()
+    for (const old of result.catalog) expect(skillCatalog.find(skill => skill.id === old.id)?.resources).toEqual(old.resources)
+    expect(routeSkills({ mode: 'build', intent: 'revise', freedom: 'balanced', prompt: '减少 A I 痕迹，保留原事实。' }).selected.map(s => s.id))
+      .toEqual(routeSkills({ mode: 'build', intent: 'revise', freedom: 'balanced', prompt: '减少 A I 痕迹，保留原事实。', routerVersion: '3.7.0', catalog: result.catalog }).selected.map(s => s.id))
   })
 
   it('a 3.6 router keeps the entire 3.5 pack at later phases, including previously unloaded skills', async () => {

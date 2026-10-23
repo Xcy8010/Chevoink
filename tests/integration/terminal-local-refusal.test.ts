@@ -8,6 +8,10 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { readReviewRequestRecoveryEvidence, readReviewRequestRecovery } from '../../api/lib/agent/review-request-recovery.js'
 import { listAgentSessionHistoryData } from '../../api/lib/agent/run-service.js'
 import { continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
+import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { prepareTerminalProposalInput } from '../../api/lib/agent/terminal-proposal-context.js'
+import { terminalCandidateFacts } from '../../api/lib/agent/terminal-fact-identity.js'
 import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 
 describe.runIf(available)('closed local candidate refusal is not an unknown provider request', () => {
@@ -23,7 +27,7 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
     vi.stubGlobal('fetch', network)
     const result = await continuityValidateTool.execute({ ...f, callId: 'local-live', mode: 'build',
       creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }, {
-      compilationId: compilation.id, terminalPatch: { baseCandidateHash: 'f'.repeat(64) },
+      compilationId: compilation.id, terminalPatch: { baseCandidateHash: 'f'.repeat(64), removeFactIds: [], addFacts: [] },
     })
     expect(result).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_INPUT_STALE', summary: '章末候选更新未应用',
       reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: chapter.revision,
@@ -98,6 +102,54 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
         expect(network).not.toHaveBeenCalled()
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
     }))
+
+  it.each(['known', 'reservation', 'unknown-usage', 'changed-body', 'corrupt-audit'] as const)(
+    'bare resumed proposal preflight %s is reconciled only with complete owned evidence', scenario => fixture(async f => {
+      await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0 } })
+      const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: 'The gauge reads two.', wordCount: 20 } })
+      const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: 'Review the saved chapter.' })
+      const context = terminalEvidenceContext(chapter, null, 2, 1, { version: 2, taskId: f.spec.id, chapterId: chapter.id, obligations: [] }, 5, 2)
+      const base = terminalCandidateSchema.parse({ exitState: { knowledge: ['A combined reading.', 'A different unsupported event.'] } })
+      const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: ['The gauge reads two.'] } })
+      const response = (selected: typeof base) => JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
+        ({ kind, result: 'clear', reason: 'Checked the synthetic body.', findingIndexes: [] })),
+      terminalVerdicts: terminalCandidateFacts(selected).map(fact => ({ path: fact.path, verdict: 'unknown', sourceEvidence: [] })),
+      terminalProofVerdicts: [], terminalDispositions: [] })
+      const prior = inspectContinuityResponse(response(base), { previous: null, current: chapter.content, terminalEvidence: context }, true, 8, base)
+      expect(prior.complete).toBe(true)
+      const staged = prepareTerminalProposalInput({ spec: f.spec, preparedContext: {}, validation: {
+        independentCheck: 'complete', terminalCandidate: base, continuityCriticResponse: prior.audit }, content: chapter.content, previousContent: null,
+      candidate, originalContext: context, nextContext: context })!
+      const evidence = { ...context, proposalChanges: staged.changes }
+      const invalid = inspectContinuityResponse(response(candidate), { previous: null, current: chapter.content, terminalEvidence: evidence }, true, 8, candidate)
+      expect(invalid.complete).toBe(false)
+      const start = Date.now() + 1000, at = (ms: number) => new Date(start + ms), callId = 'bare-resumed-review'
+      await prisma.storyCompilation.update({ where: { id: compilation.id }, data: {
+        preparedContext: runtimeJson({ terminalProposalReview: staged.state }).value,
+        validation: runtimeJson({ independentCheck: 'unavailable', checkedChapterId: chapter.id, checkedRevision: chapter.revision,
+          checkedAt: at(-100).toISOString(), terminalCandidate: candidate, continuityCriticResponse: { ...invalid.audit,
+            ...(scenario === 'corrupt-audit' ? { contentHash: 'f'.repeat(64) } : {}),
+            assessmentRequest: { version: 1, key: 'a'.repeat(64), inputHash: 'b'.repeat(64) } } }).value,
+      } })
+      await prisma.agentRunEvent.createMany({ data: [
+        { runId: f.runId, seq: 1, type: 'tool.call', createdAt: at(0), payload: { callId, toolName: 'continuity_validate', args: { compilationId: compilation.id } } },
+        { runId: f.runId, seq: 2, type: 'tool.result', createdAt: at(400), payload: { callId, toolName: 'continuity_validate', ok: false, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' } },
+      ] })
+      if (scenario === 'reservation') await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview',
+        title: 'Synthetic original reservation', content: '', metadata: { callId, continuityAssessmentRequestKey: 'a'.repeat(64) } } })
+      if (scenario === 'unknown-usage') await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId,
+        chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, action: 'agent3ContinuityCritic', providerType: 'text',
+        providerMode: 'custom', modelName: 'synthetic', usageSource: 'unknown', billingStatus: 'pending_usage', reservedCreditMilli: 16000,
+        durationMs: 10, createdAt: at(-200) } })
+      if (scenario === 'changed-body') await prisma.chapter.update({ where: { id: chapter.id }, data: { revision: { increment: 1 } } })
+      const pending = [{ callId, toolName: 'continuity_validate' as const, compilationId: compilation.id, chapterId: chapter.id, revision: chapter.revision }]
+      const withPending = await prisma.$transaction(tx => readReviewRequestRecoveryEvidence(tx, f, pending))
+      const discovered = await prisma.$transaction(tx => readReviewRequestRecoveryEvidence(tx, f))
+      expect(withPending).toHaveLength(scenario === 'known' ? 1 : 0)
+      expect(discovered).toHaveLength(scenario === 'known' ? 1 : 0)
+      if (scenario === 'known') expect(discovered[0]).toMatchObject({ callId, notDispatched: true, receipt: { usageIds: [] } })
+      expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(scenario === 'unknown-usage' ? 1 : 0)
+    }, undefined, '修改本章', { freezeWriting: true, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }))
 
   it('history keeps actual reports and preserves all private audit rows', () => fixture(async f => {
     const records = await Promise.all([

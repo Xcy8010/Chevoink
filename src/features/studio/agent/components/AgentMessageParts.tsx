@@ -937,7 +937,7 @@ const ToolCallCard = memo(function ToolCallCard({
       'shrink-0 text-[10px] font-medium',
       part.status === 'success' ? 'text-emerald-600' : part.status === 'denied' ? 'text-amber-500' : 'text-rose-500',
     )}>{part.status === 'success' ? (part.accepted ? '已接受' : '已完成') : part.status === 'denied' ? '已拒绝' : '失败'}</span> : null}
-    <span className="shrink-0">{preparing ? null : toolStatusIcon[part.status]}</span>
+    <span className="shrink-0">{toolStatusIcon[part.status]}</span>
     {spotlightType !== null ? (
       <SquareStack className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)] transition-colors group-hover:text-[var(--text-primary)]" />
     ) : rowExpandable ? <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)] transition-transform', expanded && 'rotate-180')} /> : null}

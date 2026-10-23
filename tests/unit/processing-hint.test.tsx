@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { ProcessingHint } from '../../src/features/studio/agent/components/ProcessingHint'
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
 import { projectAgentAuthorParts } from '../../shared/agent-author-view'
-import { shouldShowProcessingHint } from '../../src/features/studio/agent/lib/panel-helpers'
+import { isAssistantMessageStreaming, shouldShowProcessingHint } from '../../src/features/studio/agent/lib/panel-helpers'
 import type { AgentUIMessage } from '../../shared/contracts/index.js'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 import { OUTPUT_SILENCE_MS, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
@@ -15,6 +15,28 @@ function LiveParts() {
   const visible=useProcessingHint(messages,'r','running',false)
   return <><ProcessingHint visible={visible}/>{messages.map(message=><AgentMessageParts key={message.id} parts={message.parts} streaming runActive/>)}</>
 }
+
+it('keeps local reasoning active after finalized prose, then hands off to one animated tool card', () => {
+  const message: AgentUIMessage = { id: 'm', runId: 'r', role: 'assistant', createdAt: new Date().toISOString(),
+    parts: [{ type: 'text', text: '我先核对人物动机。' }, { type: 'reasoning', text: '接着核对时间与地点。\n\n' }] }
+  const streaming = () => isAssistantMessageStreaming(message, 'r', 'm', true, ['m'])
+  const view = render(<AgentMessageParts parts={message.parts} streaming={streaming()} runActive />)
+  expect(view.container.querySelector('[data-reasoning-running]')).toBeTruthy()
+  expect(view.container.querySelector('[class*="reasoning-sweep"]')).toBeTruthy()
+  message.parts.push({ type: 'tool-call', callId: 'write', toolName: 'chapter_write', title: '撰写本章', status: 'running', preparing: true, args: null })
+  view.rerender(<AgentMessageParts parts={message.parts.slice()} streaming={streaming()} runActive />)
+  expect(view.container.querySelector('[data-reasoning-running]')).toBeNull()
+  expect(view.container.querySelectorAll('.animate-spin')).toHaveLength(1)
+  expect(screen.getByText('准备中…')).toBeTruthy()
+  message.parts[2] = { ...message.parts[2], preparing: false } as typeof message.parts[2]
+  view.rerender(<AgentMessageParts parts={message.parts.slice()} streaming={streaming()} runActive />)
+  expect(view.container.querySelectorAll('.animate-spin')).toHaveLength(1)
+  expect(screen.getByText('执行中…')).toBeTruthy()
+  message.parts[2] = { ...message.parts[2], status: 'success' } as typeof message.parts[2]
+  view.rerender(<AgentMessageParts parts={message.parts.slice()} streaming={false} runActive={false} summaryExpanded />)
+  expect(view.container.querySelector('.animate-spin')).toBeNull()
+  expect(isAssistantMessageStreaming(message, 'other-run', 'm', true, [])).toBe(false)
+})
 
 it('hands fallback feedback to the first preparation frame and keeps one card throughout visible draft growth',()=>{
   vi.useFakeTimers()
@@ -37,7 +59,7 @@ it('hands fallback feedback to the first preparation frame and keeps one card th
   act(()=>apply({...base,seq:5,type:'tool.call',toolName:'chapter_write',title:'写入正文',args:{chapterId:'chapter'}}))
   expect(screen.queryByText('准备中…')).toBeNull()
   expect(screen.getByText('执行中…')).toBeTruthy()
-  act(()=>apply({...base,seq:6,type:'tool.result',toolName:'chapter_write',ok:true,summary:'正文已保存'}))
+  act(()=>apply({...base,seq:6,type:'tool.result',toolName:'chapter_write',ok:true,summary:'正文已保存',durationMs:0}))
   expect(view.container.querySelectorAll('[data-agent-call-id="write"]')).toHaveLength(1)
   expect(view.container.querySelector('.agent-tool-progress')).toBeNull()
   expect(screen.queryByRole('status')).toBeNull()

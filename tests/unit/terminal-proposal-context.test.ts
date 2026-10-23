@@ -61,6 +61,16 @@ it.each(['missing-audit', 'wrong-marker', 'raw-corruption', 'unknown-response'] 
     expect(f.staged.state.pending).toHaveLength(2)
   })
 
+it('does not accept a malformed lifecycle marker or altered parser evidence', () => {
+  const f = fixture()
+  for (const marker of [{ version: 2, key: 'a'.repeat(64), inputHash: 'b'.repeat(64) },
+    { version: 1, key: 'invalid', inputHash: 'b'.repeat(64) }]) {
+    const input = structuredClone(f.pendingInput)
+    Object.assign(input.validation.continuityCriticResponse, { assessmentRequest: marker })
+    expect(() => prepareTerminalProposalInput(input)).toThrow()
+  }
+})
+
 it.each([1, 2])('upgrades %i pending proposals to verified obligations on the same candidate', count => {
   const f = fixture(), facts = f.staged.state.pending.slice(0, count).map(({ id, field, claim }) => ({ id, field, claim }))
   const input = { ...f.pendingInput, preparedContext: { ...f.pendingInput.preparedContext, terminalFactCoverage: {
@@ -122,7 +132,10 @@ it.each([true, false])('retains the actual reassessment wrapper while distinguis
     system: 'Synthetic independent critic', content: 'Frozen synthetic input', reassessmentProtocol: 2,
     billingKnown: true, providerComplete: true, slotUsed: false, signal: new AbortController().signal,
     assertCurrent: async () => {}, claim: async () => true, dispatch: async () => ({ content: 'invalid-json', complete }) })
-  const input = { ...f.pendingInput, validation: { ...f.pendingInput.validation, continuityCriticResponse: observed.audit } }
+  // Production lifecycle appends this identity after the parser and before
+  // persisting either a complete or failed second response.
+  const retained = { ...observed.audit, assessmentRequest: { version: 1, key: 'a'.repeat(64), inputHash: 'b'.repeat(64) } }
+  const input = { ...f.pendingInput, validation: { ...f.pendingInput.validation, continuityCriticResponse: retained } }
   const before = JSON.stringify(observed.audit)
   if (complete) expect(prepareTerminalProposalInput(input)?.state.pending).toEqual(f.staged.state.pending)
   else expect(() => prepareTerminalProposalInput(input)).toThrow()

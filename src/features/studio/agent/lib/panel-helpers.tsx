@@ -69,6 +69,13 @@ export function shouldShowProcessingHint(
   return true
 }
 
+/** Text finalization does not end a later reasoning segment in the same message. */
+export function isAssistantMessageStreaming(message: AgentUIMessage, runId: string | null,
+  lastAssistantId: string | undefined, active: boolean, finalizedTextIds: readonly string[]) {
+  return active && message.runId === runId && message.id === lastAssistantId
+    && (!finalizedTextIds.includes(message.id) || message.parts.at(-1)?.type === 'reasoning')
+}
+
 /** 首次发送时空历史请求可能晚于本地 beginRun 返回；此时旧响应不得覆盖正在直播的消息。 */
 export function shouldKeepLiveSessionMessages(
   runId: string | null,

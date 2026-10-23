@@ -53,17 +53,17 @@
   </tr>
 </table>
 
-## Chevoink Agent 3.5
+## Chevoink Agent 4.0
 
 Custom models can use an outbound local connector for local OpenAI-compatible relays, LM Studio and Ollama. The model computer must remain online; manuscripts and tools still use the cloud. See [local model setup](docs/LOCAL-MODELS.en.md) and [cloud development/delivery](docs/CLOUD-DEVELOPMENT.md). Android signing and production deployment require configured protected environments; workflow files do not grant publication authority.
 
-Agent 3.5 researches, plans, writes and revises within one novel, loading skills by task and phase while retaining the complete author request, story facts and actual execution results. Work and IDE task windows show Chinese progress for reading, drafting, revision, checks and saving. Actual model thinking supports streaming, folded display and history restoration; copying a reply includes only its answer text. Thinking display remains separate from the execution protocol, and action cards appear when tools actually execute.
+Agent 4.0 researches, plans, writes and revises within one novel, loading skills by task and phase while retaining the complete author request, story facts and actual execution results. Work and IDE task windows show Chinese progress for reading, drafting, revision, checks and saving. Actual model thinking supports streaming, folded display and history restoration; copying a reply includes only its answer text. Thinking display remains separate from the execution protocol, and the same card distinguishes argument preparation from actual execution; preparation does not claim a saved effect. Tools and thinking retain their local activity feedback.
 
-### Writing boundaries and skills in 3.5
+### Writing boundaries and skills in 4.0
 
 - Editor selections and explicit local requests in natural language freeze the allowed range when a new task starts. Located requests use exact fragment edits; ambiguous requests ask for an exact passage or editor selection. A batch validates all edits before one revision-checked write. Recovery reuses receipts; a no-op creates no body revision.
 - Required checks must match the final current text after edits. Strict review records each actual application or a justified retention decision; factual errors and an author's requirement that every check pass remain separate gates. Ordinary author edits have separate limits from automatic repairs. Manual edits without a check obligation do not force an extra paid check.
-- The built-in skill pack and routing contract are **3.5.0**, with stable skill IDs. Work Skills displays the built-in version used by new tasks. Historical resources, saved task skill/router versions and paid receipts remain readable. Author and third-party skills retain their independent versions.
+- The built-in skill pack and routing identity are **4.0.0**, with stable skill IDs. Work Skills displays the built-in version used by new tasks. Historical resources, saved task skill/router versions and paid receipts remain readable. Author and third-party skills retain their independent versions.
 - The shared tool boundary decodes complete JSON strings only where the declared input requires an object or array, then applies the original strict validation. Legitimate strings, unknown fields, permissions, chapter scope and frozen execution receipts retain their semantics; missing decisions or identities are never invented.
 - Thinking streams use the original compact row and its existing expand, scroll and collapse interactions. Structured reviews use JSON output mode on documented official MiMo routes, while complete-report, evidence and revision validation remain mandatory. Old frozen requests are not retrofitted, and model selection and Credits multipliers are unchanged.
 - Anonymous context categories record estimated tokens and assembly time. Fixed tool definitions are estimated once per run, while author requirements, story background and review evidence remain intact. Actual model usage determines billing; estimates and visible thinking do not establish literary quality.
@@ -71,38 +71,32 @@ Agent 3.5 researches, plans, writes and revises within one novel, loading skills
 
 These controls do not certify literary quality, real-provider speed or native-device acceptance. Provider pairs, blind review of complete manuscripts and diffs, and Android/Windows device acceptance still need their respective authorization and measurements. No zero-error or 99.99% reliability claim is made. Native shells load the same live site; this web release does not certify a new APK or Windows installer.
 
+### Current 4.0 architecture and acceptance scope
+
+Server-controlled admission sends the original test author's fresh tasks and first goal dispatch into the durable executor, freezing the original request, root, budget, tool and skill versions in the admission transaction. Other authors and existing tasks retain compatibility paths; this is not a global switch. All 116 registered tools have durable adapters, which does not certify every business flow.
+
+The model sees a bounded capability catalog matching execution authority. Local pre-write context carries the target, immediately preceding chapter and revision evidence. Eligible frozen full-chapter contracts use service coordination to save the body, independently review it, dispose of feedback and verify a real commit. Saving and complete task fulfillment remain distinct. Router 3.7.0 tasks keep 3.6.0 resources; router 3.6.0 tasks keep 3.5.0 resources. Historical models, prices, schemas and paid results are neither upgraded nor resent.
+
+The 4.0 label and skill version identify delivered code. Original chapter-six recovery, three distinct new chapters, one five-chapter goal, chat/research/revision, real streaming interaction and Search/Fetch full-body reading still await the parent's product acceptance. Literary quality, cost and efficiency gains have not been established. See [current engineering state](docs/ENGINEERING.en.md) and the [4.0 implementation/open items](docs/AGENT-4.0-IMPLEMENTATION.md).
+
 ### Runtime flow
 
 ```mermaid
 flowchart TD
-  A[Author prompt / images / files / work references] --> B[Task and work-scope identification]
-  T[Scheduled task / subagent trigger] --> B
-  B --> C[Context assembly<br/>work·volumes·chapters·memory·caret·directives]
-  C --> C1[(sessions·versions·memory·usage)]
-  C --> D[Permission and budget gate<br/>network·writes·publish·destructive ops·Credits]
-  D --> E[Two-stage Skill Router<br/>deterministic trigger + semantic decision]
-  E --> F[Load 2–3 Skills on demand<br/>version lock·positive/negative triggers·scope filter]
-  F --> F1[Style DNA / rights-cleared craft retrieval<br/>techniques and statistics, never source prose]
-  F --> G{Task type}
-  G -->|New book / genre shift / factual dependency| H[Research Dossier<br/>search·deep-read·provenance·cached TTL]
-  G -->|Plan / draft / revise / continue| I[Story Compiler<br/>Charter → Promise → Scene Task → Chapter Bridge]
-  G -->|Search / manage / export| J[Agent Tool Loop<br/>116 governed tools·attachments·covers·exports]
-  G -->|Complex collaboration / scheduled check| K[Subagent / Schedule<br/>isolated session·budget·allowlist·cancellable]
-  H --> I
-  I --> L[Model execution<br/>streaming reasoning·text·tool arguments]
-  J --> L
+  A[Author request / attachments / first goal dispatch] --> B[Ownership and work scope / frozen request]
+  B --> C{Controlled fresh admission}
+  C -->|Original test author / fresh task| D[Atomic root / budget / skill and tool versions]
+  C -->|Other authors / existing tasks and recovery| E[Compatible loop or original durable protocol]
+  D --> F[Durable executor / 116 tool adapters]
+  F --> G[Bounded capabilities / local pre-write context]
+  G --> H{Task contract}
+  H -->|Eligible full chapter| I[Writing service / atomic body save]
+  I --> J[Independent reviews / feedback / current-revision commit]
+  H -->|Chat / research / local edits| K[Existing business tools / permissions / effect receipts]
+  E --> K
+  J --> L[SSE / visible progress / result and usage receipts]
   K --> L
-  L --> M[Continuity + human-quality + copyright gate<br/>evidence findings·bounded factual repair·revision verification]
-  M --> N{Write required?}
-  N -->|No| O[Assemble response and tool results]
-  N -->|Yes| P[revision lock + ChangeSet<br/>atomic write·rollback snapshot]
-  P -->|Success| O
-  P -->|Conflict| Q[Do not overwrite newer text<br/>refresh context·retry or ask author]
-  Q --> O
-  O --> R[SSE response<br/>persisted events·resume·full replay]
-  R --> S[Author review / rollback / branch / publish]
-  R --> U[Credits and AiUsageLog<br/>input·output·cached tokens·tool counts·failures]
-  S --> V[Feedback / blind review / retention / cost metrics<br/>iterate Skills, quality gates, and routing]
+  L --> M[Author review / original-task recovery / publish]
 ```
 
 ### System architecture
@@ -118,8 +112,8 @@ flowchart LR
   end
   subgraph Service[Chevoink services]
     API[Express API<br/>auth·works·community·Credits]
-    LOOP[Agent 3.5 Runtime<br/>Loop·116 Tools·sandbox]
-    SKILL[Skill OS 3.5<br/>Router·Loader·version/test/rollback]
+    LOOP[Agent 4.0 Runtime<br/>durable executor·compatibility·116 adapters]
+    SKILL[Skill OS 4.0<br/>Router·Loader·version/test/rollback]
     STORY[Story Compiler<br/>Memory·Quality Gate·Craft Retrieval]
     SSE[SSE Event Stream<br/>persistence·resume·replay]
   end
@@ -176,7 +170,7 @@ You can also ask Agent to change creative mode, switch the current model, or ass
 | Windows client development | [Build instructions](desktop/windows/README.md) · [Acceptance status](docs/WINDOWS_DESKTOP.md); internal candidate, not yet a signed public release |
 | Learn how to use it | [User guide](#user-guide) |
 | Explore features | [Feature overview](#feature-overview) |
-| Understand Agent 3.5 | [Runtime flow & architecture](#chevoink-agent-35) · [Historical Agent 3.0 proposal (Chinese)](./plan/23-Agent3.0中文网文人类化创作与技能生态升级方案.md) |
+| Understand Agent 4.0 | [Runtime flow & architecture](#chevoink-agent-40) · [Historical Agent 3.0 proposal (Chinese)](./plan/23-Agent3.0中文网文人类化创作与技能生态升级方案.md) |
 | Run it locally | [Quick start](#quick-start) |
 | Understand the architecture | [Tech stack](#tech-stack) · [Directory structure](#directory-structure) |
 | Deep engineering details | [Engineering Documentation](./docs/ENGINEERING.en.md) ([中文](./docs/ENGINEERING.md)) · [Development Standards](./docs/DEVELOPMENT-STANDARDS.en.md) ([中文](./docs/DEVELOPMENT-STANDARDS.md)) · [Agent evaluation guide (Chinese)](./tests/agent-evals/README.md) |
@@ -209,8 +203,8 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 ### Authors
 
 1. Enter the **Studio** and start talking to Chevoink Agent immediately. With no existing work, randomized creation examples appear; selecting one only fills the composer, and after the first send the Agent turns the hidden bootstrap workspace into a real novel through the scope-checked, atomic `novel_create` action. A new empty task inside an existing novel also receives four randomized building prompts;
-2. Write directly in the chapter editor or invoke **Chevoink Agent 3.5**. It streams drafts and revisions grounded in your project knowledge, builds a genre Research Dossier only when needed, and uses Story Charter, Reader Promise, Scene Task, and Chapter Bridge to preserve long-form causality and continuity. Post-write quality findings always include source-text evidence;
-3. Manage Skill OS 3.5 in the **Work Skills** area on Work, IDE, or mobile. Built-ins route automatically; authors or the Agent can draft private Skills, which must pass positive/negative trigger tests before publication. Private and third-party skills retain their independent pinned versions and may be disabled or switched to a historical version. New tasks use the current built-in release; existing tasks retain frozen resources. Shared installation requires author confirmation, while third-party source imports must declare a licence, attribution, and immutable version;
+2. Write directly in the chapter editor or invoke **Chevoink Agent 4.0**. It streams drafts and revisions grounded in your project knowledge, builds a genre Research Dossier only when needed, and uses Story Charter, Reader Promise, Scene Task, and Chapter Bridge to preserve long-form causality and continuity. Post-write quality findings always include source-text evidence;
+3. Manage Skill OS 4.0 in the **Work Skills** area on Work, IDE, or mobile. Built-ins route automatically; authors or the Agent can draft private Skills, which must pass positive/negative trigger tests before publication. Private and third-party skills retain their independent pinned versions and may be disabled or switched to a historical version. New tasks use the current built-in release; existing tasks retain frozen resources. Shared installation requires author confirmation, while third-party source imports must declare a licence, attribution, and immutable version;
 4. Attach **images (≤6) and files (≤3, pdf/docx/txt/md)** to the prompt. Multimodal models receive image pixels directly, while text-only models automatically use the safe vision sidecar; files are always read before action. Conversation files are clickable, and long contents are collapsed by default;
 5. Generate cover art with one click via **AI cover generation** (remote URLs are automatically persisted to the site); you can also ask the Agent to "look at the current cover" to verify the artwork;
 6. **One-click export**: launch it from the immersive-mode toolbar, the "…" more menu or the mobile "More" sheet; pick the export scope (plans / catalog / chapters / work info & publishing advice, with per-chapter selection), and the server packs a zip for direct download, including AI-generated publishing advice for Fanqie Novel based on its official tag vocabulary; you can also ask the Agent in chat to export on demand (only certain chapters, or excluding specific parts);
@@ -229,7 +223,7 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 ## Feature Overview
 
 - **Reading**: bookstore home (carousels, rankings, category picks), cloud-synced bookshelf & reading progress, immersive reader, TTS narration
-- **Studio**: Codex-inspired Work/IDE workspace; Agent 3.5 with Research Dossier, Skill OS, Story Compiler, Chapter Bridge, human-quality gate, licensed craft retrieval, work-private Style DNA, first-three-chapter prototyping, and blind-review pipeline; cross-novel task search/pin/archive; branch/diff/conflict-safe merge; embedded subagents; schedules; permission sandbox; replay; multimodal attachments; web/in-platform research; cross-session memory; relationship graph; AI covers; and scoped ZIP export
+- **Studio**: Codex-inspired Work/IDE workspace; Agent 4.0 with Research Dossier, Skill OS, Story Compiler, Chapter Bridge, human-quality gate, licensed craft retrieval, work-private Style DNA, first-three-chapter prototyping, and blind-review pipeline; cross-novel task search/pin/archive; branch/diff/conflict-safe merge; embedded subagents; schedules; permission sandbox; replay; multimodal attachments; web/in-platform research; cross-session memory; relationship graph; AI covers; and scoped ZIP export
 - **Community**: posts & topics, recommendation algorithm, comments/likes/bookmarks, follows & fans, direct messages with online presence
 - **Accounts**: phone + SMS-code login (Tencent Cloud SMS), HttpOnly Cookie session + Bearer fallback channel (survives Android shell process kills), public-beta Credits, and one-time referral rewards
 - **Admin console**: data dashboard, user/novel/content governance, encrypted built-in-model configuration, single-user and bulk Credits reset/pause controls, token ranking with user/novel/task drill-down, web-search and image-generation call counts, mobile-friendly
@@ -242,7 +236,7 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 | Frontend | React 18 · Vite 6 · TypeScript · TailwindCSS · React Query 5 · Zustand 5 · React Router 7 |
 | Backend | Express 4 · Prisma 6 · PostgreSQL · Zod |
 | AI | DeepSeek text generation · Zhipu GLM-4.1V image understanding · OpenAI-compatible image generation · Edge TTS speech synthesis · Bocha web search (multi-engine fallback) |
-| Agent | Agent 3.5 Runtime (`api/lib/agent`): unified Loop, 116 governed tools, Skill OS 3.5, Story Compiler, layered memory, quality gate, embedded subagents, long-task auto-resume with runaway protection, and durable SSE events |
+| Agent | Agent 4.0 Runtime (`api/lib/agent`): unified Loop, 116 governed tools, Skill OS 4.0, Story Compiler, layered memory, quality gate, embedded subagents, long-task auto-resume with runaway protection, and durable SSE events |
 | Testing | Vitest + Supertest + Testing Library (unit, PostgreSQL integration, real DOM interaction, and frozen Agent evals; 2026-09-08: 161 files / 1,885 tests passed, with coverage gates) |
 | Deployment | PM2 + nginx (production) · GitHub Actions CI (type check / lint / unit / integration tests on push) · Android Capacitor shell project (separate directory) |
 
@@ -287,7 +281,7 @@ Common scripts:
 | `npm run check` | TypeScript type check |
 | `npm run test` | Run tests (Vitest) |
 | `npx vitest run --coverage` | Run tests with local/CI dual-baseline coverage gates |
-| `npm run agent3:eval` | Emit a versioned Agent 3.5 deterministic eval snapshot with hashes and code SHA |
+| `npm run agent3:eval` | Emit a versioned Agent 4.0 deterministic eval snapshot with hashes and code SHA |
 | `npm run lint` | ESLint check |
 | `npm run build` | Production build |
 | `pwsh -NoProfile -File scripts/deploy-production.ps1 -ExpectedCurrentRevision <full-live-SHA> -CiRunId <CI-run-ID>` | Authorized same-SHA CI deployment through PowerShell 7 |
@@ -315,7 +309,7 @@ This project is open-sourced under the [GNU AGPL-3.0 License](LICENSE): free to 
 
 ## Special Thanks
 
-Chevoink is independently designed and implemented. The following open-source projects provided important references during the evolution of Agent 3.5, the novel domain model, and the Studio experience:
+Chevoink is independently designed and implemented. The following open-source projects provided important references during the evolution of Agent 4.0, the novel domain model, and the Studio experience:
 
 | Open-source project | Referenced area in Chevoink | What we learned from it |
 | --- | --- | --- |

@@ -75,7 +75,7 @@ import { isRunActive, readSessionMessagesCache, useAgentStore, type ComposerRefe
 import { selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../goal-selectors'
 import { useMessageBlockExpansion } from './use-message-block-expansion'
 import { buildGoalResumeModel } from '../goal-command'
-import { formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMessages, skillPhaseLabel } from '../lib/panel-helpers'
+import { isAssistantMessageStreaming, formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMessages, skillPhaseLabel } from '../lib/panel-helpers'
 import { useProcessingHint } from '../useProcessingHint'
 import { useAgentStream } from '../useAgentStream'
 import { resolveComposerModelEffort, useAgentModelPreference } from '../useAgentModelPreference'
@@ -1664,7 +1664,7 @@ export function AgentPanel({
                 >
                   <AgentMessageParts
                     parts={message.parts}
-                    streaming={messageRunActive && message.id === lastAssistantId && !finalizedTextIds.includes(message.id)}
+                    streaming={isAssistantMessageStreaming(message, runId, lastAssistantId, active, finalizedTextIds)}
                     runActive={messageRunActive}
                     blockId={block?.firstId}
                     summaryCount={isBlockFirst ? block?.ops : undefined}

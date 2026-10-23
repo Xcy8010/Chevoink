@@ -39,11 +39,12 @@ describe.skipIf(!dbAvailable)('Agent 3.0 作品技能目录（需 DB）', () => 
     expect(response.body.data.totalCount).toBeGreaterThanOrEqual(10)
     expect(response.body.data.enabledCount).toBe(response.body.data.totalCount)
     const current = response.body.data.items.find((item: { id: string }) => item.id === 'cn-webfiction-draft.v3')
-    expect(current).toMatchObject({ source: 'builtin', enabled: true, activeVersion: '3.6.0' })
+    expect(current).toMatchObject({ source: 'builtin', enabled: true, activeVersion: '4.0.0' })
     expect(current.versions).toContainEqual(expect.objectContaining({ version: '3.5.0' }))
     expect(current.versions).toContainEqual(expect.objectContaining({ version: '3.6.0' }))
+    expect(current.versions).toContainEqual(expect.objectContaining({ version: '4.0.0' }))
   })
-  it('keeps stored 3.0.1 assets immutable and selects current built-in 3.6.0 assets for new tasks', async () => {
+  it('keeps stored 3.0.1 assets immutable and selects current built-in 4.0.0 assets for new tasks', async () => {
     const { resolveEnabledRuntimeSkills, syncBuiltinSkillCatalog } = await import('../../api/lib/agent/skills/service.js')
     await syncBuiltinSkillCatalog()
     const skillId = 'cn-webfiction-draft.v3'
@@ -56,7 +57,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 作品技能目录（需 DB）', () => 
     await prisma.agentSkillInstallation.update({ where: { id: installation.id }, data: { enabled: true, lockedVersion: '3.0.1' } })
     try {
       const current = (await resolveEnabledRuntimeSkills(userId, novelId)).find(skill => skill.id === skillId)!
-      expect(current.version).toBe('3.6.0')
+      expect(current.version).toBe('4.0.0')
       expect(current.resources.draft).toContain('写入章节不等于聊天贴全文')
       expect(await prisma.agentSkillVersion.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
     } finally {

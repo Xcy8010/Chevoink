@@ -136,15 +136,20 @@ function authenticPendingReport(validation: unknown, content: string, previous: 
     if (!scope.success) return false
     const inspected = inspectContinuityResponse(response, { previous, current: content, terminalEvidence }, true, 8, candidate, scope.data)
     if (inspected.complete) return false
-    if (audit.reassessment === undefined) return runtimeJson(inspected.audit).hash === runtimeJson(audit).hash
+    // The lifecycle adds this dispatch identity after parsing. It is retained
+    // and checked by the reservation layer, not part of the parser's audit.
+    const { reassessment, assessmentRequest, ...first } = audit
+    if (assessmentRequest !== undefined && !z.object({ version: z.literal(1),
+      key: z.string().regex(/^[a-f0-9]{64}$/u), inputHash: z.string().regex(/^[a-f0-9]{64}$/u),
+    }).strict().safeParse(assessmentRequest).success) return false
+    if (reassessment === undefined) return runtimeJson(inspected.audit).hash === runtimeJson(first).hash
     // The existing lifecycle preserves the first invalid audit and appends a
     // failed second response. Validate that exact wrapper, keeping it failed;
     // an incomplete second response is still unknown and cannot enter here.
     const second = z.object({ version: z.literal(1), classification: z.literal('invalid'), rawResponse: z.object({
       version: z.literal(1), encoding: z.literal('json-string'), content: z.string(), complete: z.literal(true),
-    }).strict() }).strict().safeParse(audit.reassessment)
+    }).strict() }).strict().safeParse(reassessment)
     if (!second.success || typeof JSON.parse(second.data.rawResponse.content) !== 'string') return false
-    const { reassessment: _retained, ...first } = audit
     return runtimeJson(inspected.audit).hash === runtimeJson(first).hash
   } catch { return false }
 }
