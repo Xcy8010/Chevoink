@@ -630,12 +630,19 @@ export async function assertCreditAccess(userId: string, tier: CreditModelTier =
  * updated enabled BYOK model; never use another owner's model or fall back to a
  * paid provider when that selected custom configuration is invalid. */
 export async function getAuxiliaryModelRuntime(userId: string) {
+  return (await resolveAuxiliaryModelSelection(userId)).runtime
+}
+
+/** Preserve the actual standalone helper's BYOK/basic identity for a durable
+ * caller. Credentials remain in runtime only, never in the frozen selection. */
+export async function resolveAuxiliaryModelSelection(userId: string) {
   const custom = await prisma.aiModelConfig.findFirst({
     where: { ownerUserId: userId, enabled: true },
     orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
     select: { id: true },
   })
-  return getModelTierRuntime(custom ? 'custom' : 'basic', userId, custom?.id)
+  const runtime = await getModelTierRuntime(custom ? 'custom' : 'basic', userId, custom?.id)
+  return { runtime, selection: { tier: runtime.tier, customModelId: custom?.id ?? null, reasoningEffort: runtime.reasoningEffort } }
 }
 
 export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userId?: string, customModelId?: string | null, requestedReasoningEffort?: ModelReasoningEffort): Promise<{

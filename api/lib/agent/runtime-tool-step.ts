@@ -25,6 +25,8 @@ import { executeDurableAttachmentRead } from './tools/durable-attachment.js'
 import { executeDurableVision } from './tools/durable-vision.js'
 import { executeDurableCover } from './tools/durable-cover.js'
 import { executeDurableDossier } from './tools/durable-research-dossier.js'
+import { executeDurableExport } from './tools/durable-export.js'
+import { novelExportTool } from './tools/export-tools.js'
 import { executeDurableCreative } from './tools/durable-creative.js'
 import { platformNovelReadTool, platformNovelSearchTool } from './tools/platform-tools.js'
 import { executeDurablePlanSave } from './tools/durable-plan.js'
@@ -96,6 +98,7 @@ const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(qualityFindingFeedbackTool), checkedAdapter(characterVoiceSaveTool), checkedAdapter(experienceAnchorSaveTool),
   checkedAdapter(styleProfileExtractTool), checkedAdapter(firstThreePrototypeBuildTool),
   checkedAdapter(researchDossierBuildTool),
+  checkedAdapter(novelExportTool),
   checkedAdapter(coverApplyTool), checkedAdapter(coverGenerateTool),
   checkedAdapter(goalEnableTool), checkedAdapter(goalReadTool), checkedAdapter(goalReportTool),
   checkedAdapter(novelImportTool),
@@ -210,6 +213,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     else if (call.name === 'view_image') ctx.durableVision = capability
     else if (call.name === 'cover_generate') ctx.durableCover = capability
     else if (call.name === 'research_dossier_build') ctx.durableDossier = capability
+    else if (call.name === 'novel_export') ctx.durableExport = capability
     else if (call.name === 'creative_critique' || call.name === 'creative_revision_draft') ctx.durableCreative = capability
     else if ((CHANGESET_ACTIONS as readonly string[]).includes(call.name)) ctx.durableChangeSet = capability
     else if (goalTool) ctx.durableRead = capability
@@ -304,6 +308,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   if (selected.ctx.durableVision) return { kind: 'tool' as const, result: await executeDurableVision(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableCover) return { kind: 'tool' as const, result: await executeDurableCover(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableDossier) return { kind: 'tool' as const, result: await executeDurableDossier(selected.ctx, selected.tool, selected.args) }
+  if (selected.ctx.durableExport) return { kind: 'tool' as const, result: await executeDurableExport(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableContent && selected.ctx.writingScope?.writingCoordinationProtocol === 1
     && coordinatedWriterActions.some(name => name === selected.tool.name)) {
     return { kind: 'tool' as const, result: await executeDurableCoordinatedWriter(selected.ctx, selected.tool, selected.args) }

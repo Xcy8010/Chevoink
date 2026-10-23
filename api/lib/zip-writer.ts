@@ -36,7 +36,7 @@ function crc32(data: Uint8Array): number {
   return (crc ^ 0xffffffff) >>> 0
 }
 
-function dosDateTime(date: Date): { time: number; date: number } {
+export function freezeZipTimestamp(date: Date): { time: number; date: number } {
   const time =
     ((date.getHours() & 0x1f) << 11) | ((date.getMinutes() & 0x3f) << 5) | ((Math.floor(date.getSeconds() / 2)) & 0x1f)
   const dosDate =
@@ -48,16 +48,21 @@ function dosDateTime(date: Date): { time: number; date: number } {
 const encoder = new TextEncoder()
 
 /** 把若干文件条目打包成 zip Buffer（store 方式） */
-export function buildZipBuffer(entries: ZipEntry[]): Buffer {
-  const { time, date } = dosDateTime(new Date())
+export function buildZipBuffer(entries: ZipEntry[], stamp = freezeZipTimestamp(new Date())): Buffer {
+  const { time, date } = stamp
+  if (![time, date].every(value => Number.isInteger(value) && value >= 0 && value <= 0xffff)
+    || entries.length > 0xffff) throw new RangeError('ZIP_FORMAT_LIMIT')
   const chunks: Buffer[] = []
   const central: Buffer[] = []
   let offset = 0
+  let centralBytes = 0
 
   for (const entry of entries) {
     const nameBytes = encoder.encode(entry.path)
-    const crc = crc32(entry.data)
     const size = entry.data.length
+    centralBytes += 46 + nameBytes.length
+    if (nameBytes.length > 0xffff || size > 0xffffffff || offset + 30 + nameBytes.length + size + centralBytes + 22 > 0xffffffff) throw new RangeError('ZIP_FORMAT_LIMIT')
+    const crc = crc32(entry.data)
 
     const local = Buffer.alloc(30)
     local.writeUInt32LE(0x04034b50, 0) // local file header signature

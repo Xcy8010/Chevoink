@@ -16,6 +16,7 @@ import {
 import { storeAgentAttachment } from '../lib/agent-attachment-storage.js'
 import { requireSessionUserId } from '../lib/auth-session.js'
 import { getStoredExport } from '../lib/export-store.js'
+import { getDurableExport } from '../lib/agent/runtime-export-download.js'
 import { hasActiveRunInSession } from '../lib/agent/active-runs.js'
 import {
   createNovelPlanArtifact,
@@ -1035,19 +1036,20 @@ router.patch('/plans/:artifactId', async (req: Request, res: Response): Promise<
   }
 })
 
-// 一键导出产物下载：内存仓库 TTL 15 分钟，校验会话归属
+// 一键导出产物下载：原内存或持久回执，均保持首次发布的15分钟有效期和归属。
 router.get('/exports/:exportId', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
 
   try {
     const userId = requireSessionUserId(req)
-    const stored = getStoredExport(req.params.exportId, userId)
+    const stored = getStoredExport(req.params.exportId, userId) ?? await getDurableExport(req.params.exportId, userId)
 
     if (!stored) {
       res.status(404).json(buildError(requestId, 'EXPORT_NOT_FOUND', '导出文件不存在或已过期，请重新导出。'))
       return
     }
 
+    res.setHeader('Cache-Control', 'private, no-store')
     res.setHeader('Content-Type', 'application/zip')
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(stored.fileName)}`)
     res.status(200).send(stored.buffer)

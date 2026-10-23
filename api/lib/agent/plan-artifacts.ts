@@ -46,8 +46,9 @@ function toNovelPlanArtifact(artifact: {
 export async function listNovelPlanArtifacts(
   userId: string,
   novelId: string,
+  db: Prisma.TransactionClient = prisma,
 ): Promise<{ items: NovelPlanArtifact[] }> {
-  const novel = await prisma.novel.findFirst({
+  const novel = await db.novel.findFirst({
     where: { id: novelId, authorId: userId },
     select: { id: true },
   })
@@ -56,7 +57,7 @@ export async function listNovelPlanArtifacts(
     throw new DataAccessError(404, 'NOT_FOUND', '作品不存在或无权访问。')
   }
 
-  const artifacts = await prisma.agentArtifact.findMany({
+  const artifacts = await db.agentArtifact.findMany({
     where: {
       artifactType: 'chapterPlan',
       metadata: { path: ['savedAsPlan'], equals: true },

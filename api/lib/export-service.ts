@@ -1,9 +1,10 @@
 import { DataAccessError, prisma } from './prisma.js'
 import { generatePublishAdviceData } from './ai-service.js'
+import type { Prisma } from '@prisma/client'
 import type { PublishAdvice } from '../../shared/contracts/index.js'
 import { listNovelPlanArtifacts } from './agent/plan-artifacts.js'
 import { readNovelCoverBuffer } from './novel-cover-storage.js'
-import { buildZipBuffer, type ZipEntry } from './zip-writer.js'
+import { buildZipBuffer, freezeZipTimestamp, type ZipEntry } from './zip-writer.js'
 import { activeChapterScope } from './data-access.js'
 import type { NovelExportOptions } from '../../shared/contracts/novel-export.js'
 
@@ -22,9 +23,11 @@ export type NovelExportResult = {
 function sanitizePathComponent(input: string, fallback: string): string {
   const cleaned = input
     .replace(/[/\\:*?"<>|]/g, ' ')
+    .replace(/\p{Cc}/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 60)
+    .replace(/[. ]+$/g, '')
 
   return cleaned || fallback
 }
@@ -86,6 +89,11 @@ function formatDateTime(value: Date): string {
 /** 发布建议缓存：作品未变化（书名/简介/标签/首章）时直接复用上次 AI 结果，重复导出零等待 */
 const publishAdviceCache = new Map<string, { fingerprint: string; advice: PublishAdvice }>()
 
+export function rememberExportAdvice(novelId: string, fingerprint: string, advice: PublishAdvice) {
+  if (publishAdviceCache.size > 200) publishAdviceCache.clear()
+  publishAdviceCache.set(novelId, { fingerprint, advice: structuredClone(advice) })
+}
+
 type AdviceNovelInput = {
   id: string
   title: string
@@ -133,10 +141,7 @@ async function resolvePublishAdvice(
     sampleText: firstChapter?.content ?? '',
   })
 
-  if (publishAdviceCache.size > 200) {
-    publishAdviceCache.clear()
-  }
-  publishAdviceCache.set(novel.id, { fingerprint, advice })
+  rememberExportAdvice(novel.id, fingerprint, advice)
 
   return advice
 }
@@ -145,12 +150,13 @@ async function resolvePublishAdvice(
  * 组装一键导出 zip：按选择包含规划、创作记忆、目录、正文与作品信息。
  * 发布建议走 AI 生成并钳制到番茄词表；AI 不可用时降级为提示文案，不阻断导出。
  */
-export async function buildNovelExportZip(
+export async function readNovelExportSource(
   userId: string,
   novelId: string,
   options: NovelExportOptions,
-): Promise<NovelExportResult> {
-  const novel = await prisma.novel.findFirst({
+  db: Prisma.TransactionClient = prisma,
+) {
+  const novel = await db.novel.findFirst({
     where: { id: novelId, authorId: userId },
     select: {
       id: true,
@@ -181,7 +187,7 @@ export async function buildNovelExportZip(
     throw new DataAccessError(400, 'VALIDATION_ERROR', '请至少勾选一项导出内容。')
   }
 
-  const allChapters = await prisma.chapter.findMany({
+  const allChapters = await db.chapter.findMany({
     where: activeChapterScope(novelId),
     orderBy: { orderIndex: 'asc' },
     select: {
@@ -204,23 +210,28 @@ export async function buildNovelExportZip(
     throw new DataAccessError(400, 'VALIDATION_ERROR', '勾选的章节已归档、已删除或不属于当前作品，请重新选择。')
   }
 
-  // 发布建议是导出唯一慢步骤（AI 调用）：缓存未命中时尽早发请求，与后续装配并行隐藏延迟
-  const advicePromise = includeInfo ? resolvePublishAdvice(userId, novel, allChapters[0]) : null
+  const memories = includeMemories ? await db.projectMemoryEntry.findMany({
+    where: { novelId, novel: { authorId: userId }, status: { in: ['confirmed', 'inferred'] }, reviewStatus: { not: 'rejected' } },
+    orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }], select: { id: true, memoryType: true, title: true, content: true },
+  }) : []
+  const plans = includePlans ? await listNovelPlanArtifacts(userId, novelId, db) : { items: [] }
+  return { novel, allChapters, chapters, memories, plans: plans.items, includePlans, includeMemories, includeInfo, includeCatalog, includeChapters }
+}
+
+/** Called outside the database transaction. Local managed cover bytes and
+ * formatted paths/dates are captured once, before optional paid advice. */
+export async function prepareNovelExportSnapshot(source: Awaited<ReturnType<typeof readNovelExportSource>>) {
+  const { novel, allChapters, chapters, memories, plans, includePlans, includeMemories, includeInfo, includeCatalog, includeChapters } = source
 
   const root = sanitizePathComponent(novel.displayTitle?.trim() || novel.title, '未命名作品')
   const entries: ZipEntry[] = []
   const text = (value: string) => Buffer.from(value, 'utf8')
   const summaryParts: string[] = []
-  let adviceCreditsExhausted = false
+  let advicePath: string | null = null
 
   if (includeMemories) {
     // Same effective-card scope as listStoryMemories/listStoryMemorySets, without
     // the panel's pagination. Runtime/session memories live in other tables.
-    const memories = await prisma.projectMemoryEntry.findMany({
-      where: { novelId, novel: { authorId: userId }, status: { in: ['confirmed', 'inferred'] }, reviewStatus: { not: 'rejected' } },
-      orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
-      select: { id: true, memoryType: true, title: true, content: true },
-    })
     for (const [index, memory] of memories.entries()) {
       const title = sanitizePathComponent(memory.title.replace(/\p{Cc}/gu, ' '), '未命名记忆').replace(/[. ]+$/g, '') || '未命名记忆'
       // A unique ordinal survives duplicate titles, sanitization collisions and
@@ -231,16 +242,19 @@ export async function buildNovelExportZip(
   }
 
   if (includePlans) {
-    const { items } = await listNovelPlanArtifacts(userId, novelId)
-
-    for (const plan of items) {
+    const used = new Set<string>()
+    for (const plan of plans) {
+      const title = sanitizePathComponent(plan.title, '未命名计划')
+      let name = `${title}.txt`, suffix = 2
+      while (used.has(name.toLocaleLowerCase())) name = `${title}-${suffix++}.txt`
+      used.add(name.toLocaleLowerCase())
       entries.push({
-        path: `${root}/规划/${sanitizePathComponent(plan.title, '未命名计划')}.txt`,
+        path: `${root}/规划/${name}`,
         data: text(plan.content || '（空白计划）'),
       })
     }
 
-    summaryParts.push(`${items.length} 份规划`)
+    summaryParts.push(`${plans.length} 份规划`)
   }
 
   if (includeCatalog) {
@@ -294,14 +308,33 @@ export async function buildNovelExportZip(
       entries.push({ path: `${root}/作品信息以及发布建议/封面.${cover.extension}`, data: cover.buffer })
     }
 
+    advicePath = `${root}/作品信息以及发布建议/发布建议.txt`
+    summaryParts.push('作品信息与发布建议')
+  }
+  if (entries.length === 0) throw new DataAccessError(400, 'VALIDATION_ERROR', '当前作品没有可导出的内容。')
+  const fingerprint = includeInfo ? buildAdviceFingerprint(novel, allChapters[0]) : null
+  const cached = includeInfo ? publishAdviceCache.get(novel.id) : null
+  return { entries: entries.map(entry => ({ path: entry.path, data: Buffer.from(entry.data).toString('base64') })),
+    fileName: `${root}-一键导出.zip`, summary: summaryParts.join('、'), zipStamp: freezeZipTimestamp(new Date()),
+    advice: includeInfo ? { path: advicePath!, title: novel.displayTitle?.trim() || novel.title, fingerprint: fingerprint!,
+      input: { novelId: novel.id, title: novel.displayTitle?.trim() || novel.title, summary: novel.summary, genre: novel.categoryName ?? '未分类', tags: novel.tagNames, sampleText: allChapters[0]?.content.slice(0, 1500) ?? '' },
+      cached: cached?.fingerprint === fingerprint ? structuredClone(cached.advice) : null } : null }
+}
+
+export type NovelExportSnapshot = Awaited<ReturnType<typeof prepareNovelExportSnapshot>>
+export type ExportAdviceOutcome = { kind: 'ready'; advice: PublishAdvice } | { kind: 'unavailable' | 'credits_exhausted' }
+
+/** Pure ZIP assembly from the original frozen data. Never reads today's book,
+ * model, cache, time or filesystem during a replay. */
+export function renderNovelExportZip(snapshot: NovelExportSnapshot, outcome: ExportAdviceOutcome = { kind: 'unavailable' }): NovelExportResult {
+  const entries: ZipEntry[] = snapshot.entries.map(entry => ({ path: entry.path, data: Buffer.from(entry.data, 'base64') }))
+  if (snapshot.advice) {
     let adviceText = '发布建议本次未生成（AI 服务暂不可用），可稍后重新导出。'
-
-    try {
-      const advice = advicePromise ? await advicePromise : null
-
-      if (advice) {
-        adviceText = [
-          `《${novel.displayTitle?.trim() || novel.title}》番茄小说发布建议`,
+    if (outcome.kind === 'credits_exhausted') adviceText = '发布建议本次未生成（当前额度已用尽），其它内容已正常导出。'
+    if (outcome.kind === 'ready') {
+      const advice = outcome.advice
+      adviceText = [
+          `《${snapshot.advice.title}》番茄小说发布建议`,
           '',
           `频道：${advice.channel}`,
           `主分类：${advice.mainCategory || '（建议在番茄作者端结合主分类清单人工确认）'}`,
@@ -317,25 +350,22 @@ export async function buildNovelExportZip(
           '作品简介：',
           advice.summary || '（无）',
         ].join('\n')
-      }
-    } catch (error) {
-      // AI 不可用不阻断导出；额度用尽时换专门文案并在响应里标记，让前端弹兑底提示
-      if (error instanceof DataAccessError && error.code === 'CREDITS_EXHAUSTED') {
-        adviceCreditsExhausted = true
-        adviceText = '发布建议本次未生成（当前额度已用尽），其它内容已正常导出。'
-      }
     }
-
-    entries.push({ path: `${root}/作品信息以及发布建议/发布建议.txt`, data: text(`${adviceText}\n`) })
-    summaryParts.push('作品信息与发布建议')
+    entries.push({ path: snapshot.advice.path, data: Buffer.from(`${adviceText}\n`, 'utf8') })
   }
+  return { buffer: buildZipBuffer(entries, snapshot.zipStamp), fileName: snapshot.fileName, summary: snapshot.summary,
+    adviceCreditsExhausted: outcome.kind === 'credits_exhausted' || undefined }
+}
 
-  if (entries.length === 0) {
-    throw new DataAccessError(400, 'VALIDATION_ERROR', '当前作品没有可导出的内容。')
-  }
-
-  const buffer = buildZipBuffer(entries)
-  const fileName = `${root}-一键导出.zip`
-
-  return { buffer, fileName, summary: summaryParts.join('、'), adviceCreditsExhausted: adviceCreditsExhausted || undefined }
+/** Legacy HTTP/tool wrapper retains its original optional-advice fallback. New
+ * durable execution uses the source/snapshot/renderer separately and must not
+ * swallow an unknown supplier result through this compatibility wrapper. */
+export async function buildNovelExportZip(userId: string, novelId: string, options: NovelExportOptions): Promise<NovelExportResult> {
+  const source = await readNovelExportSource(userId, novelId, options)
+  const advice = source.includeInfo ? resolvePublishAdvice(userId, source.novel, source.allChapters[0]) : null
+  const snapshot = await prepareNovelExportSnapshot(source)
+  let outcome: ExportAdviceOutcome = { kind: 'unavailable' }
+  try { const result = await advice; if (result) outcome = { kind: 'ready', advice: result } }
+  catch (error) { if (error instanceof DataAccessError && error.code === 'CREDITS_EXHAUSTED') outcome = { kind: 'credits_exhausted' } }
+  return renderNovelExportZip(snapshot, outcome)
 }

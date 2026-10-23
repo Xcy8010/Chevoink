@@ -52,6 +52,7 @@ import {
 import { buildError, buildSuccess, createRequestId, parsePositiveInt } from '../lib/http.js'
 import { buildNovelExportZip } from '../lib/export-service.js'
 import { createStoredExport, getStoredExportByToken } from '../lib/export-store.js'
+import { getDurableExport } from '../lib/agent/runtime-export-download.js'
 import { storeNovelCoverDataUrl } from '../lib/novel-cover-storage.js'
 import { parseBody } from '../lib/parse-body.js'
 import { sendRouteError } from '../lib/route-error.js'
@@ -139,13 +140,14 @@ router.get('/exports/:exportId', async (req: Request, res: Response): Promise<vo
   const requestId = createRequestId()
 
   try {
-    const stored = getStoredExportByToken(req.params.exportId)
+    const stored = getStoredExportByToken(req.params.exportId) ?? await getDurableExport(req.params.exportId)
 
     if (!stored) {
       res.status(404).json(buildError(requestId, 'EXPORT_NOT_FOUND', '导出文件不存在或已过期，请重新导出。'))
       return
     }
 
+    res.setHeader('Cache-Control', 'private, no-store')
     res.setHeader('Content-Type', 'application/zip')
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(stored.fileName)}`)
     res.status(200).send(stored.buffer)

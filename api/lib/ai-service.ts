@@ -1762,6 +1762,21 @@ export async function generatePublishAdviceData(
     sampleText: string
   },
 ): Promise<PublishAdvice> {
+  const { systemPrompt, userPrompt } = buildPublishAdviceRequest(input)
+  const content = await generateTextCompletion(systemPrompt, userPrompt, {
+    userId,
+    action: 'generatePublishAdvice',
+    novelId: input.novelId ?? null,
+    targetType: 'publishAdvice',
+    temperature: 0.3,
+    reasoningEffort: 'low',
+    modelRuntime: await getAuxiliaryModelRuntime(userId),
+  })
+  return parsePublishAdviceResponse(content)
+}
+
+/** Pure original prompt/word-list contract shared with durable export. */
+export function buildPublishAdviceRequest(input: { title: string; summary: string; genre: string; tags: string[]; sampleText: string }) {
   const systemPrompt = [
     '你是番茄小说的资深责编，熟悉番茄作者端的标签体系。',
     '请根据作品信息快速判断其在番茄发布的标签配置并写一份作品简介，只输出一个 JSON 对象，不要输出其它内容。',
@@ -1785,15 +1800,7 @@ export async function generatePublishAdviceData(
     `内容世界观清单：${FANQIE_CONTENT_WORLDVIEW_TAGS.join('、')}`,
   ].join('\n')
 
-  const content = await generateTextCompletion(systemPrompt, userPrompt, {
-    userId,
-    action: 'generatePublishAdvice',
-    novelId: input.novelId ?? null,
-    targetType: 'publishAdvice',
-    temperature: 0.3,
-    reasoningEffort: 'low',
-    modelRuntime: await getAuxiliaryModelRuntime(userId),
-  })
-
-  return sanitizePublishAdvice(extractJsonObject(content))
+  return { systemPrompt, userPrompt }
 }
+
+export const parsePublishAdviceResponse = (content: string): PublishAdvice => sanitizePublishAdvice(extractJsonObject(content))
