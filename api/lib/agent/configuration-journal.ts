@@ -81,6 +81,10 @@ export async function consumeLegacyConfigurationConsent(userId: string, runId: s
 export async function consumeDurableConfigurationConsent(token: RunLeaseToken) {
   return withRunLease(token, async tx => {
     const run = await tx.agentRun.findUniqueOrThrow({ where: { id: token.runId } })
+    // Every applicable consent is bound to this immutable root. An empty
+    // journal needs no source/frame reconstruction and grants no new action.
+    if (!await tx.agentQueuedRequest.count({ where: { userId: token.userId, sessionId: run.sessionId,
+      status: { in: ['held', 'consented'] }, payload: { path: ['configurationConsent', 'sourceRootId'], equals: token.taskRootId } } })) return false
     const current = await readExecutionStateInTransaction(tx, token.taskRootId)
     if (current.frame.state.phase !== 'idle') return false
     let index = current.frame.state.messages.length - 1

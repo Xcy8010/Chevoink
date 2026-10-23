@@ -36,13 +36,15 @@ export function dispatchDurableChild(userId: string, childRunId: string): Promis
 export async function wakeDurableChildren(parent: RunLeaseToken) {
   const grants = await withRunLease(parent, async tx => {
     await adoptChildGrants(tx, parent)
+    const eligible = await tx.agentChildExecutionGrant.findMany({ where: { parentRootId: parent.taskRootId,
+      status: { in: ['admitted', 'running'] } }, select: { childRunId: true, parentOperationId: true } })
+    if (!eligible.length) return []
     const state = await readExecutionStateInTransaction(tx, parent.taskRootId)
     const pending = state.frame.state.pendingOperationId ? await tx.agentOperation.findUnique({ where: { id: state.frame.state.pendingOperationId } }) : null
-    return tx.agentChildExecutionGrant.findMany({ where: { parentRootId: parent.taskRootId, status: { in: ['admitted', 'running'] },
-      // Persist the immediate native window acknowledgement before allowing
-      // its workers to contend with parent cursor reduction. A restart uses
-      // the same prepared native operation and then wakes these saved grants.
-      ...(pending?.status === 'prepared' && ['task_spawn', 'task_send'].includes(pending.action) ? { parentOperationId: { not: pending.id } } : {}) }, select: { childRunId: true } })
+    // The acknowledgement exclusion is unchanged; only avoid loading the
+    // parent's full frame when adoption left no eligible child to dispatch.
+    return pending?.status === 'prepared' && ['task_spawn', 'task_send'].includes(pending.action)
+      ? eligible.filter(grant => grant.parentOperationId !== pending.id) : eligible
   })
   for (const grant of grants) void dispatchDurableChild(parent.userId, grant.childRunId).catch(() => {})
 }

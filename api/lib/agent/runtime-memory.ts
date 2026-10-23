@@ -132,6 +132,9 @@ export async function collectDurableMemoryWork(tx: RuntimeTx, root: { id: string
 export async function advanceDurableMemory(token: RunLeaseToken) {
   const lease = { ...token }
   return withRunLease(lease, async tx => {
+    // Even non-memory tool receipts must pass the original integrity gate
+    // before another native call. Only a root with no successful tools is empty.
+    if (!await tx.agentOperation.count({ where: { taskRootId: lease.taskRootId, kind: 'tool', status: 'succeeded' } })) return null
     const state = await readExecutionStateInTransaction(tx, lease.taskRootId)
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     const effects = await collectDurableToolEvidence(tx, root.id, state.frame.revision)
