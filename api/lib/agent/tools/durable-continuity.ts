@@ -15,7 +15,8 @@ import { runtimeError, runtimeJson, type RuntimeTx } from '../runtime-common.js'
 import { withRunLease } from '../runtime-lease.js'
 import { compilerStateHash, compilerObservationSchema } from '../runtime-compiler-observation.js'
 import { readObservedBaseline } from '../runtime-observed-baseline.js'
-import { prepareToolCursorOperation, rejectToolCursorCall, readAdmittedToolOperation } from '../runtime-tool-cursor.js'
+import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
+import { readAdmittedReviewWork } from '../runtime-writing-service.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
 import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { callDurableAuxiliary, auxiliaryRouteSchema, auxiliaryRouteForRuntime, resolveDurableAuxiliaryRuntime } from '../runtime-auxiliary-call.js'
@@ -94,11 +95,11 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
 /** Execute only the saved work of an admitted operation. Keeping preparation,
  * dispatch/apply and cursor projection separate lets service coordination reuse
  * the review core without copying the critic or inventing a model tool call.
- * Service admission is not enabled here; existing tool provenance stays strict. */
+ * Fresh task activation is separate; both provenances retain strict admission. */
 export async function executePreparedContinuityWork(ctx: ToolContext, lease: import('../runtime-lease.js').RunLeaseToken, operationId: string) {
   ctx = { ...ctx }; lease = { ...lease }
   if (lease.userId !== ctx.userId || lease.runId !== ctx.runId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '连续性工作不属于当前执行身份。')
-  const { operation, input } = await readAdmittedToolOperation(lease, { operationId, action: 'continuity_validate', novelId: ctx.novelId, callId: ctx.callId })
+  const { operation, input } = await readAdmittedReviewWork(lease, { operationId, action: 'continuity_validate', novelId: ctx.novelId, callId: ctx.callId })
   const { args, work } = z.object({ args: z.record(z.string(), z.unknown()), work: workSchema }).parse(input)
   const failure = (code: string, output: string) => recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code, output, summary: '连续性检查未执行' })
   const assertCurrent = async (tx: RuntimeTx, frozen: Work) => {

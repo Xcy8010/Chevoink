@@ -8,7 +8,10 @@ const mocks = vi.hoisted(() => ({
   tx: { agentOperation: { findFirst: vi.fn(), findUnique: vi.fn(), findUniqueOrThrow: vi.fn() }, agentEffectReceipt: { findUnique: vi.fn() } },
   state: vi.fn(), source: vi.fn(), reduce: vi.fn(), effect: vi.fn(), failure: vi.fn(), provider: vi.fn(),
 }))
-vi.mock('../../api/lib/agent/runtime-lease.js', async original => ({ ...await original<object>(), withRunLease: async (_lease: unknown, work: (tx: unknown) => unknown) => work(mocks.tx) }))
+vi.mock('../../api/lib/agent/runtime-lease.js', async original => ({ ...await original<object>(),
+  withRunLease: async (_lease: unknown, work: (tx: unknown) => unknown) => work(mocks.tx),
+  withRunLeaseInTransaction: async (_tx: unknown, _lease: unknown, work: (tx: unknown) => unknown) => work(mocks.tx),
+}))
 vi.mock('../../api/lib/agent/runtime-state.js', async original => ({ ...await original<object>(), readExecutionStateInTransaction: mocks.state, readExecutionFrame: mocks.source }))
 vi.mock('../../api/lib/agent/runtime-operations.js', async original => ({ ...await original<object>(), commitOperationEffect: mocks.effect, recordToolFailure: mocks.failure }))
 vi.mock('../../api/lib/agent/runtime-reducer.js', async original => ({ ...await original<object>(), reduceExecutionReceipt: mocks.reduce }))

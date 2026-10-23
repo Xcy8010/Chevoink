@@ -50,6 +50,8 @@ export const taskScopeSchema = z.object({
   localEditProtocol: z.literal(1).optional(),
   /** Fresh admission binds chapter targets to their requested action, never reference prose. */
   writingTargetProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
+  /** Server-only fresh admission. Never added by a tool, resume or migration. */
+  writingCoordinationProtocol: z.literal(1).optional(),
   /** Fresh server interpretation of requested effects. Missing keeps legacy
    * contracts unchanged; chapter scope is checked only when applying writes. */
   authorEffects: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -158,6 +160,12 @@ export const taskSpecSchema = z.object({
   qualityMode: storyCompilerModeSchema.default('premium'),
   createdAt: z.string().datetime(),
 }).superRefine((spec, ctx) => {
+  if (spec.scope.writingCoordinationProtocol === 1 && (!['write', 'revise'].includes(spec.intent)
+    || spec.writingPacing !== 'explicit_writing' || spec.scope.writing?.kind !== 'bounded'
+    || spec.scope.selection || spec.scope.selectionBoundary || spec.scope.localEditBoundary
+    || spec.scope.authorEffects?.manuscript === false)) {
+    ctx.addIssue({ code: 'custom', path: ['scope', 'writingCoordinationProtocol'], message: 'Writing coordination requires the original bounded manuscript task' })
+  }
   if (spec.authorization && (spec.authorization.binding.taskRootId !== spec.id
     || spec.authorization.binding.novelId !== spec.scope.novelId)) {
     ctx.addIssue({ code: 'custom', path: ['authorization', 'binding'], message: 'Authorization must bind this task and novel' })

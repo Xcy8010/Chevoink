@@ -21,7 +21,7 @@ export async function readCompilerObservation(tx: RuntimeTx, rootId: string, rev
   for (;;) {
     const events = await tx.agentExecutionOutbox.findMany({ where: { taskRootId: rootId, type: 'effect.committed',
       ...(cursor === undefined ? {} : { sequence: { lt: cursor } }),
-      operation: { action: { in: ['story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'continuity_validate', 'chapter_bridge_commit', 'quality_analyze'] }, status: 'succeeded' } },
+      operation: { kind: 'tool', action: { in: ['story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'continuity_validate', 'chapter_bridge_commit', 'quality_analyze'] }, status: 'succeeded' } },
       orderBy: { sequence: 'desc' }, take: 100, include: { operation: { include: { effectReceipt: true } } } })
     for (const event of events) {
       const operation = event.operation!, receipt = operation.effectReceipt

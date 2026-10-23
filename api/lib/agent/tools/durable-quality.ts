@@ -12,7 +12,8 @@ import { readExecutionStateInTransaction } from '../runtime-state.js'
 import { compilerStateHash, compilerObservationSchema } from '../runtime-compiler-observation.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { readObservedBaseline } from '../runtime-observed-baseline.js'
-import { prepareToolCursorOperation, rejectToolCursorCall, readAdmittedToolOperation } from '../runtime-tool-cursor.js'
+import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
+import { readAdmittedReviewWork } from '../runtime-writing-service.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
 import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { auxiliaryRouteSchema, auxiliaryRouteForRuntime, callDurableAuxiliary, resolveDurableAuxiliaryRuntime } from '../runtime-auxiliary-call.js'
@@ -113,7 +114,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
 export async function executePreparedQualityWork(ctx: ToolContext, lease: RunLeaseToken, operationId: string) {
   ctx = { ...ctx }; lease = { ...lease }
   if (lease.userId !== ctx.userId || lease.runId !== ctx.runId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '质量工作不属于当前执行身份。')
-  const { operation, input } = await readAdmittedToolOperation(lease, { operationId, action: 'quality_analyze', novelId: ctx.novelId, callId: ctx.callId })
+  const { operation, input } = await readAdmittedReviewWork(lease, { operationId, action: 'quality_analyze', novelId: ctx.novelId, callId: ctx.callId })
   const { work } = z.object({ work: workSchema }).parse(input)
   const fail = (code: string, output: string) => recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code, output, summary: '质量检查未执行' })
   const assertCurrent = async (tx: RuntimeTx, frozen: Work) => {
@@ -330,7 +331,7 @@ export async function executePreparedQualityWork(ctx: ToolContext, lease: RunLea
 /** Freeze the original business input independently of model cursor admission.
  * The caller still admits that exact work before dispatch or any effect. */
 export async function prepareQualityWork(ctx: ToolContext, lease: import('../runtime-lease.js').RunLeaseToken, input: {
-  operationKey: string; observedRevision: number; baseline: z.infer<typeof compilerObservationSchema> | null; args: Record<string, unknown>
+  operationKey: string; observedRevision: number; baseline: z.infer<typeof compilerObservationSchema> | null; args: Record<string, unknown>; serviceReadOnly?: true
 }) {
   ctx = { ...ctx }; lease = { ...lease }; input = { ...input }
   const baseline = input.baseline && { ...input.baseline }, args = structuredClone(input.args)
@@ -378,7 +379,7 @@ export async function prepareQualityWork(ctx: ToolContext, lease: import('../run
     return { kind: 'check' as const, version: 13 as const, parserVersion: 3 as const, repairSourceReferences: true as const, formatRecovery, deadlineAt: Date.now() + env.aiTextTimeoutMs, sources, compiler: bundle.compilation ? baseline : null,
       chapter: { id: chapterId, title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content }, contextHash: jsonHash(bundle),
       recentContents: bundle.recentChapters.map(item => item.content), feedback: bundle.feedback,
-      mode: state.configuration.qualityMode, repair: comp?.status !== 'completed' && writable && state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId)
+      mode: state.configuration.qualityMode, repair: !input.serviceReadOnly && comp?.status !== 'completed' && writable && state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId)
         && (!cached || !!existingReport && qualityAutoRepairPending(existingReport) && (!!bundle.compilation || existingReport.runId === ctx.runId)),
       criticInput: buildCriticInput(bundle, deterministic.metrics, sources),
       repairContext: buildQualityRepairContext(bundle),

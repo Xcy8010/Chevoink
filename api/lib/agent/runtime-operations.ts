@@ -22,9 +22,13 @@ async function ownedOperation(tx: RuntimeTx, token: RunLeaseToken, operationId: 
 /** Frozen admission cannot override permissions narrowed since preparation.
  * Receipt replay is intentionally checked before this new-effect boundary. */
 export async function assertCurrentToolPolicy(tx: RuntimeTx, token: RunLeaseToken, operation: Awaited<ReturnType<typeof ownedOperation>>) {
-  if (operation.kind !== 'tool') return
   const envelope = operation.inputSnapshot as Prisma.JsonObject
   const input = envelope.input as Prisma.JsonObject | undefined
+  if (operation.kind === 'internal' && input?.serviceAdmission !== undefined) {
+    const { assertWritingServicePolicy } = await import('./runtime-writing-service.js')
+    return assertWritingServicePolicy(tx, token, operation, assertCurrentToolPolicy)
+  }
+  if (operation.kind !== 'tool') return
   const normalization = input?.normalization as Prisma.JsonObject | undefined
   // Internal primitives and recorded rejection observations have no cursor grant.
   if (!normalization) return
@@ -110,8 +114,10 @@ export async function commitOperationEffectInTransaction(tx: RuntimeTx, token: R
     if (operation.inputHash !== inputHash || operation.kind === 'provider') runtimeError('RUNTIME_IDENTITY_CONFLICT', '业务操作身份不匹配。')
     const existing = await tx.agentEffectReceipt.findUnique({ where: { operationId } })
     if (existing) {
-      const savedFailure = operation.kind === 'tool' && operation.status === 'failed' && existing.result && typeof existing.result === 'object'
+      const savedFailure = (operation.kind === 'tool' || operation.kind === 'internal' && operation.parentOperationId !== null)
+        && operation.status === 'failed' && existing.result && typeof existing.result === 'object'
         && !Array.isArray(existing.result) && existing.result.outcome === 'failed' && existing.result.effectApplied === false
+      if (savedFailure && operation.kind === 'internal') await assertServiceFailureSource(tx, token, operation)
       if ((!savedFailure && operation.status !== 'succeeded') || runtimeJson(existing.result).hash !== existing.resultHash) runtimeError('RUNTIME_RECEIPT_INVALID', '业务回执与状态不一致，需要核对。')
       return existing
     }
@@ -119,6 +125,16 @@ export async function commitOperationEffectInTransaction(tx: RuntimeTx, token: R
     await assertCurrentToolPolicy(tx, token, operation)
     const raw = await work(tx)
     if (operation.kind === 'tool') await bindMemoryJobOwnership(tx, token.taskRootId, operation.id, raw)
+    else if (operation.kind === 'internal') {
+      const envelope = operation.inputSnapshot as Prisma.JsonObject, input = envelope.input as Prisma.JsonObject | undefined
+      if (input?.serviceAdmission !== undefined) {
+        const service = await (await import('./runtime-writing-service.js')).readAdmittedWritingServiceStep(token,
+          { operationId: operation.id, action: operation.action, novelId: String(input.novelId), callId: String(input.callId) }, tx)
+        // Bind before the body transaction commits, including while its parent
+        // is still pending review. Legacy memory processors must never claim it.
+        if (service.input.serviceAdmission.step === 'body') await bindMemoryJobOwnership(tx, token.taskRootId, service.parent.id, raw)
+      }
+    }
     const result = runtimeJson(raw)
     const receipt = await tx.agentEffectReceipt.create({ data: { operationId, runId: token.runId, ownerEpoch: token.epoch, result: result.value, resultHash: result.hash } })
     await tx.agentOperation.update({ where: { id: operationId }, data: { status: 'succeeded' } })
@@ -137,13 +153,26 @@ export async function recordToolFailureInTransaction(tx: RuntimeTx, token: RunLe
   return toolFailureWrite(token, input)(tx)
 }
 
+async function assertServiceFailureSource(tx: RuntimeTx, token: RunLeaseToken, operation: Awaited<ReturnType<typeof ownedOperation>>) {
+  const service = await import('./runtime-writing-service.js')
+  const envelope = operation.inputSnapshot as Prisma.JsonObject, original = envelope.input as Prisma.JsonObject | undefined
+  if (!service.writingServiceAdmissionSchema.safeParse(original?.serviceAdmission).success
+    || typeof original?.novelId !== 'string' || typeof original.callId !== 'string') {
+    return runtimeError('RUNTIME_IDENTITY_CONFLICT', '内部失败观察没有真实写入来源。')
+  }
+  await service.readAdmittedWritingServiceStep(token,
+    { operationId: operation.id, action: operation.action, novelId: original.novelId, callId: original.callId }, tx)
+}
+
 function toolFailureWrite(token: RunLeaseToken, input: { operationId: string; inputHash: string; code: string; output: string; summary: string }) {
   token = { ...token }; input = { ...input }
   runtimeId(input.code, 96)
   const result = runtimeJson({ outcome: 'failed', effectApplied: false, code: input.code, toolResult: { output: input.output, summary: input.summary } })
   return async (tx: RuntimeTx) => {
     const operation = await ownedOperation(tx, token, input.operationId)
-    if (operation.kind !== 'tool' || operation.inputHash !== input.inputHash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '失败观察不属于原工具操作。')
+    if (operation.kind === 'internal') await assertServiceFailureSource(tx, token, operation)
+    else if (operation.kind !== 'tool') runtimeError('RUNTIME_IDENTITY_CONFLICT', '失败观察不属于原工具操作。')
+    if (operation.inputHash !== input.inputHash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '失败观察不属于原工具操作。')
     const existing = await tx.agentEffectReceipt.findUnique({ where: { operationId: operation.id } })
     if (existing) {
       if (runtimeJson(existing.result).hash !== existing.resultHash) runtimeError('RUNTIME_RECEIPT_INVALID', '工具回执损坏。')

@@ -21,7 +21,7 @@ afterEach(async () => {
 export function fixture(work: (f: {
   userId: string; novelId: string; sessionId: string; chapterId: string; runId: string; sourceMessageId: string;
   spec: ReturnType<typeof buildTaskSpec>; rootId: string;
-}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { freezeWriting?: boolean; researchNavigationAdmission?: 1; continuityEvidenceProtocol?: 1; terminalEvidenceProtocol?: 1 | 2; terminalQuoteAddressProtocol?: 1; terminalCoverageProtocol?: 1 | 2; lifecycle?: DurableTestLifecycle }) {
+}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { freezeWriting?: boolean; writingCoordinationProtocol?: 1; researchNavigationAdmission?: 1; continuityEvidenceProtocol?: 1; terminalEvidenceProtocol?: 1 | 2; terminalQuoteAddressProtocol?: 1; terminalCoverageProtocol?: 1 | 2; lifecycle?: DurableTestLifecycle }) {
   const lifecycle = options?.lifecycle
   let cleanupFailed = false
   const active = <T>(work: () => PromiseLike<T>) => lifecycle ? lifecycle.active(work) : Promise.resolve(work())
@@ -53,6 +53,12 @@ export function fixture(work: (f: {
         await active(() => prisma.agentMessage.create({ data: { id: sourceMessageId, runId, sessionId: session.id, role: 'user', parts: [{ type: 'text', text: prompt }] } }))
         if (options?.freezeWriting) {
           spec = await active(() => prisma.$transaction(tx => freezeWritingScope(tx, { userId, novelId: novel.id, runId }, spec, prompt)))
+          await active(() => prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } }))
+        }
+        // Explicit isolated fixture admission before creating the root. Never
+        // retrofit this marker into an existing production task or checkpoint.
+        if (options?.writingCoordinationProtocol) {
+          spec = { ...spec, writingPacing: 'explicit_writing', scope: { ...spec.scope, writingCoordinationProtocol: options.writingCoordinationProtocol } }
           await active(() => prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: JSON.parse(JSON.stringify(spec)) } }))
         }
         const root = await active(() => initializeDurableTask({ userId, runId, sourceMessageId, tokenBudget }))

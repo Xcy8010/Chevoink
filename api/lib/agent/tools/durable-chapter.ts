@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from '../craft-library.js'
-import { runtimeError, runtimeJson } from '../runtime-common.js'
+import { runtimeError, runtimeJson, type RuntimeTx } from '../runtime-common.js'
 import { commitOperationEffect, prepareOperation, recordToolFailure } from '../runtime-operations.js'
 import { recordChapterBaseline } from '../baseline.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
@@ -137,35 +137,8 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     }) : undefined
   if (prepared && 'rejected' in prepared) return prepared.rejected
   const operation = prepared?.operation ?? await prepareOperation(lease, { key: capability.operationKey, kind: 'tool', action, input: operationInput })
-  const receipt = await commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
-    ctx.signal.throwIfAborted()
-    await assertAgentManuscriptCurrent(tx, ctx)
-    const scope = await assertWritingTarget(tx, ctx, { chapterId: args.chapterId, effect: action === 'chapter_edit_range' ? 'range' : action === 'chapter_append' ? 'append' : 'replace' })
-    if (action === 'chapter_edit_range') assertLocalEditArguments(scope.spec, args)
-    const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
-    if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) runtimeError('RUNTIME_SCOPE_MISMATCH', '正文操作不属于原任务范围。')
-    const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
-    if (!chapter) return runtimeError('CHAPTER_REVISION_CONFLICT', '章节已归档、不存在或不属于当前作品，请重新读取当前章节。')
-    if (chapter.revision !== expectedRevision) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已被修改，请重新读取后建立新操作，不能覆盖用户修改。')
-    const before = chapter.content
-    const { after, ranges: editRanges } = composeChapterBody(before,
-      action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range', args, anchorProtocol)
-    const changed = before !== after
-    const updated = await updateOwnedChapterAtRevision({ ...ctx, transaction: tx }, chapter, { content: after, wordCount: after.length },
-      action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range', !!args.patches,
-      { editRanges, retainedFindings: args.retainedFindings })
-    if (!updated) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，正文写入未执行。')
-    if (changed) await recalculateNovelStats(tx, ctx.novelId)
-    const revision = updated.revision
-    const memoryJobId = changed && isAgent2FeatureEnabled('memory2', ctx.userId)
-      ? await enqueueChapterMemoryExtraction({ novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: revision, before, after }, tx) : null
-    ctx.signal.throwIfAborted()
-    return { toolResult: { output: changed ? `已更新章节《${chapter.title}》，当前正文 ${after.length} 字。` : `章节《${chapter.title}》正文未变化。`,
-      summary: `${changed ? '更新' : '未变化'}《${chapter.title}》 · ${after.length} 字`,
-      display: { kind: 'chapterDiff', chapterId: chapter.id, chapterTitle: chapter.title, before, after, appliedDirectly: true, revision },
-      snapshot: { target: 'chapter', targetId: chapter.id, field: 'content', previousValue: before } }, memoryJobId,
-      progress: { kind: 'content_revision', targetId: chapter.id, beforeHash: runtimeJson({ content: before }).hash, afterHash: runtimeJson({ content: after }).hash } }
-  }).catch(async error => {
+  const receipt = await commitOperationEffect(lease, operation.id, operation.inputHash,
+    tx => applyDurableChapterBody(ctx, tx, { taskRootId: lease.taskRootId, action, args, expectedRevision, anchorProtocol })).catch(async error => {
     if (!prepared || !(error instanceof DataAccessError) || !['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED', 'REVIEW_CYCLE_DECISION_REQUIRED'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code: error.code,
       summary: '正文变更未执行', output: error.message })
@@ -185,4 +158,39 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   if (prepared) await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: operation.id })
   return projectChapterBodyResult(ctx, saved.data.toolResult,
     { taskRootId: lease.taskRootId, operationId: operation.id, receiptId: receipt.operationId, resultHash: receipt.resultHash })
+}
+
+/** Shared DB-only body effect for a real writer or its authenticated service
+ * child. It never admits/reduces a cursor, dispatches HTTP or certifies review. */
+export async function applyDurableChapterBody(ctx: ToolContext, tx: RuntimeTx, input: {
+  taskRootId: string; action: Action; args: z.infer<typeof argsSchema>; expectedRevision: number; anchorProtocol: 1 | 2
+}) {
+  const { action, args, expectedRevision, anchorProtocol } = input
+  ctx.signal.throwIfAborted()
+  await assertAgentManuscriptCurrent(tx, ctx)
+  const scope = await assertWritingTarget(tx, ctx, { chapterId: args.chapterId, effect: action === 'chapter_edit_range' ? 'range' : action === 'chapter_append' ? 'append' : 'replace' })
+  if (action === 'chapter_edit_range') assertLocalEditArguments(scope.spec, args)
+  const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: input.taskRootId } })
+  if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) runtimeError('RUNTIME_SCOPE_MISMATCH', '正文操作不属于原任务范围。')
+  const chapter = await tx.chapter.findFirst({ where: { id: args.chapterId, ...activeChapterScope(ctx.novelId), authorId: ctx.userId } })
+  if (!chapter) return runtimeError('CHAPTER_REVISION_CONFLICT', '章节已归档、不存在或不属于当前作品，请重新读取当前章节。')
+  if (chapter.revision !== expectedRevision) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已被修改，请重新读取后建立新操作，不能覆盖用户修改。')
+  const before = chapter.content
+  const { after, ranges: editRanges } = composeChapterBody(before,
+    action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range', args, anchorProtocol)
+  const changed = before !== after
+  const updated = await updateOwnedChapterAtRevision({ ...ctx, transaction: tx }, chapter, { content: after, wordCount: after.length },
+    action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range', !!args.patches,
+    { editRanges, retainedFindings: args.retainedFindings })
+  if (!updated) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，正文写入未执行。')
+  if (changed) await recalculateNovelStats(tx, ctx.novelId)
+  const revision = updated.revision
+  const memoryJobId = changed && isAgent2FeatureEnabled('memory2', ctx.userId)
+    ? await enqueueChapterMemoryExtraction({ novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: revision, before, after }, tx) : null
+  ctx.signal.throwIfAborted()
+  return { toolResult: { output: changed ? `已更新章节《${chapter.title}》，当前正文 ${after.length} 字。` : `章节《${chapter.title}》正文未变化。`,
+    summary: `${changed ? '更新' : '未变化'}《${chapter.title}》 · ${after.length} 字`,
+    display: { kind: 'chapterDiff' as const, chapterId: chapter.id, chapterTitle: chapter.title, before, after, appliedDirectly: true as const, revision },
+    snapshot: { target: 'chapter' as const, targetId: chapter.id, field: 'content' as const, previousValue: before } }, memoryJobId,
+    progress: { kind: 'content_revision' as const, targetId: chapter.id, beforeHash: runtimeJson({ content: before }).hash, afterHash: runtimeJson({ content: after }).hash } }
 }

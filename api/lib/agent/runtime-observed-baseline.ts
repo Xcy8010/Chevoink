@@ -76,7 +76,7 @@ export async function readObservedBaseline(tx: RuntimeTx, rootId: string, revisi
   let afterId: string | undefined
   let best: { revision: number; baseline: NonNullable<z.infer<typeof resultSchema>['toolResult']['observedState'] | z.infer<typeof resultSchema>['toolResult']['observedStructure']> | { kind: 'memory'; id: string; hash: string } } | undefined
   for (;;) {
-    const operations = await tx.agentOperation.findMany({ where: { taskRootId: rootId, status: 'succeeded',
+    const operations = await tx.agentOperation.findMany({ where: { taskRootId: rootId, kind: 'tool', status: 'succeeded',
       action: { in: target.kind === 'changeset' ? ['bulk_replace_preview', 'entity_rename_preview', 'changeset_apply', 'changeset_rollback'] : target.kind === 'charter' ? ['story_charter_get', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'] : target.kind === 'novel' ? ['novel_get_context', 'novel_rename', 'novel_update_meta', 'cover_prompt_set'] : target.kind === 'memory' ? ['memory_search', 'memory_save', 'memory_event_save', 'memory_relation_save'] : target.kind === 'chapter' ? ['chapter_read', 'chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename', 'chapter_move', 'chapter_move_to_volume', 'chapter_merge', 'continuity_validate', 'quality_analyze']
         : target.kind === 'structure' ? ['volume_list', 'structure_outline', 'volume_update', 'volume_move', 'volume_delete', 'chapter_move', 'chapter_move_to_volume', 'chapter_split', 'chapter_merge'] : ['plan_read', 'plan_save', 'plan_rename', 'plan_delete'] } },
       orderBy: { id: 'asc' }, take: 100, ...(afterId ? { cursor: { id: afterId }, skip: 1 } : {}), include: { effectReceipt: true } })

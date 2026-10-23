@@ -47,7 +47,14 @@ export async function collectDurableToolEvidence(tx: RuntimeTx, taskRootId: stri
       const failed = result.data.toolResult.outcome === 'failed'
       effects.push({ operationId: operation.id, action: operation.action, resultHash: receipt.resultHash, sequence: String(event.sequence), sourceRevision,
         outcome: failed ? 'failed' : 'succeeded', summary: result.data.toolResult.summary })
-      if (failed || operation.action === 'todo_write') continue
+      if (failed) {
+        if (receipt.result && typeof receipt.result === 'object' && !Array.isArray(receipt.result) && receipt.result.writingCompletion !== undefined) {
+          const progress = await (await import('./runtime-writing-service.js')).readCommittedWritingBodyProgress(tx, operation, receipt.result)
+          if (observeSemanticTransition(observations, `${progress.kind}:${progress.targetId}`, progress.beforeHash, progress.afterHash)) progressSequence = String(event.sequence)
+        }
+        continue
+      }
+      if (operation.action === 'todo_write') continue
       const review = result.data.toolResult.reviewProgress
       if (review) {
         const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: taskRootId } })

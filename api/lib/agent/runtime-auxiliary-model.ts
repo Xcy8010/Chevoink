@@ -90,10 +90,15 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
   return withRunLease(lease, async tx => {
     const state = await readExecutionStateInTransaction(tx, lease.taskRootId)
     const contract = steps[captured.step]
-    const parent = await tx.agentOperation.findFirst({ where: { id: captured.parentOperationId, taskRootId: lease.taskRootId, kind: 'tool', status: 'prepared' } })
-    if (!parent || state.frame.state.phase !== 'awaiting_operation' || state.frame.state.pendingOperationId !== parent.id) return runtimeError('RUNTIME_STATE_CONFLICT', '独立模型不属于当前待执行工具。')
+    const parent = await tx.agentOperation.findFirst({ where: { id: captured.parentOperationId, taskRootId: lease.taskRootId, kind: { in: ['tool', 'internal'] }, status: 'prepared' } })
+    if (!parent) return runtimeError('RUNTIME_STATE_CONFLICT', '独立模型不属于当前待执行工具。')
+    const service = parent.kind === 'internal' ? await (await import('./runtime-writing-service.js')).readAdmittedWritingServiceStep(lease,
+      { operationId: parent.id, action: parent.action, novelId: (await tx.agentRun.findUniqueOrThrow({ where: { id: lease.runId } })).novelId,
+        callId: z.object({ input: z.object({ callId: z.string() }) }).parse(parent.inputSnapshot).input.callId }, tx) : null
+    if (service) await (await import('./runtime-operations.js')).assertCurrentToolPolicy(tx, lease, parent)
+    if (state.frame.state.phase !== 'awaiting_operation' || state.frame.state.pendingOperationId !== (service?.parent.id ?? parent.id)) return runtimeError('RUNTIME_STATE_CONFLICT', '独立模型不属于当前待执行工具。')
     if (parent.action !== contract.parent) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '独立模型步骤不能借用另一类工具的执行权限。')
-    const parsed = parentInput.safeParse(parent.inputSnapshot)
+    const parsed = parentInput.safeParse(service ? { input: { ...service.input, normalization: service.original.normalization } } : parent.inputSnapshot)
     if (!parsed.success || runtimeJson(parent.inputSnapshot).hash !== parent.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具准入快照损坏。')
     const original = parsed.data.input, source = await readExecutionFrame(tx, lease.taskRootId, original.normalization.sourceRevision)
     let index = source.state.messages.length - 1
@@ -101,14 +106,14 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
     const assistant = source.state.messages[index]
     const call = assistant?.role === 'assistant' ? assistant.toolCalls?.find(item => item.id === original.callId) : undefined
     if (source.state.phase !== 'idle' || source.snapshotHash !== original.normalization.sourceSnapshotHash
-      || source.revision + 1 !== state.frame.revision || parent.operationKey !== `exec:${source.state.nextOperationSequence}`
-      || !call || call.name !== parent.action || call.incomplete || call.arguments !== original.normalization.rawArguments
-      || runtimeJson(original.args).hash !== original.normalization.normalizedArgsHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立模型缺少原工具调用关联。')
+      || source.revision + 1 !== state.frame.revision || (service?.parent.operationKey ?? parent.operationKey) !== `exec:${source.state.nextOperationSequence}`
+      || !call || call.name !== (service?.parent.action ?? parent.action) || call.incomplete || call.arguments !== original.normalization.rawArguments
+      || runtimeJson(service?.original.args ?? original.args).hash !== original.normalization.normalizedArgsHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立模型缺少原工具调用关联。')
     const grant = state.configuration.toolAuthority.find(item => item.name === parent.action)
     const modeAllowed = parent.action === 'creative_critique' ? ['build', 'review'].includes(state.configuration.mode) : state.configuration.mode === 'build'
     if (!modeAllowed || !grant || grant.permission === 'deny'
       || !state.configuration.tools.some(tool => tool.function.name === parent.action)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务不允许独立检查或修订。')
-    if (grant.permission === 'ask' || grant.alwaysConfirm) await assertToolApproval(tx, lease, source.snapshotHash, original.callId, parent.action, call.arguments, original.normalization.normalizedArgsHash)
+    if (!service && (grant.permission === 'ask' || grant.alwaysConfirm)) await assertToolApproval(tx, lease, source.snapshotHash, original.callId, parent.action, call.arguments, original.normalization.normalizedArgsHash)
     if (captured.step === 'creative_critique' || captured.step === 'creative_revision') {
       const { creativeReviewWorkSchema } = await import('./tools/creative-review.js')
       const frozen = z.object({ input: z.object({ work: z.object({ kind: z.literal('creative'), version: z.literal(1), review: creativeReviewWorkSchema, price: z.unknown() }) }) }).safeParse(parent.inputSnapshot)
