@@ -13,6 +13,7 @@ import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { executeAgentRun } from '../../api/lib/agent/loop.js'
 import { startLoopRun, initializePersistedLoopRun, continueLoopRun, stopLoopRun, recoverDurableLoopRuns } from '../../api/lib/agent/run-service.js'
+import * as runService from '../../api/lib/agent/run-service.js'
 import { dispatchFreshDurableRun, pauseFreshBootstrap, readFreshBootstrapAdmission } from '../../api/lib/agent/runtime-bootstrap.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import * as executionState from '../../api/lib/agent/runtime-state.js'
@@ -37,7 +38,11 @@ class StreamResponse extends EventEmitter {
   end() { this.writableEnded = true }
   destroy() { this.destroyed = true }
 }
-afterEach(() => { env.agentDurableRolloutUserIds = originalRollout; env.agentGoalEnabled = originalGoalEnabled; vi.clearAllMocks(); vi.restoreAllMocks() })
+afterEach(() => {
+  env.agentDurableRolloutUserIds = originalRollout; env.agentGoalEnabled = originalGoalEnabled
+  vi.mocked(dispatchFreshDurableRun).mockReset().mockResolvedValue(undefined)
+  vi.clearAllMocks(); vi.restoreAllMocks()
+})
 
 async function ready(f: { userId: string; runId: string; rootId: string }) {
   env.agentDurableRolloutUserIds = [f.userId]
@@ -57,6 +62,35 @@ const unknownUsage = (userId: string, novelId: string, runId: string) => prisma.
   userId, novelId, agentRunId: runId, targetType: 'agentRun', targetId: runId, providerType: 'text', providerMode: 'platform',
   modelName: 'fixture', action: 'agent', modelTier: 'speed', billingStatus: 'pending_usage', usageSource: 'unknown', durationMs: 1,
 } })
+
+/** CI exposes failure annotations without requiring restricted raw logs.
+ * Observe the actual adapter calls; do not substitute an execution outcome. */
+function observeBootstrapFailures() {
+  const failures: Array<{ stage: string; message: string; code?: string }> = []
+  const record = (stage: string, error: unknown) => failures.push({ stage, message: error instanceof Error ? error.message : String(error),
+    ...(error instanceof DataAccessError ? { code: error.code } : {}) })
+  const initialize = runService.initializePersistedLoopRun, execute = runService.executePersistedLoopRun
+  vi.spyOn(runService, 'initializePersistedLoopRun').mockImplementation(async (...args) => {
+    try { return await initialize(...args) } catch (error) { record('initialize', error); throw error }
+  })
+  vi.spyOn(runService, 'executePersistedLoopRun').mockImplementation(async (...args) => {
+    try { return await execute(...args) } catch (error) { record('execute', error); throw error }
+  })
+  return failures
+}
+
+async function bootstrapDiagnostic(runId: string, failures: ReturnType<typeof observeBootstrapFailures>) {
+  const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { status: true, errorMessage: true, taskRootId: true } })
+  const frame = run.taskRootId ? await prisma.agentExecutionFrame.findFirst({ where: { taskRootId: run.taskRootId }, orderBy: { revision: 'desc' }, select: { snapshot: true } }) : null
+  const snapshot = frame?.snapshot && typeof frame.snapshot === 'object' && !Array.isArray(frame.snapshot) ? frame.snapshot : null
+  const operations = run.taskRootId ? await prisma.agentOperation.findMany({ where: { taskRootId: run.taskRootId },
+    select: { kind: true, action: true, status: true, effectReceipt: { select: { result: true } } }, orderBy: { createdAt: 'asc' } }) : []
+  const bootstrapPause = await prisma.agentExecutionOutbox.findFirst({ where: { runId, type: 'execution.bootstrap.paused' },
+    orderBy: { sequence: 'desc' }, select: { payload: true } })
+  return JSON.stringify({ ...run, failures, bootstrapPause: bootstrapPause?.payload, phase: snapshot?.phase, pendingOperationId: snapshot?.pendingOperationId,
+    operations: operations.map(item => ({ kind: item.kind, action: item.action, status: item.status,
+      result: (JSON.stringify(item.effectReceipt?.result) ?? '').slice(0, 600) })) })
+}
 
 describe.runIf(available)('fresh native admission and unstarted bootstrap', () => {
   it('retains original HTTP bootstrap event identity after later goal activation binding', () => fixture(async f => {
@@ -272,11 +306,16 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
 
   it('discovers a queued no-frame admission and dispatches the original native task only once', () => fixture(async f => {
     await ready(f)
+    const failures = observeBootstrapFailures()
     const admitted = await startLoopRun(f.userId, { sessionId: f.sessionId, novelId: f.novelId, prompt: '你好', mode: 'build' }, { humanOrigin: 'http' })
     const execute = vi.spyOn(executor, 'runReviewedDurableExecution').mockImplementation(async lease => ({ kind: 'needs_attention', reason: 'synthetic boundary', frame: (await loadExecutionState(lease.userId, lease.runId)).frame }))
-    vi.mocked(dispatchFreshDurableRun).mockImplementationOnce(realBootstrap.dispatchFreshDurableRun)
+    // Discovery is global: another parallel fixture can precede this owner.
+    // Exercise this exact source, never spend the one-shot mock on a peer run.
+    vi.mocked(dispatchFreshDurableRun).mockImplementation(async (userId, runId) => {
+      if (runId === admitted.runId) await realBootstrap.dispatchFreshDurableRun(userId, runId)
+    })
     expect(await recoverDurableLoopRuns()).toContainEqual({ runId: admitted.runId, status: 'dispatched' })
-    expect(execute).toHaveBeenCalledTimes(1)
+    expect(execute, await bootstrapDiagnostic(admitted.runId, failures)).toHaveBeenCalledTimes(1)
     expect(executeAgentRun).not.toHaveBeenCalled()
     expect(fetch).not.toHaveBeenCalled()
   }))
@@ -371,6 +410,7 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
 
   it('runs a genuine fresh writer through real read, coordinated body/reviews/commit and natural completion', () => fixture(async f => {
     await ready(f)
+    const failures = observeBootstrapFailures()
     // The derivative is owned by the native executor, not a parallel legacy job.
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const window = credits.getCreditWindow()
@@ -409,7 +449,8 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     const initial = await prisma.agentRun.findUniqueOrThrow({ where: { id: admitted.runId } })
     expect(taskSpecSchema.parse(initial.taskSpec).scope.writingCoordinationProtocol).toBe(1)
     await realBootstrap.dispatchFreshDurableRun(f.userId, admitted.runId)
-    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: admitted.runId } })).status).toBe('completed')
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: admitted.runId } })).status,
+      await bootstrapDiagnostic(admitted.runId, failures)).toBe('completed')
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content, revision: 2 })
     const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: admitted.runId }, include: { bridge: true } })
     expect(compilation).toMatchObject({ status: 'completed', bridge: { committedAt: expect.any(Date) }, validation: { independentCheck: 'complete', checkedRevision: 2 } })
