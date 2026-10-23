@@ -21,8 +21,13 @@ import { taskSpecSchema } from '../../shared/contracts/task-spec-contracts.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { streamDurableRun } from '../../api/lib/agent/runtime-stream.js'
+import { env } from '../../api/config/env.js'
+import { createAgentGoal, actOnAgentGoal, readAgentGoal } from '../../api/lib/agent/goal-service.js'
+import { superviseAgentGoal } from '../../api/lib/agent/goal-supervisor.js'
 
 const realBootstrap = await vi.importActual<typeof import('../../api/lib/agent/runtime-bootstrap.js')>('../../api/lib/agent/runtime-bootstrap.js')
+const originalRollout = env.agentDurableRolloutUserIds
+const originalGoalEnabled = env.agentGoalEnabled
 class StreamResponse extends EventEmitter {
   writableEnded = false
   destroyed = false
@@ -32,9 +37,10 @@ class StreamResponse extends EventEmitter {
   end() { this.writableEnded = true }
   destroy() { this.destroyed = true }
 }
-afterEach(() => { vi.clearAllMocks(); vi.restoreAllMocks() })
+afterEach(() => { env.agentDurableRolloutUserIds = originalRollout; env.agentGoalEnabled = originalGoalEnabled; vi.clearAllMocks(); vi.restoreAllMocks() })
 
 async function ready(f: { userId: string; runId: string; rootId: string }) {
+  env.agentDurableRolloutUserIds = [f.userId]
   await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'completed' } })
   await prisma.agentTaskRoot.update({ where: { id: f.rootId }, data: { status: 'completed' } })
   vi.spyOn(credits, 'assertCreditAccess').mockResolvedValue(undefined)
@@ -53,14 +59,123 @@ const unknownUsage = (userId: string, novelId: string, runId: string) => prisma.
 } })
 
 describe.runIf(available)('fresh native admission and unstarted bootstrap', () => {
-  it.each(['bounded-write', 'conversation', 'research', 'internal'] as const)('%s freezes identity before dispatch, without upgrading old runs', scenario => fixture(async f => {
+  it('retains original HTTP bootstrap event identity after later goal activation binding', () => fixture(async f => {
     await ready(f)
+    env.agentGoalEnabled = true
+    const admitted = await startLoopRun(f.userId, { sessionId: f.sessionId, novelId: f.novelId, prompt: '你好', mode: 'build' }, { humanOrigin: 'http' })
+    await pauseFreshBootstrap(f.userId, admitted.runId, 'SYNTHETIC_FAILURE')
+    await continueLoopRun(f.userId, admitted.runId)
+    await initializePersistedLoopRun(f.userId, admitted.runId)
+    const history = await loadDurableEvents(f.userId, admitted.runId, 0)
+    const originalPause = history.find(event => event.type === 'run.paused')!
+    await stopLoopRun(f.userId, admitted.runId)
+    const goal = await createAgentGoal(f.userId, { sessionId: f.sessionId }, { requestId: randomUUID(), objective: '保留原任务', options: { mode: 'build' } })
+    try {
+      const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: admitted.runId } })
+      // Replay the existing activation binding shape, not a new native issuer.
+      await prisma.agentGoalExecution.create({ data: { goalId: goal.id, goalRevision: 1, epoch: 1n, continuationIndex: 1,
+        runId: run.id, taskRootId: run.taskRootId, trigger: 'author', sourceEventId: `activation:${goal.id}:${run.id}` } })
+      expect((await prisma.$transaction(tx => readFreshBootstrapAdmission(tx, f.userId, run.id))).goalSource).toBeNull()
+      expect(await isDurablePauseResumed(f.userId, run.id, originalPause.seq)).toBe(true)
+      await publishDurableEvents(f.userId, run.id)
+      expect((await loadDurableEvents(f.userId, run.id, 0)).at(-1)?.type).toBe('run.paused')
+      expect(fetch).not.toHaveBeenCalled()
+    } finally { await prisma.agentGoal.delete({ where: { id: goal.id } }) }
+  }))
+
+  it.each(['http', 'internal', 'rollout-disabled', 'tampered-command', 'altered-start'] as const)('first goal %s uses its original creation authority, never a user-role inference', scenario => fixture(async f => {
+    await ready(f)
+    env.agentGoalEnabled = true
+    if (scenario === 'rollout-disabled') env.agentDurableRolloutUserIds = []
+    const objective = '完整重写第一章正文。'
+    const requestId = randomUUID()
+    const goal = await createAgentGoal(f.userId, { sessionId: f.sessionId }, { requestId, objective,
+      options: { mode: 'build', chapterId: f.chapterId, qualityMode: 'balanced', creativeFreedom: 'balanced' } },
+    scenario === 'internal' ? undefined : { authenticatedHttp: true })
+    try {
+      if (scenario === 'tampered-command') await prisma.agentGoalCommand.update({ where: { userId_requestId: { userId: f.userId, requestId } }, data: { requestHash: '0'.repeat(64) } })
+      await superviseAgentGoal(f.userId, f.sessionId, goal.id)
+      if (scenario === 'tampered-command') {
+        expect(await prisma.agentGoalExecution.count({ where: { goalId: goal.id } })).toBe(0)
+        expect((await readAgentGoal(f.userId, f.sessionId))?.status).toBe('blocked')
+        expect(dispatchFreshDurableRun).not.toHaveBeenCalled()
+        return
+      }
+      const binding = await prisma.agentGoalExecution.findFirstOrThrow({ where: { goalId: goal.id } })
+      const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: binding.runId } })
+      if (scenario === 'internal' || scenario === 'rollout-disabled') {
+        expect(run.runtimeProtocolVersion).toBe(0)
+        expect(dispatchFreshDurableRun).not.toHaveBeenCalled()
+        return
+      }
+      expect(run).toMatchObject({ runtimeProtocolVersion: 1, status: 'queued', taskRootId: binding.taskRootId })
+      expect(taskSpecSchema.parse(run.taskSpec).scope.writingCoordinationProtocol).toBe(1)
+      expect(binding).toMatchObject({ trigger: 'author', continuationIndex: 1, sourceEventId: `${goal.id}:1:1` })
+      if (scenario === 'altered-start') {
+        await prisma.agentRun.update({ where: { id: run.id }, data: { startRequest: { ...run.startRequest as object, qualityMode: 'premium' } } })
+        await expect(prisma.$transaction(tx => readFreshBootstrapAdmission(tx, f.userId, run.id))).rejects.toMatchObject({ code: 'RUNTIME_BOOTSTRAP_SOURCE_REQUIRED' })
+        expect(context.assembleContext).not.toHaveBeenCalled()
+      } else {
+        const initialized = await initializePersistedLoopRun(f.userId, run.id)
+        expect(initialized.frame.state.messages.some(message => message.content === objective)).toBe(true)
+        expect((await prisma.agentGoalExecution.findUniqueOrThrow({ where: { runId: run.id } })).taskRootId).toBe(run.taskRootId)
+      }
+      expect(executeAgentRun).not.toHaveBeenCalled()
+      expect(fetch).not.toHaveBeenCalled()
+    } finally { await prisma.agentGoal.delete({ where: { id: goal.id } }) }
+  }))
+
+  it.each(['bootstrap-error', 'goal-pause'] as const)('first goal %s resumes the same unstarted root via the real goal control', scenario => fixture(async f => {
+    await ready(f)
+    env.agentGoalEnabled = true
+    const goal = await createAgentGoal(f.userId, { sessionId: f.sessionId }, { requestId: randomUUID(), objective: '写第2至6章正文。',
+      options: { mode: 'build' }, limits: { activeTimeLimitMs: 60_000 } }, { authenticatedHttp: true })
+    try {
+      await superviseAgentGoal(f.userId, f.sessionId, goal.id)
+      const original = await prisma.agentRun.findFirstOrThrow({ where: { goalExecution: { goalId: goal.id } } })
+      expect(original.runtimeProtocolVersion).toBe(1)
+      const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: original.taskRootId! } })
+      if (scenario === 'bootstrap-error') {
+        vi.mocked(context.assembleContext).mockRejectedValueOnce(new Error('synthetic initialization failure'))
+        await realBootstrap.dispatchFreshDurableRun(f.userId, original.id)
+      } else {
+        const active = (await readAgentGoal(f.userId, f.sessionId))!
+        await actOnAgentGoal(f.userId, f.sessionId, goal.id, { requestId: randomUUID(), expectedStateVersion: active.stateVersion, action: 'pause' })
+      }
+      const paused = (await readAgentGoal(f.userId, f.sessionId))!
+      expect(paused.status).toBe(scenario === 'goal-pause' ? 'paused' : 'blocked')
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: original.id } })).status).toBe('paused')
+      await expect(continueLoopRun(f.userId, original.id)).rejects.toMatchObject({ code: 'GOAL_RESUME_REQUIRED' })
+      env.agentDurableRolloutUserIds = []
+      const resumed = await actOnAgentGoal(f.userId, f.sessionId, goal.id, { requestId: randomUUID(), expectedStateVersion: paused.stateVersion, action: 'resume' })
+      expect(resumed).toMatchObject({ phase: 'executing', activeSince: expect.any(String) })
+      expect(resumed.activeTimeMs).toBe(paused.activeTimeMs)
+      await superviseAgentGoal(f.userId, f.sessionId, goal.id)
+      expect(await prisma.agentGoalExecution.count({ where: { goalId: goal.id } })).toBe(1)
+      expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: original.taskRootId! } })).toEqual(budget)
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: original.id } })).status).toBe('queued')
+      const current = await prisma.agentGoal.findUniqueOrThrow({ where: { id: goal.id } })
+      expect((await prisma.agentGoalExecution.findUniqueOrThrow({ where: { runId: original.id } })).epoch).toBe(current.epoch)
+      await initializePersistedLoopRun(f.userId, original.id)
+      expect(await prisma.agentExecutionState.count({ where: { taskRootId: original.taskRootId! } })).toBe(1)
+      expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
+      await prisma.agentGoal.update({ where: { id: goal.id }, data: { activeSince: new Date(Date.now() - 60_001) } })
+      await superviseAgentGoal(f.userId, f.sessionId, goal.id)
+      expect((await readAgentGoal(f.userId, f.sessionId))?.status).toBe('budget_limited')
+      expect((await prisma.agentRunLease.findUniqueOrThrow({ where: { runId: original.id } })).enabled).toBe(false)
+      expect(fetch).not.toHaveBeenCalled()
+    } finally { await prisma.agentGoal.delete({ where: { id: goal.id } }) }
+  }))
+
+  it.each(['bounded-write', 'conversation', 'research', 'internal', 'rollout-disabled'] as const)('%s freezes identity before dispatch, without upgrading old runs', scenario => fixture(async f => {
+    await ready(f)
+    if (scenario === 'rollout-disabled') env.agentDurableRolloutUserIds = []
     const prompt = scenario === 'bounded-write' ? '续写下一章正文。' : scenario === 'research' ? '联网搜索《合成作品》，研究叙事技巧。' : '你好'
     const admitted = await startLoopRun(f.userId, { sessionId: f.sessionId, novelId: f.novelId, chapterId: f.chapterId, prompt, mode: 'build' },
       scenario === 'internal' ? {} : { humanOrigin: 'http' })
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: admitted.runId } })
     const spec = taskSpecSchema.parse(run.taskSpec)
-    if (scenario === 'internal') {
+    if (scenario === 'internal' || scenario === 'rollout-disabled') {
       expect(run.runtimeProtocolVersion).toBe(0)
       expect(run.taskRootId).toBeNull()
       expect(spec.scope.capabilityCatalog).toBeUndefined()
@@ -101,6 +216,7 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
       await realBootstrap.dispatchFreshDurableRun(f.userId, run.id)
     }
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe('paused')
+    env.agentDurableRolloutUserIds = [] // stopping rollout never rewrites an admitted task
     const continued = await continueLoopRun(f.userId, run.id)
     expect(continued.runId).toBe(run.id)
     expect(continued.eventStartSeq).toBeGreaterThan(0)

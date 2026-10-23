@@ -70,7 +70,9 @@ export async function createAgentGoal(userId: string, target: { sessionId: strin
     const platformTimeCapMs = BigInt(Math.floor(env.agentRunWallClockLongMinutes * 60_000))
     const control = body.limits && Object.keys(body.limits).length ? verifiedUserExecutionControl({ tokens: body.limits.tokenLimit === undefined ? null : BigInt(body.limits.tokenLimit),
       turns: null, activeTimeMs: body.limits.activeTimeLimitMs === undefined ? null : BigInt(body.limits.activeTimeLimitMs) }) : untilCompletionControl()
-    const request = runtimeJson({ ...body.options, executionControl: serializeExecutionControl(control), ...(control.origin === 'user'
+    const nativeAdmission = authorSource?.authenticatedHttp && (await import('./fresh-durable-rollout.js')).isFreshDurableAdmissionEnabled(userId)
+      ? { version: 1, origin: 'http', envelope: { operation: 'create', target, body } } : undefined
+    const request = runtimeJson({ ...body.options, ...(nativeAdmission ? { nativeAdmission } : {}), executionControl: serializeExecutionControl(control), ...(control.origin === 'user'
       ? { executionControlProof: { version: 1, revision: 1, envelope: { operation: 'create', target, body } } } : {}) }).value
     const tokenLimit = BigInt(body.limits?.tokenLimit ?? COMPATIBILITY_TOKEN_LIMIT)
     const activeTimeLimitMs = BigInt(body.limits?.activeTimeLimitMs ?? 1)
@@ -120,7 +122,8 @@ export async function revokeGoalExecutions(tx: GoalTx, goal: AgentGoal, now: Dat
   for (const run of candidates.filter(item => item.incomingChildGrant)) await lockOwnedRun(tx, goal.userId, run.id)
   const runs = await tx.agentRun.findMany({ where: { id: { in: runIds } }, select: { taskRootId: true } })
   const roots = runs.flatMap(run => run.taskRootId ? [run.taskRootId] : [])
-  if (activation) for (const rootId of [...new Set(roots)].sort()) {
+  for (const rootId of [...new Set(roots)].sort()) {
+    if (!activation && !await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `bootstrap:${rootId}` } })) continue
     await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${rootId} FOR UPDATE`
     const live = await tx.agentRun.findMany({ where: { taskRootId: rootId, status: { in: ['queued', 'running', 'awaiting_approval'] } }, select: { id: true } })
     if (live.length) {
@@ -190,6 +193,7 @@ export async function actOnAgentGoal(userId: string, sessionId: string, goalId: 
   if (resumeFence?.previous) return resumeFence.previous
   if (resumeFence) await reconcileGoalUsage(goalId, { userId, sessionId })
   const result = await runtimeTransaction(async tx => {
+    if (body.action === 'resume') await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${userId}`}, 0))::text`
     const goal = await lockOwnedGoal(tx, userId, sessionId, goalId)
     const previous = await replay(tx, userId, body.requestId, hash)
     if (previous) return { snapshot: previous, runIds: [] }
@@ -268,9 +272,19 @@ export async function actOnAgentGoal(userId: string, sessionId: string, goalId: 
       }
       // Execution options are separately versioned; never rewrite an immutable objective revision.
       const options = { ...goal.executionOptions as object, ...body.model, ...(policyPointer ? { goalExecutionControl: policyPointer } : {}) }
-      const snapshot = (await changeGoal(tx, goal, { status: 'active', phase: 'queued', epoch: { increment: 1 }, executionOptions: options as Prisma.InputJsonValue,
-        nextEligibleAt: now, reasonCode: null, blockCount: 0, blockFingerprint: null }, 'state.changed', limitChange ? control : undefined)).snapshot
-      return { snapshot: await receipt(tx, userId, body.requestId, hash, snapshot), runIds: [] }
+      const pendingBootstrap = goal.currentRunId ? await tx.agentRun.findFirst({ where: { id: goal.currentRunId, userId,
+        runtimeProtocolVersion: 1, taskRootId: { not: null }, taskRoot: { executionState: { is: null },
+          events: { some: { type: 'execution.bootstrap.admitted' } } } } }) : null
+      if (pendingBootstrap && body.model) return goalError('GOAL_ACTIVATION_SCOPE_IMMUTABLE', '继续原初始化不能替换已冻结的模型。')
+      const snapshot = (await changeGoal(tx, goal, { status: 'active', phase: pendingBootstrap ? 'executing' : 'queued', epoch: { increment: 1 }, executionOptions: options as Prisma.InputJsonValue,
+        nextEligibleAt: pendingBootstrap ? null : now, ...(pendingBootstrap ? { activeSince: now } : {}),
+        reasonCode: null, blockCount: 0, blockFingerprint: null }, 'state.changed', limitChange ? control : undefined)).snapshot
+      if (pendingBootstrap) {
+        if (!await (await import('./runtime-bootstrap.js')).resumeFreshBootstrapInTransaction(tx, userId, pendingBootstrap.id, goal.id)) {
+          return goalError('GOAL_RECONCILIATION_REQUIRED', '原初始化状态已变化，请核对后继续。')
+        }
+      }
+      return { snapshot: await receipt(tx, userId, body.requestId, hash, snapshot), runIds: [], ...(pendingBootstrap ? { bootstrapRunId: pendingBootstrap.id } : {}) }
     }
     await closeGoalActivity(tx, goal, now)
     const cancel = body.action === 'cancel'
@@ -282,6 +296,11 @@ export async function actOnAgentGoal(userId: string, sessionId: string, goalId: 
     return { snapshot: await receipt(tx, userId, body.requestId, hash, snapshot), runIds }
   })
   result.runIds.forEach(stopAgentRun)
+  const bootstrapRunId = 'bootstrapRunId' in result ? result.bootstrapRunId : undefined
+  if (typeof bootstrapRunId === 'string') {
+    void import('./runtime-bootstrap.js').then(({ dispatchFreshDurableRun }) => dispatchFreshDurableRun(userId, bootstrapRunId))
+      .catch(() => console.error('[agent-goal] 原初始化派发未确认', { goalId }))
+  }
   return result.snapshot
 }
 

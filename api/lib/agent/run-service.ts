@@ -79,6 +79,7 @@ import { freezeModelAssignments, resolveAssignedModel } from './model-assignment
 import { frozenModelAssignmentsSchema, agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
 import { buildTaskSpec } from './task-spec.js'
 import { freezeTaskCapabilities } from './task-capabilities.js'
+import { isFreshDurableAdmissionEnabled } from './fresh-durable-rollout.js'
 
 /**
  * Agent Loop 新链路的路由服务层（plan/13 §4.9）。
@@ -365,6 +366,7 @@ export async function startLoopRunLocked(
 
   if (steering) await assertManagedAttachmentsAccess(steering.attachments, userId)
 
+  const originalAdmissionInput = input
   const modelAssignments = input.modelAssignments ?? await freezeModelAssignments(userId, input.novelId)
   const networkAdmission = options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
     && options.concurrencyScope !== 'orchestration' ? 1 as const : undefined
@@ -484,6 +486,15 @@ export async function startLoopRunLocked(
       if (claimed.count !== 1) throw new DataAccessError(409, 'QUEUE_CHANGED', '待发需求已变更，请刷新。')
     }
     const previousRun = goalAdmission?.previous?.run
+    const freshGoal = goalAdmission && options.goal?.trigger === 'author' && options.goal.revision === 1
+      && options.goal.continuationIndex === 0 && options.goal.sourceEventId === `${goalAdmission.goal.id}:1:1`
+      && !await tx.agentGoalExecution.count({ where: { goalId: goalAdmission.goal.id } })
+      ? await (await import('./fresh-goal-source.js')).readFreshGoalSource(tx, goalAdmission.goal) : null
+    if (freshGoal) {
+      const { assertFreshGoalOptions } = await import('./fresh-goal-source.js')
+      assertFreshGoalOptions(originalAdmissionInput, (await import('../../../shared/contracts/agent-goal.js')).agentGoalExecutionOptionsSchema.parse(goalAdmission!.goal.executionOptions), true)
+      assertFreshGoalOptions(input, freshGoal.options)
+    }
     const durablePrevious = previousRun?.runtimeProtocolVersion === 1 && previousRun.taskRootId ? previousRun : null
     initializeGoalDurable = Boolean(durablePrevious && durablePrevious.status === 'completed')
     const previousSpec = initializeGoalDurable ? null : previousRun?.taskSpec
@@ -523,7 +534,7 @@ export async function startLoopRunLocked(
       }
       // Every fresh request keeps its original effect interpretation, including
       // chat and plans. Async bootstrap must not classify it as a legacy write.
-      if (options.humanOrigin === 'http' && !options.goal) {
+      if (freshGoal || options.humanOrigin === 'http' && !options.goal && isFreshDurableAdmissionEnabled(userId)) {
         const { getAgentToolManifest } = await import('./tools/registry.js')
         frozen = freezeTaskCapabilities(frozen, input, getAgentToolManifest().map(tool => tool.name))
         const { getAgentDefinition, getToolsForAgent, applySessionToolPolicy } = await import('./agents.js')
@@ -540,14 +551,6 @@ export async function startLoopRunLocked(
           && !isDeferredWritingRequest(input.prompt)
       }
       created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(frozen)) as Prisma.InputJsonValue } })
-      if (initializeFreshDurable) {
-        const { initializeDurableTaskInTransaction } = await import('./runtime-identity.js')
-        const root = await initializeDurableTaskInTransaction(tx, { userId, runId: created.id, sourceMessageId: admittedMessageId, tokenBudget: input.tokenBudget })
-        await tx.agentRunLease.create({ data: { runId: created.id } })
-        await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId: created.id, eventKey: `bootstrap:${root.id}`,
-          type: 'execution.bootstrap.admitted', payload: { version: 1, sourceMessageId: admittedMessageId, inputHash: root.inputHash } } })
-        created = await tx.agentRun.findUniqueOrThrow({ where: { id: created.id } })
-      }
     }
     if (steering) await tx.agentMessage.create({ data: { id: steeringMessageId!, runId: created.id, sessionId: session.id, role: 'user', parts: [
       { type: 'text', text: steering.prompt }, ...(steering.attachments ?? []).map(item => ({
@@ -555,6 +558,15 @@ export async function startLoopRunLocked(
       })),
     ] } })
     if (goalAdmission && options.goal) await bindGoalRun(tx, goalAdmission, options.goal, created.id)
+    if (initializeFreshDurable) {
+      const root = await (await import('./runtime-identity.js')).initializeDurableTaskInTransaction(tx,
+        { userId, runId: created.id, sourceMessageId: admittedMessageId, tokenBudget: input.tokenBudget })
+      await tx.agentRunLease.create({ data: { runId: created.id } })
+      await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId: created.id, eventKey: `bootstrap:${root.id}`,
+        type: 'execution.bootstrap.admitted', payload: { version: 1, sourceMessageId: admittedMessageId, inputHash: root.inputHash,
+          startHash: (await import('./runtime-common.js')).runtimeJson(created.startRequest).hash } } })
+      created = await tx.agentRun.findUniqueOrThrow({ where: { id: created.id } })
+    }
     if (durablePrevious && !initializeGoalDurable) {
       // Continue the saved durable cursor and immutable root; no fresh budget/configuration or paid replay.
       await tx.$queryRaw`SELECT id FROM agent_task_roots WHERE id = ${durablePrevious.taskRootId} FOR UPDATE`

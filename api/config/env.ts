@@ -138,6 +138,9 @@ export const env = {
   featureSkillSharingEnabled: parseBoolean(process.env.FEATURE_SKILL_SHARING_ENABLED, true),
   featureDualWorkspaceEnabled: parseBoolean(process.env.FEATURE_DUAL_WORKSPACE_ENABLED, true),
   agent2RolloutUserIds: parseCsv(process.env.AGENT2_ROLLOUT_USER_IDS),
+  // Empty is deliberately off for new native admissions. Existing native
+  // tasks keep their frozen path when this rollout is narrowed or disabled.
+  agentDurableRolloutUserIds: parseCsv(process.env.AGENT_DURABLE_ROLLOUT_USER_IDS),
   agentApprovalTimeoutMs: parsePositiveNumber(process.env.AGENT_APPROVAL_TIMEOUT_MS, 600000),
   agentUserMaxConcurrent: parsePositiveNumber(process.env.AGENT_USER_MAX_CONCURRENT, 2),
   // 单次 task_spawn 最多派生的并行任务窗口数（作者拍板：5）

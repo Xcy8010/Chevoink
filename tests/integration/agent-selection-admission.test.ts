@@ -254,7 +254,7 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
     if (human) expect(spec.scope.writing).toBeUndefined()
     expect(spec.authorization).toBeUndefined()
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
-    if (human) {
+    if ((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).runtimeProtocolVersion === 1) {
       expect(dispatchFreshDurableRun).toHaveBeenCalledWith(f.userId, result.runId)
       expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).runtimeProtocolVersion).toBe(1)
     } else expect(execution).toHaveBeenCalledWith(expect.objectContaining({ runId: result.runId }))

@@ -9,7 +9,8 @@ import { MAIN_RUN_FILTER } from './runtime-child.js'
 import { readTaskBudgetInTransaction } from './runtime-budget.js'
 import { prisma } from '../prisma.js'
 
-export const bootstrapAdmissionSchema = z.object({ version: z.literal(1), sourceMessageId: z.string(), inputHash: z.string() }).strict()
+export const bootstrapAdmissionSchema = z.object({ version: z.literal(1), sourceMessageId: z.string(), inputHash: z.string(),
+  startHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict()
 export const bootstrapPauseSchema = z.object({ version: z.literal(1), admissionId: z.string(), inputHash: z.string(), code: z.string().regex(/^[A-Z0-9_]{1,96}$/) }).strict()
 const bootstrapResumeSchema = z.object({ pauseId: z.string(), admissionId: z.string(), inputHash: z.string() }).strict()
 
@@ -32,27 +33,31 @@ export async function readFreshBootstrapResume(tx: RuntimeTx, userId: string, ru
   return { ...original, source, pause }
 }
 
-/** Authenticate a genuine new HTTP admission. This is a reader, not an issuer
+/** Authenticate a genuine new HTTP task/goal admission. This is a reader, not an issuer
  * for old runs with missing frames or user-role/model-generated instructions. */
 export async function readFreshBootstrapAdmission(tx: RuntimeTx, userId: string, runId: string) {
   const { run, root } = await lockRunRoot(tx, userId, runId)
   const admission = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `bootstrap:${root.id}` } })
   const parsed = bootstrapAdmissionSchema.safeParse(admission?.payload)
   const human = readHumanAdmission(run.startRequest), original = durableTaskSpecIdentity(run.taskSpec)
+  const goalSource = await (await import('./fresh-goal-source.js')).readFreshGoalBootstrapSource(tx, userId, runId)
+  const request = goalSource?.request ?? human?.request
   if (!admission || admission.type !== 'execution.bootstrap.admitted' || admission.runId !== runId || admission.taskRootId !== root.id
     || !parsed.success || parsed.data.sourceMessageId !== root.sourceMessageId || parsed.data.inputHash !== root.inputHash
-    || root.authorizationMode !== 'legacy' || !human || human.request.sessionId !== run.sessionId || human.request.novelId !== run.novelId
+    || (goalSource || parsed.data.startHash !== undefined) && parsed.data.startHash !== runtimeJson(run.startRequest).hash
+    || goalSource && goalSource.binding.taskRootId !== root.id
+    || root.authorizationMode !== 'legacy' || !request || request.sessionId !== run.sessionId || request.novelId !== run.novelId
     || !original.spec.scope.capabilityCatalog || original.frozen.hash !== runtimeJson(root.specSnapshot).hash
     || runtimeJson({ spec: root.specSnapshot, request: root.requestSnapshot }).hash !== root.inputHash) {
     return runtimeError('RUNTIME_BOOTSTRAP_SOURCE_REQUIRED', '缺少本次真实新任务的原始准入，不能重建旧执行状态。')
   }
   const message = await tx.agentMessage.findFirst({ where: { id: root.sourceMessageId, runId, sessionId: run.sessionId, role: 'user' } })
-  const parts = [{ type: 'text', text: human.request.prompt }, ...(human.request.attachments ?? []).map(item => ({ type: 'attachment', kind: item.kind, name: item.name, url: item.url, size: item.size }))]
+  const parts = [{ type: 'text', text: request.prompt }, ...(request.attachments ?? []).map(item => ({ type: 'attachment', kind: item.kind, name: item.name, url: item.url, size: item.size }))]
   if (!message || runtimeJson(message.parts).hash !== runtimeJson(root.requestSnapshot).hash
     || runtimeJson(JSON.parse(JSON.stringify(parts))).hash !== runtimeJson(root.requestSnapshot).hash) {
     return runtimeError('RUNTIME_BOOTSTRAP_SOURCE_REQUIRED', '新任务原始请求与冻结输入不一致。')
   }
-  return { run, root, admission }
+  return { run, root, admission, goalSource }
 }
 
 export async function assertUnstartedFreshBootstrap(tx: RuntimeTx, userId: string, runId: string) {
@@ -67,7 +72,7 @@ export async function assertUnstartedFreshBootstrap(tx: RuntimeTx, userId: strin
     || await tx.agentRuntimeCheckpoint.count({ where: { taskRootId: id } })
     || await tx.agentRun.count({ where: { taskRootId: id, id: { not: runId } } })
     || await tx.agentChildExecutionGrant.count({ where: { OR: [{ childRunId: runId }, { parentRootId: id }] } })
-    || await tx.agentGoalExecution.count({ where: { runId } })) {
+    || !current.goalSource && await tx.agentGoalExecution.count({ where: { runId } })) {
     return runtimeError('RUNTIME_STATE_REQUIRED', '已有原执行事实，不能从初始化入口重新装配或重复请求。')
   }
   const { budget } = await readTaskBudgetInTransaction(tx, id)
@@ -81,6 +86,9 @@ export async function pauseFreshBootstrap(userId: string, runId: string, code: s
   return runtimeTransaction(async tx => {
     const owned = await tx.agentRun.findFirst({ where: { id: runId, userId }, select: { taskRootId: true } })
     if (!owned?.taskRootId || await tx.agentExecutionState.findUnique({ where: { taskRootId: owned.taskRootId } })) return false
+    // Goal controls acquire novel/goal before run/root, matching the original
+    // lease/effect order. A concurrently paused goal cannot be reactivated.
+    const goalContext = await (await import('./goal-fence.js')).assertRunGoalFence(tx, userId, runId)
     const { run, root, admission } = await assertUnstartedFreshBootstrap(tx, userId, runId)
     if (root.status !== 'active' || run.status !== 'queued') return false
     const held = await tx.agentRunLease.findUnique({ where: { runId } })
@@ -94,6 +102,12 @@ export async function pauseFreshBootstrap(userId: string, runId: string, code: s
     const eventId = randomUUID()
     await tx.agentExecutionOutbox.create({ data: { id: eventId, taskRootId: root.id, runId, eventKey: `bootstrap-pause:${eventId}`,
       type: 'execution.bootstrap.paused', payload } })
+    if (goalContext) {
+      const { closeGoalActivity, changeGoal } = await import('./goal-store.js')
+      const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: goalContext.goalId } })
+      await closeGoalActivity(tx, goal, await databaseNow(tx))
+      await changeGoal(tx, goal, { status: 'blocked', phase: 'idle', activeSince: null, nextEligibleAt: null, reasonCode: payload.code })
+    }
     return true
   })
 }
@@ -101,18 +115,30 @@ export async function pauseFreshBootstrap(userId: string, runId: string, code: s
 /** Explicit Continue before the first frame. Same root, request and budget;
  * no bootstrap path exists for historical missing/corrupt execution states. */
 export async function resumeFreshBootstrap(userId: string, runId: string) {
-  return runtimeTransaction(async tx => {
+  return runtimeTransaction(tx => resumeFreshBootstrapInTransaction(tx, userId, runId))
+}
+
+/** Goal controls already hold the owned goal fence. A new goal attempt must
+ * not allocate a second root/budget while the first has not acquired a frame. */
+export async function resumeFreshBootstrapInTransaction(tx: RuntimeTx, userId: string, runId: string, goalId?: string) {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${userId}`}, 0))::text`
     const identity = await tx.agentRun.findFirst({ where: { id: runId, userId }, select: { novelId: true, taskRootId: true } })
     if (!identity?.taskRootId || await tx.agentExecutionState.findUnique({ where: { taskRootId: identity.taskRootId } })) return null
     await lockNovelActiveScope(tx, identity.novelId)
-    const { run, root, admission } = await assertUnstartedFreshBootstrap(tx, userId, runId)
+    const { run, root, admission, goalSource } = await assertUnstartedFreshBootstrap(tx, userId, runId)
+    if (goalSource) {
+      const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: goalSource.binding.goalId } })
+      if (goalId !== goal.id || goal.userId !== userId || goal.status !== 'active' || goal.currentRevision !== 1
+        || goal.pendingRevision !== null || goal.currentRunId !== runId || goal.phase !== 'executing' || !goal.activeSince) {
+        return runtimeError('GOAL_RESUME_REQUIRED', '请使用原目标的继续操作。')
+      }
+    } else if (goalId) return runtimeError('RUNTIME_BOOTSTRAP_SOURCE_REQUIRED', '缺少目标原始初始化准入。')
     await assertAgentManuscriptCurrent(tx, { userId, runId, novelId: run.novelId })
     const latest = await tx.agentRun.findFirst({ where: { sessionId: run.sessionId, ...MAIN_RUN_FILTER }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true } })
     if (latest?.id !== runId) return runtimeError('STALE_RESUME_TARGET', '当前会话已有后续任务，不能恢复旧初始化。')
     if (root.status !== 'paused' || run.status !== 'paused') return runtimeError('RUN_NOT_PAUSED', '仅本次暂停的新任务初始化可继续。')
     const held = await tx.agentRunLease.findUnique({ where: { runId } })
-    if (!held || held.enabled || held.ownerId || held.claimId || held.expiresAt) return runtimeError('RUNTIME_STATE_CONFLICT', '初始化暂停的原所有权尚未完整撤销，不能恢复。')
+    if (!held || held.enabled || !goalSource && (held.ownerId || held.claimId || held.expiresAt)) return runtimeError('RUNTIME_STATE_CONFLICT', '初始化暂停的原所有权尚未完整撤销，不能恢复。')
     if (held.epoch >= 9223372036854775807n) return runtimeError('RUNTIME_EPOCH_EXHAUSTED', '执行代次超限，需要核对。')
     const pause = await tx.agentExecutionOutbox.findFirst({ where: { taskRootId: root.id, runId,
       type: { in: ['execution.bootstrap.paused', 'run.paused'] } }, orderBy: { sequence: 'desc' } })
@@ -131,12 +157,15 @@ export async function resumeFreshBootstrap(userId: string, runId: string) {
       return runtimeError('RUN_LIMIT', '同时进行的任务数已达上限。')
     }
     await tx.agentTaskRoot.update({ where: { id: root.id }, data: { status: 'active' } })
-    const resumed = await tx.agentRun.update({ where: { id: runId }, data: { status: 'queued', errorMessage: null } })
-    await tx.agentRunLease.update({ where: { runId }, data: { enabled: true } })
+    const resumed = await tx.agentRun.update({ where: { id: runId }, data: { status: 'queued', errorMessage: null, finishedAt: null } })
+    await tx.agentRunLease.update({ where: { runId }, data: { enabled: true, ownerId: null, claimId: null, expiresAt: null } })
+    if (goalSource) {
+      const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: goalSource.binding.goalId } })
+      await tx.agentGoalExecution.update({ where: { runId }, data: { epoch: goal.epoch } })
+    }
     await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId, type: 'execution.bootstrap.resumed',
       eventKey: `bootstrap-resume:${pause.id}`, payload: { pauseId: pause.id, admissionId: admission.id, inputHash: root.inputHash } } })
     return resumed
-  })
 }
 
 /** Isolated so admission-only fixtures can stop at this execution boundary.
