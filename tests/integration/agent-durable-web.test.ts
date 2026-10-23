@@ -71,7 +71,8 @@ describe.runIf(available)('durable web identity, research budget and dispatch fe
     expect(row.amountMilli).toBe(2000)
     expect(await prisma.webToolCall.count({ where: { runId: lease.runId } })).toBe(lease.runId === f.runId ? 1 : 0)
     const state = await loadExecutionState(f.userId, lease.runId)
-    expect(state.frame.state.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'original-search', name: 'web_search' })
+    expect(state.frame.state.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'original-search' })
+    expect(await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'web_search' } })).toMatchObject({ originRunId: f.runId })
     expect(state.frame.state.messages.at(-1)?.content).toContain('Author chapter')
   }))
 

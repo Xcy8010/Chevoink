@@ -291,9 +291,10 @@ export async function readPublicWebPage(value: string, signal: AbortSignal, conf
     if ([...target.searchParams.keys()].some(key => /token|secret|signature|credential|auth|api.?key/i.test(key))) return { ...direct, code: 'WEB_READ_HOSTED_TARGET_RESTRICTED' }
     try {
       const hosted = await readHosted(target, mode, signal)
-      return { ...hosted, ...(hosted.code === 'WEB_READ_RATE_LIMITED' ? { status: 'transient_error' as const } : {}),
+      const providerUnavailable = hosted.code === 'WEB_READ_HOSTED_UNAVAILABLE'
+      return { ...hosted, ...(hosted.code === 'WEB_READ_RATE_LIMITED' || providerUnavailable ? { status: 'transient_error' as const } : {}),
         evidence: assessReaderEvidence(hosted.text, hosted.title, expectedTarget, raw, finalUrl),
-        provider: mode, finalUrl, retryable: hosted.code === 'WEB_READ_RATE_LIMITED' || (hosted.httpStatus ?? 0) >= 500, contentKind: bookMetadata ? 'metadata' : 'article',
+        provider: mode, finalUrl, retryable: hosted.code === 'WEB_READ_RATE_LIMITED' || providerUnavailable, contentKind: bookMetadata ? 'metadata' : 'article',
         ...(hosted.status === 'ok' ? { links: extractReaderLinks(raw, finalUrl) } : {}) }
     } catch (error) {
       signal.throwIfAborted()

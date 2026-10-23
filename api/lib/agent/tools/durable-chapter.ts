@@ -1,6 +1,5 @@
 import { assertWritingTarget, readWritingScope, originalSelectionBoundary } from '../writing-scope.js'
 import { assertLocalEditArguments, originalLocalEditBoundary } from '../local-edit-scope.js'
-import { assertChapterManuscriptRevision } from '../chapter-review-guard.js'
 import { z } from 'zod'
 import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
@@ -9,7 +8,7 @@ import { runtimeError, runtimeJson } from '../runtime-common.js'
 import { commitOperationEffect, prepareOperation, recordToolFailure } from '../runtime-operations.js'
 import { recordChapterBaseline } from '../baseline.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
-import { recordStoryCompilerWrite } from '../story-compiler.js'
+import { updateOwnedChapterAtRevision } from './chapter-mutation.js'
 import { activeChapterScope, recalculateNovelStats } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import type { ToolContext, ToolResult, AgentTool } from './types.js'
@@ -152,26 +151,14 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     const { after, ranges: editRanges } = composeChapterBody(before,
       action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range', args, anchorProtocol)
     const changed = before !== after
-    if (!changed) await assertChapterManuscriptRevision(tx, ctx, chapter, {
-      mutation: action === 'chapter_write' ? 'replace' : 'range', mergedBatch: !!args.patches, after, editRanges, retainedFindings: args.retainedFindings,
-    })
-    if (changed) {
-      const consumeReviewRevision = await assertChapterManuscriptRevision(tx, ctx, chapter, {
-        mutation: action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range',
-        mergedBatch: !!args.patches,
-        after, editRanges, retainedFindings: args.retainedFindings,
-      })
-      const updated = await tx.chapter.updateMany({ where: { id: chapter.id, authorId: ctx.userId, ...activeChapterScope(ctx.novelId), revision: expectedRevision },
-        data: { content: after, wordCount: after.length, revision: { increment: 1 } } })
-      if (updated.count !== 1) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，正文写入未执行。')
-      await consumeReviewRevision?.()
-      await recalculateNovelStats(tx, ctx.novelId)
-    }
-    const revision = expectedRevision + (changed ? 1 : 0)
+    const updated = await updateOwnedChapterAtRevision({ ...ctx, transaction: tx }, chapter, { content: after, wordCount: after.length },
+      action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range', !!args.patches,
+      { editRanges, retainedFindings: args.retainedFindings })
+    if (!updated) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，正文写入未执行。')
+    if (changed) await recalculateNovelStats(tx, ctx.novelId)
+    const revision = updated.revision
     const memoryJobId = changed && isAgent2FeatureEnabled('memory2', ctx.userId)
       ? await enqueueChapterMemoryExtraction({ novelId: ctx.novelId, chapterId: chapter.id, chapterRevision: revision, before, after }, tx) : null
-    if (changed && isAgent2FeatureEnabled('storyCompiler', ctx.userId)) await recordStoryCompilerWrite({ userId: ctx.userId, novelId: ctx.novelId,
-      runId: ctx.runId, chapterId: chapter.id, chapterOrderIndex: chapter.orderIndex, chapterRevision: revision }, tx)
     ctx.signal.throwIfAborted()
     return { toolResult: { output: changed ? `已更新章节《${chapter.title}》，当前正文 ${after.length} 字。` : `章节《${chapter.title}》正文未变化。`,
       summary: `${changed ? '更新' : '未变化'}《${chapter.title}》 · ${after.length} 字`,

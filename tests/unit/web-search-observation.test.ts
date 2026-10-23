@@ -113,7 +113,11 @@ describe('search URL handoff to the model', () => {
     mocks.search.mockRejectedValue(new WebSearchError('unavailable', attempts))
     mocks.reconcile.mockRejectedValue(new Error('database temporarily unavailable'))
     await expect(webSearchTool.execute(failedCtx, { query: '不同查询', maxResults: 2 })).resolves.toHaveProperty('outcome', 'failed')
-    expect(mocks.charge).toHaveBeenLastCalledWith(failedCtx, 'search', { query: '不同查询', count: 2 }, expect.any(Boolean), expect.any(Function), expect.any(Function))
+    expect(mocks.charge).toHaveBeenLastCalledWith(failedCtx, 'search', { query: '不同查询', count: 2 }, expect.any(Boolean), expect.any(Function), expect.any(Function), undefined, expect.any(Function))
+    const knownRejection = mocks.charge.mock.calls.at(-1)![7]
+    expect(knownRejection(new WebSearchError('unknown response', attempts))).toBe(false)
+    expect(knownRejection(new WebSearchError('observed rejection', [{ ...attempts[0], httpStatus: 429 }]))).toBe(true)
+    expect(knownRejection(new WebSearchError('mixed unknown', [{ ...attempts[0], httpStatus: 429 }, attempts[0]]))).toBe(false)
     mocks.refundState.mockResolvedValue('pending')
     await webSearchTool.execute(failedCtx, { query: '不同查询', maxResults: 2 })
     expect(mocks.search).toHaveBeenCalledTimes(2)
@@ -167,7 +171,7 @@ describe('search URL handoff to the model', () => {
       throw new WebSearchError('搜索已取消', attempts)
     })
     await expect(webSearchTool.execute(ctx, { query: '目录', maxResults: 2 })).rejects.toThrow('author stopped')
-    expect(mocks.charge).toHaveBeenCalledWith(ctx, 'search', { query: '目录', count: 2 }, expect.any(Boolean), expect.any(Function), expect.any(Function))
+    expect(mocks.charge).toHaveBeenCalledWith(ctx, 'search', { query: '目录', count: 2 }, expect.any(Boolean), expect.any(Function), expect.any(Function), undefined, expect.any(Function))
     expect(mocks.search).toHaveBeenCalledOnce()
   })
   it('refunds cancellation arriving after billing completes while research persistence is pending', async () => {

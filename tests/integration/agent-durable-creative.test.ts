@@ -16,8 +16,10 @@ const runtime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multi
   baseUrl: 'https://provider.invalid/v1', apiKey: 'isolated-fake-key', reasoningEffort: 'high', reasoningEfforts: ['high'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
 const price = { version: 'credits-v2-itemized' as const, modelTier: 'speed' as const, multiplierBps: 10000, rateCardId: 'creative-isolated-fixture',
   rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } }
-const response = () => Response.json({ choices: [{ message: { role: 'assistant', content: '1. “原文”：这一处应澄清人物的实际行动。' }, finish_reason: 'stop' }],
-  usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })
+// chatWithTools sends stream:true. Exercise its actual SSE reader and usage
+// observation instead of an unrelated non-stream JSON completion envelope.
+const response = () => new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '1. “原文”：这一处应澄清人物的实际行动。' }, finish_reason: 'stop' }],
+  usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
 
 describe.runIf(available)('durable independent creative artifacts', () => {
   it.each(['critique-build', 'critique-review', 'revision', 'result-recovery', 'receipt-recovery', 'stale-body', 'archived-before-dispatch', 'changed-free-route', 'wrong-critique', 'unknown'] as const)('%s preserves the original request, bill and source', scenario => fixture(async f => {
@@ -44,7 +46,10 @@ describe.runIf(available)('durable independent creative artifacts', () => {
       return scenario === 'changed-free-route' ? { ...runtime, multiplierBps: 0, provider: 'changed-provider' } : runtime
     })
     vi.spyOn(prices, 'resolveDurableTokenPrice').mockResolvedValue(price)
-    const fetch = vi.fn(async () => {
+    const fetch = vi.fn(async (_url: unknown, init: RequestInit) => {
+      const body = JSON.parse(String(init.body))
+      expect(body.stream).toBe(true)
+      expect(body.reasoning_effort).toBe('high')
       if (scenario === 'unknown') throw Error('Supplier response lost')
       if (scenario === 'stale-body') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者新的正文', revision: { increment: 1 } } })
       return response()

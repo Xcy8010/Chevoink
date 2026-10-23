@@ -1,5 +1,5 @@
 import { readSemanticStructureHash } from '../semantic-progress.js'
-import { assertWritingTarget, bindWritingChapter, readWritingScope, resolveWritingCreateTarget, originalSelectionBoundary } from '../writing-scope.js'
+import { bindWritingChapter, readWritingScope, resolveWritingCreateTarget, originalSelectionBoundary } from '../writing-scope.js'
 import { assertLocalEditArguments, originalLocalEditBoundary } from '../local-edit-scope.js'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
@@ -8,7 +8,8 @@ import { DataAccessError, prisma } from '../../prisma.js'
 import { getChapterBaseline, getCreatedChapter, getLastTouchedChapter, recordChapterBaseline, recordCreatedChapter } from '../baseline.js'
 import { activeChapterScope, recalculateNovelStats } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
-import { assertChapterManuscriptRevision, readChapterReviewWriteAdmission, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
+import { readChapterReviewWriteAdmission, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
+import { updateOwnedChapterAtRevision } from './chapter-mutation.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { placeCreatedChapter, resolveChapterPlacement } from '../../data/volume.js'
 import { normalizeToolInput } from './input-validation.js'
@@ -140,52 +141,6 @@ function assertChapterMutable(ctx: ToolContext, chapter: { id: string; title: st
       `作者明确要求前文保持不变，章节《${chapter.title}》属于本轮开始前已有内容，禁止写入、改名或改动结构。请只操作本轮新建章节。`,
     )
   }
-}
-
-/** 把“读当前版本 → 写入”收敛为单条带 revision 条件的原子更新。 */
-async function updateOwnedChapterAtRevision(
-  ctx: ToolContext,
-  chapter: { id: string; revision: number; content?: string },
-  data: Prisma.ChapterUpdateManyMutationInput,
-  mutation?: ChapterReviewRevisionOptions['mutation'],
-  mergedBatch = false,
-  review?: Pick<ChapterReviewRevisionOptions, 'retainedFindings' | 'editRanges'>,
-) {
-  const apply = async (tx: Prisma.TransactionClient) => {
-    await assertAgentManuscriptCurrent(tx, ctx)
-    await assertWritingTarget(tx, ctx, { chapterId: chapter.id, effect: mutation ?? 'metadata' })
-    if (typeof data.content === 'string' && data.content === chapter.content) {
-      await assertChapterManuscriptRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review, after: data.content })
-      // Authenticate the still-active revision inside the transaction even for
-      // a no-op. It must spend neither a manuscript CAS nor a merged correction.
-      return tx.chapter.findFirst({ where: { id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision } })
-    }
-    const consumeReviewRevision = data.content !== undefined ? await assertChapterManuscriptRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review,
-      ...(typeof data.content === 'string' ? { after: data.content } : {}) }) : undefined
-    const result = await tx.chapter.updateMany({
-      where: {
-        id: chapter.id,
-        ...activeChapterScope(ctx.novelId),
-        authorId: ctx.userId,
-        revision: chapter.revision,
-      },
-      data: { ...data, revision: { increment: 1 } },
-    })
-    if (result.count !== 1) return null
-    await consumeReviewRevision?.()
-    // Keep the returned revision/body bound to our CAS while its row lock is
-    // held, rather than observing a subsequent writer through the global client.
-    const updated = await tx.chapter.findFirst({ where: {
-      id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision + 1,
-    } })
-    if (!updated) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '写入后的章节作用域已变化，本次事务需要回滚。')
-    if (data.content !== undefined && isAgent2FeatureEnabled('storyCompiler', ctx.userId)) {
-      await recordStoryCompilerWrite({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
-        chapterId: updated.id, chapterOrderIndex: updated.orderIndex, chapterRevision: updated.revision }, tx)
-    }
-    return updated
-  }
-  return ctx.transaction ? apply(ctx.transaction) : prisma.$transaction(apply)
 }
 
 async function writeChapterContent(

@@ -605,6 +605,10 @@ describe('durable Agent chapter archive guards', () => {
   it.each(actions)('%s successful CAS preserves publication and stays in the effect transaction', async action => {
     const consume = vi.fn()
     m.reviewGuard.mockResolvedValue(consume)
+    const after = action === 'chapter_append' ? 'Before\n\nAfter' : 'After'
+    // The shared legacy/durable CAS reads its exact new revision under the
+    // same row lock. The fixture must honor that revision predicate too.
+    m.tx.chapter.findFirst.mockImplementation(async ({ where }) => where.revision === 5 ? { ...row, revision: 5, content: after } : row)
     expect((await executeDurableChapter(durable(action), action, contentArgs(action))).display).toMatchObject({ revision: 5 })
     expectCas()
     expect(m.stats).toHaveBeenCalledWith(tx, 'n')
