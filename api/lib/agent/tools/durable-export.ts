@@ -102,7 +102,7 @@ async function freezeExport(ctx: ToolContext, tool: AgentTool, args: Record<stri
 
 /** Only authenticated terminal provider evidence can choose the optional
  * advice fallback. A transport exception or timeout is never that evidence. */
-async function knownAdviceFailure(tx: RuntimeTx, parentId: string, work: ExportWork) {
+export async function readKnownExportAdviceFailure(tx: RuntimeTx, parentId: string, work: ExportWork) {
   if (work.advice.kind !== 'generate') return null
   const child = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: work.identity.taskRootId, operationKey: `aux:${parentId}:publish_advice` } }, include: { attempts: { include: { usageReceipt: true } } } })
   if (!child || child.parentOperationId !== parentId || child.kind !== 'provider' || child.action !== 'publish_advice'
@@ -110,7 +110,8 @@ async function knownAdviceFailure(tx: RuntimeTx, parentId: string, work: ExportW
   const attempt = child.attempts[0]
   const childInput = z.object({ input: z.object({ request: z.unknown(), billing: z.unknown() }) }).safeParse(child.inputSnapshot)
   if (!childInput.success || runtimeJson(childInput.data.input.billing).hash !== runtimeJson(work.advice.price).hash
-    || !attempt.requestSnapshot || runtimeJson(childInput.data.input.request).hash !== runtimeJson(attempt.requestSnapshot).hash) return null
+    || attempt.provider !== work.advice.route.provider || attempt.model !== work.advice.route.model
+    || !attempt.requestSnapshot || runtimeJson({ provider: attempt.provider, model: attempt.model, request: childInput.data.input.request }).hash !== runtimeJson(attempt.requestSnapshot).hash) return null
   if (!attempt.resultHash || !attempt.result || child.status !== attempt.status || !attempt.requestSnapshot
     || runtimeJson(attempt.requestSnapshot).hash !== attempt.requestHash || runtimeJson(attempt.result).hash !== attempt.resultHash) return null
   if (attempt.status === 'cancelled' && !attempt.dispatchedAt) {
@@ -180,7 +181,7 @@ export async function executeDurableExport(ctx: ToolContext, tool: AgentTool, ra
           catch { /* A complete known output is not valid advice; no new request. */ }
         }
       } catch (error) {
-        const known = await withRunLease(lease, tx => knownAdviceFailure(tx, prepared.operation.id, frozen))
+        const known = await withRunLease(lease, tx => readKnownExportAdviceFailure(tx, prepared.operation.id, frozen))
         if (!known) throw error
         outcome = known
       }
