@@ -12,7 +12,7 @@ function fixture(native = true) {
   generated.scope.writing = { version: 1, kind: 'bounded', targets: [{ chapterId: 'chapter', orderIndex: 1 }], titleAndBodyOnly: false, repairAuthorized: true }
   const spec = JSON.parse(JSON.stringify(generated)) as typeof generated
   const original = runtimeJson({ spec, request: { prompt } })
-  const root = { id: 'root', userId: 'user', novelId: 'novel', specSnapshot: spec, requestSnapshot: { prompt }, inputHash: original.hash }
+  const root = { id: 'root', userId: 'user', novelId: 'novel', runs: [{ id: 'run' }], specSnapshot: spec, requestSnapshot: { prompt }, inputHash: original.hash }
   const run = { id: 'run', sessionId: 'session', taskRootId: native ? 'root' : null, chapterId: 'chapter', manuscriptRevision: 7,
     writingBindings: null as unknown, taskSpec: spec as unknown, startRequest: { prompt } as unknown }
   // Native readers must not ask Prisma to deserialize these duplicated JSON fields.

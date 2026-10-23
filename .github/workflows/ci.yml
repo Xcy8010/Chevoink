@@ -80,7 +80,7 @@ jobs:
         run: python3 -m unittest discover -s workers/document-import/tests -p 'test_*.py' -v
 
       - name: 云端发布准入、只读观察与开工同步回归（不连接生产）
-        run: node --test scripts/cloud-delivery.test.mjs scripts/production-observation.test.mjs scripts/workspace-start.test.mjs scripts/audit-gate.test.mjs
+        run: node --test scripts/cloud-delivery.test.mjs scripts/production-observation.test.mjs scripts/workspace-start.test.mjs scripts/audit-gate.test.mjs scripts/ci-db-chain-control.test.mjs
 
       - name: 生成 Agent 3.0 确定性评测快照
         run: |
@@ -193,6 +193,9 @@ jobs:
         with:
           name: vitest-plan-${{ github.sha }}
           path: .
+
+      - name: 同一真实PG全链的覆盖率计时对照（不替代完整门禁）
+        run: node scripts/ci-db-chain-control.mjs ${{ matrix.shard }} ${{ matrix.count }}
 
       - name: 测试分片（隔离数据库，生成 blob 与覆盖率）
         # A partial shard cannot represent the global coverage score. The merge

@@ -40,7 +40,7 @@ import { advanceDurableMemory } from '../../api/lib/agent/runtime-memory.js'
 import { readLimitedWritingDelivery } from '../../api/lib/agent/writing-delivery-limitations.js'
 import { readQualityFormatRecovery, claimQualityFormatRecovery } from '../../api/lib/agent/quality-format-recovery.js'
 import { readQualityUnavailableProof } from '../../api/lib/agent/quality-unavailable-proof.js'
-import { createDurableTestLifecycle } from '../support/durable-test-lifecycle.js'
+import { createDurableTestLifecycle, DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS } from '../support/durable-test-lifecycle.js'
 import { startDurableTestCpuProfile } from '../support/durable-test-cpu.js'
 
 // Native admission freezes this already-resolved identity, including high.
@@ -483,10 +483,13 @@ describe.runIf(available)('quality report integrity and atomic repair', () => {
 })
 
 describe.runIf(available)('durable quality actual tool chain', () => {
-  it.for(['retain', 'mixed-retain', 'no-op-repair', 'format-35', 'complete-35', 'source-id', 'invalid-source-id', 'success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale', 'v9-quality-resume', 'v2-quality-resume', 'v2-quality-stale', 'json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-valid', 'format-valid-repair', 'format-recovery-unknown', 'format-recovery-stale', 'format-recovery-rollback', 'format-expired', 'old-format-full-chain', 'v9-format-full-chain', 'format-reprepare', 'synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical', 'v6-parser-mechanical', 'v7-parser-mechanical'] as const)('%s preserves paid results and atomic business effects', async (scenario, { signal }) => {
+  const scenarios = ['retain', 'mixed-retain', 'no-op-repair', 'format-35', 'complete-35', 'source-id', 'invalid-source-id', 'success', 'repair', 'evidence-corrected', 'evidence-unresolved', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'approval-denied', 'standalone', 'context-change', 'full-chain', 'original-request', 'original-request-resume', 'legacy-quality-resume', 'legacy-quality-stale', 'v9-quality-resume', 'v2-quality-resume', 'v2-quality-stale', 'json-noise', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-valid', 'format-valid-repair', 'format-recovery-unknown', 'format-recovery-stale', 'format-recovery-rollback', 'format-expired', 'old-format-full-chain', 'v9-format-full-chain', 'format-reprepare', 'synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical', 'v6-parser-mechanical', 'v7-parser-mechanical'] as const
+  for (const scenario of scenarios) it(`${scenario} preserves paid results and atomic business effects`, {
+    timeout: scenario === 'v9-format-full-chain' ? DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS : undefined,
+  }, async ({ signal }) => {
     const lifecycle = createDurableTestLifecycle(signal, scenario === 'v9-format-full-chain'
       ? entry => console.info('[durable-quality-stage]', JSON.stringify(entry)) : undefined)
-    // Profiling is an explicit diagnostic, not part of the unchanged 5s gate.
+    // Profiling remains an explicit diagnostic, outside normal CI timing.
     // The collected CI samples include ~177ms in inspector.post alone; leaving
     // that observer enabled on every run can make cleanup cross the deadline.
     const stopCpu = scenario === 'v9-format-full-chain' && process.env.CHEVOINK_TEST_CPU_PROFILE === '1'

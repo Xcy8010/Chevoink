@@ -25,7 +25,7 @@ import { streamDurableRun } from '../../api/lib/agent/runtime-stream.js'
 import { env } from '../../api/config/env.js'
 import { createAgentGoal, actOnAgentGoal, readAgentGoal } from '../../api/lib/agent/goal-service.js'
 import { superviseAgentGoal } from '../../api/lib/agent/goal-supervisor.js'
-import { createDurableTestLifecycle, type DurableTestLifecycle } from '../support/durable-test-lifecycle.js'
+import { createDurableTestLifecycle, DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS, type DurableTestLifecycle } from '../support/durable-test-lifecycle.js'
 import { startDurableTestCpuProfile } from '../support/durable-test-cpu.js'
 
 const realBootstrap = await vi.importActual<typeof import('../../api/lib/agent/runtime-bootstrap.js')>('../../api/lib/agent/runtime-bootstrap.js')
@@ -414,10 +414,10 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     expect(fetch).not.toHaveBeenCalled()
   }))
 
-  it('runs a genuine fresh writer through real read, coordinated body/reviews/commit and natural completion', async ({ signal }) => {
+  it('runs a genuine fresh writer through real read, coordinated body/reviews/commit and natural completion', { timeout: DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS }, async ({ signal }) => {
     const lifecycle = createDurableTestLifecycle(signal, entry => console.info('[durable-quality-stage]', JSON.stringify(entry)))
-    // Keep sampling opt-in after diagnosis; normal gates retain the original
-    // deadline and assertions without inspector startup cost.
+    // Keep sampling opt-in: the timing control and covered run use the same
+    // assertions without inspector startup cost.
     const stopCpu = process.env.CHEVOINK_TEST_CPU_PROFILE === '1' ? await startDurableTestCpuProfile() : undefined
     try { await fixture(async f => {
     await ready(f)

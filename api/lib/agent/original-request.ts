@@ -24,14 +24,21 @@ export async function readOriginalTaskRequest(tx: Prisma.TransactionClient, subj
   // Native lineage reads use the authenticated root below. Do not repeatedly
   // deserialize its duplicated run taskSpec/startRequest and unrelated usage.
   const identity = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId },
-    select: { id: true, sessionId: true, taskRootId: true, incomingChildGrant: true,
-      session: { select: { userId: true, novelId: true, spawnedFromRunId: true, spawnedFromSessionId: true } },
-      taskRoot: { select: { id: true, userId: true, novelId: true, inputHash: true, specSnapshot: true, requestSnapshot: true } } } })
+    select: { id: true, sessionId: true, taskRootId: true } })
   if (!identity) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '原任务身份无法核实。')
-  const incoming = identity.incomingChildGrant
+  const rootSelect = { id: true, userId: true, novelId: true, inputHash: true, specSnapshot: true, requestSnapshot: true,
+    runs: { where: { userId: subject.userId, novelId: subject.novelId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: 1, select: { id: true } } } satisfies Prisma.AgentTaskRootSelect
+  // Native roots have a real relation to read as one database request. Keep the
+  // separate legacy lookups for historical runs without that persisted root.
+  const lineage = identity.taskRootId ? await tx.agentRun.findFirst({ where: { id: identity.id, userId: subject.userId,
+    novelId: subject.novelId, taskRootId: identity.taskRootId }, select: { incomingChildGrant: true,
+    session: { select: { userId: true, novelId: true, spawnedFromRunId: true, spawnedFromSessionId: true } }, taskRoot: { select: rootSelect } } }) : null
+  if (identity.taskRootId && !lineage) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '原任务身份无法核实。')
+  const incoming = lineage ? lineage.incomingChildGrant : await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: identity.id } })
   if (incoming && runtimeJson(incoming.snapshot).hash !== incoming.snapshotHash) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '子任务授权来源损坏。')
   if (incoming) (await import('./runtime-child.js')).verifyChildGrant(incoming)
-  const session = identity.session.userId === subject.userId && identity.session.novelId === subject.novelId ? identity.session : null
+  const session = lineage ? (lineage.session.userId === subject.userId && lineage.session.novelId === subject.novelId ? lineage.session : null)
+    : await tx.agentSession.findFirst({ where: { id: identity.sessionId, userId: subject.userId, novelId: subject.novelId }, select: { spawnedFromRunId: true, spawnedFromSessionId: true } })
   if (!incoming && session?.spawnedFromRunId) {
     const parent = await tx.agentRun.findFirst({ where: { id: session.spawnedFromRunId, sessionId: session.spawnedFromSessionId ?? undefined,
       userId: subject.userId, novelId: subject.novelId }, select: { id: true, session: { select: { spawnedFromRunId: true } } } })
@@ -43,11 +50,11 @@ export async function readOriginalTaskRequest(tx: Prisma.TransactionClient, subj
   if (rootId) {
     // One Prisma read carries native identity and its original related rows.
     // Child authority still resolves the distinct authenticated parent root.
-    const root = incoming ? await tx.agentTaskRoot.findFirst({ where: { id: rootId, userId: subject.userId, novelId: subject.novelId } }) : identity.taskRoot
+    const root = incoming ? await tx.agentTaskRoot.findFirst({ where: { id: rootId, userId: subject.userId, novelId: subject.novelId }, select: rootSelect }) : lineage?.taskRoot
     if (!root || root.id !== rootId || root.userId !== subject.userId || root.novelId !== subject.novelId) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '原任务范围无法核实。')
     if (runtimeJson({ spec: root.specSnapshot, request: root.requestSnapshot }).hash !== root.inputHash) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原任务输入损坏。')
     return { prompt: originalPrompt(root.requestSnapshot),
-      spec: root.specSnapshot, taskId: root.id, parentRunId: incoming?.currentParentRunId ?? null, sourceRunId: (await tx.agentRun.findFirst({ where: { taskRootId: root.id, userId: subject.userId, novelId: subject.novelId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true } }))?.id ?? identity.id }
+      spec: root.specSnapshot, taskId: root.id, parentRunId: incoming?.currentParentRunId ?? null, sourceRunId: root.runs[0]?.id ?? identity.id }
   }
   // Legacy tasks retain their original source-row interpretation.
   let run = await tx.agentRun.findFirstOrThrow({ where: { id: identity.id, userId: subject.userId, novelId: subject.novelId } })

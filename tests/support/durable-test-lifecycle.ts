@@ -1,5 +1,12 @@
 import { cpuUsage } from 'node:process'
 
+// A complete real-PG scenario includes setup, multiple fenced transactions and
+// cleanup. Vitest's implicit 5s is not a product SLO and is shorter than one
+// existing runtime transaction's 10s allowance. Keep a finite 15s lifecycle
+// bound for the two measured full chains; all other tests retain their default.
+// CI separately compares the identical assertions without/with V8 coverage.
+export const DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS = 15_000
+
 export type DurableTestPhase = 'fixture.setup' | 'fixture.work' | 'fixture.cleanup' | 'step' | 'memory' | 'verification' | 'append'
   | 'lease' | 'chapter.seed' | 'compiler.prepare' | 'compiler.tasks' | 'baseline' | 'runtime.seed' | 'credit.seed'
 type PendingPhase = { phase: DurableTestPhase; ordinal: number }
