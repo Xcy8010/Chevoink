@@ -154,11 +154,14 @@ describe('严谨创作落实连续性警告', () => {
       entryState: { action: '走向仓库' }, exitState: storyStateSchema.parse({ location: '仓库内', objects: ['她持有钥匙'], openLoops: ['门后追逐'] }) })
     const actualState = storyStateSchema.parse({ location: '渡口', objects: ['钥匙归船夫'] })
     const commit = vi.spyOn(compiler, 'commitChapterBridge').mockResolvedValue({ compilationId: 'comp', chapterId: 'c', chapterRevision: 2, skippedMemoryCount: 0, retainedIssueCount: 0 })
-    await chapterBridgeCommitTool.execute(f.ctx, { compilationId: 'comp', ...(explicit ? { exitState: actualState } : {}) })
+    const result = await chapterBridgeCommitTool.execute(f.ctx, { compilationId: 'comp', ...(explicit ? { exitState: actualState } : {}) })
     expect(commit).toHaveBeenCalledWith(expect.objectContaining({ expectedChapterRevision: 2,
       expectedContentHash: createHash('sha256').update(f.chapter.content).digest('hex'),
       exitState: explicit ? actualState : storyStateSchema.parse({}), chapterSummary: `正文摘录：${f.chapter.content}`,
       openingStructure: '开篇摘录：她留在渡口。', endingStructure: '结尾摘录：钥匙已经交还船夫。', lastUnfinishedAction: '', hookDecision: '' }), undefined)
+    expect(result.output).toContain(`本章内容资料：正文摘录：${f.chapter.content}`)
+    expect(result.output).toContain('概括实际剧情推进或具体修订')
+    expect(result.output).toContain('不要额外调用模型')
     expect(f.write).not.toHaveBeenCalled()
     expect(f.critic).not.toHaveBeenCalled()
     expect(f.repair).not.toHaveBeenCalled()

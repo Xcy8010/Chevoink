@@ -3087,7 +3087,7 @@ describe('ordinary chapter summary presentation', () => {
     const prompt = '写第一章。只保存到章节。'
     const summary = scenario === 'stale-summary'
       ? '正文改为「铜钱清脆地落在地上」。\n\n结尾让人物的选择自然落地。'
-      : '《十五块的碗》已经写好，保留了旧碗与铜钱的细节，结尾让人物的选择自然落地。'
+      : '已保存《十五块的碗》（r1，3541 字）。本章保留了旧碗与铜钱的细节，结尾让人物的选择自然落地。'
     const chapter = mocks.chapters[0]
     chapter.title = '十五块的碗'
     chapter.content = '天亮之前，他把旧碗放回柜上。铜钱压在碗底，门外的脚步声渐渐远去。'
@@ -3156,6 +3156,7 @@ describe('ordinary chapter summary presentation', () => {
       for (const final of finals) expect(final).toMatchObject({ messageId, text: displayed })
       expect(JSON.stringify(finals)).not.toContain('铜钱清脆地落在地上')
       expect(displayed).toContain('结尾让人物的选择自然落地。')
+      if (scenario !== 'stale-summary') expect(displayed).toBe('已保存《十五块的碗》（3541 字）。本章保留了旧碗与铜钱的细节，结尾让人物的选择自然落地。')
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: displayed })
       expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', outputSummary: displayed })
       const persisted = mocks.persist.mock.calls as unknown as Array<[{ create?: { role?: string; parts?: AgentMessagePart[] }; update?: { parts?: AgentMessagePart[] } }]>

@@ -795,8 +795,19 @@ function withoutWritingReceiptClauses(sentence: string, delivery: PresentationDe
   // saved prose. Its literal words are evidence, not an operation receipt.
   if (/^\s*>/u.test(sentence)) return sentence
   const quotes = writingQuotations(sentence)
+  // A version and word count are often one parenthetical receipt. Splitting
+  // inside it used to delete the opening half and leave e.g. "3541 字）".
+  const groups: Array<{ start: number; end: number }> = []
+  const stack: Array<{ start: number; close: string }> = []
+  for (let index = 0; index < sentence.length; index++) {
+    if (quotes.some(quote => quote.start <= index && index < quote.end)) continue
+    const char = sentence[index]
+    if (char === stack.at(-1)?.close) groups.push({ start: stack.pop()!.start, end: index + 1 })
+    else if (char === '（' || char === '(') stack.push({ start: index, close: char === '（' ? '）' : ')' })
+  }
+  for (const group of stack) groups.push({ start: group.start, end: sentence.length })
   const boundaries = [...sentence.matchAll(/[，,；;]/gu)].filter(match =>
-    !quotes.some(quote => quote.start < match.index! && match.index! < quote.end))
+    ![...quotes, ...groups].some(group => group.start < match.index! && match.index! < group.end))
   const clauses: Array<{ text: string; separator: string }> = []
   let start = 0
   for (const match of boundaries) {
@@ -804,7 +815,8 @@ function withoutWritingReceiptClauses(sentence: string, delivery: PresentationDe
     start = match.index! + match[0].length
   }
   clauses.push({ text: sentence.slice(start), separator: '' })
-  const visible = clauses.filter(({ text }) => {
+  const visible = clauses.flatMap(({ text, separator }) => {
+    const keep = (value = text) => [{ text: value, separator }]
     let prose = text
     for (const quote of [...writingQuotations(text)].reverse()) {
       if (delivery.chapters.some(chapter => text.slice(quote.start, quote.end) === `《${chapter.title}》`)) continue
@@ -815,18 +827,30 @@ function withoutWritingReceiptClauses(sentence: string, delivery: PresentationDe
       }
       prose = prose.slice(0, quote.start) + '[引用]' + prose.slice(quote.end)
     }
-    if (/章节终态|终态(?:已|已经)?提交|提交终态|(?:章节|编译|任务|报告)(?:ID|编号)\s*(?:为|是|[=:：])/iu.test(prose)) return false
-    if (!/\br(?:evision)?\s*\d+\b|(?:当前版本|修订版本)\s*[:：]?\s*\d+/iu.test(prose)) return true
+    if (/章节终态|终态(?:已|已经)?提交|提交终态|(?:章节|编译|任务|报告)(?:ID|编号)\s*(?:为|是|[=:：])/iu.test(prose)) return []
+    if (!/\br(?:evision)?\s*\d+\b|(?:当前版本|修订版本)\s*[:：]?\s*\d+/iu.test(prose)) return keep()
     for (const chapter of delivery.chapters) prose = prose.split(`《${chapter.title}》`).join('')
     // Only a metadata-only clause is removed. A novel's r6 room, quoted code,
     // excerpt or plot summary is not a revision receipt.
-    return Boolean(prose.replace(/第\s*[0-9一二两三四五六七八九十百千]+\s*章/gu, '')
+    const substantive = prose.replace(/第\s*[0-9一二两三四五六七八九十百千]+\s*章/gu, '')
       .replace(/\br(?:evision)?\s*\d+\b|(?:当前版本|修订版本)\s*[:：]?\s*\d+/giu, '')
       .replace(/当前稿|当前版本|修订版本|版本|正文|章节|本章|已经|已|保存|提交|更新|完成|为|是/gu, '')
-      .replace(/[\s\p{P}]/gu, ''))
+      .replace(/[\s\p{P}]/gu, '')
+    if (/^\d+字$/u.test(substantive) && /已保存/u.test(text)
+      && delivery.chapters.some(chapter => text.includes(`《${chapter.title}》`))) {
+      const protectedQuotes = writingQuotations(text)
+      return keep(text.replace(/\br(?:evision)?\s*\d+\b/giu, (version, offset: number) =>
+        protectedQuotes.some(quote => quote.start < offset && offset < quote.end) ? version : '')
+        .replace(/([（(])\s*[，,；;]\s*/gu, '$1'))
+    }
+    return substantive ? keep() : []
   })
-  if (visible.length === clauses.length) return sentence
-  return visible.map(({ text, separator }, index) => text + (index < visible.length - 1 ? separator || '，' : '')).join('').trim()
+  if (visible.length === clauses.length && visible.every((clause, index) => clause.text === clauses[index].text)) return sentence
+  const result = visible.map(({ text, separator }, index) => text + (index < visible.length - 1 ? separator || '，' : '')).join('').trim()
+  // Removing the last receipt clause must not eat the sentence boundary and
+  // concatenate two otherwise complete author-facing sentences.
+  const ending = sentence.match(/[。！？!?\n]\s*$/u)?.[0] ?? ''
+  return result && ending && !/[。！？!?]$/u.test(result) ? result + ending : result
 }
 
 export function completedWritingPresentationText(delivery: PresentationDelivery, candidateText: string): string {

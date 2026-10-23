@@ -167,6 +167,36 @@ describe('current committed manuscript wrap-up', () => {
     delivery.text = `标题r6\n\n${delivery.chapters[0].content}\n章节终态已提交。\n\n\`r6\``
     expect(completedWritingPresentationText(delivery, '章节终态已提交。')).toBe(delivery.text)
   })
+  it.each([['（', '，', '）'], ['(', ',', ')'], ['（', '；', '）']])('keeps a complete saved opening with a parenthetical revision and count: %s%s%s', async (open, separator, close) => {
+    const { delivery } = await current()
+    const recap = '阿岚停在半开的闸门前，等待守闸人的回答。'
+    const text = completedWritingPresentationText(delivery, `已保存《第三章 河岸》${open}r6${separator}3541 字${close}。${recap}`)
+    expect(text).toBe(`已保存《第三章 河岸》${open}3541 字${close}。${recap}`)
+    expect(completedWritingPresentationText(delivery, text)).toBe(text)
+    expect(text).not.toMatch(/^3541/u)
+  })
+  it('does not erase a revision-like word in the actual title while cleaning its saved receipt', async () => {
+    const { delivery } = await current()
+    delivery.chapters[0].title = 'r6 房间'
+    const text = completedWritingPresentationText(delivery, '已保存《r6 房间》（r6，3541 字）。人物仍在门外等待。')
+    expect(text).toBe('已保存《r6 房间》（3541 字）。人物仍在门外等待。')
+    expect(completedWritingPresentationText(delivery, text)).toBe(text)
+  })
+
+  it('removes a whole terminal receipt without leaving a count fragment or joining adjacent sentences', async () => {
+    const { delivery } = await current()
+    const text = completedWritingPresentationText(delivery,
+      '阿岚仍在等待回答，章节终态已提交（r6，3541 字）。守闸人的沉默留下悬念。')
+    expect(text).toBe('阿岚仍在等待回答。守闸人的沉默留下悬念。')
+    expect(completedWritingPresentationText(delivery, text)).toBe(text)
+  })
+  it('keeps nested parenthetical plot details and literal commas in verified quotations', async () => {
+    const { delivery } = await current()
+    delivery.chapters[0].content += '屏幕提示：已保存（r6，3541 字）。'
+    const text = '人物的停顿（包括等待（半尺，未动）的过程）仍然克制。正文保留“已保存（r6，3541 字）”。'
+    expect(completedWritingPresentationText(delivery, text)).toBe(text)
+  })
+
   it('preserves verified manuscript block quotes and paragraph boundaries, but removes metadata-only quoted versions', async () => {
     const { delivery } = await current()
     delivery.chapters[0].content += '\n屏幕显示：章节终态已提交。'
