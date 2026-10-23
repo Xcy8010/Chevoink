@@ -86,10 +86,10 @@ describe.runIf(available)('native deletion commits real effects outside the hear
           const other = await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
             mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', status: scenario === 'child' ? 'completed' : 'queued' } })
           if (scenario === 'child') {
-            childId = randomUUID()
-            await prisma.agentChildExecutionGrant.create({ data: { id: childId, parentRootId: f.rootId, parentOperationId: ready.operationId, childIndex: 0,
+            const grant = await prisma.agentChildExecutionGrant.create({ data: { id: randomUUID(), parentRootId: f.rootId, parentOperationId: ready.operationId, childIndex: 0,
               admissionRunId: f.runId, admissionEpoch: lease.epoch, currentParentRunId: f.runId, generation: 1, childRunId: other.id,
-              kind: 'spawned', tokenCeiling: 1, snapshot: {}, snapshotHash: runtimeJson({}).hash, status: 'completed' } })
+              kind: 'spawned', tokenCeiling: 500, snapshot: {}, snapshotHash: runtimeJson({}).hash, status: 'completed' } })
+            childId = grant.id
           }
         }
         if (scenario === 'reserved') await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId,
@@ -138,6 +138,7 @@ describe.runIf(available)('native deletion commits real effects outside the hear
           expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: { in: ['novel.deletion.committed', 'novel.deletion.accounting'] } } })).toBe(0)
           expect((await prisma.user.findUniqueOrThrow({ where: { id: f.userId } })).novelCount).toBe(1)
           if (scenario === 'queued' || scenario === 'held') expect(await prisma.agentQueuedRequest.count({ where: { sessionId: f.sessionId } })).toBe(1)
+          if (childId) expect(await prisma.agentChildExecutionGrant.findUnique({ where: { id: childId } })).not.toBeNull()
           expect(fetch).not.toHaveBeenCalled(); return
         }
         const result = await execute()
@@ -189,7 +190,9 @@ describe.runIf(available)('native deletion commits real effects outside the hear
         }
         expect(fetch).not.toHaveBeenCalled()
       } finally {
-        if (childId) await prisma.agentChildExecutionGrant.delete({ where: { id: childId } })
+        // A failed setup/negative assertion must remain the reported failure;
+        // cleanup must not replace it with "record not found".
+        if (childId) await prisma.agentChildExecutionGrant.deleteMany({ where: { id: childId } })
       }
     }, undefined, '永久删除当前作品及全部章节。'))
 })
