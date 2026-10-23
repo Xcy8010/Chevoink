@@ -339,7 +339,7 @@ export async function runDurableExecution(token: RunLeaseToken, signal: AbortSig
     for (;;) {
       ownedSignal.throwIfAborted()
       const step = await executeDurableStep(lease, ownedSignal)
-      if (step.kind === 'completion_review' || step.kind === 'waiting_approval' || step.kind === 'waiting_question' || step.kind === 'waiting_import' || step.kind === 'needs_attention') return step
+      if (step.kind === 'deletion_ready' || step.kind === 'completion_review' || step.kind === 'waiting_approval' || step.kind === 'waiting_question' || step.kind === 'waiting_import' || step.kind === 'needs_attention') return step
     }
   })
   if (result.kind === 'needs_attention') {
@@ -389,6 +389,7 @@ export async function runReviewedDurableExecution(token: RunLeaseToken, signal: 
   const lease = { ...token }
   for (;;) {
     const step = await runDurableExecution(lease, signal)
+    if (step.kind === 'deletion_ready') return (await import('./runtime-novel-delete.js')).commitNovelDeletion(lease, step, signal)
     if (step.kind === 'waiting_import') {
       await waitForDurableImport(lease, signal, step.requestId)
       continue

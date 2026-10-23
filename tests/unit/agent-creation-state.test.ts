@@ -36,6 +36,7 @@ function fixture() {
     chapter: { findFirst: vi.fn(async ({ where }) => chapters.find(item => item.id === where.id) ?? null) },
     storyCompilation: { findMany: vi.fn().mockResolvedValue(compilations) },
     agentExecutionState: { findUnique: vi.fn().mockResolvedValue(null) },
+    agentExecutionOutbox: { findUnique: vi.fn().mockResolvedValue(null) },
     agentOperation: { findMany: vi.fn().mockResolvedValue([]) },
     aiUsageLog: { findMany: vi.fn().mockResolvedValue([]) },
     agentProviderAttempt: { findMany: vi.fn().mockResolvedValue([]) },

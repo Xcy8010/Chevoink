@@ -247,6 +247,7 @@ async function executeOwnedPersistedLoopRun(run: AgentRunRecord) {
   registerActiveRun(run.id, { controller, userId, sessionId: run.sessionId })
   let lease: RunLeaseToken | undefined
   let executionFailed = false
+  let deletionVerified = false
   let result: Awaited<ReturnType<typeof import('./runtime-executor.js').runReviewedDurableExecution>>
   let cleanupFailure: { error: unknown } | undefined
   try {
@@ -273,7 +274,22 @@ async function executeOwnedPersistedLoopRun(run: AgentRunRecord) {
     const { runReviewedDurableExecution } = await import('./runtime-executor.js')
     controller.signal.throwIfAborted()
     result = await runReviewedDurableExecution(lease, controller.signal)
+    if (result.kind === 'novel_deleted') {
+      const proof = await runtimeTransaction(tx => import('./runtime-novel-delete-read.js').then(module => module.readVerifiedNovelDeletion(tx, userId, runId)))
+      if (!proof || proof.deletion.taskRootId !== lease.taskRootId || proof.deletion.operationId !== result.deletion.operationId) {
+        throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '删除终态尚未核实。')
+      }
+      deletionVerified = true
+    }
   } catch (error) {
+    // An atomic commit can succeed before its response is lost. Reconcile only
+    // saved facts; never reissue a deletion, provider call or fake lease.
+    const committed = lease ? await runtimeTransaction(tx => import('./runtime-novel-delete-read.js')
+      .then(module => module.readVerifiedNovelDeletion(tx, userId, runId))).catch(() => null) : null
+    if (committed && committed.deletion.taskRootId === lease!.taskRootId && committed.deletion.runId === runId) {
+      deletionVerified = true
+      result = { kind: 'novel_deleted', deletion: committed.deletion }
+    } else {
     executionFailed = true
     await (await import('./goal-service.js')).noteGoalResourceFailure(userId, runId, error)
     // Preserve the failed operation/cursor. Only the still-current owner may
@@ -289,11 +305,12 @@ async function executeOwnedPersistedLoopRun(run: AgentRunRecord) {
       }
     }
     throw error
+    }
   } finally {
     try {
       // The executor's own heartbeat has stopped before releasing ownership.
       // Errors remain errors; unknown provider outcomes are never re-dispatched here.
-      if (lease) await releaseRunLease(lease)
+      if (lease && !deletionVerified) await releaseRunLease(lease)
     } catch (releaseError) {
       // A cleanup outage must not replace the actual provider/tool failure.
       // On an otherwise successful return, however, surface the cleanup failure.
@@ -603,6 +620,8 @@ export async function streamLoopRun(
   sinceSeq: number,
   res: Response,
 ): Promise<void> {
+  const deleted = await runtimeTransaction(tx => import('./runtime-novel-delete-read.js').then(module => module.readVerifiedNovelDeletion(tx, userId, runId)))
+  if (deleted) return streamDurableRun(userId, runId, sinceSeq, res)
   const run = await findOwnedLoopRun(userId, runId)
 
   if (run.engine !== 'loop') {

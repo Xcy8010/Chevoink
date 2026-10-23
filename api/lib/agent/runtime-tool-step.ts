@@ -31,7 +31,8 @@ import { executeDurableCreative } from './tools/durable-creative.js'
 import { platformNovelReadTool, platformNovelSearchTool } from './tools/platform-tools.js'
 import { executeDurablePlanSave } from './tools/durable-plan.js'
 import { executeDurableMemorySave } from './runtime-memory.js'
-import { novelCreateTool, novelPublishTool, novelArchiveTool, novelRenameTool, novelUpdateMetaTool, coverPromptSetTool } from './tools/novel-tools.js'
+import { novelCreateTool, novelPublishTool, novelArchiveTool, novelDeleteTool, novelRenameTool, novelUpdateMetaTool, coverPromptSetTool } from './tools/novel-tools.js'
+import { prepareNovelDeletion } from './runtime-novel-delete.js'
 import { METADATA_ACTIONS, executeDurableMetadata } from './tools/durable-metadata.js'
 import { settleProviderOperation } from './runtime-settlement.js'
 import { volumeListTool, volumeCreateTool, structureOutlineTool, volumeUpdateTool, volumeMoveTool, volumeDeleteTool, chapterMoveTool, chapterMoveToVolumeTool, chapterSplitTool, chapterMergeTool } from './tools/structure-tools.js'
@@ -119,6 +120,7 @@ const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
   checkedAdapter(novelRenameTool), checkedAdapter(novelUpdateMetaTool), checkedAdapter(coverPromptSetTool),
   checkedAdapter(novelCreateTool),
   checkedAdapter(novelPublishTool), checkedAdapter(novelArchiveTool),
+  checkedAdapter(novelDeleteTool),
   checkedAdapter(qualityAnalyzeTool),
   checkedAdapter(storyCompilerPrepareTool), checkedAdapter(sceneTaskBuildTool), checkedAdapter(chapterBridgeGetTool), checkedAdapter(continuityValidateTool), checkedAdapter(chapterBridgeCommitTool),
   checkedAdapter(todoWriteTool),
@@ -220,6 +222,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     else if (['execution_context_read', 'chapter_read', 'plan_read', 'novel_get_context', 'chapter_list_summaries', 'memory_search', 'volume_list', 'structure_outline', ...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].includes(call.name)) ctx.durableRead = capability
     else if (call.name === 'ask_user') { /* Persistent question step below; no legacy waiter. */ }
     else if (call.name === 'novel_import') ctx.durableImport = capability
+    else if (call.name === 'novel_delete') { /* Prepared here, committed after the heartbeat exits. No legacy execute capability. */ }
     else if ((METADATA_ACTIONS as readonly string[]).includes(call.name)) ctx.durableMetadata = capability
     else if (['memory_save', 'memory_event_save', 'memory_relation_save'].includes(call.name)) ctx.durableMemory = capability
     else if (['todo_write', ...TASK_ARTIFACT_ACTIONS].includes(call.name)) ctx.durableTask = capability
@@ -305,6 +308,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     // Actual adapter checks the saved decision again at effect admission.
   }
   const historyAction = [...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].find(name => name === selected.tool.name)
+  if (selected.tool.name === 'novel_delete') return prepareNovelDeletion(lease, selected.cursor, selected.ctx, selected.tool, selected.args)
   if (selected.ctx.durableVision) return { kind: 'tool' as const, result: await executeDurableVision(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableCover) return { kind: 'tool' as const, result: await executeDurableCover(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableDossier) return { kind: 'tool' as const, result: await executeDurableDossier(selected.ctx, selected.tool, selected.args) }

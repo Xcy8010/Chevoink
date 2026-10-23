@@ -1202,12 +1202,23 @@ export default function StudioWorkspace() {
     }
   }, [activeNovelId, queryClient, syncStudioPayload])
 
+  const deletedNovelCleanupRef = useRef(handleNovelDeletedFromSidebar)
+  deletedNovelCleanupRef.current = handleNovelDeletedFromSidebar
   const handleAgentStreamEvent = useCallback(
     (event: AgentStreamEvent) => {
       const live = useAgentStore.getState()
       if (!isWorkspaceStreamOwnerCurrent({ origin: chapterStreamOwner, current: chapterStreamOwnerRef.current,
         activeSessionId: live.activeSessionId, activeRunId: live.runId, eventRunId: event.runId })) return
       if (!claimWorkspaceStreamEvent(workspaceStreamCursorsRef.current, chapterStreamOwner, event)) return
+      if (event.type === 'run.finished' && event.status === 'succeeded' && event.deletedNovelId === activeNovelId) {
+        agentWorkspaceDirtyRef.current = false
+        if (agentRefreshTimerRef.current !== null) {
+          window.clearTimeout(agentRefreshTimerRef.current)
+          agentRefreshTimerRef.current = null
+        }
+        void deletedNovelCleanupRef.current(activeNovelId)
+        return
+      }
       if (event.type === 'tool.result' && event.ok && event.display?.kind === 'sessionRename') {
         const renamed = event.display
         setAgentTaskWindows(current => current.map(item => item.sessionId === renamed.sessionId ? { ...item, title: renamed.title, customNamed: true } : item))
@@ -3361,6 +3372,8 @@ export default function StudioWorkspace() {
 
   /** 侧栏已调完删除接口，这里只做缓存清理；删的是当前作品才需要换页 */
   async function handleNovelDeletedFromSidebar(deletedNovelId: string) {
+    await queryClient.cancelQueries({ queryKey: ['studio', deletedNovelId] })
+    await queryClient.cancelQueries({ queryKey: ['studio-chapter', deletedNovelId] })
     if (typeof window !== 'undefined' && window.localStorage.getItem(STUDIO_LAST_NOVEL_STORAGE_KEY) === deletedNovelId) {
       window.localStorage.removeItem(STUDIO_LAST_NOVEL_STORAGE_KEY)
     }

@@ -464,6 +464,8 @@ export type AgentStreamEventBody =
   | { type: 'run.paused'; reason: 'user_stop' | 'approval_timeout' | 'model_stalled' | 'needs_input' | 'review_receipt_pending' }
   | {
       type: 'run.finished'
+      /** Only an authenticated atomic deletion receipt may set this field. */
+      deletedNovelId?: string
       outcome?: import('./models.js').AgentRunOutcome
       authorEnded?: { fulfilled: boolean; todoItems?: AgentTodoItem[] }
       status: 'succeeded' | 'failed' | 'cancelled'

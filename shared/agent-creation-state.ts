@@ -43,7 +43,7 @@ export type AgentCreationState = {
     usageSource: string | null; tokensKnown: boolean; pendingSettlement: boolean
   }> }
   /** Persisted run status/outcome only, not a fresh manuscript acceptance. */
-  delivery: { source: 'run_record'; status: string; limitation: string | null; verified: false }
+  delivery: { source: 'run_record' | 'deletion_receipt'; status: string; limitation: string | null; verified: false }
   /** Original obligations retain their identity and are not certified by this view. */
   obligations: { source: 'original_contract'; verification: 'unverified'; goals: TaskSpec['goals'];
     expectedOutputs: TaskSpec['expectedOutputs']; postconditions: TaskSpec['postconditions']; hardConstraints: TaskSpec['hardConstraints'] } | null

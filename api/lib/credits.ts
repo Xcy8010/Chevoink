@@ -337,6 +337,15 @@ async function presentCreditLedgerEntries(db: Prisma.TransactionClient, entries:
   const runs = candidateRunIds.length ? await db.agentRun.findMany({ where: { id: { in: candidateRunIds },
     userId: { in: [...new Set(entries.map(entry => entry.userId))] } }, select: { id: true, userId: true } }) : []
   const runOwners = new Map(runs.map(run => [run.id, run.userId]))
+  const missing = candidateRunIds.filter(id => !runOwners.has(id))
+  if (missing.length) {
+    const indices = await db.agentExecutionOutbox.findMany({ where: { eventKey: { in: missing.map(id => `novel-deleted-run:${id}`) }, type: 'novel.deletion.run' },
+      select: { runId: true } })
+    const { readDeletedTaskCreditScope } = await import('./agent/runtime-novel-delete-billing.js')
+    for (const index of indices) for (const userId of new Set(entries.map(entry => entry.userId))) {
+      if (await readDeletedTaskCreditScope(db, userId, index.runId)) runOwners.set(index.runId, userId)
+    }
+  }
   const ledger: CreditLedgerItem[] = entries.map((entry) => {
     const originalPrice = presentLedgerPrice(entry.metadata)
     const logId = originalKey(entry).slice('usage:'.length)
@@ -380,28 +389,33 @@ export async function getTaskCreditUsage(userId: string, runId: string, input: {
   }
   const page = cursor
   return prisma.$transaction(async tx => {
-    const run = await tx.agentRun.findFirst({ where: { id: runId, userId, novel: { authorId: userId } } })
+    const liveRun = await tx.agentRun.findFirst({ where: { id: runId, userId, novel: { authorId: userId } } })
+    const deleted = liveRun ? null : await (await import('./agent/runtime-novel-delete-billing.js')).readDeletedTaskCreditScope(tx, userId, runId)
+    const run = liveRun ?? (deleted ? { ...deleted.run, taskSpec: null } : null)
     if (!run) throw new DataAccessError(404, 'AGENT_RUN_NOT_FOUND', '任务不存在或无权查看。')
     const spec = run.taskSpec == null ? null : taskSpecSchema.safeParse(run.taskSpec)
     if (spec && (!spec.success || spec.data.scope.novelId !== run.novelId)) throw new DataAccessError(409, 'CREDIT_TASK_SCOPE_INVALID', '原任务身份异常，未合并历史账单。')
-    const taskKey = run.taskRootId ?? (spec?.success ? spec.data.id : null)
+    const taskKey = deleted?.run.taskKey ?? run.taskRootId ?? (spec?.success ? spec.data.id : null)
     const asOf = page ? new Date(page.asOf) : new Date()
     // Prisma DateTime columns are UTC timestamp-without-time-zone. Bind their
     // ISO wall time explicitly; timestamptz comparison shifts the cutoff under
     // a non-UTC database session and can include refunds from later pages.
     const cutoff = asOf.toISOString()
+    const referenceScope = deleted ? Prisma.sql`l.reference_id IN (${Prisma.join(deleted.runIds)})` : Prisma.sql`
+      EXISTS (SELECT 1 FROM agent_runs r WHERE r.user_id = ${userId} AND r.session_id = ${run.sessionId}
+        AND r.novel_id = ${run.novelId} AND r.id = l.reference_id AND
+        (r.id = ${runId} OR (${taskKey}::text IS NOT NULL AND COALESCE(r.task_root_id, r.task_spec->>'id') = ${taskKey})))`
+    const usageScope = deleted ? Prisma.sql`u.agent_run_id IN (${Prisma.join(deleted.runIds)})` : Prisma.sql`
+      EXISTS (SELECT 1 FROM agent_runs r WHERE r.id = u.agent_run_id AND r.user_id = ${userId} AND r.session_id = ${run.sessionId}
+        AND r.novel_id = ${run.novelId} AND (r.id = ${runId} OR (${taskKey}::text IS NOT NULL AND COALESCE(r.task_root_id, r.task_spec->>'id') = ${taskKey})))`
     const scope = Prisma.sql`l.user_id = ${userId} AND l.created_at <= ${cutoff}::timestamp
       AND l.kind IN ('usage', 'refund') AND (
-        EXISTS (SELECT 1 FROM agent_runs r WHERE r.user_id = ${userId} AND r.session_id = ${run.sessionId}
-          AND r.novel_id = ${run.novelId} AND r.id = l.reference_id AND
-          (r.id = ${runId} OR (${taskKey}::text IS NOT NULL AND COALESCE(r.task_root_id, r.task_spec->>'id') = ${taskKey})))
+        ${referenceScope}
         OR (${run.taskRootId}::text IS NOT NULL AND EXISTS (SELECT 1 FROM agent_operations o
           WHERE o.task_root_id = ${run.taskRootId} AND o.id = l.reference_id))
-        OR EXISTS (SELECT 1 FROM ai_usage_logs u JOIN agent_runs r ON r.id = u.agent_run_id
-          WHERE u.user_id = ${userId} AND r.user_id = ${userId} AND r.session_id = ${run.sessionId}
-          AND r.novel_id = ${run.novelId}
+        OR EXISTS (SELECT 1 FROM ai_usage_logs u WHERE u.user_id = ${userId} AND ${usageScope}
           AND l.idempotency_key IN ('usage:' || u.id, 'refund:usage:' || u.id)
-          AND (r.id = ${runId} OR (${taskKey}::text IS NOT NULL AND COALESCE(r.task_root_id, r.task_spec->>'id') = ${taskKey})))
+        )
       )`
     const after = page ? Prisma.sql`AND (l.created_at < ${page.createdAt}::timestamp OR (l.created_at = ${page.createdAt}::timestamp AND l.id < ${page.id}))` : Prisma.empty
     const rows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT l.id FROM credit_ledger_entries l WHERE ${scope} ${after}
@@ -428,12 +442,11 @@ export async function getTaskCreditUsage(userId: string, runId: string, input: {
       for (const attempt of fixedUnits) if (!await (await import('./agent/runtime-cover-accounting.js')).readCoverUnit(tx, attempt.id)) unresolvedProviderAttempts += 1
     }
     const [unsettled] = await tx.$queryRaw<Array<{ count: bigint }>>(Prisma.sql`
-      SELECT count(*)::bigint AS count FROM ai_usage_logs u JOIN agent_runs r ON r.id = u.agent_run_id
-      WHERE u.user_id = ${userId} AND r.user_id = ${userId} AND r.session_id = ${run.sessionId} AND r.novel_id = ${run.novelId}
+      SELECT count(*)::bigint AS count FROM ai_usage_logs u
+      WHERE u.user_id = ${userId} AND ${usageScope}
         AND u.created_at <= ${cutoff}::timestamp AND u.billing_snapshot IS NOT NULL
         AND u.billing_status IS DISTINCT FROM 'not_dispatched'
         AND u.billing_snapshot->>'version' <> 'byok-exempt'
-        AND (r.id = ${runId} OR (${taskKey}::text IS NOT NULL AND COALESCE(r.task_root_id, r.task_spec->>'id') = ${taskKey}))
         AND NOT EXISTS (SELECT 1 FROM credit_ledger_entries paid WHERE paid.user_id = ${userId}
           AND paid.idempotency_key = 'usage:' || u.id AND paid.created_at <= ${cutoff}::timestamp)`)
     return { runId, asOf: asOf.toISOString(), charged: credits(total.charged), refunded: credits(total.refunded),

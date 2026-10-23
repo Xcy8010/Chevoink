@@ -14,6 +14,9 @@ const requestSchema = z.object({ version: z.literal(1), callId: z.string(), tool
   writingServices: z.object({ version: z.literal(1), chapterId: z.string(), writingHash: z.string().regex(/^[a-f0-9]{64}$/),
     steps: z.array(z.object({ step: z.enum(['body', 'continuity', 'quality', 'commit']), actions: z.array(z.string()).min(1) }).strict()).min(1).max(4) }).strict().optional() }).strict()
 const decisionSchema = z.object({ version: z.literal(1), requestId: z.string(), requestHash: z.string(), approved: z.boolean(), userId: z.string(), timedOut: z.literal(true).optional() }).strict()
+// Historical readers validate already saved facts without invoking the active
+// reader below, whose timeout observation can create a new refusal event.
+export { requestSchema as recordedToolApprovalRequestSchema, decisionSchema as recordedToolApprovalDecisionSchema }
 
 function requestKey(rootId: string, sourceHash: string, callId: string) {
   return `approval:${rootId}:${runtimeJson({ sourceHash, callId }).hash}`

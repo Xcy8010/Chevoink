@@ -23,6 +23,8 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) runtimeError('RUNTIME_INPUT_INVALID', '事件批次大小无效。')
   const contentionScope = await readParentContentionScope(userId, runId)
   return runtimeTransaction(async tx => {
+    const deleted = await (await import('./runtime-novel-delete-events.js')).readDeletedNovelEvents(tx, userId, runId, 0, limit)
+    if (deleted) return deleted
     const { root } = await lockRunRoot(tx, userId, runId)
     const sources = await tx.agentExecutionOutbox.findMany({ where: { taskRootId: root.id,
       OR: [{ type: { in: ['child.admitted', 'approval.requested', 'approval.resolved', 'execution.state.saved', 'writing.delivery.projected', 'question.requested', 'import.requested', 'import.commit_requested', 'goal.activation_registered', 'configuration.changed'] } },
@@ -204,6 +206,8 @@ export async function loadDurableEvents(userId: string, runId: string, sinceSeq:
   if (!Number.isSafeInteger(sinceSeq) || sinceSeq < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) runtimeError('RUNTIME_INPUT_INVALID', '事件游标无效。')
   const contentionScope = await readParentContentionScope(userId, runId)
   return runtimeTransaction(async tx => {
+    const deleted = await (await import('./runtime-novel-delete-events.js')).readDeletedNovelEvents(tx, userId, runId, sinceSeq, limit)
+    if (deleted) return deleted
     const { root } = await lockRunRoot(tx, userId, runId)
     const latest = await tx.agentRunEvent.findFirst({ where: { runId }, orderBy: { seq: 'desc' }, select: { seq: true } })
     if (sinceSeq > (latest?.seq ?? 0)) runtimeError('RUNTIME_EVENT_CURSOR_AHEAD', '事件游标超过已保存位置，请重新同步当前任务。')

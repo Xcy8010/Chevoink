@@ -30,7 +30,11 @@ export async function readAgentCreationState(userId: string, runId: string): Pro
 /** Caller must supply one consistent, read-only snapshot for the whole chain. */
 export async function collectAgentCreationState(tx: Prisma.TransactionClient, userId: string, runId: string): Promise<AgentCreationState> {
   const run = await tx.agentRun.findFirst({ where: { id: runId, userId } })
-  if (!run) throw new DataAccessError(404, 'AGENT_RUN_NOT_FOUND', '未找到当前作者的任务。')
+  if (!run) {
+    const deleted = await (await import('./runtime-novel-delete-state.js')).readDeletedCreationState(tx, userId, runId)
+    if (deleted) return deleted
+    throw new DataAccessError(404, 'AGENT_RUN_NOT_FOUND', '未找到当前作者的任务。')
+  }
   if (![0, 1].includes(run.runtimeProtocolVersion) || run.runtimeProtocolVersion === 1 && !run.taskRootId) {
     throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '执行协议或原任务根无法核实。')
   }

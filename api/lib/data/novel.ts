@@ -542,7 +542,14 @@ export async function adminDeleteNovelData(novelId: string): Promise<boolean> {
 
 /** 删除作品核心事务（普通删除与后台管理删除共用） */
 async function purgeNovelData(novelId: string, authorId: string): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(tx => purgeNovelDataInTransaction(tx, novelId, authorId))
+}
+
+/** DB-only purge for a dedicated deletion terminal transaction. The caller must
+ * first own the manuscript lock, verify its original authority and durably bind
+ * any retained accounting identities. This helper grants no deletion authority.
+ * Existing HTTP/admin wrappers keep their original transaction semantics. */
+export async function purgeNovelDataInTransaction(tx: Prisma.TransactionClient, novelId: string, authorId: string, retainAccounting = false) {
     const chapters = await tx.chapter.findMany({
       where: { novelId },
       select: { id: true },
@@ -578,9 +585,12 @@ async function purgeNovelData(novelId: string, authorId: string): Promise<void> 
       where: { novelId },
     })
 
-    await tx.aiUsageLog.deleteMany({
-      where: chapterIds.length > 0 ? { OR: [{ novelId }, { chapterId: { in: chapterIds } }] } : { novelId },
-    })
+    const usageScope = chapterIds.length > 0 ? { OR: [{ novelId }, { chapterId: { in: chapterIds } }] } : { novelId }
+    if (retainAccounting) {
+      // Only the manuscript FK links are detached. Original ids, agentRunId,
+      // price, tokens, reservations, settlement evidence and wallet rows stay.
+      await tx.aiUsageLog.updateMany({ where: usageScope, data: { novelId: null, chapterId: null } })
+    } else await tx.aiUsageLog.deleteMany({ where: usageScope })
 
     await tx.comment.deleteMany({
       where: chapterIds.length > 0 ? { OR: [{ novelId }, { chapterId: { in: chapterIds } }] } : { novelId },
@@ -612,7 +622,7 @@ async function purgeNovelData(novelId: string, authorId: string): Promise<void> 
         },
       },
     })
-  })
+    return { chapterCount: chapterIds.length, runCount: runIds.length }
 }
 
 
