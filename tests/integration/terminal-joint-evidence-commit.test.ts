@@ -19,7 +19,7 @@ const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: ['The 
 const checks = Object.fromEntries(['action_direction', 'state_progression'].map(kind => [kind, { result: 'clear', reason: 'Independent synthetic full-body review.', findingIndexes: [] }]))
 
 describe.runIf(available)('joint evidence survives actual save, readiness and commit', () => {
-  it('commits a c/p fact, carries it unchanged into a third chapter and rejects an edited historical anchor', () => fixture(async f => {
+  it.each([5, 6] as const)('commits v%i c/p facts, carries them into a third chapter and rejects edited historical anchors', protocol => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
     const second = await prisma.chapter.update({ where: { id: f.chapterId }, data: { orderIndex: 2, orderInVolume: 2, revision: 1, content: 'The reserve now reads one unit.' } })
@@ -31,10 +31,10 @@ describe.runIf(available)('joint evidence survives actual save, readiness and co
       await saveSceneTasks({ ...subject, compilationId: compilation.id, tasks: [{ purpose: 'Record resources', entryState: candidate.exitState, goal: 'Record', obstacle: 'Limited power', choice: 'Inventory', cost: 'Time', turn: 'Recorded', exitState: candidate.exitState, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
       const live = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: true } })
       const source = await readCompilerContinuitySource(prisma, subject, chapter, live.bridge!.fromChapterId, 11)
-      const evidence = terminalEvidenceContext(chapter, source, 2, 1, undefined, 5)
+      const evidence = terminalEvidenceContext(chapter, source, 2, 1, undefined, protocol)
       const fact = terminalCandidateFacts(candidate)[0]
-      const raw = JSON.stringify({ findings: [], semanticChecks: checks, terminalVerdicts: proofHash ? [] : [{ factId: fact.id, path: fact.path, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }, { segmentId: 'p0' }], inheritance: { priorEndState: 'established', currentState: 'unchanged' } }],
-        terminalProofVerdicts: proofHash ? [{ proofHash, currentState: 'unchanged', reason: 'The complete new body does not change these persistent resources.' }] : [] })
+      const raw = JSON.stringify({ findings: [], semanticChecks: checks, terminalVerdicts: proofHash ? [] : [{ ...(protocol === 6 ? { claimIndex: 0 } : { factId: fact.id, path: fact.path }), verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }, { segmentId: 'p0' }], inheritance: { priorEndState: 'established', currentState: 'unchanged' } }],
+        terminalProofVerdicts: proofHash ? [{ ...(protocol === 6 ? { proofIndex: 0 } : { proofHash }), currentState: 'unchanged', reason: 'The complete new body does not change these persistent resources.' }] : [] })
       const inspected = inspectContinuityResponse(raw, { previous: source!.content, current: chapter.content, terminalEvidence: evidence }, true, 8, candidate)
       expect(inspected.complete).toBe(true)
       await validateStoryContinuity({ ...subject, compilationId: compilation.id, expectedChapterRevision: chapter.revision, independentCheck: 'complete', findings: [], terminalCandidate: candidate,

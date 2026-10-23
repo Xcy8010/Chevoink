@@ -28,7 +28,9 @@ describe('old compiler continuity recovery before paid dispatch', () => {
       findUniqueOrThrow: vi.fn().mockResolvedValue({ status: scenario === 'committed-receipt' ? 'succeeded' : 'prepared',
         effectReceipt: scenario === 'committed-receipt' ? savedReceipt : null }) } } as unknown as RuntimeTx
     vi.spyOn(lease, 'withRunLease').mockImplementation(async (_token, callback) => callback(tx))
-    vi.spyOn(cursor, 'prepareToolCursorOperation').mockResolvedValue({ operation: { id: 'parent', inputHash }, pending: { revision: 1, snapshotHash: 'd'.repeat(64) } } as Awaited<ReturnType<typeof cursor.prepareToolCursorOperation>>)
+    const prepare = vi.spyOn(cursor, 'prepareToolCursorOperation').mockResolvedValue({ operation: { id: 'parent', inputHash }, pending: { revision: 1, snapshotHash: 'd'.repeat(64) } } as Awaited<ReturnType<typeof cursor.prepareToolCursorOperation>>)
+    vi.spyOn(cursor, 'readAdmittedToolOperation').mockImplementation(async () => ({ operation: { id: 'parent', inputHash },
+      input: prepare.mock.calls[0][2].operationInput } as Awaited<ReturnType<typeof cursor.readAdmittedToolOperation>>))
     const failure = vi.spyOn(operations, 'recordToolFailure').mockImplementation(async (_token, args) => ({ result: {
       outcome: 'failed', effectApplied: false, code: args.code, toolResult: { output: args.output, summary: args.summary },
     } } as Awaited<ReturnType<typeof operations.recordToolFailure>>))

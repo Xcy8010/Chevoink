@@ -149,13 +149,17 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     const network = vi.fn(async () => {
       calls++
       if (calls > (scenario === 'repeat' ? 2 : 1)) throw Error('No extra critic request is permitted')
-      const parts = scenario === 'repeat' ? { ...rejected, ...(calls === 2 ? { decisions: [] } : {}) }
-        : { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(good).map(fact => ({ factId: fact.id, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })), terminalProofVerdicts: [], terminalDispositions: [],
-          proposalDispositions: badFacts.filter(fact => !goodFacts.some(current => current.id === fact.id)).map(fact => {
+      // Historical rejected reports above retain their original v5 identities.
+      // Only this newly frozen provider request uses local addresses.
+      const parts = scenario === 'repeat' ? { ...rejected,
+        terminalVerdicts: rejected.terminalVerdicts.map(({ factId: _id, ...judgment }, claimIndex) => ({ ...judgment, claimIndex })),
+        ...(calls === 2 ? { decisions: [] } : {}) }
+        : { findings: [], semanticChecks: checks, terminalVerdicts: goodFacts.map((_fact, claimIndex) => ({ claimIndex, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })), terminalProofVerdicts: [], terminalDispositions: [],
+          proposalDispositions: badFacts.filter(fact => !goodFacts.some(current => current.id === fact.id)).map((fact, proposalIndex) => {
             const replacement = goodFacts.find(current => current.field === fact.field)
-            return { id: fact.id, outcome: replacement ? 'replaced' : 'retracted',
+            return { proposalIndex, outcome: replacement ? 'replaced' : 'retracted',
               reason: 'The complete saved body supports the doorway state; the old assertion confused intent or location.',
-              sourceEvidence: [{ segmentId: 'c0', quote: body }], ...(replacement ? { candidateFactId: replacement.id } : {}) }
+              sourceEvidence: [{ segmentId: 'c0', quote: body }], ...(replacement ? { candidateIndex: goodFacts.indexOf(replacement) } : {}) }
           }) }
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(parts) }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     })

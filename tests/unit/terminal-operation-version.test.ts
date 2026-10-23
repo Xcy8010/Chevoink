@@ -15,7 +15,7 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 const spec = { id: 'same-task', scope: { terminalCoverageProtocol: 1 } }
 const chapter = { id: 'chapter', revision: 1, orderIndex: 5, content: 'The pump remains offline.' }
 const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['The pump remains offline.'] } })
-const context = (version: 1 | 2, verdictProtocol?: 2 | 3 | 4 | 5) => terminalEvidenceContext(chapter, null, 2, 1, terminalCoverageInput(spec, {}, chapter, candidate, version), verdictProtocol)
+const context = (version: 1 | 2, verdictProtocol?: 2 | 3 | 4 | 5 | 6) => terminalEvidenceContext(chapter, null, 2, 1, terminalCoverageInput(spec, {}, chapter, candidate, version), verdictProtocol)
 const frozen: LegacyAssessmentInput = { chapterId: chapter.id, revision: 1, bodies: { previous: null, current: chapter.content, terminalEvidence: context(1) },
   system: 'original system', content: 'original full request', parserVersion: 8, sourceScope: { currentOrderIndex: 5, previous: [] }, targetType: 'story_compilation', targetId: 'compilation', terminalCandidate: candidate }
 const ctx = { runId: 'same-run', callId: 'same-call', userId: 'author', novelId: 'novel' } as ToolContext
@@ -36,7 +36,7 @@ describe('request-owned terminal response versions', () => {
     await expect(readFrozenLegacyContinuityInput(tx, ctx, frozen, () => ({ ...frozen.bodies, terminalEvidence: context(2, 5) })))
       .rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
   })
-  it.each([[1, undefined], [2, undefined], [2, 2], [2, 3], [2, 4], [2, 5]] as const)('rebuilds the exact saved coverage %i / verdict %s pair before restoring an owned call', async (coverageVersion, verdictProtocol) => {
+  it.each([[1, undefined], [2, undefined], [2, 2], [2, 3], [2, 4], [2, 5], [2, 6]] as const)('rebuilds the exact saved coverage %i / verdict %s pair before restoring an owned call', async (coverageVersion, verdictProtocol) => {
     const saved = { ...structuredClone(frozen), bodies: { ...frozen.bodies, terminalEvidence: context(coverageVersion, verdictProtocol) } }
     const metadata = { input: saved, continuityAssessmentRequestKey: legacyContinuityAssessmentKey(ctx, saved) }
     const before = JSON.stringify(metadata)
@@ -92,10 +92,10 @@ describe('request-owned terminal response versions', () => {
     expect(currentTerminalReview(validation, chapter.content, context(1))).toBeNull()
   })
 
-  it.each([[1, undefined], [2, undefined], [2, 2], [2, 3], [2, 4], [2, 5]] as const)('restores the producer entire saved coverage %i / verdict %s request before any reserve or provider dispatch', async (version, verdictProtocol) => {
+  it.each([[1, undefined], [2, undefined], [2, 2], [2, 3], [2, 4], [2, 5], [2, 6]] as const)('restores the producer entire saved coverage %i / verdict %s request before any reserve or provider dispatch', async (version, verdictProtocol) => {
     const saved = { ...structuredClone(frozen), bodies: { ...frozen.bodies, terminalEvidence: context(version, verdictProtocol) } }
     const response = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
-      ({ kind, result: 'clear', reason: 'Checked.', findingIndexes: [] })), terminalVerdicts: [{ path: 'exitState.objects.0', verdict: 'supported', basis: 'current', sourceEvidence: [{ segmentId: 'c0', quote: chapter.content }] }] })
+      ({ kind, result: 'clear', reason: 'Checked.', findingIndexes: [] })), terminalVerdicts: [{ ...(verdictProtocol === 6 ? { claimIndex: 0 } : { path: 'exitState.objects.0', basis: 'current' }), verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: chapter.content }] }] })
     const inspected = inspectContinuityResponse(response, saved.bodies, true, 8, candidate)
     const bound = lifecycle.bindLegacyContinuityAssessment(inspected, ctx, saved)
     const tx = {} as Prisma.TransactionClient

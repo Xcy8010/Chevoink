@@ -110,7 +110,7 @@ describe('严谨创作落实连续性警告', () => {
     const canonical = terminalCandidateSchema.parse({ exitState: { openLoops: ['过滤泵检修等零件'] } })
     f.critic.mockResolvedValue(JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({
       kind, result: 'not_applicable', reason: '仅核对持续事实。', findingIndexes: [],
-    })), terminalVerdicts: [], terminalProofVerdicts: [{ proofHash: 'a'.repeat(64), currentState: 'unchanged',
+    })), terminalVerdicts: [], terminalProofVerdicts: [{ proofIndex: 0, currentState: 'unchanged',
       reason: '独立核对本章未解除或改变原持续事实。' }] }))
     vi.mocked(compiler.validateStoryContinuity).mockImplementation(async input => ({ ...f.validation,
       terminalCandidate: input.terminalCandidate, coverage: input.coverage, independentCheck: input.independentCheck,
@@ -128,7 +128,7 @@ describe('严谨创作落实连续性警告', () => {
       expect(f.critic.mock.calls[0][1]).toContain('过滤泵检修等零件')
       expect(compiler.validateStoryContinuity).toHaveBeenCalledWith(expect.objectContaining({ terminalCandidate: canonical,
         coverage: expect.objectContaining({ terminalHash: runtimeJson(canonical).hash }),
-        continuityCriticResponse: expect.objectContaining({ classification: 'complete', terminalEvidence: expect.objectContaining({ verdictProtocol: 5 }) }) }), f.tx)
+        continuityCriticResponse: expect.objectContaining({ classification: 'complete', terminalEvidence: expect.objectContaining({ verdictProtocol: 6 }) }) }), f.tx)
       const commit = vi.spyOn(compiler, 'commitChapterBridge').mockResolvedValue({ compilationId: 'comp', chapterId: 'c', chapterRevision: 1, skippedMemoryCount: 0, retainedIssueCount: 0 })
       await chapterBridgeCommitTool.execute(f.ctx, { compilationId: 'comp' })
       expect(commit).toHaveBeenCalledWith(expect.objectContaining({ exitState: canonical.exitState, lastUnfinishedAction: canonical.lastUnfinishedAction }), undefined)

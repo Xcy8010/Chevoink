@@ -18,6 +18,34 @@ export type ToolExecutionCursor = { expectedRevision: number; expectedHash: stri
 export const argumentNormalizationSchema = z.object({ version: z.literal(1), rawArguments: z.string(), normalizedArgsHash: z.string().regex(/^[a-f0-9]{64}$/),
   sourceRevision: z.number().int().nonnegative(), sourceSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
 
+/** Read saved work after real tool admission. This grants no new effect or
+ * provider authority and never projects a tool message; those boundaries retain
+ * their original policy, lease, approval and receipt checks. */
+export async function readAdmittedToolOperation(token: RunLeaseToken, input: { operationId: string; action: string; novelId: string; callId: string }) {
+  token = { ...token }; input = { ...input }
+  return withRunLease(token, async tx => {
+    const operation = await tx.agentOperation.findFirst({ where: { id: input.operationId, taskRootId: token.taskRootId, kind: 'tool', action: input.action } })
+    if (!operation || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '复核工作缺少原工具操作或冻结输入损坏。')
+    const saved = z.object({ kind: z.literal('tool'), action: z.literal(input.action), input: z.object({ novelId: z.literal(input.novelId),
+      callId: z.literal(input.callId), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema }).passthrough() }).safeParse(operation.inputSnapshot)
+    if (!saved.success || runtimeJson(saved.data.input.args).hash !== saved.data.input.normalization.normalizedArgsHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具工作的作品、调用或参数准入快照不一致。')
+    const normalization = saved.data.input.normalization
+    const source = await readExecutionFrame(tx, token.taskRootId, normalization.sourceRevision)
+    let index = source.state.messages.length - 1
+    while (index >= 0 && source.state.messages[index].role === 'tool') index--
+    const assistant = source.state.messages[index]
+    const call = assistant?.role === 'assistant' ? assistant.toolCalls?.find(item => !source.state.messages.slice(index + 1)
+      .some(message => message.role === 'tool' && message.toolCallId === item.id)) : undefined
+    if (source.state.phase !== 'idle' || source.snapshotHash !== normalization.sourceSnapshotHash || operation.operationKey !== `exec:${source.state.nextOperationSequence}`
+      || !call || call.id !== input.callId || call.name !== input.action || call.incomplete || call.arguments !== normalization.rawArguments) return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具工作缺少真实调用的执行位置，不能合成另一条模型工具调用。')
+    if (operation.status === 'prepared') {
+      const current = await readExecutionStateInTransaction(tx, token.taskRootId)
+      if (current.frame.revision !== source.revision + 1 || current.frame.state.phase !== 'awaiting_operation' || current.frame.state.pendingOperationId !== operation.id) return runtimeError('RUNTIME_STATE_CONFLICT', '原工具工作不是当前待执行操作。')
+    }
+    return { operation, input: saved.data.input }
+  })
+}
+
 export const toolRejectionSchema = z.object({ version: z.literal(1), rawArguments: z.string(), incomplete: z.boolean(),
   code: z.enum(['TOOL_NOT_AUTHORIZED', 'TOOL_ARGUMENTS_INCOMPLETE', 'TOOL_ARGUMENTS_INVALID', 'TOOL_SCHEMA_INVALID', 'TOOL_APPROVAL_DENIED', 'TOOL_APPROVAL_EXPIRED', 'TOOL_BASELINE_REQUIRED', 'TOOL_TARGET_REQUIRED']),
   target: z.object({ kind: z.literal('plan'), id: z.string().min(1), title: z.string() }).strict().optional(),

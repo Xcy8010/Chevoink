@@ -18,7 +18,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 
 describe.runIf(available)('proposal retraction at the real report and commit transaction', () => {
-  it.each([false, true])('freezes before dispatch, retains invalid proposals through reprepare=%s, then commits independent dispositions', reprepare => fixture(async f => {
+  it.each([[5, false], [5, true], [6, false], [6, true]] as const)('freezes v%i before dispatch, retains invalid proposals through reprepare=%s, then commits independent dispositions', (protocol, reprepare) => fixture(async f => {
     const network = vi.fn(() => { throw Error('Unexpected provider request') })
     vi.stubGlobal('fetch', network)
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
@@ -37,16 +37,18 @@ describe.runIf(available)('proposal retraction at the real report and commit tra
     await buildScenes()
     const load = () => prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId }, include: { bridge: true, sceneTasks: true, chapter: true } })
     const evidenceFor = (saved: Awaited<ReturnType<typeof load>>, selected: typeof base) => terminalEvidenceContext(chapter, null, 2, 1,
-      terminalCoverageInput(f.spec, saved.preparedContext, chapter, selected, 2), 5, 2)
+      terminalCoverageInput(f.spec, saved.preparedContext, chapter, selected, 2), protocol, 2)
     const rawFor = (selected: typeof base, proposals?: ReturnType<typeof prepareCompilerTerminalProposals>, includeDispositions = false) => JSON.stringify({
       findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Independent synthetic full-body review.', findingIndexes: [] })),
-      terminalVerdicts: terminalCandidateFacts(selected).map(fact => ({ path: fact.path, verdict: chapter.content.includes(fact.claim) ? 'supported' : 'unknown',
+      terminalVerdicts: terminalCandidateFacts(selected).map((fact, claimIndex) => ({ ...(protocol === 6 ? { claimIndex } : { path: fact.path }), verdict: chapter.content.includes(fact.claim) ? 'supported' : 'unknown',
         sourceEvidence: chapter.content.includes(fact.claim) ? [{ segmentId: 'c0', quote: fact.claim }] : [] })),
       terminalProofVerdicts: [], terminalDispositions: [],
-      ...(includeDispositions ? { proposalDispositions: proposals!.changes!.proposals.map(proposal => ({ id: proposal.id,
+      ...(includeDispositions ? { proposalDispositions: proposals!.changes!.proposals.map((proposal, proposalIndex) => ({ ...(protocol === 6 ? { proposalIndex } : { id: proposal.id }),
         outcome: proposal.field === 'emotion' ? 'retracted' : 'replaced', reason: 'The full saved body supports only the stated current readings.',
         sourceEvidence: [{ segmentId: 'c0', quote: chapter.content }],
-        ...(proposal.field === 'knowledge' ? { candidateFactId: terminalFactId('knowledge', candidate.exitState.knowledge[0]) } : {}) })) } : {}),
+        ...(proposal.field === 'knowledge' ? protocol === 6
+          ? { candidateIndex: terminalCandidateFacts(candidate).findIndex(fact => fact.id === terminalFactId('knowledge', candidate.exitState.knowledge[0])) }
+          : { candidateFactId: terminalFactId('knowledge', candidate.exitState.knowledge[0]) } : {}) })) } : {}),
     })
     const save = async (selected: typeof base, evidence: ReturnType<typeof evidenceFor>, raw: string, expectedTerminalCandidateHash?: string) => {
       const saved = await load(), inspected = inspectContinuityResponse(raw, { previous: null, current: chapter.content, terminalEvidence: evidence }, true, 8, selected)
@@ -103,8 +105,10 @@ describe.runIf(available)('proposal retraction at the real report and commit tra
       mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilationId))).toMatchObject({ ready: true, terminalReview: { state: 'supported' } })
     await commitChapterBridge({ ...f, compilationId, ...candidate, chapterSummary: 'The current readings are recorded.', hookDecision: '', delayedHookReason: '', openingStructure: 'Read', endingStructure: 'Record' })
-    expect((await load()).status).toBe('completed')
-    expect((await readTerminalInheritance(prisma, f, chapter)).map(fact => fact.claim)).toContain(base.exitState.objects[0])
+    expect(await load()).toMatchObject({ status: 'completed', bridge: { knowledgeState: candidate.exitState.knowledge,
+      objectState: candidate.exitState.objects, emotionAftermath: candidate.exitState.emotion } })
+    expect((await readTerminalInheritance(prisma, f, chapter)).map(({ field, claim }) => [field, claim]).sort())
+      .toEqual(terminalCandidateFacts(candidate).map(({ field, claim }) => [field, claim]).sort())
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ revision: 8, content: chapter.content })
     expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
     expect(network).not.toHaveBeenCalled()

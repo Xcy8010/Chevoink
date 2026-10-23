@@ -15,7 +15,7 @@ import { runtimeError, runtimeJson, type RuntimeTx } from '../runtime-common.js'
 import { withRunLease } from '../runtime-lease.js'
 import { compilerStateHash, compilerObservationSchema } from '../runtime-compiler-observation.js'
 import { readObservedBaseline } from '../runtime-observed-baseline.js'
-import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
+import { prepareToolCursorOperation, rejectToolCursorCall, readAdmittedToolOperation } from '../runtime-tool-cursor.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
 import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { callDurableAuxiliary, auxiliaryRouteSchema, auxiliaryRouteForRuntime, resolveDurableAuxiliaryRuntime } from '../runtime-auxiliary-call.js'
@@ -71,108 +71,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
   const lease = { ...capability.lease }, cursor = { ...capability.cursor }, baseline = capability.baseline && { ...capability.baseline }
   const normalize = (value: unknown) => Object.fromEntries(Object.entries(tool.parameters.parse(normalizeToolInput(tool, value)) as Record<string, unknown>).filter(([, item]) => item !== undefined))
   const args = normalize(raw)
-  let recoveredWork = false
-  let work = await withRunLease(lease, async tx => {
-    const existing = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: capability.operationKey } } })
-    if (existing) {
-      recoveredWork = true
-      if (runtimeJson(existing.inputSnapshot).hash !== existing.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性工具原输入损坏。')
-      const saved = z.object({ input: z.object({ work: workSchema }) }).safeParse(existing.inputSnapshot)
-      if (!saved.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性检查缺少原业务快照，不能用当前正文补造。')
-      return saved.data.input.work
-    }
-    const originalRequest = await readOriginalTaskRequest(tx, ctx)
-    const sourceAuthority = hasContinuitySourceAuthority(originalRequest.spec)
-    const terminalProtocol = hasTerminalEvidenceProtocol(originalRequest.spec)
-    const terminalVersion = terminalEvidenceVersion(originalRequest.spec)
-    let criticSystem = sourceAuthority ? `${continuityCriticSystem}\n${continuitySourceAuthorityRule}` : continuityCriticSystem
-    const chapterOnlyPipeline = !args.compilationId && typeof args.chapterId === 'string' && !!baseline
-      && await isWritingTaskContinuityCompiler(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: baseline.id, chapterId: args.chapterId })
-    if (!args.compilationId && (!baseline || args.chapterId && !chapterOnlyPipeline)) {
-      if (args.terminalState || args.terminalPatch || args.inheritedProofs !== undefined) return { kind: 'rejected' as const, code: 'COMPILATION_NOT_FOUND', message: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
-      const context = await buildStandaloneContinuityContext(ctx, typeof args.chapterId === 'string' ? args.chapterId : undefined, tx, sourceAuthority ? 4 : 3)
-      const observed = await readObservedBaseline(tx, lease.taskRootId, cursor.expectedRevision, { kind: 'chapter', id: context.chapter.id })
-      if (observed?.kind !== 'chapter' || observed.revision !== context.chapter.revision) return { kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '请先 chapter_read 读取目标正文；独立审阅无需准备章节写作。' }
-      const cached = await readStandaloneContinuityReport(ctx, context.contextHash, typeof args.focus === 'string' ? args.focus : undefined, tx)
-      return { kind: 'check' as const, version: sourceAuthority ? 12 as const : 9 as const, compiler: null, standaloneContextHash: context.contextHash, chapter: context.chapter, sourceBodies: { previous: context.precedingBodies, current: context.chapter.content }, sourceId: null,
-        ...(sourceAuthority ? { sourceScope: context.sourceScope } : {}),
-        coverage: { version: 1 as const, contentHash: runtimeJson({ content: context.chapter.content }).hash, charCount: context.chapter.content.length, sourceHash: null },
-        criticSystem, criticInput: `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, typeof args.focus === 'string' ? args.focus : undefined)}`,
-        repairSystem: repairPrompt, repair: false, cached: cached?.findings ?? null, route: null, price: null }
-    }
-    if (!baseline) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_REQUIRED', message: '指定编译缺少本任务观察。独立审阅请省略 compilationId、传 chapter_read 返回的 chapterId，无需重建编译。' }
-    if (args.compilationId && args.compilationId !== baseline.id) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_REQUIRED', message: 'compilationId 不属于本任务已观察的编译；独立检查仅传真实 chapterId。' }
-    const compilation = await tx.storyCompilation.findFirst({ where: { id: baseline.id, userId: ctx.userId, novelId: ctx.novelId, run: { taskRootId: lease.taskRootId }, status: { in: ['active', 'completed'] },
-      chapter: { authorId: ctx.userId, ...activeChapterScope(ctx.novelId) } },
-      include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } } })
-    if (!compilation?.chapter || !compilation.bridge) return { kind: 'rejected' as const, code: 'COMPILATION_NOT_WRITTEN', message: '本任务的编译尚无目标正文和章节桥，不能检查。' }
-    if (await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, baseline.id) !== baseline.hash) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_STALE', message: '编译状态已变化，请先 chapter_bridge_get 读取当前章节桥，未执行检查。' }
-    if (args.chapterId && args.chapterId !== compilation.chapter.id) return { kind: 'rejected' as const, code: 'QUALITY_TARGET_AMBIGUOUS', message: 'chapterId 与 compilationId 不对应；未检查其他章节。' }
-    const sourceId = compilation.bridge.fromChapterId
-    const source = await readCompilerContinuitySource(tx, ctx, compilation.chapter, sourceId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
-    if (!compilation.chapter.content.trim() || compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4
-      || sourceId && source?.revision !== compilation.bridge.sourceRevision) return {
-      kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '正文为空、场景数量不合法或前章版本变化；先修复章节桥前置状态，不启动正文修订。',
-    }
-    if (args.terminalPatch && args.terminalState) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: 'terminalPatch 与 terminalState 只能选择一种；未应用或派发。' }
-    const savedCandidate = readTerminalCandidate(compilation.validation)
-    if (args.terminalPatch && !savedCandidate) return { kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '尚无已保存候选可增量更新；请读取章节桥后提供首份 terminalState。' }
-    const explicit = args.terminalPatch && savedCandidate ? applyTerminalCandidatePatch(savedCandidate, terminalCandidatePatchSchema.parse(args.terminalPatch))
-      : args.terminalState ? terminalCandidateInputSchema.parse(args.terminalState) : undefined
-    const selectionInput = reviewTerminalSelection(explicit,
-      readTerminalCandidate(compilation.validation), args.inheritedProofs as string[] | undefined)
-    const selectedTerminal = selectionInput ? resolveTerminalCandidate(selectionInput,
-      source && 'preceding' in source && 'terminalInheritance' in source ? source.terminalInheritance : [], terminalVersion) : undefined
-    if (selectedTerminal && !selectedTerminal.ok) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: selectedTerminal.reason }
-    const terminalCandidate = (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
-      ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
-    let terminalEvidence = terminalProtocol ? terminalEvidenceContext(compilation.chapter, source, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
-      terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(source, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
-    if (terminalEvidence && terminalCandidate && savedCandidate && runtimeJson(terminalCandidate).hash === runtimeJson(savedCandidate).hash
-      && (compilation.validation as { continuityCriticResponse?: { terminalContentHash?: string } } | null)?.continuityCriticResponse?.terminalContentHash === terminalEvidence.current.contentHash) {
-      terminalEvidence = attachTerminalProposalInput(terminalEvidence, { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext,
-        validation: compilation.validation, candidate: terminalCandidate })
-    }
-    if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
-    const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
-      source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
-    const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
-    const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
-      preparedContext: compilation.preparedContext, validation: compilation.validation, chapter: compilation.chapter, source, candidate: terminalCandidate, nextContext: terminalEvidence })
-    const reusable = proposalCacheCurrent && cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
-    if (!reusable && terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) terminalEvidence = { ...terminalEvidence,
-      factCoverage: terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, 2, terminalCoverageProofs(source, 2))! }
-    const repair = false
-    if (!reusable && terminalVersion === 2 && terminalEvidence) terminalEvidence = terminalEvidenceContext(compilation.chapter, source, terminalVersion,
-      terminalQuoteAddressVersion(originalRequest.spec), terminalEvidence.factCoverage, 5, 2)
-    if (!reusable && terminalCandidate && terminalEvidence) {
-      const proposals = prepareCompilerTerminalProposals({ spec: originalRequest.spec, preparedContext: compilation.preparedContext,
-        validation: compilation.validation, chapter: compilation.chapter, source, candidate: terminalCandidate, nextContext: terminalEvidence })
-      if (proposals?.changes) terminalEvidence = { ...terminalEvidence, proposalChanges: proposals.changes }
-      else delete terminalEvidence.proposalChanges
-    }
-    validatedContinuityCheckRounds(compilation.validation, !reusable)
-    return { kind: 'check' as const, version: terminalVersion === 2 ? 18 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), ...(terminalVersion === 2 ? { reassessmentProtocol: 2 as const } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
-      ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),
-      criticSystem, repairSystem: repairPrompt,
-      criticInput: [...((terminalEvidence?.verdictProtocol === 4 || terminalEvidence?.verdictProtocol === 5) ? [freshContinuityResponseContract(false, !!terminalCandidate, terminalEvidence.verdictProtocol, { previous: source?.content ?? null, current: compilation.chapter.content, terminalEvidence })] : []), `章节：《${compilation.chapter.title}》`,
-        sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
-        ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: compilation.chapter.id, revision: compilation.chapter.revision, orderIndex: compilation.chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
-        `章节桥（待核对摘要，不能代替前章原文）：${JSON.stringify(continuityStoryInput(compilation.bridge))}`, `生成场景任务草案（目标/代价/转折不是历史事实）：${JSON.stringify(continuityStoryInput(compilation.sceneTasks))}`,
-        continuityReviewTail(compilation.validation, compilation.chapter.revision, repair, typeof args.focus === 'string' ? args.focus : undefined, compilation.chapter.content),
-        compilerContinuitySourceScope(source), continuitySourceInput({ previous: source?.content ?? null, current: compilation.chapter.content, terminalEvidence }), terminalReviewInput(terminalCandidate, terminalEvidence)].join('\n'),
-      repair,
-      cached: reusable ? cached.data.findings : null, route: null, price: null }
-  }).catch(error => {
-    if (!(error instanceof DataAccessError) || !knownFailures.has(error.code)) throw error
-    return { kind: 'rejected' as const, code: error.code, message: error.message }
-  })
-  if (!recoveredWork && work.kind === 'check' && !work.cached && !work.route) {
-    const resolved = await resolveDurableAuxiliaryRuntime({ userId: ctx.userId, modelRuntime: ctx.modelRuntime, modelSelection: ctx.modelSelection, modelAssignments: ctx.modelAssignments, task: 'continuity' })
-    const price = await resolveDurableTokenPrice(lease, `${capability.operationKey}:critic-price`, resolved.selection.tier, resolved.runtime.multiplierBps)
-    work = { ...work, route: auxiliaryRouteForRuntime(resolved.runtime, resolved.selection, CONTINUITY_MAX_OUTPUT_TOKENS), price }
-  }
-  work = workSchema.parse(work)
+  const work = await prepareContinuityWork(ctx, lease, { operationKey: capability.operationKey, observedRevision: cursor.expectedRevision, baseline, args })
   const prepared = await prepareToolCursorOperation(lease, cursor, { key: capability.operationKey, action: tool.name, callId: ctx.callId,
     effectDomain: 'compiler', targetId: lease.taskRootId, effectiveArgs: args, normalize,
     operationInput: runtimeJson({ callId: ctx.callId, novelId: ctx.novelId, args, baseline, work }).value }).catch(async error => {
@@ -183,6 +82,24 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
   })
   if ('rejected' in prepared) return prepared.rejected
   const { operation, pending } = prepared
+  const receipt = await executePreparedContinuityWork(ctx, lease, operation.id)
+  const failed = failedToolResultSchema.safeParse(receipt.result)
+  const result = failed.success ? { ...failed.data.toolResult, failureCode: failed.data.code, outcome: 'failed' as const } : z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough(), memoryJobId: z.string().nullable() }).parse(receipt.result)
+  // Only the real tool shell advances its model cursor. Frozen business work
+  // never synthesizes a tool response or a new call identity.
+  await reduceExecutionReceipt(lease, { expectedRevision: pending.revision, expectedHash: pending.snapshotHash, operationId: operation.id })
+  return ('toolResult' in result ? result.toolResult : result) as ToolResult
+}
+
+/** Execute only the saved work of an admitted operation. Keeping preparation,
+ * dispatch/apply and cursor projection separate lets service coordination reuse
+ * the review core without copying the critic or inventing a model tool call.
+ * Service admission is not enabled here; existing tool provenance stays strict. */
+export async function executePreparedContinuityWork(ctx: ToolContext, lease: import('../runtime-lease.js').RunLeaseToken, operationId: string) {
+  ctx = { ...ctx }; lease = { ...lease }
+  if (lease.userId !== ctx.userId || lease.runId !== ctx.runId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '连续性工作不属于当前执行身份。')
+  const { operation, input } = await readAdmittedToolOperation(lease, { operationId, action: 'continuity_validate', novelId: ctx.novelId, callId: ctx.callId })
+  const { args, work } = z.object({ args: z.record(z.string(), z.unknown()), work: workSchema }).parse(input)
   const failure = (code: string, output: string) => recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code, output, summary: '连续性检查未执行' })
   const assertCurrent = async (tx: RuntimeTx, frozen: Work) => {
     const compiler = frozen.compiler
@@ -330,9 +247,118 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: AgentTool
     if (!(error instanceof DataAccessError) || !knownFailures.has(error.code)) throw error
     return failure(error.code, error.code.startsWith('CREDITS_') ? `${error.message} 本工具未完成，不要重复调用。` : error.message)
   })
-  const failed = failedToolResultSchema.safeParse(receipt.result)
-  const result = failed.success ? { ...failed.data.toolResult, failureCode: failed.data.code, outcome: 'failed' as const } : z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough(), memoryJobId: z.string().nullable() }).parse(receipt.result)
-  // Leave derivative work durably queued until its fenced executor handles it.
-  await reduceExecutionReceipt(lease, { expectedRevision: pending.revision, expectedHash: pending.snapshotHash, operationId: operation.id })
-  return ('toolResult' in result ? result.toolResult : result) as ToolResult
+  return receipt
+}
+
+/** Freeze the original business input independently of model cursor admission.
+ * The caller still admits that exact work before dispatch or any effect. */
+export async function prepareContinuityWork(ctx: ToolContext, lease: import('../runtime-lease.js').RunLeaseToken, input: {
+  operationKey: string; observedRevision: number; baseline: z.infer<typeof compilerObservationSchema> | null; args: Record<string, unknown>
+}) {
+  ctx = { ...ctx }; lease = { ...lease }; input = { ...input }
+  const baseline = input.baseline && { ...input.baseline }, args = structuredClone(input.args)
+  if (lease.userId !== ctx.userId || lease.runId !== ctx.runId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '复核准备不属于当前执行身份。')
+  let recoveredWork = false
+  let work = await withRunLease(lease, async tx => {
+    const existing = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: input.operationKey } } })
+    if (existing) {
+      recoveredWork = true
+      if (runtimeJson(existing.inputSnapshot).hash !== existing.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性工具原输入损坏。')
+      const saved = z.object({ input: z.object({ work: workSchema }) }).safeParse(existing.inputSnapshot)
+      if (!saved.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性检查缺少原业务快照，不能用当前正文补造。')
+      return saved.data.input.work
+    }
+    const originalRequest = await readOriginalTaskRequest(tx, ctx)
+    const sourceAuthority = hasContinuitySourceAuthority(originalRequest.spec)
+    const terminalProtocol = hasTerminalEvidenceProtocol(originalRequest.spec)
+    const terminalVersion = terminalEvidenceVersion(originalRequest.spec)
+    let criticSystem = sourceAuthority ? `${continuityCriticSystem}\n${continuitySourceAuthorityRule}` : continuityCriticSystem
+    const chapterOnlyPipeline = !args.compilationId && typeof args.chapterId === 'string' && !!baseline
+      && await isWritingTaskContinuityCompiler(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: baseline.id, chapterId: args.chapterId })
+    if (!args.compilationId && (!baseline || args.chapterId && !chapterOnlyPipeline)) {
+      if (args.terminalState || args.terminalPatch || args.inheritedProofs !== undefined) return { kind: 'rejected' as const, code: 'COMPILATION_NOT_FOUND', message: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
+      const context = await buildStandaloneContinuityContext(ctx, typeof args.chapterId === 'string' ? args.chapterId : undefined, tx, sourceAuthority ? 4 : 3)
+      const observed = await readObservedBaseline(tx, lease.taskRootId, input.observedRevision, { kind: 'chapter', id: context.chapter.id })
+      if (observed?.kind !== 'chapter' || observed.revision !== context.chapter.revision) return { kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '请先 chapter_read 读取目标正文；独立审阅无需准备章节写作。' }
+      const cached = await readStandaloneContinuityReport(ctx, context.contextHash, typeof args.focus === 'string' ? args.focus : undefined, tx)
+      return { kind: 'check' as const, version: sourceAuthority ? 12 as const : 9 as const, compiler: null, standaloneContextHash: context.contextHash, chapter: context.chapter, sourceBodies: { previous: context.precedingBodies, current: context.chapter.content }, sourceId: null,
+        ...(sourceAuthority ? { sourceScope: context.sourceScope } : {}),
+        coverage: { version: 1 as const, contentHash: runtimeJson({ content: context.chapter.content }).hash, charCount: context.chapter.content.length, sourceHash: null },
+        criticSystem, criticInput: `${context.criticInput}\n${continuityReviewTail(null, context.chapter.revision, false, typeof args.focus === 'string' ? args.focus : undefined)}`,
+        repairSystem: repairPrompt, repair: false, cached: cached?.findings ?? null, route: null, price: null }
+    }
+    if (!baseline) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_REQUIRED', message: '指定编译缺少本任务观察。独立审阅请省略 compilationId、传 chapter_read 返回的 chapterId，无需重建编译。' }
+    if (args.compilationId && args.compilationId !== baseline.id) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_REQUIRED', message: 'compilationId 不属于本任务已观察的编译；独立检查仅传真实 chapterId。' }
+    const compilation = await tx.storyCompilation.findFirst({ where: { id: baseline.id, userId: ctx.userId, novelId: ctx.novelId, run: { taskRootId: lease.taskRootId }, status: { in: ['active', 'completed'] },
+      chapter: { authorId: ctx.userId, ...activeChapterScope(ctx.novelId) } },
+      include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } } })
+    if (!compilation?.chapter || !compilation.bridge) return { kind: 'rejected' as const, code: 'COMPILATION_NOT_WRITTEN', message: '本任务的编译尚无目标正文和章节桥，不能检查。' }
+    if (await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, baseline.id) !== baseline.hash) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_STALE', message: '编译状态已变化，请先 chapter_bridge_get 读取当前章节桥，未执行检查。' }
+    if (args.chapterId && args.chapterId !== compilation.chapter.id) return { kind: 'rejected' as const, code: 'QUALITY_TARGET_AMBIGUOUS', message: 'chapterId 与 compilationId 不对应；未检查其他章节。' }
+    const sourceId = compilation.bridge.fromChapterId
+    const source = await readCompilerContinuitySource(tx, ctx, compilation.chapter, sourceId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
+    if (!compilation.chapter.content.trim() || compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4
+      || sourceId && source?.revision !== compilation.bridge.sourceRevision) return {
+      kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '正文为空、场景数量不合法或前章版本变化；先修复章节桥前置状态，不启动正文修订。',
+    }
+    if (args.terminalPatch && args.terminalState) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: 'terminalPatch 与 terminalState 只能选择一种；未应用或派发。' }
+    const savedCandidate = readTerminalCandidate(compilation.validation)
+    if (args.terminalPatch && !savedCandidate) return { kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '尚无已保存候选可增量更新；请读取章节桥后提供首份 terminalState。' }
+    const explicit = args.terminalPatch && savedCandidate ? applyTerminalCandidatePatch(savedCandidate, terminalCandidatePatchSchema.parse(args.terminalPatch))
+      : args.terminalState ? terminalCandidateInputSchema.parse(args.terminalState) : undefined
+    const selectionInput = reviewTerminalSelection(explicit,
+      readTerminalCandidate(compilation.validation), args.inheritedProofs as string[] | undefined)
+    const selectedTerminal = selectionInput ? resolveTerminalCandidate(selectionInput,
+      source && 'preceding' in source && 'terminalInheritance' in source ? source.terminalInheritance : [], terminalVersion) : undefined
+    if (selectedTerminal && !selectedTerminal.ok) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: selectedTerminal.reason }
+    const terminalCandidate = (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
+      ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
+    let terminalEvidence = terminalProtocol ? terminalEvidenceContext(compilation.chapter, source, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
+      terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(source, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
+    if (terminalEvidence && terminalCandidate && savedCandidate && runtimeJson(terminalCandidate).hash === runtimeJson(savedCandidate).hash
+      && (compilation.validation as { continuityCriticResponse?: { terminalContentHash?: string } } | null)?.continuityCriticResponse?.terminalContentHash === terminalEvidence.current.contentHash) {
+      terminalEvidence = attachTerminalProposalInput(terminalEvidence, { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext,
+        validation: compilation.validation, candidate: terminalCandidate })
+    }
+    if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
+    const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
+      source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
+    const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
+    const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
+      preparedContext: compilation.preparedContext, validation: compilation.validation, chapter: compilation.chapter, source, candidate: terminalCandidate, nextContext: terminalEvidence })
+    const reusable = proposalCacheCurrent && cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
+    if (!reusable && terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) terminalEvidence = { ...terminalEvidence,
+      factCoverage: terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, 2, terminalCoverageProofs(source, 2))! }
+    const repair = false
+    if (!reusable && terminalVersion === 2 && terminalEvidence) terminalEvidence = terminalEvidenceContext(compilation.chapter, source, terminalVersion,
+      terminalQuoteAddressVersion(originalRequest.spec), terminalEvidence.factCoverage, terminalCandidate ? 6 : 5, 2)
+    if (!reusable && terminalCandidate && terminalEvidence) {
+      const proposals = prepareCompilerTerminalProposals({ spec: originalRequest.spec, preparedContext: compilation.preparedContext,
+        validation: compilation.validation, chapter: compilation.chapter, source, candidate: terminalCandidate, nextContext: terminalEvidence })
+      if (proposals?.changes) terminalEvidence = { ...terminalEvidence, proposalChanges: proposals.changes }
+      else delete terminalEvidence.proposalChanges
+    }
+    validatedContinuityCheckRounds(compilation.validation, !reusable)
+    return { kind: 'check' as const, version: terminalVersion === 2 ? 18 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), ...(terminalVersion === 2 ? { reassessmentProtocol: 2 as const } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
+      ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),
+      criticSystem, repairSystem: repairPrompt,
+      criticInput: [...((terminalEvidence?.verdictProtocol === 4 || terminalEvidence?.verdictProtocol === 5 || terminalEvidence?.verdictProtocol === 6) ? [freshContinuityResponseContract(false, !!terminalCandidate, terminalEvidence.verdictProtocol, { previous: source?.content ?? null, current: compilation.chapter.content, terminalEvidence }, terminalCandidate)] : []), `章节：《${compilation.chapter.title}》`,
+        sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
+        ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: compilation.chapter.id, revision: compilation.chapter.revision, orderIndex: compilation.chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
+        `章节桥（待核对摘要，不能代替前章原文）：${JSON.stringify(continuityStoryInput(compilation.bridge))}`, `生成场景任务草案（目标/代价/转折不是历史事实）：${JSON.stringify(continuityStoryInput(compilation.sceneTasks))}`,
+        continuityReviewTail(compilation.validation, compilation.chapter.revision, repair, typeof args.focus === 'string' ? args.focus : undefined, compilation.chapter.content),
+        compilerContinuitySourceScope(source), continuitySourceInput({ previous: source?.content ?? null, current: compilation.chapter.content, terminalEvidence }), terminalReviewInput(terminalCandidate, terminalEvidence)].join('\n'),
+      repair,
+      cached: reusable ? cached.data.findings : null, route: null, price: null }
+  }).catch(error => {
+    if (!(error instanceof DataAccessError) || !knownFailures.has(error.code)) throw error
+    return { kind: 'rejected' as const, code: error.code, message: error.message }
+  })
+  if (!recoveredWork && work.kind === 'check' && !work.cached && !work.route) {
+    const resolved = await resolveDurableAuxiliaryRuntime({ userId: ctx.userId, modelRuntime: ctx.modelRuntime, modelSelection: ctx.modelSelection, modelAssignments: ctx.modelAssignments, task: 'continuity' })
+    const price = await resolveDurableTokenPrice(lease, `${input.operationKey}:critic-price`, resolved.selection.tier, resolved.runtime.multiplierBps)
+    work = { ...work, route: auxiliaryRouteForRuntime(resolved.runtime, resolved.selection, CONTINUITY_MAX_OUTPUT_TOKENS), price }
+  }
+  work = workSchema.parse(work)
+  return work
 }

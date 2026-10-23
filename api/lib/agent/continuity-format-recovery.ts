@@ -8,6 +8,7 @@ import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './cont
 import { inspectTerminalReview, terminalQuoteAddressDiagnostics, terminalResponseFields, type TerminalCandidate, type TerminalReviewDiagnostic } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
 import { validContinuitySemanticChecks } from './terminal-evidence-context.js'
+import { terminalAddressResponseFields } from './terminal-review-addresses.js'
 
 const sourceReferenceSchema = z.object({ source: z.enum(['previous', 'current']), segmentId: z.string().min(1).optional(), quote: z.string().min(2).max(360).optional() })
   .refine(value => value.segmentId !== undefined || value.quote !== undefined)
@@ -100,10 +101,13 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
     }
   }
   if (raw.length > MAX_AUDIT_CHARS) classification = 'response_too_large'
-  const freshFields = bodies?.terminalEvidence?.verdictProtocol === 4 || bodies?.terminalEvidence?.verdictProtocol === 5 ? terminalResponseFields(!!terminalCandidate, bodies.terminalEvidence.verdictProtocol, undefined, bodies.terminalEvidence.proposalChanges) : null
+  const indexed = bodies?.terminalEvidence?.verdictProtocol === 6
+  const freshFields = indexed && terminalCandidate ? { ...terminalResponseFields(true, 5), ...terminalAddressResponseFields(terminalCandidate, bodies!.terminalEvidence!) }
+    : bodies?.terminalEvidence?.verdictProtocol === 4 || bodies?.terminalEvidence?.verdictProtocol === 5 ? terminalResponseFields(!!terminalCandidate, bodies.terminalEvidence.verdictProtocol, undefined, bodies.terminalEvidence.proposalChanges) : null
+  if (classification === 'complete' && indexed && !terminalCandidate) classification = 'terminal_invalid'
   if (classification === 'complete' && parserVersion === 8 && (!bodies?.terminalEvidence
     || freshFields && !freshFields.semanticChecks.safeParse(record?.semanticChecks).success
-    || !validContinuitySemanticChecks(record?.semanticChecks, findings, bodies.terminalEvidence.factCoverage?.version, (bodies.terminalEvidence.verdictProtocol === 4 || bodies.terminalEvidence.verdictProtocol === 5)))) classification = 'semantic_invalid'
+    || !validContinuitySemanticChecks(record?.semanticChecks, findings, bodies.terminalEvidence.factCoverage?.version, (bodies.terminalEvidence.verdictProtocol === 4 || bodies.terminalEvidence.verdictProtocol === 5 || indexed)))) classification = 'semantic_invalid'
   const terminalReviewDiagnostics: TerminalReviewDiagnostic[] = []
   if (classification === 'complete' && freshFields) {
     const parsed = z.object(freshFields).passthrough().safeParse(record)
@@ -111,7 +115,7 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
       classification = 'terminal_invalid'
       // New requests receive bounded field diagnostics through the existing
       // full-reassessment channel; old frozen request renderings stay identical.
-      if (bodies?.terminalEvidence?.verdictProtocol === 5) terminalReviewDiagnostics.push(...parsed.error.issues.slice(0, 8).map(issue => ({
+      if (bodies?.terminalEvidence?.verdictProtocol === 5 || indexed) terminalReviewDiagnostics.push(...parsed.error.issues.slice(0, 8).map(issue => ({
         code: issue.code, path: issue.path.join('.'),
       })))
     }

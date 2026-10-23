@@ -20,6 +20,7 @@ import { terminalProofVerdictSchema } from './terminal-proof-verdict.js'
 import { terminalEvidenceContextSchema, type TerminalEvidenceContext } from './terminal-evidence-context.js'
 import { invalidContinuitySourceClaim, continuitySourceScopeSchema, type ContinuitySourceScope } from './continuity-source-authority.js'
 import { terminalDispositionSchema } from './terminal-fact-coverage.js'
+import { terminalAddressResponseFields } from './terminal-review-addresses.js'
 
 type Inspection = ReturnType<typeof inspectContinuityResponse>
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -57,7 +58,7 @@ export const continuityReassessmentRule = `本次是同一完整输入的一次�
 export function continuityReassessmentRequest(system: string, input: string, original: Inspection, bodies: ContinuityBodies, legacyDiagnostics = false, reassessmentProtocol?: 2) {
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
   if (reassessmentProtocol === 2) return {
-    system: `${system}\n${continuityReassessmentRule.slice(0, continuityReassessmentRule.indexOf('严格输出 '))}\n本次独立重审真实全文与完整候选，不沿用失败检查的逐项结论。逐主张先核主体、对象、时间、方位、数量和陈述模态，再选择证据；引文存在不等于完整主张成立。指令、分工、打算和引述不能证明事件已发生；位置关系不能凭目的地或相邻对象推定。没有完整依据时按原合同返回 planned、attributed、negated 或 unknown，不能为了修好格式改成 supported。原 findings 仍须逐项处置；原 findings 明确为空时 decisions=[]，不编造处置对象。完整候选、历史义务与 semanticChecks 仍全部核验。\n${freshContinuityResponseContract(true, !!original.audit.terminalCandidate, original.audit.terminalEvidence?.verdictProtocol === 5 ? 5 : 4, bodies)}`,
+    system: `${system}\n${continuityReassessmentRule.slice(0, continuityReassessmentRule.indexOf('严格输出 '))}\n本次独立重审真实全文与完整候选，不沿用失败检查的逐项结论。逐主张先核主体、对象、时间、方位、数量和陈述模态，再选择证据；引文存在不等于完整主张成立。指令、分工、打算和引述不能证明事件已发生；位置关系不能凭目的地或相邻对象推定。没有完整依据时按原合同返回 planned、attributed、negated 或 unknown，不能为了修好格式改成 supported。原 findings 仍须逐项处置；原 findings 明确为空时 decisions=[]，不编造处置对象。完整候选、历史义务与 semanticChecks 仍全部核验。\n${freshContinuityResponseContract(true, !!original.audit.terminalCandidate, original.audit.terminalEvidence?.verdictProtocol === 6 ? 6 : original.audit.terminalEvidence?.verdictProtocol === 5 ? 5 : 4, bodies, original.audit.terminalCandidate)}`,
     content: `${input}\n原解析诊断（仅定位失效合同，不代表正确判定）：${JSON.stringify({ classification: original.audit.classification, terminalReviewDiagnostics: original.audit.terminalReviewDiagnostics })}\n本次原文定位表：\n${continuitySourceInput(bodies)}\n需要逐项处置的原 findings（null表示不可解析）：${JSON.stringify(candidates?.map((finding,index)=>({index,finding}))??null)}\n失败检查的终态判定与总结不作为本轮答案输入；原始完整响应保留在服务端审计。`,
   }
   if ((original.audit.terminalEvidence?.verdictProtocol === 4 || original.audit.terminalEvidence?.verdictProtocol === 5)) return {
@@ -80,11 +81,14 @@ const decisionSchema = z.object({ index: z.number().int().nonnegative(), action:
 
 /** A complete final report and an explicit disposition for every original
  * index are both necessary. Source IDs cannot prove an opinion by themselves. */
-export function freshContinuityResponseContract(reassessment = false, hasCandidate = true, version: 4 | 5 = 4, bodies?: ContinuityBodies) {
+export function freshContinuityResponseContract(reassessment = false, hasCandidate = true, version: 4 | 5 | 6 = 4, bodies?: ContinuityBodies, candidate?: TerminalCandidate) {
   const scope = bodies?.terminalEvidence?.spanAddressProtocol === 2
     ? continuitySourceCatalog(bodies).terminalSources.map(part => part.segmentId) : undefined
+  if (version === 6 && (!hasCandidate || !candidate || bodies?.terminalEvidence?.verdictProtocol !== 6)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '复核短地址缺少本次冻结候选或目录。')
+  const fields = version === 6 ? { ...terminalResponseFields(hasCandidate, 5, scope), ...terminalAddressResponseFields(candidate!, bodies!.terminalEvidence!, scope) }
+    : terminalResponseFields(hasCandidate, version, scope, bodies?.terminalEvidence?.proposalChanges)
   return `完整响应 JSON Schema（普通事实地址与语义 map 由服务端绑定，不补造任何独立判断）：${JSON.stringify(z.toJSONSchema(z.object({
-    ...(reassessment ? { decisions: z.array(decisionSchema) } : {}), findings: z.array(continuityCandidateSchema), ...terminalResponseFields(hasCandidate, version, scope, bodies?.terminalEvidence?.proposalChanges),
+    ...(reassessment ? { decisions: z.array(decisionSchema) } : {}), findings: z.array(continuityCandidateSchema), ...fields,
   }).strict(), {io:'input'}))}`
 }
 
@@ -97,14 +101,17 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
   const value = object(parsed)
   const response = reassessmentProtocol === 2 && candidates?.length === 0 && value && !Object.prototype.hasOwnProperty.call(value, 'decisions')
     ? { ...value, decisions: [] } : parsed
+  const terminalFields = original.audit.terminalEvidence?.verdictProtocol === 6 && original.audit.terminalCandidate
+    ? { ...terminalResponseFields(true, 5), ...terminalAddressResponseFields(original.audit.terminalCandidate, original.audit.terminalEvidence) }
+    : (original.audit.terminalEvidence?.verdictProtocol === 4 || original.audit.terminalEvidence?.verdictProtocol === 5)
+      ? terminalResponseFields(!!original.audit.terminalCandidate, original.audit.terminalEvidence.verdictProtocol, undefined, original.audit.terminalEvidence.proposalChanges) : {}
   const envelope = z.object({ decisions: z.array(decisionSchema), findings: z.array(z.unknown()),
     terminalVerdicts: z.array(original.audit.parserVersion === 8 ? original.audit.terminalEvidence?.verdictProtocol === 3 ? terminalSpanVerdictSchema
       : original.audit.terminalEvidence?.verdictProtocol === 2 ? sourcedTerminalVerdictSchema : inheritedTerminalVerdictSchema : terminalVerdictSchema).max(200).optional(),
     ...(original.audit.parserVersion === 8 && original.audit.terminalEvidence?.verdictProtocol === 3 ? { terminalProofVerdicts: z.array(terminalProofVerdictSchema).max(200).optional() } : {}),
     ...(original.audit.parserVersion === 8 ? { semanticChecks: z.unknown() } : {}),
     ...(original.audit.parserVersion === 8 && original.audit.terminalEvidence?.factCoverage ? { terminalDispositions: z.array(terminalDispositionSchema).max(200).optional() } : {}),
-    ...((original.audit.terminalEvidence?.verdictProtocol === 4 || original.audit.terminalEvidence?.verdictProtocol === 5) ? terminalResponseFields(!!original.audit.terminalCandidate, original.audit.terminalEvidence.verdictProtocol, undefined, original.audit.terminalEvidence.proposalChanges) : {}),
-  }).strict().parse(response)
+  }).extend(terminalFields).strict().parse(response)
   if (envelope.decisions.length !== (candidates?.length ?? 0) || new Set(envelope.decisions.map(item => item.index)).size !== envelope.decisions.length
     || envelope.decisions.some(item => item.index >= (candidates?.length ?? 0))) throw new Error('Reassessment omitted or invented an original candidate')
   const semantic = (value: unknown) => {

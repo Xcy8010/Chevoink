@@ -45,6 +45,8 @@ describe('durable explicit terminal proof selection', () => {
     const readSource = vi.spyOn(continuitySource, 'readCompilerContinuitySource').mockResolvedValue(source as never)
     const prepare = vi.spyOn(cursor, 'prepareToolCursorOperation').mockResolvedValue({ operation: { id: 'operation', inputHash: 'd'.repeat(64) },
       pending: { revision: 1, snapshotHash: 'e'.repeat(64) } } as Awaited<ReturnType<typeof cursor.prepareToolCursorOperation>>)
+    vi.spyOn(cursor, 'readAdmittedToolOperation').mockImplementation(async () => ({ operation: { id: 'operation', inputHash: 'd'.repeat(64) },
+      input: prepare.mock.calls[0][2].operationInput } as Awaited<ReturnType<typeof cursor.readAdmittedToolOperation>>))
     const failure = vi.spyOn(operations, 'recordToolFailure').mockImplementation(async (_token, args) => ({ result: {
       outcome: 'failed', effectApplied: false, code: args.code, toolResult: { output: args.output, summary: args.summary },
     } } as Awaited<ReturnType<typeof operations.recordToolFailure>>))

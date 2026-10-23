@@ -121,12 +121,12 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     vi.spyOn(flags,'isAgent2FeatureEnabled').mockImplementation((key,owner)=>key==='storyCompiler'||key!=='memory2'&&feature(key,owner))
     const requests:unknown[]=[],network=vi.fn(async (_url:unknown,init:RequestInit)=>{
       requests.push(JSON.parse(String(init.body)))
-      const response={findings:[],semanticChecks:scenario==='patch'?Object.fromEntries(checks.map(({kind,...check})=>[kind,check])):checks,terminalVerdicts:[{...(scenario==='patch'?{factId:terminalFactId('objects',base.exitState.objects[0])}:{path:'exitState.objects.0'}),verdict:'supported',sourceEvidence:[{segmentId:'c0'}]}],
-        terminalProofVerdicts:[{proofHash:proof.proofHash,currentState:scenario==='changed'||scenario==='uncertain'?scenario:'unchanged',reason:'Independent complete-current-body persistence judgment.'}],
-        terminalDispositions:obligations.map(({id},index)=>supported||scenario==='alias-unknown'&&index===0
-          ?{id,outcome:'replaced',reason:'The whole original obligation is represented by the same pending repair.',...(scenario==='patch'?{candidateFactId:terminalFactId('openLoops',claim)}:{candidatePath:'exitState.openLoops.0'}),sourceEvidence:[]}
-          :{id,outcome:'unknown',reason:'The old obligation is not independently resolved.',sourceEvidence:[]}),
-        ...(scenario==='patch'?{proposalDispositions:[{id:terminalFactId('emotion',base.exitState.emotion[0]),outcome:'retracted',
+      const response={findings:[],semanticChecks:scenario==='patch'?Object.fromEntries(checks.map(({kind,...check})=>[kind,check])):checks,terminalVerdicts:[{claimIndex:0,verdict:'supported',sourceEvidence:[{segmentId:'c0'}]}],
+        terminalProofVerdicts:[{proofIndex:0,currentState:scenario==='changed'||scenario==='uncertain'?scenario:'unchanged',reason:'Independent complete-current-body persistence judgment.'}],
+        terminalDispositions:obligations.map((_fact,obligationIndex)=>supported||scenario==='alias-unknown'&&obligationIndex===0
+          ?{obligationIndex,outcome:'replaced',reason:'The whole original obligation is represented by the same pending repair.',candidateIndex:1,sourceEvidence:[]}
+          :{obligationIndex,outcome:'unknown',reason:'The old obligation is not independently resolved.',sourceEvidence:[]}),
+        ...(scenario==='patch'?{proposalDispositions:[{proposalIndex:0,outcome:'retracted',
           reason:'The current inventory establishes the physical object only; the earlier emotional inference was not established.',sourceEvidence:[{segmentId:'c0',quote:body}]}]}:{})}
       return new Response(`data: ${JSON.stringify({choices:[{delta:{content:JSON.stringify(response)},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:0}})}\n\ndata: [DONE]\n\n`,{headers:{'content-type':'text/event-stream'}})
     })
@@ -155,7 +155,8 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
       reviewAttempts:expect.arrayContaining(['old-attempt'])})
     expect(main).toHaveBeenCalledTimes(supported?(scenario==='fresh-context'?7:3):2)
     expect(network).toHaveBeenCalledOnce()
-    expect(JSON.stringify(requests[0])).toContain(proof.proofHash)
+    expect(JSON.stringify(requests[0])).toContain('proofIndex')
+    expect(JSON.stringify(requests[0])).not.toContain(proof.proofHash)
     const usage=await prisma.aiUsageLog.findMany({where:{userId:f.userId,agentRunId:f.runId,action:'agent3ContinuityCritic'}})
     expect(usage).toHaveLength(1)
     expect(usage[0]).toMatchObject({billingStatus:'settled',usageSource:'reported',requestTokens:10,responseTokens:0,reservedCreditMilli:0})
@@ -163,7 +164,7 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     expect(await prisma.chapter.findUniqueOrThrow({where:{id:chapter.id}})).toMatchObject({content:body,revision:15})
     const final=await prisma.storyCompilation.findUniqueOrThrow({where:{id:compilationId},include:{bridge:true}}),run=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}}),cp=(run.usage as {checkpoint:typeof checkpoint}).checkpoint
     expect(final.validation).toMatchObject({independentCheck:'complete',terminalCandidate:{exitState:{objects:base.exitState.objects,openLoops:[claim]}},
-      continuityCriticResponse:{classification:'complete',terminalEvidence:{verdictProtocol:5}}})
+      continuityCriticResponse:{classification:'complete',terminalEvidence:{verdictProtocol:6}}})
     expect(await prisma.agentRunEvent.count({where:{runId:f.runId,seq:{gt:4},type:'tool.result',payload:{path:['ok'],equals:false}}})).toBe(0)
     expect(cp.reviewAttempts).toContain('old-attempt')
     expect(cp.readProgress).toBe(scenario==='fresh-context'?11:7)

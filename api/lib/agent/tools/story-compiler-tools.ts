@@ -132,7 +132,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   let observedContent: string | undefined
   let observedComplete: boolean | undefined
   let frozen: LegacyAssessmentInput = { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system,
-    ...(input.bodies.terminalEvidence?.verdictProtocol === 5 ? { reassessmentProtocol: 2 as const } : {}),
+    ...(input.bodies.terminalEvidence?.verdictProtocol === 5 || input.bodies.terminalEvidence?.verdictProtocol === 6 ? { reassessmentProtocol: 2 as const } : {}),
     ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}),
     ...(input.terminalCandidate ? { terminalCandidate: input.terminalCandidate } : {}),
     content: input.content, ...(input.bindingHash ? { bindingHash: input.bindingHash } : {}),
@@ -1086,7 +1086,7 @@ export const continuityValidateTool = defineTool({
     // correction and exact-call replay retain their own full frozen input.
     const requestBodies = structuredClone(bodies)
     if (!continued && terminalVersion === 2 && requestBodies.terminalEvidence) requestBodies.terminalEvidence = terminalEvidenceContext(chapter, sourceChapter,
-      terminalVersion, terminalQuoteAddressVersion(originalRequest.spec), requestBodies.terminalEvidence.factCoverage, 5, 2)
+      terminalVersion, terminalQuoteAddressVersion(originalRequest.spec), requestBodies.terminalEvidence.factCoverage, terminalCandidate ? 6 : 5, 2)
     if (!continued && requestBodies.terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) {
       requestBodies.terminalEvidence.factCoverage = terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, 2, terminalCoverageProofs(sourceChapter, requestBodies.terminalEvidence.spanAddressProtocol))
     }
@@ -1098,7 +1098,7 @@ export const continuityValidateTool = defineTool({
       else delete requestBodies.terminalEvidence.proposalChanges
     }
     const criticInput = [
-        ...((requestBodies.terminalEvidence?.verdictProtocol === 4 || requestBodies.terminalEvidence?.verdictProtocol === 5) ? [freshContinuityResponseContract(false, !!terminalCandidate, requestBodies.terminalEvidence.verdictProtocol, requestBodies)] : []),
+        ...((requestBodies.terminalEvidence?.verdictProtocol === 4 || requestBodies.terminalEvidence?.verdictProtocol === 5 || requestBodies.terminalEvidence?.verdictProtocol === 6) ? [freshContinuityResponseContract(false, !!terminalCandidate, requestBodies.terminalEvidence.verdictProtocol, requestBodies, terminalCandidate)] : []),
         sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
         ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
         `章节：${chapter.title}`,

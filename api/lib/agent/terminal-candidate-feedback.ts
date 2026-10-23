@@ -6,6 +6,7 @@ import { parseQualityJsonObject } from './quality-evidence.js'
 import { inspectTerminalReview, readTerminalCandidate, terminalJointFactVerdictSchema, terminalQuoteAddressDiagnostics } from './terminal-state-review.js'
 import { readTerminalProofVerdicts } from './terminal-proof-verdict.js'
 import type { TerminalEvidenceContext } from './terminal-evidence-context.js'
+import { bindTerminalReviewAddresses } from './terminal-review-addresses.js'
 
 export type TerminalCandidateCorrection = { version: 1; candidateHash: string; contentHash: string; paths: string[];
   issues?: Array<{ path: string; reason: string }>; guidance: string }
@@ -17,7 +18,7 @@ const object = (value: unknown): Record<string, unknown> | null => value && type
 export function terminalCandidateCorrection(validation: unknown, content: string, context: TerminalEvidenceContext): TerminalCandidateCorrection | null {
   const saved = object(validation), audit = object(saved?.continuityCriticResponse), raw = object(audit?.rawResponse)
   const candidate = readTerminalCandidate(validation)
-  if (!candidate || context.verdictProtocol !== 5 || saved?.independentCheck !== 'unavailable'
+  if (!candidate || context.verdictProtocol !== 5 && context.verdictProtocol !== 6 || saved?.independentCheck !== 'unavailable'
     || audit?.classification !== 'terminal_invalid' || audit.parserVersion !== 8
     || raw?.complete !== true || raw.encoding !== 'json-string' || typeof raw.content !== 'string'
     || runtimeJson(audit.terminalCandidate).hash !== runtimeJson(candidate).hash
@@ -29,7 +30,10 @@ export function terminalCandidateCorrection(validation: unknown, content: string
       || createHash('sha256').update(response).digest('hex') !== audit.contentHash) return null
     const diagnostics: Parameters<typeof inspectTerminalReview>[5] = []
     if (inspectTerminalReview(candidate, content, response, true, context, diagnostics) || !diagnostics.length) return null
-    const parsed: unknown = parseQualityJsonObject(response, 'continuity', 3)
+    const wire: unknown = parseQualityJsonObject(response, 'continuity', 3)
+    const bound = context.verdictProtocol === 6 && object(wire) ? bindTerminalReviewAddresses(object(wire)!, candidate, context) : null
+    if (context.verdictProtocol === 6 && !bound?.success) return null
+    const parsed: unknown = bound?.success ? bound.record : wire
     const verdicts = z.array(terminalJointFactVerdictSchema).max(200).safeParse(object(parsed)?.terminalVerdicts)
     if (!verdicts.success) return null
     const facts = terminalCandidateFacts(candidate)

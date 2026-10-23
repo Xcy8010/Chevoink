@@ -10,6 +10,11 @@ import { terminalQuoteRange } from './terminal-quote-range.js'
 import { terminalProofCatalog, readTerminalProofVerdicts, terminalProofVerdictSchema } from './terminal-proof-verdict.js'
 import { terminalCandidateFacts, terminalFactId } from './terminal-fact-identity.js'
 import { inspectTerminalProposalDispositions, terminalProposalDispositionSchema, terminalProposalGuidance, type TerminalProposalChanges } from './terminal-proposal-review.js'
+import { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, terminalSpanVerdictSchema,
+  terminalFactVerdictSchema, terminalJointFactVerdictSchema } from './terminal-review-shapes.js'
+export { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, terminalSpanVerdictSchema,
+  terminalFactVerdictSchema, terminalJointFactVerdictSchema } from './terminal-review-shapes.js'
+import { bindTerminalReviewAddresses, terminalReviewAddressInput } from './terminal-review-addresses.js'
 
 export const terminalCandidateSchema = z.object({
   exitState: storyStateSchema,
@@ -59,31 +64,10 @@ export function reviewTerminalSelection(explicit: TerminalCandidateInput | undef
   const base = explicit ?? saved ?? terminalCandidateSchema.parse({ exitState: {} })
   return { ...base, ...(proofs !== undefined ? { inheritedProofs: [...(explicit?.inheritedProofs ?? []), ...proofs] } : {}) }
 }
-export const terminalVerdictSchema = z.object({ path: z.string().max(100),
-  verdict: z.enum(['supported', 'unknown', 'planned', 'negated', 'attributed']),
-  segmentIds: z.array(z.string().regex(/^c[0-9]+$/)).max(8),
-}).strict()
-export const inheritedTerminalVerdictSchema = terminalVerdictSchema.omit({ segmentIds: true }).extend({
-  basis: z.enum(['current', 'inherited']),
-  sourceEvidence: z.array(z.object({ segmentId: z.string().regex(/^[cpt][0-9]+$/), quote: z.string().min(2).max(300) }).strict()).max(8),
-  inheritance: z.object({ priorEndState: z.enum(['established', 'uncertain']), currentState: z.enum(['unchanged', 'changed', 'uncertain']) }).strict().optional(),
-}).strict()
 const inheritedVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(inheritedTerminalVerdictSchema).max(200), { io: 'input' }))
-export const sourcedTerminalVerdictSchema = inheritedTerminalVerdictSchema.extend({ basis: z.string().max(1500).optional() })
 const sourcedVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(sourcedTerminalVerdictSchema.omit({ basis: true })).max(200), { io: 'input' }))
-export const terminalSpanVerdictSchema = sourcedTerminalVerdictSchema.extend({ sourceEvidence: z.array(z.object({
-  segmentId: z.string().regex(/^[cp][0-9]+$/u), quote: z.string().min(2).max(300).optional(),
-}).strict()).max(8) })
 const spanVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(terminalSpanVerdictSchema.omit({ basis: true })).max(200), { io: 'input' }))
-export const terminalFactVerdictSchema = z.union([terminalSpanVerdictSchema.omit({ path: true }).extend({
-  factId: z.string().regex(/^[a-f0-9]{64}$/u),
-}).strict(), terminalSpanVerdictSchema])
 const factVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(terminalFactVerdictSchema).max(200), { io: 'input' }))
-// v4 is frozen. v5 accepts redundant addresses only after their exact agreement
-// is verified against this request's candidate, never by preferring one alias.
-export const terminalJointFactVerdictSchema = z.union([terminalSpanVerdictSchema.omit({ path: true }).extend({
-  factId: z.string().regex(/^[a-f0-9]{64}$/u), path: terminalSpanVerdictSchema.shape.path.optional(),
-}).strict(), terminalSpanVerdictSchema])
 const jointFactVerdictResponseContract = JSON.stringify(z.toJSONSchema(z.array(terminalJointFactVerdictSchema).max(200), { io: 'input' }))
 
 /** Shared fresh response shape; proof/decision semantics remain independently
@@ -213,6 +197,11 @@ export function terminalQuoteAddressDiagnostics(raw: string, content: string, co
   try {
     if (!terminalEvidenceContextSchema.safeParse(context).success || context.current.contentHash !== runtimeJson({ content }).hash) return []
     const record = parseQualityJsonObject(raw, 'continuity', 3) as Record<string, unknown>
+    if (context.verdictProtocol === 6) {
+      if (!candidate) return []
+      const bound = bindTerminalReviewAddresses(record, candidate, context)
+      return bound.success ? terminalQuoteAddressDiagnostics(JSON.stringify(bound.record), content, { ...context, verdictProtocol: 5 }, candidate) : []
+    }
     const parsed = readSourcedVerdicts(record.terminalVerdicts, context, candidate, record.terminalProofVerdicts, content)
     return parsed.success ? canonicalTerminalQuoteAddresses(parsed.data, content, context).diagnostics : []
   } catch { return [] }
@@ -228,6 +217,7 @@ export function terminalClaims(candidate: TerminalCandidate) {
 }
 
 export function terminalReviewInput(candidate?: TerminalCandidate, context?: TerminalEvidenceContext): string {
+  if (candidate && context?.verdictProtocol === 6) return `本次冻结复核目录：${JSON.stringify(terminalReviewAddressInput(candidate, context))}\n只使用目录的短整数地址，不返回或猜测内部hash。ordinary按claimIndex穷尽返回terminalVerdicts={claimIndex,verdict,sourceEvidence:[{segmentId,quote?}],inheritance?}；proofs按proofIndex穷尽返回terminalProofVerdicts={proofIndex,currentState,reason}，独立判断本章是否改变该已认证持续事实，unchanged须核对本章全文，changed/uncertain保持未知，不视为事实已结束。两表由服务端分组，不能串用地址。普通verdict仍为supported/unknown/planned/negated/attributed；当前动作、位置、时间、情绪和未完成动作只能用当前cN；knowledge/body/objects/relationships/openLoops持续事实可结合本章cN与紧邻前章pN，但完整主张与继承状态均须成立，按原证据规则给inheritance。指令、分工、打算、引用和推测不证明动作已完成，完整对象、持有者、时间和方位须一致。\nobligations是已验证事实，按obligationIndex穷尽返回terminalDispositions={obligationIndex,outcome,reason,sourceEvidence,candidateIndex?}，outcome仍为replaced/ended/unknown；替代只能指向本次独立supported的candidateIndex，ended须当前正文证据，未知保留。proposals是未证实旧提议，逐proposalIndex恰好返回proposalDispositions={proposalIndex,outcome,reason,sourceEvidence,candidateIndex?}，outcome为replaced/retracted/unknown；retracted须独立核对当前原文，不能因未提及、地址错误或为了清零而撤回，更不能解除obligations。sourceEvidence保持原cN/pN目录及逐字引文要求，段落地址不等于语义成立。所有地址只在本请求有效；没有某类条目时返回空数组或按schema省略，不能虚构条目。findings与两项semanticChecks仍完整核验，不因终态地址简化而减少独立判断。`
   return terminalReviewInputBase(candidate, context) + terminalProposalGuidance(context?.proposalChanges)
 }
 
@@ -274,6 +264,28 @@ function terminalReviewClaimsInput(candidate?: TerminalCandidate, context?: Term
  * explicit, exhaustive judgment, never inferred from a substring match. */
 export type TerminalReviewDiagnostic = { code: string; path?: string; referenceIndex?: number; segmentId?: string; expectedFact?: { field: string; claim: string } }
 export function inspectTerminalReview(candidate: TerminalCandidate, content: string, raw: string, complete: boolean, context?: TerminalEvidenceContext,
+  diagnostics?: TerminalReviewDiagnostic[]) {
+  if (context?.verdictProtocol !== 6 || !complete || !terminalEvidenceContextSchema.safeParse(context).success
+    || context.current.contentHash !== runtimeJson({ content }).hash) return inspectTerminalReviewBound(candidate, content, raw, complete, context, diagnostics)
+  try {
+    const record = parseQualityJsonObject(raw, 'continuity', 3) as Record<string, unknown>
+    const bound = bindTerminalReviewAddresses(record, candidate, context)
+    if (!bound.success) {
+      const path = bound.issues[0]?.path.join('.')
+      diagnostics?.push({ code: 'response_address_invalid', ...(path ? { path } : {}) })
+      return null
+    }
+    const reviewed = inspectTerminalReviewBound(candidate, content, JSON.stringify(bound.record), complete, { ...context, verdictProtocol: 5 }, diagnostics)
+    // Interpretation reuses the strict semantic contract; provenance always
+    // identifies the actual provider response and its full frozen wire input.
+    return reviewed ? { ...reviewed, responseHash: runtimeJson({ raw }).hash, evidenceContextHash: runtimeJson(context).hash } : null
+  } catch {
+    diagnostics?.push({ code: 'response_invalid' })
+    return null
+  }
+}
+
+function inspectTerminalReviewBound(candidate: TerminalCandidate, content: string, raw: string, complete: boolean, context?: TerminalEvidenceContext,
   diagnostics?: TerminalReviewDiagnostic[]) {
   const invalid = (code: string, path?: string, referenceIndex?: number, segmentId?: string, expectedFact?: { field: string; claim: string }) => {
     diagnostics?.push({ code, ...(path ? { path } : {}), ...(referenceIndex !== undefined ? { referenceIndex } : {}), ...(segmentId ? { segmentId } : {}), ...(expectedFact ? { expectedFact } : {}) })

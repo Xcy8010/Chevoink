@@ -1,8 +1,8 @@
 import { z } from 'zod'
 import { DataAccessError } from '../../prisma.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
-import { compilerStateHash } from '../runtime-compiler-observation.js'
-import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
+import { compilerStateHash, compilerObservationSchema } from '../runtime-compiler-observation.js'
+import { prepareToolCursorOperation, rejectToolCursorCall, readAdmittedToolOperation } from '../runtime-tool-cursor.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
 import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { normalizeToolInput } from './input-validation.js'
@@ -34,7 +34,22 @@ export async function executeDurableCompiler(ctx: ToolContext, tool: AgentTool, 
     return { rejected: { ...failedToolResultSchema.parse(rejected.receipt.result).toolResult, outcome: 'failed' as const } }
   })
   if ('rejected' in prepared) return prepared.rejected
-  const receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx => {
+  const receipt = await executePreparedCompilerWork(ctx, lease, prepared.operation.id, tool)
+  await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
+  const failed = failedToolResultSchema.safeParse(receipt.result)
+  return failed.success ? { ...failed.data.toolResult, failureCode: failed.data.code, outcome: 'failed' } : z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
+}
+
+/** DB business effects and their receipt are independent of cursor delivery.
+ * Only an existing, genuinely admitted compiler tool can enter this core. */
+export async function executePreparedCompilerWork(ctx: ToolContext, lease: import('../runtime-lease.js').RunLeaseToken, operationId: string, tool: AgentTool) {
+  ctx = { ...ctx }; lease = { ...lease }
+  if (lease.userId !== ctx.userId || lease.runId !== ctx.runId || !actions.has(tool.name)) return runtimeError('RUNTIME_SCOPE_MISMATCH', '编译工作不属于当前执行身份或原工具。')
+  const { operation, input } = await readAdmittedToolOperation(lease, { operationId, action: tool.name, novelId: ctx.novelId, callId: ctx.callId })
+  const { args, baseline } = z.object({ args: z.record(z.string(), z.unknown()), baseline: compilerObservationSchema.nullable() }).parse(input)
+  const capability = { lease, operationKey: operation.operationKey, baseline,
+    cursor: { expectedRevision: input.normalization.sourceRevision, expectedHash: input.normalization.sourceSnapshotHash } }
+  const receipt = await commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '编译工具不属于原任务范围。')
@@ -53,9 +68,7 @@ export async function executeDurableCompiler(ctx: ToolContext, tool: AgentTool, 
     return runtimeJson({ compilerState: { id, hash }, toolResult: { ...result, summary: result.summary ?? '读取章节编译状态' } }).value
   }).catch(async error => {
     if (!(error instanceof DataAccessError) || !failures.has(error.code)) throw error
-    return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: '章节编译未执行' })
+    return recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code: error.code, output: error.message, summary: '章节编译未执行' })
   })
-  await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
-  const failed = failedToolResultSchema.safeParse(receipt.result)
-  return failed.success ? { ...failed.data.toolResult, failureCode: failed.data.code, outcome: 'failed' } : z.object({ toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
+  return receipt
 }

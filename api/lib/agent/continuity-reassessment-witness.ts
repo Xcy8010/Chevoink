@@ -151,7 +151,7 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   if (chainProtocol) {
     let evidence = terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original?.spec),
       terminalCoverageInput(original?.spec, compilation.preparedContext, chapter, coverageInput.terminalCandidate,
-        object(object(bodies.terminalEvidence).factCoverage).version === 2 ? 2 : 1, terminalCoverageProofs(source, object(bodies.terminalEvidence).spanAddressProtocol === 2 ? 2 : undefined)), object(bodies.terminalEvidence).verdictProtocol === 5 ? 5 : object(bodies.terminalEvidence).verdictProtocol === 4 ? 4 : object(bodies.terminalEvidence).verdictProtocol === 3 ? 3 : object(bodies.terminalEvidence).verdictProtocol === 2 ? 2 : undefined,
+        object(object(bodies.terminalEvidence).factCoverage).version === 2 ? 2 : 1, terminalCoverageProofs(source, object(bodies.terminalEvidence).spanAddressProtocol === 2 ? 2 : undefined)), object(bodies.terminalEvidence).verdictProtocol === 6 ? 6 : object(bodies.terminalEvidence).verdictProtocol === 5 ? 5 : object(bodies.terminalEvidence).verdictProtocol === 4 ? 4 : object(bodies.terminalEvidence).verdictProtocol === 3 ? 3 : object(bodies.terminalEvidence).verdictProtocol === 2 ? 2 : undefined,
       object(bodies.terminalEvidence).spanAddressProtocol === 2 ? 2 : undefined)
     if (object(bodies.terminalEvidence).proposalChanges !== undefined && coverageInput.terminalCandidate && original) {
       try {
