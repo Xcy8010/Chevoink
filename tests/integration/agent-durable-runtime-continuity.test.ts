@@ -216,7 +216,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       }
       if (scenario === 'terminal-contract3') {
         const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' } })
-        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 19, reassessmentProtocol: 3 } } })
+        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 20, reassessmentProtocol: 4 } } })
         expect(saved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { responseContract: 3,
           responseNormalization: { repeated: [{ field: 'terminalVerdicts', index: 1, originalIndex: 0, address: 0 }] } } })
         expect(fetchMock).toHaveBeenCalledOnce()
@@ -592,4 +592,50 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       expect(await prisma.sceneTask.count({ where: { compilationId, status: 'completed' } })).toBe(0)
     })
   })
+})
+
+
+describe.runIf(available)('native continuity recovery keeps a complete second response with unknown usage fenced', () => {
+  it('does not apply, clear or redispatch a second reply whose usage was not reported', () => fixture(async f => {
+    const lease = await claim(f), body = '原文'
+    await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: body, wordCount: body.length } })
+    const { compilation } = await prepareStoryCompilation({ ...f, mode: 'balanced', intentSummary: '检查本章' })
+    const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
+    await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: '核查', entryState: state, goal: '核查', obstacle: '未知', choice: '核查', cost: '时间', turn: '核查', exitState: state,
+      styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
+    const tools = [chapterBridgeGetTool, continuityValidateTool]
+    await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+      tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
+      toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null, successfulToolSignatures: [],
+        messages: [{ role: 'user', content: '检查本章' }, { role: 'assistant', content: null, toolCalls: [
+          { id: 'bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId: compilation.id }) },
+          { id: 'check', name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id, terminalState: { exitState: { action: body } } }) }] }] } })
+    const window = getCreditWindow()
+    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ ...legacyReviewRuntime, reasoningEffort: 'high', reasoningEfforts: ['none', 'high'] })
+    vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
+      rateCardId: 'continuity-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
+    let requests = 0
+    const network = vi.fn(async () => {
+      requests++
+      const wire = { findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic full review.', findingIndexes: [] })),
+        terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }],
+        terminalProofVerdicts: requests === 1 ? [{ proofIndex: 0, currentState: 'unchanged', reason: 'Wrong table.' }] : [], terminalDispositions: [] }
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(wire) }, finish_reason: 'stop' }],
+        ...(requests === 1 ? { usage: { prompt_tokens: 12, completion_tokens: 8 } } : {}) })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
+    })
+    vi.stubGlobal('fetch', network)
+    const step = () => executeDurableToolStep(lease, new AbortController().signal)
+    await step()
+    await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+    expect(network).toHaveBeenCalledTimes(2)
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation).toBeNull()
+    await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+    expect(network).toHaveBeenCalledTimes(2)
+    const auxiliary = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId, action: 'continuity_reassessment' } }, include: { usageReceipt: true } })
+    expect(auxiliary.usageReceipt).not.toMatchObject({ source: 'reported', settlementStatus: 'settled' })
+    expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: f.rootId, action: 'continuity_validate' } } })).toBe(0)
+  }, undefined, '修改本章', { continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2 }))
 })

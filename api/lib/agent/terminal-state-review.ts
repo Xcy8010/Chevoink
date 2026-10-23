@@ -15,7 +15,8 @@ import { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalV
   terminalFactVerdictSchema, terminalJointFactVerdictSchema } from './terminal-review-shapes.js'
 export { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, terminalSpanVerdictSchema,
   terminalFactVerdictSchema, terminalJointFactVerdictSchema } from './terminal-review-shapes.js'
-import { bindTerminalReviewAddresses, terminalReviewAddressInput, normalizeTerminalResponseRows } from './terminal-review-addresses.js'
+import { validContinuitySparseProjection } from './continuity-response-repair.js'
+import { bindTerminalCandidateAddresses, bindTerminalReviewAddresses, terminalReviewAddressInput, normalizeTerminalResponseRows } from './terminal-review-addresses.js'
 
 /** Selection is a tool input only; saved candidates and paid audits retain their
  * original schema. A selected proof supplies identity, never a fresh verdict. */
@@ -283,13 +284,13 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
   }
 }
 
-function inspectTerminalReviewBound(candidate: TerminalCandidate, content: string, raw: string, complete: boolean, context?: TerminalEvidenceContext,
-  diagnostics?: TerminalReviewDiagnostic[], allowCurrentMetadata = false, responseContract?: 3) {
+/** Shared source/quote/inheritance/exhaustiveness checks. No disposition
+ * result and no supported/complete report is produced by this helper. */
+function inspectTerminalCandidateEvidenceBound(candidate: TerminalCandidate, content: string, raw: string, context?: TerminalEvidenceContext,
+  diagnostics?: TerminalReviewDiagnostic[], allowCurrentMetadata = false) {
   const invalid = (code: string, path?: string, referenceIndex?: number, segmentId?: string, expectedFact?: { field: string; claim: string }) => {
-    diagnostics?.push({ code, ...(path ? { path } : {}), ...(referenceIndex !== undefined ? { referenceIndex } : {}), ...(segmentId ? { segmentId } : {}), ...(expectedFact ? { expectedFact } : {}) })
-    return null
+    diagnostics?.push({ code, ...(path ? { path } : {}), ...(referenceIndex !== undefined ? { referenceIndex } : {}), ...(segmentId ? { segmentId } : {}), ...(expectedFact ? { expectedFact } : {}) }); return null
   }
-  if (!complete) return invalid('response_incomplete')
   try {
     const record = parseQualityJsonObject(raw, 'continuity', 3) as Record<string, unknown>
     if (context && (!terminalEvidenceContextSchema.safeParse(context).success || context.current.contentHash !== runtimeJson({ content }).hash)) return invalid('evidence_context_stale')
@@ -337,6 +338,27 @@ function inspectTerminalReviewBound(candidate: TerminalCandidate, content: strin
         || new Set(item.segmentIds).size !== item.segmentIds.length
         || item.verdict === 'supported' && item.segmentIds.length === 0
         || item.segmentIds.some(id => !segments.some(segment => segment.segmentId === id)))) return invalid('claim_coverage_invalid')
+    return { record, inherited, addresses, verdicts, segments }
+  } catch { return invalid('response_invalid') }
+}
+
+export function inspectTerminalCandidateEvidence(candidate: TerminalCandidate, content: string, record: Record<string, unknown>, context: TerminalEvidenceContext) {
+  if (context.verdictProtocol !== 6) return null
+  const bound = bindTerminalCandidateAddresses(record, candidate, context)
+  return bound ? inspectTerminalCandidateEvidenceBound(candidate, content, JSON.stringify(bound), { ...context, verdictProtocol: 5 }, undefined, true) : null
+}
+
+function inspectTerminalReviewBound(candidate: TerminalCandidate, content: string, raw: string, complete: boolean, context?: TerminalEvidenceContext,
+  diagnostics?: TerminalReviewDiagnostic[], allowCurrentMetadata = false, responseContract?: 3) {
+  const invalid = (code: string, path?: string, referenceIndex?: number, segmentId?: string, expectedFact?: { field: string; claim: string }) => {
+    diagnostics?.push({ code, ...(path ? { path } : {}), ...(referenceIndex !== undefined ? { referenceIndex } : {}), ...(segmentId ? { segmentId } : {}), ...(expectedFact ? { expectedFact } : {}) })
+    return null
+  }
+  if (!complete) return invalid('response_incomplete')
+  try {
+    const evidence = inspectTerminalCandidateEvidenceBound(candidate, content, raw, context, diagnostics, allowCurrentMetadata)
+    if (!evidence) return null
+    const { record, inherited, addresses, verdicts, segments } = evidence
     const factCoverage = inspectTerminalCoverage(context?.factCoverage, record.terminalDispositions, candidate, verdicts, segments.filter(item => item.segmentId.startsWith('c')), context?.verdictProtocol === 4 || context?.verdictProtocol === 5, responseContract === 3 ? diagnostics : undefined)
     if (factCoverage === null) return invalid('fact_disposition_invalid')
     const proposalInput = context?.proposalChanges
@@ -377,6 +399,7 @@ export function currentTerminalReview(validation: unknown, content: string, expe
   const candidate = readTerminalCandidate(validation)
   const audit = record.continuityCriticResponse as { parserVersion?: number; terminalEvidence?: unknown; terminalCandidate?: unknown; terminalContentHash?: unknown; rawResponse?: { content?: unknown; complete?: boolean }; responseContract?: unknown } | undefined
   const frozenCandidate = terminalCandidateSchema.safeParse(audit?.terminalCandidate)
+  if (!validContinuitySparseProjection(audit, content, expectedContext)) return null
   if (!candidate || !frozenCandidate.success || runtimeJson(candidate).hash !== runtimeJson(frozenCandidate.data).hash
     || audit?.terminalContentHash !== runtimeJson({ content }).hash
     || audit?.rawResponse?.complete !== true || typeof audit.rawResponse.content !== 'string') return null
@@ -407,7 +430,7 @@ export function terminalReviewFailure(validation: unknown, content: string, cont
       || disputed.some(item => item.path.split('.')[1] === fact.field && item.claim === fact.claim)))
       .map(({ proofHash, field, claim }) => ({ proofHash, field, claim })) ?? []
     const selection = selectable.length ? `\n可显式选择的当前有效证明：${JSON.stringify(selectable)}。保持同一 compilationId，可只传顶层 inheritedProofs=[所选proofHash]，服务端在本任务已保存候选上还原原字段与完整主张；这只是待核选择，仍须独立判断本章是否改变。不要复制临时编号或手拼旧事实。` : ''
-    const updateGuidance = context.verdictProtocol === 4 || context.verdictProtocol === 5
+    const updateGuidance = context.verdictProtocol === 4 || context.verdictProtocol === 5 || context.verdictProtocol === 6
       ? `按实际裁决用 terminalPatch={baseCandidateHash:${JSON.stringify(runtimeJson(review.candidate).hash)},removeFactIds:[],addFacts:[{field,claim}]} 只更新需要处理的候选，未指定项保留；当前事实地址：${JSON.stringify(terminalCandidateFacts(review.candidate).map(({ id, field, claim }) => ({ factId: id, field, claim })))}。也可提供完整 terminalState。更新后调用 continuity_validate；`
       : '按实际裁决更新 terminalState 后调用 continuity_validate；'
     return { ...(context.verdictProtocol !== undefined ? {} : { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' }), reviewCompleted: true,

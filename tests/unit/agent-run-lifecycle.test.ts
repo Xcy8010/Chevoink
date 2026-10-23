@@ -631,6 +631,53 @@ describe('server assessment fallback in the real execution loop', () => {
       inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
     expect((mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[] } }).checkpoint.pendingReviews ?? []).toEqual([])
   })
+  it('processes a received malformed terminal report after stagnation moves from three to four', async () => {
+    const { runtimeJson } = await import('../../api/lib/agent/runtime-common.js')
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
+    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    const body = mocks.chapters[0].content, proofHash = 'd'.repeat(64)
+    mocks.chapters[0].orderIndex = 20
+    mocks.chapters[0].orderInVolume = 20
+    mocks.chapters[0].revision = 4
+    const candidate = terminalCandidateSchema.parse({ exitState: { action: '当前有据动作' } })
+    const processing: NonNullable<ChapterReviewReadiness['terminalProcessing']> = { contractHash: 'a'.repeat(64), sourceHash: 'b'.repeat(64),
+      content: body, previous: '前章有据正文', candidate, inherited: [{ proofHash, field: 'knowledge', claim: '已验证的旧事实' }],
+      issues: [{ path: 'factCoverage.old', reason: 'report_contract_unresolved' }], recoveryGuidance: '原始处置仍未核验，不得自动通过。' }
+    const evidence: NonNullable<ChapterReviewReadiness['progressEvidence']> = { taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'c', orderIndex: 20,
+      contentHash: runtimeJson({ content: body }).hash, phases: [] }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000, activeExecutionMs: 100,
+      stagnantBatches: 3, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500, writeProgress: 3, writeBaseline: 0, readProgress: 3, readBaseline: 0, progressSignatures: [] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 12, startedAt: new Date(checkpoint.runStartedAt), usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint } })
+    let state: ChapterReviewReadiness = readiness('missing', 'complete', 4), checks = 0
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const check = tool('continuity_validate', async () => {
+      if (++checks === 1) {
+        state = { ...readiness('incomplete', 'complete', 4), progressEvidence: evidence,
+          terminalReview: { state: 'unverified', unresolved: [{ path: 'factCoverage.old', verdict: 'unknown' }] }, terminalProcessing: processing }
+        return { reviewCompleted: false, summary: '连续性报告已收到 · 终态待处理', output: processing.recoveryGuidance! }
+      }
+      expect(mocks.chat.mock.calls[1][0].messages.some((message: { content?: string | null }) => message.content?.includes('当前候选处理') && message.content.includes('原始处置仍未核验'))).toBe(true)
+      expect(events().some(event => event.type === 'run.paused')).toBe(false)
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: 4, tokenBudget: 500, maxTurns: 1 } })
+      state = { ...readiness('complete', 'complete', 4), progressEvidence: { ...evidence, phases: ['continuity', 'terminal', 'terminal_supported'] },
+        terminalReview: { state: 'supported', unresolved: [] }, terminalProcessing: { ...processing, issues: [],
+          candidate: terminalCandidateSchema.parse({ ...candidate, exitState: { ...candidate.exitState, knowledge: ['已验证的旧事实'] } }) } }
+      return { reviewCompleted: true, output: '独立复核完成，终态得到支持' }
+    })
+    const commit = tool('chapter_bridge_commit', async () => {
+      expect(state.terminalReview?.state).toBe('supported'); mocks.committedChapter.mockResolvedValue(true)
+      state = { ...state, terminalCommitted: true, terminalProcessing: undefined }
+      return { output: '终态已核验提交' }
+    }, false)
+    mocks.tools = [check, commit]
+    queue(response('', [call('received-report', check.name, '{"compilationId":"comp"}')]),
+      response('', [call('process-candidate', check.name, JSON.stringify({ compilationId: 'comp', inheritedProofs: [proofHash] }))]), response('已保存。'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    expect(check.execute).toHaveBeenCalledTimes(2); expect(commit.execute).toHaveBeenCalledOnce()
+    expect(events().some(event => event.type === 'run.paused')).toBe(false)
+    expect(events().at(-1), JSON.stringify(events().slice(-8))).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
   it('does not attribute a previous revision failure to the current incomplete review', async () => {
     const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
     mocks.currentOriginal = { prompt: '写下一章', taskSpec }

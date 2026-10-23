@@ -185,7 +185,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     expect(await prisma.aiUsageLog.findMany({ where: { id: { in: oldPayments.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(oldPayments)
     expect(await prisma.agentArtifact.findMany({ where: { id: { in: oldArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(oldArtifacts)
     const next = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, metadata: { path: ['callId'], equals: continued.callId } } })
-    expect(next.metadata).toMatchObject({ input: { reassessmentProtocol: 3 } })
+    expect(next.metadata).toMatchObject({ input: { reassessmentProtocol: 4 } })
   }))
   it('persists a new contract3 duplicate projection and commits the same reviewed chapter without buying another check', () => fixture(async f => {
     const { ctx, compilation } = await retryFixture(f, new AbortController())
@@ -213,7 +213,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
     const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
     const reservation = artifacts.map(row => row.metadata as Record<string, unknown>).find(row => row.continuityAssessmentRequestKey)!
-    expect(reservation.input).toMatchObject({ reassessmentProtocol: 3 })
+    expect(reservation.input).toMatchObject({ reassessmentProtocol: 4 })
     expect(await prisma.$transaction(tx => lifecycle.readReusableLegacyContinuityAssessment(tx, ctx, reservation.input as lifecycle.LegacyAssessmentInput)))
       .toMatchObject({ complete: true, audit: { responseContract: 3 } })
     expect(await chapterBridgeCommitTool.execute(ctx, { compilationId: compilation.id })).not.toMatchObject({ outcome: 'failed' })
@@ -264,7 +264,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
     expect(await prisma.$transaction(tx => lifecycle.readReusableLegacyContinuityAssessment(tx, ctx, reservation.input as lifecycle.LegacyAssessmentInput))).toBeNull()
     if (scenario === 'wrong-contract-marker') await expect(runLegacyContinuityReview(ctx, input)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
-    else expect(await runLegacyContinuityReview(ctx, input)).toMatchObject({ complete: false })
+    else await expect(runLegacyContinuityReview(ctx, input)).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
     expect(fetcher).toHaveBeenCalledTimes(2)
     expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation).toBeNull()

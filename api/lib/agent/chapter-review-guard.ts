@@ -20,6 +20,7 @@ import { observedReviewCycleVerification, prepareReviewCycleTransition } from '.
 import { readTerminalCandidate, currentTerminalReview } from './terminal-state-review.js'
 import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalVerdictAuditVersion, terminalSpanAuditVersion } from './terminal-evidence-context.js'
 import { terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs } from './terminal-fact-coverage.js'
+import { terminalReportCorrection } from './terminal-report-recovery.js'
 import { terminalCandidateCorrection, type TerminalCandidateCorrection } from './terminal-candidate-feedback.js'
 import { attachTerminalProposalInput, terminalProposalTaskId } from './terminal-proposal-context.js'
 import type { TerminalProcessingInput } from './terminal-processing.js'
@@ -350,6 +351,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source,
         focus: typeof validation.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate }, storedContinuityProtocol(validation)))) {
       const correction = terminalCandidateCorrection(validation, chapter.content, evidence)
+        ?? terminalReportCorrection(validation, chapter.content, evidence, source?.content ?? null)
       if (correction) readiness.terminalCorrection = correction
     }
     readiness.terminalReview = { state: terminal?.supported ? 'supported' : 'unverified',
@@ -374,6 +376,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
         contractHash: runtimeJson(JSON.parse(JSON.stringify(original.spec))).hash,
         sourceHash: runtimeJson({ previousContent: source?.content ?? '', previousChapterId: compilation.bridge.fromChapterId }).hash,
         candidate: terminalCandidate, content: chapter.content, previous: source?.content ?? '',
+        ...(readiness.terminalCorrection ? { recoveryGuidance: readiness.terminalCorrection.guidance } : {}),
         inherited: (evidence.previous?.carried ?? []).filter(fact => fact.depth < 16)
           .map(({ proofHash, field, claim }) => ({ proofHash, field, claim })),
         issues: readiness.terminalCorrection

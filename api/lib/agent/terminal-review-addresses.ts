@@ -138,3 +138,22 @@ export function terminalReviewAddressInput(candidate: TerminalCandidate, context
     current: { orderIndex: context.current.orderIndex },
     previous: context.previous ? { orderIndex: context.previous.orderIndex, segments: context.previous.segments.map(({ segmentId, start, end, quote }) => ({ segmentId, start, end, quote })) } : null }
 }
+
+
+/** Candidate evidence can be checked independently of failed disposition
+ * tables. This binds ONLY candidate/proof rows; it supplies no empty tables,
+ * obligation outcomes, completed report or authority to dispatch. */
+export function bindTerminalCandidateAddresses(record: Record<string, unknown>, candidate: TerminalCandidate, context: TerminalEvidenceContext) {
+  const projection = normalizeTerminalResponseRows(record)
+  if (projection.error) return null
+  const fields = terminalAddressResponseFields(candidate, context, undefined, true)
+  const parsed = z.object({ terminalVerdicts: fields.terminalVerdicts, terminalProofVerdicts: fields.terminalProofVerdicts }).passthrough().safeParse(projection.record)
+  if (!parsed.success) return null
+  const catalog = terminalReviewAddressCatalog(candidate, context)
+  return { ...record,
+    terminalVerdicts: parsed.data.terminalVerdicts.flatMap(({ claimIndex, ...judgment }) => {
+      const fact = catalog.ordinary.find(row => row.claimIndex === claimIndex)
+      return fact ? fact.paths.map(path => ({ ...judgment, path })) : []
+    }),
+    terminalProofVerdicts: parsed.data.terminalProofVerdicts.map(({ proofIndex, ...judgment }) => ({ ...judgment, proofHash: catalog.proofs[proofIndex].fact.proofHash })) }
+}

@@ -554,6 +554,9 @@ export async function handleToolCall(
     }
     const durationMs = Date.now() - startedAt
     const summary = result.summary ?? `${tool.title}完成`
+    const reviewRequestFinished = result.reviewRequestFinished ?? (result.reviewCompleted === false && reviewSnapshot
+      && requestTrace.records.length > 0 && textRequestsFinished(requestTrace) ? { version: 1 as const, ...reviewSnapshot,
+        usageIds: requestTrace.records.map(row => row.usageId) } : undefined)
 
     bus.emit({
       type: 'tool.result',
@@ -563,6 +566,7 @@ export async function handleToolCall(
       ok: true,
       summary,
       display: result.display,
+      ...(reviewRequestFinished ? { reviewRequestFinished } : {}),
       durationMs,
       ...subagentMark,
     })
@@ -572,6 +576,7 @@ export async function handleToolCall(
       ...(call.name === 'ask_user' && result.failureCode === 'AUTHOR_INPUT_REQUIRED' ? { failureCode: result.failureCode } : {}),
       unresolvedTextRequest: requestTrace.records.length > 0 && !textRequestsFinished(requestTrace),
       reviewCompleted: result.reviewCompleted,
+      reviewRequestFinished,
       workflowMilestone: ctx.inlineChild ? undefined : result.workflowMilestone,
       reviewDecisionFeedback: ctx.inlineChild ? undefined : result.reviewDecisionFeedback,
       requiredResult: result.requiredResult,
@@ -2674,10 +2679,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED',
           'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? ''))) {
           pendingReviews.delete(`${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`)
-          if (outcome.part.status !== 'success' && !outcome.reviewCompleted) {
+          if (outcome.part.status !== 'success' && !outcome.reviewCompleted || outcome.reviewCompleted === false) {
             const settledKey = reviewAttemptKey(reviewDispatch, reviewDispatch.toolName)
             settledReviewFailures.add(settledKey)
-            if (['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? '')) automaticReviewAttempts.add(`settled-continuity:${settledKey}`)
+            if (reviewDispatch.toolName === 'continuity_validate' && outcome.reviewCompleted === false
+              || ['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? '')) automaticReviewAttempts.add(`settled-continuity:${settledKey}`)
           }
           await persistCheckpoint()
         }

@@ -1,3 +1,5 @@
+import { continuityResponseInput4 } from '../continuity-response-repair.js'
+import { terminalReportRecoveryResult } from '../terminal-report-recovery.js'
 import { continuityResponseContract, continuityResponseSystem, continuityResponseInput } from '../continuity-response-contract.js'
 import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { retainedFindings } from './chapter-arguments.js'
@@ -128,34 +130,37 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   bindingHash?: string;
   assessmentAdmissionId?: string;
   recoverBodies?: (version: FrozenTerminalContract) => ContinuityBodies;
-}) {
+}): Promise<ReturnType<typeof inspectContinuityResponse> & { recoveryReady?: boolean }> {
   const trace = createTextRequestTrace()
   let observedContent: string | undefined
   let observedComplete: boolean | undefined
   let frozen: LegacyAssessmentInput = { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system,
-    ...(input.bodies.terminalEvidence?.verdictProtocol === 6 && input.terminalCandidate ? { reassessmentProtocol: 3 as const }
+    ...(input.bodies.terminalEvidence?.verdictProtocol === 6 && input.terminalCandidate ? { reassessmentProtocol: 4 as const }
       : input.bodies.terminalEvidence?.verdictProtocol === 5 ? { reassessmentProtocol: 2 as const } : {}),
     ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}),
     ...(input.terminalCandidate ? { terminalCandidate: input.terminalCandidate } : {}),
     content: input.content, ...(input.bindingHash ? { bindingHash: input.bindingHash } : {}),
     targetType: input.options.targetType as 'chapter' | 'story_compilation', targetId: input.options.targetId! }
   let restoredFrozen = false
-  if (frozen.reassessmentProtocol === 2 || frozen.reassessmentProtocol === 3 || input.bodies.terminalEvidence?.factCoverage?.version === 2) {
+  if (frozen.reassessmentProtocol === 2 || frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 || input.bodies.terminalEvidence?.factCoverage?.version === 2) {
     const saved = await prisma.$transaction(tx => readFrozenLegacyContinuityInput(tx, ctx, frozen, input.recoverBodies))
     if (saved) { frozen = saved; input = { ...input, ...saved }; restoredFrozen = true }
   }
-  if (!restoredFrozen && frozen.reassessmentProtocol === 3 && input.terminalCandidate) {
+  if (!restoredFrozen && frozen.reassessmentProtocol === 4 && input.terminalCandidate) {
     // A new wire contract does not retire a paid complete historical report.
     // Never cross this compatibility path for an already frozen current call:
     // its own unknown requests/second slot must be reconciled first.
     ctx.signal.throwIfAborted(); await input.assertCurrent()
     const legacy = { ...frozen }; delete legacy.reassessmentProtocol
-    for (const prior of [{ ...legacy, reassessmentProtocol: 2 as const }, legacy]) {
+    const old3 = { ...legacy, reassessmentProtocol: 3 as const,
+      system: continuityResponseSystem(input.system, continuityResponseContract(input.bodies, input.terminalCandidate)),
+      content: continuityResponseInput(input.content, input.bodies, input.terminalCandidate) }
+    for (const prior of [old3, { ...legacy, reassessmentProtocol: 2 as const }, legacy]) {
       const reusable = await prisma.$transaction(tx => readReusableLegacyContinuityAssessment(tx, ctx, prior))
       if (reusable) { ctx.signal.throwIfAborted(); await input.assertCurrent(); return reusable }
     }
     input = { ...input, system: continuityResponseSystem(input.system, continuityResponseContract(input.bodies, input.terminalCandidate)),
-      content: continuityResponseInput(input.content, input.bodies, input.terminalCandidate) }
+      content: continuityResponseInput4(input.content, input.bodies, input.terminalCandidate) }
     frozen = { ...frozen, system: input.system, content: input.content }
   }
   type Observation = Parameters<typeof observeLegacyContinuityAssessment>[3] & { usageId: string }
@@ -208,7 +213,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
       admissionId: input.assessmentAdmissionId!, usageIds: trace.records.map(record => record.usageId), observedContent, observedComplete }))
   }
   const last = observations.at(-1)
-  const original = replay?.inspected ?? inspectContinuityResponse(last?.content ?? raw, input.bodies, frozen.reassessmentProtocol !== 3 || !!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope, frozen.reassessmentProtocol === 3 ? { responseContract: 3 } : {})
+  const original = replay?.inspected ?? inspectContinuityResponse(last?.content ?? raw, input.bodies, (frozen.reassessmentProtocol !== 3 && frozen.reassessmentProtocol !== 4) || !!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope, frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 ? { responseContract: 3 } : {})
   const assessed = await runContinuityReassessment({ original, bodies: input.bodies, system: input.system, content: input.content, reassessmentProtocol: frozen.reassessmentProtocol,
     billingKnown: replay?.billingKnown ?? textRequestsFinished(trace), providerComplete: replay?.providerComplete ?? (!!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length),
     slotUsed: replay?.slotUsed ?? [...stages.values()].some(stage => stage === 'output_recovery'), signal: ctx.signal,
@@ -243,7 +248,12 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
         }
       }
     } })
-  return bindLegacyContinuityAssessment(assessed, ctx, frozen)
+  // Re-read the actual full lifecycle before a failed report may become
+  // actionable pending work. In-memory traces alone miss an old unknown second.
+  const recovery = assessed.complete || assessed.audit.responseContract !== 3 ? null : await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, frozen))
+  if (recovery && !recovery.recoveryReady) throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED',
+    '原连续性检查仍有未确认的响应或用量，保留原请求等待核实，未再次派发。')
+  return { ...bindLegacyContinuityAssessment(assessed, ctx, frozen), ...(recovery?.recoveryReady ? { recoveryReady: true } : {}) }
 }
 
 const independentContinuityResultSchema = z.object({
@@ -1220,6 +1230,9 @@ export const continuityValidateTool = defineTool({
         continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }).value } })
       return result
     })
+    const reportRecovery = criticFallback && !continued && 'recoveryReady' in inspected && inspected.recoveryReady ? terminalReportRecoveryResult({ ...result, terminalCandidate, continuityCriticResponse: inspected.audit },
+      chapter.content, requestBodies.terminalEvidence, requestBodies.previous) : null
+    if (reportRecovery) return reportRecovery
     if (criticFallback || result.independentCheck !== 'complete') return {
       outcome: 'failed' as const,
       failureCode: inspected.audit.classification === 'source_invalid' ? 'CONTINUITY_EVIDENCE_UNLOCATED' : criticFallback ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED',
