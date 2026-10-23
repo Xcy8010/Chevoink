@@ -14,6 +14,7 @@ import { readOwnedContinuityReassessment } from '../../api/lib/agent/continuity-
 import { generateReviewCompletion } from '../../api/lib/agent/review-completion.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import * as continuityParser from '../../api/lib/agent/continuity-format-recovery.js'
+import { compilerEvidenceScope } from '../../api/lib/agent/continuity-source-authority.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -75,7 +76,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     terminalProofVerdicts: [], terminalDispositions: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
       ({ kind, result: 'clear', reason: 'The current body records the action in this direction.', findingIndexes: [] })) })
     const input = { chapterId: chapter.id, revision: chapter.revision, bodies: { previous: null, current: body, terminalEvidence: evidence },
-      system: 'Synthetic full continuity review.', content: body, terminalCandidate: candidate, parserVersion: 8 as const,
+      system: 'Synthetic full continuity review.', content: body, terminalCandidate: candidate, parserVersion: 8 as const, sourceScope: compilerEvidenceScope(chapter, null),
       options: { modelRuntime: runtime, explicitModelSelection: true, userId: f.userId, novelId: f.novelId, chapterId: chapter.id,
         action: 'agent3ContinuityCritic', targetType: 'chapter' as const, targetId: chapter.id, signal: ctx.signal },
       assertCurrent: async () => { expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(body) } }

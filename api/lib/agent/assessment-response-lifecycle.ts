@@ -354,13 +354,13 @@ export async function markLegacyContinuityAssessmentApplication(tx: Prisma.Trans
   const meta = object(reservation.metadata)!, key = String(meta.continuityAssessmentRequestKey)
   const frozen = object(meta.input)
   if (!inspected.complete || application?.inputHash !== runtimeJson(frozen).hash) return
-  if (typeof meta.callId !== 'string') return
-  const received = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
-  if (!received.billingKnown || !received.providerComplete || !received.inspected.complete) return
   const observations = await tx.agentArtifact.findMany({ where: { runId: reservation.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentKey'], equals: key } } })
   const ids = observations.flatMap(row => { const value = object(row.metadata)?.usageIds; return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [] })
   const usage = await tx.aiUsageLog.findMany({ where: { id: { in: ids }, userId: ctx.userId, novelId: ctx.novelId, action: { startsWith: 'agent3ContinuityCritic' } } })
   if (!ids.length || usage.length !== new Set(ids).size || usage.some(row => !knownAssessmentBilling(row))) return
+  if (typeof meta.callId !== 'string') return
+  const received = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
+  if (!received.billingKnown || !received.providerComplete || !received.inspected.complete) return
   if (observations.some(observation => {
     const meta = object(observation.metadata)
     return !Array.isArray(meta?.usageIds) || meta.usageIds.some(id => {
