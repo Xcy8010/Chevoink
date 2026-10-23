@@ -1,3 +1,4 @@
+import { continuityResponseContract, continuityResponseSystem, continuityResponseInput } from '../continuity-response-contract.js'
 import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { retainedFindings } from './chapter-arguments.js'
 import { readTerminalCandidate, terminalCandidateSchema, terminalCandidateInputSchema, resolveTerminalCandidate, reviewTerminalSelection, terminalReviewInput, currentTerminalReview, terminalReviewFailure, type TerminalCandidate } from '../terminal-state-review.js'
@@ -128,16 +129,20 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   assessmentAdmissionId?: string;
   recoverBodies?: (version: FrozenTerminalContract) => ContinuityBodies;
 }) {
+  if (input.bodies.terminalEvidence?.verdictProtocol === 6 && input.terminalCandidate) input = { ...input,
+    system: continuityResponseSystem(input.system, continuityResponseContract(input.bodies, input.terminalCandidate)),
+    content: continuityResponseInput(input.content, input.bodies, input.terminalCandidate) }
   const trace = createTextRequestTrace()
   let observedContent: string | undefined
   let observedComplete: boolean | undefined
   let frozen: LegacyAssessmentInput = { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system,
-    ...(input.bodies.terminalEvidence?.verdictProtocol === 5 || input.bodies.terminalEvidence?.verdictProtocol === 6 ? { reassessmentProtocol: 2 as const } : {}),
+    ...(input.bodies.terminalEvidence?.verdictProtocol === 6 && input.terminalCandidate ? { reassessmentProtocol: 3 as const }
+      : input.bodies.terminalEvidence?.verdictProtocol === 5 ? { reassessmentProtocol: 2 as const } : {}),
     ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}),
     ...(input.terminalCandidate ? { terminalCandidate: input.terminalCandidate } : {}),
     content: input.content, ...(input.bindingHash ? { bindingHash: input.bindingHash } : {}),
     targetType: input.options.targetType as 'chapter' | 'story_compilation', targetId: input.options.targetId! }
-  if (frozen.reassessmentProtocol === 2 || input.bodies.terminalEvidence?.factCoverage?.version === 2) {
+  if (frozen.reassessmentProtocol === 2 || frozen.reassessmentProtocol === 3 || input.bodies.terminalEvidence?.factCoverage?.version === 2) {
     const saved = await prisma.$transaction(tx => readFrozenLegacyContinuityInput(tx, ctx, frozen, input.recoverBodies))
     if (saved) { frozen = saved; input = { ...input, ...saved } }
   }
@@ -191,7 +196,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
       admissionId: input.assessmentAdmissionId!, usageIds: trace.records.map(record => record.usageId), observedContent, observedComplete }))
   }
   const last = observations.at(-1)
-  const original = replay?.inspected ?? inspectContinuityResponse(last?.content ?? raw, input.bodies, true, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope)
+  const original = replay?.inspected ?? inspectContinuityResponse(last?.content ?? raw, input.bodies, frozen.reassessmentProtocol !== 3 || !!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope, frozen.reassessmentProtocol === 3 ? { responseContract: 3 } : {})
   const assessed = await runContinuityReassessment({ original, bodies: input.bodies, system: input.system, content: input.content, reassessmentProtocol: frozen.reassessmentProtocol,
     billingKnown: replay?.billingKnown ?? textRequestsFinished(trace), providerComplete: replay?.providerComplete ?? (!!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length),
     slotUsed: replay?.slotUsed ?? [...stages.values()].some(stage => stage === 'output_recovery'), signal: ctx.signal,
@@ -1206,7 +1211,7 @@ export const continuityValidateTool = defineTool({
     if (criticFallback || result.independentCheck !== 'complete') return {
       outcome: 'failed' as const,
       failureCode: inspected.audit.classification === 'source_invalid' ? 'CONTINUITY_EVIDENCE_UNLOCATED' : criticFallback ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED',
-      output: continuityFailureOutput(inspected.audit, unconfirmedContinuityOutput),
+      output: continuityFailureOutput(inspected.audit, unconfirmedContinuityOutput, requestBodies),
       summary: '独立连续性复核未完成',
     }
     const repairGuidance = result.errorCount > 0 ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''

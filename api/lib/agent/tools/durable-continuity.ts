@@ -1,3 +1,4 @@
+import { continuityResponseContract, continuityResponseSystem, continuityResponseInput } from '../continuity-response-contract.js'
 import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { continuityFindingText, continuitySourceInput, unconfirmedContinuityOutput } from '../continuity-review-context.js'
 import { z } from 'zod'
@@ -26,7 +27,7 @@ import { compilerContinuityCoverage, compilerContinuityCoverageMatches, hasCurre
 import { normalizeToolInput } from './input-validation.js'
 import { parseIndependentContinuityResult, continuityCriticSystem, continuityReviewTail, CONTINUITY_MAX_OUTPUT_TOKENS, buildStandaloneContinuityContext, saveStandaloneContinuityReport, readStandaloneContinuityReport } from './story-compiler-tools.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
-import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '../continuity-format-recovery.js'
+import { inspectContinuityResponse, continuityUnlocatedCandidateCount, continuityFailureOutput } from '../continuity-format-recovery.js'
 import { runContinuityEvidenceCorrection } from '../continuity-response-correction.js'
 import { runContinuityReassessment, freshContinuityResponseContract } from '../assessment-response-lifecycle.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
@@ -41,8 +42,8 @@ const routeSchema = auxiliaryRouteSchema
 const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional(), terminalHash: hash.optional() }).strict()
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16), z.literal(17), z.literal(18)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
-    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).optional(), reassessmentProtocol: z.literal(2).optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16), z.literal(17), z.literal(18), z.literal(19)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
+    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).optional(), reassessmentProtocol: z.union([z.literal(2), z.literal(3)]).optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
 type Work = Extract<z.infer<typeof workSchema>, { kind: 'check' }>
@@ -115,6 +116,8 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
     if (!chapter || runtimeJson(chapter).hash !== runtimeJson(frozen.chapter).hash || (source ? runtimeJson(source).hash : null) !== frozen.coverage.sourceHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间正文或来源章节已变化，未应用旧结果。请读取当前正文和章节桥后重查。')
   }
   const execute = async (frozen: Work) => {
+    if ((frozen.version === 19) !== (frozen.reassessmentProtocol === 3)) return failure('RUNTIME_RECEIPT_INVALID', '连续性响应合同与冻结操作版本不一致。')
+    if (frozen.reassessmentProtocol === 3 && (frozen.sourceBodies?.terminalEvidence?.verdictProtocol !== 6 || !frozen.terminalCandidate)) return failure('RUNTIME_RECEIPT_INVALID', '响应合同缺少冻结候选或证据目录。')
     if (frozen.version >= 12 && !frozen.sourceScope) return failure('RUNTIME_RECEIPT_INVALID', '连续性检查缺少冻结来源边界，不能补造。')
     if (frozen.version >= 4 && !frozen.sourceBodies) return failure('RUNTIME_RECEIPT_INVALID', '连续性检查缺少冻结原文，不能补造引用。')
     if (frozen.compiler && !hasCurrentCompilerContinuityProtocol(frozen.coverage)
@@ -131,7 +134,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
     let parsed = frozen.cached ? { structured: true, findings: frozen.cached } : critic?.finishReason === 'stop' && !critic.toolCalls.length
       ? parseIndependentContinuityResult(critic.content, frozen.version >= 3 ? 2 : 1, frozen.version >= 4 ? frozen.sourceBodies : undefined) : { structured: false, findings: [] }
     let inspected = frozen.version >= 5 && critic && frozen.sourceBodies
-      ? inspectContinuityResponse(critic.content, frozen.sourceBodies, critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.version >= 13 ? 8 : frozen.version >= 12 ? 7 : frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, frozen.version >= 10 ? frozen.terminalCandidate : undefined, frozen.version >= 12 ? frozen.sourceScope : undefined) : null
+      ? inspectContinuityResponse(critic.content, frozen.sourceBodies, critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.version >= 13 ? 8 : frozen.version >= 12 ? 7 : frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, frozen.version >= 10 ? frozen.terminalCandidate : undefined, frozen.version >= 12 ? frozen.sourceScope : undefined, frozen.reassessmentProtocol === 3 ? { responseContract: 3 } : {}) : null
     if (frozen.version === 7 && inspected && frozen.sourceBodies && inspected.audit.classification === 'source_invalid') {
       const billingKnown = await withRunLease(lease, async tx => {
         const previous = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:continuity_critic` } } })
@@ -224,7 +227,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
         { errors: report.errorCount, text: `连续性完整报告：${report.errorCount} 错误、${report.warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compiler.id, frozen.chapter.revision, { ...report, coverage: frozen.coverage })}\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` })
       const toolResult: ToolResult = terminalFailure ?? (incomplete
         ? { outcome: 'failed', failureCode: inspected?.audit.classification === 'source_invalid' ? 'CONTINUITY_EVIDENCE_UNLOCATED' : !parsed.structured ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED', summary: '独立连续性复核未完成',
-          output: unconfirmedContinuityOutput }
+          output: continuityFailureOutput(inspected?.audit, unconfirmedContinuityOutput, frozen.sourceBodies) }
         : { summary: `连续性检查${frozen.cached ? '（复用）' : ''} · ${report.errorCount} 错误 ${report.warningCount} 警告`,
           output: `检查意见已保存，正文未改动；${repairGuidance || '仅警告不授权改写正文，保留剩余意见交作者决定，不追求零警告。'}${frozen.cached ? '复用当前正文与来源的检查，不重复调用模型。' : ''}\n留置绑定 reportId=${continuityDecisionBinding(compiler.id, frozen.chapter.revision, { ...report, coverage: frozen.coverage })}；findingId 使用从0开始的编号。\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`,
           display: { kind: 'storyCompiler', compilationId: compiler.id, phase: 'check', title: '连续性检查', detail: `${report.errorCount} 错误 · ${report.warningCount} 警告`, errorCount: report.errorCount, warningCount: report.warningCount, items: report.findings.map(item => item.evidence) } })
@@ -340,7 +343,7 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
       else delete terminalEvidence.proposalChanges
     }
     validatedContinuityCheckRounds(compilation.validation, !reusable)
-    return { kind: 'check' as const, version: terminalVersion === 2 ? 18 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), ...(terminalVersion === 2 ? { reassessmentProtocol: 2 as const } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
+    return { kind: 'check' as const, version: terminalVersion === 2 ? terminalCandidate ? 19 as const : 18 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), ...(terminalVersion === 2 ? { reassessmentProtocol: terminalCandidate ? 3 as const : 2 as const } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
       ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),
       criticSystem, repairSystem: repairPrompt,
       criticInput: [...((terminalEvidence?.verdictProtocol === 4 || terminalEvidence?.verdictProtocol === 5 || terminalEvidence?.verdictProtocol === 6) ? [freshContinuityResponseContract(false, !!terminalCandidate, terminalEvidence.verdictProtocol, { previous: source?.content ?? null, current: compilation.chapter.content, terminalEvidence }, terminalCandidate)] : []), `章节：《${compilation.chapter.title}》`,
@@ -360,6 +363,9 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
     const price = await resolveDurableTokenPrice(lease, `${input.operationKey}:critic-price`, resolved.selection.tier, resolved.runtime.multiplierBps)
     work = { ...work, route: auxiliaryRouteForRuntime(resolved.runtime, resolved.selection, CONTINUITY_MAX_OUTPUT_TOKENS), price }
   }
+  if (!recoveredWork && work.kind === 'check' && work.reassessmentProtocol === 3 && work.sourceBodies && work.terminalCandidate) work = { ...work,
+    criticSystem: continuityResponseSystem(work.criticSystem, continuityResponseContract(work.sourceBodies, work.terminalCandidate)),
+    criticInput: continuityResponseInput(work.criticInput, work.sourceBodies, work.terminalCandidate) }
   work = workSchema.parse(work)
   return work
 }

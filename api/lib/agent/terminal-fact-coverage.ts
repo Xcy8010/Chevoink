@@ -95,12 +95,12 @@ export const addressedTerminalDispositionSchema = z.union([
 /** Quoted source existence is mechanical; the fresh critic owns whether the
  * whole fact ended or is represented by a new independently supported claim. */
 export function inspectTerminalCoverage(input: TerminalCoverageInput | undefined, raw: unknown,
-  candidate: TerminalCandidate, verdicts: Array<{ path: string; verdict: string }>, segments: Array<{ segmentId: string; quote: string }>, addressed = false) {
+  candidate: TerminalCandidate, verdicts: Array<{ path: string; verdict: string }>, segments: Array<{ segmentId: string; quote: string }>, addressed = false, diagnostics?: Array<{ code: string; path?: string }>) {
   if (!input) return undefined
   let normalized = raw ?? (input.obligations.length ? undefined : [])
   if (addressed) {
     const selected = z.array(addressedTerminalDispositionSchema).max(200).safeParse(normalized)
-    if (!selected.success) return null
+    if (!selected.success) { diagnostics?.push({ code: 'fact_disposition_schema_invalid', path: 'terminalDispositions' }); return null }
     const facts = terminalCandidateFacts(candidate)
     normalized = selected.data.map(item => {
       const { sourceEvidence, ...rest } = item
@@ -116,17 +116,22 @@ export function inspectTerminalCoverage(input: TerminalCoverageInput | undefined
   }
   const parsed = z.array(terminalDispositionSchema).max(200).safeParse(normalized)
   if (!parsed.success || parsed.data.length !== input.obligations.length
-    || new Set(parsed.data.map(item => item.id)).size !== parsed.data.length) return null
-  if (parsed.data.some(item => {
+    || new Set(parsed.data.map(item => item.id)).size !== parsed.data.length) {
+    diagnostics?.push({ code: 'fact_disposition_coverage_invalid', path: 'terminalDispositions' }); return null
+  }
+  if (parsed.data.some((item, index) => {
+    const invalid = (code: string, suffix = '') => { diagnostics?.push({ code, path: `terminalDispositions.${index}${suffix}` }); return true }
     const obligation = input.obligations.find(fact => fact.id === item.id)
-    if (!obligation || item.sourceEvidence.some(ref => input.version === 2 ? !terminalQuoteRange(ref, segments)
-      : !segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote)))) return true
-    if (item.outcome === 'unknown') return item.candidatePath !== undefined
-    if (item.outcome === 'ended') return item.candidatePath !== undefined || !item.sourceEvidence.length
+    if (!obligation) return invalid('fact_disposition_address_invalid', '.id')
+    if (item.sourceEvidence.some(ref => input.version === 2 ? !terminalQuoteRange(ref, segments)
+      : !segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote)))) return invalid('fact_disposition_evidence_invalid', '.sourceEvidence')
+    if (item.outcome === 'unknown') return item.candidatePath !== undefined && invalid('unknown_disposition_has_target', '.candidatePath')
+    if (item.outcome === 'ended') return (item.candidatePath !== undefined || !item.sourceEvidence.length) && invalid('ended_disposition_invalid', '.sourceEvidence')
     const match = /^exitState\.(knowledge|body|objects|relationships|openLoops)\.([0-9]+)$/u.exec(item.candidatePath ?? '')
-    return !match || (match[1] !== obligation.field && (input.version !== 2 || !item.sourceEvidence.length))
-      || !candidate.exitState[field.parse(match[1])][Number(match[2])]
-      || !verdicts.some(verdict => verdict.path === item.candidatePath && verdict.verdict === 'supported')
+    if (!match || (match[1] !== obligation.field && (input.version !== 2 || !item.sourceEvidence.length))
+      || !candidate.exitState[field.parse(match[1])][Number(match[2])]) return invalid('replacement_target_invalid', '.candidatePath')
+    return !verdicts.some(verdict => verdict.path === item.candidatePath && verdict.verdict === 'supported')
+      && invalid('replacement_target_not_supported', '.candidatePath')
   })) return null
   return { ...(input.version === 2 ? { version: 2 as const } : {}), complete: parsed.data.every(item => item.outcome !== 'unknown'), dispositions: parsed.data }
 }

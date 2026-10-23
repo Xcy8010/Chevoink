@@ -108,10 +108,14 @@ describe('严谨创作落实连续性警告', () => {
     vi.spyOn(originalRequest, 'readOriginalTaskRequest').mockResolvedValue({ prompt: '写完章节', spec: { scope: { terminalEvidenceProtocol: 2, continuityEvidenceProtocol: 1 } }, taskId: 'task', sourceRunId: 'r', parentRunId: null } as never)
     vi.spyOn(continuitySource, 'readCompilerContinuitySource').mockResolvedValue(inheritedSource())
     const canonical = terminalCandidateSchema.parse({ exitState: { openLoops: ['过滤泵检修等零件'] } })
-    f.critic.mockResolvedValue(JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({
+    const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({
       kind, result: 'not_applicable', reason: '仅核对持续事实。', findingIndexes: [],
     })), terminalVerdicts: [], terminalProofVerdicts: [{ proofIndex: 0, currentState: 'unchanged',
-      reason: '独立核对本章未解除或改变原持续事实。' }] }))
+      reason: '独立核对本章未解除或改变原持续事实。' }] })
+    f.critic.mockImplementation(async (_system, _content, options) => {
+      options?.onObservedCompletion?.({ usageId: 'synthetic-complete-review', content: raw, finishReason: 'stop', toolCalls: [] })
+      return raw
+    })
     vi.mocked(compiler.validateStoryContinuity).mockImplementation(async input => ({ ...f.validation,
       terminalCandidate: input.terminalCandidate, coverage: input.coverage, independentCheck: input.independentCheck,
     }) as Awaited<ReturnType<typeof compiler.validateStoryContinuity>>)

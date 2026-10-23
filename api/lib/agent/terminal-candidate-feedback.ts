@@ -28,10 +28,12 @@ export function terminalCandidateCorrection(validation: unknown, content: string
     const response: unknown = JSON.parse(raw.content)
     if (typeof response !== 'string' || response.length !== audit.characterCount
       || createHash('sha256').update(response).digest('hex') !== audit.contentHash) return null
+    const responseContract = audit.responseContract === 3 ? 3 as const : undefined
+    if (audit.responseContract !== undefined && responseContract === undefined || responseContract === 3 && context.verdictProtocol !== 6) return null
     const diagnostics: Parameters<typeof inspectTerminalReview>[5] = []
-    if (inspectTerminalReview(candidate, content, response, true, context, diagnostics) || !diagnostics.length) return null
+    if (inspectTerminalReview(candidate, content, response, true, context, diagnostics, responseContract ? { responseContract } : {}) || !diagnostics.length) return null
     const wire: unknown = parseQualityJsonObject(response, 'continuity', 3)
-    const bound = context.verdictProtocol === 6 && object(wire) ? bindTerminalReviewAddresses(object(wire)!, candidate, context) : null
+    const bound = context.verdictProtocol === 6 && object(wire) ? bindTerminalReviewAddresses(object(wire)!, candidate, context, responseContract) : null
     if (context.verdictProtocol === 6 && !bound?.success) return null
     const parsed: unknown = bound?.success ? bound.record : wire
     const verdicts = z.array(terminalJointFactVerdictSchema).max(200).safeParse(object(parsed)?.terminalVerdicts)
@@ -53,7 +55,7 @@ export function terminalCandidateCorrection(validation: unknown, content: string
     // A rejected address is evidence of an unresolved binding, never evidence
     // that the claimed fact is true or false. Only exhaustive, uniquely mapped
     // candidate responses can feed the existing bounded processing episode.
-    const addresses = terminalQuoteAddressDiagnostics(response, content, context, candidate)
+    const addresses = terminalQuoteAddressDiagnostics(response, content, context, candidate, responseContract)
       ?.filter(item => item.reason !== 'relocated' && facts.some(fact => fact.path === item.path)) ?? []
     const pending = [...diagnostics.flatMap(item => item.path && inheritedPaths.includes(item.path)
       ? [{ path: item.path, reason: item.code }] : []),

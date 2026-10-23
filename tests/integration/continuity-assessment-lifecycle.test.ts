@@ -4,7 +4,7 @@ import * as credits from '../../api/lib/credits.js'
 import { tokenPriceSchema } from '../../api/lib/billing/token-price.js'
 import { priceTokenEvidence } from '../../api/lib/billing/reservation-policy.js'
 import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
-import { continuityValidateTool, runLegacyContinuityReview } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { chapterBridgeCommitTool, continuityValidateTool, runLegacyContinuityReview } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { readContinuedContinuityRecovery } from '../../api/lib/agent/legacy-continuity-recovery.js'
 import { readContinuedReviewRecovery } from '../../api/lib/agent/continued-review-recovery.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
@@ -21,6 +21,8 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { readContinuedContinuityEvidence } from '../../api/lib/agent/continued-continuity-evidence.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { withHumanAdmission } from '../../api/lib/agent/goal-activation-authority.js'
+import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
+import { currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { readQualityReviewAdmission } from '../../api/lib/agent/quality-review-admission.js'
 
 const runtime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1',
@@ -89,6 +91,18 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     const oldParser = vi.spyOn(continuityParser, 'inspectContinuityResponse').mockImplementation((...args) =>
       parse(args[0], args[1], args[2], args[3], args[4], args[5], { frozenCurrentMetadata: true }))
     const callAt = new Date()
+    // Reproduce an actually frozen old request. New v6 requests now use 3;
+    // changing that producer must not silently upgrade an existing reservation.
+    const frozen: lifecycle.LegacyAssessmentInput = { chapterId: chapter.id, revision: chapter.revision, bodies: input.bodies,
+      system: input.system, content: input.content, parserVersion: 8, sourceScope: input.sourceScope, terminalCandidate: candidate,
+      reassessmentProtocol: 2, targetType: 'chapter', targetId: chapter.id }
+    expect(await prisma.$transaction(tx => lifecycle.reserveLegacyContinuityAssessment(tx, ctx, frozen, input.assertCurrent))).toBe('new')
+    await generateReviewCompletion(input.system, input.content, { ...input.options, agentRunId: ctx.runId,
+      beforeProviderDispatch: async id => { await prisma.$transaction(tx => lifecycle.bindLegacyContinuityRequest(tx, ctx, frozen, id, 'primary', input.assertCurrent)) },
+    })
+    const primaryUsage = await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId, action: 'agent3ContinuityCritic' } })
+    await prisma.$transaction(tx => lifecycle.observeLegacyContinuityAssessment(tx, ctx, frozen,
+      { content: raw, finishReason: 'stop', toolCalls: [] }, [primaryUsage.id], 'primary'))
     const old = await runLegacyContinuityReview(ctx, input)
     oldParser.mockRestore()
     expect(old.complete).toBe(false)
@@ -121,6 +135,139 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     await expect(prisma.$transaction(tx => lifecycle.readLegacyContinuityAssessment(tx, ctx, reservation.input as lifecycle.LegacyAssessmentInput)))
       .rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
     expect(fetcher).toHaveBeenCalledTimes(2)
+  }))
+  it('keeps a closed old2 failure frozen and admits contract3 only after a real author Continue', () => fixture(async f => {
+    const { ctx } = await retryFixture(f, new AbortController())
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const candidate = terminalCandidateSchema.parse({ exitState: { action: '人物走进门。' } })
+    const bodies = { previous: null, current: body, terminalEvidence: terminalEvidenceContext(chapter, null, 2, 1,
+      { version: 2, taskId: f.spec.id, chapterId: chapter.id, obligations: [] }, 6, 2) }
+    const verdict = { claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: '人物走进门' }] }
+    const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
+      ({ kind, result: 'clear', reason: 'Synthetic complete body check.', findingIndexes: [] })),
+      terminalVerdicts: [verdict, verdict], terminalProofVerdicts: [], terminalDispositions: [] })
+    const input = { chapterId: chapter.id, revision: chapter.revision, bodies, system: 'Synthetic complete continuity check.', content: body,
+      parserVersion: 8 as const, terminalCandidate: candidate, sourceScope: compilerEvidenceScope(chapter, null),
+      options: { modelRuntime: runtime, explicitModelSelection: true, userId: f.userId, novelId: f.novelId, chapterId: chapter.id,
+        action: 'agent3ContinuityCritic', targetType: 'chapter' as const, targetId: chapter.id, signal: ctx.signal },
+      assertCurrent: async () => { expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(body) } }
+    const frozen: lifecycle.LegacyAssessmentInput = { chapterId: chapter.id, revision: chapter.revision, bodies,
+      system: input.system, content: input.content, parserVersion: 8, sourceScope: input.sourceScope, terminalCandidate: candidate,
+      reassessmentProtocol: 2, targetType: 'chapter', targetId: chapter.id }
+    await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', payload: { callId: ctx.callId, toolName: 'continuity_validate', args: { chapterId: chapter.id } } } })
+    expect(await prisma.$transaction(tx => lifecycle.reserveLegacyContinuityAssessment(tx, ctx, frozen, input.assertCurrent))).toBe('new')
+    const fetcher = vi.fn(async () => completion(raw)); vi.stubGlobal('fetch', fetcher)
+    await generateReviewCompletion(input.system, input.content, { ...input.options, agentRunId: ctx.runId,
+      beforeProviderDispatch: async id => { await prisma.$transaction(tx => lifecycle.bindLegacyContinuityRequest(tx, ctx, frozen, id, 'primary', input.assertCurrent)) },
+    })
+    const primary = await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId, action: 'agent3ContinuityCritic' } })
+    await prisma.$transaction(tx => lifecycle.observeLegacyContinuityAssessment(tx, ctx, frozen, { content: raw, finishReason: 'stop', toolCalls: [] }, [primary.id], 'primary'))
+    const old = await runLegacyContinuityReview(ctx, input)
+    expect(old.complete).toBe(false); expect(old.audit).not.toHaveProperty('responseContract')
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.result', payload: { callId: ctx.callId,
+      toolName: 'continuity_validate', ok: false, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED' } } })
+    const oldPayments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const oldArtifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
+    expect(oldPayments).toHaveLength(2)
+    for (const payment of oldPayments) expect(payment).toMatchObject({ billingStatus: 'settled', usageSource: 'reported', reservedCreditMilli: 0 })
+    const continued = { ...ctx, callId: 'new-contract-after-continue' }
+    await expect(runLegacyContinuityReview(continued, input)).rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'run.paused', payload: {} } })
+    const start = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4, type: 'run.started', payload: { authorContinue: { eventId: pause.id, afterSeq: 3 } } } })
+    expect(start.createdAt.getTime()).toBeGreaterThan(Math.max(...oldArtifacts.map(row => row.createdAt.getTime())))
+    expect(await prisma.$transaction(async tx => readQualityReviewAdmission(tx, await tx.agentRun.findUniqueOrThrow({ where: { id: f.runId } }))))
+      .toEqual({ id: `author-continue:${pause.id}`, at: start.createdAt })
+    expect(await runLegacyContinuityReview(continued, input)).toMatchObject({ complete: true, audit: { responseContract: 3 } })
+    expect(await runLegacyContinuityReview(continued, input)).toMatchObject({ complete: true, audit: { responseContract: 3 } })
+    expect(fetcher).toHaveBeenCalledTimes(3)
+    expect(await prisma.aiUsageLog.findMany({ where: { id: { in: oldPayments.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(oldPayments)
+    expect(await prisma.agentArtifact.findMany({ where: { id: { in: oldArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(oldArtifacts)
+    const next = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, metadata: { path: ['callId'], equals: continued.callId } } })
+    expect(next.metadata).toMatchObject({ input: { reassessmentProtocol: 3 } })
+  }))
+  it('persists a new contract3 duplicate projection and commits the same reviewed chapter without buying another check', () => fixture(async f => {
+    const { ctx, compilation } = await retryFixture(f, new AbortController())
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const candidate = terminalCandidateSchema.parse({ exitState: { action: '人物走进门。' } })
+    const verdict = { claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: '人物走进门' }] }
+    const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
+      ({ kind, result: 'clear', reason: 'Synthetic current-body action check.', findingIndexes: [] })),
+      terminalVerdicts: [verdict, verdict], terminalProofVerdicts: [], terminalDispositions: [] })
+    const fetcher = vi.fn(async () => completion(raw))
+    vi.stubGlobal('fetch', fetcher)
+    const result = await continuityValidateTool.execute(ctx, { compilationId: compilation.id, terminalState: candidate })
+    expect(result, JSON.stringify(result)).not.toMatchObject({ outcome: 'failed' })
+    const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+    expect(saved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { responseContract: 3,
+      rawResponse: { content: JSON.stringify(raw) }, responseNormalization: { repeated: [{ field: 'terminalVerdicts', index: 1, originalIndex: 0, address: 0 }] } } })
+    const audit = (saved.validation as { continuityCriticResponse: { terminalEvidence: Parameters<typeof currentTerminalReview>[2] } }).continuityCriticResponse
+    expect(currentTerminalReview(saved.validation, body, audit.terminalEvidence)).toMatchObject({ supported: true })
+    await persistHumanityQualityReport({ ...ctx, chapterId: chapter.id, compilationId: compilation.id, chapterRevision: chapter.revision, mode: 'balanced',
+      criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
+    expect(await chapterBridgeCommitTool.execute(ctx, { compilationId: compilation.id })).not.toMatchObject({ outcome: 'failed' })
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } }))
+      .toMatchObject({ status: 'completed', bridge: { targetRevision: chapter.revision } })
+    const paid = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
+    const reservation = artifacts.map(row => row.metadata as Record<string, unknown>).find(row => row.continuityAssessmentRequestKey)!
+    expect(reservation.input).toMatchObject({ reassessmentProtocol: 3 })
+    expect(await prisma.$transaction(tx => lifecycle.readReusableLegacyContinuityAssessment(tx, ctx, reservation.input as lifecycle.LegacyAssessmentInput)))
+      .toMatchObject({ complete: true, audit: { responseContract: 3 } })
+    expect(await chapterBridgeCommitTool.execute(ctx, { compilationId: compilation.id })).not.toMatchObject({ outcome: 'failed' })
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(paid).toHaveLength(1); expect(ledger).toHaveLength(1)
+    expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(paid)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
+    expect(await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })).toEqual(artifacts)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: body, revision: chapter.revision })
+  }, undefined, '写本章', { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2,
+    terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }))
+
+  it.each(['unknown-second', 'missing-second-frame', 'wrong-contract-marker'] as const)('contract3 field recovery refuses reuse and resend after %s', scenario => fixture(async f => {
+    const { ctx, compilation } = await retryFixture(f, new AbortController())
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const candidate = terminalCandidateSchema.parse({ exitState: { action: '人物走进门。' } })
+    const bodies = { previous: null, current: body, terminalEvidence: terminalEvidenceContext(chapter, null, 2, 1,
+      { version: 2, taskId: f.spec.id, chapterId: chapter.id, obligations: [] }, 6, 2) }
+    const wire = { findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
+      ({ kind, result: 'clear', reason: 'Synthetic complete current-body check.', findingIndexes: [] })),
+      terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: '人物走进门' }] }],
+      terminalProofVerdicts: [], terminalDispositions: [] }
+    const raw = JSON.stringify(wire), bad = JSON.stringify({ ...wire, terminalProofVerdicts: [{ proofIndex: 0, currentState: 'unchanged', reason: 'Wrong historical table.' }] })
+    const fetcher = vi.fn(async () => completion(fetcher.mock.calls.length === 1 ? bad : raw))
+    vi.stubGlobal('fetch', fetcher)
+    const input = { chapterId: chapter.id, revision: chapter.revision, bodies, system: 'Synthetic complete continuity check.', content: body,
+      parserVersion: 8 as const, terminalCandidate: candidate, sourceScope: compilerEvidenceScope(chapter, null),
+      options: { modelRuntime: runtime, explicitModelSelection: true, userId: f.userId, novelId: f.novelId, chapterId: chapter.id,
+        action: 'agent3ContinuityCritic', targetType: 'chapter' as const, targetId: chapter.id, signal: ctx.signal },
+      assertCurrent: async () => { expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(body) } }
+    const first = await runLegacyContinuityReview(ctx, input)
+    expect(first).toMatchObject({ complete: true, audit: { responseContract: 3, reassessment: { kind: 'field_repair' } } })
+    expect(JSON.parse(first.audit.rawResponse.content)).toBe(raw)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    const payments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    expect(payments).toHaveLength(2)
+    const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId } })
+    const reservation = artifacts.map(row => row.metadata as Record<string, unknown>).find(row => row.continuityAssessmentRequestKey)!
+    if (scenario === 'unknown-second') await prisma.aiUsageLog.update({ where: { id: payments.find(row => row.action === 'agent3ContinuityCriticSecondPass')!.id },
+      data: { billingStatus: 'pending_usage', usageSource: 'unknown' } })
+    else if (scenario === 'missing-second-frame') await prisma.agentArtifact.delete({ where: { id: artifacts.find(row => { const meta = row.metadata as Record<string, unknown>; return meta.assessmentResponseKey && meta.stage === 'reassessment' })!.id } })
+    else {
+      const frame = artifacts.find(row => { const meta = row.metadata as Record<string, unknown>; return meta.assessmentResponseKey && meta.stage === 'first' })!
+      const meta = structuredClone(frame.metadata) as Record<string, unknown>
+      delete (meta.audit as Record<string, unknown>).responseContract
+      await prisma.agentArtifact.update({ where: { id: frame.id }, data: { metadata: runtimeJson(meta).value } })
+    }
+    const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    expect(await prisma.$transaction(tx => lifecycle.readReusableLegacyContinuityAssessment(tx, ctx, reservation.input as lifecycle.LegacyAssessmentInput))).toBeNull()
+    if (scenario === 'wrong-contract-marker') await expect(runLegacyContinuityReview(ctx, input)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    else expect(await runLegacyContinuityReview(ctx, input)).toMatchObject({ complete: false })
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation).toBeNull()
   }))
   it.each(['known-new-body', 'known-new-body-no-candidate', 'known-new-candidate', 'delayed-call-persistence', 'no-author-admission', 'unknown-first', 'unknown-second', 'incomplete-second', 'focus-only', 'revision-only'] as const)(
     'a known completed failure fences its reviewed input without resetting the original contract or fees: %s', scenario => fixture(async f => {

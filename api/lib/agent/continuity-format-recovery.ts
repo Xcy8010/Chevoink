@@ -8,7 +8,7 @@ import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './cont
 import { inspectTerminalReview, terminalQuoteAddressDiagnostics, terminalResponseFields, type TerminalCandidate, type TerminalReviewDiagnostic } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
 import { validContinuitySemanticChecks } from './terminal-evidence-context.js'
-import { terminalAddressResponseFields } from './terminal-review-addresses.js'
+import { terminalAddressResponseFields, normalizeTerminalResponseRows } from './terminal-review-addresses.js'
 
 const sourceReferenceSchema = z.object({ source: z.enum(['previous', 'current']), segmentId: z.string().min(1).optional(), quote: z.string().min(2).max(360).optional() })
   .refine(value => value.segmentId !== undefined || value.quote !== undefined)
@@ -30,7 +30,7 @@ function normalize(value: unknown, bodies: ContinuityBodies | undefined, parserV
 }
 
 /** Mechanical envelope compatibility; no new model call or missing-content reconstruction. */
-export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies, responseComplete = true, parserVersion: 3 | 4 | 5 | 6 | 7 | 8 = 3, terminalCandidate?: TerminalCandidate, sourceScope?: ContinuitySourceScope, options: { frozenCurrentMetadata?: true } = {}) {
+export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies, responseComplete = true, parserVersion: 3 | 4 | 5 | 6 | 7 | 8 = 3, terminalCandidate?: TerminalCandidate, sourceScope?: ContinuitySourceScope, options: { frozenCurrentMetadata?: true; responseContract?: 3 } = {}) {
   const sourceRelocations: ContinuitySourceRelocation[] = []
   let classification = responseComplete ? 'json_invalid' : 'response_incomplete'
   let record: Record<string, unknown> | null = null
@@ -101,14 +101,20 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
     }
   }
   if (raw.length > MAX_AUDIT_CHARS) classification = 'response_too_large'
+  const validContract = options.responseContract === undefined || options.responseContract === 3
+    && parserVersion === 8 && bodies?.terminalEvidence?.verdictProtocol === 6 && !!terminalCandidate
+  if (!validContract) classification = 'response_contract_invalid'
+  const projection = record && options.responseContract === 3 && validContract ? normalizeTerminalResponseRows(record) : null
+  if (projection) record = projection.record
   const indexed = bodies?.terminalEvidence?.verdictProtocol === 6
-  const freshFields = indexed && terminalCandidate ? { ...terminalResponseFields(true, 5), ...terminalAddressResponseFields(terminalCandidate, bodies!.terminalEvidence!) }
+  const freshFields = indexed && terminalCandidate ? { ...terminalResponseFields(true, 5), ...terminalAddressResponseFields(terminalCandidate, bodies!.terminalEvidence!, undefined, options.responseContract === 3) }
     : bodies?.terminalEvidence?.verdictProtocol === 4 || bodies?.terminalEvidence?.verdictProtocol === 5 ? terminalResponseFields(!!terminalCandidate, bodies.terminalEvidence.verdictProtocol, undefined, bodies.terminalEvidence.proposalChanges) : null
   if (classification === 'complete' && indexed && !terminalCandidate) classification = 'terminal_invalid'
   if (classification === 'complete' && parserVersion === 8 && (!bodies?.terminalEvidence
     || freshFields && !freshFields.semanticChecks.safeParse(record?.semanticChecks).success
     || !validContinuitySemanticChecks(record?.semanticChecks, findings, bodies.terminalEvidence.factCoverage?.version, (bodies.terminalEvidence.verdictProtocol === 4 || bodies.terminalEvidence.verdictProtocol === 5 || indexed)))) classification = 'semantic_invalid'
   const terminalReviewDiagnostics: TerminalReviewDiagnostic[] = []
+  if (projection?.error) { if (classification === 'complete') classification = 'terminal_invalid'; terminalReviewDiagnostics.push({ code: 'response_projection_invalid', message: projection.error }) }
   if (classification === 'complete' && freshFields) {
     const parsed = z.object(freshFields).passthrough().safeParse(record)
     if (!parsed.success) {
@@ -117,14 +123,18 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
       // full-reassessment channel; old frozen request renderings stay identical.
       if (bodies?.terminalEvidence?.verdictProtocol === 5 || indexed) terminalReviewDiagnostics.push(...parsed.error.issues.slice(0, 8).map(issue => ({
         code: issue.code, path: issue.path.join('.'),
+        ...(options.responseContract === 3 ? { message: issue.message,
+          ...((issue.code === 'too_big' || issue.code === 'too_small') && issue.path.length === 1 && Array.isArray(record?.[String(issue.path[0])])
+            ? { expectedCount: Number(issue.code === 'too_big' ? issue.maximum : issue.minimum), actualCount: (record![String(issue.path[0])] as unknown[]).length } : {}) } : {}),
       })))
     }
   }
   if (classification === 'complete' && terminalCandidate && (!bodies || !inspectTerminalReview(terminalCandidate, bodies.current, raw, responseComplete,
     parserVersion === 8 ? bodies.terminalEvidence : undefined, terminalReviewDiagnostics, options))) classification = 'terminal_invalid'
-  const audit = { version: 1, parserVersion, classification, unwrapped, ...(parserVersion >= 4 ? { sourceRelocations } : {}),
+  const audit = { version: 1, parserVersion, classification, unwrapped, ...(options.responseContract === 3 ? { responseContract: 3 as const } : {}),
+    ...(projection?.normalization ? { responseNormalization: projection.normalization } : {}), ...(parserVersion >= 4 ? { sourceRelocations } : {}),
     ...(terminalReviewDiagnostics.length ? { terminalReviewDiagnostics } : {}),
-    ...(parserVersion === 8 && bodies?.terminalEvidence?.quoteAddressProtocol === 1 ? { terminalAddressDiagnostics: terminalQuoteAddressDiagnostics(raw, bodies.current, bodies.terminalEvidence, terminalCandidate) } : {}),
+    ...(parserVersion === 8 && bodies?.terminalEvidence?.quoteAddressProtocol === 1 ? { terminalAddressDiagnostics: terminalQuoteAddressDiagnostics(raw, bodies.current, bodies.terminalEvidence, terminalCandidate, options.responseContract) } : {}),
     ...(parserVersion >= 7 && sourceScope ? { sourceScope } : {}),
     ...(parserVersion === 8 && bodies?.terminalEvidence ? { terminalEvidence: bodies.terminalEvidence } : {}),
     ...(terminalCandidate ? { terminalCandidate, terminalContentHash: bodies ? runtimeJson({ content: bodies.current }).hash : null } : {}),
@@ -134,7 +144,24 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
 }
 
 /** Internal model observation only; public summaries and saved raw responses stay intact. */
-export function continuityFailureOutput(audit: { classification?: string; terminalReviewDiagnostics?: TerminalReviewDiagnostic[] } | undefined, fallback: string) {
-  if (audit?.classification !== 'terminal_invalid' || !audit.terminalReviewDiagnostics?.length) return fallback
-  return `${fallback}\n已接收独立响应，终态证据绑定未通过：${JSON.stringify(audit.terminalReviewDiagnostics)}。核对对应候选与冻结证据，使用准确的完整 terminalState 重检；保留正文、原预算及失败记录。`
+export function continuityFailureOutput(audit: Partial<ReturnType<typeof inspectContinuityResponse>['audit']> | undefined, fallback: string, bodies?: ContinuityBodies) {
+  if (!audit) return fallback
+  let latest: { classification?: string; terminalReviewDiagnostics?: TerminalReviewDiagnostic[] } = { classification: audit.classification, terminalReviewDiagnostics: audit.terminalReviewDiagnostics }
+  const second = (audit as { reassessment?: { classification?: string; rawResponse?: { complete?: boolean; content?: string };
+    diagnostics?: { classification: string; terminalReviewDiagnostics?: TerminalReviewDiagnostic[]; fixedFieldError?: string } } }).reassessment
+  if (second?.rawResponse?.complete && typeof second.rawResponse.content === 'string') {
+    if (audit.responseContract === 3 && second.diagnostics) latest = second.diagnostics
+    else if (bodies && audit.parserVersion) try {
+      const raw: unknown = JSON.parse(second.rawResponse.content)
+      if (typeof raw === 'string') {
+        const inspected = inspectContinuityResponse(raw, { ...bodies, ...(audit.terminalEvidence ? { terminalEvidence: audit.terminalEvidence } : {}) }, true, audit.parserVersion, audit.terminalCandidate, audit.sourceScope,
+          audit.responseContract === 3 ? { responseContract: 3 } : {})
+        latest = inspected.audit
+      }
+    } catch { /* Original and second raw remain intact; no invented diagnosis. */ }
+  }
+  if (audit.responseContract === 3 && second?.diagnostics?.fixedFieldError) return `${fallback}\n最新复评改变了已冻结的独立意见或语义核查字段，未接受：${second.diagnostics.fixedFieldError}。保留原有效判断，不重复改稿或静默丢弃意见。`
+  if (latest.classification !== 'terminal_invalid' || !latest.terminalReviewDiagnostics?.length) return fallback
+  if (!second && audit.responseContract !== 3) return `${fallback}\n已接收独立响应，终态证据绑定未通过：${JSON.stringify(latest.terminalReviewDiagnostics)}。核对对应候选与冻结证据，使用准确的完整 terminalState 重检；保留正文、原预算及失败记录。`
+  return `${fallback}\n${second ? '最新一次复评' : '独立响应'}的具体合同诊断：${JSON.stringify(latest.terminalReviewDiagnostics)}。先纠正对应响应字段、冻结目录或候选，不重复改写正文；若存在已确认事实冲突再按真实意见处理。保留原预算和所有原始记录。`
 }

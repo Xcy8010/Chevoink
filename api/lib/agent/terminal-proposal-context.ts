@@ -1,3 +1,4 @@
+import { continuityReassessmentDiagnostics } from './continuity-response-contract.js'
 import { DataAccessError } from '../prisma.js'
 import { z } from 'zod'
 import { runtimeJson } from './runtime-common.js'
@@ -138,8 +139,10 @@ function authenticFailedReport(validation: unknown, content: string, previous: s
     // Match the entire actual failure under either its current or frozen
     // metadata rule. Never relabel a failure or rewrite a stored audit.
     const bodies = { previous, current: content, terminalEvidence }
-    const reports = [inspectContinuityResponse(response, bodies, true, 8, candidate, scope.data),
-      inspectContinuityResponse(response, bodies, true, 8, candidate, scope.data, { frozenCurrentMetadata: true })]
+    if (audit.responseContract !== undefined && audit.responseContract !== 3) return false
+    const responseOptions = audit.responseContract === 3 ? { responseContract: 3 as const } : {}
+    const reports = [inspectContinuityResponse(response, bodies, true, 8, candidate, scope.data, responseOptions),
+      inspectContinuityResponse(response, bodies, true, 8, candidate, scope.data, { frozenCurrentMetadata: true, ...responseOptions })]
     // The lifecycle adds this dispatch identity after parsing. It is retained
     // and checked by the reservation layer, not part of the parser's audit.
     const { reassessment, assessmentRequest, ...first } = audit
@@ -153,8 +156,15 @@ function authenticFailedReport(validation: unknown, content: string, previous: s
     // an incomplete second response is still unknown and cannot enter here.
     const second = z.object({ version: z.literal(1), classification: z.literal('invalid'), rawResponse: z.object({
       version: z.literal(1), encoding: z.literal('json-string'), content: z.string(), complete: z.literal(true),
-    }).strict() }).strict().safeParse(reassessment)
+    }).strict(), ...(audit.responseContract === 3 ? { diagnostics: z.object({ classification: z.string(),
+      fixedFieldError: z.string().optional(), terminalReviewDiagnostics: z.array(z.object({ code: z.string(), path: z.string().optional(),
+        referenceIndex: z.number().optional(), segmentId: z.string().optional(), message: z.string().optional(), expectedCount: z.number().optional(), actualCount: z.number().optional(), expectedFact: z.object({ field: z.string(), claim: z.string() }).optional() }).strict()) }).strict().optional() } : {}) }).strict().safeParse(reassessment)
     if (!second.success || typeof JSON.parse(second.data.rawResponse.content) !== 'string') return false
+    if (audit.responseContract === 3 && 'diagnostics' in second.data && second.data.diagnostics !== undefined) {
+      const original = reports.find(report => !report.complete && runtimeJson(report.audit).hash === runtimeJson(first).hash)
+      if (!original || runtimeJson(second.data.diagnostics).hash !== runtimeJson(continuityReassessmentDiagnostics(original,
+        JSON.parse(second.data.rawResponse.content) as string, bodies)).hash) return false
+    }
     return matches()
   } catch { return false }
 }

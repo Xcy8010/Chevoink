@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { runtimeJson } from './runtime-common.js'
 import { terminalCandidateSchema, type TerminalCandidate } from './terminal-candidate-contract.js'
 import type { TerminalEvidenceContext } from './terminal-evidence-context.js'
 import { terminalCandidateFacts } from './terminal-fact-identity.js'
@@ -35,7 +36,7 @@ const exhaustive = <T extends z.ZodType>(row: T, count: number, key: string) => 
 
 /** The wire has no claim/proof/proposal hashes to transcribe. Complete sets,
  * strict row shapes and all semantic/evidence checks remain mandatory. */
-export function terminalAddressResponseFields(candidate: TerminalCandidate, context: TerminalEvidenceContext, legalSegmentIds?: string[]) {
+export function terminalAddressResponseFields(candidate: TerminalCandidate, context: TerminalEvidenceContext, legalSegmentIds?: string[], conditionalDispositions = false) {
   const catalog = terminalReviewAddressCatalog(candidate, context)
   const source = legalSegmentIds ? terminalSpanVerdictSchema.shape.sourceEvidence.element.extend({ segmentId: legalSegmentIds.length
     ? z.enum(legalSegmentIds as [string, ...string[]]) : z.never() }) : terminalSpanVerdictSchema.shape.sourceEvidence.element
@@ -49,18 +50,58 @@ export function terminalAddressResponseFields(candidate: TerminalCandidate, cont
   const proposal = terminalProposalDispositionSchema.omit({ id: true, candidateFactId: true }).extend({
     proposalIndex: address(catalog.proposals.length), candidateIndex: address(catalog.claims.length).optional(),
   }).strict()
+  // New requests expose exactly the same outcome/target constraints enforced
+  // by inspectTerminalCoverage, rather than advertising values it must reject.
+  const persistent = catalog.claims.filter(item => ['knowledge', 'body', 'objects', 'relationships', 'openLoops'].includes(item.field))
+  const replacementAddress = persistent.length ? z.union(persistent.map(item => z.literal(item.claimIndex))) : z.never()
+  const dispositionBase = disposition.omit({ outcome: true, candidateIndex: true })
+  const legalDisposition: z.ZodType<z.infer<typeof disposition>> = conditionalDispositions ? z.discriminatedUnion('outcome', [
+    dispositionBase.extend({ outcome: z.literal('replaced'), candidateIndex: replacementAddress }).strict(),
+    dispositionBase.extend({ outcome: z.literal('ended'), sourceEvidence: z.array(dispositionSource).min(1).max(8) }).strict(),
+    dispositionBase.extend({ outcome: z.literal('unknown') }).strict(),
+  ]) : disposition
   const proofs = exhaustive(proof, catalog.proofs.length, 'proofIndex')
-  const dispositions = exhaustive(disposition, catalog.obligations.length, 'obligationIndex')
+  const dispositions = exhaustive(legalDisposition, catalog.obligations.length, 'obligationIndex')
   return { terminalVerdicts: exhaustive(verdict, catalog.ordinary.length, 'claimIndex'),
     terminalProofVerdicts: catalog.proofs.length ? proofs : proofs.default([]),
     terminalDispositions: catalog.obligations.length ? dispositions : dispositions.default([]),
     proposalDispositions: context.proposalChanges ? exhaustive(proposal, catalog.proposals.length, 'proposalIndex') : z.never().optional() }
 }
 
+/** Protocol 3 only: repeating an identical addressed row does not create a
+ * second independent judgment. Conflicting rows, missing addresses and unknown
+ * keys survive unchanged and are rejected by the complete original contract. */
+export function normalizeTerminalResponseRows(record: Record<string, unknown>) {
+  try {
+  const repeated: Array<{ field: string; index: number; originalIndex: number; address: number }> = []
+  const normalized = { ...record }
+  for (const [field, key] of [['terminalVerdicts', 'claimIndex'], ['terminalProofVerdicts', 'proofIndex'],
+    ['terminalDispositions', 'obligationIndex'], ['proposalDispositions', 'proposalIndex']] as const) {
+    const rows = record[field]
+    if (!Array.isArray(rows)) continue
+    const seen = new Map<string, number>()
+    normalized[field] = rows.filter((row, index) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row) || !Number.isInteger(row[key])) return true
+      const identity = runtimeJson(row).hash, prior = seen.get(identity)
+      if (prior === undefined) { seen.set(identity, index); return true }
+      repeated.push({ field, index, originalIndex: prior, address: row[key] as number })
+      return false
+    })
+  }
+  return { record: repeated.length ? normalized : record, normalization: { version: 1 as const,
+    originalHash: runtimeJson(record).hash, projectionHash: runtimeJson(repeated.length ? normalized : record).hash, repeated }, error: undefined }
+  } catch { return { record, normalization: null, error: 'Response projection exceeds canonical input limits' } }
+}
+
 /** Resolve exact local addresses before the existing independent semantic
  * review. No approximate hash matching, missing-row inference or verdict repair. */
-export function bindTerminalReviewAddresses(record: Record<string, unknown>, candidate: TerminalCandidate, context: TerminalEvidenceContext) {
-  const parsed = z.object(terminalAddressResponseFields(candidate, context)).passthrough().safeParse(record)
+export function bindTerminalReviewAddresses(record: Record<string, unknown>, candidate: TerminalCandidate, context: TerminalEvidenceContext, responseContract?: 3) {
+  if (responseContract === 3) {
+    const projection = normalizeTerminalResponseRows(record)
+    if (projection.error) return { success: false as const, issues: [{ code: 'custom' as const, path: [], message: projection.error }] }
+    record = projection.record
+  }
+  const parsed = z.object(terminalAddressResponseFields(candidate, context, undefined, responseContract === 3)).passthrough().safeParse(record)
   if (!parsed.success) return { success: false as const, issues: parsed.error.issues }
   const catalog = terminalReviewAddressCatalog(candidate, context), value = parsed.data
   const ordinary = value.terminalVerdicts.flatMap(({ claimIndex, ...judgment }) => {

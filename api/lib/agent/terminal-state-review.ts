@@ -15,7 +15,7 @@ import { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalV
   terminalFactVerdictSchema, terminalJointFactVerdictSchema } from './terminal-review-shapes.js'
 export { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, terminalSpanVerdictSchema,
   terminalFactVerdictSchema, terminalJointFactVerdictSchema } from './terminal-review-shapes.js'
-import { bindTerminalReviewAddresses, terminalReviewAddressInput } from './terminal-review-addresses.js'
+import { bindTerminalReviewAddresses, terminalReviewAddressInput, normalizeTerminalResponseRows } from './terminal-review-addresses.js'
 
 /** Selection is a tool input only; saved candidates and paid audits retain their
  * original schema. A selected proof supplies identity, never a fresh verdict. */
@@ -188,14 +188,15 @@ function canonicalTerminalQuoteAddresses(items: Array<Omit<z.infer<typeof inheri
 
 /** Address-only diagnostics share the exact canonicalizer used for admission.
  * JSON/schema, transport and semantic failures retain their existing audits. */
-export function terminalQuoteAddressDiagnostics(raw: string, content: string, context?: TerminalEvidenceContext, candidate?: TerminalCandidate): TerminalQuoteAddressDiagnostic[] | undefined {
+export function terminalQuoteAddressDiagnostics(raw: string, content: string, context?: TerminalEvidenceContext, candidate?: TerminalCandidate, responseContract?: 3): TerminalQuoteAddressDiagnostic[] | undefined {
   if (context?.quoteAddressProtocol !== 1) return undefined
   try {
     if (!terminalEvidenceContextSchema.safeParse(context).success || context.current.contentHash !== runtimeJson({ content }).hash) return []
-    const record = parseQualityJsonObject(raw, 'continuity', 3) as Record<string, unknown>
+    let record = parseQualityJsonObject(raw, 'continuity', 3) as Record<string, unknown>
+    if (responseContract === 3) record = normalizeTerminalResponseRows(record).record
     if (context.verdictProtocol === 6) {
       if (!candidate) return []
-      const bound = bindTerminalReviewAddresses(record, candidate, context)
+      const bound = bindTerminalReviewAddresses(record, candidate, context, responseContract)
       return bound.success ? terminalQuoteAddressDiagnostics(JSON.stringify(bound.record), content, { ...context, verdictProtocol: 5 }, candidate) : []
     }
     const parsed = readSourcedVerdicts(record.terminalVerdicts, context, candidate, record.terminalProofVerdicts, content)
@@ -258,20 +259,21 @@ function terminalReviewClaimsInput(candidate?: TerminalCandidate, context?: Term
 /** A critic selects server-owned spans. It cannot supply or rewrite evidence.
  * Source existence is checked here; entailment is the independent critic's
  * explicit, exhaustive judgment, never inferred from a substring match. */
-export type TerminalReviewDiagnostic = { code: string; path?: string; referenceIndex?: number; segmentId?: string; expectedFact?: { field: string; claim: string } }
+export type TerminalReviewDiagnostic = { code: string; path?: string; referenceIndex?: number; segmentId?: string; expectedFact?: { field: string; claim: string }; message?: string; expectedCount?: number; actualCount?: number }
 export function inspectTerminalReview(candidate: TerminalCandidate, content: string, raw: string, complete: boolean, context?: TerminalEvidenceContext,
-  diagnostics?: TerminalReviewDiagnostic[], options: { frozenCurrentMetadata?: true } = {}) {
+  diagnostics?: TerminalReviewDiagnostic[], options: { frozenCurrentMetadata?: true; responseContract?: 3 } = {}) {
+  if (options.responseContract === 3 && context?.verdictProtocol !== 6) { diagnostics?.push({ code: 'response_contract_invalid' }); return null }
   if (context?.verdictProtocol !== 6 || !complete || !terminalEvidenceContextSchema.safeParse(context).success
     || context.current.contentHash !== runtimeJson({ content }).hash) return inspectTerminalReviewBound(candidate, content, raw, complete, context, diagnostics)
   try {
     const record = parseQualityJsonObject(raw, 'continuity', 3) as Record<string, unknown>
-    const bound = bindTerminalReviewAddresses(record, candidate, context)
+    const bound = bindTerminalReviewAddresses(record, candidate, context, options.responseContract)
     if (!bound.success) {
       const path = bound.issues[0]?.path.join('.')
       diagnostics?.push({ code: 'response_address_invalid', ...(path ? { path } : {}) })
       return null
     }
-    const reviewed = inspectTerminalReviewBound(candidate, content, JSON.stringify(bound.record), complete, { ...context, verdictProtocol: 5 }, diagnostics, !options.frozenCurrentMetadata)
+    const reviewed = inspectTerminalReviewBound(candidate, content, JSON.stringify(bound.record), complete, { ...context, verdictProtocol: 5 }, diagnostics, !options.frozenCurrentMetadata, options.responseContract)
     // Interpretation reuses the strict semantic contract; provenance always
     // identifies the actual provider response and its full frozen wire input.
     return reviewed ? { ...reviewed, responseHash: runtimeJson({ raw }).hash, evidenceContextHash: runtimeJson(context).hash } : null
@@ -282,7 +284,7 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
 }
 
 function inspectTerminalReviewBound(candidate: TerminalCandidate, content: string, raw: string, complete: boolean, context?: TerminalEvidenceContext,
-  diagnostics?: TerminalReviewDiagnostic[], allowCurrentMetadata = false) {
+  diagnostics?: TerminalReviewDiagnostic[], allowCurrentMetadata = false, responseContract?: 3) {
   const invalid = (code: string, path?: string, referenceIndex?: number, segmentId?: string, expectedFact?: { field: string; claim: string }) => {
     diagnostics?.push({ code, ...(path ? { path } : {}), ...(referenceIndex !== undefined ? { referenceIndex } : {}), ...(segmentId ? { segmentId } : {}), ...(expectedFact ? { expectedFact } : {}) })
     return null
@@ -335,7 +337,7 @@ function inspectTerminalReviewBound(candidate: TerminalCandidate, content: strin
         || new Set(item.segmentIds).size !== item.segmentIds.length
         || item.verdict === 'supported' && item.segmentIds.length === 0
         || item.segmentIds.some(id => !segments.some(segment => segment.segmentId === id)))) return invalid('claim_coverage_invalid')
-    const factCoverage = inspectTerminalCoverage(context?.factCoverage, record.terminalDispositions, candidate, verdicts, segments.filter(item => item.segmentId.startsWith('c')), context?.verdictProtocol === 4 || context?.verdictProtocol === 5)
+    const factCoverage = inspectTerminalCoverage(context?.factCoverage, record.terminalDispositions, candidate, verdicts, segments.filter(item => item.segmentId.startsWith('c')), context?.verdictProtocol === 4 || context?.verdictProtocol === 5, responseContract === 3 ? diagnostics : undefined)
     if (factCoverage === null) return invalid('fact_disposition_invalid')
     const proposalInput = context?.proposalChanges
     if (proposalInput && (proposalInput.chapterId !== context.current.id || proposalInput.bodyHash !== context.current.contentHash
@@ -373,7 +375,7 @@ export function readTerminalCandidate(validation: unknown): TerminalCandidate | 
 export function currentTerminalReview(validation: unknown, content: string, expectedContext?: TerminalEvidenceContext) {
   const record = validation && typeof validation === 'object' ? validation as Record<string, unknown> : {}
   const candidate = readTerminalCandidate(validation)
-  const audit = record.continuityCriticResponse as { parserVersion?: number; terminalEvidence?: unknown; terminalCandidate?: unknown; terminalContentHash?: unknown; rawResponse?: { content?: unknown; complete?: boolean } } | undefined
+  const audit = record.continuityCriticResponse as { parserVersion?: number; terminalEvidence?: unknown; terminalCandidate?: unknown; terminalContentHash?: unknown; rawResponse?: { content?: unknown; complete?: boolean }; responseContract?: unknown } | undefined
   const frozenCandidate = terminalCandidateSchema.safeParse(audit?.terminalCandidate)
   if (!candidate || !frozenCandidate.success || runtimeJson(candidate).hash !== runtimeJson(frozenCandidate.data).hash
     || audit?.terminalContentHash !== runtimeJson({ content }).hash
@@ -381,7 +383,7 @@ export function currentTerminalReview(validation: unknown, content: string, expe
   if (audit.parserVersion === 8 ? !expectedContext || runtimeJson(audit.terminalEvidence).hash !== runtimeJson(expectedContext).hash : expectedContext !== undefined) return null
   try {
     const raw: unknown = JSON.parse(audit.rawResponse.content)
-    return typeof raw === 'string' ? inspectTerminalReview(candidate, content, raw, record.independentCheck === 'complete', expectedContext) : null
+    return typeof raw === 'string' && (audit.responseContract === undefined || audit.responseContract === 3) ? inspectTerminalReview(candidate, content, raw, record.independentCheck === 'complete', expectedContext, undefined, audit.responseContract === 3 ? { responseContract: 3 } : {}) : null
   } catch { return null }
 }
 
