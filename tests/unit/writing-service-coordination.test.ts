@@ -56,8 +56,8 @@ function refreshParent(draftComplete = true) {
 }
 beforeEach(() => {
   vi.resetAllMocks(); operations = new Map(); receipts = new Map(); keys = new Map(); order = []
-  ctx = { userId: 'user', novelId: 'novel', runId: 'run', sessionId: 'session', callId: 'writer', mode: 'build', qualityMode: 'balanced',
-    signal: new AbortController().signal, protectedChapterIds: new Set() } as ToolContext
+  ctx = { userId: 'user', novelId: 'novel', chapterId: 'chapter', runId: 'run', sessionId: 'session', callId: 'writer', mode: 'build', qualityMode: 'balanced',
+    creativeFreedom: 'balanced', emit: vi.fn(), signal: new AbortController().signal, protectedChapterIds: new Set() }
   spec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'chapter', prompt: '完整写作本章' })
   spec.scope.writingCoordinationProtocol = 1; spec.writingPacing = 'explicit_writing'; spec.qualityMode = 'balanced'
   spec.scope.writing = { version: 1, kind: 'bounded', targets: [{ chapterId: 'chapter', orderIndex: 1 }], titleAndBodyOnly: false, repairAuthorized: true }

@@ -416,9 +416,9 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
 
   it('runs a genuine fresh writer through real read, coordinated body/reviews/commit and natural completion', async ({ signal }) => {
     const lifecycle = createDurableTestLifecycle(signal, entry => console.info('[durable-quality-stage]', JSON.stringify(entry)))
-    // This one diagnosed 5s failure needs its actual code-location profile.
-    // The original deadline/assertions remain unchanged; no provider is real.
-    const stopCpu = process.env.GITHUB_ACTIONS === 'true' ? await startDurableTestCpuProfile() : undefined
+    // Retain the diagnosed profile behind the existing explicit opt-in. Normal
+    // release gates keep their original deadline without inspector startup cost.
+    const stopCpu = process.env.CHEVOINK_TEST_CPU_PROFILE === '1' ? await startDurableTestCpuProfile() : undefined
     try { await fixture(async f => {
     await ready(f)
     const failures = observeBootstrapFailures(lifecycle)

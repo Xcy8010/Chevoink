@@ -98,7 +98,7 @@ export async function readCommittedWritingBodyProgress(tx: RuntimeTx, parent: { 
 /** Authenticate service work against a real pending writer and its immutable
  * predecessor receipt. An internal row, target ID or current DB read alone is
  * never a grant or an observation delivered to the model. */
-async function verifyServiceInput(tx: RuntimeTx, lease: RunLeaseToken, saved: z.infer<typeof inputSchema>, action: string) {
+async function readServiceParent(tx: RuntimeTx, lease: RunLeaseToken, saved: z.infer<typeof inputSchema>) {
   const admission = saved.serviceAdmission
   const parent = await tx.agentOperation.findFirst({ where: { id: admission.parentOperationId, taskRootId: lease.taskRootId, kind: 'tool', status: 'prepared' } })
   if (!parent || !coordinatedWriterActions.some(name => name === parent.action)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '内部写作步骤缺少原待执行写入。')
@@ -107,6 +107,30 @@ async function verifyServiceInput(tx: RuntimeTx, lease: RunLeaseToken, saved: z.
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
   const spec = taskSpecSchema.parse(root.specSnapshot)
   const request = await readOriginalTaskRequest(tx, { userId: lease.userId, novelId: saved.novelId, runId: lease.runId })
+  return { parent, original, root, spec, request }
+}
+
+type ServiceIdentity = { operationId: string; action: string; novelId: string; callId: string }
+type ServiceVerification = { parent?: Awaited<ReturnType<typeof readServiceParent>>; proven: Set<string> }
+const serviceVerification = (): ServiceVerification => ({ proven: new Set() })
+
+/** Only this read traversal shares proof. Never reuse it between transactions,
+ * preparation, effects or provider requests: those boundaries re-read authority. */
+async function verifyPredecessor(tx: RuntimeTx, lease: RunLeaseToken, input: ServiceIdentity, verification: ServiceVerification): Promise<void> {
+  const key = JSON.stringify([input.operationId, input.action, input.novelId, input.callId])
+  if (verification.proven.has(key)) return
+  await readVerifiedServiceStep(lease, input, tx, verification)
+  verification.proven.add(key)
+}
+
+async function verifyServiceInput(tx: RuntimeTx, lease: RunLeaseToken, saved: z.infer<typeof inputSchema>, action: string, verification: ServiceVerification) {
+  const admission = saved.serviceAdmission
+  const common = verification.parent ?? await readServiceParent(tx, lease, saved)
+  const { parent, original, root, spec, request } = common
+  if (parent.id !== admission.parentOperationId || original.novelId !== saved.novelId || original.callId !== saved.callId) {
+    return runtimeError('RUNTIME_RECEIPT_INVALID', '内部前置步骤与同一父写入或调用不一致。')
+  }
+  verification.parent = common
   const chapterId = original.args.chapterId
   const writing = coordinatedWritingInputSchema.parse(original.args.writing)
   if (typeof chapterId !== 'string' || chapterId !== admission.chapterId || root.novelId !== saved.novelId
@@ -137,8 +161,8 @@ async function verifyServiceInput(tx: RuntimeTx, lease: RunLeaseToken, saved: z.
       || runtimeJson(source.inputSnapshot).hash !== source.inputHash || runtimeJson(receipt.result).hash !== receipt.resultHash) {
       return runtimeError('RUNTIME_RECEIPT_INVALID', '内部写作步骤缺少同一父写入的真实前置回执。')
     }
-    await readAdmittedWritingServiceStep(lease, { operationId: source.id, action: actionFor(previous, parent.action),
-      novelId: saved.novelId, callId: saved.callId }, tx)
+    await verifyPredecessor(tx, lease, { operationId: source.id, action: actionFor(previous, parent.action),
+      novelId: saved.novelId, callId: saved.callId }, verification)
     const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `effect:${source.id}` } })
     if (!event || event.operationId !== source.id || event.taskRootId !== lease.taskRootId || event.type !== 'effect.committed'
       || runtimeJson(event.payload).hash !== runtimeJson({ operationId: source.id, resultHash: receipt.resultHash }).hash) {
@@ -158,8 +182,8 @@ async function verifyServiceInput(tx: RuntimeTx, lease: RunLeaseToken, saved: z.
         || runtimeJson(body.effectReceipt.result).hash !== body.effectReceipt.resultHash) {
         return runtimeError('RUNTIME_RECEIPT_INVALID', '独立复核缺少同一写入的正文回执。')
       }
-      if (previous !== 'body') await readAdmittedWritingServiceStep(lease, { operationId: body.id, action: parent.action,
-        novelId: saved.novelId, callId: saved.callId }, tx)
+      if (previous !== 'body') await verifyPredecessor(tx, lease, { operationId: body.id, action: parent.action,
+        novelId: saved.novelId, callId: saved.callId }, verification)
       const display = bodyReceiptSchema.parse(body.effectReceipt.result).toolResult.display
       if (display.chapterId !== chapterId) return runtimeError('RUNTIME_RECEIPT_INVALID', '正文回执目标与原写入不一致。')
       assertWritingReviewWork(saved.work, { step: admission.step, baseline: expectedBaseline, chapterId,
@@ -177,7 +201,7 @@ async function verifyServiceInput(tx: RuntimeTx, lease: RunLeaseToken, saved: z.
 
 /** Strict alternate provenance for service cores. Real tool admission is never
  * weakened and no fabricated call or additional main cursor is produced. */
-export async function readAdmittedWritingServiceStep(lease: RunLeaseToken, input: { operationId: string; action: string; novelId: string; callId: string }, tx: RuntimeTx) {
+async function readVerifiedServiceStep(lease: RunLeaseToken, input: ServiceIdentity, tx: RuntimeTx, verification: ServiceVerification) {
   const operation = await tx.agentOperation.findFirst({ where: { id: input.operationId, taskRootId: lease.taskRootId, kind: 'internal', action: input.action } })
   if (!operation || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '内部写作操作缺失或原输入损坏。')
   const envelope = z.object({ kind: z.literal('internal'), action: z.literal(input.action), parentOperationId: z.string(), input: inputSchema }).strict().parse(operation.inputSnapshot)
@@ -186,8 +210,12 @@ export async function readAdmittedWritingServiceStep(lease: RunLeaseToken, input
     || envelope.parentOperationId !== operation.parentOperationId || operation.operationKey !== writingServiceOperationKey(operation.parentOperationId, saved.serviceAdmission.step)) {
     return runtimeError('RUNTIME_RECEIPT_INVALID', '内部写作操作的父归属、调用或步骤键不一致。')
   }
-  const verified = await verifyServiceInput(tx, lease, saved, operation.action)
+  const verified = await verifyServiceInput(tx, lease, saved, operation.action, verification)
   return { operation, ...verified }
+}
+
+export async function readAdmittedWritingServiceStep(lease: RunLeaseToken, input: ServiceIdentity, tx: RuntimeTx) {
+  return readVerifiedServiceStep(lease, input, tx, serviceVerification())
 }
 
 /** Two explicit provenances for existing compiler/review work. Normalization
@@ -214,7 +242,7 @@ export async function prepareWritingServiceStep(lease: RunLeaseToken, value: unk
   const saved = inputSchema.parse(value)
   return withManuscriptRunLease(lease, async tx => {
     const verified = await verifyServiceInput(tx, lease, saved, actionFor(saved.serviceAdmission.step,
-      (await tx.agentOperation.findUniqueOrThrow({ where: { id: saved.serviceAdmission.parentOperationId } })).action))
+      (await tx.agentOperation.findUniqueOrThrow({ where: { id: saved.serviceAdmission.parentOperationId } })).action), serviceVerification())
     return prepareOperationInTransaction(tx, lease, { key: writingServiceOperationKey(verified.parent.id, saved.serviceAdmission.step),
       kind: 'internal', action: actionFor(saved.serviceAdmission.step, verified.parent.action), parentOperationId: verified.parent.id,
       input: runtimeJson(saved).value })
