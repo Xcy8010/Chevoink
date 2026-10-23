@@ -444,7 +444,7 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
         const report = criticCalls === 1 ? { findings: [],
           semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: '当前全文只说明停在原地并且尚未行动，不把计划或指令当作已发生事件。', findingIndexes: [] })),
           terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: '原地' }] }],
-          terminalProofVerdicts: [], terminalDispositions: [], proposalDispositions: [] } : { findings: [] }
+          terminalProofVerdicts: [], terminalDispositions: [] } : { findings: [] }
         delta = { content: JSON.stringify(report) }
       }
       return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: 'tool_calls' in delta ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`,
