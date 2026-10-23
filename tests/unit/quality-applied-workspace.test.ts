@@ -39,14 +39,14 @@ it.each(['read', 'failed', 'mismatched-chapter', 'mismatched-revision', 'no-op']
   useAgentStore.getState().applyEvent(result(1, payload, scenario !== 'failed'))
   expect(workspaceBodyChanges(useAgentStore.getState().workspaceActivities)).toEqual([])
 })
-it('keeps the earliest body baseline across normal writing, automatic repair, and a later exact revert', () => {
+it('keeps cumulative edits across normal writing, automatic repair, and a later exact revert', () => {
   const write = { callId: 'write', toolName: 'chapter_write', label: 'Chapter five', chapterId: 'chapter', deltaChars: 4, status: 'done' as const,
     display: { kind: 'chapterDiff' as const, chapterId: 'chapter', chapterTitle: 'Chapter five', before: 'Base.', after: 'Old.', appliedDirectly: true, revision: 14 } }
   useAgentStore.setState({ workspaceActivities: [write] })
   useAgentStore.getState().applyEvent(result(1))
-  expect(workspaceBodyChanges(useAgentStore.getState().workspaceActivities)).toMatchObject([{ added: 9, removed: 5 }])
+  expect(workspaceBodyChanges(useAgentStore.getState().workspaceActivities)).toMatchObject([{ added: 13, removed: 9 }])
   const reverted = { ...display, chapterRevision: 16, appliedBodyChange: { ...display.appliedBodyChange!, before: 'New text.', after: 'Base.', sourceRevision: 15, targetRevision: 16 } }
   expect(qualityAppliedBodyChange(reverted)).not.toBeNull()
   useAgentStore.getState().applyEvent({ ...result(2, reverted), callId: 'revert' })
-  expect(workspaceBodyChanges(useAgentStore.getState().workspaceActivities)).toEqual([])
+  expect(workspaceBodyChanges(useAgentStore.getState().workspaceActivities)).toMatchObject([{ added: 18, removed: 18 }])
 })

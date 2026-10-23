@@ -61,6 +61,7 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
     const network = vi.fn(() => { throw Error('Local preflight must not dispatch') })
     vi.stubGlobal('fetch', network)
     const operation = continuityValidateTool.execute({ ...f, callId, mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
+      modelSelection: { tier: 'speed', customModelId: null, reasoningEffort: 'high', provider: 'fixture', modelName: 'fixture', routeRevision: 'a'.repeat(64) },
       signal: new AbortController().signal, emit: () => {} }, { compilationId: compilation.id, terminalState: candidate })
     if (reserved) await expect(operation).rejects.toMatchObject({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' })
     else expect(await operation).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED',
@@ -190,7 +191,8 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
         chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, action: 'agent3ContinuityCritic', providerType: 'text',
         providerMode: 'custom', modelName: 'synthetic', usageSource: 'unknown', billingStatus: 'pending_usage', reservedCreditMilli: 16000,
         durationMs: 10, createdAt: at(-200) } })
-      if (scenario === 'changed-body') await prisma.chapter.update({ where: { id: chapter.id }, data: { revision: { increment: 1 } } })
+      // Model the edit AFTER this synthetic call, rather than wall-clock now before its future timestamp.
+      if (scenario === 'changed-body') await prisma.chapter.update({ where: { id: chapter.id }, data: { revision: { increment: 1 }, updatedAt: at(500) } })
       const pending = [{ callId, toolName: 'continuity_validate' as const, compilationId: compilation.id, chapterId: chapter.id, revision: refusedChapter.revision }]
       const withPending = await prisma.$transaction(tx => readReviewRequestRecoveryEvidence(tx, f, pending))
       const discovered = await prisma.$transaction(tx => readReviewRequestRecoveryEvidence(tx, f))

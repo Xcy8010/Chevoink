@@ -11,10 +11,10 @@ it('does not count the long unchanged body between two distant patches', () => {
   expect(workspaceGroupDelta([activity])).toEqual({ added: 17, removed: 17 })
   expect(workspaceBodyChanges([activity])).toMatchObject([{ added: 17, removed: 17 }])
 })
-it('aggregates documents from first before to last successful after, including an exact revert', () => {
+it('accumulates every successful document edit, including an exact revert', () => {
   const activities = [chapter('1', 'A', 'B'), chapter('2', 'B', 'C'), chapter('3', 'C', 'A')]
   expect(activities.map(workspaceActivityDelta)).toEqual(Array.from({ length: 3 }, () => ({ added: 1, removed: 1 })))
-  expect(workspaceGroupDelta(activities)).toEqual({ added: 0, removed: 0 })
+  expect(workspaceGroupDelta(activities)).toEqual({ added: 3, removed: 3 })
 })
 it('uses plan IDs to keep separate documents in the same group and preserves non-body deltas', () => {
   const plan = (id: string, text: string): WorkspaceActivity => ({ callId: id, toolName: 'plan_save', label: 'Plan', chapterId: null, status: 'done', deltaChars: null,
