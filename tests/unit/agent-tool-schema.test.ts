@@ -3,7 +3,8 @@ import { z } from 'zod'
 import { toOpenAIParameters, withObjectType, originalToolParameterSchemas } from '../../api/lib/agent/tool-schema.js'
 import { getToolsForMode, toOpenAITools } from '../../api/lib/agent/tools/registry.js'
 import { novelImportArguments } from '../../api/lib/agent/tools/import-tools.js'
-import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { chapterCreateTool, chapterWriteTool, chapterAppendTool, chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { coordinatedWriterParameters } from '../../api/lib/agent/coordinated-writing-input.js'
 import { chapterBridgeCommitTool, continuityValidateTool, storyCompilerPrepareTool, sceneTaskBuildTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { researchReportSaveTool } from '../../api/lib/agent/tools/search-tools.js'
@@ -20,6 +21,23 @@ vi.mock('zod', async importOriginal => {
 // 回归：novel_import 顶层 discriminatedUnion 转换后没有 type，DeepSeek 按 type null 拒绝，
 // 导致线上继续任务时报 Invalid schema for function 'novel_import'。
 describe('tool schema provider contract', () => {
+  it.each([chapterWriteTool, chapterAppendTool, chapterEditRangeTool])('keeps unmarked $name hashes exact and admits literary data only for the original server marker', tool => {
+    const legacyScope: TaskSpec['scope'] = { novelId: 'novel' }, markedScope: TaskSpec['scope'] = { novelId: 'novel', writingCoordinationProtocol: 1 }
+    const legacy = toOpenAIParameters(tool.parameters)
+    expect(coordinatedWriterParameters(tool, legacyScope)).toBe(tool.parameters)
+    expect(toOpenAITools([tool], legacyScope)[0].function.parameters).toEqual(legacy)
+    expect(originalToolParameterSchemas(tool, legacyScope).every(schema => runtimeJson(schema).hash === runtimeJson(legacy).hash)).toBe(true)
+    const marked = toOpenAITools([tool], markedScope)[0].function.parameters
+    expect(marked).toHaveProperty('properties.writing')
+    expect(marked.required).toContain('writing')
+    expect(originalToolParameterSchemas(tool, markedScope)).toEqual([marked])
+    expect(originalToolParameterSchemas(tool, markedScope)).not.toContainEqual(legacy)
+    const schema = coordinatedWriterParameters(tool, markedScope)
+    const body = tool.name === 'chapter_edit_range' ? { oldText: '原文', newText: '新文' } : { content: '新文' }
+    expect(schema.safeParse({ chapterId: 'chapter', ...body, writing: { draftComplete: false } }).success).toBe(true)
+    expect(schema.safeParse({ chapterId: 'chapter', ...body, writing: { draftComplete: true } }).success).toBe(false)
+    expect(schema.safeParse({ chapterId: 'chapter', ...body, writing: { draftComplete: false, skipChecks: true } }).success).toBe(false)
+  })
   it('converts each schema only once per alternatives lookup while preserving scoped and legacy hashes', () => {
     const conversion = vi.mocked(z.toJSONSchema)
     try {

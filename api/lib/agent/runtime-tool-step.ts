@@ -15,6 +15,8 @@ import { chapterReadTool, planReadTool, novelGetContextTool, chapterListSummarie
 import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool, chapterCreateTool, chapterRenameTool, preflightChapterReviewWrite } from './tools/chapter-tools.js'
 import { deferReviewWriteInTransaction } from './runtime-review-deferral.js'
 import { executeDurableChapterRename } from './tools/durable-chapter.js'
+import { coordinatedWritingManifest, coordinatedWriterActions, coordinatedWriterParameters } from './coordinated-writing-input.js'
+import { executeDurableCoordinatedWriter } from './tools/durable-coordinated-writer.js'
 import { planSaveTool, planRenameTool, planDeleteTool, memorySaveTool, planExitTool } from './tools/write-tools.js'
 import { researchReportReadTool, researchReportSaveTool, webSearchTool, webReadTool, webReadNavigationTool } from './tools/search-tools.js'
 import { executeDurableWeb } from './tools/durable-web.js'
@@ -168,6 +170,9 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     const originalSpec = taskSpecSchema.parse(root.specSnapshot)
     const originalScope = originalSpec.scope
+    if (originalScope.writingCoordinationProtocol === 1 && coordinatedWriterActions.some(name => name === call.name)) {
+      tool = { ...tool, parameters: coordinatedWriterParameters(tool, originalScope) }
+    }
     if (call.name === 'web_read' && originalSpec.researchNavigation?.version === 1 && originalSpec.intent === 'research_analysis') {
       tool = checkedAdapter(webReadNavigationTool)
     }
@@ -190,6 +195,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
         provider: current.configuration.model.provider, modelName: current.configuration.model.modelName, routeRevision: current.configuration.model.routeRevision } }
     ctx.modelAssignments = current.configuration.modelAssignments
+    if (originalScope.writingCoordinationProtocol === 1 && coordinatedWriterActions.some(name => name === call.name)) ctx.writingScope = originalScope
     ctx.inlineChild = Boolean(lease.parent)
     const capability = { lease, cursor, operationKey: `exec:${frame.state.nextOperationSequence}` }
     if (call.name === 'agent_configure' || call.name === 'model_assign') ctx.durableConfiguration = capability
@@ -237,7 +243,19 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       const admission = await preflightChapterReviewWrite({ ...ctx, transaction: tx }, call.name, args)
       if (admission?.kind === 'decision_required') return { deferred: await deferReviewWriteInTransaction(tx, lease, frame, call, admission.guidance) }
     }
-    return { tool, args, ctx, cursor, needsApproval: grant.permission === 'ask' || grant.alwaysConfirm }
+    let serviceConfirmation = false
+    if (ctx.writingScope?.writingCoordinationProtocol === 1 && ctx.durableContent) {
+      const original = await (await import('./original-request.js')).readOriginalTaskRequest(tx, ctx)
+      const manifest = z.object({ steps: z.array(z.object({ actions: z.array(z.string()) })) }).parse(
+        coordinatedWritingManifest({ spec: originalSpec, prompt: original.prompt }, call.name, ctx.durableContent.chapterId, args.writing))
+      serviceConfirmation = (await (await import('./runtime-writing-service.js')).readWritingServiceConfirmations(tx, lease,
+        manifest.steps.flatMap(step => step.actions))).length > 0
+    }
+    // A validated prepared parent already owns this source frame. Its cores
+    // recheck the frozen approval/current policy; idle polling cannot run again
+    // after a body save or provider interruption.
+    const resumeWriting = ctx.writingScope?.writingCoordinationProtocol === 1 && current.frame.state.phase === 'awaiting_operation'
+    return { tool, args, ctx, cursor, needsApproval: !resumeWriting && (grant.permission === 'ask' || grant.alwaysConfirm || serviceConfirmation) }
   })
   if ('deferred' in selected) return { kind: 'context' as const, frame: selected.deferred! }
   if ('recover' in selected) {
@@ -276,6 +294,10 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     // Actual adapter checks the saved decision again at effect admission.
   }
   const historyAction = [...HISTORY_READ_ACTIONS, ...DOMAIN_READ_ACTIONS].find(name => name === selected.tool.name)
+  if (selected.ctx.durableContent && selected.ctx.writingScope?.writingCoordinationProtocol === 1
+    && coordinatedWriterActions.some(name => name === selected.tool.name)) {
+    return { kind: 'tool' as const, result: await executeDurableCoordinatedWriter(selected.ctx, selected.tool, selected.args) }
+  }
   if (selected.ctx.durableWeb) return { kind: 'tool' as const, result: await executeDurableWeb(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableAttachment) return { kind: 'tool' as const, result: await executeDurableAttachmentRead(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableCreative) return { kind: 'tool' as const, result: await executeDurableCreative(selected.ctx, selected.tool, selected.args) }

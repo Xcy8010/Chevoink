@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runtimeJson, type RuntimeTx } from '../../api/lib/agent/runtime-common.js'
 import * as lease from '../../api/lib/agent/runtime-lease.js'
 import * as cursor from '../../api/lib/agent/runtime-tool-cursor.js'
+import * as reviewWork from '../../api/lib/agent/runtime-writing-service.js'
 import * as operations from '../../api/lib/agent/runtime-operations.js'
 import * as reducer from '../../api/lib/agent/runtime-reducer.js'
 import * as auxiliary from '../../api/lib/agent/runtime-auxiliary-call.js'
@@ -29,8 +30,10 @@ describe('old compiler continuity recovery before paid dispatch', () => {
         effectReceipt: scenario === 'committed-receipt' ? savedReceipt : null }) } } as unknown as RuntimeTx
     vi.spyOn(lease, 'withRunLease').mockImplementation(async (_token, callback) => callback(tx))
     const prepare = vi.spyOn(cursor, 'prepareToolCursorOperation').mockResolvedValue({ operation: { id: 'parent', inputHash }, pending: { revision: 1, snapshotHash: 'd'.repeat(64) } } as Awaited<ReturnType<typeof cursor.prepareToolCursorOperation>>)
-    vi.spyOn(cursor, 'readAdmittedToolOperation').mockImplementation(async () => ({ operation: { id: 'parent', inputHash },
-      input: prepare.mock.calls[0][2].operationInput } as Awaited<ReturnType<typeof cursor.readAdmittedToolOperation>>))
+    // This test owns frozen-work recovery; actual tool/service provenance has
+    // its separate negative matrix. Keep the same admitted input at that seam.
+    vi.spyOn(reviewWork, 'readAdmittedReviewWork').mockImplementation(async () => ({ operation: { id: 'parent', inputHash },
+      input: prepare.mock.calls[0][2].operationInput } as Awaited<ReturnType<typeof reviewWork.readAdmittedReviewWork>>))
     const failure = vi.spyOn(operations, 'recordToolFailure').mockImplementation(async (_token, args) => ({ result: {
       outcome: 'failed', effectApplied: false, code: args.code, toolResult: { output: args.output, summary: args.summary },
     } } as Awaited<ReturnType<typeof operations.recordToolFailure>>))

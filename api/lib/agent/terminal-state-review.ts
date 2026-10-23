@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
-import { storyStateSchema } from '../../../shared/contracts/story-compiler-contracts.js'
+import { terminalCandidateSchema, type TerminalCandidate } from './terminal-candidate-contract.js'
+export { terminalCandidateSchema, type TerminalCandidate } from './terminal-candidate-contract.js'
 import { continuitySourceSegments, locateUniqueContinuityQuote } from './continuity-review-context.js'
 import { parseQualityJsonObject } from './quality-evidence.js'
 import { runtimeJson } from './runtime-common.js'
@@ -16,11 +17,6 @@ export { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalV
   terminalFactVerdictSchema, terminalJointFactVerdictSchema } from './terminal-review-shapes.js'
 import { bindTerminalReviewAddresses, terminalReviewAddressInput } from './terminal-review-addresses.js'
 
-export const terminalCandidateSchema = z.object({
-  exitState: storyStateSchema,
-  lastUnfinishedAction: z.string().max(1000).default(''),
-}).strict()
-export type TerminalCandidate = z.infer<typeof terminalCandidateSchema>
 /** Selection is a tool input only; saved candidates and paid audits retain their
  * original schema. A selected proof supplies identity, never a fresh verdict. */
 export const terminalCandidateInputSchema = terminalCandidateSchema.extend({

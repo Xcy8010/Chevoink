@@ -228,13 +228,25 @@ export async function assertWritingServicePolicy(tx: RuntimeTx, lease: RunLeaseT
   const saved = z.object({ input: inputSchema }).parse(operation.inputSnapshot).input
   const verified = await readAdmittedWritingServiceStep(lease, { operationId: operation.id, action: operation.action, novelId: saved.novelId, callId: saved.callId }, tx)
   await assertParent(tx, lease, verified.parent)
+  const required = await readWritingServiceConfirmations(tx, lease, verified.step.actions)
+  if (required.length) {
+    await (await import('./runtime-approval.js')).assertWritingServiceApproval(tx, lease, { sourceHash: verified.original.normalization.sourceSnapshotHash,
+      callId: saved.callId, toolName: verified.parent.action, rawArguments: verified.original.normalization.rawArguments,
+      argsHash: verified.original.normalization.normalizedArgsHash, manifest: runtimeJson(verified.manifest).value })
+  }
+}
+
+/** Frozen and current ceilings apply to every real action. This read is also
+ * used before the parent starts, to show any required composite confirmation. */
+export async function readWritingServiceConfirmations(tx: RuntimeTx, lease: RunLeaseToken, actions: readonly string[]) {
   const current = await readExecutionStateInTransaction(tx, lease.taskRootId)
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
   await tx.$queryRaw`SELECT id FROM agent_sessions WHERE id = ${root.sessionId} FOR SHARE`
   const session = await tx.agentSession.findUnique({ where: { id: root.sessionId } })
   const [{ getToolByName }, { applySessionToolPolicy }] = await Promise.all([import('./tools/registry.js'), import('./agents.js')])
   if (!session || session.userId !== lease.userId || session.novelId !== root.novelId) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '内部写作会话归属已变化。')
-  for (const action of verified.step.actions) {
+  const required: string[] = []
+  for (const action of new Set(actions)) {
     const grant = current.configuration.toolAuthority.find(item => item.name === action), tool = getToolByName(action)
     if (!tool || !grant || grant.permission === 'deny' || !current.configuration.tools.some(item => item.function.name === action)) {
       return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务未授予内部写作步骤的实际工具能力。')
@@ -242,8 +254,7 @@ export async function assertWritingServicePolicy(tx: RuntimeTx, lease: RunLeaseT
     const effective = applySessionToolPolicy([{ ...tool, permission: { ...tool.permission, [current.configuration.mode]: grant.permission } }],
       current.configuration.mode, session.toolPolicy, session.sandboxMode === 'read_only' ? 'read_only' : 'workspace')[0]
     if (!effective || effective.permission[current.configuration.mode] === 'deny') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '当前会话已收紧内部写作权限。')
-    // Composite approval is a separate explicitly displayed decision. Until its
-    // carrier is present, never reinterpret an ordinary writer approval.
-    if (effective.permission[current.configuration.mode] === 'ask' || grant.alwaysConfirm) return runtimeError('RUNTIME_APPROVAL_REQUIRED', '内部步骤需要与原写入和完整步骤清单绑定的明确确认。')
+    if (effective.permission[current.configuration.mode] === 'ask' || grant.alwaysConfirm) required.push(action)
   }
+  return required
 }

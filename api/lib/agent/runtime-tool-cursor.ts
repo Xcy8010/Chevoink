@@ -133,8 +133,14 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
         }
       }
     }
-    if (!code && grant && (grant.permission === 'ask' || grant.alwaysConfirm)) {
-      const outcome = await readToolApprovalOutcome(tx, token, frame.snapshotHash, call.id, call.name, call.arguments)
+    if (!code && grant) {
+      const original = taskSpecSchema.safeParse(current.originalSpec)
+      const markedWriter = original.success && original.data.scope.writingCoordinationProtocol === 1
+        && ['chapter_write', 'chapter_append', 'chapter_edit_range'].includes(call.name)
+      const outcome = grant.permission === 'ask' || grant.alwaysConfirm
+        ? await readToolApprovalOutcome(tx, token, frame.snapshotHash, call.id, call.name, call.arguments)
+        : markedWriter ? await (await import('./runtime-approval.js')).readWritingServiceRefusal(tx, token,
+          { sourceHash: frame.snapshotHash, callId: call.id, toolName: call.name, rawArguments: call.arguments }) : null
       if (outcome && (outcome.status === 'denied' || outcome.status === 'expired') && outcome.decision) {
         code = outcome.status === 'expired' ? 'TOOL_APPROVAL_EXPIRED' : 'TOOL_APPROVAL_DENIED'
         approval = { requestId: outcome.request.id, decisionId: outcome.decision.id, decisionHash: runtimeJson(outcome.decision.payload).hash }

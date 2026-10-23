@@ -10,11 +10,20 @@ import type { AgentStreamEventBody } from '../../../shared/contracts/index.js'
 import type { AgentExecutionOutbox } from '@prisma/client'
 
 const requestSchema = z.object({ version: z.literal(1), callId: z.string(), toolName: z.string(), sourceRevision: z.number().int().nonnegative(),
-  sourceHash: z.string(), rawArguments: z.string(), args: z.unknown(), argsHash: z.string(), expiresAt: z.string().datetime() }).strict()
+  sourceHash: z.string(), rawArguments: z.string(), args: z.unknown(), argsHash: z.string(), expiresAt: z.string().datetime(),
+  writingServices: z.object({ version: z.literal(1), chapterId: z.string(), writingHash: z.string().regex(/^[a-f0-9]{64}$/),
+    steps: z.array(z.object({ step: z.enum(['body', 'continuity', 'quality', 'commit']), actions: z.array(z.string()).min(1) }).strict()).min(1).max(4) }).strict().optional() }).strict()
 const decisionSchema = z.object({ version: z.literal(1), requestId: z.string(), requestHash: z.string(), approved: z.boolean(), userId: z.string(), timedOut: z.literal(true).optional() }).strict()
 
 function requestKey(rootId: string, sourceHash: string, callId: string) {
   return `approval:${rootId}:${runtimeJson({ sourceHash, callId }).hash}`
+}
+
+function displayedApprovalArgs(input: z.infer<typeof requestSchema>) {
+  if (!input.writingServices) return input.args
+  const names: Record<string, string> = { story_compiler_prepare: '准备本章', scene_task_build: '保存场景方案', chapter_write: '保存正文',
+    chapter_append: '追加正文', chapter_edit_range: '修改指定正文', continuity_validate: '独立连续性复核', quality_analyze: '独立质量复核', chapter_bridge_commit: '提交本章承接状态' }
+  return { 写入参数: input.args, 后续操作: [...new Set(input.writingServices.steps.flatMap(step => step.actions))].map(action => names[action] ?? action) }
 }
 
 /** Read-only projection from saved facts, including while a task is paused. */
@@ -24,7 +33,7 @@ export async function projectApprovalEvent(tx: RuntimeTx, source: AgentExecution
     if (!parsed.success || source.eventKey !== requestKey(source.taskRootId, parsed.data.sourceHash, parsed.data.callId)
       || runtimeJson(parsed.data.args).hash !== parsed.data.argsHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '审批事件源损坏。')
     return { type: 'permission.ask', approvalId: source.id, callId: parsed.data.callId, toolName: parsed.data.toolName,
-      title: parsed.data.toolName, args: parsed.data.args, expiresAt: parsed.data.expiresAt, allowAlways: false }
+      title: parsed.data.toolName, args: displayedApprovalArgs(parsed.data), expiresAt: parsed.data.expiresAt, allowAlways: false }
   }
   const decision = decisionSchema.safeParse(source.payload)
   if (source.type !== 'approval.resolved' || !decision.success || decision.data.userId !== userId
@@ -52,7 +61,7 @@ export async function pollToolApproval(token: RunLeaseToken, input: { expectedRe
     if (!outcome) return runtimeError('RUNTIME_APPROVAL_REQUIRED', '尚未创建审批请求。')
     const event: AgentStreamEventBody = outcome.status === 'pending'
       ? { type: 'permission.ask', approvalId: outcome.request.id, callId: call.id, toolName: call.name, title: call.name,
-        args: outcome.requestData.args, allowAlways: false, expiresAt: outcome.requestData.expiresAt }
+        args: displayedApprovalArgs(outcome.requestData), allowAlways: false, expiresAt: outcome.requestData.expiresAt }
       : { type: 'permission.resolved', approvalId: outcome.request.id, callId: call.id, approved: outcome.status === 'approved' }
     return { status: outcome.status, event, sourceEventId: outcome.decision?.id ?? outcome.request.id }
   })
@@ -72,9 +81,24 @@ export async function requestToolApproval(token: RunLeaseToken, input: { expecte
     const call = assistant?.role === 'assistant' ? assistant.toolCalls?.find(call => !frame.state.messages.slice(index + 1).some(message => message.role === 'tool' && message.toolCallId === call.id)) : undefined
     if (!call || call.id !== input.callId || call.incomplete) return runtimeError('RUNTIME_STATE_CONFLICT', '审批不是当前完整待执行调用。')
     const grant = current.configuration.toolAuthority.find(grant => grant.name === call.name)
-    if (!grant || grant.permission === 'deny' || (grant.permission !== 'ask' && !grant.alwaysConfirm)
+    if (!grant || grant.permission === 'deny'
       || !current.configuration.tools.some(tool => tool.function.name === call.name)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '审批不能扩大冻结工具权限。')
     const args = runtimeJson(input.normalize(coerceToolArgumentEnvelope(call.arguments ? parseToolArgsTolerant(call.arguments, false) : {})))
+    const { taskSpecSchema } = await import('../../../shared/contracts/task-spec-contracts.js')
+    const originalSpec = taskSpecSchema.safeParse(current.originalSpec)
+    const { coordinatedWriterActions, coordinatedWritingManifest } = await import('./coordinated-writing-input.js')
+    let writingServices: z.infer<typeof requestSchema>['writingServices']
+    let serviceConfirmation = false
+    if (originalSpec.success && originalSpec.data.scope.writingCoordinationProtocol === 1 && coordinatedWriterActions.some(name => name === call.name)) {
+      const spec = originalSpec.data
+      const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
+      const original = await (await import('./original-request.js')).readOriginalTaskRequest(tx, { userId: token.userId, novelId: root.novelId, runId: token.runId })
+      const writer = z.object({ chapterId: z.string().min(1), writing: z.unknown() }).parse(args.value)
+      writingServices = requestSchema.shape.writingServices.unwrap().parse(coordinatedWritingManifest({ spec, prompt: original.prompt }, call.name, writer.chapterId, writer.writing))
+      serviceConfirmation = (await (await import('./runtime-writing-service.js')).readWritingServiceConfirmations(tx, token,
+        writingServices.steps.flatMap(step => step.actions))).length > 0
+    }
+    if (grant.permission !== 'ask' && !grant.alwaysConfirm && !serviceConfirmation) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原工具和写作步骤不需要本次确认。')
     const key = requestKey(token.taskRootId, frame.snapshotHash, call.id)
     const existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: key } })
     if (existing) {
@@ -82,14 +106,16 @@ export async function requestToolApproval(token: RunLeaseToken, input: { expecte
       if (existing.taskRootId !== token.taskRootId || existing.type !== 'approval.requested' || !parsed.success
         || parsed.data.sourceHash !== frame.snapshotHash || parsed.data.sourceRevision !== frame.revision || parsed.data.callId !== call.id
         || parsed.data.toolName !== call.name || parsed.data.rawArguments !== call.arguments || parsed.data.argsHash !== args.hash
-        || runtimeJson(parsed.data.args).hash !== args.hash) runtimeError('RUNTIME_RECEIPT_INVALID', '原审批请求损坏或实际参数已变化。')
+        || runtimeJson(parsed.data.args).hash !== args.hash
+        || runtimeJson({ manifest: parsed.data.writingServices ?? null }).hash !== runtimeJson({ manifest: writingServices ?? null }).hash) runtimeError('RUNTIME_RECEIPT_INVALID', '原审批请求损坏或实际参数已变化。')
       return existing // Original expiry is never extended by polling or resume.
     }
     if (current.frame.revision !== frame.revision) runtimeError('RUNTIME_STATE_CONFLICT', '不能为已经离开的执行位置新建审批。')
     const now = await databaseNow(tx)
     return tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: token.taskRootId, runId: token.runId,
       eventKey: key, type: 'approval.requested', payload: { version: 1, callId: call.id, toolName: call.name, sourceRevision: frame.revision,
-        sourceHash: frame.snapshotHash, rawArguments: call.arguments, args: args.value, argsHash: args.hash, expiresAt: new Date(now.getTime() + input.timeoutMs).toISOString() } } })
+        sourceHash: frame.snapshotHash, rawArguments: call.arguments, args: args.value, argsHash: args.hash, expiresAt: new Date(now.getTime() + input.timeoutMs).toISOString(),
+        ...(writingServices ? { writingServices } : {}) } } })
   })
 }
 
@@ -132,6 +158,40 @@ export async function assertToolApproval(tx: RuntimeTx, token: RunLeaseToken, so
   if (outcome.requestData.argsHash !== argsHash) runtimeError('RUNTIME_RECEIPT_INVALID', '审批不匹配实际参数。')
   if (outcome.status === 'expired') runtimeError('RUNTIME_APPROVAL_EXPIRED', '审批已超时。')
   if (outcome.status === 'denied') runtimeError('RUNTIME_APPROVAL_DENIED', '用户拒绝本次调用。')
+}
+
+/** The existing author decision must expressly cover the frozen whole service
+ * manifest and this exact writer input. An ordinary writer-only approval is
+ * never relabeled as independent review or commit authority. */
+export async function assertWritingServiceApproval(tx: RuntimeTx, token: RunLeaseToken, input: {
+  sourceHash: string; callId: string; toolName: string; rawArguments: string; argsHash: string; manifest: import('@prisma/client').Prisma.InputJsonValue
+}) {
+  await assertToolApproval(tx, token, input.sourceHash, input.callId, input.toolName, input.rawArguments, input.argsHash)
+  const outcome = await readToolApprovalOutcome(tx, token, input.sourceHash, input.callId, input.toolName, input.rawArguments)
+  if (!outcome?.requestData.writingServices || runtimeJson(outcome.requestData.writingServices).hash !== runtimeJson(input.manifest).hash) {
+    return runtimeError('RUNTIME_RECEIPT_INVALID', '原确认未明确覆盖此写入及完整复核、提交步骤，不能沿用普通写入确认。')
+  }
+}
+
+/** A service-only confirmation can also be refused before the writer starts.
+ * Authenticate the original marked manifest; an arbitrary ordinary allow-tool
+ * request cannot become proof of a composite refusal. */
+export async function readWritingServiceRefusal(tx: RuntimeTx, token: RunLeaseToken, input: {
+  sourceHash: string; callId: string; toolName: string; rawArguments: string
+}) {
+  const outcome = await readToolApprovalOutcome(tx, token, input.sourceHash, input.callId, input.toolName, input.rawArguments)
+  if (!outcome?.requestData.writingServices || !['denied', 'expired'].includes(outcome.status)) return null
+  const { taskSpecSchema } = await import('../../../shared/contracts/task-spec-contracts.js')
+  const { coordinatedWriterActions, coordinatedWritingManifest } = await import('./coordinated-writing-input.js')
+  const current = await readExecutionStateInTransaction(tx, token.taskRootId)
+  const spec = taskSpecSchema.parse(current.originalSpec)
+  if (spec.scope.writingCoordinationProtocol !== 1 || !coordinatedWriterActions.some(action => action === input.toolName)) return null
+  const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
+  const request = await (await import('./original-request.js')).readOriginalTaskRequest(tx, { userId: token.userId, novelId: root.novelId, runId: token.runId })
+  const writer = z.object({ chapterId: z.string().min(1), writing: z.unknown() }).parse(outcome.requestData.args)
+  const manifest = coordinatedWritingManifest({ spec, prompt: request.prompt }, input.toolName, writer.chapterId, writer.writing)
+  if (runtimeJson(manifest).hash !== runtimeJson(outcome.requestData.writingServices).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '组合确认拒绝不匹配原写入步骤。')
+  return outcome
 }
 
 /** Caller holds the lease/root lock. A timed-out refusal and its observation can

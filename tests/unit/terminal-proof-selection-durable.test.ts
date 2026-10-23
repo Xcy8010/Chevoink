@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runtimeJson, type RuntimeTx } from '../../api/lib/agent/runtime-common.js'
 import * as lease from '../../api/lib/agent/runtime-lease.js'
 import * as cursor from '../../api/lib/agent/runtime-tool-cursor.js'
+import * as reviewWork from '../../api/lib/agent/runtime-writing-service.js'
 import * as operations from '../../api/lib/agent/runtime-operations.js'
 import * as reducer from '../../api/lib/agent/runtime-reducer.js'
 import * as observation from '../../api/lib/agent/runtime-compiler-observation.js'
@@ -45,8 +46,8 @@ describe('durable explicit terminal proof selection', () => {
     const readSource = vi.spyOn(continuitySource, 'readCompilerContinuitySource').mockResolvedValue(source as never)
     const prepare = vi.spyOn(cursor, 'prepareToolCursorOperation').mockResolvedValue({ operation: { id: 'operation', inputHash: 'd'.repeat(64) },
       pending: { revision: 1, snapshotHash: 'e'.repeat(64) } } as Awaited<ReturnType<typeof cursor.prepareToolCursorOperation>>)
-    vi.spyOn(cursor, 'readAdmittedToolOperation').mockImplementation(async () => ({ operation: { id: 'operation', inputHash: 'd'.repeat(64) },
-      input: prepare.mock.calls[0][2].operationInput } as Awaited<ReturnType<typeof cursor.readAdmittedToolOperation>>))
+    vi.spyOn(reviewWork, 'readAdmittedReviewWork').mockImplementation(async () => ({ operation: { id: 'operation', inputHash: 'd'.repeat(64) },
+      input: prepare.mock.calls[0][2].operationInput } as Awaited<ReturnType<typeof reviewWork.readAdmittedReviewWork>>))
     const failure = vi.spyOn(operations, 'recordToolFailure').mockImplementation(async (_token, args) => ({ result: {
       outcome: 'failed', effectApplied: false, code: args.code, toolResult: { output: args.output, summary: args.summary },
     } } as Awaited<ReturnType<typeof operations.recordToolFailure>>))

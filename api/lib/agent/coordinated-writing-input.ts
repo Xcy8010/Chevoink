@@ -1,10 +1,11 @@
 import { z } from 'zod'
 import { sceneTaskInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import { writingVolumeDecisionSchema } from '../../../shared/contracts/writing-volume-contracts.js'
-import { terminalCandidateSchema } from './terminal-state-review.js'
+import { terminalCandidateSchema } from './terminal-candidate-contract.js'
 import { runtimeError, runtimeJson } from './runtime-common.js'
-import { originalChapterReviewRequirements } from './chapter-review-guard.js'
+import { originalChapterReviewRequirements } from './chapter-review-requirements.js'
 import type { TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
+import type { AgentTool } from './tools/types.js'
 
 export const coordinatedWriterActions = ['chapter_write', 'chapter_append', 'chapter_edit_range'] as const
 export const writingServiceStepSchema = z.enum(['body', 'continuity', 'quality', 'commit'])
@@ -33,6 +34,14 @@ export const coordinatedWritingInputSchema = z.object({
   }
 })
 export type CoordinatedWritingInput = z.infer<typeof coordinatedWritingInputSchema>
+
+/** Only the original server marker can publish/parse the additional literary
+ * carrier. Unmarked schemas retain their exact objects and hashes. */
+export function coordinatedWriterParameters(tool: Pick<AgentTool, 'name' | 'parameters'>, scope?: TaskSpec['scope']) {
+  if (scope?.writingCoordinationProtocol !== 1 || !coordinatedWriterActions.some(action => action === tool.name)) return tool.parameters
+  if (!(tool.parameters instanceof z.ZodObject)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '写作协调字段不能替换另一类工具的原参数。')
+  return tool.parameters.safeExtend({ writing: coordinatedWritingInputSchema }).strict()
+}
 
 /** Frozen business manifest, not a second grant. Permission, current policy,
  * approval, version and source-receipt checks still happen at every effect. */

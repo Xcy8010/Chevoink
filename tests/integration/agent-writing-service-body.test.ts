@@ -6,12 +6,13 @@ import { initializeExecutionState, loadExecutionState } from '../../api/lib/agen
 import { prepareToolCursorOperation } from '../../api/lib/agent/runtime-tool-cursor.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { reduceExecutionReceipt } from '../../api/lib/agent/runtime-reducer.js'
-import { coordinatedWritingInputSchema, coordinatedWritingManifest } from '../../api/lib/agent/coordinated-writing-input.js'
+import { coordinatedWritingInputSchema, coordinatedWritingManifest, coordinatedWriterParameters } from '../../api/lib/agent/coordinated-writing-input.js'
 import { executeCoordinatedWritingServices } from '../../api/lib/agent/writing-service-coordination.js'
 import * as operations from '../../api/lib/agent/runtime-operations.js'
 import * as continuity from '../../api/lib/agent/tools/durable-continuity.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
+import { resolveDurableApproval } from '../../api/lib/agent/runtime-approval.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { withRunLease } from '../../api/lib/agent/runtime-lease.js'
 import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
@@ -25,10 +26,10 @@ import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-t
 import type { ToolContext, AgentTool } from '../../api/lib/agent/tools/types.js'
 
 describe.runIf(available)('coordinated writer actual PG body and parent cursor', () => {
-  it.each(['draft', 'rollback-body', 'stale-body', 'narrowed-policy', 'resume-after-body'] as const)('%s preserves the real body transaction and task identity', async scenario => {
+  it.each(['draft', 'shell-draft', 'shell-approve', 'shell-deny', 'shell-approved-resume', 'rollback-body', 'stale-body', 'narrowed-policy', 'resume-after-body'] as const)('%s preserves the real body transaction and task identity', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
-      const complete = scenario === 'resume-after-body'
+      const complete = scenario === 'resume-after-body' || scenario === 'shell-approved-resume'
       if (complete) {
         const originalFlag = featureFlags.isAgent2FeatureEnabled
         vi.spyOn(featureFlags, 'isAgent2FeatureEnabled').mockImplementation((key, userId) => key === 'memory2' || originalFlag(key, userId))
@@ -37,10 +38,12 @@ describe.runIf(available)('coordinated writer actual PG body and parent cursor',
         choice: '留下缺项', cost: '核查延后', turn: '请人复核' }], ...(complete ? { actualOutcomes: { exitState: {} }, chapterSummary: '核查尚未结束', hookDecision: '',
         delayedHookReason: '', openingStructure: '核查开始', endingStructure: '等待复核' } : {}) })
       const args = { chapterId: f.chapterId, content: '他看过记录，留下缺项，等待另一人复核。', writing }
-      const writerSchema = chapterWriteTool.parameters.safeExtend({ writing: coordinatedWritingInputSchema })
+      const writerSchema = coordinatedWriterParameters(chapterWriteTool, f.spec.scope)
       const tools: AgentTool[] = [chapterReadTool, { ...chapterWriteTool, parameters: writerSchema }, storyCompilerPrepareTool,
         sceneTaskBuildTool, continuityValidateTool, qualityAnalyzeTool, chapterBridgeCommitTool]
-      const authority = tools.map(tool => ({ name: tool.name, permission: 'allow' as const, alwaysConfirm: false, dangerous: false }))
+      const serviceAsk = ['shell-approve', 'shell-deny', 'shell-approved-resume'].includes(scenario)
+      const authority = tools.map(tool => ({ name: tool.name, permission: serviceAsk && tool.name === 'story_compiler_prepare' ? 'ask' as const : 'allow' as const,
+        alwaysConfirm: false, dangerous: false }))
       await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
         tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
@@ -50,6 +53,40 @@ describe.runIf(available)('coordinated writer actual PG body and parent cursor',
             { id: 'real-writer', name: 'chapter_write', arguments: JSON.stringify(args) }] }] } })
       await executeDurableToolStep(lease, new AbortController().signal) // A real reduced read, not a fresh DB read used as model observation.
       const before = await loadExecutionState(f.userId, lease.runId)
+      if (serviceAsk) {
+        const step = () => executeDurableToolStep(lease, new AbortController().signal)
+        const waiting = await step()
+        if (waiting.kind !== 'waiting_approval') throw Error('Expected explicit composite approval')
+        expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ revision: 1, content: '原文' })
+        expect(await prisma.storyCompilation.count({ where: { userId: f.userId } })).toBe(0)
+        await resolveDurableApproval({ userId: f.userId, runId: lease.runId, requestId: waiting.approvalId, callId: 'real-writer',
+          approved: scenario !== 'shell-deny', alwaysAllow: false })
+        if (scenario === 'shell-deny') {
+          expect(await step()).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
+          expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ revision: 1, content: '原文' })
+          expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, kind: 'internal' } })).toBe(0)
+          expect((await loadExecutionState(f.userId, lease.runId)).frame.state).toMatchObject({ phase: 'idle', pendingOperationId: null })
+          return
+        }
+        if (scenario === 'shell-approved-resume') {
+          const prepare = vi.spyOn(continuity, 'prepareContinuityWork').mockRejectedValueOnce(Error('approved writer interrupted after body'))
+          await expect(step()).rejects.toThrow('approved writer interrupted after body')
+          const pending = (await loadExecutionState(f.userId, lease.runId)).frame.state.pendingOperationId
+          expect(pending).toBeTruthy()
+          await pauseDurableTask(f.userId, lease.runId)
+          const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' } })
+          const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: pause.id })
+          lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'approved-writer-resume')
+          prepare.mockResolvedValue({ kind: 'rejected', code: 'CONTINUITY_INPUT_STALE', message: 'Original bounded refusal after resume' })
+          expect(await step()).toMatchObject({ kind: 'tool', result: { outcome: 'failed', display: { chapterId: f.chapterId, revision: 2 } } })
+          expect(await prisma.agentEffectReceipt.findUniqueOrThrow({ where: { operationId: pending! } })).not.toHaveProperty('result.effectApplied', false)
+        } else expect(await step()).toMatchObject({ kind: 'tool', result: { display: { chapterId: f.chapterId, revision: 2 } } })
+        expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: args.content, revision: 2 })
+        expect(await prisma.storyCompilation.count({ where: { userId: f.userId } })).toBe(1)
+        expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'approval.requested' } })).toBe(1)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+        return
+      }
       const prepared = await prepareToolCursorOperation(lease, { expectedRevision: before.frame.revision, expectedHash: before.frame.snapshotHash }, {
         key: `exec:${before.frame.state.nextOperationSequence}`, action: 'chapter_write', callId: 'real-writer', targetId: f.chapterId,
         effectiveArgs: args, normalize: value => writerSchema.parse(value), operationInput: runtimeJson({ novelId: f.novelId, callId: 'real-writer',
@@ -57,7 +94,11 @@ describe.runIf(available)('coordinated writer actual PG body and parent cursor',
       let context: ToolContext = { userId: f.userId, novelId: f.novelId, runId: lease.runId, sessionId: f.sessionId, chapterId: f.chapterId,
         callId: 'real-writer', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', protectedChapterIds: new Set(),
         toolAuthority: new Map(authority.map(grant => [grant.name, grant])), signal: new AbortController().signal, emit: () => {} }
-      const execute = () => executeCoordinatedWritingServices(context, lease, prepared.operation.id, 'chapter_write')
+      const execute = async () => {
+        if (scenario !== 'shell-draft') return executeCoordinatedWritingServices(context, lease, prepared.operation.id, 'chapter_write')
+        expect(await executeDurableToolStep(lease, context.signal)).toMatchObject({ kind: 'tool', result: { display: { chapterId: f.chapterId, revision: 2 } } })
+        return prisma.agentEffectReceipt.findUniqueOrThrow({ where: { operationId: prepared.operation.id } })
+      }
       if (scenario === 'rollback-body') {
         const original = operations.commitOperationEffect
         vi.spyOn(operations, 'commitOperationEffect').mockImplementationOnce((token, id, hash, work) => original(token, id, hash, async tx => {
@@ -108,8 +149,11 @@ describe.runIf(available)('coordinated writer actual PG body and parent cursor',
       expect(await prisma.storyCompilation.count({ where: { userId: f.userId } })).toBe(1)
       expect(await prisma.sceneTask.count({ where: { userId: f.userId } })).toBe(1)
       const unchanged = await loadExecutionState(f.userId, lease.runId)
-      expect(unchanged.frame.state).toMatchObject({ phase: 'awaiting_operation', pendingOperationId: prepared.operation.id })
-      await reduceExecutionReceipt(lease, { expectedRevision: unchanged.frame.revision, expectedHash: unchanged.frame.snapshotHash, operationId: prepared.operation.id })
+      if (scenario === 'shell-draft') expect(unchanged.frame.state).toMatchObject({ phase: 'idle', pendingOperationId: null })
+      else {
+        expect(unchanged.frame.state).toMatchObject({ phase: 'awaiting_operation', pendingOperationId: prepared.operation.id })
+        await reduceExecutionReceipt(lease, { expectedRevision: unchanged.frame.revision, expectedHash: unchanged.frame.snapshotHash, operationId: prepared.operation.id })
+      }
       const result = await loadExecutionState(f.userId, lease.runId)
       expect(result.frame.state.messages.filter(message => message.role === 'tool').map(message => message.toolCallId)).toEqual(['read-body', 'real-writer'])
       expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
