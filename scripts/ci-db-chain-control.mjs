@@ -3,12 +3,14 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// A paired measurement of the two existing real-PG full chains. This runs only
+// Paired measurements of existing real-PG full chains and compiler dispatch. This runs only
 // on their owning shards, using the same DB, fixture, assertions and Node. The
 // normal full coverage shard remains the release gate and runs afterwards.
 export const dbChainControls = [
   { file: 'tests/integration/agent-fresh-durable-admission.test.ts', name: 'runs a genuine fresh writer through real read, coordinated body/reviews/commit and natural completion' },
   { file: 'tests/integration/agent-durable-runtime-quality.test.ts', name: 'v9-format-full-chain preserves paid results and atomic business effects' },
+  ...['chain', 'commit'].map(scenario => ({ file: 'tests/integration/agent-durable-runtime-compiler.test.ts',
+    name: scenario + ' preserves compilation identity and atomic effects' })),
 ]
 
 export function selectDbChainControls(plan, revision, index, count) {
@@ -41,7 +43,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     mkdirSync('.ci-test-diagnostics', { recursive: true })
     const output = `.ci-test-diagnostics/db-control-${index}.json`
     const pattern = targets.map(target => target.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$').join('|')
-    execFileSync(process.execPath, ['node_modules/vitest/vitest.mjs', 'run', ...targets.map(target => target.file),
+    execFileSync(process.execPath, ['node_modules/vitest/vitest.mjs', 'run', ...new Set(targets.map(target => target.file)),
       '--config=./vitest.config.ts', '--testNamePattern=' + pattern, '--no-file-parallelism', '--coverage.enabled=false',
       '--reporter=json', '--outputFile=' + output], { stdio: 'inherit', env: process.env })
     const summary = summarizeDbChainControls(JSON.parse(readFileSync(output, 'utf8')), targets)

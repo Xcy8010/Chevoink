@@ -35,11 +35,12 @@ import { todoWriteTool,withTodoIds } from '../../api/lib/agent/tools/todo-tools.
 import type { AgentTool,ToolContext } from '../../api/lib/agent/tools/types.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture } from '../support/agent-durable-runtime-fixture.js'
+import { createDurableTestLifecycle, DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS } from '../support/durable-test-lifecycle.js'
 
 // Production freezes directory targets before durable admission. The generic
 // protocol fixture deliberately omits that API stage and cannot prove bounded
 // writing progress; build a new, fully admitted run without rewriting a root.
-const writingFixture: typeof fixture = (work, tokenBudget, prompt = '修改本章') => fixture(async base => {
+const writingFixture: typeof fixture = (work, tokenBudget, prompt = '修改本章', options) => fixture(async base => {
   const session = await prisma.agentSession.create({ data: { userId: base.userId, novelId: base.novelId, title: '原始冻结写作任务',
     toolPolicy: { network: 'allow', contentWrite: 'allow', bulkWrite: 'allow', publish: 'allow', destructive: 'allow' } } })
   const runId = randomUUID()
@@ -53,7 +54,7 @@ const writingFixture: typeof fixture = (work, tokenBudget, prompt = '修改本�
   const root = await initializeDurableTask({ userId: base.userId, runId, sourceMessageId: source.id, tokenBudget })
   try { await work({ ...base, sessionId: session.id, runId, rootId: root.id, sourceMessageId: source.id, spec: frozen }) }
   finally { await prisma.agentChildExecutionGrant.deleteMany({ where: { parentRootId: root.id } }) }
-})
+}, undefined, undefined, options)
 
 describe.runIf(available)('first writing workflow milestones are bounded persisted observations', () => {
   const tasks = [{ purpose: '推进原授权场景', entryState: {}, goal: '查找线索', obstacle: '门锁', choice: '绕路', cost: '时间', turn: '发现脚印', exitState: {},
@@ -207,8 +208,9 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
 })
 
 describe.runIf(available)('durable compiler dispatch', () => {
-  it.each(['chain', 'resume', 'prepare-gap', 'scene-gap', 'replay', 'stale', 'foreign', 'missing', 'approval-denied', 'commit', 'commit-gap', 'commit-no-quality', 'commit-stale', 'commit-retain'] as const)('%s preserves compilation identity and atomic effects', async scenario => {
-    await (scenario === 'chain' ? writingFixture : fixture)(async f => {
+  for (const scenario of ['chain', 'resume', 'prepare-gap', 'scene-gap', 'replay', 'stale', 'foreign', 'missing', 'approval-denied', 'commit', 'commit-gap', 'commit-no-quality', 'commit-stale', 'commit-retain'] as const) it(`${scenario} preserves compilation identity and atomic effects`, { timeout: DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS }, async ({ signal }) => {
+    const lifecycle = createDurableTestLifecycle(signal, entry => console.info('[durable-compiler-stage]', JSON.stringify(entry)))
+    try { await (scenario === 'chain' ? writingFixture : fixture)(async f => {
       vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
       let lease = await claim(f)
       const prepareArgs = { chapterId: f.chapterId, intentSummary: '先准备本章，然后构建场景并写入' }
@@ -239,7 +241,7 @@ describe.runIf(available)('durable compiler dispatch', () => {
         toolAuthority: tools.map(tool => ({ name: tool.name, permission: scenario === 'approval-denied' ? 'ask' : 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '准备本章并写入' }, { role: 'assistant', content: null, toolCalls: calls }], successfulToolSignatures: [] } })
-      const step = () => executeDurableToolStep(lease, new AbortController().signal)
+      const step = () => lifecycle.phase('step', () => executeDurableToolStep(lease, signal))
       if (scenario === 'approval-denied') {
         const waiting = await step()
         if (waiting.kind !== 'waiting_approval') throw new Error('Expected approval')
@@ -363,7 +365,8 @@ describe.runIf(available)('durable compiler dispatch', () => {
       }
       const events = await publishDurableEvents(f.userId, lease.runId)
       expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'scene_task_build')).toMatchObject(scenario === 'stale' ? [{ ok: false }, { ok: true }] : [{ ok: true }])
-    })
+    }, undefined, undefined, { lifecycle })
+    } finally { lifecycle.dispose() }
   })
 })
 

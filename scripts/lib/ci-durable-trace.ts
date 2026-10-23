@@ -12,8 +12,8 @@ const traceSchema = z.object({ event: z.enum(['start', 'finish', 'abort', 'mock'
 /** Fixed counters only. Never forward arbitrary captured console/error content
  * into public diagnostics, even when it uses the known tracing prefix. */
 export function parseCiDurableTrace(content: string) {
-  const prefix = '[durable-quality-stage] '
-  if (!content.startsWith(prefix) || content.length > 8192) return null
+  const prefix = ['[durable-quality-stage] ', '[durable-compiler-stage] '].find(value => content.startsWith(value))
+  if (!prefix || content.length > 8192) return null
   try {
     const parsed = traceSchema.safeParse(JSON.parse(content.slice(prefix.length)))
     return parsed.success ? parsed.data : null
