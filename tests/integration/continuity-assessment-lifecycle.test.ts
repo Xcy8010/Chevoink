@@ -4,7 +4,7 @@ import * as credits from '../../api/lib/credits.js'
 import { tokenPriceSchema } from '../../api/lib/billing/token-price.js'
 import { priceTokenEvidence } from '../../api/lib/billing/reservation-policy.js'
 import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
-import { continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { continuityValidateTool, runLegacyContinuityReview } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { readContinuedContinuityRecovery } from '../../api/lib/agent/legacy-continuity-recovery.js'
 import { readContinuedReviewRecovery } from '../../api/lib/agent/continued-review-recovery.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
@@ -13,6 +13,8 @@ import * as lifecycle from '../../api/lib/agent/assessment-response-lifecycle.js
 import { readOwnedContinuityReassessment } from '../../api/lib/agent/continuity-reassessment-witness.js'
 import { generateReviewCompletion } from '../../api/lib/agent/review-completion.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import * as continuityParser from '../../api/lib/agent/continuity-format-recovery.js'
+import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { readContinuedContinuityEvidence } from '../../api/lib/agent/continued-continuity-evidence.js'
@@ -62,6 +64,60 @@ async function retryFixture(f: Parameters<Parameters<typeof fixture>[0]>[0], con
 }
 
 describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', () => {
+  it('reuses a settled v6 report rejected by the old current-metadata rule after JSONB persistence, with no new request or audit rewrite', () => fixture(async f => {
+    const { ctx } = await retryFixture(f, new AbortController())
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const candidate = terminalCandidateSchema.parse({ exitState: { action: '他推门走进来。' } })
+    const evidence = terminalEvidenceContext(chapter, null, 2, 1,
+      { version: 2, taskId: f.spec.id, chapterId: chapter.id, obligations: [] }, 6, 2)
+    const raw = JSON.stringify({ findings: [], terminalVerdicts: [{ claimIndex: 0, verdict: 'supported',
+      sourceEvidence: [{ segmentId: 'c0', quote: '他推门走进来' }], inheritance: { priorEndState: 'uncertain', currentState: 'changed' } }],
+    terminalProofVerdicts: [], terminalDispositions: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
+      ({ kind, result: 'clear', reason: 'The current body records the action in this direction.', findingIndexes: [] })) })
+    const input = { chapterId: chapter.id, revision: chapter.revision, bodies: { previous: null, current: body, terminalEvidence: evidence },
+      system: 'Synthetic full continuity review.', content: body, terminalCandidate: candidate, parserVersion: 8 as const,
+      options: { modelRuntime: runtime, explicitModelSelection: true, userId: f.userId, novelId: f.novelId, chapterId: chapter.id,
+        action: 'agent3ContinuityCritic', targetType: 'chapter' as const, targetId: chapter.id, signal: ctx.signal },
+      assertCurrent: async () => { expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(body) } }
+    const fetcher = vi.fn(async () => completion(raw))
+    vi.stubGlobal('fetch', fetcher)
+    const parse = continuityParser.inspectContinuityResponse
+    const oldParser = vi.spyOn(continuityParser, 'inspectContinuityResponse').mockImplementation((...args) =>
+      parse(args[0], args[1], args[2], args[3], args[4], args[5], { frozenCurrentMetadata: true }))
+    const callAt = new Date()
+    const old = await runLegacyContinuityReview(ctx, input)
+    oldParser.mockRestore()
+    expect(old.complete).toBe(false)
+    expect(old.audit).toMatchObject({ classification: 'terminal_invalid', terminalReviewDiagnostics: [{ code: 'inheritance_invalid' }] })
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    const payments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    expect(payments).toHaveLength(2)
+    expect(await prisma.$transaction(tx => readOwnedContinuityReassessment(tx, f, { runId: f.runId, callId: ctx.callId!, chapterId: chapter.id, revision: chapter.revision, callAt, resultAt: new Date(), payments })))
+      .toMatchObject({ primary: { id: payments.find(row => row.action === 'agent3ContinuityCritic')!.id }, second: { id: payments.find(row => row.action === 'agent3ContinuityCriticSecondPass')!.id } })
+    for (const payment of payments) expect(payment).toMatchObject({ billingStatus: 'settled', usageSource: 'reported', reservedCreditMilli: 0 })
+    const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
+    const oldHash = runtimeJson(old.audit).hash
+    const restored = await runLegacyContinuityReview({ ...ctx, callId: 'continue-reuse-v6' }, input)
+    expect(restored).toMatchObject({ complete: true, findings: [], audit: { assessmentRequest: (old.audit as unknown as { assessmentRequest: unknown }).assessmentRequest } })
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(payments)
+    expect(await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })).toEqual(artifacts)
+    expect(runtimeJson(old.audit).hash).toBe(oldHash)
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(body)
+    const reservation = artifacts.map(row => row.metadata as Record<string, unknown>).find(row => row.continuityAssessmentRequestKey)!
+    await prisma.aiUsageLog.update({ where: { id: payments[1].id }, data: { billingStatus: 'pending_usage', usageSource: 'unknown' } })
+    expect(await prisma.$transaction(tx => lifecycle.readReusableLegacyContinuityAssessment(tx, { ...ctx, callId: 'unknown-must-not-reuse' },
+      reservation.input as lifecycle.LegacyAssessmentInput))).toBeNull()
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    await prisma.aiUsageLog.update({ where: { id: payments[1].id }, data: { billingStatus: 'settled', usageSource: 'reported' } })
+    const responseFrame = artifacts.find(row => { const meta = row.metadata as Record<string, unknown>; return meta.assessmentResponseKey && meta.stage === 'reassessment' })!
+    await prisma.agentArtifact.delete({ where: { id: responseFrame.id } })
+    expect(await prisma.$transaction(tx => lifecycle.readReusableLegacyContinuityAssessment(tx, { ...ctx, callId: 'bound-second-without-response' },
+      reservation.input as lifecycle.LegacyAssessmentInput))).toBeNull()
+    await expect(prisma.$transaction(tx => lifecycle.readLegacyContinuityAssessment(tx, ctx, reservation.input as lifecycle.LegacyAssessmentInput)))
+      .rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  }))
   it.each(['known-new-body', 'known-new-body-no-candidate', 'known-new-candidate', 'delayed-call-persistence', 'no-author-admission', 'unknown-first', 'unknown-second', 'incomplete-second', 'focus-only', 'revision-only'] as const)(
     'a known completed failure fences its reviewed input without resetting the original contract or fees: %s', scenario => fixture(async f => {
       try {
@@ -185,7 +241,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
         const known = scenario === 'settled-with-continue'
         expect(payments[0]).toMatchObject({ billingStatus: known ? 'settled' : 'pending_usage', usageSource: known ? 'reported' : 'unknown' })
         await prisma.$transaction(tx => lifecycle.observeLegacyContinuityAssessment(tx, ctx, oldInput,
-          { content: known ? raw : null, finishReason: known ? 'stop' : null, toolCalls: [], transportComplete: known }, [payments[0].id], 'primary'))
+          { content: known ? raw : null, finishReason: known ? 'stop' : null, toolCalls: [], ...(known ? {} : { transportComplete: false as const }) }, [payments[0].id], 'primary'))
         const old = await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: chapter.revision,
           independentCheck: 'unavailable', coverage, findings: [] })
         if (known) {

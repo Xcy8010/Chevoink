@@ -7,6 +7,7 @@ import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format
 import { freshContinuityResponseContract, applyContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { stageTerminalProposals } from '../../api/lib/agent/terminal-proposal-review.js'
 import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
+import { prepareTerminalProposalInput } from '../../api/lib/agent/terminal-proposal-context.js'
 import { terminalCandidateCorrection } from '../../api/lib/agent/terminal-candidate-feedback.js'
 
 const content = 'The clerk records the request but has not approved it. The pump still awaits a seal.'
@@ -30,6 +31,71 @@ function response() {
 }
 
 describe('server-bound terminal review addresses', () => {
+  it('keeps request-local addresses stable after JSONB reorders candidate keys, including carried and repeated claims', () => {
+    const selected = terminalCandidateSchema.parse({ exitState: { location: 'At the desk.', knowledge: ['The request is recorded.', 'The request is recorded.'],
+      emotion: ['Patient.'], openLoops: [persistent] }, lastUnfinishedAction: 'Awaiting approval.' })
+    const stored = { ...selected, exitState: Object.fromEntries(Object.entries(selected.exitState).reverse()) } as typeof selected
+    const before = JSON.stringify(stored), ctx = context(), catalog = terminalReviewAddressCatalog(selected, ctx)
+    expect(terminalReviewAddressCatalog(stored, ctx)).toEqual(catalog)
+    expect(terminalReviewAddressInput(stored, ctx)).toEqual(terminalReviewAddressInput(selected, ctx))
+    const wire = { ...response(), terminalVerdicts: catalog.ordinary.map(row => ({ claimIndex: row.claimIndex, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })) }
+    expect(bindTerminalReviewAddresses(wire, stored, ctx)).toEqual(bindTerminalReviewAddresses(wire, selected, ctx))
+    expect(JSON.stringify(stored)).toBe(before)
+    expect(catalog.proofs).toHaveLength(1)
+    expect(catalog.ordinary).toHaveLength(4)
+  })
+  it.each(['changed', 'uncertain', 'unchanged'] as const)('accepts current-only v6 evidence with redundant %s metadata while preserving raw provenance and the old audit', currentState => {
+    const wire = { ...response(), terminalVerdicts: [{ ...response().terminalVerdicts[0],
+      inheritance: { priorEndState: 'uncertain', currentState } }] }, ctx = context(), raw = JSON.stringify(wire)
+    const bodies = { previous: persistent, current: content, terminalEvidence: ctx }
+    const frozen = inspectContinuityResponse(raw, bodies, true, 8, candidate, undefined, { frozenCurrentMetadata: true })
+    expect(frozen).toMatchObject({ complete: false, audit: { classification: 'terminal_invalid', terminalReviewDiagnostics: [{ code: 'inheritance_invalid' }] } })
+    const oldHash = runtimeJson(frozen.audit).hash
+    expect(inspectTerminalReview(candidate, content, raw, true, ctx)).toMatchObject({ supported: true, responseHash: runtimeJson({ raw }).hash })
+    expect(inspectContinuityResponse(raw, bodies, true, 8, candidate)).toMatchObject({ complete: true, audit: { rawResponse: frozen.audit.rawResponse } })
+    const bound = bindTerminalReviewAddresses(wire, candidate, ctx)
+    expect(bound.success).toBe(true)
+    if (bound.success) expect(inspectTerminalReview(candidate, content, JSON.stringify(bound.record), true, { ...ctx, verdictProtocol: 5 })).toBeNull()
+    expect(runtimeJson(frozen.audit).hash).toBe(oldHash)
+    const validation = { terminalCandidate: candidate, independentCheck: 'unavailable', continuityCriticResponse: frozen.audit }
+    const before = runtimeJson(validation).hash
+    expect(prepareTerminalProposalInput({ spec: { id: 'task' }, preparedContext: {}, validation, content, previousContent: persistent,
+      candidate: terminalCandidateSchema.parse({ exitState: { openLoops: [persistent] } }), originalContext: ctx, nextContext: ctx })).toBeDefined()
+    expect(runtimeJson(validation).hash).toBe(before)
+  })
+  it('authenticates a new genuine failure after redundant current metadata without substituting the historical failure', () => {
+    const ctx = context()
+    ctx.factCoverage!.obligations = [{ id: terminalFactId('openLoops', 'The instruction is pending.'), field: 'openLoops', claim: 'The instruction is pending.' }]
+    const wire = { ...response(), terminalDispositions: [{ obligationIndex: 0, outcome: 'ended', reason: 'No current evidence establishes the end.', sourceEvidence: [] }], terminalVerdicts: [{ ...response().terminalVerdicts[0], inheritance: { priorEndState: 'uncertain', currentState: 'changed' } }] }
+    const raw = JSON.stringify(wire), bodies = { previous: persistent, current: content, terminalEvidence: ctx }
+    const current = inspectContinuityResponse(raw, bodies, true, 8, candidate)
+    const frozen = inspectContinuityResponse(raw, bodies, true, 8, candidate, undefined, { frozenCurrentMetadata: true })
+    expect(current).toMatchObject({ complete: false, audit: { terminalReviewDiagnostics: [{ code: 'fact_disposition_invalid' }] } })
+    expect(frozen).toMatchObject({ complete: false, audit: { terminalReviewDiagnostics: [{ code: 'inheritance_invalid' }] } })
+    const validation = { terminalCandidate: candidate, independentCheck: 'unavailable', continuityCriticResponse: current.audit }
+    expect(prepareTerminalProposalInput({ spec: { id: 'task' }, preparedContext: {}, validation, content, previousContent: persistent,
+      candidate: terminalCandidateSchema.parse({ exitState: { openLoops: [persistent] } }), originalContext: ctx, nextContext: ctx })).toBeDefined()
+    const altered = { ...validation, continuityCriticResponse: { ...current.audit, terminalReviewDiagnostics: [{ code: 'inheritance_invalid', path: 'invented' }] } }
+    expect(() => prepareTerminalProposalInput({ spec: { id: 'task' }, preparedContext: {}, validation: altered, content, previousContent: persistent,
+      candidate, originalContext: ctx, nextContext: ctx })).toThrow()
+  })
+  it.each(['previous-only', 'mixed'] as const)('still requires an established unchanged inheritance judgment for %s evidence', source => {
+    const ctx = context()
+    ctx.previous!.segments = [{ segmentId: 'p0', start: 0, end: persistent.length, quote: persistent, hash: runtimeJson({ content: persistent }).hash }]
+    const sourceEvidence = [{ segmentId: 'p0', quote: persistent }, ...(source === 'mixed' ? [{ segmentId: 'c0' }] : [])]
+    for (const inheritance of [undefined, { priorEndState: 'uncertain', currentState: 'unchanged' }, { priorEndState: 'established', currentState: 'changed' }]) {
+      expect(inspectTerminalReview(candidate, content, JSON.stringify({ ...response(), terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence, inheritance }] }), true, ctx)).toBeNull()
+    }
+  })
+  it('does not forgive absent, foreign or false current quotations, incomplete semantics or unknown judgments', () => {
+    const row = { ...response().terminalVerdicts[0], inheritance: { priorEndState: 'uncertain', currentState: 'changed' } }, ctx = context()
+    for (const sourceEvidence of [[], [{ segmentId: 'c99' }], [{ segmentId: 'c0', quote: 'A fabricated approval.' }]]) {
+      expect(inspectTerminalReview(candidate, content, JSON.stringify({ ...response(), terminalVerdicts: [{ ...row, sourceEvidence }] }), true, ctx)).toBeNull()
+    }
+    expect(inspectContinuityResponse(JSON.stringify({ ...response(), terminalVerdicts: [row], semanticChecks: [] }),
+      { previous: persistent, current: content, terminalEvidence: ctx }, true, 8, candidate).complete).toBe(false)
+    expect(inspectTerminalReview(candidate, content, JSON.stringify({ ...response(), terminalVerdicts: [{ ...row, verdict: 'unknown' }] }), true, ctx)).toMatchObject({ supported: false })
+  })
   it('restores exact original identities and independent judgments, preserving full provider provenance', () => {
     const ctx = context(), wire = response(), raw = JSON.stringify(wire)
     const bound = bindTerminalReviewAddresses(wire, candidate, ctx)

@@ -299,10 +299,18 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
   const primary = frames.filter(row => row.stage === 'first' || row.stage === 'output_recovery')
   const first = primary.filter(row => typeof object(row.response)?.content === 'string').at(-1), response = object(first?.response)
   if (!first || !response || typeof response.content !== 'string') throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原检查未取得可复用响应，未重放请求。')
-  const ids = [...new Set(frames.flatMap(row => Array.isArray(row.usageIds) ? row.usageIds.filter((id): id is string => typeof id === 'string') : []))]
+  const bindings = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview',
+    metadata: { path: ['assessmentRequestOwnerKey'], equals: key } } })
+  const owners = bindings.map(row => object(row.metadata)!)
+  const ids = [...new Set([...frames, ...owners].flatMap(row => Array.isArray(row.usageIds) ? row.usageIds.filter((id): id is string => typeof id === 'string') : []))]
   const usage = await tx.aiUsageLog.findMany({ where: { id: { in: ids }, userId: ctx.userId, novelId: ctx.novelId,
-    targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3ContinuityCritic' } } })
+    agentRunId: ctx.runId, targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3ContinuityCritic' } } })
   const known = ids.length > 0 && usage.length === ids.length && usage.every(knownAssessmentBilling)
+    && owners.every(owner => {
+      const ids = owner.usageIds
+      return Array.isArray(ids) && ids.length === 1
+        && usage.some(row => ids.includes(row.id) && legacyContinuityStageForAction(row.action) === owner.stage)
+    })
     && frames.every(frame => Array.isArray(frame.usageIds) && frame.usageIds.length > 0 && new Set(frame.usageIds).size === frame.usageIds.length && frame.usageIds.every(id => {
       const row = usage.find(item => item.id === id)
       return row && legacyContinuityStageForAction(row.action) === frame.stage
@@ -314,17 +322,23 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
   const secondFrames = frames.filter(row => row.stage === 'reassessment')
   const second = secondFrames.filter(row => typeof object(row.response)?.content === 'string').at(-1), secondResponse = object(second?.response)
   let inspected = original
+  let secondApplied = false
   if (secondResponse && typeof secondResponse.content === 'string' && secondResponse.transportComplete === true && secondResponse.finishReason === 'stop'
     && Array.isArray(secondResponse.toolCalls) && !secondResponse.toolCalls.length) {
     const secondIds = [...new Set(secondFrames.flatMap(row => Array.isArray(row.usageIds) ? row.usageIds as string[] : []))]
     const secondUsage = await tx.aiUsageLog.findMany({ where: { id: { in: secondIds }, userId: ctx.userId, novelId: ctx.novelId,
-      targetType: input.targetType, targetId: input.targetId, action: 'agent3ContinuityCriticSecondPass' } })
+      agentRunId: ctx.runId, targetType: input.targetType, targetId: input.targetId, action: 'agent3ContinuityCriticSecondPass' } })
     if (secondUsage.length === new Set(secondIds).size && secondUsage.filter(row => !isKnownRejectedTextRequestAttempt(row)).length === 1
       && secondUsage.every(knownAssessmentBilling)) {
-      try { inspected = applyContinuityReassessment(original, JSON.parse(secondResponse.content) as string, input.bodies, input.reassessmentProtocol) } catch { /* Preserve invalid final response, never retry. */ }
+      try { inspected = applyContinuityReassessment(original, JSON.parse(secondResponse.content) as string, input.bodies, input.reassessmentProtocol); secondApplied = true } catch { /* Preserve invalid final response, never retry. */ }
     }
   }
   const claimed = await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['fullReassessmentKey'], equals: key } } })
+  // A newly interpretable primary cannot erase an already claimed second
+  // request or its unknown fees. Require the actual complete final report.
+  if (original.complete && claimed && !secondApplied || inspected.complete && !known) {
+    throw new DataAccessError(409, 'CONTINUITY_REPORT_INCOMPLETE', '原复核仍有未确认请求、用量或无效终态报告；保留原始记录，未复用或重发。')
+  }
   return { inspected, usageIds: ids, billingKnown: known, providerComplete: response.transportComplete === true && response.finishReason === 'stop'
     && Array.isArray(response.toolCalls) && !response.toolCalls.length, slotUsed: primary.some(row => row.stage === 'output_recovery') || !!claimed }
 }
@@ -340,6 +354,9 @@ export async function markLegacyContinuityAssessmentApplication(tx: Prisma.Trans
   const meta = object(reservation.metadata)!, key = String(meta.continuityAssessmentRequestKey)
   const frozen = object(meta.input)
   if (!inspected.complete || application?.inputHash !== runtimeJson(frozen).hash) return
+  if (typeof meta.callId !== 'string') return
+  const received = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
+  if (!received.billingKnown || !received.providerComplete || !received.inspected.complete) return
   const observations = await tx.agentArtifact.findMany({ where: { runId: reservation.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentKey'], equals: key } } })
   const ids = observations.flatMap(row => { const value = object(row.metadata)?.usageIds; return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [] })
   const usage = await tx.aiUsageLog.findMany({ where: { id: { in: ids }, userId: ctx.userId, novelId: ctx.novelId, action: { startsWith: 'agent3ContinuityCritic' } } })
@@ -376,7 +393,7 @@ export async function readReusableLegacyContinuityAssessment(tx: Prisma.Transact
   const source = { ...ctx, runId: latest.runId, callId: meta.callId }
   try {
     const result = await readLegacyContinuityAssessment(tx, source, input)
-    if (!result.billingKnown || !result.inspected.complete) return null
+    if (!result.billingKnown || !result.providerComplete || !result.inspected.complete) return null
     return bindLegacyContinuityAssessment(result.inspected, source, input)
   } catch { return null }
 }

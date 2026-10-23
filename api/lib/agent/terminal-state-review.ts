@@ -260,7 +260,7 @@ function terminalReviewClaimsInput(candidate?: TerminalCandidate, context?: Term
  * explicit, exhaustive judgment, never inferred from a substring match. */
 export type TerminalReviewDiagnostic = { code: string; path?: string; referenceIndex?: number; segmentId?: string; expectedFact?: { field: string; claim: string } }
 export function inspectTerminalReview(candidate: TerminalCandidate, content: string, raw: string, complete: boolean, context?: TerminalEvidenceContext,
-  diagnostics?: TerminalReviewDiagnostic[]) {
+  diagnostics?: TerminalReviewDiagnostic[], options: { frozenCurrentMetadata?: true } = {}) {
   if (context?.verdictProtocol !== 6 || !complete || !terminalEvidenceContextSchema.safeParse(context).success
     || context.current.contentHash !== runtimeJson({ content }).hash) return inspectTerminalReviewBound(candidate, content, raw, complete, context, diagnostics)
   try {
@@ -271,7 +271,7 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
       diagnostics?.push({ code: 'response_address_invalid', ...(path ? { path } : {}) })
       return null
     }
-    const reviewed = inspectTerminalReviewBound(candidate, content, JSON.stringify(bound.record), complete, { ...context, verdictProtocol: 5 }, diagnostics)
+    const reviewed = inspectTerminalReviewBound(candidate, content, JSON.stringify(bound.record), complete, { ...context, verdictProtocol: 5 }, diagnostics, !options.frozenCurrentMetadata)
     // Interpretation reuses the strict semantic contract; provenance always
     // identifies the actual provider response and its full frozen wire input.
     return reviewed ? { ...reviewed, responseHash: runtimeJson({ raw }).hash, evidenceContextHash: runtimeJson(context).hash } : null
@@ -282,7 +282,7 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
 }
 
 function inspectTerminalReviewBound(candidate: TerminalCandidate, content: string, raw: string, complete: boolean, context?: TerminalEvidenceContext,
-  diagnostics?: TerminalReviewDiagnostic[]) {
+  diagnostics?: TerminalReviewDiagnostic[], allowCurrentMetadata = false) {
   const invalid = (code: string, path?: string, referenceIndex?: number, segmentId?: string, expectedFact?: { field: string; claim: string }) => {
     diagnostics?.push({ code, ...(path ? { path } : {}), ...(referenceIndex !== undefined ? { referenceIndex } : {}), ...(segmentId ? { segmentId } : {}), ...(expectedFact ? { expectedFact } : {}) })
     return null
@@ -314,7 +314,10 @@ function inspectTerminalReviewBound(candidate: TerminalCandidate, content: strin
       const supported = item.verdict === 'supported'
       if (item.basis === 'inherited' && ((context?.verdictProtocol === undefined || supported) && !/^exitState\.(knowledge|body|objects|relationships|openLoops)\./u.test(item.path)
         || supported && (item.inheritance?.priorEndState !== 'established' || item.inheritance.currentState !== 'unchanged'))) return invalid('inheritance_invalid', item.path)
-      if (item.basis === 'current' && item.inheritance !== undefined && (context?.verdictProtocol === undefined || supported)) return invalid('inheritance_invalid', item.path)
+      // In v6, source comes from the exact selected refs. Redundant optional
+      // inheritance metadata cannot turn c-only evidence into a prior claim.
+      // Frozen failed-audit replay and all older contracts retain their check.
+      if (!allowCurrentMetadata && item.basis === 'current' && item.inheritance !== undefined && (context?.verdictProtocol === undefined || supported)) return invalid('inheritance_invalid', item.path)
       for (const [index, ref] of item.sourceEvidence.entries()) {
         if (context?.verdictProtocol !== 5 && (item.basis === 'current' ? !ref.segmentId.startsWith('c') : !/^[pt]/u.test(ref.segmentId))) return invalid('evidence_source_mismatch', item.path, index, ref.segmentId)
         if (ref.segmentId.startsWith('t')) {

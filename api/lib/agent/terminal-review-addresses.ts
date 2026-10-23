@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import type { TerminalCandidate } from './terminal-state-review.js'
+import { terminalCandidateSchema, type TerminalCandidate } from './terminal-candidate-contract.js'
 import type { TerminalEvidenceContext } from './terminal-evidence-context.js'
 import { terminalCandidateFacts } from './terminal-fact-identity.js'
 import { terminalProofCatalog, terminalProofVerdictSchema } from './terminal-proof-verdict.js'
@@ -10,6 +10,9 @@ import { terminalProposalDispositionSchema } from './terminal-proposal-review.js
 /** Request-local addresses are reconstructed only from the frozen candidate and
  * evidence context. They are neither facts nor authority to change a judgment. */
 export function terminalReviewAddressCatalog(candidate: TerminalCandidate, context: TerminalEvidenceContext) {
+  // JSONB/canonical serialization may reorder object keys. Rebuild the same
+  // schema-owned field order used at admission, without changing any claim.
+  candidate = terminalCandidateSchema.parse(candidate)
   const grouped = new Map<string, { id: string; field: string; claim: string; paths: string[] }>()
   for (const fact of terminalCandidateFacts(candidate)) {
     const prior = grouped.get(fact.id)

@@ -50,23 +50,28 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
   let content: unknown
   try { content = JSON.parse(raw.content) } catch { return null }
   if (typeof content !== 'string') return null
-  const inspected = inspectContinuityResponse(content, frozen.data.bodies, true, frozen.data.parserVersion ?? 6, frozen.data.terminalCandidate, frozen.data.sourceScope)
-  if (inspected.complete) return null
-  const currentPair = runtimeJson(inspected.audit).hash === runtimeJson(original).hash
-    && runtimeJson(meta.request).hash === runtimeJson(continuityReassessmentRequest(frozen.data.system, frozen.data.content, inspected, frozen.data.bodies, false, frozen.data.reassessmentProtocol)).hash
-  // The earlier v2 renderer omitted schema-error paths and their prompt field.
-  // Authenticate that exact pair; never mix projections or ignore other bytes.
-  const legacyAudit = { ...inspected.audit, ...(inspected.audit.terminalReviewDiagnostics ? {
-    terminalReviewDiagnostics: inspected.audit.terminalReviewDiagnostics.map(item => {
-      const projected = { ...item }
-      if (projected.code === 'verdict_schema_invalid' && (projected.path === 'terminalVerdicts' || projected.path?.startsWith('terminalVerdicts.'))) delete projected.path
-      return projected
-    }),
-  } : {}) }
-  const legacyPair = frozen.data.reassessmentProtocol === undefined && runtimeJson(legacyAudit).hash === runtimeJson(original).hash
-    && runtimeJson(meta.request).hash === runtimeJson(continuityReassessmentRequest(frozen.data.system, frozen.data.content,
-      { ...inspected, audit: legacyAudit }, frozen.data.bodies, true)).hash
-  if (!currentPair && !legacyPair) return null
+  // A parser correction cannot erase a real historical two-request interval.
+  // Authenticate one complete audit/request pair under its own metadata rule.
+  const inspected = [inspectContinuityResponse(content, frozen.data.bodies, true, frozen.data.parserVersion ?? 6, frozen.data.terminalCandidate, frozen.data.sourceScope),
+    inspectContinuityResponse(content, frozen.data.bodies, true, frozen.data.parserVersion ?? 6, frozen.data.terminalCandidate, frozen.data.sourceScope, { frozenCurrentMetadata: true })].find(inspected => {
+    if (inspected.complete) return false
+    const currentPair = runtimeJson(inspected.audit).hash === runtimeJson(original).hash
+      && runtimeJson(meta.request).hash === runtimeJson(continuityReassessmentRequest(frozen.data.system, frozen.data.content, inspected, frozen.data.bodies, false, frozen.data.reassessmentProtocol)).hash
+    // The earlier v2 renderer omitted schema-error paths and their prompt field.
+    // Authenticate that exact pair; never mix projections or ignore other bytes.
+    const legacyAudit = { ...inspected.audit, ...(inspected.audit.terminalReviewDiagnostics ? {
+      terminalReviewDiagnostics: inspected.audit.terminalReviewDiagnostics.map(item => {
+        const projected = { ...item }
+        if (projected.code === 'verdict_schema_invalid' && (projected.path === 'terminalVerdicts' || projected.path?.startsWith('terminalVerdicts.'))) delete projected.path
+        return projected
+      }),
+    } : {}) }
+    const legacyPair = frozen.data.reassessmentProtocol === undefined && runtimeJson(legacyAudit).hash === runtimeJson(original).hash
+      && runtimeJson(meta.request).hash === runtimeJson(continuityReassessmentRequest(frozen.data.system, frozen.data.content,
+        { ...inspected, audit: legacyAudit }, frozen.data.bodies, true)).hash
+    return currentPair || legacyPair
+  })
+  if (!inspected) return null
   const firstFrames = claims.filter(row => object(row.metadata).assessmentKey === meta.fullReassessmentKey && object(row.metadata).stage === 'first')
   const observed = firstFrames.filter(row => typeof object(object(row.metadata).response).content === 'string')
   if (observed.length !== 1 || !Array.isArray(object(observed[0].metadata).usageIds) || observed[0].createdAt > claim.createdAt || object(object(observed[0].metadata).audit).contentHash !== inspected.audit.contentHash

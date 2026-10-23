@@ -100,6 +100,19 @@ describe('legacy continuity request attempts retain their semantic stage', () =>
     expect(result).toMatchObject({ billingKnown: true, providerComplete: true, slotUsed: true, inspected: { complete: true, findings: [] } })
     expect(result.usageIds).toEqual([rejected.id, settled.id, secondRejected.id, secondSettled.id])
   })
+  it.each(['unknown-bound', 'settled-bound', 'truncated', 'invalid'] as const)('does not replace an unresolved final report with a newly interpretable primary: %s', async kind => {
+    const second = { ...settled, id: 'second-request', action: 'agent3ContinuityCriticSecondPass',
+      ...(kind === 'unknown-bound' ? { usageSource: 'unknown', billingStatus: 'pending_usage' } : {}) }
+    const frames = [{ stage: 'first', usageIds: [settled.id], response: response('{"findings":[]}') },
+      ...(kind === 'truncated' ? [{ stage: 'reassessment', usageIds: [second.id], response: { ...response('{"findings":[]}'), finishReason: 'length', transportComplete: false } }]
+        : kind === 'invalid' ? [{ stage: 'reassessment', usageIds: [second.id], response: response('{"invalid":true}') }] : [])]
+    const tx = reader([settled, second], frames), findMany = vi.mocked(tx.agentArtifact.findMany)
+    findMany.mockResolvedValueOnce(frames.map((metadata, index) => ({ id: `frame-${index}`, metadata })) as never)
+      .mockResolvedValueOnce([{ metadata: { stage: 'first', usageIds: [settled.id] } }, { metadata: { stage: 'reassessment', usageIds: [second.id] } }] as never)
+    vi.mocked(tx.agentArtifact.findFirst).mockResolvedValue({ id: 'second-claimed' } as never)
+    await expect(readLegacyContinuityAssessment(tx, ctx, input)).rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
+    expect(vi.mocked(tx.aiUsageLog.findMany).mock.calls[0][0]?.where?.id).toEqual({ in: [settled.id, second.id] })
+  })
   it('does not erase a successful unmarked 0/0 output recovery stage', async () => {
     const zero = { ...settled, id: 'zero-response', action: 'agent3ContinuityCriticEmptyRecovery', requestTokens: 0, responseTokens: 0, creditChargeMilli: 0 }
     const frames = [{ stage: 'first', usageIds: [settled.id], response: response(raw) },
@@ -129,9 +142,9 @@ describe('legacy continuity request attempts retain their semantic stage', () =>
         : kind === 'pending-settlement' ? { usageSource: 'reported', billingStatus: 'pending_settlement', requestTokens: 0, responseTokens: 0 }
           : { creditChargeMilli: 1 }) }
     const frames = [{ stage: 'first', usageIds: [unsafe.id], response: response(null) }, { stage: 'first', usageIds: [settled.id], response: response('{"findings":[]}') }]
-    const result = await readLegacyContinuityAssessment(reader([unsafe, settled], frames), ctx, input)
-    expect(result.billingKnown).toBe(false)
-    expect(result.usageIds).toEqual([unsafe.id, settled.id])
+    const tx = reader([unsafe, settled], frames)
+    await expect(readLegacyContinuityAssessment(tx, ctx, input)).rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
+    expect(vi.mocked(tx.aiUsageLog.findMany).mock.calls[0][0]?.where?.id).toEqual({ in: [unsafe.id, settled.id] })
   })
 })
 
@@ -176,7 +189,7 @@ describe('one complete continuity reassessment', () => {
       billingEvidence: { responseObserved: true } }
     await expect(readOwnedContinuityReassessment(tx, subject, { runId: 'run', callId: 'call', chapterId: 'chapter', revision: 1,
       callAt: new Date(1), resultAt: new Date(2), payments: [{ ...usage, action: 'agent3ContinuityCritic' },
-        { ...usage, action: 'agent3ContinuityCriticSecondPass' }] as AiUsageLog[] })).resolves.toBeNull()
+        { ...usage, action: 'agent3ContinuityCriticSecondPass' }] as unknown as AiUsageLog[] })).resolves.toBeNull()
     expect(findMany.mock.calls[0]).toEqual([expect.objectContaining({ where: expect.objectContaining({ run: { userId: 'owner', novelId: 'novel' } }) })])
   })
   it('preserves parseable invalid fields as original indices and invents none for unparseable syntax', () => {

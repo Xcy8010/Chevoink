@@ -135,15 +135,19 @@ function authenticFailedReport(validation: unknown, content: string, previous: s
     if (typeof response !== 'string') return false
     const scope = continuitySourceScopeSchema.optional().safeParse(audit.sourceScope)
     if (!scope.success) return false
-    const inspected = inspectContinuityResponse(response, { previous, current: content, terminalEvidence }, true, 8, candidate, scope.data)
-    if (inspected.complete) return false
+    // Match the entire actual failure under either its current or frozen
+    // metadata rule. Never relabel a failure or rewrite a stored audit.
+    const bodies = { previous, current: content, terminalEvidence }
+    const reports = [inspectContinuityResponse(response, bodies, true, 8, candidate, scope.data),
+      inspectContinuityResponse(response, bodies, true, 8, candidate, scope.data, { frozenCurrentMetadata: true })]
     // The lifecycle adds this dispatch identity after parsing. It is retained
     // and checked by the reservation layer, not part of the parser's audit.
     const { reassessment, assessmentRequest, ...first } = audit
     if (assessmentRequest !== undefined && !z.object({ version: z.literal(1),
       key: z.string().regex(/^[a-f0-9]{64}$/u), inputHash: z.string().regex(/^[a-f0-9]{64}$/u),
     }).strict().safeParse(assessmentRequest).success) return false
-    if (reassessment === undefined) return runtimeJson(inspected.audit).hash === runtimeJson(first).hash
+    const matches = () => reports.some(report => !report.complete && runtimeJson(report.audit).hash === runtimeJson(first).hash)
+    if (reassessment === undefined) return matches()
     // The existing lifecycle preserves the first invalid audit and appends a
     // failed second response. Validate that exact wrapper, keeping it failed;
     // an incomplete second response is still unknown and cannot enter here.
@@ -151,6 +155,6 @@ function authenticFailedReport(validation: unknown, content: string, previous: s
       version: z.literal(1), encoding: z.literal('json-string'), content: z.string(), complete: z.literal(true),
     }).strict() }).strict().safeParse(reassessment)
     if (!second.success || typeof JSON.parse(second.data.rawResponse.content) !== 'string') return false
-    return runtimeJson(inspected.audit).hash === runtimeJson(first).hash
+    return matches()
   } catch { return false }
 }
