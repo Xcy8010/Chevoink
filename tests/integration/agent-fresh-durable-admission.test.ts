@@ -50,7 +50,8 @@ async function ready(f: { userId: string; runId: string; rootId: string }) {
   await prisma.agentTaskRoot.update({ where: { id: f.rootId }, data: { status: 'completed' } })
   vi.spyOn(credits, 'assertCreditAccess').mockResolvedValue(undefined)
   vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
-    baseUrl: 'https://provider.invalid/v1', apiKey: 'synthetic-only', reasoningEffort: 'high', reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: null })
+    baseUrl: 'https://provider.invalid/v1', apiKey: 'synthetic-only', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'],
+    reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })
   const features = flags.resolveAgent2FeatureFlags(f.userId)
   vi.spyOn(flags, 'resolveAgent2FeatureFlags').mockReturnValue({ ...features, storyCompiler: true, humanityQuality: true })
   vi.spyOn(context, 'assembleContext').mockImplementation(async input => ({ messages: [{ role: 'system', content: '合成原始任务边界' }, { role: 'user', content: input.prompt }],
@@ -308,6 +309,9 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     await ready(f)
     const failures = observeBootstrapFailures()
     const admitted = await startLoopRun(f.userId, { sessionId: f.sessionId, novelId: f.novelId, prompt: '你好', mode: 'build' }, { humanOrigin: 'http' })
+    // Admission dispatch is intentionally async. Let its no-op fixture finish
+    // before the recovery scan becomes the sole real dispatcher for this case.
+    await vi.waitFor(() => expect(dispatchFreshDurableRun).toHaveBeenCalledWith(f.userId, admitted.runId))
     const execute = vi.spyOn(executor, 'runReviewedDurableExecution').mockImplementation(async lease => ({ kind: 'needs_attention', reason: 'synthetic boundary', frame: (await loadExecutionState(lease.userId, lease.runId)).frame }))
     // Discovery is global: another parallel fixture can precede this owner.
     // Exercise this exact source, never spend the one-shot mock on a peer run.
@@ -433,6 +437,8 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
         ] } : { content: '第一章已保存并完成核对。' }
       } else {
         criticCalls++
+        expect(body.reasoning_effort).toBe('none')
+        expect(body.thinking?.type).not.toBe('enabled')
         if (criticCalls > 2) throw Error('A successful current-version report must not be paid twice')
         expect(body.messages[1].content).toContain(content)
         const report = criticCalls === 1 ? { findings: [],
