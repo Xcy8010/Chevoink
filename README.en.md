@@ -64,6 +64,28 @@ Chevoink Agent is an AI writing partner built around your work. It helps authors
 
 Use built-in models, custom OpenAI-compatible services, or a local connector for LM Studio and Ollama. The computer hosting a local model must stay online. See [local model setup](docs/LOCAL-MODELS.en.md).
 
+### Runtime flow
+
+The Agent works within the current project, chooses tools as needed, and uses actual execution results to decide the next step.
+
+```mermaid
+flowchart TD
+  A[Author request or source material] --> B[Read relevant project context]
+  B --> C[Select creative skills and plan steps]
+  C --> D[Model advances the current step]
+  D --> E{Are tools needed}
+  E -->|Yes| F[Use the required tools<br/>Research / read and write / review as needed]
+  F --> G[Record actual results<br/>Update context and progress]
+  G --> D
+  E -->|Ready to respond| H[Summarize actual results and remaining work]
+  D -->|Missing information or confirmation| I[Ask the author]
+  I -->|Author responds| B
+  F -->|Unable to continue| J[Keep existing work and explain the blocker]
+  J --> H
+```
+
+Drafts and revisions are saved through actual write operations; reviews follow the task's requirements. Chat, research and planning do not have to enter chapter writing or review. The final reply explains **what was created or changed, where it was saved, and what remains unfinished**. Execution progress is visible in the task window.
+
 ### System architecture
 
 ```mermaid
@@ -110,8 +132,6 @@ flowchart LR
   SSE --> APP
 ```
 
-The deterministic evaluation suite freezes 24 Chinese web-fiction scenarios across six genres, nine task classes, and twelve quality signals. CI stores a report carrying the dataset hash, code SHA, model, and Skill version. Automated metrics diagnose regressions; they do not replace real author outcomes or anonymous review by at least three target-genre readers/editors.
-
 ### Continuing work and choosing models
 
 Tasks retain project context and creative material. Use Continue to return to a paused task, and view progress and history in the task window.
@@ -127,7 +147,7 @@ Studio settings let you assign built-in or custom models and reasoning efforts t
 | Windows client development | [Build instructions](desktop/windows/README.md) · [Development status](docs/WINDOWS_DESKTOP.md); internal candidate, not yet a signed public release |
 | Learn how to use it | [User guide](#user-guide) |
 | Explore features | [Feature overview](#feature-overview) |
-| Understand Agent 4.0 | [Runtime flow & architecture](#chevoink-agent-40) · [Historical Agent 3.0 proposal (Chinese)](./plan/23-Agent3.0中文网文人类化创作与技能生态升级方案.md) |
+| Understand Agent 4.0 | [Runtime flow](#runtime-flow) · [System architecture](#system-architecture) |
 | Run it locally | [Quick start](#quick-start) |
 | Understand the architecture | [Tech stack](#tech-stack) · [Directory structure](#directory-structure) |
 | Deep engineering details | [Engineering Documentation](./docs/ENGINEERING.en.md) ([中文](./docs/ENGINEERING.md)) · [Development Standards](./docs/DEVELOPMENT-STANDARDS.en.md) ([中文](./docs/DEVELOPMENT-STANDARDS.md)) · [Agent evaluation guide (Chinese)](./tests/agent-evals/README.md) |
