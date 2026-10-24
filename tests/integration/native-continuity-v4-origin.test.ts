@@ -53,7 +53,7 @@ describe.runIf(available)('native continuity origin remains a real operation and
     const network = vi.fn(async () => {
       const origin = network.mock.calls.length === 1
       const wire = { findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic complete independent review.', ...(origin && version === 21 ? { findingIndexes: [] } : { findingIds: [] }) })),
-        terminalVerdicts: [{ claimIndex: 0, verdict: origin ? 'unknown' : 'supported', ...(origin ? { reason: 'Waiting is not established.' } : {}), sourceEvidence: origin ? [] : [{ segmentId: 'c0' }] }], terminalProofVerdicts: [], terminalDispositions: [],
+        terminalVerdicts: [{ claimIndex: 0, verdict: origin ? 'unknown' : 'supported', sourceEvidence: origin ? [] : [{ segmentId: 'c0' }] }], terminalProofVerdicts: [], terminalDispositions: [],
         ...(!origin ? { proposalDispositions: [{ proposalIndex: 0, outcome: 'unknown', reason: 'The old draft remains unverified.', sourceEvidence: [] }] } : {}) }
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(wire) }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     }); vi.stubGlobal('fetch', network)
@@ -75,12 +75,16 @@ describe.runIf(available)('native continuity origin remains a real operation and
         effectiveArgs: admittedArgs, normalize: value => JSON.parse(JSON.stringify(continuityValidateTool.parameters.parse(value))), operationInput: runtimeJson({ novelId: f.novelId, callId: 'origin', args: admittedArgs, baseline, work: frozen }).value })
       await executePreparedContinuityWork(ctx, lease, prepared.operation.id)
       await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
-    } else expect(await step()).toMatchObject({ result: { failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' } })
+    } else {
+      const result = await step()
+      expect(result, JSON.stringify(result)).toMatchObject({ result: { failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' } })
+    }
     const origin = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' }, include: { effectReceipt: true, events: true, children: { include: { attempts: { include: { usageReceipt: true } }, events: true } } } })
     expect(origin.status).toBe('succeeded'); expect(origin.effectReceipt).not.toBeNull()
     expect(origin.events).toContainEqual(expect.objectContaining({ type: 'effect.committed' }))
     expect(origin.children[0].attempts[0].usageReceipt).toMatchObject({ source: 'reported', settlementStatus: 'settled' })
-    expect(await step()).toMatchObject({ result: { failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' } })
+    const reusedOrigin = await step()
+    expect(reusedOrigin, JSON.stringify(reusedOrigin)).toMatchObject({ result: { failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' } })
     expect(network).toHaveBeenCalledOnce()
     const originCache = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate', operationKey: `exec:2` }, include: { effectReceipt: true, children: true } })
     expect(originCache.inputSnapshot).toMatchObject({ input: { work: { version: 18, cached: [] } } })

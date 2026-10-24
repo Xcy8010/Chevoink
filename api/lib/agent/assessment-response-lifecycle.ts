@@ -501,7 +501,8 @@ export async function readReusableLegacyContinuityAssessment(tx: Prisma.Transact
     const projection = object((result.inspected.audit as Record<string, unknown>).formatProjection)
     if (latest !== exact && latest !== crossWire && (!result.recoveryReady || projection?.kind !== 'empty_optional_proposal_table' || projection.version !== 1
       || !validEmptyOptionalProposalProjection(result.inspected.audit, input.bodies.current, input.bodies.terminalEvidence))) return null
-    if (projection?.kind === 'empty_optional_proposal_table' && compatible?.id !== latest.id) return null
+    if (projection?.kind === 'empty_optional_proposal_table' && (latest !== crossWire && compatible?.id !== latest.id
+      || !validEmptyOptionalProposalProjection(result.inspected.audit, input.bodies.current, input.bodies.terminalEvidence))) return null
     return bindLegacyContinuityAssessment(result.inspected, source, frozen)
   } catch { return null }
 }

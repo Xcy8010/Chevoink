@@ -78,11 +78,11 @@ describe.runIf(available)('complete terminal report resumes through processing a
       // Contract assertions run outside fetch: an assertion thrown here is
       // correctly treated as an unknown provider result by real billing.
       requests.push({ url, body: String(init.body) })
-      const response = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body judgment.', findingIndexes: [] })),
-        terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: body }] }], terminalDispositions: [],
+      const response = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body judgment.', findingIds: [] })),
+        terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }], terminalProofVerdicts: [], terminalDispositions: [],
         proposalDispositions: [{ proposalIndex: 0, outcome: 'replaced',
           reason: 'The saved body establishes that the sensor remains offline rather than repaired.', candidateIndex: 0,
-          sourceEvidence: [{ segmentId: 'c0', quote: body }] }] })
+          sourceEvidence: [{ segmentId: 'c0' }] }] })
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: response }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     })
     vi.stubGlobal('fetch', network)
@@ -103,11 +103,9 @@ describe.runIf(available)('complete terminal report resumes through processing a
       expect(requests[0].url).toBe('https://provider.invalid/v1/chat/completions')
       const request = JSON.parse(requests[0].body)
       expect(request.messages.at(-1).content).toContain(body)
-      const prefix = '本次冻结复核目录：'
-      const candidateLine = request.messages.at(-1).content.split('\n').find((line: string) => line.startsWith(prefix))
-      expect(candidateLine).toBeDefined()
-      expect(JSON.parse(candidateLine.slice(prefix.length))).toMatchObject({ ordinary: [{ claimIndex: 0, field: 'objects', claim: body }],
-        candidates: [{ claimIndex: 0, field: 'objects', claim: body }], proofs: [], obligations: [],
+      const frozenRequest = JSON.parse(request.messages.at(-1).content)
+      expect(frozenRequest.catalog.terminal).toMatchObject({ ordinary: [{ claimIndex: 0, field: 'objects', claim: body }],
+        claims: [{ claimIndex: 0, field: 'objects', claim: body }], proofs: [], obligations: [],
         proposals: [{ proposalIndex: 0, field: 'objects', claim: candidate.exitState.objects[0] }] })
     }
     const criticUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, agentRunId: f.runId, action: 'agent3ContinuityCritic' } })

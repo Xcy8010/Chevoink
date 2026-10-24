@@ -11,6 +11,7 @@ import { continuityReviewManifestSchema } from './continuity-review-v4.js'
 import { inspectAuthenticatedContinuityAssessment, type AuthenticatedContinuityInspection } from './authenticated-continuity-assessment.js'
 import { applyContinuityReassessment, failedContinuityReassessment, continuityReassessmentRequest, type LegacyAssessmentInput } from './assessment-response-lifecycle.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
+import { tokenPriceSchema } from '../billing/token-price.js'
 
 const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
 const workSchema = z.object({ kind: z.literal('check'), version: z.union([z.literal(21), z.literal(22)]),
@@ -90,6 +91,7 @@ export async function readNativeContinuityAssessments(db: Prisma.TransactionClie
         || runtimeJson(child.inputSnapshot).hash !== child.inputHash || runtimeJson(attempt.result).hash !== attempt.resultHash
         || runtimeJson(attempt.requestSnapshot).hash !== attempt.requestHash) return null
       const childInput = object(object(child.inputSnapshot).input), request = object(object(attempt.requestSnapshot).request), body = object(request.body)
+      const billing = tokenPriceSchema.safeParse(childInput.billing)
       const route = object(attempt.requestSnapshot), usage = attempt.usageReceipt
       const measurement = usage && { source: usage.source, promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
         cacheHitTokens: usage.cacheHitTokens, cacheMissTokens: usage.cacheMissTokens }
@@ -97,7 +99,7 @@ export async function readNativeContinuityAssessments(db: Prisma.TransactionClie
       if (route.provider !== work.route.provider || route.model !== work.route.model || attempt.provider !== route.provider || attempt.model !== route.model
         || request.endpoint !== `${work.route.baseUrl.replace(/\/$/u, '')}/chat/completions` || body.model !== work.route.model
         || (body.max_tokens ?? body.max_completion_tokens) !== work.route.maxOutputTokens || body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.length)
-        || runtimeJson(childInput.request).hash !== runtimeJson(request).hash || runtimeJson(childInput.price).hash !== runtimeJson(work.price).hash
+        || runtimeJson(childInput.request).hash !== runtimeJson(request).hash || !billing.success || runtimeJson(billing.data).hash !== runtimeJson(work.price).hash
         || runtimeJson(body.messages).hash !== runtimeJson([{ role: 'system', content: expected.system }, { role: 'user', content: expected.content }]).hash
         || !usage || usage.source !== 'reported' || usage.settlementStatus !== 'settled' || usage.promptTokens === null || usage.completionTokens === null
         || usage.promptTokens < 0 || usage.completionTokens < 0 || usage.observationHash !== runtimeJson(measurement).hash

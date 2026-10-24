@@ -114,7 +114,7 @@ describe.runIf(available)('Continue reuses a settled empty optional proposal tab
     const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
     const errors = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'error' }, select: { payload: true } })
     const failedTools = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.result', seq: { gt: 1 }, payload: { path: ['ok'], equals: false } }, select: { payload: true } })
-    expect(failedTools).toEqual([])
+    expect(failedTools, JSON.stringify(failedTools)).toEqual([])
     expect({ status: finished.status, errorMessage: finished.errorMessage, errors }).toEqual({ status: 'completed', errorMessage: null, errors: [] })
     expect(finished).toMatchObject({ taskSpec: beforeRun.taskSpec, modelTier: beforeRun.modelTier, customModelId: beforeRun.customModelId, reasoningEffort: beforeRun.reasoningEffort })
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))).toMatchObject({ terminalCommitted: true, terminalReview: { deliveryEligible: true } })

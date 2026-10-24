@@ -202,7 +202,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     if (variant === 'frozen3') {
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
       const coverage = compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source: null, terminalCandidate: candidate }, 11)
-      const bodies = { previous: null, current: body, terminalEvidence: terminalEvidenceContext(chapter, null, 2, 1, terminalCoverageInput(f.spec, saved.preparedContext, chapter, candidate, 2, []), 6, 2) }
+      const bodies = { previous: null, current: body, terminalEvidence: terminalEvidenceContext(chapter, null, 2, 1, terminalCoverageInput(f.spec, saved.preparedContext, chapter, candidate, 2), 6, 2) }
       const frozen: lifecycle.LegacyAssessmentInput = { chapterId: chapter.id, revision: chapter.revision, bodies, system: 'Synthetic frozen parser8 contract.', content: body,
         parserVersion: 8, reassessmentProtocol: 5, terminalCandidate: candidate, sourceScope: compilerEvidenceScope(chapter, null), bindingHash: runtimeJson(coverage).hash,
         targetType: 'story_compilation', targetId: compilation.id }

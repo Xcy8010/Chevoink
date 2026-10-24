@@ -6,7 +6,8 @@ import { buildContinuityReviewManifest, inspectContinuityV4 } from '../../api/li
 import { stageTerminalProposals } from '../../api/lib/agent/terminal-proposal-review.js'
 import { continuityReassessmentRequest, failedContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { readNativeContinuityAssessments } from '../../api/lib/agent/native-continuity-assessment.js'
-import { isContinuityV4Inspection } from '../../api/lib/agent/authenticated-continuity-assessment.js'
+import { isContinuityV4Inspection, readAuthenticatedContinuityAssessment } from '../../api/lib/agent/authenticated-continuity-assessment.js'
+import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 
 const mocks = vi.hoisted(() => ({ source: vi.fn(async (_db, row) => ({ input: row.inputSnapshot.input })), state: vi.fn() }))
 // Cursor/source verification has its own real PG chain. This unit exercises
@@ -39,7 +40,7 @@ function fixture() {
   const rawResult = (raw: string) => ({ outcome: 'succeeded', result: { content: raw, reasoning: '', toolCalls: [], finishReason: 'stop', usage: { promptTokens: 12, completionTokens: 8, totalTokens: 20, promptCacheHitTokens: null, promptCacheMissTokens: null } } })
   const child = (parentId: string, step: string, raw: string, requestText: { system: string; content: string }) => {
     const id = `${parentId}-${step}`, request = { endpoint: `${route.baseUrl}/chat/completions`, body: { model: route.model, max_tokens: route.maxOutputTokens, messages: [{ role: 'system', content: requestText.system }, { role: 'user', content: requestText.content }] } }
-    const snapshot = runtimeJson({ kind: 'provider', input: { request, price } }), result = runtimeJson(rawResult(raw)), requestSnapshot = runtimeJson({ provider: route.provider, model: route.model, request })
+    const snapshot = runtimeJson({ kind: 'provider', input: { request, billing: price } }), result = runtimeJson(rawResult(raw)), requestSnapshot = runtimeJson({ provider: route.provider, model: route.model, request })
     const measurement = { source: 'reported', promptTokens: 12, completionTokens: 8, cacheHitTokens: null, cacheMissTokens: null }
     return { id, kind: 'provider', action: step, parentOperationId: parentId, taskRootId: taskId, operationKey: `aux:${parentId}:${step}`, status: 'succeeded', inputSnapshot: snapshot.value, inputHash: snapshot.hash,
       attempts: [{ id: `${id}-attempt`, attemptKey: '1', status: 'succeeded', runId: 'run', dispatchedAt: new Date(1), completedAt: new Date(2), provider: route.provider, model: route.model, requestSnapshot: requestSnapshot.value, requestHash: requestSnapshot.hash, result: result.value, resultHash: result.hash,
@@ -70,6 +71,24 @@ function fixture() {
 }
 
 describe('readonly native continuity provenance', () => {
+  it('authenticates an original work21 UNKNOWN from the same real billing snapshot shape', async () => {
+    const f = fixture(), origin = f.operations[0], input = origin.inputSnapshot as { input: { work: Record<string, unknown> } }, work = input.input.work
+    const context = (work.sourceBodies as typeof f.frozen.bodies).terminalEvidence
+    const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic frozen parser8 review.', findingIndexes: [] })),
+      terminalVerdicts: [{ claimIndex: 0, verdict: 'unknown', sourceEvidence: [] }], terminalProofVerdicts: [], terminalDispositions: [] })
+    work.version = 21; work.reassessmentProtocol = 5; delete work.continuityManifest
+    origin.inputHash = runtimeJson(origin.inputSnapshot).hash
+    origin.children = [f.child(origin.id, 'continuity_critic', raw, { system: String(work.criticSystem), content: String(work.criticInput) })]
+    const expected = inspectContinuityResponse(raw, work.sourceBodies as typeof f.frozen.bodies, true, 8,
+      work.terminalCandidate as typeof f.frozen.candidate, f.frozen.sourceScope, { responseContract: 3 })
+    expect(expected.complete).toBe(true)
+    expect(context.verdictProtocol).toBe(6)
+    const entries = await f.read()
+    expect(entries).toHaveLength(2)
+    expect(entries?.find(entry => entry.operationId === origin.id)?.inspected.audit).toEqual(expected.audit)
+    const authenticated = entries?.find(entry => entry.operationId === origin.id)!.inspected
+    expect(readAuthenticatedContinuityAssessment(authenticated!.audit, f.frozen.bodies.current, context, true)?.supported).toBe(false)
+  })
   it('authenticates only the exact current prepared report before its own business effect exists', async () => {
     const f = fixture()
     Object.assign(f.operations[1], { status: 'prepared', effectReceipt: null, events: [] })
@@ -84,13 +103,19 @@ describe('readonly native continuity provenance', () => {
     expect(f.tx.agentOperation.findMany).toHaveBeenCalledOnce()
     expect(runtimeJson(f.operations.map(row => ({ ...row, children: row.children.map(child => ({ ...child, attempts: child.attempts.map(attempt => ({ ...attempt, dispatchedAt: 'frozen', completedAt: 'frozen' })) })) }))).hash).toBe(before)
   })
-  it.each(['missing-effect', 'wrong-root', 'unknown-usage', 'missing-result-event', 'bad-request', 'bad-cache', 'paid-cache'] as const)('rejects %s without provider or state writes', async fault => {
+  it.each(['missing-effect', 'wrong-root', 'unknown-usage', 'missing-result-event', 'bad-request', 'price-only', 'different-billing', 'bad-cache', 'paid-cache'] as const)('rejects %s without provider or state writes', async fault => {
     const f = fixture(), origin = f.operations[0], provider = origin.children[0]
     if (fault === 'missing-effect') Object.assign(origin, { effectReceipt: null })
     if (fault === 'wrong-root') provider.taskRootId = 'other'
     if (fault === 'unknown-usage') provider.attempts[0].usageReceipt.source = 'unknown'
     if (fault === 'missing-result-event') provider.events = []
     if (fault === 'bad-request') provider.attempts[0].requestHash = '0'.repeat(64)
+    if (fault === 'price-only' || fault === 'different-billing') {
+      const input = provider.inputSnapshot as { input: { billing?: unknown; price?: unknown } }
+      if (fault === 'price-only') { input.input.price = input.input.billing; delete input.input.billing }
+      else input.input.billing = { ...input.input.billing as object, rateCardId: 'another-frozen-card' }
+      provider.inputHash = runtimeJson(provider.inputSnapshot).hash
+    }
     if (fault === 'bad-cache' || fault === 'paid-cache') {
       const cache = f.cache('cache', f.operations[1]); if (fault === 'paid-cache') cache.children.push(provider)
       else { const input = cache.inputSnapshot as { input: { work: Record<string, unknown> } }; input.input.work.cached = [{ signal: 'object', severity: 'warning', evidence: 'invented', suggestion: 'invented' }]; cache.inputHash = runtimeJson(cache.inputSnapshot).hash }

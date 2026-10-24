@@ -121,13 +121,13 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     vi.spyOn(flags,'isAgent2FeatureEnabled').mockImplementation((key,owner)=>key==='storyCompiler'||key!=='memory2'&&feature(key,owner))
     const requests:unknown[]=[],network=vi.fn(async (_url:unknown,init:RequestInit)=>{
       requests.push(JSON.parse(String(init.body)))
-      const response={findings:[],semanticChecks:scenario==='patch'?Object.fromEntries(checks.map(({kind,...check})=>[kind,check])):checks,terminalVerdicts:[{claimIndex:0,verdict:'supported',sourceEvidence:[{segmentId:'c0'}]}],
+      const response={findings:[],semanticChecks:checks.map(({findingIndexes:_indexes,...check})=>({...check,findingIds:[]})),terminalVerdicts:[{claimIndex:0,verdict:'supported',sourceEvidence:[{segmentId:'c0'}]}],
         terminalProofVerdicts:[{proofIndex:0,currentState:scenario==='changed'||scenario==='uncertain'?scenario:'unchanged',reason:'Independent complete-current-body persistence judgment.'}],
         terminalDispositions:obligations.map((_fact,obligationIndex)=>supported||scenario==='alias-unknown'&&obligationIndex===0
           ?{obligationIndex,outcome:'replaced',reason:'The whole original obligation is represented by the same pending repair.',candidateIndex:1,sourceEvidence:[]}
           :{obligationIndex,outcome:'unknown',reason:'The old obligation is not independently resolved.',sourceEvidence:[]}),
         ...(scenario==='patch'?{proposalDispositions:[{proposalIndex:0,outcome:'retracted',
-          reason:'The current inventory establishes the physical object only; the earlier emotional inference was not established.',sourceEvidence:[{segmentId:'c0',quote:body}]}]}:{})}
+          reason:'The current inventory establishes the physical object only; the earlier emotional inference was not established.',sourceEvidence:[{segmentId:'c0'}]}]}:{})}
       return new Response(`data: ${JSON.stringify({choices:[{delta:{content:JSON.stringify(response)},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:0}})}\n\ndata: [DONE]\n\n`,{headers:{'content-type':'text/event-stream'}})
     })
     vi.stubGlobal('fetch',network)

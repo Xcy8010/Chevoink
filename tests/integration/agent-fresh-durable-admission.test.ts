@@ -450,8 +450,8 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
         if (criticCalls > 2) throw Error('A successful current-version report must not be paid twice')
         expect(body.messages[1].content).toContain(content)
         const report = criticCalls === 1 ? { findings: [],
-          semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: '当前全文只说明停在原地并且尚未行动，不把计划或指令当作已发生事件。', findingIndexes: [] })),
-          terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: '原地' }] }],
+          semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: '当前全文只说明停在原地并且尚未行动，不把计划或指令当作已发生事件。', findingIds: [] })),
+          terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }],
           terminalProofVerdicts: [], terminalDispositions: [] } : { findings: [] }
         delta = { content: JSON.stringify(report) }
       }

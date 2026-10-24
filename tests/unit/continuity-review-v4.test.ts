@@ -7,6 +7,8 @@ import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format
 import { runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { continuitySubjectIdentity, continuityWorkSubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
 import { nextReviewAction, type ReviewTransition } from '../../shared/review-lifecycle.js'
+import { stageTerminalProposals } from '../../api/lib/agent/terminal-proposal-review.js'
+import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 
 function fixture() {
   const content = 'The packet is sealed. The guard knows the code.'
@@ -59,6 +61,33 @@ describe('continuity v4 one manifest and four authenticated projections', () => 
     expect(() => runtimeJson(result.audit)).not.toThrow()
     expect(validateStoredContinuityV4Projection(runtimeJson(result.audit).value, f.content, f.context)?.terminalReview?.supported).toBe(false)
     expect(buildContinuityInvalidRowRepair(result)).toBeNull()
+  })
+  it.each(['replaced', 'retracted', 'unknown'] as const)('binds only explicit frozen current addresses for %s draft dispositions', outcome => {
+    const f = fixture(), old = terminalCandidateSchema.parse({ exitState: { objects: ['The packet is open.'] } })
+    const staged = stageTerminalProposals({ preparedContext: {}, identity: { taskId: 'task', chapterId: 'chapter', bodyHash: f.context.current.contentHash,
+      sourceHash: runtimeJson({ previous: null }).hash }, auditHash: 'a'.repeat(64), base: old, candidate: f.candidate, verifiedFactIds: [] })!
+    const obligation = { id: terminalFactId('objects', 'The packet was open.'), field: 'objects' as const, claim: 'The packet was open.' }
+    const context = { ...f.context, proposalChanges: staged.changes!, factCoverage: { ...f.context.factCoverage, obligations: [obligation] } }
+    const bodies = { ...f.bodies, terminalEvidence: context }
+    const manifest = buildContinuityReviewManifest({ ...f.manifest, bodies, candidate: f.candidate,
+      verifiedCoverage: context.factCoverage, draftProposals: context.proposalChanges })
+    const frozen = { ...f.frozen, bodies, manifest }
+    const wire = { ...f.wire, terminalDispositions: [{ obligationIndex: 0, outcome: 'ended', reason: 'The complete current body establishes the sealed state.', sourceEvidence: [{ segmentId: 'c0' }] }],
+      proposalDispositions: [{ proposalIndex: 0, outcome, reason: 'The independent reviewer preserves the full draft disposition.',
+        sourceEvidence: outcome === 'unknown' ? [] : [{ segmentId: 'c0' }], ...(outcome === 'replaced' ? { candidateIndex: 0 } : {}) }] }
+    const raw = JSON.stringify(wire), inspected = inspectContinuityV4(raw, frozen)
+    expect(inspected.complete, JSON.stringify(inspected.parsed?.diagnostics)).toBe(true)
+    expect(inspected.terminalReview?.supported).toBe(outcome !== 'unknown')
+    expect(inspected.terminalReview?.factCoverage?.dispositions[0].sourceEvidence).toEqual([{ segmentId: 'c0', quote: f.content }])
+    expect(inspected.terminalReview?.proposals?.dispositions[0].sourceEvidence).toEqual(outcome === 'unknown' ? [] : [{ segmentId: 'c0', quote: f.content }])
+    expect(inspected.parsed!.record).toEqual(wire)
+    expect(inspected.audit.continuityV4.projections!.draftProposals.value).toMatchObject({ rows: wire.proposalDispositions })
+    expect(JSON.parse(inspected.audit.rawResponse.content)).toBe(raw)
+    expect(validateStoredContinuityV4Projection(runtimeJson(inspected.audit).value, f.content, context)?.audit).toEqual(inspected.audit)
+    for (const ref of [{ segmentId: 'p0' }, { segmentId: 't0' }, { segmentId: 'c999' }, { segmentId: 'c0', quote: f.content }]) {
+      const invalid = { ...wire, proposalDispositions: [{ ...wire.proposalDispositions[0], sourceEvidence: [ref] }] }
+      expect(inspectContinuityV4(JSON.stringify(invalid), frozen).complete).toBe(false)
+    }
   })
   it('repairs only the exact invalid row and preserves the actual first and second responses', () => {
     const f = fixture(); f.wire.terminalVerdicts[0].sourceEvidence = [{ segmentId: 'c999' }]

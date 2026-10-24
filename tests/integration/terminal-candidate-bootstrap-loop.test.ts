@@ -346,18 +346,22 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     let calls = 0
     const network = vi.fn(async () => {
       calls++
-      if (calls > (scenario === 'repeat' ? 2 : 1)) throw Error('No extra critic request is permitted')
+      if (calls > 1) throw Error('No extra critic request is permitted')
       // Historical rejected reports above retain their original v5 identities.
       // Only this newly frozen provider request uses local addresses.
-      const parts = scenario === 'repeat' ? { ...rejected,
-        terminalVerdicts: rejected.terminalVerdicts.map(({ factId: _id, ...judgment }, claimIndex) => ({ ...judgment, claimIndex })),
-        ...(calls === 2 ? { decisions: [] } : {}) }
-        : { findings: [], semanticChecks: checks, terminalVerdicts: goodFacts.map((_fact, claimIndex) => ({ claimIndex, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })), terminalProofVerdicts: [], terminalDispositions: [],
+      // The historical malformed response above has no frozen assessment
+      // reservation. This first newly admitted request is a valid UNKNOWN;
+      // repeating its exact subject must reuse it without another paid call.
+      const parts = scenario === 'repeat' ? { findings: [],
+        semanticChecks: checks.map(({ findingIndexes: _indexes, ...check }) => ({ ...check, findingIds: [] })),
+        terminalVerdicts: badFacts.map((_fact, claimIndex) => ({ claimIndex, verdict: 'unknown', sourceEvidence: [] })),
+        terminalProofVerdicts: [], terminalDispositions: [] }
+        : { findings: [], semanticChecks: checks.map(({ findingIndexes: _indexes, ...check }) => ({ ...check, findingIds: [] })), terminalVerdicts: goodFacts.map((_fact, claimIndex) => ({ claimIndex, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })), terminalProofVerdicts: [], terminalDispositions: [],
           proposalDispositions: badFacts.filter(fact => !goodFacts.some(current => current.id === fact.id)).map((fact, proposalIndex) => {
             const replacement = goodFacts.find(current => current.field === fact.field)
             return { proposalIndex, outcome: replacement ? 'replaced' : 'retracted',
               reason: 'The complete saved body supports the doorway state; the old assertion confused intent or location.',
-              sourceEvidence: [{ segmentId: 'c0', quote: body }], ...(replacement ? { candidateIndex: goodFacts.indexOf(replacement) } : {}) }
+              sourceEvidence: [{ segmentId: 'c0' }], ...(replacement ? { candidateIndex: goodFacts.indexOf(replacement) } : {}) }
           }) }
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(parts) }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     })
@@ -422,7 +426,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       const afterSeq = events.at(-1)!.seq
       await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: stop.id, afterSeq }, eventStartSeq: afterSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     }
-    expect(network).toHaveBeenCalledTimes(scenario === 'no-proposal' ? 0 : scenario === 'repeat' ? 2 : 1)
+    expect(network).toHaveBeenCalledTimes(scenario === 'no-proposal' ? 0 : 1)
     expect(main).toHaveBeenCalledTimes(scenario === 'restart' ? 3 : scenario === 'no-proposal' || scenario === 'commit-unknown' || scenario === 'consumed-local-candidate' ? 1 : 2)
     if (scenario === 'consumed-local-candidate') {
       const resumed = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage as { checkpoint: typeof checkpoint }
@@ -434,6 +438,11 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: body, revision: 8 })
     const used = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, id: { not: old.id } } })
     expect(used).toHaveLength(network.mock.calls.length)
+    if (scenario === 'repeat') {
+      const resumed = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage as { checkpoint: typeof checkpoint }
+      expect(resumed.checkpoint.reviewAttempts.filter(key => key.startsWith(`terminal-processing:${processingKey}:`))).toHaveLength(2)
+      expect(resumed.checkpoint.reviewAttempts).toEqual(expect.arrayContaining(checkpoint.reviewAttempts))
+    }
     expect(used.every(row => row.usageSource === 'reported' && row.billingStatus === 'settled' && row.reservedCreditMilli === 0)).toBe(true)
     expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(network.mock.calls.length)
     const final = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })

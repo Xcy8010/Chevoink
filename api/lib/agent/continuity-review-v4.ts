@@ -181,9 +181,20 @@ function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Froz
   const terminalDiagnostics: TerminalReviewDiagnostic[] = []
   const candidateEvidence = inspectTerminalCandidateEvidence(frozen.candidate, frozen.bodies.current, record,
     frozen.bodies.terminalEvidence!, terminalDiagnostics, true)
-  const terminal = inspectTerminalReview(frozen.candidate, frozen.bodies.current, JSON.stringify(record), true,
+  // V4 selects exact server-owned addresses. Materialize only those explicit
+  // disposition references for the unchanged strict legacy semantic engine;
+  // neither the received rows nor the frozen raw response are rewritten.
+  const engineRecord = { ...record }
+  const currentSources = continuitySourceCatalog(frozen.bodies).terminalSources.filter(part => /^c[0-9]+$/u.test(part.segmentId))
+  for (const table of ['terminalDispositions', 'proposalDispositions'] as const) {
+    if (bad.has(table) || !Array.isArray(record[table])) continue
+    engineRecord[table] = (record[table] as Array<Record<string, unknown>>).map(row => ({ ...row,
+      sourceEvidence: (row.sourceEvidence as Array<{ segmentId: string }>).map(ref => ({ ...ref,
+        quote: currentSources.find(part => part.segmentId === ref.segmentId)?.quote ?? '' })) }))
+  }
+  const terminal = inspectTerminalReview(frozen.candidate, frozen.bodies.current, JSON.stringify(engineRecord), true,
     frozen.bodies.terminalEvidence, terminalDiagnostics, { responseContract: 3 })
-  const rows = terminalReviewRowDiagnostics(frozen.candidate, frozen.bodies, record)
+  const rows = terminalReviewRowDiagnostics(frozen.candidate, frozen.bodies, engineRecord)
   if (rows) for (const [table, indexes] of rows.bad) for (const index of indexes) add(table, index, 'terminal_evidence_invalid')
   if (!terminal && !rowFields.some(table => bad.has(table))) { repairable = false; add('terminalVerdicts', -1, 'terminal_binding_invalid') }
   const proseValid = !bad.has('findings') && !bad.has('semanticChecks')

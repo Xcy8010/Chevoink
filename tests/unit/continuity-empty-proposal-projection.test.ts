@@ -8,6 +8,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { continuityReassessmentRequest, legacyContinuityAssessmentKey, readLegacyContinuityAssessment, readReusableLegacyContinuityAssessment, runContinuityReassessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { buildContinuityReviewManifest } from '../../api/lib/agent/continuity-review-v4.js'
 
 function cachedPair() {
   const base = emptyProposalFixture(), scope = { currentOrderIndex: base.chapter.orderIndex, previous: [] }
@@ -122,6 +123,29 @@ describe('versioned empty optional proposal table projection', () => {
     expect(result).toMatchObject({ complete: true, audit: { assessmentRequest: { key: f.key, inputHash: runtimeJson(f.input).hash },
       formatProjection: { kind: 'empty_optional_proposal_table', version: 1 } } })
     expect(validEmptyOptionalProposalProjection(result!.audit, f.chapter.content, f.context)).toBe(true)
+  })
+  it.each(['valid', 'unknown-second', 'missing-second', 'body', 'candidate', 'source', 'binding', 'tampered-audit'] as const)('authenticates the original projected parser8 pair before cross-wire reuse: %s', async fault => {
+    const f = cachedPair(), cache = cacheReader(f)
+    const manifest = buildContinuityReviewManifest({ subject: { userId: 'owner', novelId: 'novel', taskId: 'task', targetType: 'story_compilation',
+      targetId: f.input.targetId, chapterId: f.chapter.id, revision: f.input.revision }, bodies: f.bodies, candidate: f.candidate, sourceScope: f.input.sourceScope!,
+      sourceHash: null, sourceVersions: f.context.current, verifiedCoverage: f.context.factCoverage, draftProposals: null })
+    const input: LegacyAssessmentInput = structuredClone({ ...f.input, parserVersion: 9, reassessmentProtocol: 6, continuityManifest: manifest,
+      system: 'New protocol reviewer.', content: 'New protocol request.' })
+    if (fault === 'unknown-second') Object.assign(f.usage[1], { usageSource: 'unknown', billingStatus: 'pending_usage' })
+    if (fault === 'missing-second') f.frames.pop()
+    if (fault === 'body') input.bodies.current += ' Changed.'
+    if (fault === 'candidate') input.terminalCandidate!.exitState.objects.push('Another object.')
+    if (fault === 'source') input.sourceScope!.currentOrderIndex++
+    if (fault === 'binding') input.bindingHash = 'c'.repeat(64)
+    if (fault === 'tampered-audit') f.frames[1].metadata.audit = { ...f.original.audit, contentHash: 'f'.repeat(64) }
+    const before = JSON.stringify({ input: f.input, frames: f.frames, claim: f.claim, usage: f.usage, reservations: cache.reservations })
+    const result = await cache.read(input)
+    if (fault === 'valid') {
+      expect(result).toMatchObject({ complete: true, audit: { parserVersion: 8, assessmentRequest: { key: f.key, inputHash: runtimeJson(f.input).hash },
+        formatProjection: { kind: 'empty_optional_proposal_table', version: 1 } } })
+      expect(validEmptyOptionalProposalProjection(result!.audit, f.chapter.content, f.context)).toBe(true)
+    } else expect(result).toBeNull()
+    expect(JSON.stringify({ input: f.input, frames: f.frames, claim: f.claim, usage: f.usage, reservations: cache.reservations })).toBe(before)
   })
 
   it.each(['system', 'binding', 'missing-binding', 'body', 'candidate', 'revision', 'target', 'protocol', 'parser', 'extra-model', 'source', 'cross-run', 'unbound-key', 'ordinary-response'] as const)('does not widen the content-only cache for %s', async scenario => {
