@@ -39,7 +39,8 @@ describe.runIf(available)('authenticated never-verified persistent draft recover
     const claims = Array.from({ length: 36 }, (_, i) => `Entry ${i} remains recorded.`)
     const content = `The packet remains sealed. ${claims.join(' ')}`
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { content, revision: 4, wordCount: content.length } })
-    const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['The packet remains sealed.'], knowledge: claims } })
+    const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['The packet remains sealed.', ...claims.slice(30)], knowledge: claims.slice(0, 30) } })
+    expect(terminalCandidateFacts(candidate)).toHaveLength(37)
     const base = terminalCandidateSchema.parse({ exitState: { openLoops: ['A reply remains pending.'] } })
     const { compilation } = await prepareStoryCompilation({ ...f, chapterId: chapter.id, mode: 'balanced', intentSummary: prompt })
     await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: 'Record', entryState: candidate.exitState, goal: 'Record', obstacle: 'Time',
