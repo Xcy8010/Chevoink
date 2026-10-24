@@ -20,6 +20,7 @@ import { prepareTerminalProposalInput } from '../../api/lib/agent/terminal-propo
 import { observeChapterReviewProgress, observeSemanticReadProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { recoverRunElapsedMs } from '../../api/lib/agent/checkpoint.js'
 import * as ai from '../../api/lib/ai-service.js'
 import * as credits from '../../api/lib/credits.js'
 import * as prices from '../../api/lib/billing/resolve-token-price.js'
@@ -37,6 +38,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
     vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
+    const startedAt = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId }, select: { createdAt: true } })).createdAt
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: {
       content: 'The packet remains on the desk.', revision: 8, wordCount: 29 } })
     await prisma.agentRun.update({ where: { id: f.runId }, data: { runtimeProtocolVersion: 0, taskRootId: null, startRequest: { prompt: '修复本章' } } })
@@ -79,18 +81,25 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     for (const phase of ['prepare', 'scenes'] as const) observeWritingWorkflowMilestone(seen, phase === 'prepare' ? 'story_compiler_prepare' : 'scene_task_build',
       { version: 1, userId: f.userId, novelId: f.novelId, runId: f.runId, targetOrderIndex: chapter.orderIndex, phase }, { ...f, taskSpec: spec })
     const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'run.paused', payload: { reason: 'model_stalled' } } })
-    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', activeExecutionMs: 200, stagnantBatches: scenario === 'before-turn' ? 7 : 3,
-      runStartedAt: Date.now(), resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500, writeProgress: 1, writeBaseline: 0, readProgress: 7, readBaseline: 0,
+    // A nonzero saved turn requires an actual execution interval. Missing
+    // startedAt correctly stops resume before any author feedback is emitted.
+    const activeExecutionMs = recoverRunElapsedMs(startedAt.getTime(), pause.createdAt.getTime(), [{ type: 'run.paused', at: pause.createdAt.getTime() }])
+    expect(activeExecutionMs).toBe(pause.createdAt.getTime() - startedAt.getTime())
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', activeExecutionMs, stagnantBatches: scenario === 'before-turn' ? 7 : 3,
+      runStartedAt: startedAt.getTime(), resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500, writeProgress: 1, writeBaseline: 0, readProgress: 7, readBaseline: 0,
       progressSignatures: [...seen], reviewAttempts: claims, pendingReviews: [], inheritedTokens: 10, inheritedTurns: 1, manualResumeCount: 0 }
-    await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', currentTurn: 26,
+    await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', currentTurn: 26, startedAt,
       usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, checkpoint } } })
     const window = credits.getCreditWindow()
-    const account = await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000,
+    const account = await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, dailyUsedMilli: 23,
       periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
     const historicalUsage = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId, chapterId: chapter.id,
       targetType: 'story_compilation', targetId: compilation.id, providerType: 'text', providerMode: 'custom', modelName: 'synthetic', modelTier: 'speed', multiplierBps: 10000,
-      action: 'agent3ContinuityCritic', requestTokens: null, responseTokens: null, usageSource: 'unknown', billingStatus: 'pending_usage',
-      reservedCreditMilli: 18023, creditChargeMilli: 0, durationMs: 0 } })
+      action: 'agent3ContinuityCritic', requestTokens: 10, responseTokens: 0, usageSource: 'reported', billingStatus: 'settled',
+      billingEvidence: { responseObserved: true }, reservedCreditMilli: 0, creditChargeMilli: 23, durationMs: 0 } })
+    const historicalCharge = await prisma.creditLedgerEntry.create({ data: { userId: f.userId, kind: 'consume', sourceType: 'ai_usage',
+      referenceId: historicalUsage.id, idempotencyKey: `synthetic-historical:${historicalUsage.id}`, deltaMilli: -23, dailyDeltaMilli: -23,
+      modelTier: 'speed', multiplierBps: 10000, requestTokens: 10, responseTokens: 0 } })
     const network = vi.fn(() => { throw Error('Exhausted claims must not dispatch a provider request') })
     vi.stubGlobal('fetch', network)
     vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture', multiplierBps: 10000,
@@ -106,17 +115,29 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
     const resume = (eventId: string, afterSeq: number) => executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true,
       authorContinue: { eventId, afterSeq }, eventStartSeq: afterSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
-    await resume(pause.id, 1)
-    for (let continuation = 0; continuation < 2; continuation++) {
+    let afterSeq = 1
+    await resume(pause.id, afterSeq)
+    for (let continuation = 0; continuation < 3; continuation++) {
       const events = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
-      const text = events.filter(event => event.type === 'text.final').map(event => (event.payload as { text?: string }).text ?? '').join('\n')
+      const currentEvents = events.filter(event => event.seq > afterSeq)
+      expect(currentEvents.filter(event => event.type === 'error').map(event => event.payload)).toEqual([])
+      const replies = currentEvents.filter(event => event.type === 'text.final')
+      expect(replies).toHaveLength(1)
+      const { messageId, text } = replies[0].payload as { messageId: string; text: string }
+      const reply = await prisma.agentMessage.findUniqueOrThrow({ where: { id: messageId } })
+      expect(reply).toMatchObject({ runId: f.runId, role: 'assistant', parts: [{ type: 'text', text }] })
       expect(text).toContain(`第${chapter.orderIndex}章（版本${chapter.revision}）：`)
       expect(text).toContain('当前终态复核结果已收到，仍有1项未获证实')
       expect(text).toContain(proposal.claim)
       expect(text).toContain(reason)
       expect(text).not.toContain('未取得有效独立结果')
-      const stop = events.filter(event => event.type === 'run.paused').at(-1)!
-      await resume(stop.id, events.at(-1)!.seq)
+      const stop = currentEvents.filter(event => event.type === 'run.paused').at(-1)!
+      expect(stop?.payload).toMatchObject({ reason: 'needs_input' })
+      expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toMatchObject({ status: 'paused', errorMessage: expect.stringContaining('当前终态复核结果已收到') })
+      if (continuation < 2) {
+        afterSeq = events.at(-1)!.seq
+        await resume(stop.id, afterSeq)
+      }
     }
     expect(main).toHaveBeenCalledTimes(scenario === 'after-read' ? 1 : 0)
     expect(network).not.toHaveBeenCalled()
@@ -130,7 +151,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     expect(await prisma.agentRunEvent.count({ where: { runId: f.runId, type: 'tool.call', payload: { path: ['toolName'], equals: 'chapter_bridge_commit' } } })).toBe(0)
     expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })).toEqual([historicalUsage])
     expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: account.userId } })).toEqual(account)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId } })).toEqual([historicalCharge])
   }, undefined, '修复本章', { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 
   it.each([...(['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)), ...(['old-slots', 'local-refusal', 'consumed-local-candidate', 'objects', 'source-address', 'commit-reserved', 'commit-unknown', 'multiple-candidates', 'no-proposal'] as const).map(scenario => ['settled', scenario] as const)])(
