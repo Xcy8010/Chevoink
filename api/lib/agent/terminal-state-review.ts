@@ -413,7 +413,7 @@ export type TerminalDeliveryEligibility = { version: 1; basis: 'fully_supported'
 /** Delivery may preserve superseded, unverified transient drafts. This never
  * changes independent verdicts, resolves a proposal or discharges a real fact. */
 function terminalDeliveryEligibility(review: NonNullable<ReturnType<typeof inspectTerminalReview>>, context?: TerminalEvidenceContext,
-  binding?: TerminalDeliveryBinding, auditHash = ''): TerminalDeliveryEligibility {
+  binding?: TerminalDeliveryBinding, auditHash = '', revisionHash = ''): TerminalDeliveryEligibility {
   const unknown = review.proposals?.dispositions.filter(item => item.outcome === 'unknown') ?? []
   const preservedUnknownProposalIds = unknown.map(item => item.id)
   const result = (eligible: boolean, basis: TerminalDeliveryEligibility['basis']): TerminalDeliveryEligibility => ({ version: 1, basis, eligible, preservedUnknownProposalIds })
@@ -431,13 +431,14 @@ function terminalDeliveryEligibility(review: NonNullable<ReturnType<typeof inspe
     const current = new Set(terminalCandidateFacts(review.candidate).map(item => item.id))
     const verified = new Set([...input.verifiedFactIds, ...(context.factCoverage?.obligations.map(item => item.id) ?? []),
       ...(context.previous?.carried?.map(item => terminalFactId(item.field, item.claim)) ?? [])])
-    const authenticatedDrafts = authenticatedTerminalDraftIds(binding.draftAuthority, terminalDraftIdentity(binding, context, review.candidateHash, auditHash))
+    const authenticatedDrafts = authenticatedTerminalDraftIds(binding.draftAuthority, terminalDraftIdentity(binding, context, review.candidateHash, auditHash, revisionHash))
     const eligible = unknown.every(item => {
       const proposal = input.proposals.find(proposal => proposal.id === item.id)
       return proposal && state.pending.some(pending => runtimeJson(pending).hash === runtimeJson(proposal).hash)
         && (['action', 'location', 'storyTime', 'emotion'].includes(proposal.field) || authenticatedDrafts.includes(proposal.id))
         && !current.has(proposal.id) && !verified.has(proposal.id)
-        && proposal.origin.bodyHash === identity.bodyHash && proposal.origin.sourceHash === identity.sourceHash
+        && (proposal.origin.bodyHash === identity.bodyHash || authenticatedDrafts.includes(proposal.id))
+        && proposal.origin.sourceHash === identity.sourceHash
     })
     return result(eligible, eligible ? 'current_supported_with_preserved_drafts' : 'blocked')
   } catch { return result(false, 'blocked') }
@@ -456,7 +457,8 @@ export function currentTerminalReview(validation: unknown, content: string, expe
   try {
     const raw: unknown = JSON.parse(audit.rawResponse.content)
     const review = typeof raw === 'string' && (audit.responseContract === undefined || audit.responseContract === 3) ? inspectTerminalReview(candidate, content, raw, record.independentCheck === 'complete', expectedContext, undefined, audit.responseContract === 3 ? { responseContract: 3 } : {}) : null
-    return review ? { ...review, deliveryEligibility: terminalDeliveryEligibility(review, expectedContext, binding, runtimeJson(audit).hash) } : null
+    return review ? { ...review, deliveryEligibility: terminalDeliveryEligibility(review, expectedContext, binding, runtimeJson(audit).hash,
+      runtimeJson({ newDraftRevision: record.newDraftRevision ?? null }).hash) } : null
   } catch { return null }
 }
 

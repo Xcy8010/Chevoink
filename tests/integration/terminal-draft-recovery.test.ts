@@ -19,6 +19,8 @@ import { readTerminalInheritance } from '../../api/lib/agent/terminal-inheritanc
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { freezeWritingScope, bindWritingChapter } from '../../api/lib/agent/writing-scope.js'
+import { createHash } from 'node:crypto'
 import * as ai from '../../api/lib/ai-service.js'
 import * as credits from '../../api/lib/credits.js'
 import * as prices from '../../api/lib/billing/resolve-token-price.js'
@@ -26,9 +28,9 @@ import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 import * as titles from '../../api/lib/agent/session-title.js'
 
-const prompt = '修改第一章，只输出标题和正文'
 describe.runIf(available)('authenticated never-verified persistent draft recovery', () => {
-  it('reuses the current cache, handles real quality decisions and preserves exhausted claims, unknowns and paid evidence', () => fixture(async f => {
+  it.each([{ crossRevision: false, prompt: '修改第一章，只输出标题和正文' }, { crossRevision: true, prompt: '写第一章，只输出标题和正文' }])(
+    'reuses the cache, retains quality decisions and preserves exhausted evidence (crossRevision=$crossRevision)', ({ crossRevision, prompt }) => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
     vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
@@ -38,20 +40,45 @@ describe.runIf(available)('authenticated never-verified persistent draft recover
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running', runtimeProtocolVersion: 0, taskRootId: null, startRequest: { prompt } } })
     const claims = Array.from({ length: 36 }, (_, i) => `Entry ${i} remains recorded.`)
     const content = `The packet remains sealed. ${claims.join(' ')}`
-    const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { content, revision: 4, wordCount: content.length } })
+    const beforeContent = crossRevision ? content.replace('remains sealed', 'remains securely sealed') : content
+    if (crossRevision) {
+      // This isolated fixture admits an empty-book first chapter, then binds
+      // its frozen null slot through the ordinary server binding function.
+      const old = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      await prisma.$transaction(async tx => {
+        await tx.chapter.delete({ where: { id: old.id } })
+        f.spec = await freezeWritingScope(tx, f, f.spec, prompt)
+        expect(f.spec.scope.writing).toMatchObject({ kind: 'bounded', repairAuthorized: false, targets: [{ chapterId: null, orderIndex: 1 }] })
+        await tx.agentRun.update({ where: { id: f.runId }, data: { taskSpec: JSON.parse(JSON.stringify(f.spec)), chapterId: null } })
+        await tx.chapter.create({ data: { id: old.id, authorId: f.userId, novelId: f.novelId, volumeId: old.volumeId, title: old.title,
+          orderIndex: 1, orderInVolume: 1, content: beforeContent, wordCount: beforeContent.length, revision: 3 } })
+        await bindWritingChapter(tx, f, 1, old.id)
+        await tx.agentRun.update({ where: { id: f.runId }, data: { chapterId: old.id } })
+      })
+    }
+    let chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: beforeContent, revision: crossRevision ? 3 : 4, wordCount: beforeContent.length } })
     const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['The packet remains sealed.', ...claims.slice(30)], knowledge: claims.slice(0, 30) } })
     expect(terminalCandidateFacts(candidate)).toHaveLength(37)
-    const base = terminalCandidateSchema.parse({ exitState: { openLoops: ['A reply remains pending.'] } })
+    const base = terminalCandidateSchema.parse({ exitState: crossRevision ? { emotion: ['A reply remains pending.'] } : { openLoops: ['A reply remains pending.'] } })
     const { compilation } = await prepareStoryCompilation({ ...f, chapterId: chapter.id, mode: 'balanced', intentSummary: prompt })
     await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: 'Record', entryState: candidate.exitState, goal: 'Record', obstacle: 'Time',
       choice: 'Wait', cost: 'Time', turn: 'Recorded', exitState: candidate.exitState, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
     await recordStoryCompilerWrite({ ...f, chapterOrderIndex: 1, chapterRevision: chapter.revision })
     const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: true } })
     const coverage = (terminalCandidate: typeof candidate) => compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source: null, terminalCandidate }, 11)
-    const synthetic = terminalDraftFixture('openLoops', { chapter, taskId: f.spec.id, ctx: f, compilationId: compilation.id, candidate,
-      originBindingHash: runtimeJson(coverage(base)).hash, currentBindingHash: runtimeJson(coverage(candidate)).hash })
+    const targetChapter = { ...chapter, content, revision: 4, wordCount: content.length }
+    const synthetic = terminalDraftFixture(crossRevision ? 'emotion' : 'openLoops', { chapter: targetChapter, originChapter: chapter,
+      taskId: f.spec.id, ctx: f, compilationId: compilation.id, candidate,
+      originBindingHash: runtimeJson(coverage(base)).hash, currentBindingHash: runtimeJson(compilerContinuityCoverage({ chapter: targetChapter,
+        bridge: { ...saved.bridge, targetRevision: 4 }, sceneTasks: saved.sceneTasks, source: null, terminalCandidate: candidate }, 11)).hash })
+    if (crossRevision) {
+      const wire = { ...synthetic.currentWire, findings: [{ signal: 'object', severity: 'warning', evidence: 'The source says “a missing quotation”.',
+        suggestion: 'Check the actual source.', sourceEvidence: [{ source: 'current', segmentId: 'c0', quote: 'a missing quotation' }] }] }
+      expect(synthetic.inspect(wire, synthetic.nextInput).audit.classification).toBe('source_invalid')
+      synthetic.add('pending-only-failure', synthetic.nextInput, wire)
+    }
     const window = credits.getCreditWindow()
-    const account = await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, dailyUsedMilli: 46,
+    const account = await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, dailyUsedMilli: synthetic.usage.length * 23,
       periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
     const usage = [], ledger = [], usageIds = new Map<string, string>()
     for (const row of synthetic.usage) {
@@ -73,8 +100,30 @@ describe.runIf(available)('authenticated never-verified persistent draft recover
     }
     await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: chapter.revision, terminalCandidate: synthetic.base,
       findings: [], independentCheck: 'complete', coverage: coverage(base), continuityCriticResponse: synthetic.bound.audit })
+    if (crossRevision) {
+      const hash = (text: string) => createHash('sha256').update(text).digest('hex'), start = beforeContent.indexOf('securely sealed')
+      const report = await prisma.chapterQualityReport.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId,
+        compilationId: compilation.id, chapterId: chapter.id, chapterRevision: 4, mode: 'balanced', status: 'repaired', repairRound: 1,
+        deterministicMetrics: { independentCheck: 'complete', sourceRevision: 3, contentHash: hash(beforeContent), repairedContentHash: hash(content) },
+        findings: { create: [{ userId: f.userId, novelId: f.novelId, signal: 'reader_pull', source: 'critic', severity: 'warning',
+          startOffset: start, endOffset: start + 'securely sealed'.length, evidenceExcerpt: 'securely sealed', evidenceHash: hash('securely sealed'),
+          explanation: 'Synthetic bounded quality repair.', suggestion: 'Preserve the sealing fact.', disposition: 'repaired' }] } }, include: { findings: true } })
+      artifacts.push(await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'rewriteSelection', title: 'Synthetic consumed quality repair',
+        content: JSON.stringify([{ findingId: report.findings[0].id, replacement: 'sealed' }]), metadata: { phase: 'humanity_revision_auto', reportId: report.id,
+          findingIds: [report.findings[0].id], sourceRevision: 3, targetRevision: 4 } } }))
+      await prisma.agentMessage.create({ data: { runId: f.runId, sessionId: f.sessionId, role: 'assistant', parts: [{ type: 'tool-call', callId: 'synthetic-quality-repair',
+        toolName: 'quality_analyze', status: 'success', display: { kind: 'qualityReport', status: 'repaired', reportId: report.id,
+          chapterId: chapter.id, chapterRevision: 4, repairRound: 1 }, snapshot: { target: 'chapter', targetId: chapter.id, field: 'content', previousValue: beforeContent } }] } })
+      chapter = await prisma.chapter.update({ where: { id: chapter.id }, data: { content, revision: 4, wordCount: content.length } })
+      await prisma.chapterBridge.update({ where: { compilationId: compilation.id }, data: { targetRevision: 4 } })
+      const prior = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+      await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...(prior.validation as Record<string, unknown>),
+        newDraftRevision: { version: 1, taskId: f.spec.id, chapterId: chapter.id, compilationId: compilation.id, checkedRevision: 3,
+          beforeHash: runtimeJson({ content: beforeContent }).hash, afterHash: runtimeJson({ content }).hash, retainedFindings: [] } }).value } })
+    }
     await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: chapter.revision, terminalCandidate: candidate,
-      findings: [], independentCheck: 'complete', coverage: coverage(candidate), continuityCriticResponse: synthetic.validation.continuityCriticResponse })
+      findings: [], independentCheck: 'complete', coverage: crossRevision ? compilerContinuityCoverage({ chapter, bridge: { ...saved.bridge, targetRevision: 4 },
+        sceneTasks: saved.sceneTasks, source: null, terminalCandidate: candidate }, 11) : coverage(candidate), continuityCriticResponse: synthetic.validation.continuityCriticResponse })
     const qualityContextHash = qualityReviewContextHash(await buildHumanityQualityContext(f.userId, f.novelId, chapter.id, f.runId))
     await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision, mode: 'balanced',
       criticComplete: true, criticFindings: [{ signal: 'reader_pull', severity: 'warning', quote: 'The packet remains sealed.',
@@ -91,7 +140,7 @@ describe.runIf(available)('authenticated never-verified persistent draft recover
     expect(cached).toMatchObject({ summary: expect.stringContaining('复用') }); expect(cached.outcome).toBeUndefined()
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
     expect(readiness).toMatchObject({ ready: true, decisionPending: true, mustPassPending: false,
-      terminalReview: { state: 'unverified', deliveryEligible: true, unresolved: [{ verdict: 'unknown', field: 'openLoops' }] } })
+      terminalReview: { state: 'unverified', deliveryEligible: true, unresolved: [{ verdict: 'unknown', field: crossRevision ? 'emotion' : 'openLoops' }] } })
     expect(readiness!.requiredDecisions).toHaveLength(1)
     expect(readiness!.decisionFeedback).toBeDefined()
     const episode = terminalProcessingPlan({ ...readiness!, terminalReview: { ...readiness!.terminalReview!, deliveryEligible: false } }, { ...f, taskSpec: f.spec }, new Set())!
@@ -125,7 +174,7 @@ describe.runIf(available)('authenticated never-verified persistent draft recover
     expect((after.validation as Record<string, unknown>).continuityCriticResponse).toEqual((before.validation as Record<string, unknown>).continuityCriticResponse)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))).toMatchObject({ terminalCommitted: true, decisionPending: false,
-      terminalReview: { state: 'unverified', deliveryEligible: true, unresolved: [{ verdict: 'unknown', field: 'openLoops' }] } })
+      terminalReview: { state: 'unverified', deliveryEligible: true, unresolved: [{ verdict: 'unknown', field: crossRevision ? 'emotion' : 'openLoops' }] } })
     const persisted = (finished.usage as { checkpoint: { reviewAttempts: string[]; consumedReviewDecisionFeedback: string[] } }).checkpoint
     expect(persisted.reviewAttempts).toEqual(processingClaims); expect(persisted.consumedReviewDecisionFeedback).toEqual(consumedFeedback)
     expect((await readTerminalInheritance(prisma, f, chapter)).map(fact => fact.claim).sort()).toEqual(terminalCandidateFacts(candidate).map(fact => fact.claim).sort())
@@ -148,5 +197,5 @@ describe.runIf(available)('authenticated never-verified persistent draft recover
     expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toEqual(account)
     expect(main).toHaveBeenCalledOnce(); expect(critic).not.toHaveBeenCalled(); expect(network).not.toHaveBeenCalled()
     expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toEqual(finished)
-  }, undefined, prompt, { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
+  }, undefined, prompt, { freezeWriting: !crossRevision, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 })

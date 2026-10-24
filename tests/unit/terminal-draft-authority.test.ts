@@ -1,10 +1,33 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
-import { terminalDraftFixture } from '../helpers/terminal-draft-fixture.js'
+import { terminalDraftFixture, terminalDraftRevisionFixture } from '../helpers/terminal-draft-fixture.js'
 import { readTerminalDraftBinding } from '../../api/lib/agent/terminal-draft-authority.js'
 import { currentTerminalReview, currentCandidateEditAddress, terminalCandidateSchema, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalProposalCacheMatches } from '../../api/lib/agent/terminal-proposal-context.js'
+import { continuityReassessmentRequest, legacyContinuityAssessmentKey } from '../../api/lib/agent/assessment-response-lifecycle.js'
+
+function pendingOnlyFailure(f: ReturnType<typeof terminalDraftFixture>, second = false) {
+  const wire = { ...f.currentWire, findings: [{ signal: 'object', severity: 'warning', evidence: 'The current text says “an invented quotation”.',
+    suggestion: 'Check the actual text.', sourceEvidence: [{ source: 'current', segmentId: 'c0', quote: 'an invented quotation' }] }] }
+  const original = f.inspect(wire, f.nextInput)
+  expect(original.audit.classification).toBe('source_invalid')
+  f.add('pending-only-failed', f.nextInput, wire)
+  if (second) {
+    const key = legacyContinuityAssessmentKey({ ...f.ctx, callId: 'pending-only-failed' }, f.nextInput), usageId = 'pending-only-second-usage'
+    const response = { ...wire, decisions: [{ index: 0, action: 'retract', reason: 'The independent quotation remains unverified.',
+      sourceEvidence: [{ source: 'current', segmentId: 'c0', quote: f.chapter.content }] }] }
+    const at = new Date(100)
+    for (const [suffix, metadata] of Object.entries({ claim: { fullReassessmentKey: key, input: f.nextInput, original: original.audit,
+      request: continuityReassessmentRequest(f.nextInput.system, f.nextInput.content, original, f.nextInput.bodies, false, 5) },
+    owner: { assessmentRequestOwnerKey: key, stage: 'reassessment', usageIds: [usageId] },
+    response: { assessmentKey: key, stage: 'reassessment', usageIds: [usageId], input: f.nextInput, audit: f.inspect(response, f.nextInput).audit,
+      response: { content: JSON.stringify(JSON.stringify(response)), transportComplete: true, finishReason: 'stop', toolCalls: [] } } })) {
+      f.rows.push({ id: `pending-second-${suffix}`, runId: f.ctx.runId, artifactType: 'continuityReview', createdAt: at, metadata: { version: 1, ...metadata } })
+    }
+    f.usage.push({ ...f.usage[0], id: usageId, action: 'agent3ContinuityCriticSecondPass' })
+  }
+}
 
 function database(f: ReturnType<typeof terminalDraftFixture>) {
   const run = { id: f.ctx.runId, sessionId: 'session', taskRootId: null, startRequest: { prompt: 'Modify the synthetic chapter.' },
@@ -13,17 +36,102 @@ function database(f: ReturnType<typeof terminalDraftFixture>) {
     where.userId !== f.ctx.userId || where.novelId !== f.ctx.novelId ? null : run), findFirstOrThrow: vi.fn(async () => run),
   findMany: vi.fn(async ({ where }: { where: { session?: unknown } }) => where.session ? [] : [run]) },
   agentChildExecutionGrant: { findUnique: vi.fn(async () => null) }, agentSession: { findFirst: vi.fn(async () => null) },
-  agentArtifact: { findMany: vi.fn(async () => f.rows.filter(row => row.runId === f.ctx.runId)) },
-  aiUsageLog: { findMany: vi.fn(async () => f.usage) } }
+  agentArtifact: { findMany: vi.fn(async (args: { where: { artifactType: string } }) => f.rows.filter(row => row.runId === f.ctx.runId && row.artifactType === args.where.artifactType)) },
+  aiUsageLog: { findMany: vi.fn(async () => f.usage) }, chapterQualityReport: { findMany: vi.fn(async (): Promise<unknown[]> => []) },
+  agentMessage: { findMany: vi.fn(async (): Promise<unknown[]> => []) } }
   const read = (signal = new AbortController().signal) => readTerminalDraftBinding(tx as unknown as Prisma.TransactionClient,
     { ...f.ctx, compilationId: 'compilation', signal }, f.binding, f.chapter, f.validation, f.nextContext)
-  return { tx, read }
+  return { tx, read, run }
 }
 
 const review = (f: ReturnType<typeof terminalDraftFixture>, binding: Awaited<ReturnType<typeof readTerminalDraftBinding>>) =>
   currentTerminalReview(f.validation, f.chapter.content, f.nextContext, binding)
 
 describe('authenticated never-verified terminal drafts', () => {
+  it.each([false, true])('ignores only an authenticated pending-only source failure, with second claimed=%s', async second => {
+    const f = terminalDraftFixture(), db = database(f)
+    pendingOnlyFailure(f, second)
+    const before = JSON.stringify({ rows: f.rows, usage: f.usage, prepared: f.preparedContext })
+    expect(review(f, await db.read())?.deliveryEligibility.eligible).toBe(true)
+    expect(JSON.stringify({ rows: f.rows, usage: f.usage, prepared: f.preparedContext })).toBe(before)
+  })
+
+  it.each(['pending-drift', 'candidate-mention', 'billing', 'missing-raw', 'corrupt-audit', 'second-unknown', 'second-request'] as const)(
+    'does not exempt pending-only history after %s', async scenario => {
+      const f = terminalDraftFixture(); pendingOnlyFailure(f, true)
+      const response = f.rows.find(row => row.id === 'pending-only-failed-response')!
+      if (scenario === 'pending-drift') {
+        // Even a self-consistent different pending origin is not this object.
+        const input = structuredClone(f.nextInput)
+        input.bodies.terminalEvidence!.proposalChanges!.proposals[0].origin.auditHash = 'f'.repeat(64)
+        f.add('pending-drift', input, { ...f.currentWire, findings: [{ signal: 'object', severity: 'warning', evidence: '“Missing”',
+          suggestion: 'Check.', sourceEvidence: [{ source: 'current', quote: 'Missing' }] }] })
+      }
+      if (scenario === 'candidate-mention') f.add('candidate-mentioned-failure', f.input, {})
+      if (scenario === 'billing') Object.assign(f.usage.find(row => row.id === 'usage-pending-only-failed')!, { billingStatus: 'pending_usage', usageSource: 'unknown' })
+      if (scenario === 'missing-raw') f.rows.splice(f.rows.indexOf(response), 1)
+      if (scenario === 'corrupt-audit') (response.metadata.audit as { contentHash: string }).contentHash = 'f'.repeat(64)
+      if (scenario === 'second-unknown') (f.rows.find(row => row.id === 'pending-second-response')!.metadata.response as { transportComplete: boolean }).transportComplete = false
+      if (scenario === 'second-request') (f.rows.find(row => row.id === 'pending-second-claim')!.metadata.request as { content: string }).content += ' changed'
+      expect(review(f, await database(f).read())?.deliveryEligibility.eligible).toBe(false)
+    })
+
+  it('authenticates one consumed new-draft quality repair across revisions, without enlarging writing permission', async () => {
+    const q = terminalDraftRevisionFixture(), { f } = q, db = database(f)
+    Object.assign(db.run, { taskSpec: q.spec, startRequest: { prompt: q.prompt }, writingBindings: { version: 1, taskId: q.spec.id,
+      targets: [{ orderIndex: 1, chapterId: f.chapter.id }] } })
+    f.rows.push(q.artifact)
+    db.tx.chapterQualityReport.findMany.mockResolvedValue([q.report])
+    db.tx.agentMessage.findMany.mockResolvedValue([{ runId: f.ctx.runId, parts: [q.part] }])
+    const before = JSON.stringify({ rows: f.rows, usage: f.usage, prepared: f.preparedContext, receipt: q.receipt })
+    expect(q.spec.scope.writing?.repairAuthorized).toBe(false)
+    const binding = await db.read()
+    expect(review(f, binding)).toMatchObject({ supported: false, proposals: { complete: false }, deliveryEligibility: { eligible: true } })
+    expect(JSON.stringify({ rows: f.rows, usage: f.usage, prepared: f.preparedContext, receipt: q.receipt })).toBe(before)
+  })
+
+  it.each(['missing-receipt', 'wrong-receipt', 'unbound-target', 'duplicate-artifact', 'missing-message', 'wrong-before', 'wrong-patch', 'overlap',
+    'wrong-owner', 'wrong-report-owner', 'revision-jump', 'wrong-after'] as const)('keeps cross-revision drafts blocked after %s', async scenario => {
+    const q = terminalDraftRevisionFixture(), { f } = q, db = database(f)
+    Object.assign(db.run, { taskSpec: q.spec, startRequest: { prompt: q.prompt }, writingBindings: { version: 1, taskId: q.spec.id,
+      targets: [{ orderIndex: 1, chapterId: f.chapter.id }] } })
+    f.rows.push(q.artifact)
+    if (scenario === 'missing-receipt') delete (f.validation as Record<string, unknown>).newDraftRevision
+    if (scenario === 'wrong-receipt') q.receipt.compilationId = 'another-compilation'
+    if (scenario === 'unbound-target') Object.assign(db.run, { writingBindings: { version: 1, taskId: q.spec.id, targets: [] } })
+    if (scenario === 'duplicate-artifact') f.rows.push({ ...q.artifact, id: 'duplicate-repair-artifact' })
+    if (scenario === 'wrong-before') q.part.snapshot.previousValue += ' changed'
+    if (scenario === 'wrong-patch') q.artifact.content = JSON.stringify([{ findingId: 'missing', replacement: 'carefully sealed' }])
+    if (scenario === 'overlap') {
+      q.report.findings.push({ ...q.report.findings[0], id: 'overlap' })
+      q.artifact.metadata.findingIds.push('overlap')
+      q.artifact.content = JSON.stringify([{ findingId: 'repair-finding', replacement: 'carefully sealed' }, { findingId: 'overlap', replacement: 'sealed' }])
+    }
+    if (scenario === 'wrong-owner') q.report.findings[0].userId = 'another-owner'
+    if (scenario === 'wrong-report-owner') q.report.userId = 'another-owner'
+    if (scenario === 'revision-jump') q.receipt.checkedRevision = 2
+    if (scenario === 'wrong-after') q.report.deterministicMetrics.repairedContentHash = 'f'.repeat(64)
+    db.tx.chapterQualityReport.findMany.mockResolvedValue([q.report])
+    db.tx.agentMessage.findMany.mockResolvedValue(scenario === 'missing-message' ? [] : [{ runId: f.ctx.runId, parts: [q.part] }])
+    expect(review(f, await db.read())?.deliveryEligibility.eligible).toBe(false)
+  })
+
+  it.each(['missing', 'tampered'])('rebinds both token and invocation cache when the consumed receipt is %s after minting', async scenario => {
+    const q = terminalDraftRevisionFixture(), { f } = q, db = database(f), scope = new WeakMap()
+    Object.assign(db.run, { taskSpec: q.spec, startRequest: { prompt: q.prompt }, writingBindings: { version: 1, taskId: q.spec.id,
+      targets: [{ orderIndex: 1, chapterId: f.chapter.id }] } })
+    f.rows.push(q.artifact); db.tx.chapterQualityReport.findMany.mockResolvedValue([q.report])
+    db.tx.agentMessage.findMany.mockResolvedValue([{ runId: f.ctx.runId, parts: [q.part] }])
+    const read = () => readTerminalDraftBinding(db.tx as unknown as Prisma.TransactionClient, { ...f.ctx, compilationId: 'compilation' },
+      f.binding, f.chapter, f.validation, f.nextContext, scope)
+    const first = await read()
+    expect(review(f, first)?.deliveryEligibility.eligible).toBe(true)
+    if (scenario === 'missing') delete (f.validation as Record<string, unknown>).newDraftRevision
+    else q.receipt.afterHash = 'f'.repeat(64)
+    expect(review(f, first)?.deliveryEligibility.eligible).toBe(false)
+    expect(review(f, await read())?.deliveryEligibility.eligible).toBe(false)
+    expect(db.tx.agentArtifact.findMany.mock.calls.filter(([args]) => args.where.artifactType === 'continuityReview')).toHaveLength(2)
+  })
   it.each(['knowledge', 'body', 'objects', 'relationships', 'openLoops'])('preserves an unknown %s draft without turning it into an established fact', async field => {
     const f = terminalDraftFixture(field), db = database(f), before = JSON.stringify({ rows: f.rows, usage: f.usage, prepared: f.preparedContext, validation: f.validation })
     expect(currentTerminalReview(f.validation, f.chapter.content, f.nextContext, f.binding)?.deliveryEligibility.eligible).toBe(false)

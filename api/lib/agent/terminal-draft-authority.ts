@@ -5,15 +5,15 @@ import type { TerminalDeliveryBinding } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
 
 type Identity = { userId: string; novelId: string; taskId: string; compilationId: string; chapterId: string; bodyHash: string;
-  sourceHash: string; candidateHash: string; evidenceHash: string; preparedHash: string; auditHash: string }
+  sourceHash: string; candidateHash: string; evidenceHash: string; preparedHash: string; auditHash: string; revisionHash: string }
 const authority = new WeakMap<object, { identityHash: string; ids: readonly string[]; originHashes: readonly string[] }>()
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 export type TerminalDraftReadScope = WeakMap<object, Map<string, Promise<TerminalDeliveryBinding>>>
 
-export function terminalDraftIdentity(binding: TerminalDeliveryBinding, context: TerminalEvidenceContext, candidateHash: string, auditHash: string): Identity {
+export function terminalDraftIdentity(binding: TerminalDeliveryBinding, context: TerminalEvidenceContext, candidateHash: string, auditHash: string, revisionHash: string): Identity {
   return { userId: binding.userId ?? '', novelId: binding.novelId ?? '', taskId: binding.taskId, compilationId: binding.compilationId ?? '', chapterId: context.current.id,
     bodyHash: context.current.contentHash, sourceHash: runtimeJson({ previous: context.previous }).hash, candidateHash,
-    evidenceHash: runtimeJson(context).hash, preparedHash: runtimeJson(binding.preparedContext).hash, auditHash }
+    evidenceHash: runtimeJson(context).hash, preparedHash: runtimeJson(binding.preparedContext).hash, auditHash, revisionHash }
 }
 
 /** Only a live object minted below has authority. JSON, copied properties and
@@ -37,7 +37,8 @@ export async function readTerminalDraftBinding(db: Prisma.TransactionClient,
   const key = runtimeJson({ userId: subject.userId, novelId: subject.novelId, runId: subject.runId, compilationId: subject.compilationId,
     taskId: binding.taskId, chapter: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex, bodyHash: runtimeJson({ content: chapter.content }).hash },
     preparedContext: binding.preparedContext, context: context ?? null,
-    audit: object(validation).continuityCriticResponse ?? null, candidate: object(validation).terminalCandidate ?? null }).hash
+    audit: object(validation).continuityCriticResponse ?? null, candidate: object(validation).terminalCandidate ?? null,
+    newDraftRevision: object(validation).newDraftRevision ?? null }).hash
   if (!cache.has(key)) cache.set(key, loadTerminalDraftBinding(db, subject, binding, chapter, validation, context))
   const result = await cache.get(key)!
   subject.signal?.throwIfAborted()
@@ -88,20 +89,26 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
     terminalEvidence: terminalEvidenceContextSchema }).strict(), system: z.string(), content: z.string(), parserVersion: z.literal(8),
     reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)]), terminalCandidate: terminalCandidateSchema.optional(),
     sourceScope: continuitySourceScopeSchema, bindingHash: z.string().regex(/^[a-f0-9]{64}$/u), targetType: z.literal('story_compilation'), targetId: z.string() }).strict()
-  const mentions = (value: unknown) => {
+  const establishes = (value: unknown) => {
     const input = object(value), evidence = object(object(input.bodies).terminalEvidence), candidate = terminalCandidateSchema.safeParse(input.terminalCandidate)
     const rawCandidate = object(input.terminalCandidate), rawExit = object(rawCandidate.exitState)
     const rawMatch = Object.entries(rawExit).some(([field, value]) => (Array.isArray(value) ? value : [value])
       .some(claim => typeof claim === 'string' && ids.has(terminalFactId(field, claim))))
       || typeof rawCandidate.lastUnfinishedAction === 'string' && ids.has(terminalFactId('lastUnfinishedAction', rawCandidate.lastUnfinishedAction))
     return rawMatch || (candidate.success && terminalCandidateFacts(candidate.data).some(fact => ids.has(fact.id)))
-      || [object(evidence.proposalChanges).proposals, object(evidence.factCoverage).obligations].some(items => Array.isArray(items) && items.some(item => ids.has(String(object(item).id))))
+      || [object(evidence.factCoverage).obligations].some(items => Array.isArray(items) && items.some(item => ids.has(String(object(item).id))))
       || (Array.isArray(object(evidence.proposalChanges).verifiedFactIds) && (object(evidence.proposalChanges).verifiedFactIds as unknown[]).some(id => ids.has(String(id))))
       || (Array.isArray(object(evidence.previous).carried) && (object(evidence.previous).carried as unknown[]).some(item => {
         const fact = object(item); return typeof fact.field === 'string' && typeof fact.claim === 'string' && ids.has(terminalFactId(fact.field, fact.claim))
       }))
   }
-  const related = rows.filter(row => object(object(row.metadata).input).chapterId === chapter.id && mentions(object(row.metadata).input))
+  const passesPending = (value: unknown) => {
+    const items = object(object(object(value).bodies).terminalEvidence).proposalChanges
+    const proposals = object(items).proposals
+    return Array.isArray(proposals) && proposals.some(item => ids.has(String(object(item).id)))
+  }
+  const related = rows.filter(row => object(object(row.metadata).input).chapterId === chapter.id
+    && (establishes(object(row.metadata).input) || passesPending(object(row.metadata).input)))
   if (related.some(row => object(row.metadata).version !== 1)) return base
   const reservations = related.filter(row => typeof object(row.metadata).continuityAssessmentRequestKey === 'string')
   if (!reservations.length) return base
@@ -149,6 +156,7 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
     const ledger = coverage.readTerminalCoverageState(original.spec, binding.preparedContext, chapter.id)
     if (ledger?.facts.some(fact => ids.has(fact.id))) return base
     const origins = new Map<string, string>()
+    const revisions = new Map<string, Promise<boolean>>()
     for (const reservation of reservations) {
       subject.signal?.throwIfAborted()
       const meta = object(reservation.metadata), parsed = inputSchema.safeParse(meta.input)
@@ -161,11 +169,13 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
       if ([...(evidence.proposalChanges?.verifiedFactIds ?? []), ...(evidence.factCoverage?.obligations.map(fact => fact.id) ?? []),
         ...(evidence.previous?.carried?.map(fact => terminalFactId(fact.field, fact.claim)) ?? [])].some(id => ids.has(id))) return base
       const result = await lifecycle.readLegacyContinuityAssessment(snapshot, ctx, frozen)
-      if (!result.inspected.complete || !result.billingKnown || !result.providerComplete || !result.recoveryReady) return base
+      if (!result.billingKnown || !result.providerComplete || !result.recoveryReady) return base
       const bound = lifecycle.bindLegacyContinuityAssessment(result.inspected, ctx, frozen)
       const auditHash = runtimeJson(bound.audit).hash
       if (meta.continuityAssessmentRequestKey === currentRequest.key && auditHash !== runtimeJson(object(validation).continuityCriticResponse).hash) return base
-      for (const row of relevantRows.filter(row => object(row.metadata).assessmentKey === meta.continuityAssessmentRequestKey)) {
+      const frames = relevantRows.filter(row => object(row.metadata).assessmentKey === meta.continuityAssessmentRequestKey)
+      const inspections = []
+      for (const row of frames) {
         const frame = object(row.metadata), response = object(frame.response)
         if (typeof response.content !== 'string' || response.transportComplete !== true || response.finishReason !== 'stop'
           || !Array.isArray(response.toolCalls) || response.toolCalls.length) return base
@@ -174,6 +184,7 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
         const inspected = inspectContinuityResponse(raw, frozen.bodies, true, 8, frozen.terminalCandidate, frozen.sourceScope,
           frozen.reassessmentProtocol === 2 ? {} : { responseContract: 3 })
         if (runtimeJson(inspected.audit).hash !== runtimeJson(frame.audit).hash) return base
+        inspections.push({ frame, inspected })
         if (frozen.terminalCandidate && inspected.complete) {
           const historical = currentTerminalReview({ independentCheck: 'complete', terminalCandidate: frozen.terminalCandidate,
             continuityCriticResponse: inspected.audit }, frozen.bodies.current, evidence)
@@ -182,23 +193,51 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
           if (historical.verdicts.some(verdict => verdict.verdict === 'supported' && candidateFacts.some(fact => ids.has(fact.id) && fact.path === verdict.path))) return base
         }
       }
+      if (!result.inspected.complete) {
+        // A failed report which merely forwards this exact pending object
+        // cannot establish it. Authenticate the whole final request anyway;
+        // unknown billing, lost responses or a candidate/ledger mention retain
+        // the ordinary strict-complete requirement.
+        if (establishes(frozen) || result.inspected.audit.classification !== 'source_invalid'
+          || !evidence.proposalChanges || pending.some(proposal => proposal && evidence.proposalChanges!.proposals.some(item => item.id === proposal.id
+            && runtimeJson(item).hash !== runtimeJson(proposal).hash))) return base
+        const first = inspections.filter(item => item.frame.stage === 'first' || item.frame.stage === 'output_recovery').at(-1)
+        const claims = relevantRows.filter(row => object(row.metadata).fullReassessmentKey === meta.continuityAssessmentRequestKey)
+        const seconds = inspections.filter(item => item.frame.stage === 'reassessment')
+        if (!first || claims.length > 1 || claims.length === 0 && seconds.length !== 0) return base
+        if (claims.length === 1) {
+          const claim = object(claims[0].metadata)
+          if (!seconds.length || runtimeJson(claim.input).hash !== runtimeJson(frozen).hash
+            || runtimeJson(claim.original).hash !== runtimeJson(first.inspected.audit).hash
+            || runtimeJson(claim.request).hash !== runtimeJson(lifecycle.continuityReassessmentRequest(frozen.system, frozen.content,
+              first.inspected, frozen.bodies, false, frozen.reassessmentProtocol)).hash) return base
+        }
+        continue
+      }
       const originReview = frozen.terminalCandidate ? currentTerminalReview({ independentCheck: 'complete', terminalCandidate: frozen.terminalCandidate,
         continuityCriticResponse: bound.audit }, frozen.bodies.current, evidence) : null
       for (const proposal of pending) {
         if (!proposal || proposal.origin.auditHash !== auditHash) continue
         const fact = frozen.terminalCandidate && terminalCandidateFacts(frozen.terminalCandidate).find(fact => fact.id === proposal.id)
         if (!fact || !originReview || frozen.targetId !== subject.compilationId || originReview.verdicts.find(verdict => verdict.path === fact.path)?.verdict !== 'unknown'
-          || frozen.chapterId !== chapter.id || frozen.revision !== chapter.revision || evidence.current.id !== chapter.id
-          || proposal.origin.bodyHash !== identity.bodyHash || evidence.current.contentHash !== identity.bodyHash
+          || frozen.chapterId !== chapter.id || evidence.current.id !== chapter.id || evidence.current.revision !== frozen.revision
+          || proposal.origin.bodyHash !== evidence.current.contentHash
           || proposal.origin.sourceHash !== identity.sourceHash || runtimeJson({ previous: evidence.previous }).hash !== identity.sourceHash
           || proposal.origin.candidateHash !== runtimeJson(frozen.terminalCandidate).hash) return base
+        if (frozen.revision !== chapter.revision || proposal.origin.bodyHash !== identity.bodyHash) {
+          const key = runtimeJson({ revision: frozen.revision, bodyHash: proposal.origin.bodyHash }).hash
+          if (!revisions.has(key)) revisions.set(key, import('./terminal-draft-revision.js').then(module => module.authenticatedTerminalDraftRevision(db,
+            subject, binding.taskId, runIds, chapter, validation, { revision: frozen.revision, content: frozen.bodies.current })))
+          if (!await revisions.get(key)) return base
+        }
         origins.set(proposal.id, auditHash)
       }
     }
     if (pending.some(proposal => !proposal || !origins.has(proposal.id))) return base
     subject.signal?.throwIfAborted()
     const token = Object.freeze({})
-    authority.set(token, { identityHash: runtimeJson(terminalDraftIdentity(base, context, review.candidateHash, runtimeJson(object(validation).continuityCriticResponse).hash)).hash,
+    authority.set(token, { identityHash: runtimeJson(terminalDraftIdentity(base, context, review.candidateHash, runtimeJson(object(validation).continuityCriticResponse).hash,
+      runtimeJson({ newDraftRevision: object(validation).newDraftRevision ?? null }).hash)).hash,
       ids: Object.freeze([...origins.keys()]), originHashes: Object.freeze([...origins.values()]) })
     return { ...base, draftAuthority: token }
   } catch (error) {
