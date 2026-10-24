@@ -16,9 +16,10 @@ import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
+import { continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 
 describe.runIf(available)('proposal retraction at the real report and commit transaction', () => {
-  it.each([[5, false], [5, true], [6, false], [6, true]] as const)('freezes v%i before dispatch, retains invalid proposals through reprepare=%s, then commits independent dispositions', (protocol, reprepare) => fixture(async f => {
+  it.each([[5, false, false], [5, true, false], [6, false, false], [6, true, false], [5, false, true], [6, false, true]] as const)('freezes v%i before dispatch, retains invalid proposals through reprepare=%s and preserves transient unknown=%s at commit', (protocol, reprepare, preserveDraft) => fixture(async f => {
     const network = vi.fn(() => { throw Error('Unexpected provider request') })
     vi.stubGlobal('fetch', network)
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
@@ -44,8 +45,8 @@ describe.runIf(available)('proposal retraction at the real report and commit tra
         sourceEvidence: chapter.content.includes(fact.claim) ? [{ segmentId: 'c0', quote: fact.claim }] : [] })),
       terminalProofVerdicts: [], terminalDispositions: [],
       ...(includeDispositions ? { proposalDispositions: proposals!.changes!.proposals.map((proposal, proposalIndex) => ({ ...(protocol === 6 ? { proposalIndex } : { id: proposal.id }),
-        outcome: proposal.field === 'emotion' ? 'retracted' : 'replaced', reason: 'The full saved body supports only the stated current readings.',
-        sourceEvidence: [{ segmentId: 'c0', quote: chapter.content }],
+        outcome: proposal.field === 'emotion' ? preserveDraft ? 'unknown' : 'retracted' : 'replaced', reason: 'The full saved body supports only the stated current readings.',
+        sourceEvidence: proposal.field === 'emotion' && preserveDraft ? [] : [{ segmentId: 'c0', quote: chapter.content }],
         ...(proposal.field === 'knowledge' ? protocol === 6
           ? { candidateIndex: terminalCandidateFacts(candidate).findIndex(fact => fact.id === terminalFactId('knowledge', candidate.exitState.knowledge[0])) }
           : { candidateFactId: terminalFactId('knowledge', candidate.exitState.knowledge[0]) } : {}) })) } : {}),
@@ -99,14 +100,34 @@ describe.runIf(available)('proposal retraction at the real report and commit tra
       chapter, source: null, candidate, nextContext: evidenceFor(current, candidate) })!
     expect(renewed.changes).toEqual(proposals.changes)
     expect((await save(candidate, { ...context, proposalChanges: renewed.changes }, rawFor(candidate, renewed, true))).complete).toBe(true)
-    const passed = await load()
-    expect(readTerminalProposalState(passed.preparedContext, { taskId: f.spec.id, chapterId: chapter.id })?.pending).toEqual([])
+    let passed = await load()
+    expect(readTerminalProposalState(passed.preparedContext, { taskId: f.spec.id, chapterId: chapter.id })?.pending)
+      .toEqual(preserveDraft ? proposals.state.pending : [])
     await persistHumanityQualityReport({ ...f, compilationId, chapterId: chapter.id, chapterRevision: chapter.revision,
       mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
-    expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilationId))).toMatchObject({ ready: true, terminalReview: { state: 'supported' } })
+    expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilationId))).toMatchObject({ ready: true,
+      terminalReview: { state: preserveDraft ? 'unverified' : 'supported', deliveryEligible: true } })
+    if (preserveDraft) {
+      const usage = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage
+      const reused = await continuityValidateTool.execute({ ...f, chapterId: chapter.id, callId: 'synthetic-preserved-draft-cache', mode: 'build',
+        creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }, { compilationId })
+      expect(reused).toMatchObject({ summary: expect.stringContaining('复用') })
+      expect(reused.outcome).toBeUndefined()
+      const cached = await load()
+      expect((cached.validation as Record<string, unknown>).continuityCriticResponse).toEqual((passed.validation as Record<string, unknown>).continuityCriticResponse)
+      expect(readTerminalProposalState(cached.preparedContext, { taskId: f.spec.id, chapterId: chapter.id }))
+        .toEqual(readTerminalProposalState(passed.preparedContext, { taskId: f.spec.id, chapterId: chapter.id }))
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage).toEqual(usage)
+      expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+      expect(network).not.toHaveBeenCalled()
+      passed = cached
+    }
     await commitChapterBridge({ ...f, compilationId, ...candidate, chapterSummary: 'The current readings are recorded.', hookDecision: '', delayedHookReason: '', openingStructure: 'Read', endingStructure: 'Record' })
     expect(await load()).toMatchObject({ status: 'completed', bridge: { knowledgeState: candidate.exitState.knowledge,
       objectState: candidate.exitState.objects, emotionAftermath: candidate.exitState.emotion } })
+    expect((await load()).validation).toEqual(passed.validation)
+    expect((await load()).preparedContext).toMatchObject(passed.preparedContext as object)
     expect((await readTerminalInheritance(prisma, f, chapter)).map(({ field, claim }) => [field, claim]).sort())
       .toEqual(terminalCandidateFacts(candidate).map(({ field, claim }) => [field, claim]).sort())
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ revision: 8, content: chapter.content })

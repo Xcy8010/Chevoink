@@ -238,8 +238,11 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
       } })
       const repairGuidance = parsed.structured && report.independentCheck === 'complete' && report.errorCount > 0 ? await readChapterReviewRevisionGuidance(tx, ctx, frozen.chapter) : ''
       const incomplete = !parsed.structured || report.independentCheck !== 'complete'
+      const savedTerminalBinding = frozen.sourceBodies?.terminalEvidence?.proposalChanges
+        ? await tx.storyCompilation.findUniqueOrThrow({ where: { id: compiler.id }, select: { preparedContext: true } }) : undefined
       const terminalFailure = incomplete ? null : terminalReviewFailure({ ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.chapter.content, frozen.sourceBodies?.terminalEvidence,
-        { errors: report.errorCount, text: `连续性完整报告：${report.errorCount} 错误、${report.warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compiler.id, frozen.chapter.revision, { ...report, coverage: frozen.coverage })}\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` })
+        { errors: report.errorCount, text: `连续性完整报告：${report.errorCount} 错误、${report.warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compiler.id, frozen.chapter.revision, { ...report, coverage: frozen.coverage })}\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` },
+        { taskId: frozen.sourceBodies?.terminalEvidence?.proposalChanges?.taskId ?? '', preparedContext: savedTerminalBinding?.preparedContext })
       const recovery = incomplete && inspected && recoveryReady ? terminalReportRecoveryResult({ ...report, terminalCandidate: frozen.terminalCandidate, continuityCriticResponse: inspected.audit },
         frozen.chapter.content, frozen.sourceBodies?.terminalEvidence, frozen.sourceBodies?.previous ?? null) : null
       const toolResult: ToolResult = recovery ?? terminalFailure ?? (incomplete

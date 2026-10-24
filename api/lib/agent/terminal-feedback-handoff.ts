@@ -13,7 +13,7 @@ export function terminalFeedbackSlots(review: ChapterReviewReadiness | null,
   const candidateCorrection = review?.continuity === 'incomplete' && !review.ready && review.terminalReview?.state === 'unverified'
     && review.requiredTools.some(tool => tool.name === 'continuity_validate') && review.terminalCorrection?.version === 1
     && !!review.terminalCorrection.paths.length && /^[a-f0-9]{64}$/u.test(review.terminalCorrection.candidateHash)
-  if (!review || !evidence || !completeJudgment && !candidateCorrection
+  if (!review || review.terminalReview?.deliveryEligible || !evidence || !completeJudgment && !candidateCorrection
     || evidence.taskId !== spec.id || evidence.userId !== subject.userId || evidence.novelId !== subject.novelId
     || evidence.chapterId !== review.chapterId || spec.scope.novelId !== subject.novelId
     || !/^[a-f0-9]{64}$/u.test(evidence.contentHash) || !['write', 'revise'].includes(spec.intent)

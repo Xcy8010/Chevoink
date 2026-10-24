@@ -1026,7 +1026,8 @@ export const continuityValidateTool = defineTool({
       const cachedEvidence = terminalEvidence
       const repairGuidance = errorCount > 0 ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
       const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: (compilation.validation as Record<string, unknown>)?.continuityCriticResponse }, chapter.content, cachedEvidence,
-        { errors: errorCount, text: `连续性完整报告：${errorCount} 错误、${warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...cachedValidation, checkedChapterId: chapter.id })}\n${findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` })
+        { errors: errorCount, text: `连续性完整报告：${errorCount} 错误、${warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...cachedValidation, checkedChapterId: chapter.id })}\n${findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` },
+        { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext })
       if (terminalFailure) return terminalFailure
       return {
         output: `当前 r${chapter.revision} 已完成连续性检查，直接复用结果：${errorCount} 个错误、${warningCount} 个警告；${errorCount ? repairGuidance : '连续性检查已完成；警告保留待审，不自动改正文。'}\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...cachedValidation, checkedChapterId: chapter.id })}；findingId 使用从0开始的编号。\n${findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`,
@@ -1243,9 +1244,12 @@ export const continuityValidateTool = defineTool({
       summary: '独立连续性复核未完成',
     }
     const repairGuidance = result.errorCount > 0 ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
+    const savedTerminalBinding = (continued ? terminalEvidence : inspected.audit.terminalEvidence ?? terminalEvidence)?.proposalChanges
+      ? await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, select: { preparedContext: true } }) : compilation
     const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }, chapter.content,
       continued ? terminalEvidence : inspected.audit.terminalEvidence ?? terminalEvidence,
-      { errors: result.errorCount, text: `连续性完整报告：${result.errorCount} 错误、${result.warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...result, coverage })}\n${result.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` })
+      { errors: result.errorCount, text: `连续性完整报告：${result.errorCount} 错误、${result.warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...result, coverage })}\n${result.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` },
+      { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: savedTerminalBinding.preparedContext })
     if (terminalFailure) return terminalFailure
     const phase = result.errorCount > 0 ? 'repair' : 'check'
     return {
@@ -1339,7 +1343,8 @@ export const chapterBridgeCommitTool = defineTool({
       terminalCoverageInput(commitRequest.spec, compilation.preparedContext, compilation.chapter, savedCommitCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(commitSource, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
     if (commitEvidence && savedCommitCandidate) commitEvidence = attachTerminalProposalInput(commitEvidence, { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId),
       preparedContext: compilation.preparedContext, validation: compilation.validation, candidate: savedCommitCandidate })
-    const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content, commitEvidence)
+    const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content, commitEvidence,
+      { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId), preparedContext: compilation.preparedContext })
     const lastExit = storyStateSchema.parse(args.exitState ?? args.terminalState?.exitState ?? reviewedTerminal?.candidate.exitState ?? {})
     const paragraphs = compilation.chapter.content.split(/\n\s*\n/u).map(text => text.trim()).filter(Boolean)
     const terminal = {

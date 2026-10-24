@@ -11,9 +11,10 @@ export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) 
   const decisionPending = readiness.decisionPending ?? (readiness.continuityErrorCount > 0 || readiness.qualityErrorCount > 0
     || (readiness.qualityCandidateCount ?? 0) > 0)
   const incomplete = readiness.requiredTools.some(tool => (tool.name === 'quality_analyze' ? readiness.quality : readiness.continuity) === 'incomplete')
-  const state = readiness.terminalProcessing && readiness.terminalReview?.state === 'unverified'
+  const terminalPending = readiness.terminalReview?.state === 'unverified' && !readiness.terminalReview.deliveryEligible
+  const state = readiness.terminalProcessing && terminalPending
     ? 'terminal_review_required' : !readiness.ready ? incomplete ? 'blocked' : 'check_required'
-    : readiness.terminalReview?.state === 'unverified' ? 'terminal_review_required'
+    : terminalPending ? 'terminal_review_required'
       : readiness.mustPassPending ? 'must_pass_required'
       : decisionPending ? 'decision_required' : 'commit_available'
   const cycle = readiness.reviewCycle ?? projectReviewCycle(null, { revision: readiness.revision,

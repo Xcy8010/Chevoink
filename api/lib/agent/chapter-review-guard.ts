@@ -64,6 +64,7 @@ export type ChapterReviewReadiness = {
   terminalReview?: { state: 'supported' | 'unverified';
     /** True only after replaying the independent response against current bound evidence. */
     currentResultVerified?: boolean;
+    deliveryEligible?: boolean;
     unresolved: Array<{ path: string; verdict: string; field?: string; claim?: string; reason?: string }> }
   /** Server-only mutation proof projection; ordinary read tools never request it. */
   reviewBoundEvidence?: ReviewBoundEvidence
@@ -349,7 +350,8 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       factCoverage, terminalVerdictAuditVersion(validation), terminalSpanAuditVersion(validation))
     if (terminalCandidate && (validation as { continuityCriticResponse?: { terminalContentHash?: string } } | null)?.continuityCriticResponse?.terminalContentHash === evidence.current.contentHash) evidence = attachTerminalProposalInput(evidence, { taskId: terminalProposalTaskId(original.spec, original.taskId),
       preparedContext: compilation.preparedContext, validation, candidate: terminalCandidate })
-    const terminal = assessment ? currentTerminalReview(validation, chapter.content, evidence) : null
+    const terminal = assessment ? currentTerminalReview(validation, chapter.content, evidence,
+      { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }) : null
     if (continuity === 'incomplete' && validation && compilerContinuityCoverageMatches(validation.coverage,
       compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source,
         focus: typeof validation.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate }, storedContinuityProtocol(validation)))) {
@@ -358,6 +360,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       if (correction) readiness.terminalCorrection = correction
     }
     readiness.terminalReview = { state: terminal?.supported ? 'supported' : 'unverified', currentResultVerified: !!terminal,
+      deliveryEligible: terminal?.deliveryEligibility.eligible ?? false,
       unresolved: [...(terminal?.verdicts.filter(item => item.verdict !== 'supported').map(({ path, verdict }) => ({ path, verdict })) ?? []),
         ...(terminal?.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' }))
           ?? factCoverage?.obligations.map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' })) ?? []),
@@ -368,7 +371,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
         }) ?? [])] }
     const committed = compilation.preparedContext as Record<string, unknown> | null
     const commitProof = committed?.terminalReviewProof as Record<string, unknown> | undefined
-    readiness.terminalCommitted = !!terminal?.supported && compilation.status === 'completed' && compilation.stage === 'commit'
+    readiness.terminalCommitted = !!terminal?.deliveryEligibility.eligible && compilation.status === 'completed' && compilation.stage === 'commit'
       && !!compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision
       && committed?.terminalContentHash === runtimeJson({ content: chapter.content }).hash
       && committed?.terminalCandidateHash === runtimeJson(terminalCandidate).hash

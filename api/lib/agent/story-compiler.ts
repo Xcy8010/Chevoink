@@ -816,7 +816,8 @@ export async function validateStoryContinuity(input: {
     && runtimeJson((validation.continuityCriticResponse as Record<string, unknown>).terminalEvidence).hash !== runtimeJson(terminalContext).hash) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间持续事实覆盖义务已变化；保留原请求和结果，不将旧核验绑定当前候选。')
   }
-  const terminalReview = terminalContext ? currentTerminalReview(validation, compilation.chapter.content, terminalContext) : null
+  const terminalReview = terminalContext ? currentTerminalReview(validation, compilation.chapter.content, terminalContext,
+    authorRequest ? { taskId: terminalProposalTaskId(authorRequest.spec, authorRequest.taskId), preparedContext: compilation.preparedContext } : undefined) : null
   const nextFactCoverage = terminalReview ? advanceTerminalCoverage(authorRequest?.spec, compilation.preparedContext, compilation.chapter, terminalReview, terminalContext?.factCoverage) : undefined
   const nextProposals = proposalPreparation && (terminalReview && proposalPreparation.changes
     ? advanceTerminalProposals(proposalPreparation.state, proposalPreparation.changes, terminalReview) : proposalPreparation.state)
@@ -962,9 +963,10 @@ export async function commitChapterBridge(input: {
     terminalCoverageInput(terminalRequest?.spec, compilation.preparedContext, { ...compilation.chapter, ...chapter }, reviewedCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(source, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
   if (reviewedEvidence && reviewedCandidate && terminalRequest) reviewedEvidence = attachTerminalProposalInput(reviewedEvidence, { taskId: terminalProposalTaskId(terminalRequest.spec, terminalRequest.taskId),
     preparedContext: compilation.preparedContext, validation: compilation.validation, candidate: reviewedCandidate })
-  const terminalReview = currentTerminalReview(compilation.validation, chapter.content, reviewedEvidence)
+  const terminalReview = currentTerminalReview(compilation.validation, chapter.content, reviewedEvidence,
+    terminalRequest ? { taskId: terminalProposalTaskId(terminalRequest.spec, terminalRequest.taskId), preparedContext: compilation.preparedContext } : undefined)
   if (outstandingFacts || reviewedCandidate || terminalClaims(proposedTerminal).length) {
-    if (!currentContinuityReview.assessment || !reviewedCandidate || !terminalReview?.supported
+    if (!currentContinuityReview.assessment || !reviewedCandidate || !terminalReview?.deliveryEligibility.eligible
       || runtimeJson(reviewedCandidate).hash !== runtimeJson(proposedTerminal).hash) {
       throw new DataAccessError(409, 'TERMINAL_STATE_REVIEW_REQUIRED', '终态包含尚未由当前正文独立核验的事实，或与检查候选不同。正文与原终态保留；调用 continuity_validate，terminalState={exitState,lastUnfinishedAction} 传入准确候选，核对逐项正文证据后再提交。计划、推测、否定或仅转述不能作为实况；不要静默清空已知状态绕过核验。')
     }
@@ -998,7 +1000,7 @@ export async function commitChapterBridge(input: {
     checkedBridge: continuityStoryInput(currentContinuityReview.checkedBridge),
     terminalStateHash: terminalReviewStateHash({ ...compilation.bridge, ...bridgeData }, orderedScenes),
   } : undefined
-  const terminalFactProofs = currentContinuityReview.coverage.protocolVersion === 11 && terminalReview?.supported && reviewedEvidence
+  const terminalFactProofs = currentContinuityReview.coverage.protocolVersion === 11 && terminalReview?.deliveryEligibility.eligible && reviewedEvidence
     ? buildTerminalFactProofs({ compilationId: compilation.id, chapter: { ...compilation.chapter, ...chapter }, validation: compilation.validation,
       stateHash: terminalReviewStateHash(sameTerminal ? compilation.bridge : { ...compilation.bridge, ...bridgeData }, orderedScenes),
       evidence: reviewedEvidence, review: terminalReview }) : undefined

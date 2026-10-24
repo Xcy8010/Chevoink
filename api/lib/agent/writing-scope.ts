@@ -635,6 +635,12 @@ export async function readCompletedWritingPresentation(tx: Prisma.TransactionCli
   return readChapterDelivery(tx, subject, 'completed_wrap_up')
 }
 
+/** Local recovery must prove the original request contains only chapter
+ * artifacts. The final transaction rechecks this same delivery kind. */
+export async function readRecoveredChapterDelivery(tx: Prisma.TransactionClient, subject: Subject) {
+  return readChapterDelivery(tx, subject, 'recovered_chapter_only')
+}
+
 export function requiresCompletedWritingPresentation(spec: TaskSpec): boolean {
   return ['write', 'revise'].includes(spec.intent) && spec.scope.writing?.kind === 'bounded'
     && !['proposal_only', 'conversation_only'].includes(spec.writingPacing ?? '')
@@ -894,7 +900,7 @@ export function savedChapterPresentationProof(subject: Subject, delivery: NonNul
     chapters: delivery.chapters.map(({ id, title, revision, contentHash }) => ({ id, title, revision, contentHash })), text: delivery.text })
 }
 
-async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subject, presentationKind: 'auto' | 'completed_saved_only' | 'completed_wrap_up') {
+async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subject, presentationKind: 'auto' | 'completed_saved_only' | 'completed_wrap_up' | 'recovered_chapter_only') {
   await lockNovelActiveScope(tx, subject.novelId)
   const scope = await readWritingScope(tx, subject)
   if (scope.writing?.kind !== 'bounded' || !scope.writing.targets.length

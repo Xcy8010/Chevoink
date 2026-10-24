@@ -1,12 +1,13 @@
 import { expect, it } from 'vitest'
-import { terminalCandidateSchema, terminalReviewInput } from '../../api/lib/agent/terminal-state-review.js'
+import { currentTerminalReview, inspectTerminalReview, terminalCandidateSchema, terminalReviewFailure, terminalReviewInput } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { freshContinuityResponseContract } from '../../api/lib/agent/assessment-response-lifecycle.js'
-import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
+import { terminalCandidateFacts, terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { advanceTerminalProposals, inspectTerminalProposalDispositions, readTerminalProposalInput,
   readTerminalProposalState, stageTerminalProposals, terminalProposalGuidance } from '../../api/lib/agent/terminal-proposal-review.js'
+import { terminalProposalCacheMatches } from '../../api/lib/agent/terminal-proposal-context.js'
 
 function fixture() {
   const body = 'The spare gauge reads two. The operator has not reached the inner room.'
@@ -146,3 +147,55 @@ it('binds the new obligation schema in primary parsing while preserving the old 
   expect(freshContinuityResponseContract(false, true, 5, oldBodies)).not.toContain('proposalDispositions')
   expect(inspectContinuityResponse(JSON.stringify(response), oldBodies, true, 8, f.candidate).complete).toBe(false)
 })
+
+it.each(['eligible', 'current-unknown', 'persistent', 'unfinished-action', 'current-id', 'verified', 'coverage-unknown',
+  'body-drift', 'source-drift', 'no-binding', 'wrong-task', 'corrupt-binding', 'invalid-raw'] as const)(
+  'derives delivery only for authenticated superseded transient drafts, preserving the independent result: %s', scenario => {
+    const chapter = { id: 'chapter', revision: 8, orderIndex: 6, content: 'The packet remains on the desk. The operator waits.' }
+    const base = terminalCandidateSchema.parse(scenario === 'persistent' ? { exitState: { knowledge: ['The sender owns the packet.'] } }
+      : scenario === 'unfinished-action' ? { exitState: {}, lastUnfinishedAction: 'A transfer remains pending.' }
+        : { exitState: { action: 'The packet was transferred.', location: 'In the vault.', storyTime: 'Before dawn.', emotion: ['Unconfirmed tension.'] } })
+    const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['The packet remains on the desk.'] } })
+    const coverage = { version: 2 as const, taskId: 'task', chapterId: chapter.id, obligations: [] as Array<{ id: string; field: 'knowledge'; claim: string }> }
+    if (scenario === 'coverage-unknown') coverage.obligations.push({ id: terminalFactId('knowledge', 'The owner is waiting.'), field: 'knowledge', claim: 'The owner is waiting.' })
+    const context = terminalEvidenceContext(chapter, null, 2, 1, coverage, 5, 2)
+    const identity = { taskId: 'task', chapterId: chapter.id, bodyHash: context.current.contentHash, sourceHash: runtimeJson({ previous: null }).hash }
+    const staged = stageTerminalProposals({ preparedContext: {}, identity, auditHash: 'a'.repeat(64), base, candidate, verifiedFactIds: [] })!
+    if (scenario === 'current-id') {
+      candidate.exitState.action = base.exitState.action
+      staged.changes!.candidateHash = runtimeJson(candidate).hash
+    }
+    if (scenario === 'verified') staged.changes!.verifiedFactIds.push(staged.changes!.proposals[0].id)
+    if (scenario === 'body-drift') staged.changes!.proposals[0].origin.bodyHash = 'b'.repeat(64)
+    if (scenario === 'source-drift') staged.changes!.proposals[0].origin.sourceHash = 'b'.repeat(64)
+    // These are synthetic server snapshots, not caller supplied attestations.
+    staged.state.pending = structuredClone(staged.changes!.proposals)
+    staged.state.lastInput = { input: structuredClone(staged.changes!), pendingHash: runtimeJson(staged.state.pending).hash }
+    const evidence = { ...context, proposalChanges: staged.changes }, binding = { taskId: scenario === 'wrong-task' ? 'other' : 'task',
+      preparedContext: { terminalProposalReview: staged.state } }
+    const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic full-body review.', findingIndexes: [] })),
+      terminalVerdicts: terminalCandidateFacts(candidate).map(fact => ({ path: fact.path, verdict: scenario === 'current-unknown' ? 'unknown' : 'supported',
+        sourceEvidence: scenario === 'current-unknown' ? [] : [{ segmentId: 'c0', quote: chapter.content }] })),
+      terminalProofVerdicts: [], terminalDispositions: coverage.obligations.map(fact => ({ id: fact.id, outcome: 'unknown', reason: 'Not established.', sourceEvidence: [] })),
+      proposalDispositions: staged.changes!.proposals.map(proposal => ({ id: proposal.id, outcome: 'unknown', reason: 'The old draft remains unverified.', sourceEvidence: [] })) })
+    const inspected = inspectContinuityResponse(raw, { current: chapter.content, previous: null, terminalEvidence: evidence }, true, 8, candidate)
+    const validation = { independentCheck: 'complete', terminalCandidate: candidate, continuityCriticResponse: inspected.audit }
+    if (scenario === 'corrupt-binding') binding.preparedContext.terminalProposalReview.lastInput.pendingHash = 'c'.repeat(64)
+    if (scenario === 'invalid-raw') validation.continuityCriticResponse.rawResponse.content = 'invalid synthetic response'
+    const before = runtimeJson({ validation, binding }).hash
+    const reviewed = currentTerminalReview(validation, chapter.content, evidence, scenario === 'no-binding' ? undefined : binding)
+    if (scenario === 'eligible') {
+      expect(inspected.complete).toBe(true)
+      expect(inspectTerminalReview(candidate, chapter.content, raw, true, evidence)).toMatchObject({ supported: false, proposals: { complete: false } })
+      expect(reviewed).toMatchObject({ supported: false, proposals: { complete: false }, deliveryEligibility: {
+        version: 1, eligible: true, basis: 'current_supported_with_preserved_drafts', preservedUnknownProposalIds: staged.changes!.proposals.map(item => item.id) } })
+      expect(terminalReviewFailure(validation, chapter.content, evidence, undefined, binding)).toBeNull()
+      expect(terminalProposalCacheMatches({ spec: { id: 'task' }, preparedContext: binding.preparedContext,
+        validation, chapter, source: null, candidate, nextContext: evidence })).toBe(true)
+    } else {
+      expect(reviewed?.deliveryEligibility.eligible ?? false).toBe(false)
+      expect(terminalReviewFailure(validation, chapter.content, evidence, undefined, scenario === 'no-binding' ? undefined : binding)).not.toBeNull()
+    }
+    expect(runtimeJson({ validation, binding }).hash).toBe(before)
+    expect(binding.preparedContext.terminalProposalReview.pending).toEqual(staged.state.pending)
+  })

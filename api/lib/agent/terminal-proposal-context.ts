@@ -120,6 +120,9 @@ export function terminalProposalCacheMatches(input: Parameters<typeof prepareCom
   const taskId = terminalProposalTaskId(input.spec)
   const state = readTerminalProposalState(input.preparedContext, { taskId, chapterId: input.chapter.id })
   if (!state?.pending.length) return true
+  const current = currentTerminalReview(input.validation, input.chapter.content, input.nextContext,
+    { taskId, preparedContext: input.preparedContext })
+  if (current?.deliveryEligibility.basis === 'current_supported_with_preserved_drafts') return true
   const proposed = prepareCompilerTerminalProposals(input)
   return runtimeJson({ changes: proposed?.changes ?? null }).hash === runtimeJson({ changes: input.nextContext.proposalChanges ?? null }).hash
 }

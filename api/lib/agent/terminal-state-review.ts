@@ -10,7 +10,7 @@ import { inspectTerminalCoverage, terminalCoverageGuidance, addressedTerminalDis
 import { terminalQuoteRange } from './terminal-quote-range.js'
 import { terminalProofCatalog, readTerminalProofVerdicts, terminalProofVerdictSchema } from './terminal-proof-verdict.js'
 import { terminalCandidateFacts, terminalFactId } from './terminal-fact-identity.js'
-import { inspectTerminalProposalDispositions, terminalProposalDispositionSchema, terminalProposalGuidance, type TerminalProposalChanges } from './terminal-proposal-review.js'
+import { inspectTerminalProposalDispositions, readTerminalProposalInput, readTerminalProposalState, terminalProposalDispositionSchema, terminalProposalGuidance, type TerminalProposalChanges } from './terminal-proposal-review.js'
 import { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, terminalSpanVerdictSchema,
   terminalFactVerdictSchema, terminalJointFactVerdictSchema } from './terminal-review-shapes.js'
 export { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, terminalSpanVerdictSchema,
@@ -397,7 +397,43 @@ export function readTerminalCandidate(validation: unknown): TerminalCandidate | 
 
 /** Reparse the saved independent response against today's body. A main-agent
  * supplied proof/quote is never accepted as a semantic attestation. */
-export function currentTerminalReview(validation: unknown, content: string, expectedContext?: TerminalEvidenceContext) {
+export type TerminalDeliveryBinding = { taskId: string; preparedContext: unknown }
+export type TerminalDeliveryEligibility = { version: 1; basis: 'fully_supported' | 'current_supported_with_preserved_drafts' | 'blocked';
+  eligible: boolean; preservedUnknownProposalIds: string[] }
+
+/** Delivery may preserve superseded, unverified transient drafts. This never
+ * changes independent verdicts, resolves a proposal or discharges a real fact. */
+function terminalDeliveryEligibility(review: NonNullable<ReturnType<typeof inspectTerminalReview>>, context?: TerminalEvidenceContext,
+  binding?: TerminalDeliveryBinding): TerminalDeliveryEligibility {
+  const unknown = review.proposals?.dispositions.filter(item => item.outcome === 'unknown') ?? []
+  const preservedUnknownProposalIds = unknown.map(item => item.id)
+  const result = (eligible: boolean, basis: TerminalDeliveryEligibility['basis']): TerminalDeliveryEligibility => ({ version: 1, basis, eligible, preservedUnknownProposalIds })
+  if (review.supported) return result(true, 'fully_supported')
+  const input = context?.proposalChanges
+  if (!context || !binding || !input || !unknown.length || !terminalCandidateFacts(review.candidate).length
+    || !review.verdicts.length || review.verdicts.some(item => item.verdict !== 'supported')
+    || review.factCoverage?.version !== 2 || !review.factCoverage.complete) return result(false, 'blocked')
+  try {
+    const identity = { taskId: binding.taskId, chapterId: context.current.id, bodyHash: context.current.contentHash,
+      sourceHash: runtimeJson({ previous: context.previous }).hash }
+    const saved = readTerminalProposalInput(binding.preparedContext, identity, review.candidate)
+    const state = readTerminalProposalState(binding.preparedContext, identity)
+    if (!saved || !state || runtimeJson(saved).hash !== runtimeJson(input).hash) return result(false, 'blocked')
+    const current = new Set(terminalCandidateFacts(review.candidate).map(item => item.id))
+    const verified = new Set([...input.verifiedFactIds, ...(context.factCoverage?.obligations.map(item => item.id) ?? []),
+      ...(context.previous?.carried?.map(item => terminalFactId(item.field, item.claim)) ?? [])])
+    const eligible = unknown.every(item => {
+      const proposal = input.proposals.find(proposal => proposal.id === item.id)
+      return proposal && state.pending.some(pending => runtimeJson(pending).hash === runtimeJson(proposal).hash)
+        && ['action', 'location', 'storyTime', 'emotion'].includes(proposal.field)
+        && !current.has(proposal.id) && !verified.has(proposal.id)
+        && proposal.origin.bodyHash === identity.bodyHash && proposal.origin.sourceHash === identity.sourceHash
+    })
+    return result(eligible, eligible ? 'current_supported_with_preserved_drafts' : 'blocked')
+  } catch { return result(false, 'blocked') }
+}
+
+export function currentTerminalReview(validation: unknown, content: string, expectedContext?: TerminalEvidenceContext, binding?: TerminalDeliveryBinding) {
   const record = validation && typeof validation === 'object' ? validation as Record<string, unknown> : {}
   const candidate = readTerminalCandidate(validation)
   const audit = record.continuityCriticResponse as { parserVersion?: number; terminalEvidence?: unknown; terminalCandidate?: unknown; terminalContentHash?: unknown; rawResponse?: { content?: unknown; complete?: boolean }; responseContract?: unknown } | undefined
@@ -409,15 +445,16 @@ export function currentTerminalReview(validation: unknown, content: string, expe
   if (audit.parserVersion === 8 ? !expectedContext || runtimeJson(audit.terminalEvidence).hash !== runtimeJson(expectedContext).hash : expectedContext !== undefined) return null
   try {
     const raw: unknown = JSON.parse(audit.rawResponse.content)
-    return typeof raw === 'string' && (audit.responseContract === undefined || audit.responseContract === 3) ? inspectTerminalReview(candidate, content, raw, record.independentCheck === 'complete', expectedContext, undefined, audit.responseContract === 3 ? { responseContract: 3 } : {}) : null
+    const review = typeof raw === 'string' && (audit.responseContract === undefined || audit.responseContract === 3) ? inspectTerminalReview(candidate, content, raw, record.independentCheck === 'complete', expectedContext, undefined, audit.responseContract === 3 ? { responseContract: 3 } : {}) : null
+    return review ? { ...review, deliveryEligibility: terminalDeliveryEligibility(review, expectedContext, binding) } : null
   } catch { return null }
 }
 
 export function terminalReviewFailure(validation: unknown, content: string, context?: TerminalEvidenceContext,
-  proseReport?: { errors: number; text: string }) {
+  proseReport?: { errors: number; text: string }, binding?: TerminalDeliveryBinding) {
   if (!readTerminalCandidate(validation)) return null
-  const review = currentTerminalReview(validation, content, context)
-  if (review?.supported) return null
+  const review = currentTerminalReview(validation, content, context, binding)
+  if (review?.deliveryEligibility.eligible) return null
   const diagnostics = (validation as { continuityCriticResponse?: { terminalReviewDiagnostics?: TerminalReviewDiagnostic[] } }).continuityCriticResponse?.terminalReviewDiagnostics
   if (review && (context?.factCoverage?.version === 2 || context?.verdictProtocol !== undefined)) {
     const claims = terminalClaims(review.candidate)

@@ -1,7 +1,7 @@
 import { readSettledQualityReviews } from './quality-review-admission.js'
 import { terminalProcessingExhaustedMessage, terminalProcessingPlan } from './terminal-processing.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
-import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
+import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery } from './review-request-recovery.js'
@@ -682,7 +682,7 @@ async function finalizeLegacyRun(
   // It is published with the confirmed failure, never ahead of its transaction.
   const failureNotice = status === 'failed' && withFailureNotice && errorMessage
     ? { messageId: randomUUID(), text: errorMessage } : undefined
-  const writingDisplayText = writingDelivery?.expected.presentationKind === 'completed_wrap_up'
+  const writingDisplayText = writingDelivery && ['completed_wrap_up', 'recovered_chapter_only'].includes(writingDelivery.expected.presentationKind)
     ? completedWritingPresentationText(writingDelivery.expected, writingDelivery.displayText ?? '')
     : writingDelivery?.displayText ?? writingDelivery?.expected.text
 
@@ -1750,8 +1750,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
     const finishPersistedWritingIfComplete = async (beforeFinish?: () => Promise<void>) => {
       if (pendingReviews.size) return false
-      let delivery = await prisma.$transaction(tx => readCompletedWritingDelivery(tx,
-        { userId: params.userId, novelId: params.novelId, runId }))
+      const readDelivery = () => prisma.$transaction(async tx => {
+        const subject = { userId: params.userId, novelId: params.novelId, runId }
+        const ordinary = await readCompletedWritingDelivery(tx, subject)
+        if (ordinary) return ordinary
+        // This recovery has no remaining semantic work: the original bounded
+        // targets and all delivery checks are reread before local completion.
+        const review = currentReviewState.value
+        return params.resume && requiresCompletedWritingPresentation(taskSpec) && review?.terminalCommitted
+          && review.terminalReview?.state === 'unverified' && review.terminalReview.deliveryEligible
+          ? readRecoveredChapterDelivery(tx, subject) : null
+      })
+      let delivery = await readDelivery()
       if (!delivery) return false
       controller.signal.throwIfAborted()
       await beforeFinish?.()
@@ -1765,7 +1775,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           if (!(error instanceof DataAccessError) || error.code !== 'WRITING_DELIVERY_STALE' || attempt !== 0) throw error
           // A display withdrawal can change the capture while the chapter is
           // already complete. Re-read once without buying a formatting turn.
-          delivery = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId: params.userId, novelId: params.novelId, runId }))
+          delivery = await readDelivery()
           if (!delivery) return false
           controller.signal.throwIfAborted()
         }
@@ -1806,6 +1816,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (processing && !processing.claim) {
         forceWrapUpLocal = true
         await wrapUpAndFinish(terminalProcessingExhaustedMessage(currentReviewState.value, processing)!)
+        return
+      }
+      if (terminalPlan?.kind === 'commit' && !tools.some(tool => tool.name === 'chapter_bridge_commit')) {
+        forceWrapUpLocal = true
+        await wrapUpAndFinish('当前授权工具中缺少章节终态提交能力，正文与独立结果保留，任务保持暂停。')
         return
       }
       if (terminalPlan?.kind === 'commit' && tools.some(tool => tool.name === 'chapter_bridge_commit')) {

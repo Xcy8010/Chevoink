@@ -4,6 +4,7 @@ import { terminalProcessingExhaustedMessage, terminalProcessingPlan } from '../.
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import { projectCurrentReviewNextStep } from '../../api/lib/agent/review-dispatch.js'
 
 function fixture() {
   const taskSpec = buildTaskSpec({ runId: 'original', novelId: 'novel', chapterId: 'chapter', prompt: '修改本章' })
@@ -79,6 +80,27 @@ it('schedules actual commit once only after current checks and decisions are rea
   review.decisionPending = false
   review.terminalCommitted = true
   expect(terminalProcessingPlan(review, subject, new Set())).toBeNull()
+})
+
+it('commits delivery-eligible current state without refilling exhausted processing claims and keeps all readiness gates', () => {
+  const { subject, review } = fixture(), attempts = new Set<string>()
+  attempts.add(terminalProcessingPlan(review, subject, attempts)!.claim!)
+  attempts.add(terminalProcessingPlan(review, subject, attempts)!.claim!)
+  const occupied = [...attempts]
+  review.ready = true
+  review.continuity = 'complete'
+  review.terminalReview!.deliveryEligible = true
+  expect(terminalProcessingPlan(review, subject, attempts)?.kind).toBe('commit')
+  for (const gate of ['ready', 'mustPassPending', 'decisionPending', 'owner'] as const) {
+    const next = structuredClone(review)
+    if (gate === 'ready') next.ready = false
+    if (gate === 'mustPassPending') next.mustPassPending = true
+    if (gate === 'decisionPending') next.decisionPending = true
+    if (gate === 'owner') next.progressEvidence!.userId = 'other'
+    expect(terminalProcessingPlan(next, subject, attempts)).toBeNull()
+    if (gate === 'decisionPending') expect(projectCurrentReviewNextStep(next).state).toBe('decision_required')
+  }
+  expect([...attempts]).toEqual(occupied)
 })
 
 it('describes verified unknown results only after both current processing claims are occupied, without side effects', () => {

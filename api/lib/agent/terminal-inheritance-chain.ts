@@ -124,19 +124,21 @@ export async function readTerminalInheritance(db: Prisma.TransactionClient, subj
       const compilation = compilations.get(node.compilationId), context = object(compilation?.preparedContext), proof = object(context.terminalReviewProof)
       const validation = object(compilation?.validation), coverage = object(validation.coverage), audit = object(validation.continuityCriticResponse)
       let evidence = audit.terminalEvidence as TerminalEvidenceContext | undefined
+      let deliveryBinding: { taskId: string; preparedContext: unknown } | undefined
       if (evidence && compilation && (evidence.proposalChanges || context.terminalProposalReview)) {
         if (!compilation.runId) { good = false; break }
         const original = await readOriginalTaskRequest(db, { ...subject, runId: compilation.runId })
+        deliveryBinding = { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }
         const candidate = readTerminalCandidate(validation)
         if (!candidate) { good = false; break }
         try { evidence = attachTerminalProposalInput(evidence, { taskId: terminalProposalTaskId(original.spec, original.taskId),
           preparedContext: compilation.preparedContext, validation, candidate }) }
         catch (error) { if (!(error instanceof DataAccessError)) throw error; good = false; break }
       }
-      const review = compilation && chapter ? currentTerminalReview(compilation.validation, chapter.content, evidence) : null
+      const review = compilation && chapter ? currentTerminalReview(compilation.validation, chapter.content, evidence, deliveryBinding) : null
       if (!chapter || !compilation?.bridge?.committedAt || compilation.chapterId !== chapter.id || compilation.bridge.targetRevision !== chapter.revision
         || chapter.revision !== node.revision || chapter.orderIndex !== node.orderIndex || bodyHash(chapter.content) !== node.bodyHash
-        || coverage.protocolVersion !== 11 || !review?.supported || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
+        || coverage.protocolVersion !== 11 || !review?.deliveryEligibility.eligible || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
         || coverage.contentHash !== review.contentHash || coverage.terminalHash !== review.candidateHash
         || evidence?.protocol !== 2 || evidence.current.id !== chapter.id || evidence.current.revision !== chapter.revision || evidence.current.orderIndex !== chapter.orderIndex
         || review.candidateHash !== node.candidateHash || context.terminalCandidateHash !== node.candidateHash

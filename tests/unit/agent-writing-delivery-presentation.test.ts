@@ -20,7 +20,7 @@ vi.mock('../../api/lib/agent/runtime-lease.js', async importOriginal => ({
 vi.mock('../../api/lib/agent/runtime-state.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/runtime-state.js')>(), readExecutionStateInTransaction: mocks.state, saveExecutionStateInTransaction: mocks.save,
 }))
-import { readCompletedWritingDelivery, readSavedWritingPresentation, readCompletedWritingPresentation, completedWritingPresentationText,
+import { readCompletedWritingDelivery, readSavedWritingPresentation, readRecoveredChapterDelivery, readCompletedWritingPresentation, completedWritingPresentationText,
   shouldUseSavedWritingPresentation, savedChapterPresentationProof, savedChapterPresentationSchema } from '../../api/lib/agent/writing-scope.js'
 import { advanceDurableWritingDelivery } from '../../api/lib/agent/runtime-writing-delivery.js'
 
@@ -56,6 +56,18 @@ function fixture(prompt = '完成第一章，只输出标题与正文。', title
   return { db: db as unknown as Prisma.TransactionClient, mocks: db, chapter, terminal, quality, spec, state }
 }
 beforeEach(() => { vi.clearAllMocks(); mocks.preference.mockResolvedValue(null) })
+
+it.each(['修改第一章，另外写报告。', '修改第一章，并生成大纲。', '写第一章，顺便写首诗。', '写第一章，然后检查正文质量。'])(
+  'does not finish additional original deliverables through local chapter recovery: %s', async prompt => {
+    const f = fixture(prompt, false)
+    expect(await readCompletedWritingPresentation(f.db, subject)).not.toBeNull()
+    expect(await readRecoveredChapterDelivery(f.db, subject)).toBeNull()
+  })
+
+it('captures the recovery kind so final persistence rechecks the original chapter-only request boundary', async () => {
+  const f = fixture('修改第一章。', false)
+  expect(await readRecoveredChapterDelivery(f.db, subject)).toMatchObject({ presentationKind: 'recovered_chapter_only', chapters: [{ id: f.chapter.id }] })
+})
 
 describe('current committed manuscript wrap-up', () => {
   async function current() {

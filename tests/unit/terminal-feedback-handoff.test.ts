@@ -32,6 +32,7 @@ it('requires a current complete terminal judgment inside the original owner and 
   expect(terminalFeedbackSlots({...review,continuity:'incomplete'},subject)).toBeNull()
   expect(terminalFeedbackSlots({...review,terminalReview:{state:'unverified',unresolved:[]}},subject)).toBeNull()
   expect(terminalFeedbackSlots({...review,terminalReview:{state:'supported',unresolved:[]}},subject)).toBeNull()
+  expect(terminalFeedbackSlots({...review,terminalReview:{...review.terminalReview!,deliveryEligible:true}},subject)).toBeNull()
   for(const patch of [{phases:['continuity'] as const},{taskId:'other'},{userId:'other'},{novelId:'other'},
     {chapterId:'other'},{orderIndex:6},{contentHash:'invalid'}]) {
     expect(terminalFeedbackSlots({...review,progressEvidence:{...review.progressEvidence!,...patch,phases:[...('phases' in patch?patch.phases:review.progressEvidence!.phases)]}},subject)).toBeNull()

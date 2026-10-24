@@ -37,7 +37,7 @@ export function terminalProcessingPlan(review: ChapterReviewReadiness | null,
   const key = runtimeJson({ kind: 'terminal-processing', version: 1, userId: evidence.userId, novelId: evidence.novelId,
     taskId: evidence.taskId, chapterId: evidence.chapterId, contentHash: evidence.contentHash,
     sourceHash: input.sourceHash, contractHash: input.contractHash }).hash
-  if (review.terminalReview.state === 'supported') {
+  if (review.terminalReview.state === 'supported' || review.terminalReview.deliveryEligible === true) {
     if (!review.ready || review.mustPassPending || (review.decisionPending ?? (review.continuityErrorCount > 0
       || review.qualityErrorCount > 0 || (review.qualityCandidateCount ?? 0) > 0))) return null
     const claim = `terminal-commit:${key}`
