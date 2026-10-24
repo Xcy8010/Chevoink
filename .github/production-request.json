@@ -1,7 +1,11 @@
 {
   "schemaVersion": 1,
-  "action": "inspect",
+  "action": "deploy",
   "sourceSha": "b1e56f48176db12d52cd4cc7328741976b43c992",
   "ciRunId": "40082129563",
-  "requestId": "b3fc3af0-e860-4ab2-9f15-62b6d5a636fb"
+  "requestId": "0d3167fd-8de3-4100-b41b-5378fc2470b5",
+  "expectedRevision": "0f9b86f0cffe2508a61f081c7bb057f7829b6eb9",
+  "inspectionRunId": "40082633134",
+  "inspectionRequestId": "b3fc3af0-e860-4ab2-9f15-62b6d5a636fb",
+  "inspectionRequestSha": "054ee64de6277c722da1f036d790c6122fbab0d9"
 }
