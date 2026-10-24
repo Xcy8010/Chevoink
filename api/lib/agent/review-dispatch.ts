@@ -79,8 +79,10 @@ export function nextMergedReviewReminder(readiness: ChapterReviewReadiness | nul
  * incomplete/unknown work is never dispatched again by this fallback. */
 export function nextReviewDispatch(readiness: ChapterReviewReadiness | null,
   available: ReadonlySet<string>, attempted: ReadonlySet<string>, recovered: ReadonlySet<string> = new Set(),
-  recoveryKeys: ReadonlyMap<string, string> = new Map()) {
+  recoveryKeys: ReadonlyMap<string, string> = new Map(), terminalDecision?: { compilationId: string; chapterId: string; revision: number; guidance: string } | null) {
   if (!readiness || readiness.ready) return { kind: 'ready' as const }
+  if (terminalDecision && readiness.compilationId === terminalDecision.compilationId && readiness.chapterId === terminalDecision.chapterId
+    && readiness.revision === terminalDecision.revision) return { kind: 'blocked' as const, reason: terminalDecision.guidance }
   const tool = readiness.requiredTools[0]
   if (!tool) return { kind: 'blocked' as const, reason: '当前版本的必要检查尚未确认完成。正文已保存，不能提交为完成。' }
   const status = tool.name === 'continuity_validate' ? readiness.continuity : readiness.quality

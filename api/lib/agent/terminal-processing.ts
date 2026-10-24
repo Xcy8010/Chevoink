@@ -17,6 +17,13 @@ export type TerminalProcessingInput = {
   recoveryGuidance?: string
 }
 
+export function terminalProcessingEpisodeKey(identity: { userId: string; novelId: string; taskId: string; chapterId: string;
+  contentHash: string; sourceHash: string; contractHash: string }) {
+  return runtimeJson({ kind: 'terminal-processing', version: 1, userId: identity.userId, novelId: identity.novelId,
+    taskId: identity.taskId, chapterId: identity.chapterId, contentHash: identity.contentHash, sourceHash: identity.sourceHash,
+    contractHash: identity.contractHash }).hash
+}
+
 /** One preparation/processing path for both fresh failures and old checkpoints.
  * The two proposals share a stable task/body/source/contract episode. New calls,
  * reports, candidates and Continue admissions cannot replenish it. The old
@@ -35,9 +42,9 @@ export function terminalProcessingPlan(review: ChapterReviewReadiness | null,
       ? spec.scope.writing.targets.some(target => target.orderIndex === evidence.orderIndex
         && (!target.chapterId || target.chapterId === evidence.chapterId))
       : spec.scope.chapterIds?.includes(evidence.chapterId))) return null
-  const key = runtimeJson({ kind: 'terminal-processing', version: 1, userId: evidence.userId, novelId: evidence.novelId,
+  const key = terminalProcessingEpisodeKey({ userId: evidence.userId, novelId: evidence.novelId,
     taskId: evidence.taskId, chapterId: evidence.chapterId, contentHash: evidence.contentHash,
-    sourceHash: input.sourceHash, contractHash: input.contractHash }).hash
+    sourceHash: input.sourceHash, contractHash: input.contractHash })
   if (review.terminalReview.state === 'supported' || review.terminalReview.deliveryEligible === true) {
     if (!review.ready || review.mustPassPending || (review.decisionPending ?? (review.continuityErrorCount > 0
       || review.qualityErrorCount > 0 || (review.qualityCandidateCount ?? 0) > 0))) return null

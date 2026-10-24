@@ -206,6 +206,7 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
   const exact = reservations.find(row => object(row.metadata)?.continuityAssessmentRequestKey === key)
   if (exact) return 'replay' as const
   const retired = reservations.length ? await readAuthorContinuedReviewUsageIds(tx, ctx) : new Set<string>()
+  let sameFailedTerminalInput = false
   for (const reservation of reservations) {
     const meta = object(reservation.metadata)
     if (typeof meta?.continuityAssessmentRequestKey !== 'string') continue
@@ -233,6 +234,11 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
     // later revision of the chapter. Changing focus/selectors/callId is not a
     // new subject. Unknown dispatches and unseen second passes stay fenced.
     const frozen = object(meta.input), frozenBodies = object(frozen?.bodies)
+    if (known && typeof meta.callId === 'string' && (await import('./terminal-input-decision.js')).sameTerminalInputSubject(meta.input, input)) {
+      const prior = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
+      if (!prior.inspected.complete && prior.inspected.audit.classification === 'source_invalid'
+        && prior.billingKnown && prior.providerComplete && prior.recoveryReady) sameFailedTerminalInput = true
+    }
     const subjectChanged = frozen?.targetType === input.targetType && frozen.targetId === input.targetId
       && frozen.chapterId === input.chapterId && typeof frozenBodies?.current === 'string'
       && (frozenBodies.current !== input.bodies.current
@@ -273,6 +279,10 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
     const last = observations.reduce((date, row) => row.createdAt > date ? row.createdAt : date, reservation.createdAt)
     if ((!known && !explicitlyRetired) || !admission || meta.admissionId === admission.id || admission.at <= last) return 'blocked' as const
   }
+  // A new Continue admission retires no semantic failure. Call IDs, prompt,
+  // focus and table ordering cannot buy the same terminal judgment again.
+  // Unknown requests above retain their original priority and reconciliation.
+  if (sameFailedTerminalInput) return 'blocked' as const
   await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性检查请求审计', content: '本次原工具检查已预约；未知请求不能重放。',
     metadata: runtimeJson({ version: 1, continuityAssessmentRequestKey: key, assessmentChapterId: input.chapterId,
       callId: ctx.callId, input, admissionId: admission?.id ?? null }).value } })

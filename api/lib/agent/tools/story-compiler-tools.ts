@@ -1009,6 +1009,17 @@ export const continuityValidateTool = defineTool({
       return { outcome: 'failed' as const, summary: '连续性检查前置未满足',
         output: '本次未调用检查模型：前章版本已变化、正文为空或场景任务数量不合法。请读取章节桥并修复该前置状态，不要反复请求连续性检查；未判定通过。' }
     }
+    const previousAudit = (compilation.validation as Record<string, unknown> | null)?.continuityCriticResponse as Record<string, unknown> | undefined
+    const failedInputDecision = previousAudit?.parserVersion === 8 && previousAudit.classification === 'source_invalid'
+      ? await (await import('../terminal-input-decision.js')).readTerminalInputDecision(prisma, ctx, compilation.id) : null
+    if (failedInputDecision && (await import('../terminal-input-decision.js')).sameTerminalInputSubject(failedInputDecision.input,
+      { ...failedInputDecision.input, terminalCandidate, sourceScope: compilerEvidenceScope(chapter, sourceChapter),
+        bodies: { previous: sourceChapter?.content ?? null, current: chapter.content, terminalEvidence } })) return {
+      outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED', summary: '相同终态候选尚待决策，未重复检查',
+      output: failedInputDecision.guidance,
+      reviewRequestFinished: { version: 1 as const, chapterId: chapter.id, revision: chapter.revision,
+        contentHash: createHash('sha256').update(chapter.content).digest('hex'), usageIds: [] },
+    }
     const parsedCachedValidation = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number().int(), coverage: z.unknown().optional(),
       findings: z.array(continuityFindingInputSchema), errorCount: z.number().int().nonnegative().optional(), warningCount: z.number().int().nonnegative().optional() }).safeParse(compilation.validation)
     const cachedValidation = parsedCachedValidation.success ? parsedCachedValidation.data : null

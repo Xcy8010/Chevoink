@@ -69,6 +69,7 @@ import { findToolRestriction, isLocalToolFailure, isInputScopedFailure, restoreT
 import { assertLimitedWritingDelivery, type LimitedWritingDelivery } from './writing-delivery-limitations.js'
 import { readChapterReviewReadiness, hasPendingChapterReviewDecision, chapterReviewDecisionGuidance, type ChapterReviewReadiness } from './chapter-review-guard.js'
 import { nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from './review-dispatch.js'
+import { readTerminalInputDecision, terminalInputDecisionAction, terminalInputDecisionCurrent, type TerminalInputDecision } from './terminal-input-decision.js'
 import { readQualityFormatRecovery, type QualityFormatRecovery } from './quality-format-recovery.js'
 import { deferToolProposal } from './deferred-tool.js'
 import { readContinuedContinuityRecovery, readLegacyContinuityRecovery } from './legacy-continuity-recovery.js'
@@ -1706,6 +1707,28 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     if (continuingTask && currentChapterReview?.ready && hasPendingChapterReviewDecision(currentChapterReview)) {
       messages.push({ role: 'user', content: `[系统·本次只读核对] compilationId=${currentChapterReview.compilationId}。${chapterReviewDecisionGuidance(currentChapterReview)} 此状态提示不新增权限、不重置预算，也不代表意见已处理或任务完成。` })
     }
+    const readInputDecision = (compilationId?: string) => prisma.$transaction(tx => readTerminalInputDecision(tx,
+      { userId: params.userId, novelId: params.novelId, runId, signal: controller.signal }, compilationId))
+    const currentDispatch = async (readiness: Parameters<typeof nextReviewDispatch>[0]) => nextReviewDispatch(readiness,
+      new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys,
+      readiness?.continuity === 'incomplete' ? await readInputDecision(readiness.compilationId ?? undefined) : null)
+    // These are control receipts, never review claims or semantic progress.
+    // Both phases are persisted before the corresponding action starts.
+    let inputDecision: TerminalInputDecision | null = null
+    let inputDecisionAllowance: { plan: TerminalInputDecision; afterRead: boolean } | null = null
+    if (continuingTask && !pendingReviews.size && ['write', 'revise'].includes(taskSpec.intent)
+      && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only') {
+      inputDecision = await readInputDecision(currentChapterReview?.compilationId ?? undefined)
+      if (inputDecision && !toolContext.protectedChapterIds?.has(inputDecision.chapterId)
+        && !inputDecision.nativeClaims.every(claim => automaticReviewAttempts.has(claim))
+        && !consumedReviewDecisionFeedback.has(inputDecision.key)) {
+        await bus.persist()
+        consumedReviewDecisionFeedback.add(inputDecision.key)
+        await persistCheckpoint()
+        inputDecisionAllowance = { plan: inputDecision, afterRead: false }
+        messages.push({ role: 'user', content: inputDecision.guidance })
+      }
+    }
     let consecutiveStructureFailures = 0
     // A4：长上下文提醒消息（单实例，每轮移除后重新追加到队尾，保证只存在一条且最靠近当前轮）
     const contextReminder: ChatMessage = {
@@ -1792,8 +1815,23 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     while (executionControl.controlPolicy === 'until_completion') {
       if (controller.signal.aborted) throw new DOMException('run aborted', 'AbortError')
       if (await finishPersistedWritingIfComplete()) return
+      if (inputDecision) {
+        const fresh = await readInputDecision(inputDecision.compilationId)
+        if (fresh && fresh.key === inputDecision.key && (!inputDecisionAllowance
+          || fresh.nativeClaims.every(claim => automaticReviewAttempts.has(claim)))) {
+          forceWrapUpLocal = true
+          await wrapUpAndFinish('相同候选的决策机会已使用，原始报告与未证实项保留，未重复购买检查。')
+          return
+        }
+        if (inputDecisionAllowance && !terminalInputDecisionCurrent(inputDecisionAllowance.plan, fresh, automaticReviewAttempts)) {
+          forceWrapUpLocal = true
+          await wrapUpAndFinish('候选决策的当前绑定已变化，保留已有记录，任务暂停。')
+          return
+        }
+        if (!fresh || fresh.key !== inputDecision.key) inputDecision = null
+      }
       const terminalPlan = await terminalPlanForCurrentState()
-      let processing = terminalPlan?.kind === 'process' && stagnantBatches >= 4
+      let processing = !inputDecisionAllowance && terminalPlan?.kind === 'process' && stagnantBatches >= 4
         && tools.some(tool => tool.name === 'continuity_validate') ? terminalPlan : null
       let bootstrapCall: ToolCallRequest | undefined
       let terminalCompatibilityClaim: string | undefined
@@ -1860,7 +1898,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       let bootstrapItem: ContinuedReviewRecovery | undefined
       let continuityBootstrap: typeof continuedContinuityBootstrap[number] | undefined
-      while (continuedReviewBootstrap.length && !bootstrapCall && !processing) {
+      while (continuedReviewBootstrap.length && !bootstrapCall && !processing && !inputDecisionAllowance) {
         const item = continuedReviewBootstrap[0]
         const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
           { userId: params.userId, novelId: params.novelId, runId }, item.compilationId ?? undefined))
@@ -1877,7 +1915,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (!bound) throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '本次继续的检查输入已变化，未派发旧检查或生成新许可。')
         if (readiness?.ready) { continuedReviewBootstrap.shift(); continue }
         if (readiness && (readiness.chapterId !== item.chapterId || readiness.revision !== item.receipt.currentRevision)) throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '本次继续的检查目标已变化，未派发请求。')
-        const next = readiness ? nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
+        const next = readiness ? await currentDispatch(readiness)
           : { kind: 'tool' as const, key: continuedReviewAttemptKey(item.receipt, item.toolName), tool: { name: item.toolName,
             args: { chapterId: item.chapterId, ...(item.compilationId ? { compilationId: item.compilationId } : {}) } } }
         if (next.kind === 'blocked') throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED', next.reason)
@@ -1886,7 +1924,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         bootstrapCall = { id: continuedReviewCallId(next.key), name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
         bootstrapItem = item
       }
-      while (continuedContinuityBootstrap.length && !bootstrapCall && !processing) {
+      while (continuedContinuityBootstrap.length && !bootstrapCall && !processing && !inputDecisionAllowance) {
         const item = continuedContinuityBootstrap[0]
         const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
           { userId: params.userId, novelId: params.novelId, runId }, item.compilationId))
@@ -1897,7 +1935,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           || !proof.some(([key, attempt]) => key === item.baseKey && attempt === item.recoveryKey)) {
           throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '继续任务时的检查依据已变化，未派发旧检查。')
         }
-        const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
+        const next = await currentDispatch(readiness)
         if (next.kind !== 'tool' || next.tool.name !== 'continuity_validate' || next.key !== item.recoveryKey) {
           throw new DataAccessError(409, 'REVIEW_DEPENDENCY_UNAVAILABLE', next.kind === 'blocked' ? next.reason : '当前检查状态不再匹配本次继续。')
         }
@@ -2018,6 +2056,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const executionReasoningDetector = createExecutionTextDetector()
 
       const observeTurnUsage = trackRequestUsage(usage)
+      const inputDecisionTurn = bootstrapCall ? null : inputDecisionAllowance
+      if (inputDecisionTurn) inputDecisionAllowance = null
       const result = bootstrapCall ? { content: '', reasoning: '', toolCalls: [bootstrapCall], finishReason: 'tool_calls' as const,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } } : await chatWithTools({
         freePromotion: modelRuntime.freePromotion,
@@ -2111,6 +2151,22 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }))
         : []
       const effectiveToolCalls = result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
+      if (inputDecisionTurn && !terminalInputDecisionCurrent(inputDecisionTurn.plan,
+        await readInputDecision(inputDecisionTurn.plan.compilationId), automaticReviewAttempts)) {
+        forceWrapUpLocal = true
+        forceWrapUpReason = '候选决策期间的目标或独立响应绑定已变化，已保留原记录，未执行生成的工具。'
+        effectiveToolCalls.splice(0)
+      }
+      const inputDecisionAction = inputDecisionTurn ? terminalInputDecisionAction(inputDecisionTurn.plan,
+        effectiveToolCalls.map(call => ({ name: call.name, args: reviewPreflightArgs(call, tools.find(tool => tool.name === call.name)) })),
+        inputDecisionTurn.afterRead, consumedReviewDecisionFeedback.has(inputDecisionTurn.plan.readKey)) : null
+      let inputDecisionReadCall: string | undefined
+      if (inputDecisionTurn && inputDecisionAction === 'read') {
+        const call = effectiveToolCalls[0]
+        consumedReviewDecisionFeedback.add(inputDecisionTurn.plan.readKey)
+        await persistCheckpoint()
+        inputDecisionReadCall = call.id
+      }
       if (effectiveToolCalls.length) releaseWritingToolText()
       let automaticReviewTriggered = false
       let mergedReviewReminder: string | undefined
@@ -2119,14 +2175,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // before its tool executes. Only a fresh authenticated author proof can
       // schedule this zero-provider path; execution rechecks the frozen proof
       // and must fail without a paid fallback if any binding has changed.
-      if (!processing && stagnantBatches >= 4 && !pendingReviews.size && ['write', 'revise'].includes(taskSpec.intent)
+      if (!inputDecisionTurn && !processing && stagnantBatches >= 4 && !pendingReviews.size && ['write', 'revise'].includes(taskSpec.intent)
         && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only'
         && effectiveToolCalls.length > 0 && effectiveToolCalls.every(call => tools.find(tool => tool.name === call.name)?.readOnly)
         && effectiveToolCalls.some(call => ['chapter_read', 'chapter_bridge_get'].includes(call.name))
         && !effectiveToolCalls.some(call => call.name === 'continuity_validate')
         && [...reviewRecoveryKeys.values()].some(key => key.startsWith('continuity-author-recovery:'))) {
         const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: params.userId, novelId: params.novelId, runId }))
-        const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
+        const next = await currentDispatch(readiness)
         if (readiness?.compilationId && readiness.continuity === 'incomplete' && next.kind === 'tool'
           && next.tool.name === 'continuity_validate' && next.key.startsWith('continuity-author-recovery:')) {
           const id = 'offline_review_' + randomUUID()
@@ -2146,12 +2202,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // A weak tool caller cannot skip the delivery assessments by returning
       // prose. These calls use the same original tool ceiling and ordinary
       // journal, approvals, billing and compiler counters as model calls.
-      if (!processing && effectiveToolCalls.length === 0 && ['write', 'revise'].includes(taskSpec.intent)
+      if (!inputDecisionTurn && !processing && effectiveToolCalls.length === 0 && ['write', 'revise'].includes(taskSpec.intent)
         && params.mode === 'build' && !['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')
         && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)
         && !looksLikePseudoToolCall(result.content, toolNameList)) {
         const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: params.userId, novelId: params.novelId, runId }))
-        const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
+        const next = await currentDispatch(readiness)
         if (next.kind === 'tool') {
           automaticReviewTriggered = true
           effectiveToolCalls.push({ id: `review_${messageId}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) })
@@ -2206,6 +2262,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (processing && effectiveToolCalls.length === 0) {
         forceWrapUpLocal = true
         forceWrapUpReason = '当前候选尚无可核验的处理提议，已保留失败报告和正文，未自动重复付费复核。'
+      }
+      if (inputDecisionTurn && effectiveToolCalls.length === 0 && !forceWrapUpReason) {
+        forceWrapUpLocal = true
+        forceWrapUpReason = '候选决策未产生可执行变化，原始报告、正文与未证实项保留，未重复检查。'
+      }
+      if (inputDecisionTurn && !inputDecisionAction && effectiveToolCalls.length) {
+        forceWrapUpLocal = true
+        forceWrapUpReason = '本次候选决策未落在当前候选或证明选择内，已保留正文、原始响应与检查记录。'
+        effectiveToolCalls.splice(0)
       }
       if (forceWrapUpReason && effectiveToolCalls.length === 0) {
         await persistMessage(messageId, runId, params.sessionId, 'assistant', parts.filter(part => part.type !== 'text'))
@@ -2411,6 +2476,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       let reviewStopReason: string | undefined
       let incompleteReview: { toolName: 'continuity_validate' | 'quality_analyze'; chapterId: string; revision: number; compilationId?: string | null; failureCode: string } | undefined
       let batchProgress = false
+      let inputDecisionReadSucceeded = false
       const decisionFeedback: NonNullable<ToolCallOutcome['reviewDecisionFeedback']>[] = []
       let compatibilityReadObserved = false
       let terminalProposalConsumed = false
@@ -2499,7 +2565,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           // final saved body at COMMIT, without discarding partial edits or
           // spending a fresh paid assessment between each fragment.
           if (readiness?.checksRequired) {
-            const next = nextReviewDispatch(readiness, new Set(tools.map(tool => tool.name)), automaticReviewAttempts, recoveredReviewKeys, reviewRecoveryKeys)
+            const next = await currentDispatch(readiness)
             if (next.kind === 'tool') {
               const required = { id: `review_${messageId}_${callIndex}_${randomUUID()}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
               deferToolProposal(call, '先完成当前版本检查，读取结果后再提交章节终态。', messageId, bus)
@@ -2762,6 +2828,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         lastActivityAt = Date.now()
         // 滑窗更新：只记成功执行；失败不碰窗口（同签名重试不会被误杀）
         if (outcome.part.status === 'success') {
+          if (call.id === inputDecisionReadCall) inputDecisionReadSucceeded = true
           if (['quality_report_get', 'chapter_bridge_get'].includes(call.name) && outcome.reviewDecisionFeedback) {
             decisionFeedback.push(outcome.reviewDecisionFeedback)
           }
@@ -2777,7 +2844,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const durableProgress = contentProgress || structureProgress
           const requiredProgress = Boolean(outcome.requiredResult && observeRequiredResult(progressSignatures,
             `chapter:${outcome.requiredResult.targetId}`, outcome.requiredResult.contentHash))
-          const readProgress = observeSemanticReadProgress(progressSignatures, call.name, outcome.observation, outcome.observedChapterRange)
+          const readProgress = !inputDecisionTurn && observeSemanticReadProgress(progressSignatures, call.name, outcome.observation, outcome.observedChapterRange)
           const workflowProgress = observeWritingWorkflowMilestone(progressSignatures, call.name, outcome.workflowMilestone,
             { userId: params.userId, novelId: params.novelId, runId, taskSpec: outcome.workflowMilestone
               ? await prisma.$transaction(tx => effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)) : taskSpec })
@@ -2912,6 +2979,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         todoReminders = 0
       }
       stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, waitingForChild)
+      let inputDecisionReadContinue = false
+      if (inputDecisionTurn && inputDecisionReadSucceeded && !forceWrapUpReason && !pendingReviews.size && blockedRepeat < 4) {
+        const fresh = await readInputDecision(inputDecisionTurn.plan.compilationId)
+        if (terminalInputDecisionCurrent(inputDecisionTurn.plan, fresh, automaticReviewAttempts)) {
+          inputDecisionAllowance = { plan: fresh!, afterRead: true }
+          inputDecisionReadContinue = true
+          messages.push({ role: 'user', content: '[系统/候选决策] 本目标已读取；读取不是进展。现在立即作出真实候选决策，不再读取或重复原检查。' })
+        }
+      }
       if (reviewProgress) await persistCheckpoint()
       // A just-read, current decision needs to reach the model before the stop
       // test. This consumes feedback once; it creates no progress or allowance.
@@ -2950,7 +3026,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const terminalNext = await terminalPlanForCurrentState()
       const terminalProcessingPending = !!terminalNext && (terminalNext.kind === 'commit' || !!terminalNext.claim) && tools.some(tool =>
         tool.name === (terminalNext.kind === 'commit' ? 'chapter_bridge_commit' : 'continuity_validate'))
-      if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead && !feedbackRead && !terminalProcessingPending)) {
+      if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead && !feedbackRead && !inputDecisionReadContinue && !terminalProcessingPending)) {
         const sameIncompleteReview = incompleteReview && review && !review.ready
           && review.chapterId === incompleteReview.chapterId && review.revision === incompleteReview.revision
           && (review.compilationId ?? null) === (incompleteReview.compilationId ?? null)

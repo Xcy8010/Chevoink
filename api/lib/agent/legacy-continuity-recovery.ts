@@ -121,6 +121,12 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     .filter(item => item.notDispatched).map(item => `${item.receipt.sourceRunId}:${item.callId}`))
   for (const compilation of compilations) {
     const validation = object(compilation.validation), coverage = object(validation.coverage)
+    // Continue resumes candidate decisions, not this identical failed paid
+    // terminal subject. Its authenticated handoff is handled by the loop;
+    // missing/unknown witnesses must not fall back to another critic call.
+    const terminalAudit = object(validation.continuityCriticResponse)
+    if (terminalAudit.parserVersion === 8 && terminalAudit.classification === 'source_invalid'
+      && object(validation.terminalCandidate).exitState) continue
     if (compilation.status !== 'active' || !compilation.chapterId || validation.independentCheck !== 'unavailable'
       || ![6, 7, COMPILER_CONTINUITY_PROTOCOL, ...(hasContinuitySourceAuthority(original.spec) ? [9] : []), ...(hasTerminalEvidenceProtocol(original.spec) ? [10] : []), ...(terminalEvidenceVersion(original.spec) === 2 ? [11] : [])].includes(Number(coverage.protocolVersion))) continue
     const chapter = await tx.chapter.findFirst({ where: { id: compilation.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true, orderIndex: true } })
